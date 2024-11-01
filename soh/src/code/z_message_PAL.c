@@ -2713,7 +2713,8 @@ void Message_OpenText(PlayState* play, u16 textId) {
     Font* font = &msgCtx->font;
     s16 textBoxType;
 
-    sDisplayNextMessageAsEnglish = false;
+    bool loadFromMessageTable = true;
+    GameInteractor_ExecuteOnOpenText(&textId, &loadFromMessageTable);
 
     if (msgCtx->msgMode == MSGMODE_NONE) {
         gSaveContext.unk_13EE = gSaveContext.unk_13EA;
@@ -2782,7 +2783,9 @@ void Message_OpenText(PlayState* play, u16 textId) {
         gSaveContext.eventInf[0] = gSaveContext.eventInf[1] = gSaveContext.eventInf[2] = gSaveContext.eventInf[3] = 0;
     }
 
-    if (CustomMessage_RetrieveIfExists(play)) {
+    if (!loadFromMessageTable) {
+        // no-op
+    } else if (CustomMessage_RetrieveIfExists(play)) {
         osSyncPrintf("Found custom message");
         if (gSaveContext.language == LANGUAGE_JPN) {
             sDisplayNextMessageAsEnglish = true;

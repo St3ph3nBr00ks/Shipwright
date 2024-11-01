@@ -1202,7 +1202,7 @@ void TimeSaverOnSceneInitHandler(int16_t sceneNum) {
     }
 }
 
-static GetItemEntry vanillaQueuedItemEntry = GET_ITEM_NONE;
+GetItemEntry vanillaQueuedItemEntry = GET_ITEM_NONE;
 
 void TimeSaverQueueItem(RandomizerGet randoGet) {
     vanillaQueuedItemEntry = Rando::StaticData::RetrieveItem(randoGet).GetGIEntry_Copy();

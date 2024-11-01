@@ -153,7 +153,6 @@ bool GameInteractor_ShouldActorUpdate(void* actor) {
     GameInteractor::Instance->ExecuteHooksForFilter<GameInteractor::ShouldActorUpdate>(actor, &result);
     return result;
 }
-
 void GameInteractor_ExecuteOnActorUpdate(void* actor) {
     GameInteractor::Instance->ExecuteHooks<GameInteractor::OnActorUpdate>(actor);
     GameInteractor::Instance->ExecuteHooksForID<GameInteractor::OnActorUpdate>(((Actor*)actor)->id, actor);
@@ -231,6 +230,12 @@ void GameInteractor_ExecuteOnPlayDrawBegin() {
 
 void GameInteractor_ExecuteOnPlayDrawEnd() {
     GameInteractor::Instance->ExecuteHooks<GameInteractor::OnPlayDrawEnd>();
+}
+
+void GameInteractor_ExecuteOnOpenText(u16* textId, bool* loadFromMessageTable) {
+    GameInteractor::Instance->ExecuteHooks<GameInteractor::OnOpenText>(textId, loadFromMessageTable);
+    GameInteractor::Instance->ExecuteHooksForID<GameInteractor::OnOpenText>(*textId, textId, loadFromMessageTable);
+    GameInteractor::Instance->ExecuteHooksForFilter<GameInteractor::OnOpenText>(textId, loadFromMessageTable);
 }
 
 bool GameInteractor_Should(GIVanillaBehavior flag, u32 result, ...) {
