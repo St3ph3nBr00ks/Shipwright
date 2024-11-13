@@ -5939,7 +5939,6 @@ void Randomizer::CreateCustomMessages() {
     CreateGetItemMessages(getItemMessages);
     CreateRupeeMessages();
     CreateTriforcePieceMessages();
-    CreateChristmasTreeMessages();
     CreateNaviRandoMessages();
     CreateFireTempleGoronMessages();
     CreateArchipelagoItemMessage();
