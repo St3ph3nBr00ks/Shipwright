@@ -2425,6 +2425,7 @@ void SaveManager::CopyZeldaFile(int from, int to) {
     fileMetaInfo[to].filenameLanguage = fileMetaInfo[from].filenameLanguage;
     SohUtils::CopyStringToCharArray(fileMetaInfo[to].buildVersion, fileMetaInfo[from].buildVersion,
                                     ARRAY_COUNT(fileMetaInfo[to].buildVersion));
+    GameInteractor::Instance->ExecuteHooks<GameInteractor::OnCopyFile>(from, to);
 }
 
 void SaveManager::DeleteZeldaFile(int fileNum) {
