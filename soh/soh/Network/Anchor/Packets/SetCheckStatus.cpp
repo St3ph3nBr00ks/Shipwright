@@ -4,6 +4,8 @@
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/OTRGlobals.h"
 
+static bool isResultOfHandling = false;
+
 /**
  * SET_CHECK_STATUS
  *
@@ -11,7 +13,7 @@
  */
 
 void Anchor::SendPacket_SetCheckStatus(RandomizerCheck rc) {
-    if (!IsSaveLoaded() || isProcessingIncomingPacket || !roomState.syncItemsAndFlags) {
+    if (!IsSaveLoaded() || isResultOfHandling) {
         return;
     }
 
@@ -39,6 +41,8 @@ void Anchor::HandlePacket_SetCheckStatus(nlohmann::json payload) {
     RandomizerCheck rc = payload["rc"].get<RandomizerCheck>();
     RandomizerCheckStatus status = payload["status"].get<RandomizerCheckStatus>();
     bool skipped = payload["skipped"].get<bool>();
+    
+    isResultOfHandling = true;
 
     if (randoContext->GetItemLocation(rc)->GetCheckStatus() != status) {
         randoContext->GetItemLocation(rc)->SetCheckStatus(status);
@@ -46,6 +50,8 @@ void Anchor::HandlePacket_SetCheckStatus(nlohmann::json payload) {
     if (randoContext->GetItemLocation(rc)->GetIsSkipped() != skipped) {
         randoContext->GetItemLocation(rc)->SetIsSkipped(skipped);
     }
+
     CheckTracker::RecalculateAllAreaTotals();
     CheckTracker::RecalculateAvailableChecks();
+    isResultOfHandling = false;
 }

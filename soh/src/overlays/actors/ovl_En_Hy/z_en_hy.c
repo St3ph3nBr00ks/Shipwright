@@ -554,7 +554,9 @@ u16 func_80A6F810(PlayState* play, Actor* thisx) {
                 return 0x5058;
             }
         case ENHY_TYPE_BOB_18:
-            if (!LINK_IS_ADULT) {
+            if (CVarGetInteger("gHoliday.Fredomato.TreeChopper", 0)) {
+                return 0x505e;
+            } else if (!LINK_IS_ADULT) {
                 return (Flags_GetEventChkInf(EVENTCHKINF_ZELDA_FLED_HYRULE_CASTLE))
                            ? 0x505F
                            : ((Flags_GetInfTable(INFTABLE_163)) ? 0x505E : 0x505D);

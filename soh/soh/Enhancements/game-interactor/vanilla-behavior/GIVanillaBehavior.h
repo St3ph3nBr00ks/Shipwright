@@ -2351,6 +2351,10 @@ typedef enum {
     // - `*int32_t` // ItemID
     VB_USE_ITEM,
 
+    VB_DRAW_SKEL_LIMB,
+    VB_DRAW_SKEL_FLEX_LIMB,
+    VB_PLAYER_ROLL,
+
 } GIVanillaBehavior;
 
 #endif

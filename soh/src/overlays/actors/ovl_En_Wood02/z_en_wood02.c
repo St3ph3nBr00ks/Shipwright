@@ -7,6 +7,7 @@
 #include "z_en_wood02.h"
 #include "objects/object_wood02/object_wood02.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/Holiday/Fredomato.h"
 
 #define FLAGS 0
 
@@ -368,8 +369,17 @@ void EnWood02_Update(Actor* thisx, PlayState* play2) {
         if (this->actor.home.rot.y != 0) {
             dropsSpawnPt = this->actor.world.pos;
             dropsSpawnPt.y += 200.0f;
-
+            if (HandleTreeBonk(&this->actor)) {
+                // no-op
+            } else 
             if (GameInteractor_Should(VB_TREE_DROP_ITEM, true, this)) {
+            	if ((this->unk_14C >= 0) && (this->unk_14C < 0x64) && (CVarGetInteger(CVAR_ENHANCEMENT("TreesDropSticks"), 0)) && !(INV_CONTENT(ITEM_STICK) == ITEM_NONE)) {
+                	(numDrops = (Rand_ZeroOne() * 4));
+	                for (i = 0; i < numDrops; ++i) {
+	                    Item_DropCollectible(play, &dropsSpawnPt, ITEM00_STICK);
+	                }
+	            }    
+            } else {
                 if ((this->unk_14C >= 0) && (this->unk_14C < 0x64)) {
                     if (GameInteractor_Should(VB_TREE_DROP_COLLECTIBLE, true, this)) {
                         Item_DropCollectibleRandom(play, &this->actor, &dropsSpawnPt, this->unk_14C << 4);
