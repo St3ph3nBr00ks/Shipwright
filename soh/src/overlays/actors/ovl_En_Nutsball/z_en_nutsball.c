@@ -183,9 +183,9 @@ void EnNutsball_Draw(Actor* thisx, PlayState* play) {
 
     OPEN_DISPS(play->state.gfxCtx);
 
-    //if ((CVarGetInteger(CVAR_ENHANCEMENT("NewDrops"), 0) != 0) || CVarGetInteger(CVAR_GENERAL("LetItSnow"), 0)) {
-    //    Gfx_SetupDL_25Opa(play->state.gfxCtx);
-    //    f32 scale = 12.0f;
+    // if ((CVarGetInteger(CVAR_ENHANCEMENT("NewDrops"), 0) != 0) || CVarGetInteger(CVAR_GENERAL("LetItSnow"), 0)) {
+    //     Gfx_SetupDL_25Opa(play->state.gfxCtx);
+    //     f32 scale = 12.0f;
 
     //    gSPSegment(POLY_OPA_DISP++, 0x08,
     //               Gfx_TwoTexScroll(play->state.gfxCtx, 0, 0, (0 - 1) % 128, 32, 32, 1, 0, (1 * -2) % 128, 32, 32));

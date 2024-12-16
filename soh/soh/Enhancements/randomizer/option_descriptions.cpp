@@ -128,9 +128,9 @@ void Settings::CreateOptionDescriptions() {
         "When the required amount of ornaments have been found, the game is saved and Ganon's Boss key is given "
         "to you when you load back into the game if you desire to beat Ganon afterwards.\n\n"
         "Keep in mind Ganon might not be logically beatable when \"All Locations Reachable\" is turned off.";
-    mOptionDescriptions[RSK_TRIFORCE_HUNT_PIECES_TOTAL] =
-        "The amount of Ornaments that will be placed in the world. "
-        "Keep in mind seed generation can fail if more ornaments are placed than there are junk items in the item pool.";
+    mOptionDescriptions[RSK_TRIFORCE_HUNT_PIECES_TOTAL] = "The amount of Ornaments that will be placed in the world. "
+                                                          "Keep in mind seed generation can fail if more ornaments are "
+                                                          "placed than there are junk items in the item pool.";
     mOptionDescriptions[RSK_TRIFORCE_HUNT_PIECES_REQUIRED] = "The amount of Ornaments required to win the game.";
     mOptionDescriptions[RSK_SHUFFLE_DUNGEON_ENTRANCES] =
         "Shuffle the pool of dungeon entrances, including Bottom of the Well, Ice Cavern and Gerudo Training Ground.\n"

@@ -554,7 +554,7 @@ void EnOkuta_ProjectileFly(EnOkuta* this, PlayState* play) {
                 EffectSsHahen_SpawnBurst(play, &pos, 6.0f, 0, 1, 2, 15, 7, 10, gOctorokProjectileDL);
             }
 
-            //SoundSource_PlaySfxAtFixedWorldPos(play, &this->actor.world.pos, 20, NA_SE_EN_OCTAROCK_ROCK);
+            // SoundSource_PlaySfxAtFixedWorldPos(play, &this->actor.world.pos, 20, NA_SE_EN_OCTAROCK_ROCK);
             SoundSource_PlaySfxAtFixedWorldPos(play, &this->actor.world.pos, 20, NA_SE_PL_ICE_BROKEN);
             Actor_Kill(&this->actor);
         }
@@ -767,16 +767,16 @@ void EnOkuta_Draw(Actor* thisx, PlayState* play) {
     } else {
         OPEN_DISPS(play->state.gfxCtx);
 
-        //if (CVarGetInteger(CVAR_ENHANCEMENT("NewDrops"), 0) != 0) {
-        //    Gfx_SetupDL_25Opa(play->state.gfxCtx);
-        //    gSPSegment(POLY_OPA_DISP++, 0x08,
-        //               Gfx_TwoTexScroll(play->state.gfxCtx, 0, 1 * (play->state.frames * 6),
-        //                                1 * (play->state.frames * 6), 32, 32, 1, 1 * (play->state.frames * 6),
-        //                                1 * (play->state.frames * 6), 32, 32));
-        //    Matrix_Scale(7.0f, 7.0f, 7.0f, MTXMODE_APPLY);
-        //    Matrix_RotateX(thisx->home.rot.z * (M_PI / 0x8000), MTXMODE_APPLY);
-        //    gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_MODELVIEW | G_MTX_LOAD);
-        //    gSPDisplayList(POLY_OPA_DISP++, gSilverRockDL);
+        // if (CVarGetInteger(CVAR_ENHANCEMENT("NewDrops"), 0) != 0) {
+        //     Gfx_SetupDL_25Opa(play->state.gfxCtx);
+        //     gSPSegment(POLY_OPA_DISP++, 0x08,
+        //                Gfx_TwoTexScroll(play->state.gfxCtx, 0, 1 * (play->state.frames * 6),
+        //                                 1 * (play->state.frames * 6), 32, 32, 1, 1 * (play->state.frames * 6),
+        //                                 1 * (play->state.frames * 6), 32, 32));
+        //     Matrix_Scale(7.0f, 7.0f, 7.0f, MTXMODE_APPLY);
+        //     Matrix_RotateX(thisx->home.rot.z * (M_PI / 0x8000), MTXMODE_APPLY);
+        //     gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_MODELVIEW | G_MTX_LOAD);
+        //     gSPDisplayList(POLY_OPA_DISP++, gSilverRockDL);
         if ((CVarGetInteger(CVAR_ENHANCEMENT("NewDrops"), 0) != 0) || CVarGetInteger(CVAR_GENERAL("LetItSnow"), 0)) {
             Gfx_SetupDL_25Opa(play->state.gfxCtx);
             f32 scale = 12.0f;

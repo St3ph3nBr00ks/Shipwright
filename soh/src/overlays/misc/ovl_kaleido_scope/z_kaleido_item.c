@@ -1198,12 +1198,12 @@ void KaleidoScope_UpdateItemEquip(PlayState* play) {
                 }
                 u8 equipped_slot = gSaveContext.equips.cButtonSlots[pauseCtx->equipTargetCBtn];
                 if (!CVarGetInteger("gHoliday.lilDavid.BombArrows.Active", 0) &&
-                    pauseCtx->equipTargetItem == ITEM_BOMB && equipped_slot == SLOT_BOW)
-                {
+                    pauseCtx->equipTargetItem == ITEM_BOMB && equipped_slot == SLOT_BOW) {
                     CVarSetInteger("gHoliday.lilDavid.BombArrows.Active", 1);
                     pauseCtx->equipTargetItem = ITEM_BOW;
                     pauseCtx->equipTargetSlot = SLOT_BOW;
-                    Audio_PlaySoundGeneral(NA_SE_SY_SET_FIRE_ARROW, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
+                    Audio_PlaySoundGeneral(NA_SE_SY_SET_FIRE_ARROW, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
+                                           &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
                 }
             }
 

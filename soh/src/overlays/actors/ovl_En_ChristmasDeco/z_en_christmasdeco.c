@@ -20,11 +20,9 @@ void EnChristmasDeco_Init(Actor* thisx, PlayState* play) {
 }
 
 void EnChristmasDeco_Destroy(Actor* thisx, PlayState* play) {
-    
 }
 
 void EnChristmasDeco_Update(Actor* thisx, PlayState* play) {
-    
 }
 
 void EnChristmasDeco_Draw(Actor* thisx, PlayState* play) {
@@ -36,7 +34,8 @@ void EnChristmasDeco_Draw(Actor* thisx, PlayState* play) {
 
     Matrix_Scale(decoSize, decoSize, decoSize, MTXMODE_APPLY);
 
-    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__), G_MTX_MODELVIEW | G_MTX_LOAD);
+    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__),
+              G_MTX_MODELVIEW | G_MTX_LOAD);
 
     // Assertion Halt in Debug mode, switch to Release when testing.
     if (play->sceneNum == SCENE_KAKARIKO_VILLAGE) {

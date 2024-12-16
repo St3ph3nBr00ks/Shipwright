@@ -5,7 +5,7 @@
 #include "src/overlays/effects/ovl_Effect_Ss_En_Ice/z_eff_ss_en_ice.h"
 
 extern "C" {
-    extern PlayState* gPlayState;
+extern PlayState* gPlayState;
 }
 
 #define AUTHOR "Pablo"
@@ -14,63 +14,21 @@ extern "C" {
 #pragma region Shiny
 
 static Vec3f shineSpots[12] = {
-    { 20.0f, 20.0f,   0.0f }, {  10.0f, 40.0f,  10.0f }, { -10.0f, 40.0f,  10.0f }, { -20.0f, 20.0f,   0.0f },
-    { 10.0f, 40.0f, -10.0f }, { -10.0f, 40.0f, -10.0f }, {   0.0f, 20.0f, -20.0f }, {  10.0f,  0.0f,  10.0f },
-    { 10.0f,  0.0f, -10.0f }, {   0.0f, 20.0f,  20.0f }, { -10.0f,  0.0f,  10.0f }, { -10.0f,  0.0f, -10.0f },
+    { 20.0f, 20.0f, 0.0f },   { 10.0f, 40.0f, 10.0f },   { -10.0f, 40.0f, 10.0f }, { -20.0f, 20.0f, 0.0f },
+    { 10.0f, 40.0f, -10.0f }, { -10.0f, 40.0f, -10.0f }, { 0.0f, 20.0f, -20.0f },  { 10.0f, 0.0f, 10.0f },
+    { 10.0f, 0.0f, -10.0f },  { 0.0f, 20.0f, 20.0f },    { -10.0f, 0.0f, 10.0f },  { -10.0f, 0.0f, -10.0f },
 };
 
 static u8 shinyableActorIds[51] = {
-    ACTOR_EN_WALLMAS,
-    ACTOR_EN_ZF,
-    ACTOR_EN_YUKABYUN,
-    ACTOR_EN_WF,
-    ACTOR_EN_WEIYER,
-    ACTOR_EN_VM,
-    ACTOR_EN_TUBO_TRAP,
-    ACTOR_EN_VALI,
-    ACTOR_EN_TP,
-    ACTOR_EN_TORCH2,
-    ACTOR_EN_TITE,
-    ACTOR_EN_TEST,
-    ACTOR_EN_SW,
-    ACTOR_EN_ST,
-    ACTOR_EN_SKB,
-    ACTOR_EN_SKJ,
-    ACTOR_EN_PEEHAT,
-    ACTOR_EN_SB,
-    ACTOR_EN_RR,
-    ACTOR_EN_REEBA,
-    ACTOR_EN_RD,
-    ACTOR_EN_PO_SISTERS,
-    ACTOR_EN_PO_FIELD,
-    ACTOR_EN_POH,
-    ACTOR_EN_KAREBABA,
-    ACTOR_EN_OKUTA,
-    ACTOR_EN_NY,
-    ACTOR_EN_MB,
-    ACTOR_EN_IK,
-    ACTOR_EN_GOMA,
-    ACTOR_EN_GELDB,
-    ACTOR_EN_FZ,
-    ACTOR_EN_FLOORMAS,
-    ACTOR_EN_FIREFLY,
-    ACTOR_EN_FD,
-    ACTOR_EN_EIYER,
-    ACTOR_EN_DODONGO,
-    ACTOR_EN_DODOJR,
-    ACTOR_EN_DH,
-    ACTOR_EN_DEKUBABA,
-    ACTOR_EN_CROW,
-    ACTOR_EN_CLEAR_TAG,
-    ACTOR_EN_BW,
-    ACTOR_EN_BUBBLE,
-    ACTOR_EN_AM,
-    ACTOR_EN_BILI,
-    ACTOR_EN_BIGOKUTA,
-    ACTOR_EN_BB,
-    ACTOR_EN_BA,
-    ACTOR_EN_ANUBICE,
-    ACTOR_DOOR_KILLER
+    ACTOR_EN_WALLMAS,   ACTOR_EN_ZF,      ACTOR_EN_YUKABYUN, ACTOR_EN_WF,         ACTOR_EN_WEIYER,   ACTOR_EN_VM,
+    ACTOR_EN_TUBO_TRAP, ACTOR_EN_VALI,    ACTOR_EN_TP,       ACTOR_EN_TORCH2,     ACTOR_EN_TITE,     ACTOR_EN_TEST,
+    ACTOR_EN_SW,        ACTOR_EN_ST,      ACTOR_EN_SKB,      ACTOR_EN_SKJ,        ACTOR_EN_PEEHAT,   ACTOR_EN_SB,
+    ACTOR_EN_RR,        ACTOR_EN_REEBA,   ACTOR_EN_RD,       ACTOR_EN_PO_SISTERS, ACTOR_EN_PO_FIELD, ACTOR_EN_POH,
+    ACTOR_EN_KAREBABA,  ACTOR_EN_OKUTA,   ACTOR_EN_NY,       ACTOR_EN_MB,         ACTOR_EN_IK,       ACTOR_EN_GOMA,
+    ACTOR_EN_GELDB,     ACTOR_EN_FZ,      ACTOR_EN_FLOORMAS, ACTOR_EN_FIREFLY,    ACTOR_EN_FD,       ACTOR_EN_EIYER,
+    ACTOR_EN_DODONGO,   ACTOR_EN_DODOJR,  ACTOR_EN_DH,       ACTOR_EN_DEKUBABA,   ACTOR_EN_CROW,     ACTOR_EN_CLEAR_TAG,
+    ACTOR_EN_BW,        ACTOR_EN_BUBBLE,  ACTOR_EN_AM,       ACTOR_EN_BILI,       ACTOR_EN_BIGOKUTA, ACTOR_EN_BB,
+    ACTOR_EN_BA,        ACTOR_EN_ANUBICE, ACTOR_DOOR_KILLER
 };
 
 u8 CanBeShiny(Actor* actor) {
@@ -157,7 +115,8 @@ void SpawnShinyReward(Actor* actor) {
 void RegisterShiny() {
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnActorInit>([](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
-        if (CVarGetInteger(CVAR("Shiny.Enabled"), 0) && CanBeShiny(actor) && Rand_ZeroOne() < (1.0f / (s32)CVarGetInteger(CVAR("Shiny.Chance"), 8192))) {
+        if (CVarGetInteger(CVAR("Shiny.Enabled"), 0) && CanBeShiny(actor) &&
+            Rand_ZeroOne() < (1.0f / (s32)CVarGetInteger(CVAR("Shiny.Chance"), 8192))) {
             ApplyShinyness(actor);
         }
     });
@@ -179,9 +138,11 @@ void RegisterShiny() {
 
 void ShinyDrawImGui() {
     UIWidgets::PaddedEnhancementCheckbox("Enable Shiny Enemies", CVAR("Shiny.Enabled"), true, false);
-    UIWidgets::Tooltip("Allows enemies to be shiny.\nShiny enemies are 25% bigger and have 4 times the health but drop the equivalent of a gold rupee upon death");
+    UIWidgets::Tooltip("Allows enemies to be shiny.\nShiny enemies are 25% bigger and have 4 times the health but drop "
+                       "the equivalent of a gold rupee upon death");
 
-    UIWidgets::PaddedEnhancementSliderInt("Shiny Chance: %d", "##ShinyChance", CVAR("Shiny.Chance"), 1, 8192, "", 8192, true, true, false, false, "");
+    UIWidgets::PaddedEnhancementSliderInt("Shiny Chance: %d", "##ShinyChance", CVAR("Shiny.Chance"), 1, 8192, "", 8192,
+                                          true, true, false, false, "");
     UIWidgets::Tooltip("The chance for an enemy to be shiny is 1 / Shiny Chance");
 }
 

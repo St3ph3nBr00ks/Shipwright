@@ -11,6 +11,8 @@
 #include "soh/ResourceManagerHelpers.h"
 #include "soh_assets.h"
 
+#include "soh/Enhancements/Holiday/Archez.h"
+
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_CAN_PRESS_SWITCHES)
@@ -985,6 +987,7 @@ void EnAm_Draw(Actor* thisx, PlayState* play) {
 
     Gfx_SetupDL_25Opa(play->state.gfxCtx);
     gDPSetEnvColor(POLY_OPA_DISP++, 0, 0, 0, this->textureBlend);
+    SkipOverrideNextSkeleton();
     SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, NULL, EnAm_PostLimbDraw, this);
 
     if (this->iceTimer != 0) {

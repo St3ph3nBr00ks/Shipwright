@@ -20,7 +20,7 @@ static void OnConfigurationChanged() {
     // COND_HOOK(OnSceneSpawnActors, CVarGetInteger(CVAR("Enabled"), 0), []() {
     //     // Spawn your own actors?
     // });
-    
+
     // COND_ID_HOOK(OnActorInit, ACTOR_OBJ_TSUBO, CVarGetInteger(CVAR("DoSomethingWithPots"), 0), [](void* actorRef) {
     //     // Do something with pots?
     // });

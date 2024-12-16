@@ -63,7 +63,7 @@ void EnSnowball_InitCollider(EnSnowball* this, PlayState* play) {
 
 static InitChainEntry sInitChain[] = {
     ICHAIN_F32_DIV1000(gravity, -860, ICHAIN_CONTINUE), ICHAIN_F32_DIV1000(minVelocityY, -15000, ICHAIN_CONTINUE),
-    ICHAIN_VEC3F_DIV1000(scale, 5, ICHAIN_CONTINUE),  ICHAIN_F32(uncullZoneForward, 1500, ICHAIN_CONTINUE),
+    ICHAIN_VEC3F_DIV1000(scale, 5, ICHAIN_CONTINUE),    ICHAIN_F32(uncullZoneForward, 1500, ICHAIN_CONTINUE),
     ICHAIN_F32(uncullZoneScale, 150, ICHAIN_CONTINUE),  ICHAIN_F32(uncullZoneDownward, 1500, ICHAIN_STOP),
 };
 
@@ -111,7 +111,7 @@ void EnSnowball_Update(Actor* thisx, PlayState* play) {
         this->collider.base.atFlags &= ~AT_HIT;
         // Flip the actor's rotation away from the player
         thisx->world.rot.y = thisx->yawTowardsPlayer + 0x8000;
-        
+
         func_8002F6D4(play, &this->actor, 2.0f, this->actor.yawTowardsPlayer, 0.0f, 0);
         Player_PlaySfx(&GET_PLAYER(play)->actor, NA_SE_PL_BODY_HIT);
     }
@@ -200,7 +200,8 @@ void EnSnowball_Update(Actor* thisx, PlayState* play) {
     Actor_MoveXZGravity(thisx);
 
     // Prevent actor from going through the ground or walls
-    Actor_UpdateBgCheckInfo(play, &this->actor, MAX(10.0f, this->actor.scale.x * 250.0f), MAX(10.0f, this->actor.scale.x * 500.0f), 0.0f, 0xFF);
+    Actor_UpdateBgCheckInfo(play, &this->actor, MAX(10.0f, this->actor.scale.x * 250.0f),
+                            MAX(10.0f, this->actor.scale.x * 500.0f), 0.0f, 0xFF);
 
     EnSnowball_UpdateCollider(this);
     // Add collision checks if the actor is a mean boulder

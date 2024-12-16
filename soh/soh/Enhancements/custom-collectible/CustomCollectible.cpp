@@ -15,12 +15,13 @@ extern PlayState* gPlayState;
 }
 
 EnItem00* CustomCollectible::Spawn(f32 posX, f32 posY, f32 posZ, s16 rot, s16 flags, s16 params, ActorFunc actionFunc,
-                            ActorFunc drawFunc) {
+                                   ActorFunc drawFunc) {
     if (!gPlayState) {
         return nullptr;
     }
 
-    Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_ITEM00, posX, posY, posZ, flags, rot, params, ITEM00_NONE, 0);
+    Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_ITEM00, posX, posY, posZ, flags, rot, params,
+                               ITEM00_NONE, 0);
     EnItem00* enItem00 = (EnItem00*)actor;
 
     if (actionFunc != NULL) {

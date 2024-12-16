@@ -23,8 +23,7 @@ bool spawningPresents = false;
 
 int collectedPresent = 0;
 
-struct Present {
-};
+struct Present {};
 
 std::unordered_map<Actor*, Present> presents;
 
@@ -60,7 +59,8 @@ void Present_Draw(Actor* actor, PlayState* play) {
 
     Matrix_Scale(30.0f, 30.0f, 30.0f, MTXMODE_APPLY);
     Matrix_Translate(49.20f, 0.0f, -106.60f, MTXMODE_APPLY);
-    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__), G_MTX_MODELVIEW | G_MTX_LOAD);
+    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__),
+              G_MTX_MODELVIEW | G_MTX_LOAD);
     gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, 255, 255, 255, 255);
     gSPDisplayList(POLY_OPA_DISP++, (Gfx*)gXmasDecor100DL);
 
@@ -88,7 +88,7 @@ void OnConfigChanged() {
                 pos.x = 0;
                 pos.z = 0;
             }
-            // X/Z anywhere from -1000.0 to +1000.0 from player 
+            // X/Z anywhere from -1000.0 to +1000.0 from player
             pos.x += (float)(Random(0, 2000)) - 1000.0f;
             pos.z += (float)(Random(0, 2000)) - 1000.0f;
 
@@ -96,7 +96,8 @@ void OnConfigChanged() {
 
             if (raycastResult > BGCHECK_Y_MIN) {
                 spawningPresents = true;
-                Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_OE2, pos.x, raycastResult, pos.z, 0, 0, 0, 0, false);
+                Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_OE2, pos.x, raycastResult, pos.z,
+                                           0, 0, 0, 0, false);
                 spawningPresents = false;
                 // break;
             }
@@ -105,30 +106,32 @@ void OnConfigChanged() {
         }
     });
 
-    COND_ID_HOOK(ShouldActorInit, ACTOR_EN_OE2, CVarGetInteger(CVAR("GiftsForNPCs"), 0), [](void* actorRef, bool* should) {
-        Actor* actor = (Actor*)actorRef;
-        if (spawningPresents) {
-            actor->init = Present_Init;
-            actor->update = Present_Update;
-            actor->draw = Present_Draw;
-            actor->destroy = Present_Destroy;
-        }
-    });
+    COND_ID_HOOK(ShouldActorInit, ACTOR_EN_OE2, CVarGetInteger(CVAR("GiftsForNPCs"), 0),
+                 [](void* actorRef, bool* should) {
+                     Actor* actor = (Actor*)actorRef;
+                     if (spawningPresents) {
+                         actor->init = Present_Init;
+                         actor->update = Present_Update;
+                         actor->draw = Present_Draw;
+                         actor->destroy = Present_Destroy;
+                     }
+                 });
 
-    COND_ID_HOOK(OnOpenText, 0x1019, CVarGetInteger(CVAR("GiftsForNPCs"), 0), [](u16 * textId, bool* loadFromMessageTable) {
-        if (collectedPresent <= 0) {
-            return;
-        }
+    COND_ID_HOOK(OnOpenText, 0x1019, CVarGetInteger(CVAR("GiftsForNPCs"), 0),
+                 [](u16* textId, bool* loadFromMessageTable) {
+                     if (collectedPresent <= 0) {
+                         return;
+                     }
 
-        auto messageEntry = CustomMessage("A present??? FOR ME???");
-        messageEntry.Format();
-        messageEntry.LoadIntoFont();
-        *loadFromMessageTable = false;
+                     auto messageEntry = CustomMessage("A present??? FOR ME???");
+                     messageEntry.Format();
+                     messageEntry.LoadIntoFont();
+                     *loadFromMessageTable = false;
 
-        vanillaQueuedItemEntry = Rando::StaticData::RetrieveItem(RG_PIECE_OF_HEART).GetGIEntry_Copy();
+                     vanillaQueuedItemEntry = Rando::StaticData::RetrieveItem(RG_PIECE_OF_HEART).GetGIEntry_Copy();
 
-        collectedPresent--;
-    });
+                     collectedPresent--;
+                 });
 }
 
 static void DrawMenu() {

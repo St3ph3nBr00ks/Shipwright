@@ -776,7 +776,8 @@ size_t SohUtils::CopyStringToCharBuffer(char* buffer, const std::string& source,
 
 int SohUtils::CopyStringToCharBuffer(const std::string& inputStr, char* buffer, const int maxBufferSize) {
     if (!inputStr.empty()) {
-        // Prevent potential horrible overflow due to implicit conversion of maxBufferSize to an unsigned. Prevents negatives.
+        // Prevent potential horrible overflow due to implicit conversion of maxBufferSize to an unsigned. Prevents
+        // negatives.
         memset(buffer, 0, std::max<int>(0, maxBufferSize));
         // Gaurentee that this value will be greater than 0, regardless of passed variables.
         const int copiedCharLen = std::min<int>(std::max<int>(0, maxBufferSize - 1), inputStr.length());

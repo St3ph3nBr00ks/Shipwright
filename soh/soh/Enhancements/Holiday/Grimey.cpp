@@ -69,7 +69,7 @@ void Penguin_Update(Actor* actor, PlayState* play) {
             actor->speedXZ = 0.5f;
             break;
     }
-    
+
     Math_SmoothStepToS(&actor->world.rot.y, penguin->targetRot, 1, 200, 0);
     actor->shape.rot.y = actor->world.rot.y;
 
@@ -89,7 +89,8 @@ void Penguin_Draw(Actor* actor, PlayState* play) {
 
     Matrix_Scale(0.8f, 0.8f, 0.8f, MTXMODE_APPLY);
     Matrix_Translate(0, 2000.0f, 0, MTXMODE_APPLY);
-    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__), G_MTX_MODELVIEW | G_MTX_LOAD);
+    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__),
+              G_MTX_MODELVIEW | G_MTX_LOAD);
     gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, 255, 255, 255, 255);
     gSPDisplayList(POLY_OPA_DISP++, (Gfx*)gPenguinDL);
 
@@ -103,7 +104,7 @@ void Penguin_Destroy(Actor* actor, PlayState* play) {
 static void OnConfigurationChanged() {
     COND_HOOK(OnPlayerUpdate, CVarGetInteger(CVAR("Hailstorm"), 0), []() {
         // Every frame has a 1/300 chance of spawning hail
-        if (rand() % 300 == 0) { 
+        if (rand() % 300 == 0) {
             int spawned = 0;
             while (spawned < 1) {
                 Vec3f pos = GET_PLAYER(gPlayState)->actor.world.pos;
@@ -111,7 +112,8 @@ static void OnConfigurationChanged() {
                 pos.z += (float)Random(0, 100) - 50.0f;
                 pos.y += 200.0f;
 
-                Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_NUTSBALL, pos.x, pos.y, pos.z, 0, 0, 0, 0, false);
+                Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_NUTSBALL, pos.x, pos.y, pos.z, 0,
+                                           0, 0, 0, false);
                 EnNutsball* nut = (EnNutsball*)actor;
                 nut->actor.draw = EnNutsball_Draw;
                 nut->actor.shape.rot.y = 0;
@@ -140,15 +142,13 @@ static void OnConfigurationChanged() {
 
         int huddlesSpawned = 0;
         while (huddlesSpawned < 10) {
-            huddlePos.x = (float)(Random(
-                (gPlayState->sceneNum == SCENE_HYRULE_FIELD ? -10000 : -2700) + 10000,
-                (gPlayState->sceneNum == SCENE_HYRULE_FIELD ? 5000 : 2000) + 10000
-            ) - (float)10000.0f);
+            huddlePos.x = (float)(Random((gPlayState->sceneNum == SCENE_HYRULE_FIELD ? -10000 : -2700) + 10000,
+                                         (gPlayState->sceneNum == SCENE_HYRULE_FIELD ? 5000 : 2000) + 10000) -
+                                  (float)10000.0f);
             huddlePos.y = 5000;
-            huddlePos.z = (float)(Random(
-                (gPlayState->sceneNum == SCENE_HYRULE_FIELD ? -1000 : -2000) + 10000,
-                (gPlayState->sceneNum == SCENE_HYRULE_FIELD ? 15000 : 2000) + 10000
-            ) - (float)10000.0f);
+            huddlePos.z = (float)(Random((gPlayState->sceneNum == SCENE_HYRULE_FIELD ? -1000 : -2000) + 10000,
+                                         (gPlayState->sceneNum == SCENE_HYRULE_FIELD ? 15000 : 2000) + 10000) -
+                                  (float)10000.0f);
 
             if (BgCheck_AnyRaycastFloor1(&gPlayState->colCtx, &poly, &huddlePos) <= BGCHECK_Y_MIN) {
                 continue;
@@ -165,7 +165,8 @@ static void OnConfigurationChanged() {
                 raycastResult = BgCheck_AnyRaycastFloor1(&gPlayState->colCtx, &poly, &spawnPos);
 
                 if (raycastResult > BGCHECK_Y_MIN) {
-                    Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_OE2, spawnPos.x, raycastResult, spawnPos.z, 0, 0, 0, 0, false);
+                    Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_OE2, spawnPos.x, raycastResult, spawnPos.z,
+                                0, 0, 0, 0, false);
                     penguinsSpawned++;
                 }
             }
@@ -174,7 +175,7 @@ static void OnConfigurationChanged() {
 
         spawningPenguins = false;
     });
-    
+
     COND_ID_HOOK(ShouldActorInit, ACTOR_EN_OE2, CVarGetInteger(CVAR("Penguins"), 0), [](void* actorRef, bool* should) {
         Actor* actor = (Actor*)actorRef;
         if (spawningPenguins) {

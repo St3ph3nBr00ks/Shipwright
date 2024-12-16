@@ -162,7 +162,7 @@ void EnChristmasTree_Update(Actor* thisx, PlayState* play) {
 
 void EnChristmasTree_Draw(Actor* thisx, PlayState* play) {
     EnChristmasTree* this = (EnChristmasTree*)thisx;
-    
+
     float treeSize = 55.0f;
     uint8_t triforceHuntActive = Randomizer_GetSettingValue(RSK_TRIFORCE_HUNT);
     float percentageCompleted = (float)gSaveContext.triforcePiecesCollected /
@@ -173,7 +173,8 @@ void EnChristmasTree_Draw(Actor* thisx, PlayState* play) {
     Gfx_SetupDL_25Opa(play->state.gfxCtx);
 
     Matrix_Scale(treeSize, treeSize, treeSize, MTXMODE_APPLY);
-    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__), G_MTX_MODELVIEW | G_MTX_LOAD);
+    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__),
+              G_MTX_MODELVIEW | G_MTX_LOAD);
 
     gSPDisplayList(POLY_OPA_DISP++, (Gfx*)gXmasTreeDL);
 

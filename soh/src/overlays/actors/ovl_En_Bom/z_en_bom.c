@@ -287,8 +287,8 @@ void EnBom_Update(Actor* thisx, PlayState* play2) {
 
             // spawn spark effect on even frames
             effPos = thisx->world.pos;
-            if (CVarGetInteger("gHoliday.lilDavid.BombArrows.Active", 0) &&
-                thisx->parent && thisx->parent->id == ACTOR_EN_ARROW) {
+            if (CVarGetInteger("gHoliday.lilDavid.BombArrows.Active", 0) && thisx->parent &&
+                thisx->parent->id == ACTOR_EN_ARROW) {
                 effPos.y += 5.0f;
             } else {
                 effPos.y += 17.0f;

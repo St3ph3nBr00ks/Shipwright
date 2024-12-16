@@ -1316,12 +1316,12 @@ extern "C" void InitOTR(int argc, char* argv[]) {
 
     time_t now = time(NULL);
     tm* tm_now = localtime(&now);
-    //if (tm_now->tm_mon == 11 && tm_now->tm_mday >= 24 && tm_now->tm_mday <= 25) {
-    //    CVarRegisterInteger(CVAR_GENERAL("LetItSnow"), 1);
-    //} else {
-    //    CVarClear(CVAR_GENERAL("LetItSnow"));
-    //}
-    
+    // if (tm_now->tm_mon == 11 && tm_now->tm_mday >= 24 && tm_now->tm_mday <= 25) {
+    //     CVarRegisterInteger(CVAR_GENERAL("LetItSnow"), 1);
+    // } else {
+    //     CVarClear(CVAR_GENERAL("LetItSnow"));
+    // }
+
     CVarRegisterInteger(CVAR_GENERAL("LetItSnow"), 1);
     CVarRegisterInteger(CVAR_COSMETIC("Hud.AButton.Changed"), 1);
     CVarRegisterColor(CVAR_COSMETIC("Hud.AButton.Value"), Color_RGBA8{ 255, 255, 255, 255 });

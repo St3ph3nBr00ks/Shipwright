@@ -179,14 +179,14 @@ struct HookInfo {
             hookId = GameInteractor::Instance->RegisterGameHookForID<GameInteractor::hookType>(id, body); \
         }                                                                                                 \
     }
-#define COND_VB_SHOULD(id, condition, body)                                                               \
-    {                                                                                                     \
-        static HOOK_ID hookId = 0;                                                                        \
+#define COND_VB_SHOULD(id, condition, body)                                                           \
+    {                                                                                                 \
+        static HOOK_ID hookId = 0;                                                                    \
         GameInteractor::Instance->UnregisterGameHookForID<GameInteractor::OnVanillaBehavior>(hookId); \
-        hookId = 0;                                                                                       \
-        if (condition) {                                                                                  \
-            hookId = REGISTER_VB_SHOULD(id, body);                                                        \
-        }                                                                                                 \
+        hookId = 0;                                                                                   \
+        if (condition) {                                                                              \
+            hookId = REGISTER_VB_SHOULD(id, body);                                                    \
+        }                                                                                             \
     }
 
 #define COND_HOOK(hookType, condition, body)                                                     \

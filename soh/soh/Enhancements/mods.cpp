@@ -657,4 +657,5 @@ void InitMods() {
     RegisterPatchHandHandler();
     RegisterHurtContainerModeHandler();
     RandoKaleido_RegisterHooks();
-    RegisterHoliday();}
+    RegisterHoliday();
+}

@@ -37,4 +37,4 @@ struct Holiday {
     }
 };
 
-#endif //HOLIDAY_HPP
+#endif // HOLIDAY_HPP
