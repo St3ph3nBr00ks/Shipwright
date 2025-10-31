@@ -1313,11 +1313,23 @@ extern "C" void InitOTR(int argc, char* argv[]) {
 
     time_t now = time(NULL);
     tm* tm_now = localtime(&now);
-    if (tm_now->tm_mon == 11 && tm_now->tm_mday >= 24 && tm_now->tm_mday <= 25) {
-        CVarRegisterInteger(CVAR_GENERAL("LetItSnow"), 1);
-    } else {
-        CVarClear(CVAR_GENERAL("LetItSnow"));
-    }
+    //if (tm_now->tm_mon == 11 && tm_now->tm_mday >= 24 && tm_now->tm_mday <= 25) {
+    //    CVarRegisterInteger(CVAR_GENERAL("LetItSnow"), 1);
+    //} else {
+    //    CVarClear(CVAR_GENERAL("LetItSnow"));
+    //}
+    
+    CVarRegisterInteger(CVAR_GENERAL("LetItSnow"), 1);
+    CVarRegisterInteger(CVAR_COSMETIC("Hud.AButton.Changed"), 1);
+    CVarRegisterColor(CVAR_COSMETIC("Hud.AButton.Value"), Color_RGBA8{ 255, 255, 255, 255 });
+    CVarRegisterInteger(CVAR_COSMETIC("Hud.BButton.Changed"), 1);
+    CVarRegisterColor(CVAR_COSMETIC("Hud.BButton.Value"), Color_RGBA8{ 255, 255, 255, 255 });
+    CVarRegisterInteger(CVAR_COSMETIC("Hud.CButtons.Changed"), 1);
+    CVarRegisterColor(CVAR_COSMETIC("Hud.CButtons.Value"), Color_RGBA8{ 255, 255, 255, 255 });
+    CVarRegisterInteger(CVAR_COSMETIC("Consumable.Hearts.Changed"), 1);
+    CVarRegisterColor(CVAR_COSMETIC("Consumable.Hearts.Value"), Color_RGBA8{ 255, 158, 0, 255 });
+    CVarRegisterInteger(CVAR_COSMETIC("Consumable.Magic.Changed"), 1);
+    CVarRegisterColor(CVAR_COSMETIC("Consumable.Magic.Value"), Color_RGBA8{ 255, 0, 0, 255 });
 
     srand(now);
 #ifdef ENABLE_REMOTE_CONTROL
@@ -2427,7 +2439,9 @@ extern "C" int CustomMessage_RetrieveIfExists(PlayState* play) {
         bool nonBeanMerchants = ctx->GetOption(RSK_SHUFFLE_MERCHANTS).Is(RO_SHUFFLE_MERCHANTS_ALL_BUT_BEANS) ||
                                 ctx->GetOption(RSK_SHUFFLE_MERCHANTS).Is(RO_SHUFFLE_MERCHANTS_ALL);
         Player* player = GET_PLAYER(play);
-        if (textId == TEXT_RANDOMIZER_CUSTOM_ITEM) {
+        if (textId == 0x406B && play->sceneNum == SCENE_KAKARIKO_VILLAGE) {
+            messageEntry = Randomizer::GetChristmasTreeMessage();
+        } else if (textId == TEXT_RANDOMIZER_CUSTOM_ITEM) {
             if (player->getItemEntry.getItemId == RG_ICE_TRAP) {
                 messageEntry = Randomizer::GetIceTrapMessage();
             } else if (player->getItemEntry.getItemId == RG_TRIFORCE_PIECE) {

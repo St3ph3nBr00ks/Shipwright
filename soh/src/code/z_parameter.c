@@ -3485,8 +3485,8 @@ void Interface_DrawMagicBar(PlayState* play) {
     if (CVarGetInteger(CVAR_COSMETIC("Consumable.Magic.Changed"), 0)) {
         magicbar_green = CVarGetColor24(CVAR_COSMETIC("Consumable.Magic.Value"), magicbar_green);
     }
-    if (CVarGetInteger("gCosmetics.Consumable_MagicInfinite.Changed", 0)) {
-        magicbar_blue = CVarGetColor24("gCosmetics.Consumable_MagicInfinite.Value", magicbar_blue);
+    if (CVarGetInteger(CVAR_COSMETIC("Consumable.MagicInfinite.Changed"), 0)) {
+        magicbar_blue = CVarGetColor24(CVAR_COSMETIC("Consumable.MagicInfinite.Value"), magicbar_blue);
     }
 
     OPEN_DISPS(play->state.gfxCtx);

@@ -35,6 +35,7 @@ class Randomizer {
     static const std::string merchantMessageTableID;
     static const std::string rupeeMessageTableID;
     static const std::string triforcePieceMessageTableID;
+    static const std::string christmasTreeMessageTableID;
     static const std::string NaviRandoMessageTableID;
     static const std::string IceTrapRandoMessageTableID;
     static const std::string randoMiscHintsTableID;
@@ -77,6 +78,7 @@ class Randomizer {
     static CustomMessage GetIceTrapMessage();
     static CustomMessage GetTriforcePieceMessage();
     static CustomMessage GetArchipelagoItemMessage(int16_t randomizerGet, uint32_t randomizerCheck);
+    static CustomMessage GetChristmasTreeMessage();
 };
 
 #ifdef __cplusplus
