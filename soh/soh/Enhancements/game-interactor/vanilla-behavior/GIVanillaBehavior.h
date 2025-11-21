@@ -580,6 +580,14 @@ typedef enum {
     // true
     // ```
     // #### `args`
+    // - None
+    VB_GANONDORF_DECIDE_TO_FIGHT,
+
+    // #### `result`
+    // ```c
+    // true
+    // ```
+    // #### `args`
     // - `*EnGe2`
     VB_GERUDO_GUARD_SET_ACTION_AFTER_TALK,
 
