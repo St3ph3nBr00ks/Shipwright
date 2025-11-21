@@ -2343,6 +2343,14 @@ typedef enum {
     // - `*BgHidanKowarerukabe`
     VB_FIRE_TEMPLE_BOMBABLE_WALL_BREAK,
 
+    // #### `result`
+    // ```c
+    // true
+    // ```
+    // #### `args`
+    // - `*int32_t` // ItemID
+    VB_USE_ITEM,
+
 } GIVanillaBehavior;
 
 #endif
