@@ -1,7 +1,7 @@
 #include "Holiday.hpp"
 #include "Archez.h"
 #include <libultraship/libultraship.h>
-#include "soh/UIWidgets.hpp"
+#include "soh/SohGui/UIWidgets.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh_assets.h"
@@ -110,9 +110,9 @@ static void ConfigurationChanged() {
 static void DrawMenu() {
     ImGui::SeparatorText(AUTHOR);
 
-    if (UIWidgets::EnhancementCheckbox("Snow Golems", CVAR("SnowGolems"))) {
-        ConfigurationChanged();
-    }
+    //if (UIWidgets::EnhancementCheckbox("Snow Golems", CVAR("SnowGolems"))) {
+    //    ConfigurationChanged();
+    //}
     UIWidgets::Tooltip("Overrides most charactor skeletons with snow balls to make them look like Snow Golems");
 }
 

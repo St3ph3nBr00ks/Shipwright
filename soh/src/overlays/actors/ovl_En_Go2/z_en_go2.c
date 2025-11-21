@@ -8,6 +8,8 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
 #include "soh/Enhancements/Holiday/Archez.h"
+#include "soh_assets.h"
+#include "functions.h"
 
 #define FLAGS                                                                                  \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -2030,6 +2032,7 @@ void EnGo2_Update(Actor* thisx, PlayState* play) {
 s32 EnGo2_DrawCurledUp(EnGo2* this, PlayState* play) {
     Vec3f D_80A48554 = { 0.0f, 0.0f, 0.0f };
 
+    OPEN_DISPS(play->state.gfxCtx);
     if (CVarGetInteger("gHoliday.Archez.SnowGolems", 0)) {
         Matrix_Translate(0.0f, 10.0f, 0.0f, MTXMODE_APPLY);
         Matrix_Scale(1.75f, 1.75f, 1.75f, MTXMODE_APPLY);

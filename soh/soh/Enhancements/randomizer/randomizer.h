@@ -39,6 +39,7 @@ class Randomizer {
     static const std::string IceTrapRandoMessageTableID;
     static const std::string randoMiscHintsTableID;
     static const std::string archipelagoItemsTableID;
+    static const std::string christmasTreeMessageTableID;
 
     static Sprite* GetSeedTexture(uint8_t index);
     bool SpoilerFileExists(const char* spoilerFileName);

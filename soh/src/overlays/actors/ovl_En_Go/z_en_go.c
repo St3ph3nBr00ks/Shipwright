@@ -5,6 +5,7 @@
 #include "soh/frame_interpolation.h"
 #include "soh/OTRGlobals.h"
 
+#include "soh_assets.h"
 #include "soh/Enhancements/Holiday/Archez.h"
 
 #define FLAGS                                                                                  \

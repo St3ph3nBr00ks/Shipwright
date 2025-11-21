@@ -59,12 +59,12 @@ static void ConfigurationChanged() {
 }
 
 static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
+    //ImGui::SeparatorText(AUTHOR);
 
-    if (UIWidgets::EnhancementCheckbox("Roc's Feather", CVAR("RocsFeather"))) {
-        ConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Using Nayru's Love will now act as Roc's Feather instead! No magic required.");
+    //if (UIWidgets::EnhancementCheckbox("Roc's Feather", CVAR("RocsFeather"))) {
+    //    ConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Using Nayru's Love will now act as Roc's Feather instead! No magic required.");
 }
 
 static void RegisterMod() {

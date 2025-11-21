@@ -40,7 +40,7 @@ void Penguin_Init(Actor* actor, PlayState* play) {
     actor->world.rot.y = penguin.targetRot = rand() % 0x10000;
     penguins[actor] = penguin;
     actor->gravity = -1.0f;
-    actor->flags &= ~ACTOR_FLAG_TARGETABLE;
+    actor->flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
 }
 
 void Penguin_Update(Actor* actor, PlayState* play) {
@@ -77,7 +77,7 @@ void Penguin_Update(Actor* actor, PlayState* play) {
         actor->speedXZ = 0.0f;
     }
 
-    Actor_MoveForward(actor);
+    Actor_MoveXZGravity(actor);
 
     Actor_UpdateBgCheckInfo(play, actor, 10.0f, 10.0f, 0.0f, 0xFF);
 }
@@ -208,15 +208,15 @@ static void OnConfigurationChanged() {
 }
 
 static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
-    if (UIWidgets::EnhancementCheckbox("Penguins", CVAR("Penguins"))) {
-        OnConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Penguins will spawn in huddles throughout hyrule");
-    if (UIWidgets::EnhancementCheckbox("Hailstorm", CVAR("Hailstorm"))) {
-        OnConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Ever persistent hailstorm throughout hyrule");
+    //ImGui::SeparatorText(AUTHOR);
+    //if (UIWidgets::EnhancementCheckbox("Penguins", CVAR("Penguins"))) {
+    //    OnConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Penguins will spawn in huddles throughout hyrule");
+    //if (UIWidgets::EnhancementCheckbox("Hailstorm", CVAR("Hailstorm"))) {
+    //    OnConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Ever persistent hailstorm throughout hyrule");
 }
 
 static void RegisterMod() {

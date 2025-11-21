@@ -1,6 +1,6 @@
 #include "Holiday.hpp"
 
-#include "utils/StringHelper.h"
+#include <ship/utils/StringHelper.h>
 
 extern "C" {
 #include "macros.h"
@@ -24,10 +24,10 @@ static void OnConfigurationChanged() {
     if (!CVarGetInteger(CVAR("BombArrows.Enabled"), 0))
         CVarSetInteger(CVAR("BombArrows.Active"), 0);
 
-    COND_HOOK(OnSaveFile, CVarGetInteger(CVAR("BombArrows.Enabled"), 0), [](int32_t file) {
+    COND_HOOK(OnSaveFile, CVarGetInteger(CVAR("BombArrows.Enabled"), 0), [](int32_t file, int32_t sectionID) {
         std::string cvar = StringHelper::Sprintf("%s%d", CVAR("BombArrows.Save"), file);
         CVarSetInteger(cvar.c_str(), CVarGetInteger(CVAR("BombArrows.Active"), 0));
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesOnNextTick();
+        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
     });
 
     COND_HOOK(OnLoadFile, CVarGetInteger(CVAR("BombArrows.Enabled"), 0), [](int32_t file) {
@@ -39,13 +39,13 @@ static void OnConfigurationChanged() {
         std::string cvarFrom = StringHelper::Sprintf("%s%d", CVAR("BombArrows.Save"), from);
         std::string cvarTo = StringHelper::Sprintf("%s%d", CVAR("BombArrows.Save"), to);
         CVarSetInteger(cvarTo.c_str(), CVarGetInteger(cvarFrom.c_str(), 0));
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesOnNextTick();
+        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
     });
 
     COND_HOOK(OnDeleteFile, CVarGetInteger(CVAR("BombArrows.Enabled"), 0), [](int32_t file) {
         std::string cvar = StringHelper::Sprintf("%s%d", CVAR("BombArrows.Save"), file);
         CVarSetInteger(cvar.c_str(), 0);
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesOnNextTick();
+        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
     });
 
     COND_ID_HOOK(OnActorInit, ACTOR_EN_ARROW, CVarGetInteger(CVAR("BombArrows.Enabled"), 0), [](void* actorRef) {
@@ -116,11 +116,11 @@ static void OnConfigurationChanged() {
 }
 
 static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
-    if (UIWidgets::EnhancementCheckbox("Bomb Arrows", CVAR("BombArrows.Enabled"))) {
-        OnConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Equip bombs over an already equipped Bow to shoot bomb arrows");
+    //ImGui::SeparatorText(AUTHOR);
+    //if (UIWidgets::EnhancementCheckbox("Bomb Arrows", CVAR("BombArrows.Enabled"))) {
+    //    OnConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Equip bombs over an already equipped Bow to shoot bomb arrows");
 }
 
 static void RegisterMod() {

@@ -193,3 +193,4 @@ void EffectSsBomb2_Update(PlayState* play, u32 index, EffectSs* this) {
         this->rEnvColorG = func_80027DD4(this->rEnvColorG, 255, divisor);
         this->rEnvColorB = func_80027DD4(this->rEnvColorB, 255, divisor);
     }
+}

@@ -7,6 +7,7 @@
 #include "soh/Enhancements/enhancementTypes.h"
 #include <soh/Enhancements/item-tables/ItemTableManager.h>
 #include "soh/Enhancements/timesaver_hook_handlers.h"
+#include "soh/Enhancements/randomizer/3drando/random.hpp"
 #include "soh/Enhancements/randomizer/hook_handlers.h"
 #include "soh/Enhancements/Holiday/Holiday.hpp"
 

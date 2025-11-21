@@ -62,11 +62,11 @@ static void OnConfigurationChanged() {
 }
 
 static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
-    if (UIWidgets::EnhancementCheckbox("Evil Gossip Stone", CVAR("EvilGossipStone"))) {
-        OnConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Don't you dare talk to them.");
+    //ImGui::SeparatorText(AUTHOR);
+    //if (UIWidgets::EnhancementCheckbox("Evil Gossip Stone", CVAR("EvilGossipStone"))) {
+    //    OnConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Don't you dare talk to them.");
 }
 
 static void RegisterMod() {

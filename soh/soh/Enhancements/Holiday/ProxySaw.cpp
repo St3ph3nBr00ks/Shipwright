@@ -1,11 +1,11 @@
 #include "Holiday.hpp"
 #include <libultraship/libultraship.h>
-#include "soh/UIWidgets.hpp"
+#include "soh/SohGui/UIWidgets.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "objects/object_dog/object_dog.h"
 #include "soh/frame_interpolation.h"
 #include "soh/Enhancements/randomizer/3drando/random.hpp"
-#include "soh/Enhancements/randomizer/3drando/location_access.hpp"
+#include "soh/Enhancements/randomizer/location_access.h"
 #include "soh/Enhancements/randomizer/entrance.h"
 
 #include "objects/gameplay_field_keep/gameplay_field_keep.h"
@@ -202,23 +202,23 @@ static void ConfigurationChanged() {
 }
 
 static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
+    //ImGui::SeparatorText(AUTHOR);
 
-    if (UIWidgets::EnhancementCheckbox("Snowballs", CVAR("Snowballs"))) {
-        ConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Rogue snowballs will spawn in Hyrule Field and Kakariko Village.");
-    if (UIWidgets::EnhancementCheckbox("Lake Hylia Icebergs", CVAR("Icebergs"))) {
-        ConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Icebergs will spawn in Lake Hylia.");
-    if (UIWidgets::EnhancementCheckbox("Down the Rabbit Hole", CVAR("DownTheRabbitHole"))) {
-        ConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Random grottos will spawn throughout Hyrule. Who knows where they will take you?");
-    if (UIWidgets::EnhancementCheckbox("Super Bonk", CVAR("SuperBonk"))) {
-        ConfigurationChanged();
-    }
+    //if (UIWidgets::EnhancementCheckbox("Snowballs", CVAR("Snowballs"))) {
+    //    ConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Rogue snowballs will spawn in Hyrule Field and Kakariko Village.");
+    //if (UIWidgets::EnhancementCheckbox("Lake Hylia Icebergs", CVAR("Icebergs"))) {
+    //    ConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Icebergs will spawn in Lake Hylia.");
+    //if (UIWidgets::EnhancementCheckbox("Down the Rabbit Hole", CVAR("DownTheRabbitHole"))) {
+    //    ConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Random grottos will spawn throughout Hyrule. Who knows where they will take you?");
+    //if (UIWidgets::EnhancementCheckbox("Super Bonk", CVAR("SuperBonk"))) {
+    //    ConfigurationChanged();
+    //}
 }
 
 static void RegisterMod() {

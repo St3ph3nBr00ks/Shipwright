@@ -66,52 +66,52 @@ static void OnConfigurationChanged() {
 
 static void DrawMenu() {
     ImGui::SeparatorText(AUTHOR);
-    if (ImGui::BeginMenu("Customize Rainbows")) {
-        UIWidgets::EnhancementCheckbox("Enable", CVAR("lEnableCustomRainbows"));
-        if (CVarGetInteger(CVAR("lEnableCustomRainbows"), 0)) {
-            ImGui::ColorEdit3("Color 1", (float*)&customColorZero,      ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("Color 2", (float*)&customColorOne,       ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("Color 3", (float*)&customColorMinusZero, ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("Color 4", (float*)&customColorMinusOne,  ImGuiColorEditFlags_NoInputs);
+    //if (ImGui::BeginMenu("Customize Rainbows")) {
+    //    UIWidgets::EnhancementCheckbox("Enable", CVAR("lEnableCustomRainbows"));
+    //    if (CVarGetInteger(CVAR("lEnableCustomRainbows"), 0)) {
+    //        ImGui::ColorEdit3("Color 1", (float*)&customColorZero,      ImGuiColorEditFlags_NoInputs);
+    //        ImGui::ColorEdit3("Color 2", (float*)&customColorOne,       ImGuiColorEditFlags_NoInputs);
+    //        ImGui::ColorEdit3("Color 3", (float*)&customColorMinusZero, ImGuiColorEditFlags_NoInputs);
+    //        ImGui::ColorEdit3("Color 4", (float*)&customColorMinusOne,  ImGuiColorEditFlags_NoInputs);
 
-            UIWidgets::PaddedText("Presets", true, false);
-            size_t rainbowPresetIdx = 0;
-            if (UIWidgets::EnhancementCombobox(CVAR("lCustomRainbowPreset"), RAINBOW_PRESET_NAMES, 0) &&
-                    (rainbowPresetIdx = CVarGetInteger(CVAR("lCustomRainbowPreset"), 0)) <= RAINBOW_PRESET_LEN) { //paranoia
-                customColorZero = RAINBOW_PRESETS[rainbowPresetIdx][0];
-                customColorOne = RAINBOW_PRESETS[rainbowPresetIdx][1];
-                customColorMinusZero = RAINBOW_PRESETS[rainbowPresetIdx][2];
-                customColorMinusOne = RAINBOW_PRESETS[rainbowPresetIdx][3];
-            }
+    //        UIWidgets::PaddedText("Presets", true, false);
+    //        size_t rainbowPresetIdx = 0;
+    //        if (UIWidgets::EnhancementCombobox(CVAR("lCustomRainbowPreset"), RAINBOW_PRESET_NAMES, 0) &&
+    //                (rainbowPresetIdx = CVarGetInteger(CVAR("lCustomRainbowPreset"), 0)) <= RAINBOW_PRESET_LEN) { //paranoia
+    //            customColorZero = RAINBOW_PRESETS[rainbowPresetIdx][0];
+    //            customColorOne = RAINBOW_PRESETS[rainbowPresetIdx][1];
+    //            customColorMinusZero = RAINBOW_PRESETS[rainbowPresetIdx][2];
+    //            customColorMinusOne = RAINBOW_PRESETS[rainbowPresetIdx][3];
+    //        }
 
-            Color_RGBA8 color1, color2, color3, color4;
-            color1.r = static_cast<uint8_t>(customColorZero.x * 255.0f);
-            color1.g = static_cast<uint8_t>(customColorZero.y * 255.0f);
-            color1.b = static_cast<uint8_t>(customColorZero.z * 255.0f);
+    //        Color_RGBA8 color1, color2, color3, color4;
+    //        color1.r = static_cast<uint8_t>(customColorZero.x * 255.0f);
+    //        color1.g = static_cast<uint8_t>(customColorZero.y * 255.0f);
+    //        color1.b = static_cast<uint8_t>(customColorZero.z * 255.0f);
 
-            color2.r = static_cast<uint8_t>(customColorOne.x * 255.0f);
-            color2.g = static_cast<uint8_t>(customColorOne.y * 255.0f);
-            color2.b = static_cast<uint8_t>(customColorOne.z * 255.0f);
+    //        color2.r = static_cast<uint8_t>(customColorOne.x * 255.0f);
+    //        color2.g = static_cast<uint8_t>(customColorOne.y * 255.0f);
+    //        color2.b = static_cast<uint8_t>(customColorOne.z * 255.0f);
 
-            color3.r = static_cast<uint8_t>(customColorMinusZero.x * 255.0f);
-            color3.g = static_cast<uint8_t>(customColorMinusZero.y * 255.0f);
-            color3.b = static_cast<uint8_t>(customColorMinusZero.z * 255.0f);
+    //        color3.r = static_cast<uint8_t>(customColorMinusZero.x * 255.0f);
+    //        color3.g = static_cast<uint8_t>(customColorMinusZero.y * 255.0f);
+    //        color3.b = static_cast<uint8_t>(customColorMinusZero.z * 255.0f);
 
-            color4.r = static_cast<uint8_t>(customColorMinusOne.x * 255.0f);
-            color4.g = static_cast<uint8_t>(customColorMinusOne.y * 255.0f);
-            color4.b = static_cast<uint8_t>(customColorMinusOne.z * 255.0f);
+    //        color4.r = static_cast<uint8_t>(customColorMinusOne.x * 255.0f);
+    //        color4.g = static_cast<uint8_t>(customColorMinusOne.y * 255.0f);
+    //        color4.b = static_cast<uint8_t>(customColorMinusOne.z * 255.0f);
 
-            CVarSetColor(CVAR("lCustomRainbow1"), color1);
-            CVarSetColor(CVAR("lCustomRainbow2"), color2);
-            CVarSetColor(CVAR("lCustomRainbow3"), color3);
-            CVarSetColor(CVAR("lCustomRainbow4"), color4);
+    //        CVarSetColor(CVAR("lCustomRainbow1"), color1);
+    //        CVarSetColor(CVAR("lCustomRainbow2"), color2);
+    //        CVarSetColor(CVAR("lCustomRainbow3"), color3);
+    //        CVarSetColor(CVAR("lCustomRainbow4"), color4);
 
-            OnConfigurationChanged();
-        }
+    //        OnConfigurationChanged();
+    //    }
 
-        ImGui::EndMenu();
+    //    ImGui::EndMenu();
 
-    }
+    //}
     //if (UIWidgets::EnhancementCheckbox("DoSomethingWithPots", CVAR("DoSomethingWithPots"))) {
     //    OnConfigurationChanged();
     //}

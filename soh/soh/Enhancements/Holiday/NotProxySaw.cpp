@@ -1,6 +1,6 @@
 #include "Holiday.hpp"
 #include <libultraship/libultraship.h>
-#include "soh/UIWidgets.hpp"
+#include "soh/SohGui/UIWidgets.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/custom-message/CustomMessageManager.h"
 #include "include/message_data_fmt.h"
@@ -122,11 +122,11 @@ static void ConfigurationChanged() {
 }
 
 static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
-    if (UIWidgets::EnhancementCheckbox("Ganon Dating Sim", CVAR("GanonDatingSim"))) {
-        ConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Prior to fighting him at the top of his Castle, you make an attempt to convince Ganon to join you instead.");
+    //ImGui::SeparatorText(AUTHOR);
+    //if (UIWidgets::EnhancementCheckbox("Ganon Dating Sim", CVAR("GanonDatingSim"))) {
+    //    ConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Prior to fighting him at the top of his Castle, you make an attempt to convince Ganon to join you instead.");
 }
 
 static void RegisterMod() {

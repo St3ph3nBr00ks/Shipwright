@@ -8576,7 +8576,7 @@ void Player_Action_808414F8(Player* this, PlayState* play) {
 
         Player_GetMovementSpeedAndYaw(this, &speedTarget, &yawTarget, SPEED_MODE_LINEAR, play);
 
-        int32_t giSpeedModifier = GameInteractor_RunSpeedModifier();
+        int32_t giSpeedModifier = GameInteractor_MovementSpeedMultiplier();
         if (giSpeedModifier != 0) {
             if (giSpeedModifier > 0) {
                 speedTarget *= giSpeedModifier;

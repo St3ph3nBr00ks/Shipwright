@@ -1,11 +1,11 @@
 #include "Holiday.hpp"
 #include <libultraship/libultraship.h>
-#include "soh/UIWidgets.hpp"
+#include "soh/SohGui/UIWidgets.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "objects/object_dog/object_dog.h"
 #include "soh/frame_interpolation.h"
 #include "soh/Enhancements/randomizer/3drando/random.hpp"
-#include "soh/Enhancements/randomizer/3drando/location_access.hpp"
+#include "soh/Enhancements/randomizer/location_access.h"
 #include "soh/Enhancements/randomizer/entrance.h"
 #include "soh/Enhancements/custom-collectible/CustomCollectible.h"
 #include "soh/Notification/Notification.h"
@@ -336,7 +336,7 @@ void SpawnCollectionPoint() {
     EnItem00* collectionPoint = CustomCollectible::Spawn(859.0f, 347.0f, 5185.0f, 0xB000, 0, 0, NULL, NULL);
     collectionPoint->actor.update = CollectionPoint_Update;
     collectionPoint->actor.draw = CollectionPoint_Draw;
-    collectionPoint->actor.flags |= ACTOR_FLAG_DRAW_WHILE_CULLED;
+    collectionPoint->actor.flags |= ACTOR_FLAG_DRAW_CULLING_DISABLED;
     SkelAnime_InitFlex(gPlayState, &collectionPointSkelAnime, (FlexSkeletonHeader*)&object_toryo_Skel_007150, 
         (AnimationHeader*)&object_toryo_Anim_000E50, collectionPointJointTable, collectionPointMorphTable, 17);
 }
@@ -425,9 +425,9 @@ static void ConfigurationChanged() {
 
     COND_HOOK(OnPlayerUpdate, CVarGetInteger(CVAR("FredsQuest.Enabled"), 0), []() {
         if (CVarGetInteger(CVAR("FredsQuest.EncumberedThreshold"), 60) == 0 || FredsQuestWoodOnHand <= CVarGetInteger(CVAR("FredsQuest.EncumberedThreshold"), 60)) {
-            GameInteractor::State::RunSpeedModifier = 0;
+            GameInteractor::State::MovementSpeedMultiplier = 0;
         } else {
-            GameInteractor::State::RunSpeedModifier = -2;
+            GameInteractor::State::MovementSpeedMultiplier = -2;
         }
     });
 
@@ -447,7 +447,7 @@ static void DrawMenu() {
     // UIWidgets::EnhancementSliderInt("Xs", "Xs", CVAR("tmpxs"), 0, UINT16_MAX, "%d", 1, false);
     // UIWidgets::EnhancementSliderInt("Ys", "Ys", CVAR("tmpys"), 0, UINT16_MAX, "%d", 1, false);
     // UIWidgets::EnhancementSliderInt("Zs", "Zs", CVAR("tmpzs"), 0, UINT16_MAX, "%d", 1, false);
-    if (UIWidgets::EnhancementCheckbox("Fred's Quest", CVAR("FredsQuest.Enabled"))) {
+    /*if (UIWidgets::EnhancementCheckbox("Fred's Quest", CVAR("FredsQuest.Enabled"))) {
         ConfigurationChanged();
     }
     UIWidgets::Tooltip("Collect wood and bring it to the collection point in Hyrule Field for a small reward.");
@@ -483,7 +483,7 @@ static void DrawMenu() {
         if (UIWidgets::EnhancementSliderInt("Spawn Chance", "##RandomTraps.SpawnChance", CVAR("RandomTraps.SpawnChance"), 40, 2000, "%d", 1000, false)) {
             ConfigurationChanged();
         }
-    }
+    }*/
 }
 
 static void RegisterMod() {

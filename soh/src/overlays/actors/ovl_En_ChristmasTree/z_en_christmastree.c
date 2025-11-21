@@ -77,9 +77,9 @@ void EnChristmasTree_Talk(EnChristmasTree* this, PlayState* play) {
     if (dialogState != TEXT_STATE_CHOICE) {
         if ((dialogState == TEXT_STATE_DONE) && Message_ShouldAdvance(play)) { // advanced final textbox
             // Teleport to credits when goal is reached.
-            if (gSaveContext.triforcePiecesCollected >= Randomizer_GetSettingValue(RSK_TRIFORCE_HUNT_PIECES_REQUIRED)) {
-                gSaveContext.sohStats.itemTimestamp[TIMESTAMP_TRIFORCE_COMPLETED] = GAMEPLAYSTAT_TOTAL_TIME;
-                gSaveContext.sohStats.gameComplete = 1;
+            if (gSaveContext.ship.quest.data.randomizer.triforcePiecesCollected >= Randomizer_GetSettingValue(RSK_TRIFORCE_HUNT_PIECES_REQUIRED)) {
+                gSaveContext.ship.stats.itemTimestamp[TIMESTAMP_TRIFORCE_COMPLETED] = GAMEPLAYSTAT_TOTAL_TIME;
+                gSaveContext.ship.stats.gameComplete = 1;
                 Play_PerformSave(play);
                 GameInteractor_SetTriforceHuntCreditsWarpActive(true);
                 this->actionFunc = EnChristmasTree_SetupEndTitle;
@@ -148,7 +148,7 @@ void EnChristmasTree_Update(Actor* thisx, PlayState* play) {
     Actor_SetFocus(&this->actor, 80.0f);
 
     uint8_t triforceHuntActive = Randomizer_GetSettingValue(RSK_TRIFORCE_HUNT);
-    float percentageCompleted = (float)gSaveContext.triforcePiecesCollected /
+    float percentageCompleted = (float)gSaveContext.ship.quest.data.randomizer.triforcePiecesCollected /
                                 (float)Randomizer_GetSettingValue(RSK_TRIFORCE_HUNT_PIECES_REQUIRED);
 
     if ((percentageCompleted >= 1.0f || !triforceHuntActive) && !this->spawnedRupee) {
@@ -165,7 +165,7 @@ void EnChristmasTree_Draw(Actor* thisx, PlayState* play) {
 
     float treeSize = 55.0f;
     uint8_t triforceHuntActive = Randomizer_GetSettingValue(RSK_TRIFORCE_HUNT);
-    float percentageCompleted = (float)gSaveContext.triforcePiecesCollected /
+    float percentageCompleted = (float)gSaveContext.ship.quest.data.randomizer.triforcePiecesCollected /
                                 (float)Randomizer_GetSettingValue(RSK_TRIFORCE_HUNT_PIECES_REQUIRED);
 
     OPEN_DISPS(play->state.gfxCtx);

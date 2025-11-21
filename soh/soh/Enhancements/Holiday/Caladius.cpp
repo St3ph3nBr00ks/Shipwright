@@ -21,7 +21,7 @@ uint64_t GetUnixTimestamp();
 
 bool isFeverDisabled = false;
 bool isExchangeDisabled = false;
-float fontScale = 1.0f;
+static float fontScale = 1.0f;
 
 extern GetItemEntry vanillaQueuedItemEntry;
 
@@ -41,7 +41,7 @@ void OnTimeOver() {
 
 int32_t calculateRemainingTime() {
     int32_t timeRemaining =
-        ((gSaveContext.sohStats.count[COUNT_ICE_TRAPS] * (CVarGetInteger(CVAR("ExtendTimer"), 0) * 600)) +
+        ((gSaveContext.ship.stats.count[COUNT_ICE_TRAPS] * (CVarGetInteger(CVAR("ExtendTimer"), 0) * 600)) +
          (CVarGetInteger(CVAR("StartTimer"), 0) * 600) - GAMEPLAYSTAT_TOTAL_TIME);
     if (timeRemaining <= 0) {
         OnTimeOver();
@@ -107,7 +107,7 @@ void Present_Update(Actor* actor, PlayState* play) {
         uint32_t giftsCollected = CVarGetInteger(CVAR("GiftsCollected"), 0);
         giftsCollected++;
         CVarSetInteger(CVAR("GiftsCollected"), giftsCollected);
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesOnNextTick();
+        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
         std::string msg = std::to_string(giftsCollected).c_str();
         msg += " Gifts in Inventory.";
         Notification::Emit({
@@ -271,38 +271,38 @@ void CaladiusWindow::Draw() {
 }
 
 static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
-    if (UIWidgets::EnhancementCheckbox("Holiday Fever", CVAR("Fever.Enabled"))) {
-        OnFeverConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Can you beat your objective before the Fever sets in?/n"
-                       "- Obtaining Ice Traps extends your timer.");
-    if (CVarGetInteger(CVAR("Fever.Enabled"), 0)) {
-        if (UIWidgets::EnhancementSliderFloat("", "##FontScale", CVAR("FontScale"), 
-            1.0f, 5.0f, "Font: %.1fx", 1.0f, false, false, isFeverDisabled)) {
-            OnFeverConfigurationChanged();
-        }
-        UIWidgets::PaddedEnhancementSliderInt("Starting Timer: %d minutes", "##StartTime", CVAR("StartTimer"),
-            5, 30, "", 15, true, true, false, isFeverDisabled);
-        UIWidgets::PaddedEnhancementSliderInt("Time Extensions: %d minutes", "##ExtendTime", CVAR("ExtendTimer"),
-            1, 10, "", 5, true, true, false, isFeverDisabled);
-    }
-    UIWidgets::PaddedSeparator();
+    //ImGui::SeparatorText(AUTHOR);
+    //if (UIWidgets::EnhancementCheckbox("Holiday Fever", CVAR("Fever.Enabled"))) {
+    //    OnFeverConfigurationChanged();
+    //}
+    //UIWidgets::Tooltip("Can you beat your objective before the Fever sets in?/n"
+    //                   "- Obtaining Ice Traps extends your timer.");
+    //if (CVarGetInteger(CVAR("Fever.Enabled"), 0)) {
+    //    if (UIWidgets::EnhancementSliderFloat("", "##FontScale", CVAR("FontScale"), 
+    //        1.0f, 5.0f, "Font: %.1fx", 1.0f, false, false, isFeverDisabled)) {
+    //        OnFeverConfigurationChanged();
+    //    }
+    //    UIWidgets::PaddedEnhancementSliderInt("Starting Timer: %d minutes", "##StartTime", CVAR("StartTimer"),
+    //        5, 30, "", 15, true, true, false, isFeverDisabled);
+    //    UIWidgets::PaddedEnhancementSliderInt("Time Extensions: %d minutes", "##ExtendTime", CVAR("ExtendTimer"),
+    //        1, 10, "", 5, true, true, false, isFeverDisabled);
+    //}
+    //UIWidgets::PaddedSeparator();
 
-    if (UIWidgets::EnhancementCheckbox("Boulder Blitz", CVAR("Blitz.Enabled"))) {
-        OnBlitzChange();
-    }
-    UIWidgets::Tooltip("Boulders will randomly be replaced with other boulder types.");
-    UIWidgets::PaddedSeparator();
+    //if (UIWidgets::EnhancementCheckbox("Boulder Blitz", CVAR("Blitz.Enabled"))) {
+    //    OnBlitzChange();
+    //}
+    //UIWidgets::Tooltip("Boulders will randomly be replaced with other boulder types.");
+    //UIWidgets::PaddedSeparator();
 
-    if (UIWidgets::EnhancementCheckbox("Ornament Exchange", CVAR("OrnExch.Enabled"))) {
-        OnPresentChange();
-    }
-    UIWidgets::Tooltip("See Malon as Young Link in Lon Lon Ranch to exchange Gifts for Ornaments!");
-    if (CVarGetInteger(CVAR("OrnExch.Enabled"), 0)) {
-        UIWidgets::PaddedEnhancementSliderInt("Gifts Required: %d Gifts", "##GiftsReq", CVAR("OrnExch.Amount"),
-            5, 30, "", 15, true, true, false, isExchangeDisabled);
-    }
+    //if (UIWidgets::EnhancementCheckbox("Ornament Exchange", CVAR("OrnExch.Enabled"))) {
+    //    OnPresentChange();
+    //}
+    //UIWidgets::Tooltip("See Malon as Young Link in Lon Lon Ranch to exchange Gifts for Ornaments!");
+    //if (CVarGetInteger(CVAR("OrnExch.Enabled"), 0)) {
+    //    UIWidgets::PaddedEnhancementSliderInt("Gifts Required: %d Gifts", "##GiftsReq", CVAR("OrnExch.Amount"),
+    //        5, 30, "", 15, true, true, false, isExchangeDisabled);
+    //}
 }
 
 static void RegisterMod() {

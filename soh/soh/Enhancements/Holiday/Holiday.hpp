@@ -4,7 +4,7 @@
 #include <vector>
 #include <functional>
 #include <libultraship/libultraship.h>
-#include "soh/UIWidgets.hpp"
+#include "soh/SohGui/UIWidgets.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/cosmetics/CosmeticsEditor.h"
 

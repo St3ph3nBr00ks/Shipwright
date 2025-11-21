@@ -1,6 +1,6 @@
 #include "Holiday.hpp"
 #include <libultraship/libultraship.h>
-#include "soh/UIWidgets.hpp"
+#include "soh/SohGui/UIWidgets.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/custom-message/CustomMessageManager.h"
 #include "include/message_data_fmt.h"
@@ -20,7 +20,7 @@ static void ConfigurationChanged() {
         }
 
         std::string message;
-        uint8_t current = gSaveContext.triforcePiecesCollected;
+        uint8_t current = gSaveContext.ship.quest.data.randomizer.triforcePiecesCollected;
         uint8_t required = OTRGlobals::Instance->gRandomizer->GetRandoSettingValue(RSK_TRIFORCE_HUNT_PIECES_REQUIRED);
 
         if (current < required) {

@@ -15,7 +15,7 @@ extern PlayState* gPlayState;
 uint64_t GetUnixTimestamp();
 }
 
-float fontScale = 1.0f;
+static float fontScale = 1.0f;
 std::string timeDisplayTime = "";
 ImTextureID textureDisplay = 0;
 ImVec4 windowBG = ImVec4(0, 0, 0, 0.5f);
