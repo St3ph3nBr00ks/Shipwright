@@ -137,8 +137,8 @@ static void TimeDisplayGetTimer(uint32_t timeID) {
             textureDisplay = Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName("NAVI_TIMER");
             break;
         case DISPLAY_FRED_QUEST:
-            timeDisplayTime = std::to_string(FredsQuestWoodOnHand) + "/" + std::to_string(FredsQuestWoodCollected) + "/" +
-                             std::to_string(CVarGetInteger("gHoliday.Fredomato.FredsQuest.WoodNeeded", 300));
+            timeDisplayTime = std::to_string(FredsQuestWoodOnHand) + "/" + std::to_string(FredsQuestWoodCollected) +
+                              "/" + std::to_string(CVarGetInteger("gHoliday.Fredomato.FredsQuest.WoodNeeded", 300));
             textureDisplay = Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName("ITEM_STICK");
         default:
             break;

@@ -115,20 +115,13 @@ static void OnConfigurationChanged() {
     });
 }
 
-static void DrawMenu() {
-    //ImGui::SeparatorText(AUTHOR);
-    //if (UIWidgets::EnhancementCheckbox("Bomb Arrows", CVAR("BombArrows.Enabled"))) {
-    //    OnConfigurationChanged();
-    //}
-    //UIWidgets::Tooltip("Equip bombs over an already equipped Bow to shoot bomb arrows");
+static void RegisterMenu() {
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
+    SohGui::mSohMenu->AddWidget(path, "Bomb Arrows", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("BombArrows.Enabled"))
+        .Options(UIWidgets::CheckboxOptions().Tooltip("Equip bombs over an already equipped Bow to shoot bomb arrows"));
 }
 
-static void RegisterMod() {
-    // #region Leave this alone unless you know what you are doing
-    OnConfigurationChanged();
-    // #endregion
-
-    CVarSetInteger(CVAR("BombArrows.Active"), 0);
-}
-
-static Holiday holiday(DrawMenu, RegisterMod);
+static RegisterShipInitFunc initFunc(OnConfigurationChanged);
+static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

@@ -14,7 +14,7 @@ extern PlayState* gPlayState;
 
 uint8_t rocsUseCount = 0;
 
-static void ConfigurationChanged() {
+static void OnConfigurationChanged() {
 
     COND_HOOK(OnPlayerUpdate, CVarGetInteger(CVAR("RocsFeather"), 0), []() {
         Player* player = GET_PLAYER(gPlayState);
@@ -58,19 +58,15 @@ static void ConfigurationChanged() {
     });
 }
 
-static void DrawMenu() {
-    //ImGui::SeparatorText(AUTHOR);
+static void RegisterMenu() {
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
 
-    //if (UIWidgets::EnhancementCheckbox("Roc's Feather", CVAR("RocsFeather"))) {
-    //    ConfigurationChanged();
-    //}
-    //UIWidgets::Tooltip("Using Nayru's Love will now act as Roc's Feather instead! No magic required.");
+    SohGui::mSohMenu->AddWidget(path, "Roc's Feather", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("RocsFeather"))
+        .Options(UIWidgets::CheckboxOptions().Tooltip(
+            "Using Nayru's Love will now act as Roc's Feather instead! No magic required."));
 }
 
-static void RegisterMod() {
-    // #region Leave this alone unless you know what you are doing
-    ConfigurationChanged();
-    // #endregion
-}
-
-static Holiday holiday(DrawMenu, RegisterMod);
+static RegisterShipInitFunc initFunc(OnConfigurationChanged);
+static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

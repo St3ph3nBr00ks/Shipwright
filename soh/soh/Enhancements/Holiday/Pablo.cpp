@@ -113,49 +113,45 @@ void SpawnShinyReward(Actor* actor) {
 }
 
 void RegisterShiny() {
-    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnActorInit>([](void* refActor) {
+    COND_HOOK(OnActorInit, CVarGetInteger(CVAR("Shiny.Enabled"), 0), [](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
-        if (CVarGetInteger(CVAR("Shiny.Enabled"), 0) && CanBeShiny(actor) &&
-            Rand_ZeroOne() < (1.0f / (s32)CVarGetInteger(CVAR("Shiny.Chance"), 8192))) {
+        if (CanBeShiny(actor) && Rand_ZeroOne() < (1.0f / (s32)CVarGetInteger(CVAR("Shiny.Chance"), 8192))) {
             ApplyShinyness(actor);
         }
     });
 
-    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnEnemyDefeat>([](void* refActor) {
+    COND_HOOK(OnEnemyDefeat, CVarGetInteger(CVAR("Shiny.Enabled"), 0), [](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
-        if (CVarGetInteger(CVAR("Shiny.Enabled"), 0) && actor->isShiny) {
+        if (actor->isShiny) {
             SpawnShinyReward(actor);
         }
     });
 
-    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnActorDraw>([](void* refActor) {
+    COND_HOOK(OnActorDraw, CVarGetInteger(CVAR("Shiny.Enabled"), 0), [](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
-        if (CVarGetInteger(CVAR("Shiny.Enabled"), 0) && actor->isShiny) {
+        if (actor->isShiny) {
             RenderShines(actor);
         }
     });
 }
 
-void ShinyDrawImGui() {
-    //UIWidgets::PaddedEnhancementCheckbox("Enable Shiny Enemies", CVAR("Shiny.Enabled"), true, false);
-    //UIWidgets::Tooltip("Allows enemies to be shiny.\nShiny enemies are 25% bigger and have 4 times the health but drop "
-    //                   "the equivalent of a gold rupee upon death");
-
-    //if (CVarGetInteger(CVAR("Shiny.Enabled"), 0)) {
-    //    UIWidgets::PaddedEnhancementSliderInt("Shiny Chance: %d", "##ShinyChance", CVAR("Shiny.Chance"), 1, 8192, "", 8192, true, true, false, false, "");
-    //    UIWidgets::Tooltip("The chance for an enemy to be shiny is 1 / Shiny Chance");
-    //}
-}
-
 #pragma endregion
 
-static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
-    ShinyDrawImGui();
+static void RegisterMenu() {
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
+    SohGui::mSohMenu->AddWidget(path, "Enable Shiny Enemies", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("Shiny.Enabled"))
+        .Options(UIWidgets::CheckboxOptions().Tooltip(
+            "Allows enemies to be shiny.\nShiny enemies are 25% bigger and have 4 times the health but drop "
+            "the equivalent of a gold rupee upon death"));
+
+    SohGui::mSohMenu->AddWidget(path, "Shiny Chance: %d", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("OrnExch.Amount"))
+        .PreFunc([](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("Shiny.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(8192).Min(1).Max(8192).Tooltip(
+            "The chance for an enemy to be shiny is 1 / {Shiny Chance}"));
 }
 
-static void RegisterMod() {
-    RegisterShiny();
-}
-
-static Holiday holiday(DrawMenu, RegisterMod);
+static RegisterShipInitFunc initFunc(RegisterShiny);
+static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

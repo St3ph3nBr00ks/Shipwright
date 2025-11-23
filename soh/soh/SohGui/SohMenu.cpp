@@ -86,6 +86,7 @@ void SohMenu::InitElement() {
     AddMenuSettings();
     AddMenuEnhancements();
     AddMenuRandomizer();
+    AddMenuEntry("Holiday", CVAR_SETTING("Menu.HolidaySidebarSection"));
     AddMenuNetwork();
     AddMenuDevTools();
 

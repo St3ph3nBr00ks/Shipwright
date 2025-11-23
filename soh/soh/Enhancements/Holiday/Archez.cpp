@@ -34,7 +34,7 @@ extern "C" void ClearOverrideSkips() {
     sSkipNextSkeleton = false;
 }
 
-static void ConfigurationChanged() {
+static void OnConfigurationChanged() {
     COND_VB_SHOULD(VB_DRAW_SKEL_LIMB, CVarGetInteger(CVAR("SnowGolems"), 0), {
         if (!*should) {
             return;
@@ -107,17 +107,15 @@ static void ConfigurationChanged() {
     });
 }
 
-static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
-
-    //if (UIWidgets::EnhancementCheckbox("Snow Golems", CVAR("SnowGolems"))) {
-    //    ConfigurationChanged();
-    //}
-    UIWidgets::Tooltip("Overrides most charactor skeletons with snow balls to make them look like Snow Golems");
+static void RegisterMenu() {
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
+    SohGui::mSohMenu->AddWidget(path, "Snow Golems", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("SnowGolems"))
+        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
+        .Options(UIWidgets::CheckboxOptions().Tooltip(
+            "Overrides most charactor skeletons with snow balls to make them look like Snow Golems"));
 }
 
-static void RegisterMod() {
-    ConfigurationChanged();
-}
-
-static Holiday holiday(DrawMenu, RegisterMod);
+static RegisterShipInitFunc initFunc(OnConfigurationChanged);
+static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

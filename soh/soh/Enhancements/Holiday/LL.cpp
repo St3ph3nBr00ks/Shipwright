@@ -42,88 +42,60 @@ Color_RGBA8 Color_ImGuiToLUS(ImVec4 color) {
 }
 
 static void OnConfigurationChanged() {
-    Color_RGBA8 c1 = CVarGetColor(CVAR("lCustomRainbow1"), Color_ImGuiToLUS(RAINBOW_PRESETS[0][0]));
-    Color_RGBA8 c2 = CVarGetColor(CVAR("lCustomRainbow2"), Color_ImGuiToLUS(RAINBOW_PRESETS[0][1]));
-    Color_RGBA8 c3 = CVarGetColor(CVAR("lCustomRainbow3"), Color_ImGuiToLUS(RAINBOW_PRESETS[0][2]));
-    Color_RGBA8 c4 = CVarGetColor(CVAR("lCustomRainbow4"), Color_ImGuiToLUS(RAINBOW_PRESETS[0][3]));
+    Color_RGBA8 c1 = CVarGetColor(CVAR("CustomRainbow1"), Color_ImGuiToLUS(RAINBOW_PRESETS[0][0]));
+    Color_RGBA8 c2 = CVarGetColor(CVAR("CustomRainbow2"), Color_ImGuiToLUS(RAINBOW_PRESETS[0][1]));
+    Color_RGBA8 c3 = CVarGetColor(CVAR("CustomRainbow3"), Color_ImGuiToLUS(RAINBOW_PRESETS[0][2]));
+    Color_RGBA8 c4 = CVarGetColor(CVAR("CustomRainbow4"), Color_ImGuiToLUS(RAINBOW_PRESETS[0][3]));
 
     customColorZero = Color_LUSToImGui((Color_RGBA8)c1);
     customColorOne = Color_LUSToImGui((Color_RGBA8)c2);
     customColorMinusZero = Color_LUSToImGui((Color_RGBA8)c3);
     customColorMinusOne = Color_LUSToImGui((Color_RGBA8)c4);
-
-    // TODO: Register any hooks or things that need to run on startup and when the main CVar is toggled
-    // Note: Hooks should be registered/unregistered depending on the CVar state (Use COND_HOOK or COND_ID_HOOK)
-
-    // COND_HOOK(OnSceneSpawnActors, CVarGetInteger(CVAR("Enabled"), 0), []() {
-    //     // Spawn your own actors?
-    // });
-    
-    // COND_ID_HOOK(OnActorInit, ACTOR_OBJ_TSUBO, CVarGetInteger(CVAR("DoSomethingWithPots"), 0), [](void* actorRef) {
-    //     // Do something with pots?
-    // });
 }
 
-static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
-    //if (ImGui::BeginMenu("Customize Rainbows")) {
-    //    UIWidgets::EnhancementCheckbox("Enable", CVAR("lEnableCustomRainbows"));
-    //    if (CVarGetInteger(CVAR("lEnableCustomRainbows"), 0)) {
-    //        ImGui::ColorEdit3("Color 1", (float*)&customColorZero,      ImGuiColorEditFlags_NoInputs);
-    //        ImGui::ColorEdit3("Color 2", (float*)&customColorOne,       ImGuiColorEditFlags_NoInputs);
-    //        ImGui::ColorEdit3("Color 3", (float*)&customColorMinusZero, ImGuiColorEditFlags_NoInputs);
-    //        ImGui::ColorEdit3("Color 4", (float*)&customColorMinusOne,  ImGuiColorEditFlags_NoInputs);
+static void RegisterMenu() {
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
 
-    //        UIWidgets::PaddedText("Presets", true, false);
-    //        size_t rainbowPresetIdx = 0;
-    //        if (UIWidgets::EnhancementCombobox(CVAR("lCustomRainbowPreset"), RAINBOW_PRESET_NAMES, 0) &&
-    //                (rainbowPresetIdx = CVarGetInteger(CVAR("lCustomRainbowPreset"), 0)) <= RAINBOW_PRESET_LEN) { //paranoia
-    //            customColorZero = RAINBOW_PRESETS[rainbowPresetIdx][0];
-    //            customColorOne = RAINBOW_PRESETS[rainbowPresetIdx][1];
-    //            customColorMinusZero = RAINBOW_PRESETS[rainbowPresetIdx][2];
-    //            customColorMinusOne = RAINBOW_PRESETS[rainbowPresetIdx][3];
-    //        }
+    SohGui::mSohMenu->AddWidget(path, "Custom Rainbows", WIDGET_CVAR_CHECKBOX).CVar(CVAR("EnableCustomRainbows"));
 
-    //        Color_RGBA8 color1, color2, color3, color4;
-    //        color1.r = static_cast<uint8_t>(customColorZero.x * 255.0f);
-    //        color1.g = static_cast<uint8_t>(customColorZero.y * 255.0f);
-    //        color1.b = static_cast<uint8_t>(customColorZero.z * 255.0f);
+    SohGui::mSohMenu->AddWidget(path, "Color 1", WIDGET_CVAR_COLOR_PICKER)
+        .CVar(CVAR("CustomRainbow1"))
+        .Options(UIWidgets::ColorPickerOptions().ShowRandom().ShowReset().UseAlpha(false).DefaultValue(
+            Color_ImGuiToLUS(RAINBOW_PRESETS[0][0])));
+    SohGui::mSohMenu->AddWidget(path, "Color 2", WIDGET_CVAR_COLOR_PICKER)
+        .CVar(CVAR("CustomRainbow2"))
+        .Options(UIWidgets::ColorPickerOptions().ShowRandom().ShowReset().UseAlpha(false).DefaultValue(
+            Color_ImGuiToLUS(RAINBOW_PRESETS[0][1])));
+    SohGui::mSohMenu->AddWidget(path, "Color 3", WIDGET_CVAR_COLOR_PICKER)
+        .CVar(CVAR("CustomRainbow3"))
+        .Options(UIWidgets::ColorPickerOptions().ShowRandom().ShowReset().UseAlpha(false).DefaultValue(
+            Color_ImGuiToLUS(RAINBOW_PRESETS[0][2])));
+    SohGui::mSohMenu->AddWidget(path, "Color 4", WIDGET_CVAR_COLOR_PICKER)
+        .CVar(CVAR("CustomRainbow4"))
+        .Options(UIWidgets::ColorPickerOptions().ShowRandom().ShowReset().UseAlpha(false).DefaultValue(
+            Color_ImGuiToLUS(RAINBOW_PRESETS[0][3])));
 
-    //        color2.r = static_cast<uint8_t>(customColorOne.x * 255.0f);
-    //        color2.g = static_cast<uint8_t>(customColorOne.y * 255.0f);
-    //        color2.b = static_cast<uint8_t>(customColorOne.z * 255.0f);
+    SohGui::mSohMenu->AddWidget(path, "Presets", WIDGET_SEPARATOR_TEXT);
+    SohGui::mSohMenu->AddWidget(path, "Custom Rainbow Presets", WIDGET_CVAR_COMBOBOX)
+        .CVar(CVAR("CustomRainbowPreset"))
+        .Options(UIWidgets::ComboboxOptions().ComboMap(RAINBOW_PRESET_NAMES))
+        .Callback([&](WidgetInfo& info) {
+            size_t rainbowPresetIdx = CVarGetInteger(CVAR("CustomRainbowPreset"), 0);
+            customColorZero = RAINBOW_PRESETS[rainbowPresetIdx][0];
+            customColorOne = RAINBOW_PRESETS[rainbowPresetIdx][1];
+            customColorMinusZero = RAINBOW_PRESETS[rainbowPresetIdx][2];
+            customColorMinusOne = RAINBOW_PRESETS[rainbowPresetIdx][3];
 
-    //        color3.r = static_cast<uint8_t>(customColorMinusZero.x * 255.0f);
-    //        color3.g = static_cast<uint8_t>(customColorMinusZero.y * 255.0f);
-    //        color3.b = static_cast<uint8_t>(customColorMinusZero.z * 255.0f);
+            CVarSetColor(CVAR("CustomRainbow1.Value"), Color_ImGuiToLUS(customColorZero));
+            CVarSetColor(CVAR("CustomRainbow2.Value"), Color_ImGuiToLUS(customColorOne));
+            CVarSetColor(CVAR("CustomRainbow3.Value"), Color_ImGuiToLUS(customColorMinusZero));
+            CVarSetColor(CVAR("CustomRainbow4.Value"), Color_ImGuiToLUS(customColorMinusOne));
+            CVarSave();
+        });
 
-    //        color4.r = static_cast<uint8_t>(customColorMinusOne.x * 255.0f);
-    //        color4.g = static_cast<uint8_t>(customColorMinusOne.y * 255.0f);
-    //        color4.b = static_cast<uint8_t>(customColorMinusOne.z * 255.0f);
-
-    //        CVarSetColor(CVAR("lCustomRainbow1"), color1);
-    //        CVarSetColor(CVAR("lCustomRainbow2"), color2);
-    //        CVarSetColor(CVAR("lCustomRainbow3"), color3);
-    //        CVarSetColor(CVAR("lCustomRainbow4"), color4);
-
-    //        OnConfigurationChanged();
-    //    }
-
-    //    ImGui::EndMenu();
-
-    //}
-    //if (UIWidgets::EnhancementCheckbox("DoSomethingWithPots", CVAR("DoSomethingWithPots"))) {
-    //    OnConfigurationChanged();
-    //}
+    SohGui::mSohMenu->AddWidget(path, "Do Something With Pots", WIDGET_CVAR_CHECKBOX).CVar(CVAR("DoSomethingWithPots"));
 }
 
-static void RegisterMod() {
-    // #region Leave this alone unless you know what you are doing
-    OnConfigurationChanged();
-    // #endregion
-
-    // TODO: Anything you want to run once on startup
-}
-
-// TODO: Uncomment this line to enable the mod
-static Holiday holiday(DrawMenu, RegisterMod);
+// static RegisterShipInitFunc initFunc(OnConfigurationChanged);
+// static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

@@ -104,7 +104,7 @@ void Penguin_Destroy(Actor* actor, PlayState* play) {
 static void OnConfigurationChanged() {
     COND_HOOK(OnPlayerUpdate, CVarGetInteger(CVAR("Hailstorm"), 0), []() {
         // Every frame has a 1/500 chance of spawning close hail
-        if (rand() % 500 == 0) { 
+        if (rand() % 500 == 0) {
             int spawned = 0;
             while (spawned < 1) {
                 Vec3f pos = GET_PLAYER(gPlayState)->actor.world.pos;
@@ -112,7 +112,8 @@ static void OnConfigurationChanged() {
                 pos.z += (float)Random(0, 50) - 25.0f;
                 pos.y += 200.0f;
 
-                Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_NUTSBALL, pos.x, pos.y, pos.z, 0, 0, 0, 0, false);
+                Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_NUTSBALL, pos.x, pos.y, pos.z, 0,
+                                           0, 0, 0, false);
                 EnNutsball* nut = (EnNutsball*)actor;
                 nut->actor.draw = EnNutsball_Draw;
                 nut->actor.shape.rot.y = 0;
@@ -124,7 +125,7 @@ static void OnConfigurationChanged() {
             }
         }
         // Every frame has a 1/50 chance of spawning far hail
-        if (rand() % 50 == 0) { 
+        if (rand() % 50 == 0) {
             int spawned = 0;
             while (spawned < 1) {
                 Vec3f pos = GET_PLAYER(gPlayState)->actor.world.pos;
@@ -207,25 +208,18 @@ static void OnConfigurationChanged() {
     });
 }
 
-static void DrawMenu() {
-    //ImGui::SeparatorText(AUTHOR);
-    //if (UIWidgets::EnhancementCheckbox("Penguins", CVAR("Penguins"))) {
-    //    OnConfigurationChanged();
-    //}
-    //UIWidgets::Tooltip("Penguins will spawn in huddles throughout hyrule");
-    //if (UIWidgets::EnhancementCheckbox("Hailstorm", CVAR("Hailstorm"))) {
-    //    OnConfigurationChanged();
-    //}
-    //UIWidgets::Tooltip("Ever persistent hailstorm throughout hyrule");
+static void RegisterMenu() {
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
+
+    SohGui::mSohMenu->AddWidget(path, "Penguins", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("Penguins"))
+        .Options(UIWidgets::CheckboxOptions().Tooltip("Penguins will spawn in huddles throughout hyrule"));
+
+    SohGui::mSohMenu->AddWidget(path, "Hailstorm", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("Hailstorm"))
+        .Options(UIWidgets::CheckboxOptions().Tooltip("Ever persistent hailstorm throughout hyrule"));
 }
 
-static void RegisterMod() {
-    // #region Leave this alone unless you know what you are doing
-    OnConfigurationChanged();
-    // #endregion
-
-    // TODO: Anything you want to run once on startup
-}
-
-// TODO: Uncomment this line to enable the mod
-static Holiday holiday(DrawMenu, RegisterMod);
+static RegisterShipInitFunc initFunc(OnConfigurationChanged);
+static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

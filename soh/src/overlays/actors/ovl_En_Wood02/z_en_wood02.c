@@ -371,8 +371,7 @@ void EnWood02_Update(Actor* thisx, PlayState* play2) {
             dropsSpawnPt.y += 200.0f;
             if (HandleTreeBonk(&this->actor)) {
                 // no-op
-            } else 
-            if (GameInteractor_Should(VB_TREE_DROP_ITEM, true, this)) {
+            } else if (GameInteractor_Should(VB_TREE_DROP_ITEM, true, this)) {
                 if ((this->unk_14C >= 0) && (this->unk_14C < 0x64)) {
                     if (GameInteractor_Should(VB_TREE_DROP_COLLECTIBLE, true, this)) {
                         Item_DropCollectibleRandom(play, &this->actor, &dropsSpawnPt, this->unk_14C << 4);
@@ -381,7 +380,7 @@ void EnWood02_Update(Actor* thisx, PlayState* play2) {
                     this->actor.home.rot.z &= 0x1FFF;
                     this->actor.home.rot.z |= 0xE000;
                     Actor_Spawn(&play->actorCtx, play, ACTOR_EN_SW, dropsSpawnPt.x, dropsSpawnPt.y, dropsSpawnPt.z, 0,
-                        this->actor.world.rot.y, 0, this->actor.home.rot.z, true);
+                                this->actor.world.rot.y, 0, this->actor.home.rot.z, true);
                     this->actor.home.rot.z = 0;
                 }
             }

@@ -84,8 +84,7 @@ void RandomizeBoulder(Actor* refActor) {
 
 bool spawningPresents = false;
 
-struct Present {
-};
+struct Present {};
 
 std::unordered_map<Actor*, Present> presents;
 
@@ -126,7 +125,8 @@ void Present_Draw(Actor* actor, PlayState* play) {
 
     Matrix_Scale(30.0f, 30.0f, 30.0f, MTXMODE_APPLY);
     Matrix_Translate(49.20f, 0.0f, -106.60f, MTXMODE_APPLY);
-    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__), G_MTX_MODELVIEW | G_MTX_LOAD);
+    gSPMatrix(POLY_OPA_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__),
+              G_MTX_MODELVIEW | G_MTX_LOAD);
     gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, 255, 255, 255, 255);
     gSPDisplayList(POLY_OPA_DISP++, (Gfx*)gXmasDecor100DL);
 
@@ -139,39 +139,37 @@ void Present_Destroy(Actor* actor, PlayState* play) {
 
 static void OnPresentChange() {
     isExchangeDisabled = !CVarGetInteger(CVAR("OrnExch.Enabled"), 0);
-    COND_ID_HOOK(OnOpenText, 0x204A, CVarGetInteger(CVAR("OrnExch.Enabled"), 0), [](u16 * textId, bool* loadFromMessageTable) {
-        auto messageEntry = CustomMessage("");
-        bool reduceGifts = false;
-        uint32_t giftsCollected = CVarGetInteger(CVAR("GiftsCollected"), 0);
-        uint32_t giftsRequired = CVarGetInteger(CVAR("OrnExch.Amount"), 15);
-        if (giftsCollected < giftsRequired) {
-            std::string msg = "You only have %r " + std::to_string(giftsCollected) + "%w If you bring me %g" 
-                + std::to_string(giftsRequired) + "%w I'll give you a reward!";
-            messageEntry = CustomMessage(msg);
-        } else {
-            std::string msg = "A present? And %g" + std::to_string(giftsRequired) + 
-                "%w to boot? Here's your reward, bring me more if you find any!";
-            messageEntry = CustomMessage(msg);
-            reduceGifts = true;
-        }
-        messageEntry.AutoFormat();
-        messageEntry.LoadIntoFont();
-        *loadFromMessageTable = false;
+    COND_ID_HOOK(
+        OnOpenText, 0x204A, CVarGetInteger(CVAR("OrnExch.Enabled"), 0), [](u16* textId, bool* loadFromMessageTable) {
+            auto messageEntry = CustomMessage("");
+            bool reduceGifts = false;
+            uint32_t giftsCollected = CVarGetInteger(CVAR("GiftsCollected"), 0);
+            uint32_t giftsRequired = CVarGetInteger(CVAR("OrnExch.Amount"), 15);
+            if (giftsCollected < giftsRequired) {
+                std::string msg = "You only have %r " + std::to_string(giftsCollected) + "%w If you bring me %g" +
+                                  std::to_string(giftsRequired) + "%w I'll give you a reward!";
+                messageEntry = CustomMessage(msg);
+            } else {
+                std::string msg = "A present? And %g" + std::to_string(giftsRequired) +
+                                  "%w to boot? Here's your reward, bring me more if you find any!";
+                messageEntry = CustomMessage(msg);
+                reduceGifts = true;
+            }
+            messageEntry.AutoFormat();
+            messageEntry.LoadIntoFont();
+            *loadFromMessageTable = false;
 
-        if (reduceGifts) {
-            vanillaQueuedItemEntry = Rando::StaticData::RetrieveItem(RG_TRIFORCE_PIECE).GetGIEntry_Copy();
-            giftsCollected -= giftsRequired;
-            CVarSetInteger(CVAR("GiftsCollected"), giftsCollected);
-            Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+            if (reduceGifts) {
+                vanillaQueuedItemEntry = Rando::StaticData::RetrieveItem(RG_TRIFORCE_PIECE).GetGIEntry_Copy();
+                giftsCollected -= giftsRequired;
+                CVarSetInteger(CVAR("GiftsCollected"), giftsCollected);
+                Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
 
-            std::string msg = std::to_string(giftsCollected).c_str();
-            msg += " Gifts in Inventory.";
-            Notification::Emit({
-                .itemIcon = "RG_TRIFORCE_PIECE",
-                .message = msg
-            });
-        }
-    });
+                std::string msg = std::to_string(giftsCollected).c_str();
+                msg += " Gifts in Inventory.";
+                Notification::Emit({ .itemIcon = "RG_TRIFORCE_PIECE", .message = msg });
+            }
+        });
 
     COND_HOOK(OnSceneSpawnActors, CVarGetInteger(CVAR("OrnExch.Enabled"), 0), []() {
         presents.clear();
@@ -188,7 +186,7 @@ static void OnPresentChange() {
                 pos.x = 0;
                 pos.z = 0;
             }
-            // X/Z anywhere from -1000.0 to +1000.0 from player 
+            // X/Z anywhere from -1000.0 to +1000.0 from player
             pos.x += (float)(Random(0, 20000)) - 10000.0f;
             pos.z += (float)(Random(0, 20000)) - 10000.0f;
 
@@ -196,7 +194,8 @@ static void OnPresentChange() {
 
             if (raycastResult > BGCHECK_Y_MIN) {
                 spawningPresents = true;
-                Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_OE2, pos.x, raycastResult, pos.z, 0, 0, 0, 0, false);
+                Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_OE2, pos.x, raycastResult, pos.z,
+                                           0, 0, 0, 0, false);
                 spawningPresents = false;
                 // break;
             }
@@ -205,15 +204,16 @@ static void OnPresentChange() {
         }
     });
 
-    COND_ID_HOOK(ShouldActorInit, ACTOR_EN_OE2, CVarGetInteger(CVAR("OrnExch.Enabled"), 0), [](void* actorRef, bool* should) {
-        Actor* actor = (Actor*)actorRef;
-        if (spawningPresents) {
-            actor->init = Present_Init;
-            actor->update = Present_Update;
-            actor->draw = Present_Draw;
-            actor->destroy = Present_Destroy;
-        }
-    });
+    COND_ID_HOOK(ShouldActorInit, ACTOR_EN_OE2, CVarGetInteger(CVAR("OrnExch.Enabled"), 0),
+                 [](void* actorRef, bool* should) {
+                     Actor* actor = (Actor*)actorRef;
+                     if (spawningPresents) {
+                         actor->init = Present_Init;
+                         actor->update = Present_Update;
+                         actor->draw = Present_Draw;
+                         actor->destroy = Present_Destroy;
+                     }
+                 });
 }
 
 static void OnBlitzChange() {
@@ -270,39 +270,48 @@ void CaladiusWindow::Draw() {
     ImGui::PopStyleVar(1);
 }
 
-static void DrawMenu() {
-    //ImGui::SeparatorText(AUTHOR);
-    //if (UIWidgets::EnhancementCheckbox("Holiday Fever", CVAR("Fever.Enabled"))) {
-    //    OnFeverConfigurationChanged();
-    //}
-    //UIWidgets::Tooltip("Can you beat your objective before the Fever sets in?/n"
-    //                   "- Obtaining Ice Traps extends your timer.");
-    //if (CVarGetInteger(CVAR("Fever.Enabled"), 0)) {
-    //    if (UIWidgets::EnhancementSliderFloat("", "##FontScale", CVAR("FontScale"), 
-    //        1.0f, 5.0f, "Font: %.1fx", 1.0f, false, false, isFeverDisabled)) {
-    //        OnFeverConfigurationChanged();
-    //    }
-    //    UIWidgets::PaddedEnhancementSliderInt("Starting Timer: %d minutes", "##StartTime", CVAR("StartTimer"),
-    //        5, 30, "", 15, true, true, false, isFeverDisabled);
-    //    UIWidgets::PaddedEnhancementSliderInt("Time Extensions: %d minutes", "##ExtendTime", CVAR("ExtendTimer"),
-    //        1, 10, "", 5, true, true, false, isFeverDisabled);
-    //}
-    //UIWidgets::PaddedSeparator();
+static void RegisterMenu() {
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
+    SohGui::mSohMenu->AddWidget(path, "Holiday Fever", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("Fever.Enabled"))
+        .Callback([](WidgetInfo& info) { OnFeverConfigurationChanged(); })
+        .Options(UIWidgets::CheckboxOptions().Tooltip("Can you beat your objective before the Fever sets in?\n"
+                                                      "- Obtaining Ice Traps extends your timer."));
+    SohGui::mSohMenu->AddWidget(path, "Font: %.1fx", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar(CVAR("FontScale"))
+        .Callback([](WidgetInfo& info) { OnFeverConfigurationChanged(); })
+        .PreFunc([](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("Fever.Enabled"), 0); })
+        .Options(UIWidgets::FloatSliderOptions().DefaultValue(1.0f).Min(1.0f).Max(5.0f));
+    SohGui::mSohMenu->AddWidget(path, "Starting Timer: %d minutes", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("StartTimer"))
+        .Callback([](WidgetInfo& info) { OnFeverConfigurationChanged(); })
+        .PreFunc([](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("Fever.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(15).Min(5).Max(30));
+    SohGui::mSohMenu->AddWidget(path, "Time Extensions: %d minutes", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("ExtendTimer"))
+        .Callback([](WidgetInfo& info) { OnFeverConfigurationChanged(); })
+        .PreFunc([](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("Fever.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(5).Min(1).Max(10));
 
-    //if (UIWidgets::EnhancementCheckbox("Boulder Blitz", CVAR("Blitz.Enabled"))) {
-    //    OnBlitzChange();
-    //}
-    //UIWidgets::Tooltip("Boulders will randomly be replaced with other boulder types.");
-    //UIWidgets::PaddedSeparator();
+    SohGui::mSohMenu->AddWidget(path, "BoulderBlitzSect", WIDGET_SEPARATOR);
+    SohGui::mSohMenu->AddWidget(path, "Boulder Blitz", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("Blitz.Enabled"))
+        .Callback([](WidgetInfo& info) { OnBlitzChange(); })
+        .Options(UIWidgets::CheckboxOptions().Tooltip("Boulders will randomly be replaced with other boulder types."));
 
-    //if (UIWidgets::EnhancementCheckbox("Ornament Exchange", CVAR("OrnExch.Enabled"))) {
-    //    OnPresentChange();
-    //}
-    //UIWidgets::Tooltip("See Malon as Young Link in Lon Lon Ranch to exchange Gifts for Ornaments!");
-    //if (CVarGetInteger(CVAR("OrnExch.Enabled"), 0)) {
-    //    UIWidgets::PaddedEnhancementSliderInt("Gifts Required: %d Gifts", "##GiftsReq", CVAR("OrnExch.Amount"),
-    //        5, 30, "", 15, true, true, false, isExchangeDisabled);
-    //}
+    SohGui::mSohMenu->AddWidget(path, "OrnamentExchSect", WIDGET_SEPARATOR);
+    SohGui::mSohMenu->AddWidget(path, "Ornament Exchange", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("OrnExch.Enabled"))
+        .Callback([](WidgetInfo& info) { OnPresentChange(); })
+        .Options(UIWidgets::CheckboxOptions().Tooltip(
+            "See Malon as Young Link in Lon Lon Ranch to exchange Gifts for Ornaments!"));
+
+    SohGui::mSohMenu->AddWidget(path, "Gifts Required: %d Gifts", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("OrnExch.Amount"))
+        .Callback([](WidgetInfo& info) { OnFeverConfigurationChanged(); })
+        .PreFunc([](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("OrnExch.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(15).Min(5).Max(30));
 }
 
 static void RegisterMod() {
@@ -311,4 +320,5 @@ static void RegisterMod() {
     OnPresentChange();
 }
 
-static Holiday holiday(DrawMenu, RegisterMod);
+static RegisterShipInitFunc initFunc(RegisterMod);
+static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

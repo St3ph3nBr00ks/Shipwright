@@ -27,10 +27,10 @@ static void OnConfigurationChanged() {
 }
 
 static void DrawMenu() {
-    //ImGui::SeparatorText(AUTHOR);
-    //if (UIWidgets::EnhancementCheckbox("DoSomethingWithPots", CVAR("DoSomethingWithPots"))) {
-    //    OnConfigurationChanged();
-    //}
+    // ImGui::SeparatorText(AUTHOR);
+    // if (UIWidgets::EnhancementCheckbox("DoSomethingWithPots", CVAR("DoSomethingWithPots"))) {
+    //     OnConfigurationChanged();
+    // }
 }
 
 static void RegisterMod() {

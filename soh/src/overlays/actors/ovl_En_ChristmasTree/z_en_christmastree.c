@@ -77,7 +77,8 @@ void EnChristmasTree_Talk(EnChristmasTree* this, PlayState* play) {
     if (dialogState != TEXT_STATE_CHOICE) {
         if ((dialogState == TEXT_STATE_DONE) && Message_ShouldAdvance(play)) { // advanced final textbox
             // Teleport to credits when goal is reached.
-            if (gSaveContext.ship.quest.data.randomizer.triforcePiecesCollected >= Randomizer_GetSettingValue(RSK_TRIFORCE_HUNT_PIECES_REQUIRED)) {
+            if (gSaveContext.ship.quest.data.randomizer.triforcePiecesCollected >=
+                Randomizer_GetSettingValue(RSK_TRIFORCE_HUNT_PIECES_REQUIRED)) {
                 gSaveContext.ship.stats.itemTimestamp[TIMESTAMP_TRIFORCE_COMPLETED] = GAMEPLAYSTAT_TOTAL_TIME;
                 gSaveContext.ship.stats.gameComplete = 1;
                 Play_PerformSave(play);

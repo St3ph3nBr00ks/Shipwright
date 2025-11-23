@@ -41,7 +41,7 @@ void Anchor::HandlePacket_SetCheckStatus(nlohmann::json payload) {
     RandomizerCheck rc = payload["rc"].get<RandomizerCheck>();
     RandomizerCheckStatus status = payload["status"].get<RandomizerCheckStatus>();
     bool skipped = payload["skipped"].get<bool>();
-    
+
     isResultOfHandling = true;
 
     if (randoContext->GetItemLocation(rc)->GetCheckStatus() != status) {

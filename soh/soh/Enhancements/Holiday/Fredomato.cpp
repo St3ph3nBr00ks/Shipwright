@@ -35,23 +35,25 @@ static CollisionPoly snowballPoly;
 static f32 raycastResult;
 
 const s16 entrances[] = {
-    0x0000, 0x0209, 0x0004, 0x0242, 0x0028, 0x0221, 0x0169, 0x0215, 0x0165, 0x024A, 0x0010, 0x021D, 0x0082, 0x01E1, 0x0037, 0x0205,
-    0x0098, 0x02A6, 0x0088, 0x03D4, 0x0008, 0x03A8, 0x0467, 0x023D, 0x0433, 0x0443, 0x0437, 0x0447, 0x009C, 0x033C, 0x00C9, 0x026A,
-    0x00C1, 0x0266, 0x0043, 0x03CC, 0x045F, 0x0309, 0x03A0, 0x03D0, 0x007E, 0x026E, 0x0530, 0x01D1, 0x0507, 0x03BC, 0x0388, 0x02A2,
-    0x0063, 0x01D5, 0x0528, 0x03C0, 0x043B, 0x0067, 0x02FD, 0x0349, 0x0550, 0x04EE, 0x039C, 0x0345, 0x05C8, 0x05DC, 0x0072, 0x034D,
-    0x030D, 0x0355, 0x037C, 0x03FC, 0x0380, 0x03C4, 0x004F, 0x0378, 0x02F9, 0x042F, 0x05D0, 0x05D4, 0x052C, 0x03B8, 0x016D, 0x01CD,
-    0x00B7, 0x0201, 0x003B, 0x0463, 0x0588, 0x057C, 0x0578, 0x0340, 0x04C2, 0x03E8, 0x04BE, 0x0482, 0x0315, 0x045B, 0x0371, 0x0394,
-    0x0272, 0x0211, 0x0053, 0x0472, 0x0453, 0x0351, 0x0384, 0x044B, 0x03EC, 0x04FF, 0x0700, 0x0800, 0x0701, 0x0801, 0x0702, 0x0802,
-    0x0703, 0x0803, 0x0704, 0x0804, 0x0705, 0x0805, 0x0706, 0x0806, 0x0707, 0x0807, 0x0708, 0x0808, 0x0709, 0x0809, 0x070A, 0x080A,
-    0x070B, 0x080B, 0x070C, 0x080C, 0x070D, 0x080D, 0x070E, 0x080E, 0x070F, 0x080F, 0x0710,         0x0711, 0x0811, 0x0712, 0x0812,
-    0x0713, 0x0813, 0x0714, 0x0814, 0x0715, 0x0815, 0x0716, 0x0816, 0x0717, 0x0817, 0x0718, 0x0818, 0x0719, 0x0819,         0x081A,
-    0x071B, 0x081B, 0x071C, 0x081C, 0x071D, 0x081D, 0x071E, 0x081E, 0x071F, 0x081F, 0x0720, 0x0820, 0x004B, 0x035D, 0x031C, 0x0361,
-    0x002D, 0x050B, 0x044F, 0x0359, 0x05E0, 0x020D, 0x011E, 0x0286, 0x04E2, 0x04D6, 0x01DD, 0x04DA, 0x00FC, 0x01A9, 0x0185, 0x04DE,
-    0x0102, 0x0189, 0x0117, 0x018D, 0x0276, 0x01FD, 0x00DB, 0x017D, 0x00EA, 0x0181, 0x0157, 0x01F9, 0x0328, 0x0560, 0x0129, 0x022D,
-    0x0130, 0x03AC, 0x0123, 0x0365, 0x00B1, 0x0033, 0x0138, 0x025A, 0x0171, 0x025E, 0x00E4, 0x0195, 0x013D, 0x0191, 0x014D, 0x01B9,
-    0x0246, 0x01C1, 0x0147, 0x01BD, 0x0108, 0x019D, 0x0225, 0x01A1, 0x0219, 0x027E, 0x0554, 0x00BB, 0x0282, 0x0600, 0x04F6, 0x0604,
-    0x01F1, 0x0568, 0x05F4, 0x040F, 0x0252, 0x040B, 0x00C5, 0x0301, 0x0407, 0x000C, 0x024E, 0x0305, 0x0175, 0x0417, 0x0423, 0x008D,
-    0x02F5, 0x0413, 0x02B2, 0x0457, 0x047A, 0x010E, 0x0608, 0x0564, 0x060C, 0x0610, 0x0580 
+    0x0000, 0x0209, 0x0004, 0x0242, 0x0028, 0x0221, 0x0169, 0x0215, 0x0165, 0x024A, 0x0010, 0x021D, 0x0082, 0x01E1,
+    0x0037, 0x0205, 0x0098, 0x02A6, 0x0088, 0x03D4, 0x0008, 0x03A8, 0x0467, 0x023D, 0x0433, 0x0443, 0x0437, 0x0447,
+    0x009C, 0x033C, 0x00C9, 0x026A, 0x00C1, 0x0266, 0x0043, 0x03CC, 0x045F, 0x0309, 0x03A0, 0x03D0, 0x007E, 0x026E,
+    0x0530, 0x01D1, 0x0507, 0x03BC, 0x0388, 0x02A2, 0x0063, 0x01D5, 0x0528, 0x03C0, 0x043B, 0x0067, 0x02FD, 0x0349,
+    0x0550, 0x04EE, 0x039C, 0x0345, 0x05C8, 0x05DC, 0x0072, 0x034D, 0x030D, 0x0355, 0x037C, 0x03FC, 0x0380, 0x03C4,
+    0x004F, 0x0378, 0x02F9, 0x042F, 0x05D0, 0x05D4, 0x052C, 0x03B8, 0x016D, 0x01CD, 0x00B7, 0x0201, 0x003B, 0x0463,
+    0x0588, 0x057C, 0x0578, 0x0340, 0x04C2, 0x03E8, 0x04BE, 0x0482, 0x0315, 0x045B, 0x0371, 0x0394, 0x0272, 0x0211,
+    0x0053, 0x0472, 0x0453, 0x0351, 0x0384, 0x044B, 0x03EC, 0x04FF, 0x0700, 0x0800, 0x0701, 0x0801, 0x0702, 0x0802,
+    0x0703, 0x0803, 0x0704, 0x0804, 0x0705, 0x0805, 0x0706, 0x0806, 0x0707, 0x0807, 0x0708, 0x0808, 0x0709, 0x0809,
+    0x070A, 0x080A, 0x070B, 0x080B, 0x070C, 0x080C, 0x070D, 0x080D, 0x070E, 0x080E, 0x070F, 0x080F, 0x0710, 0x0711,
+    0x0811, 0x0712, 0x0812, 0x0713, 0x0813, 0x0714, 0x0814, 0x0715, 0x0815, 0x0716, 0x0816, 0x0717, 0x0817, 0x0718,
+    0x0818, 0x0719, 0x0819, 0x081A, 0x071B, 0x081B, 0x071C, 0x081C, 0x071D, 0x081D, 0x071E, 0x081E, 0x071F, 0x081F,
+    0x0720, 0x0820, 0x004B, 0x035D, 0x031C, 0x0361, 0x002D, 0x050B, 0x044F, 0x0359, 0x05E0, 0x020D, 0x011E, 0x0286,
+    0x04E2, 0x04D6, 0x01DD, 0x04DA, 0x00FC, 0x01A9, 0x0185, 0x04DE, 0x0102, 0x0189, 0x0117, 0x018D, 0x0276, 0x01FD,
+    0x00DB, 0x017D, 0x00EA, 0x0181, 0x0157, 0x01F9, 0x0328, 0x0560, 0x0129, 0x022D, 0x0130, 0x03AC, 0x0123, 0x0365,
+    0x00B1, 0x0033, 0x0138, 0x025A, 0x0171, 0x025E, 0x00E4, 0x0195, 0x013D, 0x0191, 0x014D, 0x01B9, 0x0246, 0x01C1,
+    0x0147, 0x01BD, 0x0108, 0x019D, 0x0225, 0x01A1, 0x0219, 0x027E, 0x0554, 0x00BB, 0x0282, 0x0600, 0x04F6, 0x0604,
+    0x01F1, 0x0568, 0x05F4, 0x040F, 0x0252, 0x040B, 0x00C5, 0x0301, 0x0407, 0x000C, 0x024E, 0x0305, 0x0175, 0x0417,
+    0x0423, 0x008D, 0x02F5, 0x0413, 0x02B2, 0x0457, 0x047A, 0x010E, 0x0608, 0x0564, 0x060C, 0x0610, 0x0580
 };
 
 static bool midoGrottoInit = false;
@@ -66,7 +68,6 @@ static SkelAnime collectionPointSkelAnime;
 static Vec3s collectionPointJointTable[17];
 static Vec3s collectionPointMorphTable[17];
 static std::string collectionPointNametag;
-
 
 static void RandomGrotto_WaitOpen(DoorAna* doorAna, PlayState* play) {
     if (!midoGrottoInit) {
@@ -149,32 +150,35 @@ static Vec3f FindValidPos(f32 distance) {
 
 // TODO: If in hyrule field and treeChopper is on, teleport somewhere else in hyrule field
 static void SpawnRandomGrotto() {
-    if (
-        gPlayState->sceneNum == SCENE_TEMPLE_OF_TIME_EXTERIOR_DAY || 
-        gPlayState->sceneNum == SCENE_TEMPLE_OF_TIME_EXTERIOR_NIGHT || 
-        gPlayState->sceneNum == SCENE_TEMPLE_OF_TIME_EXTERIOR_RUINS
-    ) {
+    if (gPlayState->sceneNum == SCENE_TEMPLE_OF_TIME_EXTERIOR_DAY ||
+        gPlayState->sceneNum == SCENE_TEMPLE_OF_TIME_EXTERIOR_NIGHT ||
+        gPlayState->sceneNum == SCENE_TEMPLE_OF_TIME_EXTERIOR_RUINS) {
         return;
     }
 
     Vec3f pos = FindValidPos(2000.0f);
-    Actor* grotto = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_DOOR_ANA, pos.x, pos.y, pos.z, 0, 0, 0, 0, false);
+    Actor* grotto =
+        Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_DOOR_ANA, pos.x, pos.y, pos.z, 0, 0, 0, 0, false);
     midoGrottoInit = false;
     DoorAna_SetupAction((DoorAna*)grotto, RandomGrotto_WaitOpen);
     grotto->draw = RandomGrotto_Draw;
 }
 
 void SpawnStick(Vec3f pos) {
-    CustomCollectible::Spawn(pos.x, pos.y + 150.0f, pos.z, 0, CustomCollectible::KILL_ON_TOUCH | CustomCollectible::TOSS_ON_SPAWN, 0, [](Actor* actor, PlayState* play) {
-        FredsQuestWoodOnHand++;
-        Audio_PlaySoundGeneral(NA_SE_SY_METRONOME, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
-    }, [](Actor* actor, PlayState* play) {
-        Matrix_Scale(40.0f, 40.0f, 40.0f, MTXMODE_APPLY);
-        for (int i = 4; i < 7; i++) {
-            Matrix_RotateZYX(800 * i, 0, 800 * i, MTXMODE_APPLY);
-            GetItem_Draw(play, GID_STICK);
-        }
-    });
+    CustomCollectible::Spawn(
+        pos.x, pos.y + 150.0f, pos.z, 0, CustomCollectible::KILL_ON_TOUCH | CustomCollectible::TOSS_ON_SPAWN, 0,
+        [](Actor* actor, PlayState* play) {
+            FredsQuestWoodOnHand++;
+            Audio_PlaySoundGeneral(NA_SE_SY_METRONOME, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
+                                   &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
+        },
+        [](Actor* actor, PlayState* play) {
+            Matrix_Scale(40.0f, 40.0f, 40.0f, MTXMODE_APPLY);
+            for (int i = 4; i < 7; i++) {
+                Matrix_RotateZYX(800 * i, 0, 800 * i, MTXMODE_APPLY);
+                GetItem_Draw(play, GID_STICK);
+            }
+        });
 }
 
 Actor* specialTree = nullptr;
@@ -201,7 +205,7 @@ void ChooseSpecialTree() {
 
 extern "C" bool HandleTreeBonk(Actor* actor) {
     if (!CVarGetInteger(CVAR("FredsQuest.Enabled"), 0)) {
-        return false; 
+        return false;
     }
 
     int damage = 2;
@@ -255,7 +259,8 @@ void DrawCrazyTaxiArrow(Actor* actor, PlayState* play) {
     Matrix_Translate(0.0f, 70.0f, 0.0f, MTXMODE_APPLY);
     Matrix_RotateY(5.86f, MTXMODE_APPLY);
 
-    gSPMatrix(POLY_XLU_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__), G_MTX_MODELVIEW | G_MTX_LOAD);
+    gSPMatrix(POLY_XLU_DISP++, Matrix_NewMtx(play->state.gfxCtx, (char*)__FILE__, __LINE__),
+              G_MTX_MODELVIEW | G_MTX_LOAD);
     gDPSetPrimColor(POLY_XLU_DISP++, 0, 0, 0, 255, 0, 255);
     gDPSetEnvColor(POLY_XLU_DISP++, 0, 255, 0, 255);
     gSPDisplayList(POLY_XLU_DISP++, (Gfx*)gDebugArrowDL);
@@ -281,7 +286,8 @@ void CollectionPoint_Update(Actor* actor, PlayState* play) {
         lastDisplayedCount = FredsQuestWoodCollected;
         collectionPointNametag = "Bring me wood!";
         if (FredsQuestWoodCollected > 0) {
-            collectionPointNametag += std::string(" (") + std::to_string(FredsQuestWoodCollected) + "/" + std::to_string(CVarGetInteger(CVAR("FredsQuest.WoodNeeded"), 300)) + ")";
+            collectionPointNametag += std::string(" (") + std::to_string(FredsQuestWoodCollected) + "/" +
+                                      std::to_string(CVarGetInteger(CVAR("FredsQuest.WoodNeeded"), 300)) + ")";
         }
         NameTag_RemoveAllForActor(actor);
         NameTag_RegisterForActorWithOptions(actor, collectionPointNametag.c_str(), { .yOffset = 100 });
@@ -291,7 +297,8 @@ void CollectionPoint_Update(Actor* actor, PlayState* play) {
         if (FredsQuestWoodOnHand) {
             FredsQuestWoodCollected++;
             FredsQuestWoodOnHand--;
-            Audio_PlaySoundGeneral(NA_SE_SY_METRONOME, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
+            Audio_PlaySoundGeneral(NA_SE_SY_METRONOME, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
+                                   &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
 
             if (FredsQuestWoodCollected >= CVarGetInteger(CVAR("FredsQuest.WoodNeeded"), 300)) {
                 FredsQuestComplete = true;
@@ -304,7 +311,6 @@ void CollectionPoint_Update(Actor* actor, PlayState* play) {
                 } else {
                     vanillaQueuedItemEntry = Rando::StaticData::RetrieveItem(RG_HEART_CONTAINER).GetGIEntry_Copy();
                 }
-
             }
         }
     }
@@ -322,7 +328,7 @@ void CollectionPoint_Draw(Actor* actor, PlayState* play) {
     for (int i = 0; i < FredsQuestWoodCollected / (CVarGetInteger(CVAR("FredsQuest.WoodNeeded"), 300) / 50); i++) {
         float angle = 10 * i;
         float radius = (50 - i) * 0.5f; // Radius decreases as it goes up
-        float height = 10.0f;    // Incremental height
+        float height = 10.0f;           // Incremental height
 
         Matrix_Translate(radius * cosf(angle), height, radius * sinf(angle), MTXMODE_APPLY);
         Matrix_RotateY(angle, MTXMODE_APPLY);
@@ -337,8 +343,9 @@ void SpawnCollectionPoint() {
     collectionPoint->actor.update = CollectionPoint_Update;
     collectionPoint->actor.draw = CollectionPoint_Draw;
     collectionPoint->actor.flags |= ACTOR_FLAG_DRAW_CULLING_DISABLED;
-    SkelAnime_InitFlex(gPlayState, &collectionPointSkelAnime, (FlexSkeletonHeader*)&object_toryo_Skel_007150, 
-        (AnimationHeader*)&object_toryo_Anim_000E50, collectionPointJointTable, collectionPointMorphTable, 17);
+    SkelAnime_InitFlex(gPlayState, &collectionPointSkelAnime, (FlexSkeletonHeader*)&object_toryo_Skel_007150,
+                       (AnimationHeader*)&object_toryo_Anim_000E50, collectionPointJointTable,
+                       collectionPointMorphTable, 17);
 }
 
 void RandomTrap_Update(Actor* actor, PlayState* play) {
@@ -391,7 +398,8 @@ void RandomTrap_Draw(Actor* actor, PlayState* play) {
 
 void SpawnRandomTrap() {
     Vec3f pos = FindValidPos(2000.0f);
-    EnItem00* randomTrap = CustomCollectible::Spawn(pos.x, pos.y, pos.z, 0, CustomCollectible::TOSS_ON_SPAWN, 0, NULL, NULL);
+    EnItem00* randomTrap =
+        CustomCollectible::Spawn(pos.x, pos.y, pos.z, 0, CustomCollectible::TOSS_ON_SPAWN, 0, NULL, NULL);
     SoundSource_PlaySfxAtFixedWorldPos(gPlayState, &randomTrap->actor.world.pos, 20, NA_SE_EV_LIGHTNING);
     randomTrap->actor.update = RandomTrap_Update;
     randomTrap->actor.draw = RandomTrap_Draw;
@@ -414,17 +422,18 @@ void OnSceneInit() {
     SpawnCollectionPoint();
 }
 
-static void ConfigurationChanged() {
+static void OnConfigurationChanged() {
     COND_HOOK(OnSceneSpawnActors, CVarGetInteger(CVAR("FredsQuest.Enabled"), 0), OnSceneInit);
 
     COND_HOOK(OnPlayerUpdate, CVarGetInteger(CVAR("RandomTraps.Enabled"), 0), []() {
-        if (rand() % CVarGetInteger(CVAR("RandomTraps.SpawnChance"), 400) == 0) { 
+        if (rand() % CVarGetInteger(CVAR("RandomTraps.SpawnChance"), 400) == 0) {
             SpawnRandomTrap();
         }
     });
 
     COND_HOOK(OnPlayerUpdate, CVarGetInteger(CVAR("FredsQuest.Enabled"), 0), []() {
-        if (CVarGetInteger(CVAR("FredsQuest.EncumberedThreshold"), 60) == 0 || FredsQuestWoodOnHand <= CVarGetInteger(CVAR("FredsQuest.EncumberedThreshold"), 60)) {
+        if (CVarGetInteger(CVAR("FredsQuest.EncumberedThreshold"), 60) == 0 ||
+            FredsQuestWoodOnHand <= CVarGetInteger(CVAR("FredsQuest.EncumberedThreshold"), 60)) {
             GameInteractor::State::MovementSpeedMultiplier = 0;
         } else {
             GameInteractor::State::MovementSpeedMultiplier = -2;
@@ -438,8 +447,7 @@ static void ConfigurationChanged() {
     });
 }
 
-static void DrawMenu() {
-    ImGui::SeparatorText(AUTHOR);
+static void RegisterMenu() {
 
     // UIWidgets::EnhancementSliderFloat("Xfloat", "Xfloat", CVAR("tmpxf"), 0.0f, 10.0f, "%.2f", 1.0f, false);
     // UIWidgets::EnhancementSliderFloat("Yfloat", "Yfloat", CVAR("tmpyf"), 0.0f, 10.0f, "%.2f", 1.0f, false);
@@ -447,49 +455,75 @@ static void DrawMenu() {
     // UIWidgets::EnhancementSliderInt("Xs", "Xs", CVAR("tmpxs"), 0, UINT16_MAX, "%d", 1, false);
     // UIWidgets::EnhancementSliderInt("Ys", "Ys", CVAR("tmpys"), 0, UINT16_MAX, "%d", 1, false);
     // UIWidgets::EnhancementSliderInt("Zs", "Zs", CVAR("tmpzs"), 0, UINT16_MAX, "%d", 1, false);
-    /*if (UIWidgets::EnhancementCheckbox("Fred's Quest", CVAR("FredsQuest.Enabled"))) {
-        ConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Collect wood and bring it to the collection point in Hyrule Field for a small reward.");
-    if (CVarGetInteger(CVAR("FredsQuest.Enabled"), 0)) {
-        if (UIWidgets::EnhancementCheckbox("Crazy Taxi Arrow", CVAR("FredsQuest.CrazyTaxiArrow"))) {
-            ConfigurationChanged();
-        }
-        if (UIWidgets::EnhancementSliderInt("Wood Needed", "##FredsQuest.WoodNeeded", CVAR("FredsQuest.WoodNeeded"), 0, 1000, "%d", 300, false)) {
-            ConfigurationChanged();
-        }
-        if (UIWidgets::EnhancementSliderInt("Tree Bonk Drop Rate", "##FredsQuest.TreeBonkDropRate", CVAR("FredsQuest.TreeBonkDropRate"), 0, 10, "%d", 1, false)) {
-            ConfigurationChanged();
-        }
-        if (UIWidgets::EnhancementSliderInt("Tree Break Drop Rate", "##FredsQuest.TreeBreakDropRate", CVAR("FredsQuest.TreeBreakDropRate"), 0, 50, "%d", 3, false)) {
-            ConfigurationChanged();
-        }
-        if (UIWidgets::EnhancementSliderInt("Special Break Drop Rate", "##FredsQuest.SpecialBreakDropRate", CVAR("FredsQuest.SpecialBreakDropRate"), 0, 50, "%d", 10, false)) {
-            ConfigurationChanged();
-        }
-        if (UIWidgets::EnhancementSliderInt("Encumbered Threshold", "##FredsQuest.EncumberedThreshold", CVAR("FredsQuest.EncumberedThreshold"), 0, 200, "%d", 60, false)) {
-            ConfigurationChanged();
-        }
-        UIWidgets::Tooltip("If you have more than this many sticks, you will be encumbered and run slower. 0 for disabled");
-    }
-    if (UIWidgets::EnhancementCheckbox("Random Traps", CVAR("RandomTraps.Enabled"))) {
-        ConfigurationChanged();
-    }
-    UIWidgets::Tooltip("Random traps will spawn around you at a configurable rate. (Currently only knockback)");
-    if (CVarGetInteger(CVAR("RandomTraps.Enabled"), 0)) {
-        if (UIWidgets::EnhancementSliderInt("Trap Lifetime (Seconds)", "##RandomTraps.Lifetime", CVAR("RandomTraps.Lifetime"), 0, 60, "%d", 30, false)) {
-            ConfigurationChanged();
-        }
-        if (UIWidgets::EnhancementSliderInt("Spawn Chance", "##RandomTraps.SpawnChance", CVAR("RandomTraps.SpawnChance"), 40, 2000, "%d", 1000, false)) {
-            ConfigurationChanged();
-        }
-    }*/
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
+
+    SohGui::mSohMenu->AddWidget(path, "Fred's Quest", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("FredsQuest.Enabled"))
+        .Options(UIWidgets::CheckboxOptions().Tooltip(
+            "Collect wood and bring it to the collection point in Hyrule Field for a small reward."));
+    SohGui::mSohMenu->AddWidget(path, "Crazy Taxi Arrow", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("FredsQuest.CrazyTaxiArrow"))
+        .PreFunc(
+            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
+        .Options(UIWidgets::CheckboxOptions().Tooltip(
+            "Collect wood and bring it to the collection point in Hyrule Field for a small reward."));
+
+    SohGui::mSohMenu->AddWidget(path, "Wood Needed", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("FredsQuest.WoodNeeded"))
+        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
+        .PreFunc(
+            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(300).Min(0).Max(1000));
+
+    SohGui::mSohMenu->AddWidget(path, "Tree Bonk Drop Rate", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("FredsQuest.TreeBonkDropRate"))
+        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
+        .PreFunc(
+            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(1).Min(0).Max(10));
+
+    SohGui::mSohMenu->AddWidget(path, "Tree Break Drop Rate", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("FredsQuest.TreeBreakDropRate"))
+        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
+        .PreFunc(
+            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(3).Min(0).Max(50));
+
+    SohGui::mSohMenu->AddWidget(path, "Special Break Drop Rate", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("FredsQuest.SpecialBreakDropRate"))
+        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
+        .PreFunc(
+            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(10).Min(0).Max(50));
+
+    SohGui::mSohMenu->AddWidget(path, "Encumbered Threshold", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("FredsQuest.EncumberedThreshold"))
+        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
+        .PreFunc(
+            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(60).Min(0).Max(200).Tooltip(
+            "If you have more than this many sticks, you will be encumbered and run slower. 0 for disabled"));
+
+    SohGui::mSohMenu->AddWidget(path, "Random Traps", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("RandomTraps.Enabled"))
+        .Options(UIWidgets::CheckboxOptions().Tooltip(
+            "Random traps will spawn around you at a configurable rate. (Currently only knockback)"));
+
+    SohGui::mSohMenu->AddWidget(path, "Trap Lifetime (Seconds)", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("RandomTraps.Lifetime"))
+        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
+        .PreFunc(
+            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("RandomTraps.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(30).Min(0).Max(60));
+
+    SohGui::mSohMenu->AddWidget(path, "Spawn Chance", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR("RandomTraps.SpawnChance"))
+        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
+        .PreFunc(
+            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("RandomTraps.Enabled"), 0); })
+        .Options(UIWidgets::IntSliderOptions().DefaultValue(1000).Min(40).Max(2000));
 }
 
-static void RegisterMod() {
-    // #region Leave this alone unless you know what you are doing
-    ConfigurationChanged();
-    // #endregion
-}
-
-static Holiday holiday(DrawMenu, RegisterMod);
+static RegisterShipInitFunc initFunc(OnConfigurationChanged);
+static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

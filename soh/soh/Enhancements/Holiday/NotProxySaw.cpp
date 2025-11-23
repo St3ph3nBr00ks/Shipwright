@@ -71,7 +71,7 @@ const std::vector<Dialog> dialogs = { { // 0
                                             { "Our way. Our history.", -3, -1 },
                                         } } };
 
-static void ConfigurationChanged() {
+static void OnConfigurationChanged() {
     COND_ID_HOOK(OnActorInit, ACTOR_BOSS_GANON, CVarGetInteger(CVAR("GanonDatingSim"), 0), [](void* actorRef) {
         dialogIndex = 0;
         affection = 0;
@@ -121,18 +121,15 @@ static void ConfigurationChanged() {
         });
 }
 
-static void DrawMenu() {
-    //ImGui::SeparatorText(AUTHOR);
-    //if (UIWidgets::EnhancementCheckbox("Ganon Dating Sim", CVAR("GanonDatingSim"))) {
-    //    ConfigurationChanged();
-    //}
-    //UIWidgets::Tooltip("Prior to fighting him at the top of his Castle, you make an attempt to convince Ganon to join you instead.");
+static void RegisterMenu() {
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
+
+    SohGui::mSohMenu->AddWidget(path, "Ganon Dating Sim", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("GanonDatingSim"))
+        .Options(UIWidgets::CheckboxOptions().Tooltip("Prior to fighting him at the top of his Castle, you make an "
+                                                      "attempt to convince Ganon to join you instead."));
 }
 
-static void RegisterMod() {
-    // #region Leave this alone unless you know what you are doing
-    ConfigurationChanged();
-    // #endregion
-}
-
-static Holiday holiday(DrawMenu, RegisterMod);
+static RegisterShipInitFunc initFunc(OnConfigurationChanged);
+static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

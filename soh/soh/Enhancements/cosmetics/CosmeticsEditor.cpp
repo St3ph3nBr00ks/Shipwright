@@ -521,7 +521,10 @@ void ResetPositionAll() {
 
 int hue = 0;
 
-#define CVAR_LL(v) "gHoliday." "LL" "." v
+#define CVAR_LL(v) \
+    "gHoliday."    \
+    "LL"           \
+    "." v
 
 // Runs every frame to update rainbow hue, a potential future optimization is to only run this a once or twice a second
 // and increase the speed of the rainbow hue rotation.
@@ -534,13 +537,12 @@ void CosmeticsUpdateTick() {
             Color_RGBA8 newColor;
 
             newColor.a = 255;
-            
+
             if (!CVarGetInteger(CVAR_LL("lEnableCustomRainbows"), 0)) {
                 newColor.r = static_cast<uint8_t>(sin(frequency * (hue + index) + 0) * 127) + 128;
                 newColor.g = static_cast<uint8_t>(sin(frequency * (hue + index) + (2 * M_PI / 3)) * 127) + 128;
                 newColor.b = static_cast<uint8_t>(sin(frequency * (hue + index) + (4 * M_PI / 3)) * 127) + 128;
-            }
-            else {
+            } else {
                 Color_RGBA8 customColorZero = CVarGetColor(CVAR_LL("lCustomRainbow1"), {});
                 Color_RGBA8 customColorOne = CVarGetColor(CVAR_LL("lCustomRainbow2"), {});
                 Color_RGBA8 customColorMinusZero = CVarGetColor(CVAR_LL("lCustomRainbow3"), {});
@@ -551,25 +553,25 @@ void CosmeticsUpdateTick() {
                 bool quadrant3 = hue >= (360 * rainbowSpeed) / 2 && hue <= (360 * rainbowSpeed) * 3 / 4;
                 bool quadrant4 = hue >= (360 * rainbowSpeed) * 3 / 4;
 
-                if (quadrant1) { //zero to one
+                if (quadrant1) { // zero to one
                     newColor.r = sinangle * (customColorOne.r - customColorZero.r) + customColorZero.r;
                     newColor.g = sinangle * (customColorOne.g - customColorZero.g) + customColorZero.g;
                     newColor.b = sinangle * (customColorOne.b - customColorZero.b) + customColorZero.b;
-                } else if (quadrant2) { //one to zero
+                } else if (quadrant2) { // one to zero
                     newColor.r = sinangle * (customColorOne.r - customColorMinusZero.r) + customColorMinusZero.r;
                     newColor.g = sinangle * (customColorOne.g - customColorMinusZero.g) + customColorMinusZero.g;
                     newColor.b = sinangle * (customColorOne.b - customColorMinusZero.b) + customColorMinusZero.b;
-                } else if (quadrant3) { //zero to minus one
+                } else if (quadrant3) { // zero to minus one
                     newColor.r = -sinangle * (customColorMinusOne.r - customColorMinusZero.r) + customColorMinusZero.r;
                     newColor.g = -sinangle * (customColorMinusOne.g - customColorMinusZero.g) + customColorMinusZero.g;
                     newColor.b = -sinangle * (customColorMinusOne.b - customColorMinusZero.b) + customColorMinusZero.b;
-                } else if (quadrant4) { //minus one to zero
+                } else if (quadrant4) { // minus one to zero
                     newColor.r = -sinangle * (customColorMinusOne.r - customColorZero.r) + customColorZero.r;
                     newColor.g = -sinangle * (customColorMinusOne.g - customColorZero.g) + customColorZero.g;
                     newColor.b = -sinangle * (customColorMinusOne.b - customColorZero.b) + customColorZero.b;
                 }
             }
-            
+
             // For alpha supported options, retain the last set alpha instead of overwriting
             if (cosmeticOption.supportsAlpha) {
                 newColor.a = static_cast<uint8_t>(cosmeticOption.currentColor.w * 255.0f);

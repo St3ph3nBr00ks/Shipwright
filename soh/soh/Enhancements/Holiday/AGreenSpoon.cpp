@@ -61,21 +61,13 @@ static void OnConfigurationChanged() {
         });
 }
 
-static void DrawMenu() {
-    //ImGui::SeparatorText(AUTHOR);
-    //if (UIWidgets::EnhancementCheckbox("Evil Gossip Stone", CVAR("EvilGossipStone"))) {
-    //    OnConfigurationChanged();
-    //}
-    //UIWidgets::Tooltip("Don't you dare talk to them.");
+static void RegisterMenu() {
+    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
+    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
+    SohGui::mSohMenu->AddWidget(path, "Evil Gossip Stone", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR("EvilGossipStone"))
+        .Options(UIWidgets::CheckboxOptions().Tooltip("Don't you dare talk to them."));
 }
 
-static void RegisterMod() {
-    // #region Leave this alone unless you know what you are doing
-    OnConfigurationChanged();
-    // #endregion
-
-    // TODO: Anything you want to run once on startup
-}
-
-// TODO: Uncomment this line to enable the mod
-static Holiday holiday(DrawMenu, RegisterMod);
+static RegisterShipInitFunc initFunc(OnConfigurationChanged);
+static RegisterMenuInitFunc menuInitFunc(RegisterMenu);

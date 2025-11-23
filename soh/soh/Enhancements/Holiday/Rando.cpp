@@ -13,7 +13,7 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
-static void ConfigurationChanged() {
+static void OnConfigurationChanged() {
     COND_ID_HOOK(OnOpenText, 0x406B, IS_RANDO, [](u16* textId, bool* loadFromMessageTable) {
         if (gPlayState->sceneNum != SCENE_KAKARIKO_VILLAGE) {
             return;
@@ -35,15 +35,7 @@ static void ConfigurationChanged() {
         messageEntry.LoadIntoFont();
         *loadFromMessageTable = false;
     });
+    COND_HOOK(OnLoadGame, true, [](int16_t fileNum) { OnConfigurationChanged(); });
 }
 
-static void RegisterMod() {
-    // #region Leave this alone unless you know what you are doing
-    ConfigurationChanged();
-    // #endregion
-
-    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnLoadGame>(
-        [](int16_t fileNum) { ConfigurationChanged(); });
-}
-
-static Holiday holiday([]() {}, RegisterMod);
+static RegisterShipInitFunc initFunc(OnConfigurationChanged);
