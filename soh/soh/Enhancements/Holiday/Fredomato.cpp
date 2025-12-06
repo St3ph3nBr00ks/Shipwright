@@ -7,8 +7,8 @@
 #include "soh/Enhancements/randomizer/3drando/random.hpp"
 #include "soh/Enhancements/randomizer/location_access.h"
 #include "soh/Enhancements/randomizer/entrance.h"
-#include "soh/Enhancements/custom-collectible/CustomCollectible.h"
 #include "soh/Notification/Notification.h"
+#include "soh/Enhancements/custom-item/CustomItem.h"
 #include "soh/Enhancements/nametag.h"
 
 #include "objects/gameplay_field_keep/gameplay_field_keep.h"
@@ -28,8 +28,7 @@ void DoorAna_GrabPlayer(DoorAna* doorAna, PlayState* play);
 }
 extern GetItemEntry vanillaQueuedItemEntry;
 
-#define AUTHOR "Fredomato"
-#define CVAR(v) "gHoliday." AUTHOR "." v
+#define CVAR(v) "gHoliday.Gameplay." v
 
 static CollisionPoly snowballPoly;
 static f32 raycastResult;
@@ -165,20 +164,6 @@ static void SpawnRandomGrotto() {
 }
 
 void SpawnStick(Vec3f pos) {
-    CustomCollectible::Spawn(
-        pos.x, pos.y + 150.0f, pos.z, 0, CustomCollectible::KILL_ON_TOUCH | CustomCollectible::TOSS_ON_SPAWN, 0,
-        [](Actor* actor, PlayState* play) {
-            FredsQuestWoodOnHand++;
-            Audio_PlaySoundGeneral(NA_SE_SY_METRONOME, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
-                                   &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
-        },
-        [](Actor* actor, PlayState* play) {
-            Matrix_Scale(40.0f, 40.0f, 40.0f, MTXMODE_APPLY);
-            for (int i = 4; i < 7; i++) {
-                Matrix_RotateZYX(800 * i, 0, 800 * i, MTXMODE_APPLY);
-                GetItem_Draw(play, GID_STICK);
-            }
-        });
 }
 
 Actor* specialTree = nullptr;
@@ -269,8 +254,6 @@ void DrawCrazyTaxiArrow(Actor* actor, PlayState* play) {
 }
 
 void SpawnCrazyTaxiArrow() {
-    EnItem00* arrow = CustomCollectible::Spawn(0, 0, 0, 0, CustomCollectible::KEEP_ON_PLAYER, 0, NULL, NULL);
-    arrow->actor.draw = DrawCrazyTaxiArrow;
 }
 
 void CollectionPoint_Update(Actor* actor, PlayState* play) {
@@ -339,13 +322,6 @@ void CollectionPoint_Draw(Actor* actor, PlayState* play) {
 }
 
 void SpawnCollectionPoint() {
-    EnItem00* collectionPoint = CustomCollectible::Spawn(859.0f, 347.0f, 5185.0f, 0xB000, 0, 0, NULL, NULL);
-    collectionPoint->actor.update = CollectionPoint_Update;
-    collectionPoint->actor.draw = CollectionPoint_Draw;
-    collectionPoint->actor.flags |= ACTOR_FLAG_DRAW_CULLING_DISABLED;
-    SkelAnime_InitFlex(gPlayState, &collectionPointSkelAnime, (FlexSkeletonHeader*)&object_toryo_Skel_007150,
-                       (AnimationHeader*)&object_toryo_Anim_000E50, collectionPointJointTable,
-                       collectionPointMorphTable, 17);
 }
 
 void RandomTrap_Update(Actor* actor, PlayState* play) {
@@ -398,8 +374,7 @@ void RandomTrap_Draw(Actor* actor, PlayState* play) {
 
 void SpawnRandomTrap() {
     Vec3f pos = FindValidPos(2000.0f);
-    EnItem00* randomTrap =
-        CustomCollectible::Spawn(pos.x, pos.y, pos.z, 0, CustomCollectible::TOSS_ON_SPAWN, 0, NULL, NULL);
+    EnItem00* randomTrap = CustomItem::Spawn(pos.x, pos.y, pos.z, 0, CustomItem::TOSS_ON_SPAWN, 0, NULL, NULL);
     SoundSource_PlaySfxAtFixedWorldPos(gPlayState, &randomTrap->actor.world.pos, 20, NA_SE_EV_LIGHTNING);
     randomTrap->actor.update = RandomTrap_Update;
     randomTrap->actor.draw = RandomTrap_Draw;
@@ -448,67 +423,13 @@ static void OnConfigurationChanged() {
 }
 
 static void RegisterMenu() {
+    WidgetPath path = { "Holiday", "Gameplay", SECTION_COLUMN_2 };
 
-    // UIWidgets::EnhancementSliderFloat("Xfloat", "Xfloat", CVAR("tmpxf"), 0.0f, 10.0f, "%.2f", 1.0f, false);
-    // UIWidgets::EnhancementSliderFloat("Yfloat", "Yfloat", CVAR("tmpyf"), 0.0f, 10.0f, "%.2f", 1.0f, false);
-    // UIWidgets::EnhancementSliderFloat("Zfloat", "Zfloat", CVAR("tmpzf"), 0.0f, 10.0f, "%.2f", 1.0f, false);
-    // UIWidgets::EnhancementSliderInt("Xs", "Xs", CVAR("tmpxs"), 0, UINT16_MAX, "%d", 1, false);
-    // UIWidgets::EnhancementSliderInt("Ys", "Ys", CVAR("tmpys"), 0, UINT16_MAX, "%d", 1, false);
-    // UIWidgets::EnhancementSliderInt("Zs", "Zs", CVAR("tmpzs"), 0, UINT16_MAX, "%d", 1, false);
-    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
-    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
-
-    SohGui::mSohMenu->AddWidget(path, "Fred's Quest", WIDGET_CVAR_CHECKBOX)
-        .CVar(CVAR("FredsQuest.Enabled"))
-        .Options(UIWidgets::CheckboxOptions().Tooltip(
-            "Collect wood and bring it to the collection point in Hyrule Field for a small reward."));
-    SohGui::mSohMenu->AddWidget(path, "Crazy Taxi Arrow", WIDGET_CVAR_CHECKBOX)
-        .CVar(CVAR("FredsQuest.CrazyTaxiArrow"))
-        .PreFunc(
-            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
-        .Options(UIWidgets::CheckboxOptions().Tooltip(
-            "Collect wood and bring it to the collection point in Hyrule Field for a small reward."));
-
-    SohGui::mSohMenu->AddWidget(path, "Wood Needed", WIDGET_CVAR_SLIDER_INT)
-        .CVar(CVAR("FredsQuest.WoodNeeded"))
-        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
-        .PreFunc(
-            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
-        .Options(UIWidgets::IntSliderOptions().DefaultValue(300).Min(0).Max(1000));
-
-    SohGui::mSohMenu->AddWidget(path, "Tree Bonk Drop Rate", WIDGET_CVAR_SLIDER_INT)
-        .CVar(CVAR("FredsQuest.TreeBonkDropRate"))
-        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
-        .PreFunc(
-            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
-        .Options(UIWidgets::IntSliderOptions().DefaultValue(1).Min(0).Max(10));
-
-    SohGui::mSohMenu->AddWidget(path, "Tree Break Drop Rate", WIDGET_CVAR_SLIDER_INT)
-        .CVar(CVAR("FredsQuest.TreeBreakDropRate"))
-        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
-        .PreFunc(
-            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
-        .Options(UIWidgets::IntSliderOptions().DefaultValue(3).Min(0).Max(50));
-
-    SohGui::mSohMenu->AddWidget(path, "Special Break Drop Rate", WIDGET_CVAR_SLIDER_INT)
-        .CVar(CVAR("FredsQuest.SpecialBreakDropRate"))
-        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
-        .PreFunc(
-            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
-        .Options(UIWidgets::IntSliderOptions().DefaultValue(10).Min(0).Max(50));
-
-    SohGui::mSohMenu->AddWidget(path, "Encumbered Threshold", WIDGET_CVAR_SLIDER_INT)
-        .CVar(CVAR("FredsQuest.EncumberedThreshold"))
-        .Callback([](WidgetInfo& info) { OnConfigurationChanged(); })
-        .PreFunc(
-            [](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("FredsQuest.Enabled"), 0); })
-        .Options(UIWidgets::IntSliderOptions().DefaultValue(60).Min(0).Max(200).Tooltip(
-            "If you have more than this many sticks, you will be encumbered and run slower. 0 for disabled"));
-
-    SohGui::mSohMenu->AddWidget(path, "Random Traps", WIDGET_CVAR_CHECKBOX)
+    SohGui::mSohMenu->AddWidget(path, "Chasing Knockback Spikes", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR("RandomTraps.Enabled"))
         .Options(UIWidgets::CheckboxOptions().Tooltip(
-            "Random traps will spawn around you at a configurable rate. (Currently only knockback)"));
+            "Random spikes will spawn around you at a configurable rate, chasing you for a short time before "
+            "disappearing. If they touch you, you get knocked back."));
 
     SohGui::mSohMenu->AddWidget(path, "Trap Lifetime (Seconds)", WIDGET_CVAR_SLIDER_INT)
         .CVar(CVAR("RandomTraps.Lifetime"))

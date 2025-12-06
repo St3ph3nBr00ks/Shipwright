@@ -48,7 +48,7 @@ static ColliderCylinderInit sCylinderInit = {
     },
     {
         ELEMTYPE_UNK0,
-        { 0xFFCFFFFF, 0x02, 0x08 },
+        { 0xFFCFFFFF, 0x00, 0x08 },
         { 0xFFCFFFFF, 0x00, 0x00 },
         TOUCH_ON | TOUCH_SFX_WOOD,
         BUMP_ON,
@@ -73,12 +73,10 @@ void EnNutsball_Init(Actor* thisx, PlayState* play) {
     EnNutsball* this = (EnNutsball*)thisx;
     s32 pad;
 
-    this->collider.info.toucher.effect = 2;
-
     ActorShape_Init(&this->actor.shape, 400.0f, ActorShadow_DrawCircle, 13.0f);
     Collider_InitCylinder(play, &this->collider);
     Collider_SetCylinder(play, &this->collider, &this->actor, &sCylinderInit);
-    if (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) || CVarGetInteger("gLetItSnow", 0)) {
+    if (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) || CVarGetInteger(CVAR_GENERAL("LetItSnow"), 0)) {
         this->objBankIndex = 0;
     } else {
         this->objBankIndex = Object_GetIndex(&play->objectCtx, sObjectIDs[this->actor.params]);

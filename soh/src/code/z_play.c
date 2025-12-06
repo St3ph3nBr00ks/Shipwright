@@ -1603,6 +1603,10 @@ void Play_Draw(PlayState* play) {
         if ((HREG(80) != 10) || (HREG(88) != 0)) {
             if (play->envCtx.sandstormState != SANDSTORM_OFF) {
                 Environment_DrawSandstorm(play, play->envCtx.sandstormState);
+            } else if (CVarGetInteger("gHoliday.Visual.SnowingWeatherActive", 0) == 1) {
+                Environment_DrawSandstorm(play, SANDSTORM_DISSIPATE);
+            } else if (CVarGetInteger("gHoliday.Visual.SnowingWeatherActive", 0) == 2) {
+                Environment_DrawSandstorm(play, SANDSTORM_ACTIVE);
             }
         }
 
@@ -1699,7 +1703,7 @@ time_t Play_GetRealTime() {
 void Play_Main(GameState* thisx) {
     PlayState* play = (PlayState*)thisx;
 
-    if (play->envCtx.unk_EE[2] == 0 && CVarGetInteger(CVAR_GENERAL("LetItSnow"), 0)) {
+    if (play->envCtx.unk_EE[2] == 0 && CVarGetInteger("gHoliday.Visual.SnowingWeather", 0)) {
         play->envCtx.unk_EE[3] = 64;
         Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_OBJECT_KANKYO, 0, 0, 0, 0, 0, 0, 3, 0);
     }

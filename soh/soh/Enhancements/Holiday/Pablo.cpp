@@ -8,8 +8,7 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
-#define AUTHOR "Pablo"
-#define CVAR(v) "gHoliday." AUTHOR "." v
+#define CVAR(v) "gHoliday.Gameplay." v
 
 #pragma region Shiny
 
@@ -138,16 +137,15 @@ void RegisterShiny() {
 #pragma endregion
 
 static void RegisterMenu() {
-    WidgetPath path = { "Holiday", AUTHOR, SECTION_COLUMN_1 };
-    SohGui::mSohMenu->AddSidebarEntry("Holiday", AUTHOR, SECTION_COLUMN_2);
-    SohGui::mSohMenu->AddWidget(path, "Enable Shiny Enemies", WIDGET_CVAR_CHECKBOX)
+    WidgetPath path = { "Holiday", "Gameplay", SECTION_COLUMN_2 };
+    SohGui::mSohMenu->AddWidget(path, "Shiny Enemies", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR("Shiny.Enabled"))
         .Options(UIWidgets::CheckboxOptions().Tooltip(
             "Allows enemies to be shiny.\nShiny enemies are 25% bigger and have 4 times the health but drop "
             "the equivalent of a gold rupee upon death"));
 
     SohGui::mSohMenu->AddWidget(path, "Shiny Chance: %d", WIDGET_CVAR_SLIDER_INT)
-        .CVar(CVAR("OrnExch.Amount"))
+        .CVar(CVAR("Shiny.Chance"))
         .PreFunc([](WidgetInfo& info) { info.options.get()->disabled = !CVarGetInteger(CVAR("Shiny.Enabled"), 0); })
         .Options(UIWidgets::IntSliderOptions().DefaultValue(8192).Min(1).Max(8192).Tooltip(
             "The chance for an enemy to be shiny is 1 / {Shiny Chance}"));
