@@ -94,7 +94,8 @@ void Anchor::OnIncomingJson(nlohmann::json payload) {
     std::string packetType = payload["type"].get<std::string>();
 
     // Ignore packets from mismatched clients, except for ALL_CLIENT_STATE, UPDATE_CLIENT_STATE, and PLAYER_UPDATE
-    if (packetType != ALL_CLIENT_STATE && packetType != UPDATE_CLIENT_STATE && packetType != PLAYER_UPDATE) {
+    if (packetType != ALL_CLIENT_STATE && packetType != UPDATE_CLIENT_STATE && packetType != PLAYER_UPDATE &&
+        packetType != ENEMY_UPDATE) {
         if (payload.contains("clientId")) {
             uint32_t clientId = payload["clientId"].get<uint32_t>();
             if (clients.contains(clientId) && clients[clientId].clientVersion != clientVersion) {
@@ -129,6 +130,8 @@ void Anchor::ProcessIncomingPacketQueue() {
             // packetType here is a string so we can't use a switch statement
             if (packetType == ALL_CLIENT_STATE)
                 HandlePacket_AllClientState(payload);
+            else if (packetType == ENEMY_UPDATE)
+                HandlePacket_EnemyUpdate(payload);
             else if (packetType == DAMAGE_PLAYER)
                 HandlePacket_DamagePlayer(payload);
             else if (packetType == DISABLE_ANCHOR)
@@ -186,6 +189,7 @@ struct DummyPlayerClientId {
     uint32_t clientId = 0;
 };
 static ObjectExtension::Register<DummyPlayerClientId> DummyPlayerClientIdRegister;
+ObjectExtension::Register<EnemyNetId> EnemyNetIdRegister;
 
 uint32_t Anchor::GetDummyPlayerClientId(const Actor* actor) {
     const DummyPlayerClientId* clientId = ObjectExtension::GetInstance().Get<DummyPlayerClientId>(actor);

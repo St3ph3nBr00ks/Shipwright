@@ -104,6 +104,58 @@ void Anchor::RegisterHooks() {
 
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() { ProcessIncomingPacketQueue(); });
 
+    // #region Enemy sync hooks (Phase 1 — visibility)
+
+    // Assign a deterministic netId to every enemy actor on spawn so both clients
+    // can refer to the same enemy without any handshake.
+    COND_HOOK(OnActorSpawn, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor->category != ACTORCAT_ENEMY) {
+            return;
+        }
+        if (!IsSaveLoaded()) {
+            return;
+        }
+        static uint32_t spawnCounter = 0;
+        uint32_t netId = ((uint32_t)(uint16_t)gPlayState->sceneNum << 16) |
+                         ((uint32_t)(uint16_t)actor->id << 8) |
+                         (++spawnCounter & 0xFF);
+        ObjectExtension::GetInstance().Set<EnemyNetId>(actor, EnemyNetId{ netId });
+    });
+
+    // Host sends enemy positions every frame to all clients in the same scene.
+    COND_HOOK(OnActorUpdate, isConnected, [&](void* refActor) {
+        if (roomState.ownerClientId != ownClientId) {
+            return;
+        }
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor->category != ACTORCAT_ENEMY) {
+            return;
+        }
+        if (!IsSaveLoaded()) {
+            return;
+        }
+        const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+        if (ext == nullptr) {
+            return;
+        }
+        SendPacket_EnemyUpdate(ext->netId, actor);
+    });
+
+    // Non-host clients suppress enemy AI so enemies are puppets driven by the host.
+    COND_HOOK(ShouldActorUpdate, isConnected, [&](void* refActor, bool* should) {
+        if (roomState.ownerClientId == ownClientId) {
+            return;
+        }
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor->category != ACTORCAT_ENEMY) {
+            return;
+        }
+        *should = false;
+    });
+
+    // #endregion
+
     COND_HOOK(OnPlayerSfx, isConnected, [&](u16 sfxId) { SendPacket_PlayerSfx(sfxId); });
     COND_HOOK(OnOcarinaNote, isConnected,
               [&](uint8_t note, float modulator, int8_t bend) { SendPacket_OcarinaSfx(note, modulator, bend); });

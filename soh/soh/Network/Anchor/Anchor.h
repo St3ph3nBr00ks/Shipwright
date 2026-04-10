@@ -3,6 +3,7 @@
 #ifdef __cplusplus
 
 #include "soh/Network/Network.h"
+#include "soh/ObjectExtension/ObjectExtension.h"
 #include <libultraship/libultraship.h>
 #include <queue>
 #include <mutex>
@@ -11,6 +12,11 @@ extern "C" {
 #include "variables.h"
 #include "z64.h"
 }
+
+// Attached to enemy actors to give them a stable network id across all clients.
+struct EnemyNetId {
+    uint32_t netId = 0;
+};
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
 void DummyPlayer_Update(Actor* actor, PlayState* play);
@@ -87,6 +93,7 @@ class Anchor : public Network {
     void SetDummyPlayerClientId(const Actor* actor, uint32_t clientId);
 
     void HandlePacket_AllClientState(nlohmann::json payload);
+    void HandlePacket_EnemyUpdate(nlohmann::json payload);
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);
     void HandlePacket_DamagePlayer(nlohmann::json payload);
     void HandlePacket_DisableAnchor(nlohmann::json payload);
@@ -115,6 +122,7 @@ class Anchor : public Network {
 
     // Packet types //
     inline static const std::string ALL_CLIENT_STATE = "ALL_CLIENT_STATE";
+    inline static const std::string ENEMY_UPDATE = "ENEMY_UPDATE";
     inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
@@ -154,6 +162,7 @@ class Anchor : public Network {
     bool CanTeleportTo(uint32_t clientId);
     uint32_t GetDummyPlayerClientId(const Actor* actor);
 
+    void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);
