@@ -247,7 +247,15 @@ void Anchor::RegisterHooks() {
             if (ext == nullptr || !ext->hasNetState) {
                 return;
             }
-            actor->world.pos         = ext->netPos;
+            // Deku Baba's world.pos is its animated head-tip position (computed
+            // each frame from home.pos + stemSectionAngles). Applying netPos here
+            // would render the entire model at the head location, making the stem
+            // float off the floor. The jointTable sync already drives the visual
+            // head position correctly; the Deku Baba's own update() computes
+            // world.pos each frame so no override is needed.
+            if (actor->id != ACTOR_EN_DEKUBABA) {
+                actor->world.pos = ext->netPos;
+            }
             actor->world.rot         = ext->netRot;
             actor->shape.rot         = ext->netShapeRot;
             actor->colChkInfo.health = ext->netHealth;
