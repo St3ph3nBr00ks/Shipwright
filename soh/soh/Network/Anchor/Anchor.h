@@ -105,11 +105,6 @@ class Anchor : public Network {
     // Cleared when the host re-enters a scene (enemies respawn on re-entry).
     std::unordered_map<s16, std::unordered_set<uint32_t>> deadEnemiesByScene;
 
-    // True once the first OnGameFrameUpdate fires after OnSceneSpawnActors.
-    // Static (scene-load-time) actor spawns occur before the first game frame;
-    // any OnActorSpawn that fires while this is true is a dynamic runtime spawn.
-    bool sceneActorsLoaded = false;
-
     // Set to true for the duration of HandlePacket_EnemySpawn's Actor_Spawn call
     // so the resulting OnActorSpawn hook does not suppress the actor on non-host.
     bool isSpawningNetworkActor = false;

@@ -143,11 +143,6 @@ void Anchor::RegisterHooks() {
     // #region Hooks that are required for basic Anchor functionality
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {
-        // Mark scene as loading so OnActorSpawn can distinguish static (scene-load)
-        // actors from dynamic (runtime) spawns. sceneActorsLoaded is set back to true
-        // by the first OnGameFrameUpdate after the load completes.
-        sceneActorsLoaded = false;
-
         SendPacket_UpdateClientState();
 
         if (IsSaveLoaded()) {
@@ -194,9 +189,6 @@ void Anchor::RegisterHooks() {
     });
 
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
-        // First game frame after scene load: all static actors have been spawned.
-        // Any subsequent OnActorSpawn calls are dynamic runtime spawns.
-        sceneActorsLoaded = true;
         ProcessIncomingPacketQueue();
     });
 
@@ -207,10 +199,16 @@ void Anchor::RegisterHooks() {
     // pointer so the send/receive path can sync joint tables without re-deriving
     // the offset every frame.
     //
-    // Dynamic spawn handling: if the scene is already running (sceneActorsLoaded)
-    // this is a runtime spawn (e.g. Stalchild from En_Encount1, Peahat Larva).
-    // Host broadcasts an ENEMY_SPAWN packet; non-host kills the locally-spawned
-    // actor and waits to receive the host's canonical copy instead. Actors spawned
+    // Dynamic spawn detection: gPlayState->numSetupActors > 0 while the engine is
+    // iterating the scene's setup actor list (z_actor.c Actor_UpdateAll). It is
+    // zeroed immediately after that loop completes, before OnSceneSpawnActors fires.
+    // Any OnActorSpawn with numSetupActors == 0 is therefore a runtime (dynamic)
+    // spawn (e.g. Stalchild from En_Encount1, Peahat Larva). This check is reliable
+    // across scene transitions — unlike the old sceneActorsLoaded flag which stayed
+    // true from the previous scene and incorrectly suppressed static actors on P2.
+    //
+    // Host broadcasts a dynamic spawn via ENEMY_SPAWN; non-host kills the locally-
+    // spawned actor and waits to receive the host's canonical copy. Actors spawned
     // in response to HandlePacket_EnemySpawn are exempt (isSpawningNetworkActor).
     COND_HOOK(OnActorSpawn, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
@@ -221,7 +219,8 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        if (sceneActorsLoaded) {
+        bool isDynamicSpawn = (gPlayState->numSetupActors == 0);
+        if (isDynamicSpawn) {
             if (roomState.ownerClientId == ownClientId) {
                 // Host: broadcast so non-host clients can spawn a matching actor.
                 // SendPacket_EnemySpawn runs after the netId block below so the
@@ -255,9 +254,8 @@ void Anchor::RegisterHooks() {
         ObjectExtension::GetInstance().Set<EnemyNetId>(actor, std::move(ext));
 
         // Host deferred broadcast: send ENEMY_SPAWN for dynamic actors now that
-        // the netId extension is in place (SendPacket_EnemySpawn doesn't need it,
-        // but keeping sends after all state is consistent is good practice).
-        if (sceneActorsLoaded && roomState.ownerClientId == ownClientId) {
+        // the netId extension is in place.
+        if (isDynamicSpawn && roomState.ownerClientId == ownClientId) {
             SendPacket_EnemySpawn(actor);
         }
     });
