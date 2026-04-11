@@ -32,6 +32,12 @@ extern "C" {
 #include "src/overlays/actors/ovl_Bg_Hidan_Dalm/z_bg_hidan_dalm.h"
 #include "src/overlays/actors/ovl_Bg_Hidan_Kowarerukabe/z_bg_hidan_kowarerukabe.h"
 #include "objects/gameplay_keep/gameplay_keep.h"
+// Enemy struct headers for SkelAnime offset exceptions (see GetEnemySkelAnime below)
+#include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
+#include "src/overlays/actors/ovl_En_Test/z_en_test.h"
+#include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
+#include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
+#include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 
 extern PlayState* gPlayState;
 extern MapData* gMapData;
@@ -55,6 +61,81 @@ void BgYdanSp_BurnWeb(BgYdanSp* bgYdanSp, PlayState* play);
 void EnDoor_Idle(EnDoor* enDoor, PlayState* play);
 float OTRGetDimensionFromLeftEdge(float v);
 float OTRGetDimensionFromRightEdge(float v);
+}
+
+/**
+ * Returns the SkelAnime* for an enemy actor, or nullptr if unsupported.
+ *
+ * Most enemies in OoT place SkelAnime immediately after the base Actor struct.
+ * A minority have other fields in between. Known exceptions are handled via
+ * explicit struct casts; everything else uses the generic layout with validation.
+ *
+ * Generic layout (used by ~117 of ~156 animated enemies):
+ *   struct GenericEnemy { Actor actor; SkelAnime skelAnime; };
+ *
+ * Exception pattern (e.g. Redead, Wolfos, Stalfos):
+ *   struct { Actor actor; Vec3s bodyPartsPos[N]; SkelAnime skelAnime; };
+ *   — handled by casting to the specific enemy struct.
+ */
+static SkelAnime* GetEnemySkelAnime(Actor* actor) {
+    // Explicit exceptions: enemies with fields between Actor and SkelAnime.
+    switch (actor->id) {
+        case ACTOR_EN_DEKUBABA: return &((EnDekubaba*)actor)->skelAnime;
+        case ACTOR_EN_TEST:     return &((EnTest*)actor)->skelAnime;
+        case ACTOR_EN_RD:       return &((EnRd*)actor)->skelAnime;
+        case ACTOR_EN_WF:       return &((EnWf*)actor)->skelAnime;
+        case ACTOR_EN_MB:       return &((EnMb*)actor)->skelAnime;
+        default: break;
+    }
+
+    // Generic case: SkelAnime immediately follows Actor.
+    struct GenericEnemy { Actor actor; SkelAnime skelAnime; };
+    SkelAnime* ska = &((GenericEnemy*)actor)->skelAnime;
+
+    // Validate before trusting it — for the ~39 non-default enemies whose data
+    // at this offset is NOT a SkelAnime, limbCount is typically 0 or out of range.
+    if (ska->limbCount == 0 || ska->limbCount > 30 || ska->jointTable == nullptr) {
+        return nullptr;
+    }
+    return ska;
+}
+
+// Returns the Actor* of the nearest player-type actor to `enemy`.
+// Considers the local player and all live DummyPlayer actors.
+// DummyPlayers that are out-of-scene are already at (-9999,-9999,-9999) by
+// DummyPlayer_Update, so they are naturally excluded by the distance comparison.
+static Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
+    Player* localPlayer = GET_PLAYER(play);
+
+    // Seed with the pre-computed squared distance to the local player so we
+    // avoid an extra sqrt and stay consistent with the automatic field values.
+    float nearestDistSq = SQ(enemy->xzDistToPlayer) + SQ(enemy->yDistToPlayer);
+    Actor* nearest = &localPlayer->actor;
+
+    Actor* npc = play->actorCtx.actorLists[ACTORCAT_NPC].head;
+    while (npc != nullptr) {
+        if (npc->id == ACTOR_EN_OE2 && npc->update == DummyPlayer_Update) {
+            float dx = enemy->world.pos.x - npc->world.pos.x;
+            float dy = enemy->world.pos.y - npc->world.pos.y;
+            float dz = enemy->world.pos.z - npc->world.pos.z;
+            float distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq < nearestDistSq) {
+                nearestDistSq = distSq;
+                nearest = npc;
+            }
+        }
+        npc = npc->next;
+    }
+
+    return nearest;
+}
+
+// C-callable wrapper so enemy C-code files (e.g. z_en_dekubaba.c) can query the
+// nearest player actor without pulling in C++ headers. Returns the nearest
+// player-type Actor* (local player or closest DummyPlayer). Safe to call any time
+// gPlayState is valid; falls back to local player when Anchor is not active.
+extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
+    return FindNearestPlayerActor(enemy, play);
 }
 
 void Anchor::RegisterHooks() {
@@ -107,7 +188,9 @@ void Anchor::RegisterHooks() {
     // #region Enemy sync hooks (Phase 1 — visibility)
 
     // Assign a deterministic netId to every enemy actor on spawn so both clients
-    // can refer to the same enemy without any handshake.
+    // can refer to the same enemy without any handshake. Also store the SkelAnime
+    // pointer so the send/receive path can sync joint tables without re-deriving
+    // the offset every frame.
     COND_HOOK(OnActorSpawn, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
         if (actor->category != ACTORCAT_ENEMY) {
@@ -116,18 +199,26 @@ void Anchor::RegisterHooks() {
         if (!IsSaveLoaded()) {
             return;
         }
-        static uint32_t spawnCounter = 0;
+        // Deterministic netId: scene | actorId | hash(home.pos, room).
+        // Both clients spawn the same set of actors in the same scene so the
+        // same home.pos/room combination always identifies the same enemy,
+        // eliminating the spawnCounter divergence seen with dynamic spawns.
+        uint8_t posHash = (uint8_t)((int16_t)actor->home.pos.x) ^
+                          (uint8_t)((int16_t)actor->home.pos.z >> 1) ^
+                          (uint8_t)actor->room;
         uint32_t netId = ((uint32_t)(uint16_t)gPlayState->sceneNum << 16) |
                          ((uint32_t)(uint16_t)actor->id << 8) |
-                         (++spawnCounter & 0xFF);
-        ObjectExtension::GetInstance().Set<EnemyNetId>(actor, EnemyNetId{ netId });
+                         posHash;
+
+        EnemyNetId ext;
+        ext.netId = netId;
+        ext.skelAnime = GetEnemySkelAnime(actor);
+        ext.limbCount = ext.skelAnime ? ext.skelAnime->limbCount : 0;
+        ObjectExtension::GetInstance().Set<EnemyNetId>(actor, std::move(ext));
     });
 
     // Host sends enemy positions every frame to all clients in the same scene.
     COND_HOOK(OnActorUpdate, isConnected, [&](void* refActor) {
-        if (roomState.ownerClientId != ownClientId) {
-            return;
-        }
         Actor* actor = static_cast<Actor*>(refActor);
         if (actor->category != ACTORCAT_ENEMY) {
             return;
@@ -135,23 +226,85 @@ void Anchor::RegisterHooks() {
         if (!IsSaveLoaded()) {
             return;
         }
-        const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-        if (ext == nullptr) {
-            return;
+
+        if (roomState.ownerClientId == ownClientId) {
+            // Host: send current state to all clients in scene.
+            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+            if (ext == nullptr) {
+                return;
+            }
+            SendPacket_EnemyUpdate(ext->netId, actor);
+        } else {
+            // Non-host: re-apply last received network state after AI update ran.
+            // This keeps the enemy at the host-authoritative position/health while
+            // still allowing the update() to register collision shapes every frame.
+            EnemyNetId* ext = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+            if (ext == nullptr || !ext->hasNetState) {
+                return;
+            }
+            actor->world.pos         = ext->netPos;
+            actor->world.rot         = ext->netRot;
+            actor->shape.rot         = ext->netShapeRot;
+            actor->colChkInfo.health = ext->netHealth;
         }
-        SendPacket_EnemyUpdate(ext->netId, actor);
     });
 
-    // Non-host clients suppress enemy AI so enemies are puppets driven by the host.
+    // Non-host clients: allow enemy update() to run so collision registration
+    // (CollisionCheck_SetAC/OC) executes every frame, enabling P2 to hit enemies.
+    // Position/health drift from the free-running AI is corrected in OnActorUpdate
+    // below by re-applying the last state received from the host.
+    // (Previously this suppressed the update entirely with *should = false.)
+
+    // Host: before each enemy AI update runs, patch the 4 pre-computed targeting
+    // fields to point at the nearest player (local or DummyPlayer). All enemy AI
+    // that reads xzDistToPlayer, yDistToPlayer, xyzDistToPlayerSq, or
+    // yawTowardsPlayer — including Actor_IsFacingPlayer and
+    // Actor_IsFacingAndNearPlayer — will then target the correct player with no
+    // per-enemy changes required.
     COND_HOOK(ShouldActorUpdate, isConnected, [&](void* refActor, bool* should) {
-        if (roomState.ownerClientId == ownClientId) {
+        if (roomState.ownerClientId != ownClientId) {
             return;
         }
         Actor* actor = static_cast<Actor*>(refActor);
         if (actor->category != ACTORCAT_ENEMY) {
             return;
         }
-        *should = false;
+        if (!IsSaveLoaded() || gPlayState == nullptr) {
+            return;
+        }
+
+        Player* localPlayer = GET_PLAYER(gPlayState);
+        Actor* nearest = FindNearestPlayerActor(actor, gPlayState);
+
+        // Only overwrite when a DummyPlayer is closer. If the local player is
+        // nearest, the automatic calculation (z_actor.c:2665-2669) is already
+        // correct and we leave the fields untouched.
+        if (nearest != &localPlayer->actor) {
+            actor->xzDistToPlayer    = Actor_WorldDistXZToActor(actor, nearest);
+            actor->yDistToPlayer     = Actor_HeightDiff(actor, nearest);
+            actor->xyzDistToPlayerSq = SQ(actor->xzDistToPlayer) + SQ(actor->yDistToPlayer);
+            actor->yawTowardsPlayer  = Actor_WorldYawTowardActor(actor, nearest);
+        }
+        // *should is not modified — enemy AI runs normally
+    });
+
+    // Host: when an enemy dies, broadcast the defeat so non-host clients can kill
+    // the matching actor. OnEnemyDefeat fires from within each enemy's death code
+    // (after its death animation decides to call Actor_Kill), so this is late enough
+    // that the host's death animation has already played.
+    COND_HOOK(OnEnemyDefeat, isConnected, [&](void* refActor) {
+        if (roomState.ownerClientId != ownClientId) {
+            return;
+        }
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (!IsSaveLoaded()) {
+            return;
+        }
+        const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+        if (ext == nullptr) {
+            return;
+        }
+        SendPacket_EnemyDefeated(ext->netId);
     });
 
     // #endregion

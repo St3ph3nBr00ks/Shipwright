@@ -95,7 +95,8 @@ void Anchor::OnIncomingJson(nlohmann::json payload) {
 
     // Ignore packets from mismatched clients, except for ALL_CLIENT_STATE, UPDATE_CLIENT_STATE, and PLAYER_UPDATE
     if (packetType != ALL_CLIENT_STATE && packetType != UPDATE_CLIENT_STATE && packetType != PLAYER_UPDATE &&
-        packetType != ENEMY_UPDATE) {
+        packetType != ENEMY_UPDATE &&
+        packetType != ENEMY_DEFEATED) {
         if (payload.contains("clientId")) {
             uint32_t clientId = payload["clientId"].get<uint32_t>();
             if (clients.contains(clientId) && clients[clientId].clientVersion != clientVersion) {
@@ -132,6 +133,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_AllClientState(payload);
             else if (packetType == ENEMY_UPDATE)
                 HandlePacket_EnemyUpdate(payload);
+            else if (packetType == ENEMY_DEFEATED)
+                HandlePacket_EnemyDefeated(payload);
             else if (packetType == DAMAGE_PLAYER)
                 HandlePacket_DamagePlayer(payload);
             else if (packetType == DISABLE_ANCHOR)

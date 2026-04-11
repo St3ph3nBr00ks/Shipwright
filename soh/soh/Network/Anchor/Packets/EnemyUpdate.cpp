@@ -14,11 +14,19 @@ extern PlayState* gPlayState;
  * ENEMY_UPDATE
  *
  * Sent by the host every frame for each enemy actor in the current scene.
- * Non-host clients apply the position/rotation to the matching local actor
- * and have their enemy AI suppressed via ShouldActorUpdate.
+ * Non-host clients apply the received state to the matching local actor.
+ * Enemy AI is suppressed on non-hosts via ShouldActorUpdate so enemies
+ * are position/pose puppets driven entirely by the host.
  *
- * netId is deterministic: (sceneNum << 16) | (actorId << 8) | spawnIndex
- * so both clients independently assign the same id to the same enemy.
+ * Packet fields:
+ *   netId     - deterministic id assigned at spawn (see HookHandlers.cpp)
+ *   sceneNum  - guards against cross-scene application
+ *   pos       - actor->world.pos
+ *   rot       - actor->world.rot
+ *   shapeRot  - actor->shape.rot (may differ from world.rot for animated enemies)
+ *   health    - actor->colChkInfo.health (enables death detection)
+ *   jointTable - (optional) SkelAnime joint rotations; only present when the enemy
+ *                has a supported skeleton. Drives the rendered pose on non-host.
  */
 
 void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
@@ -26,7 +34,7 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         return;
     }
 
-    // Only send if at least one other client is in the same scene
+    // Only send if at least one other client is in the same scene.
     bool hasRemoteInScene = false;
     for (auto& [clientId, client] : clients) {
         if (client.sceneNum == gPlayState->sceneNum && client.online && client.isSaveLoaded && !client.self) {
@@ -44,7 +52,31 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     payload["netId"] = netId;
     payload["pos"] = actor->world.pos;
     payload["rot"] = actor->world.rot;
+    payload["shapeRot"] = actor->shape.rot;
+    payload["health"] = actor->colChkInfo.health;
     payload["quiet"] = true;
+
+    // Include the joint/morph tables if this enemy has a supported skeleton.
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
+        nlohmann::json joints = nlohmann::json::array();
+        nlohmann::json morphs = nlohmann::json::array();
+        // limbCount + 1 entries: index 0 is the root translation, 1..limbCount are limb rotations.
+        for (uint8_t i = 0; i <= ext->limbCount; i++) {
+            joints.push_back(ext->skelAnime->jointTable[i]);
+            if (ext->skelAnime->morphTable != nullptr) {
+                morphs.push_back(ext->skelAnime->morphTable[i]);
+            }
+        }
+        payload["jointTable"] = joints;
+        if (!morphs.empty()) {
+            payload["morphTable"] = morphs;
+        }
+    }
+
+    SPDLOG_DEBUG("[EnemyUpdate] Send netId={} pos=({:.1f},{:.1f},{:.1f}) health={}",
+                 netId, actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
+                 (int)actor->colChkInfo.health);
 
     for (auto& [clientId, client] : clients) {
         if (client.sceneNum == gPlayState->sceneNum && client.online && client.isSaveLoaded && !client.self) {
@@ -59,7 +91,7 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         return;
     }
 
-    // Only non-hosts apply incoming enemy positions
+    // Only non-hosts apply incoming enemy state.
     if (roomState.ownerClientId == ownClientId) {
         return;
     }
@@ -70,19 +102,56 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     }
 
     uint32_t netId = payload.value("netId", (uint32_t)0);
-    Vec3f pos = payload.value("pos", Vec3f{ 0, 0, 0 });
-    Vec3s rot = payload.value("rot", Vec3s{ 0, 0, 0 });
+    Vec3f pos      = payload.value("pos", Vec3f{ 0, 0, 0 });
+    Vec3s rot      = payload.value("rot", Vec3s{ 0, 0, 0 });
+    Vec3s shapeRot = payload.value("shapeRot", rot); // fall back to rot if field absent
+    s8 health      = (s8)payload.value("health", 1);
 
-    // Walk the enemy actor list and find the actor with a matching netId
+    // Walk the enemy actor list and find the matching actor by netId.
     Actor* actor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
     while (actor != nullptr) {
-        const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+        EnemyNetId* ext = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
         if (ext != nullptr && ext->netId == netId) {
-            actor->world.pos = pos;
-            actor->world.rot = rot;
-            actor->shape.rot = rot;
-            break;
+            actor->world.pos         = pos;
+            actor->world.rot         = rot;
+            actor->shape.rot         = shapeRot;
+            actor->colChkInfo.health = health;
+
+            // Apply joint/morph tables if present in this packet and the actor has a skeleton.
+            if (ext->skelAnime != nullptr && ext->limbCount > 0) {
+                if (payload.contains("jointTable")) {
+                    const auto& joints = payload["jointTable"];
+                    uint8_t count = static_cast<uint8_t>(
+                        std::min((size_t)(ext->limbCount + 1), joints.size()));
+                    for (uint8_t i = 0; i < count; i++) {
+                        ext->skelAnime->jointTable[i] = joints[i].get<Vec3s>();
+                    }
+                }
+                if (payload.contains("morphTable") && ext->skelAnime->morphTable != nullptr) {
+                    const auto& morphs = payload["morphTable"];
+                    uint8_t count = static_cast<uint8_t>(
+                        std::min((size_t)(ext->limbCount + 1), morphs.size()));
+                    for (uint8_t i = 0; i < count; i++) {
+                        ext->skelAnime->morphTable[i] = morphs[i].get<Vec3s>();
+                    }
+                }
+            }
+
+            // Cache state so OnActorUpdate can re-apply it after the enemy's own
+            // update() runs (required for collision registration — Fix 4).
+            ext->hasNetState  = true;
+            ext->netPos       = pos;
+            ext->netRot       = rot;
+            ext->netShapeRot  = shapeRot;
+            ext->netHealth    = health;
+
+            SPDLOG_DEBUG("[EnemyUpdate] Applied netId={} pos=({:.1f},{:.1f},{:.1f}) health={}",
+                         netId, pos.x, pos.y, pos.z, (int)health);
+            return;
         }
         actor = actor->next;
     }
+
+    SPDLOG_WARN("[EnemyUpdate] No actor found for netId={} sceneNum={} — possible netId mismatch",
+                netId, sceneNum);
 }

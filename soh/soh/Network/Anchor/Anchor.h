@@ -16,6 +16,17 @@ extern "C" {
 // Attached to enemy actors to give them a stable network id across all clients.
 struct EnemyNetId {
     uint32_t netId = 0;
+    SkelAnime* skelAnime = nullptr; // nullptr if this enemy type has no supported skeleton
+    uint8_t limbCount = 0;          // cached from skelAnime->limbCount at spawn time
+
+    // Last state received from the host via ENEMY_UPDATE (non-host clients only).
+    // Re-applied each frame in OnActorUpdate so the enemy update() can run (enabling
+    // collision registration) without drifting from the authoritative host position.
+    bool hasNetState = false;
+    Vec3f netPos = { 0.0f, 0.0f, 0.0f };
+    Vec3s netRot = { 0, 0, 0 };
+    Vec3s netShapeRot = { 0, 0, 0 };
+    s8 netHealth = 1;
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
@@ -94,6 +105,7 @@ class Anchor : public Network {
 
     void HandlePacket_AllClientState(nlohmann::json payload);
     void HandlePacket_EnemyUpdate(nlohmann::json payload);
+    void HandlePacket_EnemyDefeated(nlohmann::json payload);
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);
     void HandlePacket_DamagePlayer(nlohmann::json payload);
     void HandlePacket_DisableAnchor(nlohmann::json payload);
@@ -123,6 +135,7 @@ class Anchor : public Network {
     // Packet types //
     inline static const std::string ALL_CLIENT_STATE = "ALL_CLIENT_STATE";
     inline static const std::string ENEMY_UPDATE = "ENEMY_UPDATE";
+    inline static const std::string ENEMY_DEFEATED = "ENEMY_DEFEATED";
     inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
@@ -163,6 +176,7 @@ class Anchor : public Network {
     uint32_t GetDummyPlayerClientId(const Actor* actor);
 
     void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);
+    void SendPacket_EnemyDefeated(uint32_t netId);
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);
