@@ -58,6 +58,10 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
             const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
             if (ext != nullptr && ext->netId == netId) {
                 SPDLOG_INFO("[EnemyDefeated] Killing actor id={} netId={}", actor->id, netId);
+                // Host records this kill for join-time replay regardless of who killed it.
+                if (roomState.ownerClientId == ownClientId) {
+                    deadEnemiesByScene[gPlayState->sceneNum].insert(netId);
+                }
                 Actor_Kill(actor);
                 return;
             }
