@@ -35,6 +35,8 @@ nlohmann::json Anchor::PrepClientState() {
         payload["sceneNum"] = gPlayState->sceneNum;
         payload["curRoomNum"] = gPlayState->roomCtx.curRoom.num;
         payload["entranceIndex"] = gSaveContext.entranceIndex;
+        payload["dayTime"]   = (u16)gSaveContext.dayTime;
+        payload["nightFlag"] = gSaveContext.nightFlag;
     } else {
         payload["seed"] = 0;
         payload["isSaveLoaded"] = false;
@@ -99,6 +101,20 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                     SendJsonToRemote(killPayload);
                 }
             }
+        }
+
+        // Time-of-day sync: non-host applies the host's dayTime and nightFlag whenever
+        // it receives an UpdateClientState from the host. Both clients tick time at the
+        // same rate via En_Weather_Tag, but can drift when one player is in a dungeon
+        // (no weather tag) while the other is in the overworld. Applying host time at
+        // scene transitions corrects the drift without fighting the weather tag per-frame.
+        bool weAreHost    = (roomState.ownerClientId == ownClientId);
+        bool senderIsHost = (clientId == roomState.ownerClientId && roomState.ownerClientId != 0);
+        if (!weAreHost && senderIsHost && IsSaveLoaded() && payload["state"].contains("dayTime")) {
+            gSaveContext.dayTime   = payload["state"]["dayTime"].get<u16>();
+            gSaveContext.nightFlag = payload["state"]["nightFlag"].get<s32>();
+            SPDLOG_INFO("[UpdateClientState] Synced time from host: dayTime={} nightFlag={}",
+                        gSaveContext.dayTime, gSaveContext.nightFlag);
         }
     }
 }

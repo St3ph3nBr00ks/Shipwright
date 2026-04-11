@@ -143,6 +143,11 @@ void Anchor::RegisterHooks() {
     // #region Hooks that are required for basic Anchor functionality
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {
+        // Mark scene as loading so OnActorSpawn can distinguish static (scene-load)
+        // actors from dynamic (runtime) spawns. sceneActorsLoaded is set back to true
+        // by the first OnGameFrameUpdate after the load completes.
+        sceneActorsLoaded = false;
+
         SendPacket_UpdateClientState();
 
         if (IsSaveLoaded()) {
@@ -188,7 +193,12 @@ void Anchor::RegisterHooks() {
         SendPacket_PlayerUpdate();
     });
 
-    COND_HOOK(OnGameFrameUpdate, isConnected, [&]() { ProcessIncomingPacketQueue(); });
+    COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
+        // First game frame after scene load: all static actors have been spawned.
+        // Any subsequent OnActorSpawn calls are dynamic runtime spawns.
+        sceneActorsLoaded = true;
+        ProcessIncomingPacketQueue();
+    });
 
     // #region Enemy sync hooks (Phase 1 — visibility)
 
@@ -196,6 +206,12 @@ void Anchor::RegisterHooks() {
     // can refer to the same enemy without any handshake. Also store the SkelAnime
     // pointer so the send/receive path can sync joint tables without re-deriving
     // the offset every frame.
+    //
+    // Dynamic spawn handling: if the scene is already running (sceneActorsLoaded)
+    // this is a runtime spawn (e.g. Stalchild from En_Encount1, Peahat Larva).
+    // Host broadcasts an ENEMY_SPAWN packet; non-host kills the locally-spawned
+    // actor and waits to receive the host's canonical copy instead. Actors spawned
+    // in response to HandlePacket_EnemySpawn are exempt (isSpawningNetworkActor).
     COND_HOOK(OnActorSpawn, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
         if (actor->category != ACTORCAT_ENEMY) {
@@ -204,6 +220,23 @@ void Anchor::RegisterHooks() {
         if (!IsSaveLoaded()) {
             return;
         }
+
+        if (sceneActorsLoaded) {
+            if (roomState.ownerClientId == ownClientId) {
+                // Host: broadcast so non-host clients can spawn a matching actor.
+                // SendPacket_EnemySpawn runs after the netId block below so the
+                // actor already has a valid extension when the send path reads it.
+                // We defer the actual send to after netId assignment — see below.
+            } else if (!isSpawningNetworkActor) {
+                // Non-host: kill locally-generated dynamic actors immediately.
+                // The host's canonical copy arrives via ENEMY_SPAWN and is spawned
+                // by HandlePacket_EnemySpawn (which sets isSpawningNetworkActor).
+                SPDLOG_INFO("[EnemySpawn] Suppressing dynamic spawn actorId={} on non-host", actor->id);
+                Actor_Kill(actor);
+                return;
+            }
+        }
+
         // Deterministic netId: scene | actorId | hash(home.pos, room).
         // Both clients spawn the same set of actors in the same scene so the
         // same home.pos/room combination always identifies the same enemy,
@@ -220,6 +253,13 @@ void Anchor::RegisterHooks() {
         ext.skelAnime = GetEnemySkelAnime(actor);
         ext.limbCount = ext.skelAnime ? ext.skelAnime->limbCount : 0;
         ObjectExtension::GetInstance().Set<EnemyNetId>(actor, std::move(ext));
+
+        // Host deferred broadcast: send ENEMY_SPAWN for dynamic actors now that
+        // the netId extension is in place (SendPacket_EnemySpawn doesn't need it,
+        // but keeping sends after all state is consistent is good practice).
+        if (sceneActorsLoaded && roomState.ownerClientId == ownClientId) {
+            SendPacket_EnemySpawn(actor);
+        }
     });
 
     // Host sends enemy positions every frame to all clients in the same scene.

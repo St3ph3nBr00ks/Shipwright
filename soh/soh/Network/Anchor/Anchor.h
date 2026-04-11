@@ -105,6 +105,15 @@ class Anchor : public Network {
     // Cleared when the host re-enters a scene (enemies respawn on re-entry).
     std::unordered_map<s16, std::unordered_set<uint32_t>> deadEnemiesByScene;
 
+    // True once the first OnGameFrameUpdate fires after OnSceneSpawnActors.
+    // Static (scene-load-time) actor spawns occur before the first game frame;
+    // any OnActorSpawn that fires while this is true is a dynamic runtime spawn.
+    bool sceneActorsLoaded = false;
+
+    // Set to true for the duration of HandlePacket_EnemySpawn's Actor_Spawn call
+    // so the resulting OnActorSpawn hook does not suppress the actor on non-host.
+    bool isSpawningNetworkActor = false;
+
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();
     void RegisterHooks();
@@ -114,6 +123,7 @@ class Anchor : public Network {
     void HandlePacket_AllClientState(nlohmann::json payload);
     void HandlePacket_EnemyUpdate(nlohmann::json payload);
     void HandlePacket_EnemyDefeated(nlohmann::json payload);
+    void HandlePacket_EnemySpawn(nlohmann::json payload);
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);
     void HandlePacket_DamagePlayer(nlohmann::json payload);
     void HandlePacket_DisableAnchor(nlohmann::json payload);
@@ -144,6 +154,7 @@ class Anchor : public Network {
     inline static const std::string ALL_CLIENT_STATE = "ALL_CLIENT_STATE";
     inline static const std::string ENEMY_UPDATE = "ENEMY_UPDATE";
     inline static const std::string ENEMY_DEFEATED = "ENEMY_DEFEATED";
+    inline static const std::string ENEMY_SPAWN = "ENEMY_SPAWN";
     inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
@@ -185,6 +196,7 @@ class Anchor : public Network {
 
     void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);
     void SendPacket_EnemyDefeated(uint32_t netId);
+    void SendPacket_EnemySpawn(Actor* actor);
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);
