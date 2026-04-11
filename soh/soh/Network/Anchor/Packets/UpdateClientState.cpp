@@ -103,18 +103,28 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
             }
         }
 
-        // Time-of-day sync: non-host applies the host's dayTime and nightFlag whenever
-        // it receives an UpdateClientState from the host. Both clients tick time at the
-        // same rate via En_Weather_Tag, but can drift when one player is in a dungeon
-        // (no weather tag) while the other is in the overworld. Applying host time at
-        // scene transitions corrects the drift without fighting the weather tag per-frame.
-        bool weAreHost    = (roomState.ownerClientId == ownClientId);
-        bool senderIsHost = (clientId == roomState.ownerClientId && roomState.ownerClientId != 0);
-        if (!weAreHost && senderIsHost && IsSaveLoaded() && payload["state"].contains("dayTime")) {
-            gSaveContext.dayTime   = payload["state"]["dayTime"].get<u16>();
-            gSaveContext.nightFlag = payload["state"]["nightFlag"].get<s32>();
-            SPDLOG_INFO("[UpdateClientState] Synced time from host: dayTime={} nightFlag={}",
-                        gSaveContext.dayTime, gSaveContext.nightFlag);
+        // Time-of-day sync: apply a received time if it is more advanced than the
+        // current time. "More advanced" means the nightFlag changed (day↔night
+        // transition) OR the same nightFlag with a higher dayTime value.
+        //
+        // This is bidirectional — both host and non-host apply each other's time.
+        // Rationale: En_Weather_Tag only runs in overworld scenes. When one player
+        // is in a dungeon (time stalled) while the other is in Hyrule Field (time
+        // advancing), the dungeon player's time falls behind. If the dungeon player
+        // is the host and enters Hyrule Field they would otherwise broadcast stale
+        // time to the non-host. With forward-only bidirectional sync the more
+        // advanced time always wins regardless of host assignment.
+        if (IsSaveLoaded() && payload["state"].contains("dayTime")) {
+            s32 receivedNightFlag = payload["state"]["nightFlag"].get<s32>();
+            u16 receivedDayTime   = payload["state"]["dayTime"].get<u16>();
+            bool timeIsAhead = (receivedNightFlag != gSaveContext.nightFlag) ||
+                               (receivedDayTime > (u16)gSaveContext.dayTime);
+            if (timeIsAhead) {
+                gSaveContext.dayTime   = receivedDayTime;
+                gSaveContext.nightFlag = receivedNightFlag;
+                SPDLOG_INFO("[UpdateClientState] Synced time: dayTime={} nightFlag={}",
+                            gSaveContext.dayTime, gSaveContext.nightFlag);
+            }
         }
     }
 }

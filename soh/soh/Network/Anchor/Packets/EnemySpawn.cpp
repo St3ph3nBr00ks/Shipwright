@@ -36,17 +36,13 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor) {
         return;
     }
 
-    // Only send if at least one other client is in the same scene.
-    bool hasRemoteInScene = false;
-    for (auto& [clientId, client] : clients) {
-        if (client.sceneNum == gPlayState->sceneNum && client.online && client.isSaveLoaded && !client.self) {
-            hasRemoteInScene = true;
-            break;
-        }
-    }
-    if (!hasRemoteInScene) {
-        return;
-    }
+    // Broadcast to all clients in the room. The sceneNum field in the payload
+    // and the guard in HandlePacket_EnemySpawn ensure non-hosts only apply the
+    // spawn if they are in the same scene. Omitting a hasRemoteInScene pre-check
+    // here avoids the race window where a client's sceneNum in our local table
+    // is stale (not yet updated by their UpdateClientState) even though they are
+    // already in the same scene — which would cause ENEMY_SPAWN to be silently
+    // dropped and the enemy to exist only on the host.
 
     nlohmann::json payload;
     payload["type"]     = ENEMY_SPAWN;

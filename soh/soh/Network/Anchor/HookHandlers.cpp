@@ -144,6 +144,13 @@ void Anchor::RegisterHooks() {
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {
         SendPacket_UpdateClientState();
+        // Request current state from all other clients so we pick up their
+        // dayTime if they are in a time-advancing scene and we were not.
+        // Responses arrive as UpdateClientState packets and are applied via
+        // the forward-only bidirectional time sync in HandlePacket_UpdateClientState.
+        if (IsSaveLoaded()) {
+            SendPacket_RequestTeamState();
+        }
 
         if (IsSaveLoaded()) {
             // Clear the dead-enemy list for this scene: the scene just (re-)loaded
@@ -284,6 +291,18 @@ void Anchor::RegisterHooks() {
             EnemyNetId* ext = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
             if (ext == nullptr || !ext->hasNetState) {
                 return;
+            }
+            // Re-derive skelAnime if it was null or empty at spawn time.
+            // Dormant Deku Babas (and similar actors) may not have a valid
+            // SkelAnime until after their first activation (grow/wake animation).
+            // Checking each frame is cheap — GetEnemySkelAnime just reads a
+            // struct field and validates limbCount/jointTable.
+            if (ext->skelAnime == nullptr || ext->limbCount == 0) {
+                SkelAnime* ska = GetEnemySkelAnime(actor);
+                if (ska != nullptr && ska->limbCount > 0 && ska->jointTable != nullptr) {
+                    ext->skelAnime = ska;
+                    ext->limbCount = ska->limbCount;
+                }
             }
             // Deku Baba's world.pos is its animated head-tip position (computed
             // each frame from home.pos + stemSectionAngles). Applying netPos here
