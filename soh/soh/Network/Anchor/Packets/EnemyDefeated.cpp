@@ -45,11 +45,6 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
         return;
     }
 
-    // Host does not apply defeat packets — it is the authority.
-    if (roomState.ownerClientId == ownClientId) {
-        return;
-    }
-
     uint32_t netId = payload.value("netId", (uint32_t)0);
 
     SPDLOG_INFO("[EnemyDefeated] Received defeat for netId={}", netId);

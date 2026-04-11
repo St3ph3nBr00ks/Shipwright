@@ -59,6 +59,10 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
     uint32_t clientId = payload.at("clientId").get<uint32_t>();
 
     if (clients.contains(clientId)) {
+        // Capture prior state so we can detect transitions below.
+        bool wasSaveLoaded = clients[clientId].isSaveLoaded;
+        s16  prevSceneNum  = clients[clientId].sceneNum;
+
         AnchorClient client = payload["state"].get<AnchorClient>();
         clients[clientId].clientId = clientId;
         clients[clientId].name = client.name;
@@ -72,5 +76,29 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         clients[clientId].sceneNum = client.sceneNum;
         clients[clientId].curRoomNum = client.curRoomNum;
         clients[clientId].entranceIndex = client.entranceIndex;
+
+        // Fix 6 — join-time dead-enemy replay.
+        // When we are the host and a remote client just loaded a save or entered a
+        // new scene, send ENEMY_DEFEATED for every enemy we have recorded as dead
+        // in that scene. This ensures late-joining clients see the correct state.
+        bool nowLoaded = clients[clientId].isSaveLoaded;
+        s16  newScene  = clients[clientId].sceneNum;
+        bool sceneChanged = (prevSceneNum != newScene);
+        bool justLoaded   = (!wasSaveLoaded && nowLoaded);
+
+        if (roomState.ownerClientId == ownClientId && nowLoaded && (justLoaded || sceneChanged)) {
+            auto it = deadEnemiesByScene.find(newScene);
+            if (it != deadEnemiesByScene.end()) {
+                SPDLOG_INFO("[EnemyDefeated] Replaying {} dead enemies in scene {} for client {}",
+                            it->second.size(), (int)newScene, clientId);
+                for (uint32_t netId : it->second) {
+                    nlohmann::json killPayload;
+                    killPayload["type"]           = ENEMY_DEFEATED;
+                    killPayload["netId"]          = netId;
+                    killPayload["targetClientId"] = clientId;
+                    SendJsonToRemote(killPayload);
+                }
+            }
+        }
     }
 }

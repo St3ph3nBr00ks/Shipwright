@@ -7,6 +7,8 @@
 #include <libultraship/libultraship.h>
 #include <queue>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 
 extern "C" {
 #include "variables.h"
@@ -96,6 +98,12 @@ class Anchor : public Network {
     std::mutex incomingPacketQueueMutex;
     std::queue<nlohmann::json> outgoingPacketQueue;
     std::mutex outgoingPacketQueueMutex;
+
+    // Host-only: netIds of enemies that have died in each scene.
+    // Sent to newly joined (or scene-transitioning) clients so they see enemies
+    // as dead immediately rather than alive until the next kill event.
+    // Cleared when the host re-enters a scene (enemies respawn on re-entry).
+    std::unordered_map<s16, std::unordered_set<uint32_t>> deadEnemiesByScene;
 
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();

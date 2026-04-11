@@ -146,6 +146,11 @@ void Anchor::RegisterHooks() {
         SendPacket_UpdateClientState();
 
         if (IsSaveLoaded()) {
+            // Clear the dead-enemy list for this scene: the scene just (re-)loaded
+            // so any previously dead enemies have respawned fresh.
+            if (roomState.ownerClientId == ownClientId) {
+                deadEnemiesByScene.erase(gPlayState->sceneNum);
+            }
             RefreshClientActors();
         }
     });
@@ -288,14 +293,12 @@ void Anchor::RegisterHooks() {
         // *should is not modified — enemy AI runs normally
     });
 
-    // Host: when an enemy dies, broadcast the defeat so non-host clients can kill
-    // the matching actor. OnEnemyDefeat fires from within each enemy's death code
-    // (after its death animation decides to call Actor_Kill), so this is late enough
-    // that the host's death animation has already played.
+    // Any client: when an enemy dies locally, broadcast the defeat so all other
+    // clients kill the matching actor. Both host and non-host send this — after
+    // Fix 4 non-host clients have live colliders and can land killing blows.
+    // OnEnemyDefeat fires from within each enemy's death animation code, so the
+    // death animation has already played on the killing client before we notify.
     COND_HOOK(OnEnemyDefeat, isConnected, [&](void* refActor) {
-        if (roomState.ownerClientId != ownClientId) {
-            return;
-        }
         Actor* actor = static_cast<Actor*>(refActor);
         if (!IsSaveLoaded()) {
             return;
@@ -303,6 +306,10 @@ void Anchor::RegisterHooks() {
         const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
         if (ext == nullptr) {
             return;
+        }
+        // Host tracks kills for join-time replay (Fix 6).
+        if (roomState.ownerClientId == ownClientId) {
+            deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
         }
         SendPacket_EnemyDefeated(ext->netId);
     });
