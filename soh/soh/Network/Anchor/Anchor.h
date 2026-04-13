@@ -161,6 +161,7 @@ class Anchor : public Network {
     void HandlePacket_EnemyUpdate(nlohmann::json payload);
     void HandlePacket_EnemyDefeated(nlohmann::json payload);
     void HandlePacket_EnemySpawn(nlohmann::json payload);
+    void HandlePacket_DamageEnemy(nlohmann::json payload);
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);
     void HandlePacket_DamagePlayer(nlohmann::json payload);
     void HandlePacket_DisableAnchor(nlohmann::json payload);
@@ -192,6 +193,7 @@ class Anchor : public Network {
     inline static const std::string ENEMY_UPDATE = "ENEMY_UPDATE";
     inline static const std::string ENEMY_DEFEATED = "ENEMY_DEFEATED";
     inline static const std::string ENEMY_SPAWN = "ENEMY_SPAWN";
+    inline static const std::string DAMAGE_ENEMY = "DAMAGE_ENEMY";
     inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
@@ -234,6 +236,7 @@ class Anchor : public Network {
     void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);
     void SendPacket_EnemyDefeated(uint32_t netId);
     void SendPacket_EnemySpawn(Actor* actor);
+    void SendPacket_DamageEnemy(uint32_t netId, u8 damage);
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);

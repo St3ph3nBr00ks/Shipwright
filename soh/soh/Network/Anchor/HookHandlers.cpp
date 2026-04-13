@@ -422,7 +422,28 @@ void Anchor::RegisterHooks() {
             // This keeps the enemy at the host-authoritative position/health while
             // still allowing the update() to register collision shapes every frame.
             EnemyNetId* ext = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
-            if (ext == nullptr || !ext->hasNetState) {
+            if (ext == nullptr) {
+                return;
+            }
+
+            // Detect sword hits by the local (non-host) player this frame and forward
+            // them to the host for authoritative damage application.
+            //
+            // Timing: CollisionCheck_Damage ran BEFORE actor->update() this frame and
+            // populated colChkInfo.damage. actor->update() called Actor_ApplyDamage
+            // (reducing health locally) but did NOT clear colChkInfo.damage —
+            // CollisionCheck_ResetDamage runs AFTER this hook. So colChkInfo.damage
+            // still holds the total damage dealt this frame.
+            //
+            // Guard: skip on local kill (hasLocalDeath). On the killing blow,
+            // actor->update() fires OnEnemyDefeat before OnActorUpdate runs, which
+            // sets hasLocalDeath = true. ENEMY_DEFEATED already handles the kill;
+            // sending DAMAGE_ENEMY for the final hit would be redundant.
+            if (!ext->hasLocalDeath && actor->colChkInfo.damage > 0) {
+                SendPacket_DamageEnemy(ext->netId, (u8)actor->colChkInfo.damage);
+            }
+
+            if (!ext->hasNetState) {
                 return;
             }
             // Re-derive skelAnime if it was null or empty at spawn time.
