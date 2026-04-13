@@ -173,7 +173,9 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
 
             // Karebaba: cache received state index so OnActorUpdate can drive
             // the local state machine to match the host's current state.
-            if (actor->id == ACTOR_EN_KAREBABA && payload.contains("actionState")) {
+            // Skip when hasLocalDeath — we don't want to re-apply an Upright/Spin
+            // state index that would oscillate with the dying actor's own state.
+            if (actor->id == ACTOR_EN_KAREBABA && payload.contains("actionState") && !ext->hasLocalDeath) {
                 ext->netStateIndex  = (s16)payload["actionState"].get<int>();
                 ext->netActorParams = (s16)payload.value("actorParams", (int)0);
             }

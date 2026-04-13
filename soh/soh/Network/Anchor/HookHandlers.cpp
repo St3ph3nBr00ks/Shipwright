@@ -464,10 +464,29 @@ void Anchor::RegisterHooks() {
             // Karebaba state machine sync: if the host's current state differs from ours,
             // drive the local actor into the matching state. Called after update() so any
             // self-transition that ran this frame is immediately corrected.
-            if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0) {
+            //
+            // Guards:
+            //   hasLocalDeath — never override state after a local kill; the host keeps
+            //     sending its pre-death state for several frames which would un-kill the
+            //     actor here, causing a SetupDying↔SetupUpright oscillation loop.
+            //
+            //   dormant-to-active protection — if the host just entered the room its
+            //     enemies start at Idle (1) while this client's were already activated.
+            //     Applying Idle here would reset active enemies underground; the host
+            //     will advance to Upright/Spin via its own proximity detection within
+            //     ~2 seconds. Only block dormant resets (Grow=0/Idle=1/Regrow=9) when
+            //     the local enemy is already in an active state (Awaken=2/Upright=3/
+            //     Spin=4/Retract=7). Death and DeadItemDrop transitions are always applied.
+            if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 && !ext->hasLocalDeath) {
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
                 if (curState != ext->netStateIndex) {
-                    EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
+                    bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
+                                          ext->netStateIndex == 9);
+                    bool localIsActive = (curState == 2 || curState == 3 ||
+                                          curState == 4 || curState == 7);
+                    if (!(netIsDormant && localIsActive)) {
+                        EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
+                    }
                 }
             }
         }
