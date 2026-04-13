@@ -19,4 +19,11 @@ typedef struct EnKarebaba {
     /* 0x0244 */ ColliderCylinder bodyCollider;
 } EnKarebaba; // size = 0x0290
 
+// Network helpers — called from EnemyUpdate.cpp and HookHandlers.cpp.
+// GetStateIndex maps the actionFunc pointer to an integer index (0–9).
+// ApplyNetState drives the Karebaba into a given state without firing
+// game-logic side effects (no OnEnemyDefeat, no item drops).
+s16 EnKarebaba_GetStateIndex(struct EnKarebaba* actor);
+void EnKarebaba_ApplyNetState(struct EnKarebaba* actor, s16 stateIndex, s16 params);
+
 #endif

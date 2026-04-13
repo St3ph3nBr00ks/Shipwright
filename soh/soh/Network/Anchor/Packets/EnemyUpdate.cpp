@@ -7,6 +7,7 @@
 extern "C" {
 #include "variables.h"
 #include "z64.h"
+#include "overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
 extern PlayState* gPlayState;
 }
 
@@ -34,15 +35,19 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         return;
     }
 
-    // Only send if at least one other client is in the same scene.
-    bool hasRemoteInScene = false;
+    // Only send if at least one other client is in the same scene AND room.
+    // Room filtering prevents "No actor found" spam when one client loads a room
+    // slightly ahead of another — the other client doesn't have the actors yet.
+    s8 hostRoom = (s8)gPlayState->roomCtx.curRoom.num;
+    bool hasRemoteInRoom = false;
     for (auto& [clientId, client] : clients) {
-        if (client.sceneNum == gPlayState->sceneNum && client.online && client.isSaveLoaded && !client.self) {
-            hasRemoteInScene = true;
+        if (client.sceneNum == gPlayState->sceneNum && client.curRoomNum == hostRoom &&
+            client.online && client.isSaveLoaded && !client.self) {
+            hasRemoteInRoom = true;
             break;
         }
     }
-    if (!hasRemoteInScene) {
+    if (!hasRemoteInRoom) {
         return;
     }
 
@@ -56,6 +61,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     payload["health"] = actor->colChkInfo.health;
     payload["scale"] = actor->scale;
     payload["quiet"] = true;
+
+    // Karebaba: sync action state and params timer so non-host state machine matches host.
+    // Non-host uses these to call ApplyNetState when the host's state differs from its own.
+    if (actor->id == ACTOR_EN_KAREBABA) {
+        payload["actionState"]  = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
+        payload["actorParams"]  = (s16)actor->params;
+    }
 
     // Include the joint/morph tables if this enemy has a supported skeleton.
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
@@ -80,7 +92,8 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                  (int)actor->colChkInfo.health);
 
     for (auto& [clientId, client] : clients) {
-        if (client.sceneNum == gPlayState->sceneNum && client.online && client.isSaveLoaded && !client.self) {
+        if (client.sceneNum == gPlayState->sceneNum && client.curRoomNum == hostRoom &&
+            client.online && client.isSaveLoaded && !client.self) {
             payload["targetClientId"] = clientId;
             SendJsonToRemote(payload);
         }
@@ -117,10 +130,13 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
             actor->world.pos         = pos;
             actor->world.rot         = rot;
             actor->shape.rot         = shapeRot;
-            // Do not overwrite health after a local kill — the host keeps sending
-            // health > 0 for a few frames while our ENEMY_DEFEATED packet travels.
-            // hasLocalDeath is set by OnEnemyDefeat / OnActorKill on this client.
-            if (!ext->hasLocalDeath) {
+            // Health sync rules:
+            //   (a) hasLocalDeath: we already killed this enemy locally; ignore host
+            //       health > 0 while our ENEMY_DEFEATED packet travels.
+            //   (b) Multi-hit enemies: only apply if host's health is <= our current
+            //       value (host has taken as much or more damage). Prevents the host's
+            //       stale higher value from resetting locally-dealt damage on P2.
+            if (!ext->hasLocalDeath && health <= actor->colChkInfo.health) {
                 actor->colChkInfo.health = health;
                 ext->netHealth           = health;
             }
@@ -154,6 +170,13 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
             ext->netRot       = rot;
             ext->netShapeRot  = shapeRot;
             ext->netScale     = scale;
+
+            // Karebaba: cache received state index so OnActorUpdate can drive
+            // the local state machine to match the host's current state.
+            if (actor->id == ACTOR_EN_KAREBABA && payload.contains("actionState")) {
+                ext->netStateIndex  = (s16)payload["actionState"].get<int>();
+                ext->netActorParams = (s16)payload.value("actorParams", (int)0);
+            }
 
             SPDLOG_DEBUG("[EnemyUpdate] Applied netId={} pos=({:.1f},{:.1f},{:.1f}) health={}",
                          netId, pos.x, pos.y, pos.z, (int)health);

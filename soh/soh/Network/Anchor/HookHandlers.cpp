@@ -35,6 +35,7 @@ extern "C" {
 #include "objects/gameplay_keep/gameplay_keep.h"
 // Enemy struct headers for SkelAnime offset exceptions (see GetEnemySkelAnime below)
 #include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
+#include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
@@ -450,13 +451,25 @@ void Anchor::RegisterHooks() {
             actor->shape.rot         = ext->netShapeRot;
             // Skip health re-apply after a local kill so the host's stale health > 0
             // packets don't revive the dying actor on this client (hasLocalDeath guard).
-            if (!ext->hasLocalDeath) {
+            // Multi-hit guard: only re-apply if local health hasn't been reduced below the
+            // network value; otherwise we'd undo locally-dealt damage on multi-hit enemies.
+            if (!ext->hasLocalDeath && actor->colChkInfo.health >= ext->netHealth) {
                 actor->colChkInfo.health = ext->netHealth;
             }
             // Scale sync: enemies like En_Karebaba change actor->scale throughout their
             // state machine (0 when dormant, growing to 0.01 when fully emerged). Without
             // this re-apply the non-host always sees the actor at its spawn-time scale.
             actor->scale = ext->netScale;
+
+            // Karebaba state machine sync: if the host's current state differs from ours,
+            // drive the local actor into the matching state. Called after update() so any
+            // self-transition that ran this frame is immediately corrected.
+            if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0) {
+                s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
+                if (curState != ext->netStateIndex) {
+                    EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
+                }
+            }
         }
     });
 

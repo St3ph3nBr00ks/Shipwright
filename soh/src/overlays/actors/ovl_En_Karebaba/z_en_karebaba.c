@@ -239,6 +239,49 @@ void EnKarebaba_SetupRegrow(EnKarebaba* this) {
                 this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
 }
 
+/**
+ * Maps the current actionFunc pointer to a stable integer index for network sync.
+ * Indices: 0=Grow 1=Idle 2=Awaken 3=Upright 4=Spin 5=Dying 6=DeadItemDrop
+ *          7=Retract 8=Dead 9=Regrow
+ */
+s16 EnKarebaba_GetStateIndex(EnKarebaba* this) {
+    if (this->actionFunc == EnKarebaba_Grow)         return 0;
+    if (this->actionFunc == EnKarebaba_Idle)         return 1;
+    if (this->actionFunc == EnKarebaba_Awaken)       return 2;
+    if (this->actionFunc == EnKarebaba_Upright)      return 3;
+    if (this->actionFunc == EnKarebaba_Spin)         return 4;
+    if (this->actionFunc == EnKarebaba_Dying)        return 5;
+    if (this->actionFunc == EnKarebaba_DeadItemDrop) return 6;
+    if (this->actionFunc == EnKarebaba_Retract)      return 7;
+    if (this->actionFunc == EnKarebaba_Dead)         return 8;
+    if (this->actionFunc == EnKarebaba_Regrow)       return 9;
+    return -1;
+}
+
+/**
+ * Drives the Karebaba into the given state on a non-host client.
+ * Only transitions with meaningful visual/collision impact are applied.
+ * Death states (5=Dying, 6=DeadItemDrop, 8=Dead) are skipped — the host
+ * sends ENEMY_DEFEATED for those and Actor_Kill handles the kill locally.
+ * Regrow (9) is skipped — the non-host actor was killed via Actor_Kill so
+ * its update pointer is null; respawn requires a separate mechanism.
+ * After setting up the state, actor->params is overwritten with the host's
+ * value so timer-driven transitions (Upright↔Spin) stay in sync.
+ */
+void EnKarebaba_ApplyNetState(EnKarebaba* this, s16 stateIndex, s16 params) {
+    switch (stateIndex) {
+        case 1: EnKarebaba_SetupIdle(this);    break;
+        case 2: EnKarebaba_SetupAwaken(this);  break;
+        case 3: EnKarebaba_SetupUpright(this); break;
+        case 4: EnKarebaba_SetupSpin(this);    break;
+        case 7: EnKarebaba_SetupRetract(this); break;
+        default: break;
+    }
+    // Sync the params timer regardless of state so the host's countdown drives
+    // the Upright↔Spin cycle on this client.
+    this->actor.params = params;
+}
+
 void EnKarebaba_Grow(EnKarebaba* this, PlayState* play) {
     f32 scale;
 
@@ -269,7 +312,8 @@ void EnKarebaba_Awaken(EnKarebaba* this, PlayState* play) {
 }
 
 void EnKarebaba_Upright(EnKarebaba* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+    Actor* nearestPlayer = Anchor_GetNearestPlayerActor(&this->actor, play);
 
     SkelAnime_Update(&this->skelAnime);
 
@@ -284,7 +328,7 @@ void EnKarebaba_Upright(EnKarebaba* this, PlayState* play) {
     if (this->bodyCollider.base.acFlags & AC_HIT) {
         EnKarebaba_SetupDying(this);
         Enemy_StartFinishingBlow(play, &this->actor);
-    } else if (Math_Vec3f_DistXZ(&this->actor.home.pos, &player->actor.world.pos) > 240.0f) {
+    } else if (Math_Vec3f_DistXZ(&this->actor.home.pos, &nearestPlayer->world.pos) > 240.0f) {
         EnKarebaba_SetupRetract(this);
     } else if (this->actor.params == 0) {
         EnKarebaba_SetupSpin(this);

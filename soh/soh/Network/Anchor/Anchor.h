@@ -46,6 +46,13 @@ struct EnemyNetId {
     // the dying enemy to "resurrect" visually on P2 before the Actor_Kill from
     // the host's ENEMY_DEFEATED reaches P2.
     bool hasLocalDeath = false;
+
+    // Per-actor-type state machine sync fields.
+    // Currently used by ACTOR_EN_KAREBABA (Withered Deku Baba) to keep its
+    // Idle/Awaken/Upright/Spin/Retract state in sync with the host.
+    // -1 means no state received yet (initial value).
+    s16 netStateIndex = -1;
+    s16 netActorParams = 0;
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
