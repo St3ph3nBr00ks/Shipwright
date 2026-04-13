@@ -368,11 +368,56 @@ void Anchor::RegisterHooks() {
         if (!IsSaveLoaded()) {
             return;
         }
-        const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+        EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
         if (ext == nullptr) {
             return;
         }
+        // Mark that ENEMY_DEFEATED was sent via the normal death path so that
+        // the OnActorKill hook (Fix 12) does not send a duplicate packet when
+        // this same actor later calls Actor_Kill on itself.
+        ext->defeatPacketSent = true;
         // Host tracks kills for join-time replay (Fix 6).
+        if (roomState.ownerClientId == ownClientId) {
+            deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
+        }
+        SendPacket_EnemyDefeated(ext->netId);
+    });
+
+    // Fix 12 — Actor_Kill death path: ENEMY_DEFEATED for enemies that skip OnEnemyDefeat.
+    //
+    // Some enemies die by calling Actor_Kill directly inside their death animation
+    // (e.g., ACTOR_EN_DEKUBABA stem, ACTOR_EN_SKB at dawn) rather than going through
+    // the standard health-zero → OnEnemyDefeat → Actor_Kill sequence. Because
+    // OnEnemyDefeat never fires for these actors, no ENEMY_DEFEATED packet is sent and
+    // the actor persists on remote clients indefinitely.
+    //
+    // This hook fires for every Actor_Kill. It sends ENEMY_DEFEATED for any
+    // ACTORCAT_ENEMY / ACTORCAT_BOSS actor that has a netId but did NOT already send
+    // a packet through OnEnemyDefeat (guarded by defeatPacketSent). The
+    // isKillingNetworkActor flag prevents echo loops when HandlePacket_EnemyDefeated
+    // is the one calling Actor_Kill.
+    COND_HOOK(OnActorKill, isConnected, [&](void* refActor) {
+        if (isKillingNetworkActor) {
+            return; // This kill originated from a received ENEMY_DEFEATED — do not echo.
+        }
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (!IsSaveLoaded()) {
+            return;
+        }
+        if (actor->category != ACTORCAT_ENEMY && actor->category != ACTORCAT_BOSS) {
+            return;
+        }
+        const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+        if (ext == nullptr || ext->netId == 0) {
+            return;
+        }
+        if (ext->defeatPacketSent) {
+            return; // OnEnemyDefeat already broadcast this actor's death — no duplicate needed.
+        }
+        // Actor died via Actor_Kill without firing OnEnemyDefeat.
+        // Broadcast ENEMY_DEFEATED so remote clients remove the actor.
+        SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: sending defeat for actor id={} netId={}",
+                    actor->id, ext->netId);
         if (roomState.ownerClientId == ownClientId) {
             deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
         }

@@ -29,6 +29,14 @@ struct EnemyNetId {
     Vec3s netRot = { 0, 0, 0 };
     Vec3s netShapeRot = { 0, 0, 0 };
     s8 netHealth = 1;
+
+    // Set to true by the OnEnemyDefeat hook after it sends ENEMY_DEFEATED.
+    // The OnActorKill hook checks this flag and skips sending a second packet for
+    // enemies that go through the normal OnEnemyDefeat → Actor_Kill death path.
+    // Only enemies that die via Actor_Kill WITHOUT firing OnEnemyDefeat (e.g.,
+    // ACTOR_EN_DEKUBABA stem, ACTOR_EN_SKB at dawn) will have this false when
+    // OnActorKill fires, triggering the Fix 12 broadcast path.
+    bool defeatPacketSent = false;
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
@@ -108,6 +116,11 @@ class Anchor : public Network {
     // Set to true for the duration of HandlePacket_EnemySpawn's Actor_Spawn call
     // so the resulting OnActorSpawn hook does not suppress the actor on non-host.
     bool isSpawningNetworkActor = false;
+
+    // Set to true for the duration of HandlePacket_EnemyDefeated's Actor_Kill call
+    // so the resulting OnActorKill hook (Fix 12) does not echo ENEMY_DEFEATED back
+    // to the network for kills that originated from the network.
+    bool isKillingNetworkActor = false;
 
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();

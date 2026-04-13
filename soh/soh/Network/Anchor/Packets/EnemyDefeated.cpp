@@ -62,7 +62,11 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 if (roomState.ownerClientId == ownClientId) {
                     deadEnemiesByScene[gPlayState->sceneNum].insert(netId);
                 }
+                // Guard against the OnActorKill hook (Fix 12) echoing ENEMY_DEFEATED
+                // back to the network for this Actor_Kill call.
+                isKillingNetworkActor = true;
                 Actor_Kill(actor);
+                isKillingNetworkActor = false;
                 return;
             }
             actor = next;
