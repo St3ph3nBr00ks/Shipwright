@@ -111,6 +111,10 @@ void Lang::LoadLangs() {
         auto json = std::static_pointer_cast<Ship::Json>(
             Ship::Context::GetInstance()->GetResourceManager()->LoadResource(filePath, true, initData));
 
+        if (json == nullptr) {
+            SPDLOG_ERROR("[Lang] LoadResource returned null for '{}'", filePath);
+            continue;
+        }
         std::string fileName = filePath.substr(start, filePath.size() - start - 5); // 5 for length of ".json"
         langs.insert_or_assign(fileName, json->Data);
     }

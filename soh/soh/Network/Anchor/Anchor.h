@@ -29,6 +29,7 @@ struct EnemyNetId {
     Vec3s netRot = { 0, 0, 0 };
     Vec3s netShapeRot = { 0, 0, 0 };
     s8 netHealth = 1;
+    Vec3f netScale = { 1.0f, 1.0f, 1.0f }; // actor->scale; synced for enemies that change scale during animation
 
     // Set to true by the OnEnemyDefeat hook after it sends ENEMY_DEFEATED.
     // The OnActorKill hook checks this flag and skips sending a second packet for
@@ -37,6 +38,14 @@ struct EnemyNetId {
     // ACTOR_EN_DEKUBABA stem, ACTOR_EN_SKB at dawn) will have this false when
     // OnActorKill fires, triggering the Fix 12 broadcast path.
     bool defeatPacketSent = false;
+
+    // Set to true on the non-host when this client kills the enemy locally
+    // (OnEnemyDefeat or OnActorKill fires). Prevents ENEMY_UPDATE from re-writing
+    // health > 0 after the local kill — without this, the host keeps sending
+    // health > 0 for several frames while P2's kill packet travels to P1, causing
+    // the dying enemy to "resurrect" visually on P2 before the Actor_Kill from
+    // the host's ENEMY_DEFEATED reaches P2.
+    bool hasLocalDeath = false;
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
@@ -121,6 +130,19 @@ class Anchor : public Network {
     // so the resulting OnActorKill hook (Fix 12) does not echo ENEMY_DEFEATED back
     // to the network for kills that originated from the network.
     bool isKillingNetworkActor = false;
+
+    // Scene-visit dedup: netIds of ENEMY_DEFEATED packets sent during the current
+    // scene visit. Prevents duplicate sends when Actor_Kill fires more than once for
+    // the same logical enemy (e.g. room-transition unload + re-load within the same
+    // scene visit allocates new actor instances that share a netId via posHash).
+    // Cleared in OnSceneSpawnActors (same point as deadEnemiesByScene clear).
+    std::unordered_set<uint32_t> sentDefeatThisScene;
+
+    // Follower mode: non-host player's position is overridden to trail the host.
+    // Activated by the 8-button sequence A→B→A→B→A→B→A→B (3-second timeout between presses).
+    // Deactivated by any controller input while active.
+    bool followerActive = false;
+    int followerSeqPos = 0; // progress through the 8-step activation sequence
 
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();

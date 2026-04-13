@@ -1,4 +1,5 @@
 #include "Anchor.h"
+#include <chrono>
 #include <libultraship/libultraship.h>
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -158,6 +159,9 @@ void Anchor::RegisterHooks() {
             if (roomState.ownerClientId == ownClientId) {
                 deadEnemiesByScene.erase(gPlayState->sceneNum);
             }
+            // Clear the per-scene-visit send-dedup set so that enemies in the new
+            // scene can have their ENEMY_DEFEATED broadcast normally.
+            sentDefeatThisScene.clear();
             RefreshClientActors();
         }
     });
@@ -199,6 +203,118 @@ void Anchor::RegisterHooks() {
         ProcessIncomingPacketQueue();
     });
 
+    // Follower mode (non-host only): override local player position to trail the host.
+    //
+    // Activation: detect the sequence A→B→A→B→C-Up→C-Down→C-Left→C-Right using
+    // edge-triggered button presses (input[0].press.button). Any input while the
+    // follower is active cancels it so the player can regain manual control.
+    //
+    // Position source: the host's DummyPlayer actor (ACTORCAT_NPC, id=ACTOR_EN_OE2,
+    // update=DummyPlayer_Update, clientId==roomState.ownerClientId). Its world.pos is
+    // updated every frame by DummyPlayer_Update to the host's authoritative position.
+    //
+    // Offset: 150 units along the world +X axis from the host. This is a simple fixed
+    // offset — not relative to the host's facing — so P2 always appears to the east.
+    // Future improvement: compute an offset relative to host->world.rot.y if desired.
+    // COND_HOOK is not used here because the lambda body contains a braced initializer
+    // list (kFollowerSeq), and the C preprocessor does not treat braces as grouping —
+    // commas inside {} would be interpreted as extra macro arguments. Expanded manually.
+    {
+        static HOOK_ID followerHookId = 0;
+        GameInteractor::Instance->UnregisterGameHook<GameInteractor::OnGameFrameUpdate>(followerHookId);
+        followerHookId = 0;
+        if (isConnected) {
+            followerHookId = GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>([&]() {
+                // Only run on non-host clients with a save loaded.
+                if (roomState.ownerClientId == ownClientId) { return; }
+                if (!IsSaveLoaded()) { return; }
+                if (gPlayState == nullptr) { return; }
+
+                Player* player = GET_PLAYER(gPlayState);
+                if (player == nullptr) { return; }
+
+                // --- Sequence detection ---
+                // The 8-step activation code. Using press.button (edge-triggered).
+                // Sequence: A → B → A → B → A → B → A → B
+                // A 3-second timeout between presses resets the sequence.
+                static const u16 kFollowerSeq[] = {
+                    BTN_A, BTN_B, BTN_A, BTN_B,
+                    BTN_A, BTN_B, BTN_A, BTN_B
+                };
+                static constexpr int kFollowerSeqLen = 8;
+                static auto lastPressTime = std::chrono::steady_clock::now();
+
+                u16 pressed = gPlayState->state.input[0].press.button;
+
+                if (followerActive) {
+                    // Any input cancels follower mode.
+                    if (pressed != 0) {
+                        followerActive = false;
+                        SPDLOG_INFO("[Follower] Deactivated (input pressed)");
+                        return;
+                    }
+                } else {
+                    // Advance or reset the activation sequence on each edge press.
+                    if (pressed != 0) {
+                        auto now = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPressTime).count();
+                        if (followerSeqPos > 0 && elapsed >= 3000) {
+                            SPDLOG_INFO("[Follower] Seq timeout at step {} ({}ms since last press) -> reset",
+                                        followerSeqPos, elapsed);
+                            followerSeqPos = 0;
+                        }
+                        lastPressTime = now;
+
+                        if (pressed == kFollowerSeq[followerSeqPos]) {
+                            followerSeqPos++;
+                            if (followerSeqPos == kFollowerSeqLen) {
+                                followerSeqPos = 0;
+                                followerActive = true;
+                                SPDLOG_INFO("[Follower] Activated");
+                            } else {
+                                SPDLOG_INFO("[Follower] Seq step {}/{} matched (btn=0x{:04X})",
+                                            followerSeqPos, kFollowerSeqLen, pressed);
+                            }
+                        } else {
+                            // Wrong button — restart from the beginning (or step 1 if
+                            // this press matches the first button in the sequence).
+                            int newPos = (pressed == kFollowerSeq[0]) ? 1 : 0;
+                            SPDLOG_INFO("[Follower] Seq reset at step {} (expected=0x{:04X} got=0x{:04X}) -> pos {}",
+                                        followerSeqPos, kFollowerSeq[followerSeqPos], pressed, newPos);
+                            followerSeqPos = newPos;
+                        }
+                    }
+                }
+
+                if (!followerActive) { return; }
+
+                // --- Position override ---
+                // Find the host's DummyPlayer actor.
+                Actor* dummyActor = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
+                while (dummyActor != nullptr) {
+                    if (dummyActor->id == ACTOR_EN_OE2 &&
+                        dummyActor->update == (ActorFunc)DummyPlayer_Update &&
+                        GetDummyPlayerClientId(dummyActor) == roomState.ownerClientId) {
+                        break;
+                    }
+                    dummyActor = dummyActor->next;
+                }
+
+                if (dummyActor == nullptr) { return; } // Host DummyPlayer not found.
+
+                Vec3f hostPos = dummyActor->world.pos;
+
+                // Simple fixed-offset: 50 units along world +X from the host.
+                // Keeps P2 out of P1's collision cylinder while staying close enough
+                // for shared enemy aggro range.
+                Vec3f targetPos = { hostPos.x + 50.0f, hostPos.y, hostPos.z };
+
+                player->actor.world.pos = targetPos;
+                player->actor.prevPos   = targetPos;
+            });
+        }
+    }
+
     // #region Enemy sync hooks (Phase 1 — visibility)
 
     // Assign a deterministic netId to every enemy actor on spawn so both clients
@@ -220,6 +336,12 @@ void Anchor::RegisterHooks() {
     COND_HOOK(OnActorSpawn, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
         if (actor->category != ACTORCAT_ENEMY) {
+            // Log any actor type that might be expected to sync but has wrong category.
+            // This catches e.g. Deku Baba spawning with an unexpected initial category.
+            if (actor->id == ACTOR_EN_DEKUBABA) {
+                SPDLOG_WARN("[EnemySpawn] OnActorSpawn: ACTOR_EN_DEKUBABA skipped — cat={} (expected ACTORCAT_ENEMY={})",
+                            (int)actor->category, (int)ACTORCAT_ENEMY);
+            }
             return;
         }
         if (!IsSaveLoaded()) {
@@ -260,6 +382,10 @@ void Anchor::RegisterHooks() {
         ext.limbCount = ext.skelAnime ? ext.skelAnime->limbCount : 0;
         ObjectExtension::GetInstance().Set<EnemyNetId>(actor, std::move(ext));
 
+        SPDLOG_INFO("[EnemySpawn] Extension assigned: actorId={} netId={} limbCount={} {}",
+                    actor->id, netId, (int)ext.limbCount,
+                    isDynamicSpawn ? "dynamic" : "static");
+
         // Host deferred broadcast: send ENEMY_SPAWN for dynamic actors now that
         // the netId extension is in place.
         if (isDynamicSpawn && roomState.ownerClientId == ownClientId) {
@@ -281,6 +407,12 @@ void Anchor::RegisterHooks() {
             // Host: send current state to all clients in scene.
             const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
             if (ext == nullptr) {
+                // Log once per actor pointer to avoid per-frame spam.
+                static std::unordered_set<const Actor*> warnedNoExt;
+                if (warnedNoExt.insert(actor).second) {
+                    SPDLOG_WARN("[EnemyUpdate] Host OnActorUpdate: no extension for actorId={} cat={} — skipping update",
+                                actor->id, (int)actor->category);
+                }
                 return;
             }
             SendPacket_EnemyUpdate(ext->netId, actor);
@@ -304,18 +436,27 @@ void Anchor::RegisterHooks() {
                     ext->limbCount = ska->limbCount;
                 }
             }
-            // Deku Baba's world.pos is its animated head-tip position (computed
-            // each frame from home.pos + stemSectionAngles). Applying netPos here
-            // would render the entire model at the head location, making the stem
-            // float off the floor. The jointTable sync already drives the visual
-            // head position correctly; the Deku Baba's own update() computes
-            // world.pos each frame so no override is needed.
-            if (actor->id != ACTOR_EN_DEKUBABA) {
+            // Both En_Dekubaba and En_Karebaba compute world.pos each frame from
+            // animated angles rather than using a stable model root:
+            //   En_Dekubaba: head-tip position derived from home.pos + stemSectionAngles
+            //   En_Karebaba: in Spin state, all 3 components computed from shape.rot trig
+            // Writing netPos here would displace the model root from where the actor's
+            // own update() will place it, causing visual drift. shape.rot sync already
+            // drives the correct position; each actor's own update() recomputes world.pos.
+            if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
                 actor->world.pos = ext->netPos;
             }
             actor->world.rot         = ext->netRot;
             actor->shape.rot         = ext->netShapeRot;
-            actor->colChkInfo.health = ext->netHealth;
+            // Skip health re-apply after a local kill so the host's stale health > 0
+            // packets don't revive the dying actor on this client (hasLocalDeath guard).
+            if (!ext->hasLocalDeath) {
+                actor->colChkInfo.health = ext->netHealth;
+            }
+            // Scale sync: enemies like En_Karebaba change actor->scale throughout their
+            // state machine (0 when dormant, growing to 0.01 when fully emerged). Without
+            // this re-apply the non-host always sees the actor at its spawn-time scale.
+            actor->scale = ext->netScale;
         }
     });
 
@@ -365,17 +506,34 @@ void Anchor::RegisterHooks() {
     // death animation has already played on the killing client before we notify.
     COND_HOOK(OnEnemyDefeat, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
+        // Diagnostic: log every OnEnemyDefeat invocation so we can confirm
+        // which actors fire this hook and whether their extension is found.
+        SPDLOG_INFO("[EnemyDefeated] OnEnemyDefeat hook: actor id={} cat={}", actor->id, actor->category);
         if (!IsSaveLoaded()) {
+            SPDLOG_WARN("[EnemyDefeated] OnEnemyDefeat skipped — save not loaded (actor id={})", actor->id);
             return;
         }
         EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
         if (ext == nullptr) {
+            SPDLOG_WARN("[EnemyDefeated] OnEnemyDefeat: no extension for actor id={} — netId assignment missed", actor->id);
             return;
         }
+        // Scene-visit dedup: skip if this netId was already broadcast during the
+        // current scene visit (e.g. second Actor_Kill on a recycled actor pointer).
+        if (sentDefeatThisScene.count(ext->netId)) {
+            SPDLOG_INFO("[EnemyDefeated] OnEnemyDefeat: netId={} already sent this scene visit — skipping duplicate",
+                        ext->netId);
+            return;
+        }
+        sentDefeatThisScene.insert(ext->netId);
         // Mark that ENEMY_DEFEATED was sent via the normal death path so that
         // the OnActorKill hook (Fix 12) does not send a duplicate packet when
         // this same actor later calls Actor_Kill on itself.
         ext->defeatPacketSent = true;
+        // Prevent ENEMY_UPDATE from overwriting health > 0 after a local kill.
+        // The host keeps sending health=alive for a few frames while this packet
+        // travels; without this flag the dying enemy flickers back to alive state.
+        ext->hasLocalDeath = true;
         // Host tracks kills for join-time replay (Fix 6).
         if (roomState.ownerClientId == ownClientId) {
             deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
@@ -386,16 +544,21 @@ void Anchor::RegisterHooks() {
     // Fix 12 — Actor_Kill death path: ENEMY_DEFEATED for enemies that skip OnEnemyDefeat.
     //
     // Some enemies die by calling Actor_Kill directly inside their death animation
-    // (e.g., ACTOR_EN_DEKUBABA stem, ACTOR_EN_SKB at dawn) rather than going through
-    // the standard health-zero → OnEnemyDefeat → Actor_Kill sequence. Because
-    // OnEnemyDefeat never fires for these actors, no ENEMY_DEFEATED packet is sent and
-    // the actor persists on remote clients indefinitely.
+    // (e.g., ACTOR_EN_SKB at dawn) rather than going through the standard health-zero →
+    // OnEnemyDefeat → Actor_Kill sequence. Because OnEnemyDefeat never fires for these
+    // actors, no ENEMY_DEFEATED packet is sent and the actor persists on remote clients.
     //
-    // This hook fires for every Actor_Kill. It sends ENEMY_DEFEATED for any
-    // ACTORCAT_ENEMY / ACTORCAT_BOSS actor that has a netId but did NOT already send
-    // a packet through OnEnemyDefeat (guarded by defeatPacketSent). The
-    // isKillingNetworkActor flag prevents echo loops when HandlePacket_EnemyDefeated
-    // is the one calling Actor_Kill.
+    // This hook fires for every Actor_Kill. It sends ENEMY_DEFEATED for any actor
+    // that has an EnemyNetId extension (meaning it was ACTORCAT_ENEMY/BOSS at spawn)
+    // but did NOT already send a packet through OnEnemyDefeat (guarded by
+    // defeatPacketSent). The isKillingNetworkActor flag prevents echo loops when
+    // HandlePacket_EnemyDefeated is the one calling Actor_Kill.
+    //
+    // Room-unload guard: OoT calls Actor_Kill on every actor in a room that is
+    // being unloaded during a room transition. These are NOT real deaths — the
+    // actors respawn when the room is re-entered. After Room Init fires for the
+    // new room, gPlayState->curRoom.num reflects the destination; actors in the
+    // old room have actor->room != curRoom.num, so we can detect and skip them.
     COND_HOOK(OnActorKill, isConnected, [&](void* refActor) {
         if (isKillingNetworkActor) {
             return; // This kill originated from a received ENEMY_DEFEATED — do not echo.
@@ -404,18 +567,58 @@ void Anchor::RegisterHooks() {
         if (!IsSaveLoaded()) {
             return;
         }
-        if (actor->category != ACTORCAT_ENEMY && actor->category != ACTORCAT_BOSS) {
+        // Skip room-unload kills. When OoT transitions to a different room within
+        // the same scene, it calls Actor_Kill on every actor in the departing room
+        // after updating curRoom to the destination. Remote clients that are still
+        // in the old room must NOT receive ENEMY_DEFEATED for these actors — the
+        // enemies are not dead, just unloaded for the host. Detect by comparing
+        // the actor's assigned room to the room the host is now in.
+        if (gPlayState != nullptr && actor->room != gPlayState->roomCtx.curRoom.num) {
             return;
         }
-        const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+        // Diagnostic: log every kill for ACTORCAT_ENEMY/BOSS/MISC actors so we can
+        // confirm which enemies reach OnActorKill and why some skip sending ENEMY_DEFEATED.
+        // MISC is included because Deku Baba stems change category before Actor_Kill fires.
+        if (actor->category == ACTORCAT_ENEMY || actor->category == ACTORCAT_BOSS ||
+            actor->category == ACTORCAT_MISC) {
+            EnemyNetId* diagExt = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+            SPDLOG_INFO("[EnemyDefeated] OnActorKill: id={} cat={} ext={} netId={} defeatSent={} inDedup={}",
+                        actor->id, (int)actor->category,
+                        (diagExt != nullptr ? "found" : "NULL"),
+                        (diagExt != nullptr ? diagExt->netId : 0u),
+                        (diagExt != nullptr ? diagExt->defeatPacketSent : false),
+                        (diagExt != nullptr ? (bool)sentDefeatThisScene.count(diagExt->netId) : false));
+        }
+        // Do NOT filter by actor->category here — Deku Baba stems call
+        // Actor_ChangeCategory(ACTORCAT_MISC) in EnDekubaba_SetupDeadStickDrop
+        // before Actor_Kill fires, so they appear as ACTORCAT_MISC at this point.
+        // Instead rely on the EnemyNetId extension: it is only assigned in OnActorSpawn
+        // to ACTORCAT_ENEMY/BOSS actors, so its presence is sufficient proof.
+        EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
         if (ext == nullptr || ext->netId == 0) {
             return;
         }
         if (ext->defeatPacketSent) {
-            return; // OnEnemyDefeat already broadcast this actor's death — no duplicate needed.
+            return; // Already sent — either via OnEnemyDefeat or a prior OnActorKill fire.
+        }
+        // Scene-visit dedup: skip if this netId was already broadcast during the
+        // current scene visit (e.g. room-transition re-allocates an actor at the same
+        // address, giving it a fresh extension with defeatPacketSent=false but the same
+        // netId as an actor that already died this scene visit).
+        if (sentDefeatThisScene.count(ext->netId)) {
+            SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: netId={} already sent this scene visit — skipping duplicate",
+                        ext->netId);
+            ext->defeatPacketSent = true; // Prevent future OnActorKill fires on this instance.
+            return;
         }
         // Actor died via Actor_Kill without firing OnEnemyDefeat.
         // Broadcast ENEMY_DEFEATED so remote clients remove the actor.
+        // Set defeatPacketSent immediately so re-entrant or repeated Actor_Kill calls
+        // (e.g. OoT calling Actor_Kill twice on the same actor, or multiple actors sharing
+        // a netId via posHash collision) do not emit duplicate packets.
+        sentDefeatThisScene.insert(ext->netId);
+        ext->defeatPacketSent = true;
+        ext->hasLocalDeath = true;
         SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: sending defeat for actor id={} netId={}",
                     actor->id, ext->netId);
         if (roomState.ownerClientId == ownClientId) {

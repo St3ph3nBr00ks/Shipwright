@@ -54,6 +54,7 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     payload["rot"] = actor->world.rot;
     payload["shapeRot"] = actor->shape.rot;
     payload["health"] = actor->colChkInfo.health;
+    payload["scale"] = actor->scale;
     payload["quiet"] = true;
 
     // Include the joint/morph tables if this enemy has a supported skeleton.
@@ -106,6 +107,7 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     Vec3s rot      = payload.value("rot", Vec3s{ 0, 0, 0 });
     Vec3s shapeRot = payload.value("shapeRot", rot); // fall back to rot if field absent
     s8 health      = (s8)payload.value("health", 1);
+    Vec3f scale    = payload.value("scale", Vec3f{ 1.0f, 1.0f, 1.0f });
 
     // Walk the enemy actor list and find the matching actor by netId.
     Actor* actor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
@@ -115,7 +117,14 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
             actor->world.pos         = pos;
             actor->world.rot         = rot;
             actor->shape.rot         = shapeRot;
-            actor->colChkInfo.health = health;
+            // Do not overwrite health after a local kill — the host keeps sending
+            // health > 0 for a few frames while our ENEMY_DEFEATED packet travels.
+            // hasLocalDeath is set by OnEnemyDefeat / OnActorKill on this client.
+            if (!ext->hasLocalDeath) {
+                actor->colChkInfo.health = health;
+                ext->netHealth           = health;
+            }
+            actor->scale             = scale;
 
             // Apply joint/morph tables if present in this packet and the actor has a skeleton.
             if (ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -139,11 +148,12 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
 
             // Cache state so OnActorUpdate can re-apply it after the enemy's own
             // update() runs (required for collision registration — Fix 4).
+            // Note: netHealth is updated inside the hasLocalDeath guard above.
             ext->hasNetState  = true;
             ext->netPos       = pos;
             ext->netRot       = rot;
             ext->netShapeRot  = shapeRot;
-            ext->netHealth    = health;
+            ext->netScale     = scale;
 
             SPDLOG_DEBUG("[EnemyUpdate] Applied netId={} pos=({:.1f},{:.1f},{:.1f}) health={}",
                          netId, pos.x, pos.y, pos.z, (int)health);

@@ -10,6 +10,7 @@
 #include "overlays/effects/ovl_Effect_Ss_Hahen/z_eff_ss_hahen.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
+#include <libultraship/log/luslog.h>
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
@@ -153,6 +154,8 @@ void EnKarebaba_SetupAwaken(EnKarebaba* this) {
                      Animation_GetLastFrame(&gDekuBabaFastChompAnim), ANIMMODE_LOOP, -3.0f);
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_DUMMY482);
     this->actionFunc = EnKarebaba_Awaken;
+    LUSLOG_INFO("[Karebaba] SetupAwaken home=(%.0f,%.0f,%.0f)",
+                this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
 }
 
 void EnKarebaba_SetupUpright(EnKarebaba* this) {
@@ -168,11 +171,15 @@ void EnKarebaba_SetupUpright(EnKarebaba* this) {
 
     this->actor.params = 40;
     this->actionFunc = EnKarebaba_Upright;
+    LUSLOG_INFO("[Karebaba] SetupUpright home=(%.0f,%.0f,%.0f)",
+                this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
 }
 
 void EnKarebaba_SetupSpin(EnKarebaba* this) {
     this->actor.params = 40;
     this->actionFunc = EnKarebaba_Spin;
+    LUSLOG_INFO("[Karebaba] SetupSpin home=(%.0f,%.0f,%.0f)",
+                this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
 }
 
 void EnKarebaba_SetupDying(EnKarebaba* this) {
@@ -184,6 +191,8 @@ void EnKarebaba_SetupDying(EnKarebaba* this) {
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_JR_DEAD);
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->actionFunc = EnKarebaba_Dying;
+    LUSLOG_INFO("[Karebaba] SetupDying home=(%.0f,%.0f,%.0f)",
+                this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
     GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
 }
 
@@ -205,6 +214,8 @@ void EnKarebaba_SetupRetract(EnKarebaba* this) {
                      0.0f, ANIMMODE_ONCE, -3.0f);
     EnKarebaba_ResetCollider(this);
     this->actionFunc = EnKarebaba_Retract;
+    LUSLOG_INFO("[Karebaba] SetupRetract home=(%.0f,%.0f,%.0f)",
+                this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
 }
 
 void EnKarebaba_SetupDead(EnKarebaba* this) {
@@ -224,6 +235,8 @@ void EnKarebaba_SetupRegrow(EnKarebaba* this) {
     this->headCollider.dim.radius = sHeadColliderInit.dim.radius;
     Actor_SetScale(&this->actor, 0.0f);
     this->actionFunc = EnKarebaba_Regrow;
+    LUSLOG_INFO("[Karebaba] SetupRegrow home=(%.0f,%.0f,%.0f)",
+                this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
 }
 
 void EnKarebaba_Grow(EnKarebaba* this, PlayState* play) {
