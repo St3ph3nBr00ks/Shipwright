@@ -549,14 +549,32 @@ void Anchor::RegisterHooks() {
             if (!ext->hasLocalDeath && actor->colChkInfo.health >= ext->netHealth) {
                 actor->colChkInfo.health = ext->netHealth;
             }
+            // Karebaba: pre-compute local state and active/dormant flags here so they
+            // can guard BOTH the scale re-apply below and the state-machine sync.
+            // Computed even when netStateIndex < 0 or hasLocalDeath so the scale guard
+            // variable has a defined value; the sync block is skipped in those cases.
+            bool karebabaDormantOverride = false;
+            s16  karebabaLocalState      = -1;
+            if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 && !ext->hasLocalDeath) {
+                karebabaLocalState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
+                bool kNetDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
+                                     ext->netStateIndex == 2 || ext->netStateIndex == 9);
+                bool kLocalActive = (karebabaLocalState == 2 || karebabaLocalState == 3 ||
+                                     karebabaLocalState == 4 || karebabaLocalState == 7);
+                karebabaDormantOverride = kNetDormant && kLocalActive;
+            }
+
             // Scale sync: enemies like En_Karebaba change actor->scale throughout their
             // state machine (0 when dormant, growing to 0.01 when fully emerged). Without
             // this re-apply the non-host always sees the actor at its spawn-time scale.
-            // Guard: skip while hasLocalDeath is set (covers both local kills and the
-            // pendingNaturalDeath respawn cycle). Without this guard, P1's Idle scale=0
-            // overwrites P2's Regrow animation each frame, making the Karebaba invisible
-            // and preventing the respawn from being visible (Bugs 4 & 5).
-            if (!ext->hasLocalDeath) {
+            // Guards:
+            //   hasLocalDeath — skip while pendingNaturalDeath/respawn cycle is active.
+            //     Without this, P1's Idle scale=0 overwrites P2's Regrow animation.
+            //   karebabaDormantOverride — skip when P1's Karebaba is dormant (scale=0.005)
+            //     but P2's is active (Upright/Spin, scale=0.01). Without this guard,
+            //     P1's dormant scale overwrites P2's active scale every frame, making
+            //     the Karebaba appear tiny while P2 is standing next to it (Fix 26).
+            if (!ext->hasLocalDeath && !karebabaDormantOverride) {
                 actor->scale = ext->netScale;
             }
 
@@ -569,27 +587,27 @@ void Anchor::RegisterHooks() {
             //     sending its pre-death state for several frames which would un-kill the
             //     actor here, causing a SetupDying↔SetupUpright oscillation loop.
             //
+            //   Retract (7) blocked unconditionally — Retract is distance-driven in
+            //     EnKarebaba_Upright via Anchor_GetNearestPlayerActor. Syncing P1's
+            //     Retract to P2 forces P2's Karebaba to retract even when P2 is still
+            //     nearby. Worse: SetupRetract doesn't reset world.pos.y, so if the
+            //     actor hasn't risen from home.pos.y+14, the Retract animation completes
+            //     immediately (StepTo hits target in frame 1) → SetupIdle → OnActorUpdate
+            //     re-applies Retract again → rapid Retract→Idle→Retract loop every frame
+            //     (~50ms per iteration, visible as oscillation in logs) (Fix 26).
+            //
             //   dormant-to-active protection — if the host just entered the room its
             //     enemies start at Idle (1) while this client's were already activated.
-            //     Applying Idle here would reset active enemies underground; the host
-            //     will advance to Upright/Spin via its own proximity detection within
-            //     ~2 seconds. Block regression to early states (Grow=0/Idle=1/Awaken=2/
-            //     Regrow=9) when the local enemy is already in a fully active state
-            //     (Upright=3/Spin=4/Retract=7). Awaken(2) is included because when the
-            //     host's Karebaba respawns it briefly sends stateIndex=2, which was
-            //     resetting P2's active actor and causing rapid Upright↔Spin oscillation
-            //     every frame (Fix 21). Death and DeadItemDrop transitions always apply.
+            //     Block regression to dormant states (Grow=0/Idle=1/Awaken=2/Regrow=9)
+            //     when the local enemy is already in a fully active state
+            //     (Awaken=2/Upright=3/Spin=4/Retract=7). Awaken(2) is in both sets:
+            //     it blocks host-sent Idle from resetting a locally-Awaken actor, AND
+            //     is itself blocked from overriding already-active (Upright/Spin) actors.
             if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 && !ext->hasLocalDeath) {
-                s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
-                if (curState != ext->netStateIndex) {
+                s16 curState = karebabaLocalState; // pre-computed above
+                if (curState != ext->netStateIndex && ext->netStateIndex != 7) {
                     bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
                                           ext->netStateIndex == 2 || ext->netStateIndex == 9);
-                    // Awaken(2) added to localIsActive (Fix 25): when P2 is near and
-                    // the host (P1) is far the host stays in Idle(1) and keeps sending
-                    // netStateIndex=1. Without Awaken here, a P2 actor in Awaken is not
-                    // protected by the filter (netIsDormant=true but localIsActive=false),
-                    // so ApplyNetState(Idle) fires every frame, causing a continuous
-                    // activate-then-retract oscillation while P2 is near and P1 is far.
                     bool localIsActive = (curState == 2 || curState == 3 || curState == 4 || curState == 7);
                     if (!(netIsDormant && localIsActive)) {
                         EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
