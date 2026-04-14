@@ -584,7 +584,13 @@ void Anchor::RegisterHooks() {
                 if (curState != ext->netStateIndex) {
                     bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
                                           ext->netStateIndex == 2 || ext->netStateIndex == 9);
-                    bool localIsActive = (curState == 3 || curState == 4 || curState == 7);
+                    // Awaken(2) added to localIsActive (Fix 25): when P2 is near and
+                    // the host (P1) is far the host stays in Idle(1) and keeps sending
+                    // netStateIndex=1. Without Awaken here, a P2 actor in Awaken is not
+                    // protected by the filter (netIsDormant=true but localIsActive=false),
+                    // so ApplyNetState(Idle) fires every frame, causing a continuous
+                    // activate-then-retract oscillation while P2 is near and P1 is far.
+                    bool localIsActive = (curState == 2 || curState == 3 || curState == 4 || curState == 7);
                     if (!(netIsDormant && localIsActive)) {
                         EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
                     }
@@ -617,6 +623,13 @@ void Anchor::RegisterHooks() {
                     ext->hasLocalDeath       = false;
                     ext->defeatPacketSent    = false;
                     ext->netStateIndex       = -1; // force re-sync from host on next ENEMY_UPDATE
+                    // Clear hasNetState (Fix 25): prevents stale scale/rot from the
+                    // host's last packet being re-applied during the first few frames
+                    // after respawn (caused "missing heads" visual). The actor runs
+                    // free AI until the next ENEMY_UPDATE from the host arrives and
+                    // sets hasNetState=true again; if the host is absent it stays
+                    // false and the actor runs free AI permanently — correct behavior.
+                    ext->hasNetState = false;
                     sentDefeatThisScene.erase(ext->netId);
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (non-host) — sync re-enabled",
                                 ext->netId, curState);
