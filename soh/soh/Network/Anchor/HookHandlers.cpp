@@ -401,12 +401,24 @@ void Anchor::RegisterHooks() {
 
         // If an ENEMY_DEFEATED for this netId arrived before the scene finished
         // loading (race between scene load and packet delivery), kill it now.
+        // Karebaba: use the natural death cycle so it can respawn later, same as
+        // HandlePacket_EnemyDefeated. Other enemies: direct Actor_Kill is fine.
         if (pendingKillNetIds.count(netId)) {
-            SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} — killing actor immediately", netId);
             pendingKillNetIds.erase(netId);
-            isKillingNetworkActor = true;
-            Actor_Kill(actor);
-            isKillingNetworkActor = false;
+            if (actor->id == ACTOR_EN_KAREBABA) {
+                SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} (Karebaba) — triggering natural death cycle", netId);
+                EnemyNetId* extPtr = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+                if (extPtr != nullptr) {
+                    extPtr->hasLocalDeath       = true;
+                    extPtr->pendingNaturalDeath = true;
+                }
+                EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
+            } else {
+                SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} — killing actor immediately", netId);
+                isKillingNetworkActor = true;
+                Actor_Kill(actor);
+                isKillingNetworkActor = false;
+            }
             return;
         }
 
@@ -573,17 +585,29 @@ void Anchor::RegisterHooks() {
             }
 
             // Karebaba respawn detection (non-host path, Fix 24):
-            // While pendingNaturalDeath=true the actor ran its own death→respawn cycle
-            // instead of being Actor_Kill'd. When it returns to Idle (stateIndex=1),
-            // the cycle is complete. Re-enable all ENEMY_UPDATE overrides and state
-            // sync so the next round of combat is fully synchronised.
-            if (actor->id == ACTOR_EN_KAREBABA && ext->pendingNaturalDeath) {
+            // Karebaba respawn detection (non-host path, Fix 24):
+            // Fire when the actor returns to Idle after any local kill cycle.
+            //
+            // Two cases:
+            //   pendingNaturalDeath=true — this client received ENEMY_DEFEATED from the
+            //     host and ran the natural death cycle instead of being Actor_Kill'd.
+            //   defeatPacketSent=true    — this client killed the Karebaba itself
+            //     (OnEnemyDefeat ran) and the Karebaba ran its own natural cycle.
+            //     Also covers the dedup-skip path: when OnEnemyDefeat skips sending
+            //     because sentDefeatThisScene already has the netId, it still sets
+            //     defeatPacketSent=true so this detection can fire on the next Idle.
+            //
+            // When returning to Idle, clear ALL death flags and the sentDefeatThisScene
+            // entry so the next kill can be sent and received normally.
+            if (actor->id == ACTOR_EN_KAREBABA &&
+                (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
                 if (curState == 1) { // Idle = fully respawned
                     ext->pendingNaturalDeath = false;
                     ext->hasLocalDeath       = false;
                     ext->defeatPacketSent    = false;
                     ext->netStateIndex       = -1; // force re-sync from host on next ENEMY_UPDATE
+                    sentDefeatThisScene.erase(ext->netId);
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned to Idle (non-host) — sync re-enabled",
                                 ext->netId);
                 }
@@ -650,10 +674,19 @@ void Anchor::RegisterHooks() {
             return;
         }
         // Scene-visit dedup: skip if this netId was already broadcast during the
-        // current scene visit (e.g. second Actor_Kill on a recycled actor pointer).
+        // current scene visit (e.g. second Actor_Kill on a recycled actor pointer,
+        // or a Karebaba being killed again before its previous respawn cycle cleared
+        // the dedup set).
+        //
+        // Even when skipping the send, set hasLocalDeath and defeatPacketSent so that:
+        //   1. ENEMY_UPDATE does not revive the dying actor on this frame.
+        //   2. The non-host respawn detection (which checks defeatPacketSent) can fire
+        //      when the actor returns to Idle, clearing the dedup entry for the next kill.
         if (sentDefeatThisScene.count(ext->netId)) {
             SPDLOG_INFO("[EnemyDefeated] OnEnemyDefeat: netId={} already sent this scene visit — skipping duplicate",
                         ext->netId);
+            ext->hasLocalDeath    = true;
+            ext->defeatPacketSent = true;
             return;
         }
         sentDefeatThisScene.insert(ext->netId);
