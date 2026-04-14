@@ -443,22 +443,18 @@ void EnKarebaba_Dying(EnKarebaba* this, PlayState* play) {
 extern bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor);
 
 void EnKarebaba_DeadItemDrop(EnKarebaba* this, PlayState* play) {
-    // Network-driven natural death on a non-host client: skip the item-drop
-    // countdown entirely.  The host already drops the real stick; we just
-    // need to advance to the Dead wait as fast as the host does (host player
-    // picks up the stick within a frame or two, making its DeadItemDrop
-    // near-instant).  Without this skip the 200-frame params countdown adds
-    // ~10 extra seconds of respawn delay on the non-host.
-    if (Anchor_ShouldSuppressKarebabaDrop(&this->actor)) {
-        EnKarebaba_SetupDead(this);
-        return;
-    }
+    // Both the killing client and the receiving client run the same 200-frame
+    // countdown so respawn timing is synchronized.  The receiving client
+    // (pendingNaturalDeath=true) skips offering the item pickup — the host
+    // already dropped the real stick.  Skipping the countdown entirely
+    // (the old approach) caused a ~10-second respawn gap between the killer
+    // and receiver (200 frames × ~50ms per frame on VirtualBox, Test 25).
     if (this->actor.params != 0) {
         this->actor.params--;
     }
     if (Actor_HasParent(&this->actor, play) || this->actor.params == 0) {
         EnKarebaba_SetupDead(this);
-    } else {
+    } else if (!Anchor_ShouldSuppressKarebabaDrop(&this->actor)) {
         Actor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
     }
 }

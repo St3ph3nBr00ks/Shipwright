@@ -475,7 +475,13 @@ void Anchor::RegisterHooks() {
                 // frame — our OnActorUpdate hook fires AFTER update(), so by the time
                 // we check, the state is already Awaken (2), never Idle.
                 bool isDeathState = (curState == 5 || curState == 6 || curState == 8 || curState == 9);
-                if (curState >= 0 && !isDeathState) {
+                // Grow (state=0) is the initial spawn state when OoT re-creates the
+                // actor after Actor_Kill. A freshly-spawned actor in Grow that inherits
+                // a stale extension (pendingNaturalDeath=true) must NOT be treated as
+                // a post-death respawn — the actor hasn't completed its cycle yet and
+                // deadEnemiesByScene should remain set so late joiners get the replay.
+                bool isGrowState  = (curState == 0);
+                if (curState >= 0 && !isDeathState && !isGrowState) {
                     extMut->defeatPacketSent    = false;
                     extMut->hasLocalDeath       = false;
                     extMut->pendingNaturalDeath = false;
@@ -510,6 +516,41 @@ void Anchor::RegisterHooks() {
             // sending DAMAGE_ENEMY for the final hit would be redundant.
             if (!ext->hasLocalDeath && actor->colChkInfo.damage > 0) {
                 SendPacket_DamageEnemy(ext->netId, (u8)actor->colChkInfo.damage);
+            }
+
+            // Karebaba respawn detection (non-host path, Fix 24 + Fix 30c):
+            // Must run BEFORE the hasNetState gate. When a Karebaba is killed via
+            // pendingKillNetIds at scene load (host's actor is in ACTORCAT_MISC so
+            // no ENEMY_UPDATE arrives), hasNetState stays false forever. The old
+            // placement inside the hasNetState gate meant this detection never fired,
+            // leaving pendingNaturalDeath=true permanently and blocking all future kills.
+            //
+            // Also guards against Grow (state=0): when OoT re-creates the actor after
+            // Actor_Kill, the new instance may inherit a stale extension with
+            // pendingNaturalDeath=true. Grow is the initial spawn state — it is NOT
+            // a completed respawn. Skip until the actor reaches a non-death, non-Grow
+            // state (Idle=1 or higher living state).
+            if (actor->id == ACTOR_EN_KAREBABA &&
+                (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
+                s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
+                bool isDeathState = (curState == 5 || curState == 6 || curState == 8 || curState == 9);
+                bool isGrowState  = (curState == 0);
+                if (curState >= 0 && !isDeathState && !isGrowState) {
+                    ext->pendingNaturalDeath = false;
+                    ext->hasLocalDeath       = false;
+                    ext->defeatPacketSent    = false;
+                    ext->netStateIndex       = -1; // force re-sync from host on next ENEMY_UPDATE
+                    // Clear hasNetState (Fix 25): prevents stale scale/rot from the
+                    // host's last packet being re-applied during the first few frames
+                    // after respawn (caused "missing heads" visual). The actor runs
+                    // free AI until the next ENEMY_UPDATE from the host arrives and
+                    // sets hasNetState=true again; if the host is absent it stays
+                    // false and the actor runs free AI permanently — correct behavior.
+                    ext->hasNetState = false;
+                    sentDefeatThisScene.erase(ext->netId);
+                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (non-host) — sync re-enabled",
+                                ext->netId, curState);
+                }
             }
 
             if (!ext->hasNetState) {
@@ -606,53 +647,28 @@ void Anchor::RegisterHooks() {
             if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 && !ext->hasLocalDeath) {
                 s16 curState = karebabaLocalState; // pre-computed above
                 if (curState != ext->netStateIndex && ext->netStateIndex != 7) {
-                    bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
-                                          ext->netStateIndex == 2 || ext->netStateIndex == 9);
-                    bool localIsActive = (curState == 2 || curState == 3 || curState == 4 || curState == 7);
-                    if (!(netIsDormant && localIsActive)) {
-                        EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
+                    // Intra-attack guard (Fix 29): when both the host and local Karebaba are
+                    // in the active bite cycle (Upright=3 / Spin=4), let the local state-machine
+                    // timers drive the Upright↔Spin transitions rather than forcing the host's
+                    // exact sub-state every packet.  Syncing here causes phase-mismatch
+                    // oscillation: local actor finishes Spin → SetupUpright, then ApplyNetState
+                    // immediately sets Spin again because the host's last packet still said Spin
+                    // (confirmed in Test 25 P2 logs: SetupUpright + SetupSpin within 50ms for
+                    // the same actor).  The dormant-to-active filter below still handles the
+                    // Idle→Awaken→Upright activation boundary correctly.
+                    bool netIsAttacking   = (ext->netStateIndex == 3 || ext->netStateIndex == 4);
+                    bool localIsAttacking = (curState           == 3 || curState           == 4);
+                    if (!(netIsAttacking && localIsAttacking)) {
+                        bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
+                                              ext->netStateIndex == 2 || ext->netStateIndex == 9);
+                        bool localIsActive = (curState == 2 || curState == 3 || curState == 4 || curState == 7);
+                        if (!(netIsDormant && localIsActive)) {
+                            EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
+                        }
                     }
                 }
             }
 
-            // Karebaba respawn detection (non-host path, Fix 24):
-            // Karebaba respawn detection (non-host path, Fix 24):
-            // Fire when the actor returns to Idle after any local kill cycle.
-            //
-            // Two cases:
-            //   pendingNaturalDeath=true — this client received ENEMY_DEFEATED from the
-            //     host and ran the natural death cycle instead of being Actor_Kill'd.
-            //   defeatPacketSent=true    — this client killed the Karebaba itself
-            //     (OnEnemyDefeat ran) and the Karebaba ran its own natural cycle.
-            //     Also covers the dedup-skip path: when OnEnemyDefeat skips sending
-            //     because sentDefeatThisScene already has the netId, it still sets
-            //     defeatPacketSent=true so this detection can fire on the next Idle.
-            //
-            // When returning to Idle, clear ALL death flags and the sentDefeatThisScene
-            // entry so the next kill can be sent and received normally.
-            if (actor->id == ACTOR_EN_KAREBABA &&
-                (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
-                s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
-                // Same living-state detection as the host path: death states are
-                // 5/6/8/9; any other valid state means the respawn cycle is complete.
-                bool isDeathState = (curState == 5 || curState == 6 || curState == 8 || curState == 9);
-                if (curState >= 0 && !isDeathState) {
-                    ext->pendingNaturalDeath = false;
-                    ext->hasLocalDeath       = false;
-                    ext->defeatPacketSent    = false;
-                    ext->netStateIndex       = -1; // force re-sync from host on next ENEMY_UPDATE
-                    // Clear hasNetState (Fix 25): prevents stale scale/rot from the
-                    // host's last packet being re-applied during the first few frames
-                    // after respawn (caused "missing heads" visual). The actor runs
-                    // free AI until the next ENEMY_UPDATE from the host arrives and
-                    // sets hasNetState=true again; if the host is absent it stays
-                    // false and the actor runs free AI permanently — correct behavior.
-                    ext->hasNetState = false;
-                    sentDefeatThisScene.erase(ext->netId);
-                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (non-host) — sync re-enabled",
-                                ext->netId, curState);
-                }
-            }
         }
     });
 

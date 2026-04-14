@@ -150,7 +150,20 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
             actor->scale             = scale;
 
             // Apply joint/morph tables if present in this packet and the actor has a skeleton.
-            if (ext->skelAnime != nullptr && ext->limbCount > 0) {
+            // Skip for En_Karebaba in active attack states (Awaken=2/Upright=3/Spin=4/Retract=7):
+            // during these states the local update() drives the joint table each frame from its
+            // own timers. P1's table reflects P1's animation phase, which differs from P2's
+            // (both cycle Upright↔Spin but out of phase). Applying P1's table every packet
+            // (~50ms) causes the head to flicker between P1's pose and P2's locally-computed
+            // pose — visible as heads growing/shrinking on P2. During dormant states (Grow/Idle/
+            // Regrow) joint table sync IS needed to show the correct growth/shrink animation.
+            bool skipJoints = false;
+            if (actor->id == ACTOR_EN_KAREBABA) {
+                s16 localState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
+                skipJoints = (localState == 2 || localState == 3 ||
+                              localState == 4 || localState == 7);
+            }
+            if (!skipJoints && ext->skelAnime != nullptr && ext->limbCount > 0) {
                 if (payload.contains("jointTable")) {
                     const auto& joints = payload["jointTable"];
                     uint8_t count = static_cast<uint8_t>(
