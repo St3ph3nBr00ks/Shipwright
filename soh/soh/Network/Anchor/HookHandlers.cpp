@@ -468,14 +468,21 @@ void Anchor::RegisterHooks() {
                 (ext->defeatPacketSent || ext->pendingNaturalDeath)) {
                 EnemyNetId* extMut = const_cast<EnemyNetId*>(ext);
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
-                if (curState == 1) { // Idle = fully respawned
+                // Detect respawn-complete: any living state (>= 0, not a death/regrow state).
+                // Death states: 5=Dying, 6=DeadItemDrop, 8=Dead, 9=Regrow.
+                // We cannot rely on curState==1 (Idle) because when a player is
+                // nearby, the Idle update immediately calls SetupAwaken in the same
+                // frame — our OnActorUpdate hook fires AFTER update(), so by the time
+                // we check, the state is already Awaken (2), never Idle.
+                bool isDeathState = (curState == 5 || curState == 6 || curState == 8 || curState == 9);
+                if (curState >= 0 && !isDeathState) {
                     extMut->defeatPacketSent    = false;
                     extMut->hasLocalDeath       = false;
                     extMut->pendingNaturalDeath = false;
                     sentDefeatThisScene.erase(extMut->netId);
                     deadEnemiesByScene[gPlayState->sceneNum].erase(extMut->netId);
-                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned to Idle (host) — defeat tracking cleared",
-                                extMut->netId);
+                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (host) — defeat tracking cleared",
+                                extMut->netId, curState);
                 }
             }
             SendPacket_EnemyUpdate(ext->netId, actor);
@@ -602,14 +609,17 @@ void Anchor::RegisterHooks() {
             if (actor->id == ACTOR_EN_KAREBABA &&
                 (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
-                if (curState == 1) { // Idle = fully respawned
+                // Same living-state detection as the host path: death states are
+                // 5/6/8/9; any other valid state means the respawn cycle is complete.
+                bool isDeathState = (curState == 5 || curState == 6 || curState == 8 || curState == 9);
+                if (curState >= 0 && !isDeathState) {
                     ext->pendingNaturalDeath = false;
                     ext->hasLocalDeath       = false;
                     ext->defeatPacketSent    = false;
                     ext->netStateIndex       = -1; // force re-sync from host on next ENEMY_UPDATE
                     sentDefeatThisScene.erase(ext->netId);
-                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned to Idle (non-host) — sync re-enabled",
-                                ext->netId);
+                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (non-host) — sync re-enabled",
+                                ext->netId, curState);
                 }
             }
         }
