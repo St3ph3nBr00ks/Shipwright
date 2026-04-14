@@ -792,6 +792,26 @@ void OTRGlobals::Initialize() {
 #endif
     context->InitConfiguration();
     context->InitConsoleVariables();
+
+    // Rotate the previous session's log file before initializing logging.
+    // Each launch renames "Ship of Harkinian.log" → "Ship of Harkinian N.log"
+    // where N is the next unused integer (starting at 1).
+    {
+        std::filesystem::path logDir = std::filesystem::path(
+            Ship::Context::GetAppDirectoryPath()).append("logs");
+        std::filesystem::path currentLog = logDir / "Ship of Harkinian.log";
+        if (std::filesystem::exists(currentLog)) {
+            int n = 1;
+            std::filesystem::path dest;
+            do {
+                dest = logDir / ("Ship of Harkinian " + std::to_string(n) + ".log");
+                n++;
+            } while (std::filesystem::exists(dest));
+            std::error_code ec;
+            std::filesystem::rename(currentLog, dest, ec);
+        }
+    }
+
     auto logLevel =
         static_cast<spdlog::level::level_enum>(CVarGetInteger(CVAR_DEVELOPER_TOOLS("LogLevel"), defaultLogLevel));
     context->InitLogging(logLevel, logLevel);

@@ -140,6 +140,15 @@ extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
     return FindNearestPlayerActor(enemy, play);
 }
 
+// C-callable: returns true when a Karebaba's natural death cycle is running on this
+// (non-host) client so that its stick drop should be suppressed (no duplicate item).
+// Called from EnKarebaba_DeadItemDrop in z_en_karebaba.c.
+extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && ext->pendingNaturalDeath;
+}
+
 void Anchor::RegisterHooks() {
 
     // #region Hooks that are required for basic Anchor functionality
@@ -163,6 +172,9 @@ void Anchor::RegisterHooks() {
             // Clear the per-scene-visit send-dedup set so that enemies in the new
             // scene can have their ENEMY_DEFEATED broadcast normally.
             sentDefeatThisScene.clear();
+            // Clear buffered kills from the previous scene — any ENEMY_DEFEATED that
+            // raced ahead of the scene load are no longer relevant for a fresh scene.
+            pendingKillNetIds.clear();
             RefreshClientActors();
         }
     });
@@ -387,6 +399,17 @@ void Anchor::RegisterHooks() {
                     actor->id, netId, (int)ext.limbCount,
                     isDynamicSpawn ? "dynamic" : "static");
 
+        // If an ENEMY_DEFEATED for this netId arrived before the scene finished
+        // loading (race between scene load and packet delivery), kill it now.
+        if (pendingKillNetIds.count(netId)) {
+            SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} — killing actor immediately", netId);
+            pendingKillNetIds.erase(netId);
+            isKillingNetworkActor = true;
+            Actor_Kill(actor);
+            isKillingNetworkActor = false;
+            return;
+        }
+
         // Host deferred broadcast: send ENEMY_SPAWN for dynamic actors now that
         // the netId extension is in place.
         if (isDynamicSpawn && roomState.ownerClientId == ownClientId) {
@@ -415,6 +438,33 @@ void Anchor::RegisterHooks() {
                                 actor->id, (int)actor->category);
                 }
                 return;
+            }
+            // Karebaba respawn detection (host path, Fix 24):
+            // When a Karebaba returns to Idle (stateIndex=1) after a kill cycle,
+            // reset all death tracking so the next kill can be broadcast correctly.
+            //
+            // Two cases:
+            //   defeatPacketSent=true  — host killed it locally; sentDefeatThisScene and
+            //                            deadEnemiesByScene were written at kill time.
+            //   pendingNaturalDeath=true — host received ENEMY_DEFEATED from a non-host
+            //                             client and ran the natural death cycle itself;
+            //                             HandlePacket also wrote deadEnemiesByScene.
+            //                             Without this branch, pendingNaturalDeath stays
+            //                             set forever and subsequent kills from non-host
+            //                             are silently ignored as "already dying".
+            if (actor->id == ACTOR_EN_KAREBABA &&
+                (ext->defeatPacketSent || ext->pendingNaturalDeath)) {
+                EnemyNetId* extMut = const_cast<EnemyNetId*>(ext);
+                s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
+                if (curState == 1) { // Idle = fully respawned
+                    extMut->defeatPacketSent    = false;
+                    extMut->hasLocalDeath       = false;
+                    extMut->pendingNaturalDeath = false;
+                    sentDefeatThisScene.erase(extMut->netId);
+                    deadEnemiesByScene[gPlayState->sceneNum].erase(extMut->netId);
+                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned to Idle (host) — defeat tracking cleared",
+                                extMut->netId);
+                }
             }
             SendPacket_EnemyUpdate(ext->netId, actor);
         } else {
@@ -461,15 +511,18 @@ void Anchor::RegisterHooks() {
             // Both En_Dekubaba and En_Karebaba compute world.pos each frame from
             // animated angles rather than using a stable model root:
             //   En_Dekubaba: head-tip position derived from home.pos + stemSectionAngles
-            //   En_Karebaba: in Spin state, all 3 components computed from shape.rot trig
-            // Writing netPos here would displace the model root from where the actor's
-            // own update() will place it, causing visual drift. shape.rot sync already
-            // drives the correct position; each actor's own update() recomputes world.pos.
+            //   En_Karebaba: in Spin state, world.pos = f(home.pos, shape.rot) trig
+            // Overriding world.pos OR shape.rot causes the stem base to drift/wobble:
+            //   - world.pos override displaces the root for the render frame it is set
+            //   - shape.rot override causes the next actor->update() to compute world.pos
+            //     from a stale (50 ms-old) host angle, producing a one-frame positional error
+            // Both are skipped here and in HandlePacket_EnemyUpdate; the state machine and
+            // jointTable sync keep each actor visually correct without manual overrides.
             if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
                 actor->world.pos = ext->netPos;
+                actor->shape.rot = ext->netShapeRot;
             }
             actor->world.rot         = ext->netRot;
-            actor->shape.rot         = ext->netShapeRot;
             // Skip health re-apply after a local kill so the host's stale health > 0
             // packets don't revive the dying actor on this client (hasLocalDeath guard).
             // Multi-hit guard: only re-apply if local health hasn't been reduced below the
@@ -480,7 +533,13 @@ void Anchor::RegisterHooks() {
             // Scale sync: enemies like En_Karebaba change actor->scale throughout their
             // state machine (0 when dormant, growing to 0.01 when fully emerged). Without
             // this re-apply the non-host always sees the actor at its spawn-time scale.
-            actor->scale = ext->netScale;
+            // Guard: skip while hasLocalDeath is set (covers both local kills and the
+            // pendingNaturalDeath respawn cycle). Without this guard, P1's Idle scale=0
+            // overwrites P2's Regrow animation each frame, making the Karebaba invisible
+            // and preventing the respawn from being visible (Bugs 4 & 5).
+            if (!ext->hasLocalDeath) {
+                actor->scale = ext->netScale;
+            }
 
             // Karebaba state machine sync: if the host's current state differs from ours,
             // drive the local actor into the matching state. Called after update() so any
@@ -495,19 +554,38 @@ void Anchor::RegisterHooks() {
             //     enemies start at Idle (1) while this client's were already activated.
             //     Applying Idle here would reset active enemies underground; the host
             //     will advance to Upright/Spin via its own proximity detection within
-            //     ~2 seconds. Only block dormant resets (Grow=0/Idle=1/Regrow=9) when
-            //     the local enemy is already in an active state (Awaken=2/Upright=3/
-            //     Spin=4/Retract=7). Death and DeadItemDrop transitions are always applied.
+            //     ~2 seconds. Block regression to early states (Grow=0/Idle=1/Awaken=2/
+            //     Regrow=9) when the local enemy is already in a fully active state
+            //     (Upright=3/Spin=4/Retract=7). Awaken(2) is included because when the
+            //     host's Karebaba respawns it briefly sends stateIndex=2, which was
+            //     resetting P2's active actor and causing rapid Upright↔Spin oscillation
+            //     every frame (Fix 21). Death and DeadItemDrop transitions always apply.
             if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 && !ext->hasLocalDeath) {
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
                 if (curState != ext->netStateIndex) {
                     bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
-                                          ext->netStateIndex == 9);
-                    bool localIsActive = (curState == 2 || curState == 3 ||
-                                          curState == 4 || curState == 7);
+                                          ext->netStateIndex == 2 || ext->netStateIndex == 9);
+                    bool localIsActive = (curState == 3 || curState == 4 || curState == 7);
                     if (!(netIsDormant && localIsActive)) {
                         EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
                     }
+                }
+            }
+
+            // Karebaba respawn detection (non-host path, Fix 24):
+            // While pendingNaturalDeath=true the actor ran its own death→respawn cycle
+            // instead of being Actor_Kill'd. When it returns to Idle (stateIndex=1),
+            // the cycle is complete. Re-enable all ENEMY_UPDATE overrides and state
+            // sync so the next round of combat is fully synchronised.
+            if (actor->id == ACTOR_EN_KAREBABA && ext->pendingNaturalDeath) {
+                s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
+                if (curState == 1) { // Idle = fully respawned
+                    ext->pendingNaturalDeath = false;
+                    ext->hasLocalDeath       = false;
+                    ext->defeatPacketSent    = false;
+                    ext->netStateIndex       = -1; // force re-sync from host on next ENEMY_UPDATE
+                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned to Idle (non-host) — sync re-enabled",
+                                ext->netId);
                 }
             }
         }

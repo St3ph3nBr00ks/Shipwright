@@ -127,9 +127,16 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     while (actor != nullptr) {
         EnemyNetId* ext = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
         if (ext != nullptr && ext->netId == netId) {
-            actor->world.pos         = pos;
+            // En_Karebaba: world.pos is computed each frame from home.pos + shape.rot
+            // trig (same pattern as En_Dekubaba Fix 7). shape.rot is driven entirely
+            // by the local state machine; overriding it with a stale host value causes
+            // the next actor->update() to compute world.pos from the wrong angles,
+            // making the stem base wobble. Skip both; jointTable sync handles visuals.
+            if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
+                actor->world.pos = pos;
+                actor->shape.rot = shapeRot;
+            }
             actor->world.rot         = rot;
-            actor->shape.rot         = shapeRot;
             // Health sync rules:
             //   (a) hasLocalDeath: we already killed this enemy locally; ignore host
             //       health > 0 while our ENEMY_DEFEATED packet travels.

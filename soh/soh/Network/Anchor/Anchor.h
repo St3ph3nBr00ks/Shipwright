@@ -53,6 +53,12 @@ struct EnemyNetId {
     // -1 means no state received yet (initial value).
     s16 netStateIndex = -1;
     s16 netActorParams = 0;
+
+    // Set on a non-host client by HandlePacket_EnemyDefeated when the Karebaba
+    // is allowed to run its natural death→respawn cycle instead of being Actor_Kill'd.
+    // While true: hasLocalDeath blocks ENEMY_UPDATE overrides; item drop is suppressed.
+    // Cleared in OnActorUpdate when the actor returns to Idle (respawn complete).
+    bool pendingNaturalDeath = false;
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
@@ -144,6 +150,12 @@ class Anchor : public Network {
     // scene visit allocates new actor instances that share a netId via posHash).
     // Cleared in OnSceneSpawnActors (same point as deadEnemiesByScene clear).
     std::unordered_set<uint32_t> sentDefeatThisScene;
+
+    // netIds of ENEMY_DEFEATED packets that arrived while the target actor did not
+    // exist yet (e.g. the packet raced ahead of the scene load on this client).
+    // OnActorSpawn checks this set and immediately kills any newly-spawned actor
+    // whose netId is pending. Cleared in OnSceneSpawnActors alongside the above sets.
+    std::unordered_set<uint32_t> pendingKillNetIds;
 
     // Follower mode: non-host player's position is overridden to trail the host.
     // Activated by the 8-button sequence A→B→A→B→A→B→A→B (3-second timeout between presses).

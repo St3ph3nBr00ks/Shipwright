@@ -23,7 +23,11 @@ typedef struct EnKarebaba {
 // GetStateIndex maps the actionFunc pointer to an integer index (0–9).
 // ApplyNetState drives the Karebaba into a given state without firing
 // game-logic side effects (no OnEnemyDefeat, no item drops).
-s16 EnKarebaba_GetStateIndex(struct EnKarebaba* actor);
+// SetupDyingNet is the network-safe death trigger: same as SetupDying but
+// without GameInteractor_ExecuteOnEnemyDefeat, used by HandlePacket_EnemyDefeated
+// on non-host clients to start the natural death→respawn cycle.
+s16  EnKarebaba_GetStateIndex(struct EnKarebaba* actor);
 void EnKarebaba_ApplyNetState(struct EnKarebaba* actor, s16 stateIndex, s16 params);
+void EnKarebaba_SetupDyingNet(struct EnKarebaba* actor);
 
 #endif

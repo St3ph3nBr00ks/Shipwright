@@ -7,6 +7,7 @@ extern "C" {
 #include "variables.h"
 #include "functions.h"
 #include "z64.h"
+#include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
 extern PlayState* gPlayState;
 }
 
@@ -53,15 +54,36 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     for (int cat : { (int)ACTORCAT_ENEMY, (int)ACTORCAT_BOSS }) {
         Actor* actor = gPlayState->actorCtx.actorLists[cat].head;
         while (actor != nullptr) {
-            // Grab next before Actor_Kill to avoid touching freed memory.
+            // Grab next before any actor mutation to avoid touching freed memory.
             Actor* next = actor->next;
-            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+            EnemyNetId* ext = const_cast<EnemyNetId*>(
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
             if (ext != nullptr && ext->netId == netId) {
-                SPDLOG_INFO("[EnemyDefeated] Killing actor id={} netId={}", actor->id, netId);
                 // Host records this kill for join-time replay regardless of who killed it.
                 if (roomState.ownerClientId == ownClientId) {
                     deadEnemiesByScene[gPlayState->sceneNum].insert(netId);
                 }
+
+                // Karebaba (ACTOR_EN_KAREBABA): let the natural death→respawn cycle
+                // play out on non-host instead of calling Actor_Kill.  The actor stays
+                // alive, runs Dying→DeadItemDrop→Dead→Regrow→Idle, and remains available
+                // for the next ENEMY_UPDATE sync after respawn (Fix 24).
+                //
+                // If the Karebaba is already in a death cycle (defeatPacketSent = local
+                // kill, or pendingNaturalDeath = prior network kill), ignore the duplicate.
+                if (actor->id == ACTOR_EN_KAREBABA) {
+                    if (ext->defeatPacketSent || ext->pendingNaturalDeath) {
+                        SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} already dying — ignoring duplicate", netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle", netId);
+                    EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
+                    ext->hasLocalDeath      = true;
+                    ext->pendingNaturalDeath = true;
+                    return;
+                }
+
+                SPDLOG_INFO("[EnemyDefeated] Killing actor id={} netId={}", actor->id, netId);
                 // Guard against the OnActorKill hook (Fix 12) echoing ENEMY_DEFEATED
                 // back to the network for this Actor_Kill call.
                 isKillingNetworkActor = true;
@@ -73,6 +95,22 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
         }
     }
 
-    SPDLOG_WARN("[EnemyDefeated] No actor found for netId={} — possible netId mismatch or already dead",
+    // Also check ACTORCAT_MISC: a Karebaba moves there during its DeadItemDrop/Dead
+    // states.  If it is already in a natural death cycle, ignore — it will respawn.
+    {
+        Actor* misc = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
+        while (misc != nullptr) {
+            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(misc);
+            if (ext != nullptr && ext->netId == netId &&
+                (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
+                SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} in ACTORCAT_MISC natural cycle — ignoring", netId);
+                return;
+            }
+            misc = misc->next;
+        }
+    }
+
+    SPDLOG_WARN("[EnemyDefeated] No actor found for netId={} — buffering as pendingKill (scene not loaded yet?)",
                 netId);
+    pendingKillNetIds.insert(netId);
 }

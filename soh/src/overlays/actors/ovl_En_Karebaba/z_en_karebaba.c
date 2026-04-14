@@ -240,6 +240,23 @@ void EnKarebaba_SetupRegrow(EnKarebaba* this) {
 }
 
 /**
+ * Network-safe version of EnKarebaba_SetupDying.
+ * Identical except it does NOT call GameInteractor_ExecuteOnEnemyDefeat.
+ * Used by HandlePacket_EnemyDefeated on non-host clients so the natural
+ * death→respawn cycle plays out without triggering a network echo.
+ */
+void EnKarebaba_SetupDyingNet(EnKarebaba* this) {
+    this->actor.params = 0;
+    this->actor.gravity = -0.8f;
+    this->actor.velocity.y = 4.0f;
+    this->actor.world.rot.y = this->actor.shape.rot.y + 0x8000;
+    this->actor.speedXZ = 3.0f;
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_JR_DEAD);
+    this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
+    this->actionFunc = EnKarebaba_Dying;
+}
+
+/**
  * Maps the current actionFunc pointer to a stable integer index for network sync.
  * Indices: 0=Grow 1=Idle 2=Awaken 3=Upright 4=Spin 5=Dying 6=DeadItemDrop
  *          7=Retract 8=Dead 9=Regrow
@@ -275,9 +292,13 @@ void EnKarebaba_ApplyNetState(EnKarebaba* this, s16 stateIndex, s16 params) {
         case 3: EnKarebaba_SetupUpright(this); break;
         case 4: EnKarebaba_SetupSpin(this);    break;
         case 7: EnKarebaba_SetupRetract(this); break;
-        default: break;
+        default:
+            // Death and lifecycle states (5=Dying, 6=DeadItemDrop, 8=Dead, 9=Regrow)
+            // are intentional no-ops: ENEMY_DEFEATED drives death, and applying these
+            // to a living or freshly-respawned actor would corrupt its state machine.
+            return;
     }
-    // Sync the params timer regardless of state so the host's countdown drives
+    // Sync the params timer for alive states so the host's countdown drives
     // the Upright↔Spin cycle on this client.
     this->actor.params = params;
 }
@@ -416,11 +437,25 @@ void EnKarebaba_Dying(EnKarebaba* this, PlayState* play) {
     }
 }
 
+// Anchor suppression hook: returns true when this Karebaba is in a network-driven
+// natural death cycle on a non-host client. The item drop is skipped to prevent
+// a duplicate stick from being offered — the host already gave out the real one.
+extern bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor);
+
 void EnKarebaba_DeadItemDrop(EnKarebaba* this, PlayState* play) {
+    // Network-driven natural death on a non-host client: skip the item-drop
+    // countdown entirely.  The host already drops the real stick; we just
+    // need to advance to the Dead wait as fast as the host does (host player
+    // picks up the stick within a frame or two, making its DeadItemDrop
+    // near-instant).  Without this skip the 200-frame params countdown adds
+    // ~10 extra seconds of respawn delay on the non-host.
+    if (Anchor_ShouldSuppressKarebabaDrop(&this->actor)) {
+        EnKarebaba_SetupDead(this);
+        return;
+    }
     if (this->actor.params != 0) {
         this->actor.params--;
     }
-
     if (Actor_HasParent(&this->actor, play) || this->actor.params == 0) {
         EnKarebaba_SetupDead(this);
     } else {
