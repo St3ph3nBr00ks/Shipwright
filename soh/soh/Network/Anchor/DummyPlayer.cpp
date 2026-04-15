@@ -92,9 +92,11 @@ void DummyPlayer_Init(Actor* actor, PlayState* play) {
     if (!client.customModelFilename.empty()) {
         bool isAdult = (client.linkAge != LINK_AGE_CHILD);
         client.customSkeleton = nullptr;
+        client.lastAppliedModelFilename = "";  // reset so DummyPlayer_Update will re-apply
         SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
             &player->skelAnime, isAdult, (uint8_t)client.currentTunic,
             client.customModelFilename, client.customSkeleton);
+        client.lastAppliedModelFilename = client.customModelFilename;
     }
 }
 
@@ -137,15 +139,22 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     uint8_t prevTunic = player->currentTunic; // capture before overwrite for change detection
     player->currentTunic = client.currentTunic;
 
-    // Step 7 — re-apply custom skeleton only when tunic changes or skeleton not yet applied.
-    // Guarded to avoid calling ApplyCustomSkeletonToDummyPlayer (archive search + LoadFile)
-    // every frame — that would be 60 archive searches per second per DummyPlayer.
+    // Step 7 — re-apply custom skeleton when:
+    //   (a) the remote player's model changed since last apply, OR
+    //   (b) the tunic changed (different skeleton variant needed).
+    // Comparing lastAppliedModelFilename suppresses per-frame retries when the
+    // archive lookup fails (it does NOT produce a null customSkeleton on success,
+    // but the previous guard "customSkeleton == nullptr" was true on every frame
+    // after a failed lookup, causing a per-frame archive search).
     if (!client.customModelFilename.empty()) {
         bool isAdult = (client.linkAge != LINK_AGE_CHILD);
-        if (client.customSkeleton == nullptr || prevTunic != player->currentTunic) {
+        bool modelChanged  = (client.customModelFilename != client.lastAppliedModelFilename);
+        bool tunicChanged  = (prevTunic != player->currentTunic);
+        if (modelChanged || tunicChanged) {
             SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
                 &player->skelAnime, isAdult, (uint8_t)player->currentTunic,
                 client.customModelFilename, client.customSkeleton);
+            client.lastAppliedModelFilename = client.customModelFilename;
         }
     }
 

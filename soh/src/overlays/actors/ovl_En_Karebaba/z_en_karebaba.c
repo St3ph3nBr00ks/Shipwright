@@ -356,9 +356,6 @@ void EnKarebaba_Awaken(EnKarebaba* this, PlayState* play) {
 }
 
 void EnKarebaba_Upright(EnKarebaba* this, PlayState* play) {
-    extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
-    Actor* nearestPlayer = Anchor_GetNearestPlayerActor(&this->actor, play);
-
     SkelAnime_Update(&this->skelAnime);
 
     if (this->actor.params != 0) {
@@ -372,7 +369,15 @@ void EnKarebaba_Upright(EnKarebaba* this, PlayState* play) {
     if (this->bodyCollider.base.acFlags & AC_HIT) {
         EnKarebaba_SetupDying(this);
         Enemy_StartFinishingBlow(play, &this->actor);
-    } else if (Math_Vec3f_DistXZ(&this->actor.home.pos, &nearestPlayer->world.pos) > 240.0f) {
+    } else if (this->actor.xzDistToPlayer > 240.0f) {
+        // Fix 39: use xzDistToPlayer (pre-patched by ShouldActorUpdate toward the nearest
+        // player each frame) instead of computing distance from Anchor_GetNearestPlayerActor.
+        // The old approach called GetNearestPlayerActor and used nearestPlayer->world.pos,
+        // which is one frame stale for DummyPlayers (they are updated in OnGameFrameUpdate,
+        // which fires after Actor_UpdateAll). On the host, when P2 was nearby and P1 was
+        // far, the stale DummyPlayer pos caused the check to find P1 as nearest — the
+        // distance exceeded 240 and SetupRetract fired immediately after Upright (~50ms),
+        // producing a rapid Awaken→Upright→Retract loop every ~500ms (KB-13, log 56).
         EnKarebaba_SetupRetract(this);
     } else if (this->actor.params == 0) {
         EnKarebaba_SetupSpin(this);

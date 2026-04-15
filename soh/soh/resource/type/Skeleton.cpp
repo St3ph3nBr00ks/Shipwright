@@ -257,7 +257,20 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
     const std::string altPath = Ship::IResource::gAltAssetPrefix + skeletonPath;
 
+    // Many character packs only ship the base skeleton (gLinkAdultSkel / gLinkChildSkel)
+    // rather than the per-tunic variants.  Try the tunic path first; if that fails,
+    // retry with the base age skeleton.
+    std::string resolvedAltPath = altPath;
     auto file = LoadFileFromCoopFolder(folder, altPath, resourceMgr);
+    if (file == nullptr) {
+        const std::string baseAltPath = Ship::IResource::gAltAssetPrefix + skel.vanillaSkeletonPath;
+        if (baseAltPath != altPath) {
+            file = LoadFileFromCoopFolder(folder, baseAltPath, resourceMgr);
+            if (file != nullptr) {
+                resolvedAltPath = baseAltPath;
+            }
+        }
+    }
 
     if (file == nullptr) {
         // No archive in the selected folder has this skeleton — fall back to normal resolution.
@@ -267,7 +280,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     }
 
     auto resourceLoader = resourceMgr->GetResourceLoader();
-    auto resource = resourceLoader->LoadResource(altPath, file);
+    auto resource = resourceLoader->LoadResource(resolvedAltPath, file);
     if (resource == nullptr) {
         skel.overrideSkeleton = nullptr;
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
@@ -316,21 +329,62 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     SPDLOG_INFO("[CoopModel] ApplyCustomSkeletonToDummyPlayer: folder=\"{}\" altPath=\"{}\" isAdult={} tunic={}",
                 characterFolder, altPath, isAdult, tunic);
 
+    // Many character packs only ship the base skeleton (gLinkAdultSkel / gLinkChildSkel)
+    // rather than the per-tunic variants.  Try the tunic path first; if that fails,
+    // retry with the base age skeleton.
+    std::string resolvedAltPath = altPath;
     auto file = LoadFileFromCoopFolder(characterFolder, altPath, resourceMgr);
     if (file == nullptr) {
-        SPDLOG_WARN("[CoopModel]   no archive in folder \"{}\" contains \"{}\" — falling back to vanilla",
+        const std::string baseSkeletonPath = isAdult
+            ? std::string(gLinkAdultSkel).substr(sOtr.length())
+            : std::string(gLinkChildSkel).substr(sOtr.length());
+        const std::string baseAltPath = Ship::IResource::gAltAssetPrefix + baseSkeletonPath;
+        if (baseAltPath != altPath) {
+            SPDLOG_INFO("[CoopModel]   tunic path not found, trying base skeleton: {}", baseAltPath);
+            file = LoadFileFromCoopFolder(characterFolder, baseAltPath, resourceMgr);
+            if (file != nullptr) {
+                resolvedAltPath = baseAltPath;
+            }
+        }
+    }
+    if (file == nullptr) {
+        SPDLOG_WARN("[CoopModel]   no archive in folder \"{}\" contains \"{}\" or base skeleton — falling back to vanilla",
                     characterFolder, altPath);
         return;
     }
 
     // Parse the File into a typed Skeleton resource.
     auto resourceLoader = resourceMgr->GetResourceLoader();
-    auto resource = resourceLoader->LoadResource(altPath, file);
+    auto resource = resourceLoader->LoadResource(resolvedAltPath, file);
     if (resource == nullptr) {
         return;
     }
     auto skeleton = std::dynamic_pointer_cast<Skeleton>(resource);
     if (skeleton == nullptr) {
+        return;
+    }
+
+    // Validate the loaded skeleton before applying it to the DummyPlayer.
+    //
+    // Character packs that only ship an adult model sometimes include a stale or
+    // wrong-age entry at the child skeleton path (e.g. adult skeleton stored at
+    // alt/objects/object_link_child/gLinkChildSkel).  Applying a skeleton with the
+    // wrong limb count to a SkelAnime initialized for a different age causes an
+    // out-of-bounds access in Player_Draw → crash.
+    //
+    // Guard 1: null segment means the archive entry is incomplete / not properly
+    //          relocated.  Writing nullptr to skelAnime->skeleton would crash on render.
+    if (skeleton->skeletonData.skeletonHeader.segment == nullptr) {
+        SPDLOG_WARN("[CoopModel]   skeleton segment is null in folder \"{}\" — falling back to vanilla",
+                    characterFolder);
+        return;
+    }
+    // Guard 2: limb count mismatch — the loaded skeleton was built for a different age
+    //          than the SkelAnime (e.g. adult skeleton at a child skeleton path).
+    //          skelAnime->limbCount is set by play->playerInit before this call.
+    if (skelAnime->limbCount != 0 && skeleton->limbCount != (int)skelAnime->limbCount) {
+        SPDLOG_WARN("[CoopModel]   limb count mismatch in folder \"{}\": loaded={} expected={} — falling back to vanilla",
+                    characterFolder, skeleton->limbCount, (int)skelAnime->limbCount);
         return;
     }
 

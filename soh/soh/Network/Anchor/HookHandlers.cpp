@@ -332,7 +332,7 @@ void Anchor::RegisterHooks() {
 
                 // Yaw toward (dx, dz).  Math_Atan2S(x, y) with OoT param order.
                 auto YawToward = [](f32 dx, f32 dz) -> s16 {
-                    return Math_Atan2S(dx, dz);
+                    return Math_Atan2S(dz, dx); // z first, x second — OoT convention
                 };
 
                 // Read P2's current position.  Y is NOT overridden — let OoT's floor
@@ -671,13 +671,26 @@ void Anchor::RegisterHooks() {
                         input.rel.stick_x = 0; input.rel.stick_y = 0;
                     }
 
-                    // --- Attack: inject BTN_B at start of each charge phase ---
-                    if (followerAIState == FollowerAIState::ATTACK &&
-                        followerStateFrames % 20 == 0) {
-                        input.press.button |= BTN_B;
-                        input.cur.button   |= BTN_B;
-                        SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={})",
-                                    followerStateFrames);
+                    // --- Attack: face enemy + inject BTN_B at start of each charge phase ---
+                    if (followerAIState == FollowerAIState::ATTACK) {
+                        // Keep shape.rot.y facing the enemy here (BEFORE Player_Update) so
+                        // that when BTN_B is processed by OoT this frame, the swing direction
+                        // is current.  OnGameFrameUpdate also sets it (after Player_Update) to
+                        // maintain facing during the animation; both assignments are consistent.
+                        if (followerTargetEnemy != nullptr &&
+                            followerTargetEnemy->update != nullptr) {
+                            f32 ex = followerTargetEnemy->world.pos.x - actor->world.pos.x;
+                            f32 ez = followerTargetEnemy->world.pos.z - actor->world.pos.z;
+                            if (ex * ex + ez * ez > 1.0f) {
+                                actor->shape.rot.y = Math_Atan2S(ez, ex); // z first per OoT convention
+                            }
+                        }
+                        if (followerStateFrames % 20 == 0) {
+                            input.press.button |= BTN_B;
+                            input.cur.button   |= BTN_B;
+                            SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={})",
+                                        followerStateFrames);
+                        }
                     }
                 });
         }
@@ -778,7 +791,7 @@ void Anchor::RegisterHooks() {
                     extPtr->hasLocalDeath        = true;
                     extPtr->pendingNaturalDeath  = true;
                     extPtr->defeatPacketSent     = true;
-                    // Fix 38: defer SetupDeadItemDrop to OnActorInit.
+                    // Fix 38: defer SetupDeadItemDrop to OnActorInit (non-host only).
                     // OnActorSpawn fires BEFORE actor->init() is called by Actor_UpdateAll
                     // (z_actor.c:3409 vs 2638). Calling SetupDeadItemDrop here causes
                     // EnKarebaba_Init (Frame 1) to override actionFunc=DeadItemDrop back
@@ -787,7 +800,12 @@ void Anchor::RegisterHooks() {
                     // the Karebaba appear alive for one frame on P2.
                     // OnActorInit (z_actor.c:2641) fires AFTER actor->init() has run,
                     // so SetupDeadItemDrop can override actionFunc without being undone.
-                    extPtr->deferredDeadItemDrop = true;
+                    // CL-01: host manages its own Karebaba state naturally via respawn
+                    // detection — deferredDeadItemDrop is a non-host-only mechanism and
+                    // OnActorInit returns early for the host anyway.
+                    if (roomState.ownerClientId != ownClientId) {
+                        extPtr->deferredDeadItemDrop = true;
+                    }
                 }
             } else {
                 SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} — killing actor immediately", netId);

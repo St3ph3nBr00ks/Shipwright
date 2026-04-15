@@ -84,7 +84,7 @@ void Anchor::HandlePacket_EnemyRespawn(nlohmann::json payload) {
     }
 
     if (!actor) {
-        SPDLOG_WARN("[EnemyRespawn] netId={} not found — ignoring", netId);
+        SPDLOG_DEBUG("[EnemyRespawn] netId={} not found — ignoring (actor already respawned?)", netId);
         return;
     }
 

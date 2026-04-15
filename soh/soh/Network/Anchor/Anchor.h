@@ -125,6 +125,8 @@ typedef struct {
     // Multiplayer cosmetic sync
     std::string customModelFilename;                    // basename of remote client's .o2r, or ""
     std::shared_ptr<SOH::Skeleton> customSkeleton;      // keeps loaded skeleton alive; nullptr = vanilla
+    std::string lastAppliedModelFilename;               // folder that was last passed to ApplyCustomSkeletonToDummyPlayer;
+                                                        // suppresses per-frame retries when the lookup fails
 
     // Ptr to the dummy player
     Player* player;
