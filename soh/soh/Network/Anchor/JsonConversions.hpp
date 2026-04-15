@@ -65,6 +65,8 @@ inline void from_json(const json& j, AnchorClient& client) {
     client.curRoomNum = j.value("curRoomNum", (s8)-1);
     client.entranceIndex = j.value("entranceIndex", (s32)0);
     client.self = j.value("self", false);
+    client.customModelFilename = j.value("customModelFilename", "");
+    // customSkeleton is runtime state — not deserialized
 }
 
 inline void to_json(json& j, const Inventory& inventory) {

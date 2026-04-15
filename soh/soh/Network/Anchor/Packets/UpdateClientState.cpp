@@ -3,10 +3,24 @@
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
 #include "soh/OTRGlobals.h"
+#include <filesystem>
 
 extern "C" {
 #include "variables.h"
 extern PlayState* gPlayState;
+}
+
+// Returns the local player's chosen character folder name, or "" if unset or
+// if the folder no longer exists under mods/coopplayercharacters/.
+static std::string GetLocalModelFilename() {
+    const char* chosen = CVarGetString(CVAR_REMOTE_ANCHOR("CharacterModel"), "");
+    if (chosen == nullptr || chosen[0] == '\0') {
+        return "";
+    }
+    std::string modsPath = Ship::Context::LocateFileAcrossAppDirs("mods", appShortName);
+    std::filesystem::path fullPath =
+        std::filesystem::path(modsPath) / "coopplayercharacters" / std::string(chosen);
+    return std::filesystem::is_directory(fullPath) ? std::string(chosen) : "";
 }
 
 /**
@@ -27,6 +41,8 @@ nlohmann::json Anchor::PrepClientState() {
     payload["clientVersion"] = clientVersion;
     payload["teamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
     payload["online"] = true;
+
+    payload["customModelFilename"] = GetLocalModelFilename();
 
     if (IsSaveLoaded()) {
         payload["seed"] = IS_RANDO ? Rando::Context::GetInstance()->GetSeed() : 0;
@@ -78,6 +94,23 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         clients[clientId].sceneNum = client.sceneNum;
         clients[clientId].curRoomNum = client.curRoomNum;
         clients[clientId].entranceIndex = client.entranceIndex;
+
+        // Cosmetic sync — apply remote player's custom character model to their DummyPlayer
+        if (payload["state"].contains("customModelFilename")) {
+            std::string newFilename = payload["state"]["customModelFilename"].get<std::string>();
+            bool modelChanged = (clients[clientId].customModelFilename != newFilename);
+            clients[clientId].customModelFilename = newFilename;
+
+            if (modelChanged && clients[clientId].player != nullptr) {
+                Player* dummy = clients[clientId].player;
+                bool isAdult = (clients[clientId].linkAge != LINK_AGE_CHILD);
+                auto tunic = (uint8_t)clients[clientId].currentTunic;
+                clients[clientId].customSkeleton = nullptr; // release previous
+                SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
+                    &dummy->skelAnime, isAdult, tunic, newFilename,
+                    clients[clientId].customSkeleton);
+            }
+        }
 
         // Fix 6 — join-time dead-enemy replay.
         // When we are the host and a remote client just loaded a save or entered a

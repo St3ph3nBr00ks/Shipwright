@@ -149,6 +149,19 @@ extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
     return ext != nullptr && ext->pendingNaturalDeath;
 }
 
+void Anchor::SetFollowerActive(bool active) {
+    followerActive = active;
+    if (active) {
+        followerAIState     = FollowerAIState::IDLE;
+        followerStateFrames = 0;
+        followerStuckFrames = 0;
+        followerTargetEnemy = nullptr;
+        SPDLOG_INFO("[Follower] Activated (menu)");
+    } else {
+        SPDLOG_INFO("[Follower] Deactivated (menu)");
+    }
+}
+
 void Anchor::RegisterHooks() {
 
     // #region Hooks that are required for basic Anchor functionality
@@ -172,9 +185,22 @@ void Anchor::RegisterHooks() {
             // Clear the per-scene-visit send-dedup set so that enemies in the new
             // scene can have their ENEMY_DEFEATED broadcast normally.
             sentDefeatThisScene.clear();
-            // Clear buffered kills from the previous scene — any ENEMY_DEFEATED that
-            // raced ahead of the scene load are no longer relevant for a fresh scene.
-            pendingKillNetIds.clear();
+            // Clear buffered kills that belong to scenes OTHER than the one we are
+            // entering.  Kills for the destination scene must survive so that
+            // OnActorSpawn can call SetupDeadItemDrop when those actors spawn.
+            // (Clearing unconditionally caused Fix 35 to fail when P2 entered the
+            // target scene from a different scene — the pending kill was wiped just
+            // before the Karebaba spawned, so it appeared alive.)
+            {
+                uint16_t newScene = gPlayState ? (uint16_t)gPlayState->sceneNum : 0xFFFF;
+                for (auto it = pendingKillNetIds.begin(); it != pendingKillNetIds.end(); ) {
+                    if ((uint16_t)(*it >> 16) != newScene) {
+                        it = pendingKillNetIds.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
             RefreshClientActors();
         }
     });
@@ -218,20 +244,19 @@ void Anchor::RegisterHooks() {
 
     // Follower mode (non-host only): override local player position to trail the host.
     //
-    // Activation: detect the sequence A→B→A→B→C-Up→C-Down→C-Left→C-Right using
-    // edge-triggered button presses (input[0].press.button). Any input while the
-    // follower is active cancels it so the player can regain manual control.
+    // Activation: toggled via the Anchor settings menu (AI Follower checkbox).
+    // Any controller input while active immediately cancels it and returns manual control.
     //
     // Position source: the host's DummyPlayer actor (ACTORCAT_NPC, id=ACTOR_EN_OE2,
     // update=DummyPlayer_Update, clientId==roomState.ownerClientId). Its world.pos is
     // updated every frame by DummyPlayer_Update to the host's authoritative position.
     //
-    // Offset: 150 units along the world +X axis from the host. This is a simple fixed
-    // offset — not relative to the host's facing — so P2 always appears to the east.
-    // Future improvement: compute an offset relative to host->world.rot.y if desired.
-    // COND_HOOK is not used here because the lambda body contains a braced initializer
-    // list (kFollowerSeq), and the C preprocessor does not treat braces as grouping —
-    // commas inside {} would be interpreted as extra macro arguments. Expanded manually.
+    // Offset: fixed units along the world +X axis from the host. P2's shape.rot.y is
+    // also set to match the host so both players face the same direction.
+    //
+    // Note: COND_HOOK cannot be used here — the lambda body contains brace-initializer
+    // lists (e.g. Vec3f sideTarget = { a, b, c }), and the C preprocessor does NOT
+    // treat {} as grouping, so their commas split the macro's argument list.
     {
         static HOOK_ID followerHookId = 0;
         GameInteractor::Instance->UnregisterGameHook<GameInteractor::OnGameFrameUpdate>(followerHookId);
@@ -246,63 +271,25 @@ void Anchor::RegisterHooks() {
                 Player* player = GET_PLAYER(gPlayState);
                 if (player == nullptr) { return; }
 
-                // --- Sequence detection ---
-                // The 8-step activation code. Using press.button (edge-triggered).
-                // Sequence: A → B → A → B → A → B → A → B
-                // A 3-second timeout between presses resets the sequence.
-                static const u16 kFollowerSeq[] = {
-                    BTN_A, BTN_B, BTN_A, BTN_B,
-                    BTN_A, BTN_B, BTN_A, BTN_B
-                };
-                static constexpr int kFollowerSeqLen = 8;
-                static auto lastPressTime = std::chrono::steady_clock::now();
-
-                u16 pressed = gPlayState->state.input[0].press.button;
-
+                // Any real input cancels follower mode.
+                // During ATTACK the animation hook injects BTN_B into press.button —
+                // exclude it so our own injection doesn't cancel follower mode.
                 if (followerActive) {
-                    // Any input cancels follower mode.
-                    if (pressed != 0) {
-                        followerActive = false;
-                        SPDLOG_INFO("[Follower] Deactivated (input pressed)");
-                        return;
+                    u16 pressed = gPlayState->state.input[0].press.button;
+                    u16 deactivateCheck = pressed;
+                    if (followerAIState == FollowerAIState::ATTACK) {
+                        deactivateCheck &= ~BTN_B;
                     }
-                } else {
-                    // Advance or reset the activation sequence on each edge press.
-                    if (pressed != 0) {
-                        auto now = std::chrono::steady_clock::now();
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPressTime).count();
-                        if (followerSeqPos > 0 && elapsed >= 3000) {
-                            SPDLOG_INFO("[Follower] Seq timeout at step {} ({}ms since last press) -> reset",
-                                        followerSeqPos, elapsed);
-                            followerSeqPos = 0;
-                        }
-                        lastPressTime = now;
-
-                        if (pressed == kFollowerSeq[followerSeqPos]) {
-                            followerSeqPos++;
-                            if (followerSeqPos == kFollowerSeqLen) {
-                                followerSeqPos = 0;
-                                followerActive = true;
-                                SPDLOG_INFO("[Follower] Activated");
-                            } else {
-                                SPDLOG_INFO("[Follower] Seq step {}/{} matched (btn=0x{:04X})",
-                                            followerSeqPos, kFollowerSeqLen, pressed);
-                            }
-                        } else {
-                            // Wrong button — restart from the beginning (or step 1 if
-                            // this press matches the first button in the sequence).
-                            int newPos = (pressed == kFollowerSeq[0]) ? 1 : 0;
-                            SPDLOG_INFO("[Follower] Seq reset at step {} (expected=0x{:04X} got=0x{:04X}) -> pos {}",
-                                        followerSeqPos, kFollowerSeq[followerSeqPos], pressed, newPos);
-                            followerSeqPos = newPos;
-                        }
+                    if (deactivateCheck != 0) {
+                        SetFollowerActive(false);
+                        SPDLOG_INFO("[Follower] Deactivated (input pressed=0x{:04X})", pressed);
+                        return;
                     }
                 }
 
                 if (!followerActive) { return; }
 
-                // --- Position override ---
-                // Find the host's DummyPlayer actor.
+                // --- Find the host's DummyPlayer actor ---
                 Actor* dummyActor = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
                 while (dummyActor != nullptr) {
                     if (dummyActor->id == ACTOR_EN_OE2 &&
@@ -312,19 +299,387 @@ void Anchor::RegisterHooks() {
                     }
                     dummyActor = dummyActor->next;
                 }
-
                 if (dummyActor == nullptr) { return; } // Host DummyPlayer not found.
 
-                Vec3f hostPos = dummyActor->world.pos;
+                // --- AI follower state machine ---
+                // Constants (do not change follow offset — set by prior session).
+                static constexpr f32 kFollowOffset       = 50.0f;  // world +X from host
+                static constexpr f32 kFollowThreshold    = 100.0f; // dist to switch FOLLOW↔IDLE
+                static constexpr f32 kEngageRange        = 350.0f; // enemy detection radius
+                static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius
+                static constexpr f32 kMaxLeash           = 800.0f; // abandon ENGAGE if P1 this far
+                static constexpr f32 kMoveSpeed          = 4.0f;   // units/frame toward target
+                static constexpr int kStuckCheckInterval = 20;     // frames between stuck checks
+                static constexpr f32 kStuckMinProgress   = 5.0f;   // min units per check interval
+                static constexpr int kStuckRecovery      = 25;     // frames of strafe before retry
+                static constexpr int kAttackDuration     = 60;     // frames per ATTACK cycle
 
-                // Simple fixed-offset: 50 units along world +X from the host.
-                // Keeps P2 out of P1's collision cylinder while staying close enough
-                // for shared enemy aggro range.
-                Vec3f targetPos = { hostPos.x + 50.0f, hostPos.y, hostPos.z };
+                Vec3f hostPos    = dummyActor->world.pos;
+                Vec3f sideTarget = { hostPos.x + kFollowOffset, hostPos.y, hostPos.z };
 
-                player->actor.world.pos = targetPos;
-                player->actor.prevPos   = targetPos;
+                // Move p2Pos toward 'to' by at most 'speed' units in the XZ plane.
+                // Y is not moved — caller sets Y explicitly.  Returns XZ distance before step.
+                auto MoveXZ = [](Vec3f& pos, const Vec3f& to, f32 speed) -> f32 {
+                    f32 dx   = to.x - pos.x;
+                    f32 dz   = to.z - pos.z;
+                    f32 dist = sqrtf(dx * dx + dz * dz);
+                    if (dist < 0.001f) { return 0.0f; }
+                    f32 step = (dist < speed) ? dist : speed;
+                    pos.x   += dx / dist * step;
+                    pos.z   += dz / dist * step;
+                    return dist;
+                };
+
+                // Yaw toward (dx, dz).  Math_Atan2S(x, y) with OoT param order.
+                auto YawToward = [](f32 dx, f32 dz) -> s16 {
+                    return Math_Atan2S(dx, dz);
+                };
+
+                // Read P2's current position.  Y is NOT overridden — let OoT's floor
+                // detection handle vertical position each frame.  Overriding Y to P1's
+                // height fought the physics system on slopes: going downhill put P2 below
+                // the surface, physics pushed them back up, and XZ movement was disrupted.
+                Vec3f p2Pos = player->actor.world.pos;
+
+                followerStateFrames++;
+
+                // Periodic heartbeat: log state + positions every 60 frames.
+                if (followerStateFrames % 60 == 0) {
+                    f32 toTarget = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+                    const char* stateStr = "?";
+                    switch (followerAIState) {
+                        case FollowerAIState::IDLE:   stateStr = "IDLE";   break;
+                        case FollowerAIState::FOLLOW: stateStr = "FOLLOW"; break;
+                        case FollowerAIState::STUCK:  stateStr = "STUCK";  break;
+                        case FollowerAIState::ENGAGE: stateStr = "ENGAGE"; break;
+                        case FollowerAIState::ATTACK: stateStr = "ATTACK"; break;
+                        case FollowerAIState::RETURN: stateStr = "RETURN"; break;
+                    }
+                    SPDLOG_INFO("[Follower] state={} p2=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) distToTarget={:.0f}",
+                                stateStr,
+                                p2Pos.x, p2Pos.y, p2Pos.z,
+                                sideTarget.x, sideTarget.y, sideTarget.z,
+                                toTarget);
+                }
+
+                switch (followerAIState) {
+
+                    case FollowerAIState::IDLE: {
+                        // Drift back to side-target if P1 moved.
+                        f32 dx = sideTarget.x - p2Pos.x;
+                        f32 dz = sideTarget.z - p2Pos.z;
+                        if (dx * dx + dz * dz > kFollowThreshold * kFollowThreshold) {
+                            followerAIState     = FollowerAIState::FOLLOW;
+                            followerStateFrames = 0;
+                            followerLastPos     = p2Pos;
+                            SPDLOG_INFO("[Follower] IDLE→FOLLOW p2=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) dist={:.0f}",
+                                        p2Pos.x, p2Pos.y, p2Pos.z,
+                                        sideTarget.x, sideTarget.y, sideTarget.z,
+                                        sqrtf(dx * dx + dz * dz));
+                            break;
+                        }
+                        // Scan for the nearest live enemy within ENGAGE range.
+                        Actor* nearest    = nullptr;
+                        f32    nearDistSq = kEngageRange * kEngageRange;
+                        Actor* eActor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
+                        while (eActor != nullptr) {
+                            if (eActor->update != nullptr) {
+                                f32 edx     = eActor->world.pos.x - p2Pos.x;
+                                f32 edz     = eActor->world.pos.z - p2Pos.z;
+                                f32 eDistSq = edx * edx + edz * edz;
+                                if (eDistSq < nearDistSq) {
+                                    nearDistSq = eDistSq;
+                                    nearest    = eActor;
+                                }
+                            }
+                            eActor = eActor->next;
+                        }
+                        if (nearest != nullptr) {
+                            followerTargetEnemy = nearest;
+                            followerAIState     = FollowerAIState::ENGAGE;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] IDLE→ENGAGE enemy id={} at ({:.0f},{:.0f},{:.0f}) dist={:.0f}",
+                                        nearest->id,
+                                        nearest->world.pos.x, nearest->world.pos.y, nearest->world.pos.z,
+                                        sqrtf(nearDistSq));
+                        }
+                        // In IDLE, match P1's facing direction.
+                        player->actor.shape.rot.y = dummyActor->shape.rot.y;
+                        // Pre-populate move target so the first FOLLOW frame's
+                        // ShouldActorUpdate sees the correct direction immediately.
+                        followerMoveTarget = sideTarget;
+                        break;
+                    }
+
+                    case FollowerAIState::FOLLOW: {
+                        // Stuck detection: every kStuckCheckInterval frames check progress.
+                        if (followerStateFrames % kStuckCheckInterval == 0) {
+                            f32 progDx   = p2Pos.x - followerLastPos.x;
+                            f32 progDz   = p2Pos.z - followerLastPos.z;
+                            f32 progress = sqrtf(progDx * progDx + progDz * progDz);
+                            f32 toTarget = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+                            SPDLOG_INFO("[Follower] FOLLOW check: progress={:.1f} distToTarget={:.0f} "
+                                        "p2=({:.0f},{:.0f}) last=({:.0f},{:.0f}) target=({:.0f},{:.0f})",
+                                        progress, toTarget,
+                                        p2Pos.x, p2Pos.z,
+                                        followerLastPos.x, followerLastPos.z,
+                                        sideTarget.x, sideTarget.z);
+                            followerLastPos = p2Pos; // update checkpoint
+                            if (progress < kStuckMinProgress) {
+                                // Compute strafe direction perpendicular to travel.
+                                f32 tdx = sideTarget.x - p2Pos.x;
+                                f32 tdz = sideTarget.z - p2Pos.z;
+                                f32 len = sqrtf(tdx * tdx + tdz * tdz);
+                                if (len > 0.001f) {
+                                    followerStuckDir = { -tdz / len, 0.0f, tdx / len };
+                                } else {
+                                    followerStuckDir = { 1.0f, 0.0f, 0.0f };
+                                }
+                                followerAIState     = FollowerAIState::STUCK;
+                                followerStuckFrames = 0;
+                                followerStateFrames = 0;
+                                SPDLOG_INFO("[Follower] FOLLOW→STUCK strafeDir=({:.2f},{:.2f})",
+                                            followerStuckDir.x, followerStuckDir.z);
+                                break;
+                            }
+                        }
+                        followerMoveTarget = sideTarget;
+                        f32 dist = MoveXZ(p2Pos, sideTarget, kMoveSpeed);
+                        if (dist > 0.001f) {
+                            player->actor.shape.rot.y = YawToward(
+                                sideTarget.x - player->actor.world.pos.x,
+                                sideTarget.z - player->actor.world.pos.z);
+                        }
+                        if (dist < kFollowThreshold) {
+                            followerAIState     = FollowerAIState::IDLE;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", dist);
+                        }
+                        break;
+                    }
+
+                    case FollowerAIState::STUCK: {
+                        followerStuckFrames++;
+                        p2Pos.x += followerStuckDir.x * kMoveSpeed;
+                        p2Pos.z += followerStuckDir.z * kMoveSpeed;
+                        if (followerStuckFrames >= kStuckRecovery) {
+                            followerAIState     = FollowerAIState::FOLLOW;
+                            followerLastPos     = p2Pos;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] STUCK→FOLLOW p2=({:.0f},{:.0f})",
+                                        p2Pos.x, p2Pos.z);
+                        }
+                        break;
+                    }
+
+                    case FollowerAIState::ENGAGE: {
+                        // Abandon if P1 is too far or target is gone.
+                        {
+                            f32 ldx = hostPos.x - p2Pos.x;
+                            f32 ldz = hostPos.z - p2Pos.z;
+                            if (ldx * ldx + ldz * ldz > kMaxLeash * kMaxLeash) {
+                                followerAIState     = FollowerAIState::RETURN;
+                                followerStateFrames = 0;
+                                SPDLOG_INFO("[Follower] ENGAGE→RETURN (P1 too far)");
+                                break;
+                            }
+                        }
+                        if (followerTargetEnemy == nullptr ||
+                            followerTargetEnemy->update == nullptr) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy gone)");
+                            break;
+                        }
+                        Vec3f enemyPos = followerTargetEnemy->world.pos;
+                        f32   edx      = enemyPos.x - p2Pos.x;
+                        f32   edz      = enemyPos.z - p2Pos.z;
+                        f32   distSq   = edx * edx + edz * edz;
+                        if (distSq < kAttackRange * kAttackRange) {
+                            followerAIState     = FollowerAIState::ATTACK;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] ENGAGE→ATTACK enemy=({:.0f},{:.0f},{:.0f}) dist={:.0f}",
+                                        enemyPos.x, enemyPos.y, enemyPos.z, sqrtf(distSq));
+                            break;
+                        }
+                        // Every 20 frames log distance to enemy so we can see approach progress.
+                        if (followerStateFrames % 20 == 0) {
+                            SPDLOG_INFO("[Follower] ENGAGE progress: distToEnemy={:.0f} p2=({:.0f},{:.0f})",
+                                        sqrtf(distSq), p2Pos.x, p2Pos.z);
+                        }
+                        followerMoveTarget = enemyPos;
+                        MoveXZ(p2Pos, enemyPos, kMoveSpeed);
+                        if (distSq > 1.0f) {
+                            player->actor.shape.rot.y = YawToward(edx, edz);
+                        }
+                        break;
+                    }
+
+                    case FollowerAIState::ATTACK: {
+                        if (followerTargetEnemy == nullptr ||
+                            followerTargetEnemy->update == nullptr) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy gone)");
+                            break;
+                        }
+                        Vec3f enemyPos = followerTargetEnemy->world.pos;
+                        // Charge/retreat cycle: 10 frames toward enemy, 10 frames back.
+                        // Note: this moves P2 into the enemy's hitbox area but does NOT
+                        // trigger a sword swing — P2 slides without a swing animation.
+                        // Injecting BTN_B before the player update is needed to trigger
+                        // actual melee — deferred as future work.
+                        bool chargePhase = ((followerStateFrames / 10) % 2) == 0;
+                        {
+                            f32 edx      = enemyPos.x - p2Pos.x;
+                            f32 edz      = enemyPos.z - p2Pos.z;
+                            f32 enemyDist = sqrtf(edx * edx + edz * edz);
+                            if (followerStateFrames % 10 == 0) {
+                                SPDLOG_INFO("[Follower] ATTACK frame={} phase={} distToEnemy={:.0f} p2=({:.0f},{:.0f})",
+                                            followerStateFrames,
+                                            chargePhase ? "CHARGE" : "RETREAT",
+                                            enemyDist, p2Pos.x, p2Pos.z);
+                            }
+                            MoveXZ(p2Pos, chargePhase ? enemyPos : sideTarget, kMoveSpeed);
+                            if (edx * edx + edz * edz > 1.0f) {
+                                player->actor.shape.rot.y = YawToward(edx, edz);
+                            }
+                        }
+                        if (followerStateFrames >= kAttackDuration) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] ATTACK→RETURN (cycle complete)");
+                        }
+                        break;
+                    }
+
+                    case FollowerAIState::RETURN: {
+                        followerMoveTarget = sideTarget;
+                        f32 dist = MoveXZ(p2Pos, sideTarget, kMoveSpeed);
+                        if (dist > 0.001f) {
+                            player->actor.shape.rot.y = YawToward(
+                                sideTarget.x - player->actor.world.pos.x,
+                                sideTarget.z - player->actor.world.pos.z);
+                        }
+                        if (dist < kFollowThreshold) {
+                            followerAIState     = FollowerAIState::IDLE;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] RETURN→IDLE dist={:.1f}", dist);
+                        }
+                        break;
+                    }
+                }
+
+                player->actor.world.pos   = p2Pos;
+                player->actor.prevPos     = p2Pos;
             });
+        }
+    }
+
+    // Follower animation injection (non-host only).
+    //
+    // Fires via ShouldActorUpdate immediately BEFORE the player actor's update()
+    // so the player's own action state machine sees synthetic input and plays the
+    // correct animations.  (OnGameFrameUpdate fires too late — after update().)
+    //
+    // Walk/run: inject stick_y=80 (camera-forward) when the follower is moving.
+    //   The player enters walk/run action → correct leg animation plays.
+    //   Actual position is still controlled by our world.pos override in the
+    //   OnGameFrameUpdate hook above, so stick direction does not affect where
+    //   P2 ends up.
+    //
+    // Attack: inject BTN_B as an edge-press at the start of each charge phase.
+    //   The player's action state machine processes the press → real sword swing
+    //   animation plays.  shape.rot.y (set toward the enemy in the state machine
+    //   above) ensures P2 faces the enemy during the swing.
+    //
+    // Timing note: ShouldActorUpdate sees followerStateFrames from the PREVIOUS
+    // OnGameFrameUpdate (one frame before the next increment).  BTN_B is injected
+    // when followerStateFrames % 20 == 0, which corresponds to frame 1, 21, 41
+    // inside the ATTACK state after the next increment — the first frame of each
+    // charge phase.  The sword swing takes ~20 frames, matching the cycle period.
+    {
+        static HOOK_ID followerAnimHookId = 0;
+        GameInteractor::Instance->UnregisterGameHook<GameInteractor::ShouldActorUpdate>(followerAnimHookId);
+        followerAnimHookId = 0;
+        if (isConnected) {
+            followerAnimHookId = GameInteractor::Instance->RegisterGameHook<GameInteractor::ShouldActorUpdate>(
+                [&](void* refActor, bool* should) {
+                    (void)should; // we never block; only inject input
+                    if (!followerActive)        { return; }
+                    if (gPlayState == nullptr)  { return; }
+                    Actor* actor = static_cast<Actor*>(refActor);
+                    if (actor->id != ACTOR_PLAYER) { return; }
+
+                    Input& input = gPlayState->state.input[0];
+                    bool isMoving = (followerAIState == FollowerAIState::FOLLOW ||
+                                     followerAIState == FollowerAIState::ENGAGE ||
+                                     // ATTACK excluded: OoT determines swing direction from stick,
+                                     // overriding shape.rot.y. No stick → Link attacks in the
+                                     // direction shape.rot.y points (set toward enemy each frame).
+                                     followerAIState == FollowerAIState::RETURN);
+
+                    // --- Joystick cancel ---
+                    // Read hardware values BEFORE we inject anything. OoT resets input.cur
+                    // from hardware at the start of each frame, so these are the real values.
+                    {
+                        s8 hwX = input.cur.stick_x;
+                        s8 hwY = input.cur.stick_y;
+                        if ((s32)hwX * hwX + (s32)hwY * hwY > 25 * 25) {
+                            SetFollowerActive(false);
+                            SPDLOG_INFO("[Follower] Deactivated (joystick hw=({}, {}))", hwX, hwY);
+                            return;
+                        }
+                    }
+
+                    // --- Walk/run animation: camera-relative stick toward followerMoveTarget ---
+                    // OoT's movement pipeline: worldYaw = Camera_GetInputDirYaw(cam) + stickAngle,
+                    // where stickAngle = Math_Atan2S(relY, -relX).  To move in world direction
+                    // (dx, dz), invert that pipeline:
+                    //   worldYaw    = Math_Atan2S(dz, dx)          [OoT convention: z first]
+                    //   stickAngle  = worldYaw - inputDirYaw
+                    //   relY        = Math_CosS(stickAngle) * 60
+                    //   relX        = -Math_SinS(stickAngle) * 60
+                    // This is exact — no floating-point projection or sign guessing required.
+                    static bool sAnimHookLogged = false;
+                    if (!sAnimHookLogged) {
+                        SPDLOG_INFO("[Follower] animHook firing for ACTOR_PLAYER");
+                        sAnimHookLogged = true;
+                    }
+                    if (isMoving) {
+                        Vec3f p2w = actor->world.pos;
+                        f32 dx = followerMoveTarget.x - p2w.x;
+                        f32 dz = followerMoveTarget.z - p2w.z;
+                        if (dx * dx + dz * dz > 1.0f) {
+                            Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                            s16 inputDirYaw  = Camera_GetInputDirYaw(cam);
+                            s16 worldYaw     = Math_Atan2S(dz, dx); // z first per OoT convention
+                            s16 stickAngle   = worldYaw - inputDirYaw;
+                            s8  stickY = (s8)(Math_CosS(stickAngle) * 60.0f);
+                            s8  stickX = (s8)(-Math_SinS(stickAngle) * 60.0f);
+                            input.cur.stick_x = stickX;
+                            input.cur.stick_y = stickY;
+                            input.rel.stick_x = stickX;
+                            input.rel.stick_y = stickY;
+                        } else {
+                            // Already at target — no stick
+                            input.cur.stick_x = 0; input.cur.stick_y = 0;
+                            input.rel.stick_x = 0; input.rel.stick_y = 0;
+                        }
+                    } else {
+                        input.cur.stick_x = 0; input.cur.stick_y = 0;
+                        input.rel.stick_x = 0; input.rel.stick_y = 0;
+                    }
+
+                    // --- Attack: inject BTN_B at start of each charge phase ---
+                    if (followerAIState == FollowerAIState::ATTACK &&
+                        followerStateFrames % 20 == 0) {
+                        input.press.button |= BTN_B;
+                        input.cur.button   |= BTN_B;
+                        SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={})",
+                                    followerStateFrames);
+                    }
+                });
         }
     }
 
@@ -395,8 +750,10 @@ void Anchor::RegisterHooks() {
         ext.limbCount = ext.skelAnime ? ext.skelAnime->limbCount : 0;
         ObjectExtension::GetInstance().Set<EnemyNetId>(actor, std::move(ext));
 
-        SPDLOG_INFO("[EnemySpawn] Extension assigned: actorId={} netId={} limbCount={} {}",
-                    actor->id, netId, (int)ext.limbCount,
+        SPDLOG_INFO("[EnemySpawn] Extension assigned: actorId={} netId={} ptr={} home=({:.0f},{:.0f},{:.0f}) posHash=0x{:02X} limbCount={} {}",
+                    actor->id, netId, (void*)actor,
+                    actor->home.pos.x, actor->home.pos.y, actor->home.pos.z,
+                    (int)posHash, (int)ext.limbCount,
                     isDynamicSpawn ? "dynamic" : "static");
 
         // If an ENEMY_DEFEATED for this netId arrived before the scene finished
@@ -404,28 +761,37 @@ void Anchor::RegisterHooks() {
         // Karebaba: use the natural death cycle so it can respawn later, same as
         // HandlePacket_EnemyDefeated. Other enemies: direct Actor_Kill is fine.
         if (pendingKillNetIds.count(netId)) {
-            pendingKillNetIds.erase(netId);
+            // Karebaba: do NOT erase from pendingKillNetIds yet (Fix 35).
+            // The actor moves to ACTORCAT_MISC for ~420 frames at 20fps. If the
+            // player exits and re-enters the room during that window, OoT destroys
+            // the ACTORCAT_MISC actor (room unload) and spawns a fresh one on
+            // re-entry. Without the netId still in pendingKillNetIds, the fresh
+            // actor starts alive. The erase is deferred to the non-host respawn
+            // detection in OnActorUpdate, which fires when the actor returns to
+            // ACTORCAT_ENEMY in a living state after completing the full cycle.
+            // Non-Karebaba enemies are killed instantly so their erase is immediate.
             if (actor->id == ACTOR_EN_KAREBABA) {
-                SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} (Karebaba) — skipping to dead countdown (Fix 34)", netId);
+                SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} (Karebaba) ptr={} — deferring dead state to OnActorInit (Fix 38)",
+                            netId, (void*)actor);
                 EnemyNetId* extPtr = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                 if (extPtr != nullptr) {
-                    extPtr->hasLocalDeath       = true;
-                    extPtr->pendingNaturalDeath = true;
-                    extPtr->defeatPacketSent    = true;
+                    extPtr->hasLocalDeath        = true;
+                    extPtr->pendingNaturalDeath  = true;
+                    extPtr->defeatPacketSent     = true;
+                    // Fix 38: defer SetupDeadItemDrop to OnActorInit.
+                    // OnActorSpawn fires BEFORE actor->init() is called by Actor_UpdateAll
+                    // (z_actor.c:3409 vs 2638). Calling SetupDeadItemDrop here causes
+                    // EnKarebaba_Init (Frame 1) to override actionFunc=DeadItemDrop back
+                    // to actionFunc=Idle. The next update() (Frame 2) then runs
+                    // EnKarebaba_Idle, detects the player, and calls SetupAwaken — making
+                    // the Karebaba appear alive for one frame on P2.
+                    // OnActorInit (z_actor.c:2641) fires AFTER actor->init() has run,
+                    // so SetupDeadItemDrop can override actionFunc without being undone.
+                    extPtr->deferredDeadItemDrop = true;
                 }
-                // Fix 34: skip the Dying animation entirely and jump directly to
-                // DeadItemDrop (ACTORCAT_MISC). SetupDyingNet left the actor in
-                // ACTORCAT_ENEMY where OnActorUpdate runs; the Dying state's
-                // bgCheckFlags logic completed in ~21 frames, triggering premature
-                // respawn detection (state=1) before the death cycle could complete.
-                // With the actor in ACTORCAT_MISC, OnActorUpdate never fires on it,
-                // so the respawn detection cannot run until Actor_ChangeCategory
-                // moves it back to ACTORCAT_ENEMY naturally at the end of Regrow.
-                actor->flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
-                actor->flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
-                EnKarebaba_SetupDeadItemDrop((EnKarebaba*)actor, gPlayState);
             } else {
                 SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} — killing actor immediately", netId);
+                pendingKillNetIds.erase(netId); // instant kill — safe to release now
                 isKillingNetworkActor = true;
                 Actor_Kill(actor);
                 isKillingNetworkActor = false;
@@ -438,6 +804,40 @@ void Anchor::RegisterHooks() {
         if (isDynamicSpawn && roomState.ownerClientId == ownClientId) {
             SendPacket_EnemySpawn(actor);
         }
+    });
+
+    // Fix 38 — apply deferred dead state after EnKarebaba_Init has run.
+    // OnActorSpawn fires before actor->init() (z_actor.c:3409 vs 2638). Setting
+    // actionFunc=DeadItemDrop there is immediately overridden by EnKarebaba_Init in
+    // Frame 1, which resets actionFunc=Idle. The next update() then calls SetupAwaken.
+    // OnActorInit fires at z_actor.c:2641, after actor->init() and before the first
+    // update(), so we can safely override here without being overwritten.
+    COND_ID_HOOK(OnActorInit, ACTOR_EN_KAREBABA, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        // Only non-host needs this — host never sets deferredDeadItemDrop.
+        if (roomState.ownerClientId == ownClientId) {
+            return;
+        }
+        if (!IsSaveLoaded() || gPlayState == nullptr) {
+            return;
+        }
+        EnemyNetId* ext = const_cast<EnemyNetId*>(
+            ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+        if (ext == nullptr || !ext->deferredDeadItemDrop) {
+            return;
+        }
+        ext->deferredDeadItemDrop = false;
+        SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} (Karebaba) ptr={} — SetupDeadItemDrop after init (Fix 38)",
+                    ext->netId, (void*)actor);
+        // Set the same flags EnKarebaba_SetupDying sets (natural precursor to
+        // DeadItemDrop). EnKarebaba_Init (via Actor_ProcessInitChain) resets flags
+        // to standard enemy flags; we must re-apply the death flags now that init
+        // has run. SetupDeadItemDrop itself clears DRAW_CULLING_DISABLED.
+        actor->flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
+        actor->flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
+        EnKarebaba_SetupDeadItemDrop((EnKarebaba*)actor, gPlayState);
+        SPDLOG_INFO("[EnemySpawn] After SetupDeadItemDrop: ptr={} category={}",
+                    (void*)actor, (int)actor->category);
     });
 
     // Host sends enemy positions every frame to all clients in the same scene.
@@ -559,10 +959,18 @@ void Anchor::RegisterHooks() {
                     if (!ext->pendingNaturalDeath && ext->defeatPacketSent) {
                         SendPacket_EnemyRespawn(ext->netId);
                     }
-                    ext->pendingNaturalDeath = false;
-                    ext->hasLocalDeath       = false;
-                    ext->defeatPacketSent    = false;
-                    ext->netStateIndex       = -1; // force re-sync from host on next ENEMY_UPDATE
+
+                    // Fix 36 — stacked kill: a second ENEMY_DEFEATED arrived while the
+                    // actor was already mid-cycle. Instead of restoring to live state,
+                    // immediately re-trigger the death cycle so the stacked kill is
+                    // honoured. The actor stays in pendingKillNetIds for room re-entry.
+                    bool doStalledKill = ext->stalledKillPending;
+
+                    ext->pendingNaturalDeath  = false;
+                    ext->hasLocalDeath        = false;
+                    ext->defeatPacketSent     = false;
+                    ext->stalledKillPending   = false;
+                    ext->netStateIndex        = -1;
                     // Clear hasNetState (Fix 25): prevents stale scale/rot from the
                     // host's last packet being re-applied during the first few frames
                     // after respawn (caused "missing heads" visual). The actor runs
@@ -570,9 +978,26 @@ void Anchor::RegisterHooks() {
                     // sets hasNetState=true again; if the host is absent it stays
                     // false and the actor runs free AI permanently — correct behavior.
                     ext->hasNetState = false;
+
                     sentDefeatThisScene.erase(ext->netId);
-                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (non-host) — sync re-enabled",
-                                ext->netId, curState);
+
+                    if (doStalledKill) {
+                        // Re-trigger the death cycle immediately for the stacked kill.
+                        SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} stalled kill — re-triggering death cycle (non-host)",
+                                    ext->netId);
+                        ext->hasLocalDeath       = true;
+                        ext->pendingNaturalDeath = true;
+                        ext->defeatPacketSent    = true;
+                        actor->flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
+                        actor->flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
+                        EnKarebaba_SetupDeadItemDrop((EnKarebaba*)actor, gPlayState);
+                        // Keep in pendingKillNetIds for room re-entry persistence
+                    } else {
+                        // Release the deferred pendingKillNetIds entry (Fix 35).
+                        pendingKillNetIds.erase(ext->netId);
+                        SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (non-host) — sync re-enabled",
+                                    ext->netId, curState);
+                    }
                 }
             }
 
@@ -752,7 +1177,7 @@ void Anchor::RegisterHooks() {
         Actor* actor = static_cast<Actor*>(refActor);
         // Diagnostic: log every OnEnemyDefeat invocation so we can confirm
         // which actors fire this hook and whether their extension is found.
-        SPDLOG_INFO("[EnemyDefeated] OnEnemyDefeat hook: actor id={} cat={}", actor->id, actor->category);
+        SPDLOG_INFO("[EnemyDefeated] OnEnemyDefeat hook: actor ptr={} id={} cat={}", (void*)actor, actor->id, actor->category);
         if (!IsSaveLoaded()) {
             SPDLOG_WARN("[EnemyDefeated] OnEnemyDefeat skipped — save not loaded (actor id={})", actor->id);
             return;
@@ -1320,6 +1745,32 @@ void Anchor::RegisterHooks() {
         }
 
         CLOSE_DISPS(gPlayState->state.gfxCtx);
+    });
+
+    // Re-apply remote players' custom skeletons when the local asset-alt prefix changes
+    // (e.g. the player switches their own model, which may change which .o2r is open).
+    // Also re-broadcasts our own UPDATE_CLIENT_STATE so remote clients pick up our new model.
+    COND_HOOK(OnAssetAltChange, isConnected, [&]() {
+        if (gPlayState == nullptr) return;
+        Actor* actor = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
+        while (actor != nullptr) {
+            if (actor->id == ACTOR_EN_OE2 && actor->update == DummyPlayer_Update) {
+                uint32_t clientId = GetDummyPlayerClientId(actor);
+                if (clients.contains(clientId)) {
+                    AnchorClient& client = clients[clientId];
+                    if (!client.customModelFilename.empty()) {
+                        bool isAdult = (client.linkAge != LINK_AGE_CHILD);
+                        client.customSkeleton = nullptr;
+                        SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
+                            &((Player*)actor)->skelAnime, isAdult,
+                            (uint8_t)client.currentTunic,
+                            client.customModelFilename, client.customSkeleton);
+                    }
+                }
+            }
+            actor = actor->next;
+        }
+        SendPacket_UpdateClientState();
     });
 
     // #endregion

@@ -191,7 +191,8 @@ void EnKarebaba_SetupDying(EnKarebaba* this) {
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_JR_DEAD);
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->actionFunc = EnKarebaba_Dying;
-    LUSLOG_INFO("[Karebaba] SetupDying home=(%.0f,%.0f,%.0f)",
+    LUSLOG_INFO("[Karebaba] SetupDying ptr=%p cat=%d home=(%.0f,%.0f,%.0f)",
+                (void*)this, (int)this->actor.category,
                 this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
     GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
 }
@@ -207,7 +208,8 @@ void EnKarebaba_SetupDeadItemDrop(EnKarebaba* this, PlayState* play) {
     this->actor.params = 200;
     this->actor.flags &= ~ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->actionFunc = EnKarebaba_DeadItemDrop;
-    LUSLOG_INFO("[Karebaba] SetupDeadItemDrop home=(%.0f,%.0f,%.0f)",
+    LUSLOG_INFO("[Karebaba] SetupDeadItemDrop ptr=%p home=(%.0f,%.0f,%.0f)",
+                (void*)this,
                 this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
 }
 

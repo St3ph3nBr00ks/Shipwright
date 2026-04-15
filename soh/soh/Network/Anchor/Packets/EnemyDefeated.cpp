@@ -73,13 +73,29 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 // kill, or pendingNaturalDeath = prior network kill), ignore the duplicate.
                 if (actor->id == ACTOR_EN_KAREBABA) {
                     if (ext->defeatPacketSent || ext->pendingNaturalDeath) {
-                        SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} already dying — ignoring duplicate", netId);
+                        SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} already dying — stacking kill for after respawn", netId);
+                        // The actor is already mid-cycle; we cannot apply this kill now.
+                        // Mark stalledKillPending so that when the current cycle completes
+                        // and respawn detection fires in OnActorUpdate, it immediately
+                        // re-triggers the death cycle instead of restoring the actor to
+                        // live state (Fix 36 — stacked kill support).
+                        ext->stalledKillPending = true;
+                        // Also ensure pendingKillNetIds persists so that if the player
+                        // exits and re-enters the room mid-cycle, SetupDeadItemDrop fires
+                        // again on the fresh spawn (Fix 35).
+                        pendingKillNetIds.insert(netId);
                         return;
                     }
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle", netId);
                     EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
-                    ext->hasLocalDeath      = true;
+                    ext->hasLocalDeath       = true;
                     ext->pendingNaturalDeath = true;
+                    // Keep netId in pendingKillNetIds so that if P2 exits the room
+                    // mid-cycle (OoT destroys the actor on room unload), the fresh
+                    // spawn on re-entry will also be set to SetupDeadItemDrop via the
+                    // pendingKillNetIds check in OnActorSpawn (Fix 35). Erased by the
+                    // non-host respawn detection when the cycle completes.
+                    pendingKillNetIds.insert(netId);
                     return;
                 }
 
@@ -100,10 +116,14 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     {
         Actor* misc = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
         while (misc != nullptr) {
-            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(misc);
+            EnemyNetId* ext = const_cast<EnemyNetId*>(
+                ObjectExtension::GetInstance().Get<EnemyNetId>(misc));
             if (ext != nullptr && ext->netId == netId &&
                 (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
-                SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} in ACTORCAT_MISC natural cycle — ignoring", netId);
+                SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} in ACTORCAT_MISC natural cycle — stacking kill for after respawn", netId);
+                ext->stalledKillPending = true;
+                // Ensure persistence across room re-entries (Fix 35).
+                pendingKillNetIds.insert(netId);
                 return;
             }
             misc = misc->next;

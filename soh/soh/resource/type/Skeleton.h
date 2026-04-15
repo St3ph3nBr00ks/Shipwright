@@ -79,6 +79,7 @@ struct SkeletonPatchInfo {
     SkelAnime* skelAnime;
     std::string vanillaSkeletonPath;
     bool isLocalPlayer;
+    std::shared_ptr<Skeleton> overrideSkeleton; // keeps folder-loaded skeleton alive for local player override
 };
 
 class SkeletonPatcher {
@@ -88,6 +89,9 @@ class SkeletonPatcher {
     static void ClearSkeletons();
     static void UpdateSkeletons();
     static void UpdateCustomSkeletons();
+    static void ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, bool isAdult, uint8_t tunic,
+                                                 const std::string& characterFolder,
+                                                 std::shared_ptr<Skeleton>& outSkeleton);
 
     static std::vector<SkeletonPatchInfo> skeletons;
 
@@ -97,6 +101,7 @@ class SkeletonPatcher {
     static bool IsLocalPlayerSkelAnime(SkelAnime* skelAnime);
     static void UpdateTunicSkeletons(SkeletonPatchInfo& skel);
     static void UpdateCustomSkeletonFromPath(const std::string& skeletonPath, SkeletonPatchInfo& skel);
+    static void UpdateCustomSkeletonFromFolder(const std::string& skeletonPath, const std::string& folder, SkeletonPatchInfo& skel);
 };
 
 } // namespace SOH

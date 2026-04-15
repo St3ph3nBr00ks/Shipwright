@@ -4,6 +4,7 @@
 
 #include "soh/Network/Network.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
+#include "soh/resource/type/Skeleton.h"
 #include <libultraship/libultraship.h>
 #include <queue>
 #include <mutex>
@@ -59,6 +60,22 @@ struct EnemyNetId {
     // While true: hasLocalDeath blocks ENEMY_UPDATE overrides; item drop is suppressed.
     // Cleared in OnActorUpdate when the actor returns to Idle (respawn complete).
     bool pendingNaturalDeath = false;
+
+    // Set when a second ENEMY_DEFEATED arrives for this Karebaba while it is already
+    // in its natural death cycle (pendingNaturalDeath=true or defeatPacketSent=true).
+    // The incoming kill cannot be applied immediately — the actor must finish its
+    // current cycle first. When non-host respawn detection fires, this flag causes an
+    // immediate re-trigger of the death cycle (SetupDeadItemDrop) rather than clearing
+    // back to live state, so the stacked kill is honoured with one cycle's delay.
+    // Cleared after re-triggering (or when respawn completes with no stacked kill).
+    bool stalledKillPending = false;
+
+    // Set in OnActorSpawn when a pendingKillNetIds entry matches this Karebaba.
+    // OnActorSpawn fires BEFORE actor->init() is called by Actor_UpdateAll; calling
+    // SetupDeadItemDrop there causes EnKarebaba_Init (Frame 1) to override actionFunc
+    // back to Idle, and the next update() then calls SetupAwaken (Fix 38).
+    // OnActorInit fires AFTER actor->init() has run — safe to call SetupDeadItemDrop.
+    bool deferredDeadItemDrop = false;
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
@@ -104,6 +121,10 @@ typedef struct {
     u8 ocarinaNote;
     f32 ocarinaModulator;
     s8 ocarinaBend;
+
+    // Multiplayer cosmetic sync
+    std::string customModelFilename;                    // basename of remote client's .o2r, or ""
+    std::shared_ptr<SOH::Skeleton> customSkeleton;      // keeps loaded skeleton alive; nullptr = vanilla
 
     // Ptr to the dummy player
     Player* player;
@@ -158,10 +179,25 @@ class Anchor : public Network {
     std::unordered_set<uint32_t> pendingKillNetIds;
 
     // Follower mode: non-host player's position is overridden to trail the host.
-    // Activated by the 8-button sequence A→B→A→B→A→B→A→B (3-second timeout between presses).
+    // Toggled via the Anchor settings menu (AI Follower checkbox).
     // Deactivated by any controller input while active.
     bool followerActive = false;
-    int followerSeqPos = 0; // progress through the 8-step activation sequence
+
+    // AI follower state machine (runs each frame when followerActive is true).
+    // IDLE   — at P1's side; scans for nearby enemies.
+    // FOLLOW — moving toward P1's side.
+    // STUCK  — no progress detected; strafing to unstick, then back to FOLLOW.
+    // ENGAGE — moving toward the nearest ACTORCAT_ENEMY actor.
+    // ATTACK — within melee range; charge/retreat cycle, positions P2 for hitbox contact.
+    // RETURN — returning to P1's side after ENGAGE/ATTACK.
+    enum class FollowerAIState { IDLE, FOLLOW, STUCK, ENGAGE, ATTACK, RETURN };
+    FollowerAIState followerAIState     = FollowerAIState::IDLE;
+    int             followerStateFrames = 0;                     // frames spent in current state
+    int             followerStuckFrames = 0;                     // frames spent in STUCK
+    Vec3f           followerLastPos     = { 0.0f, 0.0f, 0.0f }; // position at last stuck-check
+    Vec3f           followerStuckDir    = { 0.0f, 0.0f, 0.0f }; // strafe direction while STUCK
+    Actor*          followerTargetEnemy = nullptr;               // current ENGAGE/ATTACK target
+    Vec3f           followerMoveTarget  = { 0.0f, 0.0f, 0.0f }; // world-space position ShouldActorUpdate steers toward
 
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();
@@ -246,6 +282,8 @@ class Anchor : public Network {
     bool IsSaveLoaded();
     bool CanTeleportTo(uint32_t clientId);
     uint32_t GetDummyPlayerClientId(const Actor* actor);
+    bool IsFollowerActive() const { return followerActive; }
+    void SetFollowerActive(bool active);
 
     void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);
     void SendPacket_EnemyDefeated(uint32_t netId);

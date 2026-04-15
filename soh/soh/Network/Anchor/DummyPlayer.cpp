@@ -87,6 +87,15 @@ void DummyPlayer_Init(Actor* actor, PlayState* play) {
     if (!isGlobalRoom) {
         NameTag_RegisterForActorWithOptions(actor, client.name.c_str(), {});
     }
+
+    // Step 6 — apply the remote player's custom character model skeleton if they have one
+    if (!client.customModelFilename.empty()) {
+        bool isAdult = (client.linkAge != LINK_AGE_CHILD);
+        client.customSkeleton = nullptr;
+        SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
+            &player->skelAnime, isAdult, (uint8_t)client.currentTunic,
+            client.customModelFilename, client.customSkeleton);
+    }
 }
 
 void Math_Vec3s_Copy(Vec3s* dest, Vec3s* src) {
@@ -125,7 +134,21 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     Math_Vec3s_Copy(&player->skelAnime.prevTransl, &client.prevTransl);
     player->currentBoots = client.currentBoots;
     player->currentShield = client.currentShield;
+    uint8_t prevTunic = player->currentTunic; // capture before overwrite for change detection
     player->currentTunic = client.currentTunic;
+
+    // Step 7 — re-apply custom skeleton only when tunic changes or skeleton not yet applied.
+    // Guarded to avoid calling ApplyCustomSkeletonToDummyPlayer (archive search + LoadFile)
+    // every frame — that would be 60 archive searches per second per DummyPlayer.
+    if (!client.customModelFilename.empty()) {
+        bool isAdult = (client.linkAge != LINK_AGE_CHILD);
+        if (client.customSkeleton == nullptr || prevTunic != player->currentTunic) {
+            SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
+                &player->skelAnime, isAdult, (uint8_t)player->currentTunic,
+                client.customModelFilename, client.customSkeleton);
+        }
+    }
+
     player->stateFlags1 = client.stateFlags1;
     player->stateFlags2 = client.stateFlags2;
     player->itemAction = client.itemAction;
@@ -248,4 +271,10 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play) {
     // asserts. Set the id back to ACTOR_PLAYER so that `numLoaded` will be decremented
     // correctly.
     actor->id = ACTOR_PLAYER;
+
+    // Step 8 — release the custom skeleton shared_ptr so its memory can be freed
+    uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(actor);
+    if (Anchor::Instance->clients.contains(clientId)) {
+        Anchor::Instance->clients[clientId].customSkeleton = nullptr;
+    }
 }
