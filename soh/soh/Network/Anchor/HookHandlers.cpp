@@ -406,13 +406,24 @@ void Anchor::RegisterHooks() {
         if (pendingKillNetIds.count(netId)) {
             pendingKillNetIds.erase(netId);
             if (actor->id == ACTOR_EN_KAREBABA) {
-                SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} (Karebaba) — triggering natural death cycle", netId);
+                SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} (Karebaba) — skipping to dead countdown (Fix 34)", netId);
                 EnemyNetId* extPtr = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                 if (extPtr != nullptr) {
                     extPtr->hasLocalDeath       = true;
                     extPtr->pendingNaturalDeath = true;
+                    extPtr->defeatPacketSent    = true;
                 }
-                EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
+                // Fix 34: skip the Dying animation entirely and jump directly to
+                // DeadItemDrop (ACTORCAT_MISC). SetupDyingNet left the actor in
+                // ACTORCAT_ENEMY where OnActorUpdate runs; the Dying state's
+                // bgCheckFlags logic completed in ~21 frames, triggering premature
+                // respawn detection (state=1) before the death cycle could complete.
+                // With the actor in ACTORCAT_MISC, OnActorUpdate never fires on it,
+                // so the respawn detection cannot run until Actor_ChangeCategory
+                // moves it back to ACTORCAT_ENEMY naturally at the end of Regrow.
+                actor->flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
+                actor->flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
+                EnKarebaba_SetupDeadItemDrop((EnKarebaba*)actor, gPlayState);
             } else {
                 SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} — killing actor immediately", netId);
                 isKillingNetworkActor = true;
@@ -580,21 +591,25 @@ void Anchor::RegisterHooks() {
                     ext->limbCount = ska->limbCount;
                 }
             }
-            // Both En_Dekubaba and En_Karebaba compute world.pos each frame from
-            // animated angles rather than using a stable model root:
-            //   En_Dekubaba: head-tip position derived from home.pos + stemSectionAngles
-            //   En_Karebaba: in Spin state, world.pos = f(home.pos, shape.rot) trig
-            // Overriding world.pos OR shape.rot causes the stem base to drift/wobble:
-            //   - world.pos override displaces the root for the render frame it is set
-            //   - shape.rot override causes the next actor->update() to compute world.pos
-            //     from a stale (50 ms-old) host angle, producing a one-frame positional error
-            // Both are skipped here and in HandlePacket_EnemyUpdate; the state machine and
-            // jointTable sync keep each actor visually correct without manual overrides.
-            if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
-                actor->world.pos = ext->netPos;
-                actor->shape.rot = ext->netShapeRot;
+            // Skip world.pos/rot/shape.rot re-apply when the actor is in a local death
+            // animation (hasLocalDeath=true). The death code drives these fields each
+            // frame (e.g. BounceAround modifies world.rot for Gold Skulltula).
+            // Overwriting with stale cached host values corrupts the animation.
+            // Scale and health have their own hasLocalDeath guards further below.
+            if (!ext->hasLocalDeath) {
+                // Both En_Dekubaba and En_Karebaba compute world.pos each frame from
+                // animated angles rather than using a stable model root:
+                //   En_Dekubaba: head-tip position derived from home.pos + stemSectionAngles
+                //   En_Karebaba: in Spin state, world.pos = f(home.pos, shape.rot) trig
+                // Overriding world.pos OR shape.rot causes the stem base to drift/wobble.
+                // Both are skipped here and in HandlePacket_EnemyUpdate; the state machine
+                // and jointTable sync keep each actor visually correct without overrides.
+                if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
+                    actor->world.pos = ext->netPos;
+                    actor->shape.rot = ext->netShapeRot;
+                }
+                actor->world.rot = ext->netRot;
             }
-            actor->world.rot         = ext->netRot;
             // Skip health re-apply after a local kill so the host's stale health > 0
             // packets don't revive the dying actor on this client (hasLocalDeath guard).
             // Multi-hit guard: only re-apply if local health hasn't been reduced below the

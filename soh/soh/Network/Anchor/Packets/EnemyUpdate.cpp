@@ -127,77 +127,81 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     while (actor != nullptr) {
         EnemyNetId* ext = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
         if (ext != nullptr && ext->netId == netId) {
-            // En_Karebaba: world.pos is computed each frame from home.pos + shape.rot
-            // trig (same pattern as En_Dekubaba Fix 7). shape.rot is driven entirely
-            // by the local state machine; overriding it with a stale host value causes
-            // the next actor->update() to compute world.pos from the wrong angles,
-            // making the stem base wobble. Skip both; jointTable sync handles visuals.
-            if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
-                actor->world.pos = pos;
-                actor->shape.rot = shapeRot;
-            }
-            actor->world.rot         = rot;
-            // Health sync rules:
-            //   (a) hasLocalDeath: we already killed this enemy locally; ignore host
-            //       health > 0 while our ENEMY_DEFEATED packet travels.
-            //   (b) Multi-hit enemies: only apply if host's health is <= our current
-            //       value (host has taken as much or more damage). Prevents the host's
-            //       stale higher value from resetting locally-dealt damage on P2.
-            if (!ext->hasLocalDeath && health <= actor->colChkInfo.health) {
-                actor->colChkInfo.health = health;
-                ext->netHealth           = health;
-            }
-            actor->scale             = scale;
+            // Cache state unconditionally so OnActorUpdate can re-apply it after the
+            // enemy's own update() runs (required for collision registration — Fix 4),
+            // and so that Karebaba respawn re-sync has fresh values on revival.
+            // netHealth is NOT cached here — it is only updated when we actually apply
+            // the health value to the actor (see multi-hit guard below).
+            ext->hasNetState = true;
+            ext->netPos      = pos;
+            ext->netRot      = rot;
+            ext->netShapeRot = shapeRot;
+            ext->netScale    = scale;
 
-            // Apply joint/morph tables if present in this packet and the actor has a skeleton.
-            // Skip for En_Karebaba in active attack states (Awaken=2/Upright=3/Spin=4/Retract=7):
-            // during these states the local update() drives the joint table each frame from its
-            // own timers. P1's table reflects P1's animation phase, which differs from P2's
-            // (both cycle Upright↔Spin but out of phase). Applying P1's table every packet
-            // (~50ms) causes the head to flicker between P1's pose and P2's locally-computed
-            // pose — visible as heads growing/shrinking on P2. During dormant states (Grow/Idle/
-            // Regrow) joint table sync IS needed to show the correct growth/shrink animation.
-            bool skipJoints = false;
-            if (actor->id == ACTOR_EN_KAREBABA) {
-                s16 localState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
-                skipJoints = (localState == 2 || localState == 3 ||
-                              localState == 4 || localState == 7);
-            }
-            if (!skipJoints && ext->skelAnime != nullptr && ext->limbCount > 0) {
-                if (payload.contains("jointTable")) {
-                    const auto& joints = payload["jointTable"];
-                    uint8_t count = static_cast<uint8_t>(
-                        std::min((size_t)(ext->limbCount + 1), joints.size()));
-                    for (uint8_t i = 0; i < count; i++) {
-                        ext->skelAnime->jointTable[i] = joints[i].get<Vec3s>();
+            // Only write to the live actor when not in a local death animation.
+            // After a local kill, hasLocalDeath=true; the actor's own death code
+            // drives world.pos/rot/scale/joints each frame (e.g. BounceAround
+            // modifies world.rot every frame for Gold Skulltula). Overwriting with
+            // stale host values corrupts the death animation visually.
+            if (!ext->hasLocalDeath) {
+                // En_Karebaba and En_Dekubaba: world.pos is computed analytically
+                // each frame from home.pos + animated angles; shape.rot is driven
+                // entirely by the local state machine. Overriding either causes
+                // wobble or misalignment. Skip both; jointTable sync handles visuals.
+                if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
+                    actor->world.pos = pos;
+                    actor->shape.rot = shapeRot;
+                }
+                actor->world.rot = rot;
+
+                // Health sync: only apply if host's health is <= our current value
+                // (host has taken as much or more damage). Prevents the host's stale
+                // higher value from resetting locally-dealt damage on multi-hit enemies.
+                if (health <= actor->colChkInfo.health) {
+                    actor->colChkInfo.health = health;
+                    ext->netHealth           = health;
+                }
+                actor->scale = scale;
+
+                // Apply joint/morph tables if present in this packet and the actor has a skeleton.
+                // Skip for En_Karebaba in active attack states (Awaken=2/Upright=3/Spin=4/Retract=7):
+                // during these states the local update() drives the joint table each frame from its
+                // own timers. P1's table reflects P1's animation phase, which differs from P2's
+                // (both cycle Upright↔Spin but out of phase). Applying P1's table every packet
+                // (~50ms) causes the head to flicker between P1's pose and P2's locally-computed
+                // pose — visible as heads growing/shrinking on P2. During dormant states (Grow/Idle/
+                // Regrow) joint table sync IS needed to show the correct growth/shrink animation.
+                bool skipJoints = false;
+                if (actor->id == ACTOR_EN_KAREBABA) {
+                    s16 localState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
+                    skipJoints = (localState == 2 || localState == 3 ||
+                                  localState == 4 || localState == 7);
+                }
+                if (!skipJoints && ext->skelAnime != nullptr && ext->limbCount > 0) {
+                    if (payload.contains("jointTable")) {
+                        const auto& joints = payload["jointTable"];
+                        uint8_t count = static_cast<uint8_t>(
+                            std::min((size_t)(ext->limbCount + 1), joints.size()));
+                        for (uint8_t i = 0; i < count; i++) {
+                            ext->skelAnime->jointTable[i] = joints[i].get<Vec3s>();
+                        }
+                    }
+                    if (payload.contains("morphTable") && ext->skelAnime->morphTable != nullptr) {
+                        const auto& morphs = payload["morphTable"];
+                        uint8_t count = static_cast<uint8_t>(
+                            std::min((size_t)(ext->limbCount + 1), morphs.size()));
+                        for (uint8_t i = 0; i < count; i++) {
+                            ext->skelAnime->morphTable[i] = morphs[i].get<Vec3s>();
+                        }
                     }
                 }
-                if (payload.contains("morphTable") && ext->skelAnime->morphTable != nullptr) {
-                    const auto& morphs = payload["morphTable"];
-                    uint8_t count = static_cast<uint8_t>(
-                        std::min((size_t)(ext->limbCount + 1), morphs.size()));
-                    for (uint8_t i = 0; i < count; i++) {
-                        ext->skelAnime->morphTable[i] = morphs[i].get<Vec3s>();
-                    }
+
+                // Karebaba: cache received state index so OnActorUpdate can drive
+                // the local state machine to match the host's current state.
+                if (actor->id == ACTOR_EN_KAREBABA && payload.contains("actionState")) {
+                    ext->netStateIndex  = (s16)payload["actionState"].get<int>();
+                    ext->netActorParams = (s16)payload.value("actorParams", (int)0);
                 }
-            }
-
-            // Cache state so OnActorUpdate can re-apply it after the enemy's own
-            // update() runs (required for collision registration — Fix 4).
-            // Note: netHealth is updated inside the hasLocalDeath guard above.
-            ext->hasNetState  = true;
-            ext->netPos       = pos;
-            ext->netRot       = rot;
-            ext->netShapeRot  = shapeRot;
-            ext->netScale     = scale;
-
-            // Karebaba: cache received state index so OnActorUpdate can drive
-            // the local state machine to match the host's current state.
-            // Skip when hasLocalDeath — we don't want to re-apply an Upright/Spin
-            // state index that would oscillate with the dying actor's own state.
-            if (actor->id == ACTOR_EN_KAREBABA && payload.contains("actionState") && !ext->hasLocalDeath) {
-                ext->netStateIndex  = (s16)payload["actionState"].get<int>();
-                ext->netActorParams = (s16)payload.value("actorParams", (int)0);
             }
 
             SPDLOG_DEBUG("[EnemyUpdate] Applied netId={} pos=({:.1f},{:.1f},{:.1f}) health={}",

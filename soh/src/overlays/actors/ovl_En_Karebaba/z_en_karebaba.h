@@ -29,6 +29,10 @@ typedef struct EnKarebaba {
 s16  EnKarebaba_GetStateIndex(struct EnKarebaba* actor);
 void EnKarebaba_ApplyNetState(struct EnKarebaba* actor, s16 stateIndex, s16 params);
 void EnKarebaba_SetupDyingNet(struct EnKarebaba* actor);
+// SetupDeadItemDrop is the public entry point used by the pendingKillNetIds path
+// (Fix 34) to skip the Dying animation and jump directly to the dead-countdown
+// phase in ACTORCAT_MISC, preventing premature respawn detection in OnActorUpdate.
+void EnKarebaba_SetupDeadItemDrop(struct EnKarebaba* actor, PlayState* play);
 // SetupRegrowNet skips the remaining DeadItemDrop/Dead countdown and jumps
 // directly to Regrow, called by HandlePacket_EnemyRespawn on non-host clients.
 void EnKarebaba_SetupRegrowNet(struct EnKarebaba* actor);

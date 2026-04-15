@@ -207,6 +207,8 @@ void EnKarebaba_SetupDeadItemDrop(EnKarebaba* this, PlayState* play) {
     this->actor.params = 200;
     this->actor.flags &= ~ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->actionFunc = EnKarebaba_DeadItemDrop;
+    LUSLOG_INFO("[Karebaba] SetupDeadItemDrop home=(%.0f,%.0f,%.0f)",
+                this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
 }
 
 void EnKarebaba_SetupRetract(EnKarebaba* this) {
