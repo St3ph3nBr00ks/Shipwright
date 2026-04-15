@@ -98,6 +98,7 @@ void Anchor::OnIncomingJson(nlohmann::json payload) {
         packetType != ENEMY_UPDATE &&
         packetType != ENEMY_DEFEATED &&
         packetType != ENEMY_SPAWN &&
+        packetType != ENEMY_RESPAWN &&
         packetType != DAMAGE_ENEMY) {
         if (payload.contains("clientId")) {
             uint32_t clientId = payload["clientId"].get<uint32_t>();
@@ -139,6 +140,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_EnemyDefeated(payload);
             else if (packetType == ENEMY_SPAWN)
                 HandlePacket_EnemySpawn(payload);
+            else if (packetType == ENEMY_RESPAWN)
+                HandlePacket_EnemyRespawn(payload);
             else if (packetType == DAMAGE_ENEMY)
                 HandlePacket_DamageEnemy(payload);
             else if (packetType == DAMAGE_PLAYER)

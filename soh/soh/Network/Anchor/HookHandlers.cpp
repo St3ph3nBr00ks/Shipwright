@@ -482,6 +482,10 @@ void Anchor::RegisterHooks() {
                 // deadEnemiesByScene should remain set so late joiners get the replay.
                 bool isGrowState  = (curState == 0);
                 if (curState >= 0 && !isDeathState && !isGrowState) {
+                    // Notify non-hosts to skip their remaining countdown and jump to
+                    // Regrow. Send before clearing flags so the receive-side guard
+                    // (pendingNaturalDeath check) still holds when the packet arrives.
+                    SendPacket_EnemyRespawn(extMut->netId);
                     extMut->defeatPacketSent    = false;
                     extMut->hasLocalDeath       = false;
                     extMut->pendingNaturalDeath = false;
@@ -536,6 +540,14 @@ void Anchor::RegisterHooks() {
                 bool isDeathState = (curState == 5 || curState == 6 || curState == 8 || curState == 9);
                 bool isGrowState  = (curState == 0);
                 if (curState >= 0 && !isDeathState && !isGrowState) {
+                    // Fix 33: non-host was the killer (not the receiver of a host kill).
+                    // pendingNaturalDeath=false means we killed it locally;
+                    // defeatPacketSent=true means we sent ENEMY_DEFEATED (not a dedup skip).
+                    // Notify the host to skip its remaining countdown — symmetric to how
+                    // the host sends ENEMY_RESPAWN to us after a host-side kill (Fix 32).
+                    if (!ext->pendingNaturalDeath && ext->defeatPacketSent) {
+                        SendPacket_EnemyRespawn(ext->netId);
+                    }
                     ext->pendingNaturalDeath = false;
                     ext->hasLocalDeath       = false;
                     ext->defeatPacketSent    = false;
@@ -657,7 +669,12 @@ void Anchor::RegisterHooks() {
                     // the same actor).  The dormant-to-active filter below still handles the
                     // Idle→Awaken→Upright activation boundary correctly.
                     bool netIsAttacking   = (ext->netStateIndex == 3 || ext->netStateIndex == 4);
-                    bool localIsAttacking = (curState           == 3 || curState           == 4);
+                    // Retract (7) is the natural wind-down of the attack cycle. When the local
+                    // actor is retracting and the host is still in Upright/Spin, ApplyNetState
+                    // would reset the actor back to Upright mid-retract — world.pos.y is already
+                    // at home.pos.y+14 so the retract completes in one frame, immediately loops
+                    // (confirmed in Test 27 P2 logs: rapid Upright↔Retract every 50ms).
+                    bool localIsAttacking = (curState == 3 || curState == 4 || curState == 7);
                     if (!(netIsAttacking && localIsAttacking)) {
                         bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
                                               ext->netStateIndex == 2 || ext->netStateIndex == 9);

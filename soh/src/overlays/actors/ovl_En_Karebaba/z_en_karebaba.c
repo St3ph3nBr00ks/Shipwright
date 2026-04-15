@@ -257,6 +257,25 @@ void EnKarebaba_SetupDyingNet(EnKarebaba* this) {
 }
 
 /**
+ * Network-safe shortcut to Regrow state.
+ * Called by HandlePacket_EnemyRespawn when the host has already completed its
+ * natural death cycle and the non-host should skip its remaining
+ * DeadItemDrop/Dead countdown rather than waiting 200 more frames.
+ *
+ * Replicates the world.pos/parent cleanup that EnKarebaba_SetupDead normally
+ * performs before SetupRegrow, then jumps straight to Regrow.
+ * actor->params is zeroed so EnKarebaba_Regrow's 0→20 growth counter starts
+ * correctly. Actor_ChangeCategory back to ACTORCAT_ENEMY happens naturally
+ * inside EnKarebaba_Regrow when params reaches 20.
+ */
+void EnKarebaba_SetupRegrowNet(EnKarebaba* this) {
+    Math_Vec3f_Copy(&this->actor.world.pos, &this->actor.home.pos);
+    this->actor.parent = NULL;
+    this->actor.params = 0;
+    EnKarebaba_SetupRegrow(this);
+}
+
+/**
  * Maps the current actionFunc pointer to a stable integer index for network sync.
  * Indices: 0=Grow 1=Idle 2=Awaken 3=Upright 4=Spin 5=Dying 6=DeadItemDrop
  *          7=Retract 8=Dead 9=Regrow

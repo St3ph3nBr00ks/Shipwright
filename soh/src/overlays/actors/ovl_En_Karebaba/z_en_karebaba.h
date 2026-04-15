@@ -29,5 +29,8 @@ typedef struct EnKarebaba {
 s16  EnKarebaba_GetStateIndex(struct EnKarebaba* actor);
 void EnKarebaba_ApplyNetState(struct EnKarebaba* actor, s16 stateIndex, s16 params);
 void EnKarebaba_SetupDyingNet(struct EnKarebaba* actor);
+// SetupRegrowNet skips the remaining DeadItemDrop/Dead countdown and jumps
+// directly to Regrow, called by HandlePacket_EnemyRespawn on non-host clients.
+void EnKarebaba_SetupRegrowNet(struct EnKarebaba* actor);
 
 #endif
