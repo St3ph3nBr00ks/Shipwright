@@ -1,4 +1,6 @@
 #include <ship/resource/ResourceManager.h>
+#include <ship/resource/archive/OtrArchive.h>
+#include <ship/resource/archive/O2rArchive.h>
 #include <unordered_set>
 #include "Skeleton.h"
 #include "soh/OTRGlobals.h"
@@ -93,8 +95,8 @@ std::vector<SkeletonPatchInfo> SkeletonPatcher::skeletons;
 // shared_ptr is destroyed before the loop body runs, freeing the vector.
 // trackForLocal: if true, record each newly-added archive path in sLocalCoopArchivePaths
 // so ClearLocalCoopArchives() can remove it when the local player switches models.
-// Pass false for DummyPlayer calls — each DummyPlayer uses a folder-specific resource
-// cache key so there is no cross-pack conflict.
+// Pass false for DummyPlayer calls — the archive is opened transiently (not added to
+// ArchiveManager) so it cannot pollute the global alt-asset lookup.
 static std::shared_ptr<Ship::File> LoadFileFromCoopFolder(const std::string& folder,
                                                            const std::string& altPath,
                                                            std::shared_ptr<Ship::ResourceManager> resourceMgr,
@@ -133,21 +135,37 @@ static std::shared_ptr<Ship::File> LoadFileFromCoopFolder(const std::string& fol
             }
         }
 
-        // Not yet in the manager (e.g. filename collision in mod_menu) — load it now.
+        // Not yet in the manager — behaviour depends on who is calling.
         if (archive == nullptr) {
-            archive = archiveManager->AddArchive(archivePath);
-            if (archive != nullptr) {
-                if (trackForLocal) {
+            if (trackForLocal) {
+                // Local player: add to ArchiveManager so textures are reachable via
+                // the global alt-asset lookup during Player_Draw.
+                archive = archiveManager->AddArchive(archivePath);
+                if (archive != nullptr) {
                     SPDLOG_INFO("[CoopModel]   AddArchive (tracked): \"{}\"", archivePath);
                     sLocalCoopArchivePaths.insert(archivePath);
-                } else {
-                    // WARNING: This archive is added to ArchiveManager but NOT tracked in
-                    // sLocalCoopArchivePaths.  It will remain in ArchiveManager for the
-                    // entire session and CAN pollute UpdateCustomSkeletonFromPath's generic
-                    // alt-asset lookup for the LOCAL player's skeleton.
-                    SPDLOG_WARN("[CoopModel]   AddArchive (UNTRACKED — DummyPlayer path, persists in ArchiveManager): \"{}\"",
-                                archivePath);
                 }
+            } else {
+                // DummyPlayer: open transiently — Load(), read the file, then discard.
+                // The archive is never added to ArchiveManager, so it cannot pollute
+                // the global alt-asset lookup or persist across DummyPlayer spawns.
+                const std::string ext = entry.path().extension().generic_string();
+                std::shared_ptr<Ship::Archive> transient;
+                if (ext == ".o2r" || ext == ".zip") {
+                    transient = std::make_shared<Ship::O2rArchive>(archivePath);
+                } else {
+                    transient = std::make_shared<Ship::OtrArchive>(archivePath);
+                }
+                transient->Load();
+                if (transient->IsLoaded()) {
+                    SPDLOG_INFO("[CoopModel]   transient open: \"{}\"", archivePath);
+                    auto file = transient->LoadFile(altPath);
+                    if (file != nullptr) {
+                        SPDLOG_INFO("[CoopModel]   found \"{}\" in transient archive \"{}\"", altPath, archivePath);
+                        return file;
+                    }
+                }
+                continue;  // transient archive discarded here; skip the shared archive->LoadFile below
             }
         } else {
             SPDLOG_INFO("[CoopModel]   archive already loaded: \"{}\"", archivePath);
