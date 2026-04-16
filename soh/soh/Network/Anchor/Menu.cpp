@@ -4,8 +4,6 @@
 #include "soh/SohGui/SohMenu.h"
 #include "soh/util.h"
 #include "soh/OTRGlobals.h"
-#include "soh/resource/type/Skeleton.h"
-#include <filesystem>
 
 namespace SohGui {
 extern std::shared_ptr<SohMenu> mSohMenu;
@@ -15,25 +13,6 @@ extern std::shared_ptr<AnchorRoomWindow> mAnchorRoomWindow;
 static const char* pvpModes[3] = { "Off", "On", "On + Friendly Fire" };
 static std::vector<const char*> teleportModes = { "None", "Team Only", "All" };
 static std::vector<const char*> showLocationsModes = { "None", "Team Only", "All" };
-
-// Returns {"", <FolderA>, <FolderB>, ...} where "" represents Default Link.
-// Each entry is the name of a subdirectory of coopplayercharacters/ (a sibling of mods/).
-// A character may supply multiple .otr archives (e.g. adult + child in separate files);
-// placing them in a named subfolder groups them as a single dropdown entry.
-static std::vector<std::string> GetInstalledCoopModelMods() {
-    std::vector<std::string> mods;
-    mods.push_back(""); // Default Link
-    std::string coopPath = Ship::Context::LocateFileAcrossAppDirs("coopplayercharacters", appShortName);
-    std::filesystem::path coopDir = std::filesystem::path(coopPath);
-    if (std::filesystem::exists(coopDir) && std::filesystem::is_directory(coopDir)) {
-        for (const auto& entry : std::filesystem::directory_iterator(coopDir)) {
-            if (entry.is_directory()) {
-                mods.push_back(entry.path().filename().string());
-            }
-        }
-    }
-    return mods;
-}
 
 void AnchorMainMenu(WidgetInfo& info) {
     auto anchor = Anchor::Instance;
@@ -90,50 +69,6 @@ void AnchorMainMenu(WidgetInfo& info) {
         CVarSetString(CVAR_REMOTE_ANCHOR("TeamId"), anchorTeamId.c_str());
         Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
     }
-
-    // Character Model — populated from coopplayercharacters/<FolderName>/*.otr (sibling of mods/)
-    {
-        auto mods = GetInstalledCoopModelMods();
-        std::string currentModel = CVarGetString(CVAR_REMOTE_ANCHOR("CharacterModel"), "");
-
-        // Auto-populate: if CharacterModel CVar is unset and at least one mod exists, pick the first.
-        // Guarded by a static flag so this only fires once per session — without it, selecting
-        // "Default Link" (empty string) would be immediately overridden on the next frame render.
-        static bool autoPopulateDone = false;
-        if (!autoPopulateDone && currentModel.empty() && mods.size() > 1) {
-            autoPopulateDone = true;
-            currentModel = mods[1];
-            CVarSetString(CVAR_REMOTE_ANCHOR("CharacterModel"), currentModel.c_str());
-            Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-        }
-        if (!currentModel.empty()) {
-            autoPopulateDone = true; // also mark done if a mod was already saved from a prior session
-        }
-
-        // Build a parallel display-name list; find which entry matches the stored CVar.
-        std::vector<const char*> displayNames;
-        int currentIdx = 0;
-        for (int i = 0; i < (int)mods.size(); i++) {
-            displayNames.push_back(mods[i].empty() ? "Default Link" : mods[i].c_str());
-            if (mods[i] == currentModel) {
-                currentIdx = i;
-            }
-        }
-
-        ImGui::Text("Character Model");
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-        if (ImGui::Combo("##CharacterModel", &currentIdx,
-                         (const char* const*)displayNames.data(), (int)displayNames.size())) {
-            CVarSetString(CVAR_REMOTE_ANCHOR("CharacterModel"), mods[currentIdx].c_str());
-            Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-            // Apply the new model immediately to the local player without waiting for a scene reload.
-            SOH::SkeletonPatcher::UpdateCustomSkeletons();
-            if (anchor->isConnected) {
-                anchor->SendPacket_UpdateClientState();
-            }
-        }
-    }
-    ImGui::Spacing();
 
     if (UIWidgets::Button("Restore Defaults", UIWidgets::ButtonOptions()
                                                   .Size(ImVec2(ImGui::GetContentRegionAvail().x / 2, 0))

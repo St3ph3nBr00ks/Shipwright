@@ -32,6 +32,12 @@ namespace SOH {
 // and unique cache keys, so they never conflict with each other or the local player.
 static std::unordered_set<std::string> sLocalCoopArchivePaths;
 
+// Tracks the last folder successfully passed to UpdateCustomSkeletonFromFolder so that
+// repeated calls with the same folder (e.g. every DummyPlayer spawn firing OnLinkSkeletonInit)
+// can skip the expensive ClearLocalCoopArchives + AddArchive cycle.  Reset to "" whenever
+// the folder changes or the archives are explicitly cleared via the empty-folder path.
+static std::string sLastLoadedCoopFolder;
+
 // Removes any archives in sLocalCoopArchivePaths from ArchiveManager, then clears
 // the tracking set.  Call before applying a new local player coop folder (or reverting
 // to default) to prevent stale archives from satisfying alt-asset lookups in
@@ -307,15 +313,20 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         // model — they would otherwise pollute ArchiveManager and cause
         // UpdateCustomSkeletonFromPath to return a coop skeleton instead of vanilla.
         ClearLocalCoopArchives(resourceMgr);
+        sLastLoadedCoopFolder = "";
         skel.overrideSkeleton = nullptr;
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
         return;
     }
 
-    // Switching to a new folder: clear any previously-loaded local coop archives so
-    // the old pack's alt assets don't win over the new pack's in ArchiveManager,
-    // and so the resource cache entries are evicted and re-parsed from the new archive.
-    ClearLocalCoopArchives(resourceMgr);
+    // Only clear when switching to a different folder.  If the folder is unchanged
+    // (e.g. every DummyPlayer spawn triggers OnLinkSkeletonInit → UpdateCustomSkeletons),
+    // the archives are already in the manager — clearing and re-opening them on a
+    // VirtualBox shared-folder path costs ~300 ms per call.
+    if (folder != sLastLoadedCoopFolder) {
+        ClearLocalCoopArchives(resourceMgr);
+        sLastLoadedCoopFolder = folder;
+    }
 
     const std::string altPath = Ship::IResource::gAltAssetPrefix + skeletonPath;
 
@@ -397,11 +408,27 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     // Character packs typically only ship adult models.  The child skeleton entries in
     // tested packs (3dsLink, Malon-Heroine) contain non-null but invalid limb data that
     // passes Guards 1–5 yet crashes in Player_Draw on the first render frame.
-    // Adult DummyPlayers with the same packs work correctly, confirming the adult limb
-    // data is valid while child data is not.  Skipping the apply lets the child DummyPlayer
-    // use the vanilla child skeleton, which is always safe.
+    //
+    // IMPORTANT: simply returning here is NOT safe.  OoT's SkelAnime_InitLink already ran
+    // before this function and applied the ArchiveManager's alt-asset lookup for gLinkChildSkel
+    // to the DummyPlayer's skelAnime — which resolves to the LOCAL PLAYER's coop child
+    // skeleton (e.g. 3dsLink's 3ds_young_link.otr) rather than vanilla.  Returning without
+    // correcting skelAnime leaves the DummyPlayer with that bleed-through skeleton.
+    // Fix: explicitly load and apply the vanilla child skeleton (no "alt/" prefix = bypasses
+    // alt-asset lookup entirely regardless of what is loaded in ArchiveManager).
     if (!isAdult) {
-        SPDLOG_INFO("[CoopModel]   skipping coop skeleton for child DummyPlayer (child skeleton may be invalid in pack)");
+        auto rMgr = Ship::Context::GetInstance()->GetResourceManager();
+        const std::string vanillaChildPath = std::string(gLinkChildSkel).substr(sOtr.length());
+        auto vanillaRes = rMgr->LoadResource(vanillaChildPath, true);
+        auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
+        if (vanillaSkel != nullptr && vanillaSkel->skeletonData.skeletonHeader.segment != nullptr) {
+            SPDLOG_INFO("[CoopModel]   child DummyPlayer: pack skeleton skipped, reset to vanilla child");
+            skelAnime->skeleton = vanillaSkel->skeletonData.skeletonHeader.segment;
+            uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
+            memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+        } else {
+            SPDLOG_WARN("[CoopModel]   child DummyPlayer: vanilla child skeleton unavailable, leaving skelAnime unchanged");
+        }
         return;
     }
 
