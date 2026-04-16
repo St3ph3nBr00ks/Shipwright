@@ -89,6 +89,8 @@ void DummyPlayer_Init(Actor* actor, PlayState* play) {
     }
 
     // Step 6 — apply the remote player's custom character model skeleton if they have one
+    SPDLOG_INFO("[CoopModel] DummyPlayer_Init clientId={}: linkAge={} customModel=\"{}\"",
+                clientId, client.linkAge, client.customModelFilename);
     if (!client.customModelFilename.empty()) {
         bool isAdult = (client.linkAge != LINK_AGE_CHILD);
         client.customSkeleton = nullptr;

@@ -53,6 +53,12 @@ static const std::map<int32_t, const char*> notificationPosition = {
     { 0, "Top Left" }, { 1, "Top Right" }, { 2, "Bottom Left" }, { 3, "Bottom Right" }, { 4, "Hidden" },
 };
 
+static const std::map<int32_t, const char*> pronounModeOptions = {
+    { 0, "He / Him / His (default)" },
+    { 1, "She / Her / Her" },
+    { 2, "They / Them / Their" },
+};
+
 static const std::map<int32_t, const char*> bootSequenceLabels = {
     { BOOTSEQUENCE_DEFAULT, "Default" },        { BOOTSEQUENCE_AUTHENTIC, "Authentic" },
     { BOOTSEQUENCE_FILESELECT, "File Select" }, { BOOTSEQUENCE_DEBUGWARPSCREEN, "Debug Warp Screen" },
@@ -251,6 +257,17 @@ void SohMenu::AddMenuSettings() {
         .CVar(CVAR_SETTING("A11yNoJabuWobble"))
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip("Disable the geometry wobble and camera distortion inside Jabu."));
+    AddWidget(path, "Player Pronouns in Dialogue", WIDGET_CVAR_COMBOBOX)
+        .CVar(CVAR_ENHANCEMENT("PronounMode"))
+        .RaceDisable(false)
+        .Options(ComboboxOptions()
+                     .ComboMap(pronounModeOptions)
+                     .DefaultIndex(0)
+                     .ComponentAlignment(ComponentAlignments::Right)
+                     .LabelPosition(LabelPositions::Far)
+                     .Tooltip("Replaces gendered pronouns referring to the player character in all in-game dialogue.\n"
+                              "Works at message display time — takes effect immediately without reloading.\n"
+                              "Note: verb agreement (e.g. 'they are' vs 'he is') is not automatically adjusted."));
     AddWidget(path, "EXPERIMENTAL", WIDGET_SEPARATOR_TEXT).Options(TextOptions().Color(Colors::Orange));
     AddWidget(path, "ImGui Menu Scaling", WIDGET_CVAR_COMBOBOX)
         .CVar(CVAR_SETTING("ImGuiScale"))

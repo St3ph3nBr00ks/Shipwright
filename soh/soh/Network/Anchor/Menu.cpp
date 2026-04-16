@@ -17,14 +17,14 @@ static std::vector<const char*> teleportModes = { "None", "Team Only", "All" };
 static std::vector<const char*> showLocationsModes = { "None", "Team Only", "All" };
 
 // Returns {"", <FolderA>, <FolderB>, ...} where "" represents Default Link.
-// Each entry is the name of a subdirectory of mods/coopplayercharacters/.
+// Each entry is the name of a subdirectory of coopplayercharacters/ (a sibling of mods/).
 // A character may supply multiple .otr archives (e.g. adult + child in separate files);
 // placing them in a named subfolder groups them as a single dropdown entry.
 static std::vector<std::string> GetInstalledCoopModelMods() {
     std::vector<std::string> mods;
     mods.push_back(""); // Default Link
-    std::string modsPath = Ship::Context::LocateFileAcrossAppDirs("mods", appShortName);
-    std::filesystem::path coopDir = std::filesystem::path(modsPath) / "coopplayercharacters";
+    std::string coopPath = Ship::Context::LocateFileAcrossAppDirs("coopplayercharacters", appShortName);
+    std::filesystem::path coopDir = std::filesystem::path(coopPath);
     if (std::filesystem::exists(coopDir) && std::filesystem::is_directory(coopDir)) {
         for (const auto& entry : std::filesystem::directory_iterator(coopDir)) {
             if (entry.is_directory()) {
@@ -91,7 +91,7 @@ void AnchorMainMenu(WidgetInfo& info) {
         Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
     }
 
-    // Character Model — populated from mods/coopplayercharacters/*.o2r|.otr
+    // Character Model — populated from coopplayercharacters/<FolderName>/*.otr (sibling of mods/)
     {
         auto mods = GetInstalledCoopModelMods();
         std::string currentModel = CVarGetString(CVAR_REMOTE_ANCHOR("CharacterModel"), "");

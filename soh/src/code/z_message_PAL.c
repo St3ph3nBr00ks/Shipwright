@@ -11,6 +11,7 @@
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/misc/PronounSystem.h"
 #include "soh/OTRGlobals.h"
 #include "soh/SaveManager.h"
 #include "soh/ResourceManagerHelpers.h"
@@ -2842,6 +2843,9 @@ void Message_OpenText(PlayState* play, u16 textId) {
         msgCtx->msgLength = font->msgLength;
         char* src = (uintptr_t)font->msgOffset;
         memcpy(font->msgBuf, src, font->msgLength);
+        int msgLen = (int)font->msgLength;
+        PronounSystem_FilterMessageBuffer(font->msgBuf, &msgLen);
+        font->msgLength = msgCtx->msgLength = (u32)msgLen;
     }
 
     msgCtx->textBoxProperties = font->charTexBuf[0];
