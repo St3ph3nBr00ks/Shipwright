@@ -235,6 +235,21 @@ void Anchor::RegisterHooks() {
             RefreshClientActors();
         }
 
+        // Diagnostic: log when local player's skelAnime.skeleton pointer changes.
+        // Helps identify if something overwrites the skeleton AFTER UpdateCustomSkeletons sets it.
+        static void* sLastLocalSkeleton = nullptr;
+        if (gPlayState != nullptr) {
+            Player* localPlayer = GET_PLAYER(gPlayState);
+            if (localPlayer != nullptr) {
+                void* curSkel = (void*)localPlayer->skelAnime.skeleton;
+                if (curSkel != sLastLocalSkeleton) {
+                    SPDLOG_INFO("[CoopModel] LocalPlayer skelAnime.skeleton changed: {} -> {}",
+                                sLastLocalSkeleton, curSkel);
+                    sLastLocalSkeleton = curSkel;
+                }
+            }
+        }
+
         SendPacket_PlayerUpdate();
     });
 

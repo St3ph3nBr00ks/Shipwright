@@ -103,7 +103,12 @@ static std::shared_ptr<Ship::File> LoadFileFromCoopFolder(const std::string& fol
     const std::filesystem::path charDir =
         std::filesystem::path(coopRoot) / folder;
 
+    SPDLOG_INFO("[CoopModel] LoadFileFromCoopFolder: folder=\"{}\" altPath=\"{}\" trackForLocal={} charDir=\"{}\"",
+                folder, altPath, trackForLocal, charDir.generic_string());
+
     if (!std::filesystem::exists(charDir) || !std::filesystem::is_directory(charDir)) {
+        SPDLOG_WARN("[CoopModel]   charDir does not exist or is not a directory: \"{}\" — returning nullptr",
+                    charDir.generic_string());
         return nullptr;
     }
 
@@ -131,17 +136,31 @@ static std::shared_ptr<Ship::File> LoadFileFromCoopFolder(const std::string& fol
         // Not yet in the manager (e.g. filename collision in mod_menu) — load it now.
         if (archive == nullptr) {
             archive = archiveManager->AddArchive(archivePath);
-            if (archive != nullptr && trackForLocal) {
-                sLocalCoopArchivePaths.insert(archivePath);
+            if (archive != nullptr) {
+                if (trackForLocal) {
+                    SPDLOG_INFO("[CoopModel]   AddArchive (tracked): \"{}\"", archivePath);
+                    sLocalCoopArchivePaths.insert(archivePath);
+                } else {
+                    // WARNING: This archive is added to ArchiveManager but NOT tracked in
+                    // sLocalCoopArchivePaths.  It will remain in ArchiveManager for the
+                    // entire session and CAN pollute UpdateCustomSkeletonFromPath's generic
+                    // alt-asset lookup for the LOCAL player's skeleton.
+                    SPDLOG_WARN("[CoopModel]   AddArchive (UNTRACKED — DummyPlayer path, persists in ArchiveManager): \"{}\"",
+                                archivePath);
+                }
             }
+        } else {
+            SPDLOG_INFO("[CoopModel]   archive already loaded: \"{}\"", archivePath);
         }
         if (archive == nullptr) continue;
 
         auto file = archive->LoadFile(altPath);
         if (file != nullptr) {
+            SPDLOG_INFO("[CoopModel]   found \"{}\" in archive \"{}\"", altPath, archivePath);
             return file;
         }
     }
+    SPDLOG_INFO("[CoopModel]   \"{}\" not found in any archive under folder \"{}\"", altPath, folder);
     return nullptr;
 }
 
@@ -309,10 +328,29 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
 
     if (folder.empty()) {
         // Revert to system default (vanilla or user's non-coop alt mod).
-        // Clear any coop archives that were added for the previous local player
-        // model — they would otherwise pollute ArchiveManager and cause
-        // UpdateCustomSkeletonFromPath to return a coop skeleton instead of vanilla.
+        // Clear tracked local archives first.
         ClearLocalCoopArchives(resourceMgr);
+        // ALSO remove any coopplayercharacters archives added UNTRACKED by DummyPlayer
+        // calls (trackForLocal=false path in LoadFileFromCoopFolder).  These are not in
+        // sLocalCoopArchivePaths but if left in ArchiveManager they cause
+        // UpdateCustomSkeletonFromPath to return a coop skeleton instead of vanilla.
+        {
+            const std::string coopRoot = Ship::Context::LocateFileAcrossAppDirs("coopplayercharacters", appShortName);
+            auto archiveManager = resourceMgr->GetArchiveManager();
+            auto loaded = archiveManager->GetArchives();
+            std::vector<std::string> toRemove;
+            for (auto& a : *loaded) {
+                const std::string& ap = a->GetPath();
+                if (ap.find(coopRoot) != std::string::npos ||
+                    ap.find("coopplayercharacters") != std::string::npos) {
+                    toRemove.push_back(ap);
+                }
+            }
+            for (const auto& ap : toRemove) {
+                SPDLOG_INFO("[CoopModel] ClearAllCoopArchives (revert to default): removing \"{}\"", ap);
+                archiveManager->RemoveArchive(ap);
+            }
+        }
         sLastLoadedCoopFolder = "";
         skel.overrideSkeleton = nullptr;
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
@@ -385,7 +423,10 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     // Keep the skeleton alive for as long as this SkeletonPatchInfo exists.
     skel.overrideSkeleton = skeleton;
 
-    SPDLOG_INFO("[CoopModel]   skeleton applied to local player skelAnime={}", (void*)skel.skelAnime);
+    SPDLOG_INFO("[CoopModel]   skeleton applied to local player skelAnime={} segment: {} -> {}",
+                (void*)skel.skelAnime,
+                (void*)skel.skelAnime->skeleton,
+                (void*)skeleton->skeletonData.skeletonHeader.segment);
     skel.skelAnime->skeleton = skeleton->skeletonData.skeletonHeader.segment;
     uintptr_t skelPtr = (uintptr_t)skeleton->GetPointer();
     memcpy(&skel.skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
@@ -404,25 +445,29 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         return;
     }
 
-    // Guard 0: skip coop skeleton for child-age DummyPlayers.
-    // Character packs typically only ship adult models.  The child skeleton entries in
-    // tested packs (3dsLink, Malon-Heroine) contain non-null but invalid limb data that
-    // passes Guards 1–5 yet crashes in Player_Draw on the first render frame.
+    // Guard 0: child-age DummyPlayers always use vanilla child skeleton.
     //
-    // IMPORTANT: simply returning here is NOT safe.  OoT's SkelAnime_InitLink already ran
-    // before this function and applied the ArchiveManager's alt-asset lookup for gLinkChildSkel
-    // to the DummyPlayer's skelAnime — which resolves to the LOCAL PLAYER's coop child
-    // skeleton (e.g. 3dsLink's 3ds_young_link.otr) rather than vanilla.  Returning without
-    // correcting skelAnime leaves the DummyPlayer with that bleed-through skeleton.
-    // Fix: explicitly load and apply the vanilla child skeleton (no "alt/" prefix = bypasses
-    // alt-asset lookup entirely regardless of what is loaded in ArchiveManager).
+    // OoT's SkelAnime_InitLink (called from play->playerInit) already ran before this
+    // function and applied the ArchiveManager's alt-asset lookup for gLinkChildSkel to
+    // the DummyPlayer's skelAnime.  If multiple coop archives are loaded, this may resolve
+    // to the LOCAL player's coop child skeleton instead of the remote player's.  We must
+    // reset skelAnime to the real vanilla child skeleton regardless.
+    //
+    // We do NOT attempt to apply the pack's own child skeleton here.  Both tested packs
+    // (3dsLink, Malon-Heroine) contain a child skeleton at alt/objects/object_link_child/
+    // gLinkChildSkel that passes Guards 1-5 numerically but crashes Player_Draw on the
+    // first render frame.  The crash cause is invalid limb display-list data that cannot
+    // be detected by the validation guards.
+    //
+    // loadExact=true bypasses the alt-asset auto-lookup in ResourceManager::LoadResourceProcess,
+    // so no coop archive can bleed through into this vanilla load.
     if (!isAdult) {
         auto rMgr = Ship::Context::GetInstance()->GetResourceManager();
         const std::string vanillaChildPath = std::string(gLinkChildSkel).substr(sOtr.length());
         auto vanillaRes = rMgr->LoadResource(vanillaChildPath, true);
         auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
         if (vanillaSkel != nullptr && vanillaSkel->skeletonData.skeletonHeader.segment != nullptr) {
-            SPDLOG_INFO("[CoopModel]   child DummyPlayer: pack skeleton skipped, reset to vanilla child");
+            SPDLOG_INFO("[CoopModel]   child DummyPlayer: reset to vanilla child skeleton (skelAnime={})", (void*)skelAnime);
             skelAnime->skeleton = vanillaSkel->skeletonData.skeletonHeader.segment;
             uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
             memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
@@ -569,6 +614,12 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     skelAnime->skeleton = skeleton->skeletonData.skeletonHeader.segment;
     uintptr_t skelPtr = (uintptr_t)skeleton->GetPointer();
     memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+
+    // Flush the F3DZEX2 display list cache so the renderer rebuilds from the new
+    // skeleton on the next frame.  Without this, stale cached display list commands
+    // from a previous skeleton (e.g. vanilla Link or a prior DummyPlayer at the same
+    // memory address) are served instead, producing the old model geometry + wrong textures.
+    gfx_texture_cache_clear();
 }
 
 void SkeletonPatcher::UpdateCustomSkeletonFromPath(const std::string& skeletonPath, SkeletonPatchInfo& skel) {
@@ -577,12 +628,19 @@ void SkeletonPatcher::UpdateCustomSkeletonFromPath(const std::string& skeletonPa
     auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
     bool isAlt = resourceMgr->IsAltAssetsEnabled();
 
+    SPDLOG_WARN("[CoopModel] UpdateCustomSkeletonFromPath FALLBACK: skeletonPath=\"{}\" isAlt={} skelAnime={}",
+                skeletonPath, isAlt, (void*)skel.skelAnime);
+
     // If alt assets are on, look for alt tagged skeletons
     if (isAlt) {
+        const std::string altLookupPath = Ship::IResource::gAltAssetPrefix + skeletonPath;
         altSkel = (Skeleton*)Ship::Context::GetInstance()
                       ->GetResourceManager()
-                      ->LoadResource(Ship::IResource::gAltAssetPrefix + skeletonPath, true)
+                      ->LoadResource(altLookupPath, true)
                       .get();
+
+        SPDLOG_WARN("[CoopModel]   alt lookup \"{}\" -> {} (ptr={})",
+                    altLookupPath, altSkel != nullptr ? "FOUND" : "not found", (void*)altSkel);
 
         // Override non-alt skeleton if necessary
         if (altSkel != nullptr) {
@@ -593,15 +651,19 @@ void SkeletonPatcher::UpdateCustomSkeletonFromPath(const std::string& skeletonPa
     // Load new skeleton based on the custom model if it exists
     if (altSkel == nullptr) {
         newSkel = (Skeleton*)Ship::Context::GetInstance()->GetResourceManager()->LoadResource(skeletonPath, true).get();
+        SPDLOG_WARN("[CoopModel]   vanilla lookup \"{}\" -> {} (ptr={})",
+                    skeletonPath, newSkel != nullptr ? "FOUND" : "not found", (void*)newSkel);
     }
 
     // Change back to the original skeleton if no skeleton's were found
     if (newSkel == nullptr && skeletonPath != skel.vanillaSkeletonPath) {
+        SPDLOG_WARN("[CoopModel]   no skeleton found, retrying with vanilla path \"{}\"", skel.vanillaSkeletonPath);
         UpdateCustomSkeletonFromPath(skel.vanillaSkeletonPath, skel);
         return;
     }
 
     if (newSkel != nullptr) {
+        SPDLOG_WARN("[CoopModel]   applying skeleton ptr={} to local player skelAnime={}", (void*)newSkel, (void*)skel.skelAnime);
         skel.skelAnime->skeleton = newSkel->skeletonData.skeletonHeader.segment;
         uintptr_t skelPtr = (uintptr_t)newSkel->GetPointer();
         memcpy(&skel.skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));

@@ -1,5 +1,6 @@
 #include "Anchor.h"
 #include "soh/Enhancements/nametag.h"
+#include <unordered_map>
 
 extern "C" {
 #include "macros.h"
@@ -262,6 +263,16 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
 
     if (client.sceneNum != gPlayState->sceneNum || !client.online || !client.isSaveLoaded) {
         return;
+    }
+
+    // Log skeleton pointer once per DummyPlayer lifetime so we can verify the
+    // correct pack skeleton is active at render time (not a stale/wrong-pack skeleton).
+    static std::unordered_map<uint32_t, void*> sLoggedSkeletons;
+    void* curSkel = (void*)player->skelAnime.skeleton;
+    if (sLoggedSkeletons[clientId] != curSkel) {
+        SPDLOG_INFO("[CoopModel] DummyPlayer_Draw clientId={} skelAnime.skeleton changed: {} -> {} (customModel=\"{}\")",
+                    clientId, sLoggedSkeletons[clientId], curSkel, client.customModelFilename);
+        sLoggedSkeletons[clientId] = curSkel;
     }
 
     // Hack to account for usage of gSaveContext in Player_Draw
