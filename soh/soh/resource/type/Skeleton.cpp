@@ -463,37 +463,11 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         return;
     }
 
-    // Guard 0: child-age DummyPlayers always use vanilla child skeleton.
+    // Guard 0: TEMPORARILY DISABLED — testing whether limbCount/dListCount fix resolves
+    // the child DummyPlayer crash.  If no crash occurs with the pack child skeleton applied,
+    // this block can be removed permanently.
     //
-    // OoT's SkelAnime_InitLink (called from play->playerInit) already ran before this
-    // function and applied the ArchiveManager's alt-asset lookup for gLinkChildSkel to
-    // the DummyPlayer's skelAnime.  If multiple coop archives are loaded, this may resolve
-    // to the LOCAL player's coop child skeleton instead of the remote player's.  We must
-    // reset skelAnime to the real vanilla child skeleton regardless.
-    //
-    // We do NOT attempt to apply the pack's own child skeleton here.  Both tested packs
-    // (3dsLink, Malon-Heroine) contain a child skeleton at alt/objects/object_link_child/
-    // gLinkChildSkel that passes Guards 1-5 numerically but crashes Player_Draw on the
-    // first render frame.  The crash cause is invalid limb display-list data that cannot
-    // be detected by the validation guards.
-    //
-    // loadExact=true bypasses the alt-asset auto-lookup in ResourceManager::LoadResourceProcess,
-    // so no coop archive can bleed through into this vanilla load.
-    if (!isAdult) {
-        auto rMgr = Ship::Context::GetInstance()->GetResourceManager();
-        const std::string vanillaChildPath = std::string(gLinkChildSkel).substr(sOtr.length());
-        auto vanillaRes = rMgr->LoadResource(vanillaChildPath, true);
-        auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
-        if (vanillaSkel != nullptr && vanillaSkel->skeletonData.skeletonHeader.segment != nullptr) {
-            SPDLOG_INFO("[CoopModel]   child DummyPlayer: reset to vanilla child skeleton (skelAnime={})", (void*)skelAnime);
-            skelAnime->skeleton = vanillaSkel->skeletonData.skeletonHeader.segment;
-            uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
-            memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
-        } else {
-            SPDLOG_WARN("[CoopModel]   child DummyPlayer: vanilla child skeleton unavailable, leaving skelAnime unchanged");
-        }
-        return;
-    }
+    // if (!isAdult) { ... return; }
 
     // Select the tunic-variant skeleton path (strip __OTR__ prefix used in asset macros)
     std::string skeletonPath;
@@ -632,6 +606,8 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     skelAnime->skeleton = skeleton->skeletonData.skeletonHeader.segment;
     uintptr_t skelPtr = (uintptr_t)skeleton->GetPointer();
     memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+    skelAnime->limbCount  = (u8)skeleton->limbCount;
+    skelAnime->dListCount = (s8)skeleton->dListCount;
 
     // Flush the F3DZEX2 display list cache so the renderer rebuilds from the new
     // skeleton on the next frame.  Without this, stale cached display list commands
