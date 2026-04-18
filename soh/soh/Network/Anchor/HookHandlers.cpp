@@ -1794,10 +1794,12 @@ void Anchor::RegisterHooks() {
                     if (!client.customModelFilename.empty()) {
                         bool isAdult = (client.linkAge != LINK_AGE_CHILD);
                         client.customSkeleton = nullptr;
+                        client.bakedModel = std::make_unique<SOH::BakedPlayerModel>();
                         SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
                             &((Player*)actor)->skelAnime, isAdult,
                             (uint8_t)client.currentTunic,
-                            client.customModelFilename, client.customSkeleton);
+                            client.customModelFilename, client.customSkeleton,
+                            *client.bakedModel);
                     }
                 }
             }

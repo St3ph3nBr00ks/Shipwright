@@ -1,9 +1,7 @@
 #include "Anchor.h"
 #include "soh/Enhancements/nametag.h"
 #include <unordered_map>
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include <libultraship/libultraship.h>
 
 extern "C" {
 #include "macros.h"
@@ -14,37 +12,6 @@ extern PlayState* gPlayState;
 void Player_UseItem(PlayState* play, Player* player, s32 item);
 void Player_Draw(Actor* actor, PlayState* play);
 }
-
-#ifdef _WIN32
-// Helper: calls Player_Draw inside a SEH __try/__except block.
-// Must be a separate function with no C++ objects (no destructors) so MSVC
-// allows __try — C2712 fires when __try is in a function that requires
-// object unwinding (e.g. a function with a static std::unordered_map).
-// Returns true if Player_Draw completed without exception, false if it crashed.
-// On crash, *outCode and *outAddr are set; for EXCEPTION_ACCESS_VIOLATION,
-// *outIsWrite and *outAccessAddr are also set.
-static bool TryPlayerDraw(Actor* actor, PlayState* play,
-                           DWORD* outCode, void** outAddr,
-                           bool* outIsWrite, ULONG_PTR* outAccessAddr) {
-    __try {
-        Player_Draw(actor, play);
-        return true;
-    } __except(
-        [&](LPEXCEPTION_POINTERS ep) -> LONG {
-            *outCode = ep->ExceptionRecord->ExceptionCode;
-            *outAddr = ep->ExceptionRecord->ExceptionAddress;
-            if (*outCode == EXCEPTION_ACCESS_VIOLATION &&
-                ep->ExceptionRecord->NumberParameters >= 2) {
-                *outIsWrite    = (ep->ExceptionRecord->ExceptionInformation[0] == 1);
-                *outAccessAddr =  ep->ExceptionRecord->ExceptionInformation[1];
-            }
-            return EXCEPTION_EXECUTE_HANDLER;
-        }(GetExceptionInformation())
-    ) {
-        return false;
-    }
-}
-#endif
 
 static DamageTable DummyPlayerDamageTable = {
     /* Deku nut      */ DMG_ENTRY(0, DUMMY_PLAYER_HIT_RESPONSE_STUN),
@@ -129,10 +96,11 @@ void DummyPlayer_Init(Actor* actor, PlayState* play) {
     if (!client.customModelFilename.empty()) {
         bool isAdult = (client.linkAge != LINK_AGE_CHILD);
         client.customSkeleton = nullptr;
+        client.bakedModel = std::make_unique<SOH::BakedPlayerModel>();
         client.lastAppliedModelFilename = "";  // reset so DummyPlayer_Update will re-apply
         SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
             &player->skelAnime, isAdult, (uint8_t)client.currentTunic,
-            client.customModelFilename, client.customSkeleton);
+            client.customModelFilename, client.customSkeleton, *client.bakedModel);
         client.lastAppliedModelFilename = client.customModelFilename;
     }
 }
@@ -188,9 +156,11 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         bool modelChanged  = (client.customModelFilename != client.lastAppliedModelFilename);
         bool tunicChanged  = (prevTunic != player->currentTunic);
         if (modelChanged || tunicChanged) {
+            client.customSkeleton = nullptr;
+            client.bakedModel = std::make_unique<SOH::BakedPlayerModel>();
             SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
                 &player->skelAnime, isAdult, (uint8_t)player->currentTunic,
-                client.customModelFilename, client.customSkeleton);
+                client.customModelFilename, client.customSkeleton, *client.bakedModel);
             client.lastAppliedModelFilename = client.customModelFilename;
         }
     }
@@ -315,55 +285,10 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     u8 originalButtonItem0 = gSaveContext.equips.buttonItems[0];
     gSaveContext.equips.buttonItems[0] = client.buttonItem0;
 
-#ifdef _WIN32
-    // Diagnostic: catch crashes in Player_Draw to identify the fault address and
-    // exception type.  Primary target: child DummyPlayers with custom skeletons,
-    // which crash on first render despite passing all structural validation guards.
-    // Remove this wrapper once the root cause is understood and fixed.
-    DWORD     exCode     = 0;
-    void*     exAddr     = nullptr;
-    ULONG_PTR accessAddr = 0;
-    bool      isWrite    = false;
-
-    bool drawOk = TryPlayerDraw((Actor*)player, play,
-                                &exCode, &exAddr, &isWrite, &accessAddr);
-
-    gSaveContext.linkAge = originalAge;
-    gSaveContext.equips.buttonItems[0] = originalButtonItem0;
-
-    if (!drawOk) {
-        SPDLOG_ERROR("[CoopModel] Player_Draw CRASHED clientId={} linkAge={} customModel=\"{}\"",
-                     clientId, (int)client.linkAge, client.customModelFilename);
-        SPDLOG_ERROR("[CoopModel]   exception: code=0x{:08X} at instrAddr={}",
-                     exCode, exAddr);
-        if (exCode == EXCEPTION_ACCESS_VIOLATION) {
-            SPDLOG_ERROR("[CoopModel]   access violation: {} address=0x{:016X}",
-                         isWrite ? "WRITE" : "READ", accessAddr);
-        }
-        SPDLOG_ERROR("[CoopModel]   skelAnime: skeleton={} limbCount={} dListCount={}",
-                     (void*)player->skelAnime.skeleton,
-                     (int)player->skelAnime.limbCount,
-                     (int)player->skelAnime.dListCount);
-        if (client.customSkeleton != nullptr) {
-            void** limbPtrs = (void**)client.customSkeleton->skeletonData.skeletonHeader.segment;
-            SPDLOG_ERROR("[CoopModel]   customSkeleton: ptr={} limbCount={} dListCount={} segment={}",
-                         (void*)client.customSkeleton.get(),
-                         client.customSkeleton->limbCount,
-                         client.customSkeleton->dListCount,
-                         (void*)client.customSkeleton->skeletonData.skeletonHeader.segment);
-            int logCount = (client.customSkeleton->limbCount < 5) ? client.customSkeleton->limbCount : 5;
-            for (int i = 0; i < logCount; i++) {
-                SPDLOG_ERROR("[CoopModel]   customSkeleton limbPtrs[{}] = {}", i, limbPtrs[i]);
-            }
-        } else {
-            SPDLOG_ERROR("[CoopModel]   customSkeleton: nullptr (Guard 0 applied vanilla)");
-        }
-    }
-#else
     Player_Draw((Actor*)player, play);
+
     gSaveContext.linkAge = originalAge;
     gSaveContext.equips.buttonItems[0] = originalButtonItem0;
-#endif
 }
 
 void DummyPlayer_Destroy(Actor* actor, PlayState* play) {
@@ -386,6 +311,7 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play) {
     if (Anchor::Instance->clients.contains(clientId)) {
         if (Anchor::Instance->clients[clientId].player == (Player*)actor) {
             Anchor::Instance->clients[clientId].customSkeleton = nullptr;
+            Anchor::Instance->clients[clientId].bakedModel = nullptr;
         }
     }
 }

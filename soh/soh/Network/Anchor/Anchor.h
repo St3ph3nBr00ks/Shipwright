@@ -123,10 +123,13 @@ typedef struct {
     s8 ocarinaBend;
 
     // Multiplayer cosmetic sync
-    std::string customModelFilename;                    // basename of remote client's .o2r, or ""
+    std::string customModelFilename;                    // folder name of remote client's coop pack, or ""
     std::shared_ptr<SOH::Skeleton> customSkeleton;      // keeps loaded skeleton alive; nullptr = vanilla
     std::string lastAppliedModelFilename;               // folder that was last passed to ApplyCustomSkeletonToDummyPlayer;
                                                         // suppresses per-frame retries when the lookup fails
+    std::unique_ptr<SOH::BakedPlayerModel> bakedModel;  // per-DummyPlayer baked display lists;
+                                                        // unique_ptr so its address (and all c_str() inside) is
+                                                        // stable even if this unordered_map entry is rehashed
 
     // Ptr to the dummy player
     Player* player;

@@ -793,28 +793,72 @@ void OTRGlobals::Initialize() {
     context->InitConfiguration();
     context->InitConsoleVariables();
 
-    // Rotate the previous session's log file before initializing logging.
-    // Each launch renames "Ship of Harkinian.log" → "Ship of Harkinian N.log"
-    // where N is the next unused integer (starting at 1).
+    // Compute this session's numbered log file path before initializing logging.
+    // The file's name never changes after creation, so references like "log 101"
+    // stay valid forever; no post-launch rename.  Retention: keep 10 sets (current
+    // + 9 prior); older ones are deleted each launch.
+    std::string logFilePath;
     {
         std::filesystem::path logDir = std::filesystem::path(
             Ship::Context::GetAppDirectoryPath()).append("logs");
-        std::filesystem::path currentLog = logDir / "Ship of Harkinian.log";
-        if (std::filesystem::exists(currentLog)) {
-            int n = 1;
-            std::filesystem::path dest;
-            do {
-                dest = logDir / ("Ship of Harkinian " + std::to_string(n) + ".log");
-                n++;
-            } while (std::filesystem::exists(dest));
-            std::error_code ec;
-            std::filesystem::rename(currentLog, dest, ec);
+        std::error_code mkdirEc;
+        std::filesystem::create_directories(logDir, mkdirEc);
+
+        const std::string baseName = Ship::Context::GetInstance()->GetName();  // "Ship of Harkinian"
+        const std::string prefix   = baseName + " ";
+        const std::string suffix   = ".log";
+
+        // Scan directory for "<baseName> <N>.log" files; track max N and all
+        // existing numbers (for pruning).
+        int maxN = 0;
+        std::vector<std::pair<int, std::filesystem::path>> existing;
+        if (std::filesystem::exists(logDir)) {
+            for (const auto& entry : std::filesystem::directory_iterator(logDir, mkdirEc)) {
+                if (!entry.is_regular_file()) continue;
+                const std::string name = entry.path().filename().generic_string();
+                if (name.size() <= prefix.size() + suffix.size()) continue;
+                if (name.compare(0, prefix.size(), prefix) != 0) continue;
+                if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+                const std::string middle = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+                if (middle.empty() || !std::all_of(middle.begin(), middle.end(), ::isdigit)) continue;
+                try {
+                    int n = std::stoi(middle);
+                    existing.emplace_back(n, entry.path());
+                    if (n > maxN) maxN = n;
+                } catch (...) { /* ignore malformed */ }
+            }
         }
+
+        // Pick the next N; bump up to 5 times if the chosen filename already
+        // exists (concurrent launch race on a shared logs directory).
+        int chosenN = maxN + 1;
+        std::filesystem::path chosenPath;
+        for (int tries = 0; tries < 5; tries++) {
+            chosenPath = logDir / (prefix + std::to_string(chosenN) + suffix);
+            if (!std::filesystem::exists(chosenPath)) break;
+            chosenN++;
+        }
+        logFilePath = chosenPath.generic_string();
+
+        // Prune: keep current session + 9 prior = 10 files total.  Delete anything
+        // with M < (chosenN - 9).
+        const int keepCutoff = chosenN - 9;
+        for (const auto& [n, path] : existing) {
+            if (n < keepCutoff) {
+                std::error_code rmEc;
+                std::filesystem::remove(path, rmEc);
+            }
+        }
+
+        // Best-effort: also remove the legacy unnumbered "Ship of Harkinian.log"
+        // left behind by older builds.  It is no longer created by this code.
+        std::error_code legacyEc;
+        std::filesystem::remove(logDir / (baseName + suffix), legacyEc);
     }
 
     auto logLevel =
         static_cast<spdlog::level::level_enum>(CVarGetInteger(CVAR_DEVELOPER_TOOLS("LogLevel"), defaultLogLevel));
-    context->InitLogging(logLevel, logLevel);
+    context->InitLogging(logLevel, logLevel, logFilePath);
     Ship::Context::GetInstance()->GetLogger()->set_pattern("[%H:%M:%S.%e] [%s:%#] [%l] %v");
 
     context->InitGfxDebugger();

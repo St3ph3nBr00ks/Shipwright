@@ -6,6 +6,10 @@
 #include "soh/OTRGlobals.h"
 #include "soh/cvar_prefixes.h"
 #include "libultraship/libultraship.h"
+#include <fast/lus_gbi.h>
+#include <fast/f3dex2.h>
+#include <fast/resource/type/DisplayList.h>
+#include <bitset>
 #include <soh_assets.h>
 #include <objects/object_link_child/object_link_child.h>
 #include <objects/object_link_boy/object_link_boy.h>
@@ -146,26 +150,24 @@ static std::shared_ptr<Ship::File> LoadFileFromCoopFolder(const std::string& fol
                     sLocalCoopArchivePaths.insert(archivePath);
                 }
             } else {
-                // DummyPlayer: open transiently — Load(), read the file, then discard.
-                // The archive is never added to ArchiveManager, so it cannot pollute
-                // the global alt-asset lookup or persist across DummyPlayer spawns.
-                const std::string ext = entry.path().extension().generic_string();
-                std::shared_ptr<Ship::Archive> transient;
+                // DummyPlayer: open the archive transiently without adding it to
+                // ArchiveManager so it cannot pollute the global alt-asset lookup.
+                std::shared_ptr<Ship::Archive> opened;
                 if (ext == ".o2r" || ext == ".zip") {
-                    transient = std::make_shared<Ship::O2rArchive>(archivePath);
+                    opened = std::make_shared<Ship::O2rArchive>(archivePath);
                 } else {
-                    transient = std::make_shared<Ship::OtrArchive>(archivePath);
+                    opened = std::make_shared<Ship::OtrArchive>(archivePath);
                 }
-                transient->Load();
-                if (transient->IsLoaded()) {
+                opened->Load();
+                if (opened->IsLoaded()) {
                     SPDLOG_INFO("[CoopModel]   transient open: \"{}\"", archivePath);
-                    auto file = transient->LoadFile(altPath);
+                    auto file = opened->LoadFile(altPath);
                     if (file != nullptr) {
                         SPDLOG_INFO("[CoopModel]   found \"{}\" in transient archive \"{}\"", altPath, archivePath);
                         return file;
                     }
                 }
-                continue;  // transient archive discarded here; skip the shared archive->LoadFile below
+                continue;  // file not in this archive; try next
             }
         } else {
             SPDLOG_INFO("[CoopModel]   archive already loaded: \"{}\"", archivePath);
@@ -456,18 +458,677 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     gfx_texture_cache_clear();
 }
 
+// ---------------------------------------------------------------------------
+// Pre-baked DL helpers
+// ---------------------------------------------------------------------------
+
+// Opens the first .otr/.o2r archive under coopplayercharacters/<folder>/ that
+// actually contains `probePath`, without adding it to ArchiveManager.
+// Returns nullptr if no archive contains the probe.
+//
+// A plain first-match pick is wrong: packs frequently ship separate adult and
+// child archives (e.g. 3ds_link.otr + 3ds_young_link.otr).  directory_iterator
+// yields whichever alphabetizes first, which for a child skeleton bake will be
+// the adult pack → every limb lookup fails → zombie skeleton applied.
+static std::shared_ptr<Ship::Archive> OpenCoopPackArchive(const std::string& folder,
+                                                          const std::string& probePath) {
+    const std::string coopRoot = Ship::Context::LocateFileAcrossAppDirs("coopplayercharacters", appShortName);
+    const std::filesystem::path charDir = std::filesystem::path(coopRoot) / folder;
+
+    if (!std::filesystem::exists(charDir) || !std::filesystem::is_directory(charDir)) {
+        return nullptr;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(charDir)) {
+        if (entry.is_directory()) continue;
+        const std::string ext = entry.path().extension().generic_string();
+        if (ext != ".otr" && ext != ".o2r") continue;
+
+        const std::string archivePath = entry.path().generic_string();
+        std::shared_ptr<Ship::Archive> archive;
+        if (ext == ".o2r") {
+            archive = std::make_shared<Ship::O2rArchive>(archivePath);
+        } else {
+            archive = std::make_shared<Ship::OtrArchive>(archivePath);
+        }
+        archive->Load();
+        if (!archive->IsLoaded()) continue;
+        if (archive->LoadFile(probePath) != nullptr) {
+            SPDLOG_INFO("[CoopModel][Bake] Opened transient archive: \"{}\" (contains probe \"{}\")",
+                        archivePath, probePath);
+            return archive;
+        }
+    }
+    SPDLOG_ERROR("[CoopModel][Bake] No archive in folder \"{}\" contains probe \"{}\"",
+                 folder, probePath);
+    return nullptr;
+}
+
+// Per-bake counters that tell us, at a glance, how self-contained a pack is
+// and whether the bake is relying heavily on vanilla inheritance.  Logged
+// once per BuildBakedPlayerModel call (across all limbs and recursive sub-DLs).
+//
+// "pack":      the referenced file was found in the pack archive and preloaded
+//              under a "coopchar/<folder>/..." key (isolated, pack-local).
+// "inherited": the file was not in the pack; we kept the original OTR path
+//              (or ArchiveManager::HashToCString fallback) so render-time
+//              resolution falls through to vanilla / other archives.
+// "sentinel":  path could not be resolved anywhere at bake time — a sentinel
+//              string was emitted.  Render-time null checks handle the miss.
+struct BakeStats {
+    int vtxPack = 0;      int vtxInherited = 0;
+    int subdlPack = 0;    int subdlInherited = 0;
+    int texPack = 0;      int texInherited = 0;    int texSentinel = 0;
+};
+
+// Recursively bakes a single display list from the archive.
+// Returns pointer to the baked Gfx array (owned by model.bakedDLs), or nullptr.
+static Gfx* BakeDL(
+    const std::string& dlPath,
+    const std::string& folder,
+    std::shared_ptr<Ship::Archive>& archive,
+    const std::unordered_map<uint64_t, std::string>& hashMap,
+    std::shared_ptr<Ship::ResourceLoader>& loader,
+    BakeStats& stats,
+    BakedPlayerModel& model,
+    std::unordered_map<std::string, Gfx*>& dlCache)
+{
+    // Guard against infinite recursion / repeated baking
+    auto cacheIt = dlCache.find(dlPath);
+    if (cacheIt != dlCache.end()) {
+        return cacheIt->second;
+    }
+    // Mark in-progress with nullptr to break cycles
+    dlCache[dlPath] = nullptr;
+
+    // Load and parse the DL from the archive.
+    // Character pack archives store resources with "alt/" prefix; try both bare and prefixed paths.
+    auto file = archive->LoadFile(dlPath);
+    std::string resolvedDlPath = dlPath;
+    if (!file) {
+        const std::string altDlPath = Ship::IResource::gAltAssetPrefix + dlPath;
+        file = archive->LoadFile(altDlPath);
+        if (file) {
+            resolvedDlPath = altDlPath;
+        }
+    }
+    if (!file) {
+        SPDLOG_WARN("[CoopModel][Bake] BakeDL: file not found in archive: \"{}\"", dlPath);
+        return nullptr;
+    }
+    const std::string cacheKey = "coopchar/" + folder + "/" + resolvedDlPath;
+    auto resource = loader->LoadResource(cacheKey, file);
+    // Inject into ResourceManager cache so render-time GetResourceRawPointer(key)
+    // finds it.  Without this, loader->LoadResource only transforms the raw bytes
+    // into a resource object without populating the cache, and render-time lookup
+    // falls through to archive search → NotFound → null (Coop Test 15 symptom).
+    Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(cacheKey, resource);
+    auto dl = std::dynamic_pointer_cast<Fast::DisplayList>(resource);
+    if (!dl) {
+        SPDLOG_WARN("[CoopModel][Bake] BakeDL: not a DisplayList: \"{}\"", dlPath);
+        return nullptr;
+    }
+
+    // Deep-copy the instructions; we will patch them in place
+    std::vector<Gfx> baked = dl->Instructions;
+
+    for (size_t i = 0; i < baked.size(); i++) {
+        const uint8_t op = (uint8_t)((baked[i].words.w0 >> 24) & 0xFF);
+
+        // For all FILEPATH/HASH branches below: a referenced file missing from the
+        // pack archive is expected (packs ship only assets they change and inherit
+        // the rest from vanilla).  Rewriting w1 to a "coopchar/..." key without
+        // having actually loaded the resource produces a cache miss at render time;
+        // for vertex lookups that miss crashes GfxSpVertex on a null pointer.
+        // On fallthrough we leave the original OTR opcode intact so the interpreter
+        // resolves through the global archive cache — and we always push the string
+        // onto model.pathStrings so the w1 char* is owned by the BakedPlayerModel
+        // (the source DisplayList resource may be evicted from the cache).
+
+        // ── FILEPATH texture ──────────────────────────────────────────────
+        // Packs typically ship overrides under "alt/<path>" (the gAltAssetPrefix).
+        // Try bare first, then alt-prefixed — same pattern as the outer DL load.
+        if (op == (uint8_t)Fast::OTR_G_SETTIMG_OTR_FILEPATH) {
+            const char* origPath = (const char*)baked[i].words.w1;
+            auto texFile = archive->LoadFile(origPath);
+            std::string resolvedPath = origPath;
+            if (!texFile) {
+                const std::string altPath = Ship::IResource::gAltAssetPrefix + origPath;
+                texFile = archive->LoadFile(altPath);
+                if (texFile) resolvedPath = altPath;
+            }
+            if (texFile) {
+                const std::string uniqueKey = "coopchar/" + folder + "/" + resolvedPath;
+                auto texRes = loader->LoadResource(uniqueKey, texFile);
+                Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(uniqueKey, texRes);
+                model.pathStrings.push_back(uniqueKey);
+                stats.texPack++;
+            } else {
+                model.pathStrings.push_back(origPath);  // keep OTR op, stabilize string
+                stats.texInherited++;
+            }
+            baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+        }
+        // ── HASH texture ──────────────────────────────────────────────────
+        //
+        // ALWAYS convert HASH → FILEPATH unconditionally.  Upstream
+        // `gfx_set_timg_otr_hash_handler_custom` (libultraship
+        // interpreter.cpp:3438) mis-advances the instruction pointer on both
+        // resource-miss paths (extra `(*cmd0)++` at L3448 when fileName is null,
+        // and L3497 when texture is null), skipping one real instruction and
+        // causing "Unhandled OP code" crashes when the skipped word's bytes are
+        // read as an opcode.  The FILEPATH handler is miss-safe — it logs the
+        // failure and returns without advancing.
+        //
+        // Baked stride stays 2 Gfx: FILEPATH (1-Gfx) + zeroed Gfx (opcode 0 =
+        // G_NOOP) preserves the HASH instruction's original width so indices
+        // around this instruction remain correct for subsequent ops.
+        else if (op == (uint8_t)Fast::OTR_G_SETTIMG_OTR_HASH) {
+            const uint64_t hash = ((uint64_t)(uint32_t)baked[i+1].words.w0 << 32)
+                                | (uint64_t)(uint32_t)baked[i+1].words.w1;
+
+            std::string pathStr;
+            auto hashIt = hashMap.find(hash);
+            if (hashIt != hashMap.end()) {
+                pathStr = hashIt->second;
+                // Best-effort: pre-load into the resource cache under a
+                // pack-unique key to avoid cross-pack cache collisions.
+                auto texFile = archive->LoadFile(pathStr);
+                if (texFile) {
+                    const std::string uniqueKey = "coopchar/" + folder + "/" + pathStr;
+                    auto texRes = loader->LoadResource(uniqueKey, texFile);
+                    Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(uniqueKey, texRes);
+                    pathStr = uniqueKey;
+                    stats.texPack++;
+                } else {
+                    stats.texInherited++;
+                }
+            } else {
+                // Hash not in this pack's file list — ask the global
+                // ArchiveManager for the path so the FILEPATH handler can try
+                // vanilla / other-pack resolution at render time.
+                auto archiveMgr =
+                    Ship::Context::GetInstance()->GetResourceManager()->GetArchiveManager();
+                const char* globalPath = archiveMgr->HashToCString(hash);
+                if (globalPath != nullptr) {
+                    pathStr = globalPath;
+                    stats.texInherited++;
+                } else {
+                    pathStr = "__coopbake_unresolved_hash__";
+                    stats.texSentinel++;
+                }
+            }
+
+            model.pathStrings.push_back(pathStr);
+            baked[i].words.w0 = (baked[i].words.w0 & 0x00FFFFFF)
+                              | ((uintptr_t)(uint8_t)Fast::OTR_G_SETTIMG_OTR_FILEPATH << 24);
+            baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+            baked[i+1].words.w0 = 0;  // G_NOOP padding — preserves 2-Gfx stride
+            baked[i+1].words.w1 = 0;
+            i++;  // skip hash word
+        }
+        // ── FILEPATH vertex ───────────────────────────────────────────────
+        //
+        // Two-tier resolution at bake time:
+        //   1. Pack has it     → preload under "coopchar/<folder>/<path>" (isolated)
+        //   2. Pack miss       → keep origPath; resolves at render via the global
+        //                        ArchiveManager alt-asset fallback (vanilla inheritance)
+        //
+        // Note: we do NOT neuter on a probe miss here.  The pack's DLs legitimately
+        // reference vanilla-stored vertex arrays (e.g. "objects/object_link_boy/..."
+        // — the pack overrides the DL but inherits vtx data from vanilla).  An
+        // eager bake-time probe (ArchiveManager::HasFile) is too strict: vanilla
+        // resolution uses alt-asset/loader logic that HasFile does not replicate,
+        // so a false-negative would wrongly drop healthy vertex batches, leaving
+        // the DummyPlayer rendering against stale GPU vertex cache (Coop Test 13
+        // scramble symptom).
+        //
+        // If a path is genuinely unresolvable at render time,
+        // gfx_vtx_otr_filepath_handler_custom's null check (interpreter.cpp)
+        // logs and skips the op safely — no crash, single missing batch.
+        else if (op == (uint8_t)Fast::OTR_G_VTX_OTR_FILEPATH) {
+            // Packs typically ship overrides under "alt/<path>" (the gAltAssetPrefix).
+            // Try bare first, then alt-prefixed — same pattern as the outer DL load.
+            // Without this, the bake resolves every vtx via render-time alt-asset
+            // fallback, which on a multi-pack setup returns the LOCAL player's
+            // vertex data for a REMOTE DummyPlayer — Coop Test 14 "exploded" symptom.
+            const char* origPath = (const char*)baked[i].words.w1;
+            auto vtxFile = archive->LoadFile(origPath);
+            std::string resolvedPath = origPath;
+            if (!vtxFile) {
+                const std::string altPath = Ship::IResource::gAltAssetPrefix + origPath;
+                vtxFile = archive->LoadFile(altPath);
+                if (vtxFile) resolvedPath = altPath;
+            }
+            if (vtxFile) {
+                const std::string uniqueKey = "coopchar/" + folder + "/" + resolvedPath;
+                auto vtxRes = loader->LoadResource(uniqueKey, vtxFile);
+                Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(uniqueKey, vtxRes);
+                model.pathStrings.push_back(uniqueKey);
+                stats.vtxPack++;
+            } else {
+                model.pathStrings.push_back(origPath);
+                stats.vtxInherited++;
+            }
+            baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+            i++;  // skip vtx-params word [i+1]
+        }
+        // ── HASH vertex ───────────────────────────────────────────────────
+        else if (op == (uint8_t)Fast::OTR_G_VTX_OTR_HASH) {
+            const uint32_t vtxW0    = (uint32_t)baked[i].words.w0;
+            const uint32_t vtxCnt   = (vtxW0 >> 12) & 0xFF;
+            const uint32_t vtxIdxOff = ((vtxW0 >> 1) & 0x7F) - vtxCnt;
+            const uint32_t byteOffset = (uint32_t)baked[i].words.w1;
+            const uint64_t hash = ((uint64_t)(uint32_t)baked[i+1].words.w0 << 32)
+                                | (uint64_t)(uint32_t)baked[i+1].words.w1;
+            auto hashIt = hashMap.find(hash);
+            if (hashIt != hashMap.end()) {
+                auto vtxFile = archive->LoadFile(hashIt->second);
+                if (vtxFile) {
+                    const std::string uniqueKey = "coopchar/" + folder + "/" + hashIt->second;
+                    auto vtxRes = loader->LoadResource(uniqueKey, vtxFile);
+                    Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(uniqueKey, vtxRes);
+                    model.pathStrings.push_back(uniqueKey);
+                    // Convert HASH → FILEPATH (vtxDataOff is byteOffset / sizeof F3DVtx)
+                    baked[i].words.w0 = (uintptr_t)(uint8_t)Fast::OTR_G_VTX_OTR_FILEPATH << 24;
+                    baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+                    baked[i+1].words.w0 = (uintptr_t)vtxCnt;
+                    baked[i+1].words.w1 = (uintptr_t)((vtxIdxOff << 16) | (byteOffset / 16));
+                    stats.vtxPack++;
+                } else {
+                    stats.vtxInherited++;  // left HASH op intact
+                }
+            } else {
+                stats.vtxInherited++;  // left HASH op intact
+            }
+            i++;  // skip hash word
+        }
+        // ── FILEPATH sub-DL ───────────────────────────────────────────────
+        else if (op == (uint8_t)Fast::OTR_G_DL_OTR_FILEPATH) {
+            const char* origPath = (const char*)baked[i].words.w1;
+            Gfx* subBaked = BakeDL(origPath, folder, archive, hashMap, loader, stats, model, dlCache);
+            if (subBaked) {
+                const uintptr_t pushBit = (baked[i].words.w0 >> 16) & 1;
+                baked[i].words.w0 = ((uintptr_t)(uint8_t)0xDE << 24) | (pushBit << 16);
+                baked[i].words.w1 = (uintptr_t)subBaked;
+                stats.subdlPack++;
+            } else {
+                model.pathStrings.push_back(origPath);  // keep OTR op, stabilize string
+                baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+                stats.subdlInherited++;
+            }
+        }
+        // ── HASH sub-DL ───────────────────────────────────────────────────
+        else if (op == (uint8_t)Fast::OTR_G_DL_OTR_HASH) {
+            const uintptr_t pushBit = (baked[i].words.w0 >> 16) & 1;
+            const uint64_t hash = ((uint64_t)(uint32_t)baked[i+1].words.w0 << 32)
+                                | (uint64_t)(uint32_t)baked[i+1].words.w1;
+            auto hashIt = hashMap.find(hash);
+            if (hashIt != hashMap.end()) {
+                Gfx* subBaked = BakeDL(hashIt->second, folder, archive, hashMap, loader, stats, model, dlCache);
+                if (subBaked) {
+                    baked[i].words.w0 = ((uintptr_t)(uint8_t)0xDE << 24) | (pushBit << 16);
+                    baked[i].words.w1 = (uintptr_t)subBaked;
+                    baked[i+1].words.w0 = 0;
+                    baked[i+1].words.w1 = 0;
+                    stats.subdlPack++;
+                } else {
+                    stats.subdlInherited++;
+                }
+            } else {
+                stats.subdlInherited++;
+            }
+            i++;  // skip hash word
+        }
+        // ── 2-word commands with no path reference: skip second word ──────
+        else if (op == (uint8_t)Fast::OTR_G_MARKER       ||
+                 op == (uint8_t)Fast::OTR_G_BRANCH_Z_OTR ||
+                 op == (uint8_t)Fast::OTR_G_MTX_OTR      ||
+                 op == (uint8_t)Fast::OTR_G_MOVEMEM_HASH) {
+            i++;
+        }
+        // All other opcodes (standard GBI, RDP, MTX_OTR_FILEPATH, etc.) pass through
+    }
+
+    model.bakedDLs.push_back(std::move(baked));
+    Gfx* ptr = model.bakedDLs.back().data();
+    dlCache[dlPath] = ptr;
+    return ptr;
+}
+
+// Builds a BakedPlayerModel for the given skeleton loaded from the pack archive.
+// Returns true on success.
+static bool BuildBakedPlayerModel(
+    const std::shared_ptr<Skeleton>& skeleton,
+    const std::string& folder,
+    std::shared_ptr<Ship::Archive>& archive,
+    std::shared_ptr<Ship::ResourceLoader>& loader,
+    BakedPlayerModel& outModel)
+{
+    const int limbCount = skeleton->limbCount;
+    outModel.limbCopies.resize(limbCount);
+    outModel.segmentPtrs.resize(limbCount);
+
+    // Build hash→path map for .otr archives (used to resolve HASH commands)
+    std::unordered_map<uint64_t, std::string> hashMap;
+    auto files = archive->ListFiles();
+    int altPrefixed = 0;
+    int bareObjects = 0;
+    int other = 0;
+    std::vector<std::string> samples;
+    samples.reserve(6);
+    if (files) {
+        for (auto& [hash, path] : *files) {
+            hashMap[hash] = path;
+            if (path.rfind("alt/", 0) == 0) altPrefixed++;
+            else if (path.rfind("objects/", 0) == 0) bareObjects++;
+            else other++;
+            if (samples.size() < 6) samples.push_back(path);
+        }
+    }
+    // Pack manifest diagnostic: tells us at a glance whether the pack ships
+    // overrides under "alt/" (expected), bare "objects/" (unusual), or another
+    // scheme entirely.  If vtxPack stays at 0 in the bake stats, the sample
+    // paths reveal what prefix the pack actually uses.
+    {
+        std::string sampleStr;
+        for (size_t k = 0; k < samples.size(); k++) {
+            sampleStr += samples[k];
+            if (k + 1 < samples.size()) sampleStr += ", ";
+        }
+        SPDLOG_INFO("[CoopModel][Bake] folder=\"{}\" pack manifest: {} files "
+                    "(alt/={}, objects/={}, other={}); samples: {}",
+                    folder, hashMap.size(), altPrefixed, bareObjects, other, sampleStr);
+    }
+
+    // Per-DL cache to avoid baking the same DL twice (also breaks cycles)
+    std::unordered_map<std::string, Gfx*> dlCache;
+
+    // Per-bake resource-source counters (see BakeStats declaration).
+    BakeStats stats;
+
+    // Count limbs whose resource actually loaded from the archive.  If this stays
+    // at zero, the archive is the wrong one (e.g. 3ds_link.otr opened when the
+    // child skeleton's limbs live in 3ds_young_link.otr) and we should refuse
+    // to apply a zombie skeleton.
+    int limbLoadedCount = 0;
+
+    for (int i = 0; i < limbCount; i++) {
+        // segmentPtrs[i] = pointer to this limb's LodLimb — set before early-continues
+        // so the skeleton segment array is populated even if this limb has no DL
+        outModel.segmentPtrs[i] = &outModel.limbCopies[i];
+
+        if (i >= (int)skeleton->limbTable.size()) {
+            SPDLOG_WARN("[CoopModel][Bake] limbTable shorter than limbCount at index {}", i);
+            continue;
+        }
+
+        const std::string& limbPath = skeleton->limbTable[i];
+
+        // Load the limb resource from the archive.
+        // Character pack archives store resources with "alt/" prefix; try both bare and prefixed paths.
+        auto limbFile = archive->LoadFile(limbPath);
+        std::string resolvedLimbPath = limbPath;
+        if (!limbFile) {
+            const std::string altLimbPath = Ship::IResource::gAltAssetPrefix + limbPath;
+            limbFile = archive->LoadFile(altLimbPath);
+            if (limbFile) {
+                resolvedLimbPath = altLimbPath;
+            }
+        }
+        if (!limbFile) {
+            SPDLOG_WARN("[CoopModel][Bake] limb not found in archive: \"{}\" or alt/ variant", limbPath);
+            // Copy hierarchy from vanilla limb (populated by SkeletonFactory via global ResourceManager)
+            // to prevent zero-initialized child/sibling fields from causing infinite recursion in
+            // SkelAnime_DrawFlexLimb (limb 0 with child=0 loops forever → stack overflow).
+            {
+                void** limbPtrs = (void**)skeleton->skeletonData.skeletonHeader.segment;
+                if (limbPtrs && limbPtrs[i]) {
+                    LodLimb* vanillaLimb = (LodLimb*)limbPtrs[i];
+                    outModel.limbCopies[i].jointPos = vanillaLimb->jointPos;
+                    outModel.limbCopies[i].child    = vanillaLimb->child;
+                    outModel.limbCopies[i].sibling  = vanillaLimb->sibling;
+                }
+            }
+            continue;
+        }
+        const std::string limbKey = "coopchar/" + folder + "/" + resolvedLimbPath;
+        auto limbResource = loader->LoadResource(limbKey, limbFile);
+        auto skeletonLimb = std::dynamic_pointer_cast<SkeletonLimb>(limbResource);
+        if (!skeletonLimb) {
+            SPDLOG_WARN("[CoopModel][Bake] limb resource not a SkeletonLimb: \"{}\"", limbPath);
+            continue;
+        }
+        limbLoadedCount++;
+
+        // Hierarchy fields (jointPos / child / sibling) come from the Skeleton's
+        // pre-built segment[] array, NOT from the per-limb SkeletonLimb resource.
+        //
+        // The SkeletonLimb factory and the Skeleton factory encode these fields
+        // differently — per-limb resources can use different sentinels or
+        // relative-vs-absolute indexing than the Skeleton's post-processed
+        // segment[].  Reading from SkeletonLimb produced cyclic hierarchies on
+        // some packs, causing SkelAnime_DrawFlexLimb to recurse forever and
+        // stack-overflow (Coop Test 11 retest logs 106/107).
+        //
+        // The non-baked fallback path in ApplyCustomSkeletonToDummyPlayer reads
+        // from segment[] directly and is known to work.  This bake path now does
+        // the same.
+        {
+            void** limbPtrs = (void**)skeleton->skeletonData.skeletonHeader.segment;
+            if (limbPtrs && limbPtrs[i]) {
+                LodLimb* srcLimb = (LodLimb*)limbPtrs[i];
+                outModel.limbCopies[i].jointPos = srcLimb->jointPos;
+                outModel.limbCopies[i].child    = srcLimb->child;
+                outModel.limbCopies[i].sibling  = srcLimb->sibling;
+            } else {
+                SPDLOG_WARN("[CoopModel][Bake] skeleton segment[{}] is null; zero-initialising hierarchy",
+                            i);
+                outModel.limbCopies[i].child   = 0xFF; // LIMB_DONE
+                outModel.limbCopies[i].sibling = 0xFF;
+            }
+        }
+        outModel.limbCopies[i].dLists[0] = nullptr;
+        outModel.limbCopies[i].dLists[1] = nullptr;
+
+        // Bake near dList (dLists[0])
+        // dListPtr has "__OTR__" prefix added by SkeletonLimbFactory; strip it.
+        if (!skeletonLimb->dListPtr.empty()) {
+            const std::string sOtr = "__OTR__";
+            const std::string dlPath = skeletonLimb->dListPtr.starts_with(sOtr)
+                ? skeletonLimb->dListPtr.substr(sOtr.size())
+                : skeletonLimb->dListPtr;
+            Gfx* baked = BakeDL(dlPath, folder, archive, hashMap, loader, stats, outModel, dlCache);
+            if (baked) {
+                outModel.limbCopies[i].dLists[0] = baked;
+            }
+        }
+        // dLists[1] (LOD far) — bake if present
+        if (!skeletonLimb->dList2Ptr.empty()) {
+            const std::string sOtr = "__OTR__";
+            const std::string dlPath = skeletonLimb->dList2Ptr.starts_with(sOtr)
+                ? skeletonLimb->dList2Ptr.substr(sOtr.size())
+                : skeletonLimb->dList2Ptr;
+            Gfx* baked = BakeDL(dlPath, folder, archive, hashMap, loader, stats, outModel, dlCache);
+            if (baked) {
+                outModel.limbCopies[i].dLists[1] = baked;
+            }
+        }
+    }
+
+    if (limbLoadedCount == 0) {
+        SPDLOG_ERROR("[CoopModel][Bake] BuildBakedPlayerModel: 0/{} limbs loaded from archive — "
+                     "refusing to apply zombie skeleton (wrong archive for this skeleton age?)",
+                     limbCount);
+        return false;
+    }
+
+    // Diagnostic: count limbs without a baked near-DL.  If many, the DummyPlayer
+    // will render as a partial skeleton — useful signal when diagnosing missing
+    // geometry vs. a hierarchy bug.
+    {
+        int limbsWithNoDL = 0;
+        for (int i = 0; i < limbCount; i++) {
+            if (outModel.limbCopies[i].dLists[0] == nullptr) limbsWithNoDL++;
+        }
+        if (limbsWithNoDL > 0) {
+            SPDLOG_WARN("[CoopModel][Bake] {}/{} limbs have no baked dList[0] — may render partially",
+                        limbsWithNoDL, limbCount);
+        }
+    }
+
+    // Diagnostic: dump the built limb tree.  One INFO line per bake in a
+    // machine-greppable compact format: `[i:c=XX,s=XX]` for each limb, with `-`
+    // appended when that limb has no baked dList[0].  When a crash log shows a
+    // successful bake but misbehaving render, this lets us reconstruct the full
+    // hierarchy from the log alone without attaching a debugger.
+    {
+        std::string treeStr;
+        treeStr.reserve(limbCount * 16);
+        for (int i = 0; i < limbCount; i++) {
+            const LodLimb& l = outModel.limbCopies[i];
+            char buf[24];
+            const char* flag = (l.dLists[0] == nullptr) ? "-" : "";
+            int n = std::snprintf(buf, sizeof(buf), "[%d:c=%02X,s=%02X%s]",
+                                  i,
+                                  (unsigned)(uint8_t)l.child,
+                                  (unsigned)(uint8_t)l.sibling,
+                                  flag);
+            if (n > 0 && n < (int)sizeof(buf)) {
+                treeStr.append(buf, n);
+                if (i < limbCount - 1) treeStr.push_back(' ');
+            }
+        }
+        SPDLOG_INFO("[CoopModel][Bake] limb tree (c=child, s=sibling hex; '-' = no dList[0]): {}",
+                    treeStr);
+    }
+
+    // Bake-time cycle detector.  Walk the limb hierarchy from limbCopies[0] via
+    // child/sibling, tracking visited indices.  If we hit a back-edge or an
+    // out-of-range index, refuse the bake — SkelAnime_DrawFlexLimb recurses on
+    // these indices and would stack-overflow at render time (Fix 4 belt-and-
+    // braces).  0xFF (LIMB_DONE) terminates a branch cleanly.
+    //
+    // On error, log the exact visit path that reached the bad index so the
+    // failure is diagnosable from the log alone.
+    {
+        std::bitset<256> visited;
+        std::vector<uint8_t> path;
+        path.reserve(limbCount);
+        auto formatPath = [&](uint8_t finalIdx, const char* marker) -> std::string {
+            std::string s;
+            s.reserve(path.size() * 5 + 16);
+            for (auto p : path) {
+                s += std::to_string((int)p);
+                s += "->";
+            }
+            s += std::to_string((int)finalIdx);
+            s += " (";
+            s += marker;
+            s += ")";
+            return s;
+        };
+        auto walk = [&](auto& self, uint8_t idx) -> bool {
+            if (idx == 0xFF) return true; // LIMB_DONE — branch complete
+            if (idx >= (uint8_t)limbCount) {
+                SPDLOG_ERROR("[CoopModel][Bake] Limb index {} out of range (limbCount={}); "
+                             "refusing to apply",
+                             (int)idx, limbCount);
+                SPDLOG_ERROR("[CoopModel][Bake]   path: {}", formatPath(idx, "OOR"));
+                return false;
+            }
+            if (visited.test(idx)) {
+                SPDLOG_ERROR("[CoopModel][Bake] Limb hierarchy cycle at index {}; refusing to apply",
+                             (int)idx);
+                SPDLOG_ERROR("[CoopModel][Bake]   path: {}", formatPath(idx, "cycle"));
+                return false;
+            }
+            visited.set(idx);
+            path.push_back(idx);
+            const LodLimb& l = outModel.limbCopies[idx];
+            if (!self(self, l.child))   return false;
+            if (!self(self, l.sibling)) return false;
+            path.pop_back();
+            return true;
+        };
+        if (!walk(walk, 0)) {
+            return false;
+        }
+        // Unreachable-limb sanity: if some limbs weren't visited by the walk,
+        // they're disconnected from the root.  That's a separate class of
+        // malformed skeleton — log it, but don't fail the bake (unreachable
+        // limbs just never draw, which is survivable).
+        int unreachable = 0;
+        for (int i = 0; i < limbCount; i++) {
+            if (!visited.test(i)) unreachable++;
+        }
+        if (unreachable > 0) {
+            SPDLOG_WARN("[CoopModel][Bake] {}/{} limbs are unreachable from root — will not render",
+                        unreachable, limbCount);
+        }
+    }
+
+    outModel.isValid = true;
+    SPDLOG_INFO("[CoopModel][Bake] BuildBakedPlayerModel: {}/{} limbs loaded, {} DLs, {} path strings",
+                limbLoadedCount, limbCount, outModel.bakedDLs.size(), outModel.pathStrings.size());
+    // Per-bake resource-source summary.  "pack" = file loaded from this pack's
+    // archive and isolated under a coopchar/... key; "inherited" = kept the
+    // original OTR path so render-time resolution falls through to vanilla /
+    // other archives; "sentinel" (textures only) = bake-time hash miss with no
+    // global path — render-time FILEPATH handler logs and skips safely.
+    // Mostly-pack ≈ self-contained pack; mostly-inherited ≈ pack overrides
+    // DLs but inherits vtx/tex from vanilla (normal for minimal packs).
+    SPDLOG_INFO("[CoopModel][Bake] folder=\"{}\" resource sources: "
+                "vtx={} pack/{} inherited, subdl={} pack/{} inherited, "
+                "tex={} pack/{} inherited/{} sentinel",
+                folder,
+                stats.vtxPack, stats.vtxInherited,
+                stats.subdlPack, stats.subdlInherited,
+                stats.texPack, stats.texInherited, stats.texSentinel);
+    // Self-check: sample up to 3 injected "coopchar/..." keys and verify they
+    // resolve via the public ResourceManager API.  If SetCachedResource worked,
+    // these should all be non-null.  If a key comes back null here, the fix
+    // didn't stick (wrong cache identifier fields, immediate eviction, type
+    // mismatch) — render-time null errors would follow and we already know
+    // why without waiting.
+    {
+        auto resMgr = Ship::Context::GetInstance()->GetResourceManager();
+        int probed = 0, resolved = 0;
+        std::string firstMiss;
+        for (const auto& pathStr : outModel.pathStrings) {
+            if (pathStr.rfind("coopchar/", 0) != 0) continue;
+            if (probed >= 3) break;
+            probed++;
+            void* raw = resMgr->GetResourceRawPointer(pathStr.c_str());
+            if (raw != nullptr) {
+                resolved++;
+            } else if (firstMiss.empty()) {
+                firstMiss = pathStr;
+            }
+        }
+        if (probed > 0) {
+            if (resolved == probed) {
+                SPDLOG_INFO("[CoopModel][Bake] folder=\"{}\" cache self-check: {}/{} sample keys resolved",
+                            folder, resolved, probed);
+            } else {
+                SPDLOG_ERROR("[CoopModel][Bake] folder=\"{}\" cache self-check FAILED: {}/{} resolved; "
+                             "first miss=\"{}\"",
+                             folder, resolved, probed, firstMiss);
+            }
+        }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+
 void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, bool isAdult, uint8_t tunic,
                                                         const std::string& characterFolder,
-                                                        std::shared_ptr<Skeleton>& outSkeleton) {
+                                                        std::shared_ptr<Skeleton>& outSkeleton,
+                                                        BakedPlayerModel& outBakedModel) {
     if (characterFolder.empty()) {
         return;
     }
-
-    // Guard 0: TEMPORARILY DISABLED — testing whether limbCount/dListCount fix resolves
-    // the child DummyPlayer crash.  If no crash occurs with the pack child skeleton applied,
-    // this block can be removed permanently.
-    //
-    // if (!isAdult) { ... return; }
 
     // Select the tunic-variant skeleton path (strip __OTR__ prefix used in asset macros)
     std::string skeletonPath;
@@ -494,7 +1155,7 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     // rather than the per-tunic variants.  Try the tunic path first; if that fails,
     // retry with the base age skeleton.
     std::string resolvedAltPath = altPath;
-    auto file = LoadFileFromCoopFolder(characterFolder, altPath, resourceMgr);
+    auto file = LoadFileFromCoopFolder(characterFolder, altPath, resourceMgr, false);
     if (file == nullptr) {
         const std::string baseSkeletonPath = isAdult
             ? std::string(gLinkAdultSkel).substr(sOtr.length())
@@ -502,7 +1163,7 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         const std::string baseAltPath = Ship::IResource::gAltAssetPrefix + baseSkeletonPath;
         if (baseAltPath != altPath) {
             SPDLOG_INFO("[CoopModel]   tunic path not found, trying base skeleton: {}", baseAltPath);
-            file = LoadFileFromCoopFolder(characterFolder, baseAltPath, resourceMgr);
+            file = LoadFileFromCoopFolder(characterFolder, baseAltPath, resourceMgr, false);
             if (file != nullptr) {
                 resolvedAltPath = baseAltPath;
             }
@@ -598,21 +1259,49 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         }
     }
 
-    // Store the shared_ptr so the skeleton data stays alive while skelAnime uses it.
-    // The caller (AnchorClient) must hold this and release it on destroy or model change.
+    // Store the skeleton shared_ptr so the skeleton data stays alive while skelAnime uses it.
     outSkeleton = skeleton;
 
-    SPDLOG_INFO("[CoopModel]   skeleton applied to skelAnime={}", (void*)skelAnime);
+    // Try to build per-DummyPlayer baked display lists so the remote player's textures
+    // are resolved from their own pack archive rather than the global DL cache.
+    // This prevents "both players same model" bugs caused by shared "__OTR__" path lookups.
+    outBakedModel = BakedPlayerModel{};  // reset any previous baked data
+
+    // Probe with resolvedAltPath (the skeleton path that actually loaded via
+    // LoadFileFromCoopFolder) so we pick the archive matching this skeleton's age.
+    auto archive = OpenCoopPackArchive(characterFolder, resolvedAltPath);
+    if (archive) {
+        auto loader = resourceMgr->GetResourceLoader();
+        if (BuildBakedPlayerModel(skeleton, characterFolder, archive, loader, outBakedModel)) {
+            // Point skelAnime at our per-DummyPlayer limb copies instead of the shared
+            // global skeletonHeaderSegments vector.
+            skelAnime->skeleton = (void**)outBakedModel.segmentPtrs.data();
+            uintptr_t skelPtr = (uintptr_t)skeleton->GetPointer();
+            memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+            skelAnime->limbCount  = (u8)skeleton->limbCount;
+            skelAnime->dListCount = (s8)skeleton->dListCount;
+            SPDLOG_INFO("[CoopModel]   baked skeleton applied to skelAnime={} (limbCount={})",
+                        (void*)skelAnime, skeleton->limbCount);
+            gfx_texture_cache_clear();
+            return;
+        }
+        SPDLOG_ERROR("[CoopModel]   BuildBakedPlayerModel failed; falling back to shared segment "
+                     "(may exhibit #85 same-model bleed-through)");
+    } else {
+        SPDLOG_ERROR("[CoopModel]   OpenCoopPackArchive failed for \"{}\" probe=\"{}\"; "
+                     "falling back to shared segment (may exhibit #85 same-model bleed-through)",
+                     characterFolder, resolvedAltPath);
+    }
+
+    // Fallback: use the globally-cached skeleton segment (may show wrong textures if
+    // packs share resource paths, but at least geometry is correct).
+    SPDLOG_INFO("[CoopModel]   skeleton applied to skelAnime={} (fallback, shared segment)", (void*)skelAnime);
     skelAnime->skeleton = skeleton->skeletonData.skeletonHeader.segment;
     uintptr_t skelPtr = (uintptr_t)skeleton->GetPointer();
     memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
     skelAnime->limbCount  = (u8)skeleton->limbCount;
     skelAnime->dListCount = (s8)skeleton->dListCount;
 
-    // Flush the F3DZEX2 display list cache so the renderer rebuilds from the new
-    // skeleton on the next frame.  Without this, stale cached display list commands
-    // from a previous skeleton (e.g. vanilla Link or a prior DummyPlayer at the same
-    // memory address) are served instead, producing the old model geometry + wrong textures.
     gfx_texture_cache_clear();
 }
 

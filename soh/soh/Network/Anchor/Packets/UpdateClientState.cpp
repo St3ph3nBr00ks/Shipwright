@@ -109,10 +109,12 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                 bool isAdult = (clients[clientId].linkAge != LINK_AGE_CHILD);
                 auto tunic = (uint8_t)clients[clientId].currentTunic;
                 SPDLOG_INFO("[CoopModel]   applying to DummyPlayer: isAdult={} tunic={}", isAdult, (int)tunic);
-                clients[clientId].customSkeleton = nullptr; // release previous
+                clients[clientId].customSkeleton = nullptr;  // release previous
+                clients[clientId].bakedModel = std::make_unique<SOH::BakedPlayerModel>();
                 SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
                     &dummy->skelAnime, isAdult, tunic, newFilename,
-                    clients[clientId].customSkeleton);
+                    clients[clientId].customSkeleton,
+                    *clients[clientId].bakedModel);
                 clients[clientId].lastAppliedModelFilename = newFilename;
             } else if (modelChanged) {
                 SPDLOG_INFO("[CoopModel]   model changed but DummyPlayer not yet spawned — will apply at spawn");
