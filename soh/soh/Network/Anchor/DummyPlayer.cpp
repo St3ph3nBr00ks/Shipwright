@@ -11,6 +11,14 @@ extern PlayState* gPlayState;
 
 void Player_UseItem(PlayState* play, Player* player, s32 item);
 void Player_Draw(Actor* actor, PlayState* play);
+
+// Face-texture bindings used by Player_DrawImpl via gSPSegment(0x08/0x09, ...).
+// Declared at file scope in z_player_lib.c:975/990 with external linkage under
+// MODDING/_MSC_VER/__GNUC__.  We swap the populated slots around each
+// DummyPlayer's Player_Draw call so remote packs get their own face textures
+// (Coop Test 17 fix).
+extern void* sEyeTextures[2][8];
+extern void* sMouthTextures[2][4];
 }
 
 static DamageTable DummyPlayerDamageTable = {
@@ -285,7 +293,40 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     u8 originalButtonItem0 = gSaveContext.equips.buttonItems[0];
     gSaveContext.equips.buttonItems[0] = client.buttonItem0;
 
+    // Swap this DummyPlayer's baked face textures into the shared sEyeTextures /
+    // sMouthTextures arrays for exactly the duration of Player_Draw.  Slots
+    // where the pack did not ship an override keep their saved original value,
+    // so partial packs still work (same acceptable bleed as the non-face case).
+    // Scope is intentionally tight: any other actor that calls Player_Draw in
+    // the same frame (or the local player's draw before us) must see the
+    // vanilla/local-pack bindings.
+    int faceAge = (client.linkAge == LINK_AGE_CHILD) ? 1 : 0;
+    void* savedEye[8];
+    void* savedMouth[4];
+    bool swappedFace = false;
+    if (client.bakedModel && client.bakedModel->isValid) {
+        auto& bm = *client.bakedModel;
+        for (int i = 0; i < 8; i++) savedEye[i]   = sEyeTextures[faceAge][i];
+        for (int i = 0; i < 4; i++) savedMouth[i] = sMouthTextures[faceAge][i];
+        for (int i = 0; i < 8; i++) {
+            if (!bm.eyeTexKeys[faceAge][i].empty()) {
+                sEyeTextures[faceAge][i] = (void*)bm.eyeTexKeys[faceAge][i].c_str();
+            }
+        }
+        for (int i = 0; i < 4; i++) {
+            if (!bm.mouthTexKeys[faceAge][i].empty()) {
+                sMouthTextures[faceAge][i] = (void*)bm.mouthTexKeys[faceAge][i].c_str();
+            }
+        }
+        swappedFace = true;
+    }
+
     Player_Draw((Actor*)player, play);
+
+    if (swappedFace) {
+        for (int i = 0; i < 8; i++) sEyeTextures[faceAge][i]   = savedEye[i];
+        for (int i = 0; i < 4; i++) sMouthTextures[faceAge][i] = savedMouth[i];
+    }
 
     gSaveContext.linkAge = originalAge;
     gSaveContext.equips.buttonItems[0] = originalButtonItem0;

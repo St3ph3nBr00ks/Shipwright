@@ -107,6 +107,16 @@ struct BakedPlayerModel {
     std::vector<void*>            segmentPtrs;  // &limbCopies[i] — forms the skeleton->segment array
     std::deque<std::vector<Gfx>>  bakedDLs;     // owns baked Gfx arrays; stable data() after push_back
     std::deque<std::string>       pathStrings;  // stable c_str() for GBI w1 path pointers
+    // Per-slot "coopchar/<folder>/..." cache keys for the eye and mouth textures
+    // bound by Player_DrawImpl via gSPSegment (z_player_lib.c:1050/1062).  These
+    // aren't inside any baked DL — they live in the file-scope sEyeTextures /
+    // sMouthTextures arrays and are swapped per-DummyPlayer in DummyPlayer_Draw.
+    // Indexed [age][slot]: age 0=adult, 1=child; 8 eye slots, 4 mouth slots.
+    // Empty string = pack doesn't ship this variant; the swap falls through to the
+    // saved original value (render-time ArchiveManager lookup — may bleed on a
+    // multi-pack setup, same class as the non-face miss case).
+    std::string                   eyeTexKeys[2][8];
+    std::string                   mouthTexKeys[2][4];
     bool isValid = false;
 };
 

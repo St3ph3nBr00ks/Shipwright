@@ -796,6 +796,116 @@ static Gfx* BakeDL(
     return ptr;
 }
 
+// Pre-loads any face-texture overrides that this pack ships into the resource
+// cache under pack-unique "coopchar/<folder>/..." keys and records the keys on
+// outModel.eyeTexKeys / mouthTexKeys.
+//
+// Background: Player_DrawImpl binds the active eye/mouth texture at runtime via
+// gSPSegment(0x08/0x09, sEyeTextures[age][idx]) (z_player_lib.c:1050/1062).  The
+// char* stored in each slot is a bare OTR path string (e.g. gLinkAdultEyesOpenTex).
+// Those bindings are not inside any DL that BakeDL walks — they're generated
+// per-frame into POLY_OPA_DISP — so the face G_SETTIMG resolves through the global
+// ArchiveManager alt-asset lookup, which on a multi-pack setup wins with the
+// LOCAL player's pack (Coop Test 16 residual).
+//
+// Fix: at bake time, probe each of the 12 known face paths (per age) against the
+// pack archive with the same bare→"alt/<path>" fallback pattern used elsewhere.
+// On hit, preload the resource under "coopchar/<folder>/<resolvedPath>" and store
+// that key.  DummyPlayer_Draw swaps the populated slots into sEyeTextures/
+// sMouthTextures around its Player_Draw call, then restores.
+//
+// On miss we leave the key empty — the swap falls through to the saved original,
+// so packs that only override the base geometry continue to work (with the same
+// acceptable cross-pack bleed as the non-face miss case).
+static void BakeFaceTextures(
+    const std::string& folder,
+    std::shared_ptr<Ship::Archive>& archive,
+    std::shared_ptr<Ship::ResourceLoader>& loader,
+    BakedPlayerModel& model)
+{
+    // [age][slot] → OTR-relative path (no "__OTR__" prefix; BakeDL strips it too).
+    // Empty slots (none here) would be skipped.
+    static const char* kEyePaths[2][8] = {
+        { // adult (age 0)
+            "objects/object_link_boy/gLinkAdultEyesOpenTex",
+            "objects/object_link_boy/gLinkAdultEyesHalfTex",
+            "objects/object_link_boy/gLinkAdultEyesClosedfTex",
+            "objects/object_link_boy/gLinkAdultEyesRollLeftTex",
+            "objects/object_link_boy/gLinkAdultEyesRollRightTex",
+            "objects/object_link_boy/gLinkAdultEyesShockTex",
+            "objects/object_link_boy/gLinkAdultEyesUnk1Tex",
+            "objects/object_link_boy/gLinkAdultEyesUnk2Tex",
+        },
+        { // child (age 1)
+            "objects/object_link_child/gLinkChildEyesOpenTex",
+            "objects/object_link_child/gLinkChildEyesHalfTex",
+            "objects/object_link_child/gLinkChildEyesClosedfTex",
+            "objects/object_link_child/gLinkChildEyesRollLeftTex",
+            "objects/object_link_child/gLinkChildEyesRollRightTex",
+            "objects/object_link_child/gLinkChildEyesShockTex",
+            "objects/object_link_child/gLinkChildEyesUnk1Tex",
+            "objects/object_link_child/gLinkChildEyesUnk2Tex",
+        },
+    };
+    static const char* kMouthPaths[2][4] = {
+        { // adult
+            "objects/object_link_boy/gLinkAdultMouth1Tex",
+            "objects/object_link_boy/gLinkAdultMouth2Tex",
+            "objects/object_link_boy/gLinkAdultMouth3Tex",
+            "objects/object_link_boy/gLinkAdultMouth4Tex",
+        },
+        { // child
+            "objects/object_link_child/gLinkChildMouth1Tex",
+            "objects/object_link_child/gLinkChildMouth2Tex",
+            "objects/object_link_child/gLinkChildMouth3Tex",
+            "objects/object_link_child/gLinkChildMouth4Tex",
+        },
+    };
+
+    auto resMgr = Ship::Context::GetInstance()->GetResourceManager();
+    int ageHits[2] = { 0, 0 };   // adult / child total hits (eye + mouth)
+    int eyeHits[2] = { 0, 0 };
+    int mouthHits[2] = { 0, 0 };
+
+    auto tryBake = [&](const char* origPath, std::string& outKey, int age, int* ageCounter, int* slotCounter) {
+        auto file = archive->LoadFile(origPath);
+        std::string resolvedPath = origPath;
+        if (!file) {
+            const std::string altPath = Ship::IResource::gAltAssetPrefix + origPath;
+            file = archive->LoadFile(altPath);
+            if (file) resolvedPath = altPath;
+        }
+        if (!file) {
+            return; // pack doesn't ship this variant — leave outKey empty
+        }
+        const std::string uniqueKey = "coopchar/" + folder + "/" + resolvedPath;
+        auto res = loader->LoadResource(uniqueKey, file);
+        if (res) {
+            resMgr->SetCachedResource(uniqueKey, res);
+            // Prefix with "__OTR__" so the segmented G_SETTIMG path in the
+            // renderer (gfx_set_timg_handler_rdp → gfx_check_image_signature →
+            // ResourceManager::OtrSignatureCheck) recognises the swapped
+            // sEyeTextures/sMouthTextures pointer as an OTR resource path
+            // rather than raw pixel data.  LoadResourceProcess strips the
+            // 7-byte prefix before the cache lookup, so the resource remains
+            // cached under the bare "coopchar/..." key used everywhere else.
+            outKey = "__OTR__" + uniqueKey;
+            ageHits[age]++;
+            (*slotCounter)++;
+        }
+    };
+
+    for (int age = 0; age < 2; age++) {
+        for (int i = 0; i < 8; i++) tryBake(kEyePaths[age][i],   model.eyeTexKeys[age][i],   age, ageHits, &eyeHits[age]);
+        for (int i = 0; i < 4; i++) tryBake(kMouthPaths[age][i], model.mouthTexKeys[age][i], age, ageHits, &mouthHits[age]);
+    }
+
+    SPDLOG_INFO("[CoopModel][Bake] folder=\"{}\" face textures: {}/24 pack overrides "
+                "(adult: eye={}/8 mouth={}/4; child: eye={}/8 mouth={}/4)",
+                folder, ageHits[0] + ageHits[1],
+                eyeHits[0], mouthHits[0], eyeHits[1], mouthHits[1]);
+}
+
 // Builds a BakedPlayerModel for the given skeleton loaded from the pack archive.
 // Returns true on success.
 static bool BuildBakedPlayerModel(
@@ -1067,6 +1177,10 @@ static bool BuildBakedPlayerModel(
                         unreachable, limbCount);
         }
     }
+
+    // Pre-load any pack-local face textures (sEyeTextures / sMouthTextures
+    // bindings are outside the walked DLs; see BakeFaceTextures for why).
+    BakeFaceTextures(folder, archive, loader, outModel);
 
     outModel.isValid = true;
     SPDLOG_INFO("[CoopModel][Bake] BuildBakedPlayerModel: {}/{} limbs loaded, {} DLs, {} path strings",
