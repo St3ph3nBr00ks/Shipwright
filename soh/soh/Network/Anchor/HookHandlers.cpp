@@ -40,6 +40,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
+// Issue #153 — En_Goroiwa is ACTORCAT_PROP, the first non-ENEMY actor synced.
+#include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
 
 extern PlayState* gPlayState;
 extern MapData* gMapData;
@@ -102,6 +104,36 @@ static SkelAnime* GetEnemySkelAnime(Actor* actor) {
     return ska;
 }
 
+// Issue #153 — admission predicate for non-ACTORCAT_ENEMY actors that should
+// participate in the sync pipeline (ENEMY_UPDATE, ENEMY_DEFEATED, etc.).
+//
+// The original three gate sites (OnActorSpawn / OnActorUpdate / ShouldActorUpdate)
+// hard-checked `category == ACTORCAT_ENEMY`. That excludes hostile/world actors
+// in PROP / BG / NPC / SWITCH / MISC, even when they affect cross-client gameplay
+// (rolling boulders, scripted-path NPCs, eye-switch traps, etc.).
+//
+// Adding actor IDs here joins them to the sync pipeline without disturbing the
+// existing ACTORCAT_ENEMY-only flow. Per-actor sync logic (payload extension,
+// re-apply behaviour) still has to be implemented case by case in the relevant
+// hook bodies and packet handlers.
+//
+// Pending future allowlist entries surfaced in research:
+//   ACTOR_EN_PO_DESERT     — Desert Poe / Guide Poe   (#124, ACTORCAT_BG)
+//   ACTOR_EN_PO_RELAY      — Dampé's Ghost            (#125, ACTORCAT_NPC)
+//   ACTOR_EN_ANUBICE_TAG   — Anubis spawn marker      (#116, ACTORCAT_SWITCH)
+static bool IsSyncedWorldActor(int16_t actorId) {
+    switch (actorId) {
+        case ACTOR_EN_GOROIWA: return true;
+        default: return false;
+    }
+}
+
+// True when the actor should be considered for sync. Called from each filter
+// site to keep the gate logic identical everywhere.
+static inline bool IsSyncableActor(Actor* actor) {
+    return actor->category == ACTORCAT_ENEMY || IsSyncedWorldActor(actor->id);
+}
+
 // Returns the Actor* of the nearest player-type actor to `enemy`.
 // Considers the local player and all live DummyPlayer actors.
 // DummyPlayers that are out-of-scene are already at (-9999,-9999,-9999) by
@@ -147,6 +179,18 @@ extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     return ext != nullptr && ext->pendingNaturalDeath;
+}
+
+// C-callable: non-host tells host that its local Link was just hit by this enemy
+// so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
+// Phase 2). No-op when Anchor is disconnected, when this client is the host, or
+// when the actor lacks an EnemyNetId extension (never reached the sync pipeline).
+extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
+    if (Anchor::Instance->roomState.ownerClientId == Anchor::Instance->ownClientId) return;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return;
+    Anchor::Instance->SendPacket_EnemyHitPlayer(ext->netId);
 }
 
 void Anchor::SetFollowerActive(bool active) {
@@ -255,6 +299,21 @@ void Anchor::RegisterHooks() {
 
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
         ProcessIncomingPacketQueue();
+
+        // KB-15 / issue #110 — retire counter tick.
+        // Every client that retired a BakedPlayerModel this frame or in recent
+        // frames has a non-zero retireFrameCounter. Decrement; when it reaches
+        // 0, destroy the retiree — by this point every Gfx frame that could
+        // have referenced it has been fully consumed by the renderer. See
+        // AnchorClient::RetireBakedModel and kRetireFrames in Anchor.h.
+        for (auto& [id, client] : clients) {
+            if (client.retireFrameCounter > 0) {
+                client.retireFrameCounter--;
+                if (client.retireFrameCounter == 0) {
+                    client.retiredBakedModel = nullptr;
+                }
+            }
+        }
     });
 
     // Follower mode (non-host only): override local player position to trail the host.
@@ -731,7 +790,8 @@ void Anchor::RegisterHooks() {
     // in response to HandlePacket_EnemySpawn are exempt (isSpawningNetworkActor).
     COND_HOOK(OnActorSpawn, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
-        if (actor->category != ACTORCAT_ENEMY) {
+        // Issue #153 — gate accepts ACTORCAT_ENEMY OR an allowlisted world-actor id.
+        if (!IsSyncableActor(actor)) {
             // Log any actor type that might be expected to sync but has wrong category.
             // This catches e.g. Deku Baba spawning with an unexpected initial category.
             if (actor->id == ACTOR_EN_DEKUBABA) {
@@ -876,7 +936,8 @@ void Anchor::RegisterHooks() {
     // Host sends enemy positions every frame to all clients in the same scene.
     COND_HOOK(OnActorUpdate, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
-        if (actor->category != ACTORCAT_ENEMY) {
+        // Issue #153 — gate accepts ACTORCAT_ENEMY OR an allowlisted world-actor id.
+        if (!IsSyncableActor(actor)) {
             return;
         }
         if (!IsSaveLoaded()) {
@@ -1159,6 +1220,21 @@ void Anchor::RegisterHooks() {
                 }
             }
 
+            // Goroiwa state-machine sync — issue #153.
+            // The local action func runs every frame for collision registration but
+            // its waypoint advance can drift across frame-rate boundaries (P2 on
+            // VirtualBox at 20fps vs P1 native at 60fps). Cached waypoint state was
+            // already applied directly in HandlePacket_EnemyUpdate; this block only
+            // resets actionFunc when the host's state diverges from local. Position
+            // is host-authoritative via ext->netPos (re-applied above).
+            if (actor->id == ACTOR_EN_GOROIWA && ext->netStateIndex >= 0) {
+                EnGoroiwa* boulder = (EnGoroiwa*)actor;
+                s16 curState = EnGoroiwa_GetStateIndex(boulder);
+                if (curState != ext->netStateIndex) {
+                    EnGoroiwa_ApplyNetState(boulder, gPlayState, ext->netStateIndex);
+                }
+            }
+
         }
     });
 
@@ -1179,7 +1255,8 @@ void Anchor::RegisterHooks() {
             return;
         }
         Actor* actor = static_cast<Actor*>(refActor);
-        if (actor->category != ACTORCAT_ENEMY) {
+        // Issue #153 — gate accepts ACTORCAT_ENEMY OR an allowlisted world-actor id.
+        if (!IsSyncableActor(actor)) {
             return;
         }
         if (!IsSaveLoaded() || gPlayState == nullptr) {

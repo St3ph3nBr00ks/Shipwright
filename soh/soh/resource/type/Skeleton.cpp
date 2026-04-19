@@ -326,16 +326,23 @@ void SkeletonPatcher::UpdateTunicSkeletons(SkeletonPatchInfo& skel) {
     // hook fires before Anchor's hooks, so a pre-set static would always be stale on the
     // first call after a scene load.
     const char* overrideFolder = CVarGetString(CVAR_REMOTE_ANCHOR("CharacterModel"), nullptr);
-    if (overrideFolder != nullptr && overrideFolder[0] != '\0') {
+    const std::string folderStr = (overrideFolder != nullptr) ? std::string(overrideFolder) : std::string();
+    if (!folderStr.empty()) {
         SPDLOG_INFO("[CoopModel] UpdateTunicSkeletons: folder override=\"{}\" path=\"{}\"",
-                    overrideFolder, skeletonPath);
-        UpdateCustomSkeletonFromFolder(skeletonPath, std::string(overrideFolder), skel);
-        return;
+                    folderStr, skeletonPath);
+    } else {
+        SPDLOG_INFO("[CoopModel] UpdateTunicSkeletons: no override (revert to default) path=\"{}\"",
+                    skeletonPath);
     }
-
-    SPDLOG_INFO("[CoopModel] UpdateTunicSkeletons: no override, system default path=\"{}\"",
-                skeletonPath);
-    UpdateCustomSkeletonFromPath(skeletonPath, skel);
+    // Route BOTH cases through UpdateCustomSkeletonFromFolder.  Its folder.empty() branch
+    // already performs the archive cleanup (ClearLocalCoopArchives + untracked-archive
+    // removal + sLastLoadedCoopFolder reset) and then falls through to the vanilla
+    // resolution path — without this, selecting "Default Link" after a coop pack left
+    // the previous pack's archives registered in ArchiveManager, so the alt-asset lookup
+    // inside UpdateCustomSkeletonFromPath kept returning the previous pack's skeleton
+    // (Coop Test 19 log 10: "alt lookup ... -> FOUND" pointing at a 3dsLink skeleton
+    // after the user had switched to Default Link).
+    UpdateCustomSkeletonFromFolder(skeletonPath, folderStr, skel);
 }
 
 // Searches all loaded archives inside coopplayercharacters/<folder>/ for a skeleton
@@ -1241,6 +1248,37 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
                                                         std::shared_ptr<Skeleton>& outSkeleton,
                                                         BakedPlayerModel& outBakedModel) {
     if (characterFolder.empty()) {
+        // Revert-to-default path: the remote player switched their CharacterModel back
+        // to "Default Link" (UPDATE_CLIENT_STATE carries customModelFilename="").  We
+        // MUST restore skelAnime->skeleton to a valid vanilla segment here — simply
+        // returning would leave it pointing at the retired bakedModel's segmentPtrs,
+        // which becomes dangling after kRetireFrames and crashes the renderer with
+        // Unhandled-OP-code floods (Coop Test 19 log 10, issue #110 regression).
+        //
+        // loadExact=true bypasses alt-asset resolution so we get the genuine vanilla
+        // skeleton even if a different coop pack's archive is registered globally for
+        // some unrelated reason.
+        auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+        const std::string vanillaPath = isAdult
+            ? std::string(gLinkAdultSkel).substr(sOtr.length())
+            : std::string(gLinkChildSkel).substr(sOtr.length());
+        auto vanillaRes = resourceMgr->LoadResource(vanillaPath, /*loadExact=*/true);
+        auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
+        if (vanillaSkel != nullptr && vanillaSkel->skeletonData.skeletonHeader.segment != nullptr) {
+            skelAnime->skeleton = vanillaSkel->skeletonData.skeletonHeader.segment;
+            uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
+            memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+            skelAnime->limbCount  = (u8)vanillaSkel->limbCount;
+            skelAnime->dListCount = (s8)vanillaSkel->dListCount;
+            outSkeleton = vanillaSkel;  // keep it alive via caller's shared_ptr
+            SPDLOG_INFO("[CoopModel] ApplyCustomSkeletonToDummyPlayer: revert to vanilla \"{}\" (isAdult={})",
+                        vanillaPath, isAdult);
+        } else {
+            SPDLOG_WARN("[CoopModel] ApplyCustomSkeletonToDummyPlayer: revert requested but vanilla skeleton "
+                        "\"{}\" not found — leaving skelAnime->skeleton unchanged (may crash after retire)",
+                        vanillaPath);
+        }
+        gfx_texture_cache_clear();
         return;
     }
 

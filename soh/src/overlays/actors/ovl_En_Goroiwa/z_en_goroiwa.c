@@ -10,6 +10,12 @@
 #include "objects/object_goroiwa/object_goroiwa.h"
 #include "vt.h"
 
+// Multiplayer notifier (#153 Phase 2) — declared in HookHandlers.cpp.
+// When a non-host's local boulder scores an AT_HIT, this sends ENEMY_HIT_PLAYER
+// to the host so the host can reverse its authoritative copy. No-op when
+// Anchor is disconnected or when called from the host.
+void Anchor_NotifyEnemyHitPlayer(Actor* actor);
+
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
 typedef s32 (*EnGoroiwaUnkFunc1)(EnGoroiwa* this, PlayState* play);
@@ -584,6 +590,10 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
     s16 loopMode;
 
     if (this->collider.base.atFlags & AT_HIT) {
+        // Multiplayer (#153 Phase 2): tell the host that this client's local Link
+        // just got hit by this boulder so the host reverses its authoritative copy.
+        // No-op on host and when disconnected — the regular branch below still runs.
+        Anchor_NotifyEnemyHitPlayer(&this->actor);
         this->collider.base.atFlags &= ~AT_HIT;
         this->stateFlags &= ~ENGOROIWA_PLAYER_IN_THE_WAY;
         yawDiff = this->actor.yawTowardsPlayer - this->actor.world.rot.y;
@@ -754,4 +764,71 @@ void EnGoroiwa_Update(Actor* thisx, PlayState* play) {
 
 void EnGoroiwa_Draw(Actor* thisx, PlayState* play) {
     Gfx_DrawDListOpa(play, gRollingRockDL);
+}
+
+// Multiplayer sync — issue #153.
+// Returns a stable state index identifying which action function is currently
+// installed. Used by host to broadcast in ENEMY_UPDATE and by non-host to
+// detect divergence and call ApplyNetState.
+s16 EnGoroiwa_GetStateIndex(EnGoroiwa* this) {
+    if (this->actionFunc == EnGoroiwa_Roll)                 return 0;
+    if (this->actionFunc == EnGoroiwa_MoveAndFallToGround)  return 1;
+    if (this->actionFunc == EnGoroiwa_Wait)                 return 2;
+    if (this->actionFunc == EnGoroiwa_MoveUp)               return 3;
+    if (this->actionFunc == EnGoroiwa_MoveDown)             return 4;
+    return -1;
+}
+
+// Multiplayer sync — issue #153.
+// Resets actionFunc to match the host's authoritative state. Each Setup* helper
+// also writes the bookkeeping (stateFlags, rollRotSpeed, velocity hints, etc.)
+// the corresponding action expects, so callers don't need to wipe extras manually.
+void EnGoroiwa_ApplyNetState(EnGoroiwa* this, PlayState* play, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0: EnGoroiwa_SetupRoll(this); break;
+        case 1: EnGoroiwa_SetupMoveAndFallToGround(this); break;
+        case 2: EnGoroiwa_SetupWait(this); break;
+        case 3: EnGoroiwa_SetupMoveUp(this); break;
+        case 4: EnGoroiwa_SetupMoveDown(this); break;
+        default: break;
+    }
+}
+
+// Multiplayer sync — issue #153 Phase 2.
+// Applied by the host when it receives ENEMY_HIT_PLAYER from a non-host whose
+// local Link was hit by its local instance of this boulder. Mirrors the
+// AT_HIT branch of EnGoroiwa_Roll without the player-damage/knockback call
+// (host's local Link is not the one that was hit — the non-host's is).
+//
+// yawTowardsPlayer is auto-patched toward the nearest player (local or
+// DummyPlayer) on the host by ShouldActorUpdate, so the reverse-direction
+// gate uses the correct aim when the non-host's DummyPlayer is the nearest.
+void EnGoroiwa_ProcessRemoteHit(EnGoroiwa* this, PlayState* play) {
+    s16 yawDiff;
+
+    // Only react while rolling. If the boulder already transitioned to Wait /
+    // MoveAndFallToGround from a host-local hit this cycle, ignore the packet
+    // (prevents double-reverse when both players are in the path at once).
+    if (this->actionFunc != EnGoroiwa_Roll) {
+        return;
+    }
+
+    this->collider.base.atFlags &= ~AT_HIT;
+    this->stateFlags &= ~ENGOROIWA_PLAYER_IN_THE_WAY;
+    yawDiff = this->actor.yawTowardsPlayer - this->actor.world.rot.y;
+    if (yawDiff > -0x4000 && yawDiff < 0x4000) {
+        this->stateFlags |= ENGOROIWA_PLAYER_IN_THE_WAY;
+        if (((this->actor.params >> 10) & 1) || (this->actor.home.rot.z & 1) != 1) {
+            EnGoroiwa_ReverseDirection(this);
+            EnGoroiwa_FaceNextWaypoint(this, play);
+        }
+    }
+    if ((this->actor.params >> 10) & 1) {
+        EnGoroiwa_SetupMoveAndFallToGround(this);
+    } else {
+        EnGoroiwa_SetupWait(this);
+    }
+    if ((this->actor.home.rot.z & 1) == 1) {
+        this->collisionDisabledTimer = 50;
+    }
 }

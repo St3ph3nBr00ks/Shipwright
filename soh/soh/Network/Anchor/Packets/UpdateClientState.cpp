@@ -109,7 +109,12 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                 bool isAdult = (clients[clientId].linkAge != LINK_AGE_CHILD);
                 auto tunic = (uint8_t)clients[clientId].currentTunic;
                 SPDLOG_INFO("[CoopModel]   applying to DummyPlayer: isAdult={} tunic={}", isAdult, (int)tunic);
-                clients[clientId].customSkeleton = nullptr;  // release previous
+                clients[clientId].customSkeleton = nullptr;  // release previous (not referenced by Gfx buffers)
+                // KB-15 fix (issue #110): move outgoing bakedModel to the retire slot
+                // so the last-submitted frame's Gfx buffer can finish consuming it.
+                // Synchronous destruction here caused P1 Unhandled-OP-code crashes when
+                // P2 changed pack mid-scene (Test 17 log 113).
+                clients[clientId].RetireBakedModel();
                 clients[clientId].bakedModel = std::make_unique<SOH::BakedPlayerModel>();
                 SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
                     &dummy->skelAnime, isAdult, tunic, newFilename,
