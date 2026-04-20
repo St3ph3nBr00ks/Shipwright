@@ -57,6 +57,22 @@ static std::string sLastLoadedCoopFolder;
 //     Skeleton objects own their data and remain valid after the archive is removed.
 static void ClearLocalCoopArchives(std::shared_ptr<Ship::ResourceManager> resourceMgr) {
     if (sLocalCoopArchivePaths.empty()) return;
+
+    // NOTE (Coop Test 22): calling UnloadResources("alt/objects/object_link_{boy,child}/*")
+    // here — intended to evict the previous pack's cached limb DLs so the new pack's
+    // skeleton wouldn't resolve stale data at render time — crashed the game with
+    // "G_DL_OTR_FILEPATH: DisplayList resource null for \"\"" followed by
+    // Exception: 0xc0000005 (P1 log 15, 10:13:17.539).
+    //
+    // Root cause of the crash: UnloadResource destructs cached resources synchronously,
+    // and the renderer holds raw pointers (char* from std::string inside the resource,
+    // or Gfx* into bakedDLs) for any in-flight Gfx command.  Evicting resources that
+    // are still referenced by the current frame → dangling pointer → zero bytes read
+    // as an empty path → null DL → crash.  Same race class as KB-15, different surface.
+    //
+    // Left for a follow-up fix: baking the local player's skeleton under pack-unique
+    // "coopchar/<folder>/..." keys (mirroring the DummyPlayer path) avoids the cache
+    // collision entirely without needing aggressive eviction.  See issue tracker.
     auto archiveManager = resourceMgr->GetArchiveManager();
     for (const auto& archivePath : sLocalCoopArchivePaths) {
         archiveManager->RemoveArchive(archivePath);
@@ -1242,6 +1258,312 @@ static bool BuildBakedPlayerModel(
 }
 
 // ---------------------------------------------------------------------------
+// Vanilla-variant bake path — issue #163
+//
+// When a remote player selects "Default Link" (empty customModelFilename),
+// the viewer's DummyPlayer renders the vanilla Link skeleton.  The previous
+// fix (Coop Test 21) loaded the vanilla skeleton via LoadResource(loadExact=true)
+// and pointed skelAnime->skeleton at its shared segment — which prevented the
+// retire-slot dangling crash but did NOT protect render-time resource resolution
+// from alt-asset collisions.  Symptom: the vanilla face TLUT, bound inside the
+// vanilla face DL via an OTR path, was resolved at render time through
+// LoadResourceProcess which applies alt-asset resolution.  If the viewer's own
+// coop pack is registered in ArchiveManager (typical: the viewer picked a coop
+// model), its alt TLUT at the same path wins — CI8 face pixels sampled against
+// the wrong palette produced the blue-line scramble reported in #163.
+//
+// The fix below mirrors BuildBakedPlayerModel + BakeDL + BakeFaceTextures but
+// resolves every reference through LoadResource(path, loadExact=true), and
+// re-caches each under a pack-unique "vanilla-dummy/<path>" key.  Baked DLs
+// reference those keys via the same __OTR__-prefix trick BakeFaceTextures uses,
+// so render-time OtrSignatureCheck / LoadResourceProcess bypass alt-asset
+// resolution (no archive has "alt/vanilla-dummy/..." entries) and hit the
+// cache directly.
+//
+// Duplication with the pack bake is intentional for now.  Consolidation into
+// a shared ResourceResolver lambda is tracked as a follow-up once a second
+// real caller exists.
+
+static void BakeVanillaFaceTexturesForDummy(
+    std::shared_ptr<Ship::ResourceManager>& resMgr,
+    BakedPlayerModel& model)
+{
+    // Same 24 paths as BakeFaceTextures but loaded via loadExact=true so we
+    // get the genuine vanilla face textures regardless of which coop packs
+    // are registered globally.
+    static const char* kEyePaths[2][8] = {
+        { "objects/object_link_boy/gLinkAdultEyesOpenTex",
+          "objects/object_link_boy/gLinkAdultEyesHalfTex",
+          "objects/object_link_boy/gLinkAdultEyesClosedfTex",
+          "objects/object_link_boy/gLinkAdultEyesRollLeftTex",
+          "objects/object_link_boy/gLinkAdultEyesRollRightTex",
+          "objects/object_link_boy/gLinkAdultEyesShockTex",
+          "objects/object_link_boy/gLinkAdultEyesUnk1Tex",
+          "objects/object_link_boy/gLinkAdultEyesUnk2Tex" },
+        { "objects/object_link_child/gLinkChildEyesOpenTex",
+          "objects/object_link_child/gLinkChildEyesHalfTex",
+          "objects/object_link_child/gLinkChildEyesClosedfTex",
+          "objects/object_link_child/gLinkChildEyesRollLeftTex",
+          "objects/object_link_child/gLinkChildEyesRollRightTex",
+          "objects/object_link_child/gLinkChildEyesShockTex",
+          "objects/object_link_child/gLinkChildEyesUnk1Tex",
+          "objects/object_link_child/gLinkChildEyesUnk2Tex" },
+    };
+    static const char* kMouthPaths[2][4] = {
+        { "objects/object_link_boy/gLinkAdultMouth1Tex",
+          "objects/object_link_boy/gLinkAdultMouth2Tex",
+          "objects/object_link_boy/gLinkAdultMouth3Tex",
+          "objects/object_link_boy/gLinkAdultMouth4Tex" },
+        { "objects/object_link_child/gLinkChildMouth1Tex",
+          "objects/object_link_child/gLinkChildMouth2Tex",
+          "objects/object_link_child/gLinkChildMouth3Tex",
+          "objects/object_link_child/gLinkChildMouth4Tex" },
+    };
+
+    int hits = 0;
+    auto tryBake = [&](const char* origPath, std::string& outKey) {
+        auto res = resMgr->LoadResource(origPath, /*loadExact=*/true);
+        if (!res) return;
+        const std::string uniqueKey = "vanilla-dummy/" + std::string(origPath);
+        resMgr->SetCachedResource(uniqueKey, res);
+        outKey = "__OTR__" + uniqueKey;
+        hits++;
+    };
+    for (int age = 0; age < 2; age++) {
+        for (int i = 0; i < 8; i++) tryBake(kEyePaths[age][i],   model.eyeTexKeys[age][i]);
+        for (int i = 0; i < 4; i++) tryBake(kMouthPaths[age][i], model.mouthTexKeys[age][i]);
+    }
+    SPDLOG_INFO("[CoopModel][Bake][Vanilla] face textures: {}/24 vanilla overrides preloaded", hits);
+}
+
+static Gfx* BakeVanillaDummyDL(
+    const std::string& dlPath,
+    std::shared_ptr<Ship::ResourceManager>& resMgr,
+    BakedPlayerModel& model,
+    std::unordered_map<std::string, Gfx*>& dlCache)
+{
+    // Guard against re-baking and cycles
+    auto cacheIt = dlCache.find(dlPath);
+    if (cacheIt != dlCache.end()) return cacheIt->second;
+    dlCache[dlPath] = nullptr;
+
+    auto resource = resMgr->LoadResource(dlPath, /*loadExact=*/true);
+    if (!resource) {
+        SPDLOG_WARN("[CoopModel][Bake][Vanilla] DL not found via loadExact: \"{}\"", dlPath);
+        return nullptr;
+    }
+    const std::string cacheKey = "vanilla-dummy/" + dlPath;
+    resMgr->SetCachedResource(cacheKey, resource);
+    auto dl = std::dynamic_pointer_cast<Fast::DisplayList>(resource);
+    if (!dl) return nullptr;
+
+    std::vector<Gfx> baked = dl->Instructions;
+    auto archiveMgr = resMgr->GetArchiveManager();
+
+    // Reuse BakeDL's rewrite logic, but source every preload through
+    // LoadResource(loadExact=true) instead of a pack archive's LoadFile.
+    for (size_t i = 0; i < baked.size(); i++) {
+        const uint8_t op = (uint8_t)((baked[i].words.w0 >> 24) & 0xFF);
+
+        if (op == (uint8_t)Fast::OTR_G_SETTIMG_OTR_FILEPATH) {
+            const char* origPath = (const char*)baked[i].words.w1;
+            auto texRes = resMgr->LoadResource(origPath, /*loadExact=*/true);
+            if (texRes) {
+                const std::string uniqueKey = "vanilla-dummy/" + std::string(origPath);
+                resMgr->SetCachedResource(uniqueKey, texRes);
+                model.pathStrings.push_back(uniqueKey);
+            } else {
+                model.pathStrings.push_back(origPath);  // preserve the original so the c_str() outlives `dl`
+            }
+            baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+        }
+        else if (op == (uint8_t)Fast::OTR_G_SETTIMG_OTR_HASH) {
+            // Same HASH→FILEPATH conversion as BakeDL, targeting the vanilla-dummy/
+            // cache namespace instead of coopchar/<folder>/.
+            const uint64_t hash = ((uint64_t)(uint32_t)baked[i+1].words.w0 << 32)
+                                | (uint64_t)(uint32_t)baked[i+1].words.w1;
+            std::string pathStr;
+            const char* globalPath = archiveMgr->HashToCString(hash);
+            if (globalPath != nullptr) {
+                auto texRes = resMgr->LoadResource(globalPath, /*loadExact=*/true);
+                if (texRes) {
+                    const std::string uniqueKey = "vanilla-dummy/" + std::string(globalPath);
+                    resMgr->SetCachedResource(uniqueKey, texRes);
+                    pathStr = uniqueKey;
+                } else {
+                    pathStr = globalPath;
+                }
+            } else {
+                pathStr = "__coopbake_unresolved_hash__";
+            }
+            model.pathStrings.push_back(pathStr);
+            baked[i].words.w0 = (baked[i].words.w0 & 0x00FFFFFF)
+                              | ((uintptr_t)(uint8_t)Fast::OTR_G_SETTIMG_OTR_FILEPATH << 24);
+            baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+            baked[i+1].words.w0 = 0;
+            baked[i+1].words.w1 = 0;
+            i++;
+        }
+        else if (op == (uint8_t)Fast::OTR_G_VTX_OTR_FILEPATH) {
+            const char* origPath = (const char*)baked[i].words.w1;
+            auto vtxRes = resMgr->LoadResource(origPath, /*loadExact=*/true);
+            if (vtxRes) {
+                const std::string uniqueKey = "vanilla-dummy/" + std::string(origPath);
+                resMgr->SetCachedResource(uniqueKey, vtxRes);
+                model.pathStrings.push_back(uniqueKey);
+            } else {
+                model.pathStrings.push_back(origPath);
+            }
+            baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+            i++;  // skip vtx-params word [i+1]
+        }
+        else if (op == (uint8_t)Fast::OTR_G_VTX_OTR_HASH) {
+            const uint32_t vtxW0 = (uint32_t)baked[i].words.w0;
+            const uint32_t vtxCnt = (vtxW0 >> 12) & 0xFF;
+            const uint32_t vtxIdxOff = ((vtxW0 >> 1) & 0x7F) - vtxCnt;
+            const uint32_t byteOffset = (uint32_t)baked[i].words.w1;
+            const uint64_t hash = ((uint64_t)(uint32_t)baked[i+1].words.w0 << 32)
+                                | (uint64_t)(uint32_t)baked[i+1].words.w1;
+            const char* globalPath = archiveMgr->HashToCString(hash);
+            if (globalPath != nullptr) {
+                auto vtxRes = resMgr->LoadResource(globalPath, /*loadExact=*/true);
+                if (vtxRes) {
+                    const std::string uniqueKey = "vanilla-dummy/" + std::string(globalPath);
+                    resMgr->SetCachedResource(uniqueKey, vtxRes);
+                    model.pathStrings.push_back(uniqueKey);
+                    baked[i].words.w0 = (uintptr_t)(uint8_t)Fast::OTR_G_VTX_OTR_FILEPATH << 24;
+                    baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+                    baked[i+1].words.w0 = (uintptr_t)vtxCnt;
+                    baked[i+1].words.w1 = (uintptr_t)((vtxIdxOff << 16) | (byteOffset / 16));
+                }
+            }
+            i++;
+        }
+        else if (op == (uint8_t)Fast::OTR_G_DL_OTR_FILEPATH) {
+            const char* origPath = (const char*)baked[i].words.w1;
+            Gfx* subBaked = BakeVanillaDummyDL(origPath, resMgr, model, dlCache);
+            if (subBaked) {
+                const uintptr_t pushBit = (baked[i].words.w0 >> 16) & 1;
+                baked[i].words.w0 = ((uintptr_t)(uint8_t)0xDE << 24) | (pushBit << 16);
+                baked[i].words.w1 = (uintptr_t)subBaked;
+            } else {
+                model.pathStrings.push_back(origPath);
+                baked[i].words.w1 = (uintptr_t)model.pathStrings.back().c_str();
+            }
+        }
+        else if (op == (uint8_t)Fast::OTR_G_DL_OTR_HASH) {
+            const uintptr_t pushBit = (baked[i].words.w0 >> 16) & 1;
+            const uint64_t hash = ((uint64_t)(uint32_t)baked[i+1].words.w0 << 32)
+                                | (uint64_t)(uint32_t)baked[i+1].words.w1;
+            const char* globalPath = archiveMgr->HashToCString(hash);
+            if (globalPath != nullptr) {
+                Gfx* subBaked = BakeVanillaDummyDL(globalPath, resMgr, model, dlCache);
+                if (subBaked) {
+                    baked[i].words.w0 = ((uintptr_t)(uint8_t)0xDE << 24) | (pushBit << 16);
+                    baked[i].words.w1 = (uintptr_t)subBaked;
+                    baked[i+1].words.w0 = 0;
+                    baked[i+1].words.w1 = 0;
+                }
+            }
+            i++;
+        }
+        else if (op == (uint8_t)Fast::OTR_G_MARKER       ||
+                 op == (uint8_t)Fast::OTR_G_BRANCH_Z_OTR ||
+                 op == (uint8_t)Fast::OTR_G_MTX_OTR      ||
+                 op == (uint8_t)Fast::OTR_G_MOVEMEM_HASH) {
+            i++;
+        }
+    }
+
+    model.bakedDLs.push_back(std::move(baked));
+    Gfx* ptr = model.bakedDLs.back().data();
+    dlCache[dlPath] = ptr;
+    return ptr;
+}
+
+static bool BuildVanillaDummyPlayerModel(
+    const std::shared_ptr<Skeleton>& skeleton,
+    std::shared_ptr<Ship::ResourceManager>& resMgr,
+    BakedPlayerModel& outModel)
+{
+    const int limbCount = skeleton->limbCount;
+    outModel.limbCopies.resize(limbCount);
+    outModel.segmentPtrs.resize(limbCount);
+
+    std::unordered_map<std::string, Gfx*> dlCache;
+    int limbLoadedCount = 0;
+
+    for (int i = 0; i < limbCount; i++) {
+        outModel.segmentPtrs[i] = &outModel.limbCopies[i];
+
+        if (i >= (int)skeleton->limbTable.size()) continue;
+        const std::string& limbPath = skeleton->limbTable[i];
+
+        // Hierarchy always copied from the skeleton's own segment[] (same invariant
+        // as BuildBakedPlayerModel — per-limb SkeletonLimb resources can encode
+        // child/sibling indices inconsistently with the Skeleton factory output,
+        // which causes SkelAnime_DrawFlexLimb stack overflows).
+        auto copyHierarchyFromSegment = [&]() {
+            void** limbPtrs = (void**)skeleton->skeletonData.skeletonHeader.segment;
+            if (limbPtrs && limbPtrs[i]) {
+                LodLimb* srcLimb = (LodLimb*)limbPtrs[i];
+                outModel.limbCopies[i].jointPos = srcLimb->jointPos;
+                outModel.limbCopies[i].child    = srcLimb->child;
+                outModel.limbCopies[i].sibling  = srcLimb->sibling;
+            } else {
+                outModel.limbCopies[i].child   = 0xFF;
+                outModel.limbCopies[i].sibling = 0xFF;
+            }
+        };
+
+        auto limbRes = resMgr->LoadResource(limbPath, /*loadExact=*/true);
+        if (!limbRes) {
+            copyHierarchyFromSegment();
+            continue;
+        }
+        auto skeletonLimb = std::dynamic_pointer_cast<SkeletonLimb>(limbRes);
+        if (!skeletonLimb) {
+            copyHierarchyFromSegment();
+            continue;
+        }
+        limbLoadedCount++;
+        copyHierarchyFromSegment();
+        outModel.limbCopies[i].dLists[0] = nullptr;
+        outModel.limbCopies[i].dLists[1] = nullptr;
+
+        if (!skeletonLimb->dListPtr.empty()) {
+            const std::string pfx = "__OTR__";
+            const std::string dlPath = skeletonLimb->dListPtr.starts_with(pfx)
+                ? skeletonLimb->dListPtr.substr(pfx.size())
+                : skeletonLimb->dListPtr;
+            Gfx* baked = BakeVanillaDummyDL(dlPath, resMgr, outModel, dlCache);
+            if (baked) outModel.limbCopies[i].dLists[0] = baked;
+        }
+        if (!skeletonLimb->dList2Ptr.empty()) {
+            const std::string pfx = "__OTR__";
+            const std::string dlPath = skeletonLimb->dList2Ptr.starts_with(pfx)
+                ? skeletonLimb->dList2Ptr.substr(pfx.size())
+                : skeletonLimb->dList2Ptr;
+            Gfx* baked = BakeVanillaDummyDL(dlPath, resMgr, outModel, dlCache);
+            if (baked) outModel.limbCopies[i].dLists[1] = baked;
+        }
+    }
+
+    if (limbLoadedCount == 0) {
+        SPDLOG_ERROR("[CoopModel][Bake][Vanilla] BuildVanillaDummyPlayerModel: 0/{} limbs loaded — refusing",
+                     limbCount);
+        return false;
+    }
+
+    BakeVanillaFaceTexturesForDummy(resMgr, outModel);
+
+    outModel.isValid = true;
+    SPDLOG_INFO("[CoopModel][Bake][Vanilla] BuildVanillaDummyPlayerModel: {}/{} limbs loaded, {} DLs, {} path strings",
+                limbLoadedCount, limbCount, outModel.bakedDLs.size(), outModel.pathStrings.size());
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 
 void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, bool isAdult, uint8_t tunic,
                                                         const std::string& characterFolder,
@@ -1265,14 +1587,37 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         auto vanillaRes = resourceMgr->LoadResource(vanillaPath, /*loadExact=*/true);
         auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
         if (vanillaSkel != nullptr && vanillaSkel->skeletonData.skeletonHeader.segment != nullptr) {
-            skelAnime->skeleton = vanillaSkel->skeletonData.skeletonHeader.segment;
-            uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
-            memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
-            skelAnime->limbCount  = (u8)vanillaSkel->limbCount;
-            skelAnime->dListCount = (s8)vanillaSkel->dListCount;
-            outSkeleton = vanillaSkel;  // keep it alive via caller's shared_ptr
-            SPDLOG_INFO("[CoopModel] ApplyCustomSkeletonToDummyPlayer: revert to vanilla \"{}\" (isAdult={})",
-                        vanillaPath, isAdult);
+            // Reset outBakedModel before building — the caller provides a fresh
+            // BakedPlayerModel via make_unique, but defensively clear anyway.
+            outBakedModel = BakedPlayerModel{};
+
+            // Bake the vanilla skeleton's DLs under pack-unique "vanilla-dummy/..."
+            // cache keys (issue #163).  Without this, render-time G_SETTIMG for the
+            // face TLUT resolves through alt-asset resolution and returns the
+            // viewer's own coop-pack TLUT — CI8 face pixels sampled against the
+            // wrong palette produce the blue-line scramble.
+            if (BuildVanillaDummyPlayerModel(vanillaSkel, resourceMgr, outBakedModel)) {
+                skelAnime->skeleton = (void**)outBakedModel.segmentPtrs.data();
+                uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
+                memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+                // Intentionally NOT writing skelAnime->limbCount / ->dListCount —
+                // see the same guard on the pack-bake success path at the bottom
+                // of this function for rationale (Coop Test 20 dListCount regression).
+                outSkeleton = vanillaSkel;
+                SPDLOG_INFO("[CoopModel] ApplyCustomSkeletonToDummyPlayer: revert to baked vanilla \"{}\" (isAdult={})",
+                            vanillaPath, isAdult);
+            } else {
+                // Bake failed — fall back to the shared-segment revert (Coop Test 21 behavior).
+                // Face textures will still scramble on a viewer with a coop pack registered,
+                // but at least the skeleton isn't dangling.
+                skelAnime->skeleton = vanillaSkel->skeletonData.skeletonHeader.segment;
+                uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
+                memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+                outSkeleton = vanillaSkel;
+                SPDLOG_WARN("[CoopModel] ApplyCustomSkeletonToDummyPlayer: vanilla bake failed, "
+                            "fell back to shared segment for \"{}\" (face may scramble, see #163)",
+                            vanillaPath);
+            }
         } else {
             SPDLOG_WARN("[CoopModel] ApplyCustomSkeletonToDummyPlayer: revert requested but vanilla skeleton "
                         "\"{}\" not found — leaving skelAnime->skeleton unchanged (may crash after retire)",
