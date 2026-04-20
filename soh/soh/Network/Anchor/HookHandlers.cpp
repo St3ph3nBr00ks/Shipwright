@@ -314,6 +314,19 @@ void Anchor::RegisterHooks() {
                 }
             }
         }
+
+        // Issue #82 — sibling retire-slot tick for local-player baked skeletons.
+        // UpdateCustomSkeletonFromFolder moves the outgoing bakedModel into the
+        // SkeletonPatchInfo's retire slot on pack switch (same reasoning as the
+        // AnchorClient loop above).
+        for (auto& skel : SOH::SkeletonPatcher::skeletons) {
+            if (skel.retireFrameCounter > 0) {
+                skel.retireFrameCounter--;
+                if (skel.retireFrameCounter == 0) {
+                    skel.retiredBakedModel = nullptr;
+                }
+            }
+        }
     });
 
     // Follower mode (non-host only): override local player position to trail the host.

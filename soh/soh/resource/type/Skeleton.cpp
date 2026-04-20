@@ -248,16 +248,14 @@ void SkeletonPatcher::RegisterSkeleton(std::string& path, SkelAnime* skelAnime) 
         }
     }
 
-    skeletons.push_back(info);
+    skeletons.push_back(std::move(info));
 }
 
 void SkeletonPatcher::UnregisterSkeleton(SkelAnime* skelAnime) {
 
     // TODO: Should probably just use a dictionary here...
     for (size_t i = 0; i < skeletons.size(); i++) {
-        auto skel = skeletons[i];
-
-        if (skel.skelAnime == skelAnime) {
+        if (skeletons[i].skelAnime == skelAnime) {
             skeletons.erase(skeletons.begin() + i);
             break;
         }
@@ -270,7 +268,7 @@ void SkeletonPatcher::ClearSkeletons() {
 void SkeletonPatcher::UpdateSkeletons() {
     auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
     bool isAlt = resourceMgr->IsAltAssetsEnabled();
-    for (auto skel : skeletons) {
+    for (auto& skel : skeletons) {
         Skeleton* newSkel =
             (Skeleton*)resourceMgr
                 ->LoadResource((isAlt ? Ship::IResource::gAltAssetPrefix : "") + skel.vanillaSkeletonPath, true)
@@ -361,6 +359,23 @@ void SkeletonPatcher::UpdateTunicSkeletons(SkeletonPatchInfo& skel) {
     UpdateCustomSkeletonFromFolder(skeletonPath, folderStr, skel);
 }
 
+// Forward declarations for the bake helpers defined later in this file.
+// Issue #82 — UpdateCustomSkeletonFromFolder now invokes these on the local-player
+// pack-switch and revert-to-default paths so the rendered visual updates
+// immediately rather than on next scene change.
+static std::shared_ptr<Ship::Archive> OpenCoopPackArchive(const std::string& folder,
+                                                          const std::string& probePath);
+static bool BuildBakedPlayerModel(
+    const std::shared_ptr<Skeleton>& skeleton,
+    const std::string& folder,
+    std::shared_ptr<Ship::Archive>& archive,
+    std::shared_ptr<Ship::ResourceLoader>& loader,
+    BakedPlayerModel& outModel);
+static bool BuildVanillaDummyPlayerModel(
+    const std::shared_ptr<Skeleton>& skeleton,
+    std::shared_ptr<Ship::ResourceManager>& resMgr,
+    BakedPlayerModel& outModel);
+
 // Searches all loaded archives inside coopplayercharacters/<folder>/ for a skeleton
 // at altPath.  If found, parses it and patches skel.skelAnime directly, storing the
 // shared_ptr in skel.overrideSkeleton so the data stays alive.  Falls back to
@@ -396,7 +411,70 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         }
         sLastLoadedCoopFolder = "";
         skel.overrideSkeleton = nullptr;
+
+        // Issue #82 — bake the vanilla skeleton under "vanilla-dummy/..." cache
+        // keys so the revert-to-default path also gets a clean render-time
+        // resolution. Without this, the previous pack's "coopchar/<folder>/..."
+        // entries stay cached and continue to bleed through on limbs whose DLs
+        // haven't been touched since the pack switch — identical symptom class
+        // to the coop-pack-to-coop-pack case, different surface.
+        //
+        // Fix 1 (2026-04-20 test 19 regression): LoadResource must use the base
+        // age skeleton path (skel.vanillaSkeletonPath) NOT the caller's
+        // tunic-variant skeletonPath.  SoH's per-tunic variant paths like
+        // gLinkChildKokiriTunicSkel exist only under the "alt/" prefix in packs
+        // and don't resolve via loadExact=true against vanilla OTR.  The base
+        // path (e.g. gLinkChildSkel) always resolves, and BuildVanillaDummyPlayerModel
+        // is pack-agnostic — the bake walk is structurally identical regardless
+        // of which age/variant goes in.  Using the tunic path caused vanillaRes
+        // to come back null and the whole bake block to be silently skipped.
+        //
+        // Mirrors the retire-slot lifecycle from the pack-bake path below.
+        auto vanillaRes = resourceMgr->LoadResource(skel.vanillaSkeletonPath, /*loadExact=*/true);
+        auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
+        if (vanillaSkel != nullptr && vanillaSkel->skeletonData.skeletonHeader.segment != nullptr) {
+            if (skel.bakedModel != nullptr) {
+                skel.retiredBakedModel = std::move(skel.bakedModel);
+                skel.retireFrameCounter = 4;  // kRetireFrames
+            }
+            skel.bakedModel = std::make_unique<BakedPlayerModel>();
+            if (BuildVanillaDummyPlayerModel(vanillaSkel, resourceMgr, *skel.bakedModel)) {
+                skel.overrideSkeleton = vanillaSkel;  // keep alive for the baked segment's lifetime
+                skel.skelAnime->skeleton = (void**)skel.bakedModel->segmentPtrs.data();
+                uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
+                memcpy(&skel.skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+                SPDLOG_INFO("[CoopModel] local player baked vanilla skeleton applied skelAnime={} (limbCount={})",
+                            (void*)skel.skelAnime, vanillaSkel->limbCount);
+                gfx_texture_cache_clear();
+                return;
+            }
+            // Bake failed — drop the empty slot and fall through to the legacy
+            // UpdateCustomSkeletonFromPath resolution.
+            skel.bakedModel = nullptr;
+            SPDLOG_WARN("[CoopModel] vanilla bake failed for \"{}\", falling through to UpdateCustomSkeletonFromPath",
+                        skel.vanillaSkeletonPath);
+        } else {
+            SPDLOG_WARN("[CoopModel] vanilla LoadResource(\"{}\") returned null — falling through",
+                        skel.vanillaSkeletonPath);
+        }
+
+        // Fix 2 (2026-04-20 test 19 regression): retire any stale bakedModel
+        // BEFORE handing off to UpdateCustomSkeletonFromPath.  The legacy path
+        // writes skel.skelAnime->skeleton directly to a vanilla segment pointer
+        // (not to bakedModel->segmentPtrs).  If we leave skel.bakedModel alive
+        // here, the renderer swings from "baked segment" → "vanilla segment"
+        // with no retire barrier, and any Gfx frame mid-flight that referenced
+        // the baked pathStrings/bakedDLs can walk into freed memory once the
+        // subsequent assignment in the pack-bake path (on the next cosmetic
+        // change) destroys it.  Retiring arms the counter so ≥kRetireFrames
+        // elapse before destruction.  gfx_texture_cache_clear flushes the
+        // F3DZEX2 DL cache — mirror of the successful-bake tail.
+        if (skel.bakedModel != nullptr) {
+            skel.retiredBakedModel = std::move(skel.bakedModel);
+            skel.retireFrameCounter = 4;  // kRetireFrames
+        }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
+        gfx_texture_cache_clear();
         return;
     }
 
@@ -466,13 +544,56 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     // Keep the skeleton alive for as long as this SkeletonPatchInfo exists.
     skel.overrideSkeleton = skeleton;
 
-    SPDLOG_INFO("[CoopModel]   skeleton applied to local player skelAnime={} segment: {} -> {}",
-                (void*)skel.skelAnime,
-                (void*)skel.skelAnime->skeleton,
-                (void*)skeleton->skeletonData.skeletonHeader.segment);
-    skel.skelAnime->skeleton = skeleton->skeletonData.skeletonHeader.segment;
-    uintptr_t skelPtr = (uintptr_t)skeleton->GetPointer();
-    memcpy(&skel.skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+    // Issue #82 — bake the local player's new skeleton under pack-unique
+    // "coopchar/<folder>/..." cache keys. Without baking, the raw OTR paths on
+    // each limb's dList[0] collide across packs in the global DL cache (every
+    // pack uses the same "alt/objects/object_link_child/gLinkChildSkel*" paths),
+    // so the renderer keeps serving the previous pack's limbs until a scene
+    // change evicts the cache.
+    //
+    // This mirrors the DummyPlayer bake path in ApplyCustomSkeletonToDummyPlayer.
+    // The tracked archive registration from LoadFileFromCoopFolder above stays
+    // intact — OpenCoopPackArchive opens a transient second handle just for
+    // this bake walk and discards it.
+    //
+    // Retire-slot (KB-15 / #110): the outgoing bakedModel cannot be destroyed
+    // synchronously. The last-submitted Gfx frame still holds raw c_str()
+    // pointers into its pathStrings and data() pointers into its bakedDLs.
+    // Move it into retiredBakedModel; OnGameFrameUpdate ticks retireFrameCounter
+    // down and destroys it when the renderer has moved past those frames.
+    if (skel.bakedModel != nullptr) {
+        skel.retiredBakedModel = std::move(skel.bakedModel);
+        skel.retireFrameCounter = 4;  // kRetireFrames — matches Anchor.h
+    }
+    skel.bakedModel = std::make_unique<BakedPlayerModel>();
+
+    auto bakeArchive = OpenCoopPackArchive(folder, resolvedAltPath);
+    if (bakeArchive && BuildBakedPlayerModel(skeleton, folder, bakeArchive, resourceLoader, *skel.bakedModel)) {
+        SPDLOG_INFO("[CoopModel] local player baked skeleton applied skelAnime={} (limbCount={})",
+                    (void*)skel.skelAnime, skeleton->limbCount);
+        skel.skelAnime->skeleton = (void**)skel.bakedModel->segmentPtrs.data();
+        uintptr_t skelPtr = (uintptr_t)skeleton->GetPointer();
+        memcpy(&skel.skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+        // Intentionally NOT writing skelAnime->limbCount / ->dListCount here.
+        // Same rationale as ApplyCustomSkeletonToDummyPlayer's success path:
+        // overwriting them broke Guard 4 on subsequent pack applications (Coop
+        // Test 19 regression).
+    } else {
+        // Bake failed — fall back to the pre-#82 shared-segment apply. User
+        // will see the visual-stale symptom until scene change (original #82
+        // behaviour), but rendering is safe.
+        skel.bakedModel = nullptr;
+        SPDLOG_WARN("[CoopModel] local player bake failed, fell back to shared segment for folder=\"{}\" — "
+                    "visual will be stale until scene change (see #82)",
+                    folder);
+        SPDLOG_INFO("[CoopModel]   skeleton applied to local player skelAnime={} segment: {} -> {}",
+                    (void*)skel.skelAnime,
+                    (void*)skel.skelAnime->skeleton,
+                    (void*)skeleton->skeletonData.skeletonHeader.segment);
+        skel.skelAnime->skeleton = skeleton->skeletonData.skeletonHeader.segment;
+        uintptr_t skelPtr = (uintptr_t)skeleton->GetPointer();
+        memcpy(&skel.skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+    }
 
     // Flush the F3DZEX2 display list cache so the renderer re-uploads the new skeleton's
     // display lists on the next frame.  Without this, the renderer keeps serving cached
@@ -1850,3 +1971,80 @@ void SkeletonPatcher::UpdateCustomSkeletonFromPath(const std::string& skeletonPa
     }
 }
 } // namespace SOH
+
+// ---------------------------------------------------------------------------
+// Issue #82 — face-texture swap for the LOCAL player's Player_Draw.
+//
+// Player_DrawImpl (z_player_lib.c:1050/1062) binds face textures via
+// gSPSegment(0x08/0x09, sEyeTextures[age][idx]) where each slot holds a raw
+// vanilla OTR path string.  Alt-asset resolution on that path caches the
+// texture resource under the raw "alt/objects/.../gLinkAdultEyesOpenTex" key
+// — keyed on the path, not on which pack supplied it.  When the local player
+// switches packs, the cache entry sticks and the renderer keeps drawing the
+// previous pack's face texture.
+//
+// BakeFaceTextures preloads each pack's face textures under pack-unique
+// "coopchar/<folder>/..." keys with "__OTR__"-prefixed strings stored in
+// bakedModel.eyeTexKeys / mouthTexKeys.  Anchor_LocalPlayerFaceSwapBegin /
+// End save/swap/restore the shared sEyeTextures / sMouthTextures arrays
+// around the local player's Player_Draw so the bound paths resolve to the
+// pack-local cache entries for the duration of that one call.  Same mechanism
+// as DummyPlayer_Draw's swap, different caller.
+//
+// Reentrancy: Player_Draw is not reentrant for the local player, so a single
+// save slot is sufficient.  DummyPlayer_Draw owns its own swap scope; the
+// two do not interleave because actors are drawn serially.
+extern "C" {
+    extern void* sEyeTextures[2][8];
+    extern void* sMouthTextures[2][4];
+
+    static void* sLocalSavedEye[8];
+    static void* sLocalSavedMouth[4];
+    static int   sLocalSavedFaceAge = -1;
+    static bool  sLocalFaceSwapActive = false;
+
+    void Anchor_LocalPlayerFaceSwapBegin(Actor* thisx, PlayState* play) {
+        if (sLocalFaceSwapActive) return;  // defensive: nested call would corrupt the save slot
+        if (thisx == nullptr || play == nullptr) return;
+        Player* localPlayer = GET_PLAYER(play);
+        if (localPlayer == nullptr || thisx != &localPlayer->actor) return;
+
+        SOH::BakedPlayerModel* bm = nullptr;
+        for (auto& skel : SOH::SkeletonPatcher::skeletons) {
+            if (!skel.isLocalPlayer) continue;
+            if (skel.skelAnime != &localPlayer->skelAnime) continue;
+            if (skel.bakedModel && skel.bakedModel->isValid) {
+                bm = skel.bakedModel.get();
+            }
+            break;
+        }
+        if (bm == nullptr) return;
+
+        const int faceAge = (gSaveContext.linkAge == LINK_AGE_CHILD) ? 1 : 0;
+        for (int i = 0; i < 8; i++) sLocalSavedEye[i]   = sEyeTextures[faceAge][i];
+        for (int i = 0; i < 4; i++) sLocalSavedMouth[i] = sMouthTextures[faceAge][i];
+        for (int i = 0; i < 8; i++) {
+            if (!bm->eyeTexKeys[faceAge][i].empty()) {
+                sEyeTextures[faceAge][i] = (void*)bm->eyeTexKeys[faceAge][i].c_str();
+            }
+        }
+        for (int i = 0; i < 4; i++) {
+            if (!bm->mouthTexKeys[faceAge][i].empty()) {
+                sMouthTextures[faceAge][i] = (void*)bm->mouthTexKeys[faceAge][i].c_str();
+            }
+        }
+        sLocalSavedFaceAge = faceAge;
+        sLocalFaceSwapActive = true;
+    }
+
+    void Anchor_LocalPlayerFaceSwapEnd(void) {
+        if (!sLocalFaceSwapActive) return;
+        const int faceAge = sLocalSavedFaceAge;
+        if (faceAge >= 0 && faceAge < 2) {
+            for (int i = 0; i < 8; i++) sEyeTextures[faceAge][i]   = sLocalSavedEye[i];
+            for (int i = 0; i < 4; i++) sMouthTextures[faceAge][i] = sLocalSavedMouth[i];
+        }
+        sLocalFaceSwapActive = false;
+        sLocalSavedFaceAge = -1;
+    }
+}
