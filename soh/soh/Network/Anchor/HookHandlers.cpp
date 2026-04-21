@@ -392,8 +392,9 @@ void Anchor::RegisterHooks() {
                 // Constants (do not change follow offset — set by prior session).
                 static constexpr f32 kFollowOffset       = 50.0f;  // world +X from host
                 static constexpr f32 kFollowThreshold    = 100.0f; // dist to switch FOLLOW↔IDLE
-                static constexpr f32 kEngageRange        = 350.0f; // enemy detection radius
-                static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius
+                static constexpr f32 kEngageRange        = 350.0f; // enemy detection radius (XZ)
+                static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius (XZ)
+                static constexpr f32 kMaxYDelta          = 120.0f; // reject enemies on a different floor
                 static constexpr f32 kMaxLeash           = 800.0f; // abandon ENGAGE if P1 this far
                 static constexpr f32 kMoveSpeed          = 4.0f;   // units/frame toward target
                 static constexpr int kStuckCheckInterval = 20;     // frames between stuck checks
@@ -466,11 +467,17 @@ void Anchor::RegisterHooks() {
                             break;
                         }
                         // Scan for the nearest live enemy within ENGAGE range.
+                        // Reject enemies in a different room or on a different vertical
+                        // level — the follower only moves in XZ, so targets on another
+                        // floor (e.g. a room below the Deku Tree entrance) otherwise
+                        // cause it to walk into walls and swing at air.
                         Actor* nearest    = nullptr;
                         f32    nearDistSq = kEngageRange * kEngageRange;
                         Actor* eActor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
                         while (eActor != nullptr) {
-                            if (eActor->update != nullptr) {
+                            if (eActor->update != nullptr &&
+                                eActor->room == player->actor.room &&
+                                fabsf(eActor->world.pos.y - p2Pos.y) < kMaxYDelta) {
                                 f32 edx     = eActor->world.pos.x - p2Pos.x;
                                 f32 edz     = eActor->world.pos.z - p2Pos.z;
                                 f32 eDistSq = edx * edx + edz * edz;
@@ -578,6 +585,15 @@ void Anchor::RegisterHooks() {
                             SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy gone)");
                             break;
                         }
+                        // Drop the target if it moved to another room or floor —
+                        // otherwise we chase it through walls / ceilings.
+                        if (followerTargetEnemy->room != player->actor.room ||
+                            fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy off-floor/room)");
+                            break;
+                        }
                         Vec3f enemyPos = followerTargetEnemy->world.pos;
                         f32   edx      = enemyPos.x - p2Pos.x;
                         f32   edz      = enemyPos.z - p2Pos.z;
@@ -608,6 +624,13 @@ void Anchor::RegisterHooks() {
                             followerAIState     = FollowerAIState::RETURN;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy gone)");
+                            break;
+                        }
+                        if (followerTargetEnemy->room != player->actor.room ||
+                            fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy off-floor/room)");
                             break;
                         }
                         Vec3f enemyPos = followerTargetEnemy->world.pos;
