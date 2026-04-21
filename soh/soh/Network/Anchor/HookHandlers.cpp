@@ -415,8 +415,12 @@ void Anchor::RegisterHooks() {
                         deactivateCheck &= ~(BTN_Z | BTN_A);
                     }
                     // DO_ACTION_CLIMB triggers BTN_A injection regardless of state
-                    // (ledge-hang and water-exit climb-out). Re-check the flag here.
-                    if (player != nullptr && (player->stateFlags2 & PLAYER_STATE2_DO_ACTION_CLIMB)) {
+                    // (ledge-hang and water-exit climb-out). DO_ACTION_ENTER
+                    // (Phase A) does the same for doors. Mask BTN_A in either
+                    // case so our own injection doesn't cancel follower mode.
+                    if (player != nullptr &&
+                        (player->stateFlags2 &
+                         (PLAYER_STATE2_DO_ACTION_CLIMB | PLAYER_STATE2_DO_ACTION_ENTER))) {
                         deactivateCheck &= ~BTN_A;
                     }
                     if (deactivateCheck != 0) {
@@ -484,11 +488,18 @@ void Anchor::RegisterHooks() {
                 };
                 // G6/G7/G8 — enemies that require ranged attack (slingshot/bow).
                 // ENGAGE routes to RANGED_ATTACK when the target is one of these
-                // AND |Δy| > kMaxYDelta (out of melee reach vertically).
+                // AND the target is above Link's sword vertical reach (see Fix 2,
+                // 2026-04-22). Previously gated on |Δy| >= kMaxYDelta=120, which
+                // was far too loose — Link's sword vertical reach is ~30 units,
+                // so a Skullwalltula at Δy=118 still slipped through into ATTACK
+                // and the follower swung at empty air for 60 frames (P2 log 67,
+                // 15:21:03).
+                static constexpr f32 kSwordVerticalReach = 40.0f;
                 static constexpr s16 kRangedRequiredEnemyIds[] = {
                     ACTOR_BOSS_GOMA, // Queen Gohma — ceiling phase
                     ACTOR_EN_GOMA,   // Gohma larvae on the ceiling
-                    ACTOR_EN_SW,     // Skullwalltula on a vine
+                    ACTOR_EN_SW,     // Skullwalltula on a wall vine
+                    ACTOR_EN_ST,     // Skulltula hanging from ceiling on its thread (Fix 2)
                 };
                 auto IsRangedRequiredEnemy = [&](s16 id) -> bool {
                     for (s16 e : kRangedRequiredEnemyIds) { if (e == id) return true; }
@@ -567,14 +578,27 @@ void Anchor::RegisterHooks() {
                     if (cand->world.pos.x < -9000.0f) { return false; } // out-of-scene sentinel
                     // Room-equality check DISABLED — see banner note above the state machine.
                     // if (cand->room != player->actor.room) { return false; }
-                    if (fabsf(cand->world.pos.y - player->actor.world.pos.y) >= kMaxYDelta) {
-                        return false;
-                    }
                     uint32_t cid = GetDummyPlayerClientId(cand);
                     if (cid == 0) { return false; }
                     auto it = clients.find(cid);
                     if (it != clients.end() && it->second.followerActive) {
                         return false; // don't follow another follower
+                    }
+                    // Fix 1 (2026-04-22) — Y-delta check is bypassed when the
+                    // candidate is climbing. Tall ladders/vines lift P1 out of
+                    // the `|Δy| < kMaxYDelta` band in the first ~1 s of the
+                    // climb, before the G1/G2 teleport handler has a chance to
+                    // fire. Ineligibility at that moment dropped the leader,
+                    // early-returned the hook, and left P2 on the ground for
+                    // the rest of the climb (P2 log 67, ladder at 15:20:19 —
+                    // 7 s climb, 0 `Leader started climbing` log on P2).
+                    // When isClimbing is true we admit regardless of Y-delta;
+                    // the CLIMBING state immediately teleports P2 to leaderPos
+                    // and holds Y-delta=0 for the remainder of the climb.
+                    bool leaderClimbing = (it != clients.end() && it->second.isClimbing);
+                    if (!leaderClimbing &&
+                        fabsf(cand->world.pos.y - player->actor.world.pos.y) >= kMaxYDelta) {
+                        return false;
                     }
                     return true;
                 };
@@ -946,25 +970,41 @@ void Anchor::RegisterHooks() {
                             SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy gone)");
                             break;
                         }
-                        // Off-floor handling. Two options:
-                        //  - If the target is in the ranged-required class, it's
-                        //    EXPECTED to be off the melee Y-band (Gohma on the
-                        //    ceiling, Skullwalltula on a vine). Switch to
-                        //    RANGED_ATTACK and don't bail.
-                        //  - Otherwise, give up (existing behaviour).
+                        // Vertical-reach handling. Three layered checks:
+                        //  1. Cross-floor (|Δy| >= kMaxYDelta, 120 units): target
+                        //     is on a different logical level. If it's ranged-
+                        //     required, route to RANGED_ATTACK; otherwise bail.
+                        //  2. Above sword reach but same-floor (Δy > kSwordVerticalReach,
+                        //     40 units) AND ranged-required: route to RANGED_ATTACK.
+                        //     Fix 2 (2026-04-22) — before this check existed, a
+                        //     Skullwalltula at Δy=118 (just under kMaxYDelta) was
+                        //     routed to ATTACK and the follower whiffed for the
+                        //     full 60-frame cycle (P2 log 67, 15:21:03).
+                        //  3. Otherwise fall through to XZ close + ATTACK.
                         // (Room-equality side of this check disabled — see banner note above.)
-                        if (fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
-                            if (IsRangedRequiredEnemy(followerTargetEnemy->id)) {
-                                followerAIState     = FollowerAIState::RANGED_ATTACK;
+                        {
+                            f32 dy = followerTargetEnemy->world.pos.y - p2Pos.y;
+                            if (fabsf(dy) >= kMaxYDelta) {
+                                if (IsRangedRequiredEnemy(followerTargetEnemy->id)) {
+                                    followerAIState     = FollowerAIState::RANGED_ATTACK;
+                                    followerStateFrames = 0;
+                                    SPDLOG_INFO("[Follower] ENGAGE→RANGED_ATTACK (off-floor target id={})",
+                                                followerTargetEnemy->id);
+                                    break;
+                                }
+                                followerAIState     = FollowerAIState::RETURN;
                                 followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] ENGAGE→RANGED_ATTACK (off-floor target id={})",
-                                            followerTargetEnemy->id);
+                                SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy off-floor)");
                                 break;
                             }
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy off-floor)");
-                            break;
+                            if (dy > kSwordVerticalReach &&
+                                IsRangedRequiredEnemy(followerTargetEnemy->id)) {
+                                followerAIState     = FollowerAIState::RANGED_ATTACK;
+                                followerStateFrames = 0;
+                                SPDLOG_INFO("[Follower] ENGAGE→RANGED_ATTACK (above sword reach Δy={:.0f} target id={})",
+                                            dy, followerTargetEnemy->id);
+                                break;
+                            }
                         }
                         Vec3f enemyPos = followerTargetEnemy->world.pos;
                         f32   edx      = enemyPos.x - p2Pos.x;
@@ -1330,7 +1370,37 @@ void Anchor::RegisterHooks() {
                         SPDLOG_INFO("[Follower] animHook firing for ACTOR_PLAYER");
                         sAnimHookLogged = true;
                     }
-                    if (isMoving && !blockedByPlayerState) {
+
+                    // --- Crawlspace override (2026-04-22) ---
+                    // When Link is in PLAYER_STATE2_CRAWLING, the camera is
+                    // locked to the tunnel axis and input is simplified to
+                    // forward/back along that axis. Our camera-relative stick
+                    // projection may or may not land on that axis cleanly, so
+                    // we hardcode full forward (stick_y = 127) while the flag
+                    // is set — crawlspaces in OoT are always "push forward to
+                    // advance, press backward to back out". Zero X because X
+                    // input during crawl is ignored anyway.
+                    //
+                    // Edge-logged: one log entry on entry into CRAWLING, one
+                    // on exit — so we can tell from the test log whether this
+                    // path fired. Not per-frame (would flood the log).
+                    static bool sWasCrawling = false;
+                    bool nowCrawling = (sf2 & PLAYER_STATE2_CRAWLING) != 0;
+                    if (nowCrawling && !sWasCrawling) {
+                        SPDLOG_INFO("[Follower] Crawlspace override ENTER "
+                                    "(PLAYER_STATE2_CRAWLING set) — forcing stick_y=127");
+                    } else if (!nowCrawling && sWasCrawling) {
+                        SPDLOG_INFO("[Follower] Crawlspace override EXIT "
+                                    "(PLAYER_STATE2_CRAWLING cleared)");
+                    }
+                    sWasCrawling = nowCrawling;
+
+                    if (isMoving && nowCrawling) {
+                        input.cur.stick_x = 0;
+                        input.cur.stick_y = 127;
+                        input.rel.stick_x = 0;
+                        input.rel.stick_y = 127;
+                    } else if (isMoving && !blockedByPlayerState) {
                         Vec3f p2w = actor->world.pos;
                         f32 dx = followerMoveTarget.x - p2w.x;
                         f32 dz = followerMoveTarget.z - p2w.z;
@@ -1377,6 +1447,42 @@ void Anchor::RegisterHooks() {
                         input.press.button |= BTN_A;
                         input.cur.button   |= BTN_A;
                         SPDLOG_INFO("[Follower] BTN_A climb (DO_ACTION_CLIMB)");
+                    }
+
+                    // --- Phase A — auto-press A when OoT prompts "Enter" ---
+                    // PLAYER_STATE2_DO_ACTION_ENTER is the flag the engine
+                    // sets to display "Enter" on the A-button prompt — fires
+                    // whenever Link is adjacent to an openable door / passage
+                    // that accepts A. OoT handles the actor-specific detection
+                    // (En_Door trigger volume, Door_Shutter cylinder, grotto
+                    // Door_Ana, certain transition actors) for us; we just
+                    // inject the press.
+                    //
+                    // Doesn't solve the G11 "leader in different room"
+                    // deactivation on its own — Phase B (#169, deferred) is
+                    // the handoff that keeps the follower active long enough
+                    // to WALK to the door. Phase A is still valuable standalone:
+                    // any time the follower is naturally near an openable
+                    // passage (FOLLOW toward a leader beside an open doorway,
+                    // RETURN pathway, or manual user re-activate after G11
+                    // placed the follower near a door), the door opens without
+                    // user intervention.
+                    //
+                    // Edge-logged so the test log shows when this fires. Not
+                    // per-frame (would flood when follower is idle near a door).
+                    {
+                        bool enterPromptActive = (sf2 & PLAYER_STATE2_DO_ACTION_ENTER) != 0;
+                        static bool sWasAtDoor = false;
+                        if (enterPromptActive && !sWasAtDoor) {
+                            SPDLOG_INFO("[Follower] BTN_A door ENTER prompt (Phase A — DO_ACTION_ENTER)");
+                        } else if (!enterPromptActive && sWasAtDoor) {
+                            SPDLOG_INFO("[Follower] BTN_A door EXIT (prompt cleared)");
+                        }
+                        sWasAtDoor = enterPromptActive;
+                        if (enterPromptActive) {
+                            input.press.button |= BTN_A;
+                            input.cur.button   |= BTN_A;
+                        }
                     }
 
                     // --- Attack: face enemy + inject BTN_B at start of each charge phase ---
