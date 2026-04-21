@@ -76,6 +76,16 @@ struct EnemyNetId {
     // back to Idle, and the next update() then calls SetupAwaken (Fix 38).
     // OnActorInit fires AFTER actor->init() has run — safe to call SetupDeadItemDrop.
     bool deferredDeadItemDrop = false;
+
+    // Goroiwa-net state — issue #153.
+    // First non-ACTORCAT_ENEMY actor sync (En_Goroiwa is ACTORCAT_PROP). Cached on
+    // non-host from ENEMY_UPDATE; re-applied each frame in OnActorUpdate so the local
+    // action function can run (collision registration) without drifting from the
+    // host-authoritative path-position. -1 means no state received yet.
+    s16 goroiwaCurrentWaypoint = -1;
+    s16 goroiwaNextWaypoint    = -1;
+    s16 goroiwaPathDirection   = 0; // ±1; 0 means uninitialized
+    u8  goroiwaFlags           = 0; // ENGOROIWA_* bitmask (PLAYER_IN_THE_WAY etc.)
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
@@ -83,7 +93,7 @@ void DummyPlayer_Update(Actor* actor, PlayState* play);
 void DummyPlayer_Draw(Actor* actor, PlayState* play);
 void DummyPlayer_Destroy(Actor* actor, PlayState* play);
 
-typedef struct {
+typedef struct AnchorClient {
     uint32_t clientId;
     std::string name;
     Color_RGB8 color;
@@ -131,6 +141,33 @@ typedef struct {
                                                         // unique_ptr so its address (and all c_str() inside) is
                                                         // stable even if this unordered_map entry is rehashed
 
+    // KB-15 / issue #110 — deferred destruction of a replaced BakedPlayerModel.
+    //
+    // When cosmetic state changes (remote pack change, local model/tunic change,
+    // DummyPlayer re-spawn), the outgoing bakedModel cannot be destroyed
+    // synchronously: the most recently submitted frame's Gfx buffer still holds
+    // raw pointers into its pathStrings / bakedDLs / eyeTexKeys. Destroying it
+    // now leaves those pointers dangling and the renderer walks freed heap memory
+    // (Unhandled OP code crash flood observed in Test 17 log 113).
+    //
+    // Instead: move the outgoing bakedModel into retiredBakedModel, arm
+    // retireFrameCounter = kRetireFrames, and let OnGameFrameUpdate tick it down.
+    // When the counter hits 0 the slot is cleared and the destructor runs — by
+    // which point every Gfx frame that could have referenced the model has been
+    // fully consumed by the renderer.
+    //
+    // Single-slot design is sufficient because the bake is synchronous and
+    // blocks the main thread for ~400 ms (>> kRetireFrames worth of frames),
+    // so back-to-back changes can't overlap in practice.
+    std::unique_ptr<SOH::BakedPlayerModel> retiredBakedModel;
+    int retireFrameCounter = 0;
+
+    // Helper: move current bakedModel into the retire slot, arming the counter.
+    // Any model already in the retire slot is destroyed immediately — acceptable
+    // because it has been sitting there at least one frame already (the previous
+    // bake that displaced the prior retiree took time itself).
+    void RetireBakedModel();
+
     // Voice pack selection (B1 plumbing — see issue #84, #83).  Holds the remote client's
     // chosen voice-pack folder name, or "" for the default vanilla voices.  Not yet
     // consumed by any audio code path; B2 (local preload/indirection) and B3
@@ -140,6 +177,14 @@ typedef struct {
     // Ptr to the dummy player
     Player* player;
 } AnchorClient;
+
+// Number of render frames a retired BakedPlayerModel must sit idle before
+// destruction. See commentary on AnchorClient::retiredBakedModel for rationale.
+// N=4 covers: synchronous CPU walks, LUS command batching, double-buffered GPU
+// presentation, driver-queue stalls, gfx_texture_cache_clear flush tail, and
+// VirtualBox frame-rate disparity. 67 ms at 60 fps / 200 ms at 20 fps — below
+// user-visible threshold.
+static constexpr int kRetireFrames = 4;
 
 typedef struct {
     uint32_t ownerClientId;
@@ -256,6 +301,7 @@ class Anchor : public Network {
     inline static const std::string ENEMY_RESPAWN = "ENEMY_RESPAWN";
     inline static const std::string DAMAGE_ENEMY = "DAMAGE_ENEMY";
     inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
+    inline static const std::string ENEMY_HIT_PLAYER = "ENEMY_HIT_PLAYER";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
     inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
@@ -301,6 +347,8 @@ class Anchor : public Network {
     void SendPacket_EnemySpawn(Actor* actor);
     void SendPacket_EnemyRespawn(uint32_t netId);
     void SendPacket_DamageEnemy(uint32_t netId, u8 damage);
+    void SendPacket_EnemyHitPlayer(uint32_t netId);
+    void HandlePacket_EnemyHitPlayer(nlohmann::json payload);
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);

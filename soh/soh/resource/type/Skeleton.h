@@ -126,6 +126,22 @@ struct SkeletonPatchInfo {
     std::string vanillaSkeletonPath;
     bool isLocalPlayer;
     std::shared_ptr<Skeleton> overrideSkeleton; // keeps folder-loaded skeleton alive for local player override
+
+    // Local-player bake (issue #82). When the local player switches coop packs (or
+    // reverts to Default Link), we bake the new skeleton's DLs under pack-unique
+    // "coopchar/<folder>/..." / "vanilla-dummy/..." cache keys and point skelAnime
+    // at bakedModel->segmentPtrs. Without this, the renderer's DL cache key
+    // collides across packs (identical alt-path strings) and the visual lags a
+    // full scene transition behind the skelAnime pointer swap.
+    //
+    // retiredBakedModel / retireFrameCounter mirror the KB-15 / #110 pattern on
+    // AnchorClient: the replaced bakedModel cannot be destroyed synchronously
+    // because the last submitted Gfx frame still holds raw pointers into its
+    // pathStrings / bakedDLs. OnGameFrameUpdate ticks the counter down; when it
+    // reaches 0 the retiree is destroyed safely.
+    std::unique_ptr<BakedPlayerModel> bakedModel;
+    std::unique_ptr<BakedPlayerModel> retiredBakedModel;
+    int retireFrameCounter = 0;
 };
 
 class SkeletonPatcher {

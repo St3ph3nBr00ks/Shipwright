@@ -11,6 +11,26 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
+// MARK: - AnchorClient helpers
+
+void AnchorClient::RetireBakedModel() {
+    // No live model → nothing to retire. Belt-and-braces: if a retired model is
+    // already sitting in the slot with no counter, clear it on the way out (it
+    // has been there at least one frame already, so safe to destroy now).
+    if (bakedModel == nullptr) {
+        if (retiredBakedModel != nullptr && retireFrameCounter == 0) {
+            retiredBakedModel = nullptr;
+        }
+        return;
+    }
+    // If the retire slot is already full, the previous retiree has been sitting
+    // there for however long it took to bake the model we're now retiring
+    // (synchronous bake ≥ ~400 ms = ≥ 24 frames at 60 fps, >> kRetireFrames).
+    // Destroying it here is safe; no frame can still be referencing it.
+    retiredBakedModel = std::move(bakedModel);
+    retireFrameCounter = kRetireFrames;
+}
+
 // MARK: - Overrides
 
 void Anchor::Enable() {
@@ -99,7 +119,8 @@ void Anchor::OnIncomingJson(nlohmann::json payload) {
         packetType != ENEMY_DEFEATED &&
         packetType != ENEMY_SPAWN &&
         packetType != ENEMY_RESPAWN &&
-        packetType != DAMAGE_ENEMY) {
+        packetType != DAMAGE_ENEMY &&
+        packetType != ENEMY_HIT_PLAYER) {
         if (payload.contains("clientId")) {
             uint32_t clientId = payload["clientId"].get<uint32_t>();
             if (clients.contains(clientId) && clients[clientId].clientVersion != clientVersion) {
@@ -146,6 +167,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_DamageEnemy(payload);
             else if (packetType == DAMAGE_PLAYER)
                 HandlePacket_DamagePlayer(payload);
+            else if (packetType == ENEMY_HIT_PLAYER)
+                HandlePacket_EnemyHitPlayer(payload);
             else if (packetType == DISABLE_ANCHOR)
                 HandlePacket_DisableAnchor(payload);
             else if (packetType == ENTRANCE_DISCOVERED)

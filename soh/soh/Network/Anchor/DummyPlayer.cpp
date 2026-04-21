@@ -104,6 +104,12 @@ void DummyPlayer_Init(Actor* actor, PlayState* play) {
     if (!client.customModelFilename.empty()) {
         bool isAdult = (client.linkAge != LINK_AGE_CHILD);
         client.customSkeleton = nullptr;
+        // KB-15 fix (issue #110): if this client already held a bakedModel (possible
+        // when RefreshClientActors spawns a replacement DummyPlayer), retire it
+        // instead of dropping it — the old DummyPlayer's final draw frame may still
+        // be in flight and its Gfx commands still reference pathStrings / bakedDLs /
+        // eyeTexKeys owned by the old bakedModel.
+        client.RetireBakedModel();
         client.bakedModel = std::make_unique<SOH::BakedPlayerModel>();
         client.lastAppliedModelFilename = "";  // reset so DummyPlayer_Update will re-apply
         SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
@@ -165,6 +171,9 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         bool tunicChanged  = (prevTunic != player->currentTunic);
         if (modelChanged || tunicChanged) {
             client.customSkeleton = nullptr;
+            // KB-15 fix (issue #110): retire the outgoing bakedModel so in-flight
+            // Gfx commands finish consuming it before destruction.
+            client.RetireBakedModel();
             client.bakedModel = std::make_unique<SOH::BakedPlayerModel>();
             SOH::SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(
                 &player->skelAnime, isAdult, (uint8_t)player->currentTunic,
@@ -352,7 +361,10 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play) {
     if (Anchor::Instance->clients.contains(clientId)) {
         if (Anchor::Instance->clients[clientId].player == (Player*)actor) {
             Anchor::Instance->clients[clientId].customSkeleton = nullptr;
-            Anchor::Instance->clients[clientId].bakedModel = nullptr;
+            // KB-15 fix (issue #110): retire rather than destroy.
+            // Actor_Delete can fire during scene transitions and similar points where
+            // the last-submitted Gfx frame may still reference this bakedModel.
+            Anchor::Instance->clients[clientId].RetireBakedModel();
         }
     }
 }

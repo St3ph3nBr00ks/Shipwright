@@ -12496,6 +12496,12 @@ void Player_DrawGameplay(PlayState* play, Player* this, s32 lod, Gfx* cullDList,
     CLOSE_DISPS(play->state.gfxCtx);
 }
 
+// Issue #82 — face-texture swap around the local player's Player_Draw.
+// Mirrors the pattern used by DummyPlayer_Draw. Defined in soh/resource/type/Skeleton.cpp.
+// No-op unless the local player has a valid BakedPlayerModel with pack-local face textures.
+extern void Anchor_LocalPlayerFaceSwapBegin(Actor* thisx, PlayState* play);
+extern void Anchor_LocalPlayerFaceSwapEnd(void);
+
 void Player_Draw(Actor* thisx, PlayState* play2) {
     PlayState* play = play2;
     Player* this = (Player*)thisx;
@@ -12525,6 +12531,8 @@ void Player_Draw(Actor* thisx, PlayState* play2) {
     rot.x = rot.z = 0;
 
     OPEN_DISPS(play->state.gfxCtx);
+
+    Anchor_LocalPlayerFaceSwapBegin(thisx, play);
 
     if (!(this->stateFlags2 & PLAYER_STATE2_DISABLE_DRAW)) {
         OverrideLimbDrawOpa overrideLimbDraw = Player_OverrideLimbDrawGameplayDefault;
@@ -12614,6 +12622,8 @@ void Player_Draw(Actor* thisx, PlayState* play2) {
             Player_DrawGetItem(play, this);
         }
     }
+
+    Anchor_LocalPlayerFaceSwapEnd();
 
     CLOSE_DISPS(play->state.gfxCtx);
 }
