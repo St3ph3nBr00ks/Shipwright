@@ -44,6 +44,7 @@ nlohmann::json Anchor::PrepClientState() {
     std::string localModel = GetLocalModelFilename();
     SPDLOG_INFO("[CoopModel] PrepClientState: customModelFilename=\"{}\"", localModel);
     payload["customModelFilename"] = localModel;
+    payload["followerActive"] = IsFollowerActive();
 
     if (IsSaveLoaded()) {
         payload["seed"] = IS_RANDO ? Rando::Context::GetInstance()->GetSeed() : 0;
@@ -95,6 +96,7 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         clients[clientId].sceneNum = client.sceneNum;
         clients[clientId].curRoomNum = client.curRoomNum;
         clients[clientId].entranceIndex = client.entranceIndex;
+        clients[clientId].followerActive = client.followerActive;
 
         // Cosmetic sync — apply remote player's custom character model to their DummyPlayer
         if (payload["state"].contains("customModelFilename")) {

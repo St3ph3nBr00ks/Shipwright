@@ -132,6 +132,10 @@ typedef struct AnchorClient {
     f32 ocarinaModulator;
     s8 ocarinaBend;
 
+    // AI follower mode (remote client is running the follower AI and should not be
+    // selected as a follower's leader target). Defaults to false for pre-update peers.
+    bool followerActive = false;
+
     // Multiplayer cosmetic sync
     std::string customModelFilename;                    // folder name of remote client's coop pack, or ""
     std::shared_ptr<SOH::Skeleton> customSkeleton;      // keeps loaded skeleton alive; nullptr = vanilla
@@ -248,6 +252,7 @@ class Anchor : public Network {
     Vec3f           followerStuckDir    = { 0.0f, 0.0f, 0.0f }; // strafe direction while STUCK
     Actor*          followerTargetEnemy = nullptr;               // current ENGAGE/ATTACK target
     Vec3f           followerMoveTarget  = { 0.0f, 0.0f, 0.0f }; // world-space position ShouldActorUpdate steers toward
+    uint32_t        followerLeaderClientId = 0;                  // sticky: clientId of current leader DummyPlayer (0 = none)
 
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();

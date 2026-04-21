@@ -194,15 +194,20 @@ extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
 }
 
 void Anchor::SetFollowerActive(bool active) {
+    bool changed = (followerActive != active);
     followerActive = active;
     if (active) {
         followerAIState     = FollowerAIState::IDLE;
         followerStateFrames = 0;
         followerStuckFrames = 0;
         followerTargetEnemy = nullptr;
+        followerLeaderClientId = 0;
         SPDLOG_INFO("[Follower] Activated (menu)");
     } else {
         SPDLOG_INFO("[Follower] Deactivated (menu)");
+    }
+    if (changed && isConnected) {
+        SendPacket_UpdateClientState();
     }
 }
 
@@ -376,34 +381,126 @@ void Anchor::RegisterHooks() {
 
                 if (!followerActive) { return; }
 
-                // --- Find the host's DummyPlayer actor ---
-                Actor* dummyActor = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
-                while (dummyActor != nullptr) {
-                    if (dummyActor->id == ACTOR_EN_OE2 &&
-                        dummyActor->update == (ActorFunc)DummyPlayer_Update &&
-                        GetDummyPlayerClientId(dummyActor) == roomState.ownerClientId) {
-                        break;
-                    }
-                    dummyActor = dummyActor->next;
-                }
-                if (dummyActor == nullptr) { return; } // Host DummyPlayer not found.
-
                 // --- AI follower state machine ---
                 // Constants (do not change follow offset — set by prior session).
-                static constexpr f32 kFollowOffset       = 50.0f;  // world +X from host
+                static constexpr f32 kFollowOffset       = 50.0f;  // world +X from leader
                 static constexpr f32 kFollowThreshold    = 100.0f; // dist to switch FOLLOW↔IDLE
                 static constexpr f32 kEngageRange        = 350.0f; // enemy detection radius (XZ)
                 static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius (XZ)
                 static constexpr f32 kMaxYDelta          = 120.0f; // reject enemies on a different floor
-                static constexpr f32 kMaxLeash           = 800.0f; // abandon ENGAGE if P1 this far
-                static constexpr f32 kMoveSpeed          = 4.0f;   // units/frame toward target
+                static constexpr f32 kMaxLeash           = 800.0f; // abandon ENGAGE if leader this far
+                static constexpr f32 kMoveSpeed          = 4.0f;   // fixed speed in STUCK / ATTACK
+                static constexpr f32 kMinSpeed           = 1.5f;   // speed when near the leader (slow easing)
+                static constexpr f32 kBaseSpeed          = 4.0f;   // normal walk speed
+                static constexpr f32 kSprintSpeed        = 8.0f;   // speed when far (catching up)
+                static constexpr f32 kSlowRadius         = 60.0f;  // distance at which slowdown begins
+                static constexpr f32 kSprintRadius       = 250.0f; // distance at which sprint engages
                 static constexpr int kStuckCheckInterval = 20;     // frames between stuck checks
                 static constexpr f32 kStuckMinProgress   = 5.0f;   // min units per check interval
                 static constexpr int kStuckRecovery      = 25;     // frames of strafe before retry
                 static constexpr int kAttackDuration     = 60;     // frames per ATTACK cycle
 
-                Vec3f hostPos    = dummyActor->world.pos;
-                Vec3f sideTarget = { hostPos.x + kFollowOffset, hostPos.y, hostPos.z };
+                // Task 2: piecewise speed curve. Slow at close range (stops overshoot-
+                // bounce into IDLE), normal walk in mid-range, sprint when the leader
+                // has sprinted ahead. Used in FOLLOW / ENGAGE / RETURN. STUCK and
+                // ATTACK keep kMoveSpeed for predictable strafe/charge distances.
+                auto ComputeSpeed = [](f32 distToTarget) -> f32 {
+                    if (distToTarget < kSlowRadius) {
+                        f32 t = distToTarget / kSlowRadius;
+                        return kMinSpeed + (kBaseSpeed - kMinSpeed) * t;
+                    }
+                    if (distToTarget > kSprintRadius) {
+                        f32 t = (distToTarget - kSprintRadius) / kSprintRadius;
+                        if (t > 1.0f) { t = 1.0f; }
+                        return kBaseSpeed + (kSprintSpeed - kBaseSpeed) * t;
+                    }
+                    return kBaseSpeed;
+                };
+
+                // --- Pick a leader DummyPlayer ---
+                // Prefer the previously chosen leader (stickiness) if it is still
+                // eligible; otherwise scan the DummyPlayer list for the nearest
+                // eligible one. Eligibility: same room as the follower, within the
+                // vertical gate, not parked out-of-scene at (-9999,-9999,-9999),
+                // and the remote client is not itself in follower mode.
+                auto IsEligibleLeader = [&](Actor* cand) -> bool {
+                    if (cand == nullptr || cand->update != (ActorFunc)DummyPlayer_Update) {
+                        return false;
+                    }
+                    if (cand->id != ACTOR_EN_OE2) { return false; }
+                    if (cand->world.pos.x < -9000.0f) { return false; } // out-of-scene sentinel
+                    if (cand->room != player->actor.room) { return false; }
+                    if (fabsf(cand->world.pos.y - player->actor.world.pos.y) >= kMaxYDelta) {
+                        return false;
+                    }
+                    uint32_t cid = GetDummyPlayerClientId(cand);
+                    if (cid == 0) { return false; }
+                    auto it = clients.find(cid);
+                    if (it != clients.end() && it->second.followerActive) {
+                        return false; // don't follow another follower
+                    }
+                    return true;
+                };
+
+                Actor* leaderActor = nullptr;
+                if (followerLeaderClientId != 0) {
+                    // Sticky path: re-find last leader's actor and check eligibility.
+                    Actor* cand = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
+                    while (cand != nullptr) {
+                        if (cand->id == ACTOR_EN_OE2 &&
+                            cand->update == (ActorFunc)DummyPlayer_Update &&
+                            GetDummyPlayerClientId(cand) == followerLeaderClientId) {
+                            if (IsEligibleLeader(cand)) { leaderActor = cand; }
+                            break;
+                        }
+                        cand = cand->next;
+                    }
+                    if (leaderActor == nullptr) {
+                        followerLeaderClientId = 0; // release stickiness, re-scan below
+                    }
+                }
+                if (leaderActor == nullptr) {
+                    // Scan for nearest eligible DummyPlayer (any client, not just host).
+                    Actor* nearestLeader  = nullptr;
+                    f32    nearestDistSq  = 1.0e18f; // effectively unbounded for XZ world distances
+                    Vec3f  selfPos        = player->actor.world.pos;
+                    Actor* cand = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
+                    while (cand != nullptr) {
+                        if (IsEligibleLeader(cand)) {
+                            f32 dx = cand->world.pos.x - selfPos.x;
+                            f32 dz = cand->world.pos.z - selfPos.z;
+                            f32 d2 = dx * dx + dz * dz;
+                            if (d2 < nearestDistSq) {
+                                nearestDistSq = d2;
+                                nearestLeader = cand;
+                            }
+                        }
+                        cand = cand->next;
+                    }
+                    if (nearestLeader != nullptr) {
+                        leaderActor = nearestLeader;
+                        followerLeaderClientId = GetDummyPlayerClientId(nearestLeader);
+                        SPDLOG_INFO("[Follower] Leader selected clientId={} pos=({:.0f},{:.0f},{:.0f})",
+                                    followerLeaderClientId,
+                                    nearestLeader->world.pos.x,
+                                    nearestLeader->world.pos.y,
+                                    nearestLeader->world.pos.z);
+                    }
+                }
+                // No eligible leader — stay in IDLE and wait. Do not cancel
+                // follower mode; the user may be the only active player.
+                if (leaderActor == nullptr) {
+                    if (followerAIState != FollowerAIState::IDLE) {
+                        followerAIState     = FollowerAIState::IDLE;
+                        followerStateFrames = 0;
+                        SPDLOG_INFO("[Follower] No eligible leader — reverting to IDLE");
+                    }
+                    return;
+                }
+
+                Actor* dummyActor = leaderActor;                          // preserved name for downstream reads
+                Vec3f  leaderPos  = leaderActor->world.pos;
+                Vec3f  sideTarget = { leaderPos.x + kFollowOffset, leaderPos.y, leaderPos.z };
 
                 // Move p2Pos toward 'to' by at most 'speed' units in the XZ plane.
                 // Y is not moved — caller sets Y explicitly.  Returns XZ distance before step.
@@ -538,16 +635,20 @@ void Anchor::RegisterHooks() {
                             }
                         }
                         followerMoveTarget = sideTarget;
-                        f32 dist = MoveXZ(p2Pos, sideTarget, kMoveSpeed);
-                        if (dist > 0.001f) {
-                            player->actor.shape.rot.y = YawToward(
-                                sideTarget.x - player->actor.world.pos.x,
-                                sideTarget.z - player->actor.world.pos.z);
-                        }
-                        if (dist < kFollowThreshold) {
-                            followerAIState     = FollowerAIState::IDLE;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", dist);
+                        {
+                            f32 toDist = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+                            f32 speed  = ComputeSpeed(toDist);
+                            f32 dist   = MoveXZ(p2Pos, sideTarget, speed);
+                            if (dist > 0.001f) {
+                                player->actor.shape.rot.y = YawToward(
+                                    sideTarget.x - player->actor.world.pos.x,
+                                    sideTarget.z - player->actor.world.pos.z);
+                            }
+                            if (dist < kFollowThreshold) {
+                                followerAIState     = FollowerAIState::IDLE;
+                                followerStateFrames = 0;
+                                SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", dist);
+                            }
                         }
                         break;
                     }
@@ -567,14 +668,14 @@ void Anchor::RegisterHooks() {
                     }
 
                     case FollowerAIState::ENGAGE: {
-                        // Abandon if P1 is too far or target is gone.
+                        // Abandon if leader is too far or target is gone.
                         {
-                            f32 ldx = hostPos.x - p2Pos.x;
-                            f32 ldz = hostPos.z - p2Pos.z;
+                            f32 ldx = leaderPos.x - p2Pos.x;
+                            f32 ldz = leaderPos.z - p2Pos.z;
                             if (ldx * ldx + ldz * ldz > kMaxLeash * kMaxLeash) {
                                 followerAIState     = FollowerAIState::RETURN;
                                 followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] ENGAGE→RETURN (P1 too far)");
+                                SPDLOG_INFO("[Follower] ENGAGE→RETURN (leader too far)");
                                 break;
                             }
                         }
@@ -611,7 +712,7 @@ void Anchor::RegisterHooks() {
                                         sqrtf(distSq), p2Pos.x, p2Pos.z);
                         }
                         followerMoveTarget = enemyPos;
-                        MoveXZ(p2Pos, enemyPos, kMoveSpeed);
+                        MoveXZ(p2Pos, enemyPos, ComputeSpeed(sqrtf(distSq)));
                         if (distSq > 1.0f) {
                             player->actor.shape.rot.y = YawToward(edx, edz);
                         }
@@ -624,6 +725,16 @@ void Anchor::RegisterHooks() {
                             followerAIState     = FollowerAIState::RETURN;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy gone)");
+                            break;
+                        }
+                        // Task 3: stop swinging the moment the target hits 0 HP.
+                        // Actor_Kill nulls update next tick, but health goes to 0
+                        // on the damaging hit itself — one frame earlier than the
+                        // update-null check above.
+                        if (followerTargetEnemy->colChkInfo.health <= 0) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy dead)");
                             break;
                         }
                         if (followerTargetEnemy->room != player->actor.room ||
@@ -665,7 +776,9 @@ void Anchor::RegisterHooks() {
 
                     case FollowerAIState::RETURN: {
                         followerMoveTarget = sideTarget;
-                        f32 dist = MoveXZ(p2Pos, sideTarget, kMoveSpeed);
+                        f32 toDist = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+                        f32 speed  = ComputeSpeed(toDist);
+                        f32 dist   = MoveXZ(p2Pos, sideTarget, speed);
                         if (dist > 0.001f) {
                             player->actor.shape.rot.y = YawToward(
                                 sideTarget.x - player->actor.world.pos.x,
@@ -787,19 +900,26 @@ void Anchor::RegisterHooks() {
                         // that when BTN_B is processed by OoT this frame, the swing direction
                         // is current.  OnGameFrameUpdate also sets it (after Player_Update) to
                         // maintain facing during the animation; both assignments are consistent.
-                        if (followerTargetEnemy != nullptr &&
-                            followerTargetEnemy->update != nullptr) {
+                        // Task 3: suppress both the facing update and the BTN_B injection
+                        // when the target is dead or dying (health <= 0). The state-machine
+                        // RETURN transition above catches it one frame earlier on the next
+                        // OnGameFrameUpdate; this gate prevents a final rogue swing in the
+                        // gap between the killing hit and the state transition.
+                        bool targetAlive = (followerTargetEnemy != nullptr &&
+                                            followerTargetEnemy->update != nullptr &&
+                                            followerTargetEnemy->colChkInfo.health > 0);
+                        if (targetAlive) {
                             f32 ex = followerTargetEnemy->world.pos.x - actor->world.pos.x;
                             f32 ez = followerTargetEnemy->world.pos.z - actor->world.pos.z;
                             if (ex * ex + ez * ez > 1.0f) {
                                 actor->shape.rot.y = Math_Atan2S(ez, ex); // z first per OoT convention
                             }
-                        }
-                        if (followerStateFrames % 20 == 0) {
-                            input.press.button |= BTN_B;
-                            input.cur.button   |= BTN_B;
-                            SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={})",
-                                        followerStateFrames);
+                            if (followerStateFrames % 20 == 0) {
+                                input.press.button |= BTN_B;
+                                input.cur.button   |= BTN_B;
+                                SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={})",
+                                            followerStateFrames);
+                            }
                         }
                     }
                 });
