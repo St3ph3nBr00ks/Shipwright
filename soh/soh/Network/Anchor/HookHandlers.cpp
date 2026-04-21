@@ -389,12 +389,7 @@ void Anchor::RegisterHooks() {
                 static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius (XZ)
                 static constexpr f32 kMaxYDelta          = 120.0f; // reject enemies on a different floor
                 static constexpr f32 kMaxLeash           = 800.0f; // abandon ENGAGE if leader this far
-                static constexpr f32 kMoveSpeed          = 4.0f;   // fixed speed in STUCK / ATTACK
-                static constexpr f32 kMinSpeed           = 1.5f;   // speed when near the leader (slow easing)
-                static constexpr f32 kBaseSpeed          = 4.0f;   // normal walk speed
-                static constexpr f32 kSprintSpeed        = 8.0f;   // speed when far (catching up)
-                static constexpr f32 kSlowRadius         = 60.0f;  // distance at which slowdown begins
-                static constexpr f32 kSprintRadius       = 250.0f; // distance at which sprint engages
+                static constexpr f32 kMoveSpeed          = 4.0f;   // units/frame for STUCK fallback nudge only
                 static constexpr int kStuckCheckInterval = 20;     // frames between stuck checks
                 static constexpr f32 kStuckMinProgress   = 5.0f;   // min units per check interval
                 static constexpr int kStuckRecovery      = 25;     // frames of strafe before retry
@@ -450,22 +445,13 @@ void Anchor::RegisterHooks() {
                 // deleted so the intent and re-enable path stay discoverable.
                 // -----------------------------------------------------------------
 
-                // Task 2: piecewise speed curve. Slow at close range (stops overshoot-
-                // bounce into IDLE), normal walk in mid-range, sprint when the leader
-                // has sprinted ahead. Used in FOLLOW / ENGAGE / RETURN. STUCK and
-                // ATTACK keep kMoveSpeed for predictable strafe/charge distances.
-                auto ComputeSpeed = [](f32 distToTarget) -> f32 {
-                    if (distToTarget < kSlowRadius) {
-                        f32 t = distToTarget / kSlowRadius;
-                        return kMinSpeed + (kBaseSpeed - kMinSpeed) * t;
-                    }
-                    if (distToTarget > kSprintRadius) {
-                        f32 t = (distToTarget - kSprintRadius) / kSprintRadius;
-                        if (t > 1.0f) { t = 1.0f; }
-                        return kBaseSpeed + (kSprintSpeed - kBaseSpeed) * t;
-                    }
-                    return kBaseSpeed;
-                };
+                // Movement is driven by stick input injected in ShouldActorUpdate
+                // (mirrors how BTN_B drives sword swings). Link's own Player_Update
+                // then handles locomotion, wall collisions, ledge-climb, swim,
+                // cutscene suspension, etc. The state machine here only computes
+                // `followerMoveTarget` — the world-space point ShouldActorUpdate
+                // steers toward — and never writes to player->actor.world.pos
+                // except in the STUCK fallback (see that case below for rationale).
 
                 // --- Pick a leader DummyPlayer ---
                 // Prefer the previously chosen leader (stickiness) if it is still
@@ -553,28 +539,18 @@ void Anchor::RegisterHooks() {
                 Vec3f  leaderPos  = leaderActor->world.pos;
                 Vec3f  sideTarget = { leaderPos.x + kFollowOffset, leaderPos.y, leaderPos.z };
 
-                // Move p2Pos toward 'to' by at most 'speed' units in the XZ plane.
-                // Y is not moved — caller sets Y explicitly.  Returns XZ distance before step.
-                auto MoveXZ = [](Vec3f& pos, const Vec3f& to, f32 speed) -> f32 {
-                    f32 dx   = to.x - pos.x;
-                    f32 dz   = to.z - pos.z;
-                    f32 dist = sqrtf(dx * dx + dz * dz);
-                    if (dist < 0.001f) { return 0.0f; }
-                    f32 step = (dist < speed) ? dist : speed;
-                    pos.x   += dx / dist * step;
-                    pos.z   += dz / dist * step;
-                    return dist;
-                };
-
                 // Yaw toward (dx, dz).  Math_Atan2S(x, y) with OoT param order.
                 auto YawToward = [](f32 dx, f32 dz) -> s16 {
                     return Math_Atan2S(dz, dx); // z first, x second — OoT convention
                 };
 
-                // Read P2's current position.  Y is NOT overridden — let OoT's floor
-                // detection handle vertical position each frame.  Overriding Y to P1's
-                // height fought the physics system on slopes: going downhill put P2 below
-                // the surface, physics pushed them back up, and XZ movement was disrupted.
+                // p2Pos is a READ-ONLY snapshot of the follower's current position,
+                // taken at the top of the state-machine block for distance/transition
+                // checks. Under stick-input movement, the state machine no longer
+                // writes p2Pos back to player->actor.world.pos — Link's own
+                // Player_Update moves him in response to the stick injected in
+                // ShouldActorUpdate. The only path that now writes to
+                // player->actor.world.pos is the STUCK fallback (see that case).
                 Vec3f p2Pos = player->actor.world.pos;
 
                 followerStateFrames++;
@@ -669,28 +645,26 @@ void Anchor::RegisterHooks() {
                                         sideTarget.x, sideTarget.z);
                             followerLastPos = p2Pos; // update checkpoint
                             if (progress < kStuckMinProgress) {
-                                // Compute strafe direction perpendicular to travel.
-                                f32 tdx = sideTarget.x - p2Pos.x;
-                                f32 tdz = sideTarget.z - p2Pos.z;
-                                f32 len = sqrtf(tdx * tdx + tdz * tdz);
-                                if (len > 0.001f) {
-                                    followerStuckDir = { -tdz / len, 0.0f, tdx / len };
-                                } else {
-                                    followerStuckDir = { 1.0f, 0.0f, 0.0f };
-                                }
+                                // Stick input failed to make progress. Enter the
+                                // STUCK fallback, which nudges the follower
+                                // directly toward followerMoveTarget via
+                                // position override until kStuckRecovery frames
+                                // elapse. (followerStuckDir is no longer used:
+                                // the perpendicular strafe pattern was dropped
+                                // when movement switched to stick input. Field
+                                // kept in the header for a future strafe variant.)
                                 followerAIState     = FollowerAIState::STUCK;
                                 followerStuckFrames = 0;
                                 followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] FOLLOW→STUCK strafeDir=({:.2f},{:.2f})",
-                                            followerStuckDir.x, followerStuckDir.z);
+                                SPDLOG_INFO("[Follower] FOLLOW→STUCK (stick input stalled)");
                                 break;
                             }
                         }
                         followerMoveTarget = sideTarget;
                         {
-                            f32 toDist = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
-                            f32 speed  = ComputeSpeed(toDist);
-                            f32 dist   = MoveXZ(p2Pos, sideTarget, speed);
+                            f32 dist = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+                            // Stick injection in ShouldActorUpdate drives actual movement;
+                            // here we just transition when we're close enough.
                             if (dist > 0.001f) {
                                 player->actor.shape.rot.y = YawToward(
                                     sideTarget.x - player->actor.world.pos.x,
@@ -706,15 +680,29 @@ void Anchor::RegisterHooks() {
                     }
 
                     case FollowerAIState::STUCK: {
+                        // Fallback path: stick-input hit a wall / corner / doorway
+                        // the simulation can't navigate. Apply a small position nudge
+                        // directly toward followerMoveTarget for up to kStuckRecovery
+                        // frames. This bypasses Link's physics just enough to get
+                        // past the obstacle. Stick injection stays active in this
+                        // state (see ShouldActorUpdate) so Link's legs still try to
+                        // walk — the nudge is additive, not a replacement.
+                        // This is the ONLY path in the follower state machine that
+                        // writes to player->actor.world.pos in the stick-input design.
                         followerStuckFrames++;
-                        p2Pos.x += followerStuckDir.x * kMoveSpeed;
-                        p2Pos.z += followerStuckDir.z * kMoveSpeed;
+                        f32 ndx = followerMoveTarget.x - player->actor.world.pos.x;
+                        f32 ndz = followerMoveTarget.z - player->actor.world.pos.z;
+                        f32 nd  = sqrtf(ndx * ndx + ndz * ndz);
+                        if (nd > 0.001f) {
+                            f32 step = (nd < kMoveSpeed) ? nd : kMoveSpeed;
+                            player->actor.world.pos.x += ndx / nd * step;
+                            player->actor.world.pos.z += ndz / nd * step;
+                        }
                         if (followerStuckFrames >= kStuckRecovery) {
                             followerAIState     = FollowerAIState::FOLLOW;
-                            followerLastPos     = p2Pos;
+                            followerLastPos     = player->actor.world.pos;
                             followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] STUCK→FOLLOW p2=({:.0f},{:.0f})",
-                                        p2Pos.x, p2Pos.z);
+                            SPDLOG_INFO("[Follower] STUCK→FOLLOW (fallback nudge complete)");
                         }
                         break;
                     }
@@ -765,7 +753,7 @@ void Anchor::RegisterHooks() {
                                         sqrtf(distSq), p2Pos.x, p2Pos.z);
                         }
                         followerMoveTarget = enemyPos;
-                        MoveXZ(p2Pos, enemyPos, ComputeSpeed(sqrtf(distSq)));
+                        // Stick injection in ShouldActorUpdate drives actual movement.
                         if (distSq > 1.0f) {
                             player->actor.shape.rot.y = YawToward(edx, edz);
                         }
@@ -821,23 +809,22 @@ void Anchor::RegisterHooks() {
                             break;
                         }
                         Vec3f enemyPos = followerTargetEnemy->world.pos;
-                        // Charge/retreat cycle: 10 frames toward enemy, 10 frames back.
-                        // Note: this moves P2 into the enemy's hitbox area but does NOT
-                        // trigger a sword swing — P2 slides without a swing animation.
-                        // Injecting BTN_B before the player update is needed to trigger
-                        // actual melee — deferred as future work.
-                        bool chargePhase = ((followerStateFrames / 10) % 2) == 0;
+                        // Keep the stick target live on the enemy — the follower
+                        // is admitted to ATTACK at kAttackRange (80) but sword
+                        // reach is roughly half that, so we need to keep closing
+                        // the gap during the cycle. ShouldActorUpdate consumes
+                        // followerMoveTarget every frame and projects it into
+                        // camera-relative stick input.
+                        followerMoveTarget = enemyPos;
                         {
                             f32 edx      = enemyPos.x - p2Pos.x;
                             f32 edz      = enemyPos.z - p2Pos.z;
                             f32 enemyDist = sqrtf(edx * edx + edz * edz);
                             if (followerStateFrames % 10 == 0) {
-                                SPDLOG_INFO("[Follower] ATTACK frame={} phase={} distToEnemy={:.0f} p2=({:.0f},{:.0f})",
+                                SPDLOG_INFO("[Follower] ATTACK frame={} distToEnemy={:.0f} p2=({:.0f},{:.0f})",
                                             followerStateFrames,
-                                            chargePhase ? "CHARGE" : "RETREAT",
                                             enemyDist, p2Pos.x, p2Pos.z);
                             }
-                            MoveXZ(p2Pos, chargePhase ? enemyPos : sideTarget, kMoveSpeed);
                             if (edx * edx + edz * edz > 1.0f) {
                                 player->actor.shape.rot.y = YawToward(edx, edz);
                             }
@@ -852,9 +839,8 @@ void Anchor::RegisterHooks() {
 
                     case FollowerAIState::RETURN: {
                         followerMoveTarget = sideTarget;
-                        f32 toDist = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
-                        f32 speed  = ComputeSpeed(toDist);
-                        f32 dist   = MoveXZ(p2Pos, sideTarget, speed);
+                        f32 dist = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+                        // Stick injection in ShouldActorUpdate drives actual movement.
                         if (dist > 0.001f) {
                             player->actor.shape.rot.y = YawToward(
                                 sideTarget.x - player->actor.world.pos.x,
@@ -869,34 +855,53 @@ void Anchor::RegisterHooks() {
                     }
                 }
 
-                player->actor.world.pos   = p2Pos;
-                player->actor.prevPos     = p2Pos;
+                // End-of-block position override was intentionally removed when
+                // the follower switched to stick-input movement. The only path
+                // that now writes to player->actor.world.pos is the STUCK state
+                // fallback above — see that case's comment block for rationale.
             });
         }
     }
 
-    // Follower animation injection (non-host only).
+    // Follower input injection (non-host only).
     //
     // Fires via ShouldActorUpdate immediately BEFORE the player actor's update()
-    // so the player's own action state machine sees synthetic input and plays the
-    // correct animations.  (OnGameFrameUpdate fires too late — after update().)
+    // so the player's own action state machine sees synthetic input and moves /
+    // swings / climbs in response. (OnGameFrameUpdate fires too late — after
+    // update() — so inputs written there would miss the current frame.)
     //
-    // Walk/run: inject stick_y=80 (camera-forward) when the follower is moving.
-    //   The player enters walk/run action → correct leg animation plays.
-    //   Actual position is still controlled by our world.pos override in the
-    //   OnGameFrameUpdate hook above, so stick direction does not affect where
-    //   P2 ends up.
+    // This hook is the PRIMARY driver of follower movement. The state machine
+    // in OnGameFrameUpdate computes `followerMoveTarget`; this hook projects
+    // that target into camera-relative stick input and lets Link's own
+    // Player_Update carry him there — respecting walls, slopes, ledges,
+    // water, cutscenes, and every other state transition OoT handles natively.
     //
-    // Attack: inject BTN_B as an edge-press at the start of each charge phase.
-    //   The player's action state machine processes the press → real sword swing
-    //   animation plays.  shape.rot.y (set toward the enemy in the state machine
-    //   above) ensures P2 faces the enemy during the swing.
+    // Walk/run: stick is deflected toward followerMoveTarget with magnitude
+    // scaled by distance (sprint > 250 units, run > 60, walk > 30, zero
+    // within 30 so Link's own deceleration handles the last few units).
+    //
+    // State guard: stick is zeroed when Link is in a state that can't accept
+    // free movement (ladder climb, ledge hang / climb-up, water, cutscene,
+    // hit-react, talking, input disabled). Injecting during these can corrupt
+    // the associated state machine.
+    //
+    // Ledge-climb: BTN_A is injected whenever PLAYER_STATE1_HANGING_OFF_LEDGE
+    // is set — the follower runs up to a tall ledge, Link hangs, we press A,
+    // Link hoists up. This replaces the old position-override-through-geometry
+    // behaviour that clipped through ledges.
+    //
+    // Attack: BTN_B as an edge-press every 20 frames while in ATTACK state.
+    // Stick is ALSO driven during ATTACK so the follower keeps closing the
+    // gap between kAttackRange (80) and actual sword reach (~30-40 units);
+    // without it the follower stops at 80 and swings at empty air. The stick
+    // points at enemyPos, agreeing with shape.rot.y, so swing direction is
+    // unambiguous regardless of which field OoT consults on the BTN_B frame.
     //
     // Timing note: ShouldActorUpdate sees followerStateFrames from the PREVIOUS
     // OnGameFrameUpdate (one frame before the next increment).  BTN_B is injected
     // when followerStateFrames % 20 == 0, which corresponds to frame 1, 21, 41
-    // inside the ATTACK state after the next increment — the first frame of each
-    // charge phase.  The sword swing takes ~20 frames, matching the cycle period.
+    // inside the ATTACK state after the next increment. The sword swing takes
+    // ~20 frames, matching the cycle period.
     {
         static HOOK_ID followerAnimHookId = 0;
         GameInteractor::Instance->UnregisterGameHook<GameInteractor::ShouldActorUpdate>(followerAnimHookId);
@@ -911,11 +916,20 @@ void Anchor::RegisterHooks() {
                     if (actor->id != ACTOR_PLAYER) { return; }
 
                     Input& input = gPlayState->state.input[0];
+                    // States where we drive locomotion via stick input.
+                    // ATTACK included: under stick-input movement the follower
+                    // needs to close the last few tens of units between
+                    // kAttackRange (80) and actual sword reach (~40). Without
+                    // stick injection during ATTACK the follower stops at 80
+                    // and swings into empty air (observed 2026-04-21, P2 log 64
+                    // — 60-frame cycles with distToEnemy 75-85). Stick points
+                    // at enemyPos, so the swing also goes toward the enemy
+                    // — OoT reads stick on the BTN_B edge-press frame to set
+                    // swing direction, which agrees with the approach direction.
                     bool isMoving = (followerAIState == FollowerAIState::FOLLOW ||
+                                     followerAIState == FollowerAIState::STUCK  ||
                                      followerAIState == FollowerAIState::ENGAGE ||
-                                     // ATTACK excluded: OoT determines swing direction from stick,
-                                     // overriding shape.rot.y. No stick → Link attacks in the
-                                     // direction shape.rot.y points (set toward enemy each frame).
+                                     followerAIState == FollowerAIState::ATTACK ||
                                      followerAIState == FollowerAIState::RETURN);
 
                     // --- Joystick cancel ---
@@ -931,31 +945,63 @@ void Anchor::RegisterHooks() {
                         }
                     }
 
-                    // --- Walk/run animation: camera-relative stick toward followerMoveTarget ---
+                    // --- State guard — don't inject stick while Link is in a
+                    // non-walkable state. Injecting during these can corrupt the
+                    // ladder/cutscene state machines. Button presses (BTN_A for
+                    // climb) are handled below, separately from stick.
+                    //
+                    // IN_WATER is intentionally NOT blocked — swimming uses the
+                    // same camera-relative stick input as walking, and the
+                    // follower needs to be able to swim forward into a ledge
+                    // to trigger the water-exit climb-out animation. (Observed
+                    // 2026-04-21: blocking IN_WATER left the follower sliding
+                    // along the water's edge unable to exit.)
+                    Player* player = (Player*)actor;
+                    u32 sf1 = player->stateFlags1;
+                    u32 sf2 = player->stateFlags2;
+                    bool blockedByPlayerState =
+                        (sf1 & PLAYER_STATE1_CLIMBING_LADDER)   ||
+                        (sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) ||
+                        (sf1 & PLAYER_STATE1_CLIMBING_LEDGE)    ||
+                        (sf1 & PLAYER_STATE1_IN_CUTSCENE)       ||
+                        (sf1 & PLAYER_STATE1_DAMAGED)           ||
+                        (sf1 & PLAYER_STATE1_TALKING)           ||
+                        (sf1 & PLAYER_STATE1_INPUT_DISABLED);
+
+                    // --- Walk/run: camera-relative stick toward followerMoveTarget ---
                     // OoT's movement pipeline: worldYaw = Camera_GetInputDirYaw(cam) + stickAngle,
                     // where stickAngle = Math_Atan2S(relY, -relX).  To move in world direction
                     // (dx, dz), invert that pipeline:
                     //   worldYaw    = Math_Atan2S(dz, dx)          [OoT convention: z first]
                     //   stickAngle  = worldYaw - inputDirYaw
-                    //   relY        = Math_CosS(stickAngle) * 60
-                    //   relX        = -Math_SinS(stickAngle) * 60
-                    // This is exact — no floating-point projection or sign guessing required.
+                    //   relY        = Math_CosS(stickAngle) * mag
+                    //   relX        = -Math_SinS(stickAngle) * mag
+                    // Magnitude is distance-scaled: sprint when far, walk when
+                    // close, zero within the stop radius so Link's own
+                    // deceleration carries him the last few units.
                     static bool sAnimHookLogged = false;
                     if (!sAnimHookLogged) {
                         SPDLOG_INFO("[Follower] animHook firing for ACTOR_PLAYER");
                         sAnimHookLogged = true;
                     }
-                    if (isMoving) {
+                    if (isMoving && !blockedByPlayerState) {
                         Vec3f p2w = actor->world.pos;
                         f32 dx = followerMoveTarget.x - p2w.x;
                         f32 dz = followerMoveTarget.z - p2w.z;
-                        if (dx * dx + dz * dz > 1.0f) {
+                        f32 distSq = dx * dx + dz * dz;
+                        if (distSq > 1.0f) {
+                            f32 dist = sqrtf(distSq);
+                            f32 magF;
+                            if      (dist > 250.0f) magF = 127.0f; // sprint — leader far ahead
+                            else if (dist >  60.0f) magF = 100.0f; // run
+                            else if (dist >  30.0f) magF =  60.0f; // walk (decelerate)
+                            else                    magF =   0.0f; // coast to a stop
                             Camera* cam = GET_ACTIVE_CAM(gPlayState);
                             s16 inputDirYaw  = Camera_GetInputDirYaw(cam);
                             s16 worldYaw     = Math_Atan2S(dz, dx); // z first per OoT convention
                             s16 stickAngle   = worldYaw - inputDirYaw;
-                            s8  stickY = (s8)(Math_CosS(stickAngle) * 60.0f);
-                            s8  stickX = (s8)(-Math_SinS(stickAngle) * 60.0f);
+                            s8  stickY = (s8)( Math_CosS(stickAngle) * magF);
+                            s8  stickX = (s8)(-Math_SinS(stickAngle) * magF);
                             input.cur.stick_x = stickX;
                             input.cur.stick_y = stickY;
                             input.rel.stick_x = stickX;
@@ -968,6 +1014,23 @@ void Anchor::RegisterHooks() {
                     } else {
                         input.cur.stick_x = 0; input.cur.stick_y = 0;
                         input.rel.stick_x = 0; input.rel.stick_y = 0;
+                    }
+
+                    // --- Auto-press A when the "Climb" action is available ---
+                    // PLAYER_STATE2_DO_ACTION_CLIMB is the flag the engine uses
+                    // to show "Climb" on the A-button prompt. It covers:
+                    //   - Link hanging off a land ledge (PLAYER_STATE1_HANGING_OFF_LEDGE
+                    //     is also set; the two flags agree).
+                    //   - Link swimming at a water-exit ledge where the engine
+                    //     accepts an A-press to climb out of the water.
+                    // Injecting BTN_A whenever DO_ACTION_CLIMB is set handles
+                    // both cases without needing to distinguish land vs water.
+                    // (Observed 2026-04-21: relying on HANGING_OFF_LEDGE alone
+                    // left the follower stuck at the water's edge.)
+                    if (sf2 & PLAYER_STATE2_DO_ACTION_CLIMB) {
+                        input.press.button |= BTN_A;
+                        input.cur.button   |= BTN_A;
+                        SPDLOG_INFO("[Follower] BTN_A climb (DO_ACTION_CLIMB)");
                     }
 
                     // --- Attack: face enemy + inject BTN_B at start of each charge phase ---
