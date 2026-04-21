@@ -400,6 +400,56 @@ void Anchor::RegisterHooks() {
                 static constexpr int kStuckRecovery      = 25;     // frames of strafe before retry
                 static constexpr int kAttackDuration     = 60;     // frames per ATTACK cycle
 
+                // -----------------------------------------------------------------
+                // Room-equality check — DISABLED 2026-04-21.
+                //
+                // What it did (four sites: IsEligibleLeader, IDLE enemy scan,
+                // ENGAGE off-floor/room guard, ATTACK off-floor/room guard):
+                // reject any candidate whose actor->room did not match the local
+                // player's actor->room. Added originally alongside kMaxYDelta to
+                // keep the follower from targeting enemies in a different logical
+                // room — e.g. an enemy in the pit beneath the Great Deku Tree
+                // entrance, where XZ distance is short but they are physically
+                // unreachable.
+                //
+                // Why it broke combat:
+                // OoT's Actor_Spawn (z_actor.c:3394) assigns actor->room =
+                // roomCtx.curRoom.num AT SPAWN TIME and never updates it. The
+                // Player actor is spawned once per scene and persists across
+                // TransitionActor room changes — nothing in the decomp writes
+                // to player->actor.room after the initial spawn (verified by
+                // searching soh/src for any such assignment: zero hits). So
+                // in any multi-room scene (Hyrule Field quadrants, most
+                // dungeons past room 0), the Player's room number is stale
+                // the moment the player walks through the first transition,
+                // and every enemy spawned in a subsequent room fails the
+                // equality test. Observed regression: Hyrule Field with 5
+                // Karebabas within 80-unit attack range, zero IDLE→ENGAGE
+                // events (P2 log 52, 2026-04-21).
+                //
+                // The kMaxYDelta gate alone handles the original floor-below
+                // bug that motivated this check — OoT floor-to-floor vertical
+                // separation is always ≫ 120 units in practice.
+                //
+                // When it would be useful again: single-floor scenes where
+                // two rooms are physically adjacent at the same Y level and
+                // could be mistakenly targeted through a thin wall within
+                // the 350-unit engage range. If such a case surfaces, the
+                // correct fix is to compare against a live room source,
+                // NOT player->actor.room. Candidates:
+                //   - gPlayState->roomCtx.curRoom.num (authoritative current
+                //     room number; accept actor->room == -1 as well since
+                //     that is the documented "persistent across rooms"
+                //     sentinel — see z64actor.h:215).
+                //   - A SoH-side room tracker updated from a TransitionActor
+                //     hook, stored on the Anchor instance.
+                // With either, the four sites below should read e.g.:
+                //   s8 curRoom = (s8)gPlayState->roomCtx.curRoom.num;
+                //   bool roomOk = (cand->room == curRoom || cand->room == -1);
+                // Until then, the lines are commented out rather than
+                // deleted so the intent and re-enable path stay discoverable.
+                // -----------------------------------------------------------------
+
                 // Task 2: piecewise speed curve. Slow at close range (stops overshoot-
                 // bounce into IDLE), normal walk in mid-range, sprint when the leader
                 // has sprinted ahead. Used in FOLLOW / ENGAGE / RETURN. STUCK and
@@ -429,7 +479,8 @@ void Anchor::RegisterHooks() {
                     }
                     if (cand->id != ACTOR_EN_OE2) { return false; }
                     if (cand->world.pos.x < -9000.0f) { return false; } // out-of-scene sentinel
-                    if (cand->room != player->actor.room) { return false; }
+                    // Room-equality check DISABLED — see banner note above the state machine.
+                    // if (cand->room != player->actor.room) { return false; }
                     if (fabsf(cand->world.pos.y - player->actor.world.pos.y) >= kMaxYDelta) {
                         return false;
                     }
@@ -564,16 +615,17 @@ void Anchor::RegisterHooks() {
                             break;
                         }
                         // Scan for the nearest live enemy within ENGAGE range.
-                        // Reject enemies in a different room or on a different vertical
-                        // level — the follower only moves in XZ, so targets on another
-                        // floor (e.g. a room below the Deku Tree entrance) otherwise
+                        // Reject enemies on a different vertical level — the
+                        // follower only moves in XZ, so targets on another floor
+                        // (e.g. a room below the Deku Tree entrance) otherwise
                         // cause it to walk into walls and swing at air.
+                        // (Room-equality check disabled — see banner note above.)
                         Actor* nearest    = nullptr;
                         f32    nearDistSq = kEngageRange * kEngageRange;
                         Actor* eActor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
                         while (eActor != nullptr) {
                             if (eActor->update != nullptr &&
-                                eActor->room == player->actor.room &&
+                                /* eActor->room == player->actor.room && */
                                 fabsf(eActor->world.pos.y - p2Pos.y) < kMaxYDelta) {
                                 f32 edx     = eActor->world.pos.x - p2Pos.x;
                                 f32 edz     = eActor->world.pos.z - p2Pos.z;
@@ -686,13 +738,14 @@ void Anchor::RegisterHooks() {
                             SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy gone)");
                             break;
                         }
-                        // Drop the target if it moved to another room or floor —
-                        // otherwise we chase it through walls / ceilings.
-                        if (followerTargetEnemy->room != player->actor.room ||
+                        // Drop the target if it moved to another floor —
+                        // otherwise we chase it through ceilings / pits.
+                        // (Room-equality side of this check disabled — see banner note above.)
+                        if (/* followerTargetEnemy->room != player->actor.room || */
                             fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
                             followerAIState     = FollowerAIState::RETURN;
                             followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy off-floor/room)");
+                            SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy off-floor)");
                             break;
                         }
                         Vec3f enemyPos = followerTargetEnemy->world.pos;
@@ -727,21 +780,44 @@ void Anchor::RegisterHooks() {
                             SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy gone)");
                             break;
                         }
-                        // Task 3: stop swinging the moment the target hits 0 HP.
-                        // Actor_Kill nulls update next tick, but health goes to 0
-                        // on the damaging hit itself — one frame earlier than the
-                        // update-null check above.
-                        if (followerTargetEnemy->colChkInfo.health <= 0) {
+                        // Task 3 — stop swinging when the target is defeated.
+                        // Two complementary signals because OoT doesn't have one
+                        // universal "dead" field:
+                        //   (a) colChkInfo.health <= 0 — catches actors that
+                        //       decrement their own health (Dekubaba, En_Ba,
+                        //       most bosses — ~14 overlays total).
+                        //   (b) EnemyNetId::hasLocalDeath / pendingNaturalDeath —
+                        //       covers the AC_HIT-only pattern (Karebaba,
+                        //       En_Firefly, En_St, most Phase-4A enemies) where
+                        //       health is initialised once in sColCheckInfoInit
+                        //       and never written again. Their death is signalled
+                        //       by the collision AC_HIT flag driving SetupDying,
+                        //       and our OnEnemyDefeat / HandlePacket_EnemyDefeated
+                        //       paths flip these flags on the EnemyNetId extension.
+                        // Initial Task 3 implementation used only (a) and was a
+                        // no-op for Karebaba (health stays at 1 through the entire
+                        // Dying cycle, P2 log 62 2026-04-21).
+                        bool targetDefeated = (followerTargetEnemy->colChkInfo.health <= 0);
+                        if (!targetDefeated) {
+                            const EnemyNetId* ext =
+                                ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
+                            if (ext != nullptr &&
+                                (ext->hasLocalDeath || ext->pendingNaturalDeath)) {
+                                targetDefeated = true;
+                            }
+                        }
+                        if (targetDefeated) {
                             followerAIState     = FollowerAIState::RETURN;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy dead)");
                             break;
                         }
-                        if (followerTargetEnemy->room != player->actor.room ||
+                        // Room-equality side of this check disabled — see banner note above.
+                        if (/* followerTargetEnemy->room != player->actor.room || */
                             fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
                             followerAIState     = FollowerAIState::RETURN;
                             followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy off-floor/room)");
+                            SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy off-floor)");
                             break;
                         }
                         Vec3f enemyPos = followerTargetEnemy->world.pos;
@@ -901,13 +977,27 @@ void Anchor::RegisterHooks() {
                         // is current.  OnGameFrameUpdate also sets it (after Player_Update) to
                         // maintain facing during the animation; both assignments are consistent.
                         // Task 3: suppress both the facing update and the BTN_B injection
-                        // when the target is dead or dying (health <= 0). The state-machine
-                        // RETURN transition above catches it one frame earlier on the next
+                        // when the target is dead or dying. The state-machine RETURN
+                        // transition above catches it one frame earlier on the next
                         // OnGameFrameUpdate; this gate prevents a final rogue swing in the
                         // gap between the killing hit and the state transition.
+                        //
+                        // Mirrors the two-signal check in the ATTACK state (see banner
+                        // comment there): colChkInfo.health catches actors that decrement
+                        // their own health; EnemyNetId::hasLocalDeath / pendingNaturalDeath
+                        // catches AC_HIT-only actors whose health never moves (Karebaba
+                        // and most simple enemies).
                         bool targetAlive = (followerTargetEnemy != nullptr &&
                                             followerTargetEnemy->update != nullptr &&
                                             followerTargetEnemy->colChkInfo.health > 0);
+                        if (targetAlive) {
+                            const EnemyNetId* ext =
+                                ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
+                            if (ext != nullptr &&
+                                (ext->hasLocalDeath || ext->pendingNaturalDeath)) {
+                                targetAlive = false;
+                            }
+                        }
                         if (targetAlive) {
                             f32 ex = followerTargetEnemy->world.pos.x - actor->world.pos.x;
                             f32 ez = followerTargetEnemy->world.pos.z - actor->world.pos.z;
