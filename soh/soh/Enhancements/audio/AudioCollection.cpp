@@ -1,4 +1,5 @@
 #include "AudioCollection.h"
+#include "VoicePack.h"
 #include "sequence.h"
 #include "sfx.h"
 #include "soh/cvar_prefixes.h"
@@ -347,6 +348,37 @@ std::string AudioCollection::GetCvarLockKey(std::string sfxKey) {
     return prefix + sfxKey + ".locked";
 }
 
+// --- VoicePack (issue #84) helpers -----------------------------------------
+
+uint16_t AudioCollection::FindSeqIdBySfxKey(const std::string& sfxKey) const {
+    for (const auto& [seqId, info] : sequenceMap) {
+        if (info.sfxKey == sfxKey) {
+            return seqId;
+        }
+    }
+    return 0;
+}
+
+void AudioCollection::AddCustomVoiceEntry(uint16_t seqNum, const std::string& label,
+                                           const std::string& sfxKey) {
+    // canBeUsedAsReplacement=false hides these entries from the Audio Editor's
+    // Voices tab dropdown.  Until the sample-fetch interception (proper B2
+    // playback layer) lands, selecting a pack-custom seqNum via the dropdown
+    // and hitting Preview crashes inside Audio_PlaySoundGeneral — the vanilla
+    // SFX bank has no entry for 0xF000+ ids.  Draw_SfxTab skips entries whose
+    // canBeUsedAsReplacement is false, so this keeps registration in place for
+    // future B2 consumers without exposing a crash path in the existing UI.
+    SequenceInfo info = { seqNum, label, sfxKey, SEQ_VOICE,
+                          /*canBeReplaced=*/false, /*canBeUsedAsReplacement=*/false };
+    sequenceMap[seqNum] = info;  // insert_or_assign semantics
+}
+
+void AudioCollection::RemoveCustomEntry(uint16_t seqNum) {
+    sequenceMap.erase(seqNum);
+}
+
+// ---------------------------------------------------------------------------
+
 void AudioCollection::AddToCollection(char* otrPath, uint16_t seqNum) {
     std::string fileName = std::filesystem::path(otrPath).filename().string();
     std::vector<std::string> splitFileName = StringHelper::Split(fileName, "_");
@@ -379,6 +411,15 @@ uint16_t AudioCollection::GetReplacementSequence(uint16_t seqId) {
             NA_BGM_FIELD_LOGIC) {
             seqId = NA_BGM_FIELD_LOGIC;
         }
+    }
+
+    // VoicePack early-out (issue #84).  Pack-driven voice remaps take
+    // precedence over the user-facing replacement CVars: they're session-scoped
+    // overlays on top of user choices, and clear automatically on pack deselect.
+    // Returns 0 when no pack override exists; any non-zero value points at a
+    // custom voice sample the pack pre-registered in sequenceMap.
+    if (uint16_t packReplacement = VoicePack_GetReplacement(seqId); packReplacement != 0) {
+        return packReplacement;
     }
 
     if (sequenceMap.find(seqId) == sequenceMap.end()) {

@@ -1,6 +1,7 @@
 #include "global.h"
 #include "soh/ResourceManagerHelpers.h"
 #include <libultraship/bridge.h>
+#include <libultraship/luslog.h>
 
 extern bool gUseLegacySD;
 
@@ -385,6 +386,13 @@ SoundFontSound* Audio_GetSfx(s32 fontId, s32 sfxId) {
     }
 
     SoundFont* sf = ResourceMgr_LoadAudioSoundFontByName(fontMap[fontId]);
+    // VoicePack diagnostic — issue #84 / B2 iteration 1.  Logs every Audio_GetSfx
+    // call so we can see which fontId + local sfxId combination the engine uses
+    // for each vanilla voice line.  Remove once the mapping is tabulated.
+    if (sf != NULL) {
+        LUSLOG_INFO("[VoicePack][Probe] Audio_GetSfx fontId=%d path=\"%s\" sfxIdLocal=%d (0x%X) numSfx=%d",
+                    fontId, fontMap[fontId] ? fontMap[fontId] : "(null)", sfxId, sfxId, sf->numSfx);
+    }
     if (sfxId < sf->numSfx) {
         sfx = &sf->soundEffects[sfxId];
     }

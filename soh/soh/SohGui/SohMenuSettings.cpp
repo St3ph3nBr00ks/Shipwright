@@ -9,7 +9,7 @@
 #include <spdlog/fmt/fmt.h>
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/resource/type/Skeleton.h"
-#include "soh/Enhancements/audio/VoicePack_prototype.h"
+#include "soh/Enhancements/audio/VoicePack.h"
 #include <filesystem>
 
 extern "C" {
@@ -132,21 +132,32 @@ void SohMenu::UpdateLanguageMap(std::map<int32_t, const char*>& languageMap) {
     }
 }
 
-// Returns {"", <FolderA>, <FolderB>, ...} where "" represents Default Link / Default Voices.
-// Each entry is the name of a subdirectory of coopplayercharacters/ (a sibling of mods/).
-static std::vector<std::string> GetInstalledCoopModelMods() {
+// Returns {"", <FolderA>, <FolderB>, ...} where "" represents the vanilla default.
+// `subdir` is the app-relative directory the dropdown scans — e.g.
+// "coopplayercharacters" for character models, "player-voices" for voice packs.
+// Keeping these separate avoids voice dropdowns offering .otr/.o2r files that
+// are actually 3D-model packs, and vice versa.
+static std::vector<std::string> GetInstalledMods(const char* subdir) {
     std::vector<std::string> mods;
     mods.push_back(""); // Default (empty = vanilla)
-    std::string coopPath = Ship::Context::LocateFileAcrossAppDirs("coopplayercharacters", appShortName);
-    std::filesystem::path coopDir(coopPath);
-    if (std::filesystem::exists(coopDir) && std::filesystem::is_directory(coopDir)) {
-        for (const auto& entry : std::filesystem::directory_iterator(coopDir)) {
+    std::string modsPath = Ship::Context::LocateFileAcrossAppDirs(subdir, appShortName);
+    std::filesystem::path modsDir(modsPath);
+    if (std::filesystem::exists(modsDir) && std::filesystem::is_directory(modsDir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(modsDir)) {
             if (entry.is_directory()) {
                 mods.push_back(entry.path().filename().string());
             }
         }
     }
     return mods;
+}
+
+static std::vector<std::string> GetInstalledCoopModelMods() {
+    return GetInstalledMods("coopplayercharacters");
+}
+
+static std::vector<std::string> GetInstalledVoicePacks() {
+    return GetInstalledMods("player-voices");
 }
 
 void SohMenu::AddMenuSettings() {
@@ -616,13 +627,15 @@ void SohMenu::AddMenuSettings() {
 
     // Voice Pack — UI only. Saves selection to CVAR_REMOTE_ANCHOR("AudioMod") and syncs it
     // via UPDATE_CLIENT_STATE. Actual audio replacement is a no-op until the backend task lands.
+    // Sourced from `player-voices/` (sibling of `coopplayercharacters/` and `mods/`) so that
+    // 3D-model packs can't appear in the voice list and vice versa.
     AddWidget(path, "Voice Pack", WIDGET_CUSTOM)
         .HideInSearch(true)
         .CustomFunction([](WidgetInfo& info) {
             auto anchor = Anchor::Instance;
             static std::vector<std::string> mods;
             if (mods.empty()) {
-                mods = GetInstalledCoopModelMods();
+                mods = GetInstalledVoicePacks();
             }
             std::string currentAudio = CVarGetString(CVAR_REMOTE_ANCHOR("AudioMod"), "");
 
@@ -639,10 +652,10 @@ void SohMenu::AddMenuSettings() {
                              (const char* const*)displayNames.data(), (int)displayNames.size())) {
                 CVarSetString(CVAR_REMOTE_ANCHOR("AudioMod"), mods[currentIdx].c_str());
                 Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-                // B2 day-1 probe: log what the selected pack's archives look
-                // like audio-wise.  Read-only; no audio engine state is touched.
-                // Remove or replace once B2 proper lands.
-                VoicePack_Prototype_OnAudioModChanged(mods[currentIdx].c_str());
+                // B2 proper — load/unload the pack's voice samples into AudioCollection's
+                // in-memory remap.  GetReplacementSequence consults VoicePack before its
+                // CVar lookup, so user-configured voice swaps survive pack changes.
+                VoicePack_OnAudioModChanged(mods[currentIdx].c_str());
                 if (anchor && anchor->isConnected) {
                     anchor->SendPacket_UpdateClientState();
                 }

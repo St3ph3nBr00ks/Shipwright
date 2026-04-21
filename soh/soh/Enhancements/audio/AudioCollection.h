@@ -68,6 +68,21 @@ class AudioCollection {
     size_t SequenceMapSize();
     std::string GetCvarKey(std::string sfxKey);
     std::string GetCvarLockKey(std::string sfxKey);
+
+    // --- VoicePack (issue #84) support ---
+    // Reverse lookup: given an sfxKey like "NA_SE_VO_LI_SWORD_N", returns the
+    // matching seqId.  Returns 0 if not found.
+    uint16_t FindSeqIdBySfxKey(const std::string& sfxKey) const;
+
+    // Registers a custom voice entry not tied to a music-pack filename scheme.
+    // Used by VoicePack when loading VRP-style samples.  Inserts a
+    // SequenceInfo{seqNum, label, sfxKey, SEQ_VOICE, false, true} into the map.
+    void AddCustomVoiceEntry(uint16_t seqNum, const std::string& label,
+                              const std::string& sfxKey);
+
+    // Removes a custom entry previously added via AddCustomVoiceEntry.
+    // No-op if the entry does not exist.
+    void RemoveCustomEntry(uint16_t seqNum);
 };
 #else
 void AudioCollection_AddToCollection(char* otrPath, uint16_t seqNum);

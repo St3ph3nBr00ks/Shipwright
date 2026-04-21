@@ -1,4 +1,5 @@
 #include <libultraship/libultra.h>
+#include <libultraship/luslog.h>
 #include "global.h"
 #include "vt.h"
 
@@ -127,6 +128,13 @@ void Audio_ClearBGMMute(u8 channelIdx) {
 void Audio_PlaySoundGeneral(u16 sfxId, Vec3f* pos, u8 token, f32* freqScale, f32* vol, s8* reverbAdd) {
     size_t i;
     SoundRequest* req;
+
+    // VoicePack diagnostic — log only voice-bank plays so we can map
+    // vanilla sfxId (NA_SE_VO_LI_*) to the per-font localId that Audio_GetSfx
+    // actually looks up.  Voice bank is 0x6000-0x6FFF.
+    if ((sfxId & 0xF000) == 0x6000) {
+        LUSLOG_INFO("[VoicePack][Probe] Audio_PlaySoundGeneral vanilla sfxId=0x%04X", sfxId);
+    }
 
     if (!gSoundBankMuted[SFX_BANK_SHIFT(sfxId)]) {
         req = &sSoundRequests[sSoundRequestWriteIndex];
