@@ -9,6 +9,7 @@
 #include <spdlog/fmt/fmt.h>
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/resource/type/Skeleton.h"
+#include "soh/Enhancements/audio/VoicePack_prototype.h"
 #include <filesystem>
 
 extern "C" {
@@ -638,7 +639,10 @@ void SohMenu::AddMenuSettings() {
                              (const char* const*)displayNames.data(), (int)displayNames.size())) {
                 CVarSetString(CVAR_REMOTE_ANCHOR("AudioMod"), mods[currentIdx].c_str());
                 Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-                // Audio loading: placeholder — backend task (B2) not yet implemented
+                // B2 day-1 probe: log what the selected pack's archives look
+                // like audio-wise.  Read-only; no audio engine state is touched.
+                // Remove or replace once B2 proper lands.
+                VoicePack_Prototype_OnAudioModChanged(mods[currentIdx].c_str());
                 if (anchor && anchor->isConnected) {
                     anchor->SendPacket_UpdateClientState();
                 }
