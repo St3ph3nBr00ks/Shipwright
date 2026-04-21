@@ -131,6 +131,12 @@ typedef struct {
                                                         // unique_ptr so its address (and all c_str() inside) is
                                                         // stable even if this unordered_map entry is rehashed
 
+    // Voice pack selection (B1 plumbing — see issue #84, #83).  Holds the remote client's
+    // chosen voice-pack folder name, or "" for the default vanilla voices.  Not yet
+    // consumed by any audio code path; B2 (local preload/indirection) and B3
+    // (PLAYER_SFX packet) will wire the audio routing on top of this field.
+    std::string audioModFilename;
+
     // Ptr to the dummy player
     Player* player;
 } AnchorClient;
