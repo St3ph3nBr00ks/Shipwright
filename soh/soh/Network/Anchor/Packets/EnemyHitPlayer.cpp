@@ -73,13 +73,10 @@ void Anchor::HandlePacket_EnemyHitPlayer(nlohmann::json payload) {
 
     uint32_t netId = payload.value("netId", (uint32_t)0);
 
-    // Walk likely categories (ENEMY first, then PROP for En_Goroiwa et al.).
-    static const u8 kCategories[] = {
-        ACTORCAT_ENEMY, ACTORCAT_PROP, ACTORCAT_BG, ACTORCAT_NPC, ACTORCAT_SWITCH, ACTORCAT_MISC,
-    };
+    // Walk every syncable actor category (shared list in Anchor.h).
     Actor* actor = nullptr;
-    for (size_t i = 0; i < sizeof(kCategories) / sizeof(kCategories[0]); i++) {
-        actor = gPlayState->actorCtx.actorLists[kCategories[i]].head;
+    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
+        actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
         while (actor != nullptr) {
             const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
             if (ext != nullptr && ext->netId == netId) {

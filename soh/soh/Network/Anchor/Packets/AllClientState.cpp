@@ -54,6 +54,7 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
         clients[client.clientId].entranceIndex = client.entranceIndex;
         clients[client.clientId].customModelFilename = client.customModelFilename;
         clients[client.clientId].followerActive = client.followerActive;
+        clients[client.clientId].isClimbing = client.isClimbing;
     }
 
     // remove clients that are no longer in the list

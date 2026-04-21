@@ -16,6 +16,25 @@ extern "C" {
 #include "z64.h"
 }
 
+// Categories walked by all receive-side netId→actor lookups.
+// Covers every runtime category transition surveyed in session_state.md
+// (Karebaba→MISC, Armos→BG, Po Sisters→PROP, Heishi2→ITEMACTION, etc.)
+// plus BOSS for full-boss sync. Adding an ID to IsSyncedWorldActor
+// admits both default-category and transition-category instances.
+// `inline constexpr` (C++17) deduplicates across translation units.
+inline constexpr u8 kSyncableActorCategories[] = {
+    ACTORCAT_ENEMY,
+    ACTORCAT_BOSS,
+    ACTORCAT_PROP,
+    ACTORCAT_BG,
+    ACTORCAT_NPC,
+    ACTORCAT_SWITCH,
+    ACTORCAT_ITEMACTION,
+    ACTORCAT_MISC,
+};
+inline constexpr size_t kSyncableActorCategoriesCount =
+    sizeof(kSyncableActorCategories) / sizeof(kSyncableActorCategories[0]);
+
 // Attached to enemy actors to give them a stable network id across all clients.
 struct EnemyNetId {
     uint32_t netId = 0;
@@ -142,6 +161,12 @@ typedef struct AnchorClient {
     // selected as a follower's leader target). Defaults to false for pre-update peers.
     bool followerActive = false;
 
+    // G1/G2 — set when the remote client's local Player is in a climbing state
+    // (PLAYER_STATE1_CLIMBING_LADDER for vines/ladders, or HANGING_OFF_LEDGE /
+    // CLIMBING_LEDGE during ledge-hoist). Broadcast on edge change so the
+    // follower can teleport-and-ride along. Defaults to false for pre-update peers.
+    bool isClimbing = false;
+
     // Multiplayer cosmetic sync
     std::string customModelFilename;                    // folder name of remote client's coop pack, or ""
     std::shared_ptr<SOH::Skeleton> customSkeleton;      // keeps loaded skeleton alive; nullptr = vanilla
@@ -249,21 +274,35 @@ class Anchor : public Network {
     bool followerActive = false;
 
     // AI follower state machine (runs each frame when followerActive is true).
-    // IDLE   — at P1's side; scans for nearby enemies.
-    // FOLLOW — moving toward P1's side.
-    // STUCK  — no progress detected; strafing to unstick, then back to FOLLOW.
-    // ENGAGE — moving toward the nearest ACTORCAT_ENEMY actor.
-    // ATTACK — within melee range; charge/retreat cycle, positions P2 for hitbox contact.
-    // RETURN — returning to P1's side after ENGAGE/ATTACK.
-    enum class FollowerAIState { IDLE, FOLLOW, STUCK, ENGAGE, ATTACK, RETURN };
+    // IDLE     — at leader's side; scans for nearby enemies.
+    // FOLLOW   — stick-driven movement toward leader's side.
+    // STUCK    — stick stalled; bounded position-override nudge toward target.
+    // ENGAGE   — moving toward the nearest ACTORCAT_ENEMY actor.
+    // ATTACK   — within sword reach; BTN_B injection, stick continues to track enemy.
+    // RETURN   — returning to leader's side after ENGAGE/ATTACK.
+    // CLIMBING — leader is on a vine/ladder above the kMaxYDelta band; teleport
+    //            follower to leader and ride along until leader stops climbing (G1/G2).
+    // BLOCK    — ENGAGE target is shield-reflect class (Mad Scrub); inject BTN_R (G4).
+    // RANGED_ATTACK — target is out of melee Y-band but in a known ranged class
+    //                 (Gohma ceiling, En_Goma larvae, En_Sw on vines); inject BTN_Z+BTN_A
+    //                 (G6/G7/G8).
+    // STANDBY  — placeholder: hold position next to leader, no swings. Reserved for
+    //            future use (G19 Gohma weak-point timing).
+    enum class FollowerAIState {
+        IDLE, FOLLOW, STUCK, ENGAGE, ATTACK, RETURN,
+        CLIMBING, BLOCK, RANGED_ATTACK, STANDBY,
+    };
     FollowerAIState followerAIState     = FollowerAIState::IDLE;
     int             followerStateFrames = 0;                     // frames spent in current state
     int             followerStuckFrames = 0;                     // frames spent in STUCK
     Vec3f           followerLastPos     = { 0.0f, 0.0f, 0.0f }; // position at last stuck-check
-    Vec3f           followerStuckDir    = { 0.0f, 0.0f, 0.0f }; // strafe direction while STUCK
+    Vec3f           followerStuckDir    = { 0.0f, 0.0f, 0.0f }; // strafe direction while STUCK (legacy; see STUCK case)
     Actor*          followerTargetEnemy = nullptr;               // current ENGAGE/ATTACK target
     Vec3f           followerMoveTarget  = { 0.0f, 0.0f, 0.0f }; // world-space position ShouldActorUpdate steers toward
     uint32_t        followerLeaderClientId = 0;                  // sticky: clientId of current leader DummyPlayer (0 = none)
+    int             followerOverrunFrames = 0;                   // G10: consecutive frames distToLeader > kTeleportThreshold
+    int             followerStuckCycleCount = 0;                 // G12: consecutive STUCK entries within the cycle window
+    int             followerStuckCycleResetFrames = 0;           // G12: counts down each frame; resets cycle count to 0 on hit zero
 
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();
@@ -351,6 +390,10 @@ class Anchor : public Network {
     uint32_t GetDummyPlayerClientId(const Actor* actor);
     bool IsFollowerActive() const { return followerActive; }
     void SetFollowerActive(bool active);
+    // G1/G2 — read local Player's stateFlags1 to detect ladder/vine/ledge climbing.
+    // Returns false when there is no live PlayState or local Player. Used in
+    // PrepClientState so remote clients see this client's climbing state.
+    bool IsLocalPlayerClimbing() const;
 
     void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);
     void SendPacket_EnemyDefeated(uint32_t netId);

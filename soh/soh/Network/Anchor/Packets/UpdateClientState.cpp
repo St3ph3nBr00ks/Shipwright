@@ -46,6 +46,7 @@ nlohmann::json Anchor::PrepClientState() {
     payload["customModelFilename"] = localModel;
     payload["followerActive"] = IsFollowerActive();
     payload["sceneSpawnEpoch"] = sceneSpawnEpoch;
+    payload["isClimbing"] = IsLocalPlayerClimbing();
 
     if (IsSaveLoaded()) {
         payload["seed"] = IS_RANDO ? Rando::Context::GetInstance()->GetSeed() : 0;
@@ -100,6 +101,7 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         clients[clientId].entranceIndex = client.entranceIndex;
         clients[clientId].sceneSpawnEpoch = client.sceneSpawnEpoch;
         clients[clientId].followerActive = client.followerActive;
+        clients[clientId].isClimbing = client.isClimbing;
 
         // Cosmetic sync — apply remote player's custom character model to their DummyPlayer
         if (payload["state"].contains("customModelFilename")) {

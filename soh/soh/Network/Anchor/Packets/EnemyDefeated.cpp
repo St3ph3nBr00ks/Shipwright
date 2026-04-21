@@ -50,9 +50,11 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
 
     SPDLOG_INFO("[EnemyDefeated] Received defeat for netId={}", netId);
 
-    // Search ACTORCAT_ENEMY and ACTORCAT_BOSS for the matching actor.
-    for (int cat : { (int)ACTORCAT_ENEMY, (int)ACTORCAT_BOSS }) {
-        Actor* actor = gPlayState->actorCtx.actorLists[cat].head;
+    // Walk every syncable actor category (shared list in Anchor.h) looking
+    // for the netId match. Covers ENEMY + BOSS plus any actor that underwent
+    // a runtime category transition (Karebaba→MISC, Armos→BG, etc.).
+    for (size_t catIdx = 0; catIdx < kSyncableActorCategoriesCount; catIdx++) {
+        Actor* actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[catIdx]].head;
         while (actor != nullptr) {
             // Grab next before any actor mutation to avoid touching freed memory.
             Actor* next = actor->next;

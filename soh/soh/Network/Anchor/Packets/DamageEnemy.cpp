@@ -90,28 +90,39 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
         return;
     }
 
-    // Walk the enemy actor list and find the matching actor by netId.
-    Actor* actor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
-    while (actor != nullptr) {
-        const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-        if (ext != nullptr && ext->netId == netId) {
-            // Skip dead actors — actor->update == NULL after Actor_Kill.
-            if (actor->update == nullptr || actor->colChkInfo.health == 0) {
-                break;
+    // Walk every syncable actor category looking for the netId match.
+    // Widened beyond ACTORCAT_ENEMY so non-host damage to non-ENEMY synced
+    // actors (allowlisted via IsSyncedWorldActor or mid-transition BOSS /
+    // ITEMACTION / MISC instances) doesn't silently drop.
+    Actor* actor = nullptr;
+    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
+        actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
+        while (actor != nullptr) {
+            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+            if (ext != nullptr && ext->netId == netId) {
+                goto damage_target_found;
             }
-
-            // Accumulate into colChkInfo.damage. The enemy's own update() will read
-            // this on the next frame (same code path as a local sword hit) and call
-            // Actor_ApplyDamage, decrement health, play hit reactions, and potentially
-            // fire GameInteractor_ExecuteOnEnemyDefeat → ENEMY_DEFEATED.
-            // Using += handles the rare case where two DAMAGE_ENEMY packets arrive in
-            // the same processing window (multi-hit same frame from the non-host).
-            actor->colChkInfo.damage += damage;
-
-            SPDLOG_DEBUG("[DamageEnemy] Applied damage={} to netId={} health={} (will be processed next frame)",
-                         (int)damage, netId, (int)actor->colChkInfo.health);
-            break;
+            actor = actor->next;
         }
-        actor = actor->next;
     }
+    actor = nullptr;
+damage_target_found:
+    if (actor == nullptr) {
+        return;
+    }
+    // Skip dead actors — actor->update == NULL after Actor_Kill.
+    if (actor->update == nullptr || actor->colChkInfo.health == 0) {
+        return;
+    }
+
+    // Accumulate into colChkInfo.damage. The enemy's own update() will read
+    // this on the next frame (same code path as a local sword hit) and call
+    // Actor_ApplyDamage, decrement health, play hit reactions, and potentially
+    // fire GameInteractor_ExecuteOnEnemyDefeat → ENEMY_DEFEATED.
+    // Using += handles the rare case where two DAMAGE_ENEMY packets arrive in
+    // the same processing window (multi-hit same frame from the non-host).
+    actor->colChkInfo.damage += damage;
+
+    SPDLOG_DEBUG("[DamageEnemy] Applied damage={} to netId={} health={} (will be processed next frame)",
+                 (int)damage, netId, (int)actor->colChkInfo.health);
 }

@@ -138,22 +138,15 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     s8 health      = (s8)payload.value("health", 1);
     Vec3f scale    = payload.value("scale", Vec3f{ 1.0f, 1.0f, 1.0f });
 
-    // Walk the actor list and find the matching actor by netId.
+    // Walk every syncable actor category looking for the netId match.
+    // Shared list lives in Anchor.h — see kSyncableActorCategories.
     // Most synced actors are ACTORCAT_ENEMY; world-actors added via
-    // IsSyncedWorldActor (issue #153) live in PROP / BG / NPC / SWITCH / MISC.
-    // Walk ENEMY first (cheap path), then fall back to the others on miss.
-    static const u8 kSearchCategories[] = {
-        ACTORCAT_ENEMY,
-        ACTORCAT_PROP,
-        ACTORCAT_BG,
-        ACTORCAT_NPC,
-        ACTORCAT_SWITCH,
-        ACTORCAT_MISC,
-    };
+    // IsSyncedWorldActor (issue #153) plus BOSS/ITEMACTION transitions
+    // live elsewhere.
     Actor* actor = nullptr;
     EnemyNetId* ext = nullptr;
-    for (size_t i = 0; i < sizeof(kSearchCategories) / sizeof(kSearchCategories[0]); i++) {
-        actor = gPlayState->actorCtx.actorLists[kSearchCategories[i]].head;
+    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
+        actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
         while (actor != nullptr) {
             ext = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
             if (ext != nullptr && ext->netId == netId) {

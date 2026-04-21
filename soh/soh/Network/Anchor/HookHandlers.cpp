@@ -122,9 +122,14 @@ static SkelAnime* GetEnemySkelAnime(Actor* actor) {
 //   ACTOR_EN_PO_RELAY      — Dampé's Ghost            (#125, ACTORCAT_NPC)
 //   ACTOR_EN_ANUBICE_TAG   — Anubis spawn marker      (#116, ACTORCAT_SWITCH)
 static bool IsSyncedWorldActor(int16_t actorId) {
+    // Adding an ID here admits the actor into the sync pipeline regardless of
+    // its current `actor->category` — so default-category and any mid-life
+    // category-transition instances both pass the admission gate.
     switch (actorId) {
-        case ACTOR_EN_GOROIWA: return true;
-        default: return false;
+        case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
+        case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
+        case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
+        default:                return false;
     }
 }
 
@@ -193,6 +198,16 @@ extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
     Anchor::Instance->SendPacket_EnemyHitPlayer(ext->netId);
 }
 
+bool Anchor::IsLocalPlayerClimbing() const {
+    if (gPlayState == nullptr) { return false; }
+    Player* p = GET_PLAYER(gPlayState);
+    if (p == nullptr) { return false; }
+    u32 sf1 = p->stateFlags1;
+    return (sf1 & PLAYER_STATE1_CLIMBING_LADDER)   ||
+           (sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) ||
+           (sf1 & PLAYER_STATE1_CLIMBING_LEDGE);
+}
+
 void Anchor::SetFollowerActive(bool active) {
     bool changed = (followerActive != active);
     followerActive = active;
@@ -202,6 +217,9 @@ void Anchor::SetFollowerActive(bool active) {
         followerStuckFrames = 0;
         followerTargetEnemy = nullptr;
         followerLeaderClientId = 0;
+        followerOverrunFrames = 0;
+        followerStuckCycleCount = 0;
+        followerStuckCycleResetFrames = 0;
         SPDLOG_INFO("[Follower] Activated (menu)");
     } else {
         SPDLOG_INFO("[Follower] Deactivated (menu)");
@@ -303,6 +321,18 @@ void Anchor::RegisterHooks() {
             }
         }
 
+        // G1/G2 — broadcast climbing-state edge changes so remote followers can
+        // teleport-and-ride. Edge-only (not every frame): UPDATE_CLIENT_STATE is
+        // a heavy packet and climbing transitions are infrequent.
+        static bool sLastClimbing = false;
+        bool nowClimbing = IsLocalPlayerClimbing();
+        if (nowClimbing != sLastClimbing) {
+            sLastClimbing = nowClimbing;
+            SPDLOG_INFO("[Follower] LocalPlayer isClimbing edge: {} -> {}",
+                        !nowClimbing, nowClimbing);
+            SendPacket_UpdateClientState();
+        }
+
         SendPacket_PlayerUpdate();
     });
 
@@ -373,8 +403,21 @@ void Anchor::RegisterHooks() {
                 if (followerActive) {
                     u16 pressed = gPlayState->state.input[0].press.button;
                     u16 deactivateCheck = pressed;
+                    // Mask off buttons WE inject — otherwise our own input would
+                    // cancel follower mode the frame after we inject it.
                     if (followerAIState == FollowerAIState::ATTACK) {
                         deactivateCheck &= ~BTN_B;
+                    }
+                    if (followerAIState == FollowerAIState::BLOCK) {
+                        deactivateCheck &= ~BTN_R;
+                    }
+                    if (followerAIState == FollowerAIState::RANGED_ATTACK) {
+                        deactivateCheck &= ~(BTN_Z | BTN_A);
+                    }
+                    // DO_ACTION_CLIMB triggers BTN_A injection regardless of state
+                    // (ledge-hang and water-exit climb-out). Re-check the flag here.
+                    if (player != nullptr && (player->stateFlags2 & PLAYER_STATE2_DO_ACTION_CLIMB)) {
+                        deactivateCheck &= ~BTN_A;
                     }
                     if (deactivateCheck != 0) {
                         SetFollowerActive(false);
@@ -384,6 +427,26 @@ void Anchor::RegisterHooks() {
                 }
 
                 if (!followerActive) { return; }
+
+                // G18 — full cutscene suspension. csCtx.state == CS_STATE_IDLE means
+                // no cutscene; anything else is an active CS frame and we must not
+                // touch the player's state machine. Stick suppression alone (in
+                // ShouldActorUpdate) is not enough — running the state machine here
+                // can still write shape.rot.y or trigger state transitions that
+                // collide with cutscene scripts.
+                if (gPlayState->csCtx.state != CS_STATE_IDLE) {
+                    return;
+                }
+
+                // G12 — tick the stuck-cycle reset window. When the window expires,
+                // the cycle counter clears so isolated STUCK events don't accumulate
+                // across long sessions. Counter is incremented at FOLLOW→STUCK below.
+                if (followerStuckCycleResetFrames > 0) {
+                    followerStuckCycleResetFrames--;
+                    if (followerStuckCycleResetFrames == 0) {
+                        followerStuckCycleCount = 0;
+                    }
+                }
 
                 // --- AI follower state machine ---
                 // Constants (do not change follow offset — set by prior session).
@@ -398,6 +461,39 @@ void Anchor::RegisterHooks() {
                 static constexpr f32 kStuckMinProgress   = 5.0f;   // min units per check interval
                 static constexpr int kStuckRecovery      = 25;     // frames of strafe before retry
                 static constexpr int kAttackDuration     = 60;     // frames per ATTACK cycle
+                // G10 — leash-timeout teleport thresholds.
+                static constexpr f32 kTeleportThreshold   = 1200.0f; // sustained XZ overrun that triggers teleport
+                static constexpr int kTeleportDelayFrames = 120;     // ~2s at 60fps; debounces brief overshoots
+                // G12 — STUCK escalation: N STUCK entries within window → teleport.
+                static constexpr int kStuckCycleEscalation = 3;     // count threshold
+                static constexpr int kStuckCycleWindow     = 300;   // frames; resets count if exceeded
+                // G13 — boss scenes that warrant pre-emptive teleport on leader entry.
+                // Only Deku Tree boss is in scope for the first dungeon demo (#167);
+                // extend this list as later dungeons land.
+                static constexpr s16 kBossScenes[] = { /* SCENE_DEKU_TREE_BOSS */ 0x11 };
+                auto IsBossScene = [&](s16 scene) -> bool {
+                    for (s16 s : kBossScenes) { if (s == scene) return true; }
+                    return false;
+                };
+                // G4 — enemies that require shield-reflect to defeat. ENGAGE routes
+                // to BLOCK instead of ATTACK when the target is one of these.
+                static constexpr s16 kShieldReflectEnemyIds[] = { ACTOR_EN_DEKUNUTS };
+                auto IsShieldReflectEnemy = [&](s16 id) -> bool {
+                    for (s16 e : kShieldReflectEnemyIds) { if (e == id) return true; }
+                    return false;
+                };
+                // G6/G7/G8 — enemies that require ranged attack (slingshot/bow).
+                // ENGAGE routes to RANGED_ATTACK when the target is one of these
+                // AND |Δy| > kMaxYDelta (out of melee reach vertically).
+                static constexpr s16 kRangedRequiredEnemyIds[] = {
+                    ACTOR_BOSS_GOMA, // Queen Gohma — ceiling phase
+                    ACTOR_EN_GOMA,   // Gohma larvae on the ceiling
+                    ACTOR_EN_SW,     // Skullwalltula on a vine
+                };
+                auto IsRangedRequiredEnemy = [&](s16 id) -> bool {
+                    for (s16 e : kRangedRequiredEnemyIds) { if (e == id) return true; }
+                    return false;
+                };
 
                 // -----------------------------------------------------------------
                 // Room-equality check — DISABLED 2026-04-21.
@@ -557,6 +653,116 @@ void Anchor::RegisterHooks() {
                 // player->actor.world.pos is the STUCK fallback (see that case).
                 Vec3f p2Pos = player->actor.world.pos;
 
+                // -----------------------------------------------------------------
+                // Top-of-hook safety nets (Batch A — G10, G11, G12 escalation, G13).
+                //
+                // Run BEFORE the state machine so they apply uniformly regardless
+                // of which state the follower is in. Each writes player->actor.world.pos
+                // directly under specific failure conditions — these are bounded
+                // exceptions to the "STUCK is the only world.pos writer" rule
+                // documented in the state machine block below.
+                // -----------------------------------------------------------------
+
+                // G11/G13 — leader crossed a scene or room boundary.
+                // Leader's scene/room is broadcast via UPDATE_CLIENT_STATE; if it
+                // diverges from ours, we either teleport (boss scene per G13) or
+                // deactivate the follower (default per G11) so the human can walk
+                // their own follower-Link through the door.
+                {
+                    auto it = clients.find(followerLeaderClientId);
+                    if (it != clients.end() && it->second.isSaveLoaded) {
+                        s16 leaderScene = it->second.sceneNum;
+                        s8  leaderRoom  = it->second.curRoomNum;
+                        s16 ourScene    = (s16)gPlayState->sceneNum;
+                        s8  ourRoom     = (s8)gPlayState->roomCtx.curRoom.num;
+                        if (leaderScene != ourScene) {
+                            if (IsBossScene(leaderScene)) {
+                                // G13 — pre-emptive teleport into the boss room
+                                // before the door seals. We can't actually load
+                                // a different scene from here, so this falls
+                                // through to the same deactivate path as G11
+                                // for now; reactivation is a manual user step
+                                // until proper scene-transition driving lands.
+                                SPDLOG_WARN("[Follower] Leader entered boss scene 0x{:02X} — deactivating "
+                                            "(walk through the door manually, then re-enable)",
+                                            leaderScene);
+                            } else {
+                                SPDLOG_WARN("[Follower] Leader in different scene (ours=0x{:02X} leader=0x{:02X}) "
+                                            "— deactivating; walk through the door manually",
+                                            ourScene, leaderScene);
+                            }
+                            SetFollowerActive(false);
+                            return;
+                        }
+                        // Same scene, different room: same handling as different scene
+                        // for now (rooms within a scene are typically connected by
+                        // doors that the human player must walk through).
+                        if (leaderRoom != ourRoom && leaderRoom != -1 && ourRoom != -1) {
+                            SPDLOG_WARN("[Follower] Leader in different room (ours={} leader={}) "
+                                        "— deactivating",
+                                        (int)ourRoom, (int)leaderRoom);
+                            SetFollowerActive(false);
+                            return;
+                        }
+                    }
+                }
+
+                // G10 — leash-timeout teleport. If the follower has been more
+                // than kTeleportThreshold from the leader for kTeleportDelayFrames
+                // continuous frames, teleport to the leader. Catches stuck-in-
+                // geometry / fell-behind / can't-traverse scenarios that the
+                // state machine couldn't recover from.
+                {
+                    f32 dxL = leaderPos.x - p2Pos.x;
+                    f32 dzL = leaderPos.z - p2Pos.z;
+                    if (dxL * dxL + dzL * dzL > kTeleportThreshold * kTeleportThreshold) {
+                        followerOverrunFrames++;
+                        if (followerOverrunFrames >= kTeleportDelayFrames) {
+                            player->actor.world.pos = leaderPos;
+                            player->actor.prevPos   = leaderPos;
+                            followerOverrunFrames = 0;
+                            followerAIState       = FollowerAIState::IDLE;
+                            followerStateFrames   = 0;
+                            SPDLOG_INFO("[Follower] Teleported to leader (G10 leash overrun)");
+                        }
+                    } else {
+                        followerOverrunFrames = 0;
+                    }
+                }
+
+                // G12 — STUCK escalation teleport. If the follower has entered
+                // STUCK kStuckCycleEscalation times within kStuckCycleWindow,
+                // bail to a teleport. Counter is incremented at the FOLLOW→STUCK
+                // transition below; window is reset when we reach IDLE cleanly.
+                if (followerStuckCycleCount >= kStuckCycleEscalation) {
+                    player->actor.world.pos = leaderPos;
+                    player->actor.prevPos   = leaderPos;
+                    followerStuckCycleCount       = 0;
+                    followerStuckCycleResetFrames = 0;
+                    followerOverrunFrames         = 0;
+                    followerAIState               = FollowerAIState::IDLE;
+                    followerStateFrames           = 0;
+                    SPDLOG_INFO("[Follower] Teleported to leader (G12 stuck-cycle escalation)");
+                    return;
+                }
+
+                // G1/G2 — leader is climbing a vine/ladder. Teleport to leader
+                // and ride along (CLIMBING state below maintains this). Edge-
+                // triggered: only enter CLIMBING if we aren't already there.
+                {
+                    auto it = clients.find(followerLeaderClientId);
+                    if (it != clients.end() && it->second.isClimbing &&
+                        followerAIState != FollowerAIState::CLIMBING) {
+                        player->actor.world.pos = leaderPos;
+                        player->actor.prevPos   = leaderPos;
+                        followerAIState     = FollowerAIState::CLIMBING;
+                        followerStateFrames = 0;
+                        SPDLOG_INFO("[Follower] Leader started climbing → CLIMBING (teleport)");
+                        // Refresh p2Pos snapshot since we just moved.
+                        p2Pos = player->actor.world.pos;
+                    }
+                }
+
                 followerStateFrames++;
 
                 // Periodic heartbeat: log state + positions every 60 frames.
@@ -564,12 +770,16 @@ void Anchor::RegisterHooks() {
                     f32 toTarget = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
                     const char* stateStr = "?";
                     switch (followerAIState) {
-                        case FollowerAIState::IDLE:   stateStr = "IDLE";   break;
-                        case FollowerAIState::FOLLOW: stateStr = "FOLLOW"; break;
-                        case FollowerAIState::STUCK:  stateStr = "STUCK";  break;
-                        case FollowerAIState::ENGAGE: stateStr = "ENGAGE"; break;
-                        case FollowerAIState::ATTACK: stateStr = "ATTACK"; break;
-                        case FollowerAIState::RETURN: stateStr = "RETURN"; break;
+                        case FollowerAIState::IDLE:          stateStr = "IDLE";          break;
+                        case FollowerAIState::FOLLOW:        stateStr = "FOLLOW";        break;
+                        case FollowerAIState::STUCK:         stateStr = "STUCK";         break;
+                        case FollowerAIState::ENGAGE:        stateStr = "ENGAGE";        break;
+                        case FollowerAIState::ATTACK:        stateStr = "ATTACK";        break;
+                        case FollowerAIState::RETURN:        stateStr = "RETURN";        break;
+                        case FollowerAIState::CLIMBING:      stateStr = "CLIMBING";      break;
+                        case FollowerAIState::BLOCK:         stateStr = "BLOCK";         break;
+                        case FollowerAIState::RANGED_ATTACK: stateStr = "RANGED_ATTACK"; break;
+                        case FollowerAIState::STANDBY:       stateStr = "STANDBY";       break;
                     }
                     SPDLOG_INFO("[Follower] state={} p2=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) distToTarget={:.0f}",
                                 stateStr,
@@ -660,7 +870,13 @@ void Anchor::RegisterHooks() {
                                 followerAIState     = FollowerAIState::STUCK;
                                 followerStuckFrames = 0;
                                 followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] FOLLOW→STUCK (stick input stalled)");
+                                // G12 — count this entry; arm the reset window.
+                                // The top-of-hook check escalates to teleport when
+                                // count >= kStuckCycleEscalation within the window.
+                                followerStuckCycleCount++;
+                                followerStuckCycleResetFrames = kStuckCycleWindow;
+                                SPDLOG_INFO("[Follower] FOLLOW→STUCK (stick input stalled, cycle={})",
+                                            followerStuckCycleCount);
                                 break;
                             }
                         }
@@ -730,11 +946,21 @@ void Anchor::RegisterHooks() {
                             SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy gone)");
                             break;
                         }
-                        // Drop the target if it moved to another floor —
-                        // otherwise we chase it through ceilings / pits.
+                        // Off-floor handling. Two options:
+                        //  - If the target is in the ranged-required class, it's
+                        //    EXPECTED to be off the melee Y-band (Gohma on the
+                        //    ceiling, Skullwalltula on a vine). Switch to
+                        //    RANGED_ATTACK and don't bail.
+                        //  - Otherwise, give up (existing behaviour).
                         // (Room-equality side of this check disabled — see banner note above.)
-                        if (/* followerTargetEnemy->room != player->actor.room || */
-                            fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
+                        if (fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
+                            if (IsRangedRequiredEnemy(followerTargetEnemy->id)) {
+                                followerAIState     = FollowerAIState::RANGED_ATTACK;
+                                followerStateFrames = 0;
+                                SPDLOG_INFO("[Follower] ENGAGE→RANGED_ATTACK (off-floor target id={})",
+                                            followerTargetEnemy->id);
+                                break;
+                            }
                             followerAIState     = FollowerAIState::RETURN;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy off-floor)");
@@ -745,6 +971,15 @@ void Anchor::RegisterHooks() {
                         f32   edz      = enemyPos.z - p2Pos.z;
                         f32   distSq   = edx * edx + edz * edz;
                         if (distSq < kAttackRange * kAttackRange) {
+                            // G4 — Mad Scrub class: shield first, then swing on
+                            // the stunned scrub. BLOCK→ATTACK is wired in BLOCK.
+                            if (IsShieldReflectEnemy(followerTargetEnemy->id)) {
+                                followerAIState     = FollowerAIState::BLOCK;
+                                followerStateFrames = 0;
+                                SPDLOG_INFO("[Follower] ENGAGE→BLOCK (shield-reflect target id={})",
+                                            followerTargetEnemy->id);
+                                break;
+                            }
                             followerAIState     = FollowerAIState::ATTACK;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] ENGAGE→ATTACK enemy=({:.0f},{:.0f},{:.0f}) dist={:.0f}",
@@ -854,6 +1089,113 @@ void Anchor::RegisterHooks() {
                             followerAIState     = FollowerAIState::IDLE;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] RETURN→IDLE dist={:.1f}", dist);
+                        }
+                        break;
+                    }
+
+                    // G1/G2 — leader is climbing. Track their position every frame.
+                    // Y-override is essential here: we want to ride up the vine/ladder
+                    // alongside the leader, not stay at our ground level. Exit when
+                    // the leader's isClimbing flips back to false.
+                    case FollowerAIState::CLIMBING: {
+                        auto it = clients.find(followerLeaderClientId);
+                        if (it == clients.end() || !it->second.isClimbing) {
+                            // Leader stopped climbing (or disappeared from clients).
+                            // Drop to IDLE so the next FOLLOW recomputes sideTarget
+                            // around the leader's new ground position.
+                            followerAIState     = FollowerAIState::IDLE;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] CLIMBING→IDLE (leader stopped climbing)");
+                            break;
+                        }
+                        // Stay glued to the leader for the duration of the climb.
+                        // This is one of the documented exceptions to the "STUCK is
+                        // the only world.pos writer" rule (see Batch A safety nets).
+                        player->actor.world.pos = leaderPos;
+                        player->actor.prevPos   = leaderPos;
+                        // Match leader's facing so we don't visually pop on dismount.
+                        player->actor.shape.rot.y = leaderActor->shape.rot.y;
+                        break;
+                    }
+
+                    // G4 — shield reflect. Inject BTN_R while ENGAGE target is a
+                    // known shield-reflect class (Mad Scrub). Movement freezes
+                    // (no stick) so Link plants the shield. Returns to ENGAGE
+                    // when target leaves the reflect-class window or is defeated.
+                    case FollowerAIState::BLOCK: {
+                        if (followerTargetEnemy == nullptr ||
+                            followerTargetEnemy->update == nullptr) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] BLOCK→RETURN (target gone)");
+                            break;
+                        }
+                        // shape.rot.y points at target so the shield faces the
+                        // incoming projectile. Position is held by zeroed stick
+                        // (see ShouldActorUpdate isMoving exclusion).
+                        f32 ex = followerTargetEnemy->world.pos.x - p2Pos.x;
+                        f32 ez = followerTargetEnemy->world.pos.z - p2Pos.z;
+                        if (ex * ex + ez * ez > 1.0f) {
+                            player->actor.shape.rot.y = YawToward(ex, ez);
+                        }
+                        // Hold the shield for kAttackDuration frames per cycle,
+                        // then drop to ATTACK to swing on the (now-stunned) scrub.
+                        if (followerStateFrames >= kAttackDuration) {
+                            followerAIState     = FollowerAIState::ATTACK;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] BLOCK→ATTACK (shield cycle complete)");
+                        }
+                        break;
+                    }
+
+                    // G6/G7/G8 — ranged attack. Inject BTN_Z + BTN_A while ENGAGE
+                    // target is a known ranged-required class (Gohma ceiling, larvae,
+                    // Skullwalltulas on vines). Movement freezes so Link aims.
+                    case FollowerAIState::RANGED_ATTACK: {
+                        if (followerTargetEnemy == nullptr ||
+                            followerTargetEnemy->update == nullptr) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target gone)");
+                            break;
+                        }
+                        // Two-signal defeat check, mirroring the ATTACK state.
+                        bool defeated = (followerTargetEnemy->colChkInfo.health <= 0);
+                        if (!defeated) {
+                            const EnemyNetId* ext =
+                                ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
+                            if (ext != nullptr &&
+                                (ext->hasLocalDeath || ext->pendingNaturalDeath)) {
+                                defeated = true;
+                            }
+                        }
+                        if (defeated) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target dead)");
+                            break;
+                        }
+                        // Face the target so the slingshot aim line is correct.
+                        f32 ex = followerTargetEnemy->world.pos.x - p2Pos.x;
+                        f32 ez = followerTargetEnemy->world.pos.z - p2Pos.z;
+                        if (ex * ex + ez * ez > 1.0f) {
+                            player->actor.shape.rot.y = YawToward(ex, ez);
+                        }
+                        if (followerStateFrames >= kAttackDuration) {
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (cycle complete)");
+                        }
+                        break;
+                    }
+
+                    // Reserved — placeholder for G19 (Gohma weak-point window).
+                    // No transitions wired today; ENGAGE never picks STANDBY.
+                    case FollowerAIState::STANDBY: {
+                        if (followerStateFrames >= kAttackDuration) {
+                            followerAIState     = FollowerAIState::ENGAGE;
+                            followerStateFrames = 0;
+                            SPDLOG_INFO("[Follower] STANDBY→ENGAGE (window expired)");
                         }
                         break;
                     }
@@ -1077,6 +1419,31 @@ void Anchor::RegisterHooks() {
                                 SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={})",
                                             followerStateFrames);
                             }
+                        }
+                    }
+
+                    // G4 — BLOCK: hold BTN_R to plant the shield. OoT treats
+                    // R-hold as a continuous shielding input, so set both .cur
+                    // and .press every frame.
+                    if (followerAIState == FollowerAIState::BLOCK) {
+                        input.press.button |= BTN_R;
+                        input.cur.button   |= BTN_R;
+                    }
+
+                    // G6/G7/G8 — RANGED_ATTACK: Z-target + A to fire. Z is held
+                    // every frame to keep the lock-on; A is edge-pressed at the
+                    // start of each 20-frame sub-cycle (same cadence as BTN_B
+                    // in ATTACK). Inventory check is intentionally omitted in
+                    // this first pass — the demo assumes the player has the
+                    // slingshot. If they don't, RANGED_ATTACK is a no-op visually.
+                    if (followerAIState == FollowerAIState::RANGED_ATTACK) {
+                        input.press.button |= BTN_Z;
+                        input.cur.button   |= BTN_Z;
+                        if (followerStateFrames % 20 == 0) {
+                            input.press.button |= BTN_A;
+                            input.cur.button   |= BTN_A;
+                            SPDLOG_INFO("[Follower] RANGED_ATTACK injecting BTN_A (stateFrames={})",
+                                        followerStateFrames);
                         }
                     }
                 });

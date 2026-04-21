@@ -68,6 +68,7 @@ inline void from_json(const json& j, AnchorClient& client) {
     client.self = j.value("self", false);
     client.customModelFilename = j.value("customModelFilename", "");
     client.followerActive = j.value("followerActive", false);
+    client.isClimbing = j.value("isClimbing", false);
     // customSkeleton is runtime state — not deserialized
 }
 
