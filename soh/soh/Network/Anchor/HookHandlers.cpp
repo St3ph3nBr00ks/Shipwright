@@ -208,6 +208,64 @@ bool Anchor::IsLocalPlayerClimbing() const {
            (sf1 & PLAYER_STATE1_CLIMBING_LEDGE);
 }
 
+// Option B — follower item override system. See Anchor.h for full
+// design. Touches gSaveContext.equips.{buttonItems[1..3], cButtonSlots[0..2]}.
+// B-slot (sword) is never modified.
+u8 Anchor::FollowerTryEquipRangedWeapon() {
+    // Gate on CVar.
+    if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("FollowerAllowChooseItems"), 0)) {
+        return 0xFF;
+    }
+    // Idempotent — if already overridden, just report the active slot.
+    if (followerItemOverrideActive) {
+        return followerActiveCSlot;
+    }
+    // Pick slingshot (child) or bow (adult), whichever is in inventory.
+    u8 item = ITEM_NONE;
+    u8 invSlot = 0;
+    if (gSaveContext.inventory.items[SLOT_SLINGSHOT] == ITEM_SLINGSHOT) {
+        item = ITEM_SLINGSHOT;
+        invSlot = SLOT_SLINGSHOT;
+    } else if (gSaveContext.inventory.items[SLOT_BOW] == ITEM_BOW) {
+        item = ITEM_BOW;
+        invSlot = SLOT_BOW;
+    } else {
+        SPDLOG_INFO("[Follower] FollowerTryEquipRangedWeapon: no slingshot or bow in inventory");
+        return 0xFF;
+    }
+    // Snapshot C-button loadout (indices 1..3 of buttonItems; indices 0..2
+    // of cButtonSlots). Skip B-button.
+    for (int i = 1; i <= 3; i++) {
+        savedButtonItems[i] = gSaveContext.equips.buttonItems[i];
+    }
+    for (int i = 0; i < 3; i++) {
+        savedCButtonSlots[i] = gSaveContext.equips.cButtonSlots[i];
+    }
+    // Override C-left (buttonItems index 1; cButtonSlots index 0).
+    gSaveContext.equips.buttonItems[1]  = item;
+    gSaveContext.equips.cButtonSlots[0] = invSlot;
+    followerItemOverrideActive          = true;
+    followerActiveCSlot                 = 0; // C-left
+    SPDLOG_INFO("[Follower] Item override: equipped {} (invSlot={}) to C-left; "
+                "saved prior C-items ({:#04x},{:#04x},{:#04x})",
+                (item == ITEM_SLINGSHOT ? "slingshot" : "bow"), (int)invSlot,
+                (int)savedButtonItems[1], (int)savedButtonItems[2], (int)savedButtonItems[3]);
+    return 0;
+}
+
+void Anchor::FollowerRestoreItems() {
+    if (!followerItemOverrideActive) { return; }
+    for (int i = 1; i <= 3; i++) {
+        gSaveContext.equips.buttonItems[i] = savedButtonItems[i];
+    }
+    for (int i = 0; i < 3; i++) {
+        gSaveContext.equips.cButtonSlots[i] = savedCButtonSlots[i];
+    }
+    followerItemOverrideActive = false;
+    followerActiveCSlot        = 0xFF;
+    SPDLOG_INFO("[Follower] Item override: restored original C-button loadout");
+}
+
 void Anchor::SetFollowerActive(bool active) {
     bool changed = (followerActive != active);
     followerActive = active;
@@ -220,8 +278,17 @@ void Anchor::SetFollowerActive(bool active) {
         followerOverrunFrames = 0;
         followerStuckCycleCount = 0;
         followerStuckCycleResetFrames = 0;
+        hasPendingTransition = false;
+        pendingTransitionTimeoutFrames = 0;
         SPDLOG_INFO("[Follower] Activated (menu)");
     } else {
+        hasPendingTransition = false;
+        pendingTransitionTimeoutFrames = 0;
+        // Safety: always restore the player's C-button loadout on any
+        // deactivation path (menu toggle, joystick cancel, scene boundary,
+        // leash timeout, …). FollowerRestoreItems is a no-op when no
+        // override is active.
+        FollowerRestoreItems();
         SPDLOG_INFO("[Follower] Deactivated (menu)");
     }
     if (changed && isConnected) {
@@ -366,6 +433,32 @@ void Anchor::RegisterHooks() {
                 }
             }
         }
+
+        // Phase C — SCENE_TRANSITION_HANDOFF leader-side broadcast.
+        // Every client runs this: on the rising edge of transitionTrigger
+        // (OFF → START), capture our current position and destination
+        // entrance, broadcast to other clients. A client with follower mode
+        // active will use the data to follow us through the transition
+        // (SceneTransitionHandoff.cpp HandlePacket_… stashes it pending; the
+        // follower state machine below consumes it once within proximity).
+        if (IsSaveLoaded() && gPlayState != nullptr) {
+            s32 curTrigger = gPlayState->transitionTrigger;
+            if (curTrigger == TRANS_TRIGGER_START &&
+                prevTransitionTrigger == TRANS_TRIGGER_OFF) {
+                Player* localPlayer = GET_PLAYER(gPlayState);
+                if (localPlayer != nullptr) {
+                    s16   fromScene   = (s16)gPlayState->sceneNum;
+                    s16   toEntrance  = (s16)gPlayState->nextEntranceIndex;
+                    Vec3f triggerPos  = localPlayer->actor.world.pos;
+                    s16   triggerRotY = localPlayer->actor.shape.rot.y;
+                    SendPacket_SceneTransitionHandoff(fromScene, toEntrance,
+                                                      triggerPos, triggerRotY);
+                }
+            }
+            prevTransitionTrigger = curTrigger;
+        } else {
+            prevTransitionTrigger = TRANS_TRIGGER_OFF;
+        }
     });
 
     // Follower mode (non-host only): override local player position to trail the host.
@@ -413,6 +506,15 @@ void Anchor::RegisterHooks() {
                     }
                     if (followerAIState == FollowerAIState::RANGED_ATTACK) {
                         deactivateCheck &= ~(BTN_Z | BTN_A);
+                        // If we also injected a C-button for item draw
+                        // (Option B), mask that too so our own press doesn't
+                        // cancel follower mode.
+                        switch (followerActiveCSlot) {
+                            case 0: deactivateCheck &= ~BTN_CLEFT;  break;
+                            case 1: deactivateCheck &= ~BTN_CDOWN;  break;
+                            case 2: deactivateCheck &= ~BTN_CRIGHT; break;
+                            default: break;
+                        }
                     }
                     // DO_ACTION_CLIMB triggers BTN_A injection regardless of state
                     // (ledge-hang and water-exit climb-out). DO_ACTION_ENTER
@@ -687,12 +789,84 @@ void Anchor::RegisterHooks() {
                 // documented in the state machine block below.
                 // -----------------------------------------------------------------
 
+                // Phase C — pending SCENE_TRANSITION_HANDOFF replay.
+                // Runs BEFORE G11 so the follower doesn't get deactivated while
+                // navigating toward the trigger point. Three outcomes:
+                //   (a) our sceneNum has already changed to (or past) the
+                //       leader's — packet is stale; clear and fall through.
+                //   (b) still in the from-scene AND within proximity of the
+                //       trigger — fire our own transition (set
+                //       nextEntranceIndex + transitionTrigger) and clear.
+                //   (c) still in the from-scene but too far from the trigger —
+                //       point followerMoveTarget at triggerPos so the state
+                //       machine walks us there. Decrement timeout.
+                bool pendingTransitionInFlight = false;
+                if (hasPendingTransition) {
+                    s16 ourScene = (s16)gPlayState->sceneNum;
+                    if (ourScene != pendingTransitionFromScene) {
+                        // We moved on without using the handoff (user walked
+                        // manually, or we already fired the transition last
+                        // frame). Drop it.
+                        SPDLOG_INFO("[Follower] Pending transition cleared — scene already changed "
+                                    "(ours=0x{:02X} packet.fromScene=0x{:02X})",
+                                    (int)ourScene, (int)pendingTransitionFromScene);
+                        hasPendingTransition           = false;
+                        pendingTransitionTimeoutFrames = 0;
+                    } else {
+                        static constexpr f32 kHandoffProximity = 60.0f;
+                        f32 dx = pendingTransitionPos.x - p2Pos.x;
+                        f32 dz = pendingTransitionPos.z - p2Pos.z;
+                        f32 d2 = dx * dx + dz * dz;
+                        if (d2 < kHandoffProximity * kHandoffProximity) {
+                            SPDLOG_INFO("[Follower] Pending transition firing — entering scene via "
+                                        "entrance 0x{:04X} (from scene 0x{:02X})",
+                                        (int)(u16)pendingTransitionEntrance,
+                                        (int)pendingTransitionFromScene);
+                            gPlayState->nextEntranceIndex = pendingTransitionEntrance;
+                            gPlayState->transitionTrigger = TRANS_TRIGGER_START;
+                            hasPendingTransition           = false;
+                            pendingTransitionTimeoutFrames = 0;
+                            return; // scene load owns the next frames
+                        } else {
+                            // Navigate to the trigger. Force the state machine
+                            // to walk toward the door/trigger point by routing
+                            // through FOLLOW with an overridden move target.
+                            pendingTransitionInFlight = true;
+                            followerMoveTarget = pendingTransitionPos;
+                            if (followerAIState == FollowerAIState::IDLE) {
+                                followerAIState     = FollowerAIState::FOLLOW;
+                                followerStateFrames = 0;
+                                followerLastPos     = p2Pos;
+                                SPDLOG_INFO("[Follower] IDLE→FOLLOW (toward pending transition trigger at "
+                                            "{:.0f},{:.0f},{:.0f}, dist={:.0f})",
+                                            pendingTransitionPos.x, pendingTransitionPos.y,
+                                            pendingTransitionPos.z, sqrtf(d2));
+                            }
+                        }
+                        if (pendingTransitionTimeoutFrames > 0) {
+                            pendingTransitionTimeoutFrames--;
+                            if (pendingTransitionTimeoutFrames == 0) {
+                                SPDLOG_WARN("[Follower] Pending transition TIMEOUT — leader is gone, "
+                                            "can't reach trigger. Deactivating.");
+                                hasPendingTransition = false;
+                                SetFollowerActive(false);
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 // G11/G13 — leader crossed a scene or room boundary.
                 // Leader's scene/room is broadcast via UPDATE_CLIENT_STATE; if it
                 // diverges from ours, we either teleport (boss scene per G13) or
                 // deactivate the follower (default per G11) so the human can walk
                 // their own follower-Link through the door.
-                {
+                //
+                // SUPPRESSED when a pending SCENE_TRANSITION_HANDOFF is in
+                // flight (phase C): the packet already tells us exactly where
+                // to go and which entrance to use. Deactivating here would
+                // stop the navigation before we reach the trigger.
+                if (!pendingTransitionInFlight) {
                     auto it = clients.find(followerLeaderClientId);
                     if (it != clients.end() && it->second.isSaveLoaded) {
                         s16 leaderScene = it->second.sceneNum;
@@ -701,14 +875,17 @@ void Anchor::RegisterHooks() {
                         s8  ourRoom     = (s8)gPlayState->roomCtx.curRoom.num;
                         if (leaderScene != ourScene) {
                             if (IsBossScene(leaderScene)) {
-                                // G13 — pre-emptive teleport into the boss room
-                                // before the door seals. We can't actually load
-                                // a different scene from here, so this falls
-                                // through to the same deactivate path as G11
-                                // for now; reactivation is a manual user step
-                                // until proper scene-transition driving lands.
-                                SPDLOG_WARN("[Follower] Leader entered boss scene 0x{:02X} — deactivating "
-                                            "(walk through the door manually, then re-enable)",
+                                // G13 — historically we deactivated here. With
+                                // SCENE_TRANSITION_HANDOFF active, the leader's
+                                // handoff packet is what carries the follower
+                                // through the boss door. G13 only fires now if
+                                // the leader entered the boss scene WITHOUT
+                                // the handoff packet reaching us (packet
+                                // dropped, or leader's build predates the
+                                // packet). In that case, deactivate with the
+                                // same fallback behaviour as before.
+                                SPDLOG_WARN("[Follower] Leader entered boss scene 0x{:02X} without handoff — "
+                                            "deactivating (walk through the door manually, then re-enable)",
                                             leaderScene);
                             } else {
                                 SPDLOG_WARN("[Follower] Leader in different scene (ours=0x{:02X} leader=0x{:02X}) "
@@ -986,6 +1163,7 @@ void Anchor::RegisterHooks() {
                             f32 dy = followerTargetEnemy->world.pos.y - p2Pos.y;
                             if (fabsf(dy) >= kMaxYDelta) {
                                 if (IsRangedRequiredEnemy(followerTargetEnemy->id)) {
+                                    FollowerTryEquipRangedWeapon();
                                     followerAIState     = FollowerAIState::RANGED_ATTACK;
                                     followerStateFrames = 0;
                                     SPDLOG_INFO("[Follower] ENGAGE→RANGED_ATTACK (off-floor target id={})",
@@ -999,6 +1177,7 @@ void Anchor::RegisterHooks() {
                             }
                             if (dy > kSwordVerticalReach &&
                                 IsRangedRequiredEnemy(followerTargetEnemy->id)) {
+                                FollowerTryEquipRangedWeapon();
                                 followerAIState     = FollowerAIState::RANGED_ATTACK;
                                 followerStateFrames = 0;
                                 SPDLOG_INFO("[Follower] ENGAGE→RANGED_ATTACK (above sword reach Δy={:.0f} target id={})",
@@ -1194,6 +1373,7 @@ void Anchor::RegisterHooks() {
                     case FollowerAIState::RANGED_ATTACK: {
                         if (followerTargetEnemy == nullptr ||
                             followerTargetEnemy->update == nullptr) {
+                            FollowerRestoreItems();
                             followerAIState     = FollowerAIState::RETURN;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target gone)");
@@ -1210,6 +1390,7 @@ void Anchor::RegisterHooks() {
                             }
                         }
                         if (defeated) {
+                            FollowerRestoreItems();
                             followerAIState     = FollowerAIState::RETURN;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target dead)");
@@ -1222,6 +1403,7 @@ void Anchor::RegisterHooks() {
                             player->actor.shape.rot.y = YawToward(ex, ez);
                         }
                         if (followerStateFrames >= kAttackDuration) {
+                            FollowerRestoreItems();
                             followerAIState     = FollowerAIState::RETURN;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (cycle complete)");
@@ -1536,20 +1718,39 @@ void Anchor::RegisterHooks() {
                         input.cur.button   |= BTN_R;
                     }
 
-                    // G6/G7/G8 — RANGED_ATTACK: Z-target + A to fire. Z is held
-                    // every frame to keep the lock-on; A is edge-pressed at the
-                    // start of each 20-frame sub-cycle (same cadence as BTN_B
-                    // in ATTACK). Inventory check is intentionally omitted in
-                    // this first pass — the demo assumes the player has the
-                    // slingshot. If they don't, RANGED_ATTACK is a no-op visually.
+                    // G6/G7/G8 — RANGED_ATTACK: Z-target + C-button (to draw
+                    // the weapon) + A (to fire). Z and the C-button are held
+                    // every frame to keep the lock-on and the weapon drawn;
+                    // A is edge-pressed every 20 frames (same cadence as
+                    // BTN_B in ATTACK) to fire.
+                    //
+                    // Option B — the C-button press is only meaningful if
+                    // followerActiveCSlot != 0xFF, which happens when
+                    // FollowerTryEquipRangedWeapon succeeded (CVar enabled
+                    // AND player had a slingshot/bow). Otherwise we fall
+                    // back to Z+A alone — which is a no-op visually but
+                    // doesn't corrupt player input.
                     if (followerAIState == FollowerAIState::RANGED_ATTACK) {
                         input.press.button |= BTN_Z;
                         input.cur.button   |= BTN_Z;
+                        u16 cBtn = 0;
+                        switch (followerActiveCSlot) {
+                            case 0: cBtn = BTN_CLEFT;  break;
+                            case 1: cBtn = BTN_CDOWN;  break;
+                            case 2: cBtn = BTN_CRIGHT; break;
+                            default: break;
+                        }
+                        if (cBtn != 0) {
+                            input.press.button |= cBtn;
+                            input.cur.button   |= cBtn;
+                        }
                         if (followerStateFrames % 20 == 0) {
                             input.press.button |= BTN_A;
                             input.cur.button   |= BTN_A;
-                            SPDLOG_INFO("[Follower] RANGED_ATTACK injecting BTN_A (stateFrames={})",
-                                        followerStateFrames);
+                            SPDLOG_INFO("[Follower] RANGED_ATTACK injecting BTN_A "
+                                        "(stateFrames={}, cSlot={})",
+                                        followerStateFrames,
+                                        (int)followerActiveCSlot);
                         }
                     }
                 });

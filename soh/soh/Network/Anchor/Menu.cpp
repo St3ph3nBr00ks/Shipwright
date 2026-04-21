@@ -169,6 +169,25 @@ void AnchorMainMenu(WidgetInfo& info) {
                                              "Any controller input cancels it and returns manual control."))) {
             anchor->SetFollowerActive(followerActive);
         }
+
+        // Option B — allow the follower to temporarily override the player's
+        // C-button items when it needs something (slingshot/bow for ranged
+        // combat, fairy/potion for the future revive system). The original
+        // loadout is snapshot at first override and restored on state exit
+        // and on any follower deactivation.
+        bool allowChooseItems =
+            CVarGetInteger(CVAR_REMOTE_ANCHOR("FollowerAllowChooseItems"), 0) != 0;
+        if (UIWidgets::Checkbox("Allow Choose Items", &allowChooseItems,
+                                UIWidgets::CheckboxOptions()
+                                    .Color(THEME_COLOR)
+                                    .Tooltip("Allow the AI follower to temporarily assign items to C-buttons "
+                                             "when it needs them (e.g., slingshot/bow for ranged combat against "
+                                             "targets out of sword reach). The original loadout is restored when "
+                                             "the follower finishes or deactivates."))) {
+            CVarSetInteger(CVAR_REMOTE_ANCHOR("FollowerAllowChooseItems"),
+                           allowChooseItems ? 1 : 0);
+            CVarSave();
+        }
     }
 
     ImGui::Spacing();

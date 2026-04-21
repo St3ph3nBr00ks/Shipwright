@@ -304,6 +304,36 @@ class Anchor : public Network {
     int             followerStuckCycleCount = 0;                 // G12: consecutive STUCK entries within the cycle window
     int             followerStuckCycleResetFrames = 0;           // G12: counts down each frame; resets cycle count to 0 on hit zero
 
+    // Item-override system (Option B). When
+    // CVAR_REMOTE_ANCHOR("FollowerAllowChooseItems") is enabled, the follower
+    // can temporarily override the player's C-button item assignments to use
+    // items it needs (slingshot/bow for RANGED_ATTACK; fairy/potion for the
+    // future revive system). Snapshot is taken on first override and restored
+    // on state exit OR on SetFollowerActive(false).
+    //
+    // Touches gSaveContext.equips.buttonItems[1..3] (C-left/down/right) and
+    // gSaveContext.equips.cButtonSlots[0..2]. B-button (index 0) is never
+    // touched — always stays as the sword.
+    bool            followerItemOverrideActive  = false;
+    u8              savedButtonItems[4]         = { 0xFF, 0xFF, 0xFF, 0xFF }; // [0]=B(unused), [1..3]=C-slots
+    u8              savedCButtonSlots[3]        = { 0, 0, 0 };
+    u8              followerActiveCSlot         = 0xFF; // 0=C-left, 1=C-down, 2=C-right; 0xFF = none
+
+    // Phase C — pending SCENE_TRANSITION_HANDOFF replay (see #169). Set on
+    // receipt of the packet; consumed when we're close enough to the trigger
+    // point to fire our own transitionTrigger. Timeout clears the pending
+    // state and falls back to the G11 manual-walkthrough behaviour.
+    bool            hasPendingTransition        = false;
+    s16             pendingTransitionFromScene  = 0;
+    s16             pendingTransitionEntrance   = 0;
+    Vec3f           pendingTransitionPos        = { 0.0f, 0.0f, 0.0f };
+    s16             pendingTransitionRotY       = 0;
+    int             pendingTransitionTimeoutFrames = 0;          // decrement each tick; 0 → clear
+    // Leader-side edge detection: previous frame's transitionTrigger value.
+    // Non-zero when we're already inside a transition sequence; we only fire
+    // the handoff on the rising edge (OFF→START).
+    s32             prevTransitionTrigger       = 0;
+
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();
     void RegisterHooks();
@@ -337,6 +367,7 @@ class Anchor : public Network {
     void HandlePacket_UpdateDungeonItems(nlohmann::json payload);
     void HandlePacket_UpdateRoomState(nlohmann::json payload);
     void HandlePacket_UpdateTeamState(nlohmann::json payload);
+    void HandlePacket_SceneTransitionHandoff(nlohmann::json payload);
 
   public:
     uint32_t ownClientId;
@@ -371,6 +402,14 @@ class Anchor : public Network {
     inline static const std::string UPDATE_DUNGEON_ITEMS = "UPDATE_DUNGEON_ITEMS";
     inline static const std::string UPDATE_ROOM_STATE = "UPDATE_ROOM_STATE";
     inline static const std::string UPDATE_TEAM_STATE = "UPDATE_TEAM_STATE";
+    // Leader→follower scene-transition handoff. Sent by the leader on edge-
+    // detect of `gPlayState->transitionTrigger` OFF→START. Payload carries the
+    // source sceneNum, destination nextEntranceIndex, and the world-space
+    // position (+rotation) of the trigger in the source scene so the follower
+    // can navigate there and fire its own transition. Supersedes the G13
+    // boss-room deactivate path and unblocks cross-scene doors / grotto /
+    // crawlspace entry. See #169.
+    inline static const std::string SCENE_TRANSITION_HANDOFF = "SCENE_TRANSITION_HANDOFF";
 
     static Anchor* Instance;
     std::map<uint32_t, AnchorClient> clients;
@@ -395,6 +434,19 @@ class Anchor : public Network {
     // PrepClientState so remote clients see this client's climbing state.
     bool IsLocalPlayerClimbing() const;
 
+    // Option B — follower item override (see #169 polish list).
+    // FollowerTryEquipRangedWeapon: if the CVar is enabled and Link has a
+    // slingshot (child form) or bow (adult form) in inventory, snapshot the
+    // current C-button loadout and assign the ranged weapon to C-left
+    // (cSlot=0). Returns the C-slot used (0), or 0xFF if not available or
+    // the CVar is off. Safe to call repeatedly — no-op if override already
+    // active.
+    u8   FollowerTryEquipRangedWeapon();
+    // Restore the player's original C-button loadout. No-op if no override
+    // is active. Called on every RANGED_ATTACK exit path and unconditionally
+    // on SetFollowerActive(false) as a safety net.
+    void FollowerRestoreItems();
+
     void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);
     void SendPacket_EnemyDefeated(uint32_t netId);
     void SendPacket_EnemySpawn(Actor* actor);
@@ -402,6 +454,11 @@ class Anchor : public Network {
     void SendPacket_DamageEnemy(uint32_t netId, u8 damage);
     void SendPacket_EnemyHitPlayer(uint32_t netId);
     void HandlePacket_EnemyHitPlayer(nlohmann::json payload);
+    // Scene-transition handoff — see #169 Phase C. Leader sends on
+    // transitionTrigger OFF→START edge. Follower stores pending state and
+    // fires its own transition once in proximity of the trigger point.
+    void SendPacket_SceneTransitionHandoff(s16 fromSceneNum, s16 toEntranceIndex,
+                                           Vec3f triggerPos, s16 triggerRotY);
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);
