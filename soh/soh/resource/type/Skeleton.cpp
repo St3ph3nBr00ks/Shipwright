@@ -44,40 +44,30 @@ static std::unordered_set<std::string> sLocalCoopArchivePaths;
 // the folder changes or the archives are explicitly cleared via the empty-folder path.
 static std::string sLastLoadedCoopFolder;
 
-// Removes any archives in sLocalCoopArchivePaths from ArchiveManager, then clears
-// the tracking set.  Call before applying a new local player coop folder (or reverting
-// to default) to prevent stale archives from satisfying alt-asset lookups in
-// UpdateCustomSkeletonFromPath.
+// Historically this function removed each coop pack archive from ArchiveManager
+// before applying a new folder or reverting to default.  That triggered
+// ArchiveManager::ResetVirtualFileSystem() either per-call (original) or once
+// (via SetArchives batched), and the reset's Unload+Load cycle for every
+// surviving archive (including oot.o2r / soh.o2r and every mod) remapped
+// their backing mmap regions.  Any cached resource holding a raw pointer into
+// the old memory then became invalid — producing the intermittent white-tunic
+// regression on Default Link (log 42 analysis: ~600 ms of archive churn on
+// revert, then vanilla bake ran against post-remap resources).
 //
-// We do NOT evict the "coopchar/..." resource cache entries because:
-// (a) UnloadResources(mask) lists keys from ArchiveManager — our synthetic cache keys
-//     aren't archive paths and would not be found.
-// (b) Keeping the cache avoids re-parsing the skeleton from disk when the player
-//     switches back to a previously-loaded folder later in the session.  The cached
-//     Skeleton objects own their data and remain valid after the archive is removed.
+// LUS's alt-asset priority is "last-added wins", so leaving old pack archives
+// mounted is harmless for rendering: the active pack's new archives (or the
+// baked skeleton's loadExact=true lookups) take precedence.  The resource
+// cache keys are pack-unique ("coopchar/<folder>/...") so there's no
+// cross-pack cache collision either.  Memory grows modestly across a session
+// as the user samples packs, which is the accepted tradeoff to eliminate the
+// ResetVirtualFileSystem() churn.
+//
+// We keep the tracking set populated so future work can re-enable a safer
+// eviction path if one emerges; the set is not currently consulted by any
+// cleanup caller.
 static void ClearLocalCoopArchives(std::shared_ptr<Ship::ResourceManager> resourceMgr) {
-    if (sLocalCoopArchivePaths.empty()) return;
-
-    // NOTE (Coop Test 22): calling UnloadResources("alt/objects/object_link_{boy,child}/*")
-    // here — intended to evict the previous pack's cached limb DLs so the new pack's
-    // skeleton wouldn't resolve stale data at render time — crashed the game with
-    // "G_DL_OTR_FILEPATH: DisplayList resource null for \"\"" followed by
-    // Exception: 0xc0000005 (P1 log 15, 10:13:17.539).
-    //
-    // Root cause of the crash: UnloadResource destructs cached resources synchronously,
-    // and the renderer holds raw pointers (char* from std::string inside the resource,
-    // or Gfx* into bakedDLs) for any in-flight Gfx command.  Evicting resources that
-    // are still referenced by the current frame → dangling pointer → zero bytes read
-    // as an empty path → null DL → crash.  Same race class as KB-15, different surface.
-    //
-    // Left for a follow-up fix: baking the local player's skeleton under pack-unique
-    // "coopchar/<folder>/..." keys (mirroring the DummyPlayer path) avoids the cache
-    // collision entirely without needing aggressive eviction.  See issue tracker.
-    auto archiveManager = resourceMgr->GetArchiveManager();
-    for (const auto& archivePath : sLocalCoopArchivePaths) {
-        archiveManager->RemoveArchive(archivePath);
-    }
-    sLocalCoopArchivePaths.clear();
+    (void)resourceMgr;
+    // Intentionally a no-op.  See comment above for rationale.
 }
 
 SkeletonData* Skeleton::GetPointer() {
@@ -136,14 +126,26 @@ static std::shared_ptr<Ship::File> LoadFileFromCoopFolder(const std::string& fol
 
     auto archiveManager = resourceMgr->GetArchiveManager();
 
-    for (const auto& entry : std::filesystem::directory_iterator(charDir)) {
+    // Recursive so packs that nest archives in per-age subfolders (e.g.
+    // DarkMalon/DarkMalonChild/DarkMalonChild.otr) are still discovered.
+    //
+    // Only archives that CONTAIN the probe path get added to ArchiveManager.
+    // Sibling archives in the same folder (e.g. DarkMalonChildTextures.otr
+    // when we're probing for the skel) are opened transiently at bake time
+    // via OpenCoopPackArchives() — that bake path reads their textures
+    // directly and caches them under pack-unique "coopchar/<folder>/..."
+    // keys, so render-time never needs them in ArchiveManager.  Eagerly
+    // registering non-matching siblings here caused the white-tunic
+    // regression (log 35) because their presence perturbed the revert-time
+    // ResetVirtualFileSystem() cycle.
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(charDir)) {
         if (entry.is_directory()) continue;
         const std::string ext = entry.path().extension().generic_string();
         if (ext != ".otr" && ext != ".o2r") continue;
 
         const std::string archivePath = entry.path().generic_string();
 
-        // Prefer the already-loaded archive for this path to avoid duplicate entries.
+        // Already in the manager?  Then just probe it in place.
         std::shared_ptr<Ship::Archive> archive = nullptr;
         {
             auto loaded = archiveManager->GetArchives();
@@ -155,46 +157,50 @@ static std::shared_ptr<Ship::File> LoadFileFromCoopFolder(const std::string& fol
             }
         }
 
-        // Not yet in the manager — behaviour depends on who is calling.
-        if (archive == nullptr) {
-            if (trackForLocal) {
-                // Local player: add to ArchiveManager so textures are reachable via
-                // the global alt-asset lookup during Player_Draw.
-                archive = archiveManager->AddArchive(archivePath);
-                if (archive != nullptr) {
-                    SPDLOG_INFO("[CoopModel]   AddArchive (tracked): \"{}\"", archivePath);
-                    sLocalCoopArchivePaths.insert(archivePath);
-                }
-            } else {
-                // DummyPlayer: open the archive transiently without adding it to
-                // ArchiveManager so it cannot pollute the global alt-asset lookup.
-                std::shared_ptr<Ship::Archive> opened;
-                if (ext == ".o2r" || ext == ".zip") {
-                    opened = std::make_shared<Ship::O2rArchive>(archivePath);
-                } else {
-                    opened = std::make_shared<Ship::OtrArchive>(archivePath);
-                }
-                opened->Load();
-                if (opened->IsLoaded()) {
-                    SPDLOG_INFO("[CoopModel]   transient open: \"{}\"", archivePath);
-                    auto file = opened->LoadFile(altPath);
-                    if (file != nullptr) {
-                        SPDLOG_INFO("[CoopModel]   found \"{}\" in transient archive \"{}\"", altPath, archivePath);
-                        return file;
-                    }
-                }
-                continue;  // file not in this archive; try next
-            }
-        } else {
+        if (archive != nullptr) {
             SPDLOG_INFO("[CoopModel]   archive already loaded: \"{}\"", archivePath);
+            auto file = archive->LoadFile(altPath);
+            if (file != nullptr) {
+                SPDLOG_INFO("[CoopModel]   found \"{}\" in archive \"{}\"", altPath, archivePath);
+                return file;
+            }
+            continue;
         }
-        if (archive == nullptr) continue;
 
-        auto file = archive->LoadFile(altPath);
-        if (file != nullptr) {
-            SPDLOG_INFO("[CoopModel]   found \"{}\" in archive \"{}\"", altPath, archivePath);
-            return file;
+        // Not in the manager — open transiently FIRST to peek inside without
+        // committing to registration.  Only upgrade to ArchiveManager if the
+        // probe hits (for the local-player path) AND the caller wants tracking.
+        std::shared_ptr<Ship::Archive> opened;
+        if (ext == ".o2r" || ext == ".zip") {
+            opened = std::make_shared<Ship::O2rArchive>(archivePath);
+        } else {
+            opened = std::make_shared<Ship::OtrArchive>(archivePath);
         }
+        opened->Load();
+        if (!opened->IsLoaded()) continue;
+
+        auto file = opened->LoadFile(altPath);
+        if (file == nullptr) continue;  // not this one; don't register
+
+        // Probe hit.  For the local player, promote to ArchiveManager so
+        // render-time alt-asset lookups see it.  For DummyPlayer, the
+        // transient open is sufficient — the caller holds the File.
+        if (trackForLocal) {
+            auto added = archiveManager->AddArchive(archivePath);
+            if (added != nullptr) {
+                SPDLOG_INFO("[CoopModel]   AddArchive (tracked, probe-match): \"{}\"", archivePath);
+                sLocalCoopArchivePaths.insert(archivePath);
+                // Re-read from the archive in the manager so File's backing archive
+                // matches the long-lived handle, not the transient one.
+                auto persistent = added->LoadFile(altPath);
+                if (persistent != nullptr) {
+                    SPDLOG_INFO("[CoopModel]   found \"{}\" in archive \"{}\"", altPath, archivePath);
+                    return persistent;
+                }
+            }
+        }
+        SPDLOG_INFO("[CoopModel]   found \"{}\" in transient archive \"{}\"", altPath, archivePath);
+        return file;
     }
     SPDLOG_INFO("[CoopModel]   \"{}\" not found in any archive under folder \"{}\"", altPath, folder);
     return nullptr;
@@ -359,16 +365,36 @@ void SkeletonPatcher::UpdateTunicSkeletons(SkeletonPatchInfo& skel) {
     UpdateCustomSkeletonFromFolder(skeletonPath, folderStr, skel);
 }
 
+// Multi-archive bundle for the bake walker.  Packs frequently split their
+// skeleton and texture assets across sibling .otr files (DarkMalon stores the
+// skel in DarkMalonChild.otr but the full-res _00_BaseColor_Merged in
+// DarkMalonChildTextures.otr).  A single-archive bake probe only finds the
+// skel archive's own textures — which for packs that ship a low-res
+// placeholder in the skel archive means rendering the low-res version.
+// LoadFile iterates in reverse (last-added = highest priority, matching the
+// LUS ArchiveManager convention where later archives override earlier ones).
+struct CoopPackArchives {
+    std::vector<std::shared_ptr<Ship::Archive>> archives;
+    std::shared_ptr<Ship::File> LoadFile(const std::string& path) const {
+        for (auto it = archives.rbegin(); it != archives.rend(); ++it) {
+            auto f = (*it)->LoadFile(path);
+            if (f) return f;
+        }
+        return nullptr;
+    }
+    bool IsLoaded() const { return !archives.empty(); }
+};
+
 // Forward declarations for the bake helpers defined later in this file.
 // Issue #82 — UpdateCustomSkeletonFromFolder now invokes these on the local-player
 // pack-switch and revert-to-default paths so the rendered visual updates
 // immediately rather than on next scene change.
-static std::shared_ptr<Ship::Archive> OpenCoopPackArchive(const std::string& folder,
-                                                          const std::string& probePath);
+static CoopPackArchives OpenCoopPackArchives(const std::string& folder,
+                                              const std::string& probePath);
 static bool BuildBakedPlayerModel(
     const std::shared_ptr<Skeleton>& skeleton,
     const std::string& folder,
-    std::shared_ptr<Ship::Archive>& archive,
+    const CoopPackArchives& archive,
     std::shared_ptr<Ship::ResourceLoader>& loader,
     BakedPlayerModel& outModel);
 static bool BuildVanillaDummyPlayerModel(
@@ -376,39 +402,62 @@ static bool BuildVanillaDummyPlayerModel(
     std::shared_ptr<Ship::ResourceManager>& resMgr,
     BakedPlayerModel& outModel);
 
+// Bakes the vanilla skeleton onto the local player's skelAnime under
+// "vanilla-dummy/..." cache keys.  Used both by the revert-to-default path and
+// by the pack-not-found fallback — a pack that is missing the requested
+// skeleton (e.g. adult-only pack while local Link is a child) would otherwise
+// hand off to UpdateCustomSkeletonFromPath, which does a GLOBAL alt-asset
+// lookup and picks up whatever child skeleton happens to be in an unrelated
+// loaded mod.  That produces a Default-Link-ish visual with wrong eye/mouth
+// textures (no BakeFaceTextures call on that path).  Vanilla bake gives a
+// clean Default Link visual with correct textures instead.
+//
+// Retires any outgoing bakedModel via kRetireFrames so the renderer can finish
+// consuming it before destruction.  Returns true on success.
+static bool BakeLocalVanillaFallback(SkeletonPatchInfo& skel,
+                                      std::shared_ptr<Ship::ResourceManager>& resourceMgr) {
+    // Fix 1 (2026-04-20 test 19 regression): use the base age path, not the
+    // caller's tunic-variant path.  Per-tunic paths only exist under "alt/"
+    // in packs; loadExact against vanilla OTR on a tunic path returns null.
+    auto vanillaRes = resourceMgr->LoadResource(skel.vanillaSkeletonPath, /*loadExact=*/true);
+    auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
+    if (vanillaSkel == nullptr || vanillaSkel->skeletonData.skeletonHeader.segment == nullptr) {
+        return false;
+    }
+    if (skel.bakedModel != nullptr) {
+        skel.retiredBakedModel = std::move(skel.bakedModel);
+        skel.retireFrameCounter = 4;  // kRetireFrames
+    }
+    skel.bakedModel = std::make_unique<BakedPlayerModel>();
+    if (!BuildVanillaDummyPlayerModel(vanillaSkel, resourceMgr, *skel.bakedModel)) {
+        skel.bakedModel = nullptr;
+        return false;
+    }
+    skel.overrideSkeleton = vanillaSkel;
+    skel.skelAnime->skeleton = (void**)skel.bakedModel->segmentPtrs.data();
+    uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
+    memcpy(&skel.skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+    return true;
+}
+
 // Searches all loaded archives inside coopplayercharacters/<folder>/ for a skeleton
 // at altPath.  If found, parses it and patches skel.skelAnime directly, storing the
-// shared_ptr in skel.overrideSkeleton so the data stays alive.  Falls back to
-// UpdateCustomSkeletonFromPath (ArchiveManager priority resolution) if no match is found.
+// shared_ptr in skel.overrideSkeleton so the data stays alive.  Falls back to a
+// vanilla bake (via BakeLocalVanillaFallback) if no match is found — keeps the
+// local visual clean and prevents #82-style cross-pack bleed-through from the
+// global alt-asset lookup.
 void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeletonPath, const std::string& folder,
                                                       SkeletonPatchInfo& skel) {
     auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
 
     if (folder.empty()) {
         // Revert to system default (vanilla or user's non-coop alt mod).
-        // Clear tracked local archives first.
-        ClearLocalCoopArchives(resourceMgr);
-        // ALSO remove any coopplayercharacters archives added UNTRACKED by DummyPlayer
-        // calls (trackForLocal=false path in LoadFileFromCoopFolder).  These are not in
-        // sLocalCoopArchivePaths but if left in ArchiveManager they cause
-        // UpdateCustomSkeletonFromPath to return a coop skeleton instead of vanilla.
-        {
-            const std::string coopRoot = Ship::Context::LocateFileAcrossAppDirs("coopplayercharacters", appShortName);
-            auto archiveManager = resourceMgr->GetArchiveManager();
-            auto loaded = archiveManager->GetArchives();
-            std::vector<std::string> toRemove;
-            for (auto& a : *loaded) {
-                const std::string& ap = a->GetPath();
-                if (ap.find(coopRoot) != std::string::npos ||
-                    ap.find("coopplayercharacters") != std::string::npos) {
-                    toRemove.push_back(ap);
-                }
-            }
-            for (const auto& ap : toRemove) {
-                SPDLOG_INFO("[CoopModel] ClearAllCoopArchives (revert to default): removing \"{}\"", ap);
-                archiveManager->RemoveArchive(ap);
-            }
-        }
+        // Leave coop archives mounted — see ClearLocalCoopArchives comment.
+        // SetArchives / RemoveArchive both trigger ResetVirtualFileSystem()
+        // which unloads+reloads every surviving archive and remaps mmap
+        // regions, invalidating any cached resource that holds a raw pointer
+        // into archive memory (intermittent white-tunic bug, log 42).
+        ClearLocalCoopArchives(resourceMgr);  // now a no-op, retained for call-site clarity
         sLastLoadedCoopFolder = "";
         skel.overrideSkeleton = nullptr;
 
@@ -510,11 +559,27 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     }
 
     if (file == nullptr) {
-        // No archive in the selected folder has this skeleton — fall back to normal resolution.
-        SPDLOG_WARN("[CoopModel]   no archive in folder \"{}\" contains \"{}\" or base skeleton — falling back to system default",
+        // No archive in the selected folder has this skeleton.  Bake vanilla instead
+        // of calling UpdateCustomSkeletonFromPath — the legacy path does a global
+        // alt-asset lookup that picks up some other loaded mod's child/adult skeleton
+        // with no pack-local face-texture bake (issue: 3DS Malon / Linkle / DarkMalon
+        // adult-only packs ending up with cross-mod eye/mouth textures).
+        SPDLOG_WARN("[CoopModel]   no archive in folder \"{}\" contains \"{}\" or base skeleton — baking vanilla fallback",
                     folder, altPath);
         skel.overrideSkeleton = nullptr;
+        if (BakeLocalVanillaFallback(skel, resourceMgr)) {
+            gfx_texture_cache_clear();
+            return;
+        }
+        // Vanilla bake unavailable — last-resort legacy resolution.  Retire any stale
+        // bakedModel first so UpdateCustomSkeletonFromPath's raw segment assignment
+        // can't leave dangling pointers into in-flight Gfx frames.
+        if (skel.bakedModel != nullptr) {
+            skel.retiredBakedModel = std::move(skel.bakedModel);
+            skel.retireFrameCounter = 4;  // kRetireFrames
+        }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
+        gfx_texture_cache_clear();
         return;
     }
 
@@ -526,18 +591,36 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     const std::string cacheKey = "coopchar/" + folder + "/" + resolvedAltPath;
     auto resource = resourceLoader->LoadResource(cacheKey, file);
     if (resource == nullptr) {
-        SPDLOG_WARN("[CoopModel]   LoadResource failed for \"{}\" — falling back to system default",
+        SPDLOG_WARN("[CoopModel]   LoadResource failed for \"{}\" — baking vanilla fallback",
                     resolvedAltPath);
         skel.overrideSkeleton = nullptr;
+        if (BakeLocalVanillaFallback(skel, resourceMgr)) {
+            gfx_texture_cache_clear();
+            return;
+        }
+        if (skel.bakedModel != nullptr) {
+            skel.retiredBakedModel = std::move(skel.bakedModel);
+            skel.retireFrameCounter = 4;
+        }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
+        gfx_texture_cache_clear();
         return;
     }
     auto skeleton = std::dynamic_pointer_cast<Skeleton>(resource);
     if (skeleton == nullptr) {
-        SPDLOG_WARN("[CoopModel]   resource is not a Skeleton for \"{}\" — falling back to system default",
+        SPDLOG_WARN("[CoopModel]   resource is not a Skeleton for \"{}\" — baking vanilla fallback",
                     resolvedAltPath);
         skel.overrideSkeleton = nullptr;
+        if (BakeLocalVanillaFallback(skel, resourceMgr)) {
+            gfx_texture_cache_clear();
+            return;
+        }
+        if (skel.bakedModel != nullptr) {
+            skel.retiredBakedModel = std::move(skel.bakedModel);
+            skel.retireFrameCounter = 4;
+        }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
+        gfx_texture_cache_clear();
         return;
     }
 
@@ -553,7 +636,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     //
     // This mirrors the DummyPlayer bake path in ApplyCustomSkeletonToDummyPlayer.
     // The tracked archive registration from LoadFileFromCoopFolder above stays
-    // intact — OpenCoopPackArchive opens a transient second handle just for
+    // intact — OpenCoopPackArchives opens a transient second handle just for
     // this bake walk and discards it.
     //
     // Retire-slot (KB-15 / #110): the outgoing bakedModel cannot be destroyed
@@ -567,8 +650,8 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     }
     skel.bakedModel = std::make_unique<BakedPlayerModel>();
 
-    auto bakeArchive = OpenCoopPackArchive(folder, resolvedAltPath);
-    if (bakeArchive && BuildBakedPlayerModel(skeleton, folder, bakeArchive, resourceLoader, *skel.bakedModel)) {
+    auto bakeArchive = OpenCoopPackArchives(folder, resolvedAltPath);
+    if (bakeArchive.IsLoaded() && BuildBakedPlayerModel(skeleton, folder, bakeArchive, resourceLoader, *skel.bakedModel)) {
         SPDLOG_INFO("[CoopModel] local player baked skeleton applied skelAnime={} (limbCount={})",
                     (void*)skel.skelAnime, skeleton->limbCount);
         skel.skelAnime->skeleton = (void**)skel.bakedModel->segmentPtrs.data();
@@ -606,46 +689,104 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
 // Pre-baked DL helpers
 // ---------------------------------------------------------------------------
 
-// Opens the first .otr/.o2r archive under coopplayercharacters/<folder>/ that
-// actually contains `probePath`, without adding it to ArchiveManager.
-// Returns nullptr if no archive contains the probe.
+// Opens every .otr/.o2r archive under coopplayercharacters/<folder>/ transiently
+// (NOT via ArchiveManager), with the probe-matching archive guaranteed to be LAST
+// in the returned vector.  Placement matters: CoopPackArchives::LoadFile iterates
+// in reverse, so the probe archive takes lookup priority, but when a path is
+// missing from the probe archive the bake walker still finds it in a sibling
+// (e.g. DarkMalonChildTextures.otr's full-res _00_BaseColor_Merged wins over
+// DarkMalonChild.otr's low-res placeholder).
 //
-// A plain first-match pick is wrong: packs frequently ship separate adult and
-// child archives (e.g. 3ds_link.otr + 3ds_young_link.otr).  directory_iterator
-// yields whichever alphabetizes first, which for a child skeleton bake will be
-// the adult pack → every limb lookup fails → zombie skeleton applied.
-static std::shared_ptr<Ship::Archive> OpenCoopPackArchive(const std::string& folder,
-                                                          const std::string& probePath) {
+// Recursive so packs that nest archives in per-age subfolders (e.g.
+// DarkMalon/DarkMalonChild/DarkMalonChild.otr) are still discovered.
+static CoopPackArchives OpenCoopPackArchives(const std::string& folder,
+                                              const std::string& probePath) {
+    CoopPackArchives out;
     const std::string coopRoot = Ship::Context::LocateFileAcrossAppDirs("coopplayercharacters", appShortName);
     const std::filesystem::path charDir = std::filesystem::path(coopRoot) / folder;
 
     if (!std::filesystem::exists(charDir) || !std::filesystem::is_directory(charDir)) {
-        return nullptr;
+        return out;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(charDir)) {
+    std::shared_ptr<Ship::Archive> probeArchive;
+    std::string probeArchivePath;
+    std::vector<std::shared_ptr<Ship::Archive>> siblings;
+
+    // Reuse archives already held by ArchiveManager whenever possible.  Opening
+    // a transient second OtrArchive against the same MPQ file creates a parallel
+    // StormLib HMPQ handle; when the transient is destroyed (the bake returns)
+    // the destructor closes that handle and can invalidate the persistent copy's
+    // internal file tables — which is what caused the DummyPlayer sync failure in
+    // log 40 (archive->LoadFile returned nullptr on a previously-working archive)
+    // and the white-tunic regression on Default Link.  The shared_ptr from
+    // ArchiveManager lives as long as the manager holds it, so we just ride along.
+    auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+    auto archiveManager = resourceMgr->GetArchiveManager();
+    auto getExistingArchive = [&](const std::string& archivePath) -> std::shared_ptr<Ship::Archive> {
+        auto loaded = archiveManager->GetArchives();
+        if (!loaded) return nullptr;
+        for (auto& a : *loaded) {
+            if (a->GetPath() == archivePath) return a;
+        }
+        return nullptr;
+    };
+
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(charDir)) {
         if (entry.is_directory()) continue;
         const std::string ext = entry.path().extension().generic_string();
         if (ext != ".otr" && ext != ".o2r") continue;
 
         const std::string archivePath = entry.path().generic_string();
-        std::shared_ptr<Ship::Archive> archive;
-        if (ext == ".o2r") {
-            archive = std::make_shared<Ship::O2rArchive>(archivePath);
-        } else {
-            archive = std::make_shared<Ship::OtrArchive>(archivePath);
+
+        std::shared_ptr<Ship::Archive> archive = getExistingArchive(archivePath);
+        bool fromManager = (archive != nullptr);
+        if (!archive) {
+            // Not in ArchiveManager — safe to transient-open.  This happens on
+            // the DummyPlayer path (trackForLocal=false in LoadFileFromCoopFolder
+            // doesn't register the probe), and for sibling archives the local
+            // LoadFileFromCoopFolder path doesn't eagerly register.
+            if (ext == ".o2r") {
+                archive = std::make_shared<Ship::O2rArchive>(archivePath);
+            } else {
+                archive = std::make_shared<Ship::OtrArchive>(archivePath);
+            }
+            archive->Load();
+            if (!archive->IsLoaded()) continue;
         }
-        archive->Load();
-        if (!archive->IsLoaded()) continue;
-        if (archive->LoadFile(probePath) != nullptr) {
-            SPDLOG_INFO("[CoopModel][Bake] Opened transient archive: \"{}\" (contains probe \"{}\")",
-                        archivePath, probePath);
-            return archive;
+        if (!probeArchive && archive->LoadFile(probePath) != nullptr) {
+            probeArchive = archive;
+            probeArchivePath = archivePath;
+            SPDLOG_INFO("[CoopModel][Bake]   Probe archive ({}): \"{}\"",
+                        fromManager ? "reused from manager" : "transient", archivePath);
+        } else {
+            siblings.push_back(archive);
+            SPDLOG_INFO("[CoopModel][Bake]   Sibling pack archive ({}): \"{}\"",
+                        fromManager ? "reused from manager" : "transient", archivePath);
         }
     }
-    SPDLOG_ERROR("[CoopModel][Bake] No archive in folder \"{}\" contains probe \"{}\"",
-                 folder, probePath);
-    return nullptr;
+
+    if (!probeArchive) {
+        SPDLOG_ERROR("[CoopModel][Bake] No archive in folder \"{}\" contains probe \"{}\"",
+                     folder, probePath);
+        return out;
+    }
+
+    // Probe archive FIRST, siblings AFTER so reverse-iteration (used by
+    // CoopPackArchives::LoadFile) tries siblings first.  This matches the
+    // "supplement overrides base" convention for packs that ship a low-res
+    // placeholder in the skel archive (e.g. DarkMalonChild.otr's 2 KB
+    // _00_BaseColor_Merged) alongside a full-res sibling archive
+    // (DarkMalonChildTextures.otr's 40 KB version) — we want the full-res
+    // to win whenever both contain the same path.  Paths that only exist in
+    // the probe archive still resolve via the fallthrough.
+    out.archives.push_back(probeArchive);
+    for (auto& s : siblings) {
+        out.archives.push_back(s);
+    }
+    SPDLOG_INFO("[CoopModel][Bake] Probe archive: \"{}\" (contains probe \"{}\"); {} sibling(s)",
+                probeArchivePath, probePath, (int)siblings.size());
+    return out;
 }
 
 // Per-bake counters that tell us, at a glance, how self-contained a pack is
@@ -670,7 +811,7 @@ struct BakeStats {
 static Gfx* BakeDL(
     const std::string& dlPath,
     const std::string& folder,
-    std::shared_ptr<Ship::Archive>& archive,
+    const CoopPackArchives& archive,
     const std::unordered_map<uint64_t, std::string>& hashMap,
     std::shared_ptr<Ship::ResourceLoader>& loader,
     BakeStats& stats,
@@ -687,11 +828,11 @@ static Gfx* BakeDL(
 
     // Load and parse the DL from the archive.
     // Character pack archives store resources with "alt/" prefix; try both bare and prefixed paths.
-    auto file = archive->LoadFile(dlPath);
+    auto file = archive.LoadFile(dlPath);
     std::string resolvedDlPath = dlPath;
     if (!file) {
         const std::string altDlPath = Ship::IResource::gAltAssetPrefix + dlPath;
-        file = archive->LoadFile(altDlPath);
+        file = archive.LoadFile(altDlPath);
         if (file) {
             resolvedDlPath = altDlPath;
         }
@@ -734,11 +875,11 @@ static Gfx* BakeDL(
         // Try bare first, then alt-prefixed — same pattern as the outer DL load.
         if (op == (uint8_t)Fast::OTR_G_SETTIMG_OTR_FILEPATH) {
             const char* origPath = (const char*)baked[i].words.w1;
-            auto texFile = archive->LoadFile(origPath);
+            auto texFile = archive.LoadFile(origPath);
             std::string resolvedPath = origPath;
             if (!texFile) {
                 const std::string altPath = Ship::IResource::gAltAssetPrefix + origPath;
-                texFile = archive->LoadFile(altPath);
+                texFile = archive.LoadFile(altPath);
                 if (texFile) resolvedPath = altPath;
             }
             if (texFile) {
@@ -777,7 +918,7 @@ static Gfx* BakeDL(
                 pathStr = hashIt->second;
                 // Best-effort: pre-load into the resource cache under a
                 // pack-unique key to avoid cross-pack cache collisions.
-                auto texFile = archive->LoadFile(pathStr);
+                auto texFile = archive.LoadFile(pathStr);
                 if (texFile) {
                     const std::string uniqueKey = "coopchar/" + folder + "/" + pathStr;
                     auto texRes = loader->LoadResource(uniqueKey, texFile);
@@ -837,11 +978,11 @@ static Gfx* BakeDL(
             // fallback, which on a multi-pack setup returns the LOCAL player's
             // vertex data for a REMOTE DummyPlayer — Coop Test 14 "exploded" symptom.
             const char* origPath = (const char*)baked[i].words.w1;
-            auto vtxFile = archive->LoadFile(origPath);
+            auto vtxFile = archive.LoadFile(origPath);
             std::string resolvedPath = origPath;
             if (!vtxFile) {
                 const std::string altPath = Ship::IResource::gAltAssetPrefix + origPath;
-                vtxFile = archive->LoadFile(altPath);
+                vtxFile = archive.LoadFile(altPath);
                 if (vtxFile) resolvedPath = altPath;
             }
             if (vtxFile) {
@@ -867,7 +1008,7 @@ static Gfx* BakeDL(
                                 | (uint64_t)(uint32_t)baked[i+1].words.w1;
             auto hashIt = hashMap.find(hash);
             if (hashIt != hashMap.end()) {
-                auto vtxFile = archive->LoadFile(hashIt->second);
+                auto vtxFile = archive.LoadFile(hashIt->second);
                 if (vtxFile) {
                     const std::string uniqueKey = "coopchar/" + folder + "/" + hashIt->second;
                     auto vtxRes = loader->LoadResource(uniqueKey, vtxFile);
@@ -963,7 +1104,7 @@ static Gfx* BakeDL(
 // acceptable cross-pack bleed as the non-face miss case).
 static void BakeFaceTextures(
     const std::string& folder,
-    std::shared_ptr<Ship::Archive>& archive,
+    const CoopPackArchives& archive,
     std::shared_ptr<Ship::ResourceLoader>& loader,
     BakedPlayerModel& model)
 {
@@ -1012,11 +1153,11 @@ static void BakeFaceTextures(
     int mouthHits[2] = { 0, 0 };
 
     auto tryBake = [&](const char* origPath, std::string& outKey, int age, int* ageCounter, int* slotCounter) {
-        auto file = archive->LoadFile(origPath);
+        auto file = archive.LoadFile(origPath);
         std::string resolvedPath = origPath;
         if (!file) {
             const std::string altPath = Ship::IResource::gAltAssetPrefix + origPath;
-            file = archive->LoadFile(altPath);
+            file = archive.LoadFile(altPath);
             if (file) resolvedPath = altPath;
         }
         if (!file) {
@@ -1055,7 +1196,7 @@ static void BakeFaceTextures(
 static bool BuildBakedPlayerModel(
     const std::shared_ptr<Skeleton>& skeleton,
     const std::string& folder,
-    std::shared_ptr<Ship::Archive>& archive,
+    const CoopPackArchives& archive,
     std::shared_ptr<Ship::ResourceLoader>& loader,
     BakedPlayerModel& outModel)
 {
@@ -1063,15 +1204,18 @@ static bool BuildBakedPlayerModel(
     outModel.limbCopies.resize(limbCount);
     outModel.segmentPtrs.resize(limbCount);
 
-    // Build hash→path map for .otr archives (used to resolve HASH commands)
+    // Build hash→path map across ALL archives in the pack bundle.  Iterate
+    // front-to-back so later archives (siblings) overwrite probe entries —
+    // matches the LoadFile reverse-iteration priority.
     std::unordered_map<uint64_t, std::string> hashMap;
-    auto files = archive->ListFiles();
     int altPrefixed = 0;
     int bareObjects = 0;
     int other = 0;
     std::vector<std::string> samples;
     samples.reserve(6);
-    if (files) {
+    for (auto& a : archive.archives) {
+        auto files = a->ListFiles();
+        if (!files) continue;
         for (auto& [hash, path] : *files) {
             hashMap[hash] = path;
             if (path.rfind("alt/", 0) == 0) altPrefixed++;
@@ -1121,11 +1265,11 @@ static bool BuildBakedPlayerModel(
 
         // Load the limb resource from the archive.
         // Character pack archives store resources with "alt/" prefix; try both bare and prefixed paths.
-        auto limbFile = archive->LoadFile(limbPath);
+        auto limbFile = archive.LoadFile(limbPath);
         std::string resolvedLimbPath = limbPath;
         if (!limbFile) {
             const std::string altLimbPath = Ship::IResource::gAltAssetPrefix + limbPath;
-            limbFile = archive->LoadFile(altLimbPath);
+            limbFile = archive.LoadFile(altLimbPath);
             if (limbFile) {
                 resolvedLimbPath = altLimbPath;
             }
@@ -1686,6 +1830,51 @@ static bool BuildVanillaDummyPlayerModel(
 
 // ---------------------------------------------------------------------------
 
+// DummyPlayer equivalent of BakeLocalVanillaFallback.  Called from both the
+// revert-to-default branch and every pack-incompatible / pack-missing failure
+// inside ApplyCustomSkeletonToDummyPlayer.  Without this fallback, the caller's
+// freshly-allocated empty bakedModel leaves skelAnime->skeleton pointing at the
+// just-retired previous bakedModel's segmentPtrs — dangling after kRetireFrames
+// → Unhandled-OP-code flood → crash (issue: remote P2 crashes when local P1
+// switches to an adult-only pack while P2 is a child).
+//
+// Returns true if skelAnime was updated to a valid state; false only when even
+// the vanilla skeleton couldn't be loaded (catastrophic).
+static bool BakeDummyPlayerVanillaFallback(SkelAnime* skelAnime, bool isAdult,
+                                            std::shared_ptr<Skeleton>& outSkeleton,
+                                            BakedPlayerModel& outBakedModel) {
+    auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+    // "__OTR__" prefix length (7). Matches SkeletonPatcher::sOtr which is private.
+    constexpr size_t kOtrPrefixLen = 7;
+    const std::string vanillaPath = isAdult
+        ? std::string(gLinkAdultSkel).substr(kOtrPrefixLen)
+        : std::string(gLinkChildSkel).substr(kOtrPrefixLen);
+    auto vanillaRes = resourceMgr->LoadResource(vanillaPath, /*loadExact=*/true);
+    auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
+    if (vanillaSkel == nullptr || vanillaSkel->skeletonData.skeletonHeader.segment == nullptr) {
+        SPDLOG_WARN("[CoopModel] BakeDummyPlayerVanillaFallback: vanilla \"{}\" not loadable — "
+                    "leaving skelAnime unchanged", vanillaPath);
+        return false;
+    }
+    outBakedModel = BakedPlayerModel{};
+    if (BuildVanillaDummyPlayerModel(vanillaSkel, resourceMgr, outBakedModel)) {
+        skelAnime->skeleton = (void**)outBakedModel.segmentPtrs.data();
+        uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
+        memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+        outSkeleton = vanillaSkel;
+        gfx_texture_cache_clear();
+        return true;
+    }
+    // Bake failed — shared-segment fallback.  Face textures may scramble on a
+    // viewer with a coop pack registered (#163), but the pointer is valid.
+    skelAnime->skeleton = vanillaSkel->skeletonData.skeletonHeader.segment;
+    uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
+    memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
+    outSkeleton = vanillaSkel;
+    gfx_texture_cache_clear();
+    return true;
+}
+
 void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, bool isAdult, uint8_t tunic,
                                                         const std::string& characterFolder,
                                                         std::shared_ptr<Skeleton>& outSkeleton,
@@ -1697,54 +1886,8 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         // returning would leave it pointing at the retired bakedModel's segmentPtrs,
         // which becomes dangling after kRetireFrames and crashes the renderer with
         // Unhandled-OP-code floods (Coop Test 19 log 10, issue #110 regression).
-        //
-        // loadExact=true bypasses alt-asset resolution so we get the genuine vanilla
-        // skeleton even if a different coop pack's archive is registered globally for
-        // some unrelated reason.
-        auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
-        const std::string vanillaPath = isAdult
-            ? std::string(gLinkAdultSkel).substr(sOtr.length())
-            : std::string(gLinkChildSkel).substr(sOtr.length());
-        auto vanillaRes = resourceMgr->LoadResource(vanillaPath, /*loadExact=*/true);
-        auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
-        if (vanillaSkel != nullptr && vanillaSkel->skeletonData.skeletonHeader.segment != nullptr) {
-            // Reset outBakedModel before building — the caller provides a fresh
-            // BakedPlayerModel via make_unique, but defensively clear anyway.
-            outBakedModel = BakedPlayerModel{};
-
-            // Bake the vanilla skeleton's DLs under pack-unique "vanilla-dummy/..."
-            // cache keys (issue #163).  Without this, render-time G_SETTIMG for the
-            // face TLUT resolves through alt-asset resolution and returns the
-            // viewer's own coop-pack TLUT — CI8 face pixels sampled against the
-            // wrong palette produce the blue-line scramble.
-            if (BuildVanillaDummyPlayerModel(vanillaSkel, resourceMgr, outBakedModel)) {
-                skelAnime->skeleton = (void**)outBakedModel.segmentPtrs.data();
-                uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
-                memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
-                // Intentionally NOT writing skelAnime->limbCount / ->dListCount —
-                // see the same guard on the pack-bake success path at the bottom
-                // of this function for rationale (Coop Test 20 dListCount regression).
-                outSkeleton = vanillaSkel;
-                SPDLOG_INFO("[CoopModel] ApplyCustomSkeletonToDummyPlayer: revert to baked vanilla \"{}\" (isAdult={})",
-                            vanillaPath, isAdult);
-            } else {
-                // Bake failed — fall back to the shared-segment revert (Coop Test 21 behavior).
-                // Face textures will still scramble on a viewer with a coop pack registered,
-                // but at least the skeleton isn't dangling.
-                skelAnime->skeleton = vanillaSkel->skeletonData.skeletonHeader.segment;
-                uintptr_t skelPtr = (uintptr_t)vanillaSkel->GetPointer();
-                memcpy(&skelAnime->skeletonHeader, &skelPtr, sizeof(uintptr_t));
-                outSkeleton = vanillaSkel;
-                SPDLOG_WARN("[CoopModel] ApplyCustomSkeletonToDummyPlayer: vanilla bake failed, "
-                            "fell back to shared segment for \"{}\" (face may scramble, see #163)",
-                            vanillaPath);
-            }
-        } else {
-            SPDLOG_WARN("[CoopModel] ApplyCustomSkeletonToDummyPlayer: revert requested but vanilla skeleton "
-                        "\"{}\" not found — leaving skelAnime->skeleton unchanged (may crash after retire)",
-                        vanillaPath);
-        }
-        gfx_texture_cache_clear();
+        BakeDummyPlayerVanillaFallback(skelAnime, isAdult, outSkeleton, outBakedModel);
+        SPDLOG_INFO("[CoopModel] ApplyCustomSkeletonToDummyPlayer: revert to baked vanilla (isAdult={})", isAdult);
         return;
     }
 
@@ -1788,8 +1931,13 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         }
     }
     if (file == nullptr) {
-        SPDLOG_WARN("[CoopModel]   no archive in folder \"{}\" contains \"{}\" or base skeleton — falling back to vanilla",
+        // Silent early return here would leave skelAnime->skeleton pointing at the
+        // freshly-retired previous bakedModel's segmentPtrs — dangling after
+        // kRetireFrames → crash.  Bake genuine vanilla so the remote renders a
+        // clean Default Link instead.
+        SPDLOG_WARN("[CoopModel]   no archive in folder \"{}\" contains \"{}\" or base skeleton — baking vanilla fallback",
                     characterFolder, altPath);
+        BakeDummyPlayerVanillaFallback(skelAnime, isAdult, outSkeleton, outBakedModel);
         return;
     }
 
@@ -1803,10 +1951,14 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     const std::string cacheKey = "coopchar/" + characterFolder + "/" + resolvedAltPath;
     auto resource = resourceLoader->LoadResource(cacheKey, file);
     if (resource == nullptr) {
+        SPDLOG_WARN("[CoopModel]   LoadResource failed for \"{}\" — baking vanilla fallback", resolvedAltPath);
+        BakeDummyPlayerVanillaFallback(skelAnime, isAdult, outSkeleton, outBakedModel);
         return;
     }
     auto skeleton = std::dynamic_pointer_cast<Skeleton>(resource);
     if (skeleton == nullptr) {
+        SPDLOG_WARN("[CoopModel]   resource is not a Skeleton for \"{}\" — baking vanilla fallback", resolvedAltPath);
+        BakeDummyPlayerVanillaFallback(skelAnime, isAdult, outSkeleton, outBakedModel);
         return;
     }
 
@@ -1816,13 +1968,15 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     // wrong-age entry at the child skeleton path (e.g. adult skeleton stored at
     // alt/objects/object_link_child/gLinkChildSkel).  Applying a skeleton with the
     // wrong limb count to a SkelAnime initialized for a different age causes an
-    // out-of-bounds access in Player_Draw → crash.
+    // out-of-bounds access in Player_Draw → crash.  Every Guard failure falls back
+    // to the baked vanilla skeleton so the remote still renders a valid Link.
     //
     // Guard 1: null segment means the archive entry is incomplete / not properly
     //          relocated.  Writing nullptr to skelAnime->skeleton would crash on render.
     if (skeleton->skeletonData.skeletonHeader.segment == nullptr) {
-        SPDLOG_WARN("[CoopModel]   skeleton segment is null in folder \"{}\" — falling back to vanilla",
+        SPDLOG_WARN("[CoopModel]   skeleton segment is null in folder \"{}\" — baking vanilla fallback",
                     characterFolder);
+        BakeDummyPlayerVanillaFallback(skelAnime, isAdult, outSkeleton, outBakedModel);
         return;
     }
     // Guard 2: reject only if the loaded skeleton has MORE limbs than the SkelAnime was
@@ -1832,8 +1986,9 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     //          raw skeleton header (the loaded count), not from skelAnime->limbCount, so
     //          the extra joint-table entries are written by animation but never rendered.
     if (skelAnime->limbCount != 0 && skeleton->limbCount > (int)skelAnime->limbCount) {
-        SPDLOG_WARN("[CoopModel]   limb count overflow in folder \"{}\": loaded={} expected={} (too many limbs) — falling back to vanilla",
+        SPDLOG_WARN("[CoopModel]   limb count overflow in folder \"{}\": loaded={} expected={} (too many limbs) — baking vanilla fallback",
                     characterFolder, skeleton->limbCount, (int)skelAnime->limbCount);
+        BakeDummyPlayerVanillaFallback(skelAnime, isAdult, outSkeleton, outBakedModel);
         return;
     }
     // Log the relevant counts for both the skeleton being loaded and the SkelAnime target.
@@ -1848,8 +2003,9 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     //          it to a Flex SkelAnime causes Player_Draw to access display lists using
     //          the wrong stride — crash.
     if (skeleton->type != SkeletonType::Flex) {
-        SPDLOG_WARN("[CoopModel]   skeleton type={} is not Flex in folder \"{}\" — falling back to vanilla",
+        SPDLOG_WARN("[CoopModel]   skeleton type={} is not Flex in folder \"{}\" — baking vanilla fallback",
                     (int)skeleton->type, characterFolder);
+        BakeDummyPlayerVanillaFallback(skelAnime, isAdult, outSkeleton, outBakedModel);
         return;
     }
     // Guard 4: The dListCount cached in skelAnime (set by SkelAnime_InitFlex at
@@ -1857,8 +2013,9 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
     //          means Player_Draw will iterate the wrong number of secondary display
     //          lists per limb, leading to out-of-bounds access.
     if (skelAnime->dListCount != 0 && skeleton->dListCount != (int)skelAnime->dListCount) {
-        SPDLOG_WARN("[CoopModel]   dListCount mismatch in folder \"{}\": loaded={} expected={} — falling back to vanilla",
+        SPDLOG_WARN("[CoopModel]   dListCount mismatch in folder \"{}\": loaded={} expected={} — baking vanilla fallback",
                     characterFolder, skeleton->dListCount, (int)skelAnime->dListCount);
+        BakeDummyPlayerVanillaFallback(skelAnime, isAdult, outSkeleton, outBakedModel);
         return;
     }
     // Guard 5: validate that every limb pointer in the skeleton segment is non-null.
@@ -1870,8 +2027,9 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         void** limbPtrs = (void**)skeleton->skeletonData.skeletonHeader.segment;
         for (int i = 0; i < skeleton->limbCount; i++) {
             if (limbPtrs[i] == nullptr) {
-                SPDLOG_WARN("[CoopModel]   null limb pointer at index {} in folder \"{}\" — falling back to vanilla",
+                SPDLOG_WARN("[CoopModel]   null limb pointer at index {} in folder \"{}\" — baking vanilla fallback",
                             i, characterFolder);
+                BakeDummyPlayerVanillaFallback(skelAnime, isAdult, outSkeleton, outBakedModel);
                 return;
             }
         }
@@ -1887,8 +2045,8 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
 
     // Probe with resolvedAltPath (the skeleton path that actually loaded via
     // LoadFileFromCoopFolder) so we pick the archive matching this skeleton's age.
-    auto archive = OpenCoopPackArchive(characterFolder, resolvedAltPath);
-    if (archive) {
+    auto archive = OpenCoopPackArchives(characterFolder, resolvedAltPath);
+    if (archive.IsLoaded()) {
         auto loader = resourceMgr->GetResourceLoader();
         if (BuildBakedPlayerModel(skeleton, characterFolder, archive, loader, outBakedModel)) {
             // Point skelAnime at our per-DummyPlayer limb copies instead of the shared
@@ -1906,7 +2064,7 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         SPDLOG_ERROR("[CoopModel]   BuildBakedPlayerModel failed; falling back to shared segment "
                      "(may exhibit #85 same-model bleed-through)");
     } else {
-        SPDLOG_ERROR("[CoopModel]   OpenCoopPackArchive failed for \"{}\" probe=\"{}\"; "
+        SPDLOG_ERROR("[CoopModel]   OpenCoopPackArchives failed for \"{}\" probe=\"{}\"; "
                      "falling back to shared segment (may exhibit #85 same-model bleed-through)",
                      characterFolder, resolvedAltPath);
     }
