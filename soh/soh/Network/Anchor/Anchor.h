@@ -107,6 +107,12 @@ typedef struct AnchorClient {
     s16 sceneNum;
     s8 curRoomNum;
     s32 entranceIndex;
+    // Monotonic counter incremented on every OnSceneSpawnActors on the sender.
+    // Host uses it to detect same-scene scene-reloads (Game Over continue, void-out,
+    // Farore's Wind back to current scene) — cases where sceneNum and isSaveLoaded
+    // both stay unchanged but the scene was freshly respawned, so dead-enemy replay
+    // must fire. Starts at 0; first scene-spawn after connect increments to 1.
+    uint32_t sceneSpawnEpoch = 0;
 
     // Only available in PLAYER_UPDATE packets
     s32 linkAge;
@@ -195,6 +201,11 @@ typedef struct {
 class Anchor : public Network {
   private:
     uint32_t spawningDummyPlayerForClientId = 0;
+    // Local monotonic counter sent in UPDATE_CLIENT_STATE so the host can detect
+    // same-scene reloads (Game Over continue, void-out) in addition to scene
+    // changes and save loads. Incremented at the top of the OnSceneSpawnActors
+    // hook before SendPacket_UpdateClientState fires.
+    uint32_t sceneSpawnEpoch = 0;
     bool shouldRefreshActors = false;
     bool justLoadedSave = false;
     bool isHandlingUpdateTeamState = false;

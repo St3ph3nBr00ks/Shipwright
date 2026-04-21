@@ -45,6 +45,7 @@ nlohmann::json Anchor::PrepClientState() {
     SPDLOG_INFO("[CoopModel] PrepClientState: customModelFilename=\"{}\"", localModel);
     payload["customModelFilename"] = localModel;
     payload["followerActive"] = IsFollowerActive();
+    payload["sceneSpawnEpoch"] = sceneSpawnEpoch;
 
     if (IsSaveLoaded()) {
         payload["seed"] = IS_RANDO ? Rando::Context::GetInstance()->GetSeed() : 0;
@@ -80,8 +81,9 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
 
     if (clients.contains(clientId)) {
         // Capture prior state so we can detect transitions below.
-        bool wasSaveLoaded = clients[clientId].isSaveLoaded;
-        s16  prevSceneNum  = clients[clientId].sceneNum;
+        bool     wasSaveLoaded        = clients[clientId].isSaveLoaded;
+        s16      prevSceneNum         = clients[clientId].sceneNum;
+        uint32_t prevSceneSpawnEpoch  = clients[clientId].sceneSpawnEpoch;
 
         AnchorClient client = payload["state"].get<AnchorClient>();
         clients[clientId].clientId = clientId;
@@ -96,6 +98,7 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         clients[clientId].sceneNum = client.sceneNum;
         clients[clientId].curRoomNum = client.curRoomNum;
         clients[clientId].entranceIndex = client.entranceIndex;
+        clients[clientId].sceneSpawnEpoch = client.sceneSpawnEpoch;
         clients[clientId].followerActive = client.followerActive;
 
         // Cosmetic sync — apply remote player's custom character model to their DummyPlayer
@@ -132,12 +135,18 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         // When we are the host and a remote client just loaded a save or entered a
         // new scene, send ENEMY_DEFEATED for every enemy we have recorded as dead
         // in that scene. This ensures late-joining clients see the correct state.
-        bool nowLoaded = clients[clientId].isSaveLoaded;
-        s16  newScene  = clients[clientId].sceneNum;
-        bool sceneChanged = (prevSceneNum != newScene);
-        bool justLoaded   = (!wasSaveLoaded && nowLoaded);
+        bool     nowLoaded           = clients[clientId].isSaveLoaded;
+        s16      newScene            = clients[clientId].sceneNum;
+        uint32_t newSceneSpawnEpoch  = clients[clientId].sceneSpawnEpoch;
+        bool     sceneChanged        = (prevSceneNum != newScene);
+        bool     justLoaded          = (!wasSaveLoaded && nowLoaded);
+        // Same-scene reload signal: Game Over continue, void-out, and Farore's Wind
+        // back to the current scene all leave sceneNum and isSaveLoaded unchanged,
+        // but the non-host's OnSceneSpawnActors still fires and bumps its epoch.
+        bool     sceneSpawned        = (prevSceneSpawnEpoch != newSceneSpawnEpoch);
 
-        if (roomState.ownerClientId == ownClientId && nowLoaded && (justLoaded || sceneChanged)) {
+        if (roomState.ownerClientId == ownClientId && nowLoaded &&
+            (justLoaded || sceneChanged || sceneSpawned)) {
             auto it = deadEnemiesByScene.find(newScene);
             if (it != deadEnemiesByScene.end()) {
                 SPDLOG_INFO("[EnemyDefeated] Replaying {} dead enemies in scene {} for client {}",

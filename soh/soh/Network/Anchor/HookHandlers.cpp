@@ -216,6 +216,10 @@ void Anchor::RegisterHooks() {
     // #region Hooks that are required for basic Anchor functionality
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {
+        // Bump before sending so the host's HandlePacket_UpdateClientState sees the
+        // new epoch and fires the dead-enemy replay even when sceneNum and isSaveLoaded
+        // are both unchanged (Game Over continue, void-out in the same scene).
+        sceneSpawnEpoch++;
         SendPacket_UpdateClientState();
         // Request current state from all other clients so we pick up their
         // dayTime if they are in a time-advancing scene and we were not.
