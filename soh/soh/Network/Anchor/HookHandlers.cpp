@@ -550,7 +550,8 @@ void Anchor::RegisterHooks() {
                 //   BLOCK                 → BTN_R   (shield plant)
                 //   RANGED_ATTACK         → BTN_Z | C-slot (BTN_A fire removed Test 6)
                 //   GETTING_ITEM/TALKING  → BTN_A   (text-box dismiss)
-                //   DO_ACTION_CLIMB/ENTER → BTN_A   (ladder + door auto-press)
+                //   DO_ACTION_CLIMB/ENTER → BTN_A   (ladder + crawlspace)
+                //   doorType != NONE/FAKE → BTN_A   (door auto-press, Test 7)
                 if (followerActive) {
                     u16 pressed = gPlayState->state.input[0].press.button;
                     u16 deactivateCheck = pressed;
@@ -596,11 +597,15 @@ void Anchor::RegisterHooks() {
                     }
                     // DO_ACTION_CLIMB triggers BTN_A injection regardless of state
                     // (ledge-hang and water-exit climb-out). DO_ACTION_ENTER
-                    // (Phase A) does the same for doors. Mask BTN_A in either
-                    // case so our own injection doesn't cancel follower mode.
+                    // covers crawlspaces. doorType (!= NONE) covers doors
+                    // (En_Door / Door_Shutter / etc.) — Phase A injects
+                    // BTN_A for all three. Mask BTN_A in any of these
+                    // cases so our own injection doesn't cancel follower.
                     if (player != nullptr &&
-                        (player->stateFlags2 &
-                         (PLAYER_STATE2_DO_ACTION_CLIMB | PLAYER_STATE2_DO_ACTION_ENTER))) {
+                        ((player->stateFlags2 &
+                          (PLAYER_STATE2_DO_ACTION_CLIMB | PLAYER_STATE2_DO_ACTION_ENTER)) ||
+                         (player->doorType != PLAYER_DOORTYPE_NONE &&
+                          player->doorType != PLAYER_DOORTYPE_FAKE))) {
                         deactivateCheck &= ~BTN_A;
                     }
                     if (deactivateCheck != 0) {
@@ -1847,7 +1852,12 @@ void Anchor::RegisterHooks() {
                         if (followerTargetEnemy->id == ACTOR_EN_ST) {
                             f32 targetDy = enemyPos.y - p2Pos.y;
                             if (targetDy > 40.0f) {
-                                static constexpr f32 kEnStSafeStandoffXZ = 150.0f;
+                                // Test 7 (user): "extend 50 units" — 150→200
+                                // so follower stands further back and the
+                                // slingshot arc has a better downward angle
+                                // to the ground Skulltula vs a Link that
+                                // walked directly under it.
+                                static constexpr f32 kEnStSafeStandoffXZ = 200.0f;
                                 f32 distXZ = sqrtf(distSq);
                                 if (distXZ > kEnStSafeStandoffXZ) {
                                     f32 shrink = (distXZ - kEnStSafeStandoffXZ) / distXZ;
@@ -2551,15 +2561,31 @@ void Anchor::RegisterHooks() {
                     // Edge-logged so the test log shows when this fires. Not
                     // per-frame (would flood when follower is idle near a door).
                     {
+                        // Test 7 (user report) — Phase A was catching
+                        // crawlspaces only. Doors set a different field:
+                        // player->doorType becomes nonzero when Link is
+                        // adjacent to an openable door (En_Door /
+                        // Door_Shutter / Door_Toki — anything with a
+                        // transition actor collider). PLAYER_DOORTYPE_FAKE
+                        // (=3) is the trap-door variant that damages Link;
+                        // explicitly exclude it so the follower doesn't
+                        // self-inflict.
                         bool enterPromptActive = (sf2 & PLAYER_STATE2_DO_ACTION_ENTER) != 0;
+                        bool doorInRange       = (player->doorType != PLAYER_DOORTYPE_NONE) &&
+                                                 (player->doorType != PLAYER_DOORTYPE_FAKE);
+                        bool promptActive      = enterPromptActive || doorInRange;
                         static bool sWasAtDoor = false;
-                        if (enterPromptActive && !sWasAtDoor) {
-                            SPDLOG_INFO("[Follower] BTN_A door ENTER prompt (Phase A — DO_ACTION_ENTER)");
-                        } else if (!enterPromptActive && sWasAtDoor) {
+                        if (promptActive && !sWasAtDoor) {
+                            SPDLOG_INFO("[Follower] BTN_A door prompt ({}{})",
+                                        enterPromptActive ? "DO_ACTION_ENTER" : "",
+                                        doorInRange
+                                            ? (enterPromptActive ? " + doorType" : "doorType")
+                                            : "");
+                        } else if (!promptActive && sWasAtDoor) {
                             SPDLOG_INFO("[Follower] BTN_A door EXIT (prompt cleared)");
                         }
-                        sWasAtDoor = enterPromptActive;
-                        if (enterPromptActive) {
+                        sWasAtDoor = promptActive;
+                        if (promptActive) {
                             input.press.button |= BTN_A;
                             input.cur.button   |= BTN_A;
                         }
@@ -2774,15 +2800,21 @@ void Anchor::RegisterHooks() {
                         // aim (slingshot/bow drawn) uses stick_y for camera
                         // pitch. Ceiling Skulltulas (target Δy > ~60 u)
                         // require aiming UP — without this injection Link
-                        // fired forward into nothing and the Z-lock cone
-                        // also missed the target. Follower's target Y vs
-                        // follower Y gives us direction; magnitude 64
-                        // produces a steady pitch shift.
+                        // fires forward into nothing when unlocked.
+                        //
+                        // Test 7 (user report): "When locked on, aiming is
+                        // automatic, no additional input should be required."
+                        // OoT's Z-lock drives the camera onto the target
+                        // directly; injecting stick_y on top overrides that
+                        // and points aim elsewhere. Gate on HOSTILE_LOCK_ON
+                        // being CLEAR — inject pitch only as a fallback
+                        // when lock-on hasn't acquired the target.
                         //
                         // Sign convention: OoT first-person aim uses
-                        // positive stick_y = look up (verified by slingshot
-                        // target-shooter bin — stick up raises reticle).
-                        if (followerTargetEnemy != nullptr &&
+                        // positive stick_y = look up.
+                        bool lockedOn = (sf1 & PLAYER_STATE1_HOSTILE_LOCK_ON) != 0;
+                        if (!lockedOn &&
+                            followerTargetEnemy != nullptr &&
                             followerTargetEnemy->update != nullptr) {
                             f32 dy = followerTargetEnemy->world.pos.y - actor->world.pos.y;
                             s8  pitchY = 0;
@@ -2794,7 +2826,7 @@ void Anchor::RegisterHooks() {
                                 input.rel.stick_x = 0;
                                 input.rel.stick_y = pitchY;
                                 if (followerStateFrames % 20 == 0) {
-                                    SPDLOG_INFO("[Follower] RANGED_ATTACK aim-pitch "
+                                    SPDLOG_INFO("[Follower] RANGED_ATTACK aim-pitch (no lock) "
                                                 "stick_y={} dy={:.0f}",
                                                 (int)pitchY, dy);
                                 }
