@@ -4,6 +4,9 @@
 #include "soh/OTRGlobals.h"
 #include "soh/Enhancements/nametag.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
+#include <algorithm>
+#include <chrono>
+#include <vector>
 
 extern "C" {
 #include "variables.h"
@@ -29,6 +32,54 @@ void AnchorClient::RetireBakedModel() {
     // Destroying it here is safe; no frame can still be referencing it.
     retiredBakedModel = std::move(bakedModel);
     retireFrameCounter = kRetireFrames;
+}
+
+// MARK: - Bandwidth profiler (#62)
+
+void Anchor::RecordProfileSample(const nlohmann::json& payload, bool tx) {
+    if (CVarGetInteger("gEnhancements.AnchorProfiler", 0) == 0) return;
+    if (!payload.contains("type")) return;
+    std::string type = payload["type"].get<std::string>();
+    size_t bytes = payload.dump().size() + 1; // +1 for null-byte delimiter the relay expects
+
+    std::lock_guard<std::mutex> lock(profileMutex);
+    auto& bucket = (tx ? profileTx : profileRx)[type];
+    bucket.count += 1;
+    bucket.bytes += bytes;
+}
+
+void Anchor::FlushProfileIfDue() {
+    if (CVarGetInteger("gEnhancements.AnchorProfiler", 0) == 0) return;
+    uint64_t nowMs = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    std::lock_guard<std::mutex> lock(profileMutex);
+    if (profileWindowStartMs == 0) { profileWindowStartMs = nowMs; return; }
+    uint64_t elapsed = nowMs - profileWindowStartMs;
+    if (elapsed < kProfilerWindowMs) return;
+
+    std::unordered_set<std::string> types;
+    for (auto& [t, _] : profileTx) types.insert(t);
+    for (auto& [t, _] : profileRx) types.insert(t);
+    std::vector<std::string> sorted(types.begin(), types.end());
+    std::sort(sorted.begin(), sorted.end(), [this](const std::string& a, const std::string& b) {
+        return (profileTx[a].bytes + profileRx[a].bytes) >
+               (profileTx[b].bytes + profileRx[b].bytes);
+    });
+
+    SPDLOG_INFO("[AnchorProfile] window={}ms   type                   tx_pps   tx_Bps   rx_pps   rx_Bps",
+                elapsed);
+    for (const auto& t : sorted) {
+        auto& tx = profileTx[t];
+        auto& rx = profileRx[t];
+        SPDLOG_INFO("[AnchorProfile] {:<22} {:>8.1f} {:>8.0f} {:>8.1f} {:>8.0f}",
+                    t,
+                    tx.count * 1000.0 / elapsed, tx.bytes * 1000.0 / elapsed,
+                    rx.count * 1000.0 / elapsed, rx.bytes * 1000.0 / elapsed);
+    }
+    profileTx.clear();
+    profileRx.clear();
+    profileWindowStartMs = nowMs;
 }
 
 // MARK: - Overrides
@@ -85,11 +136,13 @@ void Anchor::ProcessOutgoingPackets() {
         nlohmann::json payload = packetsToSend.front();
         packetsToSend.pop();
 
+        RecordProfileSample(payload, /*tx=*/true);
         if (!payload.contains("quiet")) {
             SPDLOG_DEBUG("[Anchor] Sending payload:\n{}", payload.dump());
         }
         Network::SendJsonToRemote(payload);
     }
+    FlushProfileIfDue();
 }
 
 void Anchor::SendJsonToRemote(nlohmann::json payload) {
@@ -117,6 +170,8 @@ void Anchor::OnIncomingJson(nlohmann::json payload) {
     if (!payload.contains("type")) {
         return;
     }
+
+    RecordProfileSample(payload, /*tx=*/false);
 
     // If it's not a quiet payload, log it
     if (!payload.contains("quiet")) {
