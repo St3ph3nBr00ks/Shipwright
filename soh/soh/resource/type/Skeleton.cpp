@@ -15,6 +15,7 @@
 #include <objects/object_link_boy/object_link_boy.h>
 #include "macros.h"
 #include <filesystem>
+#include "soh/Network/Anchor/Anchor.h"  // Test 16 (#171): kRetireFrames
 
 extern "C" {
 #include "variables.h"
@@ -426,7 +427,7 @@ static bool BakeLocalVanillaFallback(SkeletonPatchInfo& skel,
     }
     if (skel.bakedModel != nullptr) {
         skel.retiredBakedModel = std::move(skel.bakedModel);
-        skel.retireFrameCounter = 4;  // kRetireFrames
+        skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
     }
     skel.bakedModel = std::make_unique<BakedPlayerModel>();
     if (!BuildVanillaDummyPlayerModel(vanillaSkel, resourceMgr, *skel.bakedModel)) {
@@ -484,7 +485,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         if (vanillaSkel != nullptr && vanillaSkel->skeletonData.skeletonHeader.segment != nullptr) {
             if (skel.bakedModel != nullptr) {
                 skel.retiredBakedModel = std::move(skel.bakedModel);
-                skel.retireFrameCounter = 4;  // kRetireFrames
+                skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
             }
             skel.bakedModel = std::make_unique<BakedPlayerModel>();
             if (BuildVanillaDummyPlayerModel(vanillaSkel, resourceMgr, *skel.bakedModel)) {
@@ -520,7 +521,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         // F3DZEX2 DL cache — mirror of the successful-bake tail.
         if (skel.bakedModel != nullptr) {
             skel.retiredBakedModel = std::move(skel.bakedModel);
-            skel.retireFrameCounter = 4;  // kRetireFrames
+            skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
         }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
         gfx_texture_cache_clear();
@@ -576,7 +577,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         // can't leave dangling pointers into in-flight Gfx frames.
         if (skel.bakedModel != nullptr) {
             skel.retiredBakedModel = std::move(skel.bakedModel);
-            skel.retireFrameCounter = 4;  // kRetireFrames
+            skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
         }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
         gfx_texture_cache_clear();
@@ -600,7 +601,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         }
         if (skel.bakedModel != nullptr) {
             skel.retiredBakedModel = std::move(skel.bakedModel);
-            skel.retireFrameCounter = 4;
+            skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
         }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
         gfx_texture_cache_clear();
@@ -617,7 +618,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         }
         if (skel.bakedModel != nullptr) {
             skel.retiredBakedModel = std::move(skel.bakedModel);
-            skel.retireFrameCounter = 4;
+            skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
         }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
         gfx_texture_cache_clear();
@@ -646,7 +647,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     // down and destroys it when the renderer has moved past those frames.
     if (skel.bakedModel != nullptr) {
         skel.retiredBakedModel = std::move(skel.bakedModel);
-        skel.retireFrameCounter = 4;  // kRetireFrames — matches Anchor.h
+        skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
     }
     skel.bakedModel = std::make_unique<BakedPlayerModel>();
 

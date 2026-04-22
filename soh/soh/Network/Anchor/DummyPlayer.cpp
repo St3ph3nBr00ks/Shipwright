@@ -1,6 +1,7 @@
 #include "Anchor.h"
 #include "soh/Enhancements/nametag.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <libultraship/libultraship.h>
 
 extern "C" {
@@ -301,6 +302,26 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     gSaveContext.linkAge = client.linkAge;
     u8 originalButtonItem0 = gSaveContext.equips.buttonItems[0];
     gSaveContext.equips.buttonItems[0] = client.buttonItem0;
+
+    // Test 16 #171 — defensive null-guard. If player->skelAnime.skeleton is
+    // null (e.g. the DummyPlayer bake hasn't completed or was retired
+    // without a replacement), Player_Draw dereferences it and crashes
+    // (0xc0000005 at RIP=…DCA9 observed across 4 log occurrences). Log
+    // and skip the draw this frame; the next frame will see a valid
+    // skeleton or the actor will be killed by the upstream client-gone
+    // check.
+    if (player->skelAnime.skeleton == nullptr) {
+        static std::unordered_set<uint32_t> sLoggedNullSkel;
+        if (sLoggedNullSkel.insert(clientId).second) {
+            SPDLOG_WARN("[CoopModel] DummyPlayer_Draw SKIPPED clientId={} — "
+                        "skelAnime.skeleton is null (bake in flight or retired); "
+                        "will retry next frame",
+                        clientId);
+        }
+        gSaveContext.linkAge = originalAge;
+        gSaveContext.equips.buttonItems[0] = originalButtonItem0;
+        return;
+    }
 
     // Swap this DummyPlayer's baked face textures into the shared sEyeTextures /
     // sMouthTextures arrays for exactly the duration of Player_Draw.  Slots

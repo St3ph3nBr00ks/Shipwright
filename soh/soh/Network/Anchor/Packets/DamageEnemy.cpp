@@ -63,7 +63,10 @@ void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage) {
         if (client.online && client.isSaveLoaded && clientId == roomState.ownerClientId) {
             payload["targetClientId"] = clientId;
             SendJsonToRemote(payload);
-            SPDLOG_DEBUG("[DamageEnemy] Sent netId={} damage={}", netId, (int)damage);
+            // Test 15 (log 85) — raised DEBUG→INFO so the next test log reveals
+            // whether the send side fires per hit. Will demote back to DEBUG
+            // once client→host health sync is verified working.
+            SPDLOG_INFO("[DamageEnemy] Sent netId={} damage={}", netId, (int)damage);
             break;
         }
     }
@@ -121,8 +124,11 @@ damage_target_found:
     // fire GameInteractor_ExecuteOnEnemyDefeat → ENEMY_DEFEATED.
     // Using += handles the rare case where two DAMAGE_ENEMY packets arrive in
     // the same processing window (multi-hit same frame from the non-host).
+    // Test 15 diagnostic: capture HP before and log both.
+    u8 preHp = (u8)actor->colChkInfo.health;
     actor->colChkInfo.damage += damage;
 
-    SPDLOG_DEBUG("[DamageEnemy] Applied damage={} to netId={} health={} (will be processed next frame)",
-                 (int)damage, netId, (int)actor->colChkInfo.health);
+    SPDLOG_INFO("[DamageEnemy] Received netId={} damage={} preHp={} accumDmg={} "
+                "(actor->update will consume next frame)",
+                netId, (int)damage, (int)preHp, (int)actor->colChkInfo.damage);
 }

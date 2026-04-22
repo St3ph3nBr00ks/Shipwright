@@ -1299,7 +1299,18 @@ void Anchor::RegisterHooks() {
                 // flight (phase C): the packet already tells us exactly where
                 // to go and which entrance to use. Deactivating here would
                 // stop the navigation before we reach the trigger.
-                if (!pendingTransitionInFlight) {
+                //
+                // Test 14 (log 84) — also suppressed when OoT is mid-transition
+                // (`transitionTrigger != TRANS_TRIGGER_OFF`). `hasPendingTransition`
+                // is cleared the frame we fire the trigger, but `ourScene`
+                // doesn't update until the scene load completes — a ~100-200 ms
+                // window where the G13 scene-mismatch check fires and
+                // deactivates the follower right in the middle of the
+                // transition we just triggered. Gating on transitionTrigger
+                // covers that window cleanly.
+                bool sceneLoadInProgress =
+                    (gPlayState->transitionTrigger != TRANS_TRIGGER_OFF);
+                if (!pendingTransitionInFlight && !sceneLoadInProgress) {
                     auto it = clients.find(followerLeaderClientId);
                     if (it != clients.end() && it->second.isSaveLoaded) {
                         s16 leaderScene = it->second.sceneNum;
