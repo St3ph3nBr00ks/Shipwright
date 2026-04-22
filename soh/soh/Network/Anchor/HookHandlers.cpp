@@ -1642,7 +1642,12 @@ void Anchor::RegisterHooks() {
                         player->actor.shape.rot.y = dummyActor->shape.rot.y;
                         // Pre-populate move target so the first FOLLOW frame's
                         // ShouldActorUpdate sees the correct direction immediately.
-                        followerMoveTarget = sideTarget;
+                        // Test 8 — during door handoff the G11 block above
+                        // already set followerMoveTarget to the door
+                        // centerline; don't overwrite with side-offset.
+                        if (!followerDoorHandoff) {
+                            followerMoveTarget = sideTarget;
+                        }
                         break;
                     }
 
@@ -1699,15 +1704,34 @@ void Anchor::RegisterHooks() {
                                 break;
                             }
                         }
-                        followerMoveTarget = sideTarget;
+                        // Test 8 (user report) — during door handoff, the
+                        // G11 safety-net block above this switch sets
+                        // followerMoveTarget to the transition-actor
+                        // position (door centerline). FOLLOW was then
+                        // overwriting that with sideTarget (+kFollowOffset
+                        // on X), pushing the follower 50 u off the door
+                        // centerline into the adjacent wall. Skip the
+                        // overwrite while handoff is active — the handoff
+                        // block owns the move target in that case. Same
+                        // pattern crawlspaces already use via the leader-
+                        // Crawling sideTarget collapse.
+                        Vec3f followTarget = sideTarget;
+                        if (!followerDoorHandoff) {
+                            followerMoveTarget = followTarget;
+                        } else {
+                            // Route through the handoff target without
+                            // offset; yaw/dist computations below use
+                            // followerMoveTarget as the ground truth.
+                            followTarget = followerMoveTarget;
+                        }
                         {
-                            f32 dist = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+                            f32 dist = sqrtf(SQ(followTarget.x - p2Pos.x) + SQ(followTarget.z - p2Pos.z));
                             // Stick injection in ShouldActorUpdate drives actual movement;
                             // here we just transition when we're close enough.
                             if (dist > 0.001f) {
                                 player->actor.shape.rot.y = YawToward(
-                                    sideTarget.x - player->actor.world.pos.x,
-                                    sideTarget.z - player->actor.world.pos.z);
+                                    followTarget.x - player->actor.world.pos.x,
+                                    followTarget.z - player->actor.world.pos.z);
                             }
                             if (dist < kFollowThreshold) {
                                 followerAIState     = FollowerAIState::IDLE;
@@ -1979,13 +2003,20 @@ void Anchor::RegisterHooks() {
                     }
 
                     case FollowerAIState::RETURN: {
-                        followerMoveTarget = sideTarget;
-                        f32 dist = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+                        // Test 8 — same door-handoff carve-out as FOLLOW:
+                        // preserve the handoff's door-centerline target.
+                        Vec3f returnTarget = sideTarget;
+                        if (!followerDoorHandoff) {
+                            followerMoveTarget = returnTarget;
+                        } else {
+                            returnTarget = followerMoveTarget;
+                        }
+                        f32 dist = sqrtf(SQ(returnTarget.x - p2Pos.x) + SQ(returnTarget.z - p2Pos.z));
                         // Stick injection in ShouldActorUpdate drives actual movement.
                         if (dist > 0.001f) {
                             player->actor.shape.rot.y = YawToward(
-                                sideTarget.x - player->actor.world.pos.x,
-                                sideTarget.z - player->actor.world.pos.z);
+                                returnTarget.x - player->actor.world.pos.x,
+                                returnTarget.z - player->actor.world.pos.z);
                         }
                         if (dist < kFollowThreshold) {
                             followerAIState     = FollowerAIState::IDLE;
