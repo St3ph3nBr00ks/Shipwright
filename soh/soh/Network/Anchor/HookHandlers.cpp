@@ -209,6 +209,19 @@ bool Anchor::IsLocalPlayerClimbing() const {
            (sf1 & PLAYER_STATE1_CLIMBING_LEDGE);
 }
 
+// Test 5 (log 71) — leader crawlspace sync. Broadcast via
+// UPDATE_CLIENT_STATE so the follower can recognise when the
+// leader is crawling and adjust its follow target accordingly
+// (use leaderPos directly instead of +kFollowOffset sideTarget;
+// sideTarget puts follower off-axis from the crawlspace hole
+// and DO_ACTION_ENTER never fires).
+bool Anchor::IsLocalPlayerCrawling() const {
+    if (gPlayState == nullptr) { return false; }
+    Player* p = GET_PLAYER(gPlayState);
+    if (p == nullptr) { return false; }
+    return (p->stateFlags2 & PLAYER_STATE2_CRAWLING) != 0;
+}
+
 // Option B — follower item override system. See Anchor.h for full
 // design. Touches gSaveContext.equips.{buttonItems[1..3], cButtonSlots[0..2]}.
 // B-slot (sword) is never modified.
@@ -529,7 +542,7 @@ void Anchor::RegisterHooks() {
                 //
                 // Current mask table:
                 //   ENGAGE/ATTACK         → BTN_Z   (lock-on, Bug D)
-                //   ATTACK                → BTN_B   (sword swing cycle)
+                //   ATTACK                → BTN_B | BTN_R (swing + shield)
                 //   BLOCK                 → BTN_R   (shield plant)
                 //   RANGED_ATTACK         → BTN_Z | BTN_A | C-slot
                 //   GETTING_ITEM/TALKING  → BTN_A   (text-box dismiss)
@@ -540,7 +553,9 @@ void Anchor::RegisterHooks() {
                     // Mask off buttons WE inject — otherwise our own input would
                     // cancel follower mode the frame after we inject it.
                     if (followerAIState == FollowerAIState::ATTACK) {
-                        deactivateCheck &= ~BTN_B;
+                        // Swing frames inject BTN_B; non-swing frames inject
+                        // BTN_R for the between-swings shield (Test 5 fix).
+                        deactivateCheck &= ~(BTN_B | BTN_R);
                     }
                     if (followerAIState == FollowerAIState::BLOCK) {
                         deactivateCheck &= ~BTN_R;
@@ -667,8 +682,9 @@ void Anchor::RegisterHooks() {
                 // hold stick forward at the climb-exit yaw for this many frames
                 // so Link walks inward past the rim before other state machine
                 // logic can re-point him backward toward a leader standing at
-                // the edge. ~1 s at 60fps (matches user request "~1 more second").
-                static constexpr int kClimbDismountHoldFrames = 60;
+                // the edge. Test 5 (log 71): 60 frames (1 s) was too long —
+                // reduced to 15 (~0.25 s) per user feedback.
+                static constexpr int kClimbDismountHoldFrames = 15;
                 // Item pickup (Claude/Plans/ai_follower_item_pickup.md).
                 // kItemProximity — XZ radius of the ACTORCAT_MISC scan.
                 //     User-specified 200 units: far enough to catch most
@@ -727,11 +743,15 @@ void Anchor::RegisterHooks() {
                 // The override is used BOTH for ENGAGE→ATTACK admission and
                 // for the point-blank shield trigger (see SwingReach below).
                 auto GetAttackRangeForEnemy = [](s16 id) -> f32 {
+                    // Test 5 (log 71) tuning: user reported "10 units closer"
+                    // for Karebaba + Dekubaba — swings were reaching but
+                    // sword often whiffed because standoff put Link just
+                    // outside arc. Karebaba 110→100, Dekubaba 100→90.
                     switch (id) {
-                        case ACTOR_EN_KAREBABA: return 110.0f; // head lunges ~40 u
-                        case ACTOR_EN_DEKUBABA: return 100.0f; // stem-tip head
+                        case ACTOR_EN_KAREBABA: return 100.0f; // head lunges ~40 u
+                        case ACTOR_EN_DEKUBABA: return  90.0f; // stem-tip head
                         case ACTOR_EN_VALI:     return 120.0f; // body AoE discharge
-                        default:                return 80.0f;  // kAttackRange
+                        default:                return  80.0f; // kAttackRange
                     }
                 };
                 // Sword arc reach — Link's effective swing distance. Inside
@@ -850,7 +870,18 @@ void Anchor::RegisterHooks() {
                         if (followerTickCounter - firstIt->second < kItemGraceFrames) {
                             continue;
                         }
-                        if (!FollowerWantsItem(item)) {
+                        // Test 5 diagnostics — log item type at the first
+                        // post-grace scan for each actor, sparse per type.
+                        // Lets us see why sticks/seeds/etc. don't engage.
+                        bool wants = FollowerWantsItem(item);
+                        if (followerTickCounter - firstIt->second == kItemGraceFrames) {
+                            s16 itemType = (s16)(item->params & 0xFF);
+                            SPDLOG_INFO("[Follower] item grace expired ptr=0x{:x} type=0x{:02X} "
+                                        "wants={} y-delta={:.0f}",
+                                        (uintptr_t)item, (int)itemType, wants ? 1 : 0,
+                                        item->world.pos.y - selfPos.y);
+                        }
+                        if (!wants) {
                             continue;
                         }
                         // Same-floor gate (mirrors enemy-target Y gate).
@@ -1020,7 +1051,20 @@ void Anchor::RegisterHooks() {
 
                 Actor* dummyActor = leaderActor;                          // preserved name for downstream reads
                 Vec3f  leaderPos  = leaderActor->world.pos;
-                Vec3f  sideTarget = { leaderPos.x + kFollowOffset, leaderPos.y, leaderPos.z };
+                // Test 5 (log 71) — crawlspace fix. When leader is crawling,
+                // sideTarget (+kFollowOffset on X) lands the follower beside
+                // the crawlspace hole rather than on its centerline, so
+                // DO_ACTION_ENTER never fires for the follower and Phase A's
+                // BTN_A injection has nothing to press. Use leaderPos
+                // directly to stay on-axis.
+                bool leaderCrawling = false;
+                {
+                    auto it = clients.find(followerLeaderClientId);
+                    if (it != clients.end()) { leaderCrawling = it->second.isCrawling; }
+                }
+                Vec3f  sideTarget = leaderCrawling
+                    ? leaderPos
+                    : Vec3f{ leaderPos.x + kFollowOffset, leaderPos.y, leaderPos.z };
 
                 // Yaw toward (dx, dz).  Math_Atan2S(x, y) with OoT param order.
                 auto YawToward = [](f32 dx, f32 dz) -> s16 {
@@ -1050,6 +1094,13 @@ void Anchor::RegisterHooks() {
                 // Returns true if a scene transition was triggered (caller
                 // should return from the follower hook since OoT owns the
                 // next frames).
+                // Test 5 (log 71) — centralise post-teleport resets so every
+                // caller (G10 / G11 / G12) gets the same behaviour. Without
+                // this, different call sites reset different counters (G10
+                // didn't clear stuck-cycle, G11 didn't clear overrun), which
+                // masked the Kokiri Forest 26-teleport loop until the hold
+                // counter broke the cycle.
+                static constexpr int kPostTeleportHoldFrames = 30;
                 auto TeleportToLeader = [&](const char* reason) -> bool {
                     Vec3f destPos = leaderPos;
                     s16   destYaw = leaderActor->shape.rot.y;
@@ -1057,19 +1108,43 @@ void Anchor::RegisterHooks() {
                     s8    ourRoom    = (s8)gPlayState->roomCtx.curRoom.num;
                     s8    leaderRoom = (it != clients.end()) ? it->second.curRoomNum : ourRoom;
                     bool  roomsDiffer = (leaderRoom != -1 && ourRoom != -1 && leaderRoom != ourRoom);
+                    // Reset ALL the "how long have I been unable to reach
+                    // the leader" counters on every teleport. Also arm the
+                    // post-teleport hold so ShouldActorUpdate zeroes stick
+                    // for a short window — prevents immediate sideTarget
+                    // walk-into-wall (Test 5 "stuck in wall" symptom).
+                    followerOverrunFrames         = 0;
+                    followerStuckFrames           = 0;
+                    followerStuckCycleCount       = 0;
+                    followerStuckCycleResetFrames = 0;
+                    followerPostTeleportFrames    = kPostTeleportHoldFrames;
                     if (!roomsDiffer) {
                         player->actor.world.pos = destPos;
                         player->actor.prevPos   = destPos;
-                        SPDLOG_INFO("[Follower] Teleport world.pos ({}) — same room {}", reason, (int)ourRoom);
+                        SPDLOG_INFO("[Follower] Teleport world.pos ({}) — same room {} pos={:.0f},{:.0f},{:.0f} "
+                                    "(hold {} frames)",
+                                    reason, (int)ourRoom, destPos.x, destPos.y, destPos.z,
+                                    kPostTeleportHoldFrames);
                         return false;
                     }
                     SPDLOG_WARN("[Follower] Teleport scene-reload ({}) — ours-room={} leader-room={} "
                                 "pos={:.0f},{:.0f},{:.0f}",
                                 reason, (int)ourRoom, (int)leaderRoom,
                                 destPos.x, destPos.y, destPos.z);
+                    // Test 5 (log 71) — switched from RESPAWN_MODE_DOWN to
+                    // RESPAWN_MODE_TOP. DOWN is the void-out pipeline;
+                    // z_player.c:10853 inflicts void damage via
+                    // `GameInteractor_Should(VB_INFLICT_VOID_DAMAGE, ...)`
+                    // when `respawnFlag == 1 || respawnFlag == -1` —
+                    // which matched our DOWN+1 flag. User reported P2 took
+                    // damage and died on the second teleport. TOP is the
+                    // Farore's Wind pipeline; it reads the same pos/yaw/
+                    // roomIndex fields but isn't in the void-damage
+                    // predicate, so teleport no longer damages Link.
+                    //
                     // Play_SetRespawnData is static to z_play.c; inline the
                     // struct writes rather than plumb a forward declaration.
-                    RespawnData* rd = &gSaveContext.respawn[RESPAWN_MODE_DOWN];
+                    RespawnData* rd = &gSaveContext.respawn[RESPAWN_MODE_TOP];
                     rd->entranceIndex    = gSaveContext.entranceIndex;
                     rd->roomIndex        = (s16)leaderRoom;
                     rd->pos              = destPos;
@@ -1077,7 +1152,7 @@ void Anchor::RegisterHooks() {
                     rd->playerParams     = 0x0DFF;  // normal-spawn player-params
                     rd->tempSwchFlags    = gPlayState->actorCtx.flags.tempSwch;
                     rd->tempCollectFlags = gPlayState->actorCtx.flags.tempCollect;
-                    gSaveContext.respawnFlag        = 1; // RESPAWN_MODE_DOWN + 1
+                    gSaveContext.respawnFlag        = 3; // RESPAWN_MODE_TOP + 1
                     gPlayState->transitionTrigger   = TRANS_TRIGGER_START;
                     gPlayState->nextEntranceIndex   = gSaveContext.entranceIndex;
                     gPlayState->transitionType      = TRANS_TYPE_FADE_BLACK;
@@ -2148,7 +2223,22 @@ void Anchor::RegisterHooks() {
                     }
                     sWasCrawling = nowCrawling;
 
-                    if (isMoving && nowCrawling) {
+                    if (followerPostTeleportFrames > 0) {
+                        // Test 5 post-teleport hold. Zero the stick (and
+                        // press-button stick bits) for kPostTeleportHoldFrames
+                        // after any teleport so Link settles at leaderPos
+                        // before state-machine movement drives him toward
+                        // sideTarget (which can be inside a wall if the
+                        // leader was standing next to one).
+                        input.cur.stick_x = 0;
+                        input.cur.stick_y = 0;
+                        input.rel.stick_x = 0;
+                        input.rel.stick_y = 0;
+                        followerPostTeleportFrames--;
+                        if (followerPostTeleportFrames == 0) {
+                            SPDLOG_INFO("[Follower] Post-teleport hold complete");
+                        }
+                    } else if (isMoving && nowCrawling) {
                         input.cur.stick_x = 0;
                         input.cur.stick_y = 127;
                         input.rel.stick_x = 0;
@@ -2374,16 +2464,25 @@ void Anchor::RegisterHooks() {
                                 input.cur.button   |= BTN_B;
                                 SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={})",
                                             followerStateFrames);
-                            } else if (eDistSq < 50.0f * 50.0f) {  // kSwingReach
-                                // Bug D — point-blank shield between swings.
-                                // Non-swing frames while Link is within
-                                // sword arc (enemy is mid-range retaliation
-                                // window). BTN_R raises the shield to tank
-                                // Karebaba lunges / Deku Baba bites. OoT
-                                // plants Link in place with shield up when
-                                // lock-on + BTN_R + no stick — intentional:
-                                // we stop walking into the damage volume.
-                                input.cur.button |= BTN_R;
+                            } else {
+                                // Bug D / Test 5 (log 71) — shield between
+                                // swings. Previous gate `eDistSq < 50*50`
+                                // almost never fired: typical ATTACK frames
+                                // sit at 69-96 u from enemy (user's test had
+                                // zero BTN_R log lines). Any time we're in
+                                // ATTACK state (already inside attackRange)
+                                // and NOT on a swing frame, shield up.
+                                // BLOCK pattern below sets both press+cur
+                                // every frame; R-hold is continuous so
+                                // edge-replay is harmless (unlike BTN_A
+                                // which would mis-interpret as new press).
+                                input.press.button |= BTN_R;
+                                input.cur.button   |= BTN_R;
+                                if (followerStateFrames % 20 == 10) {
+                                    SPDLOG_INFO("[Follower] ATTACK shield BTN_R "
+                                                "(stateFrames={} distToEnemy={:.0f})",
+                                                followerStateFrames, sqrtf(eDistSq));
+                                }
                             }
                         }
                     }
@@ -2451,22 +2550,61 @@ void Anchor::RegisterHooks() {
                         if (cBtn != 0) {
                             int phase = followerStateFrames % kFireCycleFrames;
                             // Phase 0: edge-press the C-button (start draw)
-                            // Phase 1 .. (kFireCycleFrames-2): hold via cur (aim/prime)
-                            // Phase (kFireCycleFrames-1): RELEASE for one frame
-                            //   (don't set cur, don't set press) → OoT auto-fires
-                            //   the primed shot.
+                            // Phase 1 .. (kFireCycleFrames-3): hold via cur (aim/prime)
+                            // Phase (kFireCycleFrames-2, -1): RELEASE for TWO frames
+                            //   (don't set cur/press). Test 5 (log 71) — early
+                            //   cycles missed the fire entirely despite the
+                            //   release-to-fire path; one-frame release was
+                            //   too short for OoT to consume as a fire event.
+                            //   Two frames is more reliable; later cycles in
+                            //   the same log did fire successfully, so the
+                            //   pattern works once OoT's state settles.
                             if (phase == 0) {
                                 input.press.button |= cBtn;
                                 input.cur.button   |= cBtn;
                                 SPDLOG_INFO("[Follower] RANGED_ATTACK draw cycle (cSlot={})",
                                             (int)followerActiveCSlot);
-                            } else if (phase == kFireCycleFrames - 1) {
-                                // Release frame — explicitly do NOT add cBtn
-                                // to either cur or press. This is the fire.
-                                SPDLOG_INFO("[Follower] RANGED_ATTACK release-to-fire (cSlot={})",
-                                            (int)followerActiveCSlot);
+                            } else if (phase >= kFireCycleFrames - 2) {
+                                // Release window — do NOT add cBtn to cur
+                                // or press for these two frames.
+                                if (phase == kFireCycleFrames - 2) {
+                                    SPDLOG_INFO("[Follower] RANGED_ATTACK release-to-fire "
+                                                "(cSlot={} 2-frame window)",
+                                                (int)followerActiveCSlot);
+                                }
                             } else {
                                 input.cur.button |= cBtn;
+                            }
+                        }
+
+                        // Test 5 (log 71) — aim-pitch injection. First-person
+                        // aim (slingshot/bow drawn) uses stick_y for camera
+                        // pitch. Ceiling Skulltulas (target Δy > ~60 u)
+                        // require aiming UP — without this injection Link
+                        // fired forward into nothing and the Z-lock cone
+                        // also missed the target. Follower's target Y vs
+                        // follower Y gives us direction; magnitude 64
+                        // produces a steady pitch shift.
+                        //
+                        // Sign convention: OoT first-person aim uses
+                        // positive stick_y = look up (verified by slingshot
+                        // target-shooter bin — stick up raises reticle).
+                        if (followerTargetEnemy != nullptr &&
+                            followerTargetEnemy->update != nullptr) {
+                            f32 dy = followerTargetEnemy->world.pos.y - actor->world.pos.y;
+                            s8  pitchY = 0;
+                            if      (dy >  60.0f) pitchY =  64;  // look up
+                            else if (dy < -60.0f) pitchY = -64;  // look down
+                            if (pitchY != 0) {
+                                input.cur.stick_x = 0;
+                                input.cur.stick_y = pitchY;
+                                input.rel.stick_x = 0;
+                                input.rel.stick_y = pitchY;
+                                if (followerStateFrames % 20 == 0) {
+                                    SPDLOG_INFO("[Follower] RANGED_ATTACK aim-pitch "
+                                                "stick_y={} dy={:.0f}",
+                                                (int)pitchY, dy);
+                                }
                             }
                         }
 

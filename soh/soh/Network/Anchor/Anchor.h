@@ -167,6 +167,14 @@ typedef struct AnchorClient {
     // follower can teleport-and-ride along. Defaults to false for pre-update peers.
     bool isClimbing = false;
 
+    // Test 5 (log 71) — set when the remote client's local Player has
+    // PLAYER_STATE2_CRAWLING set (inside a dungeon crawlspace). Follower
+    // uses this to switch its FOLLOW target from the +kFollowOffset
+    // sideTarget to the leader's exact XZ — sideTarget lands off-axis
+    // from the crawlspace hole and DO_ACTION_ENTER never fires on the
+    // follower. Default false for pre-update peers.
+    bool isCrawling = false;
+
     // Multiplayer cosmetic sync
     std::string customModelFilename;                    // folder name of remote client's coop pack, or ""
     std::shared_ptr<SOH::Skeleton> customSkeleton;      // keeps loaded skeleton alive; nullptr = vanilla
@@ -239,6 +247,18 @@ class Anchor : public Network {
     std::mutex incomingPacketQueueMutex;
     std::queue<nlohmann::json> outgoingPacketQueue;
     std::mutex outgoingPacketQueueMutex;
+
+    // Phase 5 bandwidth profiler (#62). Gated by gEnhancements.AnchorProfiler (0=off, 1=on).
+    // Per-packet-type counts+bytes flushed every kProfilerWindowMs to SPDLOG_INFO.
+    struct ProfileBucket { uint64_t count = 0; uint64_t bytes = 0; };
+    std::unordered_map<std::string, ProfileBucket> profileTx;
+    std::unordered_map<std::string, ProfileBucket> profileRx;
+    std::mutex profileMutex;
+    uint64_t   profileWindowStartMs = 0;
+    static constexpr uint64_t kProfilerWindowMs = 10000;
+
+    void RecordProfileSample(const nlohmann::json& payload, bool tx);
+    void FlushProfileIfDue();
 
     // Host-only: netIds of enemies that have died in each scene.
     // Sent to newly joined (or scene-transitioning) clients so they see enemies
@@ -337,6 +357,23 @@ class Anchor : public Network {
     // follower-state churn during the hold.
     int             followerClimbDismountFrames   = 0;
     s16             followerClimbDismountYaw      = 0;     // shape.rot.y at dismount — inject forward into this yaw
+
+    // Test 5 (log 71, Bug: "teleport offset / stuck in wall"). After a
+    // teleport (G10 leash / G11 handoff / G12 stuck), the follower lands
+    // on the leader's position and IDLE immediately recomputes
+    // `sideTarget = leaderPos + kFollowOffset` — which can be inside
+    // geometry if the leader is standing near a wall. ShouldActorUpdate
+    // then drives stick-forward toward that sideTarget and Link collides.
+    // STUCK then fires, cycles reach escalation threshold, G12 re-teleports,
+    // and the loop runs 26+ times (P2 log 71 Kokiri Forest 00:09:19).
+    //
+    // Mitigation: set a short hold counter on every teleport. While
+    // followerPostTeleportFrames > 0, ShouldActorUpdate zeroes the stick
+    // so Link stays where the teleport landed him. Decrement each tick.
+    // Gives the physics/collision system a beat to settle before the
+    // state machine moves him again; also breaks the teleport-loop
+    // cadence by starving the stuck-cycle counter's active window.
+    int             followerPostTeleportFrames    = 0;
 
     // Item pickup (Claude/Plans/ai_follower_item_pickup.md). An IDLE/FOLLOW
     // tick scans ACTORCAT_MISC for ACTOR_EN_ITEM00 drops. Eligible drops
@@ -482,6 +519,10 @@ class Anchor : public Network {
     // Returns false when there is no live PlayState or local Player. Used in
     // PrepClientState so remote clients see this client's climbing state.
     bool IsLocalPlayerClimbing() const;
+
+    // Test 5 (log 71) — whether the local Player is in a crawlspace.
+    // Returns false when there is no live PlayState or local Player.
+    bool IsLocalPlayerCrawling() const;
 
     // Option B — follower item override (see #169 polish list).
     // FollowerTryEquipRangedWeapon: if the CVar is enabled and Link has a
