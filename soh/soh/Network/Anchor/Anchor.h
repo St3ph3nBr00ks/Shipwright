@@ -304,6 +304,19 @@ class Anchor : public Network {
     int             followerStuckCycleCount = 0;                 // G12: consecutive STUCK entries within the cycle window
     int             followerStuckCycleResetFrames = 0;           // G12: counts down each frame; resets cycle count to 0 on hit zero
 
+    // Bug 7 / Phase B (2026-04-22) — door handoff. Shadow-track the leader's
+    // last-seen position WHILE THEY WERE IN OUR ROOM, so that when the
+    // leader crosses a door we know where the trigger was. On G11 room
+    // divergence, instead of immediate deactivate we:
+    //   (1) override followerMoveTarget = followerLeaderLastInOurRoom,
+    //   (2) walk the follower toward it via FOLLOW (Phase A BTN_A handles
+    //       the door open if a prompt fires),
+    //   (3) clear the handoff if we end up in the leader's room,
+    //   (4) on timeout, teleport to leader and clear.
+    bool            followerDoorHandoff           = false;
+    int             followerDoorHandoffFrames     = 0;
+    Vec3f           followerLeaderLastInOurRoom   = { 0.0f, 0.0f, 0.0f };
+
     // Item-override system (Option B). When
     // CVAR_REMOTE_ANCHOR("FollowerAllowChooseItems") is enabled, the follower
     // can temporarily override the player's C-button item assignments to use

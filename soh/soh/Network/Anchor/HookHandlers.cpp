@@ -280,15 +280,35 @@ void Anchor::SetFollowerActive(bool active) {
         followerStuckCycleResetFrames = 0;
         hasPendingTransition = false;
         pendingTransitionTimeoutFrames = 0;
+        followerDoorHandoff = false;
+        followerDoorHandoffFrames = 0;
         SPDLOG_INFO("[Follower] Activated (menu)");
     } else {
         hasPendingTransition = false;
         pendingTransitionTimeoutFrames = 0;
+        followerDoorHandoff = false;
+        followerDoorHandoffFrames = 0;
         // Safety: always restore the player's C-button loadout on any
         // deactivation path (menu toggle, joystick cancel, scene boundary,
         // leash timeout, …). FollowerRestoreItems is a no-op when no
         // override is active.
         FollowerRestoreItems();
+        // Bug 8 — defensive input cleanup. The follower hook OR-s buttons into
+        // input each frame while active; if deactivation happens mid-frame
+        // (after injection but before Player_Update consumes them), the
+        // residual bits can trigger a stray action on Link. Clear every
+        // button and stick axis the follower ever injects.
+        if (gPlayState != nullptr) {
+            Input& input = gPlayState->state.input[0];
+            constexpr u16 kFollowerButtons = BTN_A | BTN_B | BTN_Z | BTN_R |
+                                             BTN_CLEFT | BTN_CDOWN | BTN_CRIGHT;
+            input.press.button &= ~kFollowerButtons;
+            input.cur.button   &= ~kFollowerButtons;
+            input.press.stick_x = 0;
+            input.press.stick_y = 0;
+            input.cur.stick_x   = 0;
+            input.cur.stick_y   = 0;
+        }
         SPDLOG_INFO("[Follower] Deactivated (menu)");
     }
     if (changed && isConnected) {
@@ -573,6 +593,10 @@ void Anchor::RegisterHooks() {
                 // G12 — STUCK escalation: N STUCK entries within window → teleport.
                 static constexpr int kStuckCycleEscalation = 3;     // count threshold
                 static constexpr int kStuckCycleWindow     = 300;   // frames; resets count if exceeded
+                // Phase B (Bug 7) — door handoff timeout. After leader crosses a
+                // room boundary, the follower has this many frames to navigate
+                // to the door / cross the threshold itself. On timeout, teleport.
+                static constexpr int kDoorHandoffTimeout   = 360;   // ~6 s at 60fps
                 // G13 — boss scenes that warrant pre-emptive teleport on leader entry.
                 // Only Deku Tree boss is in scope for the first dungeon demo (#167);
                 // extend this list as later dungeons land.
@@ -686,22 +710,17 @@ void Anchor::RegisterHooks() {
                     if (it != clients.end() && it->second.followerActive) {
                         return false; // don't follow another follower
                     }
-                    // Fix 1 (2026-04-22) — Y-delta check is bypassed when the
-                    // candidate is climbing. Tall ladders/vines lift P1 out of
-                    // the `|Δy| < kMaxYDelta` band in the first ~1 s of the
-                    // climb, before the G1/G2 teleport handler has a chance to
-                    // fire. Ineligibility at that moment dropped the leader,
-                    // early-returned the hook, and left P2 on the ground for
-                    // the rest of the climb (P2 log 67, ladder at 15:20:19 —
-                    // 7 s climb, 0 `Leader started climbing` log on P2).
-                    // When isClimbing is true we admit regardless of Y-delta;
-                    // the CLIMBING state immediately teleports P2 to leaderPos
-                    // and holds Y-delta=0 for the remainder of the climb.
-                    bool leaderClimbing = (it != clients.end() && it->second.isClimbing);
-                    if (!leaderClimbing &&
-                        fabsf(cand->world.pos.y - player->actor.world.pos.y) >= kMaxYDelta) {
-                        return false;
-                    }
+                    // Bug 6 (2026-04-22) — Y-eligibility check REMOVED.
+                    // Previously gated on |Δy| < kMaxYDelta with a Fix 1
+                    // carve-out for isClimbing leaders. The carve-out was
+                    // necessary because tall ladders/vines lift the leader
+                    // out of the band within ~1 s, dropping the leader and
+                    // stranding the follower (log 67). Removing the gate
+                    // entirely is cleaner: the follower's stick-driven
+                    // navigation will hit walls / floors / ceilings naturally
+                    // (Link's collisions stop him), and G10 (now 3D-distance)
+                    // / G12 (stuck-cycle) catch the unreachable case.
+                    // kMaxYDelta still gates ENGAGE/IDLE enemy targeting.
                     return true;
                 };
 
@@ -858,9 +877,9 @@ void Anchor::RegisterHooks() {
 
                 // G11/G13 — leader crossed a scene or room boundary.
                 // Leader's scene/room is broadcast via UPDATE_CLIENT_STATE; if it
-                // diverges from ours, we either teleport (boss scene per G13) or
-                // deactivate the follower (default per G11) so the human can walk
-                // their own follower-Link through the door.
+                // diverges from ours, we either teleport (boss scene per G13),
+                // deactivate (different scene per G11), or initiate a door-
+                // handoff walk-through (same scene different room, Bug 7 phase B).
                 //
                 // SUPPRESSED when a pending SCENE_TRANSITION_HANDOFF is in
                 // flight (phase C): the packet already tells us exactly where
@@ -873,6 +892,23 @@ void Anchor::RegisterHooks() {
                         s8  leaderRoom  = it->second.curRoomNum;
                         s16 ourScene    = (s16)gPlayState->sceneNum;
                         s8  ourRoom     = (s8)gPlayState->roomCtx.curRoom.num;
+
+                        // Shadow-track the leader's position while we share a
+                        // room. When they cross a door and leave the room, the
+                        // follower walks toward this cached point to find the
+                        // same door, then teleports on timeout if it fails.
+                        if (leaderScene == ourScene && leaderRoom == ourRoom) {
+                            followerLeaderLastInOurRoom = leaderPos;
+                            // Rooms re-synced while a handoff was in flight:
+                            // our follower crossed the door successfully.
+                            if (followerDoorHandoff) {
+                                SPDLOG_INFO("[Follower] Door handoff complete — room re-synced (ours={})",
+                                            (int)ourRoom);
+                                followerDoorHandoff       = false;
+                                followerDoorHandoffFrames = 0;
+                            }
+                        }
+
                         if (leaderScene != ourScene) {
                             if (IsBossScene(leaderScene)) {
                                 // G13 — historically we deactivated here. With
@@ -895,15 +931,55 @@ void Anchor::RegisterHooks() {
                             SetFollowerActive(false);
                             return;
                         }
-                        // Same scene, different room: same handling as different scene
-                        // for now (rooms within a scene are typically connected by
-                        // doors that the human player must walk through).
+
+                        // Same scene, different room: Bug 7 phase B — initiate
+                        // a door handoff. The follower walks toward the leader's
+                        // last-seen position in our room (usually a door
+                        // threshold) and Phase A's DO_ACTION_ENTER injection
+                        // triggers the door animation. If we can't reach the
+                        // door within kDoorHandoffTimeout frames, teleport to
+                        // the leader (they may already be deep in the next room).
                         if (leaderRoom != ourRoom && leaderRoom != -1 && ourRoom != -1) {
-                            SPDLOG_WARN("[Follower] Leader in different room (ours={} leader={}) "
-                                        "— deactivating",
-                                        (int)ourRoom, (int)leaderRoom);
-                            SetFollowerActive(false);
-                            return;
+                            if (!followerDoorHandoff) {
+                                followerDoorHandoff       = true;
+                                followerDoorHandoffFrames = kDoorHandoffTimeout;
+                                SPDLOG_INFO("[Follower] Leader crossed room boundary (ours={} leader={}) "
+                                            "— door handoff armed (target={:.0f},{:.0f},{:.0f}, timeout={} frames)",
+                                            (int)ourRoom, (int)leaderRoom,
+                                            followerLeaderLastInOurRoom.x,
+                                            followerLeaderLastInOurRoom.y,
+                                            followerLeaderLastInOurRoom.z,
+                                            kDoorHandoffTimeout);
+                            }
+
+                            // Route the follower to the door threshold. Reuse
+                            // FOLLOW as the navigation state; its approach
+                            // logic already knows how to walk toward a target.
+                            followerMoveTarget = followerLeaderLastInOurRoom;
+                            if (followerAIState == FollowerAIState::IDLE) {
+                                followerAIState     = FollowerAIState::FOLLOW;
+                                followerStateFrames = 0;
+                                followerLastPos     = p2Pos;
+                            }
+
+                            if (followerDoorHandoffFrames > 0) {
+                                followerDoorHandoffFrames--;
+                                if (followerDoorHandoffFrames == 0) {
+                                    SPDLOG_WARN("[Follower] Door handoff TIMEOUT — teleporting to leader "
+                                                "(ours={} leader={})",
+                                                (int)ourRoom, (int)leaderRoom);
+                                    player->actor.world.pos = leaderPos;
+                                    player->actor.prevPos   = leaderPos;
+                                    followerDoorHandoff       = false;
+                                    followerOverrunFrames     = 0;
+                                    followerAIState           = FollowerAIState::IDLE;
+                                    followerStateFrames       = 0;
+                                    // Fall through — let other safety nets run
+                                    // on the new position (G10/G12 will be
+                                    // satisfied; next frame's G11 check will
+                                    // see matching rooms once room-load fires).
+                                }
+                            }
                         }
                     }
                 }
@@ -913,10 +989,18 @@ void Anchor::RegisterHooks() {
                 // continuous frames, teleport to the leader. Catches stuck-in-
                 // geometry / fell-behind / can't-traverse scenarios that the
                 // state machine couldn't recover from.
+                //
+                // Bug 6 (2026-04-22): now uses 3D distance (was XZ-only).
+                // With Y-eligibility removed from IsEligibleLeader, the
+                // "leader on a different floor" case falls through to here
+                // — Δy can be the dominant component. Treating XZ-only would
+                // miss that case entirely (log 68: P1 on floor above P2,
+                // 30 + s, no teleport fired).
                 {
                     f32 dxL = leaderPos.x - p2Pos.x;
+                    f32 dyL = leaderPos.y - p2Pos.y;
                     f32 dzL = leaderPos.z - p2Pos.z;
-                    if (dxL * dxL + dzL * dzL > kTeleportThreshold * kTeleportThreshold) {
+                    if (dxL * dxL + dyL * dyL + dzL * dzL > kTeleportThreshold * kTeleportThreshold) {
                         followerOverrunFrames++;
                         if (followerOverrunFrames >= kTeleportDelayFrames) {
                             player->actor.world.pos = leaderPos;
@@ -924,7 +1008,7 @@ void Anchor::RegisterHooks() {
                             followerOverrunFrames = 0;
                             followerAIState       = FollowerAIState::IDLE;
                             followerStateFrames   = 0;
-                            SPDLOG_INFO("[Follower] Teleported to leader (G10 leash overrun)");
+                            SPDLOG_INFO("[Follower] Teleported to leader (G10 3D leash overrun)");
                         }
                     } else {
                         followerOverrunFrames = 0;
@@ -947,18 +1031,35 @@ void Anchor::RegisterHooks() {
                     return;
                 }
 
-                // G1/G2 — leader is climbing a vine/ladder. Teleport to leader
-                // and ride along (CLIMBING state below maintains this). Edge-
-                // triggered: only enter CLIMBING if we aren't already there.
+                // G1/G2 — leader is climbing a vine/ladder. Bug 2 redesign
+                // (2026-04-22): no longer teleport-and-ride. Instead, teleport
+                // follower to leader's XZ (the ladder base) at follower's
+                // current Y, then let the CLIMBING state inject stick_y so
+                // Link's own state machine grabs the ladder and climbs
+                // naturally. This produces the real climb animation, real
+                // physics, and avoids the gravity-fight "hover slightly below
+                // P1" symptom from log 68.
+                //
+                // Edge-triggered: only enter CLIMBING if we aren't already
+                // there. The XZ-only teleport makes follower adjacent to the
+                // ladder rim; subsequent stick_y forward injection causes the
+                // ladder collider to attach Link.
                 {
                     auto it = clients.find(followerLeaderClientId);
                     if (it != clients.end() && it->second.isClimbing &&
                         followerAIState != FollowerAIState::CLIMBING) {
-                        player->actor.world.pos = leaderPos;
-                        player->actor.prevPos   = leaderPos;
+                        // Snap to leader's XZ but keep follower's Y. If
+                        // follower is already higher (leader climbing down to
+                        // us), we don't drop them; if follower is lower (the
+                        // common case), they're now at the ladder base.
+                        Vec3f ladderXz = { leaderPos.x, p2Pos.y, leaderPos.z };
+                        player->actor.world.pos = ladderXz;
+                        player->actor.prevPos   = ladderXz;
                         followerAIState     = FollowerAIState::CLIMBING;
                         followerStateFrames = 0;
-                        SPDLOG_INFO("[Follower] Leader started climbing → CLIMBING (teleport)");
+                        SPDLOG_INFO("[Follower] Leader started climbing → CLIMBING "
+                                    "(snap to ladder XZ at {:.0f},{:.0f},{:.0f})",
+                                    ladderXz.x, ladderXz.y, ladderXz.z);
                         // Refresh p2Pos snapshot since we just moved.
                         p2Pos = player->actor.world.pos;
                     }
@@ -1312,27 +1413,41 @@ void Anchor::RegisterHooks() {
                         break;
                     }
 
-                    // G1/G2 — leader is climbing. Track their position every frame.
-                    // Y-override is essential here: we want to ride up the vine/ladder
-                    // alongside the leader, not stay at our ground level. Exit when
-                    // the leader's isClimbing flips back to false.
+                    // G1/G2 — leader is climbing. Bug 2 redesign (2026-04-22):
+                    // instead of writing world.pos = leaderPos every frame
+                    // (which fights gravity between actor-update and our hook,
+                    // producing the "hover slightly below leader" symptom),
+                    // we point followerMoveTarget at leader's XZ at follower's
+                    // current Y (the ladder base / current rung) and let the
+                    // ShouldActorUpdate stick injection drive Link.
+                    //
+                    // The state machine sets a flag (followerOnLadderTarget)
+                    // so the stick-inject hook knows to use raw stick_y for
+                    // up/down rather than camera-relative XZ projection.
+                    // Once Link's PLAYER_STATE1_CLIMBING_LADDER fires (Link
+                    // physically grabbed the ladder), stick_y direction
+                    // toggles based on Δy to leader: positive (up) if leader
+                    // is higher, negative (down) if lower, zero when within
+                    // tolerance. OoT plays the real climb animation natively.
+                    //
+                    // Exit when leader's isClimbing flips back to false. The
+                    // top-of-hook re-arm only fires on rising edge so we
+                    // don't loop back into CLIMBING if leader's still
+                    // sticky-eligible.
                     case FollowerAIState::CLIMBING: {
                         auto it = clients.find(followerLeaderClientId);
                         if (it == clients.end() || !it->second.isClimbing) {
-                            // Leader stopped climbing (or disappeared from clients).
-                            // Drop to IDLE so the next FOLLOW recomputes sideTarget
-                            // around the leader's new ground position.
                             followerAIState     = FollowerAIState::IDLE;
                             followerStateFrames = 0;
                             SPDLOG_INFO("[Follower] CLIMBING→IDLE (leader stopped climbing)");
                             break;
                         }
-                        // Stay glued to the leader for the duration of the climb.
-                        // This is one of the documented exceptions to the "STUCK is
-                        // the only world.pos writer" rule (see Batch A safety nets).
-                        player->actor.world.pos = leaderPos;
-                        player->actor.prevPos   = leaderPos;
-                        // Match leader's facing so we don't visually pop on dismount.
+                        // followerMoveTarget = leader's XZ at the leader's
+                        // current Y. ShouldActorUpdate's CLIMBING-aware
+                        // injection reads this for direction (leader.y vs
+                        // p2Pos.y).
+                        followerMoveTarget = leaderPos;
+                        // Match leader's facing so dismount looks clean.
                         player->actor.shape.rot.y = leaderActor->shape.rot.y;
                         break;
                     }
@@ -1494,11 +1609,12 @@ void Anchor::RegisterHooks() {
                     // at enemyPos, so the swing also goes toward the enemy
                     // — OoT reads stick on the BTN_B edge-press frame to set
                     // swing direction, which agrees with the approach direction.
-                    bool isMoving = (followerAIState == FollowerAIState::FOLLOW ||
-                                     followerAIState == FollowerAIState::STUCK  ||
-                                     followerAIState == FollowerAIState::ENGAGE ||
-                                     followerAIState == FollowerAIState::ATTACK ||
-                                     followerAIState == FollowerAIState::RETURN);
+                    bool isMoving = (followerAIState == FollowerAIState::FOLLOW   ||
+                                     followerAIState == FollowerAIState::STUCK    ||
+                                     followerAIState == FollowerAIState::ENGAGE   ||
+                                     followerAIState == FollowerAIState::ATTACK   ||
+                                     followerAIState == FollowerAIState::RETURN   ||
+                                     followerAIState == FollowerAIState::CLIMBING);
 
                     // --- Joystick cancel ---
                     // Read hardware values BEFORE we inject anything. OoT resets input.cur
@@ -1527,14 +1643,28 @@ void Anchor::RegisterHooks() {
                     Player* player = (Player*)actor;
                     u32 sf1 = player->stateFlags1;
                     u32 sf2 = player->stateFlags2;
+                    bool nowOnLadder = (sf1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
+                    // CLIMBING_LADDER is normally blocked (stick during a real
+                    // climb would spam OoT's input). Bug 2 (2026-04-22): when
+                    // our follower state is CLIMBING, we WANT stick injection
+                    // to drive Link up/down the ladder. The CLIMBING-aware
+                    // injection block below handles it via a different code
+                    // path; here we just exempt CLIMBING_LADDER from the
+                    // blocked list when we're actively driving.
                     bool blockedByPlayerState =
-                        (sf1 & PLAYER_STATE1_CLIMBING_LADDER)   ||
                         (sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) ||
                         (sf1 & PLAYER_STATE1_CLIMBING_LEDGE)    ||
                         (sf1 & PLAYER_STATE1_IN_CUTSCENE)       ||
                         (sf1 & PLAYER_STATE1_DAMAGED)           ||
                         (sf1 & PLAYER_STATE1_TALKING)           ||
                         (sf1 & PLAYER_STATE1_INPUT_DISABLED);
+                    if (nowOnLadder && followerAIState != FollowerAIState::CLIMBING) {
+                        // On a ladder but our state machine isn't in CLIMBING:
+                        // user manually grabbed it, or we mis-entered from a
+                        // non-climbing state. Block stick injection — let the
+                        // human resume control via the joystick-cancel path.
+                        blockedByPlayerState = true;
+                    }
 
                     // --- Walk/run: camera-relative stick toward followerMoveTarget ---
                     // OoT's movement pipeline: worldYaw = Camera_GetInputDirYaw(cam) + stickAngle,
@@ -1582,6 +1712,57 @@ void Anchor::RegisterHooks() {
                         input.cur.stick_y = 127;
                         input.rel.stick_x = 0;
                         input.rel.stick_y = 127;
+                    } else if (followerAIState == FollowerAIState::CLIMBING) {
+                        // Bug 2 (2026-04-22): natural ladder grab + climb.
+                        // Two phases:
+                        //   (a) Not on ladder yet (nowOnLadder == false):
+                        //       follower is approaching the ladder from the
+                        //       side. Drive stick forward toward
+                        //       followerMoveTarget (= leader's XZ at leader's
+                        //       Y) using the standard camera-relative
+                        //       projection so OoT's collision sees Link
+                        //       walking into the ladder face-first and
+                        //       attaches him.
+                        //   (b) On ladder (nowOnLadder == true): OoT uses
+                        //       raw stick_y for vertical motion. Direction
+                        //       comes from comparing leader.y to follower.y:
+                        //       leader higher → up, lower → down, within
+                        //       tolerance → zero (we've reached them).
+                        //       Stick_x is irrelevant during climb.
+                        Vec3f p2w = actor->world.pos;
+                        if (nowOnLadder) {
+                            f32 dyL = followerMoveTarget.y - p2w.y;
+                            static constexpr f32 kClimbYTolerance = 8.0f;
+                            s8  ladderY = 0;
+                            if (dyL >  kClimbYTolerance)      ladderY =  127;
+                            else if (dyL < -kClimbYTolerance) ladderY = -127;
+                            input.cur.stick_x = 0;
+                            input.cur.stick_y = ladderY;
+                            input.rel.stick_x = 0;
+                            input.rel.stick_y = ladderY;
+                        } else {
+                            // Walk toward ladder. Reuse the standard
+                            // camera-relative inversion (smaller copy here so
+                            // we can ignore the magnitude curve — full
+                            // forward into the ladder gets the grab).
+                            f32 dx = followerMoveTarget.x - p2w.x;
+                            f32 dz = followerMoveTarget.z - p2w.z;
+                            if (dx * dx + dz * dz > 1.0f) {
+                                Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                                s16 inputDirYaw = Camera_GetInputDirYaw(cam);
+                                s16 worldYaw    = Math_Atan2S(dz, dx);
+                                s16 stickAngle  = worldYaw - inputDirYaw;
+                                s8  stickY = (s8)( Math_CosS(stickAngle) * 127.0f);
+                                s8  stickX = (s8)(-Math_SinS(stickAngle) * 127.0f);
+                                input.cur.stick_x = stickX;
+                                input.cur.stick_y = stickY;
+                                input.rel.stick_x = stickX;
+                                input.rel.stick_y = stickY;
+                            } else {
+                                input.cur.stick_x = 0; input.cur.stick_y = 0;
+                                input.rel.stick_x = 0; input.rel.stick_y = 0;
+                            }
+                        }
                     } else if (isMoving && !blockedByPlayerState) {
                         Vec3f p2w = actor->world.pos;
                         f32 dx = followerMoveTarget.x - p2w.x;
@@ -1718,21 +1899,35 @@ void Anchor::RegisterHooks() {
                         input.cur.button   |= BTN_R;
                     }
 
-                    // G6/G7/G8 — RANGED_ATTACK: Z-target + C-button (to draw
-                    // the weapon) + A (to fire). Z and the C-button are held
-                    // every frame to keep the lock-on and the weapon drawn;
-                    // A is edge-pressed every 20 frames (same cadence as
-                    // BTN_B in ATTACK) to fire.
+                    // G6/G7/G8 — RANGED_ATTACK: draw weapon, aim, release-to-fire.
+                    //
+                    // Bug 4 (2026-04-22) — release-to-fire cycle. Prior code
+                    // pressed Z + C-button + A every frame. Three problems:
+                    //   1. Setting input.press.button every frame = OoT sees
+                    //      "just pressed" every frame, so the slingshot draw
+                    //      animation never settles into ready-to-fire.
+                    //   2. A-press before Link is fully drawn = roll/jump
+                    //      attack, not fire (matches user's "rolled instead").
+                    //   3. The natural OoT firing path is "release the
+                    //      C-button to auto-fire the primed shot" — A-press
+                    //      is the secondary path.
+                    //
+                    // New cycle: hold Z + C-button (cur only, press on entry
+                    // edge), drop the C-button for one frame every kFireCycleFrames
+                    // to trigger auto-fire. Re-press the next frame to re-draw.
                     //
                     // Option B — the C-button press is only meaningful if
-                    // followerActiveCSlot != 0xFF, which happens when
-                    // FollowerTryEquipRangedWeapon succeeded (CVar enabled
-                    // AND player had a slingshot/bow). Otherwise we fall
-                    // back to Z+A alone — which is a no-op visually but
-                    // doesn't corrupt player input.
+                    // followerActiveCSlot != 0xFF (CVar enabled AND player has
+                    // a slingshot/bow). Otherwise the C-button block is
+                    // skipped; Z is still held but no fire happens.
                     if (followerAIState == FollowerAIState::RANGED_ATTACK) {
-                        input.press.button |= BTN_Z;
-                        input.cur.button   |= BTN_Z;
+                        static constexpr int kFireCycleFrames = 60;
+                        // Z: edge-press on entry, hold via cur thereafter.
+                        if (followerStateFrames == 0) {
+                            input.press.button |= BTN_Z;
+                        }
+                        input.cur.button |= BTN_Z;
+
                         u16 cBtn = 0;
                         switch (followerActiveCSlot) {
                             case 0: cBtn = BTN_CLEFT;  break;
@@ -1741,16 +1936,37 @@ void Anchor::RegisterHooks() {
                             default: break;
                         }
                         if (cBtn != 0) {
-                            input.press.button |= cBtn;
-                            input.cur.button   |= cBtn;
+                            int phase = followerStateFrames % kFireCycleFrames;
+                            // Phase 0: edge-press the C-button (start draw)
+                            // Phase 1 .. (kFireCycleFrames-2): hold via cur (aim/prime)
+                            // Phase (kFireCycleFrames-1): RELEASE for one frame
+                            //   (don't set cur, don't set press) → OoT auto-fires
+                            //   the primed shot.
+                            if (phase == 0) {
+                                input.press.button |= cBtn;
+                                input.cur.button   |= cBtn;
+                                SPDLOG_INFO("[Follower] RANGED_ATTACK draw cycle (cSlot={})",
+                                            (int)followerActiveCSlot);
+                            } else if (phase == kFireCycleFrames - 1) {
+                                // Release frame — explicitly do NOT add cBtn
+                                // to either cur or press. This is the fire.
+                                SPDLOG_INFO("[Follower] RANGED_ATTACK release-to-fire (cSlot={})",
+                                            (int)followerActiveCSlot);
+                            } else {
+                                input.cur.button |= cBtn;
+                            }
                         }
-                        if (followerStateFrames % 20 == 0) {
+
+                        // BTN_A as a backup fire path. Only inject when
+                        // PLAYER_STATE1_READY_TO_FIRE is set — that's OoT's
+                        // signal that the slingshot/bow is fully drawn and
+                        // primed. Pressing A before this would do roll /
+                        // jump-attack instead.
+                        if ((sf1 & PLAYER_STATE1_READY_TO_FIRE) &&
+                            (followerStateFrames % 20 == 0)) {
                             input.press.button |= BTN_A;
                             input.cur.button   |= BTN_A;
-                            SPDLOG_INFO("[Follower] RANGED_ATTACK injecting BTN_A "
-                                        "(stateFrames={}, cSlot={})",
-                                        followerStateFrames,
-                                        (int)followerActiveCSlot);
+                            SPDLOG_INFO("[Follower] RANGED_ATTACK BTN_A fire (READY_TO_FIRE set)");
                         }
                     }
                 });
@@ -1831,6 +2047,57 @@ void Anchor::RegisterHooks() {
                     (int)posHash, (int)ext.limbCount,
                     isDynamicSpawn ? "dynamic" : "static");
 
+        // Bug 1 (2026-04-22, log 68) — host respawn guard.
+        //
+        // OoT unloads / reloads room actors on every room transition, even
+        // within a single scene visit. When the host briefly leaves a room
+        // (e.g., Deku Tree Room 0 → Room 1 (Mad Scrub) → Room 0 again,
+        // ~6 s round trip), all room-0 actors get freshly re-spawned via
+        // their normal Init path. Their EnemyNetIds are recomputed
+        // deterministically (same scene + actor id + posHash → same netId
+        // values as before). Without this guard, the host's fresh Dekubabas
+        // come back alive, host sends ENEMY_UPDATE with health > 0, and
+        // non-host clients that had already killed them are forced to choose
+        // between (a) overwriting their dead state (visually revives the
+        // enemy) or (b) keeping it dead via hasLocalDeath (mismatch between
+        // clients).
+        //
+        // Fix: on host, check deadEnemiesByScene[sceneNum] for the freshly-
+        // computed netId. If present, the player previously killed this
+        // enemy this scene-visit — kill it again on respawn. Same Karebaba /
+        // non-Karebaba split as the pendingKillNetIds branch below; for
+        // Karebaba the deferredDeadItemDrop flag is set so OnActorInit can
+        // apply SetupDeadItemDrop AFTER actor->init() runs (otherwise
+        // EnKarebaba_Init resets actionFunc back to Idle on Frame 1).
+        // deadEnemiesByScene is cleared on OnSceneSpawnActors, so this
+        // guard only suppresses same-scene-visit revivals — leaving and
+        // re-entering the scene proper still respawns enemies as expected.
+        if (roomState.ownerClientId == ownClientId) {
+            auto deadIt = deadEnemiesByScene.find(gPlayState->sceneNum);
+            if (deadIt != deadEnemiesByScene.end() && deadIt->second.count(netId)) {
+                SPDLOG_INFO("[EnemySpawn] deadEnemiesByScene hit for netId={} on host — "
+                            "suppressing same-scene respawn (id={})",
+                            netId, actor->id);
+                if (actor->id == ACTOR_EN_KAREBABA) {
+                    EnemyNetId* extPtr = const_cast<EnemyNetId*>(
+                        ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+                    if (extPtr != nullptr) {
+                        extPtr->hasLocalDeath        = true;
+                        extPtr->pendingNaturalDeath  = true;
+                        extPtr->defeatPacketSent     = true;
+                        // OnActorInit applies SetupDeadItemDrop after init() runs.
+                        // Gated on deferredDeadItemDrop, not on host/non-host.
+                        extPtr->deferredDeadItemDrop = true;
+                    }
+                } else {
+                    isKillingNetworkActor = true;
+                    Actor_Kill(actor);
+                    isKillingNetworkActor = false;
+                }
+                return;
+            }
+        }
+
         // If an ENEMY_DEFEATED for this netId arrived before the scene finished
         // loading (race between scene load and packet delivery), kill it now.
         // Karebaba: use the natural death cycle so it can respawn later, same as
@@ -1894,10 +2161,10 @@ void Anchor::RegisterHooks() {
     // update(), so we can safely override here without being overwritten.
     COND_ID_HOOK(OnActorInit, ACTOR_EN_KAREBABA, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
-        // Only non-host needs this — host never sets deferredDeadItemDrop.
-        if (roomState.ownerClientId == ownClientId) {
-            return;
-        }
+        // 2026-04-22 (Bug 1): host now also sets deferredDeadItemDrop in the
+        // OnActorSpawn deadEnemiesByScene-respawn-guard branch. Gate on the
+        // flag itself rather than on host/non-host so both code paths reach
+        // the same SetupDeadItemDrop application below.
         if (!IsSaveLoaded() || gPlayState == nullptr) {
             return;
         }
