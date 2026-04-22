@@ -606,8 +606,16 @@ void Anchor::RegisterHooks() {
                     // (En_Door / Door_Shutter / etc.) — Phase A injects
                     // BTN_A for all three. Mask BTN_A in any of these
                     // cases so our own injection doesn't cancel follower.
+                    //
+                    // Test 10 (log 79, Bug 1) — `followerDoorPressCooldown`
+                    // covers the mid-frame race: Phase A injects this frame,
+                    // Player_Update consumes + clears doorType same frame,
+                    // deactivate-check then reads press.button with no
+                    // matching mask condition. Counter armed on injection,
+                    // decremented below in the post-check tick.
                     if (player != nullptr &&
-                        ((player->stateFlags2 &
+                        (followerDoorPressCooldown > 0 ||
+                         (player->stateFlags2 &
                           (PLAYER_STATE2_DO_ACTION_CLIMB | PLAYER_STATE2_DO_ACTION_ENTER)) ||
                          (player->doorType != PLAYER_DOORTYPE_NONE &&
                           player->doorType != PLAYER_DOORTYPE_FAKE))) {
@@ -651,6 +659,13 @@ void Anchor::RegisterHooks() {
                 // change).
                 followerTickCounter++;
 
+                // Test 10 (log 79, Bug 1) — tick down door-press BTN_A
+                // cooldown. Mask reads `> 0` each frame; decrement here
+                // AFTER the mask has had its chance to strip BTN_A.
+                if (followerDoorPressCooldown > 0) {
+                    followerDoorPressCooldown--;
+                }
+
                 // G18 — full cutscene suspension. csCtx.state == CS_STATE_IDLE means
                 // no cutscene; anything else is an active CS frame and we must not
                 // touch the player's state machine. Stick suppression alone (in
@@ -672,8 +687,14 @@ void Anchor::RegisterHooks() {
                 }
 
                 // --- AI follower state machine ---
-                // Constants (do not change follow offset — set by prior session).
-                static constexpr f32 kFollowOffset       = 50.0f;  // world +X from leader
+                // Test 10 (log 79, Bug 2 mitigation) — tightened from 50 u
+                // to 25 u. User had reserved this as a Test 8 fallback.
+                // Larger offsets put the follower's sideTarget adjacent to
+                // holes/ledges the leader was walking beside (e.g. Deku
+                // Tree Mad Scrub hole) — follower walks to sideTarget and
+                // falls in. 25 u keeps the follower visibly offset without
+                // straying as far into hazardous geometry.
+                static constexpr f32 kFollowOffset       = 25.0f;  // world +X from leader
                 static constexpr f32 kFollowThreshold    = 100.0f; // dist to switch FOLLOW↔IDLE
                 static constexpr f32 kEngageRange        = 350.0f; // enemy detection radius (XZ)
                 static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius (XZ)
@@ -1291,7 +1312,8 @@ void Anchor::RegisterHooks() {
                         // follower walks toward this cached point to find the
                         // same door, then teleports on timeout if it fails.
                         if (leaderScene == ourScene && leaderRoom == ourRoom) {
-                            followerLeaderLastInOurRoom = leaderPos;
+                            followerLeaderLastInOurRoom       = leaderPos;
+                            followerLeaderLastInOurRoomNumber = ourRoom;
                             // Rooms re-synced while a handoff was in flight:
                             // our follower crossed the door successfully.
                             if (followerDoorHandoff) {
@@ -1374,37 +1396,50 @@ void Anchor::RegisterHooks() {
                                 // Test 9 — on the arm edge (first frame rooms
                                 // diverge), teleport follower to leader's
                                 // last-same-room position + match rotation.
-                                // The follower was behind the leader (+50 u
-                                // side offset) when leader crossed, so the
-                                // follower wouldn't reach the door trigger
-                                // before timing out (log 78 handoff #1 =
-                                // 17.95 s timeout). Teleport lands follower
-                                // directly on the leader's last trajectory
-                                // at the door threshold; Phase A's BTN_A
-                                // injection then opens the door without the
-                                // walk-to-trigger leg. Uses world.pos
-                                // directly (same room), prevPos, and copies
-                                // leader's shape.rot.y so Link faces the
-                                // same direction and the door's front-face
-                                // detection logic works.
-                                player->actor.world.pos = followerLeaderLastInOurRoom;
-                                player->actor.prevPos   = followerLeaderLastInOurRoom;
-                                player->actor.shape.rot.y = leaderActor->shape.rot.y;
-                                // Post-teleport hold: zero stick for the
-                                // hold window so Link settles before the
-                                // state machine resumes pushing him around.
-                                followerPostTeleportFrames = 30;
-                                followerStuckCycleCount    = 0;
-                                followerStuckCycleResetFrames = 0;
-                                followerOverrunFrames      = 0;
+                                //
+                                // Test 10 (log 79, Bug 2) — GUARD on the
+                                // teleport. `followerLeaderLastInOurRoom`
+                                // was recorded in room
+                                // `followerLeaderLastInOurRoomNumber`.
+                                // If follower's CURRENT room matches that
+                                // number, the teleport is same-room: safe
+                                // to write world.pos directly. If NOT
+                                // (follower already crossed a room boundary
+                                // themselves — Mad Scrub fall-through hole
+                                // was observed looping at 20 Hz in log 79),
+                                // writing world.pos to another room's
+                                // coordinates produces a broken state
+                                // where Link is visually in room A but
+                                // roomCtx.curRoom.num is room B — eventually
+                                // resolved by a void-out respawn back to
+                                // room A, after which the follower walks
+                                // back into the hole from sideTarget. Skip
+                                // the teleport in that case; handoff nav +
+                                // G10/G12 will handle via scene-reload.
+                                bool teleportSafe =
+                                    (followerLeaderLastInOurRoomNumber == ourRoom);
+                                if (teleportSafe) {
+                                    player->actor.world.pos = followerLeaderLastInOurRoom;
+                                    player->actor.prevPos   = followerLeaderLastInOurRoom;
+                                    player->actor.shape.rot.y = leaderActor->shape.rot.y;
+                                    // Post-teleport hold: zero stick for
+                                    // the hold window so Link settles
+                                    // before the state machine resumes.
+                                    followerPostTeleportFrames = 30;
+                                    followerStuckCycleCount    = 0;
+                                    followerStuckCycleResetFrames = 0;
+                                    followerOverrunFrames      = 0;
+                                }
                                 SPDLOG_INFO("[Follower] Leader crossed room boundary (ours={} leader={}) "
-                                            "— door handoff armed; follower teleported to leader-last-pos "
-                                            "({:.0f},{:.0f},{:.0f}) yaw={} target={:.0f},{:.0f},{:.0f} {} "
+                                            "— door handoff armed; teleport={} last-pos=({:.0f},{:.0f},{:.0f}) "
+                                            "last-room={} yaw={} target={:.0f},{:.0f},{:.0f} {} "
                                             "timeout={} frames",
                                             (int)ourRoom, (int)leaderRoom,
+                                            teleportSafe ? "fired" : "SKIPPED(room-mismatch)",
                                             followerLeaderLastInOurRoom.x,
                                             followerLeaderLastInOurRoom.y,
                                             followerLeaderLastInOurRoom.z,
+                                            (int)followerLeaderLastInOurRoomNumber,
                                             (int)leaderActor->shape.rot.y,
                                             doorTarget.x, doorTarget.y, doorTarget.z,
                                             doorFound ? "transition-actor" : "shadow-position",
@@ -2660,6 +2695,18 @@ void Anchor::RegisterHooks() {
                         if (promptActive) {
                             input.press.button |= BTN_A;
                             input.cur.button   |= BTN_A;
+                            // Test 10 (log 79, Bug 1) — arm cooldown.
+                            // Player_Update consumes this press THIS FRAME
+                            // to start the door-open animation and clears
+                            // doorType in the same pass, before OnGameFrame-
+                            // Update's deactivate-check reads press.button.
+                            // Without this counter, the mask's doorType
+                            // condition has already flipped to NONE by
+                            // deactivate-check time → BTN_A in press,
+                            // mask doesn't strip, follower self-cancels
+                            // ("state=IDLE press=0x8000").
+                            static constexpr int kDoorPressCooldownFrames = 5;
+                            followerDoorPressCooldown = kDoorPressCooldownFrames;
                         }
                     }
 

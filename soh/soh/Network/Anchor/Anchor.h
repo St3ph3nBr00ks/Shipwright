@@ -393,6 +393,31 @@ class Anchor : public Network {
     // cadence by starving the stuck-cycle counter's active window.
     int             followerPostTeleportFrames    = 0;
 
+    // Test 10 (log 79, Bug 1). Phase A injects BTN_A on frame N when
+    // doorType != NONE. Player_Update (also frame N, after ShouldActorUpdate)
+    // consumes the press to start the door-open animation and CLEARS
+    // doorType. OnGameFrameUpdate's deactivate-check (end of frame N) reads
+    // press.button = BTN_A, evaluates doorType — already NONE — so the
+    // mask doesn't strip the bit → `state=IDLE press=0x8000` self-cancel.
+    //
+    // Fix: whenever Phase A injects BTN_A (door prompt OR DO_ACTION_ENTER),
+    // arm this counter. While > 0, deactivate-check masks BTN_A
+    // unconditionally. Covers the mid-frame race without needing to know
+    // exactly which frame doorType transitions.
+    int             followerDoorPressCooldown     = 0;
+
+    // Test 10 (log 79, Bug 2). Room number where `followerLeaderLastInOurRoom`
+    // was recorded. Defaults to -1 (unknown). Set every frame rooms match.
+    // The G11 arm-edge teleport uses world.pos (same-room only); if the
+    // follower has already crossed a room boundary before the handoff fires
+    // (e.g. follower fell into Mad Scrub hole on their own), world.pos
+    // teleport puts Link at the old-room coordinates while roomCtx stays
+    // at the new room — broken-state loop. Guard: only teleport if the
+    // follower's current room matches the room this shadow was recorded
+    // in. If mismatch, skip the teleport and let G10/G12 handle via
+    // scene-reload (respawn pipeline).
+    s8              followerLeaderLastInOurRoomNumber = -1;
+
     // Test 6 (user request 2026-04-22). G14 — close-to-leader fail-timeout.
     // Complements G10 (hard XYZ leash exceeds threshold) and G12 (STUCK
     // cycle escalation). G14 catches the slow-drift case: follower keeps
