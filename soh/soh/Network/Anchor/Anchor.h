@@ -375,6 +375,23 @@ class Anchor : public Network {
     // cadence by starving the stuck-cycle counter's active window.
     int             followerPostTeleportFrames    = 0;
 
+    // Test 6 (user request 2026-04-22). G14 — close-to-leader fail-timeout.
+    // Complements G10 (hard XYZ leash exceeds threshold) and G12 (STUCK
+    // cycle escalation). G14 catches the slow-drift case: follower keeps
+    // trying to close on leader but geometry / state-machine churn
+    // prevents meaningful progress, and G10's threshold (1200 u) is too
+    // large to trigger. If follower is outside `kG14MinDistance` from
+    // leader AND hasn't reduced distance by `kG14ProgressDelta` in
+    // `kG14TimeoutFrames` (10 s), teleport.
+    //
+    //   followerCloseFailBaseline — distance snapshot at last "progress"
+    //       moment. Reset to current distance whenever follower gets
+    //       meaningfully closer, OR leaves a movement state.
+    //   followerCloseFailFrames   — frames since the baseline was set.
+    //       When >= kG14TimeoutFrames, fire the teleport.
+    f32             followerCloseFailBaseline     = 0.0f;
+    int             followerCloseFailFrames       = 0;
+
     // Item pickup (Claude/Plans/ai_follower_item_pickup.md). An IDLE/FOLLOW
     // tick scans ACTORCAT_MISC for ACTOR_EN_ITEM00 drops. Eligible drops
     // (need-filtered; see FollowerWantsItem in HookHandlers.cpp) trigger a

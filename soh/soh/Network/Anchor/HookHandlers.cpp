@@ -297,6 +297,8 @@ void Anchor::SetFollowerActive(bool active) {
         followerDoorHandoff = false;
         followerDoorHandoffFrames = 0;
         followerClimbDismountFrames = 0;
+        followerCloseFailBaseline = 0.0f;
+        followerCloseFailFrames = 0;
         SPDLOG_INFO("[Follower] Activated (menu)");
     } else {
         hasPendingTransition = false;
@@ -304,6 +306,8 @@ void Anchor::SetFollowerActive(bool active) {
         followerDoorHandoff = false;
         followerDoorHandoffFrames = 0;
         followerClimbDismountFrames = 0;
+        followerCloseFailBaseline = 0.0f;
+        followerCloseFailFrames = 0;
         // Safety: always restore the player's C-button loadout on any
         // deactivation path (menu toggle, joystick cancel, scene boundary,
         // leash timeout, …). FollowerRestoreItems is a no-op when no
@@ -541,10 +545,10 @@ void Anchor::RegisterHooks() {
                 // mask; fixed by the block below).
                 //
                 // Current mask table:
-                //   ENGAGE/ATTACK         → BTN_Z   (lock-on, Bug D)
-                //   ATTACK                → BTN_B | BTN_R (swing + shield)
+                //   ENGAGE/ATTACK         → BTN_Z   (lock-on tap, Bug D / Test 6)
+                //   ATTACK                → BTN_A | BTN_B | BTN_R (jump/swing/shield)
                 //   BLOCK                 → BTN_R   (shield plant)
-                //   RANGED_ATTACK         → BTN_Z | BTN_A | C-slot
+                //   RANGED_ATTACK         → BTN_Z | C-slot (BTN_A fire removed Test 6)
                 //   GETTING_ITEM/TALKING  → BTN_A   (text-box dismiss)
                 //   DO_ACTION_CLIMB/ENTER → BTN_A   (ladder + door auto-press)
                 if (followerActive) {
@@ -553,9 +557,11 @@ void Anchor::RegisterHooks() {
                     // Mask off buttons WE inject — otherwise our own input would
                     // cancel follower mode the frame after we inject it.
                     if (followerAIState == FollowerAIState::ATTACK) {
-                        // Swing frames inject BTN_B; non-swing frames inject
-                        // BTN_R for the between-swings shield (Test 5 fix).
-                        deactivateCheck &= ~(BTN_B | BTN_R);
+                        // Swing frames inject BTN_B (normal) or BTN_A (jump-
+                        // attack when locked + too far for regular swing,
+                        // Test 6 fix). Non-swing frames inject BTN_R for the
+                        // between-swings shield (Test 5 fix).
+                        deactivateCheck &= ~(BTN_A | BTN_B | BTN_R);
                     }
                     if (followerAIState == FollowerAIState::BLOCK) {
                         deactivateCheck &= ~BTN_R;
@@ -1118,6 +1124,8 @@ void Anchor::RegisterHooks() {
                     followerStuckCycleCount       = 0;
                     followerStuckCycleResetFrames = 0;
                     followerPostTeleportFrames    = kPostTeleportHoldFrames;
+                    followerCloseFailBaseline     = 0.0f;
+                    followerCloseFailFrames       = 0;
                     if (!roomsDiffer) {
                         player->actor.world.pos = destPos;
                         player->actor.prevPos   = destPos;
@@ -1310,22 +1318,58 @@ void Anchor::RegisterHooks() {
                         // door within kDoorHandoffTimeout frames, teleport to
                         // the leader (they may already be deep in the next room).
                         if (leaderRoom != ourRoom && leaderRoom != -1 && ourRoom != -1) {
+                            // Test 6 (log 74) follow-up — scan for a
+                            // transition actor (door / shutter) whose
+                            // `sides[]` connect ourRoom ↔ leaderRoom.
+                            // OoT's TransitionActorEntry carries the
+                            // door's world position and the two rooms it
+                            // bridges; using that position as the nav
+                            // target puts the follower exactly on the
+                            // door trigger so Phase A's DO_ACTION_ENTER
+                            // BTN_A injection fires. Falls back to the
+                            // shadow-tracked `followerLeaderLastInOurRoom`
+                            // if no matching transition is found (e.g.
+                            // fall-through holes like Deku Tree 0→10,
+                            // where the "transition" is vertical gravity
+                            // and no door actor exists on the centerline).
+                            Vec3f doorTarget = followerLeaderLastInOurRoom;
+                            bool  doorFound  = false;
+                            {
+                                TransitionActorContext* tac = &gPlayState->transiActorCtx;
+                                for (s32 i = 0; i < tac->numActors; i++) {
+                                    const TransitionActorEntry* e = &tac->list[i];
+                                    bool matchesRoomPair =
+                                        (e->sides[0].room == (s8)ourRoom    &&
+                                         e->sides[1].room == (s8)leaderRoom) ||
+                                        (e->sides[0].room == (s8)leaderRoom &&
+                                         e->sides[1].room == (s8)ourRoom);
+                                    if (matchesRoomPair) {
+                                        doorTarget.x = (f32)e->pos.x;
+                                        doorTarget.y = (f32)e->pos.y;
+                                        doorTarget.z = (f32)e->pos.z;
+                                        doorFound    = true;
+                                        break;
+                                    }
+                                }
+                            }
+
                             if (!followerDoorHandoff) {
                                 followerDoorHandoff       = true;
                                 followerDoorHandoffFrames = kDoorHandoffTimeout;
                                 SPDLOG_INFO("[Follower] Leader crossed room boundary (ours={} leader={}) "
-                                            "— door handoff armed (target={:.0f},{:.0f},{:.0f}, timeout={} frames)",
+                                            "— door handoff armed (target={:.0f},{:.0f},{:.0f} {}, "
+                                            "timeout={} frames)",
                                             (int)ourRoom, (int)leaderRoom,
-                                            followerLeaderLastInOurRoom.x,
-                                            followerLeaderLastInOurRoom.y,
-                                            followerLeaderLastInOurRoom.z,
+                                            doorTarget.x, doorTarget.y, doorTarget.z,
+                                            doorFound ? "transition-actor" : "shadow-position",
                                             kDoorHandoffTimeout);
                             }
 
-                            // Route the follower to the door threshold. Reuse
-                            // FOLLOW as the navigation state; its approach
-                            // logic already knows how to walk toward a target.
-                            followerMoveTarget = followerLeaderLastInOurRoom;
+                            // Route the follower to the transition actor
+                            // position (preferred) or the shadow-tracked
+                            // leader position (fallback). FOLLOW's approach
+                            // logic handles the rest.
+                            followerMoveTarget = doorTarget;
                             if (followerAIState == FollowerAIState::IDLE) {
                                 followerAIState     = FollowerAIState::FOLLOW;
                                 followerStateFrames = 0;
@@ -1402,6 +1446,67 @@ void Anchor::RegisterHooks() {
                     followerAIState               = FollowerAIState::IDLE;
                     followerStateFrames           = 0;
                     return;
+                }
+
+                // G14 — close-to-leader fail-timeout (Test 6, user request).
+                // G10 catches hard leash overruns (> 1200 u for 2 s); G12
+                // catches stuck-cycle loops. Between those two is a gap:
+                // follower is 200-1200 u from leader, actively trying to
+                // close, but terrain/state-machine churn prevents progress.
+                // G14 measures baseline distance and fires a teleport when
+                // the follower hasn't reduced distance by `kG14ProgressDelta`
+                // in `kG14TimeoutFrames`.
+                //
+                // Reset the baseline whenever the follower makes progress
+                // (delta > kG14ProgressDelta) OR leaves a "trying to move"
+                // state (IDLE / CLIMBING / BLOCK / STANDBY / RANGED_ATTACK
+                // / COLLECT_ITEM are excluded).
+                static constexpr f32 kG14MinDistance     = 200.0f;   // below this, no teleport
+                static constexpr f32 kG14ProgressDelta   = 30.0f;    // units of "progress"
+                static constexpr int kG14TimeoutFrames   = 600;      // ~10 s at 60 fps
+                {
+                    bool actingToClose =
+                        (followerAIState == FollowerAIState::FOLLOW  ||
+                         followerAIState == FollowerAIState::STUCK   ||
+                         followerAIState == FollowerAIState::ENGAGE  ||
+                         followerAIState == FollowerAIState::ATTACK  ||
+                         followerAIState == FollowerAIState::RETURN);
+                    if (!actingToClose) {
+                        // Non-closing state — reset so we don't inherit
+                        // stale counter on next movement state entry.
+                        followerCloseFailBaseline = 0.0f;
+                        followerCloseFailFrames   = 0;
+                    } else {
+                        f32 dxCL = leaderPos.x - p2Pos.x;
+                        f32 dyCL = leaderPos.y - p2Pos.y;
+                        f32 dzCL = leaderPos.z - p2Pos.z;
+                        f32 distToLeader = sqrtf(dxCL * dxCL + dyCL * dyCL + dzCL * dzCL);
+                        if (distToLeader < kG14MinDistance) {
+                            followerCloseFailBaseline = 0.0f;
+                            followerCloseFailFrames   = 0;
+                        } else {
+                            if (followerCloseFailBaseline == 0.0f ||
+                                distToLeader < followerCloseFailBaseline - kG14ProgressDelta) {
+                                // First entry OR made progress — reset.
+                                followerCloseFailBaseline = distToLeader;
+                                followerCloseFailFrames   = 0;
+                            } else {
+                                followerCloseFailFrames++;
+                                if (followerCloseFailFrames >= kG14TimeoutFrames) {
+                                    SPDLOG_WARN("[Follower] G14 close-fail timeout "
+                                                "(baseline={:.0f} now={:.0f} frames={})",
+                                                followerCloseFailBaseline, distToLeader,
+                                                followerCloseFailFrames);
+                                    TeleportToLeader("G14 close-fail timeout");
+                                    followerCloseFailBaseline = 0.0f;
+                                    followerCloseFailFrames   = 0;
+                                    followerAIState           = FollowerAIState::IDLE;
+                                    followerStateFrames       = 0;
+                                    return;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // G1/G2 — leader is climbing a vine/ladder. Bug 2 redesign
@@ -1724,7 +1829,40 @@ void Anchor::RegisterHooks() {
                             SPDLOG_INFO("[Follower] ENGAGE progress: distToEnemy={:.0f} p2=({:.0f},{:.0f})",
                                         sqrtf(distSq), p2Pos.x, p2Pos.z);
                         }
-                        followerMoveTarget = enemyPos;
+                        // Test 6 (log 74) — dangling Skulltula safety gap.
+                        // User: "AI Follower gets too close to dangling
+                        // Skulltulas and takes damage without waiting for
+                        // them to reveal their weak spot." En_St on the
+                        // ceiling drops on Link when he walks underneath;
+                        // without state-machine sync (#90 pending) the
+                        // follower can't tell if the Skulltula is safe to
+                        // approach. Keep a 150 u XZ safety gap for any
+                        // EN_ST target whose Y is well above the follower
+                        // (ceiling/wall mounted). Pulls the move target
+                        // back along the follower→enemy vector so Link
+                        // stops at 150 u XZ even though the slingshot
+                        // still has line-of-fire. ENGAGE→RANGED_ATTACK
+                        // admission distance (350 u) covers this.
+                        Vec3f navTarget = enemyPos;
+                        if (followerTargetEnemy->id == ACTOR_EN_ST) {
+                            f32 targetDy = enemyPos.y - p2Pos.y;
+                            if (targetDy > 40.0f) {
+                                static constexpr f32 kEnStSafeStandoffXZ = 150.0f;
+                                f32 distXZ = sqrtf(distSq);
+                                if (distXZ > kEnStSafeStandoffXZ) {
+                                    f32 shrink = (distXZ - kEnStSafeStandoffXZ) / distXZ;
+                                    navTarget.x = p2Pos.x + edx * shrink;
+                                    navTarget.z = p2Pos.z + edz * shrink;
+                                } else {
+                                    // Already inside safe gap — hold position
+                                    // so we don't drift closer.
+                                    navTarget.x = p2Pos.x;
+                                    navTarget.z = p2Pos.z;
+                                }
+                                navTarget.y = enemyPos.y;
+                            }
+                        }
+                        followerMoveTarget = navTarget;
                         // Stick injection in ShouldActorUpdate drives actual movement.
                         if (distSq > 1.0f) {
                             player->actor.shape.rot.y = YawToward(edx, edz);
@@ -2284,14 +2422,40 @@ void Anchor::RegisterHooks() {
                         //       Stick_x is irrelevant during climb.
                         Vec3f p2w = actor->world.pos;
                         if (nowOnLadder) {
+                            // Vertical: compare leader Y to follower Y.
                             f32 dyL = followerMoveTarget.y - p2w.y;
                             static constexpr f32 kClimbYTolerance = 8.0f;
                             s8  ladderY = 0;
                             if (dyL >  kClimbYTolerance)      ladderY =  127;
                             else if (dyL < -kClimbYTolerance) ladderY = -127;
-                            input.cur.stick_x = 0;
+                            // Test 6 (log 74) — lateral tracking on vine
+                            // walls. OoT's ladder climb code ignores
+                            // stick_x (ladder is single-column), but vine
+                            // climb uses stick_x for lateral movement along
+                            // the wall face. Inject a camera-relative
+                            // horizontal component from the XZ delta so the
+                            // follower tracks the leader sideways; on
+                            // ladders this is a no-op (OoT clamps it), on
+                            // vines it slides Link along the vine face.
+                            //
+                            // Gate on Δxz > tolerance so idle stand-still
+                            // climbs (follower holding at leader Y) don't
+                            // emit phantom lateral input.
+                            f32 dxL = followerMoveTarget.x - p2w.x;
+                            f32 dzL = followerMoveTarget.z - p2w.z;
+                            f32 dxzSq = dxL * dxL + dzL * dzL;
+                            s8  ladderX = 0;
+                            static constexpr f32 kClimbXzTolerance = 10.0f;
+                            if (dxzSq > kClimbXzTolerance * kClimbXzTolerance) {
+                                Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                                s16 inputDirYaw = Camera_GetInputDirYaw(cam);
+                                s16 worldYaw    = Math_Atan2S(dzL, dxL);
+                                s16 stickAngle  = worldYaw - inputDirYaw;
+                                ladderX = (s8)(-Math_SinS(stickAngle) * 127.0f);
+                            }
+                            input.cur.stick_x = ladderX;
                             input.cur.stick_y = ladderY;
-                            input.rel.stick_x = 0;
+                            input.rel.stick_x = ladderX;
                             input.rel.stick_y = ladderY;
                         } else {
                             // Walk toward ladder. Reuse the standard
@@ -2401,27 +2565,33 @@ void Anchor::RegisterHooks() {
                         }
                     }
 
-                    // Bug D — L-target lock-on during ENGAGE/ATTACK. Holding
-                    // BTN_Z while approaching means OoT's camera tracks the
-                    // target, Link's facing stays auto-oriented, and swing
-                    // direction is taken from the locked target rather than
-                    // the raw stick angle. This corrects BTN_B swings that
-                    // previously flew into empty air when the follower's
-                    // facing drifted during approach. Edge-press on the
-                    // ENGAGE entry; hold via cur through ATTACK. No release
-                    // needed — OoT drops lock-on when the target dies or
-                    // when ATTACK→RETURN clears the Z hold next frame.
+                    // Test 6 (log 74) — BTN_Z tap-to-refresh (was hold).
+                    // User reported: a held Z without an acquirable target
+                    // just locks the CAMERA (OoT's fallback when no lock
+                    // candidate is in the attention cone), which keeps Link
+                    // facing whichever direction he was looking when Z went
+                    // down. Wall Skulltulas above/beside the follower never
+                    // enter the cone, so the camera-hold makes the problem
+                    // worse — follower can't face targets above him.
                     //
-                    // RANGED_ATTACK has its own BTN_Z cycle (see below);
-                    // the two are mutually exclusive states so there's no
-                    // double-hold.
+                    // New pattern: edge-press Z once every kZTapIntervalFrames
+                    // (0.5 s at 60 fps; scales naturally at P2's 20 fps). The
+                    // press is consumed by OoT's target-scan each time — if
+                    // the enemy drifts into range (leader walks closer, or
+                    // pitch injection lands the cone on target) a later tap
+                    // catches it. No cur.button hold, so the camera is free
+                    // to adjust between taps.
+                    //
+                    // RANGED_ATTACK keeps its own Z cycle (below) — first-
+                    // person aim mode does need Z held. The two states are
+                    // mutually exclusive so there's no double-fire.
+                    static constexpr int kZTapIntervalFrames = 30;
                     if (followerAIState == FollowerAIState::ENGAGE ||
                         followerAIState == FollowerAIState::ATTACK) {
-                        if (followerAIState == FollowerAIState::ENGAGE &&
-                            followerStateFrames == 0) {
+                        if (followerStateFrames % kZTapIntervalFrames == 0) {
                             input.press.button |= BTN_Z;
+                            input.cur.button   |= BTN_Z;
                         }
-                        input.cur.button |= BTN_Z;
                     }
 
                     // --- Attack: face enemy + inject BTN_B at start of each charge phase ---
@@ -2460,10 +2630,33 @@ void Anchor::RegisterHooks() {
                                 actor->shape.rot.y = Math_Atan2S(ez, ex); // z first per OoT convention
                             }
                             if (followerStateFrames % 20 == 0) {
-                                input.press.button |= BTN_B;
-                                input.cur.button   |= BTN_B;
-                                SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={})",
-                                            followerStateFrames);
+                                // Test 6 (log 74) — sword-range jump-attack
+                                // gate. Vanilla sword reach is ~50 u (kSwingReach);
+                                // when standoff puts the follower at 60-96 u
+                                // from enemy, BTN_B swings whiff. Jump attack
+                                // (locked + A + stick-forward) lunges Link
+                                // ~80+ u and connects at the end of the swing.
+                                //
+                                // Gate BTN_A on PLAYER_STATE1_HOSTILE_LOCK_ON
+                                // because A without lock-on triggers a roll
+                                // instead of jump-attack. If we're not yet
+                                // locked, fall back to BTN_B — worse reach
+                                // but no wrong-input risk (Z-tap cadence
+                                // above will retry the lock next cycle).
+                                bool locked = (sf1 & PLAYER_STATE1_HOSTILE_LOCK_ON) != 0;
+                                bool tooFarForSwing = (eDistSq > 50.0f * 50.0f); // kSwingReach²
+                                if (locked && tooFarForSwing) {
+                                    input.press.button |= BTN_A;
+                                    input.cur.button   |= BTN_A;
+                                    SPDLOG_INFO("[Follower] ATTACK jump-slash BTN_A "
+                                                "(dist={:.0f} locked)", sqrtf(eDistSq));
+                                } else {
+                                    input.press.button |= BTN_B;
+                                    input.cur.button   |= BTN_B;
+                                    SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={} "
+                                                "dist={:.0f} locked={})",
+                                                followerStateFrames, sqrtf(eDistSq), locked ? 1 : 0);
+                                }
                             } else {
                                 // Bug D / Test 5 (log 71) — shield between
                                 // swings. Previous gate `eDistSq < 50*50`
@@ -2608,17 +2801,17 @@ void Anchor::RegisterHooks() {
                             }
                         }
 
-                        // BTN_A as a backup fire path. Only inject when
-                        // PLAYER_STATE1_READY_TO_FIRE is set — that's OoT's
-                        // signal that the slingshot/bow is fully drawn and
-                        // primed. Pressing A before this would do roll /
-                        // jump-attack instead.
-                        if ((sf1 & PLAYER_STATE1_READY_TO_FIRE) &&
-                            (followerStateFrames % 20 == 0)) {
-                            input.press.button |= BTN_A;
-                            input.cur.button   |= BTN_A;
-                            SPDLOG_INFO("[Follower] RANGED_ATTACK BTN_A fire (READY_TO_FIRE set)");
-                        }
+                        // Test 6 (log 74) — BTN_A "backup fire" path REMOVED.
+                        // User reported follower rolling into walls when
+                        // engaging Skullwalltulas; we guarded BTN_A on
+                        // PLAYER_STATE1_READY_TO_FIRE but that flag has a
+                        // transient window where Link's pose is still
+                        // "walking with slingshot drawn" rather than
+                        // "aim stance primed". BTN_A in that window triggers
+                        // a jump-roll forward, which is exactly the wall-
+                        // dive symptom. The C-button release-to-fire cycle
+                        // above fires reliably once draw completes, so the
+                        // A-press backup isn't needed.
                     }
                 });
         }
