@@ -317,6 +317,21 @@ class Anchor : public Network {
     int             followerDoorHandoffFrames     = 0;
     Vec3f           followerLeaderLastInOurRoom   = { 0.0f, 0.0f, 0.0f };
 
+    // Bug C (log 69) — ladder/vine dismount forward-hold. After CLIMBING→IDLE,
+    // Link is standing on the rim of the destination floor. If we
+    // immediately recompute the move target toward the leader, the follower
+    // often turns and walks backward off the ledge (leader was standing
+    // near the climb exit). Hold forward stick for kClimbDismountFrames
+    // AFTER exiting CLIMBING so Link walks inward past the rim first.
+    //
+    // Counter is armed at CLIMBING→IDLE, decremented every frame in
+    // ShouldActorUpdate, and overrides the normal stick math when > 0.
+    // The held direction is a snapshot of the climb-exit forward vector
+    // (yaw at the moment of dismount) so it stays stable regardless of
+    // follower-state churn during the hold.
+    int             followerClimbDismountFrames   = 0;
+    s16             followerClimbDismountYaw      = 0;     // shape.rot.y at dismount — inject forward into this yaw
+
     // Item-override system (Option B). When
     // CVAR_REMOTE_ANCHOR("FollowerAllowChooseItems") is enabled, the follower
     // can temporarily override the player's C-button item assignments to use

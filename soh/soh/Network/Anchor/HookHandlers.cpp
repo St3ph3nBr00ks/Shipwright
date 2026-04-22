@@ -282,12 +282,14 @@ void Anchor::SetFollowerActive(bool active) {
         pendingTransitionTimeoutFrames = 0;
         followerDoorHandoff = false;
         followerDoorHandoffFrames = 0;
+        followerClimbDismountFrames = 0;
         SPDLOG_INFO("[Follower] Activated (menu)");
     } else {
         hasPendingTransition = false;
         pendingTransitionTimeoutFrames = 0;
         followerDoorHandoff = false;
         followerDoorHandoffFrames = 0;
+        followerClimbDismountFrames = 0;
         // Safety: always restore the player's C-button loadout on any
         // deactivation path (menu toggle, joystick cancel, scene boundary,
         // leash timeout, …). FollowerRestoreItems is a no-op when no
@@ -597,6 +599,12 @@ void Anchor::RegisterHooks() {
                 // room boundary, the follower has this many frames to navigate
                 // to the door / cross the threshold itself. On timeout, teleport.
                 static constexpr int kDoorHandoffTimeout   = 360;   // ~6 s at 60fps
+                // Bug C (log 69) — dismount forward-hold. After CLIMBING→IDLE,
+                // hold stick forward at the climb-exit yaw for this many frames
+                // so Link walks inward past the rim before other state machine
+                // logic can re-point him backward toward a leader standing at
+                // the edge. ~1 s at 60fps (matches user request "~1 more second").
+                static constexpr int kClimbDismountHoldFrames = 60;
                 // G13 — boss scenes that warrant pre-emptive teleport on leader entry.
                 // Only Deku Tree boss is in scope for the first dungeon demo (#167);
                 // extend this list as later dungeons land.
@@ -631,6 +639,27 @@ void Anchor::RegisterHooks() {
                     for (s16 e : kRangedRequiredEnemyIds) { if (e == id) return true; }
                     return false;
                 };
+
+                // Bug D (combat upgrade) — per-enemy approach distance.
+                // Default kAttackRange (80) stops Link at sword-tip contact,
+                // which is fine for Stalfos-class melee but walks the
+                // follower straight into the lunge arc of enemies whose
+                // damage volume sits ahead of world.pos (Karebaba head,
+                // Deku Baba stem-tip, Bari body-AoE). Override per actor id.
+                // The override is used BOTH for ENGAGE→ATTACK admission and
+                // for the point-blank shield trigger (see SwingReach below).
+                auto GetAttackRangeForEnemy = [](s16 id) -> f32 {
+                    switch (id) {
+                        case ACTOR_EN_KAREBABA: return 110.0f; // head lunges ~40 u
+                        case ACTOR_EN_DEKUBABA: return 100.0f; // stem-tip head
+                        case ACTOR_EN_VALI:     return 120.0f; // body AoE discharge
+                        default:                return 80.0f;  // kAttackRange
+                    }
+                };
+                // Sword arc reach — Link's effective swing distance. Inside
+                // this radius we switch to shield-up-between-swings; outside
+                // it, the follower walks forward during the swing-cycle gap.
+                static constexpr f32 kSwingReach = 50.0f;
 
                 // -----------------------------------------------------------------
                 // Room-equality check — DISABLED 2026-04-21.
@@ -787,6 +816,63 @@ void Anchor::RegisterHooks() {
                 // Yaw toward (dx, dz).  Math_Atan2S(x, y) with OoT param order.
                 auto YawToward = [](f32 dx, f32 dz) -> s16 {
                     return Math_Atan2S(dz, dx); // z first, x second — OoT convention
+                };
+
+                // Bug B (log 69) — cross-room teleport helper. Plain
+                // world.pos=leaderPos teleports do not update OoT's
+                // roomCtx.curRoom.num, so teleporting into a different room
+                // leaves the game's collision/actor context stuck in the
+                // old room. Every subsequent frame G11 re-detects the
+                // divergence and re-arms the handoff, producing the
+                // infinite-loop symptom from log 69.
+                //
+                // This helper decides:
+                //   (a) Same room or no leader clients entry — plain
+                //       world.pos write suffices (no room transition needed).
+                //   (b) Different room / scene — drive OoT through its
+                //       respawn pipeline (RESPAWN_MODE_DOWN + respawnFlag=1 +
+                //       same-scene TRANS_TRIGGER_START). func_8009728C reads
+                //       roomIndex from respawn[respawnFlag-1], and
+                //       Player_Init copies pos/yaw. Well-exercised engine
+                //       path (void-out / Farore's Wind). Handles Deku Tree
+                //       basement / Mad Scrub / other non-entrance-accessible
+                //       rooms that a raw entrance-index reload cannot reach.
+                //
+                // Returns true if a scene transition was triggered (caller
+                // should return from the follower hook since OoT owns the
+                // next frames).
+                auto TeleportToLeader = [&](const char* reason) -> bool {
+                    Vec3f destPos = leaderPos;
+                    s16   destYaw = leaderActor->shape.rot.y;
+                    auto  it      = clients.find(followerLeaderClientId);
+                    s8    ourRoom    = (s8)gPlayState->roomCtx.curRoom.num;
+                    s8    leaderRoom = (it != clients.end()) ? it->second.curRoomNum : ourRoom;
+                    bool  roomsDiffer = (leaderRoom != -1 && ourRoom != -1 && leaderRoom != ourRoom);
+                    if (!roomsDiffer) {
+                        player->actor.world.pos = destPos;
+                        player->actor.prevPos   = destPos;
+                        SPDLOG_INFO("[Follower] Teleport world.pos ({}) — same room {}", reason, (int)ourRoom);
+                        return false;
+                    }
+                    SPDLOG_WARN("[Follower] Teleport scene-reload ({}) — ours-room={} leader-room={} "
+                                "pos={:.0f},{:.0f},{:.0f}",
+                                reason, (int)ourRoom, (int)leaderRoom,
+                                destPos.x, destPos.y, destPos.z);
+                    // Play_SetRespawnData is static to z_play.c; inline the
+                    // struct writes rather than plumb a forward declaration.
+                    RespawnData* rd = &gSaveContext.respawn[RESPAWN_MODE_DOWN];
+                    rd->entranceIndex    = gSaveContext.entranceIndex;
+                    rd->roomIndex        = (s16)leaderRoom;
+                    rd->pos              = destPos;
+                    rd->yaw              = destYaw;
+                    rd->playerParams     = 0x0DFF;  // normal-spawn player-params
+                    rd->tempSwchFlags    = gPlayState->actorCtx.flags.tempSwch;
+                    rd->tempCollectFlags = gPlayState->actorCtx.flags.tempCollect;
+                    gSaveContext.respawnFlag        = 1; // RESPAWN_MODE_DOWN + 1
+                    gPlayState->transitionTrigger   = TRANS_TRIGGER_START;
+                    gPlayState->nextEntranceIndex   = gSaveContext.entranceIndex;
+                    gPlayState->transitionType      = TRANS_TYPE_FADE_BLACK;
+                    return true;
                 };
 
                 // p2Pos is a READ-ONLY snapshot of the follower's current position,
@@ -965,19 +1051,17 @@ void Anchor::RegisterHooks() {
                             if (followerDoorHandoffFrames > 0) {
                                 followerDoorHandoffFrames--;
                                 if (followerDoorHandoffFrames == 0) {
-                                    SPDLOG_WARN("[Follower] Door handoff TIMEOUT — teleporting to leader "
-                                                "(ours={} leader={})",
+                                    SPDLOG_WARN("[Follower] Door handoff TIMEOUT "
+                                                "(ours-room={} leader-room={})",
                                                 (int)ourRoom, (int)leaderRoom);
-                                    player->actor.world.pos = leaderPos;
-                                    player->actor.prevPos   = leaderPos;
+                                    bool triggered = TeleportToLeader("G11 handoff timeout");
                                     followerDoorHandoff       = false;
                                     followerOverrunFrames     = 0;
                                     followerAIState           = FollowerAIState::IDLE;
                                     followerStateFrames       = 0;
-                                    // Fall through — let other safety nets run
-                                    // on the new position (G10/G12 will be
-                                    // satisfied; next frame's G11 check will
-                                    // see matching rooms once room-load fires).
+                                    if (triggered) {
+                                        return; // scene transition owns the next frames
+                                    }
                                 }
                             }
                         }
@@ -1003,12 +1087,16 @@ void Anchor::RegisterHooks() {
                     if (dxL * dxL + dyL * dyL + dzL * dzL > kTeleportThreshold * kTeleportThreshold) {
                         followerOverrunFrames++;
                         if (followerOverrunFrames >= kTeleportDelayFrames) {
-                            player->actor.world.pos = leaderPos;
-                            player->actor.prevPos   = leaderPos;
+                            // Bug B (log 69) — route through TeleportToLeader
+                            // so cross-room overruns use the scene-reload path
+                            // rather than a raw world.pos write.
+                            bool triggered = TeleportToLeader("G10 3D leash overrun");
                             followerOverrunFrames = 0;
                             followerAIState       = FollowerAIState::IDLE;
                             followerStateFrames   = 0;
-                            SPDLOG_INFO("[Follower] Teleported to leader (G10 3D leash overrun)");
+                            if (triggered) {
+                                return;
+                            }
                         }
                     } else {
                         followerOverrunFrames = 0;
@@ -1020,14 +1108,15 @@ void Anchor::RegisterHooks() {
                 // bail to a teleport. Counter is incremented at the FOLLOW→STUCK
                 // transition below; window is reset when we reach IDLE cleanly.
                 if (followerStuckCycleCount >= kStuckCycleEscalation) {
-                    player->actor.world.pos = leaderPos;
-                    player->actor.prevPos   = leaderPos;
+                    // Bug B (log 69) — route through TeleportToLeader for
+                    // cross-room-safe teleport. Always return regardless of
+                    // mode: STUCK escalation is a terminal reset.
+                    TeleportToLeader("G12 stuck-cycle escalation");
                     followerStuckCycleCount       = 0;
                     followerStuckCycleResetFrames = 0;
                     followerOverrunFrames         = 0;
                     followerAIState               = FollowerAIState::IDLE;
                     followerStateFrames           = 0;
-                    SPDLOG_INFO("[Follower] Teleported to leader (G12 stuck-cycle escalation)");
                     return;
                 }
 
@@ -1290,7 +1379,11 @@ void Anchor::RegisterHooks() {
                         f32   edx      = enemyPos.x - p2Pos.x;
                         f32   edz      = enemyPos.z - p2Pos.z;
                         f32   distSq   = edx * edx + edz * edz;
-                        if (distSq < kAttackRange * kAttackRange) {
+                        // Bug D — per-enemy attackRange keeps the follower
+                        // outside lunge arcs of enemies whose damage volume
+                        // sits ahead of world.pos.
+                        f32   attackRange = GetAttackRangeForEnemy(followerTargetEnemy->id);
+                        if (distSq < attackRange * attackRange) {
                             // G4 — Mad Scrub class: shield first, then swing on
                             // the stunned scrub. BLOCK→ATTACK is wired in BLOCK.
                             if (IsShieldReflectEnemy(followerTargetEnemy->id)) {
@@ -1302,8 +1395,10 @@ void Anchor::RegisterHooks() {
                             }
                             followerAIState     = FollowerAIState::ATTACK;
                             followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ENGAGE→ATTACK enemy=({:.0f},{:.0f},{:.0f}) dist={:.0f}",
-                                        enemyPos.x, enemyPos.y, enemyPos.z, sqrtf(distSq));
+                            SPDLOG_INFO("[Follower] ENGAGE→ATTACK enemy=({:.0f},{:.0f},{:.0f}) dist={:.0f} "
+                                        "range={:.0f} id={}",
+                                        enemyPos.x, enemyPos.y, enemyPos.z, sqrtf(distSq),
+                                        attackRange, followerTargetEnemy->id);
                             break;
                         }
                         // Every 20 frames log distance to enemy so we can see approach progress.
@@ -1368,23 +1463,44 @@ void Anchor::RegisterHooks() {
                             break;
                         }
                         Vec3f enemyPos = followerTargetEnemy->world.pos;
-                        // Keep the stick target live on the enemy — the follower
-                        // is admitted to ATTACK at kAttackRange (80) but sword
-                        // reach is roughly half that, so we need to keep closing
-                        // the gap during the cycle. ShouldActorUpdate consumes
-                        // followerMoveTarget every frame and projects it into
-                        // camera-relative stick input.
-                        followerMoveTarget = enemyPos;
+                        // Bug D — point followerMoveTarget at a standoff
+                        // offset from enemyPos instead of enemyPos itself.
+                        // Stopping radius is attackRange - kSwingReach:
+                        // sword can still reach (kSwingReach), but Link
+                        // holds outside the enemy's damage volume. For
+                        // Karebaba (range=110, swing=50), standoff is 60 u
+                        // from root — outside the head's lunge arc. For
+                        // Stalfos-class (range=80, swing=50), standoff is
+                        // 30 u — the original sword-tip contact distance.
+                        f32 attackRange = GetAttackRangeForEnemy(followerTargetEnemy->id);
+                        f32 standoff    = attackRange - kSwingReach;
+                        if (standoff < 20.0f) standoff = 20.0f; // sanity floor
                         {
                             f32 edx      = enemyPos.x - p2Pos.x;
                             f32 edz      = enemyPos.z - p2Pos.z;
-                            f32 enemyDist = sqrtf(edx * edx + edz * edz);
-                            if (followerStateFrames % 10 == 0) {
-                                SPDLOG_INFO("[Follower] ATTACK frame={} distToEnemy={:.0f} p2=({:.0f},{:.0f})",
-                                            followerStateFrames,
-                                            enemyDist, p2Pos.x, p2Pos.z);
+                            f32 enemyDistSq = edx * edx + edz * edz;
+                            f32 enemyDist   = sqrtf(enemyDistSq);
+                            if (enemyDist > 1.0f) {
+                                // Move target = enemyPos pulled back toward
+                                // the follower by `standoff` units. Avoids
+                                // walking into the damage volume even while
+                                // the enemy walks toward us.
+                                f32 shrink = (enemyDist > standoff)
+                                             ? (enemyDist - standoff) / enemyDist
+                                             : 0.0f;
+                                followerMoveTarget.x = p2Pos.x + edx * shrink;
+                                followerMoveTarget.y = enemyPos.y;
+                                followerMoveTarget.z = p2Pos.z + edz * shrink;
+                            } else {
+                                followerMoveTarget = enemyPos;
                             }
-                            if (edx * edx + edz * edz > 1.0f) {
+                            if (followerStateFrames % 10 == 0) {
+                                SPDLOG_INFO("[Follower] ATTACK frame={} distToEnemy={:.0f} "
+                                            "standoff={:.0f} p2=({:.0f},{:.0f})",
+                                            followerStateFrames, enemyDist, standoff,
+                                            p2Pos.x, p2Pos.z);
+                            }
+                            if (enemyDistSq > 1.0f) {
                                 player->actor.shape.rot.y = YawToward(edx, edz);
                             }
                         }
@@ -1437,9 +1553,24 @@ void Anchor::RegisterHooks() {
                     case FollowerAIState::CLIMBING: {
                         auto it = clients.find(followerLeaderClientId);
                         if (it == clients.end() || !it->second.isClimbing) {
+                            // Bug C (log 69) — arm the dismount-forward-hold.
+                            // Immediately after CLIMBING→IDLE, follower is on
+                            // the rim of the top/bottom floor. Without this
+                            // hold, the next-frame state machine recomputes
+                            // the move target around leaderPos — and leader
+                            // often stands right at the climb exit, so the
+                            // follower's stick-math points BACKWARD off the
+                            // rim. Snapshot the current facing (set every
+                            // frame during CLIMBING to leaderActor->shape.rot.y),
+                            // arm the hold counter, then IDLE.
+                            followerClimbDismountYaw    = player->actor.shape.rot.y;
+                            followerClimbDismountFrames = kClimbDismountHoldFrames;
                             followerAIState     = FollowerAIState::IDLE;
                             followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] CLIMBING→IDLE (leader stopped climbing)");
+                            SPDLOG_INFO("[Follower] CLIMBING→IDLE (leader stopped climbing); "
+                                        "armed dismount forward-hold {} frames at yaw={}",
+                                        kClimbDismountHoldFrames,
+                                        (int)followerClimbDismountYaw);
                             break;
                         }
                         // followerMoveTarget = leader's XZ at the leader's
@@ -1712,6 +1843,28 @@ void Anchor::RegisterHooks() {
                         input.cur.stick_y = 127;
                         input.rel.stick_x = 0;
                         input.rel.stick_y = 127;
+                    } else if (followerClimbDismountFrames > 0 && !blockedByPlayerState) {
+                        // Bug C (log 69) — ladder/vine dismount forward-hold.
+                        // Project the held world-space yaw (captured at the
+                        // CLIMBING→IDLE transition as Link's shape.rot.y,
+                        // which matches the leader's facing per the CLIMBING
+                        // state body) into camera-relative stick axes. Full
+                        // magnitude so Link walks briskly inward past the
+                        // ledge rim. Counter decrements every frame; when it
+                        // reaches zero, the normal move logic resumes.
+                        Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                        s16 inputDirYaw = Camera_GetInputDirYaw(cam);
+                        s16 stickAngle  = followerClimbDismountYaw - inputDirYaw;
+                        s8  stickY = (s8)( Math_CosS(stickAngle) * 127.0f);
+                        s8  stickX = (s8)(-Math_SinS(stickAngle) * 127.0f);
+                        input.cur.stick_x = stickX;
+                        input.cur.stick_y = stickY;
+                        input.rel.stick_x = stickX;
+                        input.rel.stick_y = stickY;
+                        followerClimbDismountFrames--;
+                        if (followerClimbDismountFrames == 0) {
+                            SPDLOG_INFO("[Follower] Dismount forward-hold complete");
+                        }
                     } else if (followerAIState == FollowerAIState::CLIMBING) {
                         // Bug 2 (2026-04-22): natural ladder grab + climb.
                         // Two phases:
@@ -1848,6 +2001,29 @@ void Anchor::RegisterHooks() {
                         }
                     }
 
+                    // Bug D — L-target lock-on during ENGAGE/ATTACK. Holding
+                    // BTN_Z while approaching means OoT's camera tracks the
+                    // target, Link's facing stays auto-oriented, and swing
+                    // direction is taken from the locked target rather than
+                    // the raw stick angle. This corrects BTN_B swings that
+                    // previously flew into empty air when the follower's
+                    // facing drifted during approach. Edge-press on the
+                    // ENGAGE entry; hold via cur through ATTACK. No release
+                    // needed — OoT drops lock-on when the target dies or
+                    // when ATTACK→RETURN clears the Z hold next frame.
+                    //
+                    // RANGED_ATTACK has its own BTN_Z cycle (see below);
+                    // the two are mutually exclusive states so there's no
+                    // double-hold.
+                    if (followerAIState == FollowerAIState::ENGAGE ||
+                        followerAIState == FollowerAIState::ATTACK) {
+                        if (followerAIState == FollowerAIState::ENGAGE &&
+                            followerStateFrames == 0) {
+                            input.press.button |= BTN_Z;
+                        }
+                        input.cur.button |= BTN_Z;
+                    }
+
                     // --- Attack: face enemy + inject BTN_B at start of each charge phase ---
                     if (followerAIState == FollowerAIState::ATTACK) {
                         // Keep shape.rot.y facing the enemy here (BEFORE Player_Update) so
@@ -1879,7 +2055,8 @@ void Anchor::RegisterHooks() {
                         if (targetAlive) {
                             f32 ex = followerTargetEnemy->world.pos.x - actor->world.pos.x;
                             f32 ez = followerTargetEnemy->world.pos.z - actor->world.pos.z;
-                            if (ex * ex + ez * ez > 1.0f) {
+                            f32 eDistSq = ex * ex + ez * ez;
+                            if (eDistSq > 1.0f) {
                                 actor->shape.rot.y = Math_Atan2S(ez, ex); // z first per OoT convention
                             }
                             if (followerStateFrames % 20 == 0) {
@@ -1887,6 +2064,16 @@ void Anchor::RegisterHooks() {
                                 input.cur.button   |= BTN_B;
                                 SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={})",
                                             followerStateFrames);
+                            } else if (eDistSq < 50.0f * 50.0f) {  // kSwingReach
+                                // Bug D — point-blank shield between swings.
+                                // Non-swing frames while Link is within
+                                // sword arc (enemy is mid-range retaliation
+                                // window). BTN_R raises the shield to tank
+                                // Karebaba lunges / Deku Baba bites. OoT
+                                // plants Link in place with shield up when
+                                // lock-on + BTN_R + no stick — intentional:
+                                // we stop walking into the damage volume.
+                                input.cur.button |= BTN_R;
                             }
                         }
                     }

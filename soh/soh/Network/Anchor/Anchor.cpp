@@ -53,6 +53,18 @@ void Anchor::OnConnected() {
 
     if (IsSaveLoaded()) {
         SendPacket_RequestTeamState();
+        // Bug A (log 69) — on reconnect the host does NOT re-broadcast
+        // ENEMY_DEFEATED packets that were sent while we were offline,
+        // and RequestTeamState only covers time-of-day + item flags.
+        // Bump sceneSpawnEpoch and re-send UpdateClientState; the host's
+        // HandlePacket_UpdateClientState detects the epoch change and
+        // replays deadEnemiesByScene for our current scene. Harmless on
+        // first connect (replay is idempotent — already-dead enemies
+        // just get Actor_Kill'd again).
+        sceneSpawnEpoch++;
+        SendPacket_UpdateClientState();
+        SPDLOG_INFO("[Anchor] Reconnect epoch bump → {} (triggers host dead-enemy replay)",
+                    sceneSpawnEpoch);
     }
 }
 
