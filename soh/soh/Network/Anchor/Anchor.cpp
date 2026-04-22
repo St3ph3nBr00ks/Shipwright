@@ -102,6 +102,14 @@ void Anchor::OnConnected() {
     SendPacket_Handshake();
     RegisterHooks();
 
+    // Phase 5 #60 — drop any stale "last sent" snapshots so the first
+    // post-reconnect send for every enemy goes out on the next frame
+    // instead of waiting for the keepalive timer. Separately, the send
+    // path also guards cache writes on isConnected — so if we had been
+    // sending into a disconnected socket, nothing accumulated anyway.
+    // Doing both ("belt-and-braces") costs one hashmap clear.
+    Anchor_ClearEnemyUpdateCache();
+
     if (IsSaveLoaded()) {
         SendPacket_RequestTeamState();
         // Bug A (log 69) — on reconnect the host does NOT re-broadcast

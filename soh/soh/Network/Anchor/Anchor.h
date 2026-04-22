@@ -112,6 +112,13 @@ void DummyPlayer_Update(Actor* actor, PlayState* play);
 void DummyPlayer_Draw(Actor* actor, PlayState* play);
 void DummyPlayer_Destroy(Actor* actor, PlayState* play);
 
+// Phase 5 #60 — clears the per-netId last-sent cache that SendPacket_EnemyUpdate
+// consults to skip no-op packets. Called on scene-load (OnSceneSpawnActors)
+// and on reconnect (OnConnected) so a fresh peer sees a send on the next
+// frame instead of waiting for the keepalive timer to elapse. Cache itself
+// is file-scope static in Packets/EnemyUpdate.cpp.
+void Anchor_ClearEnemyUpdateCache();
+
 typedef struct AnchorClient {
     uint32_t clientId;
     std::string name;

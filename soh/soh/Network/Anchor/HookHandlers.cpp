@@ -363,6 +363,11 @@ void Anchor::RegisterHooks() {
             // Clear the per-scene-visit send-dedup set so that enemies in the new
             // scene can have their ENEMY_DEFEATED broadcast normally.
             sentDefeatThisScene.clear();
+            // Phase 5 #60 — clear the per-netId last-sent cache. netIds are reused
+            // across scene visits (same posHash, same enemy), so a stale cached
+            // snapshot from a previous visit would cause the predicate to skip
+            // legit sends until the keepalive timer elapses.
+            Anchor_ClearEnemyUpdateCache();
             // Clear buffered kills that belong to scenes OTHER than the one we are
             // entering.  Kills for the destination scene must survive so that
             // OnActorSpawn can call SetupDeadItemDrop when those actors spawn.
