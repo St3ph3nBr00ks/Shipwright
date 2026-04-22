@@ -288,9 +288,15 @@ class Anchor : public Network {
     //                 (G6/G7/G8).
     // STANDBY  — placeholder: hold position next to leader, no swings. Reserved for
     //            future use (G19 Gohma weak-point timing).
+    // COLLECT_ITEM — opportunistic pickup of ACTOR_EN_ITEM00 drops after an
+    //            enemy kill (rupees, filtered hearts/magic). Interrupts IDLE
+    //            and FOLLOW when eligible; ATTACK→RETURN may divert through
+    //            this state if a drop just landed. See
+    //            Claude/Plans/ai_follower_item_pickup.md.
     enum class FollowerAIState {
         IDLE, FOLLOW, STUCK, ENGAGE, ATTACK, RETURN,
         CLIMBING, BLOCK, RANGED_ATTACK, STANDBY,
+        COLLECT_ITEM,
     };
     FollowerAIState followerAIState     = FollowerAIState::IDLE;
     int             followerStateFrames = 0;                     // frames spent in current state
@@ -331,6 +337,21 @@ class Anchor : public Network {
     // follower-state churn during the hold.
     int             followerClimbDismountFrames   = 0;
     s16             followerClimbDismountYaw      = 0;     // shape.rot.y at dismount — inject forward into this yaw
+
+    // Item pickup (Claude/Plans/ai_follower_item_pickup.md). An IDLE/FOLLOW
+    // tick scans ACTORCAT_MISC for ACTOR_EN_ITEM00 drops. Eligible drops
+    // (need-filtered; see FollowerWantsItem in HookHandlers.cpp) trigger a
+    // transition to COLLECT_ITEM. The grace-period map keys on actor
+    // pointer → first-seen frame; entries whose pointers disappear from
+    // the scan are purged (handles pointer reuse).
+    Actor*                            followerTargetItem               = nullptr;
+    std::unordered_map<Actor*, int>   itemFirstSeenFrame;
+    int                               followerCollectItemTimeoutFrames = 0;
+    // Monotonic per-Anchor tick counter. Increments once per
+    // OnGameFrameUpdate tick. Used for grace-period tracking
+    // (itemFirstSeenFrame compares to this, NOT followerStateFrames
+    // which resets on state transition).
+    int                               followerTickCounter              = 0;
 
     // Item-override system (Option B). When
     // CVAR_REMOTE_ANCHOR("FollowerAllowChooseItems") is enabled, the follower

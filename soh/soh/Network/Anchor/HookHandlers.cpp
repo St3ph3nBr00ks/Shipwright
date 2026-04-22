@@ -9,6 +9,7 @@
 extern "C" {
 #include "variables.h"
 #include "functions.h"
+#include "macros.h" // AMMO / CUR_CAPACITY / INV_CONTENT — follower item-pickup need-gating
 #include "src/overlays/actors/ovl_Bg_Bombwall/z_bg_bombwall.h"
 #include "src/overlays/actors/ovl_Bg_Breakwall/z_bg_breakwall.h"
 #include "src/overlays/actors/ovl_Bg_Haka_Zou/z_bg_haka_zou.h"
@@ -515,6 +516,24 @@ void Anchor::RegisterHooks() {
                 // Any real input cancels follower mode.
                 // During ATTACK the animation hook injects BTN_B into press.button —
                 // exclude it so our own injection doesn't cancel follower mode.
+                //
+                // INVARIANT — every `input.press.button |= X` site in this file MUST
+                // have a matching mask entry below for the state(s) that inject X.
+                // If a new injection is added without its mask, the follower will
+                // self-cancel on the frame it fires. Symptom: log shows
+                // `Deactivated (input pressed=0xNNNN state=...)` with the NNNN bit
+                // matching the newly injected button and the state being one that
+                // just started injecting it (Test 4 log 70 caught this for BTN_Z
+                // in ENGAGE/ATTACK when Bug D added the lock-on hold without the
+                // mask; fixed by the block below).
+                //
+                // Current mask table:
+                //   ENGAGE/ATTACK         → BTN_Z   (lock-on, Bug D)
+                //   ATTACK                → BTN_B   (sword swing cycle)
+                //   BLOCK                 → BTN_R   (shield plant)
+                //   RANGED_ATTACK         → BTN_Z | BTN_A | C-slot
+                //   GETTING_ITEM/TALKING  → BTN_A   (text-box dismiss)
+                //   DO_ACTION_CLIMB/ENTER → BTN_A   (ladder + door auto-press)
                 if (followerActive) {
                     u16 pressed = gPlayState->state.input[0].press.button;
                     u16 deactivateCheck = pressed;
@@ -525,6 +544,22 @@ void Anchor::RegisterHooks() {
                     }
                     if (followerAIState == FollowerAIState::BLOCK) {
                         deactivateCheck &= ~BTN_R;
+                    }
+                    // Bug D — BTN_Z lock-on edge-pressed on ENGAGE entry (and
+                    // held via cur through ATTACK). Mask from cancel-check
+                    // so the ENGAGE entry frame doesn't self-cancel.
+                    if (followerAIState == FollowerAIState::ENGAGE ||
+                        followerAIState == FollowerAIState::ATTACK) {
+                        deactivateCheck &= ~BTN_Z;
+                    }
+                    // Item pickup — while OoT is showing an item-get text box
+                    // (PLAYER_STATE1_GETTING_ITEM or PLAYER_STATE1_TALKING),
+                    // we inject BTN_A every 20 frames to dismiss. Mask so
+                    // our own press doesn't self-cancel follower mode.
+                    if (player != nullptr &&
+                        (player->stateFlags1 &
+                         (PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_TALKING))) {
+                        deactivateCheck &= ~BTN_A;
                     }
                     if (followerAIState == FollowerAIState::RANGED_ATTACK) {
                         deactivateCheck &= ~(BTN_Z | BTN_A);
@@ -548,13 +583,42 @@ void Anchor::RegisterHooks() {
                         deactivateCheck &= ~BTN_A;
                     }
                     if (deactivateCheck != 0) {
+                        // Include state name + the UNMASKED residue so future
+                        // self-cancel regressions are easy to diagnose: any
+                        // bit in `check` is a button we either didn't mask or
+                        // user genuinely pressed. If the bit matches a known
+                        // injection (BTN_Z, BTN_A, BTN_B, BTN_R, C-slot) and
+                        // the state should be injecting that button, the mask
+                        // table above is missing an entry for that state.
+                        const char* stateStr = "?";
+                        switch (followerAIState) {
+                            case FollowerAIState::IDLE:          stateStr = "IDLE";          break;
+                            case FollowerAIState::FOLLOW:        stateStr = "FOLLOW";        break;
+                            case FollowerAIState::STUCK:         stateStr = "STUCK";         break;
+                            case FollowerAIState::ENGAGE:        stateStr = "ENGAGE";        break;
+                            case FollowerAIState::ATTACK:        stateStr = "ATTACK";        break;
+                            case FollowerAIState::RETURN:        stateStr = "RETURN";        break;
+                            case FollowerAIState::CLIMBING:      stateStr = "CLIMBING";      break;
+                            case FollowerAIState::BLOCK:         stateStr = "BLOCK";         break;
+                            case FollowerAIState::RANGED_ATTACK: stateStr = "RANGED_ATTACK"; break;
+                            case FollowerAIState::STANDBY:       stateStr = "STANDBY";       break;
+                            case FollowerAIState::COLLECT_ITEM:  stateStr = "COLLECT_ITEM";  break;
+                        }
                         SetFollowerActive(false);
-                        SPDLOG_INFO("[Follower] Deactivated (input pressed=0x{:04X})", pressed);
+                        SPDLOG_INFO("[Follower] Deactivated (input pressed=0x{:04X} check=0x{:04X} state={})",
+                                    pressed, deactivateCheck, stateStr);
                         return;
                     }
                 }
 
                 if (!followerActive) { return; }
+
+                // Monotonic per-Anchor tick counter. Advances once per
+                // follower-active OnGameFrameUpdate tick. Used for
+                // grace-period tracking in the item-pickup scan — must
+                // not be followerStateFrames (which resets on state
+                // change).
+                followerTickCounter++;
 
                 // G18 — full cutscene suspension. csCtx.state == CS_STATE_IDLE means
                 // no cutscene; anything else is an active CS frame and we must not
@@ -605,6 +669,20 @@ void Anchor::RegisterHooks() {
                 // logic can re-point him backward toward a leader standing at
                 // the edge. ~1 s at 60fps (matches user request "~1 more second").
                 static constexpr int kClimbDismountHoldFrames = 60;
+                // Item pickup (Claude/Plans/ai_follower_item_pickup.md).
+                // kItemProximity — XZ radius of the ACTORCAT_MISC scan.
+                //     User-specified 200 units: far enough to catch most
+                //     enemy-drop distances, short enough not to distract.
+                // kItemGraceFrames — human-first-pick window. A drop isn't
+                //     eligible until it has been observed for this many
+                //     ticks; lets the leader grab it if they want to.
+                // kItemCollectTimeout — walking timeout inside COLLECT_ITEM.
+                //     Walking from kEngageRange (350) → item at ~4 u/frame
+                //     is < 90 frames; 300 gives plenty of slack for
+                //     collision mishaps. Drops back to RETURN on expiry.
+                static constexpr f32 kItemProximity      = 200.0f;
+                static constexpr int kItemGraceFrames    = 180;
+                static constexpr int kItemCollectTimeout = 300;
                 // G13 — boss scenes that warrant pre-emptive teleport on leader entry.
                 // Only Deku Tree boss is in scope for the first dungeon demo (#167);
                 // extend this list as later dungeons land.
@@ -660,6 +738,137 @@ void Anchor::RegisterHooks() {
                 // this radius we switch to shield-up-between-swings; outside
                 // it, the follower walks forward during the swing-cycle gap.
                 static constexpr f32 kSwingReach = 50.0f;
+
+                // Item pickup — need-gated whitelist. Returns true only if
+                // the follower has a legitimate use for this ITEM00_* type
+                // AND it's not a class reserved for the leader (keys,
+                // ammo, heart pieces, etc.). After EnItem00_Init runs,
+                // actor.params is masked down to the ITEM00_* enum value
+                // directly (z_en_item00.c:363 — `this->actor.params &= 0xFF`);
+                // still AND with 0xFF to handle the one-frame window
+                // between spawn and Init when the 0x3F00 collectible-flag
+                // and 0x8000 spawn-type bits are still set.
+                auto FollowerWantsItem = [](Actor* item) -> bool {
+                    if (item == nullptr || item->id != ACTOR_EN_ITEM00 ||
+                        item->update == nullptr) {
+                        return false;
+                    }
+                    s16 itemType = (s16)(item->params & 0xFF);
+                    switch (itemType) {
+                        // --- Always-collect: rupees are capacity-capped at
+                        // the wallet level, so surplus just no-ops.
+                        case ITEM00_RUPEE_GREEN:
+                        case ITEM00_RUPEE_BLUE:
+                        case ITEM00_RUPEE_RED:
+                        case ITEM00_RUPEE_ORANGE:
+                        case ITEM00_RUPEE_PURPLE:
+                            return true;
+                        // --- Need-gated recovery.
+                        case ITEM00_HEART:
+                            return gSaveContext.health < gSaveContext.healthCapacity;
+                        case ITEM00_MAGIC_SMALL:
+                        case ITEM00_MAGIC_LARGE:
+                            return gSaveContext.isMagicAcquired &&
+                                   gSaveContext.magic < gSaveContext.magicCapacity;
+                        // --- Consumable ammo. Gate on (a) player owns the
+                        // weapon/upgrade (CUR_CAPACITY > 0 ⇒ bag acquired)
+                        // AND (b) ammo < capacity (OoT silently discards
+                        // drops when the bag is full — picking them up
+                        // would deprive the human for no gain). Plentiful
+                        // in the first dungeon so the human rarely loses
+                        // something meaningful.
+                        case ITEM00_STICK:
+                            return CUR_CAPACITY(UPG_STICKS) > 0 &&
+                                   AMMO(ITEM_STICK) < CUR_CAPACITY(UPG_STICKS);
+                        case ITEM00_NUTS:
+                            return CUR_CAPACITY(UPG_NUTS) > 0 &&
+                                   AMMO(ITEM_NUT) < CUR_CAPACITY(UPG_NUTS);
+                        case ITEM00_SEEDS:
+                            return CUR_CAPACITY(UPG_BULLET_BAG) > 0 &&
+                                   AMMO(ITEM_SLINGSHOT) < CUR_CAPACITY(UPG_BULLET_BAG);
+                        case ITEM00_ARROWS_SINGLE:
+                        case ITEM00_ARROWS_SMALL:
+                        case ITEM00_ARROWS_MEDIUM:
+                        case ITEM00_ARROWS_LARGE:
+                            return CUR_CAPACITY(UPG_QUIVER) > 0 &&
+                                   AMMO(ITEM_BOW) < CUR_CAPACITY(UPG_QUIVER);
+                        case ITEM00_BOMBS_A:
+                        case ITEM00_BOMBS_B:
+                        case ITEM00_BOMBS_SPECIAL:
+                            return CUR_CAPACITY(UPG_BOMB_BAG) > 0 &&
+                                   AMMO(ITEM_BOMB) < CUR_CAPACITY(UPG_BOMB_BAG);
+                        case ITEM00_BOMBCHU:
+                            // Bombchus have no upgrade slot (fixed 50-cap).
+                            // Gate on "player has bombchus in inventory".
+                            return INV_CONTENT(ITEM_BOMBCHU) != ITEM_NONE &&
+                                   AMMO(ITEM_BOMBCHU) < 50;
+                        // --- Reserved for human: progression items, shields,
+                        // tunics, keys, heart pieces, flexible-drop resolver.
+                        default:
+                            return false;
+                    }
+                };
+
+                // Item pickup — scan ACTORCAT_MISC for eligible En_Item00
+                // drops. Maintains itemFirstSeenFrame (grace-period tracker)
+                // and returns the nearest eligible in-range item whose
+                // grace window has elapsed. Called once per tick from the
+                // IDLE/FOLLOW state bodies. Pointer-reuse is handled by
+                // purging entries whose key is no longer in the current
+                // MISC list.
+                auto ScanForItemCandidate = [&]() -> Actor* {
+                    // Pass 1: collect current live EN_ITEM00 pointers.
+                    std::unordered_set<Actor*> liveItems;
+                    Actor* cand = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
+                    while (cand != nullptr) {
+                        if (cand->id == ACTOR_EN_ITEM00 && cand->update != nullptr) {
+                            liveItems.insert(cand);
+                        }
+                        cand = cand->next;
+                    }
+                    // Pass 2: purge itemFirstSeenFrame entries whose key is
+                    // no longer in the MISC list (item was collected / unloaded).
+                    for (auto it = itemFirstSeenFrame.begin();
+                         it != itemFirstSeenFrame.end();) {
+                        if (liveItems.find(it->first) == liveItems.end()) {
+                            it = itemFirstSeenFrame.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    // Pass 3: register newly-seen items + evaluate eligibility.
+                    Vec3f selfPos = player->actor.world.pos;
+                    Actor* bestItem  = nullptr;
+                    f32    bestDistSq = kItemProximity * kItemProximity;
+                    for (Actor* item : liveItems) {
+                        auto firstIt = itemFirstSeenFrame.find(item);
+                        if (firstIt == itemFirstSeenFrame.end()) {
+                            itemFirstSeenFrame[item] = followerTickCounter; // arm grace
+                            continue;
+                        }
+                        // Grace check first — cheap int compare before physics math.
+                        if (followerTickCounter - firstIt->second < kItemGraceFrames) {
+                            continue;
+                        }
+                        if (!FollowerWantsItem(item)) {
+                            continue;
+                        }
+                        // Same-floor gate (mirrors enemy-target Y gate).
+                        if (fabsf(item->world.pos.y - selfPos.y) >= kMaxYDelta) {
+                            continue;
+                        }
+                        // Room-equality check disabled: player->actor.room is
+                        // stale across room transitions. See earlier banner.
+                        f32 dx = item->world.pos.x - selfPos.x;
+                        f32 dz = item->world.pos.z - selfPos.z;
+                        f32 d2 = dx * dx + dz * dz;
+                        if (d2 < bestDistSq) {
+                            bestDistSq = d2;
+                            bestItem   = item;
+                        }
+                    }
+                    return bestItem;
+                };
 
                 // -----------------------------------------------------------------
                 // Room-equality check — DISABLED 2026-04-21.
@@ -1171,6 +1380,7 @@ void Anchor::RegisterHooks() {
                         case FollowerAIState::BLOCK:         stateStr = "BLOCK";         break;
                         case FollowerAIState::RANGED_ATTACK: stateStr = "RANGED_ATTACK"; break;
                         case FollowerAIState::STANDBY:       stateStr = "STANDBY";       break;
+                        case FollowerAIState::COLLECT_ITEM:  stateStr = "COLLECT_ITEM";  break;
                     }
                     SPDLOG_INFO("[Follower] state={} p2=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) distToTarget={:.0f}",
                                 stateStr,
@@ -1226,6 +1436,22 @@ void Anchor::RegisterHooks() {
                                         nearest->id,
                                         nearest->world.pos.x, nearest->world.pos.y, nearest->world.pos.z,
                                         sqrtf(nearDistSq));
+                            break;
+                        }
+                        // Item pickup — no enemy to engage; scan for eligible drops.
+                        // Grace/filter/Y-gate are all handled inside ScanForItemCandidate.
+                        {
+                            Actor* item = ScanForItemCandidate();
+                            if (item != nullptr) {
+                                followerTargetItem = item;
+                                followerCollectItemTimeoutFrames = kItemCollectTimeout;
+                                followerAIState     = FollowerAIState::COLLECT_ITEM;
+                                followerStateFrames = 0;
+                                SPDLOG_INFO("[Follower] IDLE→COLLECT_ITEM item=0x{:02X} at ({:.0f},{:.0f},{:.0f})",
+                                            (int)(item->params & 0xFF),
+                                            item->world.pos.x, item->world.pos.y, item->world.pos.z);
+                                break;
+                            }
                         }
                         // In IDLE, match P1's facing direction.
                         player->actor.shape.rot.y = dummyActor->shape.rot.y;
@@ -1268,6 +1494,23 @@ void Anchor::RegisterHooks() {
                                 followerStuckCycleResetFrames = kStuckCycleWindow;
                                 SPDLOG_INFO("[Follower] FOLLOW→STUCK (stick input stalled, cycle={})",
                                             followerStuckCycleCount);
+                                break;
+                            }
+                        }
+                        // Item pickup — scan every 10 frames inside FOLLOW (less
+                        // frequent than IDLE; we're actively traversing so a
+                        // tight scan window is less useful). On finding an
+                        // eligible drop, abandon FOLLOW and divert to COLLECT_ITEM.
+                        if (followerStateFrames % 10 == 0) {
+                            Actor* item = ScanForItemCandidate();
+                            if (item != nullptr) {
+                                followerTargetItem = item;
+                                followerCollectItemTimeoutFrames = kItemCollectTimeout;
+                                followerAIState     = FollowerAIState::COLLECT_ITEM;
+                                followerStateFrames = 0;
+                                SPDLOG_INFO("[Follower] FOLLOW→COLLECT_ITEM item=0x{:02X} at ({:.0f},{:.0f},{:.0f})",
+                                            (int)(item->params & 0xFF),
+                                            item->world.pos.x, item->world.pos.y, item->world.pos.z);
                                 break;
                             }
                         }
@@ -1667,6 +1910,72 @@ void Anchor::RegisterHooks() {
                         }
                         break;
                     }
+
+                    // Item pickup (Claude/Plans/ai_follower_item_pickup.md).
+                    // Walks toward followerTargetItem until pickup fires
+                    // (En_Item00 is collision-triggered; contact → collect).
+                    // Exit paths:
+                    //   - target actor gone (collected by us OR by leader) → RETURN
+                    //   - timeout elapsed (couldn't reach) → RETURN
+                    //   - leader beyond leash → RETURN (follow takes priority)
+                    //   - leader started climbing → let top-of-hook G1/G2 take over
+                    //   - item on a different floor (|Δy| ≥ kMaxYDelta) → RETURN
+                    case FollowerAIState::COLLECT_ITEM: {
+                        if (followerTargetItem == nullptr ||
+                            followerTargetItem->update == nullptr) {
+                            SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (item gone — collected or unloaded)");
+                            followerTargetItem  = nullptr;
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            break;
+                        }
+                        // Leader leash — don't stray too far from the leader
+                        // just for a rupee.
+                        {
+                            f32 lx = leaderPos.x - p2Pos.x;
+                            f32 lz = leaderPos.z - p2Pos.z;
+                            if (lx * lx + lz * lz > kMaxLeash * kMaxLeash) {
+                                SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (leader beyond leash)");
+                                followerTargetItem  = nullptr;
+                                followerAIState     = FollowerAIState::RETURN;
+                                followerStateFrames = 0;
+                                break;
+                            }
+                        }
+                        // Y-gate — item ended up on a different floor (bounce
+                        // off a ledge between grace expiry and pickup start).
+                        if (fabsf(followerTargetItem->world.pos.y - p2Pos.y) >= kMaxYDelta) {
+                            SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (item off-floor)");
+                            followerTargetItem  = nullptr;
+                            followerAIState     = FollowerAIState::RETURN;
+                            followerStateFrames = 0;
+                            break;
+                        }
+                        // Timeout — couldn't reach the item in kItemCollectTimeout
+                        // frames (geometry / collision mishap).
+                        if (followerCollectItemTimeoutFrames > 0) {
+                            followerCollectItemTimeoutFrames--;
+                            if (followerCollectItemTimeoutFrames == 0) {
+                                SPDLOG_WARN("[Follower] COLLECT_ITEM→RETURN (timeout)");
+                                followerTargetItem  = nullptr;
+                                followerAIState     = FollowerAIState::RETURN;
+                                followerStateFrames = 0;
+                                break;
+                            }
+                        }
+                        // Drive ShouldActorUpdate toward the item. En_Item00's
+                        // own collision handler attaches to Link on contact —
+                        // no BTN_A or other interaction needed for pickup.
+                        followerMoveTarget = followerTargetItem->world.pos;
+                        {
+                            f32 idx = followerTargetItem->world.pos.x - p2Pos.x;
+                            f32 idz = followerTargetItem->world.pos.z - p2Pos.z;
+                            if (idx * idx + idz * idz > 1.0f) {
+                                player->actor.shape.rot.y = YawToward(idx, idz);
+                            }
+                        }
+                        break;
+                    }
                 }
 
                 // End-of-block position override was intentionally removed when
@@ -1740,12 +2049,13 @@ void Anchor::RegisterHooks() {
                     // at enemyPos, so the swing also goes toward the enemy
                     // — OoT reads stick on the BTN_B edge-press frame to set
                     // swing direction, which agrees with the approach direction.
-                    bool isMoving = (followerAIState == FollowerAIState::FOLLOW   ||
-                                     followerAIState == FollowerAIState::STUCK    ||
-                                     followerAIState == FollowerAIState::ENGAGE   ||
-                                     followerAIState == FollowerAIState::ATTACK   ||
-                                     followerAIState == FollowerAIState::RETURN   ||
-                                     followerAIState == FollowerAIState::CLIMBING);
+                    bool isMoving = (followerAIState == FollowerAIState::FOLLOW       ||
+                                     followerAIState == FollowerAIState::STUCK        ||
+                                     followerAIState == FollowerAIState::ENGAGE       ||
+                                     followerAIState == FollowerAIState::ATTACK       ||
+                                     followerAIState == FollowerAIState::RETURN       ||
+                                     followerAIState == FollowerAIState::CLIMBING     ||
+                                     followerAIState == FollowerAIState::COLLECT_ITEM);
 
                     // --- Joystick cancel ---
                     // Read hardware values BEFORE we inject anything. OoT resets input.cur
@@ -2084,6 +2394,22 @@ void Anchor::RegisterHooks() {
                     if (followerAIState == FollowerAIState::BLOCK) {
                         input.press.button |= BTN_R;
                         input.cur.button   |= BTN_R;
+                    }
+
+                    // Item pickup — dismiss item-get and talking text boxes
+                    // with BTN_A every 20 frames. PLAYER_STATE1_GETTING_ITEM
+                    // is set during the "raised-item" cutscene (first-time
+                    // pickups of bombs, arrows, keys, heart pieces); TALKING
+                    // catches the text-advance portion. Matches the BTN_B
+                    // swing cadence so we're not slamming BTN_A every frame.
+                    // Fires regardless of follower state (pickup can occur
+                    // during COLLECT_ITEM, but also in any other state if
+                    // Link steps on an item by accident).
+                    if (sf1 & (PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_TALKING)) {
+                        if (followerStateFrames % 20 == 0) {
+                            input.press.button |= BTN_A;
+                            input.cur.button   |= BTN_A;
+                        }
                     }
 
                     // G6/G7/G8 — RANGED_ATTACK: draw weapon, aim, release-to-fire.
