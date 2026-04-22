@@ -217,11 +217,22 @@ typedef struct AnchorClient {
 
 // Number of render frames a retired BakedPlayerModel must sit idle before
 // destruction. See commentary on AnchorClient::retiredBakedModel for rationale.
-// N=4 covers: synchronous CPU walks, LUS command batching, double-buffered GPU
-// presentation, driver-queue stalls, gfx_texture_cache_clear flush tail, and
-// VirtualBox frame-rate disparity. 67 ms at 60 fps / 200 ms at 20 fps — below
-// user-visible threshold.
-static constexpr int kRetireFrames = 4;
+//
+// History:
+//   N=4 (original) — covers one bake per transition + LUS double-buffer.
+//     67 ms at 60 fps / 200 ms at 20 fps.
+//   N=30 (#171 step 2, 2026-04-22) — basement-transition crash
+//     reproduced on log 69 and log 74. Post-teleport scene reload into
+//     Deku Tree basement packs FIVE skeleton bakes into ~250 ms (4x local
+//     Malon-Heroine adult+child tunic bakes + 1x DummyPlayer 3dsLink),
+//     and the 5th swap's retire slot overwrote the 1st's buffer while
+//     the GPU / an in-flight ENEMY_UPDATE iteration still held a raw
+//     pointer. Access-violation on freed skelAnime.
+//     30 frames = 500 ms at 60 fps / 1.5 s at 20 fps — comfortably
+//     covers the observed 250 ms worst case. Memory cost is ~10 KB per
+//     additional slot (already-retired model sits idle until the next
+//     bake evicts it), trivial.
+static constexpr int kRetireFrames = 30;
 
 typedef struct {
     uint32_t ownerClientId;

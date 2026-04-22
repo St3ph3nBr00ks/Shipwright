@@ -693,9 +693,14 @@ void Anchor::RegisterHooks() {
                 // hold stick forward at the climb-exit yaw for this many frames
                 // so Link walks inward past the rim before other state machine
                 // logic can re-point him backward toward a leader standing at
-                // the edge. Test 5 (log 71): 60 frames (1 s) was too long —
-                // reduced to 15 (~0.25 s) per user feedback.
-                static constexpr int kClimbDismountHoldFrames = 15;
+                // the edge. Tuning history:
+                //   Test 5 (log 71): 60 (1 s) — too long, follower overshot.
+                //   Test 6 (log 74): 15 (0.25 s) — better but still overshoot.
+                //   Test 9 (log 78): 9 (0.15 s) — current, per user feedback.
+                // Covers both ladder dismount and vine top-rim climb-over
+                // (HANGING_OFF_LEDGE / CLIMBING_LEDGE clears fire the same
+                // CLIMBING→IDLE arm path).
+                static constexpr int kClimbDismountHoldFrames = 9;
                 // Item pickup (Claude/Plans/ai_follower_item_pickup.md).
                 // kItemProximity — XZ radius of the ACTORCAT_MISC scan.
                 //     User-specified 200 units: far enough to catch most
@@ -1361,10 +1366,41 @@ void Anchor::RegisterHooks() {
                             if (!followerDoorHandoff) {
                                 followerDoorHandoff       = true;
                                 followerDoorHandoffFrames = kDoorHandoffTimeout;
+                                // Test 9 — on the arm edge (first frame rooms
+                                // diverge), teleport follower to leader's
+                                // last-same-room position + match rotation.
+                                // The follower was behind the leader (+50 u
+                                // side offset) when leader crossed, so the
+                                // follower wouldn't reach the door trigger
+                                // before timing out (log 78 handoff #1 =
+                                // 17.95 s timeout). Teleport lands follower
+                                // directly on the leader's last trajectory
+                                // at the door threshold; Phase A's BTN_A
+                                // injection then opens the door without the
+                                // walk-to-trigger leg. Uses world.pos
+                                // directly (same room), prevPos, and copies
+                                // leader's shape.rot.y so Link faces the
+                                // same direction and the door's front-face
+                                // detection logic works.
+                                player->actor.world.pos = followerLeaderLastInOurRoom;
+                                player->actor.prevPos   = followerLeaderLastInOurRoom;
+                                player->actor.shape.rot.y = leaderActor->shape.rot.y;
+                                // Post-teleport hold: zero stick for the
+                                // hold window so Link settles before the
+                                // state machine resumes pushing him around.
+                                followerPostTeleportFrames = 30;
+                                followerStuckCycleCount    = 0;
+                                followerStuckCycleResetFrames = 0;
+                                followerOverrunFrames      = 0;
                                 SPDLOG_INFO("[Follower] Leader crossed room boundary (ours={} leader={}) "
-                                            "— door handoff armed (target={:.0f},{:.0f},{:.0f} {}, "
-                                            "timeout={} frames)",
+                                            "— door handoff armed; follower teleported to leader-last-pos "
+                                            "({:.0f},{:.0f},{:.0f}) yaw={} target={:.0f},{:.0f},{:.0f} {} "
+                                            "timeout={} frames",
                                             (int)ourRoom, (int)leaderRoom,
+                                            followerLeaderLastInOurRoom.x,
+                                            followerLeaderLastInOurRoom.y,
+                                            followerLeaderLastInOurRoom.z,
+                                            (int)leaderActor->shape.rot.y,
                                             doorTarget.x, doorTarget.y, doorTarget.z,
                                             doorFound ? "transition-actor" : "shadow-position",
                                             kDoorHandoffTimeout);
