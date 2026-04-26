@@ -7,6 +7,15 @@
 extern "C" {
 #include "variables.h"
 #include "z64.h"
+// Per-actor AC_HIT setter — Phase 3 of #174/#175. Each enemy's collider lives
+// at a different field path on its own struct, so we cast and set per actor id.
+#include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
+#include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
+#include "src/overlays/actors/ovl_En_Firefly/z_en_firefly.h"
+#include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
+#include "src/overlays/actors/ovl_En_St/z_en_st.h"
+#include "src/overlays/actors/ovl_En_Test/z_en_test.h"
+#include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
 extern PlayState* gPlayState;
 }
 
@@ -153,16 +162,61 @@ damage_target_found:
     // Plans/damage_enemy_propagation_fix.md — the per-enemy override table
     // (Phase 3) can refine this if any enemy reads it via a different path.
     //
-    // AC_HIT bit on the actor's AC collider is intentionally NOT set here:
-    // the collider lives on the actor's own struct (per-overlay layout), not
-    // on Actor::colChkInfo, so there is no generic way to reach it without a
-    // per-actor table. Phase 3 will add that table if Phase 2 Option A leaves
-    // residual unfixed enemies. See Plans/damage_enemy_propagation_fix.md.
     if (payload.contains("damageEffect")) {
         actor->colChkInfo.damageEffect = (u8)payload["damageEffect"].get<int>();
     }
     if (payload.contains("atHitEffect")) {
         actor->colChkInfo.atHitEffect = (u8)payload["atHitEffect"].get<int>();
+    }
+
+    // Phase 3 of #174/#175 — set AC_HIT on the actor's AC collider so its
+    // update() recognises the synthetic hit. Many enemies branch on
+    // `collider.base.acFlags & AC_HIT` BEFORE consulting colChkInfo.damage
+    // (e.g. EnDekubaba_UpdateDamage, EnKarebaba lunge handler, EnFirefly hit
+    // detection). Without AC_HIT, the damage value is set but never read.
+    //
+    // The collider lives on each actor's own struct at a per-overlay-specific
+    // field path. There's no generic Actor::collider pointer, so we dispatch
+    // by actor->id. If a synced enemy is added that gates damage on AC_HIT,
+    // add it here.
+    //
+    // For multi-collider actors (Skulltula's 6-cylinder body, Stalfos' body
+    // vs sword vs shield, Karebaba's head vs body), we set the bit on the
+    // collider that the actor's damage code checks — verified in each
+    // actor's source.
+    switch (actor->id) {
+        case ACTOR_EN_DEKUBABA:
+            ((EnDekubaba*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_KAREBABA:
+            // bodyCollider — z_en_karebaba.c:369/419 read AC_HIT here.
+            ((EnKarebaba*)actor)->bodyCollider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_FIREFLY:
+            ((EnFirefly*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_SW:
+            ((EnSw*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_ST:
+            // colCylinder[0] is the body AC collider — z_en_st.c:323 sets it
+            // as AC. The other 5 cylinders are leg/limb segments.
+            ((EnSt*)actor)->colCylinder[0].base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_TEST:
+            // bodyCollider — z_en_test.c:1666 reads AC_HIT here. swordCollider
+            // and shieldCollider are AT colliders (Stalfos hitting Link), not AC.
+            ((EnTest*)actor)->bodyCollider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_DEKUNUTS:
+            ((EnDekunuts*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        default:
+            // No AC_HIT setter for this actor type. Damage is delivered via
+            // colChkInfo only — works for enemies that don't gate on AC_HIT,
+            // breaks silently for those that do. Add new entries above as
+            // they're identified during testing.
+            break;
     }
 
     SPDLOG_INFO("[DamageEnemy] Received netId={} damage={} damageEffect={} atHitEffect={} "
