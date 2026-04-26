@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/SceneMultiplayerConfig.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -66,14 +67,16 @@ bool Anchor::CanTeleportTo(uint32_t clientId) {
         return false;
     }
 
-    // Problematic scenes for teleporting
-    if (client.sceneNum == SCENE_ID_MAX || client.sceneNum == SCENE_GROTTOS || client.sceneNum == SCENE_MARKET_DAY ||
-        client.sceneNum == SCENE_MARKET_NIGHT || client.sceneNum == SCENE_MARKET_RUINS ||
-        client.sceneNum == SCENE_MARKET_ENTRANCE_DAY || client.sceneNum == SCENE_MARKET_ENTRANCE_NIGHT ||
-        client.sceneNum == SCENE_MARKET_ENTRANCE_RUINS || client.sceneNum == SCENE_TEMPLE_OF_TIME_EXTERIOR_DAY ||
-        client.sceneNum == SCENE_TEMPLE_OF_TIME_EXTERIOR_NIGHT ||
-        client.sceneNum == SCENE_TEMPLE_OF_TIME_EXTERIOR_RUINS || client.sceneNum == SCENE_BACK_ALLEY_DAY ||
-        client.sceneNum == SCENE_BACK_ALLEY_NIGHT) {
+    // No scene loaded — sentinel guard, not part of the §5 override table.
+    if (client.sceneNum == SCENE_ID_MAX) {
+        return false;
+    }
+
+    // §5 SceneMultiplayerOverrides — refuse teleport into scenes flagged
+    // disableTeleportTo. Retires the previous hard-coded "problematic
+    // scenes" list (Castle Town markets, ToT exterior, back alleys,
+    // grottos). See Common/SceneMultiplayerConfig.cpp seed map.
+    if (SceneMultiplayerConfig::GetSceneOverrides(client.sceneNum, /*roomNum=*/-1).disableTeleportTo) {
         return false;
     }
 
