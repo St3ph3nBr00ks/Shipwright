@@ -225,4 +225,13 @@ damage_target_found:
                 (int)payload.value("damageEffect", 0),
                 (int)payload.value("atHitEffect", 0),
                 (int)preHp, (int)actor->colChkInfo.damage);
+
+    // Q I Tier 2 — record who dealt this damage so SendPacket_EnemyDefeated
+    // can populate killerClientId on the outgoing kill packet. Sender is
+    // identified by the auto-injected payload["clientId"] field set by
+    // SendJsonToRemote on the originating client.
+    uint32_t senderId = payload.value("clientId", (uint32_t)0);
+    if (senderId != 0) {
+        lastDamagerByNetId[netId] = senderId;
+    }
 }
