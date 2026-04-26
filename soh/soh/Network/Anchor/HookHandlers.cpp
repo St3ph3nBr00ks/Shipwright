@@ -3030,21 +3030,25 @@ void Anchor::RegisterHooks() {
                     extPtr->hasLocalDeath        = true;
                     extPtr->pendingNaturalDeath  = true;
                     extPtr->defeatPacketSent     = true;
-                    // Fix 38: defer SetupDeadItemDrop to OnActorInit (non-host only).
+                    // Fix 38: defer SetupDeadItemDrop to OnActorInit.
                     // OnActorSpawn fires BEFORE actor->init() is called by Actor_UpdateAll
                     // (z_actor.c:3409 vs 2638). Calling SetupDeadItemDrop here causes
                     // EnKarebaba_Init (Frame 1) to override actionFunc=DeadItemDrop back
                     // to actionFunc=Idle. The next update() (Frame 2) then runs
                     // EnKarebaba_Idle, detects the player, and calls SetupAwaken — making
-                    // the Karebaba appear alive for one frame on P2.
+                    // the Karebaba appear alive for one frame.
                     // OnActorInit (z_actor.c:2641) fires AFTER actor->init() has run,
                     // so SetupDeadItemDrop can override actionFunc without being undone.
-                    // CL-01: host manages its own Karebaba state naturally via respawn
-                    // detection — deferredDeadItemDrop is a non-host-only mechanism and
-                    // OnActorInit returns early for the host anyway.
-                    if (roomState.ownerClientId != ownClientId) {
-                        extPtr->deferredDeadItemDrop = true;
-                    }
+                    // 2026-04-25: removed the previous host-only gate. The 2026-04-22
+                    // OnActorInit update made the hook gate on deferredDeadItemDrop
+                    // (not host/non-host), so the host-suppression rationale here is
+                    // obsolete. Symmetric application also covers the cross-room kill
+                    // case (Option B fix): host receives ENEMY_DEFEATED while in a
+                    // different OoT room, actor not yet in actor list at receive time,
+                    // pendingKill branch fires when host walks into the Karebaba's room
+                    // — without this, the host's respawn-detector trips on the post-init
+                    // SetupAwaken before SetupDeadItemDrop can run.
+                    extPtr->deferredDeadItemDrop = true;
                 }
             } else {
                 SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} — killing actor immediately", netId);
