@@ -6,6 +6,8 @@
 // See Claude/Plans/anchor_code_decoupling.md.
 
 #include <cstddef>
+#include <libultraship/libultraship.h>  // pre-load C++ template bridge headers
+                                        // before z64.h pulls them in via extern "C"
 
 extern "C" {
 #include "z64.h"

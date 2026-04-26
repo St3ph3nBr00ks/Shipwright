@@ -6,7 +6,7 @@ extern PlayState* gPlayState;
 extern SaveContext gSaveContext;
 }
 
-namespace Anchor::SceneAuthority {
+namespace SceneAuthority {
 
 uint32_t GetEffectiveHostClientId() {
     // Phase 1 stub: returns the legacy answer (room owner) unconditionally.
@@ -32,4 +32,4 @@ bool IsMyCurrentSceneHost() {
     return IsSceneHost(gPlayState->sceneNum, (uint8_t)gSaveContext.linkAge);
 }
 
-}  // namespace Anchor::SceneAuthority
+}  // namespace SceneAuthority

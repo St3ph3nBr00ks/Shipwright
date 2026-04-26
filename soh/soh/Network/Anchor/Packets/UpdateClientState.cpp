@@ -53,7 +53,7 @@ nlohmann::json Anchor::PrepClientState() {
     // Pillar F — broadcast our per-packet-type maxSchema so peers know
     // which optional fields they can include when sending to us.
     nlohmann::json maxSchema = nlohmann::json::object();
-    for (const auto& [type, schema] : ::Anchor::kPacketSchemas) {
+    for (const auto& [type, schema] : PacketSchemas::kPacketSchemas) {
         maxSchema[type] = schema;
     }
     payload["maxSchema"] = maxSchema;

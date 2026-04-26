@@ -21,12 +21,14 @@
 
 #include <cstdint>
 #include <string>
+#include <libultraship/libultraship.h>  // pre-load C++ template bridge headers
+                                        // before z64.h pulls them in via extern "C"
 
 extern "C" {
 #include "z64.h"
 }
 
-namespace Anchor {
+namespace ReceiveValidator {
 
 enum class ValidationVerdict {
     Valid,         // proceed with packet processing
@@ -44,8 +46,8 @@ ValidationVerdict ValidateTimelineMatches(uint8_t timeline);
 ValidationVerdict ValidateSenderAuthority(uint32_t senderId, const std::string& packetType);
 
 // VALIDATE() macro — wraps a check, adds call-site context to logs.
-#define VALIDATE(expr) ::Anchor::ValidateAndLog((expr), #expr, __FILE__, __LINE__)
+#define VALIDATE(expr) ::ReceiveValidator::ValidateAndLog((expr), #expr, __FILE__, __LINE__)
 ValidationVerdict ValidateAndLog(ValidationVerdict v, const char* exprStr,
                                   const char* file, int line);
 
-}  // namespace Anchor
+}  // namespace ReceiveValidator

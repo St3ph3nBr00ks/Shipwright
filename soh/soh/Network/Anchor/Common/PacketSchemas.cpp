@@ -1,7 +1,7 @@
 #include "PacketSchemas.h"
 #include "soh/Network/Anchor/Anchor.h"
 
-namespace Anchor {
+namespace PacketSchemas {
 
 bool PeerSupportsField(uint32_t clientId, const std::string& packetType,
                        int requiredSchema) {
@@ -24,4 +24,4 @@ bool PeerSupportsField(uint32_t clientId, const std::string& packetType,
     return sit->second >= requiredSchema;
 }
 
-}  // namespace Anchor
+}  // namespace PacketSchemas

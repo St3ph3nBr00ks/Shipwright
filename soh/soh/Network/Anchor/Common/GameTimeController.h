@@ -10,7 +10,7 @@
 // (Claude/Plans/pillar_g_time_control.md) flips PauseMenu to return true
 // in multiplayer; subsequent §4.G.ii work fills in cutscene/text-box/ocarina rules.
 
-namespace Anchor::GameTimeController {
+namespace GameTimeController {
 
 enum class TimeContext {
     PauseMenu,
@@ -25,4 +25,4 @@ enum class TimeContext {
 // Phase 1 stub: returns legacy answer per context.
 bool ShouldAdvanceWorldTime(TimeContext context);
 
-}  // namespace Anchor::GameTimeController
+}  // namespace GameTimeController

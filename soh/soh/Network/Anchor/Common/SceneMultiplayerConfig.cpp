@@ -1,6 +1,6 @@
 #include "SceneMultiplayerConfig.h"
 
-namespace Anchor {
+namespace SceneMultiplayerConfig {
 
 // Sparse override map. Most scenes have no entry (defaults apply).
 // Whole-scene entries use roomNum = -1; per-room entries use specific roomNum.
@@ -76,4 +76,4 @@ bool ShouldDisablePvP(PlayState* play) {
     return false;
 }
 
-}  // namespace Anchor
+}  // namespace SceneMultiplayerConfig

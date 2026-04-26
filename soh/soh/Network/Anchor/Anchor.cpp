@@ -1,4 +1,5 @@
 #include "Anchor.h"
+#include "Common/PacketSchemas.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
 #include "soh/OTRGlobals.h"
@@ -164,7 +165,7 @@ void Anchor::SendJsonToRemote(nlohmann::json payload) {
     // schema lives in Common/PacketSchemas.h and is bumped when fields
     // are added. Senders may override before this point if needed.
     if (!payload.contains("schema") && payload.contains("type")) {
-        payload["schema"] = ::Anchor::GetPacketSchema(payload["type"].get<std::string>());
+        payload["schema"] = PacketSchemas::GetPacketSchema(payload["type"].get<std::string>());
     }
 
     if (!payload.contains("quiet")) {

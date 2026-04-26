@@ -14,7 +14,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace Anchor {
+namespace PacketSchemas {
 
 // Current local schema per packet type. Bump when adding a new field.
 // Add new packet types here as they're introduced.
@@ -68,4 +68,4 @@ inline int GetPacketSchema(const std::string& packetType) {
 bool PeerSupportsField(uint32_t clientId, const std::string& packetType,
                        int requiredSchema);
 
-}  // namespace Anchor
+}  // namespace PacketSchemas

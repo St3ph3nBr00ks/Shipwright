@@ -12,12 +12,14 @@
 
 #include <unordered_map>
 #include <utility>
+#include <libultraship/libultraship.h>  // pre-load C++ template bridge headers
+                                        // before z64.h pulls them in via extern "C"
 
 extern "C" {
 #include "z64.h"
 }
 
-namespace Anchor {
+namespace SceneMultiplayerConfig {
 
 struct SceneMultiplayerOverrides {
     bool disableMultiplayer  = false;  // no sync at all (title, credits)
@@ -44,4 +46,4 @@ SceneMultiplayerOverrides GetSceneOverrides(int16_t sceneNum, int8_t roomNum);
 // - any scene transition (transitionMode != TRANS_MODE_OFF) → disable PvP
 bool ShouldDisablePvP(PlayState* play);
 
-}  // namespace Anchor
+}  // namespace SceneMultiplayerConfig

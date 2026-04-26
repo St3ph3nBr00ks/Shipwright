@@ -14,7 +14,7 @@
 
 #include <cstdint>
 
-namespace Anchor::SceneAuthority {
+namespace SceneAuthority {
 
 // Returns the clientId currently considered effective host.
 // Phase 1 stub: returns roomState.ownerClientId unconditionally.
@@ -30,4 +30,4 @@ bool IsSceneHost(int16_t sceneNum, uint8_t timeline);
 // Shortcut: IsSceneHost(gPlayState->sceneNum, gSaveContext.linkAge).
 bool IsMyCurrentSceneHost();
 
-}  // namespace Anchor::SceneAuthority
+}  // namespace SceneAuthority

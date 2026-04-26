@@ -1,4 +1,6 @@
 #include "GameTimeController.h"
+#include <libultraship/libultraship.h>  // pre-load C++ template bridge headers
+                                        // before z64.h pulls them in via extern "C"
 
 extern "C" {
 #include "z64.h"
@@ -6,7 +8,7 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
-namespace Anchor::GameTimeController {
+namespace GameTimeController {
 
 // Phase 1 stub: returns the legacy answer for every context, preserving
 // existing behaviour. Pillar G.i implementation
@@ -19,8 +21,9 @@ static bool LegacyAdvanceWorldTimeRule(TimeContext ctx) {
     if (gPlayState == nullptr) return true;
     switch (ctx) {
         case TimeContext::PauseMenu:
-            // Time advances when pause menu is OFF.
-            return gPlayState->pauseCtx.state == PAUSE_STATE_OFF;
+            // Time advances when pause menu is OFF (state == 0; the codebase
+            // uses the literal — there is no PAUSE_STATE_OFF macro).
+            return gPlayState->pauseCtx.state == 0;
         case TimeContext::TextBox:
             return gPlayState->msgCtx.msgMode == MSGMODE_NONE;
         case TimeContext::ItemGet: {
@@ -44,4 +47,4 @@ bool ShouldAdvanceWorldTime(TimeContext context) {
     return LegacyAdvanceWorldTimeRule(context);
 }
 
-}  // namespace Anchor::GameTimeController
+}  // namespace GameTimeController

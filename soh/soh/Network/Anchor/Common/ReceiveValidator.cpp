@@ -8,7 +8,7 @@ extern PlayState* gPlayState;
 extern SaveContext gSaveContext;
 }
 
-namespace Anchor {
+namespace ReceiveValidator {
 
 ValidationVerdict ValidateActorStillLive(Actor* actor, PlayState* play) {
     if (actor == nullptr) return ValidationVerdict::DropWithWarn;
@@ -27,7 +27,7 @@ ValidationVerdict ValidateActorStillLive(Actor* actor, PlayState* play) {
 
 ValidationVerdict ValidateNetIdMatches(Actor* actor, uint32_t expectedNetId) {
     if (actor == nullptr) return ValidationVerdict::DropWithWarn;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    const ::EnemyNetId* ext = ObjectExtension::GetInstance().Get<::EnemyNetId>(actor);
     if (ext == nullptr) return ValidationVerdict::DropSilent;  // no ext = not synced
     return (ext->netId == expectedNetId) ? ValidationVerdict::Valid
                                          : ValidationVerdict::DropWithWarn;
@@ -75,4 +75,4 @@ ValidationVerdict ValidateAndLog(ValidationVerdict v, const char* exprStr,
     return v;
 }
 
-}  // namespace Anchor
+}  // namespace ReceiveValidator
