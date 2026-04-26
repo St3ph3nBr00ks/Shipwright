@@ -13,6 +13,7 @@
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/SaveManager.h"
 #include "soh/framebuffer_effects.h"
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 
 #include <libultraship/libultraship.h>
 
@@ -1154,7 +1155,17 @@ void Play_Update(PlayState* play) {
             }
 
             PLAY_LOG(3551);
-            isPaused = (play->pauseCtx.state != 0) || (play->pauseCtx.debugState != 0);
+            // Pillar G.i: route the pause-menu world-time gate through
+            // GameTimeController. In single-player this returns false when
+            // pauseCtx.state != 0 (legacy behaviour). In multiplayer it
+            // returns true unconditionally, so the local pause menu no
+            // longer freezes the world (other players are still acting).
+            // The pause-menu UI itself still reads pauseCtx.state directly
+            // and renders normally (see KaleidoScopeCall_Update / _Draw).
+            // debugState is preserved at the call site — the bridge does
+            // not consider it.
+            isPaused = !Anchor_ShouldAdvanceWorldTime(ANCHOR_TIME_CTX_PAUSE_MENU) ||
+                       (play->pauseCtx.debugState != 0);
 
             PLAY_LOG(3555);
             AnimationContext_Reset(&play->animationCtx);

@@ -3,12 +3,15 @@
 // Multiplayer-aware time-control gate (Pillar G).
 //
 // Single gate function that owns the "does world time advance this frame"
-// decision. Routes 7 existing call sites through it.
+// decision. Routes 7 candidate call sites through it.
 //
-// Phase 1 STUB: returns the legacy answer for every context, preserving
-// behaviour. Pillar G.i implementation
-// (Claude/Plans/pillar_g_time_control.md) flips PauseMenu to return true
-// in multiplayer; subsequent §4.G.ii work fills in cutscene/text-box/ocarina rules.
+// Pillar G.i (LANDED): PauseMenu returns true when multiplayer is active
+// (so the local pause menu does not freeze the world). All other contexts
+// still return the legacy single-player answer; §4.G.ii (text-box / ocarina /
+// cutscene rules in PvP) is future work tracked in
+// Claude/Plans/pillar_g_time_control.md.
+//
+// C call sites use the C bridge in GameTimeControllerBridge.h.
 
 namespace GameTimeController {
 

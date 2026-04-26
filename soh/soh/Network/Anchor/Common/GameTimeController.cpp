@@ -1,22 +1,19 @@
 #include "GameTimeController.h"
-#include <libultraship/libultraship.h>  // pre-load C++ template bridge headers
-                                        // before z64.h pulls them in via extern "C"
+#include "GameTimeControllerBridge.h"
+#include "soh/Network/Anchor/Anchor.h"  // ::Anchor::Instance / isEnabled
+                                        // (also pre-loads libultraship.h + z64.h)
 
 extern "C" {
-#include "z64.h"
 #include "macros.h"
 extern PlayState* gPlayState;
 }
 
 namespace GameTimeController {
 
-// Phase 1 stub: returns the legacy answer for every context, preserving
-// existing behaviour. Pillar G.i implementation
-// (Claude/Plans/pillar_g_time_control.md) flips PauseMenu to return true
-// in multiplayer mode.
-//
-// "Legacy answer" here means: what the existing call site at the routed
-// location would have answered before this gate existed.
+// Returns the legacy single-player answer for each context — i.e. what
+// the existing OoT call site at the routed location would have answered
+// before this gate existed. ShouldAdvanceWorldTime layers Pillar-G
+// multiplayer rules on top.
 static bool LegacyAdvanceWorldTimeRule(TimeContext ctx) {
     if (gPlayState == nullptr) return true;
     switch (ctx) {
@@ -41,10 +38,34 @@ static bool LegacyAdvanceWorldTimeRule(TimeContext ctx) {
 }
 
 bool ShouldAdvanceWorldTime(TimeContext context) {
-    // Phase 1: pure passthrough to legacy. Future implementation
-    // (Pillar G.i) checks Anchor::Instance->isEnabled and flips
-    // PauseMenu to always-true in multiplayer.
+    // Pillar G.i: in multiplayer mode, the local pause menu does NOT
+    // freeze world time — other players continue acting, so enemies,
+    // NPCs, and scripted timers must keep advancing on this client too.
+    // The pause-menu UI itself still renders normally; only the
+    // "world ticks" gate flips.
+    //
+    // All other contexts (text-box, item-get, cutscene, ocarina,
+    // scene-transition) continue returning the legacy answer until the
+    // §4.G.ii rules land.
+    const bool multiplayerActive = (::Anchor::Instance != nullptr) &&
+                                   ::Anchor::Instance->isEnabled;
+    if (multiplayerActive && context == TimeContext::PauseMenu) {
+        return true;
+    }
     return LegacyAdvanceWorldTimeRule(context);
 }
 
 }  // namespace GameTimeController
+
+// ---------------------------------------------------------------------------
+// C bridge — lets C translation units (z_play.c, z_actor.c, etc.) call into
+// the C++ gate without exposing the namespace or enum class.
+//
+// Enum values must match the integer ordering of GameTimeController::TimeContext
+// AND the ANCHOR_TIME_CTX_* macros in GameTimeControllerBridge.h. Keep all
+// three in sync if a new context is added.
+// ---------------------------------------------------------------------------
+extern "C" bool Anchor_ShouldAdvanceWorldTime(int contextEnum) {
+    return GameTimeController::ShouldAdvanceWorldTime(
+        static_cast<GameTimeController::TimeContext>(contextEnum));
+}
