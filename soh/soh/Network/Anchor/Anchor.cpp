@@ -112,6 +112,14 @@ void Anchor::OnConnected() {
     Anchor_ClearEnemyUpdateCache();
 
     if (IsSaveLoaded()) {
+        // Reconnect orphan-actor recovery (log 116 bug — P2 disconnected
+        // during the 8-second window between connect and scene init, which
+        // unregistered OnActorSpawn. Setup actors then spawned with no
+        // EnemyNetId extension; ENEMY_UPDATE / ENEMY_DEFEATED couldn't
+        // find them. Walk all syncable categories now and backfill any
+        // actor missing the extension.
+        BackfillEnemyNetIds();
+
         SendPacket_RequestTeamState();
         // Bug A (log 69) — on reconnect the host does NOT re-broadcast
         // ENEMY_DEFEATED packets that were sent while we were offline,
@@ -356,6 +364,59 @@ void Anchor::RefreshClientActors() {
         client.player = (Player*)dummy;
     }
     spawningDummyPlayerForClientId = 0;
+}
+
+void Anchor::BackfillEnemyNetIds() {
+    // Recovery for the reconnect-during-scene-init scenario (log 116):
+    // if the OnActorSpawn hook was unregistered when the scene set up its
+    // initial actors, those actors stayed in the actor lists with no
+    // EnemyNetId extension. ENEMY_UPDATE / ENEMY_DEFEATED then can't find
+    // them by netId and the scene's enemy sync is silently broken until
+    // the player leaves the scene.
+    //
+    // This function walks every syncable actor category and assigns the
+    // same deterministic netId that OnActorSpawn would have set. It uses
+    // the identical hash/encoding as OnActorSpawn so a future hit through
+    // the normal hook produces the same netId — idempotent.
+    //
+    // Skip actors that already have an extension; only fill in missing.
+    if (!IsSaveLoaded() || gPlayState == nullptr) {
+        return;
+    }
+
+    int filled = 0;
+    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
+        Actor* actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
+        while (actor != nullptr) {
+            // Use the same admission predicate OnActorSpawn uses.
+            if (IsSyncableActor(actor) &&
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor) == nullptr) {
+                // Mirror the netId formula in HookHandlers.cpp OnActorSpawn so
+                // the value is consistent regardless of which path assigned it.
+                uint8_t posHash = (uint8_t)((int16_t)actor->home.pos.x) ^
+                                  (uint8_t)((int16_t)actor->home.pos.z >> 1) ^
+                                  (uint8_t)actor->room;
+                uint32_t netId = ((uint32_t)(uint16_t)gPlayState->sceneNum << 16) |
+                                 ((uint32_t)(uint16_t)actor->id << 8) |
+                                 posHash;
+
+                EnemyNetId ext;
+                ext.netId = netId;
+                ext.skelAnime = GetEnemySkelAnime(actor);
+                ext.limbCount = ext.skelAnime ? ext.skelAnime->limbCount : 0;
+                ObjectExtension::GetInstance().Set<EnemyNetId>(actor, std::move(ext));
+
+                SPDLOG_INFO("[BackfillNetId] Assigned netId={} to actorId={} ptr={} "
+                            "(scene init missed by hook during disconnect)",
+                            netId, actor->id, (void*)actor);
+                filled++;
+            }
+            actor = actor->next;
+        }
+    }
+    if (filled > 0) {
+        SPDLOG_INFO("[BackfillNetId] Backfilled {} actor(s) on reconnect", filled);
+    }
 }
 
 bool Anchor::IsSaveLoaded() {

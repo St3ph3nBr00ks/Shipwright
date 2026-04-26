@@ -485,6 +485,12 @@ class Anchor : public Network {
     nlohmann::json PrepRoomState();
     void RegisterHooks();
     void RefreshClientActors();
+    // Backfill EnemyNetId extensions on actors that are already loaded but
+    // missing the extension. Recovery path for the case where a scene init
+    // ran during a disconnected window (OnActorSpawn hook unregistered, no
+    // netIds assigned to setup actors). Called from OnConnected after
+    // reconnect so subsequent ENEMY_UPDATE packets find their targets.
+    void BackfillEnemyNetIds();
     void SetDummyPlayerClientId(const Actor* actor, uint32_t clientId);
 
     void HandlePacket_AllClientState(nlohmann::json payload);
