@@ -6,7 +6,12 @@
 
 struct EnSt;
 
-typedef void (*EnStActionFunc)(struct EnSt* this, PlayState* play);
+// Param renamed `this` → `thisx` so this header can be included from C++
+// (DamageEnemy.cpp consumes EnSt for the per-actor AC_HIT setter — see
+// commit message). C++ reserves `this` as a keyword regardless of extern "C"
+// linkage. The .c source file uses `this` for its actual parameter name,
+// which is fine — the typedef param name is purely informational.
+typedef void (*EnStActionFunc)(struct EnSt* thisx, PlayState* play);
 
 typedef struct EnSt {
     /* 0x0000 */ Actor actor;
