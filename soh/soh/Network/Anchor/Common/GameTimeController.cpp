@@ -69,3 +69,10 @@ extern "C" bool Anchor_ShouldAdvanceWorldTime(int contextEnum) {
     return GameTimeController::ShouldAdvanceWorldTime(
         static_cast<GameTimeController::TimeContext>(contextEnum));
 }
+
+// Inverse predicate for direct call-site replacement of `pauseCtx.state != 0`.
+// Reads more naturally at gameplay-freeze sites than negating the advance form.
+extern "C" bool Anchor_PauseMenuFreezesWorld(void) {
+    return !GameTimeController::ShouldAdvanceWorldTime(
+        GameTimeController::TimeContext::PauseMenu);
+}

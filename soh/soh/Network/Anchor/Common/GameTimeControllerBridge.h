@@ -34,6 +34,20 @@ extern "C" {
 // other context returns the legacy single-player rule.
 bool Anchor_ShouldAdvanceWorldTime(int contextEnum);
 
+// Returns true iff the pause menu is *actively freezing the world* this frame.
+//
+// Inverse of Anchor_ShouldAdvanceWorldTime(ANCHOR_TIME_CTX_PAUSE_MENU). Wraps
+// the inversion so call sites match their original semantics line-for-line:
+//
+//     if (play->pauseCtx.state != 0)        ← legacy: "pause is freezing"
+//     if (Anchor_PauseMenuFreezesWorld())   ← MP-aware: same semantics + MP false
+//
+// In multiplayer, returns false even when the pause menu UI is open, so any
+// gameplay subsystem migrated to this predicate skips its freeze. Currently
+// consumed by game.c (rendering gate at line 341). Future routings will
+// retire other direct pauseCtx.state reads as they're identified.
+bool Anchor_PauseMenuFreezesWorld(void);
+
 #ifdef __cplusplus
 }
 #endif

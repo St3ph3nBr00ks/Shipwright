@@ -4,6 +4,7 @@
 #include "libultraship/bridge.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 #include "soh/ResourceManagerHelpers.h"
 
 #include "message_data_static.h"
@@ -338,7 +339,12 @@ void GameState_Update(GameState* gameState) {
         }
     }
 
-    if (R_PAUSE_MENU_MODE != 2u) {
+    // Pillar G.i (Option B): in solo, R_PAUSE_MENU_MODE==2 is the brief
+    // capture-frame transient where the engine wants to skip GameState_Draw
+    // for one frame. In MP, the gate is bypassed so GameState_Draw runs
+    // every frame regardless — keeps the rest of the world ticking visibly
+    // for the local player whose Link is paused.
+    if (R_PAUSE_MENU_MODE != 2u || !Anchor_PauseMenuFreezesWorld()) {
         GameState_Draw(gameState, gfxCtx);
         func_800C49F4(gfxCtx);
     }
