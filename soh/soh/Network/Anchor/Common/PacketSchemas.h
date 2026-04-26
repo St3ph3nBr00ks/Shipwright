@@ -23,7 +23,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"DAMAGE_ENEMY", 2},  // bumped 2026-04-25 (#174/#175): added damageEffect + atHitEffect fields so the host receiver can reconstruct full collision state, not just the raw damage number.
     {"DAMAGE_PLAYER", 1},
     {"DISABLE_ANCHOR", 1},
-    {"ENEMY_DEFEATED", 1},
+    {"ENEMY_DEFEATED", 2},  // bumped 2026-04-26 (Q I Tier 2): added killerClientId + killerTeamId for kill-attribution plumbing.
     {"ENEMY_HIT_PLAYER", 1},
     {"ENEMY_RESPAWN", 1},
     {"ENEMY_SPAWN", 1},

@@ -1,5 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
+#include "soh/cvar_prefixes.h"  // CVAR_REMOTE_ANCHOR for local-host TeamId lookup
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
 
@@ -31,7 +32,48 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
     payload["type"] = ENEMY_DEFEATED;
     payload["netId"] = netId;
 
-    SPDLOG_INFO("[EnemyDefeated] Sending defeat for netId={}", netId);
+    // Q I Tier 2 — kill attribution. The host's lastDamagerByNetId map records
+    // the most recent DAMAGE_ENEMY sender for each netId. If this kill is
+    // being broadcast by the host (host's own player or a remote-via-host kill
+    // that bottomed out the actor's HP), look up the killer:
+    //   - Map hit  → killer is the recorded damager (covers all DAMAGE_ENEMY
+    //                paths regardless of who landed the killing blow locally;
+    //                last-DAMAGE_ENEMY-wins per design doc Q I Tier 2)
+    //   - Map miss → killer is the host (host's own player damaged the enemy
+    //                via local collision without any prior remote DAMAGE_ENEMY)
+    //
+    // killerTeamId is derived from clients[killerId].teamId at send time so
+    // the receiver doesn't need its own team-table lookup. Q C grace-window
+    // and future scoreboard work consume these fields off the wire directly.
+    //
+    // Non-host senders (the rare path where a non-host hits an enemy and lands
+    // a killing blow before the host applies the DAMAGE_ENEMY) skip
+    // attribution — only the host owns the lastDamagerByNetId map.
+    if (roomState.ownerClientId == ownClientId) {
+        uint32_t killerId;
+        auto it = lastDamagerByNetId.find(netId);
+        if (it != lastDamagerByNetId.end()) {
+            killerId = it->second;
+        } else {
+            killerId = ownClientId;  // local host kill, no remote damager recorded
+        }
+        payload["killerClientId"] = killerId;
+        if (killerId == ownClientId) {
+            payload["killerTeamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+        } else if (clients.contains(killerId)) {
+            payload["killerTeamId"] = clients[killerId].teamId;
+        }
+        // Drop the entry now that the kill has been attributed; subsequent
+        // hits on a respawned actor (same netId) start fresh.
+        if (it != lastDamagerByNetId.end()) {
+            lastDamagerByNetId.erase(it);
+        }
+    }
+
+    SPDLOG_INFO("[EnemyDefeated] Sending defeat for netId={} killerClientId={} killerTeamId={}",
+                netId,
+                payload.value("killerClientId", (uint32_t)0),
+                payload.value("killerTeamId", std::string("(unattributed)")));
 
     for (auto& [clientId, client] : clients) {
         if (client.online && client.isSaveLoaded && !client.self) {
@@ -56,7 +98,17 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
 
     uint32_t netId = payload.value("netId", (uint32_t)0);
 
-    SPDLOG_INFO("[EnemyDefeated] Received defeat for netId={}", netId);
+    // Q I Tier 2 — kill attribution. Schema-2 senders include killerClientId
+    // and killerTeamId. Tier 2 is plumbed-but-no-UI: we log the values for
+    // diagnostic visibility but otherwise no consumer reads them on receive.
+    // Future Tier 3 work (kill feed, scoreboard) and Q C grace window
+    // (3s drop pickup lockout to killer's team) will read off the wire here.
+    uint32_t    killerClientId = payload.value("killerClientId", (uint32_t)0);
+    std::string killerTeamId   = payload.value("killerTeamId", std::string{});
+
+    SPDLOG_INFO("[EnemyDefeated] Received defeat for netId={} killerClientId={} killerTeamId={}",
+                netId, killerClientId,
+                killerTeamId.empty() ? "(unattributed)" : killerTeamId);
 
     // Walk every syncable actor category (shared list in Anchor.h) looking
     // for the netId match. Covers ENEMY + BOSS plus any actor that underwent

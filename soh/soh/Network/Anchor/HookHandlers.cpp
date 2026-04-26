@@ -263,6 +263,21 @@ void Anchor::RegisterHooks() {
             // so any previously dead enemies have respawned fresh.
             if (roomState.ownerClientId == ownClientId) {
                 deadEnemiesByScene.erase(gPlayState->sceneNum);
+
+                // Q I Tier 2 — clear stale kill-attribution entries for the
+                // entered scene. netId encodes scene in high 16 bits, so any
+                // entry whose top half matches the new scene refers to an
+                // enemy that just respawned with the same netId; its old
+                // damager attribution is stale.
+                int16_t enteredScene = (int16_t)gPlayState->sceneNum;
+                for (auto it = lastDamagerByNetId.begin(); it != lastDamagerByNetId.end();) {
+                    int16_t entryScene = (int16_t)((it->first >> 16) & 0xFFFF);
+                    if (entryScene == enteredScene) {
+                        it = lastDamagerByNetId.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
             }
             // Clear the per-scene-visit send-dedup set so that enemies in the new
             // scene can have their ENEMY_DEFEATED broadcast normally.

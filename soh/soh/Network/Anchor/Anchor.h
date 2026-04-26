@@ -288,6 +288,25 @@ class Anchor : public Network {
     // whose netId is pending. Cleared in OnSceneSpawnActors alongside the above sets.
     std::unordered_set<uint32_t> pendingKillNetIds;
 
+    // Q I Tier 2 — kill attribution.
+    // Host-only map: per-netId, who last damaged the enemy. Populated by
+    // HandlePacket_DamageEnemy (remote damager) on the host. Read at kill
+    // time by SendPacket_EnemyDefeated to populate killerClientId /
+    // killerTeamId on the outgoing ENEMY_DEFEATED (schema 2).
+    //
+    // If the entry is absent at kill time (host's own player landed the
+    // killing blow without any prior remote damage), the kill is attributed
+    // to the host. If a remote client damaged the enemy and the host then
+    // finished it locally, the map still reflects the remote damager —
+    // accepted edge case for v1; "last DAMAGE_ENEMY wins" rather than
+    // "absolute last hitter wins."
+    //
+    // Cleared per-scene by OnSceneSpawnActors using netId's encoded scene
+    // (high 16 bits) so leaving and re-entering a scene resets attribution.
+    // Tier 2 = plumbed but no UI; consumers (Q C grace window, future
+    // scoreboard) read these fields off the wire without further state.
+    std::unordered_map<uint32_t /*netId*/, uint32_t /*clientId*/> lastDamagerByNetId;
+
     // Follower mode: non-host player's position is overridden to trail the host.
     // Toggled via the Anchor settings menu (AI Follower checkbox).
     // Deactivated by any controller input while active.
