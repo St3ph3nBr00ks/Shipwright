@@ -1,0 +1,4 @@
+Module home for cross-cutting helpers and infrastructure shared between
+sync layers. See Claude/Plans/anchor_code_decoupling.md for module
+contents (planned: ActorSyncHelpers, PlayerLookup, SceneAuthority,
+ReceiveValidator, SceneMultiplayerConfig, GameTimeController, PacketSchemas).

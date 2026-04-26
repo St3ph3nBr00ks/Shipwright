@@ -1,0 +1,3 @@
+Module home for globally-replicated world-state sync (Pillar C). See
+Claude/Plans/pillar_c_worldstatesync.md for design. v1 customers:
+Mad Scrub eye target, push-blocks, torches, water levels, rotating rooms.
