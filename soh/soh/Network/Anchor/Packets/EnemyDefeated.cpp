@@ -75,16 +75,24 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 // kill, or pendingNaturalDeath = prior network kill), ignore the duplicate.
                 if (actor->id == ACTOR_EN_KAREBABA) {
                     if (ext->defeatPacketSent || ext->pendingNaturalDeath) {
-                        SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} already dying — stacking kill for after respawn", netId);
-                        // The actor is already mid-cycle; we cannot apply this kill now.
-                        // Mark stalledKillPending so that when the current cycle completes
-                        // and respawn detection fires in OnActorUpdate, it immediately
-                        // re-triggers the death cycle instead of restoring the actor to
-                        // live state (Fix 36 — stacked kill support).
-                        ext->stalledKillPending = true;
-                        // Also ensure pendingKillNetIds persists so that if the player
-                        // exits and re-enters the room mid-cycle, SetupDeadItemDrop fires
-                        // again on the fresh spawn (Fix 35).
+                        SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} already dying — duplicate, dedup only", netId);
+                        // The actor is already mid-cycle. In practice this branch is
+                        // only reached via duplicate delivery — typically the host's
+                        // deadEnemiesByScene replay redelivering a kill the actor has
+                        // already started processing locally. Karebaba in DeadItemDrop
+                        // moves to ACTORCAT_MISC and is not damage-able, so a genuine
+                        // "stacked kill" can't occur during the cycle.
+                        //
+                        // Previously we set stalledKillPending=true here so the respawn
+                        // detector would re-kill on the next live state. That fired
+                        // incorrectly on the duplicate-replay case: P2 leaves room, P1
+                        // kills, P2 re-enters → P2 receives the original packet (buffered
+                        // as pendingKill, dies via Fix 38) and then a replay packet from
+                        // P1 → "already dying" → stalled kill set → Karebaba respawns
+                        // and is immediately re-killed mid-regrowth.
+                        //
+                        // Keep pendingKillNetIds.insert for Fix 35 (room-exit/re-entry
+                        // persistence). Don't set stalledKillPending.
                         pendingKillNetIds.insert(netId);
                         return;
                     }
@@ -122,9 +130,10 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 ObjectExtension::GetInstance().Get<EnemyNetId>(misc));
             if (ext != nullptr && ext->netId == netId &&
                 (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
-                SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} in ACTORCAT_MISC natural cycle — stacking kill for after respawn", netId);
-                ext->stalledKillPending = true;
-                // Ensure persistence across room re-entries (Fix 35).
+                SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} in ACTORCAT_MISC natural cycle — duplicate, dedup only", netId);
+                // Same rationale as the ACTORCAT_ENEMY already-dying branch above:
+                // duplicate replay should not set stalledKillPending. Persist
+                // pendingKillNetIds for room-exit/re-entry (Fix 35) only.
                 pendingKillNetIds.insert(netId);
                 return;
             }
@@ -135,4 +144,15 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     SPDLOG_WARN("[EnemyDefeated] No actor found for netId={} — buffering as pendingKill (scene not loaded yet?)",
                 netId);
     pendingKillNetIds.insert(netId);
+
+    // Also record the kill in deadEnemiesByScene so the host's join-time replay
+    // (HandlePacket_UpdateClientState) covers this enemy. Without this, kills
+    // received while the host is in a different room of the kill's scene never
+    // make it into the replay list and any new client joining mid-session
+    // sees the enemy alive. Scene is decoded from the netId (high 16 bits per
+    // the netId encoding scheme) — works regardless of where the host is now.
+    if (roomState.ownerClientId == ownClientId) {
+        int16_t sceneFromNetId = (int16_t)((netId >> 16) & 0xFFFF);
+        deadEnemiesByScene[sceneFromNetId].insert(netId);
+    }
 }
