@@ -46,6 +46,14 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
         return;
     }
 
+    // Pillar E note: ValidateSameScene intentionally not added here.
+    // ENEMY_DEFEATED is cross-scene tolerant by design — when the host
+    // receives a kill while in a different scene than where the kill
+    // happened, the actor lookup naturally fails and the kill is recorded
+    // in deadEnemiesByScene[sceneFromNetId] (high 16 bits of netId) for
+    // future scene-entry replay. A ValidateSameScene drop here would
+    // skip that record and the kill would never replay.
+
     uint32_t netId = payload.value("netId", (uint32_t)0);
 
     SPDLOG_INFO("[EnemyDefeated] Received defeat for netId={}", netId);

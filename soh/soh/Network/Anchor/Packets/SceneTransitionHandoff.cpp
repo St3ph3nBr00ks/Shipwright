@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -85,6 +86,16 @@ void Anchor::HandlePacket_SceneTransitionHandoff(nlohmann::json payload) {
     s16   toEntrance   = payload.value("toEntranceIndex", (s16)0);
     Vec3f triggerPos   = payload.value("triggerPos", Vec3f{ 0.0f, 0.0f, 0.0f });
     s16   triggerRotY  = payload.value("triggerRotY", (s16)0);
+
+    // The handoff is only meaningful while the follower is still in the
+    // leader's source scene — the trigger volume only exists there.
+    // Receiving while in a different scene means we missed the leader's
+    // earlier transitions; the handoff is stale and would corrupt
+    // pendingTransition* state for a scene we're not in.
+    if (VALIDATE(::ReceiveValidator::ValidateSameScene(fromSceneNum)) !=
+        ::ReceiveValidator::ValidationVerdict::Valid) {
+        return;
+    }
 
     // Store as pending. If a previous handoff was still outstanding we
     // overwrite — the newer packet is what the leader actually did last.

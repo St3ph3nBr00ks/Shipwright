@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include <nlohmann/json.hpp>
@@ -64,7 +65,8 @@ void Anchor::HandlePacket_EnemySpawn(nlohmann::json payload) {
     }
 
     s16 sceneNum = payload.value("sceneNum", (s16)-1);
-    if (sceneNum != gPlayState->sceneNum) {
+    if (VALIDATE(::ReceiveValidator::ValidateSameScene(sceneNum)) !=
+        ::ReceiveValidator::ValidationVerdict::Valid) {
         return; // different scene — ignore
     }
 
