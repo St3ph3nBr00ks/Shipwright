@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -58,7 +59,11 @@ void Anchor::HandlePacket_EnemyRespawn(nlohmann::json payload) {
     uint32_t netId = payload.value("netId",    (uint32_t)0);
     s16      scene = payload.value("sceneNum", (s16)0);
 
-    if (!gPlayState || scene != (s16)gPlayState->sceneNum) return;
+    // ValidateSameScene handles gPlayState == nullptr internally (returns DropSilent).
+    if (VALIDATE(::ReceiveValidator::ValidateSameScene(scene)) !=
+        ::ReceiveValidator::ValidationVerdict::Valid) {
+        return;
+    }
 
     // Search ACTORCAT_MISC first: the Karebaba lives there during DeadItemDrop
     // and Dead states (Actor_ChangeCategory moves it at SetupDeadItemDrop; it

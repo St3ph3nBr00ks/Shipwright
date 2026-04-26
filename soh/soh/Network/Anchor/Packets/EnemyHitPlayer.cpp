@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -67,7 +68,8 @@ void Anchor::HandlePacket_EnemyHitPlayer(nlohmann::json payload) {
     }
 
     s16 sceneNum = payload.value("sceneNum", (s16)SCENE_ID_MAX);
-    if (sceneNum != gPlayState->sceneNum) {
+    if (VALIDATE(::ReceiveValidator::ValidateSameScene(sceneNum)) !=
+        ::ReceiveValidator::ValidationVerdict::Valid) {
         return;
     }
 

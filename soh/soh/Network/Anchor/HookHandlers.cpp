@@ -3222,16 +3222,9 @@ void Anchor::RegisterHooks() {
                         SendPacket_EnemyRespawn(ext->netId);
                     }
 
-                    // Fix 36 — stacked kill: a second ENEMY_DEFEATED arrived while the
-                    // actor was already mid-cycle. Instead of restoring to live state,
-                    // immediately re-trigger the death cycle so the stacked kill is
-                    // honoured. The actor stays in pendingKillNetIds for room re-entry.
-                    bool doStalledKill = ext->stalledKillPending;
-
                     ext->pendingNaturalDeath  = false;
                     ext->hasLocalDeath        = false;
                     ext->defeatPacketSent     = false;
-                    ext->stalledKillPending   = false;
                     ext->netStateIndex        = -1;
                     // Clear hasNetState (Fix 25): prevents stale scale/rot from the
                     // host's last packet being re-applied during the first few frames
@@ -3243,23 +3236,15 @@ void Anchor::RegisterHooks() {
 
                     sentDefeatThisScene.erase(ext->netId);
 
-                    if (doStalledKill) {
-                        // Re-trigger the death cycle immediately for the stacked kill.
-                        SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} stalled kill — re-triggering death cycle (non-host)",
-                                    ext->netId);
-                        ext->hasLocalDeath       = true;
-                        ext->pendingNaturalDeath = true;
-                        ext->defeatPacketSent    = true;
-                        actor->flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
-                        actor->flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
-                        EnKarebaba_SetupDeadItemDrop((EnKarebaba*)actor, gPlayState);
-                        // Keep in pendingKillNetIds for room re-entry persistence
-                    } else {
-                        // Release the deferred pendingKillNetIds entry (Fix 35).
-                        pendingKillNetIds.erase(ext->netId);
-                        SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (non-host) — sync re-enabled",
-                                    ext->netId, curState);
-                    }
+                    // Release the deferred pendingKillNetIds entry (Fix 35).
+                    // Fix 36's "stacked kill" branch was removed 2026-04-26 — its
+                    // stalledKillPending input had no remaining writers after
+                    // duplicate-replay was reclassified as dedup-only in
+                    // HandlePacket_EnemyDefeated. See commit message for full
+                    // rationale.
+                    pendingKillNetIds.erase(ext->netId);
+                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (non-host) — sync re-enabled",
+                                ext->netId, curState);
                 }
             }
 

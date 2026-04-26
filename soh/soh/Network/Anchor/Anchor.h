@@ -67,15 +67,6 @@ struct EnemyNetId {
     // Cleared in OnActorUpdate when the actor returns to Idle (respawn complete).
     bool pendingNaturalDeath = false;
 
-    // Set when a second ENEMY_DEFEATED arrives for this Karebaba while it is already
-    // in its natural death cycle (pendingNaturalDeath=true or defeatPacketSent=true).
-    // The incoming kill cannot be applied immediately — the actor must finish its
-    // current cycle first. When non-host respawn detection fires, this flag causes an
-    // immediate re-trigger of the death cycle (SetupDeadItemDrop) rather than clearing
-    // back to live state, so the stacked kill is honoured with one cycle's delay.
-    // Cleared after re-triggering (or when respawn completes with no stacked kill).
-    bool stalledKillPending = false;
-
     // Set in OnActorSpawn when a pendingKillNetIds entry matches this Karebaba.
     // OnActorSpawn fires BEFORE actor->init() is called by Actor_UpdateAll; calling
     // SetupDeadItemDrop there causes EnKarebaba_Init (Frame 1) to override actionFunc
