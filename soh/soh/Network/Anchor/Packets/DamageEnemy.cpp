@@ -198,18 +198,21 @@ damage_target_found:
         case ACTOR_EN_SW:
             ((EnSw*)actor)->collider.base.acFlags |= AC_HIT;
             break;
-        case ACTOR_EN_ST:
-            // colCylinder[0] is the body AC collider — z_en_st.c:323 sets it
-            // as AC. The other 5 cylinders are leg/limb segments.
-            ((EnSt*)actor)->colCylinder[0].base.acFlags |= AC_HIT;
-            break;
+        // ACTOR_EN_ST (Skulltula) and ACTOR_EN_DEKUNUTS (Mad Scrub) are
+        // INTENTIONALLY OMITTED — both read `info.acHitInfo->toucher.dmgFlags`
+        // unconditionally when AC_HIT fires (z_en_st.c:433/440,
+        // z_en_dekunuts.c:451). CollisionCheck_AT normally populates
+        // acHitInfo alongside the AC_HIT bit; setting only the bit synthetic-
+        // ally leaves acHitInfo as a stale or null pointer, and the dereference
+        // crashes the host (verified in log 115 — exception 0xC0000005 on
+        // Skulltula damage receive). Until we synthesise a fake AT collider
+        // OR patch these actors with a null-check guard, leave AC_HIT off for
+        // them. damageEffect / atHitEffect propagation still happens — they
+        // just won't run their hit-reaction code on remote-only damage.
         case ACTOR_EN_TEST:
             // bodyCollider — z_en_test.c:1666 reads AC_HIT here. swordCollider
             // and shieldCollider are AT colliders (Stalfos hitting Link), not AC.
             ((EnTest*)actor)->bodyCollider.base.acFlags |= AC_HIT;
-            break;
-        case ACTOR_EN_DEKUNUTS:
-            ((EnDekunuts*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         default:
             // No AC_HIT setter for this actor type. Damage is delivered via

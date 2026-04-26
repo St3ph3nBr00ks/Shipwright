@@ -2932,6 +2932,26 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // Cross-scene-respawn fix (log 115 bug — Deku Babas didn't respawn on
+        // host after both players left and re-entered scene 0x0):
+        // OnSceneSpawnActors fires AFTER the setup-actor loop completes
+        // (z_actor.c:2598). The setup actors that fire OnActorSpawn during
+        // that loop see deadEnemiesByScene[currentScene] still populated from
+        // the prior visit, and the host-side check below (~L2985) suppresses
+        // their respawn. By the time OnSceneSpawnActors fires and clears the
+        // map, the suppression has already been applied.
+        //
+        // Fix: clear deadEnemiesByScene[currentScene] on the FIRST setup-actor
+        // spawn of a fresh scene init (numSetupActors > 0). Subsequent setup
+        // actors in the same batch see the cleared map and respawn cleanly.
+        // Room transitions within the same scene leave numSetupActors == 0 so
+        // the same-scene-visit suppression behaviour is preserved.
+        // The OnSceneSpawnActors clear below is now belt-and-braces.
+        if (gPlayState != nullptr && gPlayState->numSetupActors > 0 &&
+            roomState.ownerClientId == ownClientId) {
+            deadEnemiesByScene.erase(gPlayState->sceneNum);
+        }
+
         bool isDynamicSpawn = (gPlayState->numSetupActors == 0);
         if (isDynamicSpawn) {
             if (roomState.ownerClientId == ownClientId) {
