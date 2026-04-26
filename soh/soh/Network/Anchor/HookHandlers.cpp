@@ -1,4 +1,6 @@
 #include "Anchor.h"
+#include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
+#include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include <chrono>
 #include <libultraship/libultraship.h>
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
@@ -68,107 +70,9 @@ float OTRGetDimensionFromLeftEdge(float v);
 float OTRGetDimensionFromRightEdge(float v);
 }
 
-/**
- * Returns the SkelAnime* for an enemy actor, or nullptr if unsupported.
- *
- * Most enemies in OoT place SkelAnime immediately after the base Actor struct.
- * A minority have other fields in between. Known exceptions are handled via
- * explicit struct casts; everything else uses the generic layout with validation.
- *
- * Generic layout (used by ~117 of ~156 animated enemies):
- *   struct GenericEnemy { Actor actor; SkelAnime skelAnime; };
- *
- * Exception pattern (e.g. Redead, Wolfos, Stalfos):
- *   struct { Actor actor; Vec3s bodyPartsPos[N]; SkelAnime skelAnime; };
- *   — handled by casting to the specific enemy struct.
- */
-static SkelAnime* GetEnemySkelAnime(Actor* actor) {
-    // Explicit exceptions: enemies with fields between Actor and SkelAnime.
-    switch (actor->id) {
-        case ACTOR_EN_DEKUBABA: return &((EnDekubaba*)actor)->skelAnime;
-        case ACTOR_EN_TEST:     return &((EnTest*)actor)->skelAnime;
-        case ACTOR_EN_RD:       return &((EnRd*)actor)->skelAnime;
-        case ACTOR_EN_WF:       return &((EnWf*)actor)->skelAnime;
-        case ACTOR_EN_MB:       return &((EnMb*)actor)->skelAnime;
-        default: break;
-    }
-
-    // Generic case: SkelAnime immediately follows Actor.
-    struct GenericEnemy { Actor actor; SkelAnime skelAnime; };
-    SkelAnime* ska = &((GenericEnemy*)actor)->skelAnime;
-
-    // Validate before trusting it — for the ~39 non-default enemies whose data
-    // at this offset is NOT a SkelAnime, limbCount is typically 0 or out of range.
-    if (ska->limbCount == 0 || ska->limbCount > 30 || ska->jointTable == nullptr) {
-        return nullptr;
-    }
-    return ska;
-}
-
-// Issue #153 — admission predicate for non-ACTORCAT_ENEMY actors that should
-// participate in the sync pipeline (ENEMY_UPDATE, ENEMY_DEFEATED, etc.).
-//
-// The original three gate sites (OnActorSpawn / OnActorUpdate / ShouldActorUpdate)
-// hard-checked `category == ACTORCAT_ENEMY`. That excludes hostile/world actors
-// in PROP / BG / NPC / SWITCH / MISC, even when they affect cross-client gameplay
-// (rolling boulders, scripted-path NPCs, eye-switch traps, etc.).
-//
-// Adding actor IDs here joins them to the sync pipeline without disturbing the
-// existing ACTORCAT_ENEMY-only flow. Per-actor sync logic (payload extension,
-// re-apply behaviour) still has to be implemented case by case in the relevant
-// hook bodies and packet handlers.
-//
-// Pending future allowlist entries surfaced in research:
-//   ACTOR_EN_PO_DESERT     — Desert Poe / Guide Poe   (#124, ACTORCAT_BG)
-//   ACTOR_EN_PO_RELAY      — Dampé's Ghost            (#125, ACTORCAT_NPC)
-//   ACTOR_EN_ANUBICE_TAG   — Anubis spawn marker      (#116, ACTORCAT_SWITCH)
-static bool IsSyncedWorldActor(int16_t actorId) {
-    // Adding an ID here admits the actor into the sync pipeline regardless of
-    // its current `actor->category` — so default-category and any mid-life
-    // category-transition instances both pass the admission gate.
-    switch (actorId) {
-        case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
-        case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
-        case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
-        default:                return false;
-    }
-}
-
-// True when the actor should be considered for sync. Called from each filter
-// site to keep the gate logic identical everywhere.
-static inline bool IsSyncableActor(Actor* actor) {
-    return actor->category == ACTORCAT_ENEMY || IsSyncedWorldActor(actor->id);
-}
-
-// Returns the Actor* of the nearest player-type actor to `enemy`.
-// Considers the local player and all live DummyPlayer actors.
-// DummyPlayers that are out-of-scene are already at (-9999,-9999,-9999) by
-// DummyPlayer_Update, so they are naturally excluded by the distance comparison.
-static Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
-    Player* localPlayer = GET_PLAYER(play);
-
-    // Seed with the pre-computed squared distance to the local player so we
-    // avoid an extra sqrt and stay consistent with the automatic field values.
-    float nearestDistSq = SQ(enemy->xzDistToPlayer) + SQ(enemy->yDistToPlayer);
-    Actor* nearest = &localPlayer->actor;
-
-    Actor* npc = play->actorCtx.actorLists[ACTORCAT_NPC].head;
-    while (npc != nullptr) {
-        if (npc->id == ACTOR_EN_OE2 && npc->update == DummyPlayer_Update) {
-            float dx = enemy->world.pos.x - npc->world.pos.x;
-            float dy = enemy->world.pos.y - npc->world.pos.y;
-            float dz = enemy->world.pos.z - npc->world.pos.z;
-            float distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq < nearestDistSq) {
-                nearestDistSq = distSq;
-                nearest = npc;
-            }
-        }
-        npc = npc->next;
-    }
-
-    return nearest;
-}
+// GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor moved to
+// Common/ActorSyncHelpers.h in #173 Phase 1.
+// FindNearestPlayerActor moved to Common/PlayerLookup.h.
 
 // C-callable wrapper so enemy C-code files (e.g. z_en_dekubaba.c) can query the
 // nearest player actor without pulling in C++ headers. Returns the nearest

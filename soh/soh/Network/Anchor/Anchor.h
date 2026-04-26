@@ -17,23 +17,10 @@ extern "C" {
 }
 
 // Categories walked by all receive-side netId→actor lookups.
-// Covers every runtime category transition surveyed in session_state.md
-// (Karebaba→MISC, Armos→BG, Po Sisters→PROP, Heishi2→ITEMACTION, etc.)
-// plus BOSS for full-boss sync. Adding an ID to IsSyncedWorldActor
-// admits both default-category and transition-category instances.
-// `inline constexpr` (C++17) deduplicates across translation units.
-inline constexpr u8 kSyncableActorCategories[] = {
-    ACTORCAT_ENEMY,
-    ACTORCAT_BOSS,
-    ACTORCAT_PROP,
-    ACTORCAT_BG,
-    ACTORCAT_NPC,
-    ACTORCAT_SWITCH,
-    ACTORCAT_ITEMACTION,
-    ACTORCAT_MISC,
-};
-inline constexpr size_t kSyncableActorCategoriesCount =
-    sizeof(kSyncableActorCategories) / sizeof(kSyncableActorCategories[0]);
+// kSyncableActorCategories + kSyncableActorCategoriesCount moved to
+// Common/ActorSyncHelpers.h in #173 Phase 1. Included below for transitive
+// availability to all consumers that include Anchor.h.
+#include "Common/ActorSyncHelpers.h"
 
 // Attached to enemy actors to give them a stable network id across all clients.
 struct EnemyNetId {
