@@ -159,6 +159,14 @@ void Anchor::SendJsonToRemote(nlohmann::json payload) {
     }
 
     payload["clientId"] = ownClientId;
+
+    // Pillar F — auto-inject schema for all packet types. Per-packet
+    // schema lives in Common/PacketSchemas.h and is bumped when fields
+    // are added. Senders may override before this point if needed.
+    if (!payload.contains("schema") && payload.contains("type")) {
+        payload["schema"] = ::Anchor::GetPacketSchema(payload["type"].get<std::string>());
+    }
+
     if (!payload.contains("quiet")) {
         SPDLOG_DEBUG("[Anchor] Queuing payload:\n{}", payload.dump());
     }
@@ -188,14 +196,19 @@ void Anchor::OnIncomingJson(nlohmann::json payload) {
 
     std::string packetType = payload["type"].get<std::string>();
 
-    // Ignore packets from mismatched clients, except for ALL_CLIENT_STATE, UPDATE_CLIENT_STATE, and PLAYER_UPDATE
-    if (packetType != ALL_CLIENT_STATE && packetType != UPDATE_CLIENT_STATE && packetType != PLAYER_UPDATE &&
-        packetType != ENEMY_UPDATE &&
-        packetType != ENEMY_DEFEATED &&
-        packetType != ENEMY_SPAWN &&
-        packetType != ENEMY_RESPAWN &&
-        packetType != DAMAGE_ENEMY &&
-        packetType != ENEMY_HIT_PLAYER) {
+    // Pillar F — schema-driven compatibility. Packets carrying a "schema"
+    // field opt into the schema layer and DO NOT need the clientVersion
+    // check (schema versioning handles cross-version compatibility via
+    // additive-only fields + maxSchema clamping).
+    //
+    // The hand-maintained allowlist (ALL_CLIENT_STATE, UPDATE_CLIENT_STATE,
+    // PLAYER_UPDATE, ENEMY_UPDATE/DEFEATED/SPAWN/RESPAWN, DAMAGE_ENEMY,
+    // ENEMY_HIT_PLAYER) was retired 2026-04-25 — those packets all carry
+    // the schema field now via SendJsonToRemote auto-injection.
+    //
+    // Legacy fallback: pre-Pillar-F peers (without the schema field)
+    // continue to be filtered by the clientVersion mismatch check.
+    if (!payload.contains("schema")) {
         if (payload.contains("clientId")) {
             uint32_t clientId = payload["clientId"].get<uint32_t>();
             if (clients.contains(clientId) && clients[clientId].clientVersion != clientVersion) {

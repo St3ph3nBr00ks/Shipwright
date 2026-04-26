@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PacketSchemas.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -48,6 +49,14 @@ nlohmann::json Anchor::PrepClientState() {
     payload["sceneSpawnEpoch"] = sceneSpawnEpoch;
     payload["isClimbing"] = IsLocalPlayerClimbing();
     payload["isCrawling"] = IsLocalPlayerCrawling();
+
+    // Pillar F — broadcast our per-packet-type maxSchema so peers know
+    // which optional fields they can include when sending to us.
+    nlohmann::json maxSchema = nlohmann::json::object();
+    for (const auto& [type, schema] : ::Anchor::kPacketSchemas) {
+        maxSchema[type] = schema;
+    }
+    payload["maxSchema"] = maxSchema;
 
     if (IsSaveLoaded()) {
         payload["seed"] = IS_RANDO ? Rando::Context::GetInstance()->GetSeed() : 0;
@@ -104,6 +113,15 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         clients[clientId].followerActive = client.followerActive;
         clients[clientId].isClimbing = client.isClimbing;
         clients[clientId].isCrawling = client.isCrawling;
+
+        // Pillar F — record peer's maxSchema for outgoing field-clamping decisions.
+        if (payload["state"].contains("maxSchema") && payload["state"]["maxSchema"].is_object()) {
+            for (auto& [type, schemaVal] : payload["state"]["maxSchema"].items()) {
+                if (schemaVal.is_number_integer()) {
+                    clients[clientId].peerMaxSchema[type] = schemaVal.get<int>();
+                }
+            }
+        }
 
         // Cosmetic sync — apply remote player's custom character model to their DummyPlayer
         if (payload["state"].contains("customModelFilename")) {

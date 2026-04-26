@@ -112,6 +112,10 @@ typedef struct AnchorClient {
     Color_RGB8 color;
     std::string clientVersion;
     std::string teamId;
+    // Peer's per-packet-type maxSchema, populated from HANDSHAKE.
+    // Pillar F: senders consult `PeerSupportsField()` to decide whether
+    // to include schema-N optional fields. Empty for pre-Pillar-F peers.
+    std::unordered_map<std::string, int> peerMaxSchema;
     bool online;
     bool self;
     uint32_t seed;
