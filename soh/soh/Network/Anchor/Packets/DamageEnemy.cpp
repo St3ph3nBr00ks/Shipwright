@@ -42,22 +42,37 @@ extern PlayState* gPlayState;
  *   - Uses += so multiple packets arriving in the same frame accumulate correctly.
  *
  * Packet fields:
- *   netId    - identifies the enemy that was hit
- *   sceneNum - guards against cross-scene application
- *   damage   - colChkInfo.damage value (total damage from all hits this frame)
+ *   netId         - identifies the enemy that was hit
+ *   sceneNum      - guards against cross-scene application
+ *   damage        - colChkInfo.damage value (total damage from all hits this frame)
+ *   damageEffect  - schema 2 (#174/#175): enemy.colChkInfo.damageEffect set by the
+ *                   damage-table lookup in CollisionCheck_SetATvsACDamage
+ *   atHitEffect   - schema 2 (#174/#175): player.colChkInfo.atHitEffect set by
+ *                   CollisionCheck_SetATvsAC. Many enemies branch on these.
+ *
+ * Schema-versioning note (Pillar F):
+ *   The new fields are sent unconditionally rather than gated through
+ *   PeerSupportsField. They are two scalar ints; legacy pre-Pillar-F peers
+ *   tolerate missing fields by deserialising-to-default, and conversely a
+ *   pre-bump receiver simply sees `payload.contains("damageEffect") == false`
+ *   and falls back to the schema-1 behaviour. Cost of always sending is
+ *   negligible; gating saves nothing.
  */
 
-void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage) {
+void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect) {
     if (!IsSaveLoaded()) {
         return;
     }
 
     nlohmann::json payload;
-    payload["type"]     = DAMAGE_ENEMY;
-    payload["sceneNum"] = gPlayState->sceneNum;
-    payload["netId"]    = netId;
-    payload["damage"]   = damage;
-    payload["quiet"]    = true;
+    payload["type"]         = DAMAGE_ENEMY;
+    payload["sceneNum"]     = gPlayState->sceneNum;
+    payload["netId"]        = netId;
+    payload["damage"]       = damage;
+    // Schema 2 (#174/#175) — see comment block above for rationale.
+    payload["damageEffect"] = (int)damageEffect;
+    payload["atHitEffect"]  = (int)atHitEffect;
+    payload["quiet"]        = true;
 
     // Send only to the host — it is the authority on enemy health.
     for (auto& [clientId, client] : clients) {
@@ -67,7 +82,8 @@ void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage) {
             // Test 15 (log 85) — raised DEBUG→INFO so the next test log reveals
             // whether the send side fires per hit. Will demote back to DEBUG
             // once client→host health sync is verified working.
-            SPDLOG_INFO("[DamageEnemy] Sent netId={} damage={}", netId, (int)damage);
+            SPDLOG_INFO("[DamageEnemy] Sent netId={} damage={} damageEffect={} atHitEffect={}",
+                        netId, (int)damage, (int)damageEffect, (int)atHitEffect);
             break;
         }
     }
@@ -130,7 +146,29 @@ damage_target_found:
     u8 preHp = (u8)actor->colChkInfo.health;
     actor->colChkInfo.damage += damage;
 
-    SPDLOG_INFO("[DamageEnemy] Received netId={} damage={} preHp={} accumDmg={} "
-                "(actor->update will consume next frame)",
-                netId, (int)damage, (int)preHp, (int)actor->colChkInfo.damage);
+    // Schema 2 (#174/#175): replay damageEffect + atHitEffect so enemies that
+    // branch on these fields recognise the synthetic hit. damageEffect lives
+    // on the enemy itself (set by the damage-table lookup); atHitEffect lives
+    // on the *attacker*, but we mirror it onto the enemy here as Option A from
+    // Plans/damage_enemy_propagation_fix.md — the per-enemy override table
+    // (Phase 3) can refine this if any enemy reads it via a different path.
+    //
+    // AC_HIT bit on the actor's AC collider is intentionally NOT set here:
+    // the collider lives on the actor's own struct (per-overlay layout), not
+    // on Actor::colChkInfo, so there is no generic way to reach it without a
+    // per-actor table. Phase 3 will add that table if Phase 2 Option A leaves
+    // residual unfixed enemies. See Plans/damage_enemy_propagation_fix.md.
+    if (payload.contains("damageEffect")) {
+        actor->colChkInfo.damageEffect = (u8)payload["damageEffect"].get<int>();
+    }
+    if (payload.contains("atHitEffect")) {
+        actor->colChkInfo.atHitEffect = (u8)payload["atHitEffect"].get<int>();
+    }
+
+    SPDLOG_INFO("[DamageEnemy] Received netId={} damage={} damageEffect={} atHitEffect={} "
+                "preHp={} accumDmg={} (actor->update will consume next frame)",
+                netId, (int)damage,
+                (int)payload.value("damageEffect", 0),
+                (int)payload.value("atHitEffect", 0),
+                (int)preHp, (int)actor->colChkInfo.damage);
 }

@@ -3192,7 +3192,15 @@ void Anchor::RegisterHooks() {
             // sets hasLocalDeath = true. ENEMY_DEFEATED already handles the kill;
             // sending DAMAGE_ENEMY for the final hit would be redundant.
             if (!ext->hasLocalDeath && actor->colChkInfo.damage > 0) {
-                SendPacket_DamageEnemy(ext->netId, (u8)actor->colChkInfo.damage);
+                // #174/#175: forward damageEffect (set on enemy by collision damage-table
+                // lookup) and atHitEffect (set on the player by CollisionCheck_SetATvsAC
+                // when the player's AT element lands a hit). Many OoT enemies branch on
+                // these fields to decide whether Actor_ApplyDamage actually fires; sending
+                // only `damage` left those enemies silently ignoring the synthetic hit.
+                Player* localPlayer = GET_PLAYER(gPlayState);
+                u8 atHitEffect = (localPlayer != nullptr) ? localPlayer->actor.colChkInfo.atHitEffect : 0;
+                SendPacket_DamageEnemy(ext->netId, (u8)actor->colChkInfo.damage,
+                                       actor->colChkInfo.damageEffect, atHitEffect);
             }
 
             // Karebaba respawn detection (non-host path, Fix 24 + Fix 30c):
