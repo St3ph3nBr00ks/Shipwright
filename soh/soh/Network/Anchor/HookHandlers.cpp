@@ -3164,6 +3164,11 @@ void Anchor::RegisterHooks() {
                     extMut->pendingNaturalDeath = false;
                     sentDefeatThisScene.erase(extMut->netId);
                     deadEnemiesByScene[gPlayState->sceneNum].erase(extMut->netId);
+                    // Symmetric with non-host detector below: clear pendingKillNetIds
+                    // so a future room reload doesn't re-trigger Fix 38 dead-state
+                    // setup on the now-alive actor (T1.4 regression — see commit
+                    // message for details).
+                    pendingKillNetIds.erase(extMut->netId);
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (host) — defeat tracking cleared",
                                 extMut->netId, curState);
                 }
