@@ -1,4 +1,5 @@
 #include "Anchor.h"
+#include "soh/Network/Anchor/Common/SceneMultiplayerConfig.h"
 #include "soh/Enhancements/nametag.h"
 #include <unordered_map>
 #include <unordered_set>
@@ -227,7 +228,8 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
 
     if (Anchor::Instance->roomState.pvpMode == 0 ||
         (Anchor::Instance->roomState.pvpMode == 1 &&
-         client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default"))) {
+         client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default")) ||
+        SceneMultiplayerConfig::ShouldDisablePvP(gPlayState)) {
         actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
         return;
     }
