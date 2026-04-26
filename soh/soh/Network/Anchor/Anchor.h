@@ -583,7 +583,7 @@ class Anchor : public Network {
     void SendPacket_EnemyDefeated(uint32_t netId);
     void SendPacket_EnemySpawn(Actor* actor);
     void SendPacket_EnemyRespawn(uint32_t netId);
-    void SendPacket_DamageEnemy(uint32_t netId, u8 damage);
+    void SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect);
     void SendPacket_EnemyHitPlayer(uint32_t netId);
     void HandlePacket_EnemyHitPlayer(nlohmann::json payload);
     // Scene-transition handoff — see #169 Phase C. Leader sends on

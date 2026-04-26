@@ -20,7 +20,7 @@ namespace PacketSchemas {
 // Add new packet types here as they're introduced.
 inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"ALL_CLIENT_STATE", 1},
-    {"DAMAGE_ENEMY", 1},
+    {"DAMAGE_ENEMY", 2},  // bumped 2026-04-25 (#174/#175): added damageEffect + atHitEffect fields so the host receiver can reconstruct full collision state, not just the raw damage number.
     {"DAMAGE_PLAYER", 1},
     {"DISABLE_ANCHOR", 1},
     {"ENEMY_DEFEATED", 1},
