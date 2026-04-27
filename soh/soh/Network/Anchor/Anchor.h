@@ -522,6 +522,8 @@ class Anchor : public Network {
     void HandlePacket_UpdateRoomState(nlohmann::json payload);
     void HandlePacket_UpdateTeamState(nlohmann::json payload);
     void HandlePacket_SceneTransitionHandoff(nlohmann::json payload);
+    // Pillar C v1
+    void HandlePacket_WorldFlagSet(nlohmann::json payload);
 
   public:
     uint32_t ownClientId;
@@ -593,6 +595,10 @@ class Anchor : public Network {
     // boss-room deactivate path and unblocks cross-scene doors / grotto /
     // crawlspace entry. See #169.
     inline static const std::string SCENE_TRANSITION_HANDOFF = "SCENE_TRANSITION_HANDOFF";
+
+    // Pillar C v1 — globally-replicated world state. Plan in
+    // Claude/Plans/pillar_c_worldstatesync.md.
+    inline static const std::string WORLD_FLAG_SET = "WORLD_FLAG_SET";
 
     static Anchor* Instance;
     std::map<uint32_t, AnchorClient> clients;

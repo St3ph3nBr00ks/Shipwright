@@ -1,5 +1,6 @@
 #include "Anchor.h"
 #include "Common/PacketSchemas.h"
+#include "WorldStateSync/WorldStateSync.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
 #include "soh/OTRGlobals.h"
@@ -121,6 +122,11 @@ void Anchor::Disable() {
 
     clients.clear();
     RefreshClientActors();
+
+    // Pillar C v1 — drop replicated world state on full Disable. Reset is
+    // safe under Disable because we'd otherwise carry stale state into a
+    // fresh Enable session pointed at a different room.
+    WorldStateSync::Reset();
 }
 
 void Anchor::OnConnected() {
@@ -330,6 +336,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_UpdateDungeonItems(payload);
             else if (packetType == SCENE_TRANSITION_HANDOFF)
                 HandlePacket_SceneTransitionHandoff(payload);
+            else if (packetType == WORLD_FLAG_SET)
+                HandlePacket_WorldFlagSet(payload);
         } catch (const std::exception& e) {
             SPDLOG_ERROR("[Anchor] Exception while processing incoming packet {}", e.what());
             SPDLOG_ERROR("[Anchor] Packet: {}", payload.dump());

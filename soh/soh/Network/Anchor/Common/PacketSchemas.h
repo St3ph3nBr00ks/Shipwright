@@ -48,6 +48,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"UPDATE_DUNGEON_ITEMS", 1},
     {"UPDATE_ROOM_STATE", 1},
     {"UPDATE_TEAM_STATE", 1},
+    {"WORLD_FLAG_SET", 1},        // Pillar C v1
 };
 
 // Returns the current local schema for a packet type, or 1 if unknown

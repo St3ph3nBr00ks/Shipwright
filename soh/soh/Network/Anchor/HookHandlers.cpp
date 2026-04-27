@@ -2,6 +2,7 @@
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
+#include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
 #include <libultraship/libultraship.h>
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
@@ -305,7 +306,23 @@ void Anchor::RegisterHooks() {
                 }
             }
             RefreshClientActors();
+
+            // Pillar C v1 — apply replicated WorldState entries for the
+            // (sceneNum, timeline) we're entering. Picks up flags peers
+            // set while we were elsewhere.
+            WorldStateSync::ApplyKnownFlagsForScene(
+                (int16_t)gPlayState->sceneNum,
+                (uint8_t)gSaveContext.linkAge);
         }
+    });
+
+    // Pillar C v1 — local FLAG_SCENE_SWITCH set fires this hook from
+    // Flags_SetSwitch (z_actor.c:675). Broadcast via WorldStateSync
+    // unless we're applying a network-driven set (echo guard).
+    COND_HOOK(OnSceneFlagSet, isConnected, [&](int16_t sceneNum, int16_t flagType, int16_t flag) {
+        if (flagType != FLAG_SCENE_SWITCH) return;  // v1 scope
+        if (WorldStateSync::IsApplyingNetworkFlag()) return;
+        WorldStateSync::OnLocalFlagSet(sceneNum, flagType, flag);
     });
 
     COND_HOOK(OnPresentFileSelect, isConnected, [&]() { SendPacket_UpdateClientState(); });
