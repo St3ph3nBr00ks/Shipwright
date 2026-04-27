@@ -72,3 +72,27 @@ bool IsSyncedWorldActor(int16_t actorId);
 inline bool IsSyncableActor(Actor* actor) {
     return actor->category == ACTORCAT_ENEMY || IsSyncedWorldActor(actor->id);
 }
+
+// Deterministic netId for a syncable actor. Same scene + actor id + home
+// position produce the same netId on every client, so a posHash collision
+// is the only mechanism by which two actors share a netId.
+//
+// Encoding (32 bits):
+//   bit 31     timeline (gSaveContext.linkAge & 1) — Pillar B Phase 2
+//   bits 30-16 sceneNum (low 15 bits — sceneNum domain is u8 today; the
+//              top 15 bits accommodate any future expansion without re-cut)
+//   bits 15-8  actor->id (low 8 bits)
+//   bits  7-0  posHash = X ^ (Y >> 2) ^ (Z >> 1) ^ room
+//
+// Y-axis XOR (#162 Proposal A) was added in Phase 2 to disambiguate the
+// empirical Deku Baba / Goroiwa collision in Kokiri Forest where two
+// actors at different floor heights produced the same posHash.
+//
+// `>> 2` on Y (vs `>> 1` on Z) is intentional: actor floor heights span a
+// wider numeric range than Z, so a stronger right-shift collapses the
+// height into the same byte without spilling into the X-axis bits and
+// re-introducing the same collision class.
+//
+// Caller MUST have IsSaveLoaded()==true and gPlayState!=nullptr — the
+// function reads gSaveContext.linkAge and gPlayState->sceneNum.
+uint32_t EncodeEnemyNetId(Actor* actor);

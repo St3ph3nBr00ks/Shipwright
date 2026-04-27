@@ -269,10 +269,11 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     // (HandlePacket_UpdateClientState) covers this enemy. Without this, kills
     // received while the host is in a different room of the kill's scene never
     // make it into the replay list and any new client joining mid-session
-    // sees the enemy alive. Scene is decoded from the netId (high 16 bits per
-    // the netId encoding scheme) — works regardless of where the host is now.
+    // sees the enemy alive. Scene is decoded from the netId (low 15 bits of
+    // the upper word; bit 31 is Pillar B timeline) — works regardless of
+    // where the host is now.
     if (::SceneAuthority::IsEffectiveHost()) {
-        int16_t sceneFromNetId = (int16_t)((netId >> 16) & 0xFFFF);
+        int16_t sceneFromNetId = (int16_t)((netId >> 16) & 0x7FFF);
         deadEnemiesByScene[sceneFromNetId].insert(netId);
     }
 }

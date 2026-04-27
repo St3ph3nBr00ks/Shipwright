@@ -462,14 +462,11 @@ void Anchor::BackfillEnemyNetIds() {
             // Use the same admission predicate OnActorSpawn uses.
             if (IsSyncableActor(actor) &&
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor) == nullptr) {
-                // Mirror the netId formula in HookHandlers.cpp OnActorSpawn so
-                // the value is consistent regardless of which path assigned it.
-                uint8_t posHash = (uint8_t)((int16_t)actor->home.pos.x) ^
-                                  (uint8_t)((int16_t)actor->home.pos.z >> 1) ^
-                                  (uint8_t)actor->room;
-                uint32_t netId = ((uint32_t)(uint16_t)gPlayState->sceneNum << 16) |
-                                 ((uint32_t)(uint16_t)actor->id << 8) |
-                                 posHash;
+                // Single source of truth for the netId encoding lives in
+                // ActorSyncHelpers::EncodeEnemyNetId. Both this backfill path
+                // and OnActorSpawn route through it so a future hit through
+                // the normal hook produces the same netId — idempotent.
+                uint32_t netId = EncodeEnemyNetId(actor);
 
                 EnemyNetId ext;
                 ext.netId = netId;
