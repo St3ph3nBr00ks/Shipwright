@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
@@ -60,6 +61,7 @@ void Anchor::SendPacket_SceneTransitionHandoff(s16 fromSceneNum, s16 toEntranceI
     payload["toEntranceIndex"] = toEntranceIndex;
     payload["triggerPos"]      = triggerPos;
     payload["triggerRotY"]     = triggerRotY;
+    PacketTimeline::SetTimelineField(payload);
 
     SPDLOG_INFO("[SceneTransitionHandoff] Sending from scene 0x{:02X} to entrance 0x{:04X} "
                 "triggerPos=({:.0f},{:.0f},{:.0f})",
@@ -76,6 +78,12 @@ void Anchor::SendPacket_SceneTransitionHandoff(s16 fromSceneNum, s16 toEntranceI
 
 void Anchor::HandlePacket_SceneTransitionHandoff(nlohmann::json payload) {
     if (!IsSaveLoaded()) return;
+
+    // Pillar B Phase 1 — drop cross-timeline scene-scoped traffic. A leader
+    // and follower in different timelines have different scenes by design;
+    // a scene-transition handoff between them is meaningless.
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
+
     // Only followers react. Non-follower clients don't auto-traverse scenes.
     if (!IsFollowerActive()) {
         SPDLOG_DEBUG("[SceneTransitionHandoff] Ignored — follower mode not active on this client");

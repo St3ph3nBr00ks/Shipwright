@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"  // CVAR_REMOTE_ANCHOR for local-host TeamId lookup
@@ -32,6 +33,7 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
     nlohmann::json payload;
     payload["type"] = ENEMY_DEFEATED;
     payload["netId"] = netId;
+    PacketTimeline::SetTimelineField(payload);
 
     // Q I Tier 2 — kill attribution. Two paths depending on who is sending:
     //
@@ -94,6 +96,16 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
         return;
     }
 
+    // Pillar B Phase 1 — drop cross-timeline scene-scoped traffic.
+    // Known Phase-1 limitation: when an effective host is in a different
+    // timeline than the kill, the kill is dropped here instead of being
+    // re-broadcast to peers in the killer's timeline. Cross-timeline
+    // routing is left for a future phase (host needs to relay regardless
+    // of its own timeline; design extension beyond Phase 1 scope).
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) {
+        return;
+    }
+
     // Pillar E note: ValidateSameScene intentionally not added here.
     // ENEMY_DEFEATED is cross-scene tolerant by design — when the host
     // receives a kill while in a different scene than where the kill
@@ -137,6 +149,10 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
             rebroadcast["type"]           = ENEMY_DEFEATED;
             rebroadcast["netId"]          = netId;
             rebroadcast["killerClientId"] = senderId;
+            // Stamp our timeline. The IsCrossTimelinePacket filter above
+            // already proved sender's timeline matches ours, so the re-
+            // broadcast carries the correct timeline for downstream peers.
+            PacketTimeline::SetTimelineField(rebroadcast);
             if (clients.contains(senderId)) {
                 rebroadcast["killerTeamId"] = clients[senderId].teamId;
             }

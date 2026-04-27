@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
@@ -306,6 +307,7 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     payload["health"]   = actor->colChkInfo.health;
     payload["scale"]    = actor->scale;
     payload["quiet"]    = true;
+    PacketTimeline::SetTimelineField(payload);
 
     // Karebaba: sync action state and params timer so non-host state machine matches host.
     // Non-host uses these to call ApplyNetState when the host's state differs from its own.
@@ -368,6 +370,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
 
 void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     if (!IsSaveLoaded()) {
+        return;
+    }
+
+    // Pillar B Phase 1 — drop cross-timeline scene-scoped traffic.
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) {
         return;
     }
 
