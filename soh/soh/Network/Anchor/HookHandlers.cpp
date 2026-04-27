@@ -425,6 +425,32 @@ void Anchor::RegisterHooks() {
             }
         }
 
+        // Issue #171 fix C — within-scene room-transition detection.
+        // The host's "is peer in same room" gate at
+        // SendPacket_EnemyUpdate:251-264 reads `clients[peer].curRoomNum`,
+        // which is only refreshed by UPDATE_CLIENT_STATE. UPDATE_CLIENT_STATE
+        // fires on scene transitions (via OnSceneSpawnActors) but NOT on
+        // room transitions WITHIN a scene — so when we move to a new room,
+        // peers' view of our curRoomNum lags until the next scene
+        // transition, and the host floods us with cross-room ENEMY_UPDATE
+        // packets the whole time. Detect the change locally and fire an
+        // UPDATE_CLIENT_STATE so the host's gate can suppress correctly.
+        //
+        // -1 sentinel: first frame after registration, no prior value to
+        // compare against. Initialise without firing — the first real
+        // transition (-1 → N) is a no-op; subsequent (N → M) sends.
+        if (IsSaveLoaded() && gPlayState != nullptr) {
+            static s8 lastObservedRoomNum = -1;
+            s8 curRoom = (s8)gPlayState->roomCtx.curRoom.num;
+            if (curRoom != lastObservedRoomNum) {
+                bool firstObservation = (lastObservedRoomNum == -1);
+                lastObservedRoomNum = curRoom;
+                if (!firstObservation) {
+                    SendPacket_UpdateClientState();
+                }
+            }
+        }
+
         // Phase C — SCENE_TRANSITION_HANDOFF leader-side broadcast.
         // Every client runs this: on the rising edge of transitionTrigger
         // (OFF → START), capture our current position and destination
@@ -3636,6 +3662,24 @@ void Anchor::RegisterHooks() {
             deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
         }
         SendPacket_EnemyDefeated(ext->netId);
+    });
+
+    // Issue #171 fix B — clean up all ObjectExtension entries before
+    // the actor's memory is freed by Actor_Delete (z_actor.c:3492 fires
+    // OnActorDestroy immediately before the cleanup). Without this, the
+    // EnemyNetId.skelAnime raw pointer dangles past Actor_Delete; if
+    // the same memory address is later reused for a new actor, the
+    // stale extension stays attached and any subsequent deref of
+    // ext->skelAnime is a use-after-free. Likely contributor to #171's
+    // 0xC0000005 access violations on Deku Tree room transitions, where
+    // actor memory is reused frequently as rooms unload + reload.
+    //
+    // ObjectExtension::Free removes every type's entry for the given
+    // pointer in one call — covers EnemyNetId and any future extension
+    // types attached to actors.
+    COND_HOOK(OnActorDestroy, isConnected, [&](void* refActor) {
+        Actor* actor = (Actor*)refActor;
+        ObjectExtension::GetInstance().Free(actor);
     });
 
     // #endregion
