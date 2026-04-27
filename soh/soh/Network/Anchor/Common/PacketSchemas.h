@@ -20,14 +20,14 @@ namespace PacketSchemas {
 // Add new packet types here as they're introduced.
 inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"ALL_CLIENT_STATE", 1},
-    {"DAMAGE_ENEMY", 2},  // bumped 2026-04-25 (#174/#175): added damageEffect + atHitEffect fields so the host receiver can reconstruct full collision state, not just the raw damage number.
+    {"DAMAGE_ENEMY", 3},  // bump-history: 2 (#174/#175 damageEffect+atHitEffect), 3 (Pillar B timeline).
     {"DAMAGE_PLAYER", 1},
     {"DISABLE_ANCHOR", 1},
-    {"ENEMY_DEFEATED", 2},  // bumped 2026-04-26 (Q I Tier 2): added killerClientId + killerTeamId for kill-attribution plumbing.
-    {"ENEMY_HIT_PLAYER", 1},
-    {"ENEMY_RESPAWN", 1},
-    {"ENEMY_SPAWN", 1},
-    {"ENEMY_UPDATE", 1},
+    {"ENEMY_DEFEATED", 3},  // bump-history: 2 (Q I Tier 2 killerClientId+killerTeamId), 3 (Pillar B timeline).
+    {"ENEMY_HIT_PLAYER", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
+    {"ENEMY_RESPAWN", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
+    {"ENEMY_SPAWN", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
+    {"ENEMY_UPDATE", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
     {"ENTRANCE_DISCOVERED", 1},
     {"GAME_COMPLETE", 1},
     {"GIVE_ITEM", 1},
@@ -37,11 +37,11 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"PLAYER_UPDATE", 1},
     {"REQUEST_TEAM_STATE", 1},
     {"REQUEST_TELEPORT", 1},
-    {"SCENE_TRANSITION_HANDOFF", 1},
+    {"SCENE_TRANSITION_HANDOFF", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
     {"SERVER_MESSAGE", 1},
     {"SET_CHECK_STATUS", 1},
     {"SET_FLAG", 1},
-    {"TELEPORT_TO", 1},
+    {"TELEPORT_TO", 2},  // bumped 2026-04-27 (Pillar B Phase 5): linkAge + sceneNum for cross-timeline teleport.
     {"UNSET_FLAG", 1},
     {"UPDATE_BEANS_COUNT", 1},
     {"UPDATE_CLIENT_STATE", 1},

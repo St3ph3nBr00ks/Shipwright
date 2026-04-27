@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
@@ -46,6 +47,7 @@ void Anchor::SendPacket_EnemyHitPlayer(uint32_t netId) {
     payload["sceneNum"] = gPlayState->sceneNum;
     payload["netId"]    = netId;
     payload["quiet"]    = true;
+    PacketTimeline::SetTimelineField(payload);
 
     // Send only to the host — enemy state is host-authoritative.
     for (auto& [clientId, client] : clients) {
@@ -60,6 +62,11 @@ void Anchor::SendPacket_EnemyHitPlayer(uint32_t netId) {
 
 void Anchor::HandlePacket_EnemyHitPlayer(nlohmann::json payload) {
     if (!IsSaveLoaded()) {
+        return;
+    }
+
+    // Pillar B Phase 1 — drop cross-timeline scene-scoped traffic.
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) {
         return;
     }
 

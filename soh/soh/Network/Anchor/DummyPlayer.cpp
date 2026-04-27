@@ -226,6 +226,18 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         gSaveContext.equips.buttonItems[0] = originalButtonItem0;
     }
 
+    // Pillar B Phase 3 — cross-timeline interaction gate (Q 4.B.4).
+    // A child-timeline player and an adult-timeline player can occupy
+    // the "same" scene (sceneNum) but their world-state is independent,
+    // so any collision / lock-on / damage between them is meaningless.
+    // Treat them as the pvpMode=0 case: disable lock-on and skip the
+    // collider setup entirely. This runs BEFORE the PvP gate because
+    // cross-timeline trumps every PvP mode (including FF).
+    if (client.linkAge != gSaveContext.linkAge) {
+        actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
+        return;
+    }
+
     if (Anchor::Instance->roomState.pvpMode == 0 ||
         (Anchor::Instance->roomState.pvpMode == 1 &&
          client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default")) ||
@@ -286,6 +298,21 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     AnchorClient& client = Anchor::Instance->clients[clientId];
 
     if (client.sceneNum != gPlayState->sceneNum || !client.online || !client.isSaveLoaded) {
+        return;
+    }
+
+    // Pillar B Phase 4 — cross-timeline render gate (Q 4.B.1 = ethereal).
+    // v1 implementation: skip body draw entirely. The peer's name tag
+    // (registered via NameTag_RegisterForActorWithOptions in DummyPlayer_Init)
+    // still renders, so the player can see WHERE their cross-timeline peer
+    // is without the body cluttering the scene's layout.
+    //
+    // Polish path (deferred): proper ethereal alpha-blended draw via a
+    // hook in z_player.c that wraps Player_Draw with EnvColor.a override
+    // + RM_AA_ZB_XLU_SURF (sibling of the existing
+    // Anchor_LocalPlayerFaceSwapBegin/End hooks). Tracked in the Pillar B
+    // implementation plan as a Phase 4 polish item.
+    if (client.linkAge != gSaveContext.linkAge) {
         return;
     }
 

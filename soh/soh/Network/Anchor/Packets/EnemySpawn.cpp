@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/ObjectExtension/ObjectExtension.h"
@@ -52,6 +53,7 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor) {
     payload["pos"]      = actor->home.pos;
     payload["rot"]      = actor->home.rot;
     payload["params"]   = actor->params;
+    PacketTimeline::SetTimelineField(payload);
 
     SPDLOG_INFO("[EnemySpawn] Sending spawn actorId={} pos=({:.1f},{:.1f},{:.1f}) params={}",
                 actor->id, actor->home.pos.x, actor->home.pos.y, actor->home.pos.z, actor->params);
@@ -61,6 +63,11 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor) {
 
 void Anchor::HandlePacket_EnemySpawn(nlohmann::json payload) {
     if (!IsSaveLoaded()) {
+        return;
+    }
+
+    // Pillar B Phase 1 — drop cross-timeline scene-scoped traffic.
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) {
         return;
     }
 

@@ -2970,16 +2970,11 @@ void Anchor::RegisterHooks() {
             }
         }
 
-        // Deterministic netId: scene | actorId | hash(home.pos, room).
-        // Both clients spawn the same set of actors in the same scene so the
-        // same home.pos/room combination always identifies the same enemy,
-        // eliminating the spawnCounter divergence seen with dynamic spawns.
-        uint8_t posHash = (uint8_t)((int16_t)actor->home.pos.x) ^
-                          (uint8_t)((int16_t)actor->home.pos.z >> 1) ^
-                          (uint8_t)actor->room;
-        uint32_t netId = ((uint32_t)(uint16_t)gPlayState->sceneNum << 16) |
-                         ((uint32_t)(uint16_t)actor->id << 8) |
-                         posHash;
+        // Deterministic netId — same scene + actor id + home position +
+        // timeline produce the same netId on every client. The formula
+        // lives in ActorSyncHelpers::EncodeEnemyNetId so this site and the
+        // OnConnected reconnect-backfill path stay in lockstep.
+        uint32_t netId = EncodeEnemyNetId(actor);
 
         EnemyNetId ext;
         ext.netId = netId;
@@ -2990,7 +2985,7 @@ void Anchor::RegisterHooks() {
         SPDLOG_INFO("[EnemySpawn] Extension assigned: actorId={} netId={} ptr={} home=({:.0f},{:.0f},{:.0f}) posHash=0x{:02X} limbCount={} {}",
                     actor->id, netId, (void*)actor,
                     actor->home.pos.x, actor->home.pos.y, actor->home.pos.z,
-                    (int)posHash, (int)ext.limbCount,
+                    (int)(netId & 0xFF), (int)ext.limbCount,
                     isDynamicSpawn ? "dynamic" : "static");
 
         // Bug 1 (2026-04-22, log 68) — host respawn guard.

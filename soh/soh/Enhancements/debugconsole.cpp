@@ -403,6 +403,29 @@ static bool GiveItemHandler(std::shared_ptr<Ship::Console> Console, const std::v
     return 0;
 }
 
+static bool GiveSongHandler(std::shared_ptr<Ship::Console> Console, const std::vector<std::string>& args,
+                            std::string* output) {
+    if (args.size() < 2) {
+        ERROR_MESSAGE("[SOH] Usage: give_song <questId>  (e.g. 16 for QUEST_SONG_TIME)");
+        return 1;
+    }
+
+    int questId;
+    try {
+        questId = std::stoi(args[1]);
+    } catch (std::exception const&) {
+        ERROR_MESSAGE("[SOH] Quest ID must be a number");
+        return 1;
+    }
+    if (questId < QUEST_SONG_MINUET || questId > QUEST_SONG_STORMS) {
+        ERROR_MESSAGE("[SOH] Quest ID out of range (expected 6..17 for songs)");
+        return 1;
+    }
+
+    gSaveContext.inventory.questItems |= gBitFlags[questId];
+    return 0;
+}
+
 static bool EntranceHandler(std::shared_ptr<Ship::Console> Console, const std::vector<std::string>& args,
                             std::string* output) {
     if (args.size() < 2) {
@@ -1603,6 +1626,13 @@ void DebugConsole_Init(void) {
                                 {
                                     { "vanilla|randomizer", Ship::ArgumentType::TEXT },
                                     { "giveItemID", Ship::ArgumentType::NUMBER },
+                                } });
+
+    CMD_REGISTER("give_song", { GiveSongHandler,
+                                "Sets a song quest flag. e.g. 'give_song 16' for Song of Time. "
+                                "Range: 6 (Minuet) .. 17 (Storms). See QuestItem enum.",
+                                {
+                                    { "questId", Ship::ArgumentType::NUMBER },
                                 } });
 
     CMD_REGISTER("item", { ItemHandler,

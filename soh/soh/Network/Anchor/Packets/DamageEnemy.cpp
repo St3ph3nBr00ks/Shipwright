@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
@@ -83,6 +84,7 @@ void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, 
     payload["damageEffect"] = (int)damageEffect;
     payload["atHitEffect"]  = (int)atHitEffect;
     payload["quiet"]        = true;
+    PacketTimeline::SetTimelineField(payload);
 
     // Send only to the host — it is the authority on enemy health.
     for (auto& [clientId, client] : clients) {
@@ -101,6 +103,11 @@ void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, 
 
 void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
     if (!IsSaveLoaded()) {
+        return;
+    }
+
+    // Pillar B Phase 1 — drop cross-timeline scene-scoped traffic.
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) {
         return;
     }
 

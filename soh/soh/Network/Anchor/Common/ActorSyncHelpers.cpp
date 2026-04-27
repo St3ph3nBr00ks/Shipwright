@@ -7,6 +7,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
+extern PlayState* gPlayState;
+extern SaveContext gSaveContext;
 }
 
 SkelAnime* GetEnemySkelAnime(Actor* actor) {
@@ -39,4 +41,19 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
         default:                return false;
     }
+}
+
+uint32_t EncodeEnemyNetId(Actor* actor) {
+    uint8_t posHash = (uint8_t)((int16_t)actor->home.pos.x) ^
+                      (uint8_t)((int16_t)actor->home.pos.y >> 2) ^  // #162 Proposal A
+                      (uint8_t)((int16_t)actor->home.pos.z >> 1) ^
+                      (uint8_t)actor->room;
+    // Pillar B Phase 2 — high bit of the scene field carries linkAge so
+    // a child-timeline actor and an adult-timeline actor at the same
+    // (scene, id, posHash) get distinct netIds.
+    uint32_t scenePart = (uint32_t)(uint16_t)gPlayState->sceneNum & 0x7FFF;
+    scenePart |= ((uint32_t)gSaveContext.linkAge & 0x1) << 15;
+    return (scenePart << 16) |
+           ((uint32_t)(uint16_t)actor->id << 8) |
+           posHash;
 }

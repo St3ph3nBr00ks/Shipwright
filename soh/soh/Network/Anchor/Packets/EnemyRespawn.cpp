@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include <nlohmann/json.hpp>
@@ -37,6 +38,7 @@ void Anchor::SendPacket_EnemyRespawn(uint32_t netId) {
     payload["netId"]    = netId;
     payload["sceneNum"] = (s16)gPlayState->sceneNum;
     payload["quiet"]    = true;
+    PacketTimeline::SetTimelineField(payload);
 
     SPDLOG_INFO("[EnemyRespawn] Sending respawn for netId={}", netId);
 
@@ -50,6 +52,10 @@ void Anchor::SendPacket_EnemyRespawn(uint32_t netId) {
 
 void Anchor::HandlePacket_EnemyRespawn(nlohmann::json payload) {
     if (!IsSaveLoaded()) return;
+
+    // Pillar B Phase 1 — drop cross-timeline scene-scoped traffic.
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
+
     // Both host and non-host can receive this packet:
     //   Host receives it when the non-host was the killer and its death cycle
     //   completed first (Fix 33) — host's actor has pendingNaturalDeath=true.
