@@ -265,20 +265,20 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
             $<$<CONFIG:Debug>:
                 MultiThreadedDebug
             >
-            $<$<CONFIG:Release>:
+            $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:
                 MultiThreaded
             >
-            $<$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:Release>>>:${MSVC_RUNTIME_LIBRARY_DEFAULT}>
+            $<$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>>:${MSVC_RUNTIME_LIBRARY_DEFAULT}>
         )
     elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
         string(CONCAT "MSVC_RUNTIME_LIBRARY_STR"
             $<$<CONFIG:Debug>:
                 MultiThreadedDebug
             >
-            $<$<CONFIG:Release>:
+            $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:
                 MultiThreaded
             >
-            $<$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:Release>>>:${MSVC_RUNTIME_LIBRARY_DEFAULT}>
+            $<$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>>:${MSVC_RUNTIME_LIBRARY_DEFAULT}>
         )
     endif()
     set_target_properties(${PROJECT_NAME} PROPERTIES MSVC_RUNTIME_LIBRARY ${MSVC_RUNTIME_LIBRARY_STR})
