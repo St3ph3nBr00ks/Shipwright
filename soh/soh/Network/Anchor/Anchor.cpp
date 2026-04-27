@@ -163,6 +163,11 @@ void Anchor::OnConnected() {
         SendPacket_UpdateClientState();
         SPDLOG_INFO("[Anchor] Reconnect epoch bump → {} (triggers host dead-enemy replay)",
                     sceneSpawnEpoch);
+
+        // Pillar C v1 — request team-mates' WorldState snapshot. They reply
+        // via WORLD_STATE_SNAPSHOT; merge is idempotent so first vs.
+        // reconnect-after-state-buildup paths converge.
+        WorldStateSync::SendRequestWorldState();
     }
 }
 
@@ -338,6 +343,10 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_SceneTransitionHandoff(payload);
             else if (packetType == WORLD_FLAG_SET)
                 HandlePacket_WorldFlagSet(payload);
+            else if (packetType == WORLD_STATE_REQUEST)
+                HandlePacket_WorldStateRequest(payload);
+            else if (packetType == WORLD_STATE_SNAPSHOT)
+                HandlePacket_WorldStateSnapshot(payload);
         } catch (const std::exception& e) {
             SPDLOG_ERROR("[Anchor] Exception while processing incoming packet {}", e.what());
             SPDLOG_ERROR("[Anchor] Packet: {}", payload.dump());

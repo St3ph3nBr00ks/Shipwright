@@ -116,4 +116,54 @@ void ApplyKnownFlagsForScene(int16_t sceneNum, uint8_t timeline) {
     }
 }
 
+void SendRequestWorldState() {
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return;
+    if (Anchor::Instance->roomState.syncItemsAndFlags == 0) return;
+
+    nlohmann::json payload;
+    payload["type"]         = Anchor::WORLD_STATE_REQUEST;
+    payload["targetTeamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    Anchor::Instance->SendJsonToRemote(payload);
+    SPDLOG_INFO("[WorldStateSync] Sent WORLD_STATE_REQUEST to team");
+}
+
+nlohmann::json BuildSnapshotPayload() {
+    nlohmann::json entries = nlohmann::json::array();
+    for (const auto& key : sSetFlags) {
+        entries.push_back({
+            {"sceneNum", key.sceneNum},
+            {"timeline", key.timeline},
+            {"flagType", key.flagType},
+            {"flag",     key.flag},
+        });
+    }
+    return entries;
+}
+
+void ApplySnapshotPayload(const nlohmann::json& payload) {
+    if (!payload.is_array()) return;
+
+    int newEntries = 0;
+    for (const auto& entry : payload) {
+        int16_t sceneNum = entry.value("sceneNum", (int16_t)-1);
+        uint8_t timeline = entry.value("timeline", (uint8_t)0);
+        int16_t flagType = entry.value("flagType", (int16_t)0);
+        int16_t flag     = entry.value("flag",     (int16_t)0);
+        if (sceneNum < 0) continue;
+
+        WorldStateKey key{sceneNum, timeline, flagType, flag};
+        auto [_, inserted] = sSetFlags.insert(key);
+        if (inserted) newEntries++;
+    }
+
+    SPDLOG_INFO("[WorldStateSync] Applied snapshot — {} new entries (total now {})",
+                newEntries, sSetFlags.size());
+
+    // Apply newly-arrived entries to current scene immediately.
+    if (gPlayState != nullptr) {
+        ApplyKnownFlagsForScene((int16_t)gPlayState->sceneNum,
+                                (uint8_t)gSaveContext.linkAge);
+    }
+}
+
 }  // namespace WorldStateSync

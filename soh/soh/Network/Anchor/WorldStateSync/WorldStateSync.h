@@ -94,6 +94,20 @@ bool IsApplyingNetworkFlag();
 // peers have already established.
 void ApplyKnownFlagsForScene(int16_t sceneNum, uint8_t timeline);
 
+// Asks every team-mate for their current WorldState snapshot. Called
+// from Anchor::OnConnected after the initial handshake. Each team-mate
+// replies with WORLD_STATE_SNAPSHOT.
+void SendRequestWorldState();
+
+// Snapshot payload assembly — used by the peer responding to a
+// WORLD_STATE_REQUEST.
+nlohmann::json BuildSnapshotPayload();
+
+// Snapshot apply — merge entries from a received WORLD_STATE_SNAPSHOT
+// into the local mSetFlags. If the current scene matches any newly-
+// arrived entry, apply it to game state immediately.
+void ApplySnapshotPayload(const nlohmann::json& payload);
+
 // Direct mSetFlags mutation used by the WORLD_FLAG_SET receive handler.
 // Adds the entry (idempotent) and applies to local game state if the
 // supplied (sceneNum, timeline) matches the currently-loaded scene.
