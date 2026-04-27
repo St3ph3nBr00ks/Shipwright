@@ -1,5 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
+#include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -104,7 +105,7 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
     }
 
     // Only the host applies incoming damage events.
-    if (roomState.ownerClientId != ownClientId) {
+    if (!::SceneAuthority::IsEffectiveHost()) {
         return;
     }
 

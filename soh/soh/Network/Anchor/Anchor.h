@@ -10,6 +10,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 extern "C" {
 #include "variables.h"
@@ -524,6 +525,35 @@ class Anchor : public Network {
 
   public:
     uint32_t ownClientId;
+
+    // Pillar A Phase 1 — global effective-host migration (pure-(a)).
+    //
+    // Cached effective host client id. Recomputed by RecomputeEffectiveHost()
+    // on every ALL_CLIENT_STATE / UPDATE_CLIENT_STATE apply that could change
+    // online state. All "is this client the host?" checks across the codebase
+    // read this via SceneAuthority::IsEffectiveHost() (defined in
+    // Common/SceneAuthority.cpp), which compares this field to ownClientId.
+    //
+    // Election rule:
+    //   1. If roomState.ownerClientId is in clients[] AND that client is
+    //      online → effectiveHostClientId = roomState.ownerClientId.
+    //   2. Else: lowest-numbered online clientId in clients[].
+    //   3. Fallback (no clients online — shouldn't happen): ownClientId.
+    //
+    // Pure (a): once migration fires, the new host stays host even if the
+    // original returns within the relay's 5-min INACTIVITY_TIMEOUT window.
+    // The "pendingMigrateBack" hybrid (b) semantics from the design doc are
+    // deferred to a future Phase 1.5 session.
+    //
+    // First migration is via the relay's HEARTBEAT/INACTIVITY detection
+    // (~30-90s real time after the original host's actual TCP disconnect).
+    // No explicit observation timer in v1 — adding one only affects the
+    // upper end of that window.
+    uint32_t effectiveHostClientId = 0;
+
+    void RecomputeEffectiveHost();
+    void OnBecameEffectiveHost();
+
     inline static const std::string clientVersion = (char*)gGitCommitHash;
 
     // Packet types //
@@ -567,6 +597,19 @@ class Anchor : public Network {
     static Anchor* Instance;
     std::map<uint32_t, AnchorClient> clients;
     RoomState roomState;
+
+    // Disable-time graveyard for BakedPlayerModel and customSkeleton.
+    // KB-15 / issue #110: clients.clear() in Disable() destroys baked Gfx
+    // allocations while the renderer's pipeline still has commands in flight
+    // referencing them — the GPU walks freed memory next frame and emits a
+    // flood of "Unhandled OP code" errors before crashing on a bad pointer
+    // (log 119: 0xC9 0x78 0x64 ucode bytes → 0xC0000005). The per-AnchorClient
+    // retire slot can't help because clearing the map destroys both slots
+    // simultaneously. Disable() moves these allocations here before clear()
+    // so they outlive the in-flight Gfx; Enable() drains them (UI-driven
+    // toggle always takes >> kRetireFrames frames, so safe to free by then).
+    std::vector<std::unique_ptr<SOH::BakedPlayerModel>> postDisableBakedModels;
+    std::vector<std::shared_ptr<SOH::Skeleton>> postDisableCustomSkeletons;
 
     void Enable();
     void Disable();

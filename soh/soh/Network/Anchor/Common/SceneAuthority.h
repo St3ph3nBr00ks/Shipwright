@@ -2,22 +2,26 @@
 
 // Scene authority API (Pillar A).
 //
-// Phase 1 STUB: returns the legacy answer (`roomState.ownerClientId == ownClientId`)
-// to preserve behaviour. Full migration logic in
-// Claude/Plans/anchor_host_migration_plan.md fills in the real
-// election rule when implementation begins.
+// Phase 1 (active): pure (a) effective-host election with no migrate-back.
+// Election rule lives in Anchor::RecomputeEffectiveHost():
+//   - If roomState.ownerClientId is online → that client is effective host.
+//   - Else lowest-online clientId is effective host.
+// The election runs on connect, on AllClientState updates, and on
+// UpdateClientState `online` flag flips.
+//
+// Phase 2 (planned): per-(sceneNum, timeline) authority with handoff.
+// `IsSceneHost`/`IsMyCurrentSceneHost` are stubs today and return the
+// global answer; they will key by scene/timeline once Phase 2 lands.
 //
 // Call-site rule: every code path that previously checked
 //   `roomState.ownerClientId == ownClientId`
-// should be migrated to call `IsEffectiveHost()` instead. The migration
-// is mechanical because the stub returns the same answer today.
+// should call `IsEffectiveHost()` instead so it picks up handoff.
 
 #include <cstdint>
 
 namespace SceneAuthority {
 
 // Returns the clientId currently considered effective host.
-// Phase 1 stub: returns roomState.ownerClientId unconditionally.
 uint32_t GetEffectiveHostClientId();
 
 // True when the local client is the effective host of the room.

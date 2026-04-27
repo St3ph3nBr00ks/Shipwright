@@ -1,6 +1,7 @@
 #include "Anchor.h"
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
+#include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
 #include <chrono>
 #include <libultraship/libultraship.h>
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
@@ -261,7 +262,7 @@ void Anchor::RegisterHooks() {
         if (IsSaveLoaded()) {
             // Clear the dead-enemy list for this scene: the scene just (re-)loaded
             // so any previously dead enemies have respawned fresh.
-            if (roomState.ownerClientId == ownClientId) {
+            if (::SceneAuthority::IsEffectiveHost()) {
                 deadEnemiesByScene.erase(gPlayState->sceneNum);
 
                 // Q I Tier 2 — clear stale kill-attribution entries for the
@@ -447,7 +448,7 @@ void Anchor::RegisterHooks() {
         if (isConnected) {
             followerHookId = GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>([&]() {
                 // Only run on non-host clients with a save loaded.
-                if (roomState.ownerClientId == ownClientId) { return; }
+                if (::SceneAuthority::IsEffectiveHost()) { return; }
                 if (!IsSaveLoaded()) { return; }
                 if (gPlayState == nullptr) { return; }
 
@@ -2948,13 +2949,13 @@ void Anchor::RegisterHooks() {
         // the same-scene-visit suppression behaviour is preserved.
         // The OnSceneSpawnActors clear below is now belt-and-braces.
         if (gPlayState != nullptr && gPlayState->numSetupActors > 0 &&
-            roomState.ownerClientId == ownClientId) {
+            ::SceneAuthority::IsEffectiveHost()) {
             deadEnemiesByScene.erase(gPlayState->sceneNum);
         }
 
         bool isDynamicSpawn = (gPlayState->numSetupActors == 0);
         if (isDynamicSpawn) {
-            if (roomState.ownerClientId == ownClientId) {
+            if (::SceneAuthority::IsEffectiveHost()) {
                 // Host: broadcast so non-host clients can spawn a matching actor.
                 // SendPacket_EnemySpawn runs after the netId block below so the
                 // actor already has a valid extension when the send path reads it.
@@ -3017,7 +3018,7 @@ void Anchor::RegisterHooks() {
         // deadEnemiesByScene is cleared on OnSceneSpawnActors, so this
         // guard only suppresses same-scene-visit revivals — leaving and
         // re-entering the scene proper still respawns enemies as expected.
-        if (roomState.ownerClientId == ownClientId) {
+        if (::SceneAuthority::IsEffectiveHost()) {
             auto deadIt = deadEnemiesByScene.find(gPlayState->sceneNum);
             if (deadIt != deadEnemiesByScene.end() && deadIt->second.count(netId)) {
                 SPDLOG_INFO("[EnemySpawn] deadEnemiesByScene hit for netId={} on host — "
@@ -3097,7 +3098,7 @@ void Anchor::RegisterHooks() {
 
         // Host deferred broadcast: send ENEMY_SPAWN for dynamic actors now that
         // the netId extension is in place.
-        if (isDynamicSpawn && roomState.ownerClientId == ownClientId) {
+        if (isDynamicSpawn && ::SceneAuthority::IsEffectiveHost()) {
             SendPacket_EnemySpawn(actor);
         }
     });
@@ -3147,7 +3148,7 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        if (roomState.ownerClientId == ownClientId) {
+        if (::SceneAuthority::IsEffectiveHost()) {
             // Host: send current state to all clients in scene.
             const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
             if (ext == nullptr) {
@@ -3452,7 +3453,7 @@ void Anchor::RegisterHooks() {
     // Actor_IsFacingAndNearPlayer — will then target the correct player with no
     // per-enemy changes required.
     COND_HOOK(ShouldActorUpdate, isConnected, [&](void* refActor, bool* should) {
-        if (roomState.ownerClientId != ownClientId) {
+        if (!::SceneAuthority::IsEffectiveHost()) {
             return;
         }
         Actor* actor = static_cast<Actor*>(refActor);
@@ -3524,7 +3525,7 @@ void Anchor::RegisterHooks() {
         // travels; without this flag the dying enemy flickers back to alive state.
         ext->hasLocalDeath = true;
         // Host tracks kills for join-time replay (Fix 6).
-        if (roomState.ownerClientId == ownClientId) {
+        if (::SceneAuthority::IsEffectiveHost()) {
             deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
         }
         SendPacket_EnemyDefeated(ext->netId);
@@ -3610,7 +3611,7 @@ void Anchor::RegisterHooks() {
         ext->hasLocalDeath = true;
         SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: sending defeat for actor id={} netId={}",
                     actor->id, ext->netId);
-        if (roomState.ownerClientId == ownClientId) {
+        if (::SceneAuthority::IsEffectiveHost()) {
             deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
         }
         SendPacket_EnemyDefeated(ext->netId);

@@ -1,5 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/PacketSchemas.h"
+#include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -93,6 +94,7 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
     if (clients.contains(clientId)) {
         // Capture prior state so we can detect transitions below.
         bool     wasSaveLoaded        = clients[clientId].isSaveLoaded;
+        bool     wasOnline            = clients[clientId].online;
         s16      prevSceneNum         = clients[clientId].sceneNum;
         uint32_t prevSceneSpawnEpoch  = clients[clientId].sceneSpawnEpoch;
 
@@ -103,6 +105,14 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         clients[clientId].clientVersion = client.clientVersion;
         clients[clientId].teamId = client.teamId;
         clients[clientId].online = client.online;
+
+        // Pillar A Phase 1 — if this UPDATE_CLIENT_STATE flipped online flag,
+        // re-run the effective-host election. Most UCS payloads don't change
+        // online (it's only set to false on disconnect/timeout), so this
+        // recompute usually no-ops.
+        if (wasOnline != client.online) {
+            RecomputeEffectiveHost();
+        }
         clients[clientId].seed = client.seed;
         clients[clientId].isSaveLoaded = client.isSaveLoaded;
         clients[clientId].isGameComplete = client.isGameComplete;
@@ -167,7 +177,7 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         // but the non-host's OnSceneSpawnActors still fires and bumps its epoch.
         bool     sceneSpawned        = (prevSceneSpawnEpoch != newSceneSpawnEpoch);
 
-        if (roomState.ownerClientId == ownClientId && nowLoaded &&
+        if (::SceneAuthority::IsEffectiveHost() && nowLoaded &&
             (justLoaded || sceneChanged || sceneSpawned)) {
             auto it = deadEnemiesByScene.find(newScene);
             if (it != deadEnemiesByScene.end()) {

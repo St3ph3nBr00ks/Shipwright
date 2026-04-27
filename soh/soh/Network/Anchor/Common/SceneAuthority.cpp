@@ -9,21 +9,20 @@ extern SaveContext gSaveContext;
 namespace SceneAuthority {
 
 uint32_t GetEffectiveHostClientId() {
-    // Phase 1 stub: returns the legacy answer (room owner) unconditionally.
-    // Phase 1-real (Plans/anchor_host_migration_plan.md) replaces this with
-    // the election rule "ownerClientId if online, else lowest online clientId."
+    // Pillar A Phase 1 — read the cached value maintained by
+    // Anchor::RecomputeEffectiveHost(). The real election rule lives there.
     if (!::Anchor::Instance) return 0;
-    return ::Anchor::Instance->roomState.ownerClientId;
+    return ::Anchor::Instance->effectiveHostClientId;
 }
 
 bool IsEffectiveHost() {
     if (!::Anchor::Instance) return false;
-    return ::Anchor::Instance->roomState.ownerClientId == ::Anchor::Instance->ownClientId;
+    return ::Anchor::Instance->effectiveHostClientId == ::Anchor::Instance->ownClientId;
 }
 
 bool IsSceneHost(int16_t /*sceneNum*/, uint8_t /*timeline*/) {
-    // Phase 1 stub: same answer as IsEffectiveHost(). Phase 2 of the migration
-    // plan keys this by (sceneNum, timeline) per Pillar A + Pillar B.
+    // Phase 1: same answer as IsEffectiveHost(). Phase 2 keys this by
+    // (sceneNum, timeline) per Pillar A + Pillar B migration plan.
     return IsEffectiveHost();
 }
 
