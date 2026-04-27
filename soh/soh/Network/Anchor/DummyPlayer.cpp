@@ -301,6 +301,21 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
         return;
     }
 
+    // Pillar B Phase 4 — cross-timeline render gate (Q 4.B.1 = ethereal).
+    // v1 implementation: skip body draw entirely. The peer's name tag
+    // (registered via NameTag_RegisterForActorWithOptions in DummyPlayer_Init)
+    // still renders, so the player can see WHERE their cross-timeline peer
+    // is without the body cluttering the scene's layout.
+    //
+    // Polish path (deferred): proper ethereal alpha-blended draw via a
+    // hook in z_player.c that wraps Player_Draw with EnvColor.a override
+    // + RM_AA_ZB_XLU_SURF (sibling of the existing
+    // Anchor_LocalPlayerFaceSwapBegin/End hooks). Tracked in the Pillar B
+    // implementation plan as a Phase 4 polish item.
+    if (client.linkAge != gSaveContext.linkAge) {
+        return;
+    }
+
     // Log skeleton pointer once per DummyPlayer lifetime so we can verify the
     // correct pack skeleton is active at render time (not a stale/wrong-pack skeleton).
     static std::unordered_map<uint32_t, void*> sLoggedSkeletons;
