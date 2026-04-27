@@ -325,6 +325,15 @@ void Anchor::RegisterHooks() {
         WorldStateSync::OnLocalFlagSet(sceneNum, flagType, flag);
     });
 
+    // Pillar C v1 unset symmetry — local FLAG_SCENE_SWITCH unset fires
+    // OnSceneFlagUnset from Flags_UnsetSwitch (z_actor.c:700). Mirror of
+    // the OnSceneFlagSet handler above.
+    COND_HOOK(OnSceneFlagUnset, isConnected, [&](int16_t sceneNum, int16_t flagType, int16_t flag) {
+        if (flagType != FLAG_SCENE_SWITCH) return;
+        if (WorldStateSync::IsApplyingNetworkFlag()) return;
+        WorldStateSync::OnLocalFlagUnset(sceneNum, flagType, flag);
+    });
+
     COND_HOOK(OnPresentFileSelect, isConnected, [&]() { SendPacket_UpdateClientState(); });
 
     COND_ID_HOOK(ShouldActorInit, ACTOR_PLAYER, isConnected, [&](void* actorRef, bool* should) {

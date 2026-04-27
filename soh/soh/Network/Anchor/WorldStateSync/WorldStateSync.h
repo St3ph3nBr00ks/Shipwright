@@ -83,6 +83,12 @@ struct WorldStateKeyHash {
 // suppresses re-broadcast.
 void OnLocalFlagSet(int16_t sceneNum, int16_t flagType, int16_t flag);
 
+// Mirror of OnLocalFlagSet for unset events (Flags_UnsetSwitch fires
+// OnSceneFlagUnset at z_actor.c:700). Removes the entry from the local
+// set and broadcasts WORLD_FLAG_UNSET. Idempotent — unsetting an
+// already-unset flag is a no-op (no broadcast). Same echo guard.
+void OnLocalFlagUnset(int16_t sceneNum, int16_t flagType, int16_t flag);
+
 // True while a network-driven flag set is being applied to local game
 // state — the hook handler in HookHandlers.cpp consults this to skip
 // the broadcast that would otherwise echo back to the network.
@@ -113,6 +119,12 @@ void ApplySnapshotPayload(const nlohmann::json& payload);
 // supplied (sceneNum, timeline) matches the currently-loaded scene.
 void ReceiveFlagSet(int16_t sceneNum, uint8_t timeline,
                     int16_t flagType, int16_t flag);
+
+// Mirror of ReceiveFlagSet for the WORLD_FLAG_UNSET receive handler.
+// Removes the entry (idempotent) and applies via Flags_UnsetSwitch if
+// the supplied (sceneNum, timeline) matches the currently-loaded scene.
+void ReceiveFlagUnset(int16_t sceneNum, uint8_t timeline,
+                      int16_t flagType, int16_t flag);
 
 // Lifecycle — clear all local state. Called from Anchor::Disable.
 void Reset();

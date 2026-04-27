@@ -343,6 +343,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_SceneTransitionHandoff(payload);
             else if (packetType == WORLD_FLAG_SET)
                 HandlePacket_WorldFlagSet(payload);
+            else if (packetType == WORLD_FLAG_UNSET)
+                HandlePacket_WorldFlagUnset(payload);
             else if (packetType == WORLD_STATE_REQUEST)
                 HandlePacket_WorldStateRequest(payload);
             else if (packetType == WORLD_STATE_SNAPSHOT)

@@ -96,6 +96,54 @@ void ReceiveFlagSet(int16_t sceneNum, uint8_t timeline,
     }
 }
 
+void OnLocalFlagUnset(int16_t sceneNum, int16_t flagType, int16_t flag) {
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) {
+        return;
+    }
+    if (sApplyingNetworkFlag) {
+        return;  // echo from a network-driven Flags_UnsetSwitch
+    }
+    if (Anchor::Instance->roomState.syncItemsAndFlags == 0) {
+        return;
+    }
+
+    uint8_t timeline = (uint8_t)gSaveContext.linkAge;
+    WorldStateKey key{sceneNum, timeline, flagType, flag};
+    size_t erased = sSetFlags.erase(key);
+    if (erased == 0) {
+        return;  // wasn't set; don't broadcast (idempotency)
+    }
+
+    nlohmann::json payload;
+    payload["type"]     = Anchor::WORLD_FLAG_UNSET;
+    payload["sceneNum"] = sceneNum;
+    payload["flagType"] = flagType;
+    payload["flag"]     = flag;
+    PacketTimeline::SetTimelineField(payload);
+    payload["targetTeamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    Anchor::Instance->SendJsonToRemote(payload);
+
+    SPDLOG_INFO("[WorldStateSync] Local flag unset sceneNum={} timeline={} flagType={} flag=0x{:02X} — broadcast",
+                sceneNum, (int)timeline, flagType, flag);
+}
+
+void ReceiveFlagUnset(int16_t sceneNum, uint8_t timeline,
+                      int16_t flagType, int16_t flag) {
+    WorldStateKey key{sceneNum, timeline, flagType, flag};
+    sSetFlags.erase(key);
+
+    if (gPlayState != nullptr &&
+        (int16_t)gPlayState->sceneNum == sceneNum &&
+        (uint8_t)gSaveContext.linkAge == timeline &&
+        flagType == FLAG_SCENE_SWITCH) {
+        sApplyingNetworkFlag = true;
+        Flags_UnsetSwitch(gPlayState, flag);
+        sApplyingNetworkFlag = false;
+        SPDLOG_INFO("[WorldStateSync] Applied received unset locally sceneNum={} timeline={} flag=0x{:02X}",
+                    sceneNum, (int)timeline, flag);
+    }
+}
+
 void ApplyKnownFlagsForScene(int16_t sceneNum, uint8_t timeline) {
     if (gPlayState == nullptr) return;
 

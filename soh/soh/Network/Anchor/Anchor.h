@@ -524,6 +524,7 @@ class Anchor : public Network {
     void HandlePacket_SceneTransitionHandoff(nlohmann::json payload);
     // Pillar C v1
     void HandlePacket_WorldFlagSet(nlohmann::json payload);
+    void HandlePacket_WorldFlagUnset(nlohmann::json payload);
     void HandlePacket_WorldStateRequest(nlohmann::json payload);
     void HandlePacket_WorldStateSnapshot(nlohmann::json payload);
 
@@ -601,6 +602,7 @@ class Anchor : public Network {
     // Pillar C v1 — globally-replicated world state. Plan in
     // Claude/Plans/pillar_c_worldstatesync.md.
     inline static const std::string WORLD_FLAG_SET        = "WORLD_FLAG_SET";
+    inline static const std::string WORLD_FLAG_UNSET      = "WORLD_FLAG_UNSET";
     inline static const std::string WORLD_STATE_REQUEST   = "WORLD_STATE_REQUEST";
     inline static const std::string WORLD_STATE_SNAPSHOT  = "WORLD_STATE_SNAPSHOT";
 
