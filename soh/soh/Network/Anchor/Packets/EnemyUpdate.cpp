@@ -1,5 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
+#include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include <libultraship/bridge/consolevariablebridge.h>
@@ -371,7 +372,7 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     }
 
     // Only non-hosts apply incoming enemy state.
-    if (roomState.ownerClientId == ownClientId) {
+    if (::SceneAuthority::IsEffectiveHost()) {
         return;
     }
 

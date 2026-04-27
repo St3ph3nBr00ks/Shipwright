@@ -86,6 +86,13 @@ void Anchor::FlushProfileIfDue() {
 // MARK: - Overrides
 
 void Anchor::Enable() {
+    // Drain the disable-time graveyard from any prior Disable(). Any
+    // UI-driven re-enable takes far longer than kRetireFrames frames, so
+    // every in-flight Gfx command that referenced these allocations has
+    // long since been consumed by the renderer and they are safe to free.
+    postDisableBakedModels.clear();
+    postDisableCustomSkeletons.clear();
+
     Network::Enable(CVarGetString(CVAR_REMOTE_ANCHOR("Host"), "anchor.hm64.org"),
                     CVarGetInteger(CVAR_REMOTE_ANCHOR("Port"), 43383));
     ownClientId = CVarGetInteger(CVAR_REMOTE_ANCHOR("LastClientId"), 0);
@@ -94,6 +101,23 @@ void Anchor::Enable() {
 
 void Anchor::Disable() {
     Network::Disable();
+
+    // KB-15 / issue #110 — drain BakedPlayerModel and customSkeleton off
+    // every client into the disable-time graveyard before clients.clear()
+    // destroys them. The previous frame's draw queued Gfx commands that
+    // still reference these allocations; freeing them synchronously crashes
+    // the renderer on the next frame's Gfx walk (see log 119).
+    for (auto& [clientId, client] : clients) {
+        if (client.bakedModel != nullptr) {
+            postDisableBakedModels.push_back(std::move(client.bakedModel));
+        }
+        if (client.retiredBakedModel != nullptr) {
+            postDisableBakedModels.push_back(std::move(client.retiredBakedModel));
+        }
+        if (client.customSkeleton != nullptr) {
+            postDisableCustomSkeletons.push_back(std::move(client.customSkeleton));
+        }
+    }
 
     clients.clear();
     RefreshClientActors();
@@ -364,6 +388,53 @@ void Anchor::RefreshClientActors() {
         client.player = (Player*)dummy;
     }
     spawningDummyPlayerForClientId = 0;
+}
+
+void Anchor::RecomputeEffectiveHost() {
+    // Pillar A Phase 1 — pure (a) election rule. See Anchor.h doc on the
+    // effectiveHostClientId field for the full semantics.
+    uint32_t orig = roomState.ownerClientId;
+    uint32_t newEffective = ownClientId;  // safety fallback
+
+    auto origIt = clients.find(orig);
+    if (origIt != clients.end() && origIt->second.online) {
+        newEffective = orig;
+    } else {
+        // Original owner is offline (or not in clients). Pick the lowest-
+        // numbered online clientId. All clients converge on the same answer
+        // because they all see the same ALL_CLIENT_STATE.
+        uint32_t lowest = UINT32_MAX;
+        for (auto& [clientId, client] : clients) {
+            if (client.online && clientId < lowest) {
+                lowest = clientId;
+            }
+        }
+        if (lowest != UINT32_MAX) {
+            newEffective = lowest;
+        }
+    }
+
+    if (newEffective != effectiveHostClientId) {
+        SPDLOG_INFO("[Anchor] Effective host changed: {} -> {} (orig owner={} {})",
+                    effectiveHostClientId, newEffective, orig,
+                    (origIt != clients.end() && origIt->second.online) ? "online" : "offline");
+        bool localBecameHost = (newEffective == ownClientId &&
+                                effectiveHostClientId != ownClientId);
+        effectiveHostClientId = newEffective;
+        if (localBecameHost) {
+            OnBecameEffectiveHost();
+        }
+    }
+}
+
+void Anchor::OnBecameEffectiveHost() {
+    SPDLOG_INFO("[Anchor] This client is now effective host (clientId={})", ownClientId);
+    // Per migration plan A1: accept empty deadEnemiesByScene. Original host
+    // already broadcast ENEMY_DEFEATED for every kill up to the disconnect,
+    // so other clients' world-state is already correct. Only future late-
+    // joiners are affected — they'll see corpses for post-migration kills
+    // only. Acceptable for First Dungeon Demo scope.
+    sentDefeatThisScene.clear();
 }
 
 void Anchor::BackfillEnemyNetIds() {

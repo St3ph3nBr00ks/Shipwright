@@ -71,5 +71,9 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
         clients.erase(clientId);
     }
 
+    // Pillar A Phase 1 — recompute effective host after client list changes.
+    // Online flags, additions, and removals can all flip the election.
+    RecomputeEffectiveHost();
+
     shouldRefreshActors = true;
 }

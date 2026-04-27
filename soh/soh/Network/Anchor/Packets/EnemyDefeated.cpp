@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"  // CVAR_REMOTE_ANCHOR for local-host TeamId lookup
 #include <nlohmann/json.hpp>
@@ -32,24 +33,22 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
     payload["type"] = ENEMY_DEFEATED;
     payload["netId"] = netId;
 
-    // Q I Tier 2 — kill attribution. The host's lastDamagerByNetId map records
-    // the most recent DAMAGE_ENEMY sender for each netId. If this kill is
-    // being broadcast by the host (host's own player or a remote-via-host kill
-    // that bottomed out the actor's HP), look up the killer:
-    //   - Map hit  → killer is the recorded damager (covers all DAMAGE_ENEMY
-    //                paths regardless of who landed the killing blow locally;
-    //                last-DAMAGE_ENEMY-wins per design doc Q I Tier 2)
-    //   - Map miss → killer is the host (host's own player damaged the enemy
-    //                via local collision without any prior remote DAMAGE_ENEMY)
+    // Q I Tier 2 — kill attribution. Two paths depending on who is sending:
     //
-    // killerTeamId is derived from clients[killerId].teamId at send time so
-    // the receiver doesn't need its own team-table lookup. Q C grace-window
-    // and future scoreboard work consume these fields off the wire directly.
+    //  Host path: host owns the kill-feed truth. Look up the killer from
+    //    lastDamagerByNetId (last DAMAGE_ENEMY sender wins) or fall back to
+    //    ownClientId for a host-local kill with no prior remote damage.
+    //    Broadcast the attributed packet to every online peer.
     //
-    // Non-host senders (the rare path where a non-host hits an enemy and lands
-    // a killing blow before the host applies the DAMAGE_ENEMY) skip
-    // attribution — only the host owns the lastDamagerByNetId map.
-    if (roomState.ownerClientId == ownClientId) {
+    //  Non-host path: don't attribute locally — non-hosts have no way to
+    //    prove the killer field couldn't be forged. Instead, send the kill
+    //    targeted at the effective host only. The host reads the relay-
+    //    enriched `clientId` field (set server-side from the TCP socket,
+    //    not a payload field a client could set) to learn the true sender,
+    //    then re-broadcasts to all other peers with attribution filled in.
+    //    Costs ~one host roundtrip of latency on the kill propagating to
+    //    other peers; trade-off accepted for tamper-proof attribution.
+    if (::SceneAuthority::IsEffectiveHost()) {
         uint32_t killerId;
         auto it = lastDamagerByNetId.find(netId);
         if (it != lastDamagerByNetId.end()) {
@@ -68,18 +67,25 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
         if (it != lastDamagerByNetId.end()) {
             lastDamagerByNetId.erase(it);
         }
-    }
 
-    SPDLOG_INFO("[EnemyDefeated] Sending defeat for netId={} killerClientId={} killerTeamId={}",
-                netId,
-                payload.value("killerClientId", (uint32_t)0),
-                payload.value("killerTeamId", std::string("(unattributed)")));
+        SPDLOG_INFO("[EnemyDefeated] Host send for netId={} killerClientId={} killerTeamId={}",
+                    netId,
+                    payload.value("killerClientId", (uint32_t)0),
+                    payload.value("killerTeamId", std::string("(unattributed)")));
 
-    for (auto& [clientId, client] : clients) {
-        if (client.online && client.isSaveLoaded && !client.self) {
-            payload["targetClientId"] = clientId;
-            SendJsonToRemote(payload);
+        for (auto& [clientId, client] : clients) {
+            if (client.online && client.isSaveLoaded && !client.self) {
+                payload["targetClientId"] = clientId;
+                SendJsonToRemote(payload);
+            }
         }
+    } else {
+        // Non-host: route through host. The host fills in attribution from
+        // the relay-enriched sender field and re-broadcasts to other peers.
+        SPDLOG_INFO("[EnemyDefeated] Non-host route-to-host for netId={} (host will attribute and re-broadcast)",
+                    netId);
+        payload["targetClientId"] = effectiveHostClientId;
+        SendJsonToRemote(payload);
     }
 }
 
@@ -110,6 +116,44 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 netId, killerClientId,
                 killerTeamId.empty() ? "(unattributed)" : killerTeamId);
 
+    // Host-routed attribution (paired with non-host send path above): when
+    // the effective host receives an unattributed kill (killerClientId=0),
+    // it fills in attribution from the relay-enriched sender field and
+    // re-broadcasts to every peer except the original sender (who already
+    // killed locally and doesn't need the echo).
+    //
+    // sentDefeatThisScene gates re-broadcast against the host's own local
+    // kill of the same netId — if the host already sent the attributed
+    // packet via OnEnemyDefeat, skip the duplicate. Inserts into the same
+    // dedup set used by OnEnemyDefeat / OnActorKill so a follow-on local
+    // OnActorKill on this netId is also suppressed.
+    if (::SceneAuthority::IsEffectiveHost() && killerClientId == 0 &&
+        sentDefeatThisScene.count(netId) == 0) {
+        uint32_t senderId = payload.value("clientId", (uint32_t)0);
+        if (senderId != 0) {
+            sentDefeatThisScene.insert(netId);
+
+            nlohmann::json rebroadcast;
+            rebroadcast["type"]           = ENEMY_DEFEATED;
+            rebroadcast["netId"]          = netId;
+            rebroadcast["killerClientId"] = senderId;
+            if (clients.contains(senderId)) {
+                rebroadcast["killerTeamId"] = clients[senderId].teamId;
+            }
+
+            SPDLOG_INFO("[EnemyDefeated] Host re-broadcast for netId={} killerClientId={} (attributed from sender)",
+                        netId, senderId);
+
+            for (auto& [clientId, client] : clients) {
+                if (client.online && client.isSaveLoaded && !client.self &&
+                    clientId != senderId) {
+                    rebroadcast["targetClientId"] = clientId;
+                    SendJsonToRemote(rebroadcast);
+                }
+            }
+        }
+    }
+
     // Walk every syncable actor category (shared list in Anchor.h) looking
     // for the netId match. Covers ENEMY + BOSS plus any actor that underwent
     // a runtime category transition (Karebaba→MISC, Armos→BG, etc.).
@@ -122,7 +166,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
             if (ext != nullptr && ext->netId == netId) {
                 // Host records this kill for join-time replay regardless of who killed it.
-                if (roomState.ownerClientId == ownClientId) {
+                if (::SceneAuthority::IsEffectiveHost()) {
                     deadEnemiesByScene[gPlayState->sceneNum].insert(netId);
                 }
 
@@ -211,7 +255,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     // make it into the replay list and any new client joining mid-session
     // sees the enemy alive. Scene is decoded from the netId (high 16 bits per
     // the netId encoding scheme) — works regardless of where the host is now.
-    if (roomState.ownerClientId == ownClientId) {
+    if (::SceneAuthority::IsEffectiveHost()) {
         int16_t sceneFromNetId = (int16_t)((netId >> 16) & 0xFFFF);
         deadEnemiesByScene[sceneFromNetId].insert(netId);
     }
