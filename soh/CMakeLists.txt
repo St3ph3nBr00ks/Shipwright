@@ -36,6 +36,7 @@ endif()
 set(CMAKE_CONFIGURATION_TYPES
     "Debug"
     "Release"
+    "RelWithDebInfo"
     CACHE STRING "" FORCE
 )
 
