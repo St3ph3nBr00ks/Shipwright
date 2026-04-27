@@ -27,6 +27,29 @@ std::unordered_set<WorldStateSync::WorldStateKey,
 // hook would otherwise re-broadcast the packet we just received.
 bool sApplyingNetworkFlag = false;
 
+// FLAG_SCENE_SWITCH bit space split (per Flags_SetSwitch at z_actor.c:675):
+//   bits  0..0x1F → actorCtx.flags.swch     (persistent — saved to
+//                                            gSaveContext.sceneFlags,
+//                                            survives scene reload)
+//   bits 0x20..0x3F → actorCtx.flags.tempSwch (per-scene-visit, RESET
+//                                              on every scene reload)
+//
+// Temp flags must NOT be replicated / replayed by WorldStateSync.
+// Replaying them via ApplyKnownFlagsForScene on scene-spawn re-asserts
+// state OoT meant to clear, e.g. a pressure plate that resets when
+// you step off shows up as still-pressed when you re-enter the room
+// (Test 3 finding — flag 0x3C / 0x3D incorrectly persisting across
+// session restart, observed as "switch already active before P1
+// touched it").
+//
+// v1 scope: silently skip temp flags at every entry point. They fall
+// back to vanilla local-only OoT behaviour. Cross-client sync of
+// temp flags is a future enhancement that needs scene-visit-scoped
+// storage and explicit reset-on-scene-load semantics.
+inline bool IsTemporaryFlag(int16_t flagType, int16_t flag) {
+    return flagType == FLAG_SCENE_SWITCH && flag >= 0x20;
+}
+
 }  // anonymous namespace
 
 namespace WorldStateSync {
@@ -46,6 +69,9 @@ void OnLocalFlagSet(int16_t sceneNum, int16_t flagType, int16_t flag) {
     }
     if (sApplyingNetworkFlag) {
         return;  // echo from a network-driven Flags_SetSwitch
+    }
+    if (IsTemporaryFlag(flagType, flag)) {
+        return;  // tempSwch flags reset on scene reload — don't replicate
     }
     // Existing global gate — same one used by SET_FLAG / GIVE_ITEM / etc.
     if (Anchor::Instance->roomState.syncItemsAndFlags == 0) {
@@ -78,6 +104,12 @@ void OnLocalFlagSet(int16_t sceneNum, int16_t flagType, int16_t flag) {
 
 void ReceiveFlagSet(int16_t sceneNum, uint8_t timeline,
                     int16_t flagType, int16_t flag) {
+    if (IsTemporaryFlag(flagType, flag)) {
+        // Defensive — a non-upgraded peer may still send a temp-flag
+        // packet. Drop it rather than store-and-replay (which would
+        // re-introduce the persistence bug on the receiver).
+        return;
+    }
     WorldStateKey key{sceneNum, timeline, flagType, flag};
     sSetFlags.insert(key);
 
@@ -102,6 +134,9 @@ void OnLocalFlagUnset(int16_t sceneNum, int16_t flagType, int16_t flag) {
     }
     if (sApplyingNetworkFlag) {
         return;  // echo from a network-driven Flags_UnsetSwitch
+    }
+    if (IsTemporaryFlag(flagType, flag)) {
+        return;  // not replicated on set, so no broadcast needed on unset
     }
     if (Anchor::Instance->roomState.syncItemsAndFlags == 0) {
         return;
@@ -129,6 +164,9 @@ void OnLocalFlagUnset(int16_t sceneNum, int16_t flagType, int16_t flag) {
 
 void ReceiveFlagUnset(int16_t sceneNum, uint8_t timeline,
                       int16_t flagType, int16_t flag) {
+    if (IsTemporaryFlag(flagType, flag)) {
+        return;
+    }
     WorldStateKey key{sceneNum, timeline, flagType, flag};
     sSetFlags.erase(key);
 
@@ -198,6 +236,11 @@ void ApplySnapshotPayload(const nlohmann::json& payload) {
         int16_t flagType = entry.value("flagType", (int16_t)0);
         int16_t flag     = entry.value("flag",     (int16_t)0);
         if (sceneNum < 0) continue;
+
+        // Defensive — a peer running pre-fix code may include temp flags
+        // in its snapshot. Drop those before they enter sSetFlags so the
+        // joiner doesn't pick up the persistence bug from a stale peer.
+        if (IsTemporaryFlag(flagType, flag)) continue;
 
         WorldStateKey key{sceneNum, timeline, flagType, flag};
         auto [_, inserted] = sSetFlags.insert(key);
