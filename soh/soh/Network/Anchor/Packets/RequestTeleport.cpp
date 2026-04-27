@@ -80,15 +80,15 @@ bool Anchor::CanTeleportTo(uint32_t clientId) {
         return false;
     }
 
-    // Child can't teleport to Ganon's Castle exterior
-    if (client.sceneNum == SCENE_OUTSIDE_GANONS_CASTLE && gSaveContext.linkAge == LINK_AGE_CHILD) {
-        return false;
-    }
-
-    // Adult can't teleport to Hyrule Castle exterior
-    if (client.sceneNum == SCENE_HYRULE_CASTLE && gSaveContext.linkAge == LINK_AGE_ADULT) {
-        return false;
-    }
+    // Pillar B Phase 5 — the previous "child can't teleport to Outside
+    // Ganon's Castle / adult can't teleport to Hyrule Castle" hard-blocks
+    // are now superseded by Anchor_SwitchAgeAndTeleport. Cross-timeline
+    // teleport into those scenes is allowed; the §5 forceCastleExitPath
+    // override (seeded for both castle scenes in SceneMultiplayerConfig)
+    // reroutes the entrance to ENTR_CASTLE_GROUNDS_SOUTH_EXIT to avoid
+    // the age-mismatched fall-through-floor risk that motivated the
+    // original guards. Refusal still happens at the AnchorSwitchAge
+    // TimeTravel-disabled gate when the user has opted out.
 
     return true;
 }
