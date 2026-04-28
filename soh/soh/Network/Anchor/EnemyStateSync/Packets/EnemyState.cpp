@@ -506,10 +506,27 @@ actor_found:
 
     EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyUpdate.applyGuard");
     if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
-        // En_Karebaba and En_Dekubaba: world.pos and shape.rot are
-        // animation-driven each frame. Skip both; jointTable sync covers visuals.
+        // En_Karebaba and En_Dekubaba: world.pos is animation-driven each
+        // frame from home.pos + stem/shape angles, so we skip the world.pos
+        // overwrite (Fix 7) — the local update() recomputes it consistently
+        // from synced inputs.
         if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
             actor->world.pos = pos;
+        }
+        // shape.rot exclusion is split per-actor:
+        //   - Karebaba: skip — its state-machine setup funcs (SetupAwaken /
+        //     SetupUpright / SetupRetract) write shape.rot themselves; host-
+        //     overwrite would fight the local action-func mid-frame.
+        //   - Dekubaba: APPLY — shape.rot.y IS the lunge direction (set in
+        //     EnDekubaba_Grow at z_en_dekubaba.c:612 via
+        //     Anchor_GetNearestPlayerActor). Without sync, each client picks
+        //     its own local-player target and the lunge diverges (KB-08
+        //     residual; the state-machine sync alone doesn't cover this
+        //     because the targeting math runs every frame on both clients
+        //     against their own world view). Math_ApproachS only nudges by
+        //     0xE38 per frame so re-applying host's value at ~20pps wins
+        //     decisively against the local nudge.
+        if (actor->id != ACTOR_EN_KAREBABA) {
             actor->shape.rot = shapeRot;
         }
         actor->world.rot = rot;
