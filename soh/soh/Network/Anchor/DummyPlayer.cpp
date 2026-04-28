@@ -355,16 +355,25 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
         return;
     }
 
-    // KB-19 history note: a `pauseCtx.state != 0` early-return used to live
-    // here as the primary fix, because the pause menu's func_80091738 was
-    // reconfiguring gSegments[4]/[6] for the rotating-Link preview. That
-    // collided with DummyPlayer_Draw's own use of those segments and
-    // crashed/distorted. The collision is now closed at the source: Option
-    // C in z_kaleido_scope_PAL.c / z_kaleido_equipment.c gates the rotating-
-    // Link load+draw on Anchor_PauseMenuFreezesWorld(), so segments 4 and 6
-    // are never reconfigured in multiplayer. Combined with the Pillar G.i
-    // gate around the R_PAUSE_MENU_MODE==3 captured-framebuffer branch in
-    // z_play.c, remote-player rendering is now safe behind the pause UI.
+    // KB-19 — Pillar G.i companion gate. Pillar G.i lets actors keep
+    // updating and drawing while the pause menu is open (so other
+    // multiplayer clients see this client moving normally). The pause
+    // menu, however, reconfigures gSegments[4]/[6] to point at its own
+    // pause-allocated heap buffer for rendering pauseCtx->playerSkelAnime.
+    // While those segments are mid-pause, calling Player_Draw on a remote
+    // DummyPlayer reads vertex/skeleton data through the wrong segment
+    // and either visibly distorts the local Link (vertex bug, KB-19) or
+    // SEGVs inside Player_DrawImpl OPEN_DISPS (#171 Deku Tree crash —
+    // R1 control test 2026-04-27 reproduced this with both clients in
+    // SCENE_DEKU_TREE Room 0, P1 opens pause menu → CVarSetString stack-
+    // walker artifact in the dump, real crash site z_player_lib.c:1040).
+    // Suppressing the body draw for the few frames the pause menu is up
+    // is the cleanest fix: world time still advances, the remote player
+    // is briefly invisible, name tag still renders. R1/R2/R3 control
+    // tests narrowed the trigger to exactly this condition.
+    if (gPlayState->pauseCtx.state != 0) {
+        return;
+    }
 
     // Log skeleton pointer once per DummyPlayer lifetime so we can verify the
     // correct pack skeleton is active at render time (not a stale/wrong-pack skeleton).

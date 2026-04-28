@@ -48,9 +48,7 @@ static void UpdateCustomSkeletonsForLinkInit(SkelAnime* skelAnime) {
 static void RegisterCustomSkeletons() {
     COND_HOOK(OnAssetAltChange, true, UpdateCustomSkeleton);
     COND_HOOK(OnLinkSkeletonInit, true, UpdateCustomSkeletonsForLinkInit);
-    // Disambiguate the no-arg overload — Q1 #2 added an UpdateCustomSkeletons(SkelAnime*)
-    // sibling, so the bare function-name reference here is overload-ambiguous.
-    COND_HOOK(OnLinkEquipmentChange, true, static_cast<void (*)()>(&SOH::SkeletonPatcher::UpdateCustomSkeletons));
+    COND_HOOK(OnLinkEquipmentChange, true, SOH::SkeletonPatcher::UpdateCustomSkeletons);
 }
 
 static RegisterShipInitFunc initFunc(RegisterCustomSkeletons);
