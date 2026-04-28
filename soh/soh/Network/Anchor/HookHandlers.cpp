@@ -3754,16 +3754,27 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(actor);
-
-        if (!Anchor::Instance->clients.contains(clientId)) {
-            return;
+        // The pause-menu calls Player_DrawImpl with `data = &playerSwordAndShield`
+        // (a `u8*` stack pointer) instead of an Actor*. The hook contract types
+        // `data` as `Actor*` but the pause path violates that. Calling
+        // GetDummyPlayerClientId on this fake pointer reads ObjectExtension by
+        // raw address; collisions with stale entries can return a real DummyPlayer
+        // clientId, applying that DummyPlayer's color to the LOCAL player's
+        // pause-menu Link (visible bug). Defend by matching the pointer against
+        // the actual DummyPlayer pointers tracked in `clients` — only override
+        // the color when actor is a known DummyPlayer Player struct.
+        Player* asPlayer = (Player*)actor;
+        for (auto& [id, client] : Anchor::Instance->clients) {
+            if (client.player == asPlayer) {
+                color->r = client.color.r;
+                color->g = client.color.g;
+                color->b = client.color.b;
+                return;
+            }
         }
-
-        AnchorClient& client = Anchor::Instance->clients[clientId];
-        color->r = client.color.r;
-        color->g = client.color.g;
-        color->b = client.color.b;
+        // Not a recognised live player actor (e.g. pause-menu render). Fall
+        // through with no override so the caller's default tunic color (or
+        // local cosmetic) wins.
     });
 
     // #endregion

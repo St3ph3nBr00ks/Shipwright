@@ -23,6 +23,31 @@ extern void* sEyeTextures[2][8];
 extern void* sMouthTextures[2][4];
 }
 
+// KB-19 diagnostic CVars — see DummyPlayer_Draw / DummyPlayer_Init / DummyPlayer_Update.
+//   gAnchor.Debug.SkipDummyDraw   (default 0): when 1, DummyPlayer_Draw returns
+//                                  after the gSaveContext.linkAge swap-set/restore
+//                                  WITHOUT calling Player_Draw. Originally used
+//                                  to isolate KB-19 (R1/R2/R3 control tests
+//                                  2026-04-27 confirmed the pause-menu /
+//                                  DummyPlayer collision). The narrower
+//                                  pauseCtx.state != 0 gate below is now the
+//                                  permanent fix; this CVar is retained as an
+//                                  emergency override / future bisection probe.
+//   gAnchor.Debug.LogSwapWindows  (default 0): when 1, every gSaveContext.linkAge
+//                                  swap entry/exit in DummyPlayer.cpp is logged
+//                                  with clientId, savedAge, swappedAge so frames
+//                                  showing distortion can be correlated with the
+//                                  exact swap pattern.
+#define CVAR_ANCHOR_DEBUG_SKIP_DUMMY_DRAW   "gAnchor.Debug.SkipDummyDraw"
+#define CVAR_ANCHOR_DEBUG_LOG_SWAP_WINDOWS  "gAnchor.Debug.LogSwapWindows"
+
+static inline bool DebugSkipDummyDraw() {
+    return CVarGetInteger(CVAR_ANCHOR_DEBUG_SKIP_DUMMY_DRAW, 0) != 0;
+}
+static inline bool DebugLogSwapWindows() {
+    return CVarGetInteger(CVAR_ANCHOR_DEBUG_LOG_SWAP_WINDOWS, 0) != 0;
+}
+
 static DamageTable DummyPlayerDamageTable = {
     /* Deku nut      */ DMG_ENTRY(0, DUMMY_PLAYER_HIT_RESPONSE_STUN),
     /* Deku stick    */ DMG_ENTRY(2, DUMMY_PLAYER_HIT_RESPONSE_NORMAL),
@@ -73,6 +98,10 @@ void DummyPlayer_Init(Actor* actor, PlayState* play) {
     // Hack to account for usage of gSaveContext in Player_Init
     s32 originalAge = gSaveContext.linkAge;
     gSaveContext.linkAge = client.linkAge;
+    if (DebugLogSwapWindows()) {
+        SPDLOG_INFO("[KB19][SwapEnter:Init] clientId={} savedAge={} swappedTo={}",
+                    clientId, originalAge, client.linkAge);
+    }
 
     // #region modeled after EnTorch2_Init and Player_Init
     actor->room = -1;
@@ -93,6 +122,9 @@ void DummyPlayer_Init(Actor* actor, PlayState* play) {
     player->actor.colChkInfo.damageTable = &DummyPlayerDamageTable;
 
     gSaveContext.linkAge = originalAge;
+    if (DebugLogSwapWindows()) {
+        SPDLOG_INFO("[KB19][SwapExit:Init] clientId={} restoredAge={}", clientId, originalAge);
+    }
 
     bool isGlobalRoom = (std::string("soh-global") == CVarGetString(CVAR_REMOTE_ANCHOR("RoomId"), ""));
 
@@ -221,9 +253,16 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         gSaveContext.linkAge = client.linkAge;
         u8 originalButtonItem0 = gSaveContext.equips.buttonItems[0];
         gSaveContext.equips.buttonItems[0] = client.buttonItem0;
+        if (DebugLogSwapWindows()) {
+            SPDLOG_INFO("[KB19][SwapEnter:Update] clientId={} savedAge={} swappedTo={} newModelGroup={}",
+                        clientId, originalAge, client.linkAge, client.modelGroup);
+        }
         Player_SetModelGroup(player, client.modelGroup);
         gSaveContext.linkAge = originalAge;
         gSaveContext.equips.buttonItems[0] = originalButtonItem0;
+        if (DebugLogSwapWindows()) {
+            SPDLOG_INFO("[KB19][SwapExit:Update] clientId={} restoredAge={}", clientId, originalAge);
+        }
     }
 
     // Pillar B Phase 3 — cross-timeline interaction gate (Q 4.B.4).
@@ -316,6 +355,26 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
         return;
     }
 
+    // KB-19 — Pillar G.i companion gate. Pillar G.i lets actors keep
+    // updating and drawing while the pause menu is open (so other
+    // multiplayer clients see this client moving normally). The pause
+    // menu, however, reconfigures gSegments[4]/[6] to point at its own
+    // pause-allocated heap buffer for rendering pauseCtx->playerSkelAnime.
+    // While those segments are mid-pause, calling Player_Draw on a remote
+    // DummyPlayer reads vertex/skeleton data through the wrong segment
+    // and either visibly distorts the local Link (vertex bug, KB-19) or
+    // SEGVs inside Player_DrawImpl OPEN_DISPS (#171 Deku Tree crash —
+    // R1 control test 2026-04-27 reproduced this with both clients in
+    // SCENE_DEKU_TREE Room 0, P1 opens pause menu → CVarSetString stack-
+    // walker artifact in the dump, real crash site z_player_lib.c:1040).
+    // Suppressing the body draw for the few frames the pause menu is up
+    // is the cleanest fix: world time still advances, the remote player
+    // is briefly invisible, name tag still renders. R1/R2/R3 control
+    // tests narrowed the trigger to exactly this condition.
+    if (gPlayState->pauseCtx.state != 0) {
+        return;
+    }
+
     // Log skeleton pointer once per DummyPlayer lifetime so we can verify the
     // correct pack skeleton is active at render time (not a stale/wrong-pack skeleton).
     static std::unordered_map<uint32_t, void*> sLoggedSkeletons;
@@ -331,6 +390,31 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     gSaveContext.linkAge = client.linkAge;
     u8 originalButtonItem0 = gSaveContext.equips.buttonItems[0];
     gSaveContext.equips.buttonItems[0] = client.buttonItem0;
+    if (DebugLogSwapWindows()) {
+        // Rate-limited to a single line per (clientId, swappedAge) transition;
+        // Draw runs every frame and would otherwise flood the log.
+        static std::unordered_map<uint32_t, s32> sLastSwappedAge;
+        auto it = sLastSwappedAge.find(clientId);
+        if (it == sLastSwappedAge.end() || it->second != client.linkAge) {
+            SPDLOG_INFO("[KB19][SwapEnter:Draw] clientId={} savedAge={} swappedTo={} (logged on age change)",
+                        clientId, originalAge, client.linkAge);
+            sLastSwappedAge[clientId] = client.linkAge;
+        }
+    }
+
+    // KB-19 Diagnostic A — when gAnchor.Debug.SkipDummyDraw is on, skip Player_Draw
+    // entirely. The swap window still opens and closes around this gate so that
+    // any side-effects of writing gSaveContext.linkAge alone (without Player_Draw
+    // executing) are still observed. If KB-19 vertex distortion on the LOCAL
+    // player goes away with this gate enabled, the distortion source is inside
+    // Player_Draw's read of segmented state during the swap window. If
+    // distortion still occurs, the source is elsewhere (e.g. update-time
+    // jointTable aliasing in DummyPlayer_Update line 155).
+    if (DebugSkipDummyDraw()) {
+        gSaveContext.linkAge = originalAge;
+        gSaveContext.equips.buttonItems[0] = originalButtonItem0;
+        return;
+    }
 
     // Test 16 #171 — defensive null-guard. If player->skelAnime.skeleton is
     // null (e.g. the DummyPlayer bake hasn't completed or was retired

@@ -255,6 +255,36 @@ void SkeletonPatcher::RegisterSkeleton(std::string& path, SkelAnime* skelAnime) 
         }
     }
 
+    // KB-19 follow-up #1 — dedupe by SkelAnime*. pauseCtx->playerSkelAnime is
+    // re-initialised on every pause-open via SkelAnime_InitLink → ResourceMgr_
+    // LoadSkeletonByName → RegisterSkeleton, but the matching UnregisterSkeleton
+    // never fires on pause-close (no hook there yet, and pauseCtx doesn't
+    // explicitly free its skelAnime resource). Without this dedupe, the
+    // skeletons vector grows by 1 every pause-open, and UpdateCustomSkeletons
+    // bakes the same SkelAnime an additional time per duplicate
+    // (log 12 P1: "15 registered, 4 local" with 2 entries pointing at the same
+    // pauseCtx skelAnime). Replace any existing entry for this SkelAnime in
+    // place — the new info has fresh path / isLocalPlayer / vanillaSkeletonPath.
+    // bakedModel and retiredBakedModel are intentionally preserved on update so
+    // an in-flight Gfx frame's pointers stay valid through the retire window.
+    for (auto& existing : skeletons) {
+        if (existing.skelAnime == skelAnime) {
+            existing.vanillaSkeletonPath = std::move(info.vanillaSkeletonPath);
+            existing.isLocalPlayer = info.isLocalPlayer;
+            existing.overrideSkeleton = nullptr;
+            // SkelAnime_InitLink (the caller's caller) has just reset
+            // skelAnime->skeleton to point at the vanilla segment, overwriting
+            // any prior bake's segmentPtrs.data(). Invalidate the cache key so
+            // the next UpdateTunicSkeletons call rebakes and reassigns the
+            // pointer instead of skipping on a cache hit.
+            existing.lastBakedFolder = "<uninit>";
+            existing.lastBakedTunicPath.clear();
+            existing.lastBakedAge = -1;
+            existing.lastBakedTunic = -1;
+            return;
+        }
+    }
+
     skeletons.push_back(std::move(info));
 }
 
@@ -306,6 +336,32 @@ void SkeletonPatcher::UpdateCustomSkeletons() {
     }
 }
 
+// KB-19 follow-up #2 — bake only the SkeletonPatchInfo whose skelAnime just
+// initialised. OnLinkSkeletonInit fires per SkelAnime_InitLink call (one per
+// init), but the broadcast UpdateCustomSkeletons() above iterates and bakes
+// every local entry on every fire. Pause-open triggers an init for
+// pauseCtx->playerSkelAnime alone, yet would re-bake player->skelAnime and
+// player->upperSkelAnime alongside it (~6ms each, byte-identical output).
+// This targeted form bakes only the firing entry; if the trigger isn't
+// registered (rare race during init/teardown), falls back to the broadcast
+// path so we never silently skip a needed bake.
+void SkeletonPatcher::UpdateCustomSkeletons(SkelAnime* triggerSkelAnime) {
+    if (triggerSkelAnime == nullptr) {
+        UpdateCustomSkeletons();
+        return;
+    }
+    for (auto& skel : skeletons) {
+        if (skel.skelAnime == triggerSkelAnime && skel.isLocalPlayer) {
+            SPDLOG_INFO("[CoopModel] UpdateCustomSkeletons(targeted): skelAnime={}",
+                        (void*)triggerSkelAnime);
+            UpdateTunicSkeletons(skel);
+            return;
+        }
+    }
+    // Trigger not in the patch list — fall back to broadcast form.
+    UpdateCustomSkeletons();
+}
+
 void SkeletonPatcher::UpdateTunicSkeletons(SkeletonPatchInfo& skel) {
     std::string skeletonPath;
 
@@ -348,6 +404,32 @@ void SkeletonPatcher::UpdateTunicSkeletons(SkeletonPatchInfo& skel) {
     // first call after a scene load.
     const char* overrideFolder = CVarGetString(CVAR_REMOTE_ANCHOR("CharacterModel"), nullptr);
     const std::string folderStr = (overrideFolder != nullptr) ? std::string(overrideFolder) : std::string();
+
+    // KB-19 follow-up #3 — bake cache. The bake output is fully determined by
+    // (folder, skeletonPath, gSaveContext.linkAge, currentTunic). Cache the
+    // last-baked tuple per SkeletonPatchInfo and short-circuit when nothing
+    // relevant has changed. Saves a full ~6ms vanilla bake per pause-open in
+    // the common case where age and tunic are unchanged. The first bake on a
+    // freshly-registered entry is forced through (lastBakedFolder = "<uninit>"
+    // sentinel never matches any real folder, including the empty-string
+    // "no override" case).
+    const int currentAge = gSaveContext.linkAge;
+    const int currentTunic = TUNIC_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC));
+    if (skel.lastBakedFolder == folderStr &&
+        skel.lastBakedTunicPath == skeletonPath &&
+        skel.lastBakedAge == currentAge &&
+        skel.lastBakedTunic == currentTunic &&
+        skel.bakedModel != nullptr) {
+        SPDLOG_INFO("[CoopModel] UpdateTunicSkeletons: cache hit (skipping rebake) "
+                    "folder=\"{}\" path=\"{}\" age={} tunic={}",
+                    folderStr, skeletonPath, currentAge, currentTunic);
+        return;
+    }
+    skel.lastBakedFolder = folderStr;
+    skel.lastBakedTunicPath = skeletonPath;
+    skel.lastBakedAge = currentAge;
+    skel.lastBakedTunic = currentTunic;
+
     if (!folderStr.empty()) {
         SPDLOG_INFO("[CoopModel] UpdateTunicSkeletons: folder override=\"{}\" path=\"{}\"",
                     folderStr, skeletonPath);

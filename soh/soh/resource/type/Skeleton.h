@@ -142,6 +142,15 @@ struct SkeletonPatchInfo {
     std::unique_ptr<BakedPlayerModel> bakedModel;
     std::unique_ptr<BakedPlayerModel> retiredBakedModel;
     int retireFrameCounter = 0;
+
+    // KB-19 follow-up #3 — bake cache key. UpdateTunicSkeletons short-circuits
+    // when (lastBakedFolder, lastBakedAge, lastBakedTunic, lastBakedTunicPath)
+    // matches the current resolution — the bake output would be byte-identical.
+    // Default sentinel values guarantee the first bake always runs.
+    std::string lastBakedFolder = "<uninit>";
+    std::string lastBakedTunicPath;       // tunic-variant skeleton path baked into
+    int lastBakedAge = -1;                // gSaveContext.linkAge at bake time
+    int lastBakedTunic = -1;              // CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC) at bake time
 };
 
 class SkeletonPatcher {
@@ -151,17 +160,26 @@ class SkeletonPatcher {
     static void ClearSkeletons();
     static void UpdateSkeletons();
     static void UpdateCustomSkeletons();
+    // KB-19 follow-up #2 — targeted bake. Bakes only the SkeletonPatchInfo
+    // matching `triggerSkelAnime` instead of every local entry. Falls back to
+    // the broadcast-bake form when the trigger is null or not registered.
+    static void UpdateCustomSkeletons(SkelAnime* triggerSkelAnime);
     static void ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, bool isAdult, uint8_t tunic,
                                                  const std::string& characterFolder,
                                                  std::shared_ptr<Skeleton>& outSkeleton,
                                                  BakedPlayerModel& outBakedModel);
+
+    // Promoted to public for KB-19 fix b: CustomSkeletons.cpp's
+    // OnLinkSkeletonInit consumer needs to early-return when the firing
+    // SkelAnime is not the local player's, to avoid re-baking our own Link
+    // during the gSaveContext.linkAge swap window in DummyPlayer_Init.
+    static bool IsLocalPlayerSkelAnime(SkelAnime* skelAnime);
 
     static std::vector<SkeletonPatchInfo> skeletons;
 
   private:
     inline static const std::string sOtr = "__OTR__";
     static bool IsLinkSkeletonPath(const std::string& path);
-    static bool IsLocalPlayerSkelAnime(SkelAnime* skelAnime);
     static void UpdateTunicSkeletons(SkeletonPatchInfo& skel);
     static void UpdateCustomSkeletonFromPath(const std::string& skeletonPath, SkeletonPatchInfo& skel);
     static void UpdateCustomSkeletonFromFolder(const std::string& skeletonPath, const std::string& folder, SkeletonPatchInfo& skel);

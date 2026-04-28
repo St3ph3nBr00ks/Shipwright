@@ -498,10 +498,19 @@ void UpdatePatchCustomEquipmentDlists() {
     ApplyCommonEquipmentPatches();
 }
 
+// KB-19 fix b — OnLinkSkeletonInit now carries a SkelAnime* so consumers can
+// distinguish which skelAnime initialised. UpdateCustomEquipment already
+// short-circuits via IsDummyPlayer(GET_PLAYER(...)), so the only change here
+// is a thin adapter that absorbs the new parameter. See CustomSkeletons.cpp
+// for the full rationale and the alternative fix a kept as a fallback.
+static void UpdateCustomEquipmentForSkeletonInit(SkelAnime* /*skelAnime*/) {
+    UpdateCustomEquipment();
+}
+
 static void PatchCustomEquipment() {
     COND_HOOK(OnPlayerSetModels, true, UpdateCustomEquipmentSetModel);
     COND_HOOK(OnLinkEquipmentChange, true, UpdateCustomEquipment);
-    COND_HOOK(OnLinkSkeletonInit, true, UpdateCustomEquipment);
+    COND_HOOK(OnLinkSkeletonInit, true, UpdateCustomEquipmentForSkeletonInit);
     COND_HOOK(OnAssetAltChange, true, UpdateCustomEquipment);
 }
 

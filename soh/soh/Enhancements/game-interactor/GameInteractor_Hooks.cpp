@@ -90,8 +90,8 @@ void GameInteractor_ExecuteOnSceneSpawnActors() {
     GameInteractor::Instance->ExecuteHooks<GameInteractor::OnSceneSpawnActors>();
 }
 
-void GameInteractor_ExecuteOnLinkSkeletonInit() {
-    GameInteractor::Instance->ExecuteHooks<GameInteractor::OnLinkSkeletonInit>();
+void GameInteractor_ExecuteOnLinkSkeletonInit(SkelAnime* skelAnime) {
+    GameInteractor::Instance->ExecuteHooks<GameInteractor::OnLinkSkeletonInit>(skelAnime);
 }
 
 void GameInteractor_ExecuteOnLinkEquipmentChange() {
