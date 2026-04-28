@@ -267,6 +267,13 @@ void Anchor::RegisterHooks() {
             if (::SceneAuthority::IsEffectiveHost()) {
                 bookkeeping.ClearScene(gPlayState->sceneNum);
                 bookkeeping.ClearStaleDamagers((int16_t)gPlayState->sceneNum);
+                // KB-18 (#177) Option 4 — schedule the host-authoritative
+                // netId snapshot broadcast for next OnGameFrameUpdate. We
+                // can't fire it here because the static-actor batch is
+                // still loading; deferring one frame guarantees every
+                // static actor has completed its Init + had its EnemyNetId
+                // extension assigned before we serialise.
+                pendingSceneActorNetIdsBroadcast = true;
             }
             // Clear the per-scene-visit send-dedup set so that enemies in the new
             // scene can have their ENEMY_DEFEATED broadcast normally.
@@ -377,6 +384,15 @@ void Anchor::RegisterHooks() {
 
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
         ProcessIncomingPacketQueue();
+
+        // KB-18 (#177) Option 4 — deferred host snapshot broadcast.
+        // OnSceneSpawnActors host-path armed pendingSceneActorNetIdsBroadcast;
+        // we drain it on the next frame so every static actor has completed
+        // Init + EnemyNetId assignment before we serialise.
+        if (pendingSceneActorNetIdsBroadcast) {
+            pendingSceneActorNetIdsBroadcast = false;
+            SendPacket_SceneActorNetIds();
+        }
 
         // KB-15 / issue #110 + KB-19 / issue #176 — retire vector tick.
         // Each client carries a vector of {model, framesRemaining} retirees.
@@ -3022,7 +3038,21 @@ void Anchor::RegisterHooks() {
         // timeline produce the same netId on every client. The formula
         // lives in ActorSyncHelpers::EncodeEnemyNetId so this site and the
         // OnConnected reconnect-backfill path stay in lockstep.
-        uint32_t netId = EncodeEnemyNetId(actor);
+        //
+        // KB-18 (#177) Option 4 — non-host overrides the local compute
+        // with the host's snapshot value when available. Some actors
+        // (En_Sw confirmed) mutate home.pos non-deterministically inside
+        // Init; the local compute then disagrees with the host's. The
+        // snapshot's matched entry takes precedence; falls through to
+        // local compute when no entry matches (host hasn't sent yet,
+        // or actor is a dynamic spawn outside the snapshot scope).
+        uint32_t netId = 0;
+        if (!::SceneAuthority::IsEffectiveHost()) {
+            netId = LookupHostNetIdForCurrentScene(actor);
+        }
+        if (netId == 0) {
+            netId = EncodeEnemyNetId(actor);
+        }
 
         EnemyNetId ext;
         ext.netId = netId;

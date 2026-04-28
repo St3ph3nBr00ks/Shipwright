@@ -486,6 +486,8 @@ class Anchor : public Network {
     void HandlePacket_EnemyDefeated(nlohmann::json payload);  // phase=DyingByLocal phaseChanged=true
     void HandlePacket_EnemySpawn(nlohmann::json payload);     // phase=Alive       phaseChanged=true
     void HandlePacket_EnemyRespawn(nlohmann::json payload);   // phase=Regrowing   phaseChanged=true
+    // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
+    void HandlePacket_SceneActorNetIds(nlohmann::json payload);
     void HandlePacket_DamageEnemy(nlohmann::json payload);
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);
     void HandlePacket_DamagePlayer(nlohmann::json payload);
@@ -595,6 +597,13 @@ class Anchor : public Network {
     inline static const std::string WORLD_STATE_REQUEST   = "WORLD_STATE_REQUEST";
     inline static const std::string WORLD_STATE_SNAPSHOT  = "WORLD_STATE_SNAPSHOT";
 
+    // KB-18 (#177) Option 4 — host-authoritative netId snapshot. Host
+    // broadcasts the per-static-actor netId table on scene-spawn so non-
+    // hosts override their locally-computed (potentially divergent) netIds
+    // with the host's value. Solves the entire class of post-init
+    // home.pos non-determinism (En_Sw raycast + future actors).
+    inline static const std::string SCENE_ACTOR_NETIDS = "SCENE_ACTOR_NETIDS";
+
     static Anchor* Instance;
     std::map<uint32_t, AnchorClient> clients;
     RoomState roomState;
@@ -658,6 +667,61 @@ class Anchor : public Network {
     void SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect);
     void SendPacket_EnemyHitPlayer(uint32_t netId);
     void HandlePacket_EnemyHitPlayer(nlohmann::json payload);
+
+    // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
+    //
+    // Some actors (En_Sw / Skullwalltula confirmed; others suspected)
+    // mutate `actor->home.pos` non-deterministically inside `Init` (raycast
+    // results vary by collision-pipeline state and float truncation). When
+    // both clients independently compute their netId from the post-init
+    // home.pos, they get DIFFERENT netIds for what is conceptually the
+    // same scene-table entry — leading to the "No actor found for netId"
+    // warning flood and broken sync.
+    //
+    // Fix: at scene-spawn time, the host serialises every static actor's
+    // {actorId, room, params, homePos} → netId mapping and broadcasts it
+    // team-scoped. Non-host caches the snapshot keyed by (sceneNum,
+    // timeline). At OnActorSpawn time, non-host looks up the matching
+    // entry by approximate homePos (±50 unit tolerance to absorb the
+    // very divergence that motivates the fix) and uses the host's netId
+    // verbatim instead of computing locally. Snapshot also retroactively
+    // fixes already-spawned actors when the snapshot arrives late
+    // (typical race: non-host loads scene faster than the snapshot
+    // transit). Falls back to local compute when no snapshot exists
+    // (host hasn't sent yet) or no entry matches (dynamic spawn — host
+    // sends ENEMY_STATE phase=Alive phaseChanged=true for those, with
+    // an authoritative spawnInfo that includes the host's netId via
+    // `EncodeEnemyNetId` on the host side; non-host's local compute
+    // matches by deterministic-input convention).
+    struct SceneActorNetIdEntry {
+        int16_t  actorId;
+        int8_t   room;
+        int16_t  params;
+        Vec3f    homePos;
+        uint32_t netId;
+    };
+    // Keyed by (sceneNum<<8 | timeline). Cleared on Disable.
+    std::unordered_map<uint32_t, std::vector<SceneActorNetIdEntry>> sceneActorNetIdSnapshots;
+    // Set true by OnSceneSpawnActors host-path. Drained on next
+    // OnGameFrameUpdate so the broadcast fires AFTER all static actors
+    // have spawned + had their netIds assigned (OnSceneSpawnActors
+    // itself runs before the static-actor batch completes).
+    bool pendingSceneActorNetIdsBroadcast = false;
+    // Sender — walks current scene's syncable-actor categories and
+    // builds the snapshot from each actor's EnemyNetId extension.
+    void SendPacket_SceneActorNetIds();
+    // Helper — apply a just-cached snapshot to currently-loaded actors,
+    // overriding their (potentially divergent) netIds. Called from
+    // HandlePacket_SceneActorNetIds when the receiving client is in the
+    // matching scene+timeline.
+    void ApplyHostNetIdsToCurrentScene(int16_t sceneNum, uint8_t timeline);
+    // Helper — find the matching cache entry for a given actor.
+    // Returns 0 on miss or ambiguous (multi-match within tolerance).
+    uint32_t LookupHostNetIdForActor(struct Actor* actor,
+                                     const std::vector<SceneActorNetIdEntry>& cache);
+    // Convenience — cache lookup + LookupHostNetIdForActor for the
+    // current scene+timeline. Used by OnActorSpawn non-host path.
+    uint32_t LookupHostNetIdForCurrentScene(struct Actor* actor);
     // Scene-transition handoff — see #169 Phase C. Leader sends on
     // transitionTrigger OFF→START edge. Follower stores pending state and
     // fires its own transition once in proximity of the trigger point.

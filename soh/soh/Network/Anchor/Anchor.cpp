@@ -134,6 +134,12 @@ void Anchor::Disable() {
     // the module's static instance survives Disable so we must explicitly
     // wipe.
     EnemyStateSync::HostBookkeeping::Instance().Reset();
+
+    // KB-18 (#177) Option 4 — drop host-authoritative netId snapshot cache.
+    // A stale snapshot from a prior Anchor session pointed at a different
+    // room/team would mis-reassign netIds on the next scene-spawn.
+    sceneActorNetIdSnapshots.clear();
+    pendingSceneActorNetIdsBroadcast = false;
 }
 
 void Anchor::OnConnected() {
@@ -296,6 +302,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_AllClientState(payload);
             else if (packetType == ENEMY_STATE)
                 HandlePacket_EnemyState(payload);
+            else if (packetType == SCENE_ACTOR_NETIDS)
+                HandlePacket_SceneActorNetIds(payload);
             else if (packetType == DAMAGE_ENEMY)
                 HandlePacket_DamageEnemy(payload);
             else if (packetType == DAMAGE_PLAYER)

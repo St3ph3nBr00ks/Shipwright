@@ -34,6 +34,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"PLAYER_UPDATE", 1},
     {"REQUEST_TEAM_STATE", 1},
     {"REQUEST_TELEPORT", 1},
+    {"SCENE_ACTOR_NETIDS", 1},  // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     {"SCENE_TRANSITION_HANDOFF", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
     {"SERVER_MESSAGE", 1},
     {"SET_CHECK_STATUS", 1},
