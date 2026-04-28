@@ -42,11 +42,18 @@ bool IsRecognisedTransition(LifecyclePhase from, LifecyclePhase to) {
             return to == LifecyclePhase::DyingByNetwork;
         case LifecyclePhase::DyingByLocal:
             // Death anim completes (actor->update == NULL) → Dead.
-            // Karebaba respawn detector on host → Regrowing.
-            return to == LifecyclePhase::Dead || to == LifecyclePhase::Regrowing;
+            // Karebaba respawn detector on host → Alive (the existing code
+            // skips a separate Regrowing intermediate; the actor reaches
+            // Idle and the flags clear in one step).
+            return to == LifecyclePhase::Dead ||
+                   to == LifecyclePhase::Regrowing ||
+                   to == LifecyclePhase::Alive;
         case LifecyclePhase::DyingByNetwork:
-            // Karebaba respawn detector on non-host → Regrowing.
-            return to == LifecyclePhase::Regrowing;
+            // Karebaba respawn detector on non-host → Alive (same direct
+            // transition as DyingByLocal — Regrowing is in the formal model
+            // but the code consolidates it into the Alive transition).
+            return to == LifecyclePhase::Regrowing ||
+                   to == LifecyclePhase::Alive;
         case LifecyclePhase::Dead:
             // Scene re-init produces a fresh actor → reset to Alive.
             return to == LifecyclePhase::Alive;
@@ -82,12 +89,33 @@ void TransitionTo(EnemyNetId& state, LifecyclePhase newPhase) {
 }
 
 bool PhaseImpliesHasLocalDeath(LifecyclePhase phase) {
+    // True for ANY death state — the field's purpose is to block
+    // ENEMY_UPDATE health overrides on a dying/dead actor regardless of
+    // whether the kill was local or network. DyingByNetwork (Karebaba
+    // natural cycle from received ENEMY_DEFEATED) explicitly sets
+    // hasLocalDeath=true at the existing write site, so the audit
+    // correctly expects it true.
     return phase == LifecyclePhase::DyingByLocal ||
+           phase == LifecyclePhase::DyingByNetwork ||
            phase == LifecyclePhase::AwaitingDeadItemDrop ||
            phase == LifecyclePhase::Dead;
 }
 
 bool PhaseImpliesDefeatPacketSent(LifecyclePhase phase) {
+    // NOTE — this predicate is not used by AuditBooleansVsPhase. The
+    // C2 plan originally proposed `defeatPacketSent ≡ phase != Alive`,
+    // but `defeatPacketSent` tracks *broadcast ownership* on the local
+    // client (did THIS client send/receive a defeat packet for the
+    // netId), not lifecycle state. Two paths yield the same phase with
+    // different boolean values:
+    //   - DyingByLocal:    defeatPacketSent=true (we sent the broadcast)
+    //   - DyingByNetwork (received ENEMY_DEFEATED, no rebroadcast):
+    //                       defeatPacketSent=false (we didn't send)
+    // After Phase 1 finishes, defeatPacketSent stays as a non-derivative
+    // field — likely migrated into Phase 2's HostBookkeeping module
+    // alongside sentDefeatThisScene rather than EnemyState. This
+    // predicate exists only as a fallback for future code that wants a
+    // conservative "is the actor in any non-Alive state" answer.
     return phase != LifecyclePhase::Alive && phase != LifecyclePhase::Regrowing;
 }
 
@@ -119,9 +147,9 @@ void AuditBooleansVsPhase(const EnemyNetId& state, const char* siteTag) {
     warnOnce("hasLocalDeath",
              state.hasLocalDeath,
              PhaseImpliesHasLocalDeath(state.phase));
-    warnOnce("defeatPacketSent",
-             state.defeatPacketSent,
-             PhaseImpliesDefeatPacketSent(state.phase));
+    // defeatPacketSent intentionally not audited — see
+    // PhaseImpliesDefeatPacketSent comment for rationale. Field tracks
+    // broadcast ownership, not lifecycle state.
     warnOnce("pendingNaturalDeath",
              state.pendingNaturalDeath,
              PhaseImpliesPendingNaturalDeath(state.phase));

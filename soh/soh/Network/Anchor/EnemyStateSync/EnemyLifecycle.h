@@ -67,10 +67,15 @@ bool ValidatePhaseTransition(LifecyclePhase from, LifecyclePhase to);
 // write.
 void TransitionTo(EnemyNetId& state, LifecyclePhase newPhase);
 
-// Phase-derived predicates. During Phase 1, both reads (boolean field
-// AND derived predicate) should agree at every site; in Phase 1 step 2
-// these become assertion points. After the booleans are removed, only
-// the predicates remain as the canonical reads.
+// Phase-derived predicates. The lifecycle-derivative ones become the
+// canonical reads after Phase 1 deletes the booleans they shadow.
+//
+// NOTE — `defeatPacketSent` is NOT lifecycle-derivative. It tracks
+// "did this client emit/own a defeat broadcast for this netId" and
+// has different values for the same phase depending on send vs.
+// receive path. Phase 1 keeps it as a real field; the predicate below
+// exists only as a conservative fallback for callers that want a
+// "non-Alive" answer. Not audited.
 bool PhaseImpliesHasLocalDeath(LifecyclePhase phase);
 bool PhaseImpliesDefeatPacketSent(LifecyclePhase phase);
 bool PhaseImpliesPendingNaturalDeath(LifecyclePhase phase);
