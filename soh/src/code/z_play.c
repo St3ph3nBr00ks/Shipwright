@@ -1501,7 +1501,16 @@ void Play_Draw(PlayState* play) {
             R_PAUSE_MENU_MODE = 0;
         }
 
-        if (R_PAUSE_MENU_MODE == 3) {
+        // KB-19 — gate on Pillar G.i. In single-player, mode 3 displays the
+        // captured pause-background framebuffer and skips the world render
+        // (goto over skybox/scene/room/actor draws). In multiplayer, the
+        // world keeps ticking via Pillar G.i and we want it visible behind
+        // the pause UI, so fall through to the live world render below.
+        // Paired with the rotating-Link suppression in
+        // z_kaleido_scope_PAL.c / z_kaleido_equipment.c — together those
+        // remove the gSegments[4]/[6] collision that previously crashed
+        // when DummyPlayer_Draw read through pause-allocated memory.
+        if (R_PAUSE_MENU_MODE == 3 && Anchor_PauseMenuFreezesWorld()) {
             Gfx* gfxP = POLY_OPA_DISP;
 
             // SOH [Port] Draw game framebuffer using our custom handling

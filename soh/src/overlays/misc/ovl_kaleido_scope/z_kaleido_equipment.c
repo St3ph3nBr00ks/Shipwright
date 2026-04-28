@@ -4,6 +4,7 @@
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
 #include "soh/Enhancements/enhancementTypes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 
 static u8 sChildUpgrades[] = { UPG_BULLET_BAG, UPG_BOMB_BAG, UPG_STRENGTH, UPG_SCALE };
 static u8 sAdultUpgrades[] = { UPG_QUIVER, UPG_BOMB_BAG, UPG_STRENGTH, UPG_SCALE };
@@ -855,7 +856,14 @@ void KaleidoScope_DrawEquipment(PlayState* play) {
         KaleidoScope_DrawAButton(play, sStrengthAButtonVtx, translateX, translateY);
     }
 
-    KaleidoScope_DrawPlayerWork(play);
+    // KB-19 Option C — pause-menu rotating Link suppressed in multiplayer.
+    // Paired with the func_80091738 skip in z_kaleido_scope_PAL.c (no init,
+    // no per-frame draw, no gSegments[4]/[6] reconfiguration). Equipment
+    // slots, bottle slots, A-button overlays etc. all still render normally
+    // since they don't depend on the player skel/anim.
+    if (Anchor_PauseMenuFreezesWorld()) {
+        KaleidoScope_DrawPlayerWork(play);
+    }
 
     // if ((pauseCtx->unk_1E4 == 7) && (sEquipTimer == 10)) {
     // KaleidoScope_SetupPlayerPreRender(play);

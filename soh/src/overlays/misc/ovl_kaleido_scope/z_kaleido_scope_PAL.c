@@ -22,6 +22,7 @@
 #include "soh/SaveManager.h"
 #include "soh/Enhancements/kaleido.h"
 #include <soh_assets.h>
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 
 static void* sEquipmentFRATexs[] = {
     gPauseEquipment00FRATex, gPauseEquipment01Tex, gPauseEquipment02Tex, gPauseEquipment03Tex, gPauseEquipment04Tex,
@@ -3881,7 +3882,24 @@ void KaleidoScope_Update(PlayState* play) {
 
             pauseCtx->playerSegment = (void*)(((uintptr_t)play->objectCtx.spaceStart + 0x30) & ~0x3F);
 
-            size1 = func_80091738(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime);
+            // KB-19 Option C — suppress the pause-menu rotating Link in
+            // multiplayer. func_80091738 reconfigures gSegments[4]/[6] to
+            // point at the pause-allocated playerSegment for rendering the
+            // equipment-screen Link preview. While the pause menu is open
+            // and Pillar G.i keeps DummyPlayer_Draw running, those segment
+            // overrides clash with remote-player vertex addressing — visible
+            // distortion and SCENE_DEKU_TREE Room 0 SEGV (R1 control 2026-04-27).
+            // Skipping func_80091738 in multiplayer leaves gSegments[4]/[6]
+            // alone; players lose the rotating-Link preview but everything
+            // else (item slots, map, save) works. iconItemSegment overlaps
+            // playerSegment when size1=0 — both reference the same offset and
+            // the icon DMA below writes there harmlessly since no Link DMA
+            // happened.
+            if (Anchor_PauseMenuFreezesWorld()) {
+                size1 = func_80091738(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime);
+            } else {
+                size1 = 0;
+            }
             osSyncPrintf("プレイヤー size1＝%x\n", size1);
 
             pauseCtx->iconItemSegment = (void*)(((uintptr_t)pauseCtx->playerSegment + size1 + 0xF) & ~0xF);
@@ -3994,7 +4012,12 @@ void KaleidoScope_Update(PlayState* play) {
             PreRender_SetValuesSave(&sPlayerPreRender, PAUSE_EQUIP_PLAYER_WIDTH, PAUSE_EQUIP_PLAYER_HEIGHT,
                                     pauseCtx->playerSegment, NULL, sPreRenderCvg);
 
-            KaleidoScope_DrawPlayerWork(play);
+            // KB-19 Option C — paired with the func_80091738 skip above. When
+            // multiplayer suppressed the Link load, pauseCtx->playerSkelAnime
+            // is uninitialised; skip the draw to avoid dereferencing it.
+            if (Anchor_PauseMenuFreezesWorld()) {
+                KaleidoScope_DrawPlayerWork(play);
+            }
 // KaleidoScope_SetupPlayerPreRender(play);
 #endif
             for (i = 0; i < ARRAY_COUNT(pauseCtx->worldMapPoints); i++) {
