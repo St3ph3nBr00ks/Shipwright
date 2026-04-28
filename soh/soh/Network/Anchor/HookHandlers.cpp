@@ -3485,6 +3485,30 @@ void Anchor::RegisterHooks() {
                 }
             }
 
+            // Dekubaba state-machine sync — KB-08 / #7. Without this, each
+            // client's free-running grow/lunge cycle drifts to a different
+            // phase, and Anchor_GetNearestPlayerActor (called from Grow,
+            // DecideLunge, PrepareLunge) ends up resolving to the local
+            // player on each side because each Dekubaba's animation-derived
+            // world.pos lands closer to its own client's player at any
+            // given frame. Forcing the host's stateIndex onto the non-host
+            // pins both cycles in lockstep so the targeting math converges.
+            //
+            // Death and post-death states (11=PrunedSomersault, 12=ShrinkDie,
+            // 13=DeadStickDrop) are skipped inside ApplyNetState — the
+            // ENEMY_STATE phase=DyingByLocal path drives those transitions
+            // separately. PhaseImpliesHasLocalDeath also blocks the call so
+            // a locally-killed Dekubaba doesn't have its death animation
+            // overwritten by a stale alive-state packet.
+            if (actor->id == ACTOR_EN_DEKUBABA && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnDekubaba* baba = (EnDekubaba*)actor;
+                s16 curState = EnDekubaba_GetStateIndex(baba);
+                if (curState != ext->netStateIndex) {
+                    EnDekubaba_ApplyNetState(baba, ext->netStateIndex);
+                }
+            }
+
         }
     });
 

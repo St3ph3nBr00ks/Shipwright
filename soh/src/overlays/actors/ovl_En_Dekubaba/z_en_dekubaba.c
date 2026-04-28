@@ -295,6 +295,72 @@ void EnDekubaba_DisableHitboxes(EnDekubaba* this) {
     }
 }
 
+/**
+ * Anchor multiplayer (KB-08 / #7) — state-machine sync for non-host clients.
+ *
+ * Returns a stable numeric index for the current actionFunc so the host's
+ * state can be transmitted via ENEMY_STATE and applied verbatim on the
+ * non-host. Without this sync, each client's free-running grow/lunge cycle
+ * picks `Anchor_GetNearestPlayerActor` against its own animation-derived
+ * world.pos at a different cycle phase — manifesting as "P1's Dekubaba
+ * targets P1, P2's Dekubaba targets P2."
+ *
+ * Index assignments (do not renumber — they cross the wire):
+ *   0=Wait 1=Grow 2=Retract 3=DecideLunge 4=PrepareLunge 5=Lunge
+ *   6=PullBack 7=Recover 8=Hit 9=StunnedVertical 10=Sway
+ *   11=PrunedSomersault 12=ShrinkDie 13=DeadStickDrop
+ */
+s16 EnDekubaba_GetStateIndex(EnDekubaba* this) {
+    if (this->actionFunc == EnDekubaba_Wait)             return 0;
+    if (this->actionFunc == EnDekubaba_Grow)             return 1;
+    if (this->actionFunc == EnDekubaba_Retract)          return 2;
+    if (this->actionFunc == EnDekubaba_DecideLunge)      return 3;
+    if (this->actionFunc == EnDekubaba_PrepareLunge)     return 4;
+    if (this->actionFunc == EnDekubaba_Lunge)            return 5;
+    if (this->actionFunc == EnDekubaba_PullBack)         return 6;
+    if (this->actionFunc == EnDekubaba_Recover)          return 7;
+    if (this->actionFunc == EnDekubaba_Hit)              return 8;
+    if (this->actionFunc == EnDekubaba_StunnedVertical)  return 9;
+    if (this->actionFunc == EnDekubaba_Sway)             return 10;
+    if (this->actionFunc == EnDekubaba_PrunedSomersault) return 11;
+    if (this->actionFunc == EnDekubaba_ShrinkDie)        return 12;
+    if (this->actionFunc == EnDekubaba_DeadStickDrop)    return 13;
+    return -1;
+}
+
+/**
+ * Drives the Dekubaba into the given state on a non-host client.
+ *
+ * Death and post-death states (PrunedSomersault=11, ShrinkDie=12,
+ * DeadStickDrop=13) are intentional no-ops — ENEMY_STATE phase=DyingByLocal
+ * drives those transitions and forcing them via SetupXxx here would
+ * double-fire `GameInteractor_ExecuteOnEnemyDefeat` (lines 417, 426) or
+ * change category mid-frame.
+ *
+ * Hit (8) is also a no-op: SetupHit takes a numeric arg1 (timer value)
+ * we don't currently transmit, and Hit is brief enough that the next
+ * steady-state ENEMY_STATE packet snaps the non-host back to the post-Hit
+ * state on the host.
+ */
+void EnDekubaba_ApplyNetState(EnDekubaba* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  EnDekubaba_SetupWait(this);             break;
+        case 1:  EnDekubaba_SetupGrow(this);             break;
+        case 2:  EnDekubaba_SetupRetract(this);          break;
+        case 3:  EnDekubaba_SetupDecideLunge(this);      break;
+        case 4:  EnDekubaba_SetupPrepareLunge(this);     break;
+        case 5:  EnDekubaba_SetupLunge(this);            break;
+        case 6:  EnDekubaba_SetupPullBack(this);         break;
+        case 7:  EnDekubaba_SetupRecover(this);          break;
+        case 9:  EnDekubaba_SetupStunnedVertical(this);  break;
+        case 10: EnDekubaba_SetupSway(this);             break;
+        default:
+            // 8=Hit (needs arg), 11=PrunedSomersault / 12=ShrinkDie /
+            // 13=DeadStickDrop (death) — see header comment above.
+            return;
+    }
+}
+
 void EnDekubaba_SetupWait(EnDekubaba* this) {
     s32 i;
     ColliderJntSphElement* element;

@@ -30,4 +30,8 @@ typedef struct EnDekubaba {
     /* 0x0258 */ ColliderJntSphElement colliderElements[7];
 } EnDekubaba; // size = 0x0418
 
+// Anchor multiplayer state-machine sync (KB-08 / #7).
+s16  EnDekubaba_GetStateIndex(struct EnDekubaba* actor);
+void EnDekubaba_ApplyNetState(struct EnDekubaba* actor, s16 stateIndex);
+
 #endif

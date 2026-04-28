@@ -24,6 +24,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
 // Issue #153 — En_Goroiwa carries extra path-state fields in the steady-state branch.
 #include "overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
+// KB-08 / #7 — En_Dekubaba carries actionState for state-machine sync.
+#include "overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
 extern PlayState* gPlayState;
 }
 
@@ -59,6 +61,10 @@ struct EnemyUpdateExtras {
     s16  goroiwaNextWp       = 0;
     s16  goroiwaPathDir      = 0;
     u8   goroiwaFlags        = 0;
+
+    // KB-08 / #7 — En_Dekubaba state-machine sync.
+    bool hasDekubaba         = false;
+    s16  dekubabaActionState = 0;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -127,6 +133,9 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.goroiwaNextWp      = b->nextWaypoint;
         e.goroiwaPathDir     = b->pathDirection;
         e.goroiwaFlags       = b->stateFlags;
+    } else if (actor->id == ACTOR_EN_DEKUBABA) {
+        e.hasDekubaba         = true;
+        e.dekubabaActionState = EnDekubaba_GetStateIndex((EnDekubaba*)actor);
     }
     return e;
 }
@@ -144,6 +153,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
         if (cur.goroiwaNextWp      != prev.goroiwaNextWp)      return true;
         if (cur.goroiwaPathDir     != prev.goroiwaPathDir)     return true;
         if (cur.goroiwaFlags       != prev.goroiwaFlags)       return true;
+    }
+    if (cur.hasDekubaba != prev.hasDekubaba) return true;
+    if (cur.hasDekubaba) {
+        if (cur.dekubabaActionState != prev.dekubabaActionState) return true;
     }
     return false;
 }
@@ -289,6 +302,12 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         payload["goroiwaNextWp"]  = (int)extras.goroiwaNextWp;
         payload["goroiwaPathDir"] = (int)extras.goroiwaPathDir;
         payload["goroiwaFlags"]   = (int)extras.goroiwaFlags;
+    }
+
+    // KB-08 / #7 — Dekubaba state-machine sync. Drives non-host
+    // ApplyNetState to keep both clients on the same cycle phase.
+    if (extras.hasDekubaba) {
+        payload["actionState"] = extras.dekubabaActionState;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -532,6 +551,12 @@ actor_found:
         if (actor->id == ACTOR_EN_KAREBABA && payload.contains("actionState")) {
             ext->netStateIndex  = (s16)payload["actionState"].get<int>();
             ext->netActorParams = (s16)payload.value("actorParams", (int)0);
+        }
+
+        // KB-08 / #7 — cache Dekubaba host state so OnActorUpdate can call
+        // EnDekubaba_ApplyNetState when local state diverges from net.
+        if (actor->id == ACTOR_EN_DEKUBABA && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
 
         if (actor->id == ACTOR_EN_GOROIWA) {
