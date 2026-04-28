@@ -95,7 +95,22 @@ void Anchor::HandlePacket_EnemyRespawn(nlohmann::json payload) {
     }
 
     if (!actor) {
-        SPDLOG_DEBUG("[EnemyRespawn] netId={} not found — ignoring (actor already respawned?)", netId);
+        // Race fix (logs 31, netId 2153105155): an ENEMY_DEFEATED for a
+        // not-yet-loaded actor was buffered as pendingKill, then an
+        // ENEMY_RESPAWN arrived before the actor finished loading. Without
+        // this branch, the respawn was ignored ("actor already respawned?")
+        // and when the actor finally spawned the pendingKill made it run
+        // the FULL natural-death cycle from DeadItemDrop, ending up alive
+        // ~20s after the host. Clearing the pendingKill here means the
+        // actor will spawn alive on next OnActorSpawn (host has already
+        // completed the cycle, so the host-authoritative truth is "alive").
+        if (EnemyStateSync::HostBookkeeping::Instance().IsPendingKill(netId)) {
+            SPDLOG_INFO("[EnemyRespawn] netId={} actor not loaded; cancelling pendingKill so it spawns alive",
+                        netId);
+            EnemyStateSync::HostBookkeeping::Instance().ClearPendingKill(netId);
+        } else {
+            SPDLOG_DEBUG("[EnemyRespawn] netId={} not found — ignoring (actor already respawned?)", netId);
+        }
         return;
     }
 
