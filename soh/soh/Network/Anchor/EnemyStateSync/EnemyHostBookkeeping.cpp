@@ -32,11 +32,17 @@ void HostBookkeeping::ClearPendingKill(uint32_t netId) {
 }
 
 void HostBookkeeping::ClearStalePendingKillsFromOtherScenes(uint16_t currentScene) {
+    // netId encoding: bit 31 = Pillar B timeline (1 = child), bits 30-16 =
+    // sceneNum low 15 bits. Mask 0x7FFF to drop the timeline bit before
+    // comparing — the pre-Pillar-B inline loop in HookHandlers used a
+    // bare 0xFFFF mask which silently always evaluated to "stale" for
+    // every child-timeline pendingKill (bit 31 always set), wiping every
+    // pendingKill on room transition. Reproduced as the room-leave-and-
+    // re-enter respawn-too-fast bug in test 32 (logs 32, 2026-04-28).
+    const uint16_t maskedCurrent = currentScene & 0x7FFF;
     for (auto it = mPendingKills.begin(); it != mPendingKills.end();) {
-        // netId encoding: bits 30-16 carry the scene low 15 bits.
-        // Mask to the same uint16_t the historical inline loop used.
-        const uint16_t entryScene = (uint16_t)(*it >> 16);
-        if (entryScene != currentScene) {
+        const uint16_t entryScene = (uint16_t)((*it >> 16) & 0x7FFF);
+        if (entryScene != maskedCurrent) {
             it = mPendingKills.erase(it);
         } else {
             ++it;
@@ -119,9 +125,15 @@ void HostBookkeeping::ClearStaleDamagers(int16_t enteredScene) {
     // scene; those actors respawned with the same netId, so the pre-
     // respawn damager attribution no longer applies. Entries from other
     // scenes are kept (their actors weren't reset by this scene-load).
+    //
+    // Mask 0x7FFF on both sides to drop the Pillar B timeline bit
+    // (bit 31 of netId). Same bug as ClearStalePendingKillsFromOtherScenes
+    // — the pre-Pillar-B inline loop used a bare 0xFFFF mask, which made
+    // every child-timeline entry compare as a different scene.
+    const int16_t maskedEntered = static_cast<int16_t>(enteredScene & 0x7FFF);
     for (auto it = mDamagers.begin(); it != mDamagers.end();) {
-        const int16_t entryScene = static_cast<int16_t>((it->first >> 16) & 0xFFFF);
-        if (entryScene == enteredScene) {
+        const int16_t entryScene = static_cast<int16_t>((it->first >> 16) & 0x7FFF);
+        if (entryScene == maskedEntered) {
             it = mDamagers.erase(it);
         } else {
             ++it;
