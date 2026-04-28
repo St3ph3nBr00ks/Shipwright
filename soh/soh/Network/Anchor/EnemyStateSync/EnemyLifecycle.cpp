@@ -150,9 +150,9 @@ void AuditBooleansVsPhase(const EnemyNetId& state, const char* siteTag) {
     // defeatPacketSent intentionally not audited — see
     // PhaseImpliesDefeatPacketSent comment for rationale. Field tracks
     // broadcast ownership, not lifecycle state.
-    warnOnce("pendingNaturalDeath",
-             state.pendingNaturalDeath,
-             PhaseImpliesPendingNaturalDeath(state.phase));
+    // pendingNaturalDeath was deleted at end of C2 Phase 1 step 5b;
+    // the audit no longer has a boolean to compare against. Phase-derived
+    // reads use PhaseImpliesPendingNaturalDeath() directly.
     warnOnce("deferredDeadItemDrop",
              state.deferredDeadItemDrop,
              PhaseImpliesDeferredDeadItemDrop(state.phase));

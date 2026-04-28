@@ -73,11 +73,11 @@ struct EnemyNetId {
     s16 netStateIndex = -1;
     s16 netActorParams = 0;
 
-    // Set on a non-host client by HandlePacket_EnemyDefeated when the Karebaba
-    // is allowed to run its natural death→respawn cycle instead of being Actor_Kill'd.
-    // While true: hasLocalDeath blocks ENEMY_UPDATE overrides; item drop is suppressed.
-    // Cleared in OnActorUpdate when the actor returns to Idle (respawn complete).
-    bool pendingNaturalDeath = false;
+    // pendingNaturalDeath was deleted at end of C2 Phase 1 step 5b.
+    // Read sites use EnemyStateSync::PhaseImpliesPendingNaturalDeath(
+    // ext->phase), which returns true for DyingByNetwork /
+    // AwaitingDeadItemDrop. Karebaba item-drop suppression and natural-
+    // cycle gating now derive from phase.
 
     // Set in OnActorSpawn when a pendingKillNetIds entry matches this Karebaba.
     // OnActorSpawn fires BEFORE actor->init() is called by Actor_UpdateAll; calling

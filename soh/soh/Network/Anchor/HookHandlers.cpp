@@ -90,7 +90,7 @@ extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
 extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    return ext != nullptr && ext->pendingNaturalDeath;
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
 // C-callable: non-host tells host that its local Link was just hit by this enemy
@@ -1995,7 +1995,7 @@ void Anchor::RegisterHooks() {
                             if (ext != nullptr) {
                                 EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.A");
                                 if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
-                                    ext->pendingNaturalDeath) {
+                                    EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
                                     targetDefeated = true;
                                 }
                             }
@@ -2192,7 +2192,7 @@ void Anchor::RegisterHooks() {
                             if (ext != nullptr) {
                                 EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.B");
                                 if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
-                                    ext->pendingNaturalDeath) {
+                                    EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
                                     defeated = true;
                                 }
                             }
@@ -2754,7 +2754,7 @@ void Anchor::RegisterHooks() {
                             if (ext != nullptr) {
                                 EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetAliveCheck");
                                 if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
-                                    ext->pendingNaturalDeath) {
+                                    EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
                                     targetAlive = false;
                                 }
                             }
@@ -3085,7 +3085,6 @@ void Anchor::RegisterHooks() {
                         ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                     if (extPtr != nullptr) {
                         EnemyStateSync::TransitionTo(*extPtr, EnemyStateSync::LifecyclePhase::AwaitingDeadItemDrop);
-                        extPtr->pendingNaturalDeath  = true;
                         extPtr->defeatPacketSent     = true;
                         // OnActorInit applies SetupDeadItemDrop after init() runs.
                         // Gated on deferredDeadItemDrop, not on host/non-host.
@@ -3120,7 +3119,6 @@ void Anchor::RegisterHooks() {
                 EnemyNetId* extPtr = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                 if (extPtr != nullptr) {
                     EnemyStateSync::TransitionTo(*extPtr, EnemyStateSync::LifecyclePhase::AwaitingDeadItemDrop);
-                    extPtr->pendingNaturalDeath  = true;
                     extPtr->defeatPacketSent     = true;
                     // Fix 38: defer SetupDeadItemDrop to OnActorInit.
                     // OnActorSpawn fires BEFORE actor->init() is called by Actor_UpdateAll
@@ -3235,7 +3233,7 @@ void Anchor::RegisterHooks() {
                 EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.host.Karebaba.respawnDetect.precond");
             }
             if (actor->id == ACTOR_EN_KAREBABA &&
-                (ext->defeatPacketSent || ext->pendingNaturalDeath)) {
+                (ext->defeatPacketSent || EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase))) {
                 EnemyNetId* extMut = const_cast<EnemyNetId*>(ext);
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
                 // Detect respawn-complete: any living state (>= 0, not a death/regrow state).
@@ -3259,7 +3257,6 @@ void Anchor::RegisterHooks() {
                     EnemyStateSync::AuditBooleansVsPhase(*extMut, "OnActorUpdate.host.Karebaba.respawn");
                     EnemyStateSync::TransitionTo(*extMut, EnemyStateSync::LifecyclePhase::Alive);
                     extMut->defeatPacketSent    = false;
-                    extMut->pendingNaturalDeath = false;
                     sentDefeatThisScene.erase(extMut->netId);
                     deadEnemiesByScene[gPlayState->sceneNum].erase(extMut->netId);
                     // Symmetric with non-host detector below: clear pendingKillNetIds
@@ -3323,7 +3320,7 @@ void Anchor::RegisterHooks() {
                 EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.Karebaba.respawnDetect.precond");
             }
             if (actor->id == ACTOR_EN_KAREBABA &&
-                (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
+                (EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) || ext->defeatPacketSent)) {
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
                 bool isDeathState = (curState == 5 || curState == 6 || curState == 8 || curState == 9);
                 bool isGrowState  = (curState == 0);
@@ -3333,13 +3330,12 @@ void Anchor::RegisterHooks() {
                     // defeatPacketSent=true means we sent ENEMY_DEFEATED (not a dedup skip).
                     // Notify the host to skip its remaining countdown — symmetric to how
                     // the host sends ENEMY_RESPAWN to us after a host-side kill (Fix 32).
-                    if (!ext->pendingNaturalDeath && ext->defeatPacketSent) {
+                    if (!EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) && ext->defeatPacketSent) {
                         SendPacket_EnemyRespawn(ext->netId);
                     }
 
                     EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.Karebaba.respawn");
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Alive);
-                    ext->pendingNaturalDeath  = false;
                     ext->defeatPacketSent     = false;
                     ext->netStateIndex        = -1;
                     // Clear hasNetState (Fix 25): prevents stale scale/rot from the

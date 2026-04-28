@@ -103,7 +103,7 @@ void Anchor::HandlePacket_EnemyRespawn(nlohmann::json payload) {
     if (ext != nullptr) {
         EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyRespawn.pendingCheck");
     }
-    if (!ext || !ext->pendingNaturalDeath) {
+    if (!ext || !EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
         // Not in a network-driven death cycle, or already respawned — nothing to do.
         return;
     }

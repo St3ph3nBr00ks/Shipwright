@@ -195,7 +195,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 // kill, or pendingNaturalDeath = prior network kill), ignore the duplicate.
                 if (actor->id == ACTOR_EN_KAREBABA) {
                     EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Karebaba.dupDetect");
-                    if (ext->defeatPacketSent || ext->pendingNaturalDeath) {
+                    if (ext->defeatPacketSent || EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
                         SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} already dying — duplicate, dedup only", netId);
                         // The actor is already mid-cycle. In practice this branch is
                         // only reached via duplicate delivery — typically the host's
@@ -220,7 +220,6 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle", netId);
                     EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
-                    ext->pendingNaturalDeath = true;
                     // Keep netId in pendingKillNetIds so that if P2 exits the room
                     // mid-cycle (OoT destroys the actor on room unload), the fresh
                     // spawn on re-entry will also be set to SetupDeadItemDrop via the
@@ -253,7 +252,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Karebaba.MISC.dupDetect");
             }
             if (ext != nullptr && ext->netId == netId &&
-                (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
+                (EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) || ext->defeatPacketSent)) {
                 SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} in ACTORCAT_MISC natural cycle — duplicate, dedup only", netId);
                 // Same rationale as the ACTORCAT_ENEMY already-dying branch above:
                 // duplicate replay should not set stalledKillPending. Persist
