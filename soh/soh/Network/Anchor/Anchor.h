@@ -60,13 +60,11 @@ struct EnemyNetId {
     // OnActorKill fires, triggering the Fix 12 broadcast path.
     bool defeatPacketSent = false;
 
-    // Set to true on the non-host when this client kills the enemy locally
-    // (OnEnemyDefeat or OnActorKill fires). Prevents ENEMY_UPDATE from re-writing
-    // health > 0 after the local kill — without this, the host keeps sending
-    // health > 0 for several frames while P2's kill packet travels to P1, causing
-    // the dying enemy to "resurrect" visually on P2 before the Actor_Kill from
-    // the host's ENEMY_DEFEATED reaches P2.
-    bool hasLocalDeath = false;
+    // hasLocalDeath was deleted at end of C2 Phase 1 (commit landing this
+    // change). Read sites now use EnemyStateSync::PhaseImpliesHasLocalDeath(
+    // ext->phase), which returns true for DyingByLocal / DyingByNetwork /
+    // AwaitingDeadItemDrop / Dead. Write sites moved to TransitionTo()
+    // calls during Phase 1 step 2; this commit drops the boolean storage.
 
     // Per-actor-type state machine sync fields.
     // Currently used by ACTOR_EN_KAREBABA (Withered Deku Baba) to keep its

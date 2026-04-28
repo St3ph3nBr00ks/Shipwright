@@ -144,9 +144,9 @@ void AuditBooleansVsPhase(const EnemyNetId& state, const char* siteTag) {
         }
     };
 
-    warnOnce("hasLocalDeath",
-             state.hasLocalDeath,
-             PhaseImpliesHasLocalDeath(state.phase));
+    // hasLocalDeath was deleted at end of C2 Phase 1; the audit no longer
+    // has a boolean to compare against. Phase-derived reads use
+    // PhaseImpliesHasLocalDeath() directly.
     // defeatPacketSent intentionally not audited — see
     // PhaseImpliesDefeatPacketSent comment for rationale. Field tracks
     // broadcast ownership, not lifecycle state.

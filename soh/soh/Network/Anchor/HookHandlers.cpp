@@ -1994,7 +1994,8 @@ void Anchor::RegisterHooks() {
                                 ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
                             if (ext != nullptr) {
                                 EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.A");
-                                if (ext->hasLocalDeath || ext->pendingNaturalDeath) {
+                                if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
+                                    ext->pendingNaturalDeath) {
                                     targetDefeated = true;
                                 }
                             }
@@ -2190,7 +2191,8 @@ void Anchor::RegisterHooks() {
                                 ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
                             if (ext != nullptr) {
                                 EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.B");
-                                if (ext->hasLocalDeath || ext->pendingNaturalDeath) {
+                                if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
+                                    ext->pendingNaturalDeath) {
                                     defeated = true;
                                 }
                             }
@@ -2751,7 +2753,8 @@ void Anchor::RegisterHooks() {
                                 ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
                             if (ext != nullptr) {
                                 EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetAliveCheck");
-                                if (ext->hasLocalDeath || ext->pendingNaturalDeath) {
+                                if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
+                                    ext->pendingNaturalDeath) {
                                     targetAlive = false;
                                 }
                             }
@@ -3082,7 +3085,6 @@ void Anchor::RegisterHooks() {
                         ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                     if (extPtr != nullptr) {
                         EnemyStateSync::TransitionTo(*extPtr, EnemyStateSync::LifecyclePhase::AwaitingDeadItemDrop);
-                        extPtr->hasLocalDeath        = true;
                         extPtr->pendingNaturalDeath  = true;
                         extPtr->defeatPacketSent     = true;
                         // OnActorInit applies SetupDeadItemDrop after init() runs.
@@ -3118,7 +3120,6 @@ void Anchor::RegisterHooks() {
                 EnemyNetId* extPtr = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                 if (extPtr != nullptr) {
                     EnemyStateSync::TransitionTo(*extPtr, EnemyStateSync::LifecyclePhase::AwaitingDeadItemDrop);
-                    extPtr->hasLocalDeath        = true;
                     extPtr->pendingNaturalDeath  = true;
                     extPtr->defeatPacketSent     = true;
                     // Fix 38: defer SetupDeadItemDrop to OnActorInit.
@@ -3258,7 +3259,6 @@ void Anchor::RegisterHooks() {
                     EnemyStateSync::AuditBooleansVsPhase(*extMut, "OnActorUpdate.host.Karebaba.respawn");
                     EnemyStateSync::TransitionTo(*extMut, EnemyStateSync::LifecyclePhase::Alive);
                     extMut->defeatPacketSent    = false;
-                    extMut->hasLocalDeath       = false;
                     extMut->pendingNaturalDeath = false;
                     sentDefeatThisScene.erase(extMut->netId);
                     deadEnemiesByScene[gPlayState->sceneNum].erase(extMut->netId);
@@ -3295,7 +3295,7 @@ void Anchor::RegisterHooks() {
             // sets hasLocalDeath = true. ENEMY_DEFEATED already handles the kill;
             // sending DAMAGE_ENEMY for the final hit would be redundant.
             EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.DamageEnemyForward");
-            if (!ext->hasLocalDeath && actor->colChkInfo.damage > 0) {
+            if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) && actor->colChkInfo.damage > 0) {
                 // #174/#175: forward damageEffect (set on enemy by collision damage-table
                 // lookup) and atHitEffect (set on the player by CollisionCheck_SetATvsAC
                 // when the player's AT element lands a hit). Many OoT enemies branch on
@@ -3340,7 +3340,6 @@ void Anchor::RegisterHooks() {
                     EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.Karebaba.respawn");
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Alive);
                     ext->pendingNaturalDeath  = false;
-                    ext->hasLocalDeath        = false;
                     ext->defeatPacketSent     = false;
                     ext->netStateIndex        = -1;
                     // Clear hasNetState (Fix 25): prevents stale scale/rot from the
@@ -3386,7 +3385,7 @@ void Anchor::RegisterHooks() {
             // Overwriting with stale cached host values corrupts the animation.
             // Scale and health have their own hasLocalDeath guards further below.
             EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.reapplyGuard");
-            if (!ext->hasLocalDeath) {
+            if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 // Both En_Dekubaba and En_Karebaba compute world.pos each frame from
                 // animated angles rather than using a stable model root:
                 //   En_Dekubaba: head-tip position derived from home.pos + stemSectionAngles
@@ -3404,7 +3403,7 @@ void Anchor::RegisterHooks() {
             // packets don't revive the dying actor on this client (hasLocalDeath guard).
             // Multi-hit guard: only re-apply if local health hasn't been reduced below the
             // network value; otherwise we'd undo locally-dealt damage on multi-hit enemies.
-            if (!ext->hasLocalDeath && actor->colChkInfo.health >= ext->netHealth) {
+            if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) && actor->colChkInfo.health >= ext->netHealth) {
                 actor->colChkInfo.health = ext->netHealth;
             }
             // Karebaba: pre-compute local state and active/dormant flags here so they
@@ -3413,7 +3412,8 @@ void Anchor::RegisterHooks() {
             // variable has a defined value; the sync block is skipped in those cases.
             bool karebabaDormantOverride = false;
             s16  karebabaLocalState      = -1;
-            if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 && !ext->hasLocalDeath) {
+            if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 karebabaLocalState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
                 bool kNetDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
                                      ext->netStateIndex == 2 || ext->netStateIndex == 9);
@@ -3432,7 +3432,7 @@ void Anchor::RegisterHooks() {
             //     but P2's is active (Upright/Spin, scale=0.01). Without this guard,
             //     P1's dormant scale overwrites P2's active scale every frame, making
             //     the Karebaba appear tiny while P2 is standing next to it (Fix 26).
-            if (!ext->hasLocalDeath && !karebabaDormantOverride) {
+            if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) && !karebabaDormantOverride) {
                 actor->scale = ext->netScale;
             }
 
@@ -3461,7 +3461,8 @@ void Anchor::RegisterHooks() {
             //     (Awaken=2/Upright=3/Spin=4/Retract=7). Awaken(2) is in both sets:
             //     it blocks host-sent Idle from resetting a locally-Awaken actor, AND
             //     is itself blocked from overriding already-active (Upright/Spin) actors.
-            if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 && !ext->hasLocalDeath) {
+            if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 s16 curState = karebabaLocalState; // pre-computed above
                 if (curState != ext->netStateIndex && ext->netStateIndex != 7) {
                     // Intra-attack guard (Fix 29): when both the host and local Karebaba are
@@ -3582,7 +3583,6 @@ void Anchor::RegisterHooks() {
                         ext->netId);
             EnemyStateSync::AuditBooleansVsPhase(*ext, "OnEnemyDefeat.dedup");
             EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
-            ext->hasLocalDeath    = true;
             ext->defeatPacketSent = true;
             return;
         }
@@ -3592,10 +3592,9 @@ void Anchor::RegisterHooks() {
         // the OnActorKill hook (Fix 12) does not send a duplicate packet when
         // this same actor later calls Actor_Kill on itself.
         ext->defeatPacketSent = true;
-        // Prevent ENEMY_UPDATE from overwriting health > 0 after a local kill.
-        // The host keeps sending health=alive for a few frames while this packet
-        // travels; without this flag the dying enemy flickers back to alive state.
-        ext->hasLocalDeath = true;
+        // ENEMY_UPDATE re-apply guard now derived from phase via
+        // PhaseImpliesHasLocalDeath(DyingByLocal) → true. The legacy
+        // hasLocalDeath boolean was deleted at end of C2 Phase 1.
         // Host tracks kills for join-time replay (Fix 6).
         if (::SceneAuthority::IsEffectiveHost()) {
             deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
@@ -3684,7 +3683,6 @@ void Anchor::RegisterHooks() {
         sentDefeatThisScene.insert(ext->netId);
         EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
         ext->defeatPacketSent = true;
-        ext->hasLocalDeath = true;
         SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: sending defeat for actor id={} netId={}",
                     actor->id, ext->netId);
         if (::SceneAuthority::IsEffectiveHost()) {

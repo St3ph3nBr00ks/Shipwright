@@ -438,7 +438,7 @@ actor_found:
     // modifies world.rot every frame for Gold Skulltula). Overwriting with
     // stale host values corrupts the death animation visually.
     EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyUpdate.applyGuard");
-    if (!ext->hasLocalDeath) {
+    if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
         // En_Karebaba and En_Dekubaba: world.pos is computed analytically
         // each frame from home.pos + animated angles; shape.rot is driven
         // entirely by the local state machine. Overriding either causes

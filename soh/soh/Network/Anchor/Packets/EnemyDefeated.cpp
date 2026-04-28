@@ -220,7 +220,6 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle", netId);
                     EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
-                    ext->hasLocalDeath       = true;
                     ext->pendingNaturalDeath = true;
                     // Keep netId in pendingKillNetIds so that if P2 exits the room
                     // mid-cycle (OoT destroys the actor on room unload), the fresh
