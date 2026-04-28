@@ -100,6 +100,9 @@ void Anchor::HandlePacket_EnemyRespawn(nlohmann::json payload) {
     }
 
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext != nullptr) {
+        EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyRespawn.pendingCheck");
+    }
     if (!ext || !ext->pendingNaturalDeath) {
         // Not in a network-driven death cycle, or already respawned — nothing to do.
         return;

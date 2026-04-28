@@ -437,6 +437,7 @@ actor_found:
     // drives world.pos/rot/scale/joints each frame (e.g. BounceAround
     // modifies world.rot every frame for Gold Skulltula). Overwriting with
     // stale host values corrupts the death animation visually.
+    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyUpdate.applyGuard");
     if (!ext->hasLocalDeath) {
         // En_Karebaba and En_Dekubaba: world.pos is computed analytically
         // each frame from home.pos + animated angles; shape.rot is driven

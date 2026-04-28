@@ -23,11 +23,24 @@ extern "C" {
 // availability to all consumers that include Anchor.h.
 #include "Common/ActorSyncHelpers.h"
 
+#include "EnemyStateSync/EnemyLifecycle.h"
+
 // Attached to enemy actors to give them a stable network id across all clients.
 struct EnemyNetId {
     uint32_t netId = 0;
     SkelAnime* skelAnime = nullptr; // nullptr if this enemy type has no supported skeleton
     uint8_t limbCount = 0;          // cached from skelAnime->limbCount at spawn time
+
+    // Pillar C2 Phase 1 — explicit lifecycle phase.
+    //
+    // Source of truth for the boolean flag soup that grew alongside this
+    // struct: `hasLocalDeath`, `defeatPacketSent`, `pendingNaturalDeath`,
+    // and `deferredDeadItemDrop` will be removed at the end of Phase 1 in
+    // favour of reads off `phase`. During the migration both representations
+    // are kept in lock-step by EnemyStateSync::TransitionTo().
+    //
+    // Default Alive — initialised at OnActorSpawn for new enemies.
+    EnemyStateSync::LifecyclePhase phase = EnemyStateSync::LifecyclePhase::Alive;
 
     // Last state received from the host via ENEMY_UPDATE (non-host clients only).
     // Re-applied each frame in OnActorUpdate so the enemy update() can run (enabling

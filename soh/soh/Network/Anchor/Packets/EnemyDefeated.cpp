@@ -194,6 +194,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 // If the Karebaba is already in a death cycle (defeatPacketSent = local
                 // kill, or pendingNaturalDeath = prior network kill), ignore the duplicate.
                 if (actor->id == ACTOR_EN_KAREBABA) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Karebaba.dupDetect");
                     if (ext->defeatPacketSent || ext->pendingNaturalDeath) {
                         SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} already dying — duplicate, dedup only", netId);
                         // The actor is already mid-cycle. In practice this branch is
@@ -218,6 +219,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle", netId);
                     EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     ext->hasLocalDeath       = true;
                     ext->pendingNaturalDeath = true;
                     // Keep netId in pendingKillNetIds so that if P2 exits the room
@@ -248,6 +250,9 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
         while (misc != nullptr) {
             EnemyNetId* ext = const_cast<EnemyNetId*>(
                 ObjectExtension::GetInstance().Get<EnemyNetId>(misc));
+            if (ext != nullptr && ext->netId == netId) {
+                EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Karebaba.MISC.dupDetect");
+            }
             if (ext != nullptr && ext->netId == netId &&
                 (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
                 SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} in ACTORCAT_MISC natural cycle — duplicate, dedup only", netId);

@@ -1992,9 +1992,11 @@ void Anchor::RegisterHooks() {
                         if (!targetDefeated) {
                             const EnemyNetId* ext =
                                 ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
-                            if (ext != nullptr &&
-                                (ext->hasLocalDeath || ext->pendingNaturalDeath)) {
-                                targetDefeated = true;
+                            if (ext != nullptr) {
+                                EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.A");
+                                if (ext->hasLocalDeath || ext->pendingNaturalDeath) {
+                                    targetDefeated = true;
+                                }
                             }
                         }
                         if (targetDefeated) {
@@ -2186,9 +2188,11 @@ void Anchor::RegisterHooks() {
                         if (!defeated) {
                             const EnemyNetId* ext =
                                 ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
-                            if (ext != nullptr &&
-                                (ext->hasLocalDeath || ext->pendingNaturalDeath)) {
-                                defeated = true;
+                            if (ext != nullptr) {
+                                EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.B");
+                                if (ext->hasLocalDeath || ext->pendingNaturalDeath) {
+                                    defeated = true;
+                                }
                             }
                         }
                         if (defeated) {
@@ -2745,9 +2749,11 @@ void Anchor::RegisterHooks() {
                         if (targetAlive) {
                             const EnemyNetId* ext =
                                 ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
-                            if (ext != nullptr &&
-                                (ext->hasLocalDeath || ext->pendingNaturalDeath)) {
-                                targetAlive = false;
+                            if (ext != nullptr) {
+                                EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetAliveCheck");
+                                if (ext->hasLocalDeath || ext->pendingNaturalDeath) {
+                                    targetAlive = false;
+                                }
                             }
                         }
                         if (targetAlive) {
@@ -3075,6 +3081,7 @@ void Anchor::RegisterHooks() {
                     EnemyNetId* extPtr = const_cast<EnemyNetId*>(
                         ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                     if (extPtr != nullptr) {
+                        EnemyStateSync::TransitionTo(*extPtr, EnemyStateSync::LifecyclePhase::AwaitingDeadItemDrop);
                         extPtr->hasLocalDeath        = true;
                         extPtr->pendingNaturalDeath  = true;
                         extPtr->defeatPacketSent     = true;
@@ -3110,6 +3117,7 @@ void Anchor::RegisterHooks() {
                             netId, (void*)actor);
                 EnemyNetId* extPtr = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                 if (extPtr != nullptr) {
+                    EnemyStateSync::TransitionTo(*extPtr, EnemyStateSync::LifecyclePhase::AwaitingDeadItemDrop);
                     extPtr->hasLocalDeath        = true;
                     extPtr->pendingNaturalDeath  = true;
                     extPtr->defeatPacketSent     = true;
@@ -3170,6 +3178,8 @@ void Anchor::RegisterHooks() {
         if (ext == nullptr || !ext->deferredDeadItemDrop) {
             return;
         }
+        EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorInit.Karebaba.deferredDeadItemDrop");
+        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
         ext->deferredDeadItemDrop = false;
         SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} (Karebaba) ptr={} — SetupDeadItemDrop after init (Fix 38)",
                     ext->netId, (void*)actor);
@@ -3220,6 +3230,9 @@ void Anchor::RegisterHooks() {
             //                             Without this branch, pendingNaturalDeath stays
             //                             set forever and subsequent kills from non-host
             //                             are silently ignored as "already dying".
+            if (actor->id == ACTOR_EN_KAREBABA) {
+                EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.host.Karebaba.respawnDetect.precond");
+            }
             if (actor->id == ACTOR_EN_KAREBABA &&
                 (ext->defeatPacketSent || ext->pendingNaturalDeath)) {
                 EnemyNetId* extMut = const_cast<EnemyNetId*>(ext);
@@ -3242,6 +3255,8 @@ void Anchor::RegisterHooks() {
                     // Regrow. Send before clearing flags so the receive-side guard
                     // (pendingNaturalDeath check) still holds when the packet arrives.
                     SendPacket_EnemyRespawn(extMut->netId);
+                    EnemyStateSync::AuditBooleansVsPhase(*extMut, "OnActorUpdate.host.Karebaba.respawn");
+                    EnemyStateSync::TransitionTo(*extMut, EnemyStateSync::LifecyclePhase::Alive);
                     extMut->defeatPacketSent    = false;
                     extMut->hasLocalDeath       = false;
                     extMut->pendingNaturalDeath = false;
@@ -3279,6 +3294,7 @@ void Anchor::RegisterHooks() {
             // actor->update() fires OnEnemyDefeat before OnActorUpdate runs, which
             // sets hasLocalDeath = true. ENEMY_DEFEATED already handles the kill;
             // sending DAMAGE_ENEMY for the final hit would be redundant.
+            EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.DamageEnemyForward");
             if (!ext->hasLocalDeath && actor->colChkInfo.damage > 0) {
                 // #174/#175: forward damageEffect (set on enemy by collision damage-table
                 // lookup) and atHitEffect (set on the player by CollisionCheck_SetATvsAC
@@ -3303,6 +3319,9 @@ void Anchor::RegisterHooks() {
             // pendingNaturalDeath=true. Grow is the initial spawn state — it is NOT
             // a completed respawn. Skip until the actor reaches a non-death, non-Grow
             // state (Idle=1 or higher living state).
+            if (actor->id == ACTOR_EN_KAREBABA) {
+                EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.Karebaba.respawnDetect.precond");
+            }
             if (actor->id == ACTOR_EN_KAREBABA &&
                 (ext->pendingNaturalDeath || ext->defeatPacketSent)) {
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
@@ -3318,6 +3337,8 @@ void Anchor::RegisterHooks() {
                         SendPacket_EnemyRespawn(ext->netId);
                     }
 
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.Karebaba.respawn");
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Alive);
                     ext->pendingNaturalDeath  = false;
                     ext->hasLocalDeath        = false;
                     ext->defeatPacketSent     = false;
@@ -3364,6 +3385,7 @@ void Anchor::RegisterHooks() {
             // frame (e.g. BounceAround modifies world.rot for Gold Skulltula).
             // Overwriting with stale cached host values corrupts the animation.
             // Scale and health have their own hasLocalDeath guards further below.
+            EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.reapplyGuard");
             if (!ext->hasLocalDeath) {
                 // Both En_Dekubaba and En_Karebaba compute world.pos each frame from
                 // animated angles rather than using a stable model root:
@@ -3558,11 +3580,14 @@ void Anchor::RegisterHooks() {
         if (sentDefeatThisScene.count(ext->netId)) {
             SPDLOG_INFO("[EnemyDefeated] OnEnemyDefeat: netId={} already sent this scene visit — skipping duplicate",
                         ext->netId);
+            EnemyStateSync::AuditBooleansVsPhase(*ext, "OnEnemyDefeat.dedup");
+            EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
             ext->hasLocalDeath    = true;
             ext->defeatPacketSent = true;
             return;
         }
         sentDefeatThisScene.insert(ext->netId);
+        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
         // Mark that ENEMY_DEFEATED was sent via the normal death path so that
         // the OnActorKill hook (Fix 12) does not send a duplicate packet when
         // this same actor later calls Actor_Kill on itself.
@@ -3635,6 +3660,7 @@ void Anchor::RegisterHooks() {
         if (ext == nullptr || ext->netId == 0) {
             return;
         }
+        EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorKill.alreadySentGuard");
         if (ext->defeatPacketSent) {
             return; // Already sent — either via OnEnemyDefeat or a prior OnActorKill fire.
         }
@@ -3645,6 +3671,8 @@ void Anchor::RegisterHooks() {
         if (sentDefeatThisScene.count(ext->netId)) {
             SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: netId={} already sent this scene visit — skipping duplicate",
                         ext->netId);
+            EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorKill.dedup");
+            EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
             ext->defeatPacketSent = true; // Prevent future OnActorKill fires on this instance.
             return;
         }
@@ -3654,6 +3682,7 @@ void Anchor::RegisterHooks() {
         // (e.g. OoT calling Actor_Kill twice on the same actor, or multiple actors sharing
         // a netId via posHash collision) do not emit duplicate packets.
         sentDefeatThisScene.insert(ext->netId);
+        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
         ext->defeatPacketSent = true;
         ext->hasLocalDeath = true;
         SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: sending defeat for actor id={} netId={}",
