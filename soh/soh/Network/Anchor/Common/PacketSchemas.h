@@ -27,6 +27,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"ENEMY_HIT_PLAYER", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
     {"ENEMY_RESPAWN", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
     {"ENEMY_SPAWN", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
+    {"ENEMY_STATE", 1},  // Pillar C2 Phase 4 — unified enemy lifecycle packet.
     {"ENEMY_UPDATE", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
     {"ENTRANCE_DISCOVERED", 1},
     {"GAME_COMPLETE", 1},

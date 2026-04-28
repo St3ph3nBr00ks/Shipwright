@@ -303,6 +303,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_EnemySpawn(payload);
             else if (packetType == ENEMY_RESPAWN)
                 HandlePacket_EnemyRespawn(payload);
+            else if (packetType == ENEMY_STATE)
+                HandlePacket_EnemyState(payload);
             else if (packetType == DAMAGE_ENEMY)
                 HandlePacket_DamageEnemy(payload);
             else if (packetType == DAMAGE_PLAYER)
