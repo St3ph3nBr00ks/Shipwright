@@ -24,6 +24,7 @@ extern "C" {
 #include "Common/ActorSyncHelpers.h"
 
 #include "EnemyStateSync/EnemyLifecycle.h"
+#include "EnemyStateSync/EnemyHostBookkeeping.h"
 
 // Attached to enemy actors to give them a stable network id across all clients.
 struct EnemyNetId {
@@ -52,13 +53,11 @@ struct EnemyNetId {
     s8 netHealth = 1;
     Vec3f netScale = { 1.0f, 1.0f, 1.0f }; // actor->scale; synced for enemies that change scale during animation
 
-    // Set to true by the OnEnemyDefeat hook after it sends ENEMY_DEFEATED.
-    // The OnActorKill hook checks this flag and skips sending a second packet for
-    // enemies that go through the normal OnEnemyDefeat → Actor_Kill death path.
-    // Only enemies that die via Actor_Kill WITHOUT firing OnEnemyDefeat (e.g.,
-    // ACTOR_EN_DEKUBABA stem, ACTOR_EN_SKB at dawn) will have this false when
-    // OnActorKill fires, triggering the Fix 12 broadcast path.
-    bool defeatPacketSent = false;
+    // defeatPacketSent was extracted to EnemyStateSync::HostBookkeeping at
+    // end of C2 Phase 2 (consolidated with sentDefeatThisScene into
+    // mDefeatBroadcasts — both signals had the same lifetime and purpose).
+    // Read sites use HostBookkeeping::Instance().HasDefeatBroadcast(netId);
+    // writes use ClaimDefeatBroadcast / ReleaseDefeatBroadcast.
 
     // hasLocalDeath was deleted at end of C2 Phase 1 (commit landing this
     // change). Read sites now use EnemyStateSync::PhaseImpliesHasLocalDeath(
@@ -274,11 +273,11 @@ class Anchor : public Network {
     void RecordProfileSample(const nlohmann::json& payload, bool tx);
     void FlushProfileIfDue();
 
-    // Host-only: netIds of enemies that have died in each scene.
-    // Sent to newly joined (or scene-transitioning) clients so they see enemies
-    // as dead immediately rather than alive until the next kill event.
-    // Cleared when the host re-enters a scene (enemies respawn on re-entry).
-    std::unordered_map<s16, std::unordered_set<uint32_t>> deadEnemiesByScene;
+    // Host-only enemy bookkeeping (deadEnemiesByScene / sentDefeatThisScene
+    // / pendingKillNetIds / lastDamagerByNetId) was extracted into
+    // EnemyStateSync::HostBookkeeping at end of C2 Phase 2. Access via
+    // EnemyStateSync::HostBookkeeping::Instance().{RecordPendingKill,
+    // RecordSceneDeath, ClaimDefeatBroadcast, RecordDamager, ...}.
 
     // Set to true for the duration of HandlePacket_EnemySpawn's Actor_Spawn call
     // so the resulting OnActorSpawn hook does not suppress the actor on non-host.
@@ -288,38 +287,6 @@ class Anchor : public Network {
     // so the resulting OnActorKill hook (Fix 12) does not echo ENEMY_DEFEATED back
     // to the network for kills that originated from the network.
     bool isKillingNetworkActor = false;
-
-    // Scene-visit dedup: netIds of ENEMY_DEFEATED packets sent during the current
-    // scene visit. Prevents duplicate sends when Actor_Kill fires more than once for
-    // the same logical enemy (e.g. room-transition unload + re-load within the same
-    // scene visit allocates new actor instances that share a netId via posHash).
-    // Cleared in OnSceneSpawnActors (same point as deadEnemiesByScene clear).
-    std::unordered_set<uint32_t> sentDefeatThisScene;
-
-    // netIds of ENEMY_DEFEATED packets that arrived while the target actor did not
-    // exist yet (e.g. the packet raced ahead of the scene load on this client).
-    // OnActorSpawn checks this set and immediately kills any newly-spawned actor
-    // whose netId is pending. Cleared in OnSceneSpawnActors alongside the above sets.
-    std::unordered_set<uint32_t> pendingKillNetIds;
-
-    // Q I Tier 2 — kill attribution.
-    // Host-only map: per-netId, who last damaged the enemy. Populated by
-    // HandlePacket_DamageEnemy (remote damager) on the host. Read at kill
-    // time by SendPacket_EnemyDefeated to populate killerClientId /
-    // killerTeamId on the outgoing ENEMY_DEFEATED (schema 2).
-    //
-    // If the entry is absent at kill time (host's own player landed the
-    // killing blow without any prior remote damage), the kill is attributed
-    // to the host. If a remote client damaged the enemy and the host then
-    // finished it locally, the map still reflects the remote damager —
-    // accepted edge case for v1; "last DAMAGE_ENEMY wins" rather than
-    // "absolute last hitter wins."
-    //
-    // Cleared per-scene by OnSceneSpawnActors using netId's encoded scene
-    // (high 16 bits) so leaving and re-entering a scene resets attribution.
-    // Tier 2 = plumbed but no UI; consumers (Q C grace window, future
-    // scoreboard) read these fields off the wire without further state.
-    std::unordered_map<uint32_t /*netId*/, uint32_t /*clientId*/> lastDamagerByNetId;
 
     // Follower mode: non-host player's position is overridden to trail the host.
     // Toggled via the Anchor settings menu (AI Follower checkbox).

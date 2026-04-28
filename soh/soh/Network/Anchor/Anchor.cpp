@@ -127,6 +127,14 @@ void Anchor::Disable() {
     // safe under Disable because we'd otherwise carry stale state into a
     // fresh Enable session pointed at a different room.
     WorldStateSync::Reset();
+
+    // Pillar C2 Phase 2 — drop host-only enemy bookkeeping (pendingKills,
+    // sceneDeaths, defeatBroadcasts, damagers). Same rationale as
+    // WorldStateSync::Reset() above; pre-extraction these were per-Anchor
+    // fields cleared by the implicit `clients.clear()` adjacent block, but
+    // the module's static instance survives Disable so we must explicitly
+    // wipe.
+    EnemyStateSync::HostBookkeeping::Instance().Reset();
 }
 
 void Anchor::OnConnected() {
@@ -453,7 +461,7 @@ void Anchor::OnBecameEffectiveHost() {
     // so other clients' world-state is already correct. Only future late-
     // joiners are affected — they'll see corpses for post-migration kills
     // only. Acceptable for First Dungeon Demo scope.
-    sentDefeatThisScene.clear();
+    EnemyStateSync::HostBookkeeping::Instance().ClearAllDefeatBroadcasts();
 }
 
 void Anchor::BackfillEnemyNetIds() {

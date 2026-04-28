@@ -179,11 +179,11 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
 
         if (::SceneAuthority::IsEffectiveHost() && nowLoaded &&
             (justLoaded || sceneChanged || sceneSpawned)) {
-            auto it = deadEnemiesByScene.find(newScene);
-            if (it != deadEnemiesByScene.end()) {
+            const auto& deaths = EnemyStateSync::HostBookkeeping::Instance().SceneDeaths(newScene);
+            if (!deaths.empty()) {
                 SPDLOG_INFO("[EnemyDefeated] Replaying {} dead enemies in scene {} for client {}",
-                            it->second.size(), (int)newScene, clientId);
-                for (uint32_t netId : it->second) {
+                            deaths.size(), (int)newScene, clientId);
+                for (uint32_t netId : deaths) {
                     nlohmann::json killPayload;
                     killPayload["type"]           = ENEMY_DEFEATED;
                     killPayload["netId"]          = netId;

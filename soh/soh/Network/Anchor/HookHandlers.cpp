@@ -263,27 +263,14 @@ void Anchor::RegisterHooks() {
         if (IsSaveLoaded()) {
             // Clear the dead-enemy list for this scene: the scene just (re-)loaded
             // so any previously dead enemies have respawned fresh.
+            auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
             if (::SceneAuthority::IsEffectiveHost()) {
-                deadEnemiesByScene.erase(gPlayState->sceneNum);
-
-                // Q I Tier 2 — clear stale kill-attribution entries for the
-                // entered scene. netId encodes scene in high 16 bits, so any
-                // entry whose top half matches the new scene refers to an
-                // enemy that just respawned with the same netId; its old
-                // damager attribution is stale.
-                int16_t enteredScene = (int16_t)gPlayState->sceneNum;
-                for (auto it = lastDamagerByNetId.begin(); it != lastDamagerByNetId.end();) {
-                    int16_t entryScene = (int16_t)((it->first >> 16) & 0xFFFF);
-                    if (entryScene == enteredScene) {
-                        it = lastDamagerByNetId.erase(it);
-                    } else {
-                        ++it;
-                    }
-                }
+                bookkeeping.ClearScene(gPlayState->sceneNum);
+                bookkeeping.ClearStaleDamagers((int16_t)gPlayState->sceneNum);
             }
             // Clear the per-scene-visit send-dedup set so that enemies in the new
             // scene can have their ENEMY_DEFEATED broadcast normally.
-            sentDefeatThisScene.clear();
+            bookkeeping.ClearAllDefeatBroadcasts();
             // Phase 5 #60 — clear the per-netId last-sent cache. netIds are reused
             // across scene visits (same posHash, same enemy), so a stale cached
             // snapshot from a previous visit would cause the predicate to skip
@@ -297,13 +284,7 @@ void Anchor::RegisterHooks() {
             // before the Karebaba spawned, so it appeared alive.)
             {
                 uint16_t newScene = gPlayState ? (uint16_t)gPlayState->sceneNum : 0xFFFF;
-                for (auto it = pendingKillNetIds.begin(); it != pendingKillNetIds.end(); ) {
-                    if ((uint16_t)(*it >> 16) != newScene) {
-                        it = pendingKillNetIds.erase(it);
-                    } else {
-                        ++it;
-                    }
-                }
+                bookkeeping.ClearStalePendingKillsFromOtherScenes(newScene);
             }
             RefreshClientActors();
 
@@ -3011,7 +2992,7 @@ void Anchor::RegisterHooks() {
         // The OnSceneSpawnActors clear below is now belt-and-braces.
         if (gPlayState != nullptr && gPlayState->numSetupActors > 0 &&
             ::SceneAuthority::IsEffectiveHost()) {
-            deadEnemiesByScene.erase(gPlayState->sceneNum);
+            EnemyStateSync::HostBookkeeping::Instance().ClearScene(gPlayState->sceneNum);
         }
 
         bool isDynamicSpawn = (gPlayState->numSetupActors == 0);
@@ -3075,8 +3056,7 @@ void Anchor::RegisterHooks() {
         // guard only suppresses same-scene-visit revivals — leaving and
         // re-entering the scene proper still respawns enemies as expected.
         if (::SceneAuthority::IsEffectiveHost()) {
-            auto deadIt = deadEnemiesByScene.find(gPlayState->sceneNum);
-            if (deadIt != deadEnemiesByScene.end() && deadIt->second.count(netId)) {
+            if (EnemyStateSync::HostBookkeeping::Instance().IsSceneDeath(gPlayState->sceneNum, netId)) {
                 SPDLOG_INFO("[EnemySpawn] deadEnemiesByScene hit for netId={} on host — "
                             "suppressing same-scene respawn (id={})",
                             netId, actor->id);
@@ -3085,7 +3065,7 @@ void Anchor::RegisterHooks() {
                         ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                     if (extPtr != nullptr) {
                         EnemyStateSync::TransitionTo(*extPtr, EnemyStateSync::LifecyclePhase::AwaitingDeadItemDrop);
-                        extPtr->defeatPacketSent     = true;
+                        EnemyStateSync::HostBookkeeping::Instance().ClaimDefeatBroadcast(extPtr->netId);
                         // OnActorInit applies SetupDeadItemDrop after init() runs.
                         // Phase=AwaitingDeadItemDrop is the gate (was deferredDeadItemDrop).
                     }
@@ -3102,7 +3082,7 @@ void Anchor::RegisterHooks() {
         // loading (race between scene load and packet delivery), kill it now.
         // Karebaba: use the natural death cycle so it can respawn later, same as
         // HandlePacket_EnemyDefeated. Other enemies: direct Actor_Kill is fine.
-        if (pendingKillNetIds.count(netId)) {
+        if (EnemyStateSync::HostBookkeeping::Instance().IsPendingKill(netId)) {
             // Karebaba: do NOT erase from pendingKillNetIds yet (Fix 35).
             // The actor moves to ACTORCAT_MISC for ~420 frames at 20fps. If the
             // player exits and re-enters the room during that window, OoT destroys
@@ -3118,7 +3098,7 @@ void Anchor::RegisterHooks() {
                 EnemyNetId* extPtr = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                 if (extPtr != nullptr) {
                     EnemyStateSync::TransitionTo(*extPtr, EnemyStateSync::LifecyclePhase::AwaitingDeadItemDrop);
-                    extPtr->defeatPacketSent     = true;
+                    EnemyStateSync::HostBookkeeping::Instance().ClaimDefeatBroadcast(extPtr->netId);
                     // Fix 38: defer SetupDeadItemDrop to OnActorInit.
                     // OnActorSpawn fires BEFORE actor->init() is called by Actor_UpdateAll
                     // (z_actor.c:3409 vs 2638). Calling SetupDeadItemDrop here causes
@@ -3141,7 +3121,7 @@ void Anchor::RegisterHooks() {
                 }
             } else {
                 SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} — killing actor immediately", netId);
-                pendingKillNetIds.erase(netId); // instant kill — safe to release now
+                EnemyStateSync::HostBookkeeping::Instance().ClearPendingKill(netId); // instant kill — safe to release now
                 isKillingNetworkActor = true;
                 Actor_Kill(actor);
                 isKillingNetworkActor = false;
@@ -3231,7 +3211,8 @@ void Anchor::RegisterHooks() {
                 EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.host.Karebaba.respawnDetect.precond");
             }
             if (actor->id == ACTOR_EN_KAREBABA &&
-                (ext->defeatPacketSent || EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase))) {
+                (EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(ext->netId) ||
+                 EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase))) {
                 EnemyNetId* extMut = const_cast<EnemyNetId*>(ext);
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
                 // Detect respawn-complete: any living state (>= 0, not a death/regrow state).
@@ -3254,14 +3235,14 @@ void Anchor::RegisterHooks() {
                     SendPacket_EnemyRespawn(extMut->netId);
                     EnemyStateSync::AuditBooleansVsPhase(*extMut, "OnActorUpdate.host.Karebaba.respawn");
                     EnemyStateSync::TransitionTo(*extMut, EnemyStateSync::LifecyclePhase::Alive);
-                    extMut->defeatPacketSent    = false;
-                    sentDefeatThisScene.erase(extMut->netId);
-                    deadEnemiesByScene[gPlayState->sceneNum].erase(extMut->netId);
+                    auto& bk = EnemyStateSync::HostBookkeeping::Instance();
+                    bk.ReleaseDefeatBroadcast(extMut->netId);
+                    bk.ClearSceneDeath(gPlayState->sceneNum, extMut->netId);
                     // Symmetric with non-host detector below: clear pendingKillNetIds
                     // so a future room reload doesn't re-trigger Fix 38 dead-state
                     // setup on the now-alive actor (T1.4 regression — see commit
                     // message for details).
-                    pendingKillNetIds.erase(extMut->netId);
+                    bk.ClearPendingKill(extMut->netId);
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (host) — defeat tracking cleared",
                                 extMut->netId, curState);
                 }
@@ -3317,24 +3298,25 @@ void Anchor::RegisterHooks() {
             if (actor->id == ACTOR_EN_KAREBABA) {
                 EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.Karebaba.respawnDetect.precond");
             }
+            const bool nonhostHasBroadcast =
+                EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(ext->netId);
             if (actor->id == ACTOR_EN_KAREBABA &&
-                (EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) || ext->defeatPacketSent)) {
+                (EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) || nonhostHasBroadcast)) {
                 s16 curState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
                 bool isDeathState = (curState == 5 || curState == 6 || curState == 8 || curState == 9);
                 bool isGrowState  = (curState == 0);
                 if (curState >= 0 && !isDeathState && !isGrowState) {
                     // Fix 33: non-host was the killer (not the receiver of a host kill).
                     // pendingNaturalDeath=false means we killed it locally;
-                    // defeatPacketSent=true means we sent ENEMY_DEFEATED (not a dedup skip).
+                    // defeatBroadcast=true means we sent ENEMY_DEFEATED (not a dedup skip).
                     // Notify the host to skip its remaining countdown — symmetric to how
                     // the host sends ENEMY_RESPAWN to us after a host-side kill (Fix 32).
-                    if (!EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) && ext->defeatPacketSent) {
+                    if (!EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) && nonhostHasBroadcast) {
                         SendPacket_EnemyRespawn(ext->netId);
                     }
 
                     EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.Karebaba.respawn");
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Alive);
-                    ext->defeatPacketSent     = false;
                     ext->netStateIndex        = -1;
                     // Clear hasNetState (Fix 25): prevents stale scale/rot from the
                     // host's last packet being re-applied during the first few frames
@@ -3344,15 +3326,17 @@ void Anchor::RegisterHooks() {
                     // false and the actor runs free AI permanently — correct behavior.
                     ext->hasNetState = false;
 
-                    sentDefeatThisScene.erase(ext->netId);
-
-                    // Release the deferred pendingKillNetIds entry (Fix 35).
-                    // Fix 36's "stacked kill" branch was removed 2026-04-26 — its
-                    // stalledKillPending input had no remaining writers after
-                    // duplicate-replay was reclassified as dedup-only in
-                    // HandlePacket_EnemyDefeated. See commit message for full
-                    // rationale.
-                    pendingKillNetIds.erase(ext->netId);
+                    {
+                        auto& bk = EnemyStateSync::HostBookkeeping::Instance();
+                        bk.ReleaseDefeatBroadcast(ext->netId);
+                        // Release the deferred pendingKillNetIds entry (Fix 35).
+                        // Fix 36's "stacked kill" branch was removed 2026-04-26 — its
+                        // stalledKillPending input had no remaining writers after
+                        // duplicate-replay was reclassified as dedup-only in
+                        // HandlePacket_EnemyDefeated. See commit message for full
+                        // rationale.
+                        bk.ClearPendingKill(ext->netId);
+                    }
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} respawned (state={}) (non-host) — sync re-enabled",
                                 ext->netId, curState);
                 }
@@ -3568,30 +3552,27 @@ void Anchor::RegisterHooks() {
         // or a Karebaba being killed again before its previous respawn cycle cleared
         // the dedup set).
         //
-        // Even when skipping the send, set hasLocalDeath and defeatPacketSent so that:
-        //   1. ENEMY_UPDATE does not revive the dying actor on this frame.
-        //   2. The non-host respawn detection (which checks defeatPacketSent) can fire
-        //      when the actor returns to Idle, clearing the dedup entry for the next kill.
-        if (sentDefeatThisScene.count(ext->netId)) {
+        // ClaimDefeatBroadcast returns true on first claim; false means a prior
+        // OnEnemyDefeat / OnActorKill already broadcast for this netId in this
+        // scene visit. Phase still transitions to DyingByLocal in the dup case
+        // so PhaseImpliesHasLocalDeath continues to block ENEMY_UPDATE revives,
+        // and the next Karebaba respawn detector fires (it reads
+        // HasDefeatBroadcast which stays true).
+        auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
+        if (!bookkeeping.ClaimDefeatBroadcast(ext->netId)) {
             SPDLOG_INFO("[EnemyDefeated] OnEnemyDefeat: netId={} already sent this scene visit — skipping duplicate",
                         ext->netId);
             EnemyStateSync::AuditBooleansVsPhase(*ext, "OnEnemyDefeat.dedup");
             EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
-            ext->defeatPacketSent = true;
             return;
         }
-        sentDefeatThisScene.insert(ext->netId);
         EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
-        // Mark that ENEMY_DEFEATED was sent via the normal death path so that
-        // the OnActorKill hook (Fix 12) does not send a duplicate packet when
-        // this same actor later calls Actor_Kill on itself.
-        ext->defeatPacketSent = true;
         // ENEMY_UPDATE re-apply guard now derived from phase via
         // PhaseImpliesHasLocalDeath(DyingByLocal) → true. The legacy
         // hasLocalDeath boolean was deleted at end of C2 Phase 1.
         // Host tracks kills for join-time replay (Fix 6).
         if (::SceneAuthority::IsEffectiveHost()) {
-            deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
+            bookkeeping.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
         }
         SendPacket_EnemyDefeated(ext->netId);
     });
@@ -3637,12 +3618,13 @@ void Anchor::RegisterHooks() {
         if (actor->category == ACTORCAT_ENEMY || actor->category == ACTORCAT_BOSS ||
             actor->category == ACTORCAT_MISC) {
             EnemyNetId* diagExt = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-            SPDLOG_INFO("[EnemyDefeated] OnActorKill: id={} cat={} ext={} netId={} defeatSent={} inDedup={}",
+            const uint32_t diagNetId = (diagExt != nullptr) ? diagExt->netId : 0u;
+            const bool diagBroadcast = (diagExt != nullptr) &&
+                EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(diagNetId);
+            SPDLOG_INFO("[EnemyDefeated] OnActorKill: id={} cat={} ext={} netId={} broadcast={}",
                         actor->id, (int)actor->category,
                         (diagExt != nullptr ? "found" : "NULL"),
-                        (diagExt != nullptr ? diagExt->netId : 0u),
-                        (diagExt != nullptr ? diagExt->defeatPacketSent : false),
-                        (diagExt != nullptr ? (bool)sentDefeatThisScene.count(diagExt->netId) : false));
+                        diagNetId, diagBroadcast);
         }
         // Do NOT filter by actor->category here — Deku Baba stems call
         // Actor_ChangeCategory(ACTORCAT_MISC) in EnDekubaba_SetupDeadStickDrop
@@ -3653,34 +3635,29 @@ void Anchor::RegisterHooks() {
         if (ext == nullptr || ext->netId == 0) {
             return;
         }
-        EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorKill.alreadySentGuard");
-        if (ext->defeatPacketSent) {
-            return; // Already sent — either via OnEnemyDefeat or a prior OnActorKill fire.
-        }
-        // Scene-visit dedup: skip if this netId was already broadcast during the
-        // current scene visit (e.g. room-transition re-allocates an actor at the same
-        // address, giving it a fresh extension with defeatPacketSent=false but the same
-        // netId as an actor that already died this scene visit).
-        if (sentDefeatThisScene.count(ext->netId)) {
-            SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: netId={} already sent this scene visit — skipping duplicate",
-                        ext->netId);
+        // Single dedup gate via HostBookkeeping. ClaimDefeatBroadcast is
+        // false on duplicate (either a prior OnEnemyDefeat / OnActorKill
+        // for this netId in this scene visit, or — pre-extraction — what
+        // the ext->defeatPacketSent guard at line 3637 caught). On a
+        // duplicate we still transition to Dead so the FSM matches the
+        // actor's actual state, then return without emitting.
+        auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
+        if (!bookkeeping.ClaimDefeatBroadcast(ext->netId)) {
             EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorKill.dedup");
             EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
-            ext->defeatPacketSent = true; // Prevent future OnActorKill fires on this instance.
             return;
         }
         // Actor died via Actor_Kill without firing OnEnemyDefeat.
         // Broadcast ENEMY_DEFEATED so remote clients remove the actor.
-        // Set defeatPacketSent immediately so re-entrant or repeated Actor_Kill calls
-        // (e.g. OoT calling Actor_Kill twice on the same actor, or multiple actors sharing
-        // a netId via posHash collision) do not emit duplicate packets.
-        sentDefeatThisScene.insert(ext->netId);
+        // ClaimDefeatBroadcast above guarantees re-entrant or repeated
+        // Actor_Kill calls (e.g. OoT calling Actor_Kill twice on the
+        // same actor, or multiple actors sharing a netId via posHash
+        // collision) do not emit duplicate packets.
         EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
-        ext->defeatPacketSent = true;
         SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: sending defeat for actor id={} netId={}",
                     actor->id, ext->netId);
         if (::SceneAuthority::IsEffectiveHost()) {
-            deadEnemiesByScene[gPlayState->sceneNum].insert(ext->netId);
+            bookkeeping.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
         }
         SendPacket_EnemyDefeated(ext->netId);
     });

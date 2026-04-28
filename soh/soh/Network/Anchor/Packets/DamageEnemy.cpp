@@ -243,6 +243,6 @@ damage_target_found:
     // SendJsonToRemote on the originating client.
     uint32_t senderId = payload.value("clientId", (uint32_t)0);
     if (senderId != 0) {
-        lastDamagerByNetId[netId] = senderId;
+        EnemyStateSync::HostBookkeeping::Instance().RecordDamager(netId, senderId);
     }
 }

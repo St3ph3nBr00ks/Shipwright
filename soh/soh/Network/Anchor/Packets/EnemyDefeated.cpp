@@ -51,13 +51,9 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
     //    Costs ~one host roundtrip of latency on the kill propagating to
     //    other peers; trade-off accepted for tamper-proof attribution.
     if (::SceneAuthority::IsEffectiveHost()) {
-        uint32_t killerId;
-        auto it = lastDamagerByNetId.find(netId);
-        if (it != lastDamagerByNetId.end()) {
-            killerId = it->second;
-        } else {
-            killerId = ownClientId;  // local host kill, no remote damager recorded
-        }
+        auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
+        const uint32_t damager = bookkeeping.LookupDamager(netId);
+        const uint32_t killerId = damager != 0 ? damager : ownClientId;  // 0 = local host kill, no remote damager recorded
         payload["killerClientId"] = killerId;
         if (killerId == ownClientId) {
             payload["killerTeamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
@@ -66,9 +62,7 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
         }
         // Drop the entry now that the kill has been attributed; subsequent
         // hits on a respawned actor (same netId) start fresh.
-        if (it != lastDamagerByNetId.end()) {
-            lastDamagerByNetId.erase(it);
-        }
+        bookkeeping.ClearDamager(netId);
 
         SPDLOG_INFO("[EnemyDefeated] Host send for netId={} killerClientId={} killerTeamId={}",
                     netId,
@@ -140,10 +134,10 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     // dedup set used by OnEnemyDefeat / OnActorKill so a follow-on local
     // OnActorKill on this netId is also suppressed.
     if (::SceneAuthority::IsEffectiveHost() && killerClientId == 0 &&
-        sentDefeatThisScene.count(netId) == 0) {
+        !EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(netId)) {
         uint32_t senderId = payload.value("clientId", (uint32_t)0);
         if (senderId != 0) {
-            sentDefeatThisScene.insert(netId);
+            EnemyStateSync::HostBookkeeping::Instance().ClaimDefeatBroadcast(netId);
 
             nlohmann::json rebroadcast;
             rebroadcast["type"]           = ENEMY_DEFEATED;
@@ -183,7 +177,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
             if (ext != nullptr && ext->netId == netId) {
                 // Host records this kill for join-time replay regardless of who killed it.
                 if (::SceneAuthority::IsEffectiveHost()) {
-                    deadEnemiesByScene[gPlayState->sceneNum].insert(netId);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(gPlayState->sceneNum, netId);
                 }
 
                 // Karebaba (ACTOR_EN_KAREBABA): let the natural death→respawn cycle
@@ -195,7 +189,8 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 // kill, or pendingNaturalDeath = prior network kill), ignore the duplicate.
                 if (actor->id == ACTOR_EN_KAREBABA) {
                     EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Karebaba.dupDetect");
-                    if (ext->defeatPacketSent || EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
+                    if (EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(ext->netId) ||
+                        EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
                         SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} already dying — duplicate, dedup only", netId);
                         // The actor is already mid-cycle. In practice this branch is
                         // only reached via duplicate delivery — typically the host's
@@ -214,7 +209,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                         //
                         // Keep pendingKillNetIds.insert for Fix 35 (room-exit/re-entry
                         // persistence). Don't set stalledKillPending.
-                        pendingKillNetIds.insert(netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                         return;
                     }
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle", netId);
@@ -225,7 +220,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     // spawn on re-entry will also be set to SetupDeadItemDrop via the
                     // pendingKillNetIds check in OnActorSpawn (Fix 35). Erased by the
                     // non-host respawn detection when the cycle completes.
-                    pendingKillNetIds.insert(netId);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
                 }
 
@@ -252,12 +247,13 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Karebaba.MISC.dupDetect");
             }
             if (ext != nullptr && ext->netId == netId &&
-                (EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) || ext->defeatPacketSent)) {
+                (EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) ||
+                 EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(ext->netId))) {
                 SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} in ACTORCAT_MISC natural cycle — duplicate, dedup only", netId);
                 // Same rationale as the ACTORCAT_ENEMY already-dying branch above:
                 // duplicate replay should not set stalledKillPending. Persist
                 // pendingKillNetIds for room-exit/re-entry (Fix 35) only.
-                pendingKillNetIds.insert(netId);
+                EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                 return;
             }
             misc = misc->next;
@@ -266,7 +262,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
 
     SPDLOG_WARN("[EnemyDefeated] No actor found for netId={} — buffering as pendingKill (scene not loaded yet?)",
                 netId);
-    pendingKillNetIds.insert(netId);
+    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
 
     // Also record the kill in deadEnemiesByScene so the host's join-time replay
     // (HandlePacket_UpdateClientState) covers this enemy. Without this, kills
@@ -277,6 +273,6 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     // where the host is now.
     if (::SceneAuthority::IsEffectiveHost()) {
         int16_t sceneFromNetId = (int16_t)((netId >> 16) & 0x7FFF);
-        deadEnemiesByScene[sceneFromNetId].insert(netId);
+        EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(sceneFromNetId, netId);
     }
 }
