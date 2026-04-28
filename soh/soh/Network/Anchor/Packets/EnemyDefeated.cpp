@@ -189,8 +189,21 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 // kill, or pendingNaturalDeath = prior network kill), ignore the duplicate.
                 if (actor->id == ACTOR_EN_KAREBABA) {
                     EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Karebaba.dupDetect");
-                    if (EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(ext->netId) ||
-                        EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
+                    // C2 Phase 2 fix (regression in cc6a435b7): the merged
+                    // HostBookkeeping defeat-broadcast set conflates "this
+                    // actor is in a death cycle" (per-EnemyNetId state) with
+                    // "host has re-broadcast in this scene visit" (per-scene
+                    // dedup). On the host, the route-to-host re-broadcast at
+                    // line 140 above just claimed the broadcast for this
+                    // exact netId, so HasDefeatBroadcast would falsely trip
+                    // dup-detect on the very first receive. The original
+                    // ext->defeatPacketSent was never set by the receive
+                    // path; the right post-Phase-1 check is "actor is in any
+                    // death phase," which PhaseImpliesHasLocalDeath captures
+                    // (DyingByLocal | DyingByNetwork | AwaitingDeadItemDrop
+                    // | Dead). PhaseImpliesPendingNaturalDeath is a strict
+                    // subset, so the unified predicate is enough.
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                         SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} already dying — duplicate, dedup only", netId);
                         // The actor is already mid-cycle. In practice this branch is
                         // only reached via duplicate delivery — typically the host's
@@ -246,9 +259,12 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
             if (ext != nullptr && ext->netId == netId) {
                 EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Karebaba.MISC.dupDetect");
             }
+            // Same regression fix as the ENEMY-category dup-detect above:
+            // use PhaseImpliesHasLocalDeath instead of HasDefeatBroadcast
+            // so the host's own route-to-host re-broadcast doesn't false-
+            // positive this dup-detect on the FIRST receive.
             if (ext != nullptr && ext->netId == netId &&
-                (EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase) ||
-                 EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(ext->netId))) {
+                EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} in ACTORCAT_MISC natural cycle — duplicate, dedup only", netId);
                 // Same rationale as the ACTORCAT_ENEMY already-dying branch above:
                 // duplicate replay should not set stalledKillPending. Persist
