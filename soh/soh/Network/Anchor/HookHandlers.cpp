@@ -3087,8 +3087,7 @@ void Anchor::RegisterHooks() {
                         EnemyStateSync::TransitionTo(*extPtr, EnemyStateSync::LifecyclePhase::AwaitingDeadItemDrop);
                         extPtr->defeatPacketSent     = true;
                         // OnActorInit applies SetupDeadItemDrop after init() runs.
-                        // Gated on deferredDeadItemDrop, not on host/non-host.
-                        extPtr->deferredDeadItemDrop = true;
+                        // Phase=AwaitingDeadItemDrop is the gate (was deferredDeadItemDrop).
                     }
                 } else {
                     isKillingNetworkActor = true;
@@ -3138,7 +3137,7 @@ void Anchor::RegisterHooks() {
                     // pendingKill branch fires when host walks into the Karebaba's room
                     // — without this, the host's respawn-detector trips on the post-init
                     // SetupAwaken before SetupDeadItemDrop can run.
-                    extPtr->deferredDeadItemDrop = true;
+                    // Phase=AwaitingDeadItemDrop set by TransitionTo above is now the gate.
                 }
             } else {
                 SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} — killing actor immediately", netId);
@@ -3174,12 +3173,11 @@ void Anchor::RegisterHooks() {
         }
         EnemyNetId* ext = const_cast<EnemyNetId*>(
             ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
-        if (ext == nullptr || !ext->deferredDeadItemDrop) {
+        if (ext == nullptr || !EnemyStateSync::PhaseImpliesDeferredDeadItemDrop(ext->phase)) {
             return;
         }
         EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorInit.Karebaba.deferredDeadItemDrop");
         EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
-        ext->deferredDeadItemDrop = false;
         SPDLOG_INFO("[EnemySpawn] Pending kill for netId={} (Karebaba) ptr={} — SetupDeadItemDrop after init (Fix 38)",
                     ext->netId, (void*)actor);
         // Set the same flags EnKarebaba_SetupDying sets (natural precursor to

@@ -2,9 +2,6 @@
 
 #include "soh/Network/Anchor/Anchor.h"  // EnemyNetId definition
 #include <libultraship/libultraship.h>  // SPDLOG_*
-#include <unordered_map>
-#include <unordered_set>
-#include <string>
 
 namespace EnemyStateSync {
 
@@ -128,34 +125,17 @@ bool PhaseImpliesDeferredDeadItemDrop(LifecyclePhase phase) {
     return phase == LifecyclePhase::AwaitingDeadItemDrop;
 }
 
-void AuditBooleansVsPhase(const EnemyNetId& state, const char* siteTag) {
-    // Rate-limit: first warning per (netId, fieldName, siteTag) only.
-    // Map key: netId; value: set of "<field>@<siteTag>" strings already warned.
-    static std::unordered_map<uint32_t, std::unordered_set<std::string>> sWarned;
-
-    auto warnOnce = [&](const char* fieldName, bool boolValue, bool impliedValue) {
-        if (boolValue == impliedValue) return;
-        std::string key = std::string(fieldName) + "@" + (siteTag ? siteTag : "<null>");
-        auto& fieldsForId = sWarned[state.netId];
-        if (fieldsForId.insert(key).second) {
-            SPDLOG_WARN("[EnemyStateSync] phase mismatch at {} netId={} {}: bool={} phase={}({}=>implied={})",
-                        siteTag ? siteTag : "<null>", state.netId, fieldName,
-                        boolValue, LifecyclePhaseName(state.phase), fieldName, impliedValue);
-        }
-    };
-
-    // hasLocalDeath was deleted at end of C2 Phase 1; the audit no longer
-    // has a boolean to compare against. Phase-derived reads use
-    // PhaseImpliesHasLocalDeath() directly.
-    // defeatPacketSent intentionally not audited — see
-    // PhaseImpliesDefeatPacketSent comment for rationale. Field tracks
-    // broadcast ownership, not lifecycle state.
-    // pendingNaturalDeath was deleted at end of C2 Phase 1 step 5b;
-    // the audit no longer has a boolean to compare against. Phase-derived
-    // reads use PhaseImpliesPendingNaturalDeath() directly.
-    warnOnce("deferredDeadItemDrop",
-             state.deferredDeadItemDrop,
-             PhaseImpliesDeferredDeadItemDrop(state.phase));
+void AuditBooleansVsPhase(const EnemyNetId& /*state*/, const char* /*siteTag*/) {
+    // Phase 1 step 5c — all lifecycle-derivative booleans
+    // (hasLocalDeath, pendingNaturalDeath, deferredDeadItemDrop) have
+    // been deleted; reads now use PhaseImplies* directly. defeatPacketSent
+    // is broadcast-ownership, not lifecycle, and was never audited here.
+    // The function is retained as a no-op so the existing call sites
+    // (12 of them across HookHandlers / Packets) compile without
+    // touching every site again. They serve as breakpoints if a future
+    // bug needs site-tagged tracing — a single edit here re-enables
+    // diagnostic output. Otherwise the calls inline-optimise to nothing
+    // in release builds.
 }
 
 }  // namespace EnemyStateSync

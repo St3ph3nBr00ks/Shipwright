@@ -79,12 +79,14 @@ struct EnemyNetId {
     // AwaitingDeadItemDrop. Karebaba item-drop suppression and natural-
     // cycle gating now derive from phase.
 
-    // Set in OnActorSpawn when a pendingKillNetIds entry matches this Karebaba.
-    // OnActorSpawn fires BEFORE actor->init() is called by Actor_UpdateAll; calling
-    // SetupDeadItemDrop there causes EnKarebaba_Init (Frame 1) to override actionFunc
-    // back to Idle, and the next update() then calls SetupAwaken (Fix 38).
-    // OnActorInit fires AFTER actor->init() has run — safe to call SetupDeadItemDrop.
-    bool deferredDeadItemDrop = false;
+    // deferredDeadItemDrop was deleted at end of C2 Phase 1 step 5c.
+    // The OnActorInit Karebaba SetupDeadItemDrop gate now reads
+    // EnemyStateSync::PhaseImpliesDeferredDeadItemDrop(ext->phase),
+    // which returns true iff phase == AwaitingDeadItemDrop. The
+    // OnActorInit handler also transitions AwaitingDeadItemDrop ->
+    // DyingByNetwork after firing SetupDeadItemDrop, so the second
+    // OnActorInit pass on the same actor is a no-op (the predicate
+    // returns false).
 
     // Goroiwa-net state — issue #153.
     // First non-ACTORCAT_ENEMY actor sync (En_Goroiwa is ACTORCAT_PROP). Cached on
