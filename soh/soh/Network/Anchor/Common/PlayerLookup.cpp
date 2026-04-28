@@ -9,9 +9,33 @@ extern SaveContext gSaveContext;
 Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
     Player* localPlayer = GET_PLAYER(play);
 
-    // Seed with the pre-computed squared distance to the local player so we
-    // avoid an extra sqrt and stay consistent with the automatic field values.
-    float nearestDistSq = SQ(enemy->xzDistToPlayer) + SQ(enemy->yDistToPlayer);
+    // Compute the seed distance directly from positions rather than reading
+    // `enemy->xzDistToPlayer` / `yDistToPlayer`. Those cached fields are
+    // patched every frame by the host's `ShouldActorUpdate` hook
+    // (HookHandlers.cpp around line 3577) to point at whichever player
+    // FindNearestPlayerActor previously decided was nearest — usable as
+    // an aim hint for vanilla AI but a tie-breaking landmine when this
+    // function later runs again from inside `actor->update()` (e.g.,
+    // `EnDekubaba_Grow` → `Anchor_GetNearestPlayerActor`):
+    //   1. Seed = patched distance (= distance to the actually-nearest
+    //      player, possibly a DummyPlayer).
+    //   2. Seed actor = `&localPlayer->actor` (hardcoded).
+    //   3. Loop walks DummyPlayers; for the one that was the patch
+    //      source, distSq exactly matches the seed.
+    //   4. `<` strict-less-than fails on tie; localPlayer wins.
+    //   5. Function returns localPlayer even when a DummyPlayer was
+    //      genuinely closer.
+    // Result observed in Inside Great Deku Tree (KB-08 follow-up,
+    // 2026-04-28): Dekubaba lunges at host even when host is out of
+    // range and non-host stands adjacent.
+    //
+    // Recomputing from positions removes the patched-seed dependency.
+    // The arithmetic is two extra subtracts + three extra multiplies vs.
+    // the field reads — negligible.
+    float dxL = enemy->world.pos.x - localPlayer->actor.world.pos.x;
+    float dyL = enemy->world.pos.y - localPlayer->actor.world.pos.y;
+    float dzL = enemy->world.pos.z - localPlayer->actor.world.pos.z;
+    float nearestDistSq = dxL * dxL + dyL * dyL + dzL * dzL;
     Actor* nearest = &localPlayer->actor;
 
     Actor* npc = play->actorCtx.actorLists[ACTORCAT_NPC].head;
