@@ -3007,14 +3007,32 @@ void Anchor::RegisterHooks() {
         // map, the suppression has already been applied.
         //
         // Fix: clear deadEnemiesByScene[currentScene] on the FIRST setup-actor
-        // spawn of a fresh scene init (numSetupActors > 0). Subsequent setup
-        // actors in the same batch see the cleared map and respawn cleanly.
-        // Room transitions within the same scene leave numSetupActors == 0 so
-        // the same-scene-visit suppression behaviour is preserved.
-        // The OnSceneSpawnActors clear below is now belt-and-braces.
+        // spawn of a fresh **scene** entry. The original implementation gated
+        // on `numSetupActors > 0`, which fires not just on fresh scene init
+        // but also on **intra-scene room transitions** that load static
+        // actors for the new room (assumption "Room transitions within the
+        // same scene leave numSetupActors == 0" was wrong). That wiped same-
+        // scene-visit kill records every time the host walked between rooms.
+        //
+        // Symptom: log 161 — host kills En_Sw in Inside Deku Tree Room 10,
+        // walks back to Room 0 then returns to Room 10, En_Sw is alive again
+        // because mSceneDeaths was wiped on the Room 0 → Room 10 transition.
+        // The Karebaba-only RecordPendingKill workaround in commit
+        // `e276aa74e` papered over the symptom for that one actor; this gate
+        // fixes it for the entire enemy class.
+        //
+        // sLastClearedSceneNum tracks the most recent sceneNum we cleared for.
+        // On scene CHANGE (sceneNum != prior), the clear fires; on intra-
+        // scene room transition (sceneNum == prior), it doesn't. The
+        // OnSceneSpawnActors clear below also fires on every scene init —
+        // both run for fresh entries; only this one is gated against
+        // intra-scene replays.
+        static int16_t sLastClearedSceneNum = -1;
         if (gPlayState != nullptr && gPlayState->numSetupActors > 0 &&
-            ::SceneAuthority::IsEffectiveHost()) {
+            ::SceneAuthority::IsEffectiveHost() &&
+            (int16_t)gPlayState->sceneNum != sLastClearedSceneNum) {
             EnemyStateSync::HostBookkeeping::Instance().ClearScene(gPlayState->sceneNum);
+            sLastClearedSceneNum = (int16_t)gPlayState->sceneNum;
         }
 
         bool isDynamicSpawn = (gPlayState->numSetupActors == 0);
