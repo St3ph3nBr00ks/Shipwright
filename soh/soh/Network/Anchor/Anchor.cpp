@@ -295,14 +295,6 @@ void Anchor::ProcessIncomingPacketQueue() {
             // packetType here is a string so we can't use a switch statement
             if (packetType == ALL_CLIENT_STATE)
                 HandlePacket_AllClientState(payload);
-            else if (packetType == ENEMY_UPDATE)
-                HandlePacket_EnemyUpdate(payload);
-            else if (packetType == ENEMY_DEFEATED)
-                HandlePacket_EnemyDefeated(payload);
-            else if (packetType == ENEMY_SPAWN)
-                HandlePacket_EnemySpawn(payload);
-            else if (packetType == ENEMY_RESPAWN)
-                HandlePacket_EnemyRespawn(payload);
             else if (packetType == ENEMY_STATE)
                 HandlePacket_EnemyState(payload);
             else if (packetType == DAMAGE_ENEMY)

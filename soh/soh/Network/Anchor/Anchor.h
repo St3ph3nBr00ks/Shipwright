@@ -25,7 +25,6 @@ extern "C" {
 
 #include "EnemyStateSync/EnemyLifecycle.h"
 #include "EnemyStateSync/EnemyHostBookkeeping.h"
-#include "EnemyStateSync/Packets/EnemyState.h"
 
 // Attached to enemy actors to give them a stable network id across all clients.
 struct EnemyNetId {
@@ -476,16 +475,17 @@ class Anchor : public Network {
     void SetDummyPlayerClientId(const Actor* actor, uint32_t clientId);
 
     void HandlePacket_AllClientState(nlohmann::json payload);
-    void HandlePacket_EnemyUpdate(nlohmann::json payload);
-    void HandlePacket_EnemyDefeated(nlohmann::json payload);
-    void HandlePacket_EnemySpawn(nlohmann::json payload);
-    void HandlePacket_EnemyRespawn(nlohmann::json payload);
-    // Pillar C2 Phase 4 — unified ENEMY_STATE handler. Receives the new
-    // wire format and dispatches by phase to the four legacy handlers
-    // above (Commit B). Commit C will fold the legacy bodies into per-
-    // phase methods and retire the legacy entry points. See
-    // EnemyStateSync/Packets/EnemyState.h for the type design.
+    // Pillar C2 Phase 4 — unified ENEMY_STATE handler. Sole entry point
+    // for incoming enemy lifecycle packets; dispatches by phase to the
+    // per-phase helpers below. All bodies live in
+    // EnemyStateSync/Packets/EnemyState.cpp.
     void HandlePacket_EnemyState(nlohmann::json payload);
+    // Per-phase helpers — invoked only by HandlePacket_EnemyState's
+    // dispatcher; not registered as packet types in OnIncomingJson.
+    void HandlePacket_EnemyUpdate(nlohmann::json payload);    // phase=Alive       phaseChanged=false
+    void HandlePacket_EnemyDefeated(nlohmann::json payload);  // phase=DyingByLocal phaseChanged=true
+    void HandlePacket_EnemySpawn(nlohmann::json payload);     // phase=Alive       phaseChanged=true
+    void HandlePacket_EnemyRespawn(nlohmann::json payload);   // phase=Regrowing   phaseChanged=true
     void HandlePacket_DamageEnemy(nlohmann::json payload);
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);
     void HandlePacket_DamagePlayer(nlohmann::json payload);
@@ -550,14 +550,11 @@ class Anchor : public Network {
 
     // Packet types //
     inline static const std::string ALL_CLIENT_STATE = "ALL_CLIENT_STATE";
-    inline static const std::string ENEMY_UPDATE = "ENEMY_UPDATE";
-    inline static const std::string ENEMY_DEFEATED = "ENEMY_DEFEATED";
-    inline static const std::string ENEMY_SPAWN = "ENEMY_SPAWN";
-    inline static const std::string ENEMY_RESPAWN = "ENEMY_RESPAWN";
-    // Pillar C2 Phase 4 — unified enemy lifecycle packet that will absorb
-    // ENEMY_UPDATE / ENEMY_DEFEATED / ENEMY_SPAWN / ENEMY_RESPAWN. Commit A
-    // registers the type only; emit sites and receive behaviour migrate in
-    // Commit B. See EnemyStateSync/Packets/EnemyState.{h,cpp}.
+    // Pillar C2 Phase 4 — unified enemy lifecycle packet. Consolidates
+    // the four legacy enemy packet types (ENEMY_UPDATE, ENEMY_DEFEATED,
+    // ENEMY_SPAWN, ENEMY_RESPAWN) under one wire identifier with phase +
+    // phaseChanged tags. All emit/receive logic lives in
+    // EnemyStateSync/Packets/EnemyState.cpp.
     inline static const std::string ENEMY_STATE = "ENEMY_STATE";
     inline static const std::string DAMAGE_ENEMY = "DAMAGE_ENEMY";
     inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
@@ -651,30 +648,13 @@ class Anchor : public Network {
     // on SetFollowerActive(false) as a safety net.
     void FollowerRestoreItems();
 
-    void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);
-    void SendPacket_EnemyDefeated(uint32_t netId);
-    void SendPacket_EnemySpawn(Actor* actor);
-    void SendPacket_EnemyRespawn(uint32_t netId);
-    // Pillar C2 Phase 4 Commit A — unified ENEMY_STATE send.
-    //
-    // Replaces the four legacy SendPacket_Enemy* above (one packet for
-    // steady-state position sync AND for phase transitions like kill /
-    // spawn / respawn). actor may be nullptr only on actor-less replay
-    // paths (host's deadEnemiesByScene replay to a late-joiner) — those
-    // paths transition straight to Dead with no spatial payload.
-    //
-    // Steady-state shape (phaseChanged=false): pos / rot / shapeRot /
-    // health / scale / jointTable / morphTable + per-actor extras.
-    // Transition shape (phaseChanged=true): same body PLUS optional
-    // killer (for DyingByLocal), spawnInfo (for Alive), or no extras
-    // (for Regrowing).
-    //
-    // Commit A: function exists; nothing calls it yet.
-    void SendPacket_EnemyState(uint32_t netId, Actor* actor,
-                               EnemyStateSync::LifecyclePhase phase,
-                               bool phaseChanged,
-                               const EnemyStateSync::KillerInfo* killer = nullptr,
-                               const EnemyStateSync::SpawnInfo* spawnInfo = nullptr);
+    // Pillar C2 Phase 4 — phase-specific senders for the unified
+    // ENEMY_STATE wire packet. All four emit type=ENEMY_STATE with the
+    // matching phase tag; bodies live in EnemyStateSync/Packets/EnemyState.cpp.
+    void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);   // phase=Alive       phaseChanged=false
+    void SendPacket_EnemyDefeated(uint32_t netId);               // phase=DyingByLocal phaseChanged=true
+    void SendPacket_EnemySpawn(Actor* actor);                    // phase=Alive       phaseChanged=true
+    void SendPacket_EnemyRespawn(uint32_t netId);                // phase=Regrowing   phaseChanged=true
     void SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect);
     void SendPacket_EnemyHitPlayer(uint32_t netId);
     void HandlePacket_EnemyHitPlayer(nlohmann::json payload);

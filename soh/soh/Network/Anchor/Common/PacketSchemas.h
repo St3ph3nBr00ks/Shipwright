@@ -23,12 +23,8 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"DAMAGE_ENEMY", 3},  // bump-history: 2 (#174/#175 damageEffect+atHitEffect), 3 (Pillar B timeline).
     {"DAMAGE_PLAYER", 1},
     {"DISABLE_ANCHOR", 1},
-    {"ENEMY_DEFEATED", 3},  // bump-history: 2 (Q I Tier 2 killerClientId+killerTeamId), 3 (Pillar B timeline).
     {"ENEMY_HIT_PLAYER", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
-    {"ENEMY_RESPAWN", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
-    {"ENEMY_SPAWN", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
-    {"ENEMY_STATE", 1},  // Pillar C2 Phase 4 — unified enemy lifecycle packet.
-    {"ENEMY_UPDATE", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
+    {"ENEMY_STATE", 1},  // Pillar C2 Phase 4 — unified enemy lifecycle packet (replaced ENEMY_UPDATE/DEFEATED/SPAWN/RESPAWN).
     {"ENTRANCE_DISCOVERED", 1},
     {"GAME_COMPLETE", 1},
     {"GIVE_ITEM", 1},
