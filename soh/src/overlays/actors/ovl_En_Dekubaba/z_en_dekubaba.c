@@ -18,6 +18,14 @@ void EnDekuBaba_Reset(void);
 
 void EnDekubaba_SetupWait(EnDekubaba* this);
 void EnDekubaba_SetupGrow(EnDekubaba* this);
+void EnDekubaba_SetupRetract(EnDekubaba* this);
+void EnDekubaba_SetupDecideLunge(EnDekubaba* this);
+void EnDekubaba_SetupPrepareLunge(EnDekubaba* this);
+void EnDekubaba_SetupLunge(EnDekubaba* this);
+void EnDekubaba_SetupPullBack(EnDekubaba* this);
+void EnDekubaba_SetupRecover(EnDekubaba* this);
+void EnDekubaba_SetupStunnedVertical(EnDekubaba* this);
+void EnDekubaba_SetupSway(EnDekubaba* this);
 void EnDekubaba_Wait(EnDekubaba* this, PlayState* play);
 void EnDekubaba_Grow(EnDekubaba* this, PlayState* play);
 void EnDekubaba_Retract(EnDekubaba* this, PlayState* play);
