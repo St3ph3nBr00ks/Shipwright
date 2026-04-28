@@ -263,9 +263,31 @@ void Anchor::RegisterHooks() {
         if (IsSaveLoaded()) {
             // Clear the dead-enemy list for this scene: the scene just (re-)loaded
             // so any previously dead enemies have respawned fresh.
+            //
+            // Per `Plans/host_state_lifecycle_audit.md` (sibling of the
+            // `06f540f0f` fix at OnActorSpawn:3015), OnSceneSpawnActors
+            // ALSO fires on intra-scene room transitions: room transitions
+            // execute `Scene_ExecuteCommands` on the new room's command
+            // list (`z_room.c:619`) which sets `numSetupActors > 0`
+            // (`z_scene.c:215`); `Actor_UpdateAll` iterates and fires this
+            // hook (`z_actor.c:2598`) at the end of each setup-actor batch
+            // — not just on fresh scene init. The unconditional
+            // `ClearScene` + `ClearAllDefeatBroadcasts` below would wipe
+            // legitimate same-scene-visit kill records on every room
+            // transition.
+            //
+            // Latent before `06f540f0f` because the OnActorSpawn-side
+            // clear ran first and dominated; now that one is gated, the
+            // OnSceneSpawnActors-side wipe surfaces and reintroduces the
+            // bug. Gate on actual sceneNum change via a sibling
+            // `sLastSceneEntered` static.
+            static int16_t sLastSceneEntered = -1;
+            const bool sceneChanged = ((int16_t)gPlayState->sceneNum != sLastSceneEntered);
             auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
             if (::SceneAuthority::IsEffectiveHost()) {
-                bookkeeping.ClearScene(gPlayState->sceneNum);
+                if (sceneChanged) {
+                    bookkeeping.ClearScene(gPlayState->sceneNum);
+                }
                 bookkeeping.ClearStaleDamagers((int16_t)gPlayState->sceneNum);
                 // KB-18 (#177) Option 4 — schedule the host-authoritative
                 // netId snapshot broadcast for next OnGameFrameUpdate. We
@@ -276,8 +298,16 @@ void Anchor::RegisterHooks() {
                 pendingSceneActorNetIdsBroadcast = true;
             }
             // Clear the per-scene-visit send-dedup set so that enemies in the new
-            // scene can have their ENEMY_DEFEATED broadcast normally.
-            bookkeeping.ClearAllDefeatBroadcasts();
+            // scene can have their ENEMY_DEFEATED broadcast normally. Same gate
+            // reasoning as ClearScene above — the host's Karebaba respawn
+            // detector reads `HasDefeatBroadcast(netId)` during the actor's
+            // ~10s ACTORCAT_MISC death cycle; wiping mDefeatBroadcasts on an
+            // intermediate room transition would defeat the detector and the
+            // Karebaba would never broadcast its respawn.
+            if (sceneChanged) {
+                bookkeeping.ClearAllDefeatBroadcasts();
+            }
+            sLastSceneEntered = (int16_t)gPlayState->sceneNum;
             // Phase 5 #60 — clear the per-netId last-sent cache. netIds are reused
             // across scene visits (same posHash, same enemy), so a stale cached
             // snapshot from a previous visit would cause the predicate to skip
