@@ -195,22 +195,22 @@ typedef struct AnchorClient {
     // now leaves those pointers dangling and the renderer walks freed heap memory
     // (Unhandled OP code crash flood observed in Test 17 log 113).
     //
-    // Instead: move the outgoing bakedModel into retiredBakedModel, arm
-    // retireFrameCounter = kRetireFrames, and let OnGameFrameUpdate tick it down.
-    // When the counter hits 0 the slot is cleared and the destructor runs — by
-    // which point every Gfx frame that could have referenced the model has been
-    // fully consumed by the renderer.
+    // Instead: append the outgoing bakedModel to retiredBakedModels with a
+    // framesRemaining counter, and let OnGameFrameUpdate tick the counter
+    // down. When an entry's counter hits 0 it is erased and the unique_ptr
+    // destroys the model — by which point every Gfx frame that could have
+    // referenced it has been fully consumed by the renderer.
     //
-    // Single-slot design is sufficient because the bake is synchronous and
-    // blocks the main thread for ~400 ms (>> kRetireFrames worth of frames),
-    // so back-to-back changes can't overlap in practice.
-    std::unique_ptr<SOH::BakedPlayerModel> retiredBakedModel;
-    int retireFrameCounter = 0;
+    // KB-19 (#176): vector replaces the prior single-slot pattern. The
+    // single-slot's "≥400 ms per bake" assumption only held for pack-archive
+    // bakes; vanilla revert (BuildVanillaDummyPlayerModel) is ~10 ms, so
+    // rapid re-bakes from a P2 age switch could land 4 retires in 41 ms —
+    // well within kRetireFrames — and the second retire's std::move
+    // destroyed the first while its Gfx commands were still in-flight.
+    std::vector<SOH::RetiredBake> retiredBakedModels;
 
-    // Helper: move current bakedModel into the retire slot, arming the counter.
-    // Any model already in the retire slot is destroyed immediately — acceptable
-    // because it has been sitting there at least one frame already (the previous
-    // bake that displaced the prior retiree took time itself).
+    // Helper: move current bakedModel into the retire vector, armed with
+    // kRetireFrames. No-op if bakedModel is already null.
     void RetireBakedModel();
 
     // Ptr to the dummy player
@@ -218,7 +218,7 @@ typedef struct AnchorClient {
 } AnchorClient;
 
 // Number of render frames a retired BakedPlayerModel must sit idle before
-// destruction. See commentary on AnchorClient::retiredBakedModel for rationale.
+// destruction. See commentary on AnchorClient::retiredBakedModels for rationale.
 //
 // History:
 //   N=4 (original) — covers one bake per transition + LUS double-buffer.

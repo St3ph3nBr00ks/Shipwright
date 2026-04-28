@@ -265,8 +265,8 @@ void SkeletonPatcher::RegisterSkeleton(std::string& path, SkelAnime* skelAnime) 
     // (log 12 P1: "15 registered, 4 local" with 2 entries pointing at the same
     // pauseCtx skelAnime). Replace any existing entry for this SkelAnime in
     // place — the new info has fresh path / isLocalPlayer / vanillaSkeletonPath.
-    // bakedModel and retiredBakedModel are intentionally preserved on update so
-    // an in-flight Gfx frame's pointers stay valid through the retire window.
+    // bakedModel and retiredBakedModels are intentionally preserved on update
+    // so any in-flight Gfx frame's pointers stay valid through the retire window.
     for (auto& existing : skeletons) {
         if (existing.skelAnime == skelAnime) {
             existing.vanillaSkeletonPath = std::move(info.vanillaSkeletonPath);
@@ -508,8 +508,9 @@ static bool BakeLocalVanillaFallback(SkeletonPatchInfo& skel,
         return false;
     }
     if (skel.bakedModel != nullptr) {
-        skel.retiredBakedModel = std::move(skel.bakedModel);
-        skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
+        // KB-19 (#176): append-not-overwrite to coexist with prior retirees
+        // whose Gfx commands may still be in flight from a recent re-bake.
+        skel.retiredBakedModels.push_back({ std::move(skel.bakedModel), kRetireFrames });
     }
     skel.bakedModel = std::make_unique<BakedPlayerModel>();
     if (!BuildVanillaDummyPlayerModel(vanillaSkel, resourceMgr, *skel.bakedModel)) {
@@ -566,8 +567,8 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         auto vanillaSkel = std::dynamic_pointer_cast<Skeleton>(vanillaRes);
         if (vanillaSkel != nullptr && vanillaSkel->skeletonData.skeletonHeader.segment != nullptr) {
             if (skel.bakedModel != nullptr) {
-                skel.retiredBakedModel = std::move(skel.bakedModel);
-                skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
+                // KB-19 (#176): append-not-overwrite — see Skeleton.h RetiredBake.
+                skel.retiredBakedModels.push_back({ std::move(skel.bakedModel), kRetireFrames });
             }
             skel.bakedModel = std::make_unique<BakedPlayerModel>();
             if (BuildVanillaDummyPlayerModel(vanillaSkel, resourceMgr, *skel.bakedModel)) {
@@ -602,8 +603,8 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         // elapse before destruction.  gfx_texture_cache_clear flushes the
         // F3DZEX2 DL cache — mirror of the successful-bake tail.
         if (skel.bakedModel != nullptr) {
-            skel.retiredBakedModel = std::move(skel.bakedModel);
-            skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
+            // KB-19 (#176): append-not-overwrite — see Skeleton.h RetiredBake.
+            skel.retiredBakedModels.push_back({ std::move(skel.bakedModel), kRetireFrames });
         }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
         gfx_texture_cache_clear();
@@ -658,8 +659,8 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
         // bakedModel first so UpdateCustomSkeletonFromPath's raw segment assignment
         // can't leave dangling pointers into in-flight Gfx frames.
         if (skel.bakedModel != nullptr) {
-            skel.retiredBakedModel = std::move(skel.bakedModel);
-            skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
+            // KB-19 (#176): append-not-overwrite — see Skeleton.h RetiredBake.
+            skel.retiredBakedModels.push_back({ std::move(skel.bakedModel), kRetireFrames });
         }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
         gfx_texture_cache_clear();
@@ -682,8 +683,8 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
             return;
         }
         if (skel.bakedModel != nullptr) {
-            skel.retiredBakedModel = std::move(skel.bakedModel);
-            skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
+            // KB-19 (#176): append-not-overwrite — see Skeleton.h RetiredBake.
+            skel.retiredBakedModels.push_back({ std::move(skel.bakedModel), kRetireFrames });
         }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
         gfx_texture_cache_clear();
@@ -699,8 +700,8 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
             return;
         }
         if (skel.bakedModel != nullptr) {
-            skel.retiredBakedModel = std::move(skel.bakedModel);
-            skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
+            // KB-19 (#176): append-not-overwrite — see Skeleton.h RetiredBake.
+            skel.retiredBakedModels.push_back({ std::move(skel.bakedModel), kRetireFrames });
         }
         UpdateCustomSkeletonFromPath(skeletonPath, skel);
         gfx_texture_cache_clear();
@@ -722,14 +723,16 @@ void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeleton
     // intact — OpenCoopPackArchives opens a transient second handle just for
     // this bake walk and discards it.
     //
-    // Retire-slot (KB-15 / #110): the outgoing bakedModel cannot be destroyed
-    // synchronously. The last-submitted Gfx frame still holds raw c_str()
-    // pointers into its pathStrings and data() pointers into its bakedDLs.
-    // Move it into retiredBakedModel; OnGameFrameUpdate ticks retireFrameCounter
-    // down and destroys it when the renderer has moved past those frames.
+    // Retire-slot (KB-15 / #110, KB-19 / #176): the outgoing bakedModel cannot
+    // be destroyed synchronously. The last-submitted Gfx frame still holds raw
+    // c_str() pointers into its pathStrings and data() pointers into its
+    // bakedDLs. Append it to retiredBakedModels with kRetireFrames; the per-
+    // frame tick in OnGameFrameUpdate erases the entry once the counter ages
+    // out, by which point the renderer has moved past the dependent frames.
     if (skel.bakedModel != nullptr) {
-        skel.retiredBakedModel = std::move(skel.bakedModel);
-        skel.retireFrameCounter = kRetireFrames;  // Test 16 #171: was hard-coded 4
+        // KB-19 (#176): append-not-overwrite to coexist with prior retirees
+        // whose Gfx commands may still be in flight from a recent re-bake.
+        skel.retiredBakedModels.push_back({ std::move(skel.bakedModel), kRetireFrames });
     }
     skel.bakedModel = std::make_unique<BakedPlayerModel>();
 

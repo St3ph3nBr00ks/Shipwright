@@ -120,6 +120,29 @@ struct BakedPlayerModel {
     bool isValid = false;
 };
 
+// KB-19 (#176) — replaces the single-slot retire pattern.
+//
+// The original retire design held one std::unique_ptr<BakedPlayerModel> as
+// the graveyard slot. When two re-bakes landed within kRetireFrames frames,
+// the second retire's std::move overwrote and destroyed the first retiree —
+// while in-flight Gfx commands still referenced its bakedDLs.back().data() /
+// pathStrings.back().c_str(). Symptom: vertex distortion (renderer reads
+// freed memory as wrong-but-valid GBI commands) or KB-15-style "Unhandled
+// OP code" crash (torn opcode boundary).
+//
+// Triggered by P2 age switch — 4 BuildVanillaDummyPlayerModel calls landed
+// in 41 ms (~10 ms each), much faster than kRetireFrames = 30 frames at
+// 60 fps. The single-slot pattern's "≥400 ms per bake" assumption was
+// only valid for pack-archive bakes; vanilla revert is much lighter.
+//
+// Fix: vector. Each retire APPENDS. OnGameFrameUpdate ticks every entry's
+// counter; entries reaching zero are erased (and their unique_ptr destroys
+// the model). Multiple concurrent retirees coexist safely.
+struct RetiredBake {
+    std::unique_ptr<BakedPlayerModel> model;
+    int                               framesRemaining;
+};
+
 // TODO: CLEAN THIS UP LATER
 struct SkeletonPatchInfo {
     SkelAnime* skelAnime;
@@ -134,14 +157,19 @@ struct SkeletonPatchInfo {
     // collides across packs (identical alt-path strings) and the visual lags a
     // full scene transition behind the skelAnime pointer swap.
     //
-    // retiredBakedModel / retireFrameCounter mirror the KB-15 / #110 pattern on
-    // AnchorClient: the replaced bakedModel cannot be destroyed synchronously
-    // because the last submitted Gfx frame still holds raw pointers into its
-    // pathStrings / bakedDLs. OnGameFrameUpdate ticks the counter down; when it
-    // reaches 0 the retiree is destroyed safely.
+    // retiredBakedModels mirrors the KB-15 / #110 pattern on AnchorClient: the
+    // replaced bakedModel cannot be destroyed synchronously because the last
+    // submitted Gfx frame still holds raw pointers into its pathStrings /
+    // bakedDLs. OnGameFrameUpdate ticks each entry's counter down; entries
+    // reaching zero are erased and the unique_ptr destroys the model.
+    //
+    // KB-19 (#176): vector replaces the single-slot pattern. Single-slot's
+    // std::move overwrite destroyed prior retirees during rapid re-bakes
+    // (4 BuildVanillaDummyPlayerModel calls in 41 ms during P2 age switch),
+    // while their Gfx commands were still in-flight. Vector lets multiple
+    // concurrent retirees coexist safely.
     std::unique_ptr<BakedPlayerModel> bakedModel;
-    std::unique_ptr<BakedPlayerModel> retiredBakedModel;
-    int retireFrameCounter = 0;
+    std::vector<RetiredBake>          retiredBakedModels;
 
     // KB-19 follow-up #3 — bake cache key. UpdateTunicSkeletons short-circuits
     // when (lastBakedFolder, lastBakedAge, lastBakedTunic, lastBakedTunicPath)

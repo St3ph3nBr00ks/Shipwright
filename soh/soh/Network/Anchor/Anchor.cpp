@@ -19,21 +19,16 @@ extern PlayState* gPlayState;
 // MARK: - AnchorClient helpers
 
 void AnchorClient::RetireBakedModel() {
-    // No live model → nothing to retire. Belt-and-braces: if a retired model is
-    // already sitting in the slot with no counter, clear it on the way out (it
-    // has been there at least one frame already, so safe to destroy now).
     if (bakedModel == nullptr) {
-        if (retiredBakedModel != nullptr && retireFrameCounter == 0) {
-            retiredBakedModel = nullptr;
-        }
-        return;
+        return;  // nothing to retire
     }
-    // If the retire slot is already full, the previous retiree has been sitting
-    // there for however long it took to bake the model we're now retiring
-    // (synchronous bake ≥ ~400 ms = ≥ 24 frames at 60 fps, >> kRetireFrames).
-    // Destroying it here is safe; no frame can still be referencing it.
-    retiredBakedModel = std::move(bakedModel);
-    retireFrameCounter = kRetireFrames;
+    // KB-19 (#176): append rather than overwrite. The previous single-slot
+    // assumption ("the prior retiree's slot has been occupied for ≥400 ms,
+    // safe to destroy") was wrong for vanilla revert bakes (~10 ms each)
+    // surfaced by the P2 age-switch trigger. Multiple concurrent retirees
+    // coexist in the vector; each is freed only after its own counter ages
+    // out. OnGameFrameUpdate ticks the vector each frame.
+    retiredBakedModels.push_back({ std::move(bakedModel), kRetireFrames });
 }
 
 // MARK: - Bandwidth profiler (#62)
@@ -112,9 +107,13 @@ void Anchor::Disable() {
         if (client.bakedModel != nullptr) {
             postDisableBakedModels.push_back(std::move(client.bakedModel));
         }
-        if (client.retiredBakedModel != nullptr) {
-            postDisableBakedModels.push_back(std::move(client.retiredBakedModel));
+        // KB-19 (#176): drain every entry in the retire vector.
+        for (auto& entry : client.retiredBakedModels) {
+            if (entry.model != nullptr) {
+                postDisableBakedModels.push_back(std::move(entry.model));
+            }
         }
+        client.retiredBakedModels.clear();
         if (client.customSkeleton != nullptr) {
             postDisableCustomSkeletons.push_back(std::move(client.customSkeleton));
         }

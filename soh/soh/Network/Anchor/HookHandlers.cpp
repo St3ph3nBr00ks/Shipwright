@@ -378,30 +378,36 @@ void Anchor::RegisterHooks() {
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
         ProcessIncomingPacketQueue();
 
-        // KB-15 / issue #110 — retire counter tick.
-        // Every client that retired a BakedPlayerModel this frame or in recent
-        // frames has a non-zero retireFrameCounter. Decrement; when it reaches
-        // 0, destroy the retiree — by this point every Gfx frame that could
-        // have referenced it has been fully consumed by the renderer. See
-        // AnchorClient::RetireBakedModel and kRetireFrames in Anchor.h.
+        // KB-15 / issue #110 + KB-19 / issue #176 — retire vector tick.
+        // Each client carries a vector of {model, framesRemaining} retirees.
+        // Decrement every entry's counter; entries reaching zero are erased
+        // (the unique_ptr's destructor frees the model). By that point every
+        // Gfx frame that could have referenced it has been fully consumed by
+        // the renderer. See AnchorClient::RetireBakedModel and kRetireFrames
+        // in Anchor.h. KB-19's vector replaces the prior single-slot pattern,
+        // which destroyed prior retirees during rapid re-bakes.
         for (auto& [id, client] : clients) {
-            if (client.retireFrameCounter > 0) {
-                client.retireFrameCounter--;
-                if (client.retireFrameCounter == 0) {
-                    client.retiredBakedModel = nullptr;
+            for (auto it = client.retiredBakedModels.begin();
+                 it != client.retiredBakedModels.end();) {
+                if (--it->framesRemaining <= 0) {
+                    it = client.retiredBakedModels.erase(it);
+                } else {
+                    ++it;
                 }
             }
         }
 
-        // Issue #82 — sibling retire-slot tick for local-player baked skeletons.
-        // UpdateCustomSkeletonFromFolder moves the outgoing bakedModel into the
-        // SkeletonPatchInfo's retire slot on pack switch (same reasoning as the
-        // AnchorClient loop above).
+        // Issue #82 — sibling retire tick for local-player baked skeletons.
+        // UpdateCustomSkeletonFromFolder appends to the SkeletonPatchInfo's
+        // retire vector on pack switch (same reasoning as the AnchorClient
+        // loop above).
         for (auto& skel : SOH::SkeletonPatcher::skeletons) {
-            if (skel.retireFrameCounter > 0) {
-                skel.retireFrameCounter--;
-                if (skel.retireFrameCounter == 0) {
-                    skel.retiredBakedModel = nullptr;
+            for (auto it = skel.retiredBakedModels.begin();
+                 it != skel.retiredBakedModels.end();) {
+                if (--it->framesRemaining <= 0) {
+                    it = skel.retiredBakedModels.erase(it);
+                } else {
+                    ++it;
                 }
             }
         }
