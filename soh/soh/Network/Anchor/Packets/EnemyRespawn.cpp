@@ -34,7 +34,13 @@ void Anchor::SendPacket_EnemyRespawn(uint32_t netId) {
     if (!IsSaveLoaded()) return;
 
     nlohmann::json payload;
-    payload["type"]     = ENEMY_RESPAWN;
+    // Pillar C2 Phase 4 Commit B — wire-envelope swap. Karebaba respawn-skip
+    // signals emit on the unified ENEMY_STATE type with phase=Regrowing +
+    // phaseChanged=true; HandlePacket_EnemyState dispatches back to
+    // HandlePacket_EnemyRespawn on receive.
+    payload["type"]         = ENEMY_STATE;
+    payload["phase"]        = "Regrowing";
+    payload["phaseChanged"] = true;
     payload["netId"]    = netId;
     payload["sceneNum"] = (s16)gPlayState->sceneNum;
     payload["quiet"]    = true;

@@ -480,10 +480,11 @@ class Anchor : public Network {
     void HandlePacket_EnemyDefeated(nlohmann::json payload);
     void HandlePacket_EnemySpawn(nlohmann::json payload);
     void HandlePacket_EnemyRespawn(nlohmann::json payload);
-    // Pillar C2 Phase 4 Commit A — unified ENEMY_STATE handler. Receives the
-    // new wire format and dispatches by phase. See EnemyStateSync/Packets/
-    // EnemyState.h for the type design. Handler exists alongside the four
-    // legacy handlers above; call sites have not been migrated yet.
+    // Pillar C2 Phase 4 — unified ENEMY_STATE handler. Receives the new
+    // wire format and dispatches by phase to the four legacy handlers
+    // above (Commit B). Commit C will fold the legacy bodies into per-
+    // phase methods and retire the legacy entry points. See
+    // EnemyStateSync/Packets/EnemyState.h for the type design.
     void HandlePacket_EnemyState(nlohmann::json payload);
     void HandlePacket_DamageEnemy(nlohmann::json payload);
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);

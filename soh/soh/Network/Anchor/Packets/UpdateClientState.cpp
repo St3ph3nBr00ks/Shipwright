@@ -185,7 +185,10 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                             deaths.size(), (int)newScene, clientId);
                 for (uint32_t netId : deaths) {
                     nlohmann::json killPayload;
-                    killPayload["type"]           = ENEMY_DEFEATED;
+                    // C2 Phase 4 Commit B — late-join replay also rides ENEMY_STATE.
+                    killPayload["type"]           = ENEMY_STATE;
+                    killPayload["phase"]          = "DyingByLocal";
+                    killPayload["phaseChanged"]   = true;
                     killPayload["netId"]          = netId;
                     killPayload["targetClientId"] = clientId;
                     SendJsonToRemote(killPayload);

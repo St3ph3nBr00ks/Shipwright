@@ -298,7 +298,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     }
 
     nlohmann::json payload;
-    payload["type"]     = ENEMY_UPDATE;
+    // Pillar C2 Phase 4 Commit B — wire-envelope swap. Steady-state per-frame
+    // updates emit on the unified ENEMY_STATE type with phase=Alive +
+    // phaseChanged=false; HandlePacket_EnemyState dispatches back to
+    // HandlePacket_EnemyUpdate on receive. All other fields preserved.
+    payload["type"]         = ENEMY_STATE;
+    payload["phase"]        = "Alive";
+    payload["phaseChanged"] = false;
     payload["sceneNum"] = gPlayState->sceneNum;
     payload["netId"]    = netId;
     payload["pos"]      = actor->world.pos;

@@ -95,17 +95,40 @@ void Anchor::SendPacket_EnemyState(uint32_t netId,
 }
 
 void Anchor::HandlePacket_EnemyState(nlohmann::json payload) {
-    // Commit A — wire scaffold only. The four legacy handlers
-    // (HandlePacket_EnemyUpdate / EnemyDefeated / EnemySpawn / EnemyRespawn)
-    // remain the active receive path. This handler exists so the type is
-    // dispatchable; Commit B will move per-phase behaviour into it.
+    // Commit B — phase/phaseChanged → legacy-handler dispatch. The four
+    // legacy handlers (HandlePacket_EnemyUpdate / EnemyDefeated /
+    // EnemySpawn / EnemyRespawn) keep their behaviour intact; this
+    // dispatcher just routes the unified packet to the right one. Commit
+    // C will fold the legacy-handler bodies into per-phase methods on a
+    // single class and retire the legacy entry points.
+    //
+    // The cross-timeline filter runs in each legacy handler too — leaving
+    // both calls is harmless (idempotent drop) and saves us from special-
+    // casing per-handler signatures here.
     if (!IsSaveLoaded()) return;
-    if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
 
-    const std::string phase = payload.value("phase", std::string("Alive"));
-    const uint32_t    netId = payload.value("netId", (uint32_t)0);
+    const std::string phase        = payload.value("phase", std::string("Alive"));
     const bool        phaseChanged = payload.value("phaseChanged", false);
+    const uint32_t    netId        = payload.value("netId", (uint32_t)0);
 
     SPDLOG_DEBUG("[EnemyState] Recv netId={} phase={} phaseChanged={}",
                  netId, phase, phaseChanged);
+
+    if (phase == "Alive" && !phaseChanged) {
+        // Steady-state per-frame update.
+        HandlePacket_EnemyUpdate(payload);
+    } else if (phase == "Alive" && phaseChanged) {
+        // Dynamic spawn (host runtime spawn replicated to peers).
+        HandlePacket_EnemySpawn(payload);
+    } else if (phase == "DyingByLocal" && phaseChanged) {
+        // Defeat broadcast (host kill, non-host route-to-host, host
+        // re-broadcast, and late-join replay all flow here).
+        HandlePacket_EnemyDefeated(payload);
+    } else if (phase == "Regrowing" && phaseChanged) {
+        // Karebaba natural-cycle skip-to-Regrow signal.
+        HandlePacket_EnemyRespawn(payload);
+    } else {
+        SPDLOG_WARN("[EnemyState] Unhandled phase combination netId={} phase={} phaseChanged={}",
+                    netId, phase, phaseChanged);
+    }
 }

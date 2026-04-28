@@ -47,7 +47,14 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor) {
     // dropped and the enemy to exist only on the host.
 
     nlohmann::json payload;
-    payload["type"]     = ENEMY_SPAWN;
+    // Pillar C2 Phase 4 Commit B — wire-envelope swap. Dynamic-spawn
+    // broadcasts emit on the unified ENEMY_STATE type with phase=Alive +
+    // phaseChanged=true (the phaseChanged flag distinguishes spawn from
+    // steady-state updates, both of which carry phase=Alive);
+    // HandlePacket_EnemyState dispatches back to HandlePacket_EnemySpawn.
+    payload["type"]         = ENEMY_STATE;
+    payload["phase"]        = "Alive";
+    payload["phaseChanged"] = true;
     payload["sceneNum"] = gPlayState->sceneNum;
     payload["actorId"]  = actor->id;
     payload["pos"]      = actor->home.pos;

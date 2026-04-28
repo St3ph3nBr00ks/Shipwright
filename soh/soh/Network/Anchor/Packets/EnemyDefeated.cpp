@@ -31,7 +31,14 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
     }
 
     nlohmann::json payload;
-    payload["type"] = ENEMY_DEFEATED;
+    // Pillar C2 Phase 4 Commit B — wire-envelope swap. Defeat broadcasts
+    // emit on the unified ENEMY_STATE type with phase=DyingByLocal +
+    // phaseChanged=true; HandlePacket_EnemyState dispatches back to
+    // HandlePacket_EnemyDefeated on receive. All Q I Tier 2 attribution
+    // fields (killerClientId, killerTeamId) preserved as-is below.
+    payload["type"]         = ENEMY_STATE;
+    payload["phase"]        = "DyingByLocal";
+    payload["phaseChanged"] = true;
     payload["netId"] = netId;
     PacketTimeline::SetTimelineField(payload);
 
@@ -140,7 +147,10 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
             EnemyStateSync::HostBookkeeping::Instance().ClaimDefeatBroadcast(netId);
 
             nlohmann::json rebroadcast;
-            rebroadcast["type"]           = ENEMY_DEFEATED;
+            // C2 Phase 4 Commit B — host re-broadcast also rides ENEMY_STATE.
+            rebroadcast["type"]           = ENEMY_STATE;
+            rebroadcast["phase"]          = "DyingByLocal";
+            rebroadcast["phaseChanged"]   = true;
             rebroadcast["netId"]          = netId;
             rebroadcast["killerClientId"] = senderId;
             // Stamp our timeline. The IsCrossTimelinePacket filter above
