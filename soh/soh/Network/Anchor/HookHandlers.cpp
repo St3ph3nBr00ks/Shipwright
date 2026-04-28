@@ -3573,6 +3573,28 @@ void Anchor::RegisterHooks() {
         // Host tracks kills for join-time replay (Fix 6).
         if (::SceneAuthority::IsEffectiveHost()) {
             bookkeeping.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
+            // Host-local-kill room-transition survival (surfaced in log 155
+            // / Test 3 of C2 Phase 4 Commit B). Karebaba's natural death
+            // cycle runs ~10s in ACTORCAT_MISC; if the host leaves the room
+            // mid-cycle, OoT destroys the actor and re-spawns a fresh one
+            // on return. mSceneDeaths is the host respawn guard's lookup
+            // (line 3059), but it is wiped by ClearScene in OnActorSpawn
+            // when numSetupActors > 0 — which DOES fire on intra-scene
+            // room transitions despite the comment at line 2990 claiming
+            // otherwise (verified via "static" suffix on spawn logs after
+            // a room change). mPendingKills survives ClearScene, so adding
+            // a parallel RecordPendingKill here lets OnActorSpawn's
+            // pendingKill branch (line 3085) catch the re-spawn and route
+            // through Fix 38 → SetupDeadItemDrop just like the receive-
+            // side path does for non-host kills. Cleared by the host
+            // respawn detector (line 3245) when the cycle completes.
+            //
+            // Limited to Karebaba (the only actor with a long cycle that
+            // can outlive a room transition); other enemies die instantly
+            // via Actor_Kill and have no cycle to preserve.
+            if (actor->id == ACTOR_EN_KAREBABA) {
+                bookkeeping.RecordPendingKill(ext->netId);
+            }
         }
         SendPacket_EnemyDefeated(ext->netId);
     });
