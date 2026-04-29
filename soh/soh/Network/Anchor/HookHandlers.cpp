@@ -3712,9 +3712,23 @@ void Anchor::RegisterHooks() {
                                               ext->netStateIndex == 2 || ext->netStateIndex == 9);
                         bool localIsActive = (curState == 2 || curState == 3 || curState == 4 || curState == 7);
                         if (!(netIsDormant && localIsActive)) {
+                            if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                                SPDLOG_INFO("[EnKarebaba] rx netId={} apply {}→{}",
+                                            ext->netId, (int)curState, (int)ext->netStateIndex);
+                            }
                             EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
+                        } else if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                            SPDLOG_INFO("[EnKarebaba] rx netId={} block net={} local={} (dormant-active filter)",
+                                        ext->netId, (int)ext->netStateIndex, (int)curState);
                         }
+                    } else if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnKarebaba] rx netId={} block net={} local={} (intra-attack guard)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
                     }
+                } else if (curState != ext->netStateIndex && ext->netStateIndex == 7 &&
+                           ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                    SPDLOG_INFO("[EnKarebaba] rx netId={} block net=7 local={} (retract-gate)",
+                                ext->netId, (int)curState);
                 }
             }
 
@@ -3753,6 +3767,10 @@ void Anchor::RegisterHooks() {
                 EnDekubaba* baba = (EnDekubaba*)actor;
                 s16 curState = EnDekubaba_GetStateIndex(baba);
                 if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnDekubaba] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
                     EnDekubaba_ApplyNetState(baba, ext->netStateIndex);
                 }
             }
@@ -3770,6 +3788,10 @@ void Anchor::RegisterHooks() {
                 BossGoma* g = (BossGoma*)actor;
                 s16 curState = BossGoma_GetStateIndex(g);
                 if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[BossGoma] rx netId={} apply 0x{:02X}→0x{:02X}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
                     BossGoma_ApplyNetState(g, gPlayState, ext->netStateIndex);
                 }
             }
@@ -3783,6 +3805,10 @@ void Anchor::RegisterHooks() {
                 EnGoma* lg = (EnGoma*)actor;
                 s16 curState = EnGoma_GetStateIndex(lg);
                 if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnGoma] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
                     EnGoma_ApplyNetState(lg, gPlayState, ext->netStateIndex);
                 }
             }

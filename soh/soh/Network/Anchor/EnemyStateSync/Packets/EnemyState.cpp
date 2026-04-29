@@ -464,6 +464,34 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.dekunutsActionState);
             }
         }
+        if (extras.hasDekubaba) {
+            s16 prev = prevExtras && prevExtras->hasDekubaba ? prevExtras->dekubabaActionState : -1;
+            if (prev != extras.dekubabaActionState) {
+                SPDLOG_INFO("[EnDekubaba] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.dekubabaActionState);
+            }
+        }
+        if (extras.hasKarebaba) {
+            s16 prev = prevExtras && prevExtras->hasKarebaba ? prevExtras->karebabaActionState : -1;
+            if (prev != extras.karebabaActionState) {
+                SPDLOG_INFO("[EnKarebaba] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.karebabaActionState);
+            }
+        }
+        if (extras.hasBossGoma) {
+            s16 prev = prevExtras && prevExtras->hasBossGoma ? prevExtras->bossGomaActionState : -1;
+            if (prev != extras.bossGomaActionState) {
+                SPDLOG_INFO("[BossGoma] tx netId={} state=0x{:02X}→0x{:02X}", netId,
+                            (int)prev, (int)extras.bossGomaActionState);
+            }
+        }
+        if (extras.hasEnGoma) {
+            s16 prev = prevExtras && prevExtras->hasEnGoma ? prevExtras->enGomaActionState : -1;
+            if (prev != extras.enGomaActionState) {
+                SPDLOG_INFO("[EnGoma] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enGomaActionState);
+            }
+        }
     }
 
     nlohmann::json payload;
