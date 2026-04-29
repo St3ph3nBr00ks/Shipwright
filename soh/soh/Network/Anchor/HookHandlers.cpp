@@ -98,6 +98,31 @@ extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
     return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// Receive-side state-machine logging dedup.
+// The OnActorUpdate driver blocks for En_Sw / En_St / En_Dekunuts run
+// every frame and decide apply-vs-block on (curState, netStateIndex).
+// During a sustained block (e.g. dormant-active filter holding a peer
+// in lunge while net says idle), naive logging would emit the same
+// "block" line every frame at 20-60 Hz. Dedup by netId — log only when
+// the encoded (curState<<16 | netState<<8 | blocked) tuple changes.
+//
+// One global map; netIds are scene-globally unique so collisions across
+// actor types are impossible.
+namespace {
+std::unordered_map<uint32_t, uint32_t> sLoggedStateEncoded;
+bool ShouldLogStateChange(uint32_t netId, int16_t cur, int16_t net, bool blocked) {
+    uint32_t encoded = ((uint32_t)(uint16_t)cur << 16)
+                     | ((uint32_t)(uint16_t)net << 8)
+                     | (blocked ? 1u : 0u);
+    auto it = sLoggedStateEncoded.find(netId);
+    if (it == sLoggedStateEncoded.end() || it->second != encoded) {
+        sLoggedStateEncoded[netId] = encoded;
+        return true;
+    }
+    return false;
+}
+}  // namespace
+
 // #135 / en_dekunuts_sync_plan.md §6 — suppresses Mad Scrub's
 // Item_DropCollectibleRandom on a non-host receiver during the natural
 // death cycle (after BossGoma_SetupDyingNet equivalent triggers).
@@ -3778,7 +3803,19 @@ void Anchor::RegisterHooks() {
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
                     !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnDekunuts] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
                     EnDekunuts_ApplyNetState(d, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet                  ? "death-state-gated"
+                                        : (netIsDormant && localIsActive) ? "dormant-active filter"
+                                        :                                   "other";
+                        SPDLOG_INFO("[EnDekunuts] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
                 }
             }
 
@@ -3793,7 +3830,16 @@ void Anchor::RegisterHooks() {
                 bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
                 bool localIsActive = (curState == 2 || curState == 3 || curState == 4);
                 if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnSt] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
                     EnSt_ApplyNetState(st, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnSt] rx netId={} block net={} local={} (dormant-active filter)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
+                    }
                 }
             }
 
@@ -3821,11 +3867,13 @@ void Anchor::RegisterHooks() {
                 u8  swType   = (sw->actor.params & 0xE000) >> 13;
                 bool deathStateNet;
                 bool blockTransition;
+                const char* blockReason = nullptr;
                 if (swType == 0) {
                     bool netDormant  = (ext->netStateIndex == 6);
                     bool localActive = (curState == 7 || curState == 8 || curState == 9);
                     deathStateNet    = (ext->netStateIndex == 4 || ext->netStateIndex == 5);
                     blockTransition  = (netDormant && localActive);
+                    if (blockTransition) blockReason = "dormant-active filter (combat)";
                 } else {
                     // gold: 0/1 are init transients; 2 is the settled state.
                     bool netInitTransient = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
@@ -3837,9 +3885,22 @@ void Anchor::RegisterHooks() {
                     // settled→init regression.
                     blockTransition  = (netDormant && localActive)
                                     || (netInitTransient && localSettledIdle);
+                    if (netDormant && localActive)         blockReason = "dormant-active filter (gold)";
+                    else if (netInitTransient && localSettledIdle) blockReason = "settled-init filter (gold)";
                 }
                 if (curState != ext->netStateIndex && !blockTransition && !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnSw] rx netId={} apply {}→{} swType={}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex, (int)swType);
+                    }
                     EnSw_ApplyNetState(sw, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" :
+                                          (blockReason  ? blockReason          : "other");
+                        SPDLOG_INFO("[EnSw] rx netId={} block net={} local={} swType={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, (int)swType, why);
+                    }
                 }
             }
 

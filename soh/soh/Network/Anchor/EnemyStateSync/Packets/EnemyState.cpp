@@ -434,6 +434,38 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         extras = GatherExtras(actor);
     }
 
+    // State-machine TX logging — fires on the host once per delta. Local-
+    // only (file write); zero relay impact. Compares current GatherExtras
+    // result against the cached prev (if any). Adding a per-actor branch
+    // here for new state-machine consumers keeps the log signal narrow:
+    // only state changes for the actors we're actively debugging.
+    {
+        auto cacheIt = sLastSentByNetId.find(netId);
+        const EnemyUpdateExtras* prevExtras =
+            (cacheIt != sLastSentByNetId.end()) ? &cacheIt->second.extras : nullptr;
+        if (extras.hasEnSw) {
+            s16 prev = prevExtras && prevExtras->hasEnSw ? prevExtras->enSwActionState : -1;
+            if (prev != extras.enSwActionState) {
+                SPDLOG_INFO("[EnSw] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enSwActionState);
+            }
+        }
+        if (extras.hasEnSt) {
+            s16 prev = prevExtras && prevExtras->hasEnSt ? prevExtras->enStActionState : -1;
+            if (prev != extras.enStActionState) {
+                SPDLOG_INFO("[EnSt] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enStActionState);
+            }
+        }
+        if (extras.hasDekunuts) {
+            s16 prev = prevExtras && prevExtras->hasDekunuts ? prevExtras->dekunutsActionState : -1;
+            if (prev != extras.dekunutsActionState) {
+                SPDLOG_INFO("[EnDekunuts] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.dekunutsActionState);
+            }
+        }
+    }
+
     nlohmann::json payload;
     payload["type"]         = ENEMY_STATE;
     payload["phase"]        = "Alive";
