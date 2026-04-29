@@ -177,6 +177,46 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         // but the non-host's OnSceneSpawnActors still fires and bumps its epoch.
         bool     sceneSpawned        = (prevSceneSpawnEpoch != newSceneSpawnEpoch);
 
+        // Vanilla respawn parity: when ALL participants have left a scene and
+        // any of them returns, the scene is freshly loaded for everyone — so
+        // mSceneDeaths must drop. The host-only `OnActorSpawn` peer-aware
+        // gate catches the host-returning case; this sibling site catches the
+        // client-returning case (test 4 of 2026-04-28: client re-entered an
+        // emptied scene, host's mSceneDeaths still held kills, the replay
+        // block below sent stale ENEMY_STATE/DyingByLocal and the enemies
+        // appeared dead despite being alive on the local fresh spawn).
+        //
+        // Trigger: this client just transitioned INTO newScene, and right
+        // now no peer (and no host) is in newScene. The host walks its own
+        // sceneNum + every OTHER client's sceneNum to confirm vacancy.
+        // Race-tolerant: a peer mid-transition will either (a) still report
+        // their old scene, in which case vacancy holds and we clear (correct
+        // because they're not actually tracking newScene yet), or (b) already
+        // report newScene, in which case we don't clear (correct because the
+        // peer has live state for it).
+        if (::SceneAuthority::IsEffectiveHost() && nowLoaded && sceneChanged) {
+            bool anyOtherInNewScene =
+                (gPlayState != nullptr && (s16)gPlayState->sceneNum == newScene);
+            if (!anyOtherInNewScene) {
+                for (auto& [otherId, other] : clients) {
+                    if (otherId == clientId) continue;
+                    if (!other.online || !other.isSaveLoaded || other.self) continue;
+                    if (other.sceneNum == newScene) {
+                        anyOtherInNewScene = true;
+                        break;
+                    }
+                }
+            }
+            if (!anyOtherInNewScene) {
+                auto& bk = EnemyStateSync::HostBookkeeping::Instance();
+                bk.ClearScene(newScene);
+                bk.ClearAllDefeatBroadcasts();
+                SPDLOG_INFO("[UpdateClientState] Scene {} was empty before client {} entered "
+                            "— cleared mSceneDeaths/mDefeatBroadcasts (vanilla respawn parity)",
+                            (int)newScene, clientId);
+            }
+        }
+
         if (::SceneAuthority::IsEffectiveHost() && nowLoaded &&
             (justLoaded || sceneChanged || sceneSpawned)) {
             const auto& deaths = EnemyStateSync::HostBookkeeping::Instance().SceneDeaths(newScene);

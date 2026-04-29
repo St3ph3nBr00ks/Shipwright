@@ -43,6 +43,29 @@ bool IsSyncedWorldActor(int16_t actorId) {
     }
 }
 
+bool IsSyncedBossActor(int16_t actorId) {
+    switch (actorId) {
+        // First Dungeon Demo (#167 Step 9) — paired with boss_goma_sync_plan.md
+        // implementation. Until the per-actor sync logic lands, admission
+        // produces silent ENEMY_STATE traffic (receiver discards the payload),
+        // which is harmless — it lets us verify admission alone.
+        case ACTOR_BOSS_GOMA:    return true;  // Queen Gohma (#67)
+        // Future allowlist additions go here as their trackers land. Each one
+        // should land in the SAME PR as that boss's per-actor sync logic.
+        // case ACTOR_BOSS_DODONGO:    return true;  // #68
+        // case ACTOR_BOSS_VA:         return true;  // #69
+        // case ACTOR_BOSS_FD:         return true;  // #70
+        // case ACTOR_BOSS_FD2:        return true;  // #70
+        // case ACTOR_BOSS_MO:         return true;  // #71
+        // case ACTOR_BOSS_SST:        return true;  // #72
+        // case ACTOR_BOSS_TW:         return true;  // #73
+        // case ACTOR_BOSS_GANON:      return true;  // #74
+        // case ACTOR_BOSS_GANONDROF:  return true;  // #112
+        // case ACTOR_BOSS_GANON2:     return true;  // #75
+        default:                 return false;
+    }
+}
+
 uint32_t EncodeEnemyNetId(Actor* actor) {
     uint8_t posHash = (uint8_t)((int16_t)actor->home.pos.x) ^
                       (uint8_t)((int16_t)actor->home.pos.y >> 2) ^  // #162 Proposal A

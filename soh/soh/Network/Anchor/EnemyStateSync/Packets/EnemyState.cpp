@@ -2,6 +2,7 @@
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/Common/SkelAnimeWire.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
@@ -65,6 +66,13 @@ struct EnemyUpdateExtras {
     // KB-08 / #7 — En_Dekubaba state-machine sync.
     bool hasDekubaba         = false;
     s16  dekubabaActionState = 0;
+    // Bug 2 follow-on (small-Dekubaba mid-Lunge head float, log 162) —
+    // world.pos.y is computed each frame from
+    // home.pos.y - sin(stemSectionAngle[0..2]) * 20 * size, so without
+    // syncing the three stem angles the non-host's head visual diverges
+    // from the host whenever the Dekubaba is animating (Grow, Lunge,
+    // PullBack, Recover, Hit). Six bytes per packet.
+    s16  dekubabaStemAngles[3] = { 0, 0, 0 };
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -101,16 +109,19 @@ uint64_t NowMonotonicMs() {
 // keeps an absent morphTable from colliding with a zero-filled one.
 uint64_t HashLimbs(const SkelAnime* anime, uint8_t limbCount) {
     if (anime == nullptr || limbCount == 0) return 0;
+    // Bound matches SkelAnimeWire::Serialize/Deserialize; the actor
+    // struct allocates exactly limbCount Vec3s slots. See SkelAnimeWire.h.
+    const uint8_t bounded = std::min(limbCount, SkelAnimeWire::kHardCap);
     uint64_t h = 14695981039346656037ULL;
     auto mix16 = [&h](uint16_t v) { h ^= (uint64_t)v; h *= 1099511628211ULL; };
-    for (uint8_t i = 0; i <= limbCount; i++) {
+    for (uint8_t i = 0; i < bounded; i++) {
         mix16((uint16_t)anime->jointTable[i].x);
         mix16((uint16_t)anime->jointTable[i].y);
         mix16((uint16_t)anime->jointTable[i].z);
     }
     if (anime->morphTable != nullptr) {
         mix16(0xFFFFu);
-        for (uint8_t i = 0; i <= limbCount; i++) {
+        for (uint8_t i = 0; i < bounded; i++) {
             mix16((uint16_t)anime->morphTable[i].x);
             mix16((uint16_t)anime->morphTable[i].y);
             mix16((uint16_t)anime->morphTable[i].z);
@@ -134,10 +145,19 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.goroiwaPathDir     = b->pathDirection;
         e.goroiwaFlags       = b->stateFlags;
     } else if (actor->id == ACTOR_EN_DEKUBABA) {
-        e.hasDekubaba         = true;
-        e.dekubabaActionState = EnDekubaba_GetStateIndex((EnDekubaba*)actor);
+        EnDekubaba* baba       = (EnDekubaba*)actor;
+        e.hasDekubaba          = true;
+        e.dekubabaActionState  = EnDekubaba_GetStateIndex(baba);
+        e.dekubabaStemAngles[0] = baba->stemSectionAngle[0];
+        e.dekubabaStemAngles[1] = baba->stemSectionAngle[1];
+        e.dekubabaStemAngles[2] = baba->stemSectionAngle[2];
     }
     return e;
+}
+
+int RotDeltaAbs(s16 a, s16 b) {
+    int d = (int)(int16_t)(a - b);
+    return std::abs(d);
 }
 
 bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
@@ -157,13 +177,13 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasDekubaba != prev.hasDekubaba) return true;
     if (cur.hasDekubaba) {
         if (cur.dekubabaActionState != prev.dekubabaActionState) return true;
+        // Stem angles drive head Y via trig — even small drift here
+        // shows up as visible head float on the non-host.
+        if (RotDeltaAbs(cur.dekubabaStemAngles[0], prev.dekubabaStemAngles[0]) >= kRotThresholdS16) return true;
+        if (RotDeltaAbs(cur.dekubabaStemAngles[1], prev.dekubabaStemAngles[1]) >= kRotThresholdS16) return true;
+        if (RotDeltaAbs(cur.dekubabaStemAngles[2], prev.dekubabaStemAngles[2]) >= kRotThresholdS16) return true;
     }
     return false;
-}
-
-int RotDeltaAbs(s16 a, s16 b) {
-    int d = (int)(int16_t)(a - b);
-    return std::abs(d);
 }
 
 bool AnyRotAxisExceeds(Vec3s cur, Vec3s prev, s16 threshold) {
@@ -308,20 +328,24 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // ApplyNetState to keep both clients on the same cycle phase.
     if (extras.hasDekubaba) {
         payload["actionState"] = extras.dekubabaActionState;
+        // Bug 2 follow-on — three-element stem angle array drives the
+        // animated head-tip Y position on the non-host.
+        nlohmann::json stems = nlohmann::json::array();
+        stems.push_back((int)extras.dekubabaStemAngles[0]);
+        stems.push_back((int)extras.dekubabaStemAngles[1]);
+        stems.push_back((int)extras.dekubabaStemAngles[2]);
+        payload["dekubabaStems"] = stems;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
-        nlohmann::json joints = nlohmann::json::array();
-        nlohmann::json morphs = nlohmann::json::array();
-        for (uint8_t i = 0; i <= ext->limbCount; i++) {
-            joints.push_back(ext->skelAnime->jointTable[i]);
-            if (ext->skelAnime->morphTable != nullptr) {
-                morphs.push_back(ext->skelAnime->morphTable[i]);
+        payload["jointTable"] = SkelAnimeWire::SerializePoseTable(
+            ext->skelAnime->jointTable, ext->limbCount);
+        if (ext->skelAnime->morphTable != nullptr) {
+            auto morphs = SkelAnimeWire::SerializePoseTable(
+                ext->skelAnime->morphTable, ext->limbCount);
+            if (!morphs.empty()) {
+                payload["morphTable"] = morphs;
             }
-        }
-        payload["jointTable"] = joints;
-        if (!morphs.empty()) {
-            payload["morphTable"] = morphs;
         }
     }
 
@@ -506,11 +530,21 @@ actor_found:
 
     EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyUpdate.applyGuard");
     if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+        // ACTOR_FLAG_ATTACHED_TO_ARROW guard (cross-cutting).
+        // When En_Arrow pins an enemy, the target's `Update` short-circuits
+        // to a SkelAnime-only pass and position is driven by the parent
+        // arrow. Overwriting world.pos here every packet fights the arrow-
+        // driven local position, causing the pinned actor to teleport back
+        // to the host's pre-pin location. Affected actors: En_St, En_Sw,
+        // En_Bili, En_Bb, En_Crow, En_Firefly, En_Po_Sisters. Joint/morph/
+        // rotation/health/scale still sync normally — only the world.pos
+        // write is skipped while the actor is arrow-pinned.
+        const bool arrowPinned = (actor->flags & ACTOR_FLAG_ATTACHED_TO_ARROW) != 0;
         // En_Karebaba and En_Dekubaba: world.pos is animation-driven each
         // frame from home.pos + stem/shape angles, so we skip the world.pos
         // overwrite (Fix 7) — the local update() recomputes it consistently
         // from synced inputs.
-        if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
+        if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA && !arrowPinned) {
             actor->world.pos = pos;
         }
         // shape.rot exclusion is split per-actor:
@@ -547,21 +581,20 @@ actor_found:
                           localState == 4 || localState == 7);
         }
         if (!skipJoints && ext->skelAnime != nullptr && ext->limbCount > 0) {
+            // Centralised pose-table writer enforces both the per-actor
+            // slot limit and the global hard cap. See SkelAnimeWire.h
+            // for the full rationale; #171 root cause was the previous
+            // hand-rolled loop overrunning EnDekubaba's morphTable into
+            // its adjacent boundFloor pointer.
             if (payload.contains("jointTable")) {
-                const auto& joints = payload["jointTable"];
-                uint8_t count = static_cast<uint8_t>(
-                    std::min((size_t)(ext->limbCount + 1), joints.size()));
-                for (uint8_t i = 0; i < count; i++) {
-                    ext->skelAnime->jointTable[i] = joints[i].get<Vec3s>();
-                }
+                SkelAnimeWire::DeserializePoseTable(
+                    ext->skelAnime->jointTable, ext->limbCount,
+                    payload["jointTable"], netId);
             }
             if (payload.contains("morphTable") && ext->skelAnime->morphTable != nullptr) {
-                const auto& morphs = payload["morphTable"];
-                uint8_t count = static_cast<uint8_t>(
-                    std::min((size_t)(ext->limbCount + 1), morphs.size()));
-                for (uint8_t i = 0; i < count; i++) {
-                    ext->skelAnime->morphTable[i] = morphs[i].get<Vec3s>();
-                }
+                SkelAnimeWire::DeserializePoseTable(
+                    ext->skelAnime->morphTable, ext->limbCount,
+                    payload["morphTable"], netId);
             }
         }
 
@@ -574,6 +607,20 @@ actor_found:
         // EnDekubaba_ApplyNetState when local state diverges from net.
         if (actor->id == ACTOR_EN_DEKUBABA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // Bug 2 follow-on — apply host's stem angles directly to the local
+        // actor so EnDekubaba_UpdateHeadPosition (called every frame inside
+        // each actionFunc) computes the same head Y as the host. Written
+        // before the actor's update() runs next frame; the actionFunc may
+        // step them further but the per-packet re-write keeps drift bounded.
+        if (actor->id == ACTOR_EN_DEKUBABA && payload.contains("dekubabaStems")) {
+            const auto& stems = payload["dekubabaStems"];
+            if (stems.is_array() && stems.size() >= 3) {
+                EnDekubaba* baba = (EnDekubaba*)actor;
+                baba->stemSectionAngle[0] = (s16)stems[0].get<int>();
+                baba->stemSectionAngle[1] = (s16)stems[1].get<int>();
+                baba->stemSectionAngle[2] = (s16)stems[2].get<int>();
+            }
         }
 
         if (actor->id == ACTOR_EN_GOROIWA) {

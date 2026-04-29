@@ -67,10 +67,34 @@ SkelAnime* GetEnemySkelAnime(Actor* actor);
 //   ACTOR_EN_ANUBICE_TAG   — Anubis spawn marker      (#116, ACTORCAT_SWITCH)
 bool IsSyncedWorldActor(int16_t actorId);
 
+// Issue #67/#69/#71/#72/#74/#75/#112 — admission predicate for ACTORCAT_BOSS
+// actors that should participate in the sync pipeline. Sister of
+// IsSyncedWorldActor: opt-in allowlist of boss actor IDs that are sync-ready.
+//
+// New bosses opt in here as their per-boss tracker lands. Pre-fill is
+// explicitly avoided — admitting a boss before its per-actor sync logic is in
+// place exposes a half-implemented pipeline. Same evolution pattern as
+// IsSyncedWorldActor (one ID at a time).
+//
+// Pending future allowlist entries (per the Phase 4D tracker cluster):
+//   ACTOR_BOSS_GOMA       — Queen Gohma          (#67) — first allowlist entry
+//   ACTOR_BOSS_DODONGO    — King Dodongo         (#68)
+//   ACTOR_BOSS_VA         — Barinade             (#69)
+//   ACTOR_BOSS_FD / FD2   — Volvagia             (#70)
+//   ACTOR_BOSS_MO         — Morpha               (#71)
+//   ACTOR_BOSS_SST        — Bongo Bongo          (#72)
+//   ACTOR_BOSS_TW         — Twinrova             (#73)
+//   ACTOR_BOSS_GANON      — Ganondorf            (#74)
+//   ACTOR_BOSS_GANONDROF  — Phantom Ganon        (#112)
+//   ACTOR_BOSS_GANON2     — Ganon final phase    (#75)
+bool IsSyncedBossActor(int16_t actorId);
+
 // True when the actor should be considered for sync. Called from each filter
 // site to keep the gate logic identical everywhere.
 inline bool IsSyncableActor(Actor* actor) {
-    return actor->category == ACTORCAT_ENEMY || IsSyncedWorldActor(actor->id);
+    return actor->category == ACTORCAT_ENEMY ||
+           (actor->category == ACTORCAT_BOSS && IsSyncedBossActor(actor->id)) ||
+           IsSyncedWorldActor(actor->id);
 }
 
 // Deterministic netId for a syncable actor. Same scene + actor id + home

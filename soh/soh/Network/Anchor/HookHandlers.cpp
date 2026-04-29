@@ -261,33 +261,29 @@ void Anchor::RegisterHooks() {
         }
 
         if (IsSaveLoaded()) {
-            // Clear the dead-enemy list for this scene: the scene just (re-)loaded
-            // so any previously dead enemies have respawned fresh.
+            // Multiplayer kill persistence (log 162 fix, follow-on to
+            // `06f540f0f` / `f822c2dee`):
             //
-            // Per `Plans/host_state_lifecycle_audit.md` (sibling of the
-            // `06f540f0f` fix at OnActorSpawn:3015), OnSceneSpawnActors
-            // ALSO fires on intra-scene room transitions: room transitions
-            // execute `Scene_ExecuteCommands` on the new room's command
-            // list (`z_room.c:619`) which sets `numSetupActors > 0`
-            // (`z_scene.c:215`); `Actor_UpdateAll` iterates and fires this
-            // hook (`z_actor.c:2598`) at the end of each setup-actor batch
-            // — not just on fresh scene init. The unconditional
-            // `ClearScene` + `ClearAllDefeatBroadcasts` below would wipe
-            // legitimate same-scene-visit kill records on every room
-            // transition.
+            // mSceneDeaths and mDefeatBroadcasts persist for the entire
+            // session. Earlier code wiped both whenever the host's scene
+            // changed — a single-player assumption (scene reload = enemies
+            // revive). In multiplayer it breaks the case where the host
+            // briefly leaves a scene that a peer is still inside: the peer
+            // continues to hold the dead state, but the host wipes its
+            // record and lets every previously-killed enemy come back alive
+            // on re-entry (log 162 — host left Inside Deku Tree, P2 stayed,
+            // host re-entered → all Skullwalltulas alive on host again).
             //
-            // Latent before `06f540f0f` because the OnActorSpawn-side
-            // clear ran first and dominated; now that one is gated, the
-            // OnSceneSpawnActors-side wipe surfaces and reintroduces the
-            // bug. Gate on actual sceneNum change via a sibling
-            // `sLastSceneEntered` static.
-            static int16_t sLastSceneEntered = -1;
-            const bool sceneChanged = ((int16_t)gPlayState->sceneNum != sLastSceneEntered);
+            // Persistence is safe: mSceneDeaths is keyed by
+            // (sceneNum, netId); the host respawn guard at OnActorSpawn:3142
+            // re-applies kills to freshly-spawned actors with matching netIds.
+            // The Karebaba natural-respawn path (OnActorUpdate detector
+            // ~line 3322) clears its specific netId from both maps on revival.
+            //
+            // Stale damagers DO get GC'd because their relevance is bounded
+            // by scene lifetime; ClearStaleDamagers is still called.
             auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
             if (::SceneAuthority::IsEffectiveHost()) {
-                if (sceneChanged) {
-                    bookkeeping.ClearScene(gPlayState->sceneNum);
-                }
                 bookkeeping.ClearStaleDamagers((int16_t)gPlayState->sceneNum);
                 // KB-18 (#177) Option 4 — schedule the host-authoritative
                 // netId snapshot broadcast for next OnGameFrameUpdate. We
@@ -297,17 +293,6 @@ void Anchor::RegisterHooks() {
                 // extension assigned before we serialise.
                 pendingSceneActorNetIdsBroadcast = true;
             }
-            // Clear the per-scene-visit send-dedup set so that enemies in the new
-            // scene can have their ENEMY_DEFEATED broadcast normally. Same gate
-            // reasoning as ClearScene above — the host's Karebaba respawn
-            // detector reads `HasDefeatBroadcast(netId)` during the actor's
-            // ~10s ACTORCAT_MISC death cycle; wiping mDefeatBroadcasts on an
-            // intermediate room transition would defeat the detector and the
-            // Karebaba would never broadcast its respawn.
-            if (sceneChanged) {
-                bookkeeping.ClearAllDefeatBroadcasts();
-            }
-            sLastSceneEntered = (int16_t)gPlayState->sceneNum;
             // Phase 5 #60 — clear the per-netId last-sent cache. netIds are reused
             // across scene visits (same posHash, same enemy), so a stale cached
             // snapshot from a previous visit would cause the predicate to skip
@@ -3051,18 +3036,46 @@ void Anchor::RegisterHooks() {
         // `e276aa74e` papered over the symptom for that one actor; this gate
         // fixes it for the entire enemy class.
         //
-        // sLastClearedSceneNum tracks the most recent sceneNum we cleared for.
-        // On scene CHANGE (sceneNum != prior), the clear fires; on intra-
-        // scene room transition (sceneNum == prior), it doesn't. The
-        // OnSceneSpawnActors clear below also fires on every scene init —
-        // both run for fresh entries; only this one is gated against
-        // intra-scene replays.
+        // mSceneDeaths peer-aware reset.
+        //
+        // Vanilla OoT respawns enemies whenever a scene is unloaded and
+        // reloaded. In multiplayer, the scene is "unloaded for everyone"
+        // only when no client is tracking it. So: on host scene-CHANGE
+        // (sceneNum != prior cleared), clear mSceneDeaths[scene] iff no
+        // remote client currently reports that scene.
+        //
+        // This restores vanilla parity for the "P1 alone leaves and
+        // returns to X" and "both leave and return to X" cases while
+        // preserving the multiplayer behaviour ("P1 leaves while P2 stays
+        // in X, P1 returns" → kills persist because P2 is still tracking).
+        //
+        // Race tolerance: if a peer is briefly in transition during the
+        // gate read, we may either clear (worst case: enemies respawn for
+        // both, recoverable) or not clear (worst case: kills persist one
+        // extra cycle). No crash either way.
         static int16_t sLastClearedSceneNum = -1;
         if (gPlayState != nullptr && gPlayState->numSetupActors > 0 &&
             ::SceneAuthority::IsEffectiveHost() &&
             (int16_t)gPlayState->sceneNum != sLastClearedSceneNum) {
-            EnemyStateSync::HostBookkeeping::Instance().ClearScene(gPlayState->sceneNum);
-            sLastClearedSceneNum = (int16_t)gPlayState->sceneNum;
+            const int16_t targetScene = (int16_t)gPlayState->sceneNum;
+            bool anyPeerInScene = false;
+            for (auto& [clientId, client] : Anchor::Instance->clients) {
+                if (!client.self && client.online && client.isSaveLoaded &&
+                    client.sceneNum == targetScene) {
+                    anyPeerInScene = true;
+                    break;
+                }
+            }
+            if (!anyPeerInScene) {
+                auto& bk = EnemyStateSync::HostBookkeeping::Instance();
+                bk.ClearScene(targetScene);
+                // Same gate clears the per-scene-visit broadcast-dedup set:
+                // without this, an enemy respawned by the clear above and
+                // re-killed later would have its ENEMY_DEFEATED dedup'd
+                // (peers never see the second kill).
+                bk.ClearAllDefeatBroadcasts();
+            }
+            sLastClearedSceneNum = targetScene;
         }
 
         bool isDynamicSpawn = (gPlayState->numSetupActors == 0);
@@ -3455,7 +3468,16 @@ void Anchor::RegisterHooks() {
                 // Overriding world.pos OR shape.rot causes the stem base to drift/wobble.
                 // Both are skipped here and in HandlePacket_EnemyUpdate; the state machine
                 // and jointTable sync keep each actor visually correct without overrides.
-                if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA) {
+                //
+                // ACTOR_FLAG_ATTACHED_TO_ARROW guard (cross-cutting): when an arrow
+                // pins the actor, position is driven by the parent arrow each frame.
+                // Re-applying the cached host position fights the arrow physics and
+                // teleports the actor back to its pre-pin location. Affects En_St,
+                // En_Sw, En_Bili, En_Bb, En_Crow, En_Firefly, En_Po_Sisters. Joint/
+                // rotation/scale re-apply continues normally — only world.pos and
+                // shape.rot are arrow-driven and need this skip.
+                const bool arrowPinned = (actor->flags & ACTOR_FLAG_ATTACHED_TO_ARROW) != 0;
+                if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA && !arrowPinned) {
                     actor->world.pos = ext->netPos;
                     actor->shape.rot = ext->netShapeRot;
                 }

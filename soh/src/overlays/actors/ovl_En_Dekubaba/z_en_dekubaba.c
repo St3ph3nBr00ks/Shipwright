@@ -24,6 +24,7 @@ void EnDekubaba_SetupPrepareLunge(EnDekubaba* this);
 void EnDekubaba_SetupLunge(EnDekubaba* this);
 void EnDekubaba_SetupPullBack(EnDekubaba* this);
 void EnDekubaba_SetupRecover(EnDekubaba* this);
+void EnDekubaba_SetupHit(EnDekubaba* this, s32 arg1);
 void EnDekubaba_SetupStunnedVertical(EnDekubaba* this);
 void EnDekubaba_SetupSway(EnDekubaba* this);
 void EnDekubaba_Wait(EnDekubaba* this, PlayState* play);
@@ -345,10 +346,11 @@ s16 EnDekubaba_GetStateIndex(EnDekubaba* this) {
  * double-fire `GameInteractor_ExecuteOnEnemyDefeat` (lines 417, 426) or
  * change category mid-frame.
  *
- * Hit (8) is also a no-op: SetupHit takes a numeric arg1 (timer value)
- * we don't currently transmit, and Hit is brief enough that the next
- * steady-state ENEMY_STATE packet snaps the non-host back to the post-Hit
- * state on the host.
+ * Hit (8) uses arg1=0 (the most common branch — `EnDekubaba_UpdateDamage`
+ * line 1143/1153). The arg1 affects the post-Hit transition (Recover vs
+ * StunnedVertical), but ApplyNetState only fires on a state change so the
+ * next host packet whose state differs from local will snap the non-host
+ * onto the right post-Hit branch; arg1 only governs one frame of behaviour.
  */
 void EnDekubaba_ApplyNetState(EnDekubaba* this, s16 stateIndex) {
     switch (stateIndex) {
@@ -360,11 +362,12 @@ void EnDekubaba_ApplyNetState(EnDekubaba* this, s16 stateIndex) {
         case 5:  EnDekubaba_SetupLunge(this);            break;
         case 6:  EnDekubaba_SetupPullBack(this);         break;
         case 7:  EnDekubaba_SetupRecover(this);          break;
+        case 8:  EnDekubaba_SetupHit(this, 0);           break;
         case 9:  EnDekubaba_SetupStunnedVertical(this);  break;
         case 10: EnDekubaba_SetupSway(this);             break;
         default:
-            // 8=Hit (needs arg), 11=PrunedSomersault / 12=ShrinkDie /
-            // 13=DeadStickDrop (death) — see header comment above.
+            // 11=PrunedSomersault / 12=ShrinkDie / 13=DeadStickDrop —
+            // see header comment above.
             return;
     }
 }
