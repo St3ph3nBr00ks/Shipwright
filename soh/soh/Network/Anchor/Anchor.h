@@ -523,6 +523,14 @@ class Anchor : public Network {
     void SendPacket_SceneDeathsCleared(int16_t sceneNum, uint8_t timeline);
     void HandlePacket_SceneDeathsCleared(nlohmann::json payload);
 
+    // #164 cutscene_start_end_detector_spec.md — host-only edge detector
+    // run from OnGameFrameUpdate; reads (currCsIndex, currCsState) and
+    // fires CUTSCENE_START / CUTSCENE_END when either signal crosses
+    // its respective IDLE→non-IDLE / non-IDLE→IDLE boundary. Maintains
+    // activeCutscenes across host AND non-host so migration handoff
+    // is automatic. Definition lives in Packets/CutsceneStartEnd.cpp.
+    void DetectAndSendCutsceneEdges(uint16_t currCsIndex, uint8_t currCsState);
+
   public:
     uint32_t ownClientId;
 
@@ -608,6 +616,16 @@ class Anchor : public Network {
     // clear scene-scoped buffered state for that scene so the next
     // entrant sees fresh actor pool (vanilla respawn parity).
     inline static const std::string SCENE_DEATHS_CLEARED  = "SCENE_DEATHS_CLEARED";
+
+    // #164 / cutscene_start_end_detector_spec.md — host detects cutscene
+    // edges via OR-of-two-edges on (gSaveContext.cutsceneIndex,
+    // gPlayState->csCtx.state) and broadcasts so peers can apply the
+    // matching state. Covers both save-context cutscenes (Master Sword
+    // pull, Sage chambers, etc.) and actor-internal cutscenes (Boss_Goma
+    // intro/defeat — driven via func_80064520/func_80064534 without
+    // writing cutsceneIndex).
+    inline static const std::string CUTSCENE_START        = "CUTSCENE_START";
+    inline static const std::string CUTSCENE_END          = "CUTSCENE_END";
 
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot. Host
     // broadcasts the per-static-actor netId table on scene-spawn so non-
@@ -739,6 +757,37 @@ class Anchor : public Network {
     // fires its own transition once in proximity of the trigger point.
     void SendPacket_SceneTransitionHandoff(s16 fromSceneNum, s16 toEntranceIndex,
                                            Vec3f triggerPos, s16 triggerRotY);
+
+    // #164 cutscene_start_end_detector_spec.md — sender + receiver pair.
+    // Host fires START on (cutsceneIndex 0→non-zero || csCtx.state IDLE→
+    // non-IDLE) edge; END on the symmetric falling edge. Receivers in
+    // same scene + same timeline write the matching state synchronously
+    // (cutsceneIndex for savecontext, csCtx.state for actor-internal).
+    // Idempotency keyed on (sceneNum, csKind, csKey) via activeCutscenes.
+    void SendPacket_CutsceneStart(const std::string& csKind, int32_t csKey, uint8_t csState);
+    void SendPacket_CutsceneEnd(const std::string& csKind, int32_t csKey,
+                                const std::string& endReason);
+    void HandlePacket_CutsceneStart(nlohmann::json payload);
+    void HandlePacket_CutsceneEnd(nlohmann::json payload);
+
+    // #164 — small list (typically 0-1 entries) of currently-active
+    // cutscenes scoped to (sceneNum, timeline, csKind, csKey). Tracked on
+    // ALL clients (host + non-host) so migration mid-cutscene leaves the
+    // new effective host with the correct active record and END detection
+    // works on the next IDLE drop. Cleared on scene change + Disable.
+    struct CutsceneActiveRecord {
+        int16_t     sceneNum;
+        uint8_t     timeline;
+        std::string csKind;
+        int32_t     csKey;
+    };
+    std::vector<CutsceneActiveRecord> activeCutscenes;
+    bool IsCutsceneActive(int16_t sceneNum, uint8_t timeline,
+                          const std::string& csKind, int32_t csKey) const;
+    void MarkCutsceneActive(int16_t sceneNum, uint8_t timeline,
+                            const std::string& csKind, int32_t csKey);
+    void MarkCutsceneInactive(int16_t sceneNum, uint8_t timeline,
+                              const std::string& csKind, int32_t csKey);
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);

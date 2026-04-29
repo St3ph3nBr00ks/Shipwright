@@ -380,6 +380,12 @@ void Anchor::RegisterHooks() {
             WorldStateSync::ApplyKnownFlagsForScene(
                 (int16_t)gPlayState->sceneNum,
                 (uint8_t)gSaveContext.linkAge);
+
+            // #164 — drop active-cutscene records on scene change.
+            // Stale entries would block legitimate START packets in the
+            // new scene, and an end-during-transition could otherwise
+            // leave an orphan that never clears.
+            activeCutscenes.clear();
         }
     });
 
@@ -557,6 +563,20 @@ void Anchor::RegisterHooks() {
             prevTransitionTrigger = curTrigger;
         } else {
             prevTransitionTrigger = TRANS_TRIGGER_OFF;
+        }
+
+        // #164 cutscene_start_end_detector_spec.md — read both control
+        // planes (gSaveContext.cutsceneIndex + gPlayState->csCtx.state)
+        // every frame and dispatch to the host-only edge detector. State
+        // tracking happens inside the detector so non-host's prev*
+        // statics stay current and migration mid-cutscene leaves the new
+        // effective host with a coherent baseline.
+        {
+            const uint16_t currCsIndex = gSaveContext.cutsceneIndex;
+            const uint8_t  currCsState = (gPlayState != nullptr)
+                                             ? gPlayState->csCtx.state
+                                             : (uint8_t)CS_STATE_IDLE;
+            DetectAndSendCutsceneEdges(currCsIndex, currCsState);
         }
     });
 

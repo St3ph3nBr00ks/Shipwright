@@ -142,6 +142,11 @@ void Anchor::Disable() {
     // room/team would mis-reassign netIds on the next scene-spawn.
     sceneActorNetIdSnapshots.clear();
     pendingSceneActorNetIdsBroadcast = false;
+
+    // #164 cutscene_start_end_detector_spec.md — drop active-cutscene
+    // tracking. Stale records would block legitimate START packets after
+    // re-enable.
+    activeCutscenes.clear();
 }
 
 void Anchor::OnConnected() {
@@ -352,6 +357,10 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_UpdateDungeonItems(payload);
             else if (packetType == SCENE_TRANSITION_HANDOFF)
                 HandlePacket_SceneTransitionHandoff(payload);
+            else if (packetType == CUTSCENE_START)
+                HandlePacket_CutsceneStart(payload);
+            else if (packetType == CUTSCENE_END)
+                HandlePacket_CutsceneEnd(payload);
             else if (packetType == WORLD_FLAG_SET)
                 HandlePacket_WorldFlagSet(payload);
             else if (packetType == WORLD_FLAG_UNSET)
