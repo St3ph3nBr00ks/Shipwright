@@ -2245,10 +2245,16 @@ static void BossGoma_ForceCutsceneSkip(BossGoma* this, PlayState* play) {
     if (this->subCameraId != 0) {
         // Save subcam state to main camera before releasing (matches the
         // natural exit pattern; avoids a one-frame camera snap).
+        // Defensive NULL guard added after logs 170/171 crash investigation:
+        // Play_GetCamera should never return NULL for index 0 in normal play,
+        // but during disable/re-enable transitions or migration windows the
+        // camera array can be in flux. Skip the snapshot rather than null-deref.
         cam = Play_GetCamera(play, 0);
-        cam->eye = this->subCameraEye;
-        cam->eyeNext = this->subCameraEye;
-        cam->at = this->subCameraAt;
+        if (cam != NULL) {
+            cam->eye = this->subCameraEye;
+            cam->eyeNext = this->subCameraEye;
+            cam->at = this->subCameraAt;
+        }
         func_800C08AC(play, this->subCameraId, 0);
         this->subCameraId = 0;
     }

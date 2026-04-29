@@ -3788,11 +3788,61 @@ void Anchor::RegisterHooks() {
                 BossGoma* g = (BossGoma*)actor;
                 s16 curState = BossGoma_GetStateIndex(g);
                 if (curState != ext->netStateIndex) {
-                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
-                        SPDLOG_INFO("[BossGoma] rx netId={} apply 0x{:02X}→0x{:02X}",
-                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    // Race fix (logs 170/171): when host transitions Boss_Goma
+                    // from Encounter (0x00) to combat (0x01) naturally, the
+                    // CUTSCENE_END packet lands ~450 ms AFTER the
+                    // ENEMY_STATE state-change packet. ApplyNetState's
+                    // force-cutscene-skip path then fires while
+                    // (a) csCtx.state on this client is still SKIPPABLE_INIT
+                    //     from our matching CUTSCENE_START receive, and
+                    // (b) the local Boss_Goma's Encounter actionFunc is
+                    //     mid-substate, possibly with `subCameraId` set.
+                    // ForceCutsceneSkip's release-sub-camera + flip-cs-state
+                    // races with the in-flight CUTSCENE_END's csCtx clear and
+                    // crashes the renderer (same RIP signature as #171's OOB
+                    // class but a different root cause).
+                    //
+                    // Fix: if THIS client is currently in a synced gohma_intro
+                    // cutscene (we received CUTSCENE_START and never received
+                    // the matching CUTSCENE_END yet), defer the state-machine
+                    // apply by one frame. The CUTSCENE_END arrives ~450 ms
+                    // later, clears csCtx + activeCutscenes, and the next
+                    // frame's apply runs through ApplyNetState's normal path
+                    // with disableGameplayLogic already false (set by the END
+                    // handler's IDLE write + Player_Update auto-clear).
+                    bool inSyncedGomaCutscene = false;
+                    // Two-condition gate so a lost CUTSCENE_END packet doesn't
+                    // wedge us indefinitely: defer ONLY when local csCtx.state
+                    // is still non-IDLE (cutscene actually still playing) AND
+                    // we have an activeCutscenes record for this boss. If
+                    // local CS naturally ended on its own (Encounter actionFunc
+                    // calling func_80064534), csCtx.state hits IDLE and we
+                    // fall through to normal apply.
+                    if (Anchor::Instance != nullptr && gPlayState != nullptr &&
+                        gPlayState->csCtx.state != CS_STATE_IDLE) {
+                        const int16_t sceneNum  = (int16_t)gPlayState->sceneNum;
+                        const uint8_t timeline  = (uint8_t)(gSaveContext.linkAge & 1);
+                        // csKey for actor-internal kinds is the boss netId.
+                        if (Anchor::Instance->IsCutsceneActive(sceneNum, timeline,
+                                                               "gohma_intro",
+                                                               (int32_t)ext->netId)) {
+                            inSyncedGomaCutscene = true;
+                        }
                     }
-                    BossGoma_ApplyNetState(g, gPlayState, ext->netStateIndex);
+                    const bool combatStateNet = (ext->netStateIndex >= 0x01 &&
+                                                 ext->netStateIndex <= 0x10);
+                    if (inSyncedGomaCutscene && combatStateNet) {
+                        if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                            SPDLOG_INFO("[BossGoma] rx netId={} defer net=0x{:02X} local=0x{:02X} (waiting for CUTSCENE_END)",
+                                        ext->netId, (int)ext->netStateIndex, (int)curState);
+                        }
+                    } else {
+                        if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                            SPDLOG_INFO("[BossGoma] rx netId={} apply 0x{:02X}→0x{:02X}",
+                                        ext->netId, (int)curState, (int)ext->netStateIndex);
+                        }
+                        BossGoma_ApplyNetState(g, gPlayState, ext->netStateIndex);
+                    }
                 }
             }
 
