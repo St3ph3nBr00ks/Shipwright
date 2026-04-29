@@ -144,9 +144,14 @@ void Anchor::Disable() {
     pendingSceneActorNetIdsBroadcast = false;
 
     // #164 cutscene_start_end_detector_spec.md — drop active-cutscene
-    // tracking. Stale records would block legitimate START packets after
-    // re-enable.
+    // tracking AND detector state. Audit-fix for the disable-mid-cutscene
+    // case: prev* statics were retained across Disable→Enable, so on
+    // re-enable the detector saw "prev=non-IDLE, curr=non-IDLE" and
+    // treated an in-progress cutscene as already-tracked, missing both
+    // the START re-fire and the eventual END (activeCutscenes was empty,
+    // so the END loop found nothing to send).
     activeCutscenes.clear();
+    ResetCutsceneDetectorState();
 }
 
 void Anchor::OnConnected() {

@@ -1085,6 +1085,29 @@ s16 EnSw_GetStateIndex(EnSw* this) {
     return -1;
 }
 
+// Direct actionFunc assignment (no Setup* indirection) — deliberate.
+//
+// z_en_sw.c has no public Setup* helpers; every state-entry side effect
+// (animation morph, audio, collider re-setup) lives at the START of the
+// destination actionFunc itself, gated on a per-state init flag. Each
+// state body's first frame on entry initialises its locals from
+// `this->unk_*` fields whose values were established by the previous
+// state. So a non-host receiver that swaps actionFunc directly will,
+// on the next update tick, run the destination state's init branch and
+// reach correct steady state within one frame.
+//
+// What is NOT preserved by direct assignment: animation morph timing
+// across the boundary (the destination state's "expects to have just
+// morphed in" assumption is broken on a cold swap). In practice the
+// host's per-frame ENEMY_STATE pose-table sync (jointTable + morphTable)
+// overwrites the visual state regardless, so the cold-swap penalty is
+// invisible. This was verified during the 2026-04-29 field test on
+// Inside Great Deku Tree wall Skullwalltulas.
+//
+// If a future state body adds a true cold-init dependency (e.g. reads
+// a struct field cleared on boundary, schedules an SFX that needs a
+// timer reset), expose a public EnSw_SetupStateXxx helper and route
+// through it here.
 void EnSw_ApplyNetState(EnSw* this, s16 stateIndex) {
     switch (stateIndex) {
         // 0/1 — gold init/toss-flight, transient. Skip.

@@ -1120,23 +1120,24 @@ void EnSt_SetupDyingNet(EnSt* this, PlayState* play) {
 
 s16 EnSt_GetStateIndex(EnSt* this) {
     if (this->actionFunc == EnSt_StartOnCeilingOrGround) return 0;
-    // 1 = WaitOnCeiling — declared static in this .c, not in header.
-    // Compare via the Setup* function pointer instead: if actionFunc
-    // matches none of the headed funcs and the act is in ceiling state,
-    // call it WaitOnCeiling. Simpler: identify via remaining funcs.
-    // Per plan §2 the 9 funcs from this file map cleanly; the wait/move/
-    // land funcs are file-static so we identify them by elimination.
+    // 1 = WaitOnCeiling, 3 = LandOnGround — both declared file-static
+    // in this .c with no public Setup* helpers. We can't compare against
+    // them directly from the header-imported address, so for unmatched
+    // actionFuncs we return -1.
+    //
+    // Audit-fix (post-8b1bad802): the original implementation returned
+    // 1 (WaitOnCeiling) as a fallback, which silently mislabelled
+    // state 3 (LandOnGround) as state 1 on the wire and caused the
+    // receive driver to no-op on legitimate state-3 transitions. The
+    // -1 sentinel makes the call site's `ext->netStateIndex >= 0` gate
+    // skip uncertain states cleanly.
     if (this->actionFunc == EnSt_MoveToGround)         return 2;
     if (this->actionFunc == EnSt_WaitOnGround)         return 4;
     if (this->actionFunc == EnSt_ReturnToCeiling)      return 5;
     if (this->actionFunc == EnSt_BounceAround)         return 6;
     if (this->actionFunc == EnSt_FinishBouncing)       return 7;
     if (this->actionFunc == EnSt_Die)                  return 8;
-    // 1 (WaitOnCeiling) and 3 (LandOnGround) are file-static; treat any
-    // unrecognised actionFunc as 1 (dormant) — the dormant-to-active
-    // filter at the call site prevents this from regressing an active
-    // ground state.
-    return 1;
+    return -1;
 }
 
 void EnSt_ApplyNetState(EnSt* this, s16 stateIndex) {

@@ -82,6 +82,12 @@ void Anchor::MarkCutsceneInactive(int16_t sceneNum, uint8_t timeline,
 // (input-lock benefit) on receivers.
 namespace {
 
+// First-Boss_Goma-only classifier. Sufficient for the demo scope —
+// vanilla never spawns multiple Boss_Goma actors in one room, and the
+// First Dungeon Demo (#167) doesn't introduce mods that would. If a
+// future scenario does spawn two simultaneously, the second's intro/
+// defeat cutscenes would mis-classify; classifier should then walk all
+// matches and prefer the one currently in cutscene state.
 const char* ClassifyBossGomaKind() {
     if (gPlayState == nullptr) return nullptr;
     Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head;
@@ -90,7 +96,7 @@ const char* ClassifyBossGomaKind() {
             const s16 idx = BossGoma_GetStateIndex((BossGoma*)a);
             if (idx == 0x20) return "gohma_death";
             if (idx == 0x00) return "gohma_intro";
-            return "gohma_other"; // combat/pre-defeat — won't fire CS edges
+            return "gohma_other";
         }
         a = a->next;
     }
@@ -136,37 +142,39 @@ int32_t DeriveCsKey(const std::string& csKind, uint16_t currCsIndex) {
 // activeCutscenes for migration robustness)
 // ---------------------------------------------------------------------
 
-void Anchor::DetectAndSendCutsceneEdges(uint16_t currCsIndex, uint8_t currCsState) {
-    static uint16_t prevCsIndex = 0;
-    static uint8_t  prevCsState = CS_STATE_IDLE;
-    static bool     prevSaveLoaded = false;
+void Anchor::ResetCutsceneDetectorState() {
+    cutscenePrevCsIndex    = 0;
+    cutscenePrevCsState    = CS_STATE_IDLE;
+    cutscenePrevSaveLoaded = false;
+}
 
+void Anchor::DetectAndSendCutsceneEdges(uint16_t currCsIndex, uint8_t currCsState) {
     const bool nowLoaded = IsSaveLoaded();
 
     // Re-initialise on the rising edge of save-load so the first frame
     // after entering a save doesn't fire a phantom START from a stale
     // title-screen value.
-    if (nowLoaded && !prevSaveLoaded) {
-        prevCsIndex = currCsIndex;
-        prevCsState = currCsState;
-        prevSaveLoaded = true;
+    if (nowLoaded && !cutscenePrevSaveLoaded) {
+        cutscenePrevCsIndex    = currCsIndex;
+        cutscenePrevCsState    = currCsState;
+        cutscenePrevSaveLoaded = true;
         return;
     }
-    prevSaveLoaded = nowLoaded;
+    cutscenePrevSaveLoaded = nowLoaded;
     if (!nowLoaded || gPlayState == nullptr) {
-        prevCsIndex = currCsIndex;
-        prevCsState = currCsState;
+        cutscenePrevCsIndex = currCsIndex;
+        cutscenePrevCsState = currCsState;
         return;
     }
 
-    const bool indexEdgeStart = (prevCsIndex == 0) && (currCsIndex != 0);
+    const bool indexEdgeStart = (cutscenePrevCsIndex == 0) && (currCsIndex != 0);
     const bool stateEdgeStart =
-        (prevCsState == CS_STATE_IDLE) && (currCsState != CS_STATE_IDLE);
+        (cutscenePrevCsState == CS_STATE_IDLE) && (currCsState != CS_STATE_IDLE);
     const bool startEdge = indexEdgeStart || stateEdgeStart;
 
-    const bool indexEdgeEnd = (prevCsIndex != 0) && (currCsIndex == 0);
+    const bool indexEdgeEnd = (cutscenePrevCsIndex != 0) && (currCsIndex == 0);
     const bool stateEdgeEnd =
-        (prevCsState != CS_STATE_IDLE) && (currCsState == CS_STATE_IDLE);
+        (cutscenePrevCsState != CS_STATE_IDLE) && (currCsState == CS_STATE_IDLE);
     const bool endEdge = indexEdgeEnd || stateEdgeEnd;
 
     // Both host and non-host need to keep prev* up to date so migration
@@ -174,8 +182,8 @@ void Anchor::DetectAndSendCutsceneEdges(uint16_t currCsIndex, uint8_t currCsStat
     // local client becomes effective host. But only the effective host
     // emits packets and updates the dedup bookkeeping.
     if (!::SceneAuthority::IsEffectiveHost()) {
-        prevCsIndex = currCsIndex;
-        prevCsState = currCsState;
+        cutscenePrevCsIndex = currCsIndex;
+        cutscenePrevCsState = currCsState;
         return;
     }
 
@@ -215,8 +223,8 @@ void Anchor::DetectAndSendCutsceneEdges(uint16_t currCsIndex, uint8_t currCsStat
         }
     }
 
-    prevCsIndex = currCsIndex;
-    prevCsState = currCsState;
+    cutscenePrevCsIndex = currCsIndex;
+    cutscenePrevCsState = currCsState;
 }
 
 // ---------------------------------------------------------------------
@@ -287,8 +295,24 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
 
     const std::string csKind   = payload.value("csKind",  std::string("actor_unknown"));
     const int32_t     csKey    = payload.value("csKey",   (int32_t)-1);
-    const uint8_t     csState  = payload.value("csState", (uint8_t)CS_STATE_SKIPPABLE_INIT);
+    uint8_t           csState  = payload.value("csState", (uint8_t)CS_STATE_SKIPPABLE_INIT);
     const uint8_t     timeline = (uint8_t)(gSaveContext.linkAge & 1);
+
+    // Bounds-clamp incoming csState to the valid CS_STATE_* enum range
+    // (0..4 per z64cutscene.h:97-103). Defends against a malicious or
+    // corrupted peer injecting an out-of-range value into csCtx.state,
+    // which the engine's state machine doesn't validate.
+    if (csState > CS_STATE_UNSKIPPABLE_EXEC) {
+        SPDLOG_WARN("[CutsceneStart] Out-of-range csState={} from peer; clamping to SKIPPABLE_INIT",
+                    (int)csState);
+        csState = CS_STATE_SKIPPABLE_INIT;
+    }
+    // SKIPPABLE_INIT is the safe default for "actor-internal cutscene
+    // begins" — it's also what every save-context CS rises to after one
+    // frame, so receivers never enter the post-START flow with state==0.
+    if (csState == CS_STATE_IDLE) {
+        csState = CS_STATE_SKIPPABLE_INIT;
+    }
 
     if (IsCutsceneActive(sceneNum, timeline, csKind, csKey)) {
         // Adjacent-frame index/state re-fire from the host arriving as a

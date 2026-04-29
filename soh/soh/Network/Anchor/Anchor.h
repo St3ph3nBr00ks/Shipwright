@@ -110,6 +110,12 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play);
 // is file-scope static in Packets/EnemyUpdate.cpp.
 void Anchor_ClearEnemyUpdateCache();
 
+// Per-netId cache eviction. Forces the next SendPacket_EnemyUpdate(netId)
+// to bypass the dedup filter even when the actor's state is unchanged.
+// Used by #166 mid-boss late-join snapshot — the joining peer needs the
+// packet immediately, regardless of what other peers have already received.
+void Anchor_ClearEnemyUpdateCacheForNetId(uint32_t netId);
+
 typedef struct AnchorClient {
     uint32_t clientId;
     std::string name;
@@ -788,6 +794,18 @@ class Anchor : public Network {
                             const std::string& csKind, int32_t csKey);
     void MarkCutsceneInactive(int16_t sceneNum, uint8_t timeline,
                               const std::string& csKind, int32_t csKey);
+
+    // #164 detector state — previously file-scope statics in
+    // CutsceneStartEnd.cpp. Hoisted to Anchor members per audit so
+    // Disable() / Enable() can reset them. Otherwise a disable→re-enable
+    // mid-cutscene leaves stale prev* values, causing the post-Enable
+    // first frame to (a) miss a START it should have re-fired and
+    // (b) emit an END whose activeCutscenes has already been cleared,
+    // leaving peers stuck in cutscene-locked state.
+    uint16_t cutscenePrevCsIndex     = 0;
+    uint8_t  cutscenePrevCsState     = 0;  // CS_STATE_IDLE
+    bool     cutscenePrevSaveLoaded  = false;
+    void ResetCutsceneDetectorState();
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);

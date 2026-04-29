@@ -276,11 +276,30 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         // children[3], animId, curFrame, position, rotation, health,
         // scale) — peer's local boss applies and snaps to host's state.
         //
-        // Trigger: host-only, room-or-scene change, peer now in host's room.
-        // Cost: O(BOSS-actors-in-room) which is ~1 in normal play.
+        // Trigger: host-only, room-or-scene change, peer now in host's room,
+        // and same timeline. Cost: O(BOSS-actors-in-room) which is ~1 in
+        // normal play.
+        //
+        // Audit fix (post-bcecfeb6c): two issues addressed in-place.
+        //   1. Cache filter — SendPacket_EnemyUpdate consults sLastSentByNetId
+        //      and skips no-op packets. In steady state the cache holds the
+        //      boss's current values from earlier broadcasts, so the snapshot
+        //      would silently no-op. Evict the per-netId cache entry first
+        //      via Anchor_ClearEnemyUpdateCacheForNetId so the send actually
+        //      transmits.
+        //   2. Cross-timeline gate — Pillar B ENEMY_STATE handler already
+        //      drops cross-timeline packets on the receive side via the
+        //      timeline bit on netId, but firing them at all is wasteful
+        //      and risks mis-attribution if a future scene becomes shared
+        //      between adult/child. Compare host's linkAge to the joining
+        //      peer's linkAge before snapshotting.
         const s8 newCurRoomNum = clients[clientId].curRoomNum;
         const bool roomChanged = (sceneChanged || prevCurRoomNum != newCurRoomNum);
+        const u8   hostTimeline = (u8)(gSaveContext.linkAge & 1);
+        const u8   peerTimeline = (u8)(clients[clientId].linkAge & 1);
+        const bool sameTimeline = (hostTimeline == peerTimeline);
         if (::SceneAuthority::IsEffectiveHost() && nowLoaded && roomChanged &&
+            sameTimeline &&
             gPlayState != nullptr && (s16)gPlayState->sceneNum == newScene &&
             (s8)gPlayState->roomCtx.curRoom.num == newCurRoomNum) {
             int snapped = 0;
@@ -290,6 +309,11 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                     const EnemyNetId* ext =
                         ObjectExtension::GetInstance().Get<EnemyNetId>(a);
                     if (ext != nullptr) {
+                        // Evict dedup cache so the send is not filtered by
+                        // ShouldSkipEnemyUpdate's "no-delta-since-last-send"
+                        // check. The cache will repopulate on this very
+                        // SendPacket_EnemyUpdate call.
+                        Anchor_ClearEnemyUpdateCacheForNetId(ext->netId);
                         SendPacket_EnemyUpdate(ext->netId, a);
                         snapped++;
                     }

@@ -379,6 +379,16 @@ void Anchor_ClearEnemyUpdateCache() {
     sLastSentByNetId.clear();
 }
 
+// Public — drop a single netId from the dedup cache so the next
+// SendPacket_EnemyUpdate(netId, ...) bypasses the no-delta filter and
+// actually transmits. Used by #166's mid-boss late-join snapshot, where
+// we WANT the packet to go out even if the steady-state cache thinks
+// nothing has changed since the last broadcast (the joining peer hasn't
+// seen any of those broadcasts yet).
+void Anchor_ClearEnemyUpdateCacheForNetId(uint32_t netId) {
+    sLastSentByNetId.erase(netId);
+}
+
 // ===========================================================================
 // SEND SIDE — phase-specific senders (called from HookHandlers.cpp + others).
 // All four set type=ENEMY_STATE and stamp the matching phase tag.

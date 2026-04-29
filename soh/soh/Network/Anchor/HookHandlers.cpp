@@ -3801,9 +3801,19 @@ void Anchor::RegisterHooks() {
             // sync. swType-gated dormant-to-active filter:
             //   combat (swType=0): dormant=6 (wall idle); active=7/8/9
             //                      (lunge / decel / return).
-            //   gold (swType>=1):  dormant=2 (idle); active=0/1 (init/
-            //                      flight transients).
+            //   gold (swType>=1):  init transients=0/1 (init / toss-flight,
+            //                      brief), settled=2 (idle on web).
             // Death states gated by PhaseImpliesHasLocalDeath.
+            //
+            // Audit-fix for the gold variant: states 0/1 are init transients
+            // that fire briefly during Init then transition to state 2.
+            // The ORIGINAL filter blocked "net dormant=2 over local active=0/1"
+            // — protecting the receiver while it finished its own init.
+            // But it did NOT block the inverse: if local had naturally
+            // settled to state 2 (the steady state) and an outdated host
+            // packet still says 0 or 1 (host's init transient), we'd
+            // regress local from settled-to-init. Symmetric guard: gold's
+            // init transients (0/1) are NEVER applied to a settled state-2.
             if (actor->id == ACTOR_EN_SW && ext->netStateIndex >= 0 &&
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 EnSw* sw = (EnSw*)actor;
@@ -3817,10 +3827,16 @@ void Anchor::RegisterHooks() {
                     deathStateNet    = (ext->netStateIndex == 4 || ext->netStateIndex == 5);
                     blockTransition  = (netDormant && localActive);
                 } else {
+                    // gold: 0/1 are init transients; 2 is the settled state.
+                    bool netInitTransient = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
+                    bool localSettledIdle = (curState == 2);
                     bool netDormant  = (ext->netStateIndex == 2);
                     bool localActive = (curState == 0 || curState == 1);
                     deathStateNet    = (ext->netStateIndex == 3);
-                    blockTransition  = (netDormant && localActive);
+                    // Original guard + new symmetric guard against
+                    // settled→init regression.
+                    blockTransition  = (netDormant && localActive)
+                                    || (netInitTransient && localSettledIdle);
                 }
                 if (curState != ext->netStateIndex && !blockTransition && !deathStateNet) {
                     EnSw_ApplyNetState(sw, ext->netStateIndex);
