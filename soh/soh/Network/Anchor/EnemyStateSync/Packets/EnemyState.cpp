@@ -920,43 +920,75 @@ actor_found:
         // value within one frame.
         if (actor->id == ACTOR_BOSS_GOMA) {
             BossGoma* g = (BossGoma*)actor;
-            if (payload.contains("bossGomaCutsceneSubState")) {
-                g->actionState = (s16)payload["bossGomaCutsceneSubState"].get<int>();
-            }
-            if (payload.contains("bossGomaVisualState")) {
-                g->visualState = (s16)payload["bossGomaVisualState"].get<int>();
-            }
-            if (payload.contains("bossGomaEyeState")) {
-                g->eyeState = (s16)payload["bossGomaEyeState"].get<int>();
-            }
-            if (payload.contains("bossGomaInvincibility")) {
-                g->invincibilityFrames = (s16)payload["bossGomaInvincibility"].get<int>();
-            }
-            if (payload.contains("bossGomaSpawnTimer")) {
-                g->spawnGohmasActionTimer = (s16)payload["bossGomaSpawnTimer"].get<int>();
-            }
-            if (payload.contains("bossGomaLookedAtFrames")) {
-                g->lookedAtFrames = (s16)payload["bossGomaLookedAtFrames"].get<int>();
-            }
-            if (payload.contains("bossGomaChildren")) {
-                const auto& kids = payload["bossGomaChildren"];
-                if (kids.is_array() && kids.size() >= 3) {
-                    g->childrenGohmaState[0] = (s16)kids[0].get<int>();
-                    g->childrenGohmaState[1] = (s16)kids[1].get<int>();
-                    g->childrenGohmaState[2] = (s16)kids[2].get<int>();
+
+            // Cross-state field-write gate (logs 170/171/176 crash class).
+            //
+            // The Boss_Goma struct fields below are state-dependent:
+            // `actionState` (offset 0x01D0) has different semantics in
+            // BossGoma_Encounter (cutscene substate progression) vs.
+            // BossGoma_FloorMain (combat sub-action). `visualState`,
+            // `eyeState`, `spawnGohmasActionTimer`, `childrenGohmaState[]`
+            // are similarly tied to the actionFunc that wrote them.
+            //
+            // Writing host's FloorMain-context value into P2's local
+            // Encounter-context `actionState` puts P2's local Encounter
+            // actionFunc into a substate it never expected. Next frame
+            // it reads garbage state and dereferences something at
+            // offset 0x10 → crash with RAX=0 RBX=0x10 unwinder fallback.
+            //
+            // Fix: only apply field writes when local actionState index
+            // matches the payload's. Mismatches mean the boss is mid-
+            // state-transition; the OnActorUpdate driver block will run
+            // BossGoma_ApplyNetState shortly and converge state. Once
+            // both sides agree on the actionFunc, field writes resume
+            // and visual sync (eye state, looked-at frames, etc.) catches
+            // up within one packet.
+            const s16 localStateIdx = BossGoma_GetStateIndex(g);
+            const s16 netStateIdx   = payload.value("actionState", (int)-1);
+            const bool stateAligned = (netStateIdx >= 0) && (localStateIdx == netStateIdx);
+
+            if (stateAligned) {
+                if (payload.contains("bossGomaCutsceneSubState")) {
+                    g->actionState = (s16)payload["bossGomaCutsceneSubState"].get<int>();
+                }
+                if (payload.contains("bossGomaVisualState")) {
+                    g->visualState = (s16)payload["bossGomaVisualState"].get<int>();
+                }
+                if (payload.contains("bossGomaEyeState")) {
+                    g->eyeState = (s16)payload["bossGomaEyeState"].get<int>();
+                }
+                if (payload.contains("bossGomaInvincibility")) {
+                    g->invincibilityFrames = (s16)payload["bossGomaInvincibility"].get<int>();
+                }
+                if (payload.contains("bossGomaSpawnTimer")) {
+                    g->spawnGohmasActionTimer = (s16)payload["bossGomaSpawnTimer"].get<int>();
+                }
+                if (payload.contains("bossGomaLookedAtFrames")) {
+                    g->lookedAtFrames = (s16)payload["bossGomaLookedAtFrames"].get<int>();
+                }
+                if (payload.contains("bossGomaChildren")) {
+                    const auto& kids = payload["bossGomaChildren"];
+                    if (kids.is_array() && kids.size() >= 3) {
+                        g->childrenGohmaState[0] = (s16)kids[0].get<int>();
+                        g->childrenGohmaState[1] = (s16)kids[1].get<int>();
+                        g->childrenGohmaState[2] = (s16)kids[2].get<int>();
+                    }
+                }
+                // Plan §5 — SkelAnime sync via animation enum + curFrame.
+                // BossGoma_ApplyAnimation force-changes the animation pointer
+                // (with default LOOP mode) only when the local pointer differs
+                // from host's; the actionState-driven SetupXxx fixes the mode
+                // (LOOP vs ONCE) within ~1 frame if it should be ONCE.
+                // curFrame is always applied so the playback phase matches.
+                if (payload.contains("bossGomaAnimId") && payload.contains("bossGomaCurFrame")) {
+                    u8  animId   = (u8)payload["bossGomaAnimId"].get<int>();
+                    f32 curFrame = payload["bossGomaCurFrame"].get<float>();
+                    BossGoma_ApplyAnimation(g, animId, curFrame);
                 }
             }
-            // Plan §5 — SkelAnime sync via animation enum + curFrame.
-            // BossGoma_ApplyAnimation force-changes the animation pointer
-            // (with default LOOP mode) only when the local pointer differs
-            // from host's; the actionState-driven SetupXxx fixes the mode
-            // (LOOP vs ONCE) within ~1 frame if it should be ONCE.
-            // curFrame is always applied so the playback phase matches.
-            if (payload.contains("bossGomaAnimId") && payload.contains("bossGomaCurFrame")) {
-                u8  animId   = (u8)payload["bossGomaAnimId"].get<int>();
-                f32 curFrame = payload["bossGomaCurFrame"].get<float>();
-                BossGoma_ApplyAnimation(g, animId, curFrame);
-            }
+            // else: skip field writes; OnActorUpdate's BossGoma_ApplyNetState
+            // will transition the actionFunc next frame, then on the
+            // following packet stateAligned will be true and writes resume.
         }
         // Bug 2 follow-on — apply host's stem angles directly to the local
         // actor so EnDekubaba_UpdateHeadPosition (called every frame inside
