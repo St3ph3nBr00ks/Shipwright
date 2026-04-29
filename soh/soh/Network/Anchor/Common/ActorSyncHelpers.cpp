@@ -1,4 +1,6 @@
 #include "ActorSyncHelpers.h"
+#include "soh/ObjectExtension/ObjectExtension.h"
+#include "soh/Network/Anchor/Anchor.h"
 
 extern "C" {
 #include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
@@ -79,4 +81,37 @@ uint32_t EncodeEnemyNetId(Actor* actor) {
     return (scenePart << 16) |
            ((uint32_t)(uint16_t)actor->id << 8) |
            posHash;
+}
+
+uint32_t EncodeUniqueDynamicNetId(Actor* actor) {
+    if (gPlayState == nullptr) return EncodeEnemyNetId(actor);
+
+    uint32_t netId = EncodeEnemyNetId(actor);
+    const uint32_t base = netId & 0xFFFFFF00;  // top 24 bits stay fixed
+
+    // Linear-probe the low 8 bits for an unclaimed posHash slot. Walks
+    // every syncable actor category looking for an existing EnemyNetId
+    // extension whose netId matches; bumps and retries on collision.
+    for (int probe = 0; probe < 256; probe++) {
+        bool collides = false;
+        for (size_t i = 0; i < kSyncableActorCategoriesCount && !collides; i++) {
+            Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
+            while (a != nullptr) {
+                if (a != actor) {
+                    const EnemyNetId* ext =
+                        ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                    if (ext != nullptr && ext->netId == netId) {
+                        collides = true;
+                        break;
+                    }
+                }
+                a = a->next;
+            }
+        }
+        if (!collides) return netId;
+        // Bump posHash by 1 (mod 256) and retry.
+        netId = base | (((netId + 1) & 0xFF));
+    }
+    // 256 collisions — extreme overflow, return whatever we have.
+    return netId;
 }

@@ -517,6 +517,12 @@ class Anchor : public Network {
     void HandlePacket_WorldStateRequest(nlohmann::json payload);
     void HandlePacket_WorldStateSnapshot(nlohmann::json payload);
 
+    // Test 1.5 exit-gated fix — broadcast on host when a scene becomes
+    // unoccupied. Clears mSceneDeaths/mDefeatBroadcasts on host and
+    // pendingKillNetIds for that scene on every client.
+    void SendPacket_SceneDeathsCleared(int16_t sceneNum, uint8_t timeline);
+    void HandlePacket_SceneDeathsCleared(nlohmann::json payload);
+
   public:
     uint32_t ownClientId;
 
@@ -596,6 +602,12 @@ class Anchor : public Network {
     inline static const std::string WORLD_FLAG_UNSET      = "WORLD_FLAG_UNSET";
     inline static const std::string WORLD_STATE_REQUEST   = "WORLD_STATE_REQUEST";
     inline static const std::string WORLD_STATE_SNAPSHOT  = "WORLD_STATE_SNAPSHOT";
+
+    // Test 1.5 exit-gated fix — host broadcasts when a scene becomes
+    // unoccupied (last player + host all transitioned out). Receivers
+    // clear scene-scoped buffered state for that scene so the next
+    // entrant sees fresh actor pool (vanilla respawn parity).
+    inline static const std::string SCENE_DEATHS_CLEARED  = "SCENE_DEATHS_CLEARED";
 
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot. Host
     // broadcasts the per-static-actor netId table on scene-spawn so non-

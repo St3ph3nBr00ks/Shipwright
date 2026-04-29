@@ -49,6 +49,14 @@ public:
     // while discarding kills for other scenes (Fix 35).
     void ClearStalePendingKillsFromOtherScenes(uint16_t currentScene);
 
+    // Drops entries whose encoded (sceneNum, timeline) MATCHES the
+    // arguments. Used by SCENE_DEATHS_CLEARED handler when the host
+    // detects that a scene has become unoccupied — every client clears
+    // its locally-buffered pending kills for that scene so the next
+    // entrant sees the actor pool fresh (vanilla respawn parity, Test
+    // 1.5 exit-gated fix). Pass `timeline = 0xFF` to match any.
+    void ClearPendingKillsForScene(int16_t sceneNum, uint8_t timeline);
+
     // ----- deadEnemiesByScene -----
     void RecordSceneDeath(int16_t sceneNum, uint32_t netId);
     void ClearSceneDeath(int16_t sceneNum, uint32_t netId);

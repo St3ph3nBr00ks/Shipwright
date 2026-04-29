@@ -358,6 +358,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_WorldStateRequest(payload);
             else if (packetType == WORLD_STATE_SNAPSHOT)
                 HandlePacket_WorldStateSnapshot(payload);
+            else if (packetType == SCENE_DEATHS_CLEARED)
+                HandlePacket_SceneDeathsCleared(payload);
         } catch (const std::exception& e) {
             SPDLOG_ERROR("[Anchor] Exception while processing incoming packet {}", e.what());
             SPDLOG_ERROR("[Anchor] Packet: {}", payload.dump());

@@ -177,23 +177,43 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         // but the non-host's OnSceneSpawnActors still fires and bumps its epoch.
         bool     sceneSpawned        = (prevSceneSpawnEpoch != newSceneSpawnEpoch);
 
-        // Vanilla respawn parity: when ALL participants have left a scene and
-        // any of them returns, the scene is freshly loaded for everyone — so
-        // mSceneDeaths must drop. The host-only `OnActorSpawn` peer-aware
-        // gate catches the host-returning case; this sibling site catches the
-        // client-returning case (test 4 of 2026-04-28: client re-entered an
-        // emptied scene, host's mSceneDeaths still held kills, the replay
-        // block below sent stale ENEMY_STATE/DyingByLocal and the enemies
-        // appeared dead despite being alive on the local fresh spawn).
+        // Exit-gated vacancy detection (Test 1.5 fix follow-up).
+        // PRIMARY trigger: when this client transitions OUT of a scene
+        // (prevSceneNum != newScene), check whether anyone is still in
+        // prevSceneNum. If not, the scene just became empty — broadcast
+        // SCENE_DEATHS_CLEARED so every client clears its scene-scoped
+        // buffered state in lockstep (host's mSceneDeaths and every
+        // client's locally-buffered pendingKillNetIds).
         //
-        // Trigger: this client just transitioned INTO newScene, and right
-        // now no peer (and no host) is in newScene. The host walks its own
-        // sceneNum + every OTHER client's sceneNum to confirm vacancy.
-        // Race-tolerant: a peer mid-transition will either (a) still report
-        // their old scene, in which case vacancy holds and we clear (correct
-        // because they're not actually tracking newScene yet), or (b) already
-        // report newScene, in which case we don't clear (correct because the
-        // peer has live state for it).
+        // Race-tolerant: peer-presence check happens AFTER applying this
+        // client's sceneNum change. A peer mid-transition will either
+        // still report the prior scene (vacancy doesn't hold, we don't
+        // fire) or already report a different scene (vacancy holds).
+        if (::SceneAuthority::IsEffectiveHost() && wasSaveLoaded && sceneChanged &&
+            prevSceneNum >= 0) {
+            bool anyOtherInPrevScene =
+                (gPlayState != nullptr && (s16)gPlayState->sceneNum == prevSceneNum);
+            if (!anyOtherInPrevScene) {
+                for (auto& [otherId, other] : clients) {
+                    if (otherId == clientId) continue;
+                    if (!other.online || !other.isSaveLoaded || other.self) continue;
+                    if (other.sceneNum == prevSceneNum) {
+                        anyOtherInPrevScene = true;
+                        break;
+                    }
+                }
+            }
+            if (!anyOtherInPrevScene) {
+                // 0xFF = match any timeline. We don't track per-client
+                // timeline state granularly here; broadcast clears the
+                // entire scene's state regardless.
+                SendPacket_SceneDeathsCleared(prevSceneNum, 0xFF);
+            }
+        }
+
+        // Belt-and-suspenders: keep entry-gated vacancy check as a
+        // backstop for any case the exit-gated path missed (e.g.,
+        // ungraceful disconnect where the OUT-transition wasn't observed).
         if (::SceneAuthority::IsEffectiveHost() && nowLoaded && sceneChanged) {
             bool anyOtherInNewScene =
                 (gPlayState != nullptr && (s16)gPlayState->sceneNum == newScene);
@@ -212,7 +232,7 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                 bk.ClearScene(newScene);
                 bk.ClearAllDefeatBroadcasts();
                 SPDLOG_INFO("[UpdateClientState] Scene {} was empty before client {} entered "
-                            "— cleared mSceneDeaths/mDefeatBroadcasts (vanilla respawn parity)",
+                            "— entry-gated backstop cleared mSceneDeaths/mDefeatBroadcasts",
                             (int)newScene, clientId);
             }
         }

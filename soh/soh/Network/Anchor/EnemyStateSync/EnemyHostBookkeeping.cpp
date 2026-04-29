@@ -50,6 +50,26 @@ void HostBookkeeping::ClearStalePendingKillsFromOtherScenes(uint16_t currentScen
     }
 }
 
+void HostBookkeeping::ClearPendingKillsForScene(int16_t sceneNum, uint8_t timeline) {
+    // Inverse of ClearStalePendingKillsFromOtherScenes — drops entries that
+    // DO match the (sceneNum, timeline) tuple. Used by the exit-gated
+    // SCENE_DEATHS_CLEARED handler so a scene that's been emptied is
+    // reset to fresh state on every client.
+    const uint16_t maskedScene = (uint16_t)(sceneNum & 0x7FFF);
+    const bool     anyTimeline = (timeline == 0xFF);
+    for (auto it = mPendingKills.begin(); it != mPendingKills.end();) {
+        const uint16_t entryScene    = (uint16_t)((*it >> 16) & 0x7FFF);
+        const uint8_t  entryTimeline = (uint8_t)((*it >> 31) & 0x1);
+        const bool     sceneMatches  = (entryScene == maskedScene);
+        const bool     tlMatches     = anyTimeline || (entryTimeline == timeline);
+        if (sceneMatches && tlMatches) {
+            it = mPendingKills.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // Scene deaths
 // ---------------------------------------------------------------------

@@ -292,6 +292,34 @@ void Anchor::RegisterHooks() {
                 // static actor has completed its Init + had its EnemyNetId
                 // extension assigned before we serialise.
                 pendingSceneActorNetIdsBroadcast = true;
+
+                // Exit-gated vacancy detection (Test 1.5 fix follow-up,
+                // host-side counterpart of UpdateClientState's exit check).
+                // When the host transitions to a new scene, the OLD scene
+                // is now potentially empty — check whether any peer is
+                // still tracking it. If no, broadcast SCENE_DEATHS_CLEARED.
+                // The static `sLastHostSceneEntered` survives across calls
+                // and tracks the prior sceneNum; -1 sentinel for first
+                // entry of session.
+                static int16_t sLastHostSceneEntered = -1;
+                const int16_t  curScene             = (int16_t)gPlayState->sceneNum;
+                if (sLastHostSceneEntered >= 0 && sLastHostSceneEntered != curScene) {
+                    bool anyPeerInPrevScene = false;
+                    if (Anchor::Instance != nullptr) {
+                        for (auto& [otherId, other] : Anchor::Instance->clients) {
+                            if (!other.online || !other.isSaveLoaded || other.self) continue;
+                            if (other.sceneNum == sLastHostSceneEntered) {
+                                anyPeerInPrevScene = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!anyPeerInPrevScene && Anchor::Instance != nullptr) {
+                        Anchor::Instance->SendPacket_SceneDeathsCleared(
+                            sLastHostSceneEntered, 0xFF);
+                    }
+                }
+                sLastHostSceneEntered = curScene;
             }
             // Phase 5 #60 — clear the per-netId last-sent cache. netIds are reused
             // across scene visits (same posHash, same enemy), so a stale cached
@@ -3107,12 +3135,26 @@ void Anchor::RegisterHooks() {
         // snapshot's matched entry takes precedence; falls through to
         // local compute when no entry matches (host hasn't sent yet,
         // or actor is a dynamic spawn outside the snapshot scope).
+        //
+        // Dynamic-spawn collision avoidance (#67-Gohma crash root cause):
+        // When the host generates a dynamic spawn (numSetupActors == 0)
+        // and the deterministic posHash collides with another already-
+        // spawned actor's netId in the same scene, probe-bump the low 8
+        // bits until unique. The host's authoritative value is broadcast
+        // in ENEMY_SPAWN; non-host adopts it via HandlePacket_EnemySpawn.
+        // Static spawns keep the deterministic encoding so KB-18 snapshot
+        // matching continues to work.
         uint32_t netId = 0;
         if (!::SceneAuthority::IsEffectiveHost()) {
             netId = LookupHostNetIdForCurrentScene(actor);
         }
         if (netId == 0) {
-            netId = EncodeEnemyNetId(actor);
+            if (::SceneAuthority::IsEffectiveHost() && isDynamicSpawn &&
+                !isSpawningNetworkActor) {
+                netId = EncodeUniqueDynamicNetId(actor);
+            } else {
+                netId = EncodeEnemyNetId(actor);
+            }
         }
 
         EnemyNetId ext;

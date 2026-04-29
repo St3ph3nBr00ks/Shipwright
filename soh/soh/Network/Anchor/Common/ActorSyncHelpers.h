@@ -120,3 +120,22 @@ inline bool IsSyncableActor(Actor* actor) {
 // Caller MUST have IsSaveLoaded()==true and gPlayState!=nullptr — the
 // function reads gSaveContext.linkAge and gPlayState->sceneNum.
 uint32_t EncodeEnemyNetId(Actor* actor);
+
+// Same as EncodeEnemyNetId but probes for posHash-byte collisions and
+// linearly bumps the low 8 bits until unique. Use ONLY for dynamic
+// runtime spawns (numSetupActors == 0) on the HOST. Static spawns must
+// keep deterministic encoding so non-host's KB-18 snapshot match works.
+//
+// #167-Gohma crash root cause: `BossGoma_SpawnChildGohma` drops 12 Larvae
+// in a tight ~10-unit cluster. The byte-XOR posHash collapses many of
+// them to identical values, leaving only ~5 distinct netIds. Receive
+// scans then mismatch actor pointers and the eventual stale-pointer
+// dereference produces an access violation.
+//
+// On collision, returns the deterministic value bumped by N (1..255).
+// If 256 probes all collide (extremely unlikely — would need 256 enemies
+// of the same type in the same scene), returns the last probed value.
+//
+// The host's authoritative value is broadcast in ENEMY_SPAWN; non-host
+// adopts it via `HandlePacket_EnemySpawn` to keep both clients aligned.
+uint32_t EncodeUniqueDynamicNetId(Actor* actor);

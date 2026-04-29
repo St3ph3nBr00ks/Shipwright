@@ -385,8 +385,21 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor) {
     payload["params"]   = actor->params;
     PacketTimeline::SetTimelineField(payload);
 
-    SPDLOG_INFO("[EnemySpawn] Sending spawn actorId={} pos=({:.1f},{:.1f},{:.1f}) params={}",
-                actor->id, actor->home.pos.x, actor->home.pos.y, actor->home.pos.z, actor->params);
+    // Host-authoritative netId for dynamic spawns (#67-Gohma crash fix).
+    // The host's OnActorSpawn assigned a collision-free netId via
+    // EncodeUniqueDynamicNetId; carry it on the wire so the non-host's
+    // local actor can adopt the same value rather than recomputing the
+    // (potentially colliding) deterministic posHash. Receive-side override
+    // lives in HandlePacket_EnemySpawn.
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext != nullptr && ext->netId != 0) {
+        payload["netId"] = ext->netId;
+    }
+
+    SPDLOG_INFO("[EnemySpawn] Sending spawn actorId={} netId={} pos=({:.1f},{:.1f},{:.1f}) params={}",
+                actor->id,
+                payload.value("netId", (uint32_t)0),
+                actor->home.pos.x, actor->home.pos.y, actor->home.pos.z, actor->params);
 
     SendJsonToRemote(payload);
 }
@@ -686,6 +699,25 @@ void Anchor::HandlePacket_EnemySpawn(nlohmann::json payload) {
     if (spawned == nullptr) {
         SPDLOG_WARN("[EnemySpawn] Actor_Spawn failed for actorId={} — actor limit reached or invalid id",
                     actorId);
+        return;
+    }
+
+    // Host-authoritative netId override (#67-Gohma crash fix).
+    // The host's OnActorSpawn ran EncodeUniqueDynamicNetId and probed
+    // for collision-free posHash bytes; non-host's deterministic local
+    // compute would re-collide on tight clusters (12 Larvae in Gohma's
+    // egg-throw). When the payload carries a netId, replace whatever
+    // OnActorSpawn just stored with the host's authoritative value so
+    // both clients agree on actor identity.
+    if (payload.contains("netId")) {
+        uint32_t hostNetId = payload["netId"].get<uint32_t>();
+        EnemyNetId* ext = const_cast<EnemyNetId*>(
+            ObjectExtension::GetInstance().Get<EnemyNetId>(spawned));
+        if (ext != nullptr && ext->netId != hostNetId) {
+            SPDLOG_INFO("[EnemySpawn] Override netId {} -> {} for actorId={} (host-authoritative)",
+                        ext->netId, hostNetId, actorId);
+            ext->netId = hostNetId;
+        }
     }
 }
 
