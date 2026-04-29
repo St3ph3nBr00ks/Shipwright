@@ -8,6 +8,8 @@
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include <algorithm>
 #include <chrono>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 extern "C" {
@@ -465,6 +467,73 @@ void Anchor::OnBecameEffectiveHost() {
     // joiners are affected — they'll see corpses for post-migration kills
     // only. Acceptable for First Dungeon Demo scope.
     EnemyStateSync::HostBookkeeping::Instance().ClearAllDefeatBroadcasts();
+
+    // Vacancy reconciliation across migration boundary.
+    //
+    // The exit-gated SCENE_DEATHS_CLEARED detection (HookHandlers.cpp
+    // OnSceneSpawnActors host-out path + UpdateClientState peer-out
+    // path) fires when an active host observes a scene becoming empty.
+    // But if the original host disconnected ungracefully WHILE a scene
+    // was emptying — last player exited and host crashed before the
+    // broadcast reached the relay — the new effective host has no
+    // record of the vacancy. Pre-migration mSceneDeaths entries persist
+    // on the new host (or arrive via no-op since this is the first
+    // host); next late-joiner sees stale corpses for scenes that are
+    // logically vacant.
+    //
+    // One-shot reconciliation: walk every scene currently represented
+    // in mSceneDeaths AND every scene any client is reporting; for each
+    // scene that has zero current occupants (host + every online
+    // client), broadcast SCENE_DEATHS_CLEARED. Catches scenes that
+    // became vacant during the migration window.
+    //
+    // Cheap (O(scenes × clients), both small) and idempotent — receivers
+    // clear empty state harmlessly, so re-broadcast on a scene that
+    // peers already cleared is a no-op.
+    std::unordered_set<int16_t> scenesToCheck;
+    if (gPlayState != nullptr) {
+        scenesToCheck.insert((int16_t)gPlayState->sceneNum);
+    }
+    for (auto& [otherId, other] : clients) {
+        if (other.online && other.isSaveLoaded) {
+            scenesToCheck.insert(other.sceneNum);
+        }
+    }
+    // Also include every scene that has dead-enemy bookkeeping — those
+    // are scenes where mSceneDeaths might be stale from pre-migration.
+    // (Inferred via Serialize() since SceneDeaths(s) requires knowing s.)
+    {
+        nlohmann::json snap = EnemyStateSync::HostBookkeeping::Instance().Serialize();
+        if (snap.contains("sceneDeaths") && snap["sceneDeaths"].is_object()) {
+            for (auto it = snap["sceneDeaths"].begin(); it != snap["sceneDeaths"].end(); ++it) {
+                try {
+                    scenesToCheck.insert((int16_t)std::stoi(it.key()));
+                } catch (...) { /* skip non-numeric keys */ }
+            }
+        }
+    }
+    int reconciled = 0;
+    for (int16_t scene : scenesToCheck) {
+        if (scene < 0) continue;
+        bool anyOccupant = (gPlayState != nullptr && (int16_t)gPlayState->sceneNum == scene);
+        if (!anyOccupant) {
+            for (auto& [otherId, other] : clients) {
+                if (!other.online || !other.isSaveLoaded || other.self) continue;
+                if (other.sceneNum == scene) {
+                    anyOccupant = true;
+                    break;
+                }
+            }
+        }
+        if (!anyOccupant) {
+            SendPacket_SceneDeathsCleared(scene, 0xFF);
+            reconciled++;
+        }
+    }
+    if (reconciled > 0) {
+        SPDLOG_INFO("[Anchor] Migration reconciliation: broadcast SCENE_DEATHS_CLEARED for {} vacant scene(s)",
+                    reconciled);
+    }
 }
 
 void Anchor::BackfillEnemyNetIds() {
