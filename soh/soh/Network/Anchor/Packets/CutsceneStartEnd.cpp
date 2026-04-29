@@ -235,17 +235,25 @@ void Anchor::SendPacket_CutsceneStart(const std::string& csKind, int32_t csKey,
                                       uint8_t csState) {
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
 
+    // Schema 2 — roomNum field added for same-room gate (log 174).
+    // Cutscenes are scoped to the room they fire in; peers in a
+    // different room of the same scene must NOT have csCtx.state
+    // forced — that input-locks Link mid-room-transition with
+    // unstable floor collision and triggers a void-fall.
+    const int8_t roomNum = (int8_t)gPlayState->roomCtx.curRoom.num;
+
     nlohmann::json payload;
     payload["type"]          = CUTSCENE_START;
     payload["sceneNum"]      = (int16_t)gPlayState->sceneNum;
+    payload["roomNum"]       = roomNum;
     payload["csKind"]        = csKind;
     payload["csKey"]         = csKey;
     payload["csState"]       = csState;
     payload["ownerClientId"] = ownClientId;
     PacketTimeline::SetTimelineField(payload);
 
-    SPDLOG_INFO("[CutsceneStart] Sending kind={} key={} state={} scene=0x{:02X}",
-                csKind, csKey, (int)csState, (int)gPlayState->sceneNum);
+    SPDLOG_INFO("[CutsceneStart] Sending kind={} key={} state={} scene=0x{:02X} room={}",
+                csKind, csKey, (int)csState, (int)gPlayState->sceneNum, (int)roomNum);
 
     for (auto& [clientId, client] : clients) {
         if (client.online && client.isSaveLoaded && !client.self) {
@@ -290,6 +298,26 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
     const int16_t sceneNum = payload.value("sceneNum", (int16_t)0);
     if (VALIDATE(::ReceiveValidator::ValidateSameScene(sceneNum)) !=
         ::ReceiveValidator::ValidationVerdict::Valid) {
+        return;
+    }
+
+    // Same-room gate (log 174 fix). Cutscenes are scoped to the room
+    // they fire in. Applying csCtx.state to a peer in a different room
+    // of the same scene input-locks Link via Player_SetCsActionWithHaltedActors
+    // — which can trigger a void-fall when Link is mid-room-transition
+    // (floor collision unstable during door-cross). Drop the apply if
+    // local room doesn't match the cutscene's room. Schema-2 field; if
+    // a pre-schema-2 sender omits roomNum we get the default sentinel
+    // -1 which will mismatch any real room — defensive but means
+    // legacy peers' cutscenes won't propagate. Acceptable since both
+    // ends of a session are running the same build.
+    const int8_t senderRoomNum = payload.value("roomNum", (int8_t)-1);
+    const int8_t localRoomNum  = (gPlayState != nullptr)
+                                     ? (int8_t)gPlayState->roomCtx.curRoom.num
+                                     : (int8_t)-1;
+    if (senderRoomNum >= 0 && localRoomNum != senderRoomNum) {
+        SPDLOG_INFO("[CutsceneStart] Dropped — room mismatch (sender room={} local room={}); peer not in cutscene's room",
+                    (int)senderRoomNum, (int)localRoomNum);
         return;
     }
 
