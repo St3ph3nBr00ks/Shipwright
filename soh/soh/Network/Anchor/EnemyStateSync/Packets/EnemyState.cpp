@@ -101,6 +101,11 @@ struct EnemyUpdateExtras {
     s16  bossGomaSpawnTimer       = 0;
     u8   bossGomaLookedAtFrames   = 0;
     s8   bossGomaChildren[3]      = { 0, 0, 0 };
+    // Plan §5 — SkelAnime sync via animation enum + curFrame. Boss_Goma's
+    // SkelAnime has NULL jointTable so the standard joint-table sync
+    // doesn't apply.
+    u8   bossGomaAnimId           = 0;
+    f32  bossGomaCurFrame         = 0.0f;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -192,6 +197,8 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.bossGomaChildren[0]         = (s8)g->childrenGohmaState[0];
         e.bossGomaChildren[1]         = (s8)g->childrenGohmaState[1];
         e.bossGomaChildren[2]         = (s8)g->childrenGohmaState[2];
+        e.bossGomaAnimId              = BossGoma_GetAnimationId(g);
+        e.bossGomaCurFrame            = g->skelanime.curFrame;
     }
     return e;
 }
@@ -236,6 +243,9 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
         if (cur.bossGomaChildren[0]      != prev.bossGomaChildren[0])      return true;
         if (cur.bossGomaChildren[1]      != prev.bossGomaChildren[1])      return true;
         if (cur.bossGomaChildren[2]      != prev.bossGomaChildren[2])      return true;
+        if (cur.bossGomaAnimId           != prev.bossGomaAnimId)           return true;
+        // curFrame advances ~1.0/frame so any change at all should send.
+        if (fabsf(cur.bossGomaCurFrame - prev.bossGomaCurFrame) >= 0.5f)   return true;
     }
     return false;
 }
@@ -408,6 +418,8 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         children.push_back((int)extras.bossGomaChildren[1]);
         children.push_back((int)extras.bossGomaChildren[2]);
         payload["bossGomaChildren"] = children;
+        payload["bossGomaAnimId"]   = (int)extras.bossGomaAnimId;
+        payload["bossGomaCurFrame"] = extras.bossGomaCurFrame;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -748,6 +760,17 @@ actor_found:
                     g->childrenGohmaState[1] = (s16)kids[1].get<int>();
                     g->childrenGohmaState[2] = (s16)kids[2].get<int>();
                 }
+            }
+            // Plan §5 — SkelAnime sync via animation enum + curFrame.
+            // BossGoma_ApplyAnimation force-changes the animation pointer
+            // (with default LOOP mode) only when the local pointer differs
+            // from host's; the actionState-driven SetupXxx fixes the mode
+            // (LOOP vs ONCE) within ~1 frame if it should be ONCE.
+            // curFrame is always applied so the playback phase matches.
+            if (payload.contains("bossGomaAnimId") && payload.contains("bossGomaCurFrame")) {
+                u8  animId   = (u8)payload["bossGomaAnimId"].get<int>();
+                f32 curFrame = payload["bossGomaCurFrame"].get<float>();
+                BossGoma_ApplyAnimation(g, animId, curFrame);
             }
         }
         // Bug 2 follow-on — apply host's stem angles directly to the local

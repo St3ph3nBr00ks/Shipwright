@@ -2258,6 +2258,84 @@ static void BossGoma_ForceCutsceneSkip(BossGoma* this, PlayState* play) {
     Player_SetCsActionWithHaltedActors(play, &this->actor, 7);
 }
 
+// =============================================================================
+// SkelAnime sync via animation enum + curFrame (boss_goma_sync_plan.md §5).
+// Boss_Goma's SkelAnime has NULL jointTable so the standard joint-table
+// sync used by other enemies doesn't apply. We sync (animId, curFrame)
+// and let each client's Animation_Change + SkelAnime_Update reproduce
+// the same pose locally.
+// =============================================================================
+
+u8 BossGoma_GetAnimationId(BossGoma* this) {
+    AnimationHeader* anim = (AnimationHeader*)this->skelanime.animation;
+    if (anim == &gGohmaWalkAnim)               return BOSSGOMA_ANIM_WALK;
+    if (anim == &gGohmaIdleCrouchedAnim)       return BOSSGOMA_ANIM_IDLE_CROUCHED;
+    if (anim == &gGohmaHangAnim)               return BOSSGOMA_ANIM_HANG;
+    if (anim == &gGohmaLandAnim)               return BOSSGOMA_ANIM_LAND;
+    if (anim == &gGohmaCrashAnim)              return BOSSGOMA_ANIM_CRASH;
+    if (anim == &gGohmaLayEggsAnim)            return BOSSGOMA_ANIM_LAY_EGGS;
+    if (anim == &gGohmaPrepareEggsAnim)        return BOSSGOMA_ANIM_PREPARE_EGGS;
+    if (anim == &gGohmaClimbAnim)              return BOSSGOMA_ANIM_CLIMB;
+    if (anim == &gGohmaWalkCrouchedAnim)       return BOSSGOMA_ANIM_WALK_CROUCHED;
+    if (anim == &gGohmaStunnedAnim)            return BOSSGOMA_ANIM_STUNNED;
+    if (anim == &gGohmaPrepareAttackAnim)      return BOSSGOMA_ANIM_PREPARE_ATTACK;
+    if (anim == &gGohmaStandAnim)              return BOSSGOMA_ANIM_STAND;
+    if (anim == &gGohmaAttackAnim)             return BOSSGOMA_ANIM_ATTACK;
+    if (anim == &gGohmaDamageAnim)             return BOSSGOMA_ANIM_DAMAGE;
+    if (anim == &gGohmaDeathAnim)              return BOSSGOMA_ANIM_DEATH;
+    if (anim == &gGohmaInitialLandingAnim)     return BOSSGOMA_ANIM_INITIAL_LANDING;
+    if (anim == &gGohmaRecoverAfterAttackAnim) return BOSSGOMA_ANIM_RECOVER_AFTER_ATTACK;
+    if (anim == &gGohmaRestAfterAttackAnim)    return BOSSGOMA_ANIM_REST_AFTER_ATTACK;
+    if (anim == &gGohmaEyeRollAnim)            return BOSSGOMA_ANIM_EYE_ROLL;
+    return BOSSGOMA_ANIM_NONE;
+}
+
+static AnimationHeader* BossGoma_AnimationPointerForId(u8 animId) {
+    switch (animId) {
+        case BOSSGOMA_ANIM_WALK:                return (AnimationHeader*)&gGohmaWalkAnim;
+        case BOSSGOMA_ANIM_IDLE_CROUCHED:       return (AnimationHeader*)&gGohmaIdleCrouchedAnim;
+        case BOSSGOMA_ANIM_HANG:                return (AnimationHeader*)&gGohmaHangAnim;
+        case BOSSGOMA_ANIM_LAND:                return (AnimationHeader*)&gGohmaLandAnim;
+        case BOSSGOMA_ANIM_CRASH:               return (AnimationHeader*)&gGohmaCrashAnim;
+        case BOSSGOMA_ANIM_LAY_EGGS:            return (AnimationHeader*)&gGohmaLayEggsAnim;
+        case BOSSGOMA_ANIM_PREPARE_EGGS:        return (AnimationHeader*)&gGohmaPrepareEggsAnim;
+        case BOSSGOMA_ANIM_CLIMB:               return (AnimationHeader*)&gGohmaClimbAnim;
+        case BOSSGOMA_ANIM_WALK_CROUCHED:       return (AnimationHeader*)&gGohmaWalkCrouchedAnim;
+        case BOSSGOMA_ANIM_STUNNED:             return (AnimationHeader*)&gGohmaStunnedAnim;
+        case BOSSGOMA_ANIM_PREPARE_ATTACK:      return (AnimationHeader*)&gGohmaPrepareAttackAnim;
+        case BOSSGOMA_ANIM_STAND:               return (AnimationHeader*)&gGohmaStandAnim;
+        case BOSSGOMA_ANIM_ATTACK:              return (AnimationHeader*)&gGohmaAttackAnim;
+        case BOSSGOMA_ANIM_DAMAGE:              return (AnimationHeader*)&gGohmaDamageAnim;
+        case BOSSGOMA_ANIM_DEATH:               return (AnimationHeader*)&gGohmaDeathAnim;
+        case BOSSGOMA_ANIM_INITIAL_LANDING:     return (AnimationHeader*)&gGohmaInitialLandingAnim;
+        case BOSSGOMA_ANIM_RECOVER_AFTER_ATTACK: return (AnimationHeader*)&gGohmaRecoverAfterAttackAnim;
+        case BOSSGOMA_ANIM_REST_AFTER_ATTACK:   return (AnimationHeader*)&gGohmaRestAfterAttackAnim;
+        case BOSSGOMA_ANIM_EYE_ROLL:            return (AnimationHeader*)&gGohmaEyeRollAnim;
+        default:                                return NULL;
+    }
+}
+
+void BossGoma_ApplyAnimation(BossGoma* this, u8 animId, f32 curFrame) {
+    AnimationHeader* target = BossGoma_AnimationPointerForId(animId);
+    if (target == NULL) return;
+    // Force animation change only when local pointer differs from host's.
+    // The actionState-driven SetupXxx call (see BossGoma_ApplyNetState)
+    // normally keeps these aligned with the correct mode (LOOP vs ONCE);
+    // this defensive change handles a race where ENEMY_STATE arrives
+    // before the local Setup fired. Default mode is LOOP — if the
+    // animation should be ONCE (e.g. Death, Land, Crash), the state-
+    // sync's SetupXxx call within ~1 frame will rewrite the mode.
+    if ((AnimationHeader*)this->skelanime.animation != target) {
+        Animation_Change(&this->skelanime, target, 1.0f, 0.0f,
+                         Animation_GetLastFrame(target), ANIMMODE_LOOP, 0.0f);
+    }
+    // Always sync curFrame so the playback phase matches host. Survives
+    // until the next SkelAnime_Update; if a Setup func runs (state
+    // change), curFrame resets to 0 there and converges from host's
+    // next packet.
+    this->skelanime.curFrame = curFrame;
+}
+
 void BossGoma_ApplyNetState(BossGoma* this, PlayState* play, s16 stateIndex) {
     // Late-joiner cutscene-skip: if the local boss is mid-cutscene
     // (`disableGameplayLogic == true`) and the host's net state is a

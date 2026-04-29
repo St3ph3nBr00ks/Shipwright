@@ -169,4 +169,39 @@ typedef struct BossGoma {
 s16  BossGoma_GetStateIndex(struct BossGoma* this);
 void BossGoma_ApplyNetState(struct BossGoma* this, PlayState* play, s16 stateIndex);
 
+// Animation enum for SkelAnime sync (boss_goma_sync_plan.md §5).
+// Boss_Goma's SkelAnime is SKELANIME_TYPE_NORMAL with NULL jointTable
+// (z_boss_goma.c:329 `SkelAnime_Init` passes NULL/NULL/0); the standard
+// joint-table sync used by other enemies doesn't apply. Instead sync
+// the (animId, curFrame) pair and let each client run Animation_Change
+// + SkelAnime_Update locally to reproduce the same pose.
+//
+// Wire encoding: 1 byte for animId + 4 bytes (f32) for curFrame.
+typedef enum {
+    /*  0 */ BOSSGOMA_ANIM_NONE,
+    /*  1 */ BOSSGOMA_ANIM_WALK,
+    /*  2 */ BOSSGOMA_ANIM_IDLE_CROUCHED,
+    /*  3 */ BOSSGOMA_ANIM_HANG,
+    /*  4 */ BOSSGOMA_ANIM_LAND,
+    /*  5 */ BOSSGOMA_ANIM_CRASH,
+    /*  6 */ BOSSGOMA_ANIM_LAY_EGGS,
+    /*  7 */ BOSSGOMA_ANIM_PREPARE_EGGS,
+    /*  8 */ BOSSGOMA_ANIM_CLIMB,
+    /*  9 */ BOSSGOMA_ANIM_WALK_CROUCHED,
+    /* 10 */ BOSSGOMA_ANIM_STUNNED,
+    /* 11 */ BOSSGOMA_ANIM_PREPARE_ATTACK,
+    /* 12 */ BOSSGOMA_ANIM_STAND,
+    /* 13 */ BOSSGOMA_ANIM_ATTACK,
+    /* 14 */ BOSSGOMA_ANIM_DAMAGE,
+    /* 15 */ BOSSGOMA_ANIM_DEATH,
+    /* 16 */ BOSSGOMA_ANIM_INITIAL_LANDING,
+    /* 17 */ BOSSGOMA_ANIM_RECOVER_AFTER_ATTACK,
+    /* 18 */ BOSSGOMA_ANIM_REST_AFTER_ATTACK,
+    /* 19 */ BOSSGOMA_ANIM_EYE_ROLL,
+    /* 20 */ BOSSGOMA_ANIM_MAX
+} BossGomaAnimationId;
+
+u8   BossGoma_GetAnimationId(struct BossGoma* this);
+void BossGoma_ApplyAnimation(struct BossGoma* this, u8 animId, f32 curFrame);
+
 #endif
