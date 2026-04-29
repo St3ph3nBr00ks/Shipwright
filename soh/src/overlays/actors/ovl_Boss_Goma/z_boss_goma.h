@@ -204,4 +204,13 @@ typedef enum {
 u8   BossGoma_GetAnimationId(struct BossGoma* this);
 void BossGoma_ApplyAnimation(struct BossGoma* this, u8 animId, f32 curFrame);
 
+// Multi-stage HP / phase lifecycle (boss_goma_sync_plan.md §4).
+// Mirror of EnKarebaba_SetupDyingNet — triggers the defeat animation
+// + cutscene on a non-host receiver WITHOUT firing
+// GameInteractor_ExecuteOnBossDefeat (which would re-broadcast the
+// defeat packet and produce an echo loop). Host has already sent the
+// authoritative ENEMY_STATE phase=DyingByLocal; this just plays the
+// receiver-local visual.
+void BossGoma_SetupDyingNet(struct BossGoma* this, PlayState* play);
+
 #endif

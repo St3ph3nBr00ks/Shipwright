@@ -2315,6 +2315,31 @@ static AnimationHeader* BossGoma_AnimationPointerForId(u8 animId) {
     }
 }
 
+// Triggers Boss_Goma's defeat sequence on a non-host receiver. Mirrors
+// the natural BossGoma_SetupDefeated path (line 405) but skips the
+// GameInteractor_ExecuteOnBossDefeat invocation — host already
+// broadcast the kill, receiver re-firing would echo-loop.
+//
+// Plan §4 — boss_goma_sync_plan.md.
+void BossGoma_SetupDyingNet(BossGoma* this, PlayState* play) {
+    Animation_Change(&this->skelanime, &gGohmaDeathAnim, 1.0f, 0.0f,
+                     Animation_GetLastFrame(&gGohmaDeathAnim), ANIMMODE_ONCE, -2.0f);
+    this->actionFunc = BossGoma_Defeated;
+    this->disableGameplayLogic = true;
+    this->decayingProgress = 0;
+    this->noBackfaceCulling = false;
+    this->framesUntilNextAction = 1200;
+    this->actionState = 0;
+    this->actor.flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
+    this->actor.speedXZ = 0.0f;
+    this->actor.shape.shadowScale = 0.0f;
+    Audio_QueueSeqCmd(0x1 << 28 | SEQ_PLAYER_BGM_MAIN << 24 | 0x100FF);
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_GOMA_DEAD);
+    // Intentionally NOT calling Enemy_StartFinishingBlow or
+    // GameInteractor_ExecuteOnBossDefeat — host already sent the defeat
+    // packet; receiver re-firing would cause an echo loop.
+}
+
 void BossGoma_ApplyAnimation(BossGoma* this, u8 animId, f32 curFrame) {
     AnimationHeader* target = BossGoma_AnimationPointerForId(animId);
     if (target == NULL) return;

@@ -3944,6 +3944,40 @@ void Anchor::RegisterHooks() {
 
     COND_ID_HOOK(OnBossDefeat, ACTOR_BOSS_GANON2, isConnected, [&](void* refActor) { SendPacket_GameComplete(); });
 
+    // Plan §4 — generalised OnBossDefeat host-side hook for synced bosses.
+    // Mirrors the OnEnemyDefeat hook above but gated on IsSyncedBossActor
+    // so it only fires for opted-in bosses (ACTOR_BOSS_GOMA today).
+    //
+    // Boss_Goma fires OnBossDefeat in BossGoma_SetupDefeated (line 421
+    // of z_boss_goma.c). The host-side hook records the death in
+    // bookkeeping and broadcasts ENEMY_STATE phase=DyingByLocal so peers
+    // route through BossGoma_SetupDyingNet (their cutscene-playing path).
+    COND_HOOK(OnBossDefeat, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (!IsSaveLoaded()) return;
+        if (!IsSyncedBossActor(actor->id)) return;
+
+        EnemyNetId* ext = const_cast<EnemyNetId*>(
+            ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+        if (ext == nullptr) {
+            SPDLOG_WARN("[OnBossDefeat] no EnemyNetId extension for boss id={}", actor->id);
+            return;
+        }
+
+        auto& bk = EnemyStateSync::HostBookkeeping::Instance();
+        if (!bk.ClaimDefeatBroadcast(ext->netId)) {
+            // Already broadcast — duplicate; transition phase but skip send.
+            EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
+            return;
+        }
+        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
+        if (::SceneAuthority::IsEffectiveHost()) {
+            bk.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
+        }
+        SPDLOG_INFO("[OnBossDefeat] id={} netId={} — broadcasting defeat", actor->id, ext->netId);
+        SendPacket_EnemyDefeated(ext->netId);
+    });
+
     COND_HOOK(OnItemReceive, isConnected, [&](GetItemEntry itemEntry) {
         // Handle vanilla dungeon items a bit differently
         if (itemEntry.modIndex == MOD_NONE &&

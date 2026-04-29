@@ -963,6 +963,22 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     return;
                 }
 
+                // Boss_Goma: route through BossGoma_SetupDyingNet so the
+                // defeat cutscene plays on the receiver. Plan §4 — mirrors
+                // the Karebaba pattern. Phase-dedup against duplicate
+                // delivery so the cutscene doesn't restart mid-play.
+                if (actor->id == ACTOR_BOSS_GOMA) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.BossGoma.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] Boss_Goma netId={} already dying — duplicate, dedup only", netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] Boss_Goma netId={} — triggering defeat cutscene", netId);
+                    BossGoma_SetupDyingNet((BossGoma*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    return;
+                }
+
                 SPDLOG_INFO("[EnemyDefeated] Killing actor id={} netId={}", actor->id, netId);
                 isKillingNetworkActor = true;
                 Actor_Kill(actor);
