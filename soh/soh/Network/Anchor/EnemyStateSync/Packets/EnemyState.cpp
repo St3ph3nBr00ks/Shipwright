@@ -30,6 +30,9 @@ extern "C" {
 // #67 boss_goma_sync_plan.md §2 — Boss_Goma carries actionState
 // for cutscene/combat state-machine sync.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
+// boss_goma_sync_plan.md §7 / KB-26 — En_Goma (Larva) carries
+// actionState for egg-hatch state-machine sync.
+#include "overlays/actors/ovl_En_Goma/z_en_goma.h"
 extern PlayState* gPlayState;
 }
 
@@ -106,6 +109,10 @@ struct EnemyUpdateExtras {
     // doesn't apply.
     u8   bossGomaAnimId           = 0;
     f32  bossGomaCurFrame         = 0.0f;
+
+    // Plan §7 / KB-26 — En_Goma (Larva) state-machine sync.
+    bool hasEnGoma         = false;
+    s16  enGomaActionState = 0;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -199,6 +206,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.bossGomaChildren[2]         = (s8)g->childrenGohmaState[2];
         e.bossGomaAnimId              = BossGoma_GetAnimationId(g);
         e.bossGomaCurFrame            = g->skelanime.curFrame;
+    } else if (actor->id == ACTOR_EN_GOMA) {
+        EnGoma* lg          = (EnGoma*)actor;
+        e.hasEnGoma         = true;
+        e.enGomaActionState = EnGoma_GetStateIndex(lg);
     }
     return e;
 }
@@ -246,6 +257,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
         if (cur.bossGomaAnimId           != prev.bossGomaAnimId)           return true;
         // curFrame advances ~1.0/frame so any change at all should send.
         if (fabsf(cur.bossGomaCurFrame - prev.bossGomaCurFrame) >= 0.5f)   return true;
+    }
+    if (cur.hasEnGoma != prev.hasEnGoma) return true;
+    if (cur.hasEnGoma) {
+        if (cur.enGomaActionState != prev.enGomaActionState) return true;
     }
     return false;
 }
@@ -420,6 +435,15 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         payload["bossGomaChildren"] = children;
         payload["bossGomaAnimId"]   = (int)extras.bossGomaAnimId;
         payload["bossGomaCurFrame"] = extras.bossGomaCurFrame;
+    }
+
+    // Plan §7 / KB-26 — En_Goma (Larva) state-machine sync. Drives non-
+    // host EnGoma_ApplyNetState in HookHandlers' receive driver. Resolves
+    // the egg-hatch desync where each client's local hatch timer advances
+    // independently and host's egg appears hatched while non-host's egg
+    // is still translating.
+    if (extras.hasEnGoma) {
+        payload["actionState"] = extras.enGomaActionState;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -724,6 +748,11 @@ actor_found:
         // driver (including late-joiner cutscene-skip when local is still
         // in Encounter cutscene and host has progressed to combat).
         if (actor->id == ACTOR_BOSS_GOMA && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // Plan §7 / KB-26 — cache En_Goma actionState. Drives
+        // EnGoma_ApplyNetState in HookHandlers' non-host receive driver.
+        if (actor->id == ACTOR_EN_GOMA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // Boss_Goma direct field writes — applied to the local actor's

@@ -77,4 +77,28 @@ typedef struct EnGoma {
     /* 0x358 */ ColliderCylinder colCyl2;
 } EnGoma; // size = 0x03A4
 
+// Anchor multiplayer state-machine sync (boss_goma_sync_plan.md §7 / KB-26).
+// Mirrors EnDekubaba_GetStateIndex / EnKarebaba_GetStateIndex pattern.
+// Without this sync, each client's local egg-hatch timer + local
+// player-detection at line 277 produces visible desync (P2 sees egg
+// model translating after host already hatched).
+//
+// Encoding (1 byte on the wire):
+//   0  Flee
+//   1  EggFallToGround
+//   2  Egg
+//   3  Hatch
+//   4  Hurt
+//   5  Die
+//   6  Dead
+//   7  PrepareJump
+//   8  Land
+//   9  Jump
+//  10  Stand
+//  11  ChasePlayer
+//  12  Stunned
+//  -1  unknown (caller skips ApplyNetState)
+s16  EnGoma_GetStateIndex(struct EnGoma* this);
+void EnGoma_ApplyNetState(struct EnGoma* this, PlayState* play, s16 stateIndex);
+
 #endif

@@ -42,6 +42,7 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
 #include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
 #include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
+#include "src/overlays/actors/ovl_En_Goma/z_en_goma.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
@@ -3681,6 +3682,19 @@ void Anchor::RegisterHooks() {
                 s16 curState = BossGoma_GetStateIndex(g);
                 if (curState != ext->netStateIndex) {
                     BossGoma_ApplyNetState(g, gPlayState, ext->netStateIndex);
+                }
+            }
+
+            // boss_goma_sync_plan.md §7 / KB-26 — En_Goma (Larva)
+            // state-machine sync. Resolves the egg-hatch desync where
+            // each client's local hatch timer advances independently.
+            // Death-class states (Hurt, Die, Dead) gated by phase.
+            if (actor->id == ACTOR_EN_GOMA && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnGoma* lg = (EnGoma*)actor;
+                s16 curState = EnGoma_GetStateIndex(lg);
+                if (curState != ext->netStateIndex) {
+                    EnGoma_ApplyNetState(lg, gPlayState, ext->netStateIndex);
                 }
             }
 
