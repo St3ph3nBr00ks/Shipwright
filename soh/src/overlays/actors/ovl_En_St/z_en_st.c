@@ -9,6 +9,10 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Multiplayer targeting (#90 / en_st_sync_plan_v2.md §3 step 1).
+// Defined extern "C" in HookHandlers.cpp.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_DRAW_CULLING_DISABLED)
@@ -711,7 +715,12 @@ s32 EnSt_IsCloseToPlayer(EnSt* this, PlayState* play) {
         return false;
     }
 
-    if (player->actor.world.pos.y < this->actor.floorHeight) {
+    // #90 / en_st_sync_plan_v2.md §3 step 1 — same nearest-player rule
+    // as the yDistToPlayer read above; the original `player->actor.world.pos.y`
+    // read was a leftover from the GET_PLAYER removal at line 692. Use
+    // the host-patched nearest player so DummyPlayers count too.
+    Actor* nearestActor = Anchor_GetNearestPlayerActor(&this->actor, play);
+    if (nearestActor->world.pos.y < this->actor.floorHeight) {
         // player is below the Skulltula's ground position
         return false;
     }
