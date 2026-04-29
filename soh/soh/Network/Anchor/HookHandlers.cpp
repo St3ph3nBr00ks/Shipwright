@@ -43,6 +43,7 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
 #include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 #include "src/overlays/actors/ovl_En_Goma/z_en_goma.h"
+#include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
@@ -90,6 +91,18 @@ extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
 // (non-host) client so that its stick drop should be suppressed (no duplicate item).
 // Called from EnKarebaba_DeadItemDrop in z_en_karebaba.c.
 extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// #135 / en_dekunuts_sync_plan.md §6 — suppresses Mad Scrub's
+// Item_DropCollectibleRandom on a non-host receiver during the natural
+// death cycle (after BossGoma_SetupDyingNet equivalent triggers).
+// Receiver is replaying host's already-broadcast death; host's drop
+// already came through the standard pipeline.
+extern "C" bool Anchor_ShouldSuppressDekunutsDrop(Actor* actor) {
+    if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
@@ -3042,6 +3055,16 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // #135 / en_dekunuts_sync_plan.md §3 step 1 — DEKUNUTS_FLOWER child
+        // shares its parent Mad Scrub's home.pos and actor->id, so the
+        // deterministic netId scheme would collide with the parent. The
+        // flower has no actionFunc (Update early-returns) and no collider
+        // — nothing to sync. Skip netId assignment entirely so the parent
+        // owns the netId unambiguously.
+        if (actor->id == ACTOR_EN_DEKUNUTS && actor->params == /*DEKUNUTS_FLOWER*/ 10) {
+            return;
+        }
+
         // Cross-scene-respawn fix (log 115 bug — Deku Babas didn't respawn on
         // host after both players left and re-entered scene 0x0):
         // OnSceneSpawnActors fires AFTER the setup-actor loop completes
@@ -3695,6 +3718,26 @@ void Anchor::RegisterHooks() {
                 s16 curState = EnGoma_GetStateIndex(lg);
                 if (curState != ext->netStateIndex) {
                     EnGoma_ApplyNetState(lg, gPlayState, ext->netStateIndex);
+                }
+            }
+
+            // #135 / en_dekunuts_sync_plan.md §8 — Mad Scrub state-
+            // machine sync. Without this each client's free Wait/
+            // LookAround/Stand/ThrowNut/Burrow loop drifts; aim direction
+            // and projectile-spawn frame can disagree across clients.
+            // Death/stun states gated by phase + dormant-to-active filter.
+            if (actor->id == ACTOR_EN_DEKUNUTS && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnDekunuts* d = (EnDekunuts*)actor;
+                s16 curState = EnDekunuts_GetStateIndex(d);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 4);
+                bool localIsActive = (curState == 2 || curState == 3 ||
+                                      curState == 5 || curState == 6 || curState == 7);
+                bool deathStateNet = (ext->netStateIndex == 8 || ext->netStateIndex == 10);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    EnDekunuts_ApplyNetState(d, ext->netStateIndex);
                 }
             }
 

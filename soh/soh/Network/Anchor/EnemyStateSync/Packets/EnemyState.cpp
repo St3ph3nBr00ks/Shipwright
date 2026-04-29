@@ -33,6 +33,8 @@ extern "C" {
 // boss_goma_sync_plan.md §7 / KB-26 — En_Goma (Larva) carries
 // actionState for egg-hatch state-machine sync.
 #include "overlays/actors/ovl_En_Goma/z_en_goma.h"
+// #135 / en_dekunuts_sync_plan.md — Mad Scrub state-machine sync.
+#include "overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
 extern PlayState* gPlayState;
 }
 
@@ -113,6 +115,14 @@ struct EnemyUpdateExtras {
     // Plan §7 / KB-26 — En_Goma (Larva) state-machine sync.
     bool hasEnGoma         = false;
     s16  enGomaActionState = 0;
+
+    // #135 / en_dekunuts_sync_plan.md §8 — Mad Scrub state-machine sync.
+    // animFlagAndTimer is synced to anchor the projectile-spawn frame-6
+    // check on the receiver (mitigates frame-skip race where non-host's
+    // Animation_OnFrame(6.0f) misses if its anim timer landed off-frame).
+    bool hasDekunuts             = false;
+    s16  dekunutsActionState     = 0;
+    s16  dekunutsAnimFlagAndTimer = 0;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -210,6 +220,11 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnGoma* lg          = (EnGoma*)actor;
         e.hasEnGoma         = true;
         e.enGomaActionState = EnGoma_GetStateIndex(lg);
+    } else if (actor->id == ACTOR_EN_DEKUNUTS) {
+        EnDekunuts* d                 = (EnDekunuts*)actor;
+        e.hasDekunuts                 = true;
+        e.dekunutsActionState         = EnDekunuts_GetStateIndex(d);
+        e.dekunutsAnimFlagAndTimer    = d->animFlagAndTimer;
     }
     return e;
 }
@@ -261,6 +276,11 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnGoma != prev.hasEnGoma) return true;
     if (cur.hasEnGoma) {
         if (cur.enGomaActionState != prev.enGomaActionState) return true;
+    }
+    if (cur.hasDekunuts != prev.hasDekunuts) return true;
+    if (cur.hasDekunuts) {
+        if (cur.dekunutsActionState      != prev.dekunutsActionState)      return true;
+        if (cur.dekunutsAnimFlagAndTimer != prev.dekunutsAnimFlagAndTimer) return true;
     }
     return false;
 }
@@ -444,6 +464,12 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // is still translating.
     if (extras.hasEnGoma) {
         payload["actionState"] = extras.enGomaActionState;
+    }
+
+    // #135 / en_dekunuts_sync_plan.md §8 — Mad Scrub state-machine sync.
+    if (extras.hasDekunuts) {
+        payload["actionState"]              = extras.dekunutsActionState;
+        payload["dekunutsAnimFlagAndTimer"] = (int)extras.dekunutsAnimFlagAndTimer;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -755,6 +781,19 @@ actor_found:
         if (actor->id == ACTOR_EN_GOMA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+
+        // #135 / en_dekunuts_sync_plan.md §8 — cache Mad Scrub
+        // actionState + animFlagAndTimer. Driver block in HookHandlers
+        // applies state via EnDekunuts_ApplyNetState; the timer is
+        // written directly to anchor projectile-spawn frame-6 detection
+        // on the receiver.
+        if (actor->id == ACTOR_EN_DEKUNUTS && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        if (actor->id == ACTOR_EN_DEKUNUTS && payload.contains("dekunutsAnimFlagAndTimer")) {
+            EnDekunuts* d = (EnDekunuts*)actor;
+            d->animFlagAndTimer = (s16)payload["dekunutsAnimFlagAndTimer"].get<int>();
+        }
         // Boss_Goma direct field writes — applied to the local actor's
         // struct so non-host's draw + animation match host's state.
         // These are direct overwrites on every received packet (host-
@@ -987,6 +1026,24 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle", netId);
                     EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // Mad Scrub: route through EnDekunuts_SetupDyingNet so the
+                // BeDamaged → Die natural cycle plays on the receiver
+                // without echoing GameInteractor_ExecuteOnEnemyDefeat.
+                // Plan §3 / #135.
+                if (actor->id == ACTOR_EN_DEKUNUTS) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Dekunuts.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] Dekunuts netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] Dekunuts netId={} — triggering natural death cycle", netId);
+                    EnDekunuts_SetupDyingNet((EnDekunuts*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
