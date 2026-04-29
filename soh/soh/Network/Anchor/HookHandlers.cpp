@@ -3519,7 +3519,16 @@ void Anchor::RegisterHooks() {
                 // rotation/scale re-apply continues normally — only world.pos and
                 // shape.rot are arrow-driven and need this skip.
                 const bool arrowPinned = (actor->flags & ACTOR_FLAG_ATTACHED_TO_ARROW) != 0;
-                if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA && !arrowPinned) {
+                // Boss_Goma added to the animation-driven exclusion alongside
+                // Dekubaba and Karebaba (boss_goma_sync_plan.md §2). Boss_Goma's
+                // own state-machine drives world.pos + shape.rot every frame;
+                // network override breaks the boss's transform anchoring. Per-
+                // actor sync (actionState, animation id) is the proper channel
+                // and has not yet landed.
+                const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
+                                                   actor->id == ACTOR_EN_KAREBABA ||
+                                                   actor->id == ACTOR_BOSS_GOMA);
+                if (!isAnimationDrivenPos && !arrowPinned) {
                     actor->world.pos = ext->netPos;
                     actor->shape.rot = ext->netShapeRot;
                 }

@@ -553,11 +553,21 @@ actor_found:
         // rotation/health/scale still sync normally — only the world.pos
         // write is skipped while the actor is arrow-pinned.
         const bool arrowPinned = (actor->flags & ACTOR_FLAG_ATTACHED_TO_ARROW) != 0;
-        // En_Karebaba and En_Dekubaba: world.pos is animation-driven each
-        // frame from home.pos + stem/shape angles, so we skip the world.pos
-        // overwrite (Fix 7) — the local update() recomputes it consistently
-        // from synced inputs.
-        if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA && !arrowPinned) {
+        // Animation-driven actors (Fix 7 + boss_goma_sync_plan.md §2):
+        // `world.pos` and `shape.rot` are computed each frame from the
+        // actor's own state machine, so external host overrides cause
+        // visible drift / teardown faults.
+        //   En_Dekubaba — head-tip from home.pos + stemSectionAngles.
+        //   En_Karebaba — Spin state position from home.pos + shape.rot.
+        //   Boss_Goma   — boss anim drives world.pos + shape.rot every
+        //                 frame; per-actor sync (actionState, anim id,
+        //                 etc.) is the proper sync channel and has not
+        //                 yet landed. Until then, skip the field
+        //                 overrides so admission alone is crash-safe.
+        const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
+                                           actor->id == ACTOR_EN_KAREBABA ||
+                                           actor->id == ACTOR_BOSS_GOMA);
+        if (!isAnimationDrivenPos && !arrowPinned) {
             actor->world.pos = pos;
         }
         // shape.rot exclusion is split per-actor:
@@ -573,7 +583,9 @@ actor_found:
         //     against their own world view). Math_ApproachS only nudges by
         //     0xE38 per frame so re-applying host's value at ~20pps wins
         //     decisively against the local nudge.
-        if (actor->id != ACTOR_EN_KAREBABA) {
+        //   - Boss_Goma: skip — animation-driven; per-actor sync is the
+        //     proper channel (see boss_goma_sync_plan.md §2).
+        if (actor->id != ACTOR_EN_KAREBABA && actor->id != ACTOR_BOSS_GOMA) {
             actor->shape.rot = shapeRot;
         }
         actor->world.rot = rot;
