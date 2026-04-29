@@ -49,4 +49,19 @@ typedef struct EnSw {
     /* 0x0490 */ char unk_490[0x48];
 } EnSw; // size = 0x04D8
 
+// Anchor multiplayer state-machine sync (#148 / en_sw_sync_plan.md).
+// Combat (swType=0) and gold (swType=1..4) variants share the underlying
+// action-func table; SetupDyingNet branches on swType internally.
+void EnSw_SetupDyingNet(struct EnSw* this, PlayState* play);
+s16  EnSw_GetStateIndex(struct EnSw* this);
+void EnSw_ApplyNetState(struct EnSw* this, s16 stateIndex);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnSwDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

@@ -35,6 +35,10 @@ extern "C" {
 #include "overlays/actors/ovl_En_Goma/z_en_goma.h"
 // #135 / en_dekunuts_sync_plan.md — Mad Scrub state-machine sync.
 #include "overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
+// #90 / en_st_sync_plan_v2.md — Skulltula state-machine sync.
+#include "overlays/actors/ovl_En_St/z_en_st.h"
+// #148 / en_sw_sync_plan.md — Skullwalltula state-machine sync.
+#include "overlays/actors/ovl_En_Sw/z_en_sw.h"
 extern PlayState* gPlayState;
 }
 
@@ -123,6 +127,14 @@ struct EnemyUpdateExtras {
     bool hasDekunuts             = false;
     s16  dekunutsActionState     = 0;
     s16  dekunutsAnimFlagAndTimer = 0;
+
+    // #90 / en_st_sync_plan_v2.md §3 — En_St state-machine sync.
+    bool hasEnSt         = false;
+    s16  enStActionState = 0;
+
+    // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
+    bool hasEnSw         = false;
+    s16  enSwActionState = 0;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -225,6 +237,14 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.hasDekunuts                 = true;
         e.dekunutsActionState         = EnDekunuts_GetStateIndex(d);
         e.dekunutsAnimFlagAndTimer    = d->animFlagAndTimer;
+    } else if (actor->id == ACTOR_EN_ST) {
+        EnSt* st            = (EnSt*)actor;
+        e.hasEnSt           = true;
+        e.enStActionState   = EnSt_GetStateIndex(st);
+    } else if (actor->id == ACTOR_EN_SW) {
+        EnSw* sw            = (EnSw*)actor;
+        e.hasEnSw           = true;
+        e.enSwActionState   = EnSw_GetStateIndex(sw);
     }
     return e;
 }
@@ -281,6 +301,14 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasDekunuts) {
         if (cur.dekunutsActionState      != prev.dekunutsActionState)      return true;
         if (cur.dekunutsAnimFlagAndTimer != prev.dekunutsAnimFlagAndTimer) return true;
+    }
+    if (cur.hasEnSt != prev.hasEnSt) return true;
+    if (cur.hasEnSt) {
+        if (cur.enStActionState != prev.enStActionState) return true;
+    }
+    if (cur.hasEnSw != prev.hasEnSw) return true;
+    if (cur.hasEnSw) {
+        if (cur.enSwActionState != prev.enSwActionState) return true;
     }
     return false;
 }
@@ -470,6 +498,16 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     if (extras.hasDekunuts) {
         payload["actionState"]              = extras.dekunutsActionState;
         payload["dekunutsAnimFlagAndTimer"] = (int)extras.dekunutsAnimFlagAndTimer;
+    }
+
+    // #90 / en_st_sync_plan_v2.md §3 — En_St state-machine sync.
+    if (extras.hasEnSt) {
+        payload["actionState"] = extras.enStActionState;
+    }
+
+    // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
+    if (extras.hasEnSw) {
+        payload["actionState"] = extras.enSwActionState;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -794,6 +832,15 @@ actor_found:
             EnDekunuts* d = (EnDekunuts*)actor;
             d->animFlagAndTimer = (s16)payload["dekunutsAnimFlagAndTimer"].get<int>();
         }
+
+        // #90 / en_st_sync_plan_v2.md — cache En_St actionState.
+        if (actor->id == ACTOR_EN_ST && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // #148 / en_sw_sync_plan.md — cache En_Sw actionState.
+        if (actor->id == ACTOR_EN_SW && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // Boss_Goma direct field writes — applied to the local actor's
         // struct so non-host's draw + animation match host's state.
         // These are direct overwrites on every received packet (host-
@@ -1026,6 +1073,39 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle", netId);
                     EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_St: route through EnSt_SetupDyingNet so the
+                // BounceAround → FinishBouncing → Die natural cycle plays.
+                // Plan §6 / #90.
+                if (actor->id == ACTOR_EN_ST) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnSt.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnSt netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnSt netId={} — triggering natural death cycle", netId);
+                    EnSt_SetupDyingNet((EnSt*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Sw: route through EnSw_SetupDyingNet — branches
+                // internally on swType (combat vs gold variant). Plan §6 / #148.
+                if (actor->id == ACTOR_EN_SW) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnSw.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnSw netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnSw netId={} — triggering natural death cycle", netId);
+                    EnSw_SetupDyingNet((EnSw*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;

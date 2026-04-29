@@ -44,6 +44,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 #include "src/overlays/actors/ovl_En_Goma/z_en_goma.h"
 #include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
+#include "src/overlays/actors/ovl_En_St/z_en_st.h"
+#include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
@@ -102,6 +104,25 @@ extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
 // Receiver is replaying host's already-broadcast death; host's drop
 // already came through the standard pipeline.
 extern "C" bool Anchor_ShouldSuppressDekunutsDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// #90 / en_st_sync_plan_v2.md §5 — same predicate shape as the
+// Dekunuts suppressor, applied to En_St's drop site (line 996).
+extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// #148 / en_sw_sync_plan.md §5 — same predicate shape, applied to
+// En_Sw's combat-variant drop site (line 686). Gold-variant En_Si
+// spawn deliberately NOT suppressed (cooperative collectible Design A).
+extern "C" bool Anchor_ShouldSuppressEnSwDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
@@ -3738,6 +3759,51 @@ void Anchor::RegisterHooks() {
                     !(netIsDormant && localIsActive) &&
                     !deathStateNet) {
                     EnDekunuts_ApplyNetState(d, ext->netStateIndex);
+                }
+            }
+
+            // #90 / en_st_sync_plan_v2.md §3 — Skulltula state-machine
+            // sync. Dormant-to-active filter: states 0/1 (init / wait
+            // on ceiling) shouldn't override active ground states 2/3/4.
+            // Death states 6/7/8 gated by PhaseImpliesHasLocalDeath.
+            if (actor->id == ACTOR_EN_ST && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnSt* st = (EnSt*)actor;
+                s16 curState = EnSt_GetStateIndex(st);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
+                bool localIsActive = (curState == 2 || curState == 3 || curState == 4);
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                    EnSt_ApplyNetState(st, ext->netStateIndex);
+                }
+            }
+
+            // #148 / en_sw_sync_plan.md §3 — Skullwalltula state-machine
+            // sync. swType-gated dormant-to-active filter:
+            //   combat (swType=0): dormant=6 (wall idle); active=7/8/9
+            //                      (lunge / decel / return).
+            //   gold (swType>=1):  dormant=2 (idle); active=0/1 (init/
+            //                      flight transients).
+            // Death states gated by PhaseImpliesHasLocalDeath.
+            if (actor->id == ACTOR_EN_SW && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnSw* sw = (EnSw*)actor;
+                s16 curState = EnSw_GetStateIndex(sw);
+                u8  swType   = (sw->actor.params & 0xE000) >> 13;
+                bool deathStateNet;
+                bool blockTransition;
+                if (swType == 0) {
+                    bool netDormant  = (ext->netStateIndex == 6);
+                    bool localActive = (curState == 7 || curState == 8 || curState == 9);
+                    deathStateNet    = (ext->netStateIndex == 4 || ext->netStateIndex == 5);
+                    blockTransition  = (netDormant && localActive);
+                } else {
+                    bool netDormant  = (ext->netStateIndex == 2);
+                    bool localActive = (curState == 0 || curState == 1);
+                    deathStateNet    = (ext->netStateIndex == 3);
+                    blockTransition  = (netDormant && localActive);
+                }
+                if (curState != ext->netStateIndex && !blockTransition && !deathStateNet) {
+                    EnSw_ApplyNetState(sw, ext->netStateIndex);
                 }
             }
 

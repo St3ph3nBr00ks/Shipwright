@@ -52,4 +52,17 @@ typedef struct EnSt {
     /* 0x04C6 */ Vec3s morphTable[30];
 } EnSt; // size = 0x057C
 
+// Anchor multiplayer state-machine sync (#90 / en_st_sync_plan_v2.md).
+void EnSt_SetupDyingNet(struct EnSt* this, PlayState* play);
+s16  EnSt_GetStateIndex(struct EnSt* this);
+void EnSt_ApplyNetState(struct EnSt* this, s16 stateIndex);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnStDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

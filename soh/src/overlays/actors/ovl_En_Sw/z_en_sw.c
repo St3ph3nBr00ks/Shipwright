@@ -3,6 +3,10 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Multiplayer targeting (#148 / en_sw_sync_plan.md §3 step 1).
+// Defined extern "C" in HookHandlers.cpp:83.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
 void EnSw_Init(Actor* thisx, PlayState* play);
@@ -683,7 +687,9 @@ void func_80B0DC7C(EnSw* this, PlayState* play) {
         this->actor.shape.rot.x += 0x1000;
         this->actor.shape.rot.z += 0x1000;
     } else {
-        Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0x30);
+        if (!Anchor_ShouldSuppressEnSwDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0x30);
+        }
         Actor_Kill(&this->actor);
     }
 }
@@ -698,20 +704,28 @@ s16 func_80B0DE34(EnSw* this, Vec3f* arg1) {
 }
 
 s32 func_80B0DEA8(EnSw* this, PlayState* play, s32 arg2) {
-    Player* player = GET_PLAYER(play);
+    // #148 / en_sw_sync_plan.md §3 step 1 — split GET_PLAYER:
+    //   localPlayer is used for the stateFlags1 ladder-climbing gate
+    //   (Player struct field; reading it from a DummyPlayer's EnOe2
+    //   struct would be undefined).
+    //   nearestActor is used for position/range/line-of-sight checks
+    //   (host-patched toward the nearest player including DummyPlayers
+    //   so En_Sw notices any peer approaching).
+    Player* localPlayer = GET_PLAYER(play);
+    Actor*  nearestActor = Anchor_GetNearestPlayerActor(&this->actor, play);
     CollisionPoly* sp58;
     s32 sp54;
     Vec3f sp48;
 
-    if (!(player->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) {
+    if (!(localPlayer->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) {
         return false;
     } else if (func_8002DDF4(play) && arg2) {
         return false;
-    } else if (ABS(func_80B0DE34(this, &player->actor.world.pos) - this->actor.shape.rot.z) >= 0x1FC2) {
+    } else if (ABS(func_80B0DE34(this, &nearestActor->world.pos) - this->actor.shape.rot.z) >= 0x1FC2) {
         return false;
-    } else if (Math_Vec3f_DistXYZ(&this->actor.world.pos, &player->actor.world.pos) >= 130.0f) {
+    } else if (Math_Vec3f_DistXYZ(&this->actor.world.pos, &nearestActor->world.pos) >= 130.0f) {
         return false;
-    } else if (!BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &player->actor.world.pos, &sp48, &sp58,
+    } else if (!BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &nearestActor->world.pos, &sp48, &sp58,
                                         true, false, false, true, &sp54)) {
         return true;
     } else {
@@ -842,12 +856,16 @@ void func_80B0E5E0(EnSw* this, PlayState* play) {
 }
 
 void func_80B0E728(EnSw* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // #148 / en_sw_sync_plan.md §3 step 1 — replace GET_PLAYER with
+    // Anchor_GetNearestPlayerActor for waypoint storage. Only
+    // actor.world.pos is read; safe to use Actor* directly without
+    // DummyPlayer guard.
+    Actor* nearestActor = Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 pad;
 
     if (DECR(this->unk_442) != 0) {
         if (func_80B0DEA8(this, play, 1)) {
-            this->unk_448 = player->actor.world.pos;
+            this->unk_448 = nearestActor->world.pos;
             this->unk_448.y += 30.0f;
             this->unk_444 = func_80B0DE34(this, &this->unk_448);
             func_80B0E430(this, 6.0f, (u16)0xFA0, 0, play);
@@ -1022,5 +1040,61 @@ void EnSw_Draw(Actor* thisx, PlayState* play) {
     SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnSw_OverrideLimbDraw, EnSw_PostLimbDraw, this);
     if (this->actionFunc == func_80B0E728) {
         func_80B0EEA4(play);
+    }
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (#148 / en_sw_sync_plan.md).
+// =============================================================================
+
+void EnSw_SetupDyingNet(EnSw* this, PlayState* play) {
+    Enemy_StartFinishingBlow(play, &this->actor);
+    u8 swType = (this->actor.params & 0xE000) >> 13;
+    if (swType != 0) {
+        // gold variant — mirror func_80B0C9F0 gold-death branch
+        this->skelAnime.playSpeed = 8.0f;
+        this->unk_420 = ((play->state.frames & 1) == 0) ? 0.4f : -0.4f;
+        this->unk_394 = 0xA;
+        this->unk_38A = 1;
+        this->actionFunc = func_80B0D878;
+    } else {
+        // combat variant — mirror func_80B0C9F0 non-gold death branch
+        this->actor.shape.shadowDraw  = ActorShadow_DrawCircle;
+        this->actor.shape.shadowAlpha = 0xFF;
+        this->unk_38A = 2;
+        this->actor.shape.shadowScale = 16.0f;
+        this->actor.gravity = -1.0f;
+        this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+        this->actionFunc = func_80B0DB00;
+    }
+    // Deliberately do NOT call GameInteractor_ExecuteOnEnemyDefeat —
+    // prevents echo loop on the receiver.
+}
+
+s16 EnSw_GetStateIndex(EnSw* this) {
+    if (this->actionFunc == func_80B0D364) return 0;
+    if (this->actionFunc == func_80B0D3AC) return 1;
+    if (this->actionFunc == func_80B0D590) return 2;
+    if (this->actionFunc == func_80B0D878) return 3;
+    if (this->actionFunc == func_80B0DB00) return 4;
+    if (this->actionFunc == func_80B0DC7C) return 5;
+    if (this->actionFunc == func_80B0E5E0) return 6;
+    if (this->actionFunc == func_80B0E728) return 7;
+    if (this->actionFunc == func_80B0E90C) return 8;
+    if (this->actionFunc == func_80B0E9BC) return 9;
+    return -1;
+}
+
+void EnSw_ApplyNetState(EnSw* this, s16 stateIndex) {
+    switch (stateIndex) {
+        // 0/1 — gold init/toss-flight, transient. Skip.
+        // 3 — gold damaged. Driven via SetupDyingNet for gold variant.
+        // 4/5 — combat death path. Driven via SetupDyingNet for combat.
+        case 2: this->actionFunc = func_80B0D590; break;
+        case 6: this->actionFunc = func_80B0E5E0; break;
+        case 7: this->actionFunc = func_80B0E728; break;
+        case 8: this->actionFunc = func_80B0E90C; break;
+        case 9: this->actionFunc = func_80B0E9BC; break;
+        default: break;
     }
 }

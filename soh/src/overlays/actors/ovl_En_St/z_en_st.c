@@ -689,7 +689,6 @@ void EnSt_Bob(EnSt* this, PlayState* play) {
 }
 
 s32 EnSt_IsCloseToPlayer(EnSt* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
     f32 yDist;
 
     if (this->takeDamageSpinTimer != 0) {
@@ -700,7 +699,12 @@ s32 EnSt_IsCloseToPlayer(EnSt* this, PlayState* play) {
         return false;
     }
 
-    yDist = this->actor.world.pos.y - player->actor.world.pos.y;
+    // #90 / en_st_sync_plan_v2.md §3 step 1 — use cached yDistToPlayer
+    // (host-patched by ShouldActorUpdate toward nearest player including
+    // DummyPlayers) instead of GET_PLAYER local-player read. Sign-flip:
+    // Actor_HeightDiff returns (player.y - actor.y), opposite sign from
+    // the original (actor.y - player.y) expression below.
+    yDist = -this->actor.yDistToPlayer;
     if (yDist < 0.0f || yDist > 400.0f) {
         // player is above the Skulltula or more than 400 units below
         // the Skulltula
@@ -993,7 +997,9 @@ void EnSt_Die(EnSt* this, PlayState* play) {
     if (DECR(this->finishDeathTimer) != 0) {
         EnSt_SpawnDeadEffect(this, play);
     } else {
-        Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xE0);
+        if (!Anchor_ShouldSuppressEnStDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xE0);
+        }
         Actor_Kill(&this->actor);
     }
 }
@@ -1092,4 +1098,59 @@ void EnSt_Draw(Actor* thisx, PlayState* play) {
     EnSt_CheckBodyStickHit(this, play);
     Gfx_SetupDL_25Opa(play->state.gfxCtx);
     SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnSt_OverrideLimbDraw, EnSt_PostLimbDraw, this);
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (#90 / en_st_sync_plan_v2.md).
+// =============================================================================
+
+// Triggers EnSt's BounceAround → FinishBouncing → Die natural cycle on
+// a non-host receiver without firing GameInteractor_ExecuteOnEnemyDefeat.
+// Visual divergence: the receiver always plays the bounce animation
+// regardless of whether the host's kill was melee (with bounce) or
+// arrow-direct (no bounce). Functionally correct, visually divergent.
+void EnSt_SetupDyingNet(EnSt* this, PlayState* play) {
+    Enemy_StartFinishingBlow(play, &this->actor);
+    this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    this->groundBounces = 3;
+    this->deathTimer    = 20;
+    this->actor.gravity = -1.0f;
+    EnSt_SetupAction(this, EnSt_BounceAround);
+}
+
+s16 EnSt_GetStateIndex(EnSt* this) {
+    if (this->actionFunc == EnSt_StartOnCeilingOrGround) return 0;
+    // 1 = WaitOnCeiling — declared static in this .c, not in header.
+    // Compare via the Setup* function pointer instead: if actionFunc
+    // matches none of the headed funcs and the act is in ceiling state,
+    // call it WaitOnCeiling. Simpler: identify via remaining funcs.
+    // Per plan §2 the 9 funcs from this file map cleanly; the wait/move/
+    // land funcs are file-static so we identify them by elimination.
+    if (this->actionFunc == EnSt_MoveToGround)         return 2;
+    if (this->actionFunc == EnSt_WaitOnGround)         return 4;
+    if (this->actionFunc == EnSt_ReturnToCeiling)      return 5;
+    if (this->actionFunc == EnSt_BounceAround)         return 6;
+    if (this->actionFunc == EnSt_FinishBouncing)       return 7;
+    if (this->actionFunc == EnSt_Die)                  return 8;
+    // 1 (WaitOnCeiling) and 3 (LandOnGround) are file-static; treat any
+    // unrecognised actionFunc as 1 (dormant) — the dormant-to-active
+    // filter at the call site prevents this from regressing an active
+    // ground state.
+    return 1;
+}
+
+void EnSt_ApplyNetState(EnSt* this, s16 stateIndex) {
+    switch (stateIndex) {
+        // 0 (StartOnCeilingOrGround) — init transient; never observed via
+        //    network in practice. Skip.
+        // 1 (WaitOnCeiling) / 3 (LandOnGround) — file-static funcs, no
+        //    public Setup. Driver site's dormant-to-active filter blocks
+        //    regression to dormant; safe to skip here.
+        case 2: EnSt_SetupAction(this, EnSt_MoveToGround);    break;
+        case 4: EnSt_SetupAction(this, EnSt_WaitOnGround);    break;
+        case 5: EnSt_SetupAction(this, EnSt_ReturnToCeiling); break;
+        // 6 / 7 / 8 (BounceAround / FinishBouncing / Die) — death-class.
+        //    Driven via SetupDyingNet. Skip silently here.
+        default: break;
+    }
 }
