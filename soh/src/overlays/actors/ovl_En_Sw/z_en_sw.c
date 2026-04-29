@@ -704,29 +704,39 @@ s16 func_80B0DE34(EnSw* this, Vec3f* arg1) {
 }
 
 s32 func_80B0DEA8(EnSw* this, PlayState* play, s32 arg2) {
-    // #148 / en_sw_sync_plan.md §3 step 1 — split GET_PLAYER:
-    //   localPlayer is used for the stateFlags1 ladder-climbing gate
-    //   (Player struct field; reading it from a DummyPlayer's EnOe2
-    //   struct would be undefined).
-    //   nearestActor is used for position/range/line-of-sight checks
-    //   (host-patched toward the nearest player including DummyPlayers
-    //   so En_Sw notices any peer approaching).
-    Player* localPlayer = GET_PLAYER(play);
-    Actor*  nearestActor = Anchor_GetNearestPlayerActor(&this->actor, play);
+    // #148 / en_sw_sync_plan.md §3 step 1 — read targeting fields from
+    // the host-picked NEAREST player (local or DummyPlayer).
+    //
+    // Original split (single-commit predecessor) read stateFlags1 from
+    // the LOCAL Link only. That broke multiplayer when a peer was the
+    // climber: host's localPlayer wasn't climbing → climbing gate
+    // blocked → Skullwalltula never lunged at the climbing peer.
+    //
+    // Fix: read stateFlags1 from `nearestActor`. DummyPlayers are
+    // allocated as ACTOR_PLAYER (see ShouldActorInit override in
+    // HookHandlers.cpp) so the underlying memory IS a Player struct,
+    // and DummyPlayer_Update at DummyPlayer.cpp:219 copies the peer's
+    // stateFlags1 into ((Player*)actor)->stateFlags1 every frame. So
+    // the cast is safe and the field is current for both targets.
+    //
+    // Vanilla single-player parity preserved: when there's no peer,
+    // nearestActor == &localPlayer->actor and the read is identical
+    // to the original GET_PLAYER read.
+    Player* nearestPlayer = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     CollisionPoly* sp58;
     s32 sp54;
     Vec3f sp48;
 
-    if (!(localPlayer->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) {
+    if (!(nearestPlayer->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) {
         return false;
     } else if (func_8002DDF4(play) && arg2) {
         return false;
-    } else if (ABS(func_80B0DE34(this, &nearestActor->world.pos) - this->actor.shape.rot.z) >= 0x1FC2) {
+    } else if (ABS(func_80B0DE34(this, &nearestPlayer->actor.world.pos) - this->actor.shape.rot.z) >= 0x1FC2) {
         return false;
-    } else if (Math_Vec3f_DistXYZ(&this->actor.world.pos, &nearestActor->world.pos) >= 130.0f) {
+    } else if (Math_Vec3f_DistXYZ(&this->actor.world.pos, &nearestPlayer->actor.world.pos) >= 130.0f) {
         return false;
-    } else if (!BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &nearestActor->world.pos, &sp48, &sp58,
-                                        true, false, false, true, &sp54)) {
+    } else if (!BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &nearestPlayer->actor.world.pos,
+                                        &sp48, &sp58, true, false, false, true, &sp54)) {
         return true;
     } else {
         return false;
