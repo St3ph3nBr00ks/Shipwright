@@ -153,4 +153,20 @@ typedef struct BossGoma {
     /* 0x07DC */ ColliderJntSphElement colliderItems[13];
 } BossGoma; // size = 0x0B1C
 
+// Anchor multiplayer state-machine sync (boss_goma_sync_plan.md §1).
+// Mirrors EnDekubaba_GetStateIndex / EnKarebaba_GetStateIndex pattern.
+//
+// Encoding (1 byte on the wire):
+//   0x00         = BossGoma_Encounter (intro cutscene)
+//   0x01..0x10   = combat states (FloorMain, FloorIdle, ..., FallStruckDown)
+//   0x20         = BossGoma_Defeated (defeat cutscene)
+//   -1           = unknown (caller should skip ApplyNetState)
+//
+// Late-joiner semantic: when local boss is in cutscene
+// (`disableGameplayLogic == true`) and net state is >= 0x01 && <= 0x10,
+// ApplyNetState force-skips the cutscene by tearing down the sub-camera
+// and CS context, then sets up the appropriate combat actionFunc.
+s16  BossGoma_GetStateIndex(struct BossGoma* this);
+void BossGoma_ApplyNetState(struct BossGoma* this, PlayState* play, s16 stateIndex);
+
 #endif

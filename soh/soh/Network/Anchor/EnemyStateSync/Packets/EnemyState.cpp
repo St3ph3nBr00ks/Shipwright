@@ -27,6 +27,9 @@ extern "C" {
 #include "overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
 // KB-08 / #7 — En_Dekubaba carries actionState for state-machine sync.
 #include "overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
+// #67 boss_goma_sync_plan.md §2 — Boss_Goma carries actionState
+// for cutscene/combat state-machine sync.
+#include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 extern PlayState* gPlayState;
 }
 
@@ -73,6 +76,16 @@ struct EnemyUpdateExtras {
     // from the host whenever the Dekubaba is animating (Grow, Lunge,
     // PullBack, Recover, Hit). Six bytes per packet.
     s16  dekubabaStemAngles[3] = { 0, 0, 0 };
+
+    // #67 boss_goma_sync_plan.md §2 — Boss_Goma state-machine sync.
+    // Wire encoding (1 byte per Alive packet):
+    //   0x00         BossGoma_Encounter (intro cutscene)
+    //   0x01..0x10   combat states (FloorMain..FallStruckDown)
+    //   0x20         BossGoma_Defeated (defeat cutscene)
+    // Late-joiner cutscene-skip rides on this field — see
+    // BossGoma_ApplyNetState in z_boss_goma.c.
+    bool hasBossGoma         = false;
+    s16  bossGomaActionState = 0;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -151,6 +164,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.dekubabaStemAngles[0] = baba->stemSectionAngle[0];
         e.dekubabaStemAngles[1] = baba->stemSectionAngle[1];
         e.dekubabaStemAngles[2] = baba->stemSectionAngle[2];
+    } else if (actor->id == ACTOR_BOSS_GOMA) {
+        BossGoma* g           = (BossGoma*)actor;
+        e.hasBossGoma         = true;
+        e.bossGomaActionState = BossGoma_GetStateIndex(g);
     }
     return e;
 }
@@ -182,6 +199,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
         if (RotDeltaAbs(cur.dekubabaStemAngles[0], prev.dekubabaStemAngles[0]) >= kRotThresholdS16) return true;
         if (RotDeltaAbs(cur.dekubabaStemAngles[1], prev.dekubabaStemAngles[1]) >= kRotThresholdS16) return true;
         if (RotDeltaAbs(cur.dekubabaStemAngles[2], prev.dekubabaStemAngles[2]) >= kRotThresholdS16) return true;
+    }
+    if (cur.hasBossGoma != prev.hasBossGoma) return true;
+    if (cur.hasBossGoma) {
+        if (cur.bossGomaActionState != prev.bossGomaActionState) return true;
     }
     return false;
 }
@@ -335,6 +356,14 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         stems.push_back((int)extras.dekubabaStemAngles[1]);
         stems.push_back((int)extras.dekubabaStemAngles[2]);
         payload["dekubabaStems"] = stems;
+    }
+
+    // #67 boss_goma_sync_plan.md §2 — Boss_Goma state-machine sync.
+    // Drives non-host ApplyNetState (including late-joiner cutscene-skip
+    // when host is past intro and non-host's local boss is still in
+    // BossGoma_Encounter).
+    if (extras.hasBossGoma) {
+        payload["actionState"] = extras.bossGomaActionState;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -631,6 +660,14 @@ actor_found:
         // KB-08 / #7 — cache Dekubaba host state so OnActorUpdate can call
         // EnDekubaba_ApplyNetState when local state diverges from net.
         if (actor->id == ACTOR_EN_DEKUBABA && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+
+        // #67 boss_goma_sync_plan.md §2 — cache Boss_Goma actionState.
+        // Drives BossGoma_ApplyNetState in HookHandlers' non-host receive
+        // driver (including late-joiner cutscene-skip when local is still
+        // in Encounter cutscene and host has progressed to combat).
+        if (actor->id == ACTOR_BOSS_GOMA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // Bug 2 follow-on — apply host's stem angles directly to the local

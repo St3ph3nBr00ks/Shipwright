@@ -2196,3 +2196,102 @@ void BossGoma_SpawnChildGohma(BossGoma* this, PlayState* play, s16 i) {
 
     this->childrenGohmaState[i] = 1;
 }
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (boss_goma_sync_plan.md §1 + §2).
+// Mirrors EnDekubaba_GetStateIndex / EnDekubaba_ApplyNetState.
+// =============================================================================
+
+s16 BossGoma_GetStateIndex(BossGoma* this) {
+    // Cutscene dispatchers — `disableGameplayLogic == true` while these run.
+    if (this->actionFunc == BossGoma_Encounter)              return 0x00;
+    if (this->actionFunc == BossGoma_Defeated)               return 0x20;
+    // Combat states (encoded value = combat-table index + 1).
+    if (this->actionFunc == BossGoma_FloorMain)              return 0x01;
+    if (this->actionFunc == BossGoma_FloorIdle)              return 0x02;
+    if (this->actionFunc == BossGoma_FloorAttackPosture)     return 0x03;
+    if (this->actionFunc == BossGoma_FloorPrepareAttack)     return 0x04;
+    if (this->actionFunc == BossGoma_FloorAttack)            return 0x05;
+    if (this->actionFunc == BossGoma_FloorDamaged)           return 0x06;
+    if (this->actionFunc == BossGoma_FloorStunned)           return 0x07;
+    if (this->actionFunc == BossGoma_FloorLand)              return 0x08;
+    if (this->actionFunc == BossGoma_FloorLandStruckDown)    return 0x09;
+    if (this->actionFunc == BossGoma_WallClimb)              return 0x0A;
+    if (this->actionFunc == BossGoma_CeilingMoveToCenter)    return 0x0B;
+    if (this->actionFunc == BossGoma_CeilingIdle)            return 0x0C;
+    if (this->actionFunc == BossGoma_CeilingPrepareSpawnGohmas) return 0x0D;
+    if (this->actionFunc == BossGoma_CeilingSpawnGohmas)     return 0x0E;
+    if (this->actionFunc == BossGoma_FallJump)               return 0x0F;
+    if (this->actionFunc == BossGoma_FallStruckDown)         return 0x10;
+    return -1;
+}
+
+// Force-skip the intro cutscene (`BossGoma_Encounter`) on a non-host that
+// arrived after the host has already finished it. Mirrors the natural exit
+// at z_boss_goma.c:970-980 (the "released to combat" transition at end of
+// Encounter sub-state 9).
+//
+// Late-joiner scenario: P1 (host) finishes the Gohma intro and is mid-
+// combat; P2 walks into the boss room. P2's local Boss_Goma_Init starts
+// the Encounter cutscene from sub-state 0. ENEMY_STATE arrives with
+// stateIndex >= 0x01 (combat). ApplyNetState invokes this helper to tear
+// down the local cutscene before transitioning to the host's combat state.
+//
+// Visible effect on P2: cutscene "snaps" to combat. Better than playing
+// a desynced cutscene through to its end and arriving at combat several
+// seconds late.
+static void BossGoma_ForceCutsceneSkip(BossGoma* this, PlayState* play) {
+    Camera* cam;
+    if (this->subCameraId != 0) {
+        // Save subcam state to main camera before releasing (matches the
+        // natural exit pattern; avoids a one-frame camera snap).
+        cam = Play_GetCamera(play, 0);
+        cam->eye = this->subCameraEye;
+        cam->eyeNext = this->subCameraEye;
+        cam->at = this->subCameraAt;
+        func_800C08AC(play, this->subCameraId, 0);
+        this->subCameraId = 0;
+    }
+    this->disableGameplayLogic = false;
+    this->patienceTimer = 200;
+    func_80064534(play, &play->csCtx);
+    Player_SetCsActionWithHaltedActors(play, &this->actor, 7);
+}
+
+void BossGoma_ApplyNetState(BossGoma* this, PlayState* play, s16 stateIndex) {
+    // Late-joiner cutscene-skip: if the local boss is mid-cutscene
+    // (`disableGameplayLogic == true`) and the host's net state is a
+    // combat state (0x01..0x10), force-skip the local cutscene before
+    // transitioning. Defeat-cutscene state (0x20) is left to the
+    // PhaseImpliesHasLocalDeath path so the death sequence plays
+    // properly on every client.
+    if (this->disableGameplayLogic && stateIndex >= 0x01 && stateIndex <= 0x10) {
+        BossGoma_ForceCutsceneSkip(this, play);
+        // FloorMain has been set up by ForceCutsceneSkip's exit-pattern
+        // mirror via the explicit setup call at the end of BossGoma_Encounter
+        // sub-state 9. Fall through to the per-state setup below to land
+        // on the actual host state if it differs from FloorMain.
+    }
+
+    switch (stateIndex) {
+        case 0x00: /* Encounter cutscene — leave local Encounter running */ break;
+        case 0x01: BossGoma_SetupFloorMain(this);              break;
+        case 0x02: BossGoma_SetupFloorIdle(this);              break;
+        case 0x03: BossGoma_SetupFloorAttackPosture(this);     break;
+        case 0x04: BossGoma_SetupFloorPrepareAttack(this);     break;
+        case 0x05: BossGoma_SetupFloorAttack(this);            break;
+        case 0x06: /* FloorDamaged — gated by phase=DyingByLocal */ break;
+        case 0x07: /* FloorStunned — gated; vulnerable=>damage path */ break;
+        case 0x08: BossGoma_SetupFloorLand(this);              break;
+        case 0x09: BossGoma_SetupFloorLandStruckDown(this);    break;
+        case 0x0A: BossGoma_SetupWallClimb(this);              break;
+        case 0x0B: BossGoma_SetupCeilingMoveToCenter(this);    break;
+        case 0x0C: BossGoma_SetupCeilingIdle(this);            break;
+        case 0x0D: BossGoma_SetupCeilingPrepareSpawnGohmas(this); break;
+        case 0x0E: /* CeilingSpawnGohmas — uninterruptible per plan §1 */ break;
+        case 0x0F: BossGoma_SetupFallJump(this);               break;
+        case 0x10: BossGoma_SetupFallStruckDown(this);         break;
+        case 0x20: /* Defeated cutscene — phase=DyingByLocal handles */ break;
+        default: break;
+    }
+}

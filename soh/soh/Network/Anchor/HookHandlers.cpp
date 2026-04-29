@@ -41,6 +41,7 @@ extern "C" {
 // Enemy struct headers for SkelAnime offset exceptions (see GetEnemySkelAnime below)
 #include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
 #include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
+#include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
@@ -3663,6 +3664,23 @@ void Anchor::RegisterHooks() {
                 s16 curState = EnDekubaba_GetStateIndex(baba);
                 if (curState != ext->netStateIndex) {
                     EnDekubaba_ApplyNetState(baba, ext->netStateIndex);
+                }
+            }
+
+            // #67 boss_goma_sync_plan.md §2 — Boss_Goma state-machine sync.
+            // Late-joiner cutscene-skip rides on this: when local is in the
+            // intro cutscene and host's net state is a combat state,
+            // BossGoma_ApplyNetState force-skips the local cutscene before
+            // transitioning. See z_boss_goma.c:BossGoma_ForceCutsceneSkip.
+            //
+            // Defeat cutscene (0x20) is left to PhaseImpliesHasLocalDeath
+            // path so the death sequence plays on every client.
+            if (actor->id == ACTOR_BOSS_GOMA && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                BossGoma* g = (BossGoma*)actor;
+                s16 curState = BossGoma_GetStateIndex(g);
+                if (curState != ext->netStateIndex) {
+                    BossGoma_ApplyNetState(g, gPlayState, ext->netStateIndex);
                 }
             }
 
