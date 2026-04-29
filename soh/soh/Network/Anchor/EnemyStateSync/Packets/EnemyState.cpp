@@ -84,8 +84,23 @@ struct EnemyUpdateExtras {
     //   0x20         BossGoma_Defeated (defeat cutscene)
     // Late-joiner cutscene-skip rides on this field — see
     // BossGoma_ApplyNetState in z_boss_goma.c.
-    bool hasBossGoma         = false;
-    s16  bossGomaActionState = 0;
+    bool hasBossGoma             = false;
+    s16  bossGomaActionState     = 0;
+    // Per plan §2 — additional fields for full Boss_Goma sync.
+    // cutsceneSubState     drives sub-state inside Encounter/Defeated.
+    // visualState          0-5 enum for mainEnvColor/eyeEnvColor tables.
+    // eyeState             3-value enum (eye-close / iris-follow / i-frames).
+    // invincibility        I-frames countdown — gates damage.
+    // spawnTimer           spawnGohmasActionTimer — egg-laying sub-actions.
+    // lookedAtFrames       cutscene gating (player-look detection).
+    // children[3]          larvae state (0=unspawned, 1=alive, -1=dead).
+    s16  bossGomaCutsceneSubState = 0;
+    u8   bossGomaVisualState      = 0;
+    u8   bossGomaEyeState         = 0;
+    u8   bossGomaInvincibility    = 0;
+    s16  bossGomaSpawnTimer       = 0;
+    u8   bossGomaLookedAtFrames   = 0;
+    s8   bossGomaChildren[3]      = { 0, 0, 0 };
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -165,9 +180,18 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.dekubabaStemAngles[1] = baba->stemSectionAngle[1];
         e.dekubabaStemAngles[2] = baba->stemSectionAngle[2];
     } else if (actor->id == ACTOR_BOSS_GOMA) {
-        BossGoma* g           = (BossGoma*)actor;
-        e.hasBossGoma         = true;
-        e.bossGomaActionState = BossGoma_GetStateIndex(g);
+        BossGoma* g                   = (BossGoma*)actor;
+        e.hasBossGoma                 = true;
+        e.bossGomaActionState         = BossGoma_GetStateIndex(g);
+        e.bossGomaCutsceneSubState    = g->actionState;
+        e.bossGomaVisualState         = (u8)g->visualState;
+        e.bossGomaEyeState            = (u8)g->eyeState;
+        e.bossGomaInvincibility       = (u8)g->invincibilityFrames;
+        e.bossGomaSpawnTimer          = g->spawnGohmasActionTimer;
+        e.bossGomaLookedAtFrames      = (u8)g->lookedAtFrames;
+        e.bossGomaChildren[0]         = (s8)g->childrenGohmaState[0];
+        e.bossGomaChildren[1]         = (s8)g->childrenGohmaState[1];
+        e.bossGomaChildren[2]         = (s8)g->childrenGohmaState[2];
     }
     return e;
 }
@@ -202,7 +226,16 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
-        if (cur.bossGomaActionState != prev.bossGomaActionState) return true;
+        if (cur.bossGomaActionState      != prev.bossGomaActionState)      return true;
+        if (cur.bossGomaCutsceneSubState != prev.bossGomaCutsceneSubState) return true;
+        if (cur.bossGomaVisualState      != prev.bossGomaVisualState)      return true;
+        if (cur.bossGomaEyeState         != prev.bossGomaEyeState)         return true;
+        if (cur.bossGomaInvincibility    != prev.bossGomaInvincibility)    return true;
+        if (cur.bossGomaSpawnTimer       != prev.bossGomaSpawnTimer)       return true;
+        if (cur.bossGomaLookedAtFrames   != prev.bossGomaLookedAtFrames)   return true;
+        if (cur.bossGomaChildren[0]      != prev.bossGomaChildren[0])      return true;
+        if (cur.bossGomaChildren[1]      != prev.bossGomaChildren[1])      return true;
+        if (cur.bossGomaChildren[2]      != prev.bossGomaChildren[2])      return true;
     }
     return false;
 }
@@ -363,7 +396,18 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // when host is past intro and non-host's local boss is still in
     // BossGoma_Encounter).
     if (extras.hasBossGoma) {
-        payload["actionState"] = extras.bossGomaActionState;
+        payload["actionState"]              = extras.bossGomaActionState;
+        payload["bossGomaCutsceneSubState"] = (int)extras.bossGomaCutsceneSubState;
+        payload["bossGomaVisualState"]      = (int)extras.bossGomaVisualState;
+        payload["bossGomaEyeState"]         = (int)extras.bossGomaEyeState;
+        payload["bossGomaInvincibility"]    = (int)extras.bossGomaInvincibility;
+        payload["bossGomaSpawnTimer"]       = (int)extras.bossGomaSpawnTimer;
+        payload["bossGomaLookedAtFrames"]   = (int)extras.bossGomaLookedAtFrames;
+        nlohmann::json children = nlohmann::json::array();
+        children.push_back((int)extras.bossGomaChildren[0]);
+        children.push_back((int)extras.bossGomaChildren[1]);
+        children.push_back((int)extras.bossGomaChildren[2]);
+        payload["bossGomaChildren"] = children;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -669,6 +713,42 @@ actor_found:
         // in Encounter cutscene and host has progressed to combat).
         if (actor->id == ACTOR_BOSS_GOMA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // Boss_Goma direct field writes — applied to the local actor's
+        // struct so non-host's draw + animation match host's state.
+        // These are direct overwrites on every received packet (host-
+        // authoritative). Safe because Boss_Goma's own update() doesn't
+        // race with these — the boss state machine reads them as it
+        // animates, and write-then-update ordering converges on host's
+        // value within one frame.
+        if (actor->id == ACTOR_BOSS_GOMA) {
+            BossGoma* g = (BossGoma*)actor;
+            if (payload.contains("bossGomaCutsceneSubState")) {
+                g->actionState = (s16)payload["bossGomaCutsceneSubState"].get<int>();
+            }
+            if (payload.contains("bossGomaVisualState")) {
+                g->visualState = (s16)payload["bossGomaVisualState"].get<int>();
+            }
+            if (payload.contains("bossGomaEyeState")) {
+                g->eyeState = (s16)payload["bossGomaEyeState"].get<int>();
+            }
+            if (payload.contains("bossGomaInvincibility")) {
+                g->invincibilityFrames = (s16)payload["bossGomaInvincibility"].get<int>();
+            }
+            if (payload.contains("bossGomaSpawnTimer")) {
+                g->spawnGohmasActionTimer = (s16)payload["bossGomaSpawnTimer"].get<int>();
+            }
+            if (payload.contains("bossGomaLookedAtFrames")) {
+                g->lookedAtFrames = (s16)payload["bossGomaLookedAtFrames"].get<int>();
+            }
+            if (payload.contains("bossGomaChildren")) {
+                const auto& kids = payload["bossGomaChildren"];
+                if (kids.is_array() && kids.size() >= 3) {
+                    g->childrenGohmaState[0] = (s16)kids[0].get<int>();
+                    g->childrenGohmaState[1] = (s16)kids[1].get<int>();
+                    g->childrenGohmaState[2] = (s16)kids[2].get<int>();
+                }
+            }
         }
         // Bug 2 follow-on — apply host's stem angles directly to the local
         // actor so EnDekubaba_UpdateHeadPosition (called every frame inside
