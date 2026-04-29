@@ -98,7 +98,9 @@ typedef struct EnGoma {
 //  11  ChasePlayer
 //  12  Stunned
 //  -1  unknown (caller skips ApplyNetState)
-s16  EnGoma_GetStateIndex(struct EnGoma* this);
-void EnGoma_ApplyNetState(struct EnGoma* this, PlayState* play, s16 stateIndex);
+// `this` is a C++ keyword — header decls use `actor`. Implementations
+// in z_en_goma.c keep `this` per OoT decomp convention.
+s16  EnGoma_GetStateIndex(struct EnGoma* actor);
+void EnGoma_ApplyNetState(struct EnGoma* actor, PlayState* play, s16 stateIndex);
 
 #endif

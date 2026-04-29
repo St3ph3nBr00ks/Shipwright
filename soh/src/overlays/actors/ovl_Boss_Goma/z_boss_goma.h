@@ -166,8 +166,11 @@ typedef struct BossGoma {
 // (`disableGameplayLogic == true`) and net state is >= 0x01 && <= 0x10,
 // ApplyNetState force-skips the cutscene by tearing down the sub-camera
 // and CS context, then sets up the appropriate combat actionFunc.
-s16  BossGoma_GetStateIndex(struct BossGoma* this);
-void BossGoma_ApplyNetState(struct BossGoma* this, PlayState* play, s16 stateIndex);
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (e.g. BossRush.cpp), so all decls below use `actor` instead.
+// Implementations in z_boss_goma.c keep `this` per OoT decomp convention.
+s16  BossGoma_GetStateIndex(struct BossGoma* actor);
+void BossGoma_ApplyNetState(struct BossGoma* actor, PlayState* play, s16 stateIndex);
 
 // Animation enum for SkelAnime sync (boss_goma_sync_plan.md §5).
 // Boss_Goma's SkelAnime is SKELANIME_TYPE_NORMAL with NULL jointTable
@@ -201,8 +204,8 @@ typedef enum {
     /* 20 */ BOSSGOMA_ANIM_MAX
 } BossGomaAnimationId;
 
-u8   BossGoma_GetAnimationId(struct BossGoma* this);
-void BossGoma_ApplyAnimation(struct BossGoma* this, u8 animId, f32 curFrame);
+u8   BossGoma_GetAnimationId(struct BossGoma* actor);
+void BossGoma_ApplyAnimation(struct BossGoma* actor, u8 animId, f32 curFrame);
 
 // Multi-stage HP / phase lifecycle (boss_goma_sync_plan.md §4).
 // Mirror of EnKarebaba_SetupDyingNet — triggers the defeat animation
@@ -211,6 +214,6 @@ void BossGoma_ApplyAnimation(struct BossGoma* this, u8 animId, f32 curFrame);
 // defeat packet and produce an echo loop). Host has already sent the
 // authoritative ENEMY_STATE phase=DyingByLocal; this just plays the
 // receiver-local visual.
-void BossGoma_SetupDyingNet(struct BossGoma* this, PlayState* play);
+void BossGoma_SetupDyingNet(struct BossGoma* actor, PlayState* play);
 
 #endif
