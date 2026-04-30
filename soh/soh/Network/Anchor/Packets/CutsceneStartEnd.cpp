@@ -475,6 +475,24 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
         Audio_SetCutsceneFlag(0);
     }
 
+    // Bug 1 (log 184 Saria conversation, camera stuck on peer) — when peer's
+    // local cutscene script ends naturally, the engine releases sub-cameras
+    // and returns the main camera to ACTIVE so it tracks Link again. If our
+    // forced csCtx.state=IDLE write above interrupts the script before its
+    // camera-cleanup frame runs (or if script timing diverged from host's
+    // and host's CUTSCENE_END arrived first), any sub-camera the script set
+    // up persists — peer's view is locked on whatever the cutscene was
+    // looking at, even after Link can move again. User confirmed scene
+    // change reset the camera, which matches: scene init reinits the
+    // camera array.
+    //
+    // Defensive cleanup: release all sub-cameras and reactivate cam id 0.
+    // No-op when cleanup already happened naturally; match the pattern at
+    // z_boss_dodongo.c:455-458 (Play_ClearAllSubCameras + ChangeCameraStatus
+    // back to ACTIVE on the main slot).
+    Play_ClearAllSubCameras(gPlayState);
+    Play_ChangeCameraStatus(gPlayState, 0, CAM_STAT_ACTIVE);
+
     MarkCutsceneInactive(sceneNum, timeline, csKind, csKey);
 
     SPDLOG_INFO("[CutsceneEnd] Received kind={} key={} scene=0x{:02X}",
