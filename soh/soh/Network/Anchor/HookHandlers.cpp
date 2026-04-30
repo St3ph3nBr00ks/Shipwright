@@ -3432,6 +3432,58 @@ void Anchor::RegisterHooks() {
         }
     });
 
+    // Generic SkelAnime late-bind (log 184 Hintnut sync regression).
+    //
+    // OnActorSpawn fires from Actor_Spawn (z_actor.c:3409) AFTER Actor_Init
+    // returns, but Actor_Init only invokes `actor->init` when the actor's
+    // object is loaded (z_actor.c:1256-1268). For static actors whose
+    // object isn't loaded yet at scene-load time, the init call is
+    // deferred — Actor_Init returns having done only the generic Actor*
+    // bookkeeping; `actor->init` runs later in the deferred-init loop at
+    // z_actor.c:2633-2645 and triggers OnActorInit (line 2641).
+    //
+    // Result: when our OnActorSpawn hook reads `ext.skelAnime =
+    // GetEnemySkelAnime(actor)`, the SkelAnime field is still zeroed
+    // (limbCount=0, jointTable=nullptr). GetEnemySkelAnime's validation
+    // returns nullptr. The cached extension carries `skelAnime=nullptr,
+    // limbCount=0` for the rest of the session. Both send-side
+    // (EnemyState.cpp:616) and receive-side (EnemyState.cpp:884) gate
+    // jointTable serialization on `ext->skelAnime != nullptr &&
+    // ext->limbCount > 0`, so peer animation never syncs for affected
+    // actors.
+    //
+    // User-observed reproduction (log 184 line 2086): Inside Deku Tree
+    // Compound Room Hintnut spawn logged `limbCount=0`. State-machine
+    // sync (actionState) worked because that field is set in
+    // EnemyState.cpp:943 unconditionally — so peer's Hintnut state
+    // changed when host's did, but joints stayed at the engine-init
+    // pose (Hintnut visually in nest). Another Hintnut spawned later
+    // (log line 3915) showed `limbCount=10` because its object was
+    // already loaded at that scene's load time.
+    //
+    // Fix: OnActorInit hook runs AFTER actor->init() completes. At that
+    // point SkelAnime is properly initialized. If our extension exists
+    // and has a stale `skelAnime=nullptr`, re-run GetEnemySkelAnime and
+    // update the cache. No-op for non-deferred actors (their extension
+    // already has valid skelAnime from OnActorSpawn).
+    COND_HOOK(OnActorInit, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor == nullptr) return;
+        EnemyNetId* ext = const_cast<EnemyNetId*>(
+            ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+        if (ext == nullptr) return;  // not an admitted-for-sync actor
+        if (ext->skelAnime != nullptr && ext->limbCount > 0) {
+            return;  // already populated by OnActorSpawn — no-op
+        }
+        SkelAnime* fresh = GetEnemySkelAnime(actor);
+        if (fresh != nullptr) {
+            ext->skelAnime = fresh;
+            ext->limbCount = fresh->limbCount;
+            SPDLOG_INFO("[EnemySpawn] SkelAnime late-bound on OnActorInit: actorId={} netId={} limbCount={}",
+                        actor->id, ext->netId, (int)ext->limbCount);
+        }
+    });
+
     // Fix 38 — apply deferred dead state after EnKarebaba_Init has run.
     // OnActorSpawn fires before actor->init() (z_actor.c:3409 vs 2638). Setting
     // actionFunc=DeadItemDrop there is immediately overridden by EnKarebaba_Init in
