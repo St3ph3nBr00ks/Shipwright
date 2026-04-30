@@ -960,6 +960,22 @@ s16 EnGoma_GetStateIndex(EnGoma* this) {
     return -1;
 }
 
+// Receive-side death cycle. Mirror of EnSw_SetupDyingNet /
+// EnDekunuts_SetupDyingNet. ENEMY_DEFEATED arrives from host once the
+// host has finished its natural death sequence; without this routing,
+// peer's HandlePacket_EnemyDefeated calls Actor_Kill directly and the
+// hatched larva blinks out without playing the death animation. Force
+// peer's local actor through SetupHurt with health=0 so the natural
+// finishing-blow timing (5-frame Hurt → 30-frame Die) plays end-to-end
+// on peer; Actor_Kill at the tail of EnGoma_Die finishes the lifecycle.
+void EnGoma_SetupDyingNet(EnGoma* this, PlayState* play) {
+    this->actor.colChkInfo.health = 0;
+    EnGoma_SetupHurt(this, play);
+    // Deliberately do NOT call GameInteractor_ExecuteOnEnemyDefeat —
+    // would echo a redundant ENEMY_DEFEATED back to the originating
+    // host.
+}
+
 void EnGoma_ApplyNetState(EnGoma* this, PlayState* play, s16 stateIndex) {
     switch (stateIndex) {
         // Flee, EggFallToGround, Egg are pre-hatch states with their own

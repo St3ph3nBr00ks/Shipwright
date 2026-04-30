@@ -1167,6 +1167,27 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     return;
                 }
 
+                // En_Goma (Boss_Goma's Larva): hatched larvae play a real
+                // Hurt → Die animation; route through SetupDyingNet so the
+                // natural cycle plays on peer instead of an instant
+                // Actor_Kill blink-out. Egg-state larvae (gomaType !=
+                // ENGOMA_NORMAL) have no death anim — fall through to the
+                // generic Actor_Kill path below.
+                if (actor->id == ACTOR_EN_GOMA &&
+                    ((EnGoma*)actor)->gomaType == ENGOMA_NORMAL) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnGoma.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnGoma netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnGoma netId={} — triggering natural death cycle", netId);
+                    EnGoma_SetupDyingNet((EnGoma*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
                 SPDLOG_INFO("[EnemyDefeated] Killing actor id={} netId={}", actor->id, netId);
                 isKillingNetworkActor = true;
                 Actor_Kill(actor);

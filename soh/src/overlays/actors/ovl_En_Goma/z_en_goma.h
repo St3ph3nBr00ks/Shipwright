@@ -103,4 +103,11 @@ typedef struct EnGoma {
 s16  EnGoma_GetStateIndex(struct EnGoma* actor);
 void EnGoma_ApplyNetState(struct EnGoma* actor, PlayState* play, s16 stateIndex);
 
+// Receive-side death cycle. Called from HandlePacket_EnemyDefeated
+// instead of Actor_Kill so peer plays the natural Hurt → Die death
+// animation rather than the larva blinking out instantly.
+// Egg-state larvae (gomaType != ENGOMA_NORMAL) fall through to
+// Actor_Kill in the caller — no anim available for that state.
+void EnGoma_SetupDyingNet(struct EnGoma* actor, PlayState* play);
+
 #endif
