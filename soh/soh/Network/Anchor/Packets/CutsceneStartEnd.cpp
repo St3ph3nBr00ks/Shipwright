@@ -405,8 +405,25 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
             localPlayer->actor.velocity.y = 0.0f;
             localPlayer->actor.velocity.z = 0.0f;
             localPlayer->actor.speedXZ = 0.0f;
-            SPDLOG_INFO("[CutsceneStart] Teleport peer Link to triggerPos=({:.0f},{:.0f},{:.0f}) rotY=0x{:04X}",
-                        triggerPos.x, triggerPos.y, triggerPos.z, (int)(uint16_t)triggerRotY);
+            // Log 183 P2 crash root cause — refresh bgCheck after teleport.
+            // Without this, Link's `floorPoly` stays whatever it was at the
+            // pre-cutscene location (or NULL if Link was airborne / void).
+            // Cutscenes freeze Link in place, so floorPoly never updates
+            // through Player_Update's normal path. When the cutscene later
+            // ends and a code path walks collision data via floorPoly
+            // (Boss_Goma's substate 150 → Player_SetCsActionWithHaltedActors,
+            // post-cutscene Player csAction handlers, etc.), it dereferences
+            // NULL and crashes (RAX=0, RBX=0x10 = sizeof(CollisionPoly),
+            // R14=0x78 = offset of Actor.floorPoly).
+            //
+            // Flags 7 = FLAG_0 | FLAG_1 | FLAG_2 — standard floor + wall +
+            // ceiling check. Heights (18 wall, 6 radius, 80 ceiling) match
+            // values z_player.c uses elsewhere; conservative bounds.
+            Actor_UpdateBgCheckInfo(gPlayState, &localPlayer->actor,
+                                    18.0f, 6.0f, 80.0f, 7);
+            SPDLOG_INFO("[CutsceneStart] Teleport peer Link to triggerPos=({:.0f},{:.0f},{:.0f}) rotY=0x{:04X} bgCheckFlags=0x{:04X}",
+                        triggerPos.x, triggerPos.y, triggerPos.z, (int)(uint16_t)triggerRotY,
+                        (unsigned int)localPlayer->actor.bgCheckFlags);
         }
     }
 
