@@ -44,6 +44,7 @@ extern "C" {
 #include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 #include "src/overlays/actors/ovl_En_Goma/z_en_goma.h"
 #include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
+#include "src/overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
 #include "src/overlays/actors/ovl_En_St/z_en_st.h"
 #include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
@@ -129,6 +130,25 @@ bool ShouldLogStateChange(uint32_t netId, int16_t cur, int16_t net, bool blocked
 // Receiver is replaying host's already-broadcast death; host's drop
 // already came through the standard pipeline.
 extern "C" bool Anchor_ShouldSuppressDekunutsDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// En_Hintnuts (Inside Deku Tree Compound Room) — suppresses the
+// recovery-heart drop in EnHintnuts_SetupLeave on a non-host receiver
+// when the host already broadcast the kill. Mirrors the Dekunuts drop-
+// suppression pattern. Trigger condition: actor's lifecycle phase
+// indicates a network-driven death-cycle is in progress.
+//
+// Note: Hintnuts has no health-based death (no DyingByLocal phase via
+// damage). The Leave path is reached after the Talk dialog completes,
+// which is locally driven on each client. The suppression here is
+// defensive — if a future change routes Leave through a network-defeat
+// flow, the guard prevents double-drops. Today this is effectively a
+// no-op because both clients run their local Talk→Leave naturally.
+extern "C" bool Anchor_ShouldSuppressHintnutsDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
@@ -3131,6 +3151,17 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // En_Hintnuts (Inside Deku Tree Compound Room) — same flower
+        // child pattern as Dekunuts. Parent (params 1-3 or 0) spawns a
+        // child with params=0xA (line 100 of z_en_hintnuts.c). The child
+        // is a static decorative flower with no actionFunc, no collider,
+        // and identical home.pos/id to the parent. Skip netId assignment
+        // for the flower so parent owns the netId. Without this skip,
+        // logs show the same netId assigned twice — collision.
+        if (actor->id == ACTOR_EN_HINTNUTS && (actor->params & 0xFF) == 0xA) {
+            return;
+        }
+
         // Cross-scene-respawn fix (log 115 bug — Deku Babas didn't respawn on
         // host after both players left and re-entered scene 0x0):
         // OnSceneSpawnActors fires AFTER the setup-actor loop completes
@@ -3890,6 +3921,48 @@ void Anchor::RegisterHooks() {
                                         : (netIsDormant && localIsActive) ? "dormant-active filter"
                                         :                                   "other";
                         SPDLOG_INFO("[EnDekunuts] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Hintnuts (Inside Deku Tree Compound Room) — sibling sync
+            // of Dekunuts pattern. Without state-machine sync, each
+            // client's free Wait/LookAround/Stand/ThrowNut/Burrow/Run
+            // cycle drifts; aim direction at projectile-spawn diverges,
+            // and the visible "scrub hidden vs popped up" state desyncs
+            // (logs 179/180 symptom).
+            //
+            // Dormant-to-active filter:
+            //   net-dormant: 0 Wait, 1 LookAround, 4 Burrow
+            //   local-active: 2 Stand, 3 ThrowNut, 5 BeginRun, 6 Run
+            // Death-class states 7-10 (Talk/Leave/Freeze/BeginFreeze)
+            // are sPuzzleCounter-driven and gated — local logic drives
+            // them via the synced En_Nutsball collision flow on each
+            // peer independently.
+            if (actor->id == ACTOR_EN_HINTNUTS && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnHintnuts* h = (EnHintnuts*)actor;
+                s16 curState = EnHintnuts_GetStateIndex(h);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
+                                      ext->netStateIndex == 4);
+                bool localIsActive = (curState == 2 || curState == 3 ||
+                                      curState == 5 || curState == 6);
+                bool deathStateNet = (ext->netStateIndex >= 7 && ext->netStateIndex <= 10);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnHintnuts] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnHintnuts_ApplyNetState(h, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet                  ? "death-state-gated"
+                                        : (netIsDormant && localIsActive) ? "dormant-active filter"
+                                        :                                   "other";
+                        SPDLOG_INFO("[EnHintnuts] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }

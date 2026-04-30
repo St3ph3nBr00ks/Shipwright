@@ -202,8 +202,10 @@ void EnHintnuts_SetupLeave(EnHintnuts* this, PlayState* play) {
     this->collider.base.ocFlags1 &= ~OC1_ON;
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
-    Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, this->actor.world.pos.x, this->actor.world.pos.y,
-                this->actor.world.pos.z, 0x0, 0x0, 0x0, 0x3); // recovery heart
+    if (!Anchor_ShouldSuppressHintnutsDrop(&this->actor)) {
+        Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, this->actor.world.pos.x, this->actor.world.pos.y,
+                    this->actor.world.pos.z, 0x0, 0x0, 0x0, 0x3); // recovery heart
+    }
     this->actionFunc = EnHintnuts_Leave;
 }
 
@@ -544,5 +546,48 @@ void EnHintnuts_Draw(Actor* thisx, PlayState* play) {
         Gfx_DrawDListOpa(play, gHintNutsFlowerDL);
     } else {
         SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnHintnuts_OverrideLimbDraw, NULL, this);
+    }
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (en_hintnuts_sync).
+// =============================================================================
+
+s16 EnHintnuts_GetStateIndex(EnHintnuts* this) {
+    if (this->actionFunc == EnHintnuts_Wait)        return 0;
+    if (this->actionFunc == EnHintnuts_LookAround)  return 1;
+    if (this->actionFunc == EnHintnuts_Stand)       return 2;
+    if (this->actionFunc == EnHintnuts_ThrowNut)    return 3;
+    if (this->actionFunc == EnHintnuts_Burrow)      return 4;
+    if (this->actionFunc == EnHintnuts_BeginRun)    return 5;
+    if (this->actionFunc == EnHintnuts_Run)         return 6;
+    if (this->actionFunc == EnHintnuts_Talk)        return 7;
+    if (this->actionFunc == EnHintnuts_Leave)       return 8;
+    if (this->actionFunc == EnHintnuts_Freeze)      return 9;
+    if (this->actionFunc == EnHintnuts_BeginFreeze) return 10;
+    return -1;
+}
+
+void EnHintnuts_ApplyNetState(EnHintnuts* this, s16 stateIndex) {
+    // Only apply visible-state transitions (0-6). The death-class states
+    // (7 Talk / 8 Leave / 9 Freeze / 10 BeginFreeze) are sPuzzleCounter-
+    // driven and unsafe to call from outside the natural collision-
+    // hit flow — they read collider state and mutate the global
+    // sPuzzleCounter via HitByScrubProjectile2. On a non-host receiver,
+    // these states are reached naturally via the synced En_Nutsball
+    // projectile collision, so there's no need to drive them via
+    // network state. Receivers' local logic handles death-class
+    // transitions on their own.
+    switch (stateIndex) {
+        case 0: EnHintnuts_SetupWait(this);                    break;
+        case 1: EnHintnuts_SetupLookAround(this);              break;
+        case 2: EnHintnuts_SetupStand(this);                   break;
+        case 3: EnHintnuts_SetupThrowScrubProjectile(this);    break;
+        case 4: EnHintnuts_SetupBurrow(this);                  break;
+        // 5 (BeginRun) — no public Setup; transitions to Run via
+        //                SkelAnime_Update naturally. Skip.
+        case 6: EnHintnuts_SetupRun(this);                     break;
+        // 7-10 — death-class, driven by local collision logic. Skip.
+        default: break;
     }
 }

@@ -35,6 +35,9 @@ extern "C" {
 #include "overlays/actors/ovl_En_Goma/z_en_goma.h"
 // #135 / en_dekunuts_sync_plan.md — Mad Scrub state-machine sync.
 #include "overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
+// En_Hintnuts (Inside Deku Tree Compound Room) — separate actor from
+// En_Dekunuts. Same conceptual "Mad Scrub" but distinct id (0x0192).
+#include "overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
 // #90 / en_st_sync_plan_v2.md — Skulltula state-machine sync.
 #include "overlays/actors/ovl_En_St/z_en_st.h"
 // #148 / en_sw_sync_plan.md — Skullwalltula state-machine sync.
@@ -127,6 +130,13 @@ struct EnemyUpdateExtras {
     bool hasDekunuts             = false;
     s16  dekunutsActionState     = 0;
     s16  dekunutsAnimFlagAndTimer = 0;
+
+    // En_Hintnuts state-machine sync (Inside Deku Tree Compound Room
+    // puzzle scrubs). Same animFlagAndTimer trick as Dekunuts to anchor
+    // ThrowNut's projectile-spawn frame-6 check.
+    bool hasHintnuts             = false;
+    s16  hintnutsActionState     = 0;
+    s16  hintnutsAnimFlagAndTimer = 0;
 
     // #90 / en_st_sync_plan_v2.md §3 — En_St state-machine sync.
     bool hasEnSt         = false;
@@ -237,6 +247,11 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.hasDekunuts                 = true;
         e.dekunutsActionState         = EnDekunuts_GetStateIndex(d);
         e.dekunutsAnimFlagAndTimer    = d->animFlagAndTimer;
+    } else if (actor->id == ACTOR_EN_HINTNUTS) {
+        EnHintnuts* h                 = (EnHintnuts*)actor;
+        e.hasHintnuts                 = true;
+        e.hintnutsActionState         = EnHintnuts_GetStateIndex(h);
+        e.hintnutsAnimFlagAndTimer    = h->animFlagAndTimer;
     } else if (actor->id == ACTOR_EN_ST) {
         EnSt* st            = (EnSt*)actor;
         e.hasEnSt           = true;
@@ -301,6 +316,11 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasDekunuts) {
         if (cur.dekunutsActionState      != prev.dekunutsActionState)      return true;
         if (cur.dekunutsAnimFlagAndTimer != prev.dekunutsAnimFlagAndTimer) return true;
+    }
+    if (cur.hasHintnuts != prev.hasHintnuts) return true;
+    if (cur.hasHintnuts) {
+        if (cur.hintnutsActionState      != prev.hintnutsActionState)      return true;
+        if (cur.hintnutsAnimFlagAndTimer != prev.hintnutsAnimFlagAndTimer) return true;
     }
     if (cur.hasEnSt != prev.hasEnSt) return true;
     if (cur.hasEnSt) {
@@ -464,6 +484,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.dekunutsActionState);
             }
         }
+        if (extras.hasHintnuts) {
+            s16 prev = prevExtras && prevExtras->hasHintnuts ? prevExtras->hintnutsActionState : -1;
+            if (prev != extras.hintnutsActionState) {
+                SPDLOG_INFO("[EnHintnuts] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.hintnutsActionState);
+            }
+        }
         if (extras.hasDekubaba) {
             s16 prev = prevExtras && prevExtras->hasDekubaba ? prevExtras->dekubabaActionState : -1;
             if (prev != extras.dekubabaActionState) {
@@ -568,6 +595,12 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     if (extras.hasDekunuts) {
         payload["actionState"]              = extras.dekunutsActionState;
         payload["dekunutsAnimFlagAndTimer"] = (int)extras.dekunutsAnimFlagAndTimer;
+    }
+
+    // En_Hintnuts state-machine sync (Inside Deku Tree Compound Room).
+    if (extras.hasHintnuts) {
+        payload["actionState"]              = extras.hintnutsActionState;
+        payload["hintnutsAnimFlagAndTimer"] = (int)extras.hintnutsAnimFlagAndTimer;
     }
 
     // #90 / en_st_sync_plan_v2.md §3 — En_St state-machine sync.
@@ -901,6 +934,18 @@ actor_found:
         if (actor->id == ACTOR_EN_DEKUNUTS && payload.contains("dekunutsAnimFlagAndTimer")) {
             EnDekunuts* d = (EnDekunuts*)actor;
             d->animFlagAndTimer = (s16)payload["dekunutsAnimFlagAndTimer"].get<int>();
+        }
+
+        // En_Hintnuts — cache actionState + animFlagAndTimer. Mirrors
+        // the Dekunuts receive path: driver block in HookHandlers applies
+        // state via EnHintnuts_ApplyNetState; timer write here anchors
+        // ThrowNut's projectile-spawn frame-6 detection on the receiver.
+        if (actor->id == ACTOR_EN_HINTNUTS && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        if (actor->id == ACTOR_EN_HINTNUTS && payload.contains("hintnutsAnimFlagAndTimer")) {
+            EnHintnuts* h = (EnHintnuts*)actor;
+            h->animFlagAndTimer = (s16)payload["hintnutsAnimFlagAndTimer"].get<int>();
         }
 
         // #90 / en_st_sync_plan_v2.md — cache En_St actionState.
