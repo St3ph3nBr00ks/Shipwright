@@ -2356,6 +2356,31 @@ void BossGoma_SetupDyingNet(BossGoma* this, PlayState* play) {
 void BossGoma_ApplyAnimation(BossGoma* this, u8 animId, f32 curFrame) {
     AnimationHeader* target = BossGoma_AnimationPointerForId(animId);
     if (target == NULL) return;
+    // Skip network animation sync while the boss is in a scripted intro
+    // or defeat cutscene (debug log 36 P2 render-thread crash root cause).
+    //
+    // During Encounter and Defeated, each substate sets a specific
+    // animation locally via its own Animation_Change calls (Initial
+    // Landing → Crash → Idle Crouched → Walk → ...). Host's network
+    // packets carry whichever animation host's substate is currently
+    // playing — usually a different one than peer's local substate.
+    // Without this gate, peer's BossGoma_ApplyAnimation force-changes
+    // the animation pointer every received packet, fighting the local
+    // substate's own Animation_Change calls.
+    //
+    // The combat path runs Animation_Change once per state transition
+    // (in SetupFloorMain/SetupFloorAttack/etc) so the local pointer
+    // settles. Gating intro/defeat eliminates the per-packet contention
+    // without losing combat-state animation sync.
+    //
+    // disableGameplayLogic is true exactly for the duration of those
+    // two cutscene actionFuncs (set TRUE in SetupEncounter line 430 +
+    // SetupDefeated line 409 + SetupDyingNet line 2334; cleared FALSE
+    // in substate 150 end line 977 + ForceCutsceneSkip line 2261). It's
+    // the canonical "don't sync animation" gate.
+    if (this->disableGameplayLogic) {
+        return;
+    }
     // Force animation change only when local pointer differs from host's.
     // The actionState-driven SetupXxx call (see BossGoma_ApplyNetState)
     // normally keeps these aligned with the correct mode (LOOP vs ONCE);
