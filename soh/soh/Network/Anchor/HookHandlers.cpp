@@ -3842,29 +3842,40 @@ void Anchor::RegisterHooks() {
                     // with disableGameplayLogic already false (set by the END
                     // handler's IDLE write + Player_Update auto-clear).
                     bool inSyncedGomaCutscene = false;
-                    // Two-condition gate so a lost CUTSCENE_END packet doesn't
-                    // wedge us indefinitely: defer ONLY when local csCtx.state
-                    // is still non-IDLE (cutscene actually still playing) AND
-                    // we have an activeCutscenes record for this boss. If
-                    // local CS naturally ended on its own (Encounter actionFunc
-                    // calling func_80064534), csCtx.state hits IDLE and we
-                    // fall through to normal apply.
-                    if (Anchor::Instance != nullptr && gPlayState != nullptr &&
-                        gPlayState->csCtx.state != CS_STATE_IDLE) {
-                        const int16_t sceneNum  = (int16_t)gPlayState->sceneNum;
-                        const uint8_t timeline  = (uint8_t)(gSaveContext.linkAge & 1);
-                        // csKey for actor-internal kinds is the boss netId.
-                        if (Anchor::Instance->IsCutsceneActive(sceneNum, timeline,
-                                                               "gohma_intro",
-                                                               (int32_t)ext->netId)) {
-                            inSyncedGomaCutscene = true;
-                        }
+                    // Defer ApplyNetState while local Boss_Goma is still in
+                    // intro cutscene mode. The reliable signal is the boss's
+                    // OWN `disableGameplayLogic` flag — set during Encounter
+                    // substates, cleared only when SetupFloorMain runs.
+                    //
+                    // Earlier (commit 712e76da5) this gate used
+                    // `csCtx.state != CS_STATE_IDLE` + activeCutscenes record.
+                    // Log 182 showed that wasn't enough: Boss_Goma's intro
+                    // has TWO csState rises (door-slam at substate 1, boss-
+                    // card at substate 4), with csState dropping back to
+                    // IDLE between them. If host's state-change packet
+                    // arrives in that gap, csCtx.state is IDLE on peer but
+                    // disableGameplayLogic is still TRUE — gate misfires,
+                    // ApplyNetState runs, ForceCutsceneSkip downstream
+                    // dereferences a null floorPoly on the boss → crash
+                    // (RAX=0, RBX=0x10, R14=0x78).
+                    //
+                    // disableGameplayLogic is the canonical "boss is in
+                    // intro" flag — gating on it directly defers cleanly
+                    // until the local actionFunc transitions to FloorMain
+                    // and clears the flag. At that point ApplyNetState's
+                    // own `if (disableGameplayLogic && stateIndex >= 0x01)`
+                    // check ALSO returns false, so ForceCutsceneSkip is
+                    // skipped and we land directly on the SetupFloorMain
+                    // case. Net: the dangerous code path is unreachable.
+                    BossGoma* gPeer = (BossGoma*)actor;
+                    if (gPeer->disableGameplayLogic) {
+                        inSyncedGomaCutscene = true;
                     }
                     const bool combatStateNet = (ext->netStateIndex >= 0x01 &&
                                                  ext->netStateIndex <= 0x10);
                     if (inSyncedGomaCutscene && combatStateNet) {
                         if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
-                            SPDLOG_INFO("[BossGoma] rx netId={} defer net=0x{:02X} local=0x{:02X} (waiting for CUTSCENE_END)",
+                            SPDLOG_INFO("[BossGoma] rx netId={} defer net=0x{:02X} local=0x{:02X} (disableGameplayLogic=true, waiting for local FloorMain transition)",
                                         ext->netId, (int)ext->netStateIndex, (int)curState);
                         }
                     } else {
@@ -3944,8 +3955,25 @@ void Anchor::RegisterHooks() {
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 EnHintnuts* h = (EnHintnuts*)actor;
                 s16 curState = EnHintnuts_GetStateIndex(h);
-                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
-                                      ext->netStateIndex == 4);
+                // Log 182 narrowed the dormant set for Hintnuts.
+                // Originally Burrow (4) was treated as dormant alongside
+                // Wait (0) and LookAround (1). But Burrow is a DELIBERATE
+                // hide-from-player action — not idle dormancy. When host's
+                // Hintnut burrows because P1 approached, peer should follow
+                // even if P2 is far and peer's local Hintnut is at Stand.
+                // User's report: "P2's Hintnut continued throwing nuts
+                // while P1's was hidden underground" — caused by filter
+                // blocking host's Burrow. Removing 4 from dormant fixes.
+                //
+                // Also removed LookAround (1) from dormant. It IS a low-
+                // engagement state, but if host explicitly transitioned
+                // there, peer should follow (host is authoritative for
+                // sync purposes; local actionFunc recovers from there
+                // naturally if peer's Link is close).
+                //
+                // Net dormant set is now just Wait (0). Active set
+                // unchanged.
+                bool netIsDormant  = (ext->netStateIndex == 0);
                 bool localIsActive = (curState == 2 || curState == 3 ||
                                       curState == 5 || curState == 6);
                 bool deathStateNet = (ext->netStateIndex >= 7 && ext->netStateIndex <= 10);
