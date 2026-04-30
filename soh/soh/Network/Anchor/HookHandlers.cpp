@@ -1939,7 +1939,27 @@ void Anchor::RegisterHooks() {
                                     followTarget.x - player->actor.world.pos.x,
                                     followTarget.z - player->actor.world.pos.z);
                             }
-                            if (dist < kFollowThreshold) {
+                            // Bug 2 (log 184 Karebaba corridor) — skip the
+                            // FOLLOW→IDLE transition while a door handoff is
+                            // armed. The handoff block at the top of the hook
+                            // re-arms `followerDoorHandoff` every frame the
+                            // rooms differ, and (when state was IDLE) flips
+                            // back to FOLLOW on the same frame. Without this
+                            // guard, FOLLOW→IDLE→FOLLOW oscillates at frame
+                            // cadence whenever dist-to-door < kFollowThreshold,
+                            // which is exactly the moment the follower is
+                            // close enough for the BTN_A door-open injection
+                            // to fire — and the oscillation prevents that
+                            // injection from sticking.
+                            //
+                            // Stay in FOLLOW until either:
+                            //   (a) follower crosses into leader's room (door
+                            //       opens, walks through; rooms re-match and
+                            //       the handoff clears at the top of the hook
+                            //       at line 1449-1453), or
+                            //   (b) followerDoorHandoffFrames hits zero
+                            //       (timeout → fallback teleport).
+                            if (dist < kFollowThreshold && !followerDoorHandoff) {
                                 followerAIState     = FollowerAIState::IDLE;
                                 followerStateFrames = 0;
                                 SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", dist);
