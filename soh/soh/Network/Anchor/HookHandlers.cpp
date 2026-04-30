@@ -52,6 +52,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // Issue #153 — En_Goroiwa is ACTORCAT_PROP, the first non-ENEMY actor synced.
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
+// Boss_Goma — minimal Encounter -> FloorMain bridge (boss-fight trigger sync).
+#include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 
 extern PlayState* gPlayState;
 extern MapData* gMapData;
@@ -4054,6 +4056,26 @@ void Anchor::RegisterHooks() {
                         SPDLOG_INFO("[EnSw] rx netId={} block net={} local={} swType={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, (int)swType, why);
                     }
+                }
+            }
+
+            // Boss_Goma — minimal Encounter -> FloorMain bridge so any
+            // player triggering the fight starts it on every client.
+            // One-way bridge: only fires when local is in Encounter (0x00)
+            // and host has progressed to combat (0x01). Once peer is in
+            // combat the wire field is no-op'd — both clients run their
+            // own combat AI from there. Death state (0x20) is left to the
+            // ENEMY_STATE phase=DyingByLocal path.
+            if (actor->id == ACTOR_BOSS_GOMA && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                BossGoma* bg = (BossGoma*)actor;
+                s16 curState = BossGoma_GetStateIndex(bg);
+                if (curState == 0x00 && ext->netStateIndex == 0x01) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[BossGoma] rx netId={} bridge Encounter->FloorMain",
+                                    ext->netId);
+                    }
+                    BossGoma_BridgeToCombat(bg, gPlayState);
                 }
             }
 

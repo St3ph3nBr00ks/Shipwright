@@ -39,6 +39,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_St/z_en_st.h"
 // #148 / en_sw_sync_plan.md — Skullwalltula state-machine sync.
 #include "overlays/actors/ovl_En_Sw/z_en_sw.h"
+// Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
+#include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 extern PlayState* gPlayState;
 }
 
@@ -112,6 +114,11 @@ struct EnemyUpdateExtras {
     // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
     bool hasEnSw         = false;
     s16  enSwActionState = 0;
+
+    // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
+    // triggering the fight starts it on every client.
+    bool hasBossGoma         = false;
+    s16  bossGomaActionState = 0;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -212,6 +219,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnSw* sw            = (EnSw*)actor;
         e.hasEnSw           = true;
         e.enSwActionState   = EnSw_GetStateIndex(sw);
+    } else if (actor->id == ACTOR_BOSS_GOMA) {
+        BossGoma* bg            = (BossGoma*)actor;
+        e.hasBossGoma           = true;
+        e.bossGomaActionState   = BossGoma_GetStateIndex(bg);
     }
     return e;
 }
@@ -265,6 +276,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnSw != prev.hasEnSw) return true;
     if (cur.hasEnSw) {
         if (cur.enSwActionState != prev.enSwActionState) return true;
+    }
+    if (cur.hasBossGoma != prev.hasBossGoma) return true;
+    if (cur.hasBossGoma) {
+        if (cur.bossGomaActionState != prev.bossGomaActionState) return true;
     }
     return false;
 }
@@ -519,6 +534,12 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
     if (extras.hasEnSw) {
         payload["actionState"] = extras.enSwActionState;
+    }
+
+    // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
+    // trigger the fight on every client).
+    if (extras.hasBossGoma) {
+        payload["actionState"] = extras.bossGomaActionState;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -855,6 +876,13 @@ actor_found:
         }
         // #148 / en_sw_sync_plan.md — cache En_Sw actionState.
         if (actor->id == ACTOR_EN_SW && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // Boss_Goma — cache host actionState. Receive driver in
+        // HookHandlers' OnActorUpdate non-host block invokes
+        // BossGoma_BridgeToCombat when local Goma is in Encounter (0x00)
+        // and host has progressed to combat (>= 0x01).
+        if (actor->id == ACTOR_BOSS_GOMA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // Bug 2 follow-on — apply host's stem angles directly to the local

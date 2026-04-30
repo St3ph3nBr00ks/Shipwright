@@ -2190,3 +2190,47 @@ void BossGoma_SpawnChildGohma(BossGoma* this, PlayState* play, s16 i) {
 
     this->childrenGohmaState[i] = 1;
 }
+
+// =============================================================================
+// Anchor multiplayer boss-fight trigger sync.
+// Minimal scope: just enough to bridge the Encounter -> FloorMain transition
+// when any player triggers the fight. Intra-combat state transitions are NOT
+// synced here; both clients run their own combat AI once the bridge fires.
+// =============================================================================
+
+s16 BossGoma_GetStateIndex(BossGoma* this) {
+    if (this->actionFunc == BossGoma_Encounter) return 0x00;
+    if (this->actionFunc == BossGoma_Defeated)  return 0x20;
+    if (this->actionFunc == NULL)               return -1;
+    // Any other actionFunc is a combat state.
+    return 0x01;
+}
+
+void BossGoma_BridgeToCombat(BossGoma* this, PlayState* play) {
+    Camera* cam;
+
+    // Mirror the natural cutscene-exit pattern at z_boss_goma.c:970-980 so the
+    // peer's view ends up in the same state as if the local cutscene had run
+    // to completion.
+    if (this->subCameraId != 0) {
+        cam = Play_GetCamera(play, 0);
+        if (cam != NULL) {
+            cam->eye = this->subCameraEye;
+            cam->eyeNext = this->subCameraEye;
+            cam->at = this->subCameraAt;
+        }
+        func_800C08AC(play, this->subCameraId, 0);
+        this->subCameraId = 0;
+    }
+
+    this->disableGameplayLogic = false;
+    this->patienceTimer = 200;
+
+    // End cutscene context + release halted actors on the local player. Safe
+    // to call even when the cutscene never actually ran (substate 0): csCtx
+    // state will simply already be CS_STATE_IDLE.
+    func_80064534(play, &play->csCtx);
+    Player_SetCsActionWithHaltedActors(play, &this->actor, 7);
+
+    BossGoma_SetupFloorMain(this);
+}

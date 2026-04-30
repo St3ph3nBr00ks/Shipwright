@@ -153,4 +153,17 @@ typedef struct BossGoma {
     /* 0x07DC */ ColliderJntSphElement colliderItems[13];
 } BossGoma; // size = 0x0B1C
 
+// Anchor multiplayer boss-fight trigger sync.
+// Encoding (1 byte on the wire):
+//   0x00 = BossGoma_Encounter (intro cutscene / pre-fight idle)
+//   0x01 = combat (any post-Encounter actionFunc)
+//   0x20 = BossGoma_Defeated
+//   -1   = unknown (caller should skip bridge)
+s16  BossGoma_GetStateIndex(struct BossGoma* this);
+
+// Receive-side bridge: tear down local intro cutscene and enter FloorMain.
+// Called when the host has triggered the fight but the peer's local boss
+// is still in BossGoma_Encounter.
+void BossGoma_BridgeToCombat(struct BossGoma* this, PlayState* play);
+
 #endif
