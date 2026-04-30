@@ -21,7 +21,7 @@ namespace PacketSchemas {
 inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"ALL_CLIENT_STATE", 1},
     {"CUTSCENE_END", 1},   // #164 — actor-internal + savecontext cutscene end edge.
-    {"CUTSCENE_START", 2}, // bump-history: 2 (log 174 same-room gate — adds roomNum field).
+    {"CUTSCENE_START", 3}, // bump-history: 2 (log 174 same-room gate — adds roomNum field). 3 (logs 178/179 — adds triggerPos, triggerRotY for peer-teleport on receive).
     {"DAMAGE_ENEMY", 3},  // bump-history: 2 (#174/#175 damageEffect+atHitEffect), 3 (Pillar B timeline).
     {"DAMAGE_PLAYER", 1},
     {"DISABLE_ANCHOR", 1},

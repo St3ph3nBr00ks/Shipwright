@@ -242,6 +242,25 @@ void Anchor::SendPacket_CutsceneStart(const std::string& csKind, int32_t csKey,
     // unstable floor collision and triggers a void-fall.
     const int8_t roomNum = (int8_t)gPlayState->roomCtx.curRoom.num;
 
+    // Schema 3 — triggerPos / triggerRotY for cutscene-trigger position
+    // (log 178/179 fix). Captured from the local Player's position at
+    // the moment the cutscene edge fires. On the receive side, peer's
+    // Link is teleported to this position before csKey is applied to
+    // gSaveContext.cutsceneIndex. Without this, savecontext cutscenes
+    // play with peer's Link at its current location while the cutscene
+    // script's camera flies to scene-coordinate locations the Link is
+    // not standing at — visible as "Link's model floats in the void
+    // while camera focuses on something else." Boss_Goma actor-
+    // internal cutscenes also benefit (peer who entered the boss room
+    // from a corner gets snapped near the boss for the intro).
+    Vec3f  triggerPos  = { 0.0f, 0.0f, 0.0f };
+    int16_t triggerRotY = 0;
+    Player* localPlayer = GET_PLAYER(gPlayState);
+    if (localPlayer != nullptr) {
+        triggerPos  = localPlayer->actor.world.pos;
+        triggerRotY = localPlayer->actor.shape.rot.y;
+    }
+
     nlohmann::json payload;
     payload["type"]          = CUTSCENE_START;
     payload["sceneNum"]      = (int16_t)gPlayState->sceneNum;
@@ -249,11 +268,14 @@ void Anchor::SendPacket_CutsceneStart(const std::string& csKind, int32_t csKey,
     payload["csKind"]        = csKind;
     payload["csKey"]         = csKey;
     payload["csState"]       = csState;
+    payload["triggerPos"]    = triggerPos;
+    payload["triggerRotY"]   = triggerRotY;
     payload["ownerClientId"] = ownClientId;
     PacketTimeline::SetTimelineField(payload);
 
-    SPDLOG_INFO("[CutsceneStart] Sending kind={} key={} state={} scene=0x{:02X} room={}",
-                csKind, csKey, (int)csState, (int)gPlayState->sceneNum, (int)roomNum);
+    SPDLOG_INFO("[CutsceneStart] Sending kind={} key={} state={} scene=0x{:02X} room={} pos=({:.0f},{:.0f},{:.0f})",
+                csKind, csKey, (int)csState, (int)gPlayState->sceneNum, (int)roomNum,
+                triggerPos.x, triggerPos.y, triggerPos.z);
 
     for (auto& [clientId, client] : clients) {
         if (client.online && client.isSaveLoaded && !client.self) {
@@ -349,6 +371,43 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
     }
 
     if (gPlayState == nullptr) return;
+
+    // Schema 3 — teleport peer's Link to the cutscene-trigger position
+    // BEFORE applying csKey (logs 178/179 fix). Without this, savecontext
+    // cutscenes play with peer's Link at an unrelated position while the
+    // cutscene script's camera flies to scene-coordinate locations
+    // unrelated to peer's actual location — visible as "Link's model
+    // floating in the void." For Boss_Goma actor-internal cutscenes,
+    // this also pulls peer in from a wall corner of the boss arena to a
+    // sensible viewing position next to the host.
+    //
+    // Pre-cutscene Link state is replaced; the cutscene's own
+    // PLAYER_CUEID frames take over Link's position immediately after
+    // (typically frame 1) so the teleport-then-script handoff is clean.
+    // Defensive: only teleport if both pos values look sane (non-zero
+    // sentinel). A pre-schema-3 sender omits the field; we get the
+    // default zero-initialized Vec3f and skip the teleport rather than
+    // moving Link to (0,0,0).
+    Player* localPlayer = GET_PLAYER(gPlayState);
+    if (localPlayer != nullptr && payload.contains("triggerPos")) {
+        Vec3f triggerPos = payload.value("triggerPos", Vec3f{ 0.0f, 0.0f, 0.0f });
+        int16_t triggerRotY = payload.value("triggerRotY", (int16_t)0);
+        const bool posIsSane = (triggerPos.x != 0.0f || triggerPos.y != 0.0f ||
+                                triggerPos.z != 0.0f);
+        if (posIsSane) {
+            localPlayer->actor.world.pos = triggerPos;
+            localPlayer->actor.shape.rot.y = triggerRotY;
+            localPlayer->actor.world.rot.y = triggerRotY;
+            // Zero velocity so post-teleport gravity doesn't make Link
+            // sliding-fall through any momentary geometry inconsistency.
+            localPlayer->actor.velocity.x = 0.0f;
+            localPlayer->actor.velocity.y = 0.0f;
+            localPlayer->actor.velocity.z = 0.0f;
+            localPlayer->actor.speedXZ = 0.0f;
+            SPDLOG_INFO("[CutsceneStart] Teleport peer Link to triggerPos=({:.0f},{:.0f},{:.0f}) rotY=0x{:04X}",
+                        triggerPos.x, triggerPos.y, triggerPos.z, (int)(uint16_t)triggerRotY);
+        }
+    }
 
     if (csKind == "savecontext") {
         // Engine's func_80068ECC will auto-advance csCtx.state next
