@@ -6,6 +6,12 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Multiplayer targeting (boss_goma_sync_plan.md §7 / KB-25). Replaces
+// GET_PLAYER reads in yaw/pitch math + the egg-detect proximity check
+// so all clients agree on which player Larvae are tracking. Defined
+// extern "C" in HookHandlers.cpp:83.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_DRAW_CULLING_DISABLED)
@@ -202,7 +208,7 @@ void EnGoma_SetupFlee(EnGoma* this) {
 void EnGoma_Flee(EnGoma* this, PlayState* play) {
     SkelAnime_Update(&this->skelanime);
     Math_ApproachF(&this->actor.speedXZ, 20.0f / 3.0f, 0.5f, 2.0f);
-    Math_ApproachS(&this->actor.world.rot.y, Actor_WorldYawTowardActor(&this->actor, &GET_PLAYER(play)->actor) + 0x8000,
+    Math_ApproachS(&this->actor.world.rot.y, Actor_WorldYawTowardActor(&this->actor, Anchor_GetNearestPlayerActor(&this->actor, play)) + 0x8000,
                    3, 2000);
     Math_ApproachS(&this->actor.shape.rot.y, this->actor.world.rot.y, 2, 3000);
 
@@ -274,13 +280,18 @@ void EnGoma_EggFallToGround(EnGoma* this, PlayState* play) {
 }
 
 void EnGoma_Egg(EnGoma* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // KB-26 / boss_goma_sync_plan.md §7 — egg hatch trigger uses nearest
+    // player so any peer's approach hatches the egg, not just local Link.
+    // Without this, each client detects against its own local player and
+    // the egg-state desyncs across clients (reported in log 164: P2 sees
+    // egg model continue translating after host already hatched).
+    Actor* player = Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 i;
 
     this->eggSquishAngle += 1.0f;
     Math_ApproachF(&this->eggSquishAmount, 0.1f, 1.0f, 0.005f);
-    if (fabsf(this->actor.world.pos.x - player->actor.world.pos.x) < 100.0f &&
-        fabsf(this->actor.world.pos.z - player->actor.world.pos.z) < 100.0f) {
+    if (fabsf(this->actor.world.pos.x - player->world.pos.x) < 100.0f &&
+        fabsf(this->actor.world.pos.z - player->world.pos.z) < 100.0f) {
         if (++this->playerDetectionTimer > 9) {
             this->actionFunc = EnGoma_EggFallToGround;
         }
@@ -310,7 +321,7 @@ void EnGoma_SetupHatch(EnGoma* this, PlayState* play) {
     Actor_SetScale(&this->actor, 0.005f);
     this->gomaType = ENGOMA_NORMAL;
     this->actionTimer = 5;
-    this->actor.shape.rot.y = Actor_WorldYawTowardActor(&this->actor, &GET_PLAYER(play)->actor);
+    this->actor.shape.rot.y = Actor_WorldYawTowardActor(&this->actor, Anchor_GetNearestPlayerActor(&this->actor, play));
     this->actor.world.rot.y = this->actor.shape.rot.y;
     EnGoma_SpawnHatchDebris(this, play);
     this->eggScale = 1.0f;
@@ -422,7 +433,12 @@ void EnGoma_Dead(EnGoma* this, PlayState* play) {
     }
 
     if (this->actionTimer == 0 && Math_SmoothStepToF(&this->actor.scale.y, 0.0f, 0.5f, 0.00225f, 0.00001f) <= 0.001f) {
-        if (this->actor.params < 6) {
+        // boss_goma_sync_plan.md §7 — non-host's larva is spawned via
+        // HandlePacket_EnemySpawn → Actor_Spawn (NOT Actor_SpawnAsChild),
+        // so parent is NULL on non-host. Host-authoritative
+        // childrenGohmaState[3] sync (in BossGoma's ENEMY_STATE payload)
+        // covers the array; non-host writes are no-ops via this guard.
+        if (this->actor.params < 6 && this->actor.parent != NULL) {
             BossGoma* parent = (BossGoma*)this->actor.parent;
 
             parent->childrenGohmaState[this->actor.params] = -1;
@@ -465,7 +481,7 @@ void EnGoma_PrepareJump(EnGoma* this, PlayState* play) {
     SkelAnime_Update(&this->skelanime);
     Math_ApproachZeroF(&this->actor.speedXZ, 0.5f, 2.0f);
 
-    targetAngle = Actor_WorldYawTowardActor(&this->actor, &GET_PLAYER(play)->actor);
+    targetAngle = Actor_WorldYawTowardActor(&this->actor, Anchor_GetNearestPlayerActor(&this->actor, play));
     Math_ApproachS(&this->actor.world.rot.y, targetAngle, 2, 4000);
     Math_ApproachS(&this->actor.shape.rot.y, targetAngle, 2, 3000);
 
@@ -525,7 +541,7 @@ void EnGoma_Jump(EnGoma* this, PlayState* play) {
 void EnGoma_Stand(EnGoma* this, PlayState* play) {
     SkelAnime_Update(&this->skelanime);
     Math_ApproachZeroF(&this->actor.speedXZ, 0.5f, 2.0f);
-    Math_ApproachS(&this->actor.shape.rot.y, Actor_WorldYawTowardActor(&this->actor, &GET_PLAYER(play)->actor), 2,
+    Math_ApproachS(&this->actor.shape.rot.y, Actor_WorldYawTowardActor(&this->actor, Anchor_GetNearestPlayerActor(&this->actor, play)), 2,
                    3000);
 
     if (this->actionTimer == 0) {
@@ -599,8 +615,8 @@ void EnGoma_LookAtPlayer(EnGoma* this, PlayState* play) {
     s16 eyePitch;
     s16 eyeYaw;
 
-    eyeYaw = Actor_WorldYawTowardActor(&this->actor, &GET_PLAYER(play)->actor) - this->actor.shape.rot.y;
-    eyePitch = Actor_WorldPitchTowardActor(&this->actor, &GET_PLAYER(play)->actor) - this->actor.shape.rot.x;
+    eyeYaw = Actor_WorldYawTowardActor(&this->actor, Anchor_GetNearestPlayerActor(&this->actor, play)) - this->actor.shape.rot.y;
+    eyePitch = Actor_WorldPitchTowardActor(&this->actor, Anchor_GetNearestPlayerActor(&this->actor, play)) - this->actor.shape.rot.x;
 
     if (eyeYaw > 6000) {
         eyeYaw = 6000;
@@ -666,7 +682,9 @@ void EnGoma_UpdateHit(EnGoma* this, PlayState* play) {
                 }
             } else {
                 // die if still an egg
-                if (this->actor.params <= 5) { //! BossGoma only has 3 children
+                if (this->actor.params <= 5 && this->actor.parent != NULL) { //! BossGoma only has 3 children
+                    // boss_goma_sync_plan.md §7 — see same NULL-guard
+                    // rationale at the Dead path above.
                     BossGoma* parent = (BossGoma*)this->actor.parent;
 
                     parent->childrenGohmaState[this->actor.params] = -1;
@@ -912,4 +930,47 @@ void EnGoma_BossLimb(EnGoma* this, PlayState* play) {
 
 void EnGoma_Reset(void) {
     sSpawnNum = 0;
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (boss_goma_sync_plan.md §7 / KB-26).
+// Mirrors EnDekubaba_GetStateIndex / EnDekubaba_ApplyNetState.
+// =============================================================================
+
+s16 EnGoma_GetStateIndex(EnGoma* this) {
+    if (this->actionFunc == EnGoma_Flee)            return 0;
+    if (this->actionFunc == EnGoma_EggFallToGround) return 1;
+    if (this->actionFunc == EnGoma_Egg)             return 2;
+    if (this->actionFunc == EnGoma_Hatch)           return 3;
+    if (this->actionFunc == EnGoma_Hurt)            return 4;
+    if (this->actionFunc == EnGoma_Die)             return 5;
+    if (this->actionFunc == EnGoma_Dead)            return 6;
+    if (this->actionFunc == EnGoma_PrepareJump)     return 7;
+    if (this->actionFunc == EnGoma_Land)            return 8;
+    if (this->actionFunc == EnGoma_Jump)            return 9;
+    if (this->actionFunc == EnGoma_Stand)           return 10;
+    if (this->actionFunc == EnGoma_ChasePlayer)     return 11;
+    if (this->actionFunc == EnGoma_Stunned)         return 12;
+    return -1;
+}
+
+void EnGoma_ApplyNetState(EnGoma* this, PlayState* play, s16 stateIndex) {
+    switch (stateIndex) {
+        // Flee, EggFallToGround, Egg are pre-hatch states with their own
+        // self-driven transitions; ApplyNetState shouldn't force them.
+        case 0:  /* Flee — entered via EnGoma_SetupFlee on player melee */ break;
+        case 1:  /* EggFallToGround — entered when player approaches */    break;
+        case 2:  /* Egg — initial state, set by EnGoma_Init */              break;
+        case 3:  EnGoma_SetupHatch(this, play);    break;
+        case 4:  /* Hurt — gated; non-host damage routes via DAMAGE_ENEMY */ break;
+        case 5:  /* Die — gated by phase=DyingByLocal */                    break;
+        case 6:  /* Dead — gated by phase=DyingByLocal */                   break;
+        case 7:  EnGoma_SetupPrepareJump(this);    break;
+        case 8:  EnGoma_SetupLand(this);           break;
+        case 9:  EnGoma_SetupJump(this);           break;
+        case 10: EnGoma_SetupStand(this);          break;
+        case 11: EnGoma_SetupChasePlayer(this);    break;
+        case 12: /* Stunned — entered via EnGoma_SetupStunned with arg */   break;
+        default: break;
+    }
 }

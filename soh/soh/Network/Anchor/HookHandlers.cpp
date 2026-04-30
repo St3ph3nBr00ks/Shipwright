@@ -41,6 +41,11 @@ extern "C" {
 // Enemy struct headers for SkelAnime offset exceptions (see GetEnemySkelAnime below)
 #include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
 #include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
+#include "src/overlays/actors/ovl_En_Goma/z_en_goma.h"
+#include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
+#include "src/overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
+#include "src/overlays/actors/ovl_En_St/z_en_st.h"
+#include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
@@ -88,6 +93,81 @@ extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
 // (non-host) client so that its stick drop should be suppressed (no duplicate item).
 // Called from EnKarebaba_DeadItemDrop in z_en_karebaba.c.
 extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// Receive-side state-machine logging dedup.
+// The OnActorUpdate driver blocks for En_Sw / En_St / En_Dekunuts run
+// every frame and decide apply-vs-block on (curState, netStateIndex).
+// During a sustained block (e.g. dormant-active filter holding a peer
+// in lunge while net says idle), naive logging would emit the same
+// "block" line every frame at 20-60 Hz. Dedup by netId — log only when
+// the encoded (curState<<16 | netState<<8 | blocked) tuple changes.
+//
+// One global map; netIds are scene-globally unique so collisions across
+// actor types are impossible.
+namespace {
+std::unordered_map<uint32_t, uint32_t> sLoggedStateEncoded;
+bool ShouldLogStateChange(uint32_t netId, int16_t cur, int16_t net, bool blocked) {
+    uint32_t encoded = ((uint32_t)(uint16_t)cur << 16)
+                     | ((uint32_t)(uint16_t)net << 8)
+                     | (blocked ? 1u : 0u);
+    auto it = sLoggedStateEncoded.find(netId);
+    if (it == sLoggedStateEncoded.end() || it->second != encoded) {
+        sLoggedStateEncoded[netId] = encoded;
+        return true;
+    }
+    return false;
+}
+}  // namespace
+
+// #135 / en_dekunuts_sync_plan.md §6 — suppresses Mad Scrub's
+// Item_DropCollectibleRandom on a non-host receiver during the natural
+// death cycle (after BossGoma_SetupDyingNet equivalent triggers).
+// Receiver is replaying host's already-broadcast death; host's drop
+// already came through the standard pipeline.
+extern "C" bool Anchor_ShouldSuppressDekunutsDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// En_Hintnuts (Inside Deku Tree Compound Room) — suppresses the
+// recovery-heart drop in EnHintnuts_SetupLeave on a non-host receiver
+// when the host already broadcast the kill. Mirrors the Dekunuts drop-
+// suppression pattern. Trigger condition: actor's lifecycle phase
+// indicates a network-driven death-cycle is in progress.
+//
+// Note: Hintnuts has no health-based death (no DyingByLocal phase via
+// damage). The Leave path is reached after the Talk dialog completes,
+// which is locally driven on each client. The suppression here is
+// defensive — if a future change routes Leave through a network-defeat
+// flow, the guard prevents double-drops. Today this is effectively a
+// no-op because both clients run their local Talk→Leave naturally.
+extern "C" bool Anchor_ShouldSuppressHintnutsDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// #90 / en_st_sync_plan_v2.md §5 — same predicate shape as the
+// Dekunuts suppressor, applied to En_St's drop site (line 996).
+extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// #148 / en_sw_sync_plan.md §5 — same predicate shape, applied to
+// En_Sw's combat-variant drop site (line 686). Gold-variant En_Si
+// spawn deliberately NOT suppressed (cooperative collectible Design A).
+extern "C" bool Anchor_ShouldSuppressEnSwDrop(Actor* actor) {
+    if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
@@ -259,7 +339,6 @@ void Anchor::RegisterHooks() {
         if (IsSaveLoaded()) {
             SendPacket_RequestTeamState();
         }
-
         if (IsSaveLoaded()) {
             // Multiplayer kill persistence (log 162 fix, follow-on to
             // `06f540f0f` / `f822c2dee`):
@@ -344,6 +423,12 @@ void Anchor::RegisterHooks() {
             WorldStateSync::ApplyKnownFlagsForScene(
                 (int16_t)gPlayState->sceneNum,
                 (uint8_t)gSaveContext.linkAge);
+
+            // #164 — drop active-cutscene records on scene change.
+            // Stale entries would block legitimate START packets in the
+            // new scene, and an end-during-transition could otherwise
+            // leave an orphan that never clears.
+            activeCutscenes.clear();
         }
     });
 
@@ -522,6 +607,7 @@ void Anchor::RegisterHooks() {
         } else {
             prevTransitionTrigger = TRANS_TRIGGER_OFF;
         }
+
     });
 
     // Follower mode (non-host only): override local player position to trail the host.
@@ -1838,7 +1924,27 @@ void Anchor::RegisterHooks() {
                                     followTarget.x - player->actor.world.pos.x,
                                     followTarget.z - player->actor.world.pos.z);
                             }
-                            if (dist < kFollowThreshold) {
+                            // Bug 2 (log 184 Karebaba corridor) — skip the
+                            // FOLLOW→IDLE transition while a door handoff is
+                            // armed. The handoff block at the top of the hook
+                            // re-arms `followerDoorHandoff` every frame the
+                            // rooms differ, and (when state was IDLE) flips
+                            // back to FOLLOW on the same frame. Without this
+                            // guard, FOLLOW→IDLE→FOLLOW oscillates at frame
+                            // cadence whenever dist-to-door < kFollowThreshold,
+                            // which is exactly the moment the follower is
+                            // close enough for the BTN_A door-open injection
+                            // to fire — and the oscillation prevents that
+                            // injection from sticking.
+                            //
+                            // Stay in FOLLOW until either:
+                            //   (a) follower crosses into leader's room (door
+                            //       opens, walks through; rooms re-match and
+                            //       the handoff clears at the top of the hook
+                            //       at line 1449-1453), or
+                            //   (b) followerDoorHandoffFrames hits zero
+                            //       (timeout → fallback teleport).
+                            if (dist < kFollowThreshold && !followerDoorHandoff) {
                                 followerAIState     = FollowerAIState::IDLE;
                                 followerStateFrames = 0;
                                 SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", dist);
@@ -3040,6 +3146,27 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // #135 / en_dekunuts_sync_plan.md §3 step 1 — DEKUNUTS_FLOWER child
+        // shares its parent Mad Scrub's home.pos and actor->id, so the
+        // deterministic netId scheme would collide with the parent. The
+        // flower has no actionFunc (Update early-returns) and no collider
+        // — nothing to sync. Skip netId assignment entirely so the parent
+        // owns the netId unambiguously.
+        if (actor->id == ACTOR_EN_DEKUNUTS && actor->params == /*DEKUNUTS_FLOWER*/ 10) {
+            return;
+        }
+
+        // En_Hintnuts (Inside Deku Tree Compound Room) — same flower
+        // child pattern as Dekunuts. Parent (params 1-3 or 0) spawns a
+        // child with params=0xA (line 100 of z_en_hintnuts.c). The child
+        // is a static decorative flower with no actionFunc, no collider,
+        // and identical home.pos/id to the parent. Skip netId assignment
+        // for the flower so parent owns the netId. Without this skip,
+        // logs show the same netId assigned twice — collision.
+        if (actor->id == ACTOR_EN_HINTNUTS && (actor->params & 0xFF) == 0xA) {
+            return;
+        }
+
         // Cross-scene-respawn fix (log 115 bug — Deku Babas didn't respawn on
         // host after both players left and re-entered scene 0x0):
         // OnSceneSpawnActors fires AFTER the setup-actor loop completes
@@ -3272,6 +3399,58 @@ void Anchor::RegisterHooks() {
         // the netId extension is in place.
         if (isDynamicSpawn && ::SceneAuthority::IsEffectiveHost()) {
             SendPacket_EnemySpawn(actor);
+        }
+    });
+
+    // Generic SkelAnime late-bind (log 184 Hintnut sync regression).
+    //
+    // OnActorSpawn fires from Actor_Spawn (z_actor.c:3409) AFTER Actor_Init
+    // returns, but Actor_Init only invokes `actor->init` when the actor's
+    // object is loaded (z_actor.c:1256-1268). For static actors whose
+    // object isn't loaded yet at scene-load time, the init call is
+    // deferred — Actor_Init returns having done only the generic Actor*
+    // bookkeeping; `actor->init` runs later in the deferred-init loop at
+    // z_actor.c:2633-2645 and triggers OnActorInit (line 2641).
+    //
+    // Result: when our OnActorSpawn hook reads `ext.skelAnime =
+    // GetEnemySkelAnime(actor)`, the SkelAnime field is still zeroed
+    // (limbCount=0, jointTable=nullptr). GetEnemySkelAnime's validation
+    // returns nullptr. The cached extension carries `skelAnime=nullptr,
+    // limbCount=0` for the rest of the session. Both send-side
+    // (EnemyState.cpp:616) and receive-side (EnemyState.cpp:884) gate
+    // jointTable serialization on `ext->skelAnime != nullptr &&
+    // ext->limbCount > 0`, so peer animation never syncs for affected
+    // actors.
+    //
+    // User-observed reproduction (log 184 line 2086): Inside Deku Tree
+    // Compound Room Hintnut spawn logged `limbCount=0`. State-machine
+    // sync (actionState) worked because that field is set in
+    // EnemyState.cpp:943 unconditionally — so peer's Hintnut state
+    // changed when host's did, but joints stayed at the engine-init
+    // pose (Hintnut visually in nest). Another Hintnut spawned later
+    // (log line 3915) showed `limbCount=10` because its object was
+    // already loaded at that scene's load time.
+    //
+    // Fix: OnActorInit hook runs AFTER actor->init() completes. At that
+    // point SkelAnime is properly initialized. If our extension exists
+    // and has a stale `skelAnime=nullptr`, re-run GetEnemySkelAnime and
+    // update the cache. No-op for non-deferred actors (their extension
+    // already has valid skelAnime from OnActorSpawn).
+    COND_HOOK(OnActorInit, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor == nullptr) return;
+        EnemyNetId* ext = const_cast<EnemyNetId*>(
+            ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+        if (ext == nullptr) return;  // not an admitted-for-sync actor
+        if (ext->skelAnime != nullptr && ext->limbCount > 0) {
+            return;  // already populated by OnActorSpawn — no-op
+        }
+        SkelAnime* fresh = GetEnemySkelAnime(actor);
+        if (fresh != nullptr) {
+            ext->skelAnime = fresh;
+            ext->limbCount = fresh->limbCount;
+            SPDLOG_INFO("[EnemySpawn] SkelAnime late-bound on OnActorInit: actorId={} netId={} limbCount={}",
+                        actor->id, ext->netId, (int)ext->limbCount);
         }
     });
 
@@ -3519,7 +3698,16 @@ void Anchor::RegisterHooks() {
                 // rotation/scale re-apply continues normally — only world.pos and
                 // shape.rot are arrow-driven and need this skip.
                 const bool arrowPinned = (actor->flags & ACTOR_FLAG_ATTACHED_TO_ARROW) != 0;
-                if (actor->id != ACTOR_EN_DEKUBABA && actor->id != ACTOR_EN_KAREBABA && !arrowPinned) {
+                // Boss_Goma added to the animation-driven exclusion alongside
+                // Dekubaba and Karebaba (boss_goma_sync_plan.md §2). Boss_Goma's
+                // own state-machine drives world.pos + shape.rot every frame;
+                // network override breaks the boss's transform anchoring. Per-
+                // actor sync (actionState, animation id) is the proper channel
+                // and has not yet landed.
+                const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
+                                                   actor->id == ACTOR_EN_KAREBABA ||
+                                                   actor->id == ACTOR_BOSS_GOMA);
+                if (!isAnimationDrivenPos && !arrowPinned) {
                     actor->world.pos = ext->netPos;
                     actor->shape.rot = ext->netShapeRot;
                 }
@@ -3612,9 +3800,23 @@ void Anchor::RegisterHooks() {
                                               ext->netStateIndex == 2 || ext->netStateIndex == 9);
                         bool localIsActive = (curState == 2 || curState == 3 || curState == 4 || curState == 7);
                         if (!(netIsDormant && localIsActive)) {
+                            if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                                SPDLOG_INFO("[EnKarebaba] rx netId={} apply {}→{}",
+                                            ext->netId, (int)curState, (int)ext->netStateIndex);
+                            }
                             EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
+                        } else if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                            SPDLOG_INFO("[EnKarebaba] rx netId={} block net={} local={} (dormant-active filter)",
+                                        ext->netId, (int)ext->netStateIndex, (int)curState);
                         }
+                    } else if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnKarebaba] rx netId={} block net={} local={} (intra-attack guard)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
                     }
+                } else if (curState != ext->netStateIndex && ext->netStateIndex == 7 &&
+                           ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                    SPDLOG_INFO("[EnKarebaba] rx netId={} block net=7 local={} (retract-gate)",
+                                ext->netId, (int)curState);
                 }
             }
 
@@ -3653,7 +3855,210 @@ void Anchor::RegisterHooks() {
                 EnDekubaba* baba = (EnDekubaba*)actor;
                 s16 curState = EnDekubaba_GetStateIndex(baba);
                 if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnDekubaba] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
                     EnDekubaba_ApplyNetState(baba, ext->netStateIndex);
+                }
+            }
+
+            // boss_goma_sync_plan.md §7 / KB-26 — En_Goma (Larva)
+            // state-machine sync. Resolves the egg-hatch desync where
+            // each client's local hatch timer advances independently.
+            // Death-class states (Hurt, Die, Dead) gated by phase.
+            if (actor->id == ACTOR_EN_GOMA && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnGoma* lg = (EnGoma*)actor;
+                s16 curState = EnGoma_GetStateIndex(lg);
+                if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnGoma] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnGoma_ApplyNetState(lg, gPlayState, ext->netStateIndex);
+                }
+            }
+
+            // #135 / en_dekunuts_sync_plan.md §8 — Mad Scrub state-
+            // machine sync. Without this each client's free Wait/
+            // LookAround/Stand/ThrowNut/Burrow loop drifts; aim direction
+            // and projectile-spawn frame can disagree across clients.
+            // Death/stun states gated by phase + dormant-to-active filter.
+            if (actor->id == ACTOR_EN_DEKUNUTS && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnDekunuts* d = (EnDekunuts*)actor;
+                s16 curState = EnDekunuts_GetStateIndex(d);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 4);
+                bool localIsActive = (curState == 2 || curState == 3 ||
+                                      curState == 5 || curState == 6 || curState == 7);
+                bool deathStateNet = (ext->netStateIndex == 8 || ext->netStateIndex == 10);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnDekunuts] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnDekunuts_ApplyNetState(d, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet                  ? "death-state-gated"
+                                        : (netIsDormant && localIsActive) ? "dormant-active filter"
+                                        :                                   "other";
+                        SPDLOG_INFO("[EnDekunuts] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Hintnuts (Inside Deku Tree Compound Room) — sibling sync
+            // of Dekunuts pattern. Without state-machine sync, each
+            // client's free Wait/LookAround/Stand/ThrowNut/Burrow/Run
+            // cycle drifts; aim direction at projectile-spawn diverges,
+            // and the visible "scrub hidden vs popped up" state desyncs
+            // (logs 179/180 symptom).
+            //
+            // Dormant-to-active filter:
+            //   net-dormant: 0 Wait, 1 LookAround, 4 Burrow
+            //   local-active: 2 Stand, 3 ThrowNut, 5 BeginRun, 6 Run
+            // Death-class states 7-10 (Talk/Leave/Freeze/BeginFreeze)
+            // are sPuzzleCounter-driven and gated — local logic drives
+            // them via the synced En_Nutsball collision flow on each
+            // peer independently.
+            if (actor->id == ACTOR_EN_HINTNUTS && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnHintnuts* h = (EnHintnuts*)actor;
+                s16 curState = EnHintnuts_GetStateIndex(h);
+                // Log 182 narrowed the dormant set for Hintnuts.
+                // Originally Burrow (4) was treated as dormant alongside
+                // Wait (0) and LookAround (1). But Burrow is a DELIBERATE
+                // hide-from-player action — not idle dormancy. When host's
+                // Hintnut burrows because P1 approached, peer should follow
+                // even if P2 is far and peer's local Hintnut is at Stand.
+                //
+                // Net dormant set is now just Wait (0). Active set
+                // unchanged.
+                //
+                // #180 residual #4 — death-class state gate removed.
+                // Originally states 7-10 (Talk/Leave/Freeze/BeginFreeze)
+                // were blocked from ApplyNetState because SetupFreeze
+                // mutates the global sPuzzleCounter. But the user-visible
+                // symptom (P1 sees Freeze visual, P2 doesn't) is more
+                // important than the conditional sPuzzleCounter mutation
+                // (which only fires if local counter == -3). EnHintnuts_
+                // ApplyNetState now applies Freeze/BeginFreeze to keep
+                // the visual sync. Talk also synced. Leave skipped
+                // because SetupLeave needs a PlayState we don't have here
+                // and the natural Talk→Leave transition fires locally.
+                bool netIsDormant  = (ext->netStateIndex == 0);
+                bool localIsActive = (curState == 2 || curState == 3 ||
+                                      curState == 5 || curState == 6);
+                // Only block raw-Leave (8) since ApplyNetState skips it
+                // anyway; saves a redundant SetupTalk re-fire if peer
+                // already at Talk.
+                bool deathStateNet = (ext->netStateIndex == 8);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnHintnuts] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnHintnuts_ApplyNetState(h, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet                  ? "death-state-gated"
+                                        : (netIsDormant && localIsActive) ? "dormant-active filter"
+                                        :                                   "other";
+                        SPDLOG_INFO("[EnHintnuts] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // #90 / en_st_sync_plan_v2.md §3 — Skulltula state-machine
+            // sync. Dormant-to-active filter: states 0/1 (init / wait
+            // on ceiling) shouldn't override active ground states 2/3/4.
+            // Death states 6/7/8 gated by PhaseImpliesHasLocalDeath.
+            if (actor->id == ACTOR_EN_ST && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnSt* st = (EnSt*)actor;
+                s16 curState = EnSt_GetStateIndex(st);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
+                bool localIsActive = (curState == 2 || curState == 3 || curState == 4);
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnSt] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnSt_ApplyNetState(st, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnSt] rx netId={} block net={} local={} (dormant-active filter)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
+                    }
+                }
+            }
+
+            // #148 / en_sw_sync_plan.md §3 — Skullwalltula state-machine
+            // sync. swType-gated dormant-to-active filter:
+            //   combat (swType=0): dormant=6 (wall idle); active=7/8/9
+            //                      (lunge / decel / return).
+            //   gold (swType>=1):  init transients=0/1 (init / toss-flight,
+            //                      brief), settled=2 (idle on web).
+            // Death states gated by PhaseImpliesHasLocalDeath.
+            //
+            // Audit-fix for the gold variant: states 0/1 are init transients
+            // that fire briefly during Init then transition to state 2.
+            // The ORIGINAL filter blocked "net dormant=2 over local active=0/1"
+            // — protecting the receiver while it finished its own init.
+            // But it did NOT block the inverse: if local had naturally
+            // settled to state 2 (the steady state) and an outdated host
+            // packet still says 0 or 1 (host's init transient), we'd
+            // regress local from settled-to-init. Symmetric guard: gold's
+            // init transients (0/1) are NEVER applied to a settled state-2.
+            if (actor->id == ACTOR_EN_SW && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnSw* sw = (EnSw*)actor;
+                s16 curState = EnSw_GetStateIndex(sw);
+                u8  swType   = (sw->actor.params & 0xE000) >> 13;
+                bool deathStateNet;
+                bool blockTransition;
+                const char* blockReason = nullptr;
+                if (swType == 0) {
+                    bool netDormant  = (ext->netStateIndex == 6);
+                    bool localActive = (curState == 7 || curState == 8 || curState == 9);
+                    deathStateNet    = (ext->netStateIndex == 4 || ext->netStateIndex == 5);
+                    blockTransition  = (netDormant && localActive);
+                    if (blockTransition) blockReason = "dormant-active filter (combat)";
+                } else {
+                    // gold: 0/1 are init transients; 2 is the settled state.
+                    bool netInitTransient = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
+                    bool localSettledIdle = (curState == 2);
+                    bool netDormant  = (ext->netStateIndex == 2);
+                    bool localActive = (curState == 0 || curState == 1);
+                    deathStateNet    = (ext->netStateIndex == 3);
+                    // Original guard + new symmetric guard against
+                    // settled→init regression.
+                    blockTransition  = (netDormant && localActive)
+                                    || (netInitTransient && localSettledIdle);
+                    if (netDormant && localActive)         blockReason = "dormant-active filter (gold)";
+                    else if (netInitTransient && localSettledIdle) blockReason = "settled-init filter (gold)";
+                }
+                if (curState != ext->netStateIndex && !blockTransition && !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnSw] rx netId={} apply {}→{} swType={}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex, (int)swType);
+                    }
+                    EnSw_ApplyNetState(sw, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" :
+                                          (blockReason  ? blockReason          : "other");
+                        SPDLOG_INFO("[EnSw] rx netId={} block net={} local={} swType={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, (int)swType, why);
+                    }
                 }
             }
 
@@ -3916,6 +4321,40 @@ void Anchor::RegisterHooks() {
               [&](u16 entranceIndex, u8 isReversedEntrance) { SendPacket_EntranceDiscovered(entranceIndex); });
 
     COND_ID_HOOK(OnBossDefeat, ACTOR_BOSS_GANON2, isConnected, [&](void* refActor) { SendPacket_GameComplete(); });
+
+    // Plan §4 — generalised OnBossDefeat host-side hook for synced bosses.
+    // Mirrors the OnEnemyDefeat hook above but gated on IsSyncedBossActor
+    // so it only fires for opted-in bosses (ACTOR_BOSS_GOMA today).
+    //
+    // Boss_Goma fires OnBossDefeat in BossGoma_SetupDefeated (line 421
+    // of z_boss_goma.c). The host-side hook records the death in
+    // bookkeeping and broadcasts ENEMY_STATE phase=DyingByLocal so peers
+    // route through BossGoma_SetupDyingNet (their cutscene-playing path).
+    COND_HOOK(OnBossDefeat, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (!IsSaveLoaded()) return;
+        if (!IsSyncedBossActor(actor->id)) return;
+
+        EnemyNetId* ext = const_cast<EnemyNetId*>(
+            ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+        if (ext == nullptr) {
+            SPDLOG_WARN("[OnBossDefeat] no EnemyNetId extension for boss id={}", actor->id);
+            return;
+        }
+
+        auto& bk = EnemyStateSync::HostBookkeeping::Instance();
+        if (!bk.ClaimDefeatBroadcast(ext->netId)) {
+            // Already broadcast — duplicate; transition phase but skip send.
+            EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
+            return;
+        }
+        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
+        if (::SceneAuthority::IsEffectiveHost()) {
+            bk.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
+        }
+        SPDLOG_INFO("[OnBossDefeat] id={} netId={} — broadcasting defeat", actor->id, ext->netId);
+        SendPacket_EnemyDefeated(ext->netId);
+    });
 
     COND_HOOK(OnItemReceive, isConnected, [&](GetItemEntry itemEntry) {
         // Handle vanilla dungeon items a bit differently

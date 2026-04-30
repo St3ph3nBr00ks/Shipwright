@@ -22,4 +22,22 @@ typedef struct EnDekunuts {
     /* 0x02C8 */ ColliderCylinder collider;
 } EnDekunuts; // size = 0x0314
 
+// Anchor multiplayer state-machine sync (#135 / en_dekunuts_sync_plan.md).
+// SetupDyingNet triggers the natural death animation on a non-host
+// receiver without echoing GameInteractor_ExecuteOnEnemyDefeat.
+// GetStateIndex / ApplyNetState mirror the EnDekubaba/Karebaba pattern.
+// `this` is a C++ keyword — header decls use `actor`. Implementations
+// in z_en_dekunuts.c keep `this` per OoT decomp convention.
+void EnDekunuts_SetupDyingNet(struct EnDekunuts* actor, PlayState* play);
+s16  EnDekunuts_GetStateIndex(struct EnDekunuts* actor);
+void EnDekunuts_ApplyNetState(struct EnDekunuts* actor, s16 stateIndex);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressDekunutsDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

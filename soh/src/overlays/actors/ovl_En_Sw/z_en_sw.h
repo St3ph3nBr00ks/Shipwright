@@ -49,4 +49,24 @@ typedef struct EnSw {
     /* 0x0490 */ char unk_490[0x48];
 } EnSw; // size = 0x04D8
 
+// Anchor multiplayer state-machine sync (#148 / en_sw_sync_plan.md).
+// Combat (swType=0) and gold (swType=1..4) variants share the underlying
+// action-func table; SetupDyingNet branches on swType internally.
+//
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (e.g. GSTargetable.cpp), so the param name in the declaration
+// uses `actor` instead. The implementations in z_en_sw.c keep `this`
+// per OoT decomp convention.
+void EnSw_SetupDyingNet(struct EnSw* actor, PlayState* play);
+s16  EnSw_GetStateIndex(struct EnSw* actor);
+void EnSw_ApplyNetState(struct EnSw* actor, s16 stateIndex);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnSwDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

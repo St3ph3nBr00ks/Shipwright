@@ -142,6 +142,7 @@ void Anchor::Disable() {
     // room/team would mis-reassign netIds on the next scene-spawn.
     sceneActorNetIdSnapshots.clear();
     pendingSceneActorNetIdsBroadcast = false;
+
 }
 
 void Anchor::OnConnected() {
@@ -289,10 +290,62 @@ void Anchor::ProcessIncomingPacketQueue() {
         packetsToProcess.swap(incomingPacketQueue);
     }
 
-    // Process packets without holding the lock
+    // Drain into a vector so we can two-pass for ENEMY_STATE coalescing.
+    // When P2's TCP receive thread stalls (process scheduling, audio
+    // pipeline contention, network blip), the relay buffers per-frame
+    // ENEMY_STATE packets and dumps them in a burst on recovery —
+    // observed up to 153 pps recovery storm in log 177's window
+    // 16:53:26-36 after a 30-second stall. Each phase=Alive
+    // phaseChanged=false ENEMY_STATE is a complete snapshot of an
+    // actor's state at send time, so applying older ones in sequence
+    // is wasteful: the receiver ends up at the same place as if it had
+    // only applied the latest. Coalesce by netId, keep only latest.
+    //
+    // What is NOT coalesced (preserve event semantics + ordering):
+    //   - phaseChanged=true (spawns / defeats / respawns)
+    //   - all non-ENEMY_STATE packet types
+    std::vector<nlohmann::json> packets;
     while (!packetsToProcess.empty()) {
-        nlohmann::json payload = packetsToProcess.front();
+        packets.push_back(std::move(packetsToProcess.front()));
         packetsToProcess.pop();
+    }
+
+    // First pass (back-to-front): record index of LATEST coalescible
+    // ENEMY_STATE per netId. Walking backwards means the first hit per
+    // netId is the latest occurrence in the batch.
+    std::unordered_map<uint32_t, size_t> latestSteadyByNetId;
+    for (size_t i = packets.size(); i-- > 0;) {
+        const auto& p = packets[i];
+        if (!p.contains("type")) continue;
+        if (p.value("type", std::string("")) != ENEMY_STATE) continue;
+        if (p.value("phase", std::string("")) != "Alive") continue;
+        if (p.value("phaseChanged", false)) continue;
+        uint32_t netId = p.value("netId", (uint32_t)0);
+        if (netId == 0) continue;
+        latestSteadyByNetId.emplace(netId, i);  // first emplace per netId wins
+    }
+
+    // Second pass (front-to-back): process each packet, skipping stale
+    // coalescible ENEMY_STATE entries. All other types and phaseChanged
+    // events flow through in original order.
+    int coalescedDropped = 0;
+    for (size_t i = 0; i < packets.size(); ++i) {
+        const nlohmann::json& checkPayload = packets[i];
+        if (checkPayload.contains("type") &&
+            checkPayload.value("type", std::string("")) == ENEMY_STATE &&
+            checkPayload.value("phase", std::string("")) == "Alive" &&
+            !checkPayload.value("phaseChanged", false)) {
+            uint32_t netId = checkPayload.value("netId", (uint32_t)0);
+            if (netId != 0) {
+                auto it = latestSteadyByNetId.find(netId);
+                if (it != latestSteadyByNetId.end() && it->second != i) {
+                    coalescedDropped++;
+                    continue;  // a newer snapshot exists later in this batch
+                }
+            }
+        }
+
+        nlohmann::json payload = packets[i];
 
         std::string packetType = payload["type"].get<std::string>();
 
@@ -368,6 +421,14 @@ void Anchor::ProcessIncomingPacketQueue() {
         }
 
         isProcessingIncomingPacket = false;
+    }
+
+    // Coalesce diagnostic. Threshold of 5 keeps normal-operation noise
+    // out of the log (a 1-2 packet coalesce per tick is routine). A
+    // catch-up burst after a stall produces dozens or hundreds at once.
+    if (coalescedDropped >= 5) {
+        SPDLOG_INFO("[Anchor] Coalesced {} stale ENEMY_STATE packets ({} netIds; total batch {} packets)",
+                    coalescedDropped, (int)latestSteadyByNetId.size(), (int)packets.size());
     }
 }
 

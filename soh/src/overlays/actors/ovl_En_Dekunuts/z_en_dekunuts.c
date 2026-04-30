@@ -439,7 +439,9 @@ void EnDekunuts_Die(EnDekunuts* this, PlayState* play) {
                              150, 150, 1, 13, 1);
         effectPos.y = this->actor.world.pos.y + 10.0f;
         EffectSsHahen_SpawnBurst(play, &effectPos, 3.0f, 0, 12, 3, 15, HAHEN_OBJECT_DEFAULT, 10, NULL);
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x30);
+        if (!Anchor_ShouldSuppressDekunutsDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x30);
+        }
         if (this->actor.child != NULL) {
             Actor_ChangeCategory(play, &play->actorCtx, this->actor.child, ACTORCAT_PROP);
         }
@@ -535,5 +537,69 @@ void EnDekunuts_Draw(Actor* thisx, PlayState* play) {
         Gfx_DrawDListOpa(play, gDekuNutsFlowerDL);
     } else {
         SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnDekunuts_OverrideLimbDraw, NULL, this);
+    }
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (#135 / en_dekunuts_sync_plan.md §3).
+// =============================================================================
+
+// Triggers Mad Scrub's death animation on a non-host receiver. Mirrors
+// the natural BeDamaged → Die transition without firing
+// GameInteractor_ExecuteOnEnemyDefeat (host already broadcast; receiver
+// re-firing would echo-loop). Avoids EnDekunuts_SetupBeDamaged because
+// it dereferences `collider.info.acHitInfo->ac` which the receiver
+// doesn't have.
+void EnDekunuts_SetupDyingNet(EnDekunuts* this, PlayState* play) {
+    Enemy_StartFinishingBlow(play, &this->actor);
+    this->actor.colChkInfo.health = 0;
+    this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    Animation_MorphToPlayOnce(&this->skelAnime, &gDekuNutsDamageAnim, -3.0f);
+    // 180° from facing — knockback direction substitute when no attacker
+    // collider is available (mostly cosmetic; actor dies after one anim
+    // cycle).
+    this->actor.world.rot.y = this->actor.shape.rot.y + 0x8000;
+    this->collider.base.acFlags &= ~AC_ON;
+    this->actionFunc = EnDekunuts_BeDamaged;
+    this->actor.speedXZ = 10.0f;
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_CUTBODY);
+    Actor_SetColorFilter(&this->actor, 0x4000, 0xFF, 0,
+                         Animation_GetLastFrame(&gDekuNutsDamageAnim));
+}
+
+s16 EnDekunuts_GetStateIndex(EnDekunuts* this) {
+    if (this->actionFunc == EnDekunuts_Wait)        return 0;
+    if (this->actionFunc == EnDekunuts_LookAround)  return 1;
+    if (this->actionFunc == EnDekunuts_Stand)       return 2;
+    if (this->actionFunc == EnDekunuts_ThrowNut)    return 3;
+    if (this->actionFunc == EnDekunuts_Burrow)      return 4;
+    if (this->actionFunc == EnDekunuts_BeginRun)    return 5;
+    if (this->actionFunc == EnDekunuts_Run)         return 6;
+    if (this->actionFunc == EnDekunuts_Gasp)        return 7;
+    if (this->actionFunc == EnDekunuts_BeDamaged)   return 8;
+    if (this->actionFunc == EnDekunuts_BeStunned)   return 9;
+    if (this->actionFunc == EnDekunuts_Die)         return 10;
+    return -1;
+}
+
+void EnDekunuts_ApplyNetState(EnDekunuts* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  EnDekunuts_SetupWait(this);        break;
+        case 1:  EnDekunuts_SetupLookAround(this);  break;
+        case 2:  EnDekunuts_SetupStand(this);       break;
+        case 3:  EnDekunuts_SetupThrowNut(this);    break;
+        case 4:  EnDekunuts_SetupBurrow(this);      break;
+        case 5:  EnDekunuts_SetupBeginRun(this);    break;
+        case 6:  EnDekunuts_SetupRun(this);         break;
+        case 7:  EnDekunuts_SetupGasp(this);        break;
+        // 8 (BeDamaged) — driven via SetupDyingNet for receivers; no
+        //                 standalone entry point. Skip silently.
+        case 9:  EnDekunuts_SetupBeStunned(this);   break;
+        // 10 (Die)      — driven via natural-cycle from BeDamaged. Skip
+        //                 silently rather than calling SetupDie directly,
+        //                 which fires GameInteractor_ExecuteOnEnemyDefeat
+        //                 → echo loop.
+        default: break;
     }
 }

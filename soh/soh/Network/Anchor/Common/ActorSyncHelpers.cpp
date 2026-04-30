@@ -41,6 +41,12 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
         case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
         case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
+        case ACTOR_EN_NUTSBALL: return true;  // En_Hintnuts deku-nut projectile (PROP).
+                                              // Host's spawn fires ENEMY_SPAWN; peer spawns
+                                              // matching copy. Both sides run deterministic
+                                              // Actor_MoveXZGravity locally and detect
+                                              // collisions independently, advancing each
+                                              // peer's local sPuzzleCounter consistently.
         default:                return false;
     }
 }

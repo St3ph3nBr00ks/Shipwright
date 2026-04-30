@@ -1,7 +1,9 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/PacketSchemas.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
+#include "soh/ObjectExtension/ObjectExtension.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
 #include "soh/OTRGlobals.h"
@@ -96,6 +98,7 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         bool     wasSaveLoaded        = clients[clientId].isSaveLoaded;
         bool     wasOnline            = clients[clientId].online;
         s16      prevSceneNum         = clients[clientId].sceneNum;
+        s8       prevCurRoomNum       = clients[clientId].curRoomNum;
         uint32_t prevSceneSpawnEpoch  = clients[clientId].sceneSpawnEpoch;
 
         AnchorClient client = payload["state"].get<AnchorClient>();
@@ -253,6 +256,74 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                     killPayload["targetClientId"] = clientId;
                     SendJsonToRemote(killPayload);
                 }
+            }
+        }
+
+        // #166 sub-item (6) — mid-boss late-join immediate snapshot.
+        //
+        // Without this, when a peer joins a scene+room mid-Gohma-fight, the
+        // peer's local Boss_Goma_Init creates a fresh full-HP boss in the
+        // intro Encounter cutscene. The standard per-frame ENEMY_STATE
+        // arrives ~50ms later (one simulation frame), but during that
+        // window the peer's view of the boss is full-HP / cutscene-zero —
+        // visibly desynced.
+        //
+        // Fix: when host detects a peer's curRoomNum change AND host is
+        // currently in the same scene+room, walk the synced boss actors
+        // in host's actor list and fire an immediate SendPacket_EnemyUpdate
+        // for each. Carries full state (actionState, cutsceneSubState,
+        // visualState, eyeState, invincibility, spawnTimer, lookedAtFrames,
+        // children[3], animId, curFrame, position, rotation, health,
+        // scale) — peer's local boss applies and snaps to host's state.
+        //
+        // Trigger: host-only, room-or-scene change, peer now in host's room,
+        // and same timeline. Cost: O(BOSS-actors-in-room) which is ~1 in
+        // normal play.
+        //
+        // Audit fix (post-bcecfeb6c): two issues addressed in-place.
+        //   1. Cache filter — SendPacket_EnemyUpdate consults sLastSentByNetId
+        //      and skips no-op packets. In steady state the cache holds the
+        //      boss's current values from earlier broadcasts, so the snapshot
+        //      would silently no-op. Evict the per-netId cache entry first
+        //      via Anchor_ClearEnemyUpdateCacheForNetId so the send actually
+        //      transmits.
+        //   2. Cross-timeline gate — Pillar B ENEMY_STATE handler already
+        //      drops cross-timeline packets on the receive side via the
+        //      timeline bit on netId, but firing them at all is wasteful
+        //      and risks mis-attribution if a future scene becomes shared
+        //      between adult/child. Compare host's linkAge to the joining
+        //      peer's linkAge before snapshotting.
+        const s8 newCurRoomNum = clients[clientId].curRoomNum;
+        const bool roomChanged = (sceneChanged || prevCurRoomNum != newCurRoomNum);
+        const u8   hostTimeline = (u8)(gSaveContext.linkAge & 1);
+        const u8   peerTimeline = (u8)(clients[clientId].linkAge & 1);
+        const bool sameTimeline = (hostTimeline == peerTimeline);
+        if (::SceneAuthority::IsEffectiveHost() && nowLoaded && roomChanged &&
+            sameTimeline &&
+            gPlayState != nullptr && (s16)gPlayState->sceneNum == newScene &&
+            (s8)gPlayState->roomCtx.curRoom.num == newCurRoomNum) {
+            int snapped = 0;
+            Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head;
+            while (a != nullptr) {
+                if (IsSyncedBossActor(a->id)) {
+                    const EnemyNetId* ext =
+                        ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                    if (ext != nullptr) {
+                        // Evict dedup cache so the send is not filtered by
+                        // ShouldSkipEnemyUpdate's "no-delta-since-last-send"
+                        // check. The cache will repopulate on this very
+                        // SendPacket_EnemyUpdate call.
+                        Anchor_ClearEnemyUpdateCacheForNetId(ext->netId);
+                        SendPacket_EnemyUpdate(ext->netId, a);
+                        snapped++;
+                    }
+                }
+                a = a->next;
+            }
+            if (snapped > 0) {
+                SPDLOG_INFO("[EnemyState] Snapshot fired for {} boss(es) on client {} "
+                            "scene/room change scene={} room={}",
+                            snapped, clientId, (int)newScene, (int)newCurRoomNum);
             }
         }
 

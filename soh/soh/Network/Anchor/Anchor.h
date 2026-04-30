@@ -110,6 +110,12 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play);
 // is file-scope static in Packets/EnemyUpdate.cpp.
 void Anchor_ClearEnemyUpdateCache();
 
+// Per-netId cache eviction. Forces the next SendPacket_EnemyUpdate(netId)
+// to bypass the dedup filter even when the actor's state is unchanged.
+// Used by #166 mid-boss late-join snapshot — the joining peer needs the
+// packet immediately, regardless of what other peers have already received.
+void Anchor_ClearEnemyUpdateCacheForNetId(uint32_t netId);
+
 typedef struct AnchorClient {
     uint32_t clientId;
     std::string name;
@@ -739,6 +745,7 @@ class Anchor : public Network {
     // fires its own transition once in proximity of the trigger point.
     void SendPacket_SceneTransitionHandoff(s16 fromSceneNum, s16 toEntranceIndex,
                                            Vec3f triggerPos, s16 triggerRotY);
+
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);
