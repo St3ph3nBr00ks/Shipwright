@@ -159,11 +159,13 @@ typedef struct BossGoma {
 //   0x01 = combat (any post-Encounter actionFunc)
 //   0x20 = BossGoma_Defeated
 //   -1   = unknown (caller should skip bridge)
-s16  BossGoma_GetStateIndex(struct BossGoma* this);
+// Parameter named `actor` (not `this`) so the header can be #included from
+// C++ TUs (BossRush.cpp etc.) where `this` is reserved.
+s16  BossGoma_GetStateIndex(struct BossGoma* actor);
 
 // Receive-side bridge: tear down local intro cutscene and enter FloorMain.
 // Called when the host has triggered the fight but the peer's local boss
 // is still in BossGoma_Encounter.
-void BossGoma_BridgeToCombat(struct BossGoma* this, PlayState* play);
+void BossGoma_BridgeToCombat(struct BossGoma* actor, PlayState* play);
 
 #endif
