@@ -992,7 +992,30 @@ actor_found:
             const s16 netStateIdx   = payload.value("actionState", (int)-1);
             const bool stateAligned = (netStateIdx >= 0) && (localStateIdx == netStateIdx);
 
-            if (stateAligned) {
+            // Cutscene-window gate (debug log 38 P2 crash class).
+            //
+            // While Boss_Goma is in scripted intro/defeat (Encounter or
+            // Defeated actionFunc, `disableGameplayLogic == true`), the
+            // host's substate progression is timer-driven and DIFFERS
+            // from each peer's local progression. Writing host's substate
+            // value into P2's `g->actionState` skips P2's local substate
+            // sequence — bypassing per-substate setup (camera id creation
+            // in substate 4, player position resets in substate 5,
+            // animation changes in substate 130, etc.). The skipped
+            // substate setups never run; substate 150 end then reads
+            // un-set values (subCameraId=0, stale player pos) and
+            // mis-sequences the SetupFloorMain transition.
+            //
+            // The cutscene is short enough (~25 s) that each peer's local
+            // timer-driven progression converges naturally without
+            // network help. Only the OUTER state index (Encounter vs
+            // FloorMain) needs sync; that runs through the driver block
+            // in OnActorUpdate.
+            //
+            // Combat-state field syncs (visualState during attacks,
+            // invincibilityFrames after damage, etc.) are still useful
+            // and run normally once disableGameplayLogic is false.
+            if (stateAligned && !g->disableGameplayLogic) {
                 if (payload.contains("bossGomaCutsceneSubState")) {
                     g->actionState = (s16)payload["bossGomaCutsceneSubState"].get<int>();
                 }
