@@ -539,6 +539,49 @@ void Anchor::RegisterHooks() {
         // session) for an already-finished cutscene.
         TickPendingCutsceneStarts();
 
+        // Boss_Goma fight-start crash class (logs 183/184) — Link bgCheck
+        // refresh on cutscene-end edge.
+        //
+        // Recurring crash signature: RAX=0, RBX=0x10, R14=0x78 (Actor.floorPoly
+        // offset), unwinder fallback ending at ControllerUnblockGameInput.
+        // Pattern is `[NULL + offset]` deref of a CollisionPoly via NULL
+        // floorPoly. Boss_Goma's intro substate 150 calls
+        // `func_80064534(play, &play->csCtx)` to drop csCtx.state to IDLE
+        // and `Player_SetCsActionWithHaltedActors(play, &boss->actor, 7)`
+        // — at that moment Link is at the end-of-cutscene position
+        // (placed there by the cutscene script's PLAYER_CUEID frames).
+        // If the script's last frame placed Link in a position whose floor
+        // wasn't bgCheck'd (cutscene cueIds don't refresh bgCheck), Link's
+        // floorPoly is stale or NULL when normal Player_Update resumes.
+        // Some Player csAction code paths (and the engine's collision
+        // checks) read floorPoly without a null guard → crash.
+        //
+        // The CUTSCENE_START handler's bgCheck refresh (commit 0915236f6)
+        // covers the network-driven entry but not the local actor-
+        // internal cutscene's natural end (Boss_Goma's substate 150 →
+        // FloorMain transition fires on each peer locally; csCtx state
+        // drops to IDLE locally without a CUTSCENE_END packet round-trip).
+        //
+        // Defensive: detect csCtx.state non-IDLE → IDLE edge per frame and
+        // refresh Link's bgCheck. Heights (18 wall, 6 radius, 80 ceiling)
+        // and flags=7 match the CUTSCENE_START refresh and z_player.c
+        // patterns. Idempotent if floorPoly is already valid.
+        if (gPlayState != nullptr) {
+            static uint8_t sPrevCsCtxState = 0;  // CS_STATE_IDLE
+            const uint8_t curCsCtxState = gPlayState->csCtx.state;
+            if (sPrevCsCtxState != 0 /* non-IDLE */ &&
+                curCsCtxState == 0 /* IDLE */) {
+                Player* localPlayer = GET_PLAYER(gPlayState);
+                if (localPlayer != nullptr) {
+                    Actor_UpdateBgCheckInfo(gPlayState, &localPlayer->actor,
+                                            18.0f, 6.0f, 80.0f, 7);
+                    SPDLOG_INFO("[CutsceneEnd] Local cs IDLE edge — Link bgCheck refreshed (bgCheckFlags=0x{:04X})",
+                                (unsigned int)localPlayer->actor.bgCheckFlags);
+                }
+            }
+            sPrevCsCtxState = curCsCtxState;
+        }
+
         // KB-15 / issue #110 + KB-19 / issue #176 — retire vector tick.
         // Each client carries a vector of {model, framesRemaining} retirees.
         // Decrement every entry's counter; entries reaching zero are erased
