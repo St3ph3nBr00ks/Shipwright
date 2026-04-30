@@ -424,11 +424,6 @@ void Anchor::RegisterHooks() {
                 (int16_t)gPlayState->sceneNum,
                 (uint8_t)gSaveContext.linkAge);
 
-            // #164 — drop active-cutscene records on scene change.
-            // Stale entries would block legitimate START packets in the
-            // new scene, and an end-during-transition could otherwise
-            // leave an orphan that never clears.
-            activeCutscenes.clear();
         }
     });
 
