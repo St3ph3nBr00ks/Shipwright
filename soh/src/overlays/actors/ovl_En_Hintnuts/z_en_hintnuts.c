@@ -9,6 +9,18 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Multiplayer targeting (#180 residual #1, KB-08-style pattern).
+// Vanilla En_Hintnuts reads `actor.xzDistToPlayer` / `yawTowardsPlayer`,
+// which the engine auto-computes against the LOCAL Link only. On host
+// our ShouldActorUpdate hook patches these toward the nearest player
+// (DummyPlayer-aware), but on peer they always reference the local
+// Link. That makes peer's local Hintnut rotate toward P2 while host's
+// Hintnut rotates toward P1 — the per-packet shape.rot write from host
+// is then nudged back by the local Math_ApproachS, producing visible
+// yaw drift. Switch the targeting reads to Anchor_GetNearestPlayerActor
+// so peer and host both target the same player.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnHintnuts_Init(Actor* thisx, PlayState* play);
@@ -225,6 +237,10 @@ void EnHintnuts_SetupFreeze(EnHintnuts* this) {
 
 void EnHintnuts_Wait(EnHintnuts* this, PlayState* play) {
     s32 hasSlowPlaybackSpeed = false;
+    // #180 residual #1 — target nearest player.
+    Actor* nearestPlayer = Anchor_GetNearestPlayerActor(&this->actor, play);
+    f32    distToNearest = Actor_WorldDistXZToActor(&this->actor, nearestPlayer);
+    f32    yDistToNearest = Actor_HeightDiff(&this->actor, nearestPlayer);
 
     if (this->skelAnime.playSpeed < 0.5f) {
         hasSlowPlaybackSpeed = true;
@@ -239,42 +255,52 @@ void EnHintnuts_Wait(EnHintnuts* this, PlayState* play) {
     }
 
     this->collider.dim.height = 5.0f + ((CLAMP(this->skelAnime.curFrame, 9.0f, 12.0f) - 9.0f) * 9.0f);
-    if (!hasSlowPlaybackSpeed && (this->actor.xzDistToPlayer < 120.0f)) {
+    if (!hasSlowPlaybackSpeed && (distToNearest < 120.0f)) {
         EnHintnuts_SetupBurrow(this);
     } else if (SkelAnime_Update(&this->skelAnime)) {
-        if (this->actor.xzDistToPlayer < 120.0f) {
+        if (distToNearest < 120.0f) {
             EnHintnuts_SetupBurrow(this);
-        } else if ((this->animFlagAndTimer == 0) && (this->actor.xzDistToPlayer > 320.0f)) {
+        } else if ((this->animFlagAndTimer == 0) && (distToNearest > 320.0f)) {
             EnHintnuts_SetupLookAround(this);
         } else {
             EnHintnuts_SetupStand(this);
         }
     }
-    if (hasSlowPlaybackSpeed && 160.0f < this->actor.xzDistToPlayer && fabsf(this->actor.yDistToPlayer) < 120.0f &&
-        ((this->animFlagAndTimer == 0) || (this->actor.xzDistToPlayer < 480.0f))) {
+    if (hasSlowPlaybackSpeed && 160.0f < distToNearest && fabsf(yDistToNearest) < 120.0f &&
+        ((this->animFlagAndTimer == 0) || (distToNearest < 480.0f))) {
         this->skelAnime.playSpeed = 1.0f;
     }
 }
 
 void EnHintnuts_LookAround(EnHintnuts* this, PlayState* play) {
+    // #180 residual #1 — target nearest player.
+    Actor* nearestPlayer = Anchor_GetNearestPlayerActor(&this->actor, play);
+    f32    distToNearest = Actor_WorldDistXZToActor(&this->actor, nearestPlayer);
+
     SkelAnime_Update(&this->skelAnime);
     if (Animation_OnFrame(&this->skelAnime, 0.0f) && this->animFlagAndTimer != 0) {
         this->animFlagAndTimer--;
     }
-    if ((this->actor.xzDistToPlayer < 120.0f) || (this->animFlagAndTimer == 0)) {
+    if ((distToNearest < 120.0f) || (this->animFlagAndTimer == 0)) {
         EnHintnuts_SetupBurrow(this);
     }
 }
 
 void EnHintnuts_Stand(EnHintnuts* this, PlayState* play) {
+    // #180 residual #1 — target nearest player (peer-aware) instead of
+    // local-only yawTowardsPlayer / xzDistToPlayer fields.
+    Actor* nearestPlayer = Anchor_GetNearestPlayerActor(&this->actor, play);
+    s16    yawToNearest  = Actor_WorldYawTowardActor(&this->actor, nearestPlayer);
+    f32    distToNearest = Actor_WorldDistXZToActor(&this->actor, nearestPlayer);
+
     SkelAnime_Update(&this->skelAnime);
     if (Animation_OnFrame(&this->skelAnime, 0.0f) && this->animFlagAndTimer != 0) {
         this->animFlagAndTimer--;
     }
     if (!(this->animFlagAndTimer & 0x1000)) {
-        Math_ApproachS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 2, 0xE38);
+        Math_ApproachS(&this->actor.shape.rot.y, yawToNearest, 2, 0xE38);
     }
-    if (this->actor.xzDistToPlayer < 120.0f || this->animFlagAndTimer == 0x1000) {
+    if (distToNearest < 120.0f || this->animFlagAndTimer == 0x1000) {
         EnHintnuts_SetupBurrow(this);
     } else if (this->animFlagAndTimer == 0) {
         EnHintnuts_SetupThrowScrubProjectile(this);
@@ -283,9 +309,13 @@ void EnHintnuts_Stand(EnHintnuts* this, PlayState* play) {
 
 void EnHintnuts_ThrowNut(EnHintnuts* this, PlayState* play) {
     Vec3f nutPos;
+    // #180 residual #1 — target nearest player.
+    Actor* nearestPlayer = Anchor_GetNearestPlayerActor(&this->actor, play);
+    s16    yawToNearest  = Actor_WorldYawTowardActor(&this->actor, nearestPlayer);
+    f32    distToNearest = Actor_WorldDistXZToActor(&this->actor, nearestPlayer);
 
-    Math_ApproachS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 2, 0xE38);
-    if (this->actor.xzDistToPlayer < 120.0f) {
+    Math_ApproachS(&this->actor.shape.rot.y, yawToNearest, 2, 0xE38);
+    if (distToNearest < 120.0f) {
         EnHintnuts_SetupBurrow(this);
     } else if (SkelAnime_Update(&this->skelAnime)) {
         EnHintnuts_SetupStand(this);
@@ -569,25 +599,53 @@ s16 EnHintnuts_GetStateIndex(EnHintnuts* this) {
 }
 
 void EnHintnuts_ApplyNetState(EnHintnuts* this, s16 stateIndex) {
-    // Only apply visible-state transitions (0-6). The death-class states
-    // (7 Talk / 8 Leave / 9 Freeze / 10 BeginFreeze) are sPuzzleCounter-
-    // driven and unsafe to call from outside the natural collision-
-    // hit flow — they read collider state and mutate the global
-    // sPuzzleCounter via HitByScrubProjectile2. On a non-host receiver,
-    // these states are reached naturally via the synced En_Nutsball
-    // projectile collision, so there's no need to drive them via
-    // network state. Receivers' local logic handles death-class
-    // transitions on their own.
+    // States 0-6 are safely applied via Setup helpers. States 9
+    // (Freeze) and 10 (BeginFreeze) are mostly safe — SetupFreeze
+    // mutates sPuzzleCounter only conditionally (if it equals -3),
+    // and the visual effects (color filter, freeze animation) are
+    // what the user wants to see synced. Apply them directly to fix
+    // residual #4 — the "blue stunned scrub" visual sync gap.
+    //
+    // Re-entry guard for state 3 (ThrowNut) — residual #2: if local
+    // is already in ThrowNut, don't restart the animation. The vanilla
+    // SetupThrowScrubProjectile calls Animation_PlayOnce(...) which
+    // resets curFrame to 0. If host's per-packet sync re-applies
+    // ThrowNut every packet (e.g. during sustained mismatch with
+    // local cycle), the animation never reaches frame 6 where the
+    // En_Nutsball projectile spawns — net result: animation plays
+    // repeatedly with zero projectile spawns past the first.
+    // Caller's curState check should already prevent this in normal
+    // operation, but the explicit re-entry guard is belt-and-suspenders.
     switch (stateIndex) {
         case 0: EnHintnuts_SetupWait(this);                    break;
         case 1: EnHintnuts_SetupLookAround(this);              break;
         case 2: EnHintnuts_SetupStand(this);                   break;
-        case 3: EnHintnuts_SetupThrowScrubProjectile(this);    break;
+        case 3:
+            if (this->actionFunc != EnHintnuts_ThrowNut) {
+                EnHintnuts_SetupThrowScrubProjectile(this);
+            }
+            break;
         case 4: EnHintnuts_SetupBurrow(this);                  break;
-        // 5 (BeginRun) — no public Setup; transitions to Run via
-        //                SkelAnime_Update naturally. Skip.
+        // 5 (BeginRun) — no public Setup; entered via the Hit-By-
+        //                Projectile flow only on local collision. Skip.
         case 6: EnHintnuts_SetupRun(this);                     break;
-        // 7-10 — death-class, driven by local collision logic. Skip.
+        case 7: EnHintnuts_SetupTalk(this);                    break;
+        // 8 (Leave) — locally-driven only. SetupLeave needs a PlayState
+        //             which we don't have here, and it spawns a recovery
+        //             heart (suppressed via the drop guard either way).
+        //             Local Talk→Leave transition fires naturally on
+        //             dialog close. Skip.
+        // 9 (Freeze) — visual stun for puzzle-wrong scrub. SetupFreeze
+        //              plays freeze anim + color filter. The
+        //              sPuzzleCounter mutation in SetupFreeze is
+        //              conditional (only fires if local sPuzzleCounter
+        //              == -3); on a peer with a different counter
+        //              value the mutation is a no-op.
+        case 9: EnHintnuts_SetupFreeze(this);                  break;
+        // 10 (BeginFreeze) — no public Setup; just plays anim then
+        //                    transitions to Freeze. Apply Freeze
+        //                    directly so the visual is consistent.
+        case 10: EnHintnuts_SetupFreeze(this);                 break;
         default: break;
     }
 }

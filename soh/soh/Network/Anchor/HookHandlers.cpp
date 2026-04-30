@@ -3961,22 +3961,28 @@ void Anchor::RegisterHooks() {
                 // hide-from-player action — not idle dormancy. When host's
                 // Hintnut burrows because P1 approached, peer should follow
                 // even if P2 is far and peer's local Hintnut is at Stand.
-                // User's report: "P2's Hintnut continued throwing nuts
-                // while P1's was hidden underground" — caused by filter
-                // blocking host's Burrow. Removing 4 from dormant fixes.
-                //
-                // Also removed LookAround (1) from dormant. It IS a low-
-                // engagement state, but if host explicitly transitioned
-                // there, peer should follow (host is authoritative for
-                // sync purposes; local actionFunc recovers from there
-                // naturally if peer's Link is close).
                 //
                 // Net dormant set is now just Wait (0). Active set
                 // unchanged.
+                //
+                // #180 residual #4 — death-class state gate removed.
+                // Originally states 7-10 (Talk/Leave/Freeze/BeginFreeze)
+                // were blocked from ApplyNetState because SetupFreeze
+                // mutates the global sPuzzleCounter. But the user-visible
+                // symptom (P1 sees Freeze visual, P2 doesn't) is more
+                // important than the conditional sPuzzleCounter mutation
+                // (which only fires if local counter == -3). EnHintnuts_
+                // ApplyNetState now applies Freeze/BeginFreeze to keep
+                // the visual sync. Talk also synced. Leave skipped
+                // because SetupLeave needs a PlayState we don't have here
+                // and the natural Talk→Leave transition fires locally.
                 bool netIsDormant  = (ext->netStateIndex == 0);
                 bool localIsActive = (curState == 2 || curState == 3 ||
                                       curState == 5 || curState == 6);
-                bool deathStateNet = (ext->netStateIndex >= 7 && ext->netStateIndex <= 10);
+                // Only block raw-Leave (8) since ApplyNetState skips it
+                // anyway; saves a redundant SetupTalk re-fire if peer
+                // already at Talk.
+                bool deathStateNet = (ext->netStateIndex == 8);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
                     !deathStateNet) {

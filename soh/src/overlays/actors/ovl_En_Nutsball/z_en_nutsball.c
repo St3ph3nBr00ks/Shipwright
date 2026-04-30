@@ -12,6 +12,7 @@
 #include "objects/object_shopnuts/object_shopnuts.h"
 #include "objects/object_dns/object_dns.h"
 #include "objects/object_dnk/object_dnk.h"
+#include <libultraship/log/luslog.h>
 
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
@@ -120,6 +121,17 @@ void func_80ABBBA8(EnNutsball* this, PlayState* play) {
 
     if ((this->actor.bgCheckFlags & 8) || (this->actor.bgCheckFlags & 1) || (this->collider.base.atFlags & AT_HIT) ||
         (this->collider.base.acFlags & AC_HIT) || (this->collider.base.ocFlags1 & OC1_HIT)) {
+        // #180 residual #3 — diagnostic log so we can trace why a peer's
+        // En_Nutsball doesn't reflect off a peer's shield. User reported
+        // projectiles breaking against P2's shield rather than bouncing.
+        // Reflect requires (a) deku shield OR (hylian shield + adult Link),
+        // AND (b) AT_HIT, AT_TYPE_ENEMY, AT_BOUNCED all set on the AT
+        // collider. Anything failing those conditions falls through to
+        // the kill-with-burst path.
+        LUSLOG_INFO("[EnNutsball] hit: shield=%d adult=%d atFlags=0x%04X bgCheck=0x%04X",
+                    (int)player->currentShield, (int)LINK_IS_ADULT,
+                    (unsigned int)this->collider.base.atFlags,
+                    (unsigned int)this->actor.bgCheckFlags);
         // Checking if the player is using a shield that reflects projectiles
         // And if so, reflects the projectile on impact
         if ((player->currentShield == PLAYER_SHIELD_DEKU) ||
