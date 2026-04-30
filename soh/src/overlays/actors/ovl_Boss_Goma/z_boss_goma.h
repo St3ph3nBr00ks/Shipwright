@@ -171,12 +171,19 @@ s16  BossGoma_GetStateIndex(struct BossGoma* actor);
 // is still in BossGoma_Encounter.
 void BossGoma_BridgeToCombat(struct BossGoma* actor, PlayState* play);
 
-// Receive-side dispatcher for the stunned/damaged transitions. Calls the
-// matching SetupFloor* function on the peer so the right animation plays.
-// Generic combat (0x01) is a no-op — peer's local AI runs combat states
-// independently. Encounter (0x00) and Defeated (0x20) are NOT handled
-// here; Encounter goes through BridgeToCombat above, Defeated is handled
-// by the ENEMY_STATE phase=DyingByLocal path.
+// Receive-side dispatcher for combat actionFunc transitions. Calls the
+// matching SetupX function on the peer so the right animation plays.
+// Encounter (0x00) is NOT handled here — it goes through BridgeToCombat
+// above (which tears down the local intro cutscene). Defeated (0x20)
+// is NOT handled here — it's routed via the ENEMY_DEFEATED packet
+// receive path, which calls BossGoma_SetupDyingNet.
 void BossGoma_ApplyMinimalNetState(struct BossGoma* actor, s16 stateIndex);
+
+// Receive-side death cycle. HandlePacket_EnemyDefeated calls this when
+// ACTOR_BOSS_GOMA's defeat packet arrives, instead of falling through
+// to generic Actor_Kill. Plays the death animation locally and lets
+// BossGoma_Defeated's natural sequence drop the heart container and
+// spawn the blue warp on every client.
+void BossGoma_SetupDyingNet(struct BossGoma* actor, PlayState* play);
 
 #endif

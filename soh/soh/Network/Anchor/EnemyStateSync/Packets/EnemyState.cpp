@@ -1167,6 +1167,26 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     return;
                 }
 
+                // Boss_Goma: route through SetupDyingNet so peer plays
+                // the death animation, drops the heart container, and
+                // spawns the blue warp via BossGoma_Defeated's natural
+                // sequence. Without this routing, peer's defeat shows
+                // Goma blinking out instantly with none of the post-fight
+                // room state changes.
+                if (actor->id == ACTOR_BOSS_GOMA) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.BossGoma.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] BossGoma netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] BossGoma netId={} — triggering natural death cycle", netId);
+                    BossGoma_SetupDyingNet((BossGoma*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
                 // En_Goma (Boss_Goma's Larva): hatched larvae play a real
                 // Hurt → Die animation; route through SetupDyingNet so the
                 // natural cycle plays on peer instead of an instant

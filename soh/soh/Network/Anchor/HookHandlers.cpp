@@ -4062,32 +4062,32 @@ void Anchor::RegisterHooks() {
                 }
             }
 
-            // Boss_Goma — Encounter -> combat bridge + stunned/damaged
+            // Boss_Goma — Encounter -> combat bridge + per-actionFunc
             // dispatch. Encounter (0x00) → combat (0x01..0x10) calls the
-            // cutscene-teardown bridge once. Any combat → stunned (0x07)
-            // or damaged (0x06) calls the matching SetupFloor* function
-            // so peer plays the same animation as the host. Death state
-            // (0x20) is left to the ENEMY_STATE phase=DyingByLocal path.
-            // Recovery transitions (0x07 stunned → 0x01 generic combat)
-            // are NOT forced — peer's local AI exits stun on its own
-            // when the local stun timer elapses.
+            // cutscene-teardown bridge once, then dispatches to the
+            // matching SetupX function. Any combat → any other combat
+            // state calls ApplyMinimalNetState so peer plays the same
+            // animation as the host (rear-back / lunge / climb / spawn-
+            // eggs / fall-struck-down all transition cleanly). Death
+            // state (0x20) routes via ENEMY_DEFEATED → SetupDyingNet,
+            // not via this driver.
             if (actor->id == ACTOR_BOSS_GOMA && ext->netStateIndex >= 0 &&
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 BossGoma* bg = (BossGoma*)actor;
                 s16 curState = BossGoma_GetStateIndex(bg);
-                if (curState != ext->netStateIndex) {
+                if (curState != ext->netStateIndex && ext->netStateIndex != 0x20) {
                     if (curState == 0x00 && ext->netStateIndex >= 0x01 && ext->netStateIndex <= 0x10) {
                         if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                             SPDLOG_INFO("[BossGoma] rx netId={} bridge Encounter->combat (net=0x{:02x})",
                                         ext->netId, (int)ext->netStateIndex);
                         }
                         BossGoma_BridgeToCombat(bg, gPlayState);
-                        // BridgeToCombat lands in FloorMain (0x01). If host is
-                        // already in stunned/damaged, dispatch immediately.
-                        if (ext->netStateIndex == 0x06 || ext->netStateIndex == 0x07) {
+                        // BridgeToCombat lands in FloorMain (0x01). If
+                        // host is already past FloorMain, dispatch.
+                        if (ext->netStateIndex != 0x01) {
                             BossGoma_ApplyMinimalNetState(bg, ext->netStateIndex);
                         }
-                    } else if (ext->netStateIndex == 0x06 || ext->netStateIndex == 0x07) {
+                    } else if (ext->netStateIndex >= 0x01 && ext->netStateIndex <= 0x10) {
                         if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                             SPDLOG_INFO("[BossGoma] rx netId={} apply 0x{:02x}->0x{:02x}",
                                         ext->netId, (int)curState, (int)ext->netStateIndex);

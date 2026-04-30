@@ -2199,29 +2199,74 @@ void BossGoma_SpawnChildGohma(BossGoma* this, PlayState* play, s16 i) {
 // =============================================================================
 
 s16 BossGoma_GetStateIndex(BossGoma* this) {
-    if (this->actionFunc == BossGoma_Encounter)     return 0x00;
-    if (this->actionFunc == BossGoma_Defeated)      return 0x20;
-    if (this->actionFunc == NULL)                   return -1;
-    // Differentiate stunned and damaged so peer can play the matching
-    // animation. All other combat actionFuncs (FloorMain, FloorAttack,
-    // WallClimb, Ceiling*, etc.) bucket as generic combat 0x01 — peer
-    // runs its own AI for those.
-    if (this->actionFunc == BossGoma_FloorStunned)  return 0x07;
-    if (this->actionFunc == BossGoma_FloorDamaged)  return 0x06;
-    return 0x01;
+    if (this->actionFunc == BossGoma_Encounter)                 return 0x00;
+    if (this->actionFunc == BossGoma_Defeated)                  return 0x20;
+    if (this->actionFunc == NULL)                               return -1;
+    // Per-actionFunc encoding so peer can play the matching animation
+    // for every combat transition (rear-back / lunge / climb / ceiling-
+    // spawn / fall). Without this, peer's local AI runs in parallel and
+    // visibly diverges on attack-posture / climb / spawn-eggs.
+    if (this->actionFunc == BossGoma_FloorMain)                 return 0x01;
+    if (this->actionFunc == BossGoma_FloorIdle)                 return 0x02;
+    if (this->actionFunc == BossGoma_FloorAttackPosture)        return 0x03;
+    if (this->actionFunc == BossGoma_FloorPrepareAttack)        return 0x04;
+    if (this->actionFunc == BossGoma_FloorAttack)               return 0x05;
+    if (this->actionFunc == BossGoma_FloorDamaged)              return 0x06;
+    if (this->actionFunc == BossGoma_FloorStunned)              return 0x07;
+    if (this->actionFunc == BossGoma_FloorLand)                 return 0x08;
+    if (this->actionFunc == BossGoma_FloorLandStruckDown)       return 0x09;
+    if (this->actionFunc == BossGoma_WallClimb)                 return 0x0A;
+    if (this->actionFunc == BossGoma_CeilingMoveToCenter)       return 0x0B;
+    if (this->actionFunc == BossGoma_CeilingIdle)               return 0x0C;
+    if (this->actionFunc == BossGoma_CeilingPrepareSpawnGohmas) return 0x0D;
+    if (this->actionFunc == BossGoma_CeilingSpawnGohmas)        return 0x0E;
+    if (this->actionFunc == BossGoma_FallJump)                  return 0x0F;
+    if (this->actionFunc == BossGoma_FallStruckDown)            return 0x10;
+    return 0x01;  // unknown combat — bucket as FloorMain
 }
 
 void BossGoma_ApplyMinimalNetState(BossGoma* this, s16 stateIndex) {
     switch (stateIndex) {
-        case 0x06: /* FloorDamaged — brief flash anim after stunned hit */
-            BossGoma_SetupFloorDamaged(this);
-            break;
-        case 0x07: /* FloorStunned — eye-down, vulnerable */
-            BossGoma_SetupFloorStunned(this);
-            break;
-        default: /* generic combat / encounter / defeat — handled elsewhere */
-            break;
+        case 0x01: BossGoma_SetupFloorMain(this);                 break;
+        case 0x02: BossGoma_SetupFloorIdle(this);                 break;
+        case 0x03: BossGoma_SetupFloorAttackPosture(this);        break;
+        case 0x04: BossGoma_SetupFloorPrepareAttack(this);        break;
+        case 0x05: BossGoma_SetupFloorAttack(this);               break;
+        case 0x06: BossGoma_SetupFloorDamaged(this);              break;
+        case 0x07: BossGoma_SetupFloorStunned(this);              break;
+        case 0x08: BossGoma_SetupFloorLand(this);                 break;
+        case 0x09: BossGoma_SetupFloorLandStruckDown(this);       break;
+        case 0x0A: BossGoma_SetupWallClimb(this);                 break;
+        case 0x0B: BossGoma_SetupCeilingMoveToCenter(this);       break;
+        case 0x0C: BossGoma_SetupCeilingIdle(this);               break;
+        case 0x0D: BossGoma_SetupCeilingPrepareSpawnGohmas(this); break;
+        case 0x0E: BossGoma_SetupCeilingSpawnGohmas(this);        break;
+        case 0x0F: BossGoma_SetupFallJump(this);                  break;
+        case 0x10: BossGoma_SetupFallStruckDown(this);            break;
+        default:                                                  break;
+        // 0x00 (Encounter) handled by BridgeToCombat;
+        // 0x20 (Defeated) handled by SetupDyingNet via ENEMY_DEFEATED.
     }
+}
+
+// Receive-side death cycle. Mirrors EnGoma_SetupDyingNet pattern.
+// ENEMY_DEFEATED arrives once host (or a peer that killed host's Goma)
+// has triggered SetupDefeated. Without routing through SetupDyingNet
+// the receiver's HandlePacket_EnemyDefeated falls to generic Actor_Kill
+// which removes the boss instantly — the death animation, heart-
+// container drop, and blue warp spawn all live inside the BossGoma_
+// Defeated actionFunc and never run.
+//
+// We still don't synchronise the cutscene camera (deferred per design
+// doc Pillar G.ii); each client's BossGoma_Defeated runs its own
+// camera locally, which is acceptable for the demo.
+void BossGoma_SetupDyingNet(BossGoma* this, PlayState* play) {
+    this->actor.colChkInfo.health = 0;
+    BossGoma_SetupDefeated(this, play);
+    Enemy_StartFinishingBlow(play, &this->actor);
+    // Deliberately do NOT call GameInteractor_ExecuteOnBossDefeat —
+    // would echo a redundant ENEMY_DEFEATED back to the originating
+    // host.
 }
 
 void BossGoma_BridgeToCombat(BossGoma* this, PlayState* play) {
