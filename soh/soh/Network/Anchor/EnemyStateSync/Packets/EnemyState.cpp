@@ -116,9 +116,16 @@ struct EnemyUpdateExtras {
     s16  enSwActionState = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
-    // triggering the fight starts it on every client.
-    bool hasBossGoma         = false;
-    s16  bossGomaActionState = 0;
+    // triggering the fight starts it on every client. Plus stunned/
+    // damaged state buckets and eye/vulnerability gate fields so peer's
+    // local BossGoma_UpdateHit (z_boss_goma.c:1823) gates damage in the
+    // same frames as the host.
+    bool hasBossGoma                  = false;
+    s16  bossGomaActionState          = 0;
+    s16  bossGomaEyeClosedTimer       = 0;
+    s16  bossGomaInvincibilityFrames  = 0;
+    s16  bossGomaVisualState          = 0;
+    s16  bossGomaEyeState             = 0;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -220,9 +227,13 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.hasEnSw           = true;
         e.enSwActionState   = EnSw_GetStateIndex(sw);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
-        BossGoma* bg            = (BossGoma*)actor;
-        e.hasBossGoma           = true;
-        e.bossGomaActionState   = BossGoma_GetStateIndex(bg);
+        BossGoma* bg                      = (BossGoma*)actor;
+        e.hasBossGoma                     = true;
+        e.bossGomaActionState             = BossGoma_GetStateIndex(bg);
+        e.bossGomaEyeClosedTimer          = bg->eyeClosedTimer;
+        e.bossGomaInvincibilityFrames     = bg->invincibilityFrames;
+        e.bossGomaVisualState             = bg->visualState;
+        e.bossGomaEyeState                = bg->eyeState;
     }
     return e;
 }
@@ -279,7 +290,11 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
-        if (cur.bossGomaActionState != prev.bossGomaActionState) return true;
+        if (cur.bossGomaActionState         != prev.bossGomaActionState)         return true;
+        if (cur.bossGomaEyeClosedTimer      != prev.bossGomaEyeClosedTimer)      return true;
+        if (cur.bossGomaInvincibilityFrames != prev.bossGomaInvincibilityFrames) return true;
+        if (cur.bossGomaVisualState         != prev.bossGomaVisualState)         return true;
+        if (cur.bossGomaEyeState            != prev.bossGomaEyeState)            return true;
     }
     return false;
 }
@@ -537,9 +552,14 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
-    // trigger the fight on every client).
+    // trigger the fight on every client) + stunned/damaged buckets +
+    // eye-vulnerability gate fields.
     if (extras.hasBossGoma) {
-        payload["actionState"] = extras.bossGomaActionState;
+        payload["actionState"]                 = extras.bossGomaActionState;
+        payload["bossGomaEyeClosedTimer"]      = (int)extras.bossGomaEyeClosedTimer;
+        payload["bossGomaInvincibilityFrames"] = (int)extras.bossGomaInvincibilityFrames;
+        payload["bossGomaVisualState"]         = (int)extras.bossGomaVisualState;
+        payload["bossGomaEyeState"]            = (int)extras.bossGomaEyeState;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -883,9 +903,28 @@ actor_found:
         // Boss_Goma — cache host actionState. Receive driver in
         // HookHandlers' OnActorUpdate non-host block invokes
         // BossGoma_BridgeToCombat when local Goma is in Encounter (0x00)
-        // and host has progressed to combat (>= 0x01).
-        if (actor->id == ACTOR_BOSS_GOMA && payload.contains("actionState")) {
-            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        // and host has progressed to combat (>= 0x01), plus
+        // BossGoma_ApplyMinimalNetState for stunned/damaged transitions.
+        // Eye-vulnerability gate fields are written DIRECTLY to the
+        // local actor here so peer's BossGoma_UpdateHit gates damage
+        // in the same frames as the host (z_boss_goma.c:1830).
+        if (actor->id == ACTOR_BOSS_GOMA) {
+            if (payload.contains("actionState")) {
+                ext->netStateIndex = (s16)payload["actionState"].get<int>();
+            }
+            BossGoma* bg = (BossGoma*)actor;
+            if (payload.contains("bossGomaEyeClosedTimer")) {
+                bg->eyeClosedTimer = (s16)payload["bossGomaEyeClosedTimer"].get<int>();
+            }
+            if (payload.contains("bossGomaInvincibilityFrames")) {
+                bg->invincibilityFrames = (s16)payload["bossGomaInvincibilityFrames"].get<int>();
+            }
+            if (payload.contains("bossGomaVisualState")) {
+                bg->visualState = (s16)payload["bossGomaVisualState"].get<int>();
+            }
+            if (payload.contains("bossGomaEyeState")) {
+                bg->eyeState = (s16)payload["bossGomaEyeState"].get<int>();
+            }
         }
         // Bug 2 follow-on — apply host's stem angles directly to the local
         // actor so EnDekubaba_UpdateHeadPosition (called every frame inside

@@ -2199,11 +2199,29 @@ void BossGoma_SpawnChildGohma(BossGoma* this, PlayState* play, s16 i) {
 // =============================================================================
 
 s16 BossGoma_GetStateIndex(BossGoma* this) {
-    if (this->actionFunc == BossGoma_Encounter) return 0x00;
-    if (this->actionFunc == BossGoma_Defeated)  return 0x20;
-    if (this->actionFunc == NULL)               return -1;
-    // Any other actionFunc is a combat state.
+    if (this->actionFunc == BossGoma_Encounter)     return 0x00;
+    if (this->actionFunc == BossGoma_Defeated)      return 0x20;
+    if (this->actionFunc == NULL)                   return -1;
+    // Differentiate stunned and damaged so peer can play the matching
+    // animation. All other combat actionFuncs (FloorMain, FloorAttack,
+    // WallClimb, Ceiling*, etc.) bucket as generic combat 0x01 — peer
+    // runs its own AI for those.
+    if (this->actionFunc == BossGoma_FloorStunned)  return 0x07;
+    if (this->actionFunc == BossGoma_FloorDamaged)  return 0x06;
     return 0x01;
+}
+
+void BossGoma_ApplyMinimalNetState(BossGoma* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0x06: /* FloorDamaged — brief flash anim after stunned hit */
+            BossGoma_SetupFloorDamaged(this);
+            break;
+        case 0x07: /* FloorStunned — eye-down, vulnerable */
+            BossGoma_SetupFloorStunned(this);
+            break;
+        default: /* generic combat / encounter / defeat — handled elsewhere */
+            break;
+    }
 }
 
 void BossGoma_BridgeToCombat(BossGoma* this, PlayState* play) {

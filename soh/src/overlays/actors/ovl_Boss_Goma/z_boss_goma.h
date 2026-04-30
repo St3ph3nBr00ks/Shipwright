@@ -156,7 +156,10 @@ typedef struct BossGoma {
 // Anchor multiplayer boss-fight trigger sync.
 // Encoding (1 byte on the wire):
 //   0x00 = BossGoma_Encounter (intro cutscene / pre-fight idle)
-//   0x01 = combat (any post-Encounter actionFunc)
+//   0x01 = combat — generic combat actionFunc (FloorMain, WallClimb,
+//          Ceiling*, FloorAttack, etc.)
+//   0x06 = BossGoma_FloorDamaged (damaged-while-stunned brief flash)
+//   0x07 = BossGoma_FloorStunned (eye-down, vulnerable, stunned anim)
 //   0x20 = BossGoma_Defeated
 //   -1   = unknown (caller should skip bridge)
 // Parameter named `actor` (not `this`) so the header can be #included from
@@ -167,5 +170,13 @@ s16  BossGoma_GetStateIndex(struct BossGoma* actor);
 // Called when the host has triggered the fight but the peer's local boss
 // is still in BossGoma_Encounter.
 void BossGoma_BridgeToCombat(struct BossGoma* actor, PlayState* play);
+
+// Receive-side dispatcher for the stunned/damaged transitions. Calls the
+// matching SetupFloor* function on the peer so the right animation plays.
+// Generic combat (0x01) is a no-op — peer's local AI runs combat states
+// independently. Encounter (0x00) and Defeated (0x20) are NOT handled
+// here; Encounter goes through BridgeToCombat above, Defeated is handled
+// by the ENEMY_STATE phase=DyingByLocal path.
+void BossGoma_ApplyMinimalNetState(struct BossGoma* actor, s16 stateIndex);
 
 #endif
