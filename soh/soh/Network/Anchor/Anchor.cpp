@@ -151,6 +151,7 @@ void Anchor::Disable() {
     // the START re-fire and the eventual END (activeCutscenes was empty,
     // so the END loop found nothing to send).
     activeCutscenes.clear();
+    pendingCutsceneStarts.clear();
     ResetCutsceneDetectorState();
 }
 

@@ -795,6 +795,35 @@ class Anchor : public Network {
     void MarkCutsceneInactive(int16_t sceneNum, uint8_t timeline,
                               const std::string& csKind, int32_t csKey);
 
+    // Bug 3 (log 184 GDT meets Link CS) — buffer for CUTSCENE_START packets
+    // that arrive while peer is still in a different scene than the
+    // cutscene's. Without this, ValidateSameScene drops the packet outright
+    // and peer never enters the cutscene state, even after transitioning
+    // into the matching scene a few seconds later. Symptom: peer free-roams
+    // while host is mid-cutscene; user sees their player floating in the
+    // void or hears dialogue with no actor present.
+    //
+    // Replayed when the local scene transitions to a matching `sceneNum`
+    // (OnSceneSpawnActors hook). Removed by CUTSCENE_END for the same key.
+    // TTL-bounded so a buffered START whose target scene is never visited
+    // ages out instead of firing on a future unrelated scene match.
+    struct PendingCutsceneStart {
+        nlohmann::json payload;
+        int16_t        sceneNum;
+        uint8_t        timeline;
+        std::string    csKind;
+        int32_t        csKey;
+        uint16_t       ttlFrames;  // ticks down each frame; remove at 0
+    };
+    std::vector<PendingCutsceneStart> pendingCutsceneStarts;
+    void BufferPendingCutsceneStart(const nlohmann::json& payload,
+                                    int16_t sceneNum, uint8_t timeline,
+                                    const std::string& csKind, int32_t csKey);
+    void ReplayPendingCutsceneStartsForScene(int16_t sceneNum, uint8_t timeline);
+    void RemovePendingCutsceneStart(int16_t sceneNum, uint8_t timeline,
+                                    const std::string& csKind, int32_t csKey);
+    void TickPendingCutsceneStarts();
+
     // #164 detector state — previously file-scope statics in
     // CutsceneStartEnd.cpp. Hoisted to Anchor members per audit so
     // Disable() / Enable() can reset them. Otherwise a disable→re-enable

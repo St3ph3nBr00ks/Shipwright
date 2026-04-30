@@ -340,6 +340,15 @@ void Anchor::RegisterHooks() {
         if (IsSaveLoaded()) {
             SendPacket_RequestTeamState();
         }
+        // Bug 3 — replay any CUTSCENE_START packets buffered while peer was
+        // in a different scene. Done after the scene-load bookkeeping above
+        // is complete so HandlePacket_CutsceneStart sees the new sceneNum
+        // when it re-evaluates the scene gate.
+        if (IsSaveLoaded() && Anchor::Instance != nullptr && gPlayState != nullptr) {
+            const uint8_t timeline = (uint8_t)(gSaveContext.linkAge & 1);
+            Anchor::Instance->ReplayPendingCutsceneStartsForScene(
+                (int16_t)gPlayState->sceneNum, timeline);
+        }
 
         if (IsSaveLoaded()) {
             // Multiplayer kill persistence (log 162 fix, follow-on to
@@ -523,6 +532,12 @@ void Anchor::RegisterHooks() {
             pendingSceneActorNetIdsBroadcast = false;
             SendPacket_SceneActorNetIds();
         }
+
+        // Bug 3 — age out buffered CUTSCENE_START packets whose target scene
+        // peer never visited. Without TTL, a buffered START would fire on
+        // any future visit to that scene (potentially much later in the
+        // session) for an already-finished cutscene.
+        TickPendingCutsceneStarts();
 
         // KB-15 / issue #110 + KB-19 / issue #176 — retire vector tick.
         // Each client carries a vector of {model, framesRemaining} retirees.

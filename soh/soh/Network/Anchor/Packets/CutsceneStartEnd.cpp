@@ -74,6 +74,79 @@ void Anchor::MarkCutsceneInactive(int16_t sceneNum, uint8_t timeline,
 }
 
 // ---------------------------------------------------------------------
+// Pending-cutscene buffer (Bug 3 — log 184 GDT meets Link CS)
+// ---------------------------------------------------------------------
+
+// TTL for buffered CUTSCENE_START packets. 100 frames at 20 Hz ≈ 5 s.
+// Long enough to cover normal loading-zone traversal (the user-observed
+// case was P2 ~3 s behind P1 entering Inside Great Deku Tree); short
+// enough that a buffered START whose target scene is never visited
+// ages out instead of firing on a future unrelated scene visit.
+static constexpr uint16_t kPendingCutsceneTtlFrames = 100;
+
+void Anchor::BufferPendingCutsceneStart(const nlohmann::json& payload,
+                                        int16_t sceneNum, uint8_t timeline,
+                                        const std::string& csKind, int32_t csKey) {
+    // Replace any existing entry with the same key — host re-sending START
+    // for the same CS (different csState) overwrites the buffered copy.
+    for (auto& p : pendingCutsceneStarts) {
+        if (p.sceneNum == sceneNum && p.timeline == timeline &&
+            p.csKind == csKind && p.csKey == csKey) {
+            p.payload   = payload;
+            p.ttlFrames = kPendingCutsceneTtlFrames;
+            return;
+        }
+    }
+    pendingCutsceneStarts.push_back(
+        { payload, sceneNum, timeline, csKind, csKey, kPendingCutsceneTtlFrames });
+}
+
+void Anchor::RemovePendingCutsceneStart(int16_t sceneNum, uint8_t timeline,
+                                        const std::string& csKind, int32_t csKey) {
+    for (auto it = pendingCutsceneStarts.begin(); it != pendingCutsceneStarts.end(); ++it) {
+        if (it->sceneNum == sceneNum && it->timeline == timeline &&
+            it->csKind == csKind && it->csKey == csKey) {
+            pendingCutsceneStarts.erase(it);
+            return;
+        }
+    }
+}
+
+void Anchor::ReplayPendingCutsceneStartsForScene(int16_t sceneNum, uint8_t timeline) {
+    if (pendingCutsceneStarts.empty()) return;
+    // Snapshot matching entries before replay so the receive-handler's
+    // own bookkeeping mutations (MarkCutsceneActive etc.) don't invalidate
+    // the iteration. Entries are removed from the buffer as we go.
+    std::vector<nlohmann::json> toReplay;
+    for (auto it = pendingCutsceneStarts.begin(); it != pendingCutsceneStarts.end(); ) {
+        if (it->sceneNum == sceneNum && it->timeline == timeline) {
+            toReplay.push_back(it->payload);
+            it = pendingCutsceneStarts.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto& payload : toReplay) {
+        SPDLOG_INFO("[CutsceneStart] Replaying buffered START for sceneNum=0x{:02X} (peer transitioned in)",
+                    (int)sceneNum);
+        HandlePacket_CutsceneStart(payload);
+    }
+}
+
+void Anchor::TickPendingCutsceneStarts() {
+    for (auto it = pendingCutsceneStarts.begin(); it != pendingCutsceneStarts.end(); ) {
+        if (it->ttlFrames == 0) {
+            SPDLOG_INFO("[CutsceneStart] Pending START expired — sceneNum=0x{:02X} csKind={} csKey={}",
+                        (int)it->sceneNum, it->csKind, it->csKey);
+            it = pendingCutsceneStarts.erase(it);
+        } else {
+            it->ttlFrames--;
+            ++it;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Detector-time classifier
 // ---------------------------------------------------------------------
 //
@@ -319,8 +392,27 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
     if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
 
     const int16_t sceneNum = payload.value("sceneNum", (int16_t)0);
-    if (VALIDATE(::ReceiveValidator::ValidateSameScene(sceneNum)) !=
-        ::ReceiveValidator::ValidationVerdict::Valid) {
+    // Bug 3 (log 184) — when peer is in a different scene than the
+    // cutscene's, BUFFER instead of dropping. Common race: host enters
+    // a loading zone (e.g. Inside Great Deku Tree) and immediately
+    // triggers the entry cutscene; peer is still 2-3 s behind in the
+    // outgoing scene. Without buffering, peer's ValidateSameScene drops
+    // the START, peer enters the new scene with no synced cutscene
+    // state, and host plays the CS alone. With buffering, peer
+    // transitions in and replays the buffered START via
+    // ReplayPendingCutsceneStartsForScene (called from
+    // OnSceneSpawnActors). TTL-bounded so a buffered entry whose target
+    // scene is never visited ages out instead of firing on a future
+    // unrelated scene match.
+    if (gPlayState == nullptr || (int16_t)gPlayState->sceneNum != sceneNum) {
+        const std::string csKindForBuffer  = payload.value("csKind", std::string("actor_unknown"));
+        const int32_t     csKeyForBuffer   = payload.value("csKey",  (int32_t)-1);
+        const uint8_t     timelineForBuffer = (uint8_t)(gSaveContext.linkAge & 1);
+        BufferPendingCutsceneStart(payload, sceneNum, timelineForBuffer,
+                                   csKindForBuffer, csKeyForBuffer);
+        SPDLOG_INFO("[CutsceneStart] Buffered — peer in scene 0x{:02X} but CS is for scene 0x{:02X} (csKind={} csKey={})",
+                    gPlayState != nullptr ? (int)gPlayState->sceneNum : -1,
+                    (int)sceneNum, csKindForBuffer, csKeyForBuffer);
         return;
     }
 
@@ -449,14 +541,21 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
     if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
 
     const int16_t sceneNum = payload.value("sceneNum", (int16_t)0);
+    const std::string csKind   = payload.value("csKind", std::string("actor_unknown"));
+    const int32_t     csKey    = payload.value("csKey",  (int32_t)-1);
+    const uint8_t     timeline = (uint8_t)(gSaveContext.linkAge & 1);
+
+    // Bug 3 — drop any pending START with the same key. If host's
+    // CS ended before peer transitioned into the matching scene,
+    // we don't want the buffered START firing on a future scene
+    // entry (which would re-play an already-finished cutscene from
+    // frame 0 with the host already gone).
+    RemovePendingCutsceneStart(sceneNum, timeline, csKind, csKey);
+
     if (VALIDATE(::ReceiveValidator::ValidateSameScene(sceneNum)) !=
         ::ReceiveValidator::ValidationVerdict::Valid) {
         return;
     }
-
-    const std::string csKind   = payload.value("csKind", std::string("actor_unknown"));
-    const int32_t     csKey    = payload.value("csKey",  (int32_t)-1);
-    const uint8_t     timeline = (uint8_t)(gSaveContext.linkAge & 1);
 
     // No-op if we never saw the matching START (late-join replay path).
     if (!IsCutsceneActive(sceneNum, timeline, csKind, csKey)) {
