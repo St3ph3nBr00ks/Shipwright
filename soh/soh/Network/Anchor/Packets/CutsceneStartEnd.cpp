@@ -592,6 +592,31 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
     Play_ClearAllSubCameras(gPlayState);
     Play_ChangeCameraStatus(gPlayState, 0, CAM_STAT_ACTIVE);
 
+    // Bug 1 follow-on (log 184 follow-up — controller input still locked
+    // after CS ended even though camera returned to player). Sister issue
+    // to the camera-stuck path: Player_Update gates input on
+    // `player->csAction != 0`. The cutscene script's normal end frame
+    // would call `func_8002DF38(play, NULL, 0)` to release the lock, but
+    // our forced csCtx.state=IDLE write above can interrupt the script
+    // before that release runs.
+    //
+    // User-observed reproduction: Saria intro CS at start of game, P2's
+    // camera correctly returned to following Link after CS end, but P2's
+    // joystick/buttons were inert until a manual Anchor-menu teleport
+    // (which runs `Player_SetCsActionWithHaltedActors(NULL, 0)` indirectly
+    // via teleport's `respawnFlag` reset and re-clears csAction).
+    //
+    // Fix: explicitly call the engine's csAction release helper. Sets
+    // `player->csAction = 0` + `player->csActor = NULL` +
+    // `player->cv.haltActorsDuringCsAction = false`. Player_Update on the
+    // next frame sees csAction == 0 and falls back to normal input
+    // processing; PLAYER_STATE1_IN_CUTSCENE drops as a side-effect.
+    // No-op when csAction was already 0 (script released cleanly).
+    Player* localPlayerForRelease = GET_PLAYER(gPlayState);
+    if (localPlayerForRelease != nullptr) {
+        func_8002DF38(gPlayState, NULL, 0);
+    }
+
     MarkCutsceneInactive(sceneNum, timeline, csKind, csKey);
 
     SPDLOG_INFO("[CutsceneEnd] Received kind={} key={} scene=0x{:02X}",
