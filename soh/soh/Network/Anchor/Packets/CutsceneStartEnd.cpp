@@ -2,6 +2,7 @@
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/JsonConversions.hpp"  // Vec3f to_json / from_json
 
 #include <libultraship/log/luslog.h>
 #include <nlohmann/json.hpp>
