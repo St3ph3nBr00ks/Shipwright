@@ -967,10 +967,17 @@ void BossGoma_Encounter(BossGoma* this, PlayState* play) {
             Math_SmoothStepToF(&this->subCameraEye.z, this->actor.world.pos.z + 220.0f, 0.2f, 100.0f, 0.1f);
 
             if (this->framesUntilNextAction == 0) {
+                // Defensive NULL guard for parity with BossGoma_ForceCutsceneSkip
+                // (z_boss_goma.c:2253). Play_GetCamera should never return NULL
+                // for index 0 in normal play, but during disable/re-enable
+                // transitions or migration windows the camera array can be in
+                // flux. Skip the snapshot rather than null-deref.
                 cam = Play_GetCamera(play, 0);
-                cam->eye = this->subCameraEye;
-                cam->eyeNext = this->subCameraEye;
-                cam->at = this->subCameraAt;
+                if (cam != NULL) {
+                    cam->eye = this->subCameraEye;
+                    cam->eyeNext = this->subCameraEye;
+                    cam->at = this->subCameraAt;
+                }
                 func_800C08AC(play, this->subCameraId, 0);
                 this->subCameraId = 0;
                 BossGoma_SetupFloorMain(this);
