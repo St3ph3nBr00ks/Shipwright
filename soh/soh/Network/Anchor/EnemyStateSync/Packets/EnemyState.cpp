@@ -758,20 +758,18 @@ actor_found:
         // rotation/health/scale still sync normally — only the world.pos
         // write is skipped while the actor is arrow-pinned.
         const bool arrowPinned = (actor->flags & ACTOR_FLAG_ATTACHED_TO_ARROW) != 0;
-        // Animation-driven actors (Fix 7 + boss_goma_sync_plan.md §2):
-        // `world.pos` and `shape.rot` are computed each frame from the
-        // actor's own state machine, so external host overrides cause
-        // visible drift / teardown faults.
+        // Animation-driven actors (Fix 7): `world.pos` is computed each
+        // frame from the actor's own state machine, so external host
+        // overrides cause visible drift / teardown faults.
         //   En_Dekubaba — head-tip from home.pos + stemSectionAngles.
         //   En_Karebaba — Spin state position from home.pos + shape.rot.
-        //   Boss_Goma   — boss anim drives world.pos + shape.rot every
-        //                 frame; per-actor sync (actionState, anim id,
-        //                 etc.) is the proper sync channel and has not
-        //                 yet landed. Until then, skip the field
-        //                 overrides so admission alone is crash-safe.
+        // Boss_Goma is NOT in this group — its world.pos is the boss's
+        // body-root location set by its actionFunc each frame (e.g.
+        // CeilingMoveToCenter, FloorMain), not an animation-derived
+        // sub-limb position. Without world.pos sync the host's climb /
+        // ceiling-spawn locations don't reach peers (Bug A from log 47).
         const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
-                                           actor->id == ACTOR_EN_KAREBABA ||
-                                           actor->id == ACTOR_BOSS_GOMA);
+                                           actor->id == ACTOR_EN_KAREBABA);
         if (!isAnimationDrivenPos && !arrowPinned) {
             actor->world.pos = pos;
         }
@@ -788,9 +786,13 @@ actor_found:
         //     against their own world view). Math_ApproachS only nudges by
         //     0xE38 per frame so re-applying host's value at ~20pps wins
         //     decisively against the local nudge.
-        //   - Boss_Goma: skip — animation-driven; per-actor sync is the
-        //     proper channel (see boss_goma_sync_plan.md §2).
-        if (actor->id != ACTOR_EN_KAREBABA && actor->id != ACTOR_BOSS_GOMA) {
+        //   - Boss_Goma: APPLY — shape.rot is the body's facing direction,
+        //     driven by Math_ApproachS in combat actionFuncs. Same rationale
+        //     as Dekubaba: ~20pps host overwrite wins decisively over the
+        //     local per-frame nudge, and without it each client's Goma faces
+        //     a different direction (each client targets its own local
+        //     player).
+        if (actor->id != ACTOR_EN_KAREBABA) {
             actor->shape.rot = shapeRot;
         }
         actor->world.rot = rot;

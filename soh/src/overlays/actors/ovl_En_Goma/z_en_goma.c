@@ -649,7 +649,13 @@ void EnGoma_UpdateHit(EnGoma* this, PlayState* play) {
             this->colCyl2.base.acFlags &= ~AC_HIT;
 
             if (this->gomaType == ENGOMA_NORMAL) {
-                u32 dmgFlags = acHitInfo->toucher.dmgFlags;
+                // Bug B — multiplayer DAMAGE_ENEMY synthesises AC_HIT without
+                // an accompanying acHitInfo (no real AT collider on host).
+                // Treat null as dmgFlags=0 so the path falls through to the
+                // sword-damage `else` (forces swordDamage=1, decrements
+                // health, SetupHurt). Without this guard the deref crashed
+                // host on every remote larva hit.
+                u32 dmgFlags = (acHitInfo != NULL) ? acHitInfo->toucher.dmgFlags : 0;
 
                 if (dmgFlags & 0x100000) {
                     if (this->actionFunc == EnGoma_Jump) {

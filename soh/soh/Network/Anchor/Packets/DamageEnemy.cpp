@@ -18,6 +18,11 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_St/z_en_st.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
+// Bug B — En_Goma (Boss_Goma's larvae) needs AC_HIT for its damage block to
+// fire. Larva is null-guarded in z_en_goma.c so synthetic AC_HIT without
+// acHitInfo no longer crashes (treated as dmgFlags=0 → falls through to the
+// sword-damage path, decrements health by 1, plays SetupHurt).
+#include "src/overlays/actors/ovl_En_Goma/z_en_goma.h"
 extern PlayState* gPlayState;
 }
 
@@ -221,6 +226,14 @@ damage_target_found:
             // bodyCollider — z_en_test.c:1666 reads AC_HIT here. swordCollider
             // and shieldCollider are AT colliders (Stalfos hitting Link), not AC.
             ((EnTest*)actor)->bodyCollider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_GOMA:
+            // Bug B — Larva's damage block (z_en_goma.c:647) reads
+            // colCyl2.base.acFlags. acHitInfo is now NULL-guarded inside
+            // EnGoma_UpdateHit so the synthetic flag without an AT collider
+            // won't crash; the path falls through to the swordDamage branch
+            // and decrements health by 1.
+            ((EnGoma*)actor)->colCyl2.base.acFlags |= AC_HIT;
             break;
         default:
             // No AC_HIT setter for this actor type. Damage is delivered via
