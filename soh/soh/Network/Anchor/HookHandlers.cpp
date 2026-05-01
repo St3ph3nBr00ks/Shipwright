@@ -217,6 +217,35 @@ extern "C" bool Anchor_ShouldSuppressHintnutsDrop(Actor* actor) {
     return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// Hintnut state machine is host-authoritative (room host runs the AI;
+// peers receive ENEMY_STATE and apply via ApplyNetState). Peers must
+// not run HitByScrubProjectile1+2 locally on nutball impact — would
+// cause the local actor to transition out of sync with host's
+// authoritative state. Returns true on peers (non-room-hosts) so the
+// local hit gets routed through PROJECTILE_HIT_ENEMY instead.
+//
+// Single-player and offline branches: returns false (no Anchor, no
+// connection, or no scope info) so vanilla behavior is preserved.
+extern "C" bool Anchor_ShouldSuppressHintnutsLocalAI(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    if (gPlayState == nullptr) return false;
+    // Peer = "I'm not the room host of MY current (sceneNum, roomNum,
+    // timeline)". The actor is in my actor list so its scope is mine.
+    return !::SceneAuthority::IsMyCurrentRoomHost();
+}
+
+// Sender wrapper — routes a local nutball-on-hintnut collision to the
+// room host. Host applies HitByScrubProjectile1+2 on its own copy of
+// the actor and broadcasts the resulting state via ENEMY_STATE.
+extern "C" void Anchor_NotifyProjectileHitEnemy(Actor* targetActor, s16 projectileActorId) {
+    if (targetActor == nullptr) return;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(targetActor);
+    if (ext == nullptr) return;  // unsynced actor — silently drop
+    Anchor::Instance->SendPacket_ProjectileHitEnemy(ext->netId, projectileActorId);
+}
+
 // #90 / en_st_sync_plan_v2.md §5 — same predicate shape as the
 // Dekunuts suppressor, applied to En_St's drop site (line 996).
 extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
@@ -3639,12 +3668,7 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        // Bidirectional sync carve-out: hintnuts use Option A last-writer-
-        // wins state-machine sync, so every client broadcasts its local
-        // state transitions (not just the room host). Other actors keep
-        // the room-host-only broadcast pattern.
-        const bool isBidirectionalActor = (actor->id == ACTOR_EN_HINTNUTS);
-        if (isBidirectionalActor || ::SceneAuthority::IsMyCurrentRoomHost()) {
+        if (::SceneAuthority::IsMyCurrentRoomHost()) {
             // Scene host (or every client for bidirectional actors):
             // send current state to all clients in scene.
             const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
@@ -4064,24 +4088,28 @@ void Anchor::RegisterHooks() {
                 }
             }
 
-            // En_Hintnuts (Inside Deku Tree Compound Room) — bidirectional
-            // state-machine sync (Option A: last-writer-wins). Each client
-            // broadcasts its local state transitions and applies received
-            // state naively. Projectiles stay local-AI (see ActorSync-
-            // Helpers.cpp's IsSyncedWorldActor comment — En_Nutsball is
-            // intentionally not admitted to sync). This split keeps the
-            // reflect physics per-client (working) while reuniting the
-            // state machine across clients (so the puzzle outcome agrees
-            // on both screens).
+            // En_Hintnuts (Inside Deku Tree Compound Room) — host-
+            // authoritative state-machine sync. Room host runs the AI
+            // and broadcasts every state change via ENEMY_STATE; peers
+            // receive and apply via EnHintnuts_ApplyNetState. Peer's
+            // local AI still ticks (animations + ambient transitions)
+            // but the rx driver below snaps peer back to host's state
+            // on every divergence — host always wins.
             //
-            // Dormant-active filter is the only retained gate: blocks
-            // host's idle Wait (state 0) from clobbering a peer that
-            // just emerged into Stand/ThrowNut/BeginRun/Run. Other
-            // transitions apply naively, including post-hit Freeze /
-            // BeginFreeze states — Option A accepts brief regressions
-            // when clients diverge rather than imposing a forward-only
-            // rule that would lock the pattern out for future enemies
-            // whose state machines legitimately move backwards.
+            // Projectiles (En_Nutsball) remain local-AI / local-spawn
+            // — see ActorSyncHelpers.cpp's IsSyncedWorldActor comment.
+            // Per-client reflect physics drives a peer-only nutball-
+            // landed event, which fires PROJECTILE_HIT_ENEMY → host
+            // applies HitByScrubProjectile1+2 on its local actor →
+            // ENEMY_STATE round-trips the resulting transition.
+            //
+            // Dormant-active filter retained: blocks host's idle Wait
+            // (state 0) from clobbering a peer whose local AI happens
+            // to be momentarily ahead in Stand/ThrowNut/BeginRun/Run.
+            // Mostly redundant under host-authoritative (peer's local
+            // AI doesn't broadcast, so divergences are short-lived) but
+            // kept to avoid visual blink when peer's local timer crosses
+            // an idle/active boundary slightly before host's.
             if (actor->id == ACTOR_EN_HINTNUTS && ext->netStateIndex >= 0) {
                 EnHintnuts* h = (EnHintnuts*)actor;
                 s16 curState = EnHintnuts_GetStateIndex(h);

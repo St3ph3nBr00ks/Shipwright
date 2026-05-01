@@ -42,24 +42,39 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
         case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
         case ACTOR_EN_HINTNUTS: return true;  // Compound Room puzzle scrubs.
-                                              // State-machine sync is bidirectional
-                                              // (every client broadcasts) with last-
-                                              // writer-wins applied at receive time.
+                                              // State-machine sync is HOST-AUTHORITATIVE
+                                              // (room host runs the AI; peers receive
+                                              // ENEMY_STATE and apply via ApplyNetState).
+                                              // Bidirectional Option A was tried and
+                                              // produced state oscillation between
+                                              // clients (logs 208 / 213) — peer's local
+                                              // AI kept overriding host's authoritative
+                                              // broadcasts; reverted to host-only
+                                              // broadcaster.
+                                              //
                                               // sPuzzleCounter is also synced via
                                               // ENEMY_STATE so the puzzle's branch
                                               // logic resolves identically on both
-                                              // clients regardless of which one
-                                              // landed the third correct hit.
+                                              // clients. Under host-authoritative,
+                                              // host is the only writer to its local
+                                              // counter; peer's counter is mirror-only.
                                               //
                                               // Projectiles (En_Nutsball) remain
                                               // local-AI / local-spawn — each client
                                               // spawns its own nutsball aimed at its
-                                              // local nearest player, runs reflect
-                                              // physics against its local Link's
-                                              // shield, and feeds back into the
-                                              // shared state machine via standard
-                                              // HitByScrubProjectile1+2 → state
-                                              // transitions → broadcast.
+                                              // local nearest player at frame 6 of
+                                              // the synced ThrowNut animation, runs
+                                              // reflect physics against its local
+                                              // Link's shield. When peer's reflected
+                                              // nutsball lands on peer's local
+                                              // hintnut, peer fires PROJECTILE_HIT_ENEMY
+                                              // instead of running HitByScrubProjectile1+2
+                                              // locally. Host receives, applies the
+                                              // hit-response on its local actor, and
+                                              // broadcasts the resulting state via
+                                              // ENEMY_STATE. RTT cost: ~50ms between
+                                              // visual nutball impact on peer and
+                                              // peer seeing the hintnut transition.
 
         // ACTOR_EN_NUTSBALL: deliberately NOT admitted. Projectile is
         // intrinsically per-client (reflect physics needs local Link's

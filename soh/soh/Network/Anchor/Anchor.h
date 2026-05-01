@@ -573,6 +573,7 @@ class Anchor : public Network {
     inline static const std::string DAMAGE_ENEMY = "DAMAGE_ENEMY";
     inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
     inline static const std::string ENEMY_HIT_PLAYER = "ENEMY_HIT_PLAYER";
+    inline static const std::string PROJECTILE_HIT_ENEMY = "PROJECTILE_HIT_ENEMY";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
     inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
@@ -685,6 +686,15 @@ class Anchor : public Network {
     void SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect);
     void SendPacket_EnemyHitPlayer(uint32_t netId);
     void HandlePacket_EnemyHitPlayer(nlohmann::json payload);
+
+    // PROJECTILE_HIT_ENEMY — peer → room host. Sent when a peer's local
+    // projectile (currently En_Nutsball only) lands on a peer's local
+    // synced enemy. Lets the host's authoritative state machine apply
+    // the hit-response transition without the peer running redundant /
+    // conflicting local logic. Receiver dispatches by `actor->id` to a
+    // per-actor helper (matches the ENEMY_HIT_PLAYER pattern).
+    void SendPacket_ProjectileHitEnemy(uint32_t targetNetId, s16 projectileActorId);
+    void HandlePacket_ProjectileHitEnemy(nlohmann::json payload);
 
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     //

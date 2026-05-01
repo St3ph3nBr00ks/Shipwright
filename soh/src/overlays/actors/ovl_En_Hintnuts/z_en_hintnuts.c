@@ -511,14 +511,36 @@ void EnHintnuts_ColliderCheck(EnHintnuts* this, PlayState* play) {
         this->collider.base.acFlags &= ~AC_HIT;
         Actor_SetDropFlag(&this->actor, &this->collider.info, 1);
         if (this->collider.base.ac->id != ACTOR_EN_NUTSBALL) {
+            // Non-nutball hit (sword / deku stick / slingshot / etc.).
+            // On peer this would briefly burrow the local actor; host's
+            // next ENEMY_STATE snaps it back. Acceptable transient
+            // flicker for v1 — only the puzzle-progressing nutball hit
+            // is routed through PROJECTILE_HIT_ENEMY.
             EnHintnuts_SetupBurrow(this);
+        } else {
+            // Nutball hit. Host runs the authoritative HitByScrubProjectile1+2;
+            // peer routes the hit through PROJECTILE_HIT_ENEMY so host's
+            // copy of THIS hintnut transitions, then broadcasts the new
+            // state via ENEMY_STATE. Peer suppresses its own local
+            // transition to avoid fighting host's state machine
+            // (Option A bidirectional caused state oscillation — see
+            // logs 208/213 + ActorSyncHelpers comment).
+            if (Anchor_ShouldSuppressHintnutsLocalAI(&this->actor)) {
+                Anchor_NotifyProjectileHitEnemy(&this->actor, ACTOR_EN_NUTSBALL);
+            } else {
+                EnHintnuts_HitByScrubProjectile1(this, play);
+                EnHintnuts_HitByScrubProjectile2(this);
+            }
+        }
+    } else if (play->actorCtx.unk_02 != 0) {
+        // Global "all hintnuts hit" trigger — vanilla debug-ish path.
+        // Same single-authority gate as the nutball branch.
+        if (Anchor_ShouldSuppressHintnutsLocalAI(&this->actor)) {
+            Anchor_NotifyProjectileHitEnemy(&this->actor, ACTOR_EN_NUTSBALL);
         } else {
             EnHintnuts_HitByScrubProjectile1(this, play);
             EnHintnuts_HitByScrubProjectile2(this);
         }
-    } else if (play->actorCtx.unk_02 != 0) {
-        EnHintnuts_HitByScrubProjectile1(this, play);
-        EnHintnuts_HitByScrubProjectile2(this);
     }
 }
 

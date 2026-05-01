@@ -779,23 +779,29 @@ actor_found:
     // too for ACTOR_OBJ_OSHIHIKI so peer's pushes reach all clients. We
     // skip the apply when our local actor is currently in a push state —
     // otherwise a peer's stale echo would overwrite our in-progress local
-    // push. Outside of these two cases (push-block + host) the standard
-    // host short-circuit applies; non-hosts always apply.
+    // push.
     const bool isPushBlock = (actor->id == ACTOR_OBJ_OSHIHIKI);
     if (isPushBlock) {
         ObjOshihiki* block = (ObjOshihiki*)actor;
         if ((block->stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)) != 0) {
             return;
         }
-    } else if (::SceneAuthority::IsRoomHost(sceneNum,
-                                              (s8)gPlayState->roomCtx.curRoom.num,
-                                              (uint8_t)(gSaveContext.linkAge & 0x1))) {
-        // Phase 2: skip self-apply if I'm the scene host of the packet's
-        // (sceneNum, roomNum, timeline). The actor was found in my local
-        // actor list above, so the actor's room equals my current room
-        // — using gPlayState->roomCtx.curRoom.num is correct here even
-        // though the wire packet doesn't carry roomNum.
-        return;
+    } else {
+        // Self-apply skip: if the packet's sender is me, skip — don't
+        // re-apply my own broadcast (relay may echo to sender for some
+        // packet types). Sender id is stamped by the relay onto the
+        // packet's `clientId` field, so it's authoritative regardless
+        // of whether the sender was the room host at broadcast time.
+        //
+        // (Predecessor gate was "skip if I'm room host" — equivalent
+        // under host-authoritative single-broadcaster sync but fragile
+        // if authority shifts mid-flight or future packet types diverge
+        // from the room-host-broadcasts-only pattern.)
+        const uint32_t senderId = payload.value("clientId", (uint32_t)0);
+        if (senderId != 0 && Anchor::Instance != nullptr &&
+            senderId == Anchor::Instance->ownClientId) {
+            return;
+        }
     }
 
     // Receiver audio cue: when a remote pusher's ENEMY_STATE arrives and the
