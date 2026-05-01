@@ -3639,8 +3639,14 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        if (::SceneAuthority::IsMyCurrentRoomHost()) {
-            // Scene host: send current state to all clients in scene.
+        // Bidirectional sync carve-out: hintnuts use Option A last-writer-
+        // wins state-machine sync, so every client broadcasts its local
+        // state transitions (not just the room host). Other actors keep
+        // the room-host-only broadcast pattern.
+        const bool isBidirectionalActor = (actor->id == ACTOR_EN_HINTNUTS);
+        if (isBidirectionalActor || ::SceneAuthority::IsMyCurrentRoomHost()) {
+            // Scene host (or every client for bidirectional actors):
+            // send current state to all clients in scene.
             const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
             if (ext == nullptr) {
                 // Log once per actor pointer to avoid per-frame spam.
@@ -4058,16 +4064,43 @@ void Anchor::RegisterHooks() {
                 }
             }
 
-            // En_Hintnuts (Inside Deku Tree Compound Room) — INTENTIONALLY
-            // not synced. Each client runs its hintnuts as local-AI / local-
-            // spawn. See ActorSyncHelpers.cpp's IsSyncedWorldActor comment
-            // block for the rationale. This block was removed once the
-            // shared-projectile-state model was abandoned in favour of
-            // each client locally targeting their nearest player and
-            // running collision against their own Link's shield.
-            // Puzzle completion replicates via Flags_SetClear → FLAG_
-            // SCENE_SWITCH / WorldStateSync, so the door opens for both
-            // clients regardless of which one solved the puzzle locally.
+            // En_Hintnuts (Inside Deku Tree Compound Room) — bidirectional
+            // state-machine sync (Option A: last-writer-wins). Each client
+            // broadcasts its local state transitions and applies received
+            // state naively. Projectiles stay local-AI (see ActorSync-
+            // Helpers.cpp's IsSyncedWorldActor comment — En_Nutsball is
+            // intentionally not admitted to sync). This split keeps the
+            // reflect physics per-client (working) while reuniting the
+            // state machine across clients (so the puzzle outcome agrees
+            // on both screens).
+            //
+            // Dormant-active filter is the only retained gate: blocks
+            // host's idle Wait (state 0) from clobbering a peer that
+            // just emerged into Stand/ThrowNut/BeginRun/Run. Other
+            // transitions apply naively, including post-hit Freeze /
+            // BeginFreeze states — Option A accepts brief regressions
+            // when clients diverge rather than imposing a forward-only
+            // rule that would lock the pattern out for future enemies
+            // whose state machines legitimately move backwards.
+            if (actor->id == ACTOR_EN_HINTNUTS && ext->netStateIndex >= 0) {
+                EnHintnuts* h = (EnHintnuts*)actor;
+                s16 curState = EnHintnuts_GetStateIndex(h);
+                bool netIsDormant  = (ext->netStateIndex == 0);
+                bool localIsActive = (curState == 2 || curState == 3 ||
+                                      curState == 5 || curState == 6);
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnHintnuts] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnHintnuts_ApplyNetState(h, gPlayState, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnHintnuts] rx netId={} block net={} local={} (dormant-active filter)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
+                    }
+                }
+            }
 
             // #90 / en_st_sync_plan_v2.md §3 — Skulltula state-machine
             // sync. Dormant-to-active filter: states 0/1 (init / wait

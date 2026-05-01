@@ -41,38 +41,34 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
         case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
         case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
+        case ACTOR_EN_HINTNUTS: return true;  // Compound Room puzzle scrubs.
+                                              // State-machine sync is bidirectional
+                                              // (every client broadcasts) with last-
+                                              // writer-wins applied at receive time.
+                                              // sPuzzleCounter is also synced via
+                                              // ENEMY_STATE so the puzzle's branch
+                                              // logic resolves identically on both
+                                              // clients regardless of which one
+                                              // landed the third correct hit.
+                                              //
+                                              // Projectiles (En_Nutsball) remain
+                                              // local-AI / local-spawn — each client
+                                              // spawns its own nutsball aimed at its
+                                              // local nearest player, runs reflect
+                                              // physics against its local Link's
+                                              // shield, and feeds back into the
+                                              // shared state machine via standard
+                                              // HitByScrubProjectile1+2 → state
+                                              // transitions → broadcast.
 
-        // ACTOR_EN_HINTNUTS / ACTOR_EN_NUTSBALL: deliberately NOT admitted.
-        //
-        // Hintnut puzzle scrubs are an "interaction-symmetric" projectile
-        // enemy — each player has their own local interaction with the
-        // scrub (nutball thrown at me, my shield reflects, scrub freezes
-        // for me). Trying to maintain a single canonical projectile state
-        // across clients fights physics: AT_BOUNCED is set by collision
-        // checks against the local Link's AC_HARD shield, which only
-        // matches the local-client's view of player position. Replicated
-        // copies on other clients flew along the broadcasting client's
-        // trajectory toward the broadcasting client's player — missing
-        // the receiving client's shield and producing the "machine gun
-        // spawn", "fire animation but no nut", and "shield breaks
-        // instead of bouncing" bugs documented across logs 195-206.
-        //
-        // Local-AI / local-spawn model:
-        //   - Each client's hintnuts run vanilla state machine locally.
-        //   - Each client locally targets nearest player (its own Link
-        //     OR a DummyPlayer), spawns nutball locally, runs collision
-        //     locally.
-        //   - Each client's reflect advances its OWN local sPuzzleCounter.
-        //   - Whichever client first completes the puzzle locally fires
-        //     `Flags_SetClear(play, 0x9)` in EnHintnuts_Leave; the flag
-        //     replicates via FLAG_SCENE_SWITCH / WorldStateSync, opening
-        //     the door for both clients.
-        //
-        // Visual divergence (P1 sees hintnut throwing at P1, P2 sees it
-        // throwing at P2) is the explicit trade — accepted because
-        // shared-projectile-state was always going to fight reflect
-        // physics. The pattern generalises to other projectile-throwing
-        // enemies (Mad Scrub, Octorok, Beamos) when they come up.
+        // ACTOR_EN_NUTSBALL: deliberately NOT admitted. Projectile is
+        // intrinsically per-client (reflect physics needs local Link's
+        // shield). See logs 195-206 for the full investigation that led
+        // to this split: state machine = synced, projectile = local.
+        // Same shape applies to other projectile-throwing enemies as
+        // they're implemented (Mad Scrub already admitted, but the
+        // projectile spawned by EnDekunuts is also EnNutsball — kept
+        // out by the same exclusion).
 
         // Push-block / lift-and-throw actors (Pillar C realtime extension).
         // FLAG_SCENE_SWITCH already replicates the *final* resting position

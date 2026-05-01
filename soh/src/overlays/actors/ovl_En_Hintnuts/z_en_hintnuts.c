@@ -630,6 +630,17 @@ static void EnHintnuts_NetTransitionToBg(EnHintnuts* this, PlayState* play) {
     Actor_ChangeCategory(play, &play->actorCtx, &this->actor, ACTORCAT_BG);
 }
 
+// Puzzle-counter accessors for SoH multiplayer sync. See z_en_hintnuts.h
+// for the full contract — broadcaster reads via Get, receiver writes
+// via Set, both keep the file-static sPuzzleCounter in lockstep across
+// clients so the puzzle's branch logic resolves identically.
+s16 EnHintnuts_GetPuzzleCounter(void) {
+    return sPuzzleCounter;
+}
+void EnHintnuts_SetPuzzleCounter(s16 value) {
+    sPuzzleCounter = value;
+}
+
 void EnHintnuts_ApplyNetState(EnHintnuts* this, PlayState* play, s16 stateIndex) {
     // Pillar A Phase 2 pattern — every state replicates from the scene
     // host's broadcast. Cases below mirror the natural Setup helpers

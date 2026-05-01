@@ -54,6 +54,19 @@ typedef struct EnHintnuts {
 s16  EnHintnuts_GetStateIndex(struct EnHintnuts* actor);
 void EnHintnuts_ApplyNetState(struct EnHintnuts* actor, PlayState* play, s16 stateIndex);
 
+// Puzzle-progress counter accessors. The file-static sPuzzleCounter
+// inside z_en_hintnuts.c is shared across all hintnut instances in the
+// scene and drives the wrong-order reset / "this-is-the-third-correct-
+// hit" branches inside HitByScrubProjectile1+2 + SetupFreeze. Each
+// client's local hits advance their own counter independently; in
+// multiplayer this can diverge (P1's third-hit in correct order while
+// P2's third-hit landed wrong-order), producing different visual
+// outcomes for the same scrub on each client. Sync via these accessors
+// — broadcaster reads, receiver writes — keeps both clients on the
+// same counter so the puzzle resolves identically on both screens.
+s16  EnHintnuts_GetPuzzleCounter(void);
+void EnHintnuts_SetPuzzleCounter(s16 value);
+
 #ifdef __cplusplus
 extern "C" {
 #endif

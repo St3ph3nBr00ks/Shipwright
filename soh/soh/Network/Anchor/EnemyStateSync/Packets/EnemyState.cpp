@@ -110,6 +110,13 @@ struct EnemyUpdateExtras {
     bool hasHintnuts             = false;
     s16  hintnutsActionState     = 0;
     s16  hintnutsAnimFlagAndTimer = 0;
+    // sPuzzleCounter sync. Each client's local hits advance their own
+    // counter independently; sync keeps both clients on the same value
+    // so the puzzle's branch logic (HitByScrubProjectile1 BG transition,
+    // SetupFreeze -3→-4 reset bump) resolves identically. Last-writer-
+    // wins via simple overwrite — racing-hit divergence converges within
+    // a few frames at the next broadcast.
+    s16  hintnutsPuzzleCounter   = 0;
 
     // #90 / en_st_sync_plan_v2.md §3 — En_St state-machine sync.
     bool hasEnSt         = false;
@@ -222,6 +229,9 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.hasHintnuts                 = true;
         e.hintnutsActionState         = EnHintnuts_GetStateIndex(h);
         e.hintnutsAnimFlagAndTimer    = h->animFlagAndTimer;
+        // sPuzzleCounter is global to all hintnuts in the scene; reading
+        // from any one of them returns the same authoritative value.
+        e.hintnutsPuzzleCounter       = EnHintnuts_GetPuzzleCounter();
     } else if (actor->id == ACTOR_EN_ST) {
         EnSt* st            = (EnSt*)actor;
         e.hasEnSt           = true;
@@ -283,6 +293,7 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasHintnuts) {
         if (cur.hintnutsActionState      != prev.hintnutsActionState)      return true;
         if (cur.hintnutsAnimFlagAndTimer != prev.hintnutsAnimFlagAndTimer) return true;
+        if (cur.hintnutsPuzzleCounter    != prev.hintnutsPuzzleCounter)    return true;
     }
     if (cur.hasEnSt != prev.hasEnSt) return true;
     if (cur.hasEnSt) {
@@ -543,6 +554,7 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     if (extras.hasHintnuts) {
         payload["actionState"]              = extras.hintnutsActionState;
         payload["hintnutsAnimFlagAndTimer"] = (int)extras.hintnutsAnimFlagAndTimer;
+        payload["hintnutsPuzzleCounter"]    = (int)extras.hintnutsPuzzleCounter;
     }
 
     // #90 / en_st_sync_plan_v2.md §3 — En_St state-machine sync.
@@ -961,6 +973,14 @@ actor_found:
         if (actor->id == ACTOR_EN_HINTNUTS && payload.contains("hintnutsAnimFlagAndTimer")) {
             EnHintnuts* h = (EnHintnuts*)actor;
             h->animFlagAndTimer = (s16)payload["hintnutsAnimFlagAndTimer"].get<int>();
+        }
+        // sPuzzleCounter sync — last-writer-wins. Each client's local
+        // hits advance their own counter; ENEMY_STATE broadcasts the
+        // current value, receivers overwrite. Keeps the puzzle's branch
+        // logic (HitByScrubProjectile1 BG transition gate, SetupFreeze
+        // -3→-4 wrong-order reset bump) consistent across clients.
+        if (actor->id == ACTOR_EN_HINTNUTS && payload.contains("hintnutsPuzzleCounter")) {
+            EnHintnuts_SetPuzzleCounter((s16)payload["hintnutsPuzzleCounter"].get<int>());
         }
 
         // #90 / en_st_sync_plan_v2.md — cache En_St actionState.
