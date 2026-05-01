@@ -8,6 +8,10 @@
 #include "objects/object_d_lift/object_d_lift.h"
 #include "overlays/effects/ovl_Effect_Ss_Kakera/z_eff_ss_kakera.h"
 
+// Multiplayer: any-peer-on-dyna check so this platform falls when ANY
+// connected player stands on it, not just the local Link.
+extern bool Anchor_IsAnyPeerOnDyna(Actor* dynaActor);
+
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
 void ObjLift_Init(Actor* thisx, PlayState* play);
@@ -138,7 +142,7 @@ void func_80B96560(ObjLift* this, PlayState* play) {
     s32 pad;
     s32 quakeIndex;
 
-    if (DynaPolyActor_IsPlayerOnTop(&this->dyna)) {
+    if (DynaPolyActor_IsPlayerOnTop(&this->dyna) || Anchor_IsAnyPeerOnDyna(&this->dyna.actor)) {
         if (this->timer <= 0) {
             if (((this->dyna.actor.params >> 8) & 7) == 7) {
                 func_80B967C0(this);

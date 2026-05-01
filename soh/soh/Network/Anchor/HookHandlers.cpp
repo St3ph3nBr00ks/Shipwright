@@ -91,6 +91,39 @@ extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
     return FindNearestPlayerActor(enemy, play);
 }
 
+// C-callable: returns true if any DummyPlayer (remote player) is currently
+// standing on top of the given DynaPolyActor's footprint. Used by
+// `DynaPolyActor_IsPlayerOnTop` callers (Obj_Lift, etc.) to make
+// step-on-top triggers multiplayer-aware. Local player's IsPlayerOnTop
+// flag continues to come from the engine's own dyna physics; this helper
+// is a strict OR-fallthrough that fires only when the local check missed.
+//
+// Geometry: XZ proximity ≤ 120 units (matches Obj_Lift's 3×3 fragment
+// grid at 120-unit spacing) AND Y delta in [-10, +80] (player is at or
+// just above the platform top).
+extern "C" bool Anchor_IsAnyPeerOnDyna(Actor* dynaActor) {
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return false;
+    if (gPlayState == nullptr || dynaActor == nullptr) return false;
+
+    const f32 kXZRangeSq = 120.0f * 120.0f;
+    const f32 kYMin      = -10.0f;
+    const f32 kYMax      =  80.0f;
+
+    Actor* npc = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
+    while (npc != nullptr) {
+        if (npc->id == ACTOR_EN_OE2 && npc->update == DummyPlayer_Update) {
+            f32 dx = npc->world.pos.x - dynaActor->world.pos.x;
+            f32 dz = npc->world.pos.z - dynaActor->world.pos.z;
+            f32 dy = npc->world.pos.y - dynaActor->world.pos.y;
+            if (dx * dx + dz * dz < kXZRangeSq && dy > kYMin && dy < kYMax) {
+                return true;
+            }
+        }
+        npc = npc->next;
+    }
+    return false;
+}
+
 // C-callable: returns true when a Karebaba's natural death cycle is running on this
 // (non-host) client so that its stick drop should be suppressed (no duplicate item).
 // Called from EnKarebaba_DeadItemDrop in z_en_karebaba.c.
@@ -1784,12 +1817,28 @@ void Anchor::RegisterHooks() {
                         // (e.g. a room below the Deku Tree entrance) otherwise
                         // cause it to walk into walls and swing at air.
                         // (Room-equality check disabled — see banner note above.)
+                        //
+                        // Target blacklist: actors that can only be defeated by
+                        // shield-reflect of their own projectiles. The follower
+                        // can't perform reflect (no shield input in current
+                        // RANGED_ATTACK mode), and the underground "wait" state
+                        // for these scrubs has the AC collider disabled +
+                        // collider height shrunk to 5, so a melee swing hits
+                        // nothing but the targeting logic still picks them up
+                        // because ACTOR_FLAG_ATTENTION_ENABLED stays set.
+                        // Symptom on the demo path: follower "runs at empty
+                        // Hintnut nest" in Compound Room.
+                        auto IsScrubPuzzleActor = [](int16_t id) -> bool {
+                            return id == ACTOR_EN_HINTNUTS ||
+                                   id == ACTOR_EN_DEKUNUTS;
+                        };
                         Actor* nearest    = nullptr;
                         f32    nearDistSq = kEngageRange * kEngageRange;
                         Actor* eActor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
                         while (eActor != nullptr) {
                             if (eActor->update != nullptr &&
                                 /* eActor->room == player->actor.room && */
+                                !IsScrubPuzzleActor(eActor->id) &&
                                 fabsf(eActor->world.pos.y - p2Pos.y) < kMaxYDelta) {
                                 f32 edx     = eActor->world.pos.x - p2Pos.x;
                                 f32 edz     = eActor->world.pos.z - p2Pos.z;
