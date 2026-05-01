@@ -60,6 +60,30 @@ bool IsSyncedWorldActor(int16_t actorId) {
                                               // Run-state ENEMY_STATE traffic stops on the
                                               // host and the "scrub running around the room"
                                               // animation never syncs to peers.
+
+        // Push-block / lift-and-throw actors (Pillar C realtime extension).
+        // FLAG_SCENE_SWITCH already replicates the *final* resting position
+        // via WorldStateSync, but the user-visible push/lift/throw motion
+        // wasn't synced — peer saw the block stay put until the puzzle
+        // completed, then teleport to its final position. Admitting these
+        // to IsSyncedWorldActor enables ENEMY_STATE world.pos sync at
+        // ~20pps so peer sees the motion in realtime.
+        //
+        // Host-authoritative: only the host's player can push/lift the
+        // block; peer follows via position sync. Each actor is a Dyna or
+        // collision-bearing actor — DynaPoly's mesh update reads
+        // actor.world.pos each frame, so collision tracks the synced
+        // position automatically (peer's local Link can still walk on
+        // top of the block as it moves under host authority).
+        case ACTOR_OBJ_OSHIHIKI:   return true;  // Generic dungeon push block
+                                                 // (DynaPoly, ACTORCAT_PROP).
+        case ACTOR_BG_HEAVY_BLOCK: return true;  // Death Mountain large block
+                                                 // (Golden Gauntlets,
+                                                 // ACTORCAT_BG).
+        case ACTOR_EN_ISHI:        return true;  // Small/large gray rocks
+                                                 // (lift + throw,
+                                                 // ACTORCAT_PROP).
+
         default:                return false;
     }
 }
