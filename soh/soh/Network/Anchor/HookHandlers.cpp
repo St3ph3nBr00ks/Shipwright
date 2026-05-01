@@ -4097,28 +4097,26 @@ void Anchor::RegisterHooks() {
                 // the visual sync. Talk also synced. Leave skipped
                 // because SetupLeave needs a PlayState we don't have here
                 // and the natural Talk→Leave transition fires locally.
+                // Pillar A Phase 2: every state replicates from the scene
+                // host's broadcast (including state 8 Leave, which is now
+                // handled by ApplyNetState case 8 — vanilla previously
+                // blocked it because SetupLeave needs PlayState). Only
+                // filter the dormant-vs-active case to avoid host's idle
+                // Wait broadcast clobbering peer's just-emerged Stand.
                 bool netIsDormant  = (ext->netStateIndex == 0);
                 bool localIsActive = (curState == 2 || curState == 3 ||
                                       curState == 5 || curState == 6);
-                // Only block raw-Leave (8) since ApplyNetState skips it
-                // anyway; saves a redundant SetupTalk re-fire if peer
-                // already at Talk.
-                bool deathStateNet = (ext->netStateIndex == 8);
                 if (curState != ext->netStateIndex &&
-                    !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !(netIsDormant && localIsActive)) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnHintnuts] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
                     }
-                    EnHintnuts_ApplyNetState(h, ext->netStateIndex);
+                    EnHintnuts_ApplyNetState(h, gPlayState, ext->netStateIndex);
                 } else if (curState != ext->netStateIndex) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
-                        const char* why = deathStateNet                  ? "death-state-gated"
-                                        : (netIsDormant && localIsActive) ? "dormant-active filter"
-                                        :                                   "other";
-                        SPDLOG_INFO("[EnHintnuts] rx netId={} block net={} local={} ({})",
-                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                        SPDLOG_INFO("[EnHintnuts] rx netId={} block net={} local={} (dormant-active filter)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
                     }
                 }
             }

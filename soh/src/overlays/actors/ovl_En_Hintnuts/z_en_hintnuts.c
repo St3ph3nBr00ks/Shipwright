@@ -598,24 +598,27 @@ s16 EnHintnuts_GetStateIndex(EnHintnuts* this) {
     return -1;
 }
 
-void EnHintnuts_ApplyNetState(EnHintnuts* this, s16 stateIndex) {
-    // States 0-6 are safely applied via Setup helpers. States 9
-    // (Freeze) and 10 (BeginFreeze) are mostly safe — SetupFreeze
-    // mutates sPuzzleCounter only conditionally (if it equals -3),
-    // and the visual effects (color filter, freeze animation) are
-    // what the user wants to see synced. Apply them directly to fix
-    // residual #4 — the "blue stunned scrub" visual sync gap.
+void EnHintnuts_ApplyNetState(EnHintnuts* this, PlayState* play, s16 stateIndex) {
+    // Pillar A Phase 2 pattern — every state replicates from the scene
+    // host's broadcast. Cases below mirror the natural Setup helpers
+    // that the local actionFuncs run through, EXCEPT for the side
+    // effects that belong only to the broadcaster:
+    //   - sPuzzleCounter mutations in HitByScrubProjectile2 (the
+    //     "this scrub got hit by a nut" counter) — those run only on
+    //     the scene host whose local nutball lands; peer's counter
+    //     remains 0 unless peer had its own local hit.
+    //   - The recovery-heart drop in SetupLeave — peer's heart drop
+    //     would duplicate the scene host's drop on the floor. Inlined
+    //     setup below skips it.
     //
-    // Re-entry guard for state 3 (ThrowNut) — residual #2: if local
-    // is already in ThrowNut, don't restart the animation. The vanilla
-    // SetupThrowScrubProjectile calls Animation_PlayOnce(...) which
-    // resets curFrame to 0. If host's per-packet sync re-applies
-    // ThrowNut every packet (e.g. during sustained mismatch with
-    // local cycle), the animation never reaches frame 6 where the
-    // En_Nutsball projectile spawns — net result: animation plays
-    // repeatedly with zero projectile spawns past the first.
-    // Caller's curState check should already prevent this in normal
-    // operation, but the explicit re-entry guard is belt-and-suspenders.
+    // Re-entry guard for state 3 (ThrowNut): if local is already in
+    // ThrowNut, don't restart the animation. SetupThrowScrubProjectile
+    // calls Animation_PlayOnce(...) which resets curFrame to 0; per-
+    // packet re-apply during a sustained match would reset the anim
+    // mid-throw and the En_Nutsball projectile spawn at frame 6 would
+    // never land. The driver's curState != netStateIndex check should
+    // already prevent this; the explicit re-entry guard is belt-and-
+    // suspenders.
     switch (stateIndex) {
         case 0: EnHintnuts_SetupWait(this);                    break;
         case 1: EnHintnuts_SetupLookAround(this);              break;
@@ -626,26 +629,50 @@ void EnHintnuts_ApplyNetState(EnHintnuts* this, s16 stateIndex) {
             }
             break;
         case 4: EnHintnuts_SetupBurrow(this);                  break;
-        // 5 (BeginRun) — no public Setup; entered via the Hit-By-
-        //                Projectile flow only on local collision. Skip.
+        case 5:
+            // BeginRun has no public Setup helper. Mirror the natural
+            // entry from HitByScrubProjectile2's BeginRun branch
+            // (z_en_hintnuts.c:172-194) — same unburrow anim + collider
+            // setup, then actionFunc = BeginRun. Skip the puzzle-scrub
+            // sPuzzleCounter mutation (those happen on the scene host
+            // when its local nutball collision fires).
+            Animation_MorphToPlayOnce(&this->skelAnime, &gHintNutsUnburrowAnim, -3.0f);
+            this->collider.dim.height = 37;
+            Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
+            this->collider.base.acFlags &= ~AC_ON;
+            this->actionFunc = EnHintnuts_BeginRun;
+            break;
         case 6: EnHintnuts_SetupRun(this);                     break;
         case 7: EnHintnuts_SetupTalk(this);                    break;
-        // 8 (Leave) — locally-driven only. SetupLeave needs a PlayState
-        //             which we don't have here, and it spawns a recovery
-        //             heart (suppressed via the drop guard either way).
-        //             Local Talk→Leave transition fires naturally on
-        //             dialog close. Skip.
-        // 9 (Freeze) — visual stun for puzzle-wrong scrub. SetupFreeze
-        //              plays freeze anim + color filter. The
-        //              sPuzzleCounter mutation in SetupFreeze is
-        //              conditional (only fires if local sPuzzleCounter
-        //              == -3); on a peer with a different counter
-        //              value the mutation is a no-op.
+        case 8:
+            // Inlined SetupLeave minus the recovery-heart Actor_Spawn.
+            // Mirrors SetupLeave at z_en_hintnuts.c:210-223 so the
+            // walk-off-stage animation (gHintNutsRunAnim, speedXZ=3.0,
+            // animFlagAndTimer=100) and final Actor_Kill cycle play
+            // out on peer in lockstep with the scene host. The heart
+            // drop is the scene host's responsibility — its EnItem00
+            // spawn flows through normal item-replication so peers
+            // see exactly one heart on the floor.
+            Animation_MorphToLoop(&this->skelAnime, &gHintNutsRunAnim, -5.0f);
+            this->actor.speedXZ = 3.0f;
+            this->animFlagAndTimer = 100;
+            this->actor.world.rot.y = this->actor.shape.rot.y;
+            this->collider.base.ocFlags1 &= ~OC1_ON;
+            this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
+            Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
+            this->actionFunc = EnHintnuts_Leave;
+            break;
         case 9: EnHintnuts_SetupFreeze(this);                  break;
-        // 10 (BeginFreeze) — no public Setup; just plays anim then
-        //                    transitions to Freeze. Apply Freeze
-        //                    directly so the visual is consistent.
-        case 10: EnHintnuts_SetupFreeze(this);                 break;
+        case 10:
+            // BeginFreeze has no public Setup; in vanilla it just plays
+            // the unburrow anim then transitions to Freeze on anim end.
+            // Apply Freeze directly so the visual (frozen-blue stunned
+            // pose) is immediately consistent on peer. Skipping the
+            // BeginFreeze→Freeze transition costs ~10 frames of
+            // unburrow-anim visibility on peer; acceptable trade for
+            // not having to add a public BeginFreeze setup helper.
+            EnHintnuts_SetupFreeze(this);
+            break;
         default: break;
     }
 }

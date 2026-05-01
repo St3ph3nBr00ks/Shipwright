@@ -21,11 +21,8 @@ typedef struct EnHintnuts {
 } EnHintnuts; // size = 0x0260
 
 // Anchor multiplayer state-machine sync (en_hintnuts_sync — Inside Deku
-// Tree Compound Room puzzle scrubs). Mirrors EnDekunuts pattern from
-// #135 (commit b3620eb2d), but the actor is ACTOR_EN_HINTNUTS (0x0192 =
-// 402), distinct from ACTOR_EN_DEKUNUTS (0x0060 = 96). Header decls use
-// `actor` per the same C++-keyword convention as the other recent
-// per-actor sync work.
+// Tree Compound Room puzzle scrubs). Header decls use `actor` per the
+// C++-keyword convention shared with other per-actor sync work.
 //
 // State encoding (1 byte on the wire):
 //   0 = Wait              (idle, burrowed)
@@ -35,20 +32,27 @@ typedef struct EnHintnuts {
 //   4 = Burrow            (going underground)
 //   5 = BeginRun          (unburrow after wrong-projectile reflect)
 //   6 = Run               (fleeing post-wrong-hit)
-//   7 = Talk              (post-defeat dialog)        — local-only, gated
-//   8 = Leave             (post-talk, spawns recovery heart) — local-only, gated
-//   9 = Freeze            (post-correct-hit kill)     — local-only, gated
-//  10 = BeginFreeze       (transition to Freeze)      — local-only, gated
+//   7 = Talk              (post-defeat dialog)
+//   8 = Leave             (post-talk, runs off-stage and Actor_Kills)
+//   9 = Freeze            (post-correct-hit kill)
+//  10 = BeginFreeze       (transition to Freeze)
 //  -1 = unknown
 //
-// States 7-10 are sPuzzleCounter-driven; not safely re-applicable from
-// outside the actor's natural collision flow (BeginFreeze sets
-// sPuzzleCounter via HitByScrubProjectile2). On the receive side these
-// are blocked from ApplyNetState; local logic drives the death-class
-// transitions naturally because both clients spawn matching En_Nutsball
-// projectiles (admitted to sync) and apply the same hits independently.
+// Pillar A Phase 2 pattern: the scene host runs the state machine and
+// broadcasts state via ENEMY_STATE; non-scene-host clients receive the
+// state index and call ApplyNetState to drive their local actor through
+// the matching Setup function. Every state 0-10 is replicated so the
+// scene host's transitions (including post-hit BeginRun/BeginFreeze and
+// the natural Freeze→Wait reset) propagate without depending on each
+// client's local collision firing the same way.
+//
+// PlayState* parameter is required because state 8 (Leave) needs it to
+// route through SetupLeave's anim + collider setup. SetupLeave's
+// recovery-heart spawn is suppressed on receive (peer is mirroring the
+// scene host's local Leave; the host's local heart already replicates
+// via the standard EnItem00 spawn flow).
 s16  EnHintnuts_GetStateIndex(struct EnHintnuts* actor);
-void EnHintnuts_ApplyNetState(struct EnHintnuts* actor, s16 stateIndex);
+void EnHintnuts_ApplyNetState(struct EnHintnuts* actor, PlayState* play, s16 stateIndex);
 
 #ifdef __cplusplus
 extern "C" {
