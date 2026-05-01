@@ -50,6 +50,13 @@ typedef struct EnHintnuts {
 s16  EnHintnuts_GetStateIndex(struct EnHintnuts* actor);
 void EnHintnuts_ApplyNetState(struct EnHintnuts* actor, s16 stateIndex);
 
+// Receive-side death cycle (KB-16 / SetupDyingNet pattern). Called from
+// HandlePacket_EnemyDefeated instead of generic Actor_Kill so peer plays
+// the natural Run-and-Leave animation (the puzzle's "scrub runs off
+// stage after correct reflect" sequence) rather than disappearing
+// instantly. Routes through SetupLeave with a Freeze-state guard.
+void EnHintnuts_SetupDyingNet(struct EnHintnuts* actor, PlayState* play);
+
 #ifdef __cplusplus
 extern "C" {
 #endif

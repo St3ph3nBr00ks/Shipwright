@@ -34,4 +34,13 @@ typedef struct EnDekubaba {
 s16  EnDekubaba_GetStateIndex(struct EnDekubaba* actor);
 void EnDekubaba_ApplyNetState(struct EnDekubaba* actor, s16 stateIndex);
 
+// Receive-side death cycle. Called from HandlePacket_EnemyDefeated
+// instead of Actor_Kill so peer plays the natural death animation:
+//   Path A (small Babas + most kills): ShrinkDie animation, drops
+//          Deku Nuts (1× small / 3× big).
+//   Path B (big Babas struck mid-StunnedVertical): PrunedSomersault
+//          → DeadStickDrop, severed head somersaults to ground +
+//          drops a Deku Stick.
+void EnDekubaba_SetupDyingNet(struct EnDekubaba* actor, PlayState* play);
+
 #endif

@@ -674,3 +674,50 @@ void EnHintnuts_ApplyNetState(EnHintnuts* this, s16 stateIndex) {
         default: break;
     }
 }
+
+// =============================================================================
+// Anchor multiplayer — receive-side death cycle (KB-16 / SetupDyingNet).
+// Mirrors EnSw_SetupDyingNet / EnGoma_SetupDyingNet pattern. Called from
+// HandlePacket_EnemyDefeated when the host (or any client) reports this
+// actor's defeat — instead of the receiver firing Actor_Kill instantly,
+// route through SetupLeave so the natural Run-and-Leave animation plays
+// end-to-end on the peer.
+//
+// Death state-machine path on host:
+//   `EnHintnuts_HitByScrubProjectile2` (z_en_hintnuts.c:172) on third
+//   correct puzzle hit (params 1-3 with sPuzzleCounter == 2 — the
+//   "winning" scrub) → `actionFunc = EnHintnuts_BeginRun` →
+//   `EnHintnuts_BeginRun` (line 348) → `EnHintnuts_SetupRun` → Run
+//   actionFunc (line 376) → on player approach + talk: SetupTalk →
+//   on dialog close: SetupLeave (line 210) → Leave actionFunc (line 461)
+//   → `Actor_Kill` after Run-off animation completes.
+//
+// We bypass the BeginRun/Run/Talk states and jump straight to
+// `SetupLeave`, because:
+//   1. By the time ENEMY_DEFEATED arrives, the host's actor has finished
+//      the dialog and is already in Leave (which fires Actor_Kill at
+//      animation tail).
+//   2. Run/Talk are sPuzzleCounter-driven and per-client; replicating
+//      them on the receiver would re-fire the heart drop or re-prompt
+//      the dialog. SetupLeave with the existing Anchor_ShouldSuppress-
+//      HintnutsDrop guard is the visually-correct receive-side action.
+//
+// Freeze-state guard: if peer's local actor is in Freeze (state 9 — wrong
+// puzzle hit), let local cycle finish. The Freeze actionFunc at line 497
+// fires Actor_Kill when sPuzzleCounter reaches 3, so it self-terminates.
+// We don't kick into Leave from Freeze — that would visually flip a
+// frozen-blue scrub to a running animation mid-sink.
+//
+// SetupLeave fires GameInteractor_OnEnemyDefeat indirectly via the
+// natural Actor_Kill at Leave's tail (which is gated against echo by
+// the existing sentDefeatThisScene dedup). No extra GI suppression
+// needed here.
+void EnHintnuts_SetupDyingNet(EnHintnuts* this, PlayState* play) {
+    // Freeze guard — local sPuzzleCounter==3 path terminates Freeze
+    // naturally; SetupLeave from Freeze state isn't a tested transition.
+    if (this->actionFunc == EnHintnuts_Freeze ||
+        this->actionFunc == EnHintnuts_BeginFreeze) {
+        return;
+    }
+    EnHintnuts_SetupLeave(this, play);
+}

@@ -1180,6 +1180,49 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     return;
                 }
 
+                // En_Hintnuts: route through SetupDyingNet so peer plays
+                // the Run-and-Leave animation rather than blinking out.
+                // Recovery heart drop is gated by Anchor_ShouldSuppress-
+                // HintnutsDrop inside SetupLeave. #180.
+                if (actor->id == ACTOR_EN_HINTNUTS) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Hintnuts.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] Hintnuts netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] Hintnuts netId={} — triggering natural death cycle", netId);
+                    EnHintnuts_SetupDyingNet((EnHintnuts*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Dekubaba: route through SetupDyingNet so peer plays
+                // the natural death animation. Two distinct paths handled
+                // in the helper:
+                //   PATH A: ShrinkDie → Deku Nut drop (small Babas + most
+                //           kills, includes big-Baba final blow without
+                //           StunnedVertical).
+                //   PATH B: PrunedSomersault → DeadStickDrop → Deku Stick
+                //           drop (big Babas struck mid-StunnedVertical
+                //           with sword/boomerang).
+                // Per-player consumables rule (Q 5.1): each peer drops
+                // their own copy of the items. #89.
+                if (actor->id == ACTOR_EN_DEKUBABA) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Dekubaba.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] Dekubaba netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] Dekubaba netId={} — triggering natural death cycle", netId);
+                    EnDekubaba_SetupDyingNet((EnDekubaba*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
                 // Boss_Goma: route through SetupDyingNet so peer plays
                 // the death animation, drops the heart container, and
                 // spawns the blue warp via BossGoma_Defeated's natural

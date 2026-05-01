@@ -1403,3 +1403,60 @@ void EnDekubaba_Draw(Actor* thisx, PlayState* play) {
 void EnDekuBaba_Reset(void) {
     // DMG_ENTRY(2, DEKUBABA_DMGEFF_SWORD)
 }
+
+// =============================================================================
+// Anchor multiplayer — receive-side death cycle (KB-16 / SetupDyingNet).
+// Mirrors EnSw_SetupDyingNet / EnGoma_SetupDyingNet pattern. Called from
+// `HandlePacket_EnemyDefeated` instead of generic Actor_Kill so the peer
+// plays the natural Hurt → Die animation rather than blinking out.
+//
+// Two distinct death paths reachable from `EnDekubaba_UpdateDamage`:
+//   PATH A (small Babas + most kills):
+//      EnDekubaba_Hit (final blow lands while in Hit) →
+//      `health == 0` branch in EnDekubaba_Hit (line 962) →
+//      EnDekubaba_SetupShrinkDie → ShrinkDie actionFunc plays the
+//      head-shrink animation → Actor_Kill, drops Deku Nuts.
+//   PATH B (big Babas struck mid-StunnedVertical with sword/boomerang):
+//      UpdateDamage line 1148-1153: damageEffect SWORD/BOOMERANG +
+//      health-after-damage <= 0 → SetupPrunedSomersault → severed
+//      head somersaults through air → ground impact →
+//      SetupDeadStickDrop → DeadStickDrop actionFunc → Actor_Kill,
+//      drops Deku Stick. Includes Actor_ChangeCategory to MISC during
+//      the stick-drop phase (z_en_dekubaba.c:547).
+//
+// Both Setup helpers fire `GameInteractor_ExecuteOnEnemyDefeat` inside.
+// To prevent the receiver echoing ENEMY_DEFEATED back to the originating
+// host, we INLINE the Setup bodies here and skip the GI call.
+//
+// Path selection: PATH B is only reachable when the local actor is in
+// StunnedVertical state. Replicate that branch — peer's actor must
+// already be in StunnedVertical (synced from host via the state-machine
+// sync at index 9) for PATH B to fire. Otherwise default to PATH A,
+// which is the visually-correct path for any other death scenario.
+void EnDekubaba_SetupDyingNet(EnDekubaba* this, PlayState* play) {
+    Enemy_StartFinishingBlow(play, &this->actor);
+    this->actor.colChkInfo.health = 0;
+
+    // Path B — big Baba mid-stun. Inline SetupPrunedSomersault body
+    // (lines 484-494) MINUS GameInteractor_ExecuteOnEnemyDefeat at line 494.
+    if (this->actor.params == DEKUBABA_BIG &&
+        this->actionFunc == EnDekubaba_StunnedVertical) {
+        this->timer = 0;
+        this->skelAnime.playSpeed = 0.0f;
+        this->actor.gravity = -0.8f;
+        this->actor.velocity.y = 4.0f;
+        this->actor.world.rot.y = this->actor.shape.rot.y + 0x8000;
+        this->collider.base.acFlags &= ~AC_ON;
+        this->actor.speedXZ = this->size * 3.0f;
+        this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
+        this->actionFunc = EnDekubaba_PrunedSomersault;
+        return;
+    }
+
+    // Path A — default. Inline SetupShrinkDie body (lines 497-503) MINUS
+    // GameInteractor_ExecuteOnEnemyDefeat at line 503.
+    Animation_Change(&this->skelAnime, &gDekuBabaFastChompAnim, -1.5f,
+                     Animation_GetLastFrame(&gDekuBabaFastChompAnim), 0.0f, ANIMMODE_ONCE, -3.0f);
+    this->collider.base.acFlags &= ~AC_ON;
+    this->actionFunc = EnDekubaba_ShrinkDie;
+}
