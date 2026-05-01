@@ -20,7 +20,7 @@
 // yaw drift. Switch the targeting reads to Anchor_GetNearestPlayerActor
 // so peer and host both target the same player.
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
-extern bool Anchor_IsEffectiveHost(void);
+extern bool Anchor_IsCurrentSceneHost(void);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
@@ -321,11 +321,11 @@ void EnHintnuts_ThrowNut(EnHintnuts* this, PlayState* play) {
 
     Math_ApproachS(&this->actor.shape.rot.y, yawToNearest, 2, 0xE38);
 
-    // Multiplayer fix: the "burrow when player too close" check is host-
-    // authoritative. Without this gate, peer's local Hintnut sees its
-    // local Link as close (regardless of host's view) and calls
-    // SetupBurrow; the receive driver in HookHandlers.cpp then
-    // immediately overrides peer back to ThrowNut from host's net state,
+    // Multiplayer fix: the "burrow when player too close" check is
+    // scene-host-authoritative. Without this gate, peer's local Hintnut
+    // sees its local Link as close (regardless of scene host's view)
+    // and calls SetupBurrow; the receive driver in HookHandlers.cpp
+    // then immediately overrides peer back to ThrowNut from net state,
     // causing a per-frame Burrow↔ThrowNut bounce. The throw animation
     // gets restarted by SetupThrowScrubProjectile each cycle, so
     // Animation_OnFrame(6) never lands cleanly and no nutsball spawns.
@@ -336,11 +336,16 @@ void EnHintnuts_ThrowNut(EnHintnuts* this, PlayState* play) {
     // is close, it spawns inside peer's body cylinder and hits body before
     // shield, missing AT_BOUNCED.
     //
-    // Fix: only host runs the burrow-on-close check. Peers follow via
-    // state-sync. host's Anchor_GetNearestPlayerActor sees both players
-    // (local + DummyPlayers) so the host correctly burrows when ANY
-    // player is too close.
-    if (Anchor_IsEffectiveHost() && distToNearest < 120.0f) {
+    // Fix: only the scene host runs the burrow-on-close check. Peers
+    // follow via state-sync. scene host's Anchor_GetNearestPlayerActor
+    // sees both players (local + DummyPlayers) so the scene host
+    // correctly burrows when ANY player is too close.
+    //
+    // Pillar A Phase 2: scene host (not global effective host) so a
+    // peer alone in the Compound Room becomes the room's authority
+    // and runs this check naturally without the global host being
+    // present.
+    if (Anchor_IsCurrentSceneHost() && distToNearest < 120.0f) {
         EnHintnuts_SetupBurrow(this);
     } else if (SkelAnime_Update(&this->skelAnime)) {
         EnHintnuts_SetupStand(this);

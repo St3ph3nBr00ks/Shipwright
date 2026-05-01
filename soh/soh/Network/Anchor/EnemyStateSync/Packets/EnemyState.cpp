@@ -667,7 +667,7 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
     payload["netId"] = netId;
     PacketTimeline::SetTimelineField(payload);
 
-    if (::SceneAuthority::IsEffectiveHost()) {
+    if (::SceneAuthority::IsMyCurrentSceneHost()) {
         auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
         const uint32_t damager = bookkeeping.LookupDamager(netId);
         const uint32_t killerId = damager != 0 ? damager : ownClientId;
@@ -793,7 +793,14 @@ actor_found:
         if ((block->stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)) != 0) {
             return;
         }
-    } else if (::SceneAuthority::IsEffectiveHost()) {
+    } else if (::SceneAuthority::IsSceneHost(sceneNum, (uint8_t)(gSaveContext.linkAge & 0x1))) {
+        // Phase 2: skip self-apply if I'm the scene host of the packet's
+        // scene (I sent this broadcast). For non-push-block actors found
+        // in my actor list, my current scene matches the packet's scene,
+        // so this is equivalent to IsMyCurrentSceneHost — but using the
+        // packet's sceneNum is more defensive (handles multi-scene host
+        // transition windows where my gPlayState briefly disagrees with
+        // the broadcast's view).
         return;
     }
 
@@ -1003,13 +1010,16 @@ actor_found:
             EnHintnuts* h = (EnHintnuts*)actor;
             h->animFlagAndTimer = (s16)payload["hintnutsAnimFlagAndTimer"].get<int>();
         }
-        // Overwrite peer's local sPuzzleCounter with host's authoritative
-        // value. Skipped on host (host's local counter is already
-        // authoritative — this branch runs even on host because
-        // HandlePacket_EnemyUpdate's outer host short-circuit was lifted
-        // for push blocks; need to gate explicitly here).
+        // Overwrite local sPuzzleCounter with the scene host's authoritative
+        // value. Skipped on the scene host itself (its local counter is
+        // already authoritative — this branch runs even on the scene host
+        // because HandlePacket_EnemyUpdate's outer host short-circuit was
+        // lifted for push blocks; need to gate explicitly here).
+        // Phase 2: keys on IsMyCurrentSceneHost so a peer alone in a room
+        // (acting as scene host) doesn't have its own counter clobbered
+        // by stale broadcasts from the global host.
         if (actor->id == ACTOR_EN_HINTNUTS && payload.contains("hintnutsPuzzleCounter") &&
-            !::SceneAuthority::IsEffectiveHost()) {
+            !::SceneAuthority::IsMyCurrentSceneHost()) {
             EnHintnuts_SetPuzzleCounter((s16)payload["hintnutsPuzzleCounter"].get<int>());
         }
 
@@ -1216,7 +1226,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
             EnemyNetId* ext = const_cast<EnemyNetId*>(
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
             if (ext != nullptr && ext->netId == netId) {
-                if (::SceneAuthority::IsEffectiveHost()) {
+                if (::SceneAuthority::IsMyCurrentSceneHost()) {
                     EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(gPlayState->sceneNum, netId);
                 }
 
@@ -1405,11 +1415,20 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 netId);
     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
 
-    // Also record the kill in deadEnemiesByScene so the host's join-time
-    // replay (HandlePacket_UpdateClientState) covers this enemy.
-    if (::SceneAuthority::IsEffectiveHost()) {
-        int16_t sceneFromNetId = (int16_t)((netId >> 16) & 0x7FFF);
-        EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(sceneFromNetId, netId);
+    // Also record the kill in deadEnemiesByScene so the scene host's
+    // join-time replay (HandlePacket_UpdateClientState) covers this enemy.
+    // Phase 2: extract both sceneNum and timeline from netId (Pillar B
+    // packed both: bits 30-16 = scene & 0x7FFF, bit 31 = linkAge & 0x1)
+    // so the recording happens on whichever client is currently scene
+    // host of (sceneNum, timeline) — not the global host. This handles
+    // the case where peer alone in a room kills an enemy and is the
+    // authoritative recorder for that scene's dead set.
+    {
+        int16_t sceneFromNetId    = (int16_t)((netId >> 16) & 0x7FFF);
+        uint8_t timelineFromNetId = (uint8_t)((netId >> 31) & 0x1);
+        if (::SceneAuthority::IsSceneHost(sceneFromNetId, timelineFromNetId)) {
+            EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(sceneFromNetId, netId);
+        }
     }
 }
 

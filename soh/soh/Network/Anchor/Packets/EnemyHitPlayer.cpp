@@ -52,15 +52,15 @@ void Anchor::SendPacket_EnemyHitPlayer(uint32_t netId) {
     payload["quiet"]    = true;
     PacketTimeline::SetTimelineField(payload);
 
-    // Send only to the host — enemy state is host-authoritative.
-    for (auto& [clientId, client] : clients) {
-        if (client.online && client.isSaveLoaded && clientId == roomState.ownerClientId) {
-            payload["targetClientId"] = clientId;
-            SendJsonToRemote(payload);
-            SPDLOG_INFO("[EnemyHitPlayer] Sent netId={}", netId);
-            break;
-        }
-    }
+    // Pillar A Phase 2 — target the scene host of MY current scene
+    // (which is the scene the actor I just hit lives in). Falls back
+    // to the global effective host when no scene host is set, which
+    // matches Phase 1 routing.
+    const uint32_t target = ::SceneAuthority::GetSceneHostClientId(
+        gPlayState->sceneNum, (uint8_t)(gSaveContext.linkAge & 0x1));
+    payload["targetClientId"] = target;
+    SendJsonToRemote(payload);
+    SPDLOG_INFO("[EnemyHitPlayer] Sent netId={} target={}", netId, target);
 }
 
 void Anchor::HandlePacket_EnemyHitPlayer(nlohmann::json payload) {
@@ -73,14 +73,18 @@ void Anchor::HandlePacket_EnemyHitPlayer(nlohmann::json payload) {
         return;
     }
 
-    // Host only.
-    if (!::SceneAuthority::IsEffectiveHost()) {
-        return;
-    }
-
     s16 sceneNum = payload.value("sceneNum", (s16)SCENE_ID_MAX);
     if (VALIDATE(::ReceiveValidator::ValidateSameScene(sceneNum)) !=
         ::ReceiveValidator::ValidationVerdict::Valid) {
+        return;
+    }
+
+    // Pillar A Phase 2 — only the scene host of the packet's scene
+    // applies the hit-response. Other clients (including the global
+    // effective host when it's not the scene host of this sceneNum)
+    // ignore the packet so the authoritative state machine runs in
+    // exactly one place.
+    if (!::SceneAuthority::IsSceneHost(sceneNum, (uint8_t)(gSaveContext.linkAge & 0x1))) {
         return;
     }
 
