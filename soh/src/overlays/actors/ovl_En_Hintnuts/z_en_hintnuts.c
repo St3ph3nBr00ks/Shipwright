@@ -345,6 +345,13 @@ void EnHintnuts_ThrowNut(EnHintnuts* this, PlayState* play) {
     } else if (SkelAnime_Update(&this->skelAnime)) {
         EnHintnuts_SetupStand(this);
     } else if (Animation_OnFrame(&this->skelAnime, 6.0f)) {
+        // Vanilla spawn flow: shape.rot.y has been approaching yawToNearest
+        // since Stand state, so by frame 6 of ThrowNut it's converged on
+        // the target. Multiplayer model: host runs the state machine and
+        // spawns; ENEMY_SPAWN replicates to peers (see HookHandlers.cpp
+        // OnActorSpawn). Non-host's local Animation_OnFrame(6.0f) call
+        // also reaches here, but its Actor_Spawn is killed by the non-host
+        // dynamic-spawn suppression. Only host's spawn becomes canonical.
         nutPos.x = this->actor.world.pos.x + (Math_SinS(this->actor.shape.rot.y) * 23.0f);
         nutPos.y = this->actor.world.pos.y + 12.0f;
         nutPos.z = this->actor.world.pos.z + (Math_CosS(this->actor.shape.rot.y) * 23.0f);
@@ -529,6 +536,14 @@ void EnHintnuts_ColliderCheck(EnHintnuts* this, PlayState* play) {
         if (this->collider.base.ac->id != ACTOR_EN_NUTSBALL) {
             EnHintnuts_SetupBurrow(this);
         } else {
+            // Test 199 fix: tell the host this hintnut just took a reflected
+            // nutsball so its authoritative copy can fire the same
+            // HitByScrubProjectile1+2 pair locally — advancing the host's
+            // sPuzzleCounter and triggering the host-side state transition
+            // that broadcasts to peers. No-op on host (host's local pair
+            // call below already runs the same logic). See z_en_hintnuts.h
+            // for the helper's full contract.
+            Anchor_NotifyHintnutsNutsballHit(&this->actor);
             EnHintnuts_HitByScrubProjectile1(this, play);
             EnHintnuts_HitByScrubProjectile2(this);
         }
@@ -536,6 +551,25 @@ void EnHintnuts_ColliderCheck(EnHintnuts* this, PlayState* play) {
         EnHintnuts_HitByScrubProjectile1(this, play);
         EnHintnuts_HitByScrubProjectile2(this);
     }
+}
+
+// Public wrapper around the file-static HitByScrubProjectile1+2 pair so
+// the multiplayer receive path can replay a peer-reported nutsball hit
+// on the host's authoritative hintnut. See z_en_hintnuts.h for the rest
+// of the contract.
+void EnHintnuts_ProcessRemoteNutsballHit(EnHintnuts* this, PlayState* play) {
+    EnHintnuts_HitByScrubProjectile1(this, play);
+    EnHintnuts_HitByScrubProjectile2(this);
+}
+
+// Test 200 fix: accessor pair so the multiplayer ENEMY_STATE sync can
+// read host's authoritative sPuzzleCounter and write peer's local copy.
+// See z_en_hintnuts.h for full rationale.
+s16 EnHintnuts_GetPuzzleCounter(void) {
+    return sPuzzleCounter;
+}
+void EnHintnuts_SetPuzzleCounter(s16 value) {
+    sPuzzleCounter = value;
 }
 
 void EnHintnuts_Update(Actor* thisx, PlayState* play) {
@@ -623,14 +657,23 @@ s16 EnHintnuts_GetStateIndex(EnHintnuts* this) {
     return -1;
 }
 
-void EnHintnuts_ApplyNetState(EnHintnuts* this, s16 stateIndex) {
-    // States 0-6 are safely applied via Setup helpers. States 9
-    // (Freeze) and 10 (BeginFreeze) are mostly safe — SetupFreeze
-    // mutates sPuzzleCounter only conditionally (if it equals -3),
-    // and the visual effects (color filter, freeze animation) are
-    // what the user wants to see synced. Apply them directly to fix
-    // residual #4 — the "blue stunned scrub" visual sync gap.
-    //
+// Mirror EnHintnuts_HitByScrubProjectile1's category + flag swap
+// (z_en_hintnuts.c:128-133) on the peer when state-sync drives it into a
+// BG-class state (5 BeginRun / 6 Run / 7 Talk / 8 Leave). The native swap
+// only fires on local nutsball collision, so without this the peer reaches
+// Run state while still ACTORCAT_ENEMY + HOSTILE — yellow lock-on color
+// and (load-bearing) no dialog: Player_Action talks only to BG/FRIENDLY
+// actors. Idempotent: skips when already BG.
+static void EnHintnuts_NetTransitionToBg(EnHintnuts* this, PlayState* play) {
+    if (this->actor.category != ACTORCAT_ENEMY) {
+        return;
+    }
+    this->actor.flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
+    this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY;
+    Actor_ChangeCategory(play, &play->actorCtx, &this->actor, ACTORCAT_BG);
+}
+
+void EnHintnuts_ApplyNetState(EnHintnuts* this, PlayState* play, s16 stateIndex) {
     // Re-entry guard for state 3 (ThrowNut) — residual #2: if local
     // is already in ThrowNut, don't restart the animation. The vanilla
     // SetupThrowScrubProjectile calls Animation_PlayOnce(...) which
@@ -642,7 +685,36 @@ void EnHintnuts_ApplyNetState(EnHintnuts* this, s16 stateIndex) {
     // Caller's curState check should already prevent this in normal
     // operation, but the explicit re-entry guard is belt-and-suspenders.
     switch (stateIndex) {
-        case 0: EnHintnuts_SetupWait(this);                    break;
+        case 0:
+            // Test 197 fix: lock-on after wrong-order puzzle reset.
+            //
+            // When the puzzle resets via the 2-3-1-style wrong-order path,
+            // the natural reset chain on host is:
+            //   Freeze actionFunc (line 497) sees sPuzzleCounter==-4,
+            //   waits for animFlagAndTimer to elapse, then at line 516-518
+            //   restores `flags |= ATTENTION_ENABLED`,
+            //           `flags &= ~UPDATE_CULLING_DISABLED`, health, color
+            //   filter — and finally calls SetupWait.
+            //
+            // Peer's receive driver routes through `SetupFreeze` (which
+            // CLEARS `ATTENTION_ENABLED` at line 227) and then jumps
+            // straight to SetupWait when host's net state advances to
+            // Wait (0). The natural flag-restore branch never runs on
+            // peer because peer's local Freeze actionFunc isn't waiting
+            // for `sPuzzleCounter==-4` — it's just visually mirroring
+            // the freeze animation. Result: peer's hintnut lands in
+            // Wait with `ATTENTION_ENABLED=0`, not lockable.
+            //
+            // Replicate the flag/health/color restore here so peer's
+            // post-reset hintnut is lockable like host's. Idempotent:
+            // a fresh-spawn Wait already has the flag set, so writing
+            // it again is a no-op.
+            this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED;
+            this->actor.flags &= ~ACTOR_FLAG_UPDATE_CULLING_DISABLED;
+            this->actor.colChkInfo.health = sColChkInfoInit.health;
+            this->actor.colorFilterTimer = 0;
+            EnHintnuts_SetupWait(this);
+            break;
         case 1: EnHintnuts_SetupLookAround(this);              break;
         case 2: EnHintnuts_SetupStand(this);                   break;
         case 3:
@@ -651,15 +723,36 @@ void EnHintnuts_ApplyNetState(EnHintnuts* this, s16 stateIndex) {
             }
             break;
         case 4: EnHintnuts_SetupBurrow(this);                  break;
-        // 5 (BeginRun) — no public Setup; entered via the Hit-By-
-        //                Projectile flow only on local collision. Skip.
-        case 6: EnHintnuts_SetupRun(this);                     break;
-        case 7: EnHintnuts_SetupTalk(this);                    break;
-        // 8 (Leave) — locally-driven only. SetupLeave needs a PlayState
-        //             which we don't have here, and it spawns a recovery
-        //             heart (suppressed via the drop guard either way).
-        //             Local Talk→Leave transition fires naturally on
-        //             dialog close. Skip.
+        // BG-class states (5/6/7/8) — apply the category/flag swap before
+        // the per-state setup so the peer's actor matches the host's
+        // talk-eligible classification while running the matching anim.
+        case 5:
+            // BeginRun has no public Setup helper; replicate the natural
+            // entry from HitByScrubProjectile2 at z_en_hintnuts.c:174-194,
+            // BeginRun branch (line 193-194). UPDATE_CULLING_DISABLED is
+            // only set by the BeginFreeze branch, NOT BeginRun.
+            EnHintnuts_NetTransitionToBg(this, play);
+            Animation_MorphToPlayOnce(&this->skelAnime, &gHintNutsUnburrowAnim, -3.0f);
+            this->collider.dim.height = 37;
+            this->collider.base.acFlags &= ~AC_ON;
+            this->actionFunc = EnHintnuts_BeginRun;
+            break;
+        case 6:
+            EnHintnuts_NetTransitionToBg(this, play);
+            EnHintnuts_SetupRun(this);
+            break;
+        case 7:
+            EnHintnuts_NetTransitionToBg(this, play);
+            EnHintnuts_SetupTalk(this);
+            break;
+        // 8 (Leave) — still skipped. Each client runs Talk→Leave naturally
+        //             after its own dialog close; calling SetupLeave on the
+        //             peer would spawn a duplicate recovery heart (the
+        //             Anchor_ShouldSuppressHintnutsDrop guard only fires
+        //             when phase == PendingNaturalDeath, which isn't set
+        //             during normal alive-state sync). The category swap
+        //             above at case 5/6 ensures peer's actor reaches Talk
+        //             via its own ProcessTalkRequest path naturally.
         // 9 (Freeze) — visual stun for puzzle-wrong scrub. SetupFreeze
         //              plays freeze anim + color filter. The
         //              sPuzzleCounter mutation in SetupFreeze is

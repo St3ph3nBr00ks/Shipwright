@@ -54,6 +54,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
 // Boss_Goma — minimal Encounter -> FloorMain bridge (boss-fight trigger sync).
 #include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
+// Push-block bidirectional sync — stateFlags & PUSHBLOCK_PUSH detects local push.
+#include "src/overlays/actors/ovl_Obj_Oshihiki/z_obj_oshihiki.h"
 
 extern PlayState* gPlayState;
 extern MapData* gMapData;
@@ -99,6 +101,26 @@ extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
 extern "C" bool Anchor_IsEffectiveHost(void) {
     if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return true;
     return ::SceneAuthority::IsEffectiveHost();
+}
+
+// Test 199 fix: peer→host hintnut nutsball-hit propagation. Reuses the
+// existing ENEMY_HIT_PLAYER pipeline (originally Goroiwa-only) — the
+// pattern is identical: a non-host's local collision needs to replay on
+// the host's authoritative actor. The receive-side dispatch in
+// Packets/EnemyHitPlayer.cpp now branches on actor->id and calls the
+// EnHintnuts_ProcessRemoteNutsballHit wrapper for hintnuts.
+//
+// No-op on host (host's local HitByScrubProjectile1+2 already runs from
+// the same ColliderCheck call site). Also no-op when Anchor isn't
+// active or when the actor lacks an EnemyNetId extension (single-player,
+// pre-handshake, or a hintnut spawned outside the sync pipeline).
+extern "C" void Anchor_NotifyHintnutsNutsballHit(Actor* hintnut) {
+    if (hintnut == nullptr) return;
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return;
+    if (::SceneAuthority::IsEffectiveHost()) return;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(hintnut);
+    if (ext == nullptr) return;
+    Anchor::Instance->SendPacket_EnemyHitPlayer(ext->netId);
 }
 
 // C-callable: returns true if any DummyPlayer (remote player) is currently
@@ -3223,6 +3245,30 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // TEMP DIAGNOSTIC (log 195 freeze investigation): Hintnut slot-reuse
+        // probe. If OnActorSpawn fires for an actor pointer that already
+        // carries a stale EnemyNetId extension, the old phase persists and
+        // gates state-sync forever (PhaseImpliesHasLocalDeath = true blocks
+        // every receive driver path). Log whatever ext is attached BEFORE
+        // we Set<> a fresh one so we can confirm the hypothesis.
+        if (actor->id == ACTOR_EN_HINTNUTS) {
+            const EnemyNetId* priorExt =
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+            if (priorExt != nullptr) {
+                SPDLOG_WARN(
+                    "[HintnutsSlotProbe] OnActorSpawn on actor ptr={} with stale ext: "
+                    "prior netId={} prior phase={} prior hasNetState={} new params=0x{:04X}",
+                    (void*)actor, priorExt->netId, (int)priorExt->phase,
+                    priorExt->hasNetState, (int)actor->params);
+            } else {
+                SPDLOG_INFO(
+                    "[HintnutsSlotProbe] OnActorSpawn on actor ptr={} (clean — no prior ext) "
+                    "params=0x{:04X} home=({:.0f},{:.0f},{:.0f})",
+                    (void*)actor, (int)actor->params,
+                    actor->home.pos.x, actor->home.pos.y, actor->home.pos.z);
+            }
+        }
+
         // Cross-scene-respawn fix (log 115 bug — Deku Babas didn't respawn on
         // host after both players left and re-entered scene 0x0):
         // OnSceneSpawnActors fires AFTER the setup-actor loop completes
@@ -3556,6 +3602,47 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // Push-block bidirectional sync (resolves limitations 1-3 of dcd2f7d47):
+        // whichever client is locally pushing the block is authoritative for
+        // that frame. Standard host-only broadcast leaves peer pushes
+        // invisible to other clients — every client (host included) sees
+        // the block stay put when a non-local player is the one pushing.
+        //
+        // Detection uses ObjOshihiki's stateFlags rather than motion-delta
+        // so we never falsely classify network-applied position writes as
+        // "local motion" (which would echo). PUSHBLOCK_PUSH is set every
+        // frame in ObjOshihiki_Push (z_obj_oshihiki.c:564); PUSHBLOCK_FALL
+        // covers the post-edge fall case where the block tips off a ledge.
+        //
+        // Bg_Heavy_Block (Golden Gauntlets pillar) and En_Ishi (lift/throw
+        // rocks) remain in IsSyncedWorldActor and ride the standard host-
+        // broadcast path. Bidirectional support for them needs separate
+        // motion-detection because their action funcs are static and
+        // there's no public state flag — deferred until those actors
+        // appear on the demo path.
+        if (actor->id == ACTOR_OBJ_OSHIHIKI) {
+            EnemyNetId* ext = const_cast<EnemyNetId*>(
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+            if (ext == nullptr) {
+                return;
+            }
+            ObjOshihiki* block = (ObjOshihiki*)actor;
+            const bool isLocallyMoving =
+                (block->stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)) != 0;
+            if (isLocallyMoving) {
+                // Local actor is the pusher — broadcast to all peers.
+                // ObjOshihiki_Push fires NA_SE_EV_ROCK_SLIDE-SFX_FLAG every
+                // frame locally (z_obj_oshihiki.c:598), so the local audio
+                // is already correct. Receivers play it via
+                // HandlePacket_EnemyUpdate's pos-delta detector.
+                SendPacket_EnemyUpdate(ext->netId, actor);
+            }
+            // No re-apply path here — HandlePacket_EnemyUpdate writes
+            // actor->world.pos directly when packets arrive (now
+            // unconditionally for push blocks, including on the host).
+            return;
+        }
+
         if (::SceneAuthority::IsEffectiveHost()) {
             // Host: send current state to all clients in scene.
             const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
@@ -3770,11 +3857,29 @@ void Anchor::RegisterHooks() {
                 const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
                                                    actor->id == ACTOR_EN_KAREBABA ||
                                                    actor->id == ACTOR_EN_NUTSBALL);
-                if (!isAnimationDrivenPos && !arrowPinned) {
+                // Test 197 fix companion: same Talk/Leave guard as
+                // HandlePacket_EnemyUpdate. The OnActorUpdate hook fires
+                // every frame and re-applies cached ext->netPos — without
+                // this guard the world.pos override happens every frame
+                // even if the receive-side write is suppressed. Local
+                // Talk anchors at peer's chosen dialog position (where
+                // the scrub stood when peer pressed A); local Leave runs
+                // the walk-off animation under local Actor_MoveXZGravity.
+                // EnHintnuts_Talk / EnHintnuts_Leave are static; can't
+                // compare actionFunc pointers across TUs. GetStateIndex
+                // returns 7 for Talk and 8 for Leave.
+                bool inLocalDialogCycle = false;
+                if (actor->id == ACTOR_EN_HINTNUTS) {
+                    s16 localState = EnHintnuts_GetStateIndex((EnHintnuts*)actor);
+                    inLocalDialogCycle = (localState == 7 || localState == 8);
+                }
+                if (!isAnimationDrivenPos && !arrowPinned && !inLocalDialogCycle) {
                     actor->world.pos = ext->netPos;
                     actor->shape.rot = ext->netShapeRot;
                 }
-                actor->world.rot = ext->netRot;
+                if (!inLocalDialogCycle) {
+                    actor->world.rot = ext->netRot;
+                }
             }
             // Skip health re-apply after a local kill so the host's stale health > 0
             // packets don't revive the dying actor on this client (hasLocalDeath guard).
@@ -4038,7 +4143,22 @@ void Anchor::RegisterHooks() {
                 // peer's GetStateIndex returns -1 (Leave gets killed) or
                 // transitions back to a syncable state, and net-sync
                 // resumes.
-                bool talkLockout = (curState == 7);
+                // Test 197 fix: extend lockout to Leave (8) too. When peer's
+                // local Talk completes, EnHintnuts_Talk transitions to
+                // SetupLeave (curState becomes 8). Host's hintnut may still
+                // be cycling Run→Burrow→Wait (not in dialog on host) and
+                // would broadcast state 0/4/6 — without this guard, the
+                // driver applies SetupWait on top of peer's Leave, halting
+                // the natural Leave→Actor_Kill exit animation. Peer's
+                // dialog appears unable to close because the actor never
+                // finishes its leave-and-die sequence locally.
+                //
+                // Both states 7 and 8 are locally-driven per-client by
+                // design — each peer can independently enter Talk with
+                // its own Hintnut and then exit to Leave. Net-sync resumes
+                // after Actor_Kill at the end of Leave (actor disappears
+                // from the list, future packets miss netId, no override).
+                bool talkLockout = (curState == 7 || curState == 8);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
                     !deathStateNet &&
@@ -4047,7 +4167,7 @@ void Anchor::RegisterHooks() {
                         SPDLOG_INFO("[EnHintnuts] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
                     }
-                    EnHintnuts_ApplyNetState(h, ext->netStateIndex);
+                    EnHintnuts_ApplyNetState(h, gPlayState, ext->netStateIndex);
                 } else if (curState != ext->netStateIndex) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = talkLockout                    ? "local-talk lockout"
