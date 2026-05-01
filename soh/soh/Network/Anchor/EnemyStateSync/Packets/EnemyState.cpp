@@ -649,7 +649,7 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
     payload["netId"] = netId;
     PacketTimeline::SetTimelineField(payload);
 
-    if (::SceneAuthority::IsMyCurrentSceneHost()) {
+    if (::SceneAuthority::IsMyCurrentRoomHost()) {
         auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
         const uint32_t damager = bookkeeping.LookupDamager(netId);
         const uint32_t killerId = damager != 0 ? damager : ownClientId;
@@ -775,7 +775,7 @@ actor_found:
         if ((block->stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)) != 0) {
             return;
         }
-    } else if (::SceneAuthority::IsSceneHost(sceneNum,
+    } else if (::SceneAuthority::IsRoomHost(sceneNum,
                                               (s8)gPlayState->roomCtx.curRoom.num,
                                               (uint8_t)(gSaveContext.linkAge & 0x1))) {
         // Phase 2: skip self-apply if I'm the scene host of the packet's
@@ -1166,7 +1166,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
             EnemyNetId* ext = const_cast<EnemyNetId*>(
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
             if (ext != nullptr && ext->netId == netId) {
-                if (::SceneAuthority::IsMyCurrentSceneHost()) {
+                if (::SceneAuthority::IsMyCurrentRoomHost()) {
                     EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(gPlayState->sceneNum, netId);
                 }
 
@@ -1353,7 +1353,7 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
         // otherwise IsSceneHost returns false and the record fires on
         // the client that IS in that room.
         if (gPlayState != nullptr &&
-            ::SceneAuthority::IsSceneHost(sceneFromNetId,
+            ::SceneAuthority::IsRoomHost(sceneFromNetId,
                                           (s8)gPlayState->roomCtx.curRoom.num,
                                           timelineFromNetId)) {
             EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(sceneFromNetId, netId);

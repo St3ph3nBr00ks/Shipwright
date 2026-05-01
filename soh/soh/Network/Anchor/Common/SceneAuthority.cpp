@@ -22,9 +22,9 @@ bool IsEffectiveHost() {
     return ::Anchor::Instance->effectiveHostClientId == ::Anchor::Instance->ownClientId;
 }
 
-uint32_t GetSceneHostClientId(int16_t sceneNum, int8_t roomNum, uint8_t timeline) {
-    // Pillar A Phase 2 — per-(sceneNum, roomNum, timeline) authority
-    // election.
+uint32_t GetRoomHostClientId(int16_t sceneNum, int8_t roomNum, uint8_t timeline) {
+    // Pillar A Phase 2 — per-(sceneNum, roomNum, timeline) room-host
+    // authority election.
     //
     // Walk the clients map and pick the lowest clientId among those
     // currently in (sceneNum, roomNum, timeline). The clients map is
@@ -93,17 +93,17 @@ uint32_t GetSceneHostClientId(int16_t sceneNum, int8_t roomNum, uint8_t timeline
     return lowestId;
 }
 
-bool IsSceneHost(int16_t sceneNum, int8_t roomNum, uint8_t timeline) {
+bool IsRoomHost(int16_t sceneNum, int8_t roomNum, uint8_t timeline) {
     if (!::Anchor::Instance) return false;
-    return GetSceneHostClientId(sceneNum, roomNum, timeline) ==
+    return GetRoomHostClientId(sceneNum, roomNum, timeline) ==
            ::Anchor::Instance->ownClientId;
 }
 
-bool IsMyCurrentSceneHost() {
+bool IsMyCurrentRoomHost() {
     if (!gPlayState) return IsEffectiveHost();
-    return IsSceneHost((int16_t)gPlayState->sceneNum,
-                       (int8_t)gPlayState->roomCtx.curRoom.num,
-                       (uint8_t)(gSaveContext.linkAge & 0x1));
+    return IsRoomHost((int16_t)gPlayState->sceneNum,
+                      (int8_t)gPlayState->roomCtx.curRoom.num,
+                      (uint8_t)(gSaveContext.linkAge & 0x1));
 }
 
 }  // namespace SceneAuthority

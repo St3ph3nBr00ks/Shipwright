@@ -100,22 +100,22 @@ extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
 // burrowing on local-distance checks).
 //
 // Phase 1 semantics (global host). For actor-context C code, prefer
-// Anchor_IsCurrentSceneHost() below — it picks up Pillar A Phase 2 per-
-// scene authority so a peer alone in a room becomes that room's host.
+// Anchor_IsCurrentRoomHost() below — it picks up Pillar A Phase 2 per-
+// room authority so a peer alone in a room becomes that room's host.
 extern "C" bool Anchor_IsEffectiveHost(void) {
     if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return true;
     return ::SceneAuthority::IsEffectiveHost();
 }
 
-// C-callable: Pillar A Phase 2 — true when this client is the scene host
-// for its current scene+timeline. Used by actor C code that should be
-// running its host-authoritative logic when this client is alone in a
-// room (e.g. EnHintnuts's burrow-when-too-close gate), independent of
-// the global effective host. Falls back to global host when Anchor isn't
-// active or gPlayState is null.
-extern "C" bool Anchor_IsCurrentSceneHost(void) {
+// C-callable: Pillar A Phase 2 — true when this client is the room host
+// for its current (sceneNum, roomNum, timeline). Used by actor C code
+// that should be running its host-authoritative logic when this client
+// is alone in a room (e.g. EnHintnuts's burrow-when-too-close gate),
+// independent of the global effective host. Falls back to global host
+// when Anchor isn't active or gPlayState is null.
+extern "C" bool Anchor_IsCurrentRoomHost(void) {
     if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return true;
-    return ::SceneAuthority::IsMyCurrentSceneHost();
+    return ::SceneAuthority::IsMyCurrentRoomHost();
 }
 
 
@@ -425,7 +425,7 @@ void Anchor::RegisterHooks() {
             // Stale damagers DO get GC'd because their relevance is bounded
             // by scene lifetime; ClearStaleDamagers is still called.
             auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
-            if (::SceneAuthority::IsMyCurrentSceneHost()) {
+            if (::SceneAuthority::IsMyCurrentRoomHost()) {
                 bookkeeping.ClearStaleDamagers((int16_t)gPlayState->sceneNum);
                 // KB-18 (#177) Option 4 — schedule the host-authoritative
                 // netId snapshot broadcast for next OnGameFrameUpdate. We
@@ -3308,7 +3308,7 @@ void Anchor::RegisterHooks() {
         // extra cycle). No crash either way.
         static int16_t sLastClearedSceneNum = -1;
         if (gPlayState != nullptr && gPlayState->numSetupActors > 0 &&
-            ::SceneAuthority::IsMyCurrentSceneHost() &&
+            ::SceneAuthority::IsMyCurrentRoomHost() &&
             (int16_t)gPlayState->sceneNum != sLastClearedSceneNum) {
             const int16_t targetScene = (int16_t)gPlayState->sceneNum;
             bool anyPeerInScene = false;
@@ -3333,7 +3333,7 @@ void Anchor::RegisterHooks() {
 
         bool isDynamicSpawn = (gPlayState->numSetupActors == 0);
         if (isDynamicSpawn) {
-            if (::SceneAuthority::IsMyCurrentSceneHost()) {
+            if (::SceneAuthority::IsMyCurrentRoomHost()) {
                 // Scene host: broadcast so other clients can spawn a matching actor.
                 // SendPacket_EnemySpawn runs after the netId block below so the
                 // actor already has a valid extension when the send path reads it.
@@ -3370,11 +3370,11 @@ void Anchor::RegisterHooks() {
         // Static spawns keep the deterministic encoding so KB-18 snapshot
         // matching continues to work.
         uint32_t netId = 0;
-        if (!::SceneAuthority::IsMyCurrentSceneHost()) {
+        if (!::SceneAuthority::IsMyCurrentRoomHost()) {
             netId = LookupHostNetIdForCurrentScene(actor);
         }
         if (netId == 0) {
-            if (::SceneAuthority::IsMyCurrentSceneHost() && isDynamicSpawn &&
+            if (::SceneAuthority::IsMyCurrentRoomHost() && isDynamicSpawn &&
                 !isSpawningNetworkActor) {
                 netId = EncodeUniqueDynamicNetId(actor);
             } else {
@@ -3419,7 +3419,7 @@ void Anchor::RegisterHooks() {
         // deadEnemiesByScene is cleared on OnSceneSpawnActors, so this
         // guard only suppresses same-scene-visit revivals — leaving and
         // re-entering the scene proper still respawns enemies as expected.
-        if (::SceneAuthority::IsMyCurrentSceneHost()) {
+        if (::SceneAuthority::IsMyCurrentRoomHost()) {
             if (EnemyStateSync::HostBookkeeping::Instance().IsSceneDeath(gPlayState->sceneNum, netId)) {
                 SPDLOG_INFO("[EnemySpawn] deadEnemiesByScene hit for netId={} on host — "
                             "suppressing same-scene respawn (id={})",
@@ -3495,7 +3495,7 @@ void Anchor::RegisterHooks() {
 
         // Scene-host deferred broadcast: send ENEMY_SPAWN for dynamic
         // actors now that the netId extension is in place.
-        if (isDynamicSpawn && ::SceneAuthority::IsMyCurrentSceneHost()) {
+        if (isDynamicSpawn && ::SceneAuthority::IsMyCurrentRoomHost()) {
             SendPacket_EnemySpawn(actor);
         }
     });
@@ -3639,7 +3639,7 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        if (::SceneAuthority::IsMyCurrentSceneHost()) {
+        if (::SceneAuthority::IsMyCurrentRoomHost()) {
             // Scene host: send current state to all clients in scene.
             const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
             if (ext == nullptr) {
@@ -4257,7 +4257,7 @@ void Anchor::RegisterHooks() {
     // Actor_IsFacingAndNearPlayer — will then target the correct player with no
     // per-enemy changes required.
     COND_HOOK(ShouldActorUpdate, isConnected, [&](void* refActor, bool* should) {
-        if (!::SceneAuthority::IsMyCurrentSceneHost()) {
+        if (!::SceneAuthority::IsMyCurrentRoomHost()) {
             return;
         }
         Actor* actor = static_cast<Actor*>(refActor);
@@ -4327,7 +4327,7 @@ void Anchor::RegisterHooks() {
         // PhaseImpliesHasLocalDeath(DyingByLocal) → true. The legacy
         // hasLocalDeath boolean was deleted at end of C2 Phase 1.
         // Scene host tracks kills for join-time replay (Fix 6).
-        if (::SceneAuthority::IsMyCurrentSceneHost()) {
+        if (::SceneAuthority::IsMyCurrentRoomHost()) {
             bookkeeping.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
             // Host-local-kill room-transition survival (surfaced in log 155
             // / Test 3 of C2 Phase 4 Commit B). Karebaba's natural death
@@ -4434,7 +4434,7 @@ void Anchor::RegisterHooks() {
         EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
         SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: sending defeat for actor id={} netId={}",
                     actor->id, ext->netId);
-        if (::SceneAuthority::IsMyCurrentSceneHost()) {
+        if (::SceneAuthority::IsMyCurrentRoomHost()) {
             bookkeeping.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
         }
         SendPacket_EnemyDefeated(ext->netId);
@@ -4528,7 +4528,7 @@ void Anchor::RegisterHooks() {
             return;
         }
         EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
-        if (::SceneAuthority::IsMyCurrentSceneHost()) {
+        if (::SceneAuthority::IsMyCurrentRoomHost()) {
             bk.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
         }
         SPDLOG_INFO("[OnBossDefeat] id={} netId={} — broadcasting defeat", actor->id, ext->netId);

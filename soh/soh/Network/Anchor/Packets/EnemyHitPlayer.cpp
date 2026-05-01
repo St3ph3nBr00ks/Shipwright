@@ -53,7 +53,7 @@ void Anchor::SendPacket_EnemyHitPlayer(uint32_t netId) {
     // (sceneNum, roomNum, timeline) — that's the scope the actor I
     // just hit lives in. Falls back to the global effective host
     // when no scene host is set, matching Phase 1 routing.
-    const uint32_t target = ::SceneAuthority::GetSceneHostClientId(
+    const uint32_t target = ::SceneAuthority::GetRoomHostClientId(
         gPlayState->sceneNum,
         (s8)gPlayState->roomCtx.curRoom.num,
         (uint8_t)(gSaveContext.linkAge & 0x1));
@@ -86,7 +86,7 @@ void Anchor::HandlePacket_EnemyHitPlayer(nlohmann::json payload) {
     // not in the actor's room return false from IsSceneHost and
     // stay silent so the authoritative state machine runs in
     // exactly one place.
-    if (!::SceneAuthority::IsSceneHost(sceneNum,
+    if (!::SceneAuthority::IsRoomHost(sceneNum,
                                        (s8)gPlayState->roomCtx.curRoom.num,
                                        (uint8_t)(gSaveContext.linkAge & 0x1))) {
         return;
