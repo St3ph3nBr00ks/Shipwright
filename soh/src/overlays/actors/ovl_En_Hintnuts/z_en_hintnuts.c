@@ -685,7 +685,24 @@ void EnHintnuts_ApplyNetState(EnHintnuts* this, PlayState* play, s16 stateIndex)
     // already prevent this; the explicit re-entry guard is belt-and-
     // suspenders.
     switch (stateIndex) {
-        case 0: EnHintnuts_SetupWait(this);                    break;
+        case 0:
+            // Mirror the flag restoration block inside EnHintnuts_Freeze
+            // (z_en_hintnuts.c:500-503). Vanilla Freeze's body restores
+            // ATTENTION_ENABLED + UPDATE_CULLING_DISABLED + heals before
+            // calling SetupWait on the natural reset path. Under host-
+            // authoritative sync, host advances state Freeze→Wait and
+            // peer applies the new state here — peer's actor never runs
+            // through Freeze's restoration body, so without this block
+            // peer ends up in Wait with ATTENTION_ENABLED still cleared
+            // (= no Z-target lock-on after a wrong-order puzzle reset,
+            // logs 214 Bug 1). Idempotent: no-op when peer arrived at
+            // Wait via the normal path (flags were already correct).
+            this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED;
+            this->actor.flags &= ~ACTOR_FLAG_UPDATE_CULLING_DISABLED;
+            this->actor.colChkInfo.health = sColChkInfoInit.health;
+            this->actor.colorFilterTimer  = 0;
+            EnHintnuts_SetupWait(this);
+            break;
         case 1: EnHintnuts_SetupLookAround(this);              break;
         case 2: EnHintnuts_SetupStand(this);                   break;
         case 3:
