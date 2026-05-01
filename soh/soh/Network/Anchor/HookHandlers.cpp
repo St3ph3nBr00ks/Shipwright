@@ -4058,68 +4058,16 @@ void Anchor::RegisterHooks() {
                 }
             }
 
-            // En_Hintnuts (Inside Deku Tree Compound Room) — sibling sync
-            // of Dekunuts pattern. Without state-machine sync, each
-            // client's free Wait/LookAround/Stand/ThrowNut/Burrow/Run
-            // cycle drifts; aim direction at projectile-spawn diverges,
-            // and the visible "scrub hidden vs popped up" state desyncs
-            // (logs 179/180 symptom).
-            //
-            // Dormant-to-active filter:
-            //   net-dormant: 0 Wait, 1 LookAround, 4 Burrow
-            //   local-active: 2 Stand, 3 ThrowNut, 5 BeginRun, 6 Run
-            // Death-class states 7-10 (Talk/Leave/Freeze/BeginFreeze)
-            // are sPuzzleCounter-driven and gated — local logic drives
-            // them via the synced En_Nutsball collision flow on each
-            // peer independently.
-            if (actor->id == ACTOR_EN_HINTNUTS && ext->netStateIndex >= 0 &&
-                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
-                EnHintnuts* h = (EnHintnuts*)actor;
-                s16 curState = EnHintnuts_GetStateIndex(h);
-                // Log 182 narrowed the dormant set for Hintnuts.
-                // Originally Burrow (4) was treated as dormant alongside
-                // Wait (0) and LookAround (1). But Burrow is a DELIBERATE
-                // hide-from-player action — not idle dormancy. When host's
-                // Hintnut burrows because P1 approached, peer should follow
-                // even if P2 is far and peer's local Hintnut is at Stand.
-                //
-                // Net dormant set is now just Wait (0). Active set
-                // unchanged.
-                //
-                // #180 residual #4 — death-class state gate removed.
-                // Originally states 7-10 (Talk/Leave/Freeze/BeginFreeze)
-                // were blocked from ApplyNetState because SetupFreeze
-                // mutates the global sPuzzleCounter. But the user-visible
-                // symptom (P1 sees Freeze visual, P2 doesn't) is more
-                // important than the conditional sPuzzleCounter mutation
-                // (which only fires if local counter == -3). EnHintnuts_
-                // ApplyNetState now applies Freeze/BeginFreeze to keep
-                // the visual sync. Talk also synced. Leave skipped
-                // because SetupLeave needs a PlayState we don't have here
-                // and the natural Talk→Leave transition fires locally.
-                // Pillar A Phase 2: every state replicates from the scene
-                // host's broadcast (including state 8 Leave, which is now
-                // handled by ApplyNetState case 8 — vanilla previously
-                // blocked it because SetupLeave needs PlayState). Only
-                // filter the dormant-vs-active case to avoid host's idle
-                // Wait broadcast clobbering peer's just-emerged Stand.
-                bool netIsDormant  = (ext->netStateIndex == 0);
-                bool localIsActive = (curState == 2 || curState == 3 ||
-                                      curState == 5 || curState == 6);
-                if (curState != ext->netStateIndex &&
-                    !(netIsDormant && localIsActive)) {
-                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
-                        SPDLOG_INFO("[EnHintnuts] rx netId={} apply {}→{}",
-                                    ext->netId, (int)curState, (int)ext->netStateIndex);
-                    }
-                    EnHintnuts_ApplyNetState(h, gPlayState, ext->netStateIndex);
-                } else if (curState != ext->netStateIndex) {
-                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
-                        SPDLOG_INFO("[EnHintnuts] rx netId={} block net={} local={} (dormant-active filter)",
-                                    ext->netId, (int)ext->netStateIndex, (int)curState);
-                    }
-                }
-            }
+            // En_Hintnuts (Inside Deku Tree Compound Room) — INTENTIONALLY
+            // not synced. Each client runs its hintnuts as local-AI / local-
+            // spawn. See ActorSyncHelpers.cpp's IsSyncedWorldActor comment
+            // block for the rationale. This block was removed once the
+            // shared-projectile-state model was abandoned in favour of
+            // each client locally targeting their nearest player and
+            // running collision against their own Link's shield.
+            // Puzzle completion replicates via Flags_SetClear → FLAG_
+            // SCENE_SWITCH / WorldStateSync, so the door opens for both
+            // clients regardless of which one solved the puzzle locally.
 
             // #90 / en_st_sync_plan_v2.md §3 — Skulltula state-machine
             // sync. Dormant-to-active filter: states 0/1 (init / wait

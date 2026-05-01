@@ -41,25 +41,38 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
         case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
         case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
-        case ACTOR_EN_NUTSBALL: return true;  // En_Hintnuts deku-nut projectile (PROP).
-                                              // Host's spawn fires ENEMY_SPAWN; peer spawns
-                                              // matching copy. Both sides run deterministic
-                                              // Actor_MoveXZGravity locally and detect
-                                              // collisions independently, advancing each
-                                              // peer's local sPuzzleCounter consistently.
-        case ACTOR_EN_HINTNUTS: return true;  // #180 Compound Room scrubs. Default category
-                                              // is ENEMY (admitted via the default branch
-                                              // already), but EnHintnuts_HitByScrubProjectile1
-                                              // (z_en_hintnuts.c:128-133) calls
-                                              // Actor_ChangeCategory(... ACTORCAT_BG) on the
-                                              // third correct puzzle hit (sPuzzleCounter==2)
-                                              // and on any non-puzzle scrub (params==0).
-                                              // Without explicit allowlist entry the
-                                              // category change drops the actor out of
-                                              // OnActorUpdate's IsSyncableActor gate, so
-                                              // Run-state ENEMY_STATE traffic stops on the
-                                              // host and the "scrub running around the room"
-                                              // animation never syncs to peers.
+
+        // ACTOR_EN_HINTNUTS / ACTOR_EN_NUTSBALL: deliberately NOT admitted.
+        //
+        // Hintnut puzzle scrubs are an "interaction-symmetric" projectile
+        // enemy — each player has their own local interaction with the
+        // scrub (nutball thrown at me, my shield reflects, scrub freezes
+        // for me). Trying to maintain a single canonical projectile state
+        // across clients fights physics: AT_BOUNCED is set by collision
+        // checks against the local Link's AC_HARD shield, which only
+        // matches the local-client's view of player position. Replicated
+        // copies on other clients flew along the broadcasting client's
+        // trajectory toward the broadcasting client's player — missing
+        // the receiving client's shield and producing the "machine gun
+        // spawn", "fire animation but no nut", and "shield breaks
+        // instead of bouncing" bugs documented across logs 195-206.
+        //
+        // Local-AI / local-spawn model:
+        //   - Each client's hintnuts run vanilla state machine locally.
+        //   - Each client locally targets nearest player (its own Link
+        //     OR a DummyPlayer), spawns nutball locally, runs collision
+        //     locally.
+        //   - Each client's reflect advances its OWN local sPuzzleCounter.
+        //   - Whichever client first completes the puzzle locally fires
+        //     `Flags_SetClear(play, 0x9)` in EnHintnuts_Leave; the flag
+        //     replicates via FLAG_SCENE_SWITCH / WorldStateSync, opening
+        //     the door for both clients.
+        //
+        // Visual divergence (P1 sees hintnut throwing at P1, P2 sees it
+        // throwing at P2) is the explicit trade — accepted because
+        // shared-projectile-state was always going to fight reflect
+        // physics. The pattern generalises to other projectile-throwing
+        // enemies (Mad Scrub, Octorok, Beamos) when they come up.
 
         // Push-block / lift-and-throw actors (Pillar C realtime extension).
         // FLAG_SCENE_SWITCH already replicates the *final* resting position
