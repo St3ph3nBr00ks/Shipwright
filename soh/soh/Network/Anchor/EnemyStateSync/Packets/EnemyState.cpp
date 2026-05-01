@@ -775,14 +775,14 @@ actor_found:
         if ((block->stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)) != 0) {
             return;
         }
-    } else if (::SceneAuthority::IsSceneHost(sceneNum, (uint8_t)(gSaveContext.linkAge & 0x1))) {
+    } else if (::SceneAuthority::IsSceneHost(sceneNum,
+                                              (s8)gPlayState->roomCtx.curRoom.num,
+                                              (uint8_t)(gSaveContext.linkAge & 0x1))) {
         // Phase 2: skip self-apply if I'm the scene host of the packet's
-        // scene (I sent this broadcast). For non-push-block actors found
-        // in my actor list, my current scene matches the packet's scene,
-        // so this is equivalent to IsMyCurrentSceneHost — but using the
-        // packet's sceneNum is more defensive (handles multi-scene host
-        // transition windows where my gPlayState briefly disagrees with
-        // the broadcast's view).
+        // (sceneNum, roomNum, timeline). The actor was found in my local
+        // actor list above, so the actor's room equals my current room
+        // — using gPlayState->roomCtx.curRoom.num is correct here even
+        // though the wire packet doesn't carry roomNum.
         return;
     }
 
@@ -1348,7 +1348,14 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     {
         int16_t sceneFromNetId    = (int16_t)((netId >> 16) & 0x7FFF);
         uint8_t timelineFromNetId = (uint8_t)((netId >> 31) & 0x1);
-        if (::SceneAuthority::IsSceneHost(sceneFromNetId, timelineFromNetId)) {
+        // netId doesn't encode roomNum, so use my local current room.
+        // If I'm in the actor's room I'm a candidate for scene host;
+        // otherwise IsSceneHost returns false and the record fires on
+        // the client that IS in that room.
+        if (gPlayState != nullptr &&
+            ::SceneAuthority::IsSceneHost(sceneFromNetId,
+                                          (s8)gPlayState->roomCtx.curRoom.num,
+                                          timelineFromNetId)) {
             EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(sceneFromNetId, netId);
         }
     }

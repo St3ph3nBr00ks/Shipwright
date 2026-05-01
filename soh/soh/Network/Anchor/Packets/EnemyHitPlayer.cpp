@@ -49,12 +49,14 @@ void Anchor::SendPacket_EnemyHitPlayer(uint32_t netId) {
     payload["quiet"]    = true;
     PacketTimeline::SetTimelineField(payload);
 
-    // Pillar A Phase 2 — target the scene host of MY current scene
-    // (which is the scene the actor I just hit lives in). Falls back
-    // to the global effective host when no scene host is set, which
-    // matches Phase 1 routing.
+    // Pillar A Phase 2 — target the scene host of MY current
+    // (sceneNum, roomNum, timeline) — that's the scope the actor I
+    // just hit lives in. Falls back to the global effective host
+    // when no scene host is set, matching Phase 1 routing.
     const uint32_t target = ::SceneAuthority::GetSceneHostClientId(
-        gPlayState->sceneNum, (uint8_t)(gSaveContext.linkAge & 0x1));
+        gPlayState->sceneNum,
+        (s8)gPlayState->roomCtx.curRoom.num,
+        (uint8_t)(gSaveContext.linkAge & 0x1));
     payload["targetClientId"] = target;
     SendJsonToRemote(payload);
     SPDLOG_INFO("[EnemyHitPlayer] Sent netId={} target={}", netId, target);
@@ -76,12 +78,17 @@ void Anchor::HandlePacket_EnemyHitPlayer(nlohmann::json payload) {
         return;
     }
 
-    // Pillar A Phase 2 — only the scene host of the packet's scene
-    // applies the hit-response. Other clients (including the global
-    // effective host when it's not the scene host of this sceneNum)
-    // ignore the packet so the authoritative state machine runs in
+    // Pillar A Phase 2 — only the scene host of the packet's
+    // (sceneNum, my current roomNum, timeline) applies the hit-
+    // response. The packet doesn't carry roomNum on the wire; we
+    // use our local current room because the actor — if it's in
+    // this client's actor list — is in our current room. Clients
+    // not in the actor's room return false from IsSceneHost and
+    // stay silent so the authoritative state machine runs in
     // exactly one place.
-    if (!::SceneAuthority::IsSceneHost(sceneNum, (uint8_t)(gSaveContext.linkAge & 0x1))) {
+    if (!::SceneAuthority::IsSceneHost(sceneNum,
+                                       (s8)gPlayState->roomCtx.curRoom.num,
+                                       (uint8_t)(gSaveContext.linkAge & 0x1))) {
         return;
     }
 
