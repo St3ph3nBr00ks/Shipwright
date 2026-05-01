@@ -225,6 +225,21 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     player->unk_85C = client.unk_85C;
     player->av1.actionVar1 = client.actionVar1;
 
+    // Mirror the remote player's shield-hold pose. Sets rightHandType to
+    // PLAYER_MODELTYPE_RH_SHIELD when stateFlags1 carries
+    // PLAYER_STATE1_SHIELDING. The subsequent Player_OverrideLimbDraw
+    // pass (during DummyPlayer_Draw → Player_Draw) checks rightHandType
+    // and calls Player_UpdateShieldCollider, which registers the shield
+    // quad's AC collider via CollisionCheck_SetAC. That's what lets
+    // enemy projectiles like En_Nutsball read AT_BOUNCED off a peer's
+    // DummyPlayer the same way they do off the local player.
+    //
+    // Side effects of Player_SetModelsForHoldingShield: it may flip
+    // sheathType, modelAnimType, and write itemAction = -1. The
+    // itemAction write is harmless because next frame's DummyPlayer_Update
+    // restores it from client.itemAction.
+    Player_SetModelsForHoldingShield(player);
+
     // Apply animation movement (Copied from Player_ApplyAnimMovementScaledByAge)
     Vec3f diff;
     SkelAnime_UpdateTranslation(&player->skelAnime, &diff, player->actor.shape.rot.y);

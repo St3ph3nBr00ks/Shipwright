@@ -309,8 +309,12 @@ void EnHintnuts_Stand(EnHintnuts* this, PlayState* play) {
 
 void EnHintnuts_ThrowNut(EnHintnuts* this, PlayState* play) {
     Vec3f nutPos;
-    // #180 residual #1 — facing tracks nearest player (local Link OR
-    // DummyPlayer); approach + Burrow-on-too-close semantics unchanged.
+    // #180 residual #1 — target nearest player (local Link OR DummyPlayer).
+    // DummyPlayers can now register a shield AC collider when their
+    // remote player is in PLAYER_STATE1_SHIELDING — see DummyPlayer_Update
+    // line 235 (Player_SetModelsForHoldingShield call). So aiming the nut
+    // at a peer's DummyPlayer is no longer a "broken" outcome; the peer's
+    // shield bounces it just like the local Link's would.
     Actor* nearestPlayer = Anchor_GetNearestPlayerActor(&this->actor, play);
     s16    yawToNearest  = Actor_WorldYawTowardActor(&this->actor, nearestPlayer);
     f32    distToNearest = Actor_WorldDistXZToActor(&this->actor, nearestPlayer);
@@ -321,20 +325,11 @@ void EnHintnuts_ThrowNut(EnHintnuts* this, PlayState* play) {
     } else if (SkelAnime_Update(&this->skelAnime)) {
         EnHintnuts_SetupStand(this);
     } else if (Animation_OnFrame(&this->skelAnime, 6.0f)) {
-        // Multiplayer: spawn the nutsball aimed at the LOCAL player, not
-        // the nearest player. DummyPlayers have no shield AT collider —
-        // a nut flying at a peer's DummyPlayer hits its body cylinder,
-        // misses AT_BOUNCED, and breaks instead of reflecting. By using
-        // each client's local player as the spawn target, every client
-        // sees its own Hintnut's nut fly at its own Link, where the
-        // local shield can register a reflect.
-        Player* localPlayer = GET_PLAYER(play);
-        s16     spawnYaw    = Actor_WorldYawTowardActor(&this->actor, &localPlayer->actor);
-        nutPos.x = this->actor.world.pos.x + (Math_SinS(spawnYaw) * 23.0f);
+        nutPos.x = this->actor.world.pos.x + (Math_SinS(this->actor.shape.rot.y) * 23.0f);
         nutPos.y = this->actor.world.pos.y + 12.0f;
-        nutPos.z = this->actor.world.pos.z + (Math_CosS(spawnYaw) * 23.0f);
+        nutPos.z = this->actor.world.pos.z + (Math_CosS(this->actor.shape.rot.y) * 23.0f);
         if (Actor_Spawn(&play->actorCtx, play, ACTOR_EN_NUTSBALL, nutPos.x, nutPos.y, nutPos.z, this->actor.shape.rot.x,
-                        spawnYaw, this->actor.shape.rot.z, 1) != NULL) {
+                        this->actor.shape.rot.y, this->actor.shape.rot.z, 1) != NULL) {
             Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_THROW);
         }
     }
