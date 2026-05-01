@@ -3754,8 +3754,12 @@ void Anchor::RegisterHooks() {
                 // location must reach peers (Bug A from log 47 — without this,
                 // host's WallClimb / CeilingMoveToCenter location stayed stuck
                 // at the peer's last floor position).
+                // En_Nutsball is excluded so peer's local trajectory toward
+                // peer's local Link's shield isn't overridden by host's
+                // (different) nut path — see EnemyState.cpp companion comment.
                 const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
-                                                   actor->id == ACTOR_EN_KAREBABA);
+                                                   actor->id == ACTOR_EN_KAREBABA ||
+                                                   actor->id == ACTOR_EN_NUTSBALL);
                 if (!isAnimationDrivenPos && !arrowPinned) {
                     actor->world.pos = ext->netPos;
                     actor->shape.rot = ext->netShapeRot;

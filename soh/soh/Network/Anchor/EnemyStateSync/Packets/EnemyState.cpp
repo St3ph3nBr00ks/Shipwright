@@ -788,8 +788,21 @@ actor_found:
         // CeilingMoveToCenter, FloorMain), not an animation-derived
         // sub-limb position. Without world.pos sync the host's climb /
         // ceiling-spawn locations don't reach peers (Bug A from log 47).
+        //
+        // En_Nutsball (Hintnut puzzle deku-nut projectile) is also
+        // excluded. Per IsSyncedWorldActor design comment in
+        // ActorSyncHelpers.cpp:44-49, the nutsball is peer-replicated:
+        // each client spawns its own copy and runs Actor_MoveXZGravity
+        // locally. Position-sync from host drags peer's local nut off
+        // its trajectory toward peer's local Link, missing the
+        // shield AT collider window — peer's reflect never registers
+        // AT_BOUNCED. ENEMY_STATE traffic still flows for visibility
+        // but world.pos is left to local physics. (Targeting fix for
+        // EnHintnuts_ThrowNut at z_en_hintnuts.c spawns the nut toward
+        // the local player so each client's reflect window is real.)
         const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
-                                           actor->id == ACTOR_EN_KAREBABA);
+                                           actor->id == ACTOR_EN_KAREBABA ||
+                                           actor->id == ACTOR_EN_NUTSBALL);
         if (!isAnimationDrivenPos && !arrowPinned) {
             actor->world.pos = pos;
         }
