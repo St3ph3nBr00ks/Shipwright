@@ -47,6 +47,19 @@ bool IsSyncedWorldActor(int16_t actorId) {
                                               // Actor_MoveXZGravity locally and detect
                                               // collisions independently, advancing each
                                               // peer's local sPuzzleCounter consistently.
+        case ACTOR_EN_HINTNUTS: return true;  // #180 Compound Room scrubs. Default category
+                                              // is ENEMY (admitted via the default branch
+                                              // already), but EnHintnuts_HitByScrubProjectile1
+                                              // (z_en_hintnuts.c:128-133) calls
+                                              // Actor_ChangeCategory(... ACTORCAT_BG) on the
+                                              // third correct puzzle hit (sPuzzleCounter==2)
+                                              // and on any non-puzzle scrub (params==0).
+                                              // Without explicit allowlist entry the
+                                              // category change drops the actor out of
+                                              // OnActorUpdate's IsSyncableActor gate, so
+                                              // Run-state ENEMY_STATE traffic stops on the
+                                              // host and the "scrub running around the room"
+                                              // animation never syncs to peers.
         default:                return false;
     }
 }
