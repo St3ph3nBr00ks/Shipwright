@@ -1238,24 +1238,6 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     return;
                 }
 
-                // En_Hintnuts: route through SetupDyingNet so peer plays
-                // the Run-and-Leave animation rather than blinking out.
-                // Recovery heart drop is gated by Anchor_ShouldSuppress-
-                // HintnutsDrop inside SetupLeave. #180.
-                if (actor->id == ACTOR_EN_HINTNUTS) {
-                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Hintnuts.dupDetect");
-                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
-                        SPDLOG_INFO("[EnemyDefeated] Hintnuts netId={} already dying — duplicate, dedup only", netId);
-                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
-                        return;
-                    }
-                    SPDLOG_INFO("[EnemyDefeated] Hintnuts netId={} — triggering natural death cycle", netId);
-                    EnHintnuts_SetupDyingNet((EnHintnuts*)actor, gPlayState);
-                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
-                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
-                    return;
-                }
-
                 // En_Dekubaba: route through SetupDyingNet so peer plays
                 // the natural death animation. Two distinct paths handled
                 // in the helper:
