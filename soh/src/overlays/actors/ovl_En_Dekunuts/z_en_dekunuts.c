@@ -6,6 +6,7 @@
 
 #include "z_en_dekunuts.h"
 #include "overlays/effects/ovl_Effect_Ss_Hahen/z_eff_ss_hahen.h"
+#include "overlays/actors/ovl_En_Nutsball/z_en_nutsball.h"
 #include "objects/object_dekunuts/object_dekunuts.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
@@ -310,11 +311,15 @@ void EnDekunuts_ThrowNut(EnDekunuts* this, PlayState* play) {
     if (SkelAnime_Update(&this->skelAnime)) {
         EnDekunuts_SetupStand(this);
     } else if (Animation_OnFrame(&this->skelAnime, 6.0f)) {
+        Actor* spawned;
         spawnPos.x = this->actor.world.pos.x + (Math_SinS(this->actor.shape.rot.y) * 23.0f);
         spawnPos.y = this->actor.world.pos.y + 12.0f;
         spawnPos.z = this->actor.world.pos.z + (Math_CosS(this->actor.shape.rot.y) * 23.0f);
-        if (Actor_Spawn(&play->actorCtx, play, ACTOR_EN_NUTSBALL, spawnPos.x, spawnPos.y, spawnPos.z,
-                        this->actor.shape.rot.x, this->actor.shape.rot.y, this->actor.shape.rot.z, 0) != NULL) {
+        spawned = Actor_Spawn(&play->actorCtx, play, ACTOR_EN_NUTSBALL, spawnPos.x, spawnPos.y, spawnPos.z,
+                              this->actor.shape.rot.x, this->actor.shape.rot.y, this->actor.shape.rot.z, 0);
+        if (spawned != NULL) {
+            // SoH multiplayer diagnostic — see z_en_nutsball.h.
+            ((EnNutsball*)spawned)->parentParams = this->actor.params;
             Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_THROW);
         }
     } else if ((this->animFlagAndTimer > 1) && Animation_OnFrame(&this->skelAnime, 12.0f)) {

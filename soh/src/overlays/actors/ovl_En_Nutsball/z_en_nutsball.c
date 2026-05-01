@@ -73,6 +73,13 @@ void EnNutsball_Init(Actor* thisx, PlayState* play) {
     EnNutsball* this = (EnNutsball*)thisx;
     s32 pad;
 
+    // SoH multiplayer diagnostic. -1 = "unset" — the spawning enemy
+    // overwrites this immediately after Actor_Spawn returns. Set here as
+    // the safe default so any nutball that wasn't tagged at spawn site
+    // (legacy code path, future enemy that forgets) still has a defined
+    // value in the hit-event log.
+    this->parentParams = -1;
+
     ActorShape_Init(&this->actor.shape, 400.0f, ActorShadow_DrawCircle, 13.0f);
     Collider_InitCylinder(play, &this->collider);
     Collider_SetCylinder(play, &this->collider, &this->actor, &sCylinderInit);
@@ -127,10 +134,13 @@ void func_80ABBBA8(EnNutsball* this, PlayState* play) {
         // AND (b) AT_HIT, AT_TYPE_ENEMY, AT_BOUNCED all set on the AT
         // collider. Anything failing those conditions falls through to
         // the kill-with-burst path.
-        LUSLOG_INFO("[EnNutsball] hit: shield=%d adult=%d atFlags=0x%04X bgCheck=0x%04X",
+        LUSLOG_INFO("[EnNutsball] hit: parent=%d shield=%d adult=%d atFlags=0x%04X bgCheck=0x%04X "
+                    "pos=(%.0f,%.0f,%.0f)",
+                    (int)this->parentParams,
                     (int)player->currentShield, (int)LINK_IS_ADULT,
                     (unsigned int)this->collider.base.atFlags,
-                    (unsigned int)this->actor.bgCheckFlags);
+                    (unsigned int)this->actor.bgCheckFlags,
+                    this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z);
         // Reflect path: AT_BOUNCED was set on the AT collider — meaning the
         // engine matched it against an AC collider with AC_HARD (a shield).
         // The reflecting shield could belong to:

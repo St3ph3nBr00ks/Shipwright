@@ -6,6 +6,7 @@
 
 #include "z_en_hintnuts.h"
 #include "objects/object_hintnuts/object_hintnuts.h"
+#include "overlays/actors/ovl_En_Nutsball/z_en_nutsball.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
@@ -320,11 +321,19 @@ void EnHintnuts_ThrowNut(EnHintnuts* this, PlayState* play) {
     } else if (SkelAnime_Update(&this->skelAnime)) {
         EnHintnuts_SetupStand(this);
     } else if (Animation_OnFrame(&this->skelAnime, 6.0f)) {
+        Actor* spawned;
         nutPos.x = this->actor.world.pos.x + (Math_SinS(this->actor.shape.rot.y) * 23.0f);
         nutPos.y = this->actor.world.pos.y + 12.0f;
         nutPos.z = this->actor.world.pos.z + (Math_CosS(this->actor.shape.rot.y) * 23.0f);
-        if (Actor_Spawn(&play->actorCtx, play, ACTOR_EN_NUTSBALL, nutPos.x, nutPos.y, nutPos.z, this->actor.shape.rot.x,
-                        this->actor.shape.rot.y, this->actor.shape.rot.z, 1) != NULL) {
+        spawned = Actor_Spawn(&play->actorCtx, play, ACTOR_EN_NUTSBALL, nutPos.x, nutPos.y, nutPos.z,
+                              this->actor.shape.rot.x, this->actor.shape.rot.y, this->actor.shape.rot.z, 1);
+        if (spawned != NULL) {
+            // SoH multiplayer diagnostic — stamp the spawning hintnut's
+            // params (1/2/3 = puzzle scrub order, 0 = non-puzzle) onto
+            // the nutball so collision-event logs can identify which
+            // scrub fired the projectile. See z_en_nutsball.h for the
+            // field's full contract.
+            ((EnNutsball*)spawned)->parentParams = this->actor.params;
             Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_THROW);
         }
     }

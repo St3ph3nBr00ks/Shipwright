@@ -8,6 +8,7 @@
 #include "objects/object_dnk/object_dnk.h"
 #include "overlays/actors/ovl_En_Dnt_Demo/z_en_dnt_demo.h"
 #include "overlays/actors/ovl_En_Ex_Ruppy/z_en_ex_ruppy.h"
+#include "overlays/actors/ovl_En_Nutsball/z_en_nutsball.h"
 #include "overlays/actors/ovl_En_Ex_Item/z_en_ex_item.h"
 #include "overlays/effects/ovl_Effect_Ss_Hahen/z_eff_ss_hahen.h"
 #include "objects/object_hintnuts/object_hintnuts.h"
@@ -708,6 +709,8 @@ void EnDntNomal_StageAttack(EnDntNomal* this, PlayState* play) {
                           this->actor.shape.rot.y, this->actor.shape.rot.z, 4);
         if (nut != NULL) {
             nut->velocity.y = spawnOffset.y * 0.5f;
+            // SoH multiplayer diagnostic — see z_en_nutsball.h.
+            ((EnNutsball*)nut)->parentParams = this->actor.params;
         }
         Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_THROW);
         this->spawnedItem = true;

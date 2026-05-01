@@ -1,6 +1,7 @@
 #include "z_en_shopnuts.h"
 #include "objects/object_shopnuts/object_shopnuts.h"
 #include "overlays/actors/ovl_En_Dns/z_en_dns.h"
+#include "overlays/actors/ovl_En_Nutsball/z_en_nutsball.h"
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
@@ -204,11 +205,15 @@ void EnShopnuts_ThrowNut(EnShopnuts* this, PlayState* play) {
     } else if (SkelAnime_Update(&this->skelAnime)) {
         EnShopnuts_SetupStand(this);
     } else if (Animation_OnFrame(&this->skelAnime, 6.0f)) {
+        Actor* spawned;
         spawnPos.x = this->actor.world.pos.x + (Math_SinS(this->actor.shape.rot.y) * 23.0f);
         spawnPos.y = this->actor.world.pos.y + 12.0f;
         spawnPos.z = this->actor.world.pos.z + (Math_CosS(this->actor.shape.rot.y) * 23.0f);
-        if (Actor_Spawn(&play->actorCtx, play, ACTOR_EN_NUTSBALL, spawnPos.x, spawnPos.y, spawnPos.z,
-                        this->actor.shape.rot.x, this->actor.shape.rot.y, this->actor.shape.rot.z, 2) != NULL) {
+        spawned = Actor_Spawn(&play->actorCtx, play, ACTOR_EN_NUTSBALL, spawnPos.x, spawnPos.y, spawnPos.z,
+                              this->actor.shape.rot.x, this->actor.shape.rot.y, this->actor.shape.rot.z, 2);
+        if (spawned != NULL) {
+            // SoH multiplayer diagnostic — see z_en_nutsball.h.
+            ((EnNutsball*)spawned)->parentParams = this->actor.params;
             Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_THROW);
         }
     }
