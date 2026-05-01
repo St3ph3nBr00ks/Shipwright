@@ -187,6 +187,26 @@ static bool RupeeHandler(std::shared_ptr<Ship::Console> Console, const std::vect
     return 0;
 }
 
+static bool WhereHandler(std::shared_ptr<Ship::Console> Console, const std::vector<std::string>& args,
+                         std::string* output) {
+    if (gPlayState == nullptr) {
+        ERROR_MESSAGE("PlayState == nullptr");
+        return 1;
+    }
+
+    Player* player = GET_PLAYER(gPlayState);
+    int16_t scene  = gPlayState->sceneNum;
+    int8_t  room   = gPlayState->roomCtx.curRoom.num;
+
+    INFO_MESSAGE("scene=%d (0x%02X) room=%d entrance=0x%04X pos=(%.0f, %.0f, %.0f) yaw=0x%04X linkAge=%d",
+                 (int)scene, (unsigned)scene & 0xFF, (int)room,
+                 (unsigned)gSaveContext.entranceIndex,
+                 player->actor.world.pos.x, player->actor.world.pos.y, player->actor.world.pos.z,
+                 (unsigned)(uint16_t)player->actor.shape.rot.y,
+                 (int)gSaveContext.linkAge);
+    return 0;
+}
+
 static bool SetPosHandler(std::shared_ptr<Ship::Console> Console, const std::vector<std::string> args,
                           std::string* output) {
     if (gPlayState == nullptr) {
@@ -1695,6 +1715,10 @@ void DebugConsole_Init(void) {
                               { "y", Ship::ArgumentType::NUMBER, true },
                               { "z", Ship::ArgumentType::NUMBER, true },
                           } });
+
+    CMD_REGISTER("where", { WhereHandler,
+                            "Prints current scene number, room number, entrance index, "
+                            "player position, facing yaw, and link age." });
 
     CMD_REGISTER("addammo", { AddAmmoHandler,
                               "Adds ammo of an item.",
