@@ -195,15 +195,38 @@ static bool WhereHandler(std::shared_ptr<Ship::Console> Console, const std::vect
     }
 
     Player* player = GET_PLAYER(gPlayState);
-    int16_t scene  = gPlayState->sceneNum;
-    int8_t  room   = gPlayState->roomCtx.curRoom.num;
+    if (player == nullptr) {
+        ERROR_MESSAGE("Player == nullptr");
+        return 1;
+    }
 
-    INFO_MESSAGE("scene=%d (0x%02X) room=%d entrance=0x%04X pos=(%.0f, %.0f, %.0f) yaw=0x%04X linkAge=%d",
-                 (int)scene, (unsigned)scene & 0xFF, (int)room,
-                 (unsigned)gSaveContext.entranceIndex,
-                 player->actor.world.pos.x, player->actor.world.pos.y, player->actor.world.pos.z,
-                 (unsigned)(uint16_t)player->actor.shape.rot.y,
-                 (int)gSaveContext.linkAge);
+    // Resolve into ints so the printf-promotion is unambiguous regardless
+    // of whether sceneNum/curRoom.num are signed or unsigned in the SoH
+    // build. Earlier one-line variant with mixed `(unsigned) & 0xFF`
+    // arithmetic produced confusing output in some configurations; split
+    // into atomic messages so a single-field failure can't drop the rest.
+    const int    scene    = (int)(uint16_t)gPlayState->sceneNum;
+    const int    room     = (int)(uint8_t)gPlayState->roomCtx.curRoom.num;
+    const int    entrance = (int)(uint16_t)gSaveContext.entranceIndex;
+    const float  px       = player->actor.world.pos.x;
+    const float  py       = player->actor.world.pos.y;
+    const float  pz       = player->actor.world.pos.z;
+    const int    yaw      = (int)(uint16_t)player->actor.shape.rot.y;
+    const int    linkAge  = (int)gSaveContext.linkAge;
+
+    INFO_MESSAGE("scene=%d (0x%04X)", scene, scene);
+    INFO_MESSAGE("room=%d", room);
+    INFO_MESSAGE("entrance=0x%04X", entrance);
+    INFO_MESSAGE("pos=(%.1f, %.1f, %.1f)", px, py, pz);
+    INFO_MESSAGE("yaw=0x%04X", yaw);
+    INFO_MESSAGE("linkAge=%d", linkAge);
+
+    // Mirror to the rotating log file so the values are recoverable from
+    // the log even if the in-game console scrollback is cleared or the
+    // user is grepping after the fact.
+    SPDLOG_INFO("[where] scene={} (0x{:04X}) room={} entrance=0x{:04X} "
+                "pos=({:.1f}, {:.1f}, {:.1f}) yaw=0x{:04X} linkAge={}",
+                scene, scene, room, entrance, px, py, pz, yaw, linkAge);
     return 0;
 }
 
