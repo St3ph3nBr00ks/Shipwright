@@ -598,6 +598,29 @@ s16 EnHintnuts_GetStateIndex(EnHintnuts* this) {
     return -1;
 }
 
+// Replicate the ENEMY → BG re-categorization that
+// EnHintnuts_HitByScrubProjectile1 (z_en_hintnuts.c:127-134) performs
+// when the scene host's local nutball collision converts a hintnut
+// into a talkable NPC. Without this, peer's hintnut reaches BeginRun /
+// Run / Talk via state-sync but stays ACTORCAT_ENEMY + HOSTILE — the
+// lock-on diamond renders yellow, Z-target doesn't expose the talk
+// option, and Actor_ProcessTalkRequest never fires for peer.
+//
+// Called from ApplyNetState's BG-class cases (5/6/7/8). Idempotent: a
+// second call once already in BG short-circuits. The reverse transition
+// (BG → ENEMY when the give-up Run path returns to Burrow at
+// z_en_hintnuts.c:441-446) runs on every client locally inside the
+// Run actionFunc, so peer naturally reverts to ENEMY when the local
+// give-up condition fires.
+static void EnHintnuts_NetTransitionToBg(EnHintnuts* this, PlayState* play) {
+    if (this->actor.category != ACTORCAT_ENEMY) {
+        return;
+    }
+    this->actor.flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
+    this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY;
+    Actor_ChangeCategory(play, &play->actorCtx, &this->actor, ACTORCAT_BG);
+}
+
 void EnHintnuts_ApplyNetState(EnHintnuts* this, PlayState* play, s16 stateIndex) {
     // Pillar A Phase 2 pattern — every state replicates from the scene
     // host's broadcast. Cases below mirror the natural Setup helpers
@@ -636,14 +659,21 @@ void EnHintnuts_ApplyNetState(EnHintnuts* this, PlayState* play, s16 stateIndex)
             // setup, then actionFunc = BeginRun. Skip the puzzle-scrub
             // sPuzzleCounter mutation (those happen on the scene host
             // when its local nutball collision fires).
+            EnHintnuts_NetTransitionToBg(this, play);
             Animation_MorphToPlayOnce(&this->skelAnime, &gHintNutsUnburrowAnim, -3.0f);
             this->collider.dim.height = 37;
             Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
             this->collider.base.acFlags &= ~AC_ON;
             this->actionFunc = EnHintnuts_BeginRun;
             break;
-        case 6: EnHintnuts_SetupRun(this);                     break;
-        case 7: EnHintnuts_SetupTalk(this);                    break;
+        case 6:
+            EnHintnuts_NetTransitionToBg(this, play);
+            EnHintnuts_SetupRun(this);
+            break;
+        case 7:
+            EnHintnuts_NetTransitionToBg(this, play);
+            EnHintnuts_SetupTalk(this);
+            break;
         case 8:
             // Inlined SetupLeave minus the recovery-heart Actor_Spawn.
             // Mirrors SetupLeave at z_en_hintnuts.c:210-223 so the
@@ -653,6 +683,11 @@ void EnHintnuts_ApplyNetState(EnHintnuts* this, PlayState* play, s16 stateIndex)
             // drop is the scene host's responsibility — its EnItem00
             // spawn flows through normal item-replication so peers
             // see exactly one heart on the floor.
+            // Idempotent BG transition for the rare case state-sync
+            // skips directly from a non-BG state to Leave (e.g. peer
+            // joined mid-Run and the ext->netStateIndex flips 6 → 8
+            // before peer's case-6 apply lands).
+            EnHintnuts_NetTransitionToBg(this, play);
             Animation_MorphToLoop(&this->skelAnime, &gHintNutsRunAnim, -5.0f);
             this->actor.speedXZ = 3.0f;
             this->animFlagAndTimer = 100;
