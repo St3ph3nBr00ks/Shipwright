@@ -12,9 +12,6 @@ extern "C" {
 // Host-side handler lives in the actor — calls into z_en_goroiwa.c to apply
 // the reverse-direction state transition without damaging host's local Link.
 #include "overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
-// Test 199: hintnut nutsball-reflect propagation reuses this packet — host
-// fires the hintnut's own hit-response on its authoritative copy.
-#include "overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
 extern PlayState* gPlayState;
 }
 
@@ -113,17 +110,6 @@ actor_found:
         case ACTOR_EN_GOROIWA:
             EnGoroiwa_ProcessRemoteHit((EnGoroiwa*)actor, gPlayState);
             SPDLOG_INFO("[EnemyHitPlayer] Applied to Goroiwa netId={}", netId);
-            break;
-        case ACTOR_EN_HINTNUTS:
-            // Test 199 fix: peer reflected a nutsball into its local hintnut.
-            // Replay HitByScrubProjectile1+2 on host's authoritative copy so
-            // the host's sPuzzleCounter advances, host's actor transitions
-            // to BeginFreeze/BeginRun, and the resulting state broadcasts
-            // back to all clients. Without this the puzzle stalls — peer
-            // sees correct local feedback (frozen blue / running) but host
-            // never registers progress and keeps the hintnut throwing.
-            EnHintnuts_ProcessRemoteNutsballHit((EnHintnuts*)actor, gPlayState);
-            SPDLOG_INFO("[EnemyHitPlayer] Applied nutsball-hit to Hintnuts netId={}", netId);
             break;
         default:
             // Other enemies: nothing to do yet. Future actors (e.g. bounce-back

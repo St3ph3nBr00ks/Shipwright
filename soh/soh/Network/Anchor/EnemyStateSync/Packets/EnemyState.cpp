@@ -110,13 +110,6 @@ struct EnemyUpdateExtras {
     bool hasHintnuts             = false;
     s16  hintnutsActionState     = 0;
     s16  hintnutsAnimFlagAndTimer = 0;
-    // sPuzzleCounter is the file-static global driving the puzzle-progress
-    // state machine inside z_en_hintnuts.c. Host is authoritative; peer
-    // overwrites local on every received packet. Without sync, peer's
-    // local Freeze actionFunc never reaches the -4 reset trigger because
-    // its host-propagated hits don't bump the counter (only locally-
-    // detected AC_HIT does). Synced as int16.
-    s16  hintnutsPuzzleCounter   = 0;
 
     // #90 / en_st_sync_plan_v2.md §3 — En_St state-machine sync.
     bool hasEnSt         = false;
@@ -229,13 +222,6 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.hasHintnuts                 = true;
         e.hintnutsActionState         = EnHintnuts_GetStateIndex(h);
         e.hintnutsAnimFlagAndTimer    = h->animFlagAndTimer;
-        // Stamp host's sPuzzleCounter on every hintnut broadcast. The
-        // counter is global to all hintnut instances in the room, so
-        // reading it from any one of them gives the same authoritative
-        // value. Peer overwrites its local counter on receive, keeping
-        // the wrong-order reset path (-3→-4 bump in SetupFreeze)
-        // reachable on peer.
-        e.hintnutsPuzzleCounter       = EnHintnuts_GetPuzzleCounter();
     } else if (actor->id == ACTOR_EN_ST) {
         EnSt* st            = (EnSt*)actor;
         e.hasEnSt           = true;
@@ -297,7 +283,6 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasHintnuts) {
         if (cur.hintnutsActionState      != prev.hintnutsActionState)      return true;
         if (cur.hintnutsAnimFlagAndTimer != prev.hintnutsAnimFlagAndTimer) return true;
-        if (cur.hintnutsPuzzleCounter    != prev.hintnutsPuzzleCounter)    return true;
     }
     if (cur.hasEnSt != prev.hasEnSt) return true;
     if (cur.hasEnSt) {
@@ -555,10 +540,7 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     }
 
     // En_Hintnuts state-machine sync (Inside Deku Tree Compound Room).
-    // hintnutsPuzzleCounter carries the host-authoritative puzzle progress
-    // counter. Always emit (signed; 0 is a valid value).
     if (extras.hasHintnuts) {
-        payload["hintnutsPuzzleCounter"]    = (int)extras.hintnutsPuzzleCounter;
         payload["actionState"]              = extras.hintnutsActionState;
         payload["hintnutsAnimFlagAndTimer"] = (int)extras.hintnutsAnimFlagAndTimer;
     }
@@ -879,26 +861,7 @@ actor_found:
         const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
                                            actor->id == ACTOR_EN_KAREBABA ||
                                            actor->id == ACTOR_EN_NUTSBALL);
-        // Test 197 fix: when peer's local Hintnut is in Talk (state 7) or
-        // Leave (state 8), suppress world.pos / shape.rot writes. This is
-        // the position-sync companion to the receive driver's talkLockout
-        // (HookHandlers.cpp). Without it, host's hintnut keeps cycling
-        // Run→Burrow→Wait at home.pos while peer is talking, and host's
-        // running-hintnut position is forcibly applied to peer's stationary
-        // Talk-state actor — peer sees the body keep moving during dialog
-        // and follow host back to the nest. Same suppression covers Leave
-        // so the natural Leave→Actor_Kill walk-off animation runs to
-        // completion before host's stale net position drags peer's actor
-        // back to home.
-        // EnHintnuts_Talk and EnHintnuts_Leave are static (file-scope) in
-        // z_en_hintnuts.c — not addressable from this TU. Use the public
-        // GetStateIndex helper instead: returns 7 for Talk, 8 for Leave.
-        bool inLocalDialogCycle = false;
-        if (actor->id == ACTOR_EN_HINTNUTS) {
-            s16 localState = EnHintnuts_GetStateIndex((EnHintnuts*)actor);
-            inLocalDialogCycle = (localState == 7 || localState == 8);
-        }
-        if (!isAnimationDrivenPos && !arrowPinned && !inLocalDialogCycle) {
+        if (!isAnimationDrivenPos && !arrowPinned) {
             actor->world.pos = pos;
         }
         // shape.rot exclusion is split per-actor:
@@ -939,17 +902,6 @@ actor_found:
             s16 localState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
             skipJoints = (localState == 2 || localState == 3 ||
                           localState == 4 || localState == 7);
-        }
-        // Test 197 fix: also skip joint sync when peer's local Hintnut is
-        // in Talk or Leave. The local actionFunc drives skelAnime via
-        // gHintNutsTalkAnim / gHintNutsRunAnim; applying host's joints
-        // (which reflect host's still-running cycle) would flicker the
-        // dialog pose / leave-walk anim between local and remote states.
-        if (actor->id == ACTOR_EN_HINTNUTS) {
-            s16 localState = EnHintnuts_GetStateIndex((EnHintnuts*)actor);
-            if (localState == 7 || localState == 8) {
-                skipJoints = true;
-            }
         }
         if (!skipJoints && ext->skelAnime != nullptr && ext->limbCount > 0) {
             // Centralised pose-table writer enforces both the per-actor
@@ -1009,18 +961,6 @@ actor_found:
         if (actor->id == ACTOR_EN_HINTNUTS && payload.contains("hintnutsAnimFlagAndTimer")) {
             EnHintnuts* h = (EnHintnuts*)actor;
             h->animFlagAndTimer = (s16)payload["hintnutsAnimFlagAndTimer"].get<int>();
-        }
-        // Overwrite local sPuzzleCounter with the scene host's authoritative
-        // value. Skipped on the scene host itself (its local counter is
-        // already authoritative — this branch runs even on the scene host
-        // because HandlePacket_EnemyUpdate's outer host short-circuit was
-        // lifted for push blocks; need to gate explicitly here).
-        // Phase 2: keys on IsMyCurrentSceneHost so a peer alone in a room
-        // (acting as scene host) doesn't have its own counter clobbered
-        // by stale broadcasts from the global host.
-        if (actor->id == ACTOR_EN_HINTNUTS && payload.contains("hintnutsPuzzleCounter") &&
-            !::SceneAuthority::IsMyCurrentSceneHost()) {
-            EnHintnuts_SetPuzzleCounter((s16)payload["hintnutsPuzzleCounter"].get<int>());
         }
 
         // #90 / en_st_sync_plan_v2.md — cache En_St actionState.
