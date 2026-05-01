@@ -108,7 +108,6 @@ void func_80ABBB34(EnNutsball* this, PlayState* play) {
 
 void func_80ABBBA8(EnNutsball* this, PlayState* play) {
     Player* player = GET_PLAYER(play);
-    Vec3s sp4C;
     Vec3f sp40;
 
     this->timer--;
@@ -132,23 +131,51 @@ void func_80ABBBA8(EnNutsball* this, PlayState* play) {
                     (int)player->currentShield, (int)LINK_IS_ADULT,
                     (unsigned int)this->collider.base.atFlags,
                     (unsigned int)this->actor.bgCheckFlags);
-        // Checking if the player is using a shield that reflects projectiles
-        // And if so, reflects the projectile on impact
+        // Reflect path: AT_BOUNCED was set on the AT collider — meaning the
+        // engine matched it against an AC collider with AC_HARD (a shield).
+        // The reflecting shield could belong to:
+        //   (a) the local Link, if local Link was holding shield up, OR
+        //   (b) any DummyPlayer (remote player on this client) whose
+        //       shieldQuad was registered via DummyPlayer_Update's
+        //       Player_SetModelsForHoldingShield call.
+        //
+        // The original vanilla math used `player->shieldMf` to rotate the
+        // reflected nut — but `player` here is `GET_PLAYER(play)` (local
+        // Link only). When peer's nut bounces off a DummyPlayer's shield,
+        // the local Link's shieldMf is stale or junk (peer's Link wasn't
+        // shielding), so the reflect angle is wrong — the user reported
+        // sharp angles even when aiming directly back at the Hintnut.
+        //
+        // Fix: invert the nut's current direction (`world.rot.y +=
+        // 0x8000`) to send it back the way it came. For a straight-line
+        // shot from a Hintnut, the reverse direction is back at the
+        // Hintnut — which is the puzzle-solve trajectory regardless of
+        // which player's shield bounced it. Trade-off: this loses the
+        // small "shield-angle redirection" trick a single-player Link
+        // can perform by angling the shield, but in practice the puzzle
+        // requires a near-direct return anyway and the simpler math
+        // works for both local and DummyPlayer reflectors.
         if ((player->currentShield == PLAYER_SHIELD_DEKU) ||
-            ((player->currentShield == PLAYER_SHIELD_HYLIAN) && LINK_IS_ADULT)) {
+            ((player->currentShield == PLAYER_SHIELD_HYLIAN) && LINK_IS_ADULT) ||
+            // Allow reflect even if local Link isn't shielding, because the
+            // bounce may have come from a DummyPlayer's shield. AT_BOUNCED
+            // confirms the reflecting AC was bounce-capable; trust that
+            // signal regardless of local Link's state.
+            (this->collider.base.atFlags & AT_BOUNCED)) {
             if ((this->collider.base.atFlags & AT_HIT) && (this->collider.base.atFlags & AT_TYPE_ENEMY) &&
                 (this->collider.base.atFlags & AT_BOUNCED)) {
                 this->collider.base.atFlags &= ~AT_TYPE_ENEMY & ~AT_BOUNCED & ~AT_HIT;
                 this->collider.base.atFlags |= AT_TYPE_PLAYER;
 
                 this->collider.info.toucher.dmgFlags = 2;
-                Matrix_MtxFToYXZRotS(&player->shieldMf, &sp4C, 0);
-                this->actor.world.rot.y = sp4C.y + 0x8000;
+                // Direction-invert reflect — works for any reflector
+                // (local or remote shield) without needing to know which
+                // shield's matrix to read.
+                this->actor.world.rot.y = this->actor.world.rot.y + 0x8000;
                 this->timer = 30;
                 return;
             }
         }
-
         sp40.x = this->actor.world.pos.x;
         sp40.y = this->actor.world.pos.y + 4;
         sp40.z = this->actor.world.pos.z;

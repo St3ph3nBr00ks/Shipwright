@@ -20,6 +20,7 @@
 // yaw drift. Switch the targeting reads to Anchor_GetNearestPlayerActor
 // so peer and host both target the same player.
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+extern bool Anchor_IsEffectiveHost(void);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
@@ -310,17 +311,36 @@ void EnHintnuts_Stand(EnHintnuts* this, PlayState* play) {
 void EnHintnuts_ThrowNut(EnHintnuts* this, PlayState* play) {
     Vec3f nutPos;
     // #180 residual #1 — target nearest player (local Link OR DummyPlayer).
-    // DummyPlayers can now register a shield AC collider when their
-    // remote player is in PLAYER_STATE1_SHIELDING — see DummyPlayer_Update
-    // line 235 (Player_SetModelsForHoldingShield call). So aiming the nut
-    // at a peer's DummyPlayer is no longer a "broken" outcome; the peer's
-    // shield bounces it just like the local Link's would.
+    // DummyPlayers register a shield AC collider when their remote player
+    // is in PLAYER_STATE1_SHIELDING (DummyPlayer_Update calls
+    // Player_SetModelsForHoldingShield), so aiming the nut at a peer's
+    // DummyPlayer is bouncible just like a local-Link target.
     Actor* nearestPlayer = Anchor_GetNearestPlayerActor(&this->actor, play);
     s16    yawToNearest  = Actor_WorldYawTowardActor(&this->actor, nearestPlayer);
     f32    distToNearest = Actor_WorldDistXZToActor(&this->actor, nearestPlayer);
 
     Math_ApproachS(&this->actor.shape.rot.y, yawToNearest, 2, 0xE38);
-    if (distToNearest < 120.0f) {
+
+    // Multiplayer fix: the "burrow when player too close" check is host-
+    // authoritative. Without this gate, peer's local Hintnut sees its
+    // local Link as close (regardless of host's view) and calls
+    // SetupBurrow; the receive driver in HookHandlers.cpp then
+    // immediately overrides peer back to ThrowNut from host's net state,
+    // causing a per-frame Burrow↔ThrowNut bounce. The throw animation
+    // gets restarted by SetupThrowScrubProjectile each cycle, so
+    // Animation_OnFrame(6) never lands cleanly and no nutsball spawns.
+    // Symptom (user's bug 1): Hintnut plays fire animation but no
+    // projectile fires when peer is close.
+    //
+    // Symptom (user's bug 2 — same root): if a nut DOES spawn while peer
+    // is close, it spawns inside peer's body cylinder and hits body before
+    // shield, missing AT_BOUNCED.
+    //
+    // Fix: only host runs the burrow-on-close check. Peers follow via
+    // state-sync. host's Anchor_GetNearestPlayerActor sees both players
+    // (local + DummyPlayers) so the host correctly burrows when ANY
+    // player is too close.
+    if (Anchor_IsEffectiveHost() && distToNearest < 120.0f) {
         EnHintnuts_SetupBurrow(this);
     } else if (SkelAnime_Update(&this->skelAnime)) {
         EnHintnuts_SetupStand(this);

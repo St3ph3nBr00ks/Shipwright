@@ -91,6 +91,16 @@ extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
     return FindNearestPlayerActor(enemy, play);
 }
 
+// C-callable: returns true if this client is the effective host. Used by
+// per-actor C-code files that need to gate AI decisions to host-authoritative
+// behaviour (e.g. EnHintnuts's "burrow when any player too close" logic must
+// only run on host so peers follow via state-sync rather than independently
+// burrowing on local-distance checks).
+extern "C" bool Anchor_IsEffectiveHost(void) {
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return true;
+    return ::SceneAuthority::IsEffectiveHost();
+}
+
 // C-callable: returns true if any DummyPlayer (remote player) is currently
 // standing on top of the given DynaPolyActor's footprint. Used by
 // `DynaPolyActor_IsPlayerOnTop` callers (Obj_Lift, etc.) to make
@@ -4011,9 +4021,28 @@ void Anchor::RegisterHooks() {
                 // anyway; saves a redundant SetupTalk re-fire if peer
                 // already at Talk.
                 bool deathStateNet = (ext->netStateIndex == 8);
+                // User Bug 4: peer presses A to talk to its local Hintnut
+                // (in Run state) → Actor_ProcessTalkRequest fires →
+                // EnHintnuts_SetupTalk → peer's local actionFunc =
+                // EnHintnuts_Talk (state 7). Next frame, ENEMY_STATE
+                // arrives with host's net state = 6 (Run, since host's
+                // Hintnut isn't the one being talked to), and this
+                // receive driver overrides peer back to Run via
+                // SetupChasePlayer. Peer can never enter dialog.
+                //
+                // Fix: lock out net-state override when local is in Talk
+                // (state 7). Each peer can independently enter Talk with
+                // their own Hintnut; the dialog is per-client UI and
+                // doesn't need host-authority. Once peer's local Talk
+                // completes (Talk → Leave → Actor_Kill via local logic),
+                // peer's GetStateIndex returns -1 (Leave gets killed) or
+                // transitions back to a syncable state, and net-sync
+                // resumes.
+                bool talkLockout = (curState == 7);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet &&
+                    !talkLockout) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnHintnuts] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -4021,7 +4050,8 @@ void Anchor::RegisterHooks() {
                     EnHintnuts_ApplyNetState(h, ext->netStateIndex);
                 } else if (curState != ext->netStateIndex) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
-                        const char* why = deathStateNet                  ? "death-state-gated"
+                        const char* why = talkLockout                    ? "local-talk lockout"
+                                        : deathStateNet                  ? "death-state-gated"
                                         : (netIsDormant && localIsActive) ? "dormant-active filter"
                                         :                                   "other";
                         SPDLOG_INFO("[EnHintnuts] rx netId={} block net={} local={} ({})",
