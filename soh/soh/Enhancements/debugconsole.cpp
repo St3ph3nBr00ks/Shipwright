@@ -426,6 +426,102 @@ static bool GiveSongHandler(std::shared_ptr<Ship::Console> Console, const std::v
     return 0;
 }
 
+static bool GiveAllHandler(std::shared_ptr<Ship::Console> Console, const std::vector<std::string>& args,
+                           std::string* output) {
+    if (gPlayState == nullptr) {
+        ERROR_MESSAGE("[SOH] No save loaded");
+        return 1;
+    }
+
+    // Equipment + inventory items. Capacity upgrades only need their largest
+    // tier — Item_Give's UPG_* path supersedes earlier values automatically.
+    static const std::vector<int32_t> giList = {
+        // Weapons / tools
+        GI_BOW, GI_SLINGSHOT, GI_BOOMERANG, GI_HOOKSHOT, GI_LONGSHOT,
+        GI_LENS, GI_HAMMER, GI_OCARINA_OOT,
+        // Swords
+        GI_SWORD_KOKIRI, GI_SWORD_KNIFE, GI_SWORD_BGS,
+        // Shields
+        GI_SHIELD_DEKU, GI_SHIELD_HYLIAN, GI_SHIELD_MIRROR,
+        // Tunics + boots
+        GI_TUNIC_GORON, GI_TUNIC_ZORA, GI_BOOTS_IRON, GI_BOOTS_HOVER,
+        // Capacity upgrades (largest tier wins)
+        GI_QUIVER_50, GI_BOMB_BAG_40, GI_BULLET_BAG_50,
+        GI_STICK_UPGRADE_30, GI_NUT_UPGRADE_40,
+        GI_GAUNTLETS_GOLD, GI_SCALE_GOLDEN, GI_WALLET_GIANT,
+        GI_MAGIC_LARGE,
+        // Magic spells
+        GI_DINS_FIRE, GI_FARORES_WIND, GI_NAYRUS_LOVE,
+        // Arrow types
+        GI_ARROW_FIRE, GI_ARROW_ICE, GI_ARROW_LIGHT,
+        // Bombchus
+        GI_BOMBCHUS_20,
+        // Masks
+        GI_MASK_KEATON, GI_MASK_SKULL, GI_MASK_SPOOKY, GI_MASK_BUNNY,
+        GI_MASK_TRUTH, GI_MASK_GORON, GI_MASK_ZORA, GI_MASK_GERUDO,
+        // 4 empty bottles (one per inventory slot)
+        GI_BOTTLE, GI_BOTTLE, GI_BOTTLE, GI_BOTTLE,
+    };
+
+    for (int32_t gi : giList) {
+        GetItemEntry entry = ItemTableManager::Instance->RetrieveItemEntry(MOD_NONE, gi);
+        GiveItemEntryWithoutActor(gPlayState, entry);
+    }
+
+    // Quest items: medallions, stones, songs, Stone of Agony, Gerudo Card.
+    for (int32_t q = QUEST_MEDALLION_FOREST; q <= QUEST_GERUDO_CARD; q++) {
+        gSaveContext.inventory.questItems |= gBitFlags[q];
+    }
+
+    // Dungeon items: boss key + compass + map for every dungeon scene; max
+    // small keys (where applicable). dungeonItems is bit-encoded:
+    // bit 0 KEY_BOSS, bit 1 COMPASS, bit 2 MAP, bit 3 KEY_SMALL.
+    for (int32_t scene = SCENE_DEKU_TREE; scene <= SCENE_JABU_JABU_BOSS; scene++) {
+        gSaveContext.inventory.dungeonItems[scene] |= 0x07;
+        if (scene < SCENE_JABU_JABU_BOSS) {
+            gSaveContext.inventory.dungeonKeys[scene] = 99;
+        }
+    }
+
+    // Heart containers — top up to 20 hearts.
+    {
+        int32_t currentContainers = gSaveContext.healthCapacity / 16;
+        int32_t deficit = 20 - currentContainers;
+        if (deficit > 0) {
+            GameInteractionEffect::ModifyHeartContainers effect;
+            effect.parameters[0] = deficit;
+            GameInteractor::ApplyEffect(effect);
+        }
+    }
+
+    // Max ammo for the current capacities + magic + rupees + heal.
+    AMMO(ITEM_BOW)        = CUR_CAPACITY(UPG_QUIVER);
+    AMMO(ITEM_BOMB)       = CUR_CAPACITY(UPG_BOMB_BAG);
+    AMMO(ITEM_SLINGSHOT)  = CUR_CAPACITY(UPG_BULLET_BAG);
+    AMMO(ITEM_BOMBCHU)    = 50;
+    AMMO(ITEM_STICK)      = CUR_CAPACITY(UPG_STICKS);
+    AMMO(ITEM_NUT)        = CUR_CAPACITY(UPG_NUTS);
+    AMMO(ITEM_BEAN)       = 10;
+
+    {
+        GameInteractionEffect::FillMagic fillMagic;
+        GameInteractor::ApplyEffect(fillMagic);
+    }
+    {
+        GameInteractionEffect::ModifyRupees rupees;
+        rupees.parameters[0] = 999;
+        GameInteractor::ApplyEffect(rupees);
+    }
+    {
+        GameInteractionEffect::ModifyHealth heal;
+        heal.parameters[0] = 20 * 16;
+        GameInteractor::ApplyEffect(heal);
+    }
+
+    INFO_MESSAGE("[SOH] Gave Link the works.");
+    return 0;
+}
+
 static bool EntranceHandler(std::shared_ptr<Ship::Console> Console, const std::vector<std::string>& args,
                             std::string* output) {
     if (args.size() < 2) {
@@ -1634,6 +1730,12 @@ void DebugConsole_Init(void) {
                                 {
                                     { "questId", Ship::ArgumentType::NUMBER },
                                 } });
+
+    CMD_REGISTER("give_all", { GiveAllHandler,
+                               "Gives Link every standard item, equipment, song, medallion, "
+                               "spiritual stone, mask, dungeon item, capacity upgrade, plus "
+                               "max hearts / magic / rupees / ammo. Skips trade-quest items "
+                               "and chest-minigame variants. Save must be loaded." });
 
     CMD_REGISTER("item", { ItemHandler,
                            "Sets item ID in arg 1 into slot arg 2. No boundary checks. Use with caution.",
