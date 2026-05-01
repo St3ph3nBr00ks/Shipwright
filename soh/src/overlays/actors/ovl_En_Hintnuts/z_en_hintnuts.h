@@ -87,6 +87,13 @@ bool Anchor_ShouldSuppressHintnutsLocalAI(struct Actor* actor);
 // its own local actor and broadcasts the resulting state through the
 // standard ENEMY_STATE pipeline.
 void Anchor_NotifyProjectileHitEnemy(struct Actor* targetActor, s16 projectileActorId);
+
+// Sender wrapper for TALK_REQUEST. Peer's Run actionFunc calls this
+// when its local Link initiates dialog (Actor_ProcessTalkRequest
+// returns true) — instead of calling SetupTalk locally. Host receives
+// and runs SetupTalk on its local actor; the resulting state=Talk
+// reaches peer through ENEMY_STATE so peer's anim follows host's.
+void Anchor_NotifyTalkRequest(struct Actor* targetActor);
 #ifdef __cplusplus
 }
 #endif

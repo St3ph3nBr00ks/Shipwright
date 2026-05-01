@@ -246,6 +246,19 @@ extern "C" void Anchor_NotifyProjectileHitEnemy(Actor* targetActor, s16 projecti
     Anchor::Instance->SendPacket_ProjectileHitEnemy(ext->netId, projectileActorId);
 }
 
+// Sender wrapper — peer's Run actionFunc calls this when its local
+// Link initiates dialog with the hintnut. Host runs the canonical
+// SetupTalk on its local actor and broadcasts state=Talk so peer's
+// rx-driver applies it (instead of host's stale Run state reverting
+// peer back). See Packets/TalkRequest.cpp.
+extern "C" void Anchor_NotifyTalkRequest(Actor* targetActor) {
+    if (targetActor == nullptr) return;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(targetActor);
+    if (ext == nullptr) return;
+    Anchor::Instance->SendPacket_TalkRequest(ext->netId);
+}
+
 // #90 / en_st_sync_plan_v2.md §5 — same predicate shape as the
 // Dekunuts suppressor, applied to En_St's drop site (line 996).
 extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {

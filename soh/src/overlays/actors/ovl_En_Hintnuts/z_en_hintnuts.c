@@ -418,7 +418,17 @@ void EnHintnuts_Run(EnHintnuts* this, PlayState* play) {
 
     this->actor.shape.rot.y = this->actor.world.rot.y + 0x8000;
     if (Actor_ProcessTalkRequest(&this->actor, play)) {
-        EnHintnuts_SetupTalk(this);
+        // Host-authoritative sync: peer must NOT call SetupTalk locally —
+        // host's continuing Run broadcasts would revert peer back, and
+        // the give-up branch below would then fire SetupBurrow mid-
+        // dialog ("hintnut re-enters its nest", logs 214 Bug 2). Peer
+        // routes the talk request through TALK_REQUEST → host runs
+        // SetupTalk → ENEMY_STATE round-trip drives peer's transition.
+        if (Anchor_ShouldSuppressHintnutsLocalAI(&this->actor)) {
+            Anchor_NotifyTalkRequest(&this->actor);
+        } else {
+            EnHintnuts_SetupTalk(this);
+        }
     } else if (this->animFlagAndTimer == 0 && Actor_WorldDistXZToPoint(&this->actor, &this->actor.home.pos) < 20.0f &&
                fabsf(this->actor.world.pos.y - this->actor.home.pos.y) < 2.0f) {
         this->actor.speedXZ = 0.0f;

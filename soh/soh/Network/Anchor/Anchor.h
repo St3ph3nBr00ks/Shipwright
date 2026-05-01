@@ -574,6 +574,7 @@ class Anchor : public Network {
     inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
     inline static const std::string ENEMY_HIT_PLAYER = "ENEMY_HIT_PLAYER";
     inline static const std::string PROJECTILE_HIT_ENEMY = "PROJECTILE_HIT_ENEMY";
+    inline static const std::string TALK_REQUEST = "TALK_REQUEST";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
     inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
@@ -695,6 +696,15 @@ class Anchor : public Network {
     // per-actor helper (matches the ENEMY_HIT_PLAYER pattern).
     void SendPacket_ProjectileHitEnemy(uint32_t targetNetId, s16 projectileActorId);
     void HandlePacket_ProjectileHitEnemy(nlohmann::json payload);
+
+    // TALK_REQUEST — peer → room host. Sent when a peer's local Link
+    // initiates dialog with a synced NPC-style actor (currently
+    // En_Hintnuts only). Lets the host's authoritative state machine
+    // run the natural Talk→Leave dialog cycle so peer's view doesn't
+    // get reverted back to a pre-talk state by host's stale broadcasts.
+    // Receiver dispatches by `actor->id` to a per-actor helper.
+    void SendPacket_TalkRequest(uint32_t targetNetId);
+    void HandlePacket_TalkRequest(nlohmann::json payload);
 
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     //
