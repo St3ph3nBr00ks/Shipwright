@@ -64,7 +64,7 @@ bool Anchor_PauseMenuFreezesWorld(void);
 // current safe behaviour (DummyPlayer hidden, captured-frame shown,
 // pause-Link rotates).
 //
-// CVar: gAnchor.PauseLiveWorld (integer, default 0).
+// CVar: gRemote.Anchor.PauseLiveWorld (integer, default 0).
 bool Anchor_PauseLiveWorldRendering(void);
 
 #ifdef __cplusplus
