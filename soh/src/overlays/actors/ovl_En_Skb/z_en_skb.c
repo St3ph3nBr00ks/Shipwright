@@ -4,6 +4,13 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// SoH multiplayer — wrapper around FindNearestPlayerActor (HookHandlers.cpp).
+// Returns the nearest of (local Link + in-timeline DummyPlayers); single-
+// player and pre-handshake fall through to local Link, preserving vanilla
+// semantics. EnSkb_Advance uses it for both targeting math and the home-
+// distance despawn check.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
 void EnSkb_Init(Actor* thisx, PlayState* play);
@@ -263,12 +270,26 @@ void EnSkb_Advance(EnSkb* this, PlayState* play) {
     s32 thisKeyFrame;
     s32 prevKeyFrame;
     f32 playSpeed;
-    Player* player = GET_PLAYER(play);
+    // SoH multiplayer — nearest of (local Link + in-timeline DummyPlayers)
+    // so peer-targeted Stalchildren don't despawn against the local Link's
+    // distance check (KB-06 / #91 Bug 2: stalchildren spawned around peer
+    // had home.pos >800 units from local Link → instant despawn) and don't
+    // slide toward different targets on each client (#91 Bug 3: peer's
+    // local AI targeting local Link while host's broadcast moves the
+    // actor toward host's-nearest player → visible jump per tick).
+    //
+    // Vanilla semantics preserved in single-player: with no DummyPlayers,
+    // FindNearestPlayerActor returns &localPlayer->actor, so the
+    // recomputed yaw/dist values match the cached actor.yawTowardsPlayer
+    // / actor.xzDistToPlayer that vanilla read.
+    Actor* nearestPlayer  = Anchor_GetNearestPlayerActor(&this->actor, play);
+    s16    yawToNearest   = Actor_WorldYawTowardActor(&this->actor, nearestPlayer);
+    f32    distToNearest  = Actor_WorldDistXZToActor(&this->actor, nearestPlayer);
 
     if ((this->breakFlags != 0) && ((play->gameplayFrames & 0xF) == 0)) {
         this->headlessYawOffset = Rand_CenteredFloat(50000.0f);
     }
-    Math_SmoothStepToS(&this->actor.shape.rot.y, (this->actor.yawTowardsPlayer + this->headlessYawOffset), 1, 0x2EE, 0);
+    Math_SmoothStepToS(&this->actor.shape.rot.y, (yawToNearest + this->headlessYawOffset), 1, 0x2EE, 0);
     this->actor.world.rot.y = this->actor.shape.rot.y;
     thisKeyFrame = this->skelAnime.curFrame;
     SkelAnime_Update(&this->skelAnime);
@@ -292,11 +313,11 @@ void EnSkb_Advance(EnSkb* this, PlayState* play) {
     }
     // Don't despawn stallchildren during daytime or when a stalchildren walks too far away from his "home" when enemy
     // randomizer is enabled.
-    if ((Math_Vec3f_DistXZ(&this->actor.home.pos, &player->actor.world.pos) > 800.0f || IS_DAY) &&
+    if ((Math_Vec3f_DistXZ(&this->actor.home.pos, &nearestPlayer->world.pos) > 800.0f || IS_DAY) &&
         !CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
         func_80AFCF48(this);
-    } else if (Actor_IsFacingPlayer(&this->actor, 0x11C7) &&
-               (this->actor.xzDistToPlayer < (60.0f + (this->actor.params * 6.0f)))) {
+    } else if (((s16)ABS((s16)(yawToNearest - this->actor.shape.rot.y)) < 0x11C7) &&
+               (distToNearest < (60.0f + (this->actor.params * 6.0f)))) {
         func_80AFD33C(this);
     }
 }
