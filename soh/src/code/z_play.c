@@ -1501,7 +1501,20 @@ void Play_Draw(PlayState* play) {
             R_PAUSE_MENU_MODE = 0;
         }
 
-        if (R_PAUSE_MENU_MODE == 3) {
+        // #182 Phase 2.5: skip the captured-frame backdrop when the
+        // live-world feature is on. In vanilla, this branch blits the
+        // pre-pause world snapshot then `goto`s straight to the overlay
+        // (pause UI) draw, skipping all the live skybox / actor / etc.
+        // render below. With live-world we want the render below to run
+        // — fall through instead.
+        //
+        // Companion gates: pause-Link DMA stomp + rotating-Link draw
+        // (commit 21bee4caa + 66dcf51fa) ensured the world's gSegments[4]/[6]
+        // and object bank stay intact, so the actor draws below this
+        // point read their own segment data. Without those gates this
+        // path crashed (the 8db4a189d UAF — actor read the stomped
+        // object bank). With them in place, falling through is safe.
+        if (R_PAUSE_MENU_MODE == 3 && !Anchor_PauseLiveWorldRendering()) {
             Gfx* gfxP = POLY_OPA_DISP;
 
             // SOH [Port] Draw game framebuffer using our custom handling
