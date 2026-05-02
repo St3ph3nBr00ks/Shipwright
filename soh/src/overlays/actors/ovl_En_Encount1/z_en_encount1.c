@@ -3,6 +3,11 @@
 #include "overlays/actors/ovl_En_Tite/z_en_tite.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// SoH multiplayer: Hyrule Field Stalchild spawner consults the synced
+// player list to round-robin spawn positions across local Link + every
+// in-timeline DummyPlayer. Wrapper lives in HookHandlers.cpp.
+extern int Anchor_GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount);
+
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_LOCK_ON_DISABLED)
 
 void EnEncount1_Init(Actor* thisx, PlayState* play);
@@ -217,7 +222,8 @@ void EnEncount1_SpawnTektites(EnEncount1* this, PlayState* play) {
 }
 
 void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* localPlayer = GET_PLAYER(play);
+    Player* player = localPlayer;
     f32 spawnDist;
     s16 spawnAngle;
     s16 spawnId;
@@ -228,6 +234,28 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
     CollisionPoly* floorPoly;
     s32 bgId;
     f32 floorY;
+
+    // SoH multiplayer — Hyrule Field Stalchild spawner: round-robin spawn
+    // positions across the local Link + every in-timeline DummyPlayer so
+    // peers see Stalchildren clustered around their own Link, not just
+    // host's. Per-player budget is 2 (matches vanilla per-Link cap), so
+    // total maxCurSpawns scales as 2 * numFieldPlayers. Other scenes
+    // (dungeons that use En_Encount1) keep vanilla local-Link-only
+    // behavior — out-of-Hyrule-Field gameplay isn't a multi-player
+    // scenario for this spawner.
+    static s32 sFieldPlayerCursor = 0;
+    Actor* fieldPlayers[8];
+    int    numFieldPlayers = 0;
+    if (play->sceneNum == SCENE_HYRULE_FIELD) {
+        numFieldPlayers = Anchor_GetSyncedPlayerActors(play, fieldPlayers, 8);
+        if (numFieldPlayers <= 0) {
+            // Anchor disabled / not yet connected — fall back to local
+            // Link only so single-player and pre-handshake behavior match
+            // vanilla.
+            fieldPlayers[0]  = &localPlayer->actor;
+            numFieldPlayers  = 1;
+        }
+    }
 
     if (play->sceneNum != SCENE_HYRULE_FIELD) {
         if ((fabsf(player->actor.world.pos.y - this->actor.world.pos.y) > 100.0f) ||
@@ -253,38 +281,61 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
         while ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
                (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15)) {
             if (play->sceneNum == SCENE_HYRULE_FIELD) {
-                if ((player->floorSfxOffset == 0) || (player->actor.floorBgId != BGCHECK_SCENE) ||
-                    !(player->actor.bgCheckFlags & 1) || (player->stateFlags1 & PLAYER_STATE1_IN_WATER)) {
+                // Gating still uses local Link's state — if HOST's Link is
+                // in air / water / non-scene-floor, pause spawning for
+                // everyone (matches vanilla "wait for Link to land before
+                // spawning"). Doesn't matter that DummyPlayers don't carry
+                // floorSfxOffset / stateFlags1 — they aren't queried here.
+                if ((localPlayer->floorSfxOffset == 0) || (localPlayer->actor.floorBgId != BGCHECK_SCENE) ||
+                    !(localPlayer->actor.bgCheckFlags & 1) || (localPlayer->stateFlags1 & PLAYER_STATE1_IN_WATER)) {
 
                     this->fieldSpawnTimer = 60;
                     break;
                 }
                 if (this->fieldSpawnTimer == 60) {
-                    this->maxCurSpawns = 2;
+                    // SoH multiplayer: scale cap to 2 per in-timeline player.
+                    this->maxCurSpawns = (s16)(2 * numFieldPlayers);
                 }
                 if (this->fieldSpawnTimer != 0) {
                     this->fieldSpawnTimer--;
                     break;
                 }
 
+                // Round-robin spawn target across players. Each spawn
+                // iteration picks the next player in the list so a burst
+                // of N spawns gets distributed across N players.
+                Actor* targetPlayer = fieldPlayers[sFieldPlayerCursor % numFieldPlayers];
+                sFieldPlayerCursor  = (sFieldPlayerCursor + 1) % numFieldPlayers;
+
                 spawnDist = Rand_CenteredFloat(40.0f) + 200.0f;
-                spawnAngle = player->actor.shape.rot.y;
+                spawnAngle = targetPlayer->shape.rot.y;
                 if (this->curNumSpawn != 0) {
                     spawnAngle = -spawnAngle;
                     spawnDist = Rand_CenteredFloat(40.0f) + 100.0f;
                 }
                 spawnPos.x =
-                    player->actor.world.pos.x + (Math_SinS(spawnAngle) * spawnDist) + Rand_CenteredFloat(40.0f);
-                spawnPos.y = player->actor.floorHeight + 120.0f;
+                    targetPlayer->world.pos.x + (Math_SinS(spawnAngle) * spawnDist) + Rand_CenteredFloat(40.0f);
+                // Use local Link's floorHeight as raycast start. The
+                // raycast finds the actual floor at spawnPos.x/z so the
+                // start height only needs to be above terrain. DummyPlayer
+                // doesn't carry a reliable floorHeight, hence the local-
+                // Link proxy — Hyrule Field is mostly flat so the proxy
+                // is safe here.
+                spawnPos.y = localPlayer->actor.floorHeight + 120.0f;
                 spawnPos.z =
-                    player->actor.world.pos.z + (Math_CosS(spawnAngle) * spawnDist) + Rand_CenteredFloat(40.0f);
+                    targetPlayer->world.pos.z + (Math_CosS(spawnAngle) * spawnDist) + Rand_CenteredFloat(40.0f);
                 floorY = BgCheck_EntityRaycastFloor4(&play->colCtx, &floorPoly, &bgId, &this->actor, &spawnPos);
                 if (floorY <= BGCHECK_Y_MIN) {
                     break;
                 }
-                if ((player->actor.yDistToWater != BGCHECK_Y_MIN) &&
-                    (floorY < (player->actor.world.pos.y +
-                               player->actor.yDistToWater *
+                // Water check uses local Link's yDistToWater for the same
+                // reason as floorHeight above — DummyPlayer doesn't track
+                // water depth reliably. Conservative: if local Link is
+                // over water, skip; otherwise allow spawn at the resolved
+                // floor Y regardless of the per-player target.
+                if ((localPlayer->actor.yDistToWater != BGCHECK_Y_MIN) &&
+                    (floorY < (localPlayer->actor.world.pos.y +
+                               localPlayer->actor.yDistToWater *
                                    (CVarGetInteger(CVAR_ENHANCEMENT("EnemySpawnsOverWaterboxes"), 0) ? 1 : -1)))) {
                     break;
                 }

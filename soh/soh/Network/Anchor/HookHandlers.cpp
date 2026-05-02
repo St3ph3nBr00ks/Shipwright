@@ -93,6 +93,15 @@ extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
     return FindNearestPlayerActor(enemy, play);
 }
 
+// Hyrule Field Stalchild spawner (En_Encount1, ACTORCAT_PROP) needs to
+// round-robin spawn positions across local Link + in-timeline DummyPlayers
+// so peers see Stalchildren clustered around their own Link, not just
+// host's. Returns the same player list FindNearestPlayerActor walks; the
+// per-player budget (2 each) is enforced by the caller.
+extern "C" int Anchor_GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount) {
+    return GetSyncedPlayerActors(play, outActors, maxCount);
+}
+
 // C-callable: returns true if this client is the effective host. Used by
 // per-actor C-code files that need to gate AI decisions to host-authoritative
 // behaviour (e.g. EnHintnuts's "burrow when any player too close" logic must

@@ -71,3 +71,40 @@ Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
 
     return nearest;
 }
+
+int GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount) {
+    if (outActors == nullptr || maxCount <= 0) {
+        return 0;
+    }
+
+    int count = 0;
+    Player* localPlayer = GET_PLAYER(play);
+    if (localPlayer != nullptr && count < maxCount) {
+        outActors[count++] = &localPlayer->actor;
+    }
+
+    Actor* npc = play->actorCtx.actorLists[ACTORCAT_NPC].head;
+    while (npc != nullptr && count < maxCount) {
+        if (npc->id == ACTOR_EN_OE2 && npc->update == DummyPlayer_Update) {
+            // Cross-timeline filter (same shape as FindNearestPlayerActor):
+            // exclude DummyPlayers whose linkAge differs from local — they
+            // are invisible / non-interactive on this timeline (Pillar B
+            // Phase 3) and must not be targeted for spawn placement.
+            bool include = true;
+            if (Anchor::Instance != nullptr) {
+                uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(npc);
+                auto it = Anchor::Instance->clients.find(clientId);
+                if (it != Anchor::Instance->clients.end() &&
+                    it->second.linkAge != gSaveContext.linkAge) {
+                    include = false;
+                }
+            }
+            if (include) {
+                outActors[count++] = npc;
+            }
+        }
+        npc = npc->next;
+    }
+
+    return count;
+}
