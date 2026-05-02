@@ -2,6 +2,7 @@
 #include "vt.h"
 #include "overlays/actors/ovl_En_Tite/z_en_tite.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include <libultraship/log/luslog.h>
 
 // SoH multiplayer: Hyrule Field Stalchild spawner consults the synced
 // player list to round-robin spawn positions across local Link + every
@@ -235,15 +236,22 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
     s32 bgId;
     f32 floorY;
 
-    // SoH multiplayer — Hyrule Field Stalchild spawner: round-robin spawn
-    // positions across the local Link + every in-timeline DummyPlayer so
-    // peers see Stalchildren clustered around their own Link, not just
-    // host's. Per-player budget is 2 (matches vanilla per-Link cap), so
-    // total maxCurSpawns scales as 2 * numFieldPlayers. Other scenes
-    // (dungeons that use En_Encount1) keep vanilla local-Link-only
-    // behavior — out-of-Hyrule-Field gameplay isn't a multi-player
-    // scenario for this spawner.
-    static s32 sFieldPlayerCursor = 0;
+    // SoH multiplayer — Hyrule Field Stalchild spawner: per-player burst.
+    // For each in-timeline player (local Link + DummyPlayers), spawn up
+    // to 2 Stalchildren in a dedicated burst around that player's
+    // position + facing. Total maxCurSpawns scales as 2 * numFieldPlayers
+    // (each player owns 2 of the global slots). Other scenes (dungeons
+    // that use En_Encount1) keep vanilla local-Link-only behavior —
+    // out-of-Hyrule-Field gameplay isn't a multi-player scenario for
+    // this spawner.
+    //
+    // Replaced an earlier round-robin cursor approach (single static
+    // cursor advancing one position per spawn iteration) — that left
+    // distribution sensitive to vanilla's "2 spawns per cycle" cap,
+    // which fired before the cap-update path could lift it (logs 219:
+    // 4 stalchildren clustered around host even with 2 players in
+    // scene). Per-player burst is order-deterministic and decouples
+    // distribution from cooldown timing.
     Actor* fieldPlayers[8];
     int    numFieldPlayers = 0;
     if (play->sceneNum == SCENE_HYRULE_FIELD) {
@@ -255,6 +263,14 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
             fieldPlayers[0]  = &localPlayer->actor;
             numFieldPlayers  = 1;
         }
+        // Always-on cap update (vanilla only set maxCurSpawns inside
+        // the timer==60 cooldown branch — that fires once per cycle and
+        // missed the FIRST spawn cycle entirely, so the first burst was
+        // capped at vanilla 2 even with multiple players present, logs
+        // 219). Set it here, every call, so a player joining mid-game
+        // takes effect on the next spawn opportunity instead of the
+        // following one.
+        this->maxCurSpawns = (s16)(2 * numFieldPlayers);
     }
 
     if (play->sceneNum != SCENE_HYRULE_FIELD) {
@@ -278,106 +294,115 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
     int8_t enemyCount = play->actorCtx.actorLists[ACTORCAT_ENEMY].length;
     if ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
         (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15)) {
-        while ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
-               (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15)) {
-            if (play->sceneNum == SCENE_HYRULE_FIELD) {
-                // Gating still uses local Link's state — if HOST's Link is
-                // in air / water / non-scene-floor, pause spawning for
-                // everyone (matches vanilla "wait for Link to land before
-                // spawning"). Doesn't matter that DummyPlayers don't carry
-                // floorSfxOffset / stateFlags1 — they aren't queried here.
-                if ((localPlayer->floorSfxOffset == 0) || (localPlayer->actor.floorBgId != BGCHECK_SCENE) ||
-                    !(localPlayer->actor.bgCheckFlags & 1) || (localPlayer->stateFlags1 & PLAYER_STATE1_IN_WATER)) {
 
-                    this->fieldSpawnTimer = 60;
-                    break;
-                }
-                if (this->fieldSpawnTimer == 60) {
-                    // SoH multiplayer: scale cap to 2 per in-timeline player.
-                    this->maxCurSpawns = (s16)(2 * numFieldPlayers);
-                }
-                if (this->fieldSpawnTimer != 0) {
-                    this->fieldSpawnTimer--;
-                    break;
-                }
-
-                // Round-robin spawn target across players. Each spawn
-                // iteration picks the next player in the list so a burst
-                // of N spawns gets distributed across N players.
-                Actor* targetPlayer = fieldPlayers[sFieldPlayerCursor % numFieldPlayers];
-                sFieldPlayerCursor  = (sFieldPlayerCursor + 1) % numFieldPlayers;
-
-                spawnDist = Rand_CenteredFloat(40.0f) + 200.0f;
-                spawnAngle = targetPlayer->shape.rot.y;
-                if (this->curNumSpawn != 0) {
-                    spawnAngle = -spawnAngle;
-                    spawnDist = Rand_CenteredFloat(40.0f) + 100.0f;
-                }
-                spawnPos.x =
-                    targetPlayer->world.pos.x + (Math_SinS(spawnAngle) * spawnDist) + Rand_CenteredFloat(40.0f);
-                // Use local Link's floorHeight as raycast start. The
-                // raycast finds the actual floor at spawnPos.x/z so the
-                // start height only needs to be above terrain. DummyPlayer
-                // doesn't carry a reliable floorHeight, hence the local-
-                // Link proxy — Hyrule Field is mostly flat so the proxy
-                // is safe here.
-                spawnPos.y = localPlayer->actor.floorHeight + 120.0f;
-                spawnPos.z =
-                    targetPlayer->world.pos.z + (Math_CosS(spawnAngle) * spawnDist) + Rand_CenteredFloat(40.0f);
-                floorY = BgCheck_EntityRaycastFloor4(&play->colCtx, &floorPoly, &bgId, &this->actor, &spawnPos);
-                if (floorY <= BGCHECK_Y_MIN) {
-                    break;
-                }
-                // Water check uses local Link's yDistToWater for the same
-                // reason as floorHeight above — DummyPlayer doesn't track
-                // water depth reliably. Conservative: if local Link is
-                // over water, skip; otherwise allow spawn at the resolved
-                // floor Y regardless of the per-player target.
-                if ((localPlayer->actor.yDistToWater != BGCHECK_Y_MIN) &&
-                    (floorY < (localPlayer->actor.world.pos.y +
-                               localPlayer->actor.yDistToWater *
-                                   (CVarGetInteger(CVAR_ENHANCEMENT("EnemySpawnsOverWaterboxes"), 0) ? 1 : -1)))) {
-                    break;
-                }
-                spawnPos.y = floorY;
+        // SoH multiplayer / vanilla: gating + cooldown is shared across
+        // all players. If host's local Link is airborne/in-water, pause
+        // spawning entirely; if cooldown timer is non-zero, decrement
+        // and exit. These run ONCE before iterating players (vanilla
+        // ran them inside the spawn loop, but the per-iteration
+        // semantics produced single-player behavior — see logs 219).
+        if (play->sceneNum == SCENE_HYRULE_FIELD) {
+            if ((localPlayer->floorSfxOffset == 0) || (localPlayer->actor.floorBgId != BGCHECK_SCENE) ||
+                !(localPlayer->actor.bgCheckFlags & 1) || (localPlayer->stateFlags1 & PLAYER_STATE1_IN_WATER)) {
+                this->fieldSpawnTimer = 60;
+                return;
             }
-            if (this->spawnType == SPAWNER_WOLFOS) {
-                spawnId = ACTOR_EN_WF;
-                spawnParams = (0xFF << 8) | 0x00;
-            } else {
-                spawnId = ACTOR_EN_SKB;
-                spawnParams = 0;
+            if (this->fieldSpawnTimer != 0) {
+                this->fieldSpawnTimer--;
+                return;
+            }
+        }
 
-                kcOver10 = this->killCount / 10;
-                if (kcOver10 > 0) {
-                    tempmod = this->killCount % 10;
-                    if (tempmod == 0) {
-                        spawnParams = kcOver10 * 5;
+        // Per-player burst: visit each in-timeline player and try to
+        // give them up to 2 Stalchildren. With per-player budgeting,
+        // P1 alone in field gets 2 around them; P1+P2 each get 2 (4
+        // total); each kill opens a slot for that same player on the
+        // next cycle.
+        const int kPerPlayerBudget = 2;
+        const int numIterPlayers = (play->sceneNum == SCENE_HYRULE_FIELD) ? numFieldPlayers : 1;
+        for (int playerIdx = 0; playerIdx < numIterPlayers; playerIdx++) {
+            Actor* targetPlayer = (play->sceneNum == SCENE_HYRULE_FIELD) ? fieldPlayers[playerIdx] : &localPlayer->actor;
+            int spawnedThisPlayer = 0;
+            while (spawnedThisPlayer < kPerPlayerBudget &&
+                   ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
+                    (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15))) {
+
+                if (play->sceneNum == SCENE_HYRULE_FIELD) {
+                    spawnDist = Rand_CenteredFloat(40.0f) + 200.0f;
+                    spawnAngle = targetPlayer->shape.rot.y;
+                    // Vanilla: second stalchild for a player spawns
+                    // 100u BEHIND (opposite facing) instead of ahead.
+                    if (spawnedThisPlayer != 0) {
+                        spawnAngle = -spawnAngle;
+                        spawnDist = Rand_CenteredFloat(40.0f) + 100.0f;
                     }
+                    spawnPos.x =
+                        targetPlayer->world.pos.x + (Math_SinS(spawnAngle) * spawnDist) + Rand_CenteredFloat(40.0f);
+                    // Local Link's floorHeight as raycast start
+                    // (DummyPlayer doesn't carry a reliable floorHeight;
+                    // Hyrule Field is mostly flat so the proxy is safe —
+                    // raycast finds the actual floor at spawn xz).
+                    spawnPos.y = localPlayer->actor.floorHeight + 120.0f;
+                    spawnPos.z =
+                        targetPlayer->world.pos.z + (Math_CosS(spawnAngle) * spawnDist) + Rand_CenteredFloat(40.0f);
+                    floorY = BgCheck_EntityRaycastFloor4(&play->colCtx, &floorPoly, &bgId, &this->actor, &spawnPos);
+                    if (floorY <= BGCHECK_Y_MIN) {
+                        break;  // skip this player; floor not found
+                    }
+                    if ((localPlayer->actor.yDistToWater != BGCHECK_Y_MIN) &&
+                        (floorY < (localPlayer->actor.world.pos.y +
+                                   localPlayer->actor.yDistToWater *
+                                       (CVarGetInteger(CVAR_ENHANCEMENT("EnemySpawnsOverWaterboxes"), 0) ? 1 : -1)))) {
+                        break;
+                    }
+                    spawnPos.y = floorY;
                 }
-                this->killCount++;
-            }
+                if (this->spawnType == SPAWNER_WOLFOS) {
+                    spawnId = ACTOR_EN_WF;
+                    spawnParams = (0xFF << 8) | 0x00;
+                } else {
+                    spawnId = ACTOR_EN_SKB;
+                    spawnParams = 0;
 
-            if (!GameInteractor_Should(VB_ENCOUNT1_SPAWN_STALCHILD_OR_WOLFOS, true, this, play, spawnId, spawnPos,
-                                       spawnParams)) {
-                continue;
-            }
+                    kcOver10 = this->killCount / 10;
+                    if (kcOver10 > 0) {
+                        tempmod = this->killCount % 10;
+                        if (tempmod == 0) {
+                            spawnParams = kcOver10 * 5;
+                        }
+                    }
+                    this->killCount++;
+                }
 
-            if (Actor_SpawnAsChild(&play->actorCtx, &this->actor, play, spawnId, spawnPos.x, spawnPos.y, spawnPos.z, 0,
-                                   0, 0, spawnParams) != NULL) {
-                this->curNumSpawn++;
-                if (this->curNumSpawn >= this->maxCurSpawns) {
-                    this->fieldSpawnTimer = 100;
+                if (!GameInteractor_Should(VB_ENCOUNT1_SPAWN_STALCHILD_OR_WOLFOS, true, this, play, spawnId, spawnPos,
+                                           spawnParams)) {
+                    spawnedThisPlayer++;  // counted as attempted; advance to avoid infinite loop
+                    continue;
                 }
-                if (play->sceneNum != SCENE_HYRULE_FIELD) {
-                    this->totalNumSpawn++;
+
+                if (Actor_SpawnAsChild(&play->actorCtx, &this->actor, play, spawnId, spawnPos.x, spawnPos.y, spawnPos.z,
+                                       0, 0, 0, spawnParams) != NULL) {
+                    this->curNumSpawn++;
+                    spawnedThisPlayer++;
+                    LUSLOG_INFO("[En_Encount1] Stalchild spawn: targetIdx=%d/%d targetPos=(%.0f,%.0f,%.0f) "
+                                "spawnPos=(%.0f,%.0f,%.0f) curNumSpawn=%d maxCurSpawns=%d",
+                                playerIdx, numIterPlayers,
+                                targetPlayer->world.pos.x, targetPlayer->world.pos.y, targetPlayer->world.pos.z,
+                                spawnPos.x, spawnPos.y, spawnPos.z,
+                                (int)this->curNumSpawn, (int)this->maxCurSpawns);
+                    if (this->curNumSpawn >= this->maxCurSpawns) {
+                        this->fieldSpawnTimer = 100;
+                    }
+                    if (play->sceneNum != SCENE_HYRULE_FIELD) {
+                        this->totalNumSpawn++;
+                    }
+                } else {
+                    // "Cannot spawn!"
+                    osSyncPrintf(VT_FGCOL(GREEN) "☆☆☆☆☆ 発生できません！ ☆☆☆☆☆\n" VT_RST);
+                    osSyncPrintf(VT_FGCOL(GREEN) "☆☆☆☆☆ 発生できません！ ☆☆☆☆☆\n" VT_RST);
+                    osSyncPrintf(VT_FGCOL(GREEN) "☆☆☆☆☆ 発生できません！ ☆☆☆☆☆\n" VT_RST);
+                    break;  // skip this player; spawn slot exhausted or alloc failed
                 }
-            } else {
-                // "Cannot spawn!"
-                osSyncPrintf(VT_FGCOL(GREEN) "☆☆☆☆☆ 発生できません！ ☆☆☆☆☆\n" VT_RST);
-                osSyncPrintf(VT_FGCOL(GREEN) "☆☆☆☆☆ 発生できません！ ☆☆☆☆☆\n" VT_RST);
-                osSyncPrintf(VT_FGCOL(GREEN) "☆☆☆☆☆ 発生できません！ ☆☆☆☆☆\n" VT_RST);
-                break;
             }
         }
     }
