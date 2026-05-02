@@ -11852,6 +11852,32 @@ static f32 sFloorConveyorSpeeds[] = { 0.5f, 1.0f, 3.0f };
 void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
     s32 pad;
 
+    // SoH multiplayer (Pillar G.i Phase 2.55): suppress local Link's
+    // input while the pause UI is open. Pillar G.i (`1928a005f`) lets
+    // Actor_UpdateAll tick during MP pause so other players' world
+    // continues to advance — but that means Player_UpdateCommon also
+    // fires every frame the menu is up, and the same play->state.input[0]
+    // the kaleido menu reads is consumed by the ~30+ button/stick read
+    // sites scattered through z_player.c (via the file-static
+    // sControlInput below). Net effect without this gate: navigating
+    // the menu moves Link invisibly behind the captured-frame backdrop.
+    //
+    // Substitute a zero-Input for the duration of this call when the
+    // pause UI is active. Single-player path is unaffected — the
+    // world-time gate stops Player_UpdateCommon from running during
+    // SP pause, so this conditional only fires in the MP-pause case
+    // it targets. AI Follower input injection (HookHandlers.cpp
+    // ShouldActorUpdate on a different actor) is also unaffected.
+    //
+    // Edge case: a button held across pause-open appears as a release
+    // on the next frame. Acceptable; equivalent to "user released at
+    // pause-open." A snapshot-and-hold variant can replace this if a
+    // problem surfaces.
+    static Input sNullInput = {0};
+    if (play->pauseCtx.state != 0) {
+        input = &sNullInput;
+    }
+
     sControlInput = input;
 
     if (this->unk_A86 < 0) {
