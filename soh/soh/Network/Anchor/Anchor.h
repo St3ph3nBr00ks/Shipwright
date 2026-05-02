@@ -575,6 +575,7 @@ class Anchor : public Network {
     inline static const std::string ENEMY_HIT_PLAYER = "ENEMY_HIT_PLAYER";
     inline static const std::string PROJECTILE_HIT_ENEMY = "PROJECTILE_HIT_ENEMY";
     inline static const std::string TALK_REQUEST = "TALK_REQUEST";
+    inline static const std::string DIALOG_END = "DIALOG_END";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
     inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
@@ -705,6 +706,17 @@ class Anchor : public Network {
     // Receiver dispatches by `actor->id` to a per-actor helper.
     void SendPacket_TalkRequest(uint32_t targetNetId);
     void HandlePacket_TalkRequest(nlohmann::json payload);
+
+    // DIALOG_END — peer → room host. Sent when a peer's local dialog
+    // with a synced NPC-style actor closes (Message_GetState returns
+    // TEXT_STATE_EVENT on peer; host's local msgCtx never opened the
+    // dialog). Lets the host's authoritative state machine advance the
+    // actor through its post-talk transition (typically SetupLeave) so
+    // peer's actor doesn't fire SetupLeave locally — which would spawn
+    // a duplicate recovery heart and oscillate against host's stale
+    // Talk broadcasts (logs 216 actor-flood crash).
+    void SendPacket_DialogEnd(uint32_t targetNetId);
+    void HandlePacket_DialogEnd(nlohmann::json payload);
 
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     //

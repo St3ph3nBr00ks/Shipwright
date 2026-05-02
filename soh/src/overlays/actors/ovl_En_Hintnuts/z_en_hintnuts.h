@@ -94,6 +94,17 @@ void Anchor_NotifyProjectileHitEnemy(struct Actor* targetActor, s16 projectileAc
 // and runs SetupTalk on its local actor; the resulting state=Talk
 // reaches peer through ENEMY_STATE so peer's anim follows host's.
 void Anchor_NotifyTalkRequest(struct Actor* targetActor);
+
+// Sender wrapper for DIALOG_END. Peer's Talk actionFunc calls this
+// when Message_GetState returns TEXT_STATE_EVENT (its local dialog
+// closed) — instead of calling SetupLeave locally. SetupLeave's body
+// spawns a recovery heart; without this routing, peer's repeated
+// SetupLeave calls (each reverted by host's stale Talk broadcasts)
+// flood the actor table with hearts and crash the renderer
+// (logs 216). Host runs the canonical SetupLeave on its local actor;
+// the heart spawn replicates via standard EnItem00 flow and host's
+// state=Leave reaches peer via ENEMY_STATE.
+void Anchor_NotifyDialogEnd(struct Actor* targetActor);
 #ifdef __cplusplus
 }
 #endif

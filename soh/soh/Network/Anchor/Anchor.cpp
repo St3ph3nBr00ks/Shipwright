@@ -369,6 +369,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_ProjectileHitEnemy(payload);
             else if (packetType == TALK_REQUEST)
                 HandlePacket_TalkRequest(payload);
+            else if (packetType == DIALOG_END)
+                HandlePacket_DialogEnd(payload);
             else if (packetType == DISABLE_ANCHOR)
                 HandlePacket_DisableAnchor(payload);
             else if (packetType == ENTRANCE_DISCOVERED)

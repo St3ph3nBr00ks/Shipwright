@@ -448,7 +448,22 @@ void EnHintnuts_Talk(EnHintnuts* this, PlayState* play) {
     SkelAnime_Update(&this->skelAnime);
     Math_SmoothStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 0x3, 0x400, 0x100);
     if (Message_GetState(&play->msgCtx) == TEXT_STATE_EVENT) {
-        EnHintnuts_SetupLeave(this, play);
+        // Host-authoritative sync: peer must NOT call SetupLeave locally.
+        // SetupLeave's body spawns a recovery heart; under host-
+        // authoritative the host's stale Talk broadcasts revert peer's
+        // local Leave back to Talk, peer's Talk reads TEXT_STATE_EVENT
+        // again, fires SetupLeave again — heart-spawn loop runs every
+        // 50ms until the actor table overflows (logs 216, ~280 hearts
+        // in 14s, exception 0xC0000005). Peer routes through DIALOG_END;
+        // host runs SetupLeave on its actor and broadcasts state=Leave
+        // back through ENEMY_STATE. Peer's local Leave actionFunc then
+        // drives Message_CloseTextbox + Actor_Kill at the natural
+        // run-off-stage moment.
+        if (Anchor_ShouldSuppressHintnutsLocalAI(&this->actor)) {
+            Anchor_NotifyDialogEnd(&this->actor);
+        } else {
+            EnHintnuts_SetupLeave(this, play);
+        }
     }
 }
 

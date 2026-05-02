@@ -213,6 +213,19 @@ extern "C" bool Anchor_ShouldSuppressDekunutsDrop(Actor* actor) {
 extern "C" bool Anchor_ShouldSuppressHintnutsDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    if (gPlayState == nullptr) return false;
+    // Defense-in-depth against the logs-216 actor-flood crash: peers
+    // (non-room-hosts) must never spawn the recovery heart. Host's
+    // local SetupLeave fires the canonical Actor_Spawn(EnItem00); the
+    // resulting heart replicates to peer through standard item-spawn
+    // flow. Without this gate, any code path that calls SetupLeave on
+    // peer (today's DIALOG_END routing prevents the Talk→Leave path,
+    // but future paths could reach SetupLeave directly) would dup the
+    // heart per call and overflow MISC actor list.
+    if (!::SceneAuthority::IsMyCurrentRoomHost()) return true;
+    // Phase-based suppression — preserved as the original guard for
+    // network-driven death cycles (not currently exercised by Hintnuts;
+    // kept for when a future change routes Leave through ENEMY_DEFEATED).
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
@@ -257,6 +270,20 @@ extern "C" void Anchor_NotifyTalkRequest(Actor* targetActor) {
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(targetActor);
     if (ext == nullptr) return;
     Anchor::Instance->SendPacket_TalkRequest(ext->netId);
+}
+
+// Sender wrapper — peer's Talk actionFunc calls this when its local
+// Message_GetState returns TEXT_STATE_EVENT (dialog closed on peer).
+// Host runs the canonical SetupLeave on its local actor and
+// broadcasts state=Leave back via ENEMY_STATE so peer's rx-driver
+// applies it (instead of peer's local SetupLeave running and
+// spawning hearts every 50ms). See Packets/DialogEnd.cpp.
+extern "C" void Anchor_NotifyDialogEnd(Actor* targetActor) {
+    if (targetActor == nullptr) return;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(targetActor);
+    if (ext == nullptr) return;
+    Anchor::Instance->SendPacket_DialogEnd(ext->netId);
 }
 
 // #90 / en_st_sync_plan_v2.md §5 — same predicate shape as the
