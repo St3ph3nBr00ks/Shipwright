@@ -362,7 +362,28 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
                     enemy = enemy->next;
                 }
             }
-            const int playerBudget = kPerPlayerBudget - aliveNearPlayer;
+
+            // SoH multiplayer: when another player is close (≤400u),
+            // halve this player's budget to 1 so co-located players
+            // don't get overwhelmed by 2× the normal Stalchild count
+            // in close quarters. Per-player check (not global) — if
+            // 4 players are split into two clumps far apart, the
+            // close pair each gets 1 while the far pair each gets 2.
+            const f32 kCloseProximityRadius = 400.0f;
+            int targetPerPlayerBudget = kPerPlayerBudget;
+            if (play->sceneNum == SCENE_HYRULE_FIELD) {
+                for (int otherIdx = 0; otherIdx < numIterPlayers; otherIdx++) {
+                    if (otherIdx == playerIdx) continue;
+                    Actor* otherPlayer = fieldPlayers[otherIdx];
+                    if (otherPlayer->world.pos.y <= -9000.0f) continue;  // sentinel
+                    if (Math_Vec3f_DistXZ(&targetPlayer->world.pos, &otherPlayer->world.pos) <
+                        kCloseProximityRadius) {
+                        targetPerPlayerBudget = 1;
+                        break;
+                    }
+                }
+            }
+            const int playerBudget = targetPerPlayerBudget - aliveNearPlayer;
             int spawnedThisPlayer = 0;
             while (spawnedThisPlayer < playerBudget &&
                    ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
