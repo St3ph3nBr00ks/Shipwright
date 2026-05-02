@@ -23,6 +23,9 @@ extern "C" {
 // acHitInfo no longer crashes (treated as dmgFlags=0 → falls through to the
 // sword-damage path, decrements health by 1, plays SetupHurt).
 #include "src/overlays/actors/ovl_En_Goma/z_en_goma.h"
+// En_Skb (Stalchild) — Hyrule Field at night spawner output. Damage gate
+// at z_en_skb.c:456 reads collider.base.acFlags & 2 (AC_HIT).
+#include "src/overlays/actors/ovl_En_Skb/z_en_skb.h"
 extern PlayState* gPlayState;
 }
 
@@ -234,6 +237,15 @@ damage_target_found:
             // won't crash; the path falls through to the swordDamage branch
             // and decrements health by 1.
             ((EnGoma*)actor)->colCyl2.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_SKB:
+            // Stalchild damage block (z_en_skb.c:456) reads
+            // `collider.base.acFlags & 2` (AC_HIT). No acHitInfo->toucher
+            // deref — the actor branches on colChkInfo.damageEffect only,
+            // so the synthetic AC_HIT bit is safe without a fake AT
+            // collider. Fixes peer→host damage not registering when peer
+            // hits a Stalchild on Hyrule Field at night.
+            ((EnSkb*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         default:
             // No AC_HIT setter for this actor type. Damage is delivered via
