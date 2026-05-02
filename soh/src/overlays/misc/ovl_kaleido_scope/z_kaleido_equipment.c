@@ -5,6 +5,10 @@
 #include "soh/Enhancements/enhancementTypes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// SoH multiplayer (#182): Anchor_PauseLiveWorldRendering gates the
+// rotating-Link draw inside KaleidoScope_DrawPlayerWork.
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
+
 static u8 sChildUpgrades[] = { UPG_BULLET_BAG, UPG_BOMB_BAG, UPG_STRENGTH, UPG_SCALE };
 static u8 sAdultUpgrades[] = { UPG_QUIVER, UPG_BOMB_BAG, UPG_STRENGTH, UPG_SCALE };
 
@@ -127,6 +131,20 @@ void KaleidoScope_DrawAButton(PlayState* play, Vtx* vtx, int16_t xTranslate, int
 }
 
 void KaleidoScope_DrawPlayerWork(PlayState* play) {
+    // #182 Phase 2: skip the rotating-Link draw entirely when live-world
+    // rendering is on. Player_DrawPause / Player_DrawPauseImpl rebind
+    // gSegments[4]/[6] (z_player_lib.c:2169-2170, 2217-2218) every draw
+    // — without the pause-init DMAs (skipped by the companion gate in
+    // z_kaleido_scope_PAL.c) those segments would point at uninitialised
+    // memory and the link DL dereference would crash. The equipment
+    // screen still renders all icon/text elements; the central link-
+    // preview area is empty. Equipment changes show on the world Link
+    // visible behind the pause UI instead, via the Player_SetEquipmentData
+    // mirror in Player_UpdateCommon (subsequent commit).
+    if (Anchor_PauseLiveWorldRendering()) {
+        return;
+    }
+
     PauseContext* pauseCtx = &play->pauseCtx;
     Vec3f pos;
     Vec3s rot;
