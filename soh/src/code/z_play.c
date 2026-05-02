@@ -1501,12 +1501,7 @@ void Play_Draw(PlayState* play) {
             R_PAUSE_MENU_MODE = 0;
         }
 
-        // #182 Phase 2.5: vanilla mode-3 captured-frame backdrop. With
-        // live-world rendering on, this block is skipped and the world
-        // renders for real (redirected to gPauseFrameBuffer below) so
-        // there's a fresh "captured" frame to blit at the end of the
-        // world-render section.
-        if (R_PAUSE_MENU_MODE == 3 && !Anchor_PauseLiveWorldRendering()) {
+        if (R_PAUSE_MENU_MODE == 3) {
             Gfx* gfxP = POLY_OPA_DISP;
 
             // SOH [Port] Draw game framebuffer using our custom handling
@@ -1515,23 +1510,6 @@ void Play_Draw(PlayState* play) {
             POLY_OPA_DISP = gfxP;
 
             goto Play_Draw_DrawOverlayElements;
-        }
-
-        // #182 Phase 2.5 (Option B2): live-world world-render redirect.
-        // Without this, world POLY_XLU writes (water, fog, particle
-        // effects, transparency) draw on TOP of kaleido in submission
-        // order (XLU runs after OPA in the GPU pipeline), obscuring
-        // the pause UI. By redirecting both POLY_OPA and POLY_XLU to
-        // gPauseFrameBuffer, the entire world render — opaque AND
-        // translucent — composites in the off-screen buffer. The
-        // companion ResetFB + FB_DrawFromFramebuffer just before
-        // Play_Draw_DrawOverlayElements blits the composited result
-        // onto main screen, after which kaleido draws via vanilla
-        // POLY_OPA path. Same substrate kaleido sees in single-player
-        // mode-3, just with live content instead of a captured snapshot.
-        if (R_PAUSE_MENU_MODE == 3 && Anchor_PauseLiveWorldRendering()) {
-            gsSPSetFB(POLY_OPA_DISP++, gPauseFrameBuffer);
-            gsSPSetFB(POLY_XLU_DISP++, gPauseFrameBuffer);
         }
 
         if ((HREG(80) != 10) || (HREG(83) != 0)) {
@@ -1685,22 +1663,6 @@ void Play_Draw(PlayState* play) {
         // Draw Enhancements that need to be placed in the world. This happens before the PostWorldDraw
         // so that they aren't drawn when the pause menu is up (e.g. collision viewer, actor name tags)
         GameInteractor_ExecuteOnPlayDrawEnd();
-
-        // #182 Phase 2.5 (Option B2): live-world post-render composite.
-        // Pair to the SetFB at the start of the world-render section.
-        // ResetFB returns POLY_OPA / POLY_XLU GPU target to main screen,
-        // then we blit gPauseFrameBuffer (which now contains the freshly-
-        // rendered live world, opaque + translucent composited) onto
-        // main screen. Subsequent Play_DrawOverlayElements writes kaleido
-        // into POLY_OPA targeting main, on top of the blit. Vanilla
-        // render order preserved for kaleido.
-        if (R_PAUSE_MENU_MODE == 3 && Anchor_PauseLiveWorldRendering()) {
-            gsSPResetFB(POLY_OPA_DISP++);
-            gsSPResetFB(POLY_XLU_DISP++);
-            Gfx* gfxP = POLY_OPA_DISP;
-            FB_DrawFromFramebuffer(&gfxP, gPauseFrameBuffer, 255);
-            POLY_OPA_DISP = gfxP;
-        }
 
     Play_Draw_DrawOverlayElements:
         if ((HREG(80) != 10) || (HREG(89) != 0)) {
