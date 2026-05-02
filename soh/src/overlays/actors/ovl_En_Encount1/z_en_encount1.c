@@ -7,7 +7,15 @@
 // SoH multiplayer: Hyrule Field Stalchild spawner consults the synced
 // player list to round-robin spawn positions across local Link + every
 // in-timeline DummyPlayer. Wrapper lives in HookHandlers.cpp.
-extern int Anchor_GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount);
+extern int  Anchor_GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount);
+// SoH multiplayer: returns true when this client is the room host for
+// its current (sceneNum, roomNum, timeline), or true unconditionally
+// when Anchor is disabled / disconnected (vanilla single-player path).
+// Used to early-return EnEncount1_SpawnStalchildOrWolfos on non-room-
+// hosts so the spawn loop doesn't run Actor_SpawnAsChild only to have
+// every result Actor_Kill'd by OnActorSpawn's non-host suppression
+// (logs 226: 171 wasted spawn cycles on peer over a single test).
+extern bool Anchor_IsCurrentRoomHost(void);
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_LOCK_ON_DISABLED)
 
@@ -223,6 +231,24 @@ void EnEncount1_SpawnTektites(EnEncount1* this, PlayState* play) {
 }
 
 void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
+    // SoH multiplayer: early-return on non-room-host. Without this gate,
+    // peer's En_Encount1 instance ran the full spawn loop, called
+    // Actor_SpawnAsChild for each iteration, and OnActorSpawn (Anchor's
+    // dynamic-spawn hook) immediately Actor_Kill'd every spawned actor
+    // via the non-host-suppression branch. Logs 226: peer logged 171
+    // Stalchild spawn-events vs host's 14 over a single test — every
+    // peer spawn was wasted CPU + a brief render of a doomed actor.
+    //
+    // Returning early here skips the loop entirely on peer; host's
+    // authoritative spawns reach peer through the standard ENEMY_SPAWN
+    // packet (HandlePacket_EnemySpawn sets isSpawningNetworkActor=true,
+    // bypassing the suppression). Anchor_IsCurrentRoomHost falls back
+    // to true when Anchor is disabled / disconnected, so single-player
+    // and pre-handshake behavior matches vanilla.
+    if (!Anchor_IsCurrentRoomHost()) {
+        return;
+    }
+
     Player* localPlayer = GET_PLAYER(play);
     Player* player = localPlayer;
     f32 spawnDist;
