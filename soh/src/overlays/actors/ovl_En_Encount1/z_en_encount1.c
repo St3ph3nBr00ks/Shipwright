@@ -319,11 +319,52 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
         // total); each kill opens a slot for that same player on the
         // next cycle.
         const int kPerPlayerBudget = 2;
+        const f32 kPerPlayerRadius = 400.0f;  // count Stalchildren this close
+                                              // to the target as "belonging
+                                              // to" that player. Spawn radius
+                                              // is 100-220u, so 400u catches
+                                              // them mid-walk before they
+                                              // wander too far.
         const int numIterPlayers = (play->sceneNum == SCENE_HYRULE_FIELD) ? numFieldPlayers : 1;
         for (int playerIdx = 0; playerIdx < numIterPlayers; playerIdx++) {
             Actor* targetPlayer = (play->sceneNum == SCENE_HYRULE_FIELD) ? fieldPlayers[playerIdx] : &localPlayer->actor;
+
+            // SoH multiplayer: skip iter if the target is at the
+            // out-of-scene sentinel position. DummyPlayer_Update sets
+            // world.pos to (-9999,-9999,-9999) when peer is in a
+            // different scene OR before peer's first PLAYER_UPDATE
+            // arrives. Without this skip, the first cycle after scene
+            // entry produced spawns at the sentinel position (logs 222
+            // / 223 #91 Bug 1 first-cycle observation: 4 spawns
+            // landed at (-9795,-9999,-9987) etc. when peer's
+            // DummyPlayer hadn't loaded yet).
+            if (play->sceneNum == SCENE_HYRULE_FIELD && targetPlayer->world.pos.y <= -9000.0f) {
+                continue;
+            }
+
+            // SoH multiplayer: count Stalchildren currently near this
+            // player and skip iteration if the per-player cap is
+            // already reached. Without this, when peer's Stalchildren
+            // die but host's don't, the next cycle spawns 2 more at
+            // host (iter 0 hits global cap = 2*N, iter 1 skipped) —
+            // host accumulates up to N*2 while peer has 0 (logs 223
+            // #91 Bug 1 mid-night clusters). Count is over the active
+            // ACTORCAT_ENEMY list so it sees Stalchildren produced by
+            // any spawner, not just children of this one.
+            int aliveNearPlayer = 0;
+            if (play->sceneNum == SCENE_HYRULE_FIELD) {
+                Actor* enemy = play->actorCtx.actorLists[ACTORCAT_ENEMY].head;
+                while (enemy != NULL) {
+                    if (enemy->id == ACTOR_EN_SKB &&
+                        Math_Vec3f_DistXZ(&enemy->world.pos, &targetPlayer->world.pos) < kPerPlayerRadius) {
+                        aliveNearPlayer++;
+                    }
+                    enemy = enemy->next;
+                }
+            }
+            const int playerBudget = kPerPlayerBudget - aliveNearPlayer;
             int spawnedThisPlayer = 0;
-            while (spawnedThisPlayer < kPerPlayerBudget &&
+            while (spawnedThisPlayer < playerBudget &&
                    ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
                     (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15))) {
 
