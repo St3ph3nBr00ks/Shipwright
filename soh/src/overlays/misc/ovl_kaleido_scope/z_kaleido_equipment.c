@@ -897,7 +897,17 @@ void KaleidoScope_DrawEquipment(PlayState* play) {
     // gSPSegment(POLY_OPA_DISP++, 0x0C, pauseCtx->iconItemAltSegment);
 
     Gfx_SetupDL_42Opa(play->state.gfxCtx);
-    KaleidoScope_DrawEquipmentImage(play, pauseCtx->playerSegment, PAUSE_EQUIP_PLAYER_WIDTH, PAUSE_EQUIP_PLAYER_HEIGHT);
+    // #182 Phase 2 (follow-up): also skip the gPauseLinkFrameBuffer blit
+    // when live-world is on. The DrawPlayerWork early-return above stops
+    // RENDERING into gPauseLinkFrameBuffer, but DrawEquipmentImage's
+    // gDPSetTextureImageFB call (line 85) reads FROM that framebuffer
+    // when blitting to the equipment-screen quad — without this gate,
+    // it displays the last frame's contents (stale rotating-Link from
+    // a prior pause, or framebuffer init garbage). Test 52 reproduced
+    // the missed blit: rotating-Link still visible with the CVar on.
+    if (!Anchor_PauseLiveWorldRendering()) {
+        KaleidoScope_DrawEquipmentImage(play, pauseCtx->playerSegment, PAUSE_EQUIP_PLAYER_WIDTH, PAUSE_EQUIP_PLAYER_HEIGHT);
+    }
 
     if (gUpgradeMasks[0]) {}
 
