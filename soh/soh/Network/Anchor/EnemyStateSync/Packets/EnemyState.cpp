@@ -1330,6 +1330,33 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     return;
                 }
 
+                // En_Hintnuts: when peer's local Leave kill block fires
+                // first (peer's projectedPos.z<0 trigger arrives before
+                // peer's animFlagAndTimer reaches 0, beating host's local
+                // Leave kill), peer broadcasts ENEMY_DEFEATED. The
+                // generic Actor_Kill below removes host's #3 hintnut
+                // before host's local Leave actionFunc reaches its kill
+                // block — so host never runs `if (params==3) sPuzzleCounter
+                // = 3` (z_en_hintnuts.c:469-472). Without sPuzzleCounter
+                // hitting 3 on host, hintnuts #1 and #2 stay frozen
+                // forever in vanilla Freeze actionFunc (z_en_hintnuts.c:
+                // 487-495), and host's hintnutsPuzzleCounter broadcasts
+                // overwrite peer's local 3 back to 2 — both clients leave
+                // #1/#2 stunned in place (logs 217).
+                //
+                // Apply Leave's puzzle-completion side effects on host
+                // before the kill: sPuzzleCounter = 3 advances host's
+                // local Freeze actionFunc to its sink+Actor_Kill path;
+                // Flags_SetClear mirrors the room-clear flag (also
+                // replicates via SET_FLAG sync from peer's Leave, but
+                // we set it locally for ordering parity).
+                if (actor->id == ACTOR_EN_HINTNUTS && actor->params == 3) {
+                    EnHintnuts_SetPuzzleCounter(3);
+                    Flags_SetClear(gPlayState, actor->room);
+                    SPDLOG_INFO("[EnemyDefeated] Hintnut #3 netId={} — puzzle complete (sPuzzleCounter=3, room clear flag set)",
+                                netId);
+                }
+
                 SPDLOG_INFO("[EnemyDefeated] Killing actor id={} netId={}", actor->id, netId);
                 isKillingNetworkActor = true;
                 Actor_Kill(actor);
