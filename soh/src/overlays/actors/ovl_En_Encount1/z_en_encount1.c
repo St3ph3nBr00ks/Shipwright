@@ -347,7 +347,24 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
                         targetPlayer->world.pos.z + (Math_CosS(spawnAngle) * spawnDist) + Rand_CenteredFloat(40.0f);
                     floorY = BgCheck_EntityRaycastFloor4(&play->colCtx, &floorPoly, &bgId, &this->actor, &spawnPos);
                     if (floorY <= BGCHECK_Y_MIN) {
-                        break;  // skip this player; floor not found
+                        // Raycast failed — Hyrule Field uses dynamic
+                        // collision regions tied to the camera/scene
+                        // origin, so positions far from this spawner's
+                        // location may not have an active collision
+                        // mesh. Fall back to the target player's own
+                        // world.pos.y; for DummyPlayer this is peer's
+                        // broadcasted ground position (peer's local Link
+                        // already passed Actor_UpdateBgCheckInfo before
+                        // sending), and for local Link it's the actual
+                        // floor. Without this fallback, far-away
+                        // DummyPlayers got zero spawns while host got 4
+                        // per cycle (logs 221).
+                        LUSLOG_INFO("[En_Encount1] Stalchild raycast miss for targetIdx=%d/%d "
+                                    "spawnPos=(%.0f,%.0f,%.0f) — falling back to target Y=%.0f",
+                                    playerIdx, numIterPlayers,
+                                    spawnPos.x, spawnPos.y, spawnPos.z,
+                                    targetPlayer->world.pos.y);
+                        floorY = targetPlayer->world.pos.y;
                     }
                     if ((localPlayer->actor.yDistToWater != BGCHECK_Y_MIN) &&
                         (floorY < (localPlayer->actor.world.pos.y +
