@@ -48,6 +48,25 @@ bool Anchor_ShouldAdvanceWorldTime(int contextEnum);
 // retire other direct pauseCtx.state reads as they're identified.
 bool Anchor_PauseMenuFreezesWorld(void);
 
+// Returns true iff the live-world pause-menu rendering feature is active
+// this frame: multiplayer is on (Anchor enabled), the pause menu is up,
+// AND the gAnchor.PauseLiveWorld CVar is set.
+//
+// When this returns true, the rendering pipeline should:
+//   - skip pause-Link init (func_80091738 DMA stomp + gSegments[4]/[6]
+//     override) so the world's object bank stays intact;
+//   - skip the rotating-Link draw in the equipment screen;
+//   - skip the mode-3 captured-frame backdrop (z_play.c:1504-1513);
+//   - allow DummyPlayer_Draw to run during pause (peer visibility).
+//
+// All four call sites gate on this single predicate so the CVar acts as
+// an atomic enable/disable for the whole feature. Default-off ships the
+// current safe behaviour (DummyPlayer hidden, captured-frame shown,
+// pause-Link rotates).
+//
+// CVar: gAnchor.PauseLiveWorld (integer, default 0).
+bool Anchor_PauseLiveWorldRendering(void);
+
 #ifdef __cplusplus
 }
 #endif

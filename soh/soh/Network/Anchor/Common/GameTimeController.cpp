@@ -2,6 +2,9 @@
 #include "GameTimeControllerBridge.h"
 #include "soh/Network/Anchor/Anchor.h"  // ::Anchor::Instance / isEnabled
                                         // (also pre-loads libultraship.h + z64.h)
+#include "soh/cvar_prefixes.h"          // CVAR_REMOTE_ANCHOR for live-world toggle
+
+#include <libultraship/bridge/consolevariablebridge.h>  // CVarGetInteger
 
 extern "C" {
 #include "macros.h"
@@ -75,4 +78,25 @@ extern "C" bool Anchor_ShouldAdvanceWorldTime(int contextEnum) {
 extern "C" bool Anchor_PauseMenuFreezesWorld(void) {
     return !GameTimeController::ShouldAdvanceWorldTime(
         GameTimeController::TimeContext::PauseMenu);
+}
+
+// Tracker #182. Returns true when the live-world pause-menu rendering
+// feature should activate this frame. Composition:
+//   - Multiplayer is active (Anchor enabled).
+//   - Pause UI is open (pauseCtx.state != 0). Equivalently, the world-
+//     time gate above has flipped — Anchor_PauseMenuFreezesWorld() is
+//     false because we're in MP-during-pause.
+//   - The gAnchor.PauseLiveWorld CVar is set (default 0).
+//
+// All four pause-rendering gates (kaleido pause-Link init, equipment-
+// screen rotating-Link draw, z_play.c mode-3 captured-frame backdrop,
+// DummyPlayer_Draw early-return) consult this single predicate so the
+// CVar acts as an atomic on/off for the feature. Default-off ships
+// current safe behaviour while the rendering work soaks for one
+// release cycle.
+extern "C" bool Anchor_PauseLiveWorldRendering(void) {
+    if (gPlayState == nullptr) return false;
+    if (gPlayState->pauseCtx.state == 0) return false;  // pause UI not open
+    if (::Anchor::Instance == nullptr || !::Anchor::Instance->isEnabled) return false;
+    return CVarGetInteger(CVAR_REMOTE_ANCHOR("PauseLiveWorld"), 0) != 0;
 }
