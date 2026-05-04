@@ -613,8 +613,11 @@ void SohMenu::AddMenuSettings() {
             }
         });
 
-    // Voice Pack — UI only. Saves selection to CVAR_REMOTE_ANCHOR("AudioMod") and syncs it
-    // via UPDATE_CLIENT_STATE. Actual audio replacement is a no-op until the backend task lands.
+#if 0
+    // Voice Pack and Player Pronouns UI hidden until both systems are proven viable.
+    // Voice Pack backend (Pillar B2) is not yet implemented — selection saved but no audio swap.
+    // Pronoun system replacer works but verb agreement is not handled and feasibility for full
+    // dialogue coverage is unproven. Re-enable when the backend / linguistic coverage lands.
     AddWidget(path, "Voice Pack", WIDGET_CUSTOM)
         .HideInSearch(true)
         .CustomFunction([](WidgetInfo& info) {
@@ -638,7 +641,6 @@ void SohMenu::AddMenuSettings() {
                              (const char* const*)displayNames.data(), (int)displayNames.size())) {
                 CVarSetString(CVAR_REMOTE_ANCHOR("AudioMod"), mods[currentIdx].c_str());
                 Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-                // Audio loading: placeholder — backend task (B2) not yet implemented
                 if (anchor && anchor->isConnected) {
                     anchor->SendPacket_UpdateClientState();
                 }
@@ -657,6 +659,7 @@ void SohMenu::AddMenuSettings() {
                      .Tooltip("Replaces gendered pronouns referring to the player character in all in-game dialogue.\n"
                               "Works at message display time — takes effect immediately without reloading.\n"
                               "Note: verb agreement (e.g. 'they are' vs 'he is') is not automatically adjusted."));
+#endif
 }
 
 } // namespace SohGui
