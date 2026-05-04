@@ -10,6 +10,9 @@
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// Anchor multiplayer: nearest-player lookup (returns local player when not connected).
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS                                                                                  \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_UPDATE_DURING_OCARINA)
@@ -700,7 +703,15 @@ void EnMd_Watch(EnMd* this, PlayState* play) {
 void EnMd_BlockPath(EnMd* this, PlayState* play) {
     Player* player = GET_PLAYER(play);
     f32 temp;
-    Actor* actorToBlock = &GET_PLAYER(play)->actor;
+    // Anchor multiplayer #184 follow-up: Mido positions himself between
+    // his home and the player he's blocking (60-unit offset toward that
+    // player). Vanilla used GET_PLAYER (local Link only) — in MP this
+    // meant host's Mido shifted toward host, leaving non-host's local
+    // Link able to walk past from a different angle. Use the nearest-
+    // player helper so host's authoritative position tracks whichever
+    // team member is closest. Returns local Link when Anchor is off, so
+    // single-player path is unchanged.
+    Actor* actorToBlock = Anchor_GetNearestPlayerActor(&this->actor, play);
     s16 yaw;
 
     EnMd_UpdateAnimSequence_WithTalking(this);
