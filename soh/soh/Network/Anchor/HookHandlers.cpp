@@ -3689,6 +3689,42 @@ void Anchor::RegisterHooks() {
         AnchorSync::SetActorSyncScope(actor, AnchorSync::ActorSyncScope::Team);
     });
 
+    // Generic NPC State Sync Phase 2 — Inside Deku Tree B1 floating
+    // platform (#185 primary concern).
+    //
+    // `Bg_Ydan_Hasi` covers three param-variants in one actor type:
+    //   - HASI_WATER: water-plane controller (raises / lowers per the
+    //     switch flag this->type, calls Flags_GetSwitch). Already
+    //     visually-synced via existing SoH puzzle-completion / flag
+    //     replication; this addition smooths the rising/falling
+    //     animation phase between clients.
+    //   - HASI_WATER_BLOCK: floating platform that rides the water
+    //     plane. **Primary fix target** — without sync each client
+    //     locally computed position from `play->gameplayFrames`, and
+    //     small per-client tick-rate divergence put the platform in
+    //     visibly different places on each screen, breaking the puzzle.
+    //   - 3-blocks-2F: countdown-timer-driven reveal. Already visually-
+    //     synced via existing flag replication; addition is additive
+    //     smoothing.
+    //
+    // Per-frame world.pos + shape.rot broadcast via the standard
+    // ENEMY_STATE path covers all three variants. Scope = Global —
+    // puzzle state is world-canon (teams shouldn't have different
+    // water levels).
+    //
+    // `Bg_Ydan_Maruta` (rotating spike log + falling ladder) is
+    // deliberately NOT included in this phase. Spike-log damage volume
+    // is at world.pos which doesn't move; rotation phase is cosmetic.
+    // Falling ladder transitions on Flags_SetSwitch which already
+    // syncs. Can be added later if field testing surfaces visible
+    // drift — the same single-line addition to IsSyncedWorldActor +
+    // an OnActorInit hook here is all it takes.
+    COND_ID_HOOK(OnActorInit, ACTOR_BG_YDAN_HASI, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor == nullptr) return;
+        AnchorSync::SetActorSyncScope(actor, AnchorSync::ActorSyncScope::Global);
+    });
+
     // Host sends enemy positions every frame to all clients in the same scene.
     COND_HOOK(OnActorUpdate, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);

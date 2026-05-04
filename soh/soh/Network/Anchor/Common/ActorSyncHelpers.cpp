@@ -14,6 +14,26 @@ extern SaveContext gSaveContext;
 }
 
 SkelAnime* GetEnemySkelAnime(Actor* actor) {
+    // Known non-skeletal actor types — return nullptr without probing the
+    // memory at offset 0x14C. The generic limbCount heuristic below can
+    // false-positive on DynaPolyActor variants: at the SkelAnime offset
+    // they store `dyna.bgId` (s32), and when bgId byte 0 happens to be a
+    // small positive value (e.g. Bg_Ydan_Hasi observed as 2) the bogus
+    // limbCount passes the range check while the bogus `jointTable`
+    // points at heap memory past end-of-struct. ENEMY_STATE serialize
+    // then dereferences that garbage pointer → access violation.
+    // Obj_Oshihiki / Bg_Heavy_Block / En_Ishi happened to bypass the
+    // heuristic correctly only because their bgId byte 0 was 0.
+    switch (actor->id) {
+        case ACTOR_BG_YDAN_HASI:
+        case ACTOR_BG_HEAVY_BLOCK:
+        case ACTOR_OBJ_OSHIHIKI:
+        case ACTOR_EN_ISHI:
+        case ACTOR_EN_GOROIWA:
+            return nullptr;
+        default: break;
+    }
+
     // Explicit exceptions: enemies with fields between Actor and SkelAnime.
     switch (actor->id) {
         case ACTOR_EN_DEKUBABA: return &((EnDekubaba*)actor)->skelAnime;
@@ -42,6 +62,8 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
         case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
         case ACTOR_EN_MD:       return true;  // #184 Mido (Generic NPC State Sync Phase 1, Team scope)
+        case ACTOR_BG_YDAN_HASI: return true;  // #185 Inside Deku Tree B1 floating platform (Phase 2, Global scope; HASI_WATER_BLOCK variant is the primary concern, but the actor-id allowlist also covers HASI_WATER + 2F blocks variants — flag-sync handles their state already, world.pos broadcast is additive smoothing).
+        // ACTOR_BG_YDAN_MARUTA (rotating spike log + falling ladder) deliberately NOT in this allowlist. The spike log's damage volume is at world.pos which doesn't move; rotation phase is cosmetic. Falling ladder transitions on Flags_SetSwitch which already syncs. Add later if visible drift surfaces in field testing.
         case ACTOR_EN_HINTNUTS: return true;  // Compound Room puzzle scrubs.
                                               // State-machine sync is HOST-AUTHORITATIVE
                                               // (room host runs the AI; peers receive
