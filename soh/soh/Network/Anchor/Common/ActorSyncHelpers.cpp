@@ -41,6 +41,7 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
         case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
         case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
+        case ACTOR_EN_MD:       return true;  // #184 Mido (Generic NPC State Sync Phase 1, Team scope)
         case ACTOR_EN_HINTNUTS: return true;  // Compound Room puzzle scrubs.
                                               // State-machine sync is HOST-AUTHORITATIVE
                                               // (room host runs the AI; peers receive

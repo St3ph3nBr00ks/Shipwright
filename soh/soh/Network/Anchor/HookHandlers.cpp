@@ -3,6 +3,7 @@
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
 #include "Common/PauseLinkBuffer.h"   // Anchor_IsDrawingPauseLink (#182 follow-up)
+#include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
 #include <libultraship/libultraship.h>
@@ -3666,6 +3667,28 @@ void Anchor::RegisterHooks() {
                     (void*)actor, (int)actor->category);
     });
 
+    // Generic NPC State Sync Phase 1 — Mido (#184) declares Team scope.
+    // Per Plans/generic_npc_state_sync.md §10 (locked answer Q1+Q2),
+    // each NPC instance opts into syncing at Init time. Mido is team-
+    // scoped: a quest-progression NPC whose state should diverge across
+    // teams. Phase 0 framework reads scope on the send-side (skip emit
+    // for None) and applies the receive-side team filter for "team"-
+    // scoped packets.
+    //
+    // Note: Phase 1 does NOT yet wire host-emit / non-host-emit logic
+    // for full state-machine sync. Today the actual #184 fix is the
+    // VB_MOVE_MIDO_IN_KOKIRI_FOREST hook below (each client transitions
+    // independently when the synced EVENTCHKINF flag is set). The
+    // scope declaration here is informational for the framework so a
+    // future phase can wire peer-to-peer state sync without per-actor
+    // changes. EnMd_GetStateIndex / EnMd_ApplyNetState in z_en_md.{h,c}
+    // are the framework primitives those future-phase wiring will use.
+    COND_ID_HOOK(OnActorInit, ACTOR_EN_MD, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor == nullptr) return;
+        AnchorSync::SetActorSyncScope(actor, AnchorSync::ActorSyncScope::Team);
+    });
+
     // Host sends enemy positions every frame to all clients in the same scene.
     COND_HOOK(OnActorUpdate, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
@@ -4866,6 +4889,32 @@ void Anchor::RegisterHooks() {
         BgHidanDalm* actor = va_arg(args, BgHidanDalm*);
 
         if (Flags_GetSwitch(gPlayState, actor->switchFlag)) {
+            *should = true;
+        }
+    });
+
+    // Generic NPC State Sync Phase 1 — Mido (#184).
+    // Vanilla `EnMd_BlockPath` (z_en_md.c:724-726) gates the BlockPath ->
+    // Walk transition on `talkState == NPC_TALK_STATE_ACTION` (the local
+    // dialogue just concluded with the sword+shield-satisfied result).
+    // In MP, only the player who actually had the dialogue with Mido has
+    // their local talkState set; the OTHER team member's local Mido stays
+    // in BlockPath because the dialogue never ran on their machine.
+    //
+    // Vanilla code already sets `EVENTCHKINF_SHOWED_MIDO_SWORD_SHIELD`
+    // at z_en_md.c:735 inside the same transition branch. That save flag
+    // syncs to all team members via the existing SyncItemsAndFlags +
+    // SetFlag mechanism (Pillar 0). On every client, the flag becomes
+    // set within a frame or two of the originating client's transition.
+    //
+    // This hook returns true for `VB_MOVE_MIDO_IN_KOKIRI_FOREST` whenever
+    // the flag is set, so each team member's local Mido transitions to
+    // Walk independently (vanilla flow runs on each client) once any one
+    // of them has satisfied sword+shield. No per-frame state-machine
+    // sync packet needed — the flag-sync pre-existing infrastructure is
+    // load-bearing here.
+    COND_VB_SHOULD(VB_MOVE_MIDO_IN_KOKIRI_FOREST, isConnected, {
+        if (Flags_GetEventChkInf(EVENTCHKINF_SHOWED_MIDO_SWORD_SHIELD)) {
             *should = true;
         }
     });

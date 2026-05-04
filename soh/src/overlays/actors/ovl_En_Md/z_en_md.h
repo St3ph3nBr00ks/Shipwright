@@ -28,4 +28,13 @@ typedef struct EnMd {
     /* 0x02BE */ Vec3s morphTable[17];
 } EnMd; // size = 0x0324
 
+// Anchor multiplayer state-machine sync (Generic NPC State Sync Phase 1, #184).
+// 4-bucket encoding of Mido's actionFunc state:
+//   0x00 — Idle / Watch (catch-all non-progressing)
+//   0x01 — BlockPath (gating Kokiri Forest entrance)
+//   0x02 — ListenToOcarina
+//   0x03 — Walk (transitioning aside after sword+shield satisfied)
+u8   EnMd_GetStateIndex(struct EnMd* this);
+void EnMd_ApplyNetState(struct EnMd* this, PlayState* play, u8 stateIndex);
+
 #endif
