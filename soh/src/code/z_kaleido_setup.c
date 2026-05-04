@@ -1,4 +1,5 @@
 #include "global.h"
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 
 s16 sKaleidoSetupKscpPos0[] = { PAUSE_QUEST, PAUSE_EQUIP, PAUSE_ITEM, PAUSE_MAP };
 f32 sKaleidoSetupEyeX0[] = { 0.0f, 64.0f, 0.0f, -64.0f };
@@ -57,7 +58,18 @@ void KaleidoSetup_Update(PlayState* play) {
 
         if (pauseCtx->state == 1) {
             WREG(2) = -6240;
-            R_UPDATE_RATE = 2;
+            // #182 Phase 2.5 follow-up: vanilla bumps R_UPDATE_RATE from 3
+            // to 2 when pause opens (60/2=30fps logic vs 60/3=20fps), to
+            // make the rotating-Link / camera-zoom kaleido animation
+            // smoother while world is frozen. With live-world rendering
+            // on, the world keeps simulating — bumping R_UPDATE_RATE
+            // makes ALL world simulation 50% faster (Goroiwa rolls
+            // faster, scrolling textures advance faster, animation
+            // plays faster). Skip the bump when live-world is on so
+            // the simulation stays at vanilla 20fps logic.
+            if (!Anchor_PauseLiveWorldRendering()) {
+                R_UPDATE_RATE = 2;
+            }
 
             if (ShrinkWindow_GetVal()) {
                 ShrinkWindow_SetVal(0);
