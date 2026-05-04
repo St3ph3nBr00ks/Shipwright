@@ -1,6 +1,7 @@
 #include "global.h"
 #include "vt.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 
 void (*sKaleidoScopeUpdateFunc)(PlayState* play);
 void (*sKaleidoScopeDrawFunc)(PlayState* play);
@@ -13,6 +14,24 @@ extern void KaleidoScope_Draw(PlayState* play);
 
 void KaleidoScopeCall_LoadPlayer() {
     KaleidoMgrOverlay* playerActorOvl = &gKaleidoMgrOverlayTable[KALEIDO_OVL_PLAYER_ACTOR];
+    KaleidoMgrOverlay* kaleidoScopeOvl = &gKaleidoMgrOverlayTable[KALEIDO_OVL_KALEIDO_SCOPE];
+
+    // #182 Phase 2.5 Option B2: when live-world rendering is on, every
+    // PlayerCall_Update / PlayerCall_Draw fires this function (z_player_call.c
+    // wraps Player_* with KaleidoScopeCall_LoadPlayer for N64-era overlay
+    // bookkeeping). Vanilla never hits this during pause because the mode-3
+    // backdrop short-circuits past world render. With B2 the world keeps
+    // rendering, so without this guard the kaleido_scope overlay gets
+    // swapped out to player_actor every frame, KaleidoScopeCall_Draw's
+    // gate-3 fails, KaleidoScope_Draw never runs, InitVertices never
+    // allocates cursorVtx, and UpdateCursorSize derefs uninitialised
+    // memory next frame. Skipping the swap is safe on PC because
+    // KaleidoManager_GetRamAddr is identity (z_kaleido_manager.c:85-87) —
+    // sPlayerCall*Func pointers work regardless of which overlay slot is
+    // marked "current".
+    if (Anchor_PauseLiveWorldRendering() && gKaleidoMgrCurOvl == kaleidoScopeOvl) {
+        return;
+    }
 
     if (gKaleidoMgrCurOvl != playerActorOvl) {
         if (gKaleidoMgrCurOvl != NULL) {
