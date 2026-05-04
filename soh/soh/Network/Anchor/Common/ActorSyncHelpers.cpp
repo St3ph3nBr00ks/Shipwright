@@ -30,6 +30,7 @@ SkelAnime* GetEnemySkelAnime(Actor* actor) {
         case ACTOR_OBJ_OSHIHIKI:
         case ACTOR_EN_ISHI:
         case ACTOR_EN_GOROIWA:
+        case ACTOR_OBJ_SYOKUDAI:
             return nullptr;
         default: break;
     }
@@ -64,6 +65,7 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_MD:       return true;  // #184 Mido (Generic NPC State Sync Phase 1, Team scope)
         case ACTOR_BG_YDAN_HASI: return true;  // #185 Inside Deku Tree B1 floating platform (Phase 2, Global scope; HASI_WATER_BLOCK variant is the primary concern, but the actor-id allowlist also covers HASI_WATER + 2F blocks variants — flag-sync handles their state already, world.pos broadcast is additive smoothing).
         // ACTOR_BG_YDAN_MARUTA (rotating spike log + falling ladder) deliberately NOT in this allowlist. The spike log's damage volume is at world.pos which doesn't move; rotation phase is cosmetic. Falling ladder transitions on Flags_SetSwitch which already syncs. Add later if visible drift surfaces in field testing.
+        case ACTOR_OBJ_SYOKUDAI: return true;  // Per-torch lit-state sync. Existing puzzle-completion `Flags_SetSwitch` covers "all torches lit"; this admits per-instance `litTimer` so partial puzzle progress (P1 lit 2 of 4) is visible to P2. Global scope.
         case ACTOR_EN_HINTNUTS: return true;  // Compound Room puzzle scrubs.
                                               // State-machine sync is HOST-AUTHORITATIVE
                                               // (room host runs the AI; peers receive

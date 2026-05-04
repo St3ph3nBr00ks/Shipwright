@@ -3725,6 +3725,21 @@ void Anchor::RegisterHooks() {
         AnchorSync::SetActorSyncScope(actor, AnchorSync::ActorSyncScope::Global);
     });
 
+    // Per-torch lit-state sync (Obj_Syokudai). Each torch instance gets
+    // Global scope so partial multi-torch puzzle progress (P1 lit 2 of
+    // 4 torches) is visible to all peers regardless of team.
+    //
+    // Vanilla `Flags_SetSwitch(switchFlag)` already replicates the
+    // "puzzle complete → all torches permanently lit" terminal state
+    // via WORLD_FLAG_SET. This addition fills the gap for individual
+    // torch transitions before completion (Deku Stick light → s16
+    // litTimer countdown → Flags_SetSwitch on completion).
+    COND_ID_HOOK(OnActorInit, ACTOR_OBJ_SYOKUDAI, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor == nullptr) return;
+        AnchorSync::SetActorSyncScope(actor, AnchorSync::ActorSyncScope::Global);
+    });
+
     // Host sends enemy positions every frame to all clients in the same scene.
     COND_HOOK(OnActorUpdate, isConnected, [&](void* refActor) {
         Actor* actor = static_cast<Actor*>(refActor);
@@ -3774,6 +3789,25 @@ void Anchor::RegisterHooks() {
             // No re-apply path here — HandlePacket_EnemyUpdate writes
             // actor->world.pos directly when packets arrive (now
             // unconditionally for push blocks, including on the host).
+            return;
+        }
+
+        // Per-torch lit-state sync (Obj_Syokudai) — bidirectional. Either
+        // client can light a torch with their Deku Stick; both must see
+        // every other client's lightings so mixed-lighting puzzles
+        // (P1 lights 2, P2 lights 2) auto-complete via the receive-side
+        // puzzle-complete scan in HandlePacket_EnemyState.
+        //
+        // Bandwidth: ExtrasDiffer for syokudai uses category buckets
+        // (unlit / burning / permanently lit), not per-frame value, so
+        // the steady "burning, counting down" state generates zero
+        // packets. Only category transitions broadcast.
+        if (actor->id == ACTOR_OBJ_SYOKUDAI) {
+            const EnemyNetId* ext =
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+            if (ext != nullptr) {
+                SendPacket_EnemyUpdate(ext->netId, actor);
+            }
             return;
         }
 
@@ -4034,6 +4068,25 @@ void Anchor::RegisterHooks() {
             if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) && !karebabaDormantOverride) {
                 actor->scale = ext->netScale;
             }
+
+            // Per-torch lit-state sync (Obj_Syokudai) — no post-update
+            // re-apply needed. Host broadcasts on litTimer category
+            // transitions only (unlit → burning → permanently lit);
+            // the receive site (HandlePacket_EnemyState) writes
+            // torch->litTimer directly, then peer's local
+            // ObjSyokudai_Update decrements naturally each frame at
+            // the same 20fps rate as host. Both clients converge to
+            // the same value at the same time without per-frame
+            // packets.
+            //
+            // Peer's local Deku-Stick lighting still sets litTimer
+            // independently — peer sees its own lighting visually,
+            // the puzzle's `Flags_SetSwitch` completion path syncs
+            // via WORLD_FLAG_SET when sLitTorchCount reaches the
+            // threshold on whichever client is actually lighting the
+            // torches. For demo: typical playstyle is one player
+            // drives the puzzle while the other observes; the partial
+            // progress visibility is the primary fix.
 
             // Karebaba state machine sync: if the host's current state differs from ours,
             // drive the local actor into the matching state. Called after update() so any

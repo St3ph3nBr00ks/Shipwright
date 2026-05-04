@@ -24,14 +24,14 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"DAMAGE_PLAYER", 1},
     {"DISABLE_ANCHOR", 1},
     {"ENEMY_HIT_PLAYER", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
-    {"ENEMY_STATE", 2},  // bump-history: 1 (Pillar C2 Phase 4 — unified enemy lifecycle), 2 (Generic NPC State Sync Phase 0 — added "scope" field).
+    {"ENEMY_STATE", 3},  // bump-history: 1 (Pillar C2 Phase 4 — unified enemy lifecycle), 2 (Generic NPC State Sync Phase 0 — added "scope" field), 3 (per-torch lit-state sync — added "syokudaiLitTimer" field).
     {"ENTRANCE_DISCOVERED", 1},
     {"GAME_COMPLETE", 1},
     {"GIVE_ITEM", 1},
     {"HANDSHAKE", 1},
     {"OCARINA_SFX", 1},
     {"PLAYER_SFX", 1},
-    {"PLAYER_UPDATE", 1},
+    {"PLAYER_UPDATE", 2},  // bumped for unk_860 (Deku-Stick burning timer) — drives remote flame VFX.
     {"REQUEST_TEAM_STATE", 1},
     {"REQUEST_TELEPORT", 1},
     {"SCENE_ACTOR_NETIDS", 1},  // KB-18 (#177) Option 4 — host-authoritative netId snapshot.

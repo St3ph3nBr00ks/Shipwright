@@ -6,6 +6,7 @@
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/resource/type/Skeleton.h"
 #include <libultraship/libultraship.h>
+#include <climits>
 #include <queue>
 #include <mutex>
 #include <unordered_map>
@@ -96,6 +97,15 @@ struct EnemyNetId {
     s16 goroiwaNextWaypoint    = -1;
     s16 goroiwaPathDirection   = 0; // ±1; 0 means uninitialized
     u8  goroiwaFlags           = 0; // ENGOROIWA_* bitmask (PLAYER_IN_THE_WAY etc.)
+
+    // Per-torch lit-state sync (Obj_Syokudai). Host-authoritative.
+    // -1 = permanently lit, 0 = unlit, >0 = remaining-burn-frames.
+    // Cached at receive time and re-applied every frame in OnActorUpdate
+    // so peer's local ObjSyokudai_Update can run normally (the local
+    // body's writes to litTimer are overwritten post-update).
+    // INT16_MIN sentinel = no host state received yet (fall through to
+    // local AI, vanilla single-player parity).
+    s16 syokudaiLitTimer = INT16_MIN;
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
@@ -159,6 +169,11 @@ typedef struct AnchorClient {
     u8 modelGroup;
     s8 invincibilityTimer;
     f32 unk_85C;
+    // Deku-Stick burning timer (Player.unk_860). 0 = unlit, >0 = burning
+    // and counting down. Synced separately from unk_85C (which is a
+    // visual scale field that stays at 1.0 for held-but-unlit sticks).
+    // Used by DummyPlayer_Update to gate the burning-stick flame VFX.
+    s16 unk_860;
     s16 unk_862;
     s8 actionVar1;
     u8 ocarinaNote;

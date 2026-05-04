@@ -66,6 +66,7 @@ void Anchor::SendPacket_PlayerUpdate() {
     payload["invincibilityTimer"] = player->invincibilityTimer;
     payload["unk_862"] = player->unk_862;
     payload["unk_85C"] = player->unk_85C;
+    payload["unk_860"] = player->unk_860;  // Deku-Stick burning timer
     payload["actionVar1"] = player->av1.actionVar1;
     payload["quiet"] = true;
 
@@ -113,6 +114,7 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
         client.invincibilityTimer = payload.value("invincibilityTimer", (s8)0);
         client.unk_862 = payload.value("unk_862", (s16)0);
         client.unk_85C = payload.value("unk_85C", (f32)0);
+        client.unk_860 = payload.value("unk_860", (s16)0);
         client.actionVar1 = payload.value("actionVar1", (s8)0);
     }
 }

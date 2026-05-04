@@ -46,6 +46,9 @@ extern "C" {
 // is the local pusher, and peers need to suppress apply when they're the
 // local pusher (so received echoes don't overwrite their own progress).
 #include "overlays/actors/ovl_Obj_Oshihiki/z_obj_oshihiki.h"
+// Per-torch lit-state sync — host-authoritative `litTimer` so partial
+// multi-torch puzzle progress is visible across clients.
+#include "overlays/actors/ovl_Obj_Syokudai/z_obj_syokudai.h"
 extern PlayState* gPlayState;
 }
 
@@ -138,6 +141,13 @@ struct EnemyUpdateExtras {
     s16  bossGomaInvincibilityFrames  = 0;
     s16  bossGomaVisualState          = 0;
     s16  bossGomaEyeState             = 0;
+
+    // Per-torch lit-state sync (Obj_Syokudai). Host-authoritative
+    // `litTimer` for individual torches so partial multi-torch puzzle
+    // progress is visible to peers (vanilla Flags_SetSwitch covers
+    // "puzzle complete" but not "torch #2 of 4 lit").
+    bool hasSyokudai     = false;
+    s16  syokudaiLitTimer = 0;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -249,6 +259,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.bossGomaInvincibilityFrames     = bg->invincibilityFrames;
         e.bossGomaVisualState             = bg->visualState;
         e.bossGomaEyeState                = bg->eyeState;
+    } else if (actor->id == ACTOR_OBJ_SYOKUDAI) {
+        ObjSyokudai* torch  = (ObjSyokudai*)actor;
+        e.hasSyokudai       = true;
+        e.syokudaiLitTimer  = torch->litTimer;
     }
     return e;
 }
@@ -311,6 +325,23 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
         if (cur.bossGomaInvincibilityFrames != prev.bossGomaInvincibilityFrames) return true;
         if (cur.bossGomaVisualState         != prev.bossGomaVisualState)         return true;
         if (cur.bossGomaEyeState            != prev.bossGomaEyeState)            return true;
+    }
+    if (cur.hasSyokudai != prev.hasSyokudai) return true;
+    if (cur.hasSyokudai) {
+        // Only flag category transitions, not per-frame decrement.
+        // Both clients run ObjSyokudai_Update locally and decrement
+        // litTimer in lockstep; once the host's "lit transition" edge
+        // (0 → positive) lands on peer, peer's local decrement keeps
+        // pace without per-frame broadcasts. Categories:
+        //   <= 0       — unlit (or burnt out)
+        //   == -1      — permanently lit (puzzle complete)
+        //   >  0       — burning, counting down
+        auto bucket = [](s16 v) -> int {
+            if (v == -1) return 2;     // permanently lit
+            if (v >  0)  return 1;     // burning
+            return 0;                  // unlit
+        };
+        if (bucket(cur.syokudaiLitTimer) != bucket(prev.syokudaiLitTimer)) return true;
     }
     return false;
 }
@@ -586,6 +617,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         payload["bossGomaInvincibilityFrames"] = (int)extras.bossGomaInvincibilityFrames;
         payload["bossGomaVisualState"]         = (int)extras.bossGomaVisualState;
         payload["bossGomaEyeState"]            = (int)extras.bossGomaEyeState;
+    }
+
+    // Per-torch lit-state sync (Obj_Syokudai).
+    if (extras.hasSyokudai) {
+        payload["syokudaiLitTimer"] = (int)extras.syokudaiLitTimer;
     }
 
     if (ext != nullptr && ext->skelAnime != nullptr && ext->limbCount > 0) {
@@ -1075,6 +1111,54 @@ actor_found:
             if (payload.contains("goroiwaFlags")) {
                 ext->goroiwaFlags   = (u8)payload["goroiwaFlags"].get<int>();
                 boulder->stateFlags = ext->goroiwaFlags;
+            }
+        }
+
+        if (actor->id == ACTOR_OBJ_SYOKUDAI && payload.contains("syokudaiLitTimer")) {
+            ObjSyokudai* torch = (ObjSyokudai*)actor;
+            const s16 prevLit     = torch->litTimer;
+            ext->syokudaiLitTimer = (s16)payload["syokudaiLitTimer"].get<int>();
+            torch->litTimer       = ext->syokudaiLitTimer;
+
+            // Multi-torch puzzle auto-complete on bidirectional sync.
+            // Single-player code increments a static `sLitTorchCount`
+            // only when the LOCAL Deku-Stick lights a torch — torches
+            // lit via the network path don't bump it. So when P1 lights
+            // 2 torches and P2 lights 2 in a 4-torch puzzle, neither
+            // client's counter reaches 4 and `Flags_SetSwitch` never
+            // fires.
+            //
+            // Fix: when a torch transitions unlit → lit via network
+            // apply, scan the actor list for every Obj_Syokudai sharing
+            // this torch's puzzle switchFlag; if all of them are
+            // currently lit (litTimer != 0), fire Flags_SetSwitch
+            // directly. The flag replicates via WORLD_FLAG_SET, so all
+            // clients see the puzzle-complete state simultaneously.
+            //
+            // Idempotent — Flags_SetSwitch is a no-op if already set.
+            const bool wasUnlit  = (prevLit == 0);
+            const bool isLit     = (torch->litTimer != 0);
+            const s32 switchFlag = torch->actor.params & 0x3F;
+            const s32 torchCount = (torch->actor.params >> 6) & 0xF;
+            const s32 torchType  = torch->actor.params & 0xF000;
+            if (wasUnlit && isLit && torchCount > 0 && torchType != 0 &&
+                gPlayState != nullptr && !Flags_GetSwitch(gPlayState, switchFlag)) {
+                int litInGroup = 0;
+                Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_PROP].head;
+                while (a != nullptr) {
+                    if (a->id == ACTOR_OBJ_SYOKUDAI &&
+                        (a->params & 0x3F) == switchFlag &&
+                        ((ObjSyokudai*)a)->litTimer != 0) {
+                        litInGroup++;
+                    }
+                    a = a->next;
+                }
+                if (litInGroup >= torchCount) {
+                    Flags_SetSwitch(gPlayState, switchFlag);
+                    SPDLOG_INFO("[Syokudai] Puzzle complete via network sync: "
+                                "switchFlag={} lit={}/{}",
+                                switchFlag, litInGroup, torchCount);
+                }
             }
         }
     }

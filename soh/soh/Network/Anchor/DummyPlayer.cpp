@@ -224,6 +224,7 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     player->invincibilityTimer = client.invincibilityTimer;
     player->unk_862 = client.unk_862;
     player->unk_85C = client.unk_85C;
+    player->unk_860 = client.unk_860;
     player->av1.actionVar1 = client.actionVar1;
 
     // Mirror the remote player's shield-hold pose. Sets rightHandType to
@@ -279,6 +280,34 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         if (DebugLogSwapWindows()) {
             SPDLOG_INFO("[KB19][SwapExit:Update] clientId={} restoredAge={}", clientId, originalAge);
         }
+    }
+
+    // Burning Deku Stick flame VFX — placed BEFORE the cross-timeline
+    // and PvP early-returns because flame visibility is purely cosmetic
+    // and unrelated to interaction gating. (End-of-function placement
+    // is unreachable in cooperative play — pvpMode == 0 default
+    // returns early at the PvP gate below.)
+    //
+    // Mirrors Player_UpdateBurningDekuStick (z_player.c:11630) on the
+    // local owner — that function only runs in the local Player_Update
+    // path, so a peer's DummyPlayer never spawned the flame. unk_860
+    // is the burning countdown (0 = unlit, > 0 = burning); unk_85C is
+    // the visual Y-scale that ramps to 0 during the final 20-frame
+    // burn-out. Both are now synced via PLAYER_UPDATE.
+    //
+    // meleeWeaponInfo[0].tip is computed each draw by Player_Draw
+    // (z_player_lib.c:1789) from the joint table, so it's valid for
+    // DummyPlayer once the first draw cycle has run. One-frame lag is
+    // invisible at 20fps logic.
+    if (client.heldItemAction == PLAYER_IA_DEKU_STICK && client.unk_860 > 0) {
+        static Vec3f kFlameVel   = { 0.0f, 0.5f, 0.0f };
+        static Vec3f kFlameAccel = { 0.0f, 0.5f, 0.0f };
+        static Color_RGBA8 kFlamePrim = { 255, 255, 100, 255 };
+        static Color_RGBA8 kFlameEnv  = { 255,  50,   0,   0 };
+        f32 temp = (client.unk_85C > 0.0f && client.unk_85C < 1.0f) ? client.unk_85C : 1.0f;
+        func_8002836C(play, &player->meleeWeaponInfo[0].tip,
+                      &kFlameVel, &kFlameAccel, &kFlamePrim, &kFlameEnv,
+                      (s16)(temp * 200.0f), 0, 8);
     }
 
     // Pillar B Phase 3 — cross-timeline interaction gate (Q 4.B.4).
