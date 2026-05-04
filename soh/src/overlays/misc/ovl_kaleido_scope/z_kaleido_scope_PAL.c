@@ -5,6 +5,7 @@
 // SoH multiplayer (#182): Anchor_PauseLiveWorldRendering gates pause-Link
 // init (DMA stomp + gSegments[4]/[6] override) and the rotating-Link draw.
 #include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
+#include "soh/Network/Anchor/Common/PauseLinkBuffer.h"
 
 #include "textures/item_name_static/item_name_static.h"
 #include "textures/icon_item_static/icon_item_static.h"
@@ -3883,30 +3884,30 @@ void KaleidoScope_Update(PlayState* play) {
 
             pauseCtx->unk_204 = -314.0f;
 
-            pauseCtx->playerSegment = (void*)(((uintptr_t)play->objectCtx.spaceStart + 0x30) & ~0x3F);
-
-            // #182 Phase 2: skip pause-Link DMA stomp + gSegments[4]/[6]
-            // override when the live-world rendering feature is on.
-            // func_80091738 (z_player_lib.c:1970-1992) DMAs gameplay_keep
-            // and the link object INTO the world's object bank space and
-            // repoints gSegments[4]/[6] at it; the mode-3 captured-frame
-            // backdrop's `goto Play_Draw_DrawOverlayElements` is what
-            // makes that safe in vanilla. With live-world on, the world
-            // continues to render behind the pause UI, so we must not
-            // stomp the object bank or hijack the segment binding.
-            //
-            // The companion KaleidoScope_DrawPlayerWork early-return
-            // (z_kaleido_equipment.c) ensures playerSegment / playerSkelAnime
-            // contents are never read in this mode — both stay zero / stale
-            // but unconsumed. iconItemSegment derivation below sees size1=0
-            // (overlapping iconItem at the playerSegment base, harmless
-            // since the iconItem24 DMA is commented out in SoH).
+            // #182 Phase 2.5 follow-up: when live-world rendering is on,
+            // route the pause-Link's object-bank DMA into a SEPARATE
+            // buffer (Anchor_GetPauseLinkBuffer) so the world's object
+            // bank stays intact and world Player_Draw / actor draws keep
+            // working behind the pause UI. Vanilla path (CVar=0) still
+            // uses the world's objectCtx.spaceStart slice — works because
+            // the mode-3 backdrop short-circuits world render.
             if (Anchor_PauseLiveWorldRendering()) {
-                size1 = 0;
+                pauseCtx->playerSegment = (void*)(((uintptr_t)Anchor_GetPauseLinkBuffer() + 0x30) & ~0x3F);
             } else {
-                size1 = func_80091738(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime);
-                osSyncPrintf("プレイヤー size1＝%x\n", size1);
+                pauseCtx->playerSegment = (void*)(((uintptr_t)play->objectCtx.spaceStart + 0x30) & ~0x3F);
             }
+
+            // func_80091738 (z_player_lib.c:1970-1992) DMAs gameplay_keep
+            // and the link object into pauseCtx->playerSegment, then sets
+            // gSegments[4]/[6] to point inside that buffer. With CVar=1,
+            // the buffer is our separate Anchor_GetPauseLinkBuffer (above),
+            // so the DMA + segment override target our memory, not the
+            // world's. The intra-frame gSegments[4]/[6] override is then
+            // wrapped with save/restore inside KaleidoScope_DrawPlayerWork
+            // (z_kaleido_equipment.c) so anything reading the globals
+            // post-pause-Link sees the world values.
+            size1 = func_80091738(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime);
+            osSyncPrintf("プレイヤー size1＝%x\n", size1);
 
             pauseCtx->iconItemSegment = (void*)(((uintptr_t)pauseCtx->playerSegment + size1 + 0xF) & ~0xF);
 

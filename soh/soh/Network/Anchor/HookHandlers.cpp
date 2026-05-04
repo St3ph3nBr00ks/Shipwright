@@ -2,6 +2,7 @@
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
+#include "Common/PauseLinkBuffer.h"   // Anchor_IsDrawingPauseLink (#182 follow-up)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
 #include <libultraship/libultraship.h>
@@ -4613,6 +4614,25 @@ void Anchor::RegisterHooks() {
         Actor* myPlayer = (Actor*)GET_PLAYER(gPlayState);
         Actor* actor = va_arg(args, Actor*);
         Color_RGB8* color = va_arg(args, Color_RGB8*);
+
+        // #182 follow-up: pause-menu rotating-Link draw passes
+        // `data = &playerSwordAndShield` (a u8* stack pointer; see
+        // z_player_lib.c:2081, 2183), so neither the myPlayer == actor
+        // branch nor the for-loop client.player match below catches it.
+        // Without an override, the GPU env color from the previous
+        // DummyPlayer draw (the last remote player rendered in the
+        // world that frame) leaks onto the pause-Link, painting the
+        // local player's preview with the wrong client's color (visibly
+        // symmetric: P1 sees P2's color in P1's pause, and vice versa).
+        // The pause-Link is ALWAYS the local player's preview, so apply
+        // the local own-color CVar directly when this draw is in flight.
+        if (Anchor_IsDrawingPauseLink()) {
+            Color_RGBA8 ownColor = CVarGetColor(CVAR_REMOTE_ANCHOR("Color.Value"), { 100, 255, 100 });
+            color->r = ownColor.r;
+            color->g = ownColor.g;
+            color->b = ownColor.b;
+            return;
+        }
 
         if (actor == myPlayer) {
             Color_RGBA8 ownColor = CVarGetColor(CVAR_REMOTE_ANCHOR("Color.Value"), { 100, 255, 100 });

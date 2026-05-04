@@ -8,6 +8,7 @@
 // SoH multiplayer (#182): Anchor_PauseLiveWorldRendering gates the
 // rotating-Link draw inside KaleidoScope_DrawPlayerWork.
 #include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
+#include "soh/Network/Anchor/Common/PauseLinkBuffer.h"
 
 static u8 sChildUpgrades[] = { UPG_BULLET_BAG, UPG_BOMB_BAG, UPG_STRENGTH, UPG_SCALE };
 static u8 sAdultUpgrades[] = { UPG_QUIVER, UPG_BOMB_BAG, UPG_STRENGTH, UPG_SCALE };
@@ -131,18 +132,20 @@ void KaleidoScope_DrawAButton(PlayState* play, Vtx* vtx, int16_t xTranslate, int
 }
 
 void KaleidoScope_DrawPlayerWork(PlayState* play) {
-    // #182 Phase 2: skip the rotating-Link draw entirely when live-world
-    // rendering is on. Player_DrawPause / Player_DrawPauseImpl rebind
-    // gSegments[4]/[6] (z_player_lib.c:2169-2170, 2217-2218) every draw
-    // — without the pause-init DMAs (skipped by the companion gate in
-    // z_kaleido_scope_PAL.c) those segments would point at uninitialised
-    // memory and the link DL dereference would crash. The equipment
-    // screen still renders all icon/text elements; the central link-
-    // preview area is empty. Equipment changes show on the world Link
-    // visible behind the pause UI instead, via the Player_SetEquipmentData
-    // mirror in Player_UpdateCommon (subsequent commit).
-    if (Anchor_PauseLiveWorldRendering()) {
-        return;
+    // #182 Phase 2.5 follow-up: when live-world rendering is on, the
+    // pause-init DMA (z_kaleido_scope_PAL.c) is back on but writes to a
+    // SEPARATE buffer (Anchor_GetPauseLinkBuffer) so the world's object
+    // bank is unharmed. Player_DrawPauseImpl will write to gSegments[4]/[6]
+    // pointing at the pause buffer; we save the world values around the
+    // body so anything reading the globals after this draw sees the world
+    // state. (Per-frame z_play.c:1421 + per-actor z_actor.c:1237 also
+    // reset these globals — this save/restore is defence in depth so
+    // intra-frame reads after pause-Link don't see stale pause pointers.)
+    uintptr_t savedSeg4 = 0, savedSeg6 = 0;
+    bool wrapSegments = Anchor_PauseLiveWorldRendering();
+    if (wrapSegments) {
+        savedSeg4 = gSegments[4];
+        savedSeg6 = gSegments[6];
     }
 
     PauseContext* pauseCtx = &play->pauseCtx;
@@ -174,14 +177,31 @@ void KaleidoScope_DrawPlayerWork(PlayState* play) {
 
     rot.y = 32300;
     rot.x = rot.z = 0;
+    // Mark that we're drawing the pause-Link so the VB_APPLY_TUNIC_COLOR
+    // hook (HookHandlers.cpp) applies the LOCAL own-color CVar instead of
+    // falling through (which would inherit the env color set by the last
+    // DummyPlayer draw — leaking that remote player's color onto our
+    // local pause-Link).
+    Anchor_PauseLinkDrawBegin();
+
     Player_DrawPause(play, pauseCtx->playerSegment, &pauseCtx->playerSkelAnime, &pos, &rot, scale,
                      SWORD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SWORD)),
                      TUNIC_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC)),
                      SHIELD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SHIELD)),
                      BOOTS_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS)));
 
+    Anchor_PauseLinkDrawEnd();
+
     gsSPResetFB(WORK_DISP++);
     CLOSE_DISPS(play->state.gfxCtx);
+
+    // #182 Phase 2.5 follow-up: restore world's gSegments[4]/[6] after
+    // Player_DrawPause's writes (z_player_lib.c:2217-2218). See note at
+    // function entry for rationale.
+    if (wrapSegments) {
+        gSegments[4] = savedSeg4;
+        gSegments[6] = savedSeg6;
+    }
 }
 
 void KaleidoScope_DrawEquipment(PlayState* play) {
@@ -897,17 +917,13 @@ void KaleidoScope_DrawEquipment(PlayState* play) {
     // gSPSegment(POLY_OPA_DISP++, 0x0C, pauseCtx->iconItemAltSegment);
 
     Gfx_SetupDL_42Opa(play->state.gfxCtx);
-    // #182 Phase 2 (follow-up): also skip the gPauseLinkFrameBuffer blit
-    // when live-world is on. The DrawPlayerWork early-return above stops
-    // RENDERING into gPauseLinkFrameBuffer, but DrawEquipmentImage's
-    // gDPSetTextureImageFB call (line 85) reads FROM that framebuffer
-    // when blitting to the equipment-screen quad — without this gate,
-    // it displays the last frame's contents (stale rotating-Link from
-    // a prior pause, or framebuffer init garbage). Test 52 reproduced
-    // the missed blit: rotating-Link still visible with the CVar on.
-    if (!Anchor_PauseLiveWorldRendering()) {
-        KaleidoScope_DrawEquipmentImage(play, pauseCtx->playerSegment, PAUSE_EQUIP_PLAYER_WIDTH, PAUSE_EQUIP_PLAYER_HEIGHT);
-    }
+    // #182 Phase 2.5 follow-up: blit gPauseLinkFrameBuffer to the
+    // equipment quad in both modes now. With live-world on,
+    // KaleidoScope_DrawPlayerWork above renders pause-Link into
+    // gPauseLinkFrameBuffer using the separate Anchor_GetPauseLinkBuffer
+    // for object data (so the world's object bank stays clean), then
+    // this blit copies that framebuffer onto the equipment screen.
+    KaleidoScope_DrawEquipmentImage(play, pauseCtx->playerSegment, PAUSE_EQUIP_PLAYER_WIDTH, PAUSE_EQUIP_PLAYER_HEIGHT);
 
     if (gUpgradeMasks[0]) {}
 
