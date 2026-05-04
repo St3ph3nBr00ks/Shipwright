@@ -880,3 +880,48 @@ void EnMd_Draw(Actor* thisx, PlayState* play) {
 
     CLOSE_DISPS(play->state.gfxCtx);
 }
+
+// Anchor multiplayer state-machine sync (Generic NPC State Sync Phase 1, #184).
+// See z_en_md.h for the bucket encoding rationale. Defined here (rather than
+// in a sibling helper file) because EnMd_BlockPath / EnMd_Walk / etc. are
+// file-static and only visible within this translation unit.
+u8 EnMd_GetStateIndex(EnMd* this) {
+    if (this->actionFunc == EnMd_BlockPath)       return 0x01;
+    if (this->actionFunc == EnMd_ListenToOcarina) return 0x02;
+    if (this->actionFunc == EnMd_Walk)            return 0x03;
+    // EnMd_Idle, EnMd_Watch, or anything else falls into the
+    // "non-progressing" bucket.
+    return 0x00;
+}
+
+void EnMd_ApplyNetState(EnMd* this, PlayState* play, u8 stateIndex) {
+    if (EnMd_GetStateIndex(this) == stateIndex) {
+        return;  // already in target state
+    }
+    switch (stateIndex) {
+        case 0x00:
+            this->actionFunc = EnMd_Idle;
+            break;
+        case 0x01:
+            this->actionFunc = EnMd_BlockPath;
+            break;
+        case 0x02:
+            this->actionFunc = EnMd_ListenToOcarina;
+            break;
+        case 0x03:
+            // Mirror the BlockPath -> Walk transition setup at lines 741-746
+            // of EnMd_BlockPath. This is the visible behaviour for the user's
+            // bug (#184): once any team member satisfies sword+shield, every
+            // team member's Mido walks aside.
+            EnMd_SetAnimSequence(this, 3);
+            EnMd_UpdateAnimSequence(this);
+            this->waypoint = 1;
+            this->interactInfo.talkState = NPC_TALK_STATE_IDLE;
+            this->actionFunc = EnMd_Walk;
+            this->actor.speedXZ = 1.5f;
+            break;
+        default:
+            // Unknown state — leave actor unchanged.
+            break;
+    }
+}
