@@ -1346,7 +1346,39 @@ skip:
 
 void Play_DrawOverlayElements(PlayState* play) {
     if ((play->pauseCtx.state != 0) || (play->pauseCtx.debugState != 0)) {
+        // #182 Phase 2.5 Option 2: route kaleido draws through OVERLAY_DISP
+        // when live-world rendering is on. Vanilla kaleido writes commands
+        // to POLY_OPA_DISP (the macro expands to gfxCtx->polyOpa.p, see
+        // macros.h:197). The GPU pipeline renders POLY_OPA → POLY_XLU →
+        // OVERLAY in that order, so any world XLU (water surfaces, particles,
+        // fairies) draws on top of kaleido OPA — bleeds through the menu.
+        // By swapping the polyOpa and overlay TwoHeadGfxArena structs around
+        // the kaleido draw, kaleido's writes physically land in the OVERLAY
+        // buffer instead. OVERLAY renders last, on top of all XLU, so the
+        // pause UI is never overdrawn. Restoring the swap after the call
+        // leaves polyOpa untouched and overlay's write head advanced past
+        // kaleido's commands — Interface_Draw and Message_Draw below pick
+        // up at the new write head and layer correctly on top of kaleido,
+        // matching vanilla draw order within OVERLAY.
+        //
+        // Verified safe: no POLY_XLU writes anywhere in
+        // soh/src/overlays/misc/ovl_kaleido_scope/, so swapping only the
+        // polyOpa↔overlay pair is sufficient.
+        GraphicsContext* gfxCtx = play->state.gfxCtx;
+        TwoHeadGfxArena savedPolyOpa;
+        bool routeKaleidoToOverlay = Anchor_PauseLiveWorldRendering();
+
+        if (routeKaleidoToOverlay) {
+            savedPolyOpa = gfxCtx->polyOpa;
+            gfxCtx->polyOpa = gfxCtx->overlay;
+        }
+
         KaleidoScopeCall_Draw(play);
+
+        if (routeKaleidoToOverlay) {
+            gfxCtx->overlay = gfxCtx->polyOpa;
+            gfxCtx->polyOpa = savedPolyOpa;
+        }
     }
 
     if (gSaveContext.gameMode == GAMEMODE_NORMAL) {
