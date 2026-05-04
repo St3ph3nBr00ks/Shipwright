@@ -1213,6 +1213,42 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(gPlayState->sceneNum, netId);
                 }
 
+                // Init-pending guard. `actor->init != NULL` means the
+                // actor's init function hasn't run yet — OoT defers it
+                // for static actors when the object isn't loaded at
+                // OnActorSpawn time (z_actor.c:1256-1268), running the
+                // deferred init at z_actor.c:2633-2645. If we run a
+                // per-actor SetupDyingNet here, the deferred init will
+                // unconditionally rewrite `actionFunc` (every Init
+                // function does this) and overwrite the dying state —
+                // the actor stays alive after init.
+                //
+                // Symptom (P2 log 265, scene-respawn replay): three
+                // Skullwalltulas re-spawn on scene re-entry; host's
+                // replay arrives in the same sub-millisecond batch.
+                // For 2/3 of them, init had already run by ~50ms before
+                // the replay (SetupDyingNet wins). For the 3rd, init
+                // ran ~50ms AFTER replay (init's SetupWait wins) — the
+                // user saw 1 of 3 Skullwalltulas alive on re-entry.
+                //
+                // Fix: when init is still pending, skip the natural
+                // death cycle and kill the actor directly. We're
+                // replaying a past defeat — the death animation isn't
+                // user-visible (the user wasn't there to see it the
+                // first time). Karebaba already handles this case via
+                // the AwaitingDeadItemDrop phase + OnActorInit hook
+                // (Fix 38), so it's exempt from the generic guard.
+                if (actor->init != NULL && actor->id != ACTOR_EN_KAREBABA) {
+                    SPDLOG_INFO("[EnemyDefeated] netId={} actorId={} — init pending, instant kill (skip SetupDyingNet to avoid Init-overwrite race)",
+                                netId, actor->id);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    isKillingNetworkActor = true;
+                    Actor_Kill(actor);
+                    isKillingNetworkActor = false;
+                    return;
+                }
+
                 // Karebaba: let the natural death→respawn cycle play out
                 // instead of calling Actor_Kill. Dedup against duplicate
                 // delivery via PhaseImpliesHasLocalDeath.
