@@ -1,5 +1,6 @@
 #include "Anchor.h"
 #include "soh/Network/Anchor/Common/SceneMultiplayerConfig.h"
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 #include "soh/Enhancements/nametag.h"
 #include <unordered_map>
 #include <unordered_set>
@@ -386,7 +387,15 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     // is the cleanest fix: world time still advances, the remote player
     // is briefly invisible, name tag still renders. R1/R2/R3 control
     // tests narrowed the trigger to exactly this condition.
-    if (gPlayState->pauseCtx.state != 0) {
+    //
+    // #182 Phase 2.5 Option 2: when the live-world pause-menu rendering
+    // feature is active, the pause-Link DMA + segment override are
+    // skipped (commit 21bee4caa) and the rotating-Link blit is skipped
+    // (commit 66dcf51fa), so gSegments[4]/[6] stay pointed at the world's
+    // object bank. The KB-19/#171 trigger condition does not apply, and
+    // remote DummyPlayers can draw safely. Allow the draw through in
+    // that case so peers stay visible behind the live-rendered pause UI.
+    if (gPlayState->pauseCtx.state != 0 && !Anchor_PauseLiveWorldRendering()) {
         return;
     }
 
