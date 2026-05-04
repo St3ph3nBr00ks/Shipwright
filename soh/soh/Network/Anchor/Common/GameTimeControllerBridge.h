@@ -67,6 +67,21 @@ bool Anchor_PauseMenuFreezesWorld(void);
 // CVar: gRemote.Anchor.PauseLiveWorld (integer, default 0).
 bool Anchor_PauseLiveWorldRendering(void);
 
+// Returns true ~30% of the frames it is called, false the other ~70%, using
+// a fractional-carry counter (0.3 per call; an extra tick is requested when
+// the carry crosses 1.0, then 1.0 is subtracted).
+//
+// Used by the kaleido update path to drive an extra `KaleidoScope_Update`
+// tick on those frames so pause-menu animations animate at ~26fps while
+// the world tick stays at 20fps. Only meaningful when
+// `Anchor_PauseLiveWorldRendering()` is true — single-player and the
+// vanilla full-freeze pause path don't need acceleration.
+//
+// Caller is expected to invoke this exactly once per kaleido update tick.
+// Internal carry resets to 0 when the pause menu closes (state == 0) so
+// the rate stays predictable across pause sessions.
+bool Anchor_PauseMenuShouldExtraTick(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -128,6 +128,14 @@ void KaleidoScopeCall_Update(PlayState* play) {
             if (gKaleidoMgrCurOvl == kaleidoScopeOvl) {
                 sKaleidoScopeUpdateFunc(play);
 
+                // Pillar G.i — accelerate pause-menu animation 1.3× while
+                // world tick stays at 20fps. The state-machine bookkeeping
+                // above (state==1/2/8/9 transitions) ticks once per call;
+                // this only re-runs the inner animation/cursor/alpha tick.
+                if (Anchor_PauseMenuShouldExtraTick()) {
+                    sKaleidoScopeUpdateFunc(play);
+                }
+
                 if ((play->pauseCtx.state == 0) && (play->pauseCtx.debugState == 0)) {
                     osSyncPrintf(VT_FGCOL(GREEN));
                     // "Kaleido area Kaleidoscope Emission"

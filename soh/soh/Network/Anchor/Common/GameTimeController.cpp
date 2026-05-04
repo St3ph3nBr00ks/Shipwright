@@ -100,3 +100,24 @@ extern "C" bool Anchor_PauseLiveWorldRendering(void) {
     if (::Anchor::Instance == nullptr || !::Anchor::Instance->isEnabled) return false;
     return CVarGetInteger(CVAR_REMOTE_ANCHOR("PauseLiveWorld"), 0) != 0;
 }
+
+// Pause-menu animation acceleration carry. Returns true ~30% of calls so
+// the kaleido path can fire one extra `KaleidoScope_Update` on those
+// frames — net pause animation rate ≈ 1.3× world tick (20fps × 1.3 ≈
+// 26fps for pause UI animations) without disturbing world-tick pacing.
+//
+// Only fires when live-world pause rendering is active; otherwise the
+// carry resets to 0 so the rate is exact on the first pause-open.
+extern "C" bool Anchor_PauseMenuShouldExtraTick(void) {
+    static float sCarry = 0.0f;
+    if (!Anchor_PauseLiveWorldRendering()) {
+        sCarry = 0.0f;
+        return false;
+    }
+    sCarry += 0.3f;
+    if (sCarry >= 1.0f) {
+        sCarry -= 1.0f;
+        return true;
+    }
+    return false;
+}
