@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncScope.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
@@ -495,6 +496,14 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         }
     }
 
+    // Generic NPC State Sync Phase 0: read sync scope from the actor
+    // and skip the emit entirely if scope is None. This preserves
+    // bandwidth + avoids cross-team leak for actors that opt out.
+    const AnchorSync::ActorSyncScope scope = AnchorSync::GetActorSyncScope(actor);
+    if (scope == AnchorSync::ActorSyncScope::None) {
+        return;
+    }
+
     nlohmann::json payload;
     payload["type"]         = ENEMY_STATE;
     payload["phase"]        = "Alive";
@@ -506,6 +515,7 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     payload["shapeRot"] = actor->shape.rot;
     payload["health"]   = actor->colChkInfo.health;
     payload["scale"]    = actor->scale;
+    payload["scope"]    = AnchorSync::ActorSyncScopeToString(scope);
     payload["quiet"]    = true;
     PacketTimeline::SetTimelineField(payload);
 
@@ -615,6 +625,12 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor) {
         return;
     }
 
+    // Generic NPC State Sync Phase 0: skip emit if actor scope is None.
+    const AnchorSync::ActorSyncScope scope = AnchorSync::GetActorSyncScope(actor);
+    if (scope == AnchorSync::ActorSyncScope::None) {
+        return;
+    }
+
     nlohmann::json payload;
     payload["type"]         = ENEMY_STATE;
     payload["phase"]        = "Alive";
@@ -624,6 +640,7 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor) {
     payload["pos"]      = actor->home.pos;
     payload["rot"]      = actor->home.rot;
     payload["params"]   = actor->params;
+    payload["scope"]    = AnchorSync::ActorSyncScopeToString(scope);
     PacketTimeline::SetTimelineField(payload);
 
     // Host-authoritative netId for dynamic spawns (#67-Gohma crash fix).
@@ -1490,6 +1507,36 @@ void Anchor::HandlePacket_EnemyRespawn(nlohmann::json payload) {
 
 void Anchor::HandlePacket_EnemyState(nlohmann::json payload) {
     if (!IsSaveLoaded()) return;
+
+    // Generic NPC State Sync Phase 0: team-scope filter.
+    //
+    // If the sender declared this actor's state as Team-scoped, only
+    // apply on this client when our TeamId matches the sender's. Cross-
+    // team packets are dropped (defence in depth — relay's targetTeamId
+    // routing should already prevent these from arriving, but we don't
+    // trust the relay).
+    //
+    // Default scope on receive is Global (back-compat with legacy
+    // schema-1 senders that don't include a scope field). Defeated and
+    // Regrowing phases never carry a scope field today and rely on this
+    // default — death/respawn events propagate globally regardless of
+    // the actor's normal scope.
+    const std::string scopeStr = payload.value("scope", std::string("global"));
+    if (scopeStr == "team") {
+        const uint32_t senderId = payload.value("clientId", (uint32_t)0);
+        auto senderIt = clients.find(senderId);
+        if (senderIt == clients.end()) {
+            // Unknown sender — drop (could be a stale packet from a
+            // recently-disconnected peer; we have no way to verify
+            // their team).
+            return;
+        }
+        const std::string& senderTeam = senderIt->second.teamId;
+        const std::string ownTeam = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+        if (senderTeam != ownTeam) {
+            return;
+        }
+    }
 
     const std::string phase        = payload.value("phase", std::string("Alive"));
     const bool        phaseChanged = payload.value("phaseChanged", false);
