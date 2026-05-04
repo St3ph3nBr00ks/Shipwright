@@ -1282,8 +1282,37 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                         EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                         return;
                     }
+                    // Issue #187: scene-respawn replay. When a peer leaves and
+                    // returns to a scene, the host's deadEnemiesByScene list
+                    // replays the defeat for the freshly-spawned Dekubaba.
+                    // The fresh actor is in dormant Wait state (state 0) —
+                    // never activated, never grew, never lunged.
+                    // SetupDyingNet's ShrinkDie path (z_en_dekubaba.c:1456-
+                    // 1461) sets actionFunc=ShrinkDie and the FastChompAnim,
+                    // but ShrinkDie's preconditions don't hold for a Wait-
+                    // state actor (no stem, no growth state) — actor stays
+                    // alive in a half-init'd dying state. Visible bug:
+                    // peer hits the Dekubaba, doesn't take damage, looks
+                    // like vanilla "dormant Dekubaba is invulnerable from
+                    // a distance."
+                    //
+                    // Fix: detect dormant state via GetStateIndex == 0 and
+                    // Actor_Kill directly. Death animation is skipped — the
+                    // peer already saw it in the original kill before
+                    // leaving the scene. On re-entry the semantically-
+                    // correct outcome is "this enemy is dead, period."
+                    EnDekubaba* dekubaba = (EnDekubaba*)actor;
+                    if (EnDekubaba_GetStateIndex(dekubaba) == 0) {
+                        SPDLOG_INFO("[EnemyDefeated] Dekubaba netId={} dormant — Actor_Kill direct (avoids stuck-alive bug from scene-respawn replay, #187)", netId);
+                        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        isKillingNetworkActor = true;
+                        Actor_Kill(actor);
+                        isKillingNetworkActor = false;
+                        return;
+                    }
                     SPDLOG_INFO("[EnemyDefeated] Dekubaba netId={} — triggering natural death cycle", netId);
-                    EnDekubaba_SetupDyingNet((EnDekubaba*)actor, gPlayState);
+                    EnDekubaba_SetupDyingNet(dekubaba, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
