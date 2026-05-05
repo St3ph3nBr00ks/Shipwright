@@ -311,6 +311,17 @@ extern "C" void Anchor_NotifyBossGomaLookedAt(Actor* boss) {
     Anchor::Instance->SendPacket_BossGomaLookedAt(ext->netId);
 }
 
+// Sender wrapper — dialog client's EnMd_BlockPath calls this when its
+// transition to Walk fires for the post-Deku-Tree confrontation
+// (DEKU_TREE_DEAD + !SPOKE + KOKIRI). Broadcasts to team so peers
+// can transition their local Mido through the same Walk path and play
+// the walk-away cinematic instead of despawning abruptly when the SPOKE
+// flag syncs. See Packets/MidoPostDekuLeave.cpp + #184 follow-up.
+extern "C" void Anchor_NotifyMidoPostDekuLeave(void) {
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
+    Anchor::Instance->SendPacket_MidoPostDekuLeave();
+}
+
 // Receive-side accessor — case 3 of BossGoma_Encounter calls this
 // each frame. Returns 1 (and clears the flag) if a BOSS_GOMA_LOOKED_AT
 // has been received during this encounter; the caller then fires
@@ -5074,27 +5085,39 @@ void Anchor::RegisterHooks() {
     });
 
     // Generic NPC State Sync Phase 1 — Mido (#184).
-    // Vanilla `EnMd_BlockPath` (z_en_md.c:724-726) gates the BlockPath ->
+    // Vanilla `EnMd_BlockPath` (z_en_md.c:735-758) gates the BlockPath ->
     // Walk transition on `talkState == NPC_TALK_STATE_ACTION` (the local
-    // dialogue just concluded with the sword+shield-satisfied result).
-    // In MP, only the player who actually had the dialogue with Mido has
-    // their local talkState set; the OTHER team member's local Mido stays
-    // in BlockPath because the dialogue never ran on their machine.
+    // dialogue just concluded). In MP, only the player who actually had
+    // the dialogue with Mido has their local talkState set; the OTHER
+    // team member's local Mido stays in BlockPath because the dialogue
+    // never ran on their machine.
     //
-    // Vanilla code already sets `EVENTCHKINF_SHOWED_MIDO_SWORD_SHIELD`
-    // at z_en_md.c:735 inside the same transition branch. That save flag
-    // syncs to all team members via the existing SyncItemsAndFlags +
-    // SetFlag mechanism (Pillar 0). On every client, the flag becomes
-    // set within a frame or two of the originating client's transition.
+    // Vanilla code at z_en_md.c:746 sets `EVENTCHKINF_SHOWED_MIDO_SWORD_SHIELD`
+    // inside the BlockPath -> Walk transition branch for the original
+    // sword+shield encounter. That save flag syncs to all team members
+    // via the existing SyncItemsAndFlags + SetFlag mechanism (Pillar 0).
     //
-    // This hook returns true for `VB_MOVE_MIDO_IN_KOKIRI_FOREST` whenever
-    // the flag is set, so each team member's local Mido transitions to
-    // Walk independently (vanilla flow runs on each client) once any one
-    // of them has satisfied sword+shield. No per-frame state-machine
-    // sync packet needed — the flag-sync pre-existing infrastructure is
-    // load-bearing here.
+    // This hook returns true for `VB_MOVE_MIDO_IN_KOKIRI_FOREST` so each
+    // team member's local Mido transitions to Walk independently once
+    // any one of them has satisfied sword+shield. The `!has_emerald`
+    // gate is critical: SHOWED stays set forever once the original
+    // encounter completes, so without the gate this hook would fire
+    // *should=true on the very first frame of the post-Deku-Tree
+    // confrontation (Mido's Init case 2 at z_en_md.c:662-669, where
+    // SHOWED is already true and the player has the emerald). That made
+    // BlockPath skip the post-Deku confrontation dialog, walk the path,
+    // and Actor_Kill on both clients before the player could interact —
+    // setting SPOKE_TO_MIDO_AFTER_DEKU_TREES_DEATH without the
+    // confrontation ever occurring.
+    //
+    // Post-Deku-Tree sync: after the dialog client's local Walk fires
+    // Actor_Kill + SetFlag(SPOKE) (z_en_md.c:811-814), the SPOKE flag
+    // syncs to remote clients. The despawn check at the top of
+    // EnMd_Update (z_en_md.c) sees the synced flag and despawns the
+    // remote-client Mido directly — no walk-away cinematic on remote.
     COND_VB_SHOULD(VB_MOVE_MIDO_IN_KOKIRI_FOREST, isConnected, {
-        if (Flags_GetEventChkInf(EVENTCHKINF_SHOWED_MIDO_SWORD_SHIELD)) {
+        if (Flags_GetEventChkInf(EVENTCHKINF_SHOWED_MIDO_SWORD_SHIELD) &&
+            !CHECK_QUEST_ITEM(QUEST_KOKIRI_EMERALD)) {
             *should = true;
         }
     });

@@ -13,6 +13,11 @@
 // Anchor multiplayer: nearest-player lookup (returns local player when not connected).
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 
+// Anchor multiplayer #184 follow-up: broadcast post-Deku-Tree walk-away to peers
+// so their local Mido transitions BlockPath → Walk in lockstep with the dialog
+// client. See Packets/MidoPostDekuLeave.cpp.
+extern void Anchor_NotifyMidoPostDekuLeave(void);
+
 #define FLAGS                                                                                  \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_UPDATE_DURING_OCARINA)
@@ -740,6 +745,12 @@ void EnMd_BlockPath(EnMd* this, PlayState* play) {
             !Flags_GetEventChkInf(EVENTCHKINF_SPOKE_TO_MIDO_AFTER_DEKU_TREES_DEATH) &&
             (play->sceneNum == SCENE_KOKIRI_FOREST)) {
             play->msgCtx.msgMode = MSGMODE_PAUSED;
+            // Anchor multiplayer #184 follow-up: broadcast the BlockPath →
+            // Walk transition to peers so their local Mido walks the path
+            // in parallel and reaches the same Actor_Kill instead of
+            // despawning abruptly when SPOKE syncs. The notify is no-op
+            // when not connected (single-player parity preserved).
+            Anchor_NotifyMidoPostDekuLeave();
         }
 
         if (play->sceneNum == SCENE_KOKIRI_FOREST) {
@@ -805,8 +816,17 @@ void EnMd_Walk(EnMd* this, PlayState* play) {
         return;
     }
 
+    // Anchor multiplayer #184 follow-up: dropped the !SPOKE gate from
+    // this branch. Vanilla used !SPOKE to ensure Walk's kill fires only
+    // once per encounter, but in MP the dialog client sets SPOKE inside
+    // this same branch (line below) — by the time the SetFlag broadcast
+    // reaches the peer, the peer's local Walk may already be mid-traversal
+    // and the !SPOKE guard would flip false mid-walk, sending the peer's
+    // Mido to Watch instead of Actor_Kill. ShouldSpawn (line 491-505)
+    // already prevents Mido from re-spawning once SPOKE is set, so this
+    // branch is reachable at most once per encounter regardless. The
+    // SetFlag below is also idempotent.
     if (GameInteractor_Should(VB_MIDO_CONSIDER_DEKU_TREE_DEAD, CHECK_QUEST_ITEM(QUEST_KOKIRI_EMERALD)) &&
-        !Flags_GetEventChkInf(EVENTCHKINF_SPOKE_TO_MIDO_AFTER_DEKU_TREES_DEATH) &&
         (play->sceneNum == SCENE_KOKIRI_FOREST)) {
         Message_CloseTextbox(play);
         Flags_SetEventChkInf(EVENTCHKINF_SPOKE_TO_MIDO_AFTER_DEKU_TREES_DEATH);
@@ -825,6 +845,39 @@ void EnMd_Walk(EnMd* this, PlayState* play) {
 void EnMd_Update(Actor* thisx, PlayState* play) {
     EnMd* this = (EnMd*)thisx;
     s32 pad;
+
+    // Anchor multiplayer #184 follow-up: post-Deku-Tree confrontation
+    // sync backstop. The dialog client's local Mido plays the canonical
+    // walk-away cinematic + Actor_Kill (Walk's kill branch sets
+    // SPOKE_TO_MIDO_AFTER_DEKU_TREES_DEATH). The flag replicates to peers
+    // via the existing SetFlag mechanism (Pillar 0), and a one-shot
+    // MIDO_POST_DEKU_LEAVE packet (Packets/MidoPostDekuLeave.cpp) forces
+    // peers' local Mido through the BlockPath → Walk transition so they
+    // play the walk in parallel and reach the same Actor_Kill at the
+    // path end.
+    //
+    // This check is the backstop for two corner cases:
+    //   (a) MIDO_POST_DEKU_LEAVE was dropped (network error), so the
+    //       peer's local Mido is still in BlockPath when the SPOKE flag
+    //       eventually arrives — kill it directly.
+    //   (b) Peer enters the scene mid-walk on the dialog client; their
+    //       fresh Init spawns Mido in BlockPath (SPOKE not yet set when
+    //       Init fires), then SPOKE syncs in shortly after — kill that
+    //       newly-spawned BlockPath instance.
+    //
+    // Gated to actionFunc == EnMd_BlockPath so it doesn't interrupt an
+    // in-progress Walk on peers that DID receive the LEAVE packet —
+    // Walk's path-end Actor_Kill (line 813) handles those.
+    //
+    // Scene gate matters: Mido in MIDOS_HOUSE only spawns AFTER SPOKE
+    // is set (ShouldSpawn at line 491-505), so we must not despawn that
+    // instance.
+    if (Flags_GetEventChkInf(EVENTCHKINF_SPOKE_TO_MIDO_AFTER_DEKU_TREES_DEATH) &&
+        play->sceneNum == SCENE_KOKIRI_FOREST &&
+        this->actionFunc == EnMd_BlockPath) {
+        Actor_Kill(&this->actor);
+        return;
+    }
 
     Collider_UpdateCylinder(&this->actor, &this->collider);
     CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);

@@ -618,6 +618,7 @@ class Anchor : public Network {
     inline static const std::string TALK_REQUEST = "TALK_REQUEST";
     inline static const std::string DIALOG_END = "DIALOG_END";
     inline static const std::string BOSS_GOMA_LOOKED_AT = "BOSS_GOMA_LOOKED_AT";
+    inline static const std::string MIDO_POST_DEKU_LEAVE = "MIDO_POST_DEKU_LEAVE";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
     inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
@@ -772,6 +773,16 @@ class Anchor : public Network {
     // either player's look triggers the boss-fall transition. See #67.
     void SendPacket_BossGomaLookedAt(uint32_t bossNetId);
     void HandlePacket_BossGomaLookedAt(nlohmann::json payload);
+
+    // MIDO_POST_DEKU_LEAVE — team broadcast. Sent by the dialog client
+    // when its local Mido transitions BlockPath → Walk for the post-
+    // Deku-Tree confrontation (z_en_md.c BlockPath transition gated on
+    // DEKU_TREE_DEAD + !SPOKE + KOKIRI). Peers force their local Mido
+    // through the same transition so the walk-away cinematic plays on
+    // every client instead of remote despawning abruptly when the
+    // SetFlag(SPOKE) sync arrives. See #184 follow-up.
+    void SendPacket_MidoPostDekuLeave();
+    void HandlePacket_MidoPostDekuLeave(nlohmann::json payload);
 
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     //
