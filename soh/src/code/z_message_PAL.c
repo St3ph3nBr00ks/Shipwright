@@ -158,17 +158,42 @@ void Message_UpdateOcarinaGame(PlayState* play) {
     Message_ResetOcarinaNoteState();
 }
 
+// Anchor multiplayer #191 — voting-skip override for cutscene-internal
+// textboxes. Returns 1 when local advance should fire this frame (host's
+// CUTSCENE_TEXT_ADVANCED was received); returns 0 when local press should
+// be deferred (forwarded to host as a vote). Single-player / disconnected
+// returns the input unchanged. Defined in HookHandlers.cpp.
+extern int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected, unsigned currentTextId);
+
 u8 Message_ShouldAdvance(PlayState* play) {
     Input* input = &play->state.input[0];
 
     bool isB_Held = CVarGetInteger(CVAR_ENHANCEMENT("SkipText"), 0) != 0 ? CHECK_BTN_ALL(input->cur.button, BTN_B)
                                                                          : CHECK_BTN_ALL(input->press.button, BTN_B);
 
-    if (CHECK_BTN_ALL(input->press.button, BTN_A) || isB_Held || CHECK_BTN_ALL(input->press.button, BTN_CUP)) {
+    bool localPress = CHECK_BTN_ALL(input->press.button, BTN_A) || isB_Held ||
+                      CHECK_BTN_ALL(input->press.button, BTN_CUP);
+
+    // Anchor multiplayer #191 — only take the voting-skip path during
+    // cutscene-driven textboxes. Vanilla NPC dialog (csCtx.state ==
+    // CS_STATE_IDLE) keeps per-client advance — no observable lag for
+    // routine NPC interactions, and the voting-skip mechanic only
+    // matters for multi-page scripted sequences where clients drift
+    // out of sync.
+    if (play->csCtx.state != CS_STATE_IDLE) {
+        if (localPress) {
+            Audio_PlaySoundGeneral(NA_SE_SY_MESSAGE_PASS, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
+                                   &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
+        }
+        return Anchor_ShouldAdvanceCutsceneTextLocal(localPress ? 1 : 0,
+                                                     (unsigned)play->msgCtx.textId) ? 1 : 0;
+    }
+
+    if (localPress) {
         Audio_PlaySoundGeneral(NA_SE_SY_MESSAGE_PASS, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
                                &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
     }
-    return CHECK_BTN_ALL(input->press.button, BTN_A) || isB_Held || CHECK_BTN_ALL(input->press.button, BTN_CUP);
+    return localPress;
 }
 
 u8 Message_ShouldAdvanceSilent(PlayState* play) {

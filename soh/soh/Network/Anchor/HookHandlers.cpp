@@ -322,6 +322,58 @@ extern "C" void Anchor_NotifyMidoPostDekuLeave(void) {
     Anchor::Instance->SendPacket_MidoPostDekuLeave();
 }
 
+// #191 — Anchor-aware override for Message_ShouldAdvance during a
+// cutscene-internal textbox. C-callable from z_message_PAL.c.
+//
+// Returns 1 when the local message system should advance THIS frame
+// (i.e., return true from Message_ShouldAdvance):
+//   - The vote-completion broadcast was just received for the current
+//     textId (one-shot — consumed on read).
+//
+// Returns 0 when the local press should NOT immediately advance the
+// textbox; it has been forwarded to the host as a vote and the actual
+// advance fires when host's CUTSCENE_TEXT_ADVANCED arrives.
+//
+// `wasLocalPressDetected` is the OR of (BTN_A | BTN_B | BTN_CUP) press
+// computed by the caller — when true, we send a CUTSCENE_TEXT_ADVANCE
+// vote packet to the host. When the local press is for a different
+// textId than the most recent broadcast, the broadcast flag clears so
+// future presses for the new textId follow the vote pattern.
+//
+// `currentTextId` is the textbox the caller wants to advance.
+//
+// Single-player or disconnected: returns wasLocalPressDetected
+// unchanged — vanilla parity.
+extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
+                                                     unsigned currentTextId) {
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) {
+        return wasLocalPressDetected ? 1 : 0;
+    }
+
+    // Consume the broadcast flag if it matches the current textbox.
+    // Edge case: matched broadcast for a previous textId stays
+    // consumed when we move to a new textId — the new textId's
+    // vote count starts fresh.
+    if (Anchor::Instance->cutsceneTextAdvanceConsumed &&
+        Anchor::Instance->cutsceneTextAdvanceConsumedTextId == (uint16_t)currentTextId) {
+        Anchor::Instance->cutsceneTextAdvanceConsumed = false;
+        return 1;
+    }
+    if (Anchor::Instance->cutsceneTextAdvanceConsumed &&
+        Anchor::Instance->cutsceneTextAdvanceConsumedTextId != (uint16_t)currentTextId) {
+        // Stale broadcast for a different textbox — drop.
+        Anchor::Instance->cutsceneTextAdvanceConsumed = false;
+    }
+
+    // Local press → forward to host as a vote.
+    if (wasLocalPressDetected) {
+        Anchor::Instance->SendPacket_CutsceneTextAdvance((uint16_t)currentTextId);
+    }
+
+    // Don't immediately advance — wait for the host's broadcast.
+    return 0;
+}
+
 // Receive-side accessor — case 3 of BossGoma_Encounter calls this
 // each frame. Returns 1 (and clears the flag) if a BOSS_GOMA_LOOKED_AT
 // has been received during this encounter; the caller then fires
@@ -695,6 +747,11 @@ void Anchor::RegisterHooks() {
 
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
         ProcessIncomingPacketQueue();
+
+        // #191 — host countdown for cutscene-textbox vote-skip. No-op
+        // when no active textbox vote is in progress; broadcasts
+        // CUTSCENE_TEXT_ADVANCED on timer-0.
+        Anchor::Instance->TickCutsceneTextAdvance();
 
         // KB-18 (#177) Option 4 — deferred host snapshot broadcast.
         // OnSceneSpawnActors host-path armed pendingSceneActorNetIdsBroadcast;

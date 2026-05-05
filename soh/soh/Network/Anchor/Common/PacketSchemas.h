@@ -39,6 +39,8 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"BOSS_EXIT_TEAM_WARP", 1},        // Team co-warp on synced boss-room exit.
     {"BOSS_GOMA_LOOKED_AT", 1},        // Peer→host bridge for Boss_Goma intro state-3 trigger.
     {"MIDO_POST_DEKU_LEAVE", 1},       // Dialog→peers broadcast for Mido's post-Deku-Tree confrontation walk-away.
+    {"CUTSCENE_TEXT_ADVANCE", 1},      // #191 Peer→host vote-skip for cutscene-internal textboxes.
+    {"CUTSCENE_TEXT_ADVANCED", 1},     // #191 Host→all broadcast when textbox advance triggers.
     {"SERVER_MESSAGE", 1},
     {"SET_CHECK_STATUS", 1},
     {"SET_FLAG", 1},

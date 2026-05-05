@@ -375,6 +375,10 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_BossGomaLookedAt(payload);
             else if (packetType == MIDO_POST_DEKU_LEAVE)
                 HandlePacket_MidoPostDekuLeave(payload);
+            else if (packetType == CUTSCENE_TEXT_ADVANCE)
+                HandlePacket_CutsceneTextAdvance(payload);
+            else if (packetType == CUTSCENE_TEXT_ADVANCED)
+                HandlePacket_CutsceneTextAdvanced(payload);
             else if (packetType == DISABLE_ANCHOR)
                 HandlePacket_DisableAnchor(payload);
             else if (packetType == ENTRANCE_DISCOVERED)

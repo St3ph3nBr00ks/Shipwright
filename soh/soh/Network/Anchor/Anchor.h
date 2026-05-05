@@ -9,6 +9,8 @@
 #include <climits>
 #include <queue>
 #include <mutex>
+#include <chrono>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -642,6 +644,8 @@ class Anchor : public Network {
     inline static const std::string DIALOG_END = "DIALOG_END";
     inline static const std::string BOSS_GOMA_LOOKED_AT = "BOSS_GOMA_LOOKED_AT";
     inline static const std::string MIDO_POST_DEKU_LEAVE = "MIDO_POST_DEKU_LEAVE";
+    inline static const std::string CUTSCENE_TEXT_ADVANCE = "CUTSCENE_TEXT_ADVANCE";
+    inline static const std::string CUTSCENE_TEXT_ADVANCED = "CUTSCENE_TEXT_ADVANCED";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
     inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
@@ -806,6 +810,47 @@ class Anchor : public Network {
     // SetFlag(SPOKE) sync arrives. See #184 follow-up.
     void SendPacket_MidoPostDekuLeave();
     void HandlePacket_MidoPostDekuLeave(nlohmann::json payload);
+
+    // CUTSCENE_TEXT_ADVANCE — peer → effective scene host. Sent when a
+    // local A/B/CUP press fires Message_ShouldAdvance during a cutscene-
+    // internal textbox. Host accumulates the press into per-textbox
+    // state; when all team members have pressed OR the countdown timer
+    // elapses, host broadcasts CUTSCENE_TEXT_ADVANCED to all clients.
+    // See #191.
+    void SendPacket_CutsceneTextAdvance(uint16_t textId);
+    void HandlePacket_CutsceneTextAdvance(nlohmann::json payload);
+
+    // CUTSCENE_TEXT_ADVANCED — host → all clients. Broadcast when a
+    // textbox-advance vote completes (all-pressed or timer elapsed).
+    // Each receiver sets a one-shot flag that the next
+    // Message_ShouldAdvance call returns true for. See #191.
+    void SendPacket_CutsceneTextAdvanced(uint16_t textId, const char* reason);
+    void HandlePacket_CutsceneTextAdvanced(nlohmann::json payload);
+
+    // #191 — per-active-textbox vote-skip state lives on the host.
+    // Reset on each new textbox (detected by textId edge or no active
+    // textbox state). Cleared when CUTSCENE_TEXT_ADVANCED is broadcast.
+    struct CutsceneTextAdvanceState {
+        bool                   active = false;
+        uint16_t               textId = 0;
+        int16_t                sceneNum = -1;
+        std::set<uint32_t>     pressedClientIds;
+        std::chrono::steady_clock::time_point countdownEndsAt;
+        bool                   countdownStarted = false;
+    };
+    CutsceneTextAdvanceState cutsceneTextAdvanceState;
+
+    // Tick called from OnGameFrameUpdate (host only). Decrements
+    // countdown; broadcasts CUTSCENE_TEXT_ADVANCED on timer-0.
+    // Also resets state on textId-edge (new textbox).
+    void TickCutsceneTextAdvance();
+
+    // Receive-side flag — set by HandlePacket_CutsceneTextAdvanced,
+    // consumed by Anchor_ShouldAdvanceCutsceneTextLocal in z_message_PAL.c
+    // hook. Refreshes per textId so multi-page cutscenes don't double-
+    // consume the same advance signal.
+    bool     cutsceneTextAdvanceConsumed = false;
+    uint16_t cutsceneTextAdvanceConsumedTextId = 0;
 
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     //
