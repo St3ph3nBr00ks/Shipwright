@@ -186,4 +186,13 @@ void BossGoma_ApplyMinimalNetState(struct BossGoma* actor, s16 stateIndex);
 // spawn the blue warp on every client.
 void BossGoma_SetupDyingNet(struct BossGoma* actor, PlayState* play);
 
+// Triggered by BOSS_GOMA_LOOKED_AT receive handler (#67). Plays the
+// eye-roll → fall-from-ceiling cinematic (cases 4-130 in BossGoma_
+// Encounter). Already exists internal to z_boss_goma.c; exposed here
+// so the receive handler in Packets/BossGomaLookedAt.cpp can fire it
+// directly when host is past the door-close cutscene but stuck in
+// case 3 (host's local camera not pointed at Goma + case 3's
+// else-branch resets lookedAtFrames every frame).
+void BossGoma_SetupEncounterState4(struct BossGoma* actor, PlayState* play);
+
 #endif

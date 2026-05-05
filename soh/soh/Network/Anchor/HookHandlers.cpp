@@ -311,6 +311,26 @@ extern "C" void Anchor_NotifyBossGomaLookedAt(Actor* boss) {
     Anchor::Instance->SendPacket_BossGomaLookedAt(ext->netId);
 }
 
+// Receive-side accessor — case 3 of BossGoma_Encounter calls this
+// each frame. Returns 1 (and clears the flag) if a BOSS_GOMA_LOOKED_AT
+// has been received during this encounter; the caller then fires
+// BossGoma_SetupEncounterState4 immediately, skipping the local
+// 15-frame frustum-check accumulator (which doesn't trip on host
+// because host's camera isn't pointing at Goma in MP). Returns 0
+// for single-player / disconnected / non-Boss_Goma callers, in
+// which case case 3 falls through to its vanilla logic.
+extern "C" int Anchor_BossGomaConsumePeerSignaled(Actor* boss) {
+    if (boss == nullptr) return 0;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return 0;
+    EnemyNetId* ext = const_cast<EnemyNetId*>(
+        ObjectExtension::GetInstance().Get<EnemyNetId>(boss));
+    if (ext == nullptr) return 0;
+    if (!ext->bossGomaPeerSignaled) return 0;
+    ext->bossGomaPeerSignaled = false;
+    SPDLOG_INFO("[BossGoma] case-3 consumed peer-signal flag → firing eye-roll cinematic");
+    return 1;
+}
+
 // #90 / en_st_sync_plan_v2.md §5 — same predicate shape as the
 // Dekunuts suppressor, applied to En_St's drop site (line 996).
 extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {

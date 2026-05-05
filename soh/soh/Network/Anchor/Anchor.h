@@ -106,6 +106,20 @@ struct EnemyNetId {
     // INT16_MIN sentinel = no host state received yet (fall through to
     // local AI, vanilla single-player parity).
     s16 syokudaiLitTimer = INT16_MIN;
+
+    // Boss_Goma — sticky "peer is signaling encounter advance" flag (#67).
+    // Set true on receipt of any BOSS_GOMA_LOOKED_AT. Stays true until
+    // case 3 of BossGoma_Encounter consumes-and-clears it via
+    // Anchor_BossGomaConsumePeerSignaled — at which point case 3
+    // immediately calls BossGoma_SetupEncounterState4 (eye-roll
+    // cinematic) instead of waiting for the local frustum-check
+    // 15-frame threshold (vanilla case 3's else-branch resets
+    // lookedAtFrames every frame the local check fails, so the
+    // earlier per-frame `lookedAtFrames++` approach was getting
+    // clobbered). Persists across host's case 1-2 cutscene window
+    // (~228 frames) so peer's signal — which arrives ~11s before
+    // host enters case 3 — isn't lost.
+    bool bossGomaPeerSignaled = false;
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);

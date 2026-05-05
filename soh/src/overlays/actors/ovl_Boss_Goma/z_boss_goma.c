@@ -11,6 +11,7 @@
 // Anchor multiplayer hooks (#67 — Boss_Goma encounter trigger sync).
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 extern void   Anchor_NotifyBossGomaLookedAt(Actor* boss);
+extern int    Anchor_BossGomaConsumePeerSignaled(Actor* boss);
 
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -797,17 +798,21 @@ void BossGoma_Encounter(BossGoma* this, PlayState* play) {
             break;
 
         case 3: // wait for the player to look at Gohma
-            // Anchor multiplayer #67: peer's `actor.projectedPos` is
-            // computed against PEER's camera, so peer's looking gets
-            // checked here too. When the check passes locally, peer
-            // notifies host via BOSS_GOMA_LOOKED_AT — host accumulates
-            // lookedAtFrames from EITHER its own local check OR the
-            // peer notifications. Either client looking at Goma during
-            // state 3 progresses the fight. The peer's local
-            // `lookedAtFrames++` write is harmless (peer's actionFunc
-            // is force-synced from host's actionState; peer's local
-            // SetupEncounterState4 transition gets reverted by sync,
-            // but its side-effect on host's counter is what matters).
+            // Anchor multiplayer #67: peer signals via BOSS_GOMA_LOOKED_AT
+            // when peer's local frustum-check passes. The receive handler
+            // sets a sticky bossGomaPeerSignaled flag on the actor's
+            // EnemyNetId extension; we consume it here. If set, we skip
+            // the vanilla 15-frame-look puzzle entirely and fire the
+            // eye-roll cinematic immediately — host's camera isn't
+            // pointed at Goma in MP (P2 is the active player) and the
+            // else-branch reset (`lookedAtFrames = 0`) clobbers the
+            // local accumulator every frame the local check fails.
+            // No-op (returns 0) for single-player / disconnected.
+            if (Anchor_BossGomaConsumePeerSignaled(&this->actor)) {
+                BossGoma_SetupEncounterState4(this, play);
+                break;
+            }
+
             if (fabsf(this->actor.projectedPos.x) < 150.0f && fabsf(this->actor.projectedPos.y) < 250.0f &&
                 this->actor.projectedPos.z < 800.0f && this->actor.projectedPos.z > 0.0f) {
                 this->lookedAtFrames++;
