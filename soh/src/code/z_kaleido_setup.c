@@ -13,6 +13,45 @@ void KaleidoSetup_Update(PlayState* play) {
     PauseContext* pauseCtx = &play->pauseCtx;
     Input* input = &play->state.input[0];
 
+    // Anchor multiplayer #192 diagnostic — when BTN_START is pressed but
+    // the pause-menu gate below rejects, log every gate input so we can
+    // identify which flag is stuck. The post-Goma cutscene chain leaves
+    // one of these fields in a non-IDLE state and silently swallows the
+    // press; user workaround is a scene change. Diagnostic stays in
+    // place until #192's root cause is identified, then can be deleted.
+    // No per-frame spam — only logs on the press edge.
+    if (CHECK_BTN_ALL(input->press.button, BTN_START)) {
+        Player* player = GET_PLAYER(play);
+        s32 gateOk = (pauseCtx->state == 0 && pauseCtx->debugState == 0 &&
+                       play->gameOverCtx.state == GAMEOVER_INACTIVE &&
+                       play->transitionTrigger == TRANS_TRIGGER_OFF &&
+                       play->transitionMode == TRANS_MODE_OFF &&
+                       gSaveContext.cutsceneIndex < 0xFFF0 &&
+                       gSaveContext.nextCutsceneIndex < 0xFFF0 &&
+                       !Play_InCsMode(play) &&
+                       play->shootingGalleryStatus <= 1 &&
+                       gSaveContext.magicState != MAGIC_STATE_STEP_CAPACITY &&
+                       gSaveContext.magicState != MAGIC_STATE_FILL &&
+                       (play->sceneNum != SCENE_BOMBCHU_BOWLING_ALLEY ||
+                        !Flags_GetSwitch(play, 0x38)));
+        LUSLOG_INFO("[PauseAttempt] %s pauseState=%d debugState=%d gameOver=%d "
+                    "transTrigger=%d transMode=%d cs=0x%04X nextCs=0x%04X "
+                    "inCsMode=%d shootGalStat=%d magic=%d csCtxState=%d "
+                    "stateFlags1=0x%08X csAction=%d",
+                    gateOk ? "OK" : "BLOCKED",
+                    pauseCtx->state, pauseCtx->debugState,
+                    play->gameOverCtx.state,
+                    play->transitionTrigger, play->transitionMode,
+                    (unsigned)gSaveContext.cutsceneIndex,
+                    (unsigned)gSaveContext.nextCutsceneIndex,
+                    Play_InCsMode(play),
+                    play->shootingGalleryStatus,
+                    gSaveContext.magicState,
+                    play->csCtx.state,
+                    player ? player->stateFlags1 : 0,
+                    player ? player->csAction : 0);
+    }
+
     if (pauseCtx->state == 0 && pauseCtx->debugState == 0 && play->gameOverCtx.state == GAMEOVER_INACTIVE &&
         play->transitionTrigger == TRANS_TRIGGER_OFF && play->transitionMode == TRANS_MODE_OFF &&
         gSaveContext.cutsceneIndex < 0xFFF0 && gSaveContext.nextCutsceneIndex < 0xFFF0 && !Play_InCsMode(play) &&
