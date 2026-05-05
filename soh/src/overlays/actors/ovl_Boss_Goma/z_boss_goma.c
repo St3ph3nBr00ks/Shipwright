@@ -8,6 +8,10 @@
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// Anchor multiplayer hooks (#67 — Boss_Goma encounter trigger sync).
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+extern void   Anchor_NotifyBossGomaLookedAt(Actor* boss);
+
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_DRAW_CULLING_DISABLED)
@@ -684,10 +688,21 @@ void BossGoma_Encounter(BossGoma* this, PlayState* play) {
     Math_ApproachZeroF(&this->actor.speedXZ, 0.5f, 2.0f);
 
     switch (this->actionState) {
-        case 0: // wait for the player to enter the room
+        case 0: { // wait for the player to enter the room
+            // Anchor multiplayer #67: use nearest player (including
+            // DummyPlayers that carry peer positions) so any team
+            // member entering the trigger zone starts the cutscene.
+            // Single-player path unchanged — Anchor_GetNearestPlayerActor
+            // returns local Link when Anchor isn't enabled.
+            //
+            // The cinematic in cases 1-2 still hardcodes player
+            // positions via host's local Link (lines 714-734);
+            // both clients see the same scripted intro since the
+            // camera commands are scripted constants.
+            Actor* trigger = Anchor_GetNearestPlayerActor(&this->actor, play);
             // entrance of the boss room
-            if (fabsf(player->actor.world.pos.x - 150.0f) < 60.0f &&
-                fabsf(player->actor.world.pos.z - 350.0f) < 60.0f) {
+            if (fabsf(trigger->world.pos.x - 150.0f) < 60.0f &&
+                fabsf(trigger->world.pos.z - 350.0f) < 60.0f) {
                 if (Flags_GetEventChkInf(EVENTCHKINF_BEGAN_GOHMA_BATTLE)) {
                     BossGoma_SetupEncounterState4(this, play);
                     Actor_SpawnAsChild(&play->actorCtx, &this->actor, play, ACTOR_DOOR_SHUTTER, 164.72f, -480.0f,
@@ -698,6 +713,7 @@ void BossGoma_Encounter(BossGoma* this, PlayState* play) {
                 }
             }
             break;
+        }
 
         case 1: // player entered the room
             func_80064520(play, &play->csCtx);
@@ -781,9 +797,21 @@ void BossGoma_Encounter(BossGoma* this, PlayState* play) {
             break;
 
         case 3: // wait for the player to look at Gohma
+            // Anchor multiplayer #67: peer's `actor.projectedPos` is
+            // computed against PEER's camera, so peer's looking gets
+            // checked here too. When the check passes locally, peer
+            // notifies host via BOSS_GOMA_LOOKED_AT — host accumulates
+            // lookedAtFrames from EITHER its own local check OR the
+            // peer notifications. Either client looking at Goma during
+            // state 3 progresses the fight. The peer's local
+            // `lookedAtFrames++` write is harmless (peer's actionFunc
+            // is force-synced from host's actionState; peer's local
+            // SetupEncounterState4 transition gets reverted by sync,
+            // but its side-effect on host's counter is what matters).
             if (fabsf(this->actor.projectedPos.x) < 150.0f && fabsf(this->actor.projectedPos.y) < 250.0f &&
                 this->actor.projectedPos.z < 800.0f && this->actor.projectedPos.z > 0.0f) {
                 this->lookedAtFrames++;
+                Anchor_NotifyBossGomaLookedAt(&this->actor);
                 Math_ApproachZeroF(&this->actor.speedXZ, 0.5f, 2.0f);
                 Math_ApproachS(&this->actor.world.rot.y,
                                Actor_WorldYawTowardActor(&this->actor, &GET_PLAYER(play)->actor) + 0x8000, 2, 0xBB8);

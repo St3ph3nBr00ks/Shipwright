@@ -297,6 +297,20 @@ extern "C" void Anchor_NotifyDialogEnd(Actor* targetActor) {
     Anchor::Instance->SendPacket_DialogEnd(ext->netId);
 }
 
+// Sender wrapper — peer's BossGoma_Encounter case 3 calls this when
+// its local actor.projectedPos check passes (peer is looking up at
+// Goma during the intro). Host receives and increments its local
+// Goma's lookedAtFrames so the fight progresses regardless of which
+// player triggered the look. See Packets/BossGomaLookedAt.cpp + #67.
+extern "C" void Anchor_NotifyBossGomaLookedAt(Actor* boss) {
+    if (boss == nullptr) return;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return;  // host's own check fires the local path
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(boss);
+    if (ext == nullptr) return;
+    Anchor::Instance->SendPacket_BossGomaLookedAt(ext->netId);
+}
+
 // #90 / en_st_sync_plan_v2.md §5 — same predicate shape as the
 // Dekunuts suppressor, applied to En_St's drop site (line 996).
 extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {

@@ -371,6 +371,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_TalkRequest(payload);
             else if (packetType == DIALOG_END)
                 HandlePacket_DialogEnd(payload);
+            else if (packetType == BOSS_GOMA_LOOKED_AT)
+                HandlePacket_BossGomaLookedAt(payload);
             else if (packetType == DISABLE_ANCHOR)
                 HandlePacket_DisableAnchor(payload);
             else if (packetType == ENTRANCE_DISCOVERED)

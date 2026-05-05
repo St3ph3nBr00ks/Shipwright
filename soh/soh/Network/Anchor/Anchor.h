@@ -603,6 +603,7 @@ class Anchor : public Network {
     inline static const std::string PROJECTILE_HIT_ENEMY = "PROJECTILE_HIT_ENEMY";
     inline static const std::string TALK_REQUEST = "TALK_REQUEST";
     inline static const std::string DIALOG_END = "DIALOG_END";
+    inline static const std::string BOSS_GOMA_LOOKED_AT = "BOSS_GOMA_LOOKED_AT";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
     inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
@@ -750,6 +751,13 @@ class Anchor : public Network {
     // Talk broadcasts (logs 216 actor-flood crash).
     void SendPacket_DialogEnd(uint32_t targetNetId);
     void HandlePacket_DialogEnd(nlohmann::json payload);
+
+    // BOSS_GOMA_LOOKED_AT — peer → room host. Sent every frame peer's
+    // local `BossGoma_Encounter` case 3 sees Goma in its camera frustum
+    // during the intro. Host increments its local `lookedAtFrames` so
+    // either player's look triggers the boss-fall transition. See #67.
+    void SendPacket_BossGomaLookedAt(uint32_t bossNetId);
+    void HandlePacket_BossGomaLookedAt(nlohmann::json payload);
 
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     //

@@ -37,6 +37,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"SCENE_ACTOR_NETIDS", 1},  // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     {"SCENE_TRANSITION_HANDOFF", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
     {"BOSS_EXIT_TEAM_WARP", 1},        // Team co-warp on synced boss-room exit.
+    {"BOSS_GOMA_LOOKED_AT", 1},        // Peer→host bridge for Boss_Goma intro state-3 trigger.
     {"SERVER_MESSAGE", 1},
     {"SET_CHECK_STATUS", 1},
     {"SET_FLAG", 1},
