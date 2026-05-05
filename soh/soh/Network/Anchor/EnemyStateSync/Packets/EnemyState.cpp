@@ -1123,10 +1123,35 @@ actor_found:
         }
 
         if (actor->id == ACTOR_OBJ_SYOKUDAI && payload.contains("syokudaiLitTimer")) {
-            ObjSyokudai* torch = (ObjSyokudai*)actor;
+            ObjSyokudai* torch    = (ObjSyokudai*)actor;
             const s16 prevLit     = torch->litTimer;
-            ext->syokudaiLitTimer = (s16)payload["syokudaiLitTimer"].get<int>();
-            torch->litTimer       = ext->syokudaiLitTimer;
+            const s16 incoming    = (s16)payload["syokudaiLitTimer"].get<int>();
+            ext->syokudaiLitTimer = incoming;
+
+            // Stale-zero guard. The bidirectional broadcast can fire BEFORE
+            // the broadcaster's own incoming-lit packet has been processed
+            // in the same frame, so the outbound payload carries the
+            // broadcaster's pre-receive `litTimer == 0` even when the
+            // broadcaster is about to apply a positive value. Without this
+            // guard, the peer's receive overwrites its local-lit (positive)
+            // back to 0, vanilla `ObjSyokudai_Update` then sees `litTimer == 0`
+            // with the player's burning Deku Stick still in proximity and
+            // re-enters the ignite branch — `sLitTorchCount++` fires AGAIN,
+            // doubling the counter from a single user-action ignite. Field
+            // test 282 shows this exact pattern: same `home=` position
+            // increments twice in 50ms (one frame).
+            //
+            // The cost: a true burnout-zero broadcast won't propagate
+            // through this field, but each client's own vanilla decrement
+            // reaches 0 independently within a few frames at the same rate
+            // — visible drift is sub-frame and self-correcting. Permanent-
+            // lit (litTimer == -1) torches stay -1 because `prevLit != 0`
+            // still holds.
+            const bool incomingIsUnlit = (incoming == 0);
+            const bool localIsLit      = (prevLit != 0);
+            if (!(incomingIsUnlit && localIsLit)) {
+                torch->litTimer = incoming;
+            }
 
             // Multi-torch puzzle auto-complete on bidirectional sync.
             // Single-player code increments a static `sLitTorchCount`
@@ -1138,10 +1163,30 @@ actor_found:
             //
             // Fix: when a torch transitions unlit → lit via network
             // apply, scan the actor list for every Obj_Syokudai sharing
-            // this torch's puzzle switchFlag; if all of them are
-            // currently lit (litTimer != 0), fire Flags_SetSwitch
-            // directly. The flag replicates via WORLD_FLAG_SET, so all
-            // clients see the puzzle-complete state simultaneously.
+            // this torch's puzzle switchFlag; count puzzle-participant
+            // torches that are currently lit; compare to the MAX
+            // torchCount across the group. If count >= max, fire
+            // `Flags_SetSwitch` directly. Replicates via WORLD_FLAG_SET.
+            //
+            // Refinement (issue #189): use MAX(torchCount) across the
+            // group rather than the lit torch's torchCount alone, AND
+            // restrict the scan to the same room. Two failure modes
+            // closed:
+            //   1. Mixed-torchCount room: if torch A has torchCount=1
+            //      (single-torch trigger) and torch B has torchCount=2
+            //      (gating torch with same switchFlag), reading the
+            //      threshold from torch A under-counts and fires after
+            //      one lit when vanilla wouldn't. Using MAX picks 2.
+            //   2. Cross-room scan contamination: ACTORCAT_PROP is
+            //      scene-wide, but switch flags are scene-scoped. If
+            //      another room reuses the same switchFlag for an
+            //      unrelated torch, we'd count it. Same-room filter
+            //      restricts the scan to the lit torch's room, where
+            //      vanilla's `sLitTorchCount` mechanism actually lives.
+            //   3. Decorative always-lit torch contamination:
+            //      `params & 0x400` torches with `torchCount = 0` would
+            //      otherwise inflate the lit-count. Skipping
+            //      `aTorchCount == 0` excludes them.
             //
             // Idempotent — Flags_SetSwitch is a no-op if already set.
             const bool wasUnlit  = (prevLit == 0);
@@ -1149,23 +1194,37 @@ actor_found:
             const s32 switchFlag = torch->actor.params & 0x3F;
             const s32 torchCount = (torch->actor.params >> 6) & 0xF;
             const s32 torchType  = torch->actor.params & 0xF000;
+            const s8  litRoom    = torch->actor.room;
             if (wasUnlit && isLit && torchCount > 0 && torchType != 0 &&
                 gPlayState != nullptr && !Flags_GetSwitch(gPlayState, switchFlag)) {
                 int litInGroup = 0;
+                int maxTorchCount = 0;
                 Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_PROP].head;
                 while (a != nullptr) {
                     if (a->id == ACTOR_OBJ_SYOKUDAI &&
                         (a->params & 0x3F) == switchFlag &&
-                        ((ObjSyokudai*)a)->litTimer != 0) {
-                        litInGroup++;
+                        a->room == litRoom) {
+                        const int aTorchCount = (a->params >> 6) & 0xF;
+                        if (aTorchCount > 0) {
+                            if (aTorchCount > maxTorchCount) {
+                                maxTorchCount = aTorchCount;
+                            }
+                            if (((ObjSyokudai*)a)->litTimer != 0) {
+                                litInGroup++;
+                            }
+                        }
                     }
                     a = a->next;
                 }
-                if (litInGroup >= torchCount) {
+                if (maxTorchCount > 0 && litInGroup >= maxTorchCount) {
                     Flags_SetSwitch(gPlayState, switchFlag);
                     SPDLOG_INFO("[Syokudai] Puzzle complete via network sync: "
-                                "switchFlag={} lit={}/{}",
-                                switchFlag, litInGroup, torchCount);
+                                "switchFlag={} room={} lit={}/{} (lit-torch torchCount={})",
+                                switchFlag, (int)litRoom, litInGroup, maxTorchCount, torchCount);
+                } else {
+                    SPDLOG_INFO("[Syokudai] Lit transition observed but threshold not met: "
+                                "switchFlag={} room={} lit={}/{} (lit-torch torchCount={})",
+                                switchFlag, (int)litRoom, litInGroup, maxTorchCount, torchCount);
                 }
             }
         }
