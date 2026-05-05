@@ -34,7 +34,9 @@ typedef struct EnMd {
 //   0x01 — BlockPath (gating Kokiri Forest entrance)
 //   0x02 — ListenToOcarina
 //   0x03 — Walk (transitioning aside after sword+shield satisfied)
-u8   EnMd_GetStateIndex(struct EnMd* this);
-void EnMd_ApplyNetState(struct EnMd* this, PlayState* play, u8 stateIndex);
+// Parameter named `actor` (not `this`) so the header can be #included
+// from C++ TUs (Packets/MidoPostDekuLeave.cpp) where `this` is reserved.
+u8   EnMd_GetStateIndex(struct EnMd* actor);
+void EnMd_ApplyNetState(struct EnMd* actor, PlayState* play, u8 stateIndex);
 
 #endif
