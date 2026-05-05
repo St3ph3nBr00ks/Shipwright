@@ -165,45 +165,68 @@ damage_target_found:
         return;
     }
 
-    // Accumulate into colChkInfo.damage. The enemy's own update() will read
-    // this on the next frame (same code path as a local sword hit) and call
-    // Actor_ApplyDamage, decrement health, play hit reactions, and potentially
-    // fire GameInteractor_ExecuteOnEnemyDefeat → ENEMY_DEFEATED.
-    // Using += handles the rare case where two DAMAGE_ENEMY packets arrive in
-    // the same processing window (multi-hit same frame from the non-host).
-    // Test 15 diagnostic: capture HP before and log both.
-    u8 preHp = (u8)actor->colChkInfo.health;
-    actor->colChkInfo.damage += damage;
-
-    // Schema 2 (#174/#175): replay damageEffect + atHitEffect so enemies that
-    // branch on these fields recognise the synthetic hit. damageEffect lives
-    // on the enemy itself (set by the damage-table lookup); atHitEffect lives
-    // on the *attacker*, but we mirror it onto the enemy here as Option A from
-    // Plans/damage_enemy_propagation_fix.md — the per-enemy override table
-    // (Phase 3) can refine this if any enemy reads it via a different path.
+    // #190 — queue damage onto the actor's EnemyNetId extension instead of
+    // poking colChkInfo + AC_HIT directly. A new DrainPendingSyncDamage
+    // call from the host-side ShouldActorUpdate hook applies the queued
+    // values on the first frame the actor's update is about to run.
+    // This survives Item Get / cutscene / text-box / ocarina freezes
+    // (where actor updates are paused but CollisionCheck reset passes
+    // would clear the synthetic AC_HIT bit and colChkInfo.damage).
     //
-    if (payload.contains("damageEffect")) {
-        actor->colChkInfo.damageEffect = (u8)payload["damageEffect"].get<int>();
+    // pendingSyncDamage accumulates (multi-hit same frame OR multi-hit
+    // during a freeze sums up); damageEffect / atHitEffect are
+    // last-write-wins (the most-recent hit's flavour wins, which is what
+    // the actor's UpdateDamage expects anyway since vanilla overwrites
+    // those fields per-hit).
+    EnemyNetId* mut = const_cast<EnemyNetId*>(
+        ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+    if (mut == nullptr) {
+        // No extension — actor wasn't admitted to sync. Defensive
+        // fallback: apply directly so no behaviour regression for
+        // actors that don't yet have an EnemyNetId.
+        actor->colChkInfo.damage += damage;
+        if (payload.contains("damageEffect")) {
+            actor->colChkInfo.damageEffect = (u8)payload["damageEffect"].get<int>();
+        }
+        if (payload.contains("atHitEffect")) {
+            actor->colChkInfo.atHitEffect = (u8)payload["atHitEffect"].get<int>();
+        }
+        SPDLOG_INFO("[DamageEnemy] Applied directly (no ext) netId={} damage={} preHp={}",
+                    netId, (int)damage, (int)actor->colChkInfo.health);
+    } else {
+        u8 newPending = (u8)((u32)mut->pendingSyncDamage + damage);
+        if (newPending < mut->pendingSyncDamage) newPending = 0xFF;  // saturating-add overflow guard
+        mut->pendingSyncDamage = newPending;
+        if (payload.contains("damageEffect")) {
+            mut->pendingSyncDamageEffect = (u8)payload["damageEffect"].get<int>();
+        }
+        if (payload.contains("atHitEffect")) {
+            mut->pendingSyncAtHitEffect = (u8)payload["atHitEffect"].get<int>();
+        }
+        SPDLOG_INFO("[DamageEnemy] Queued netId={} +{} → pending={} (drains on next ShouldActorUpdate)",
+                    netId, (int)damage, (int)mut->pendingSyncDamage);
     }
-    if (payload.contains("atHitEffect")) {
-        actor->colChkInfo.atHitEffect = (u8)payload["atHitEffect"].get<int>();
-    }
 
-    // Phase 3 of #174/#175 — set AC_HIT on the actor's AC collider so its
-    // update() recognises the synthetic hit. Many enemies branch on
-    // `collider.base.acFlags & AC_HIT` BEFORE consulting colChkInfo.damage
-    // (e.g. EnDekubaba_UpdateDamage, EnKarebaba lunge handler, EnFirefly hit
-    // detection). Without AC_HIT, the damage value is set but never read.
-    //
-    // The collider lives on each actor's own struct at a per-overlay-specific
-    // field path. There's no generic Actor::collider pointer, so we dispatch
-    // by actor->id. If a synced enemy is added that gates damage on AC_HIT,
-    // add it here.
-    //
-    // For multi-collider actors (Skulltula's 6-cylinder body, Stalfos' body
-    // vs sword vs shield, Karebaba's head vs body), we set the bit on the
-    // collider that the actor's damage code checks — verified in each
-    // actor's source.
+    // Q I Tier 2 — record who dealt this damage. Synchronous because
+    // kill attribution is keyed on the LATEST damager seen for the
+    // netId; if the actor dies before the queued damage drains, we
+    // still want the attribution to reflect this packet's sender.
+    uint32_t senderId = payload.value("clientId", (uint32_t)0);
+    if (senderId != 0) {
+        EnemyStateSync::HostBookkeeping::Instance().RecordDamager(netId, senderId);
+    }
+}
+
+// Per-actor AC_HIT setter switch — mirrors the original
+// HandlePacket_DamageEnemy switch. Called from DrainPendingSyncDamage when
+// queued damage is applied. Kept as a separate helper so the receive-side
+// queue path stays terse and the actor-id dispatch stays in one place.
+//
+// Each branch sets the AC_HIT bit on the collider the actor's damage code
+// checks. For Boss_Goma (which reads BUMP_HIT not AC_HIT) we set bumperFlags
+// + synthesise a static ColliderInfo with sword dmgFlags so Goma's stun /
+// patience / sword-damage paths register the synthetic hit.
+static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
     switch (actor->id) {
         case ACTOR_EN_DEKUBABA:
             ((EnDekubaba*)actor)->collider.base.acFlags |= AC_HIT;
@@ -294,20 +317,43 @@ damage_target_found:
             // they're identified during testing.
             break;
     }
+}
 
-    SPDLOG_INFO("[DamageEnemy] Received netId={} damage={} damageEffect={} atHitEffect={} "
-                "preHp={} accumDmg={} (actor->update will consume next frame)",
-                netId, (int)damage,
-                (int)payload.value("damageEffect", 0),
-                (int)payload.value("atHitEffect", 0),
-                (int)preHp, (int)actor->colChkInfo.damage);
+// #190 — drain queued DAMAGE_ENEMY damage onto the actor's colChkInfo +
+// AC_HIT. Called from the host-side ShouldActorUpdate hook every frame
+// the actor's update is about to run, so the synthetic hit gets consumed
+// by UpdateDamage on the same frame the world resumes from a freeze.
+//
+// No-op when ext->pendingSyncDamage == 0. Discards queued damage when the
+// actor has died (actor->update == NULL or health == 0) — prevents
+// applying to a dead-but-not-yet-cleaned-up actor.
+void Anchor::DrainPendingSyncDamage(Actor* actor) {
+    if (actor == nullptr) return;
+    EnemyNetId* ext = const_cast<EnemyNetId*>(
+        ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+    if (ext == nullptr || ext->pendingSyncDamage == 0) return;
 
-    // Q I Tier 2 — record who dealt this damage so SendPacket_EnemyDefeated
-    // can populate killerClientId on the outgoing kill packet. Sender is
-    // identified by the auto-injected payload["clientId"] field set by
-    // SendJsonToRemote on the originating client.
-    uint32_t senderId = payload.value("clientId", (uint32_t)0);
-    if (senderId != 0) {
-        EnemyStateSync::HostBookkeeping::Instance().RecordDamager(netId, senderId);
+    if (actor->update == nullptr || actor->colChkInfo.health == 0) {
+        ext->pendingSyncDamage = 0;
+        ext->pendingSyncDamageEffect = 0;
+        ext->pendingSyncAtHitEffect = 0;
+        return;
     }
+
+    u8 damage = ext->pendingSyncDamage;
+    u8 damageEffect = ext->pendingSyncDamageEffect;
+    u8 atHitEffect = ext->pendingSyncAtHitEffect;
+    ext->pendingSyncDamage = 0;
+    ext->pendingSyncDamageEffect = 0;
+    ext->pendingSyncAtHitEffect = 0;
+
+    u8 preHp = (u8)actor->colChkInfo.health;
+    actor->colChkInfo.damage += damage;
+    if (damageEffect != 0) actor->colChkInfo.damageEffect = damageEffect;
+    if (atHitEffect != 0) actor->colChkInfo.atHitEffect = atHitEffect;
+    ApplySyncAcHitToActor(actor, damage);
+
+    SPDLOG_INFO("[DamageEnemy] Drained pending damage actorId={} damage={} preHp={} "
+                "accumDmg={} (UpdateDamage consumes this frame)",
+                actor->id, (int)damage, (int)preHp, (int)actor->colChkInfo.damage);
 }

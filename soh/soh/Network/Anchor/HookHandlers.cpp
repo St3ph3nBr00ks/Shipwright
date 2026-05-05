@@ -4530,6 +4530,16 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // #190 — drain queued DAMAGE_ENEMY damage from the actor's
+        // EnemyNetId pending fields onto colChkInfo + AC_HIT. ShouldActorUpdate
+        // fires BEFORE actor->update each frame the world is advancing, so
+        // the synthetic hit gets consumed by the actor's UpdateDamage on the
+        // same frame the world resumes from any freeze (Item Get / cutscene /
+        // text-box / ocarina / pause). When the world is frozen, this hook
+        // doesn't fire (no actor update to gate), so pending damage stays
+        // queued in the ext until resume.
+        Anchor::Instance->DrainPendingSyncDamage(actor);
+
         Player* localPlayer = GET_PLAYER(gPlayState);
         Actor* nearest = FindNearestPlayerActor(actor, gPlayState);
 

@@ -107,6 +107,22 @@ struct EnemyNetId {
     // local AI, vanilla single-player parity).
     s16 syokudaiLitTimer = INT16_MIN;
 
+    // #190 — pending DAMAGE_ENEMY queue. When peer's hit packet arrives
+    // while the host is in a world-freeze (Item Get cutscene, text box,
+    // ocarina playback, scene transition, vanilla pause), the host's
+    // actor->update doesn't run, so the synthetic AC_HIT bit and
+    // colChkInfo.damage value previously written by HandlePacket_DamageEnemy
+    // got cleared by collision-system reset passes that aren't gated on
+    // world time — silently dropping the damage. Now the receive path
+    // queues the damage onto these fields, and the ShouldActorUpdate
+    // hook drains them onto colChkInfo + AC_HIT on the first frame
+    // the actor's update is about to run (i.e., when world resumes).
+    // pendingSyncDamage accumulates (multi-hit during a single freeze
+    // adds up); damageEffect / atHitEffect are last-write-wins.
+    u8 pendingSyncDamage        = 0;
+    u8 pendingSyncDamageEffect  = 0;
+    u8 pendingSyncAtHitEffect   = 0;
+
     // Boss_Goma — sticky "peer is signaling encounter advance" flag (#67).
     // Set true on receipt of any BOSS_GOMA_LOOKED_AT. Stays true until
     // case 3 of BossGoma_Encounter consumes-and-clears it via
@@ -524,6 +540,13 @@ class Anchor : public Network {
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     void HandlePacket_SceneActorNetIds(nlohmann::json payload);
     void HandlePacket_DamageEnemy(nlohmann::json payload);
+
+    // #190 — drain queued DAMAGE_ENEMY damage from EnemyNetId pending
+    // fields onto the actor's colChkInfo + AC_HIT. Called from
+    // ShouldActorUpdate (host-side) before the actor's own update runs,
+    // so UpdateDamage consumes the synthetic hit on the same frame
+    // the world resumes. No-op when ext->pendingSyncDamage == 0.
+    void DrainPendingSyncDamage(Actor* actor);
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);
     void HandlePacket_DamagePlayer(nlohmann::json payload);
     void HandlePacket_DisableAnchor(nlohmann::json payload);
