@@ -411,6 +411,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_UpdateDungeonItems(payload);
             else if (packetType == SCENE_TRANSITION_HANDOFF)
                 HandlePacket_SceneTransitionHandoff(payload);
+            else if (packetType == BOSS_EXIT_TEAM_WARP)
+                HandlePacket_BossExitTeamWarp(payload);
             else if (packetType == WORLD_FLAG_SET)
                 HandlePacket_WorldFlagSet(payload);
             else if (packetType == WORLD_FLAG_UNSET)

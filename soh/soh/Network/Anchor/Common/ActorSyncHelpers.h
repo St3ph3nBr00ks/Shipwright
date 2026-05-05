@@ -89,6 +89,22 @@ bool IsSyncedWorldActor(int16_t actorId);
 //   ACTOR_BOSS_GANON2     — Ganon final phase    (#75)
 bool IsSyncedBossActor(int16_t actorId);
 
+// True when (sourceSceneNum, destEntranceIndex) is a synced boss-room exit.
+// Used by the BOSS_EXIT_TEAM_WARP send-side hook to decide whether the
+// local player's transitionTrigger OFF→START edge should pull all
+// teammates currently in the same boss room through the same warp.
+//
+// Includes both the first-time-clear destination (which carries the
+// post-fight cutscene index) and the subsequent-visit destination (no
+// cutscene). Both branches are valid co-warp triggers because vanilla
+// solo play uses the same blue warp for both.
+//
+// Add new (scene, entrance) pairs as additional bosses come online.
+// Defining the predicate as (scene, entrance) rather than scene-only
+// rejects death-void / save-quit / Farore's-Wind transitions out of
+// the boss room — those should NOT pull teammates along.
+bool IsSyncedBossExit(int16_t sourceSceneNum, int16_t destEntranceIndex);
+
 // True when the actor should be considered for sync. Called from each filter
 // site to keep the gate logic identical everywhere.
 inline bool IsSyncableActor(Actor* actor) {

@@ -544,6 +544,18 @@ class Anchor : public Network {
     void SendPacket_SceneDeathsCleared(int16_t sceneNum, uint8_t timeline);
     void HandlePacket_SceneDeathsCleared(nlohmann::json payload);
 
+    // Team co-warp on synced-boss-room exit. When any team member walks
+    // into the dungeon-clear blue warp, every teammate currently in the
+    // same boss room is force-transitioned to the same destination so
+    // their post-fight exit stays grouped. Receivers apply silently
+    // (no fade VFX) so the transition feels seamless. Fired from the
+    // existing transitionTrigger OFF→START edge in OnGameFrameUpdate
+    // and gated by IsSyncedBossExit(sceneNum, entranceIndex).
+    void SendPacket_BossExitTeamWarp(s16 sourceSceneNum, s16 entranceIndex,
+                                     u16 nextCutsceneIndex, s8 transitionType,
+                                     s8 nextTransitionType);
+    void HandlePacket_BossExitTeamWarp(nlohmann::json payload);
+
   public:
     uint32_t ownClientId;
 
@@ -619,6 +631,12 @@ class Anchor : public Network {
     // boss-room deactivate path and unblocks cross-scene doors / grotto /
     // crawlspace entry. See #169.
     inline static const std::string SCENE_TRANSITION_HANDOFF = "SCENE_TRANSITION_HANDOFF";
+
+    // BOSS_EXIT_TEAM_WARP — team-routed scene transition for synced boss
+    // exits. When a team member enters the dungeon-clear blue warp, all
+    // teammates in the same boss room transition to the same destination
+    // entrance / next-cutscene, in lockstep. Routed via `targetTeamId`.
+    inline static const std::string BOSS_EXIT_TEAM_WARP = "BOSS_EXIT_TEAM_WARP";
 
     // Pillar C v1 — globally-replicated world state. Plan in
     // Claude/Plans/pillar_c_worldstatesync.md.

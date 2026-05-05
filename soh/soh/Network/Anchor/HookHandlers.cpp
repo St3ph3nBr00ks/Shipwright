@@ -727,18 +727,30 @@ void Anchor::RegisterHooks() {
         // active will use the data to follow us through the transition
         // (SceneTransitionHandoff.cpp HandlePacket_… stashes it pending; the
         // follower state machine below consumes it once within proximity).
+        //
+        // Same edge also fires BOSS_EXIT_TEAM_WARP when (sourceScene,
+        // destEntrance) is a synced-boss-exit pair. That packet pulls
+        // teammates currently in the same boss room through the same warp
+        // so post-fight exits stay grouped (post-Goma cutscene chain).
         if (IsSaveLoaded() && gPlayState != nullptr) {
             s32 curTrigger = gPlayState->transitionTrigger;
             if (curTrigger == TRANS_TRIGGER_START &&
                 prevTransitionTrigger == TRANS_TRIGGER_OFF) {
                 Player* localPlayer = GET_PLAYER(gPlayState);
+                s16 fromScene  = (s16)gPlayState->sceneNum;
+                s16 toEntrance = (s16)gPlayState->nextEntranceIndex;
                 if (localPlayer != nullptr) {
-                    s16   fromScene   = (s16)gPlayState->sceneNum;
-                    s16   toEntrance  = (s16)gPlayState->nextEntranceIndex;
                     Vec3f triggerPos  = localPlayer->actor.world.pos;
                     s16   triggerRotY = localPlayer->actor.shape.rot.y;
                     SendPacket_SceneTransitionHandoff(fromScene, toEntrance,
                                                       triggerPos, triggerRotY);
+                }
+                if (IsSyncedBossExit(fromScene, toEntrance)) {
+                    SendPacket_BossExitTeamWarp(
+                        fromScene, toEntrance,
+                        (u16)gSaveContext.nextCutsceneIndex,
+                        (s8)gPlayState->transitionType,
+                        (s8)gSaveContext.nextTransitionType);
                 }
             }
             prevTransitionTrigger = curTrigger;
@@ -3575,7 +3587,19 @@ void Anchor::RegisterHooks() {
 
         // Scene-host deferred broadcast: send ENEMY_SPAWN for dynamic
         // actors now that the netId extension is in place.
-        if (isDynamicSpawn && ::SceneAuthority::IsMyCurrentRoomHost()) {
+        //
+        // `!isSpawningNetworkActor` closes the echo cascade root for
+        // #186. Without it, when a peer's spawn arrives at the host,
+        // HandlePacket_EnemySpawn → Actor_Spawn → OnActorSpawn fires —
+        // and the host re-broadcasts the spawn back to the original
+        // sender, which then re-spawns and re-broadcasts in turn. The
+        // log signature is dozens of ENEMY_SPAWN packets per 100ms for
+        // the same netId family, ending in `Unhandled OP code` in the
+        // F3DEX interpreter (renderer chasing display lists through a
+        // corrupted segment table). isSpawningNetworkActor is set by
+        // HandlePacket_EnemySpawn around the Actor_Spawn call, exactly
+        // for this guard.
+        if (isDynamicSpawn && ::SceneAuthority::IsMyCurrentRoomHost() && !isSpawningNetworkActor) {
             SendPacket_EnemySpawn(actor);
         }
     });
@@ -4034,9 +4058,30 @@ void Anchor::RegisterHooks() {
             }
             // Skip health re-apply after a local kill so the host's stale health > 0
             // packets don't revive the dying actor on this client (hasLocalDeath guard).
-            // Multi-hit guard: only re-apply if local health hasn't been reduced below the
-            // network value; otherwise we'd undo locally-dealt damage on multi-hit enemies.
-            if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) && actor->colChkInfo.health >= ext->netHealth) {
+            //
+            // For regular enemies, multi-hit guard: only re-apply if local health hasn't
+            // been reduced below the network value; otherwise we'd undo locally-dealt
+            // damage on multi-hit enemies.
+            //
+            // For boss actors, the multi-hit guard is REVERSED — bosses are strictly
+            // host-authoritative. Peer's local BossGoma_UpdateHit decrements peer's
+            // local HP every time peer hits the boss (the boss's own update runs
+            // locally and damages itself off the synthesised AC_HIT). Without forcing
+            // the network HP back, peer's local HP races to 0 ahead of the host's
+            // authoritative HP, peer fires OnBossDefeat from its own SetupDefeated
+            // path, and broadcasts ENEMY_DEFEATED — host then trusts peer's "boss is
+            // dead" claim despite host's HP still being well above 0. Field test 273
+            // showed Goma dying after only 1 ENEMY_DEFEATED-from-peer event with
+            // host's `preHp=10` (full HP minus 1).
+            //
+            // Force-overwrite for boss actors: peer's local HP always tracks the
+            // host's authoritative value, even when local damage already decremented
+            // it lower. The boss's hit-reaction visuals (color flash, sound) still
+            // play locally because they're driven by BUMP_HIT / state-machine sync,
+            // not by the HP value.
+            const bool forceNetHealth = IsSyncedBossActor(actor->id);
+            if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
+                (forceNetHealth || actor->colChkInfo.health >= ext->netHealth)) {
                 actor->colChkInfo.health = ext->netHealth;
             }
             // Karebaba: pre-compute local state and active/dormant flags here so they
@@ -4692,6 +4737,20 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // Host-authoritative broadcast: only the elected host announces a
+        // boss defeat. Peer's local BossGoma_UpdateHit can still enter
+        // SetupDefeated → fire OnBossDefeat as a side effect of state-machine
+        // sync (host's actionFunc transition replicates), but peer must NOT
+        // broadcast ENEMY_DEFEATED back at the host. Without this gate, peer's
+        // local "I think the boss is dying" claim would route to host and
+        // trigger the kill cycle prematurely (field test 273: peer broadcast
+        // defeat while host's HP was still 9 — host trusted peer and the boss
+        // died on a fraction of full HP).
+        if (!::SceneAuthority::IsMyCurrentRoomHost()) {
+            EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+            return;
+        }
+
         auto& bk = EnemyStateSync::HostBookkeeping::Instance();
         if (!bk.ClaimDefeatBroadcast(ext->netId)) {
             // Already broadcast — duplicate; transition phase but skip send.
@@ -4699,9 +4758,7 @@ void Anchor::RegisterHooks() {
             return;
         }
         EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
-        if (::SceneAuthority::IsMyCurrentRoomHost()) {
-            bk.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
-        }
+        bk.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
         SPDLOG_INFO("[OnBossDefeat] id={} netId={} — broadcasting defeat", actor->id, ext->netId);
         SendPacket_EnemyDefeated(ext->netId);
     });

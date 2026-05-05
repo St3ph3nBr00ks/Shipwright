@@ -26,6 +26,10 @@ extern "C" {
 // En_Skb (Stalchild) — Hyrule Field at night spawner output. Damage gate
 // at z_en_skb.c:456 reads collider.base.acFlags & 2 (AC_HIT).
 #include "src/overlays/actors/ovl_En_Skb/z_en_skb.h"
+// Boss_Goma — non-host damage requires synthesised acHitInfo + BUMP_HIT
+// because BossGoma_UpdateHit (z_boss_goma.c:1823) gates on bumperFlags &
+// BUMP_HIT (not AC_HIT) and dereferences acHitInfo->toucher.dmgFlags.
+#include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 extern PlayState* gPlayState;
 }
 
@@ -238,6 +242,42 @@ damage_target_found:
             // and decrements health by 1.
             ((EnGoma*)actor)->colCyl2.base.acFlags |= AC_HIT;
             break;
+        case ACTOR_BOSS_GOMA: {
+            // Boss Gohma damage from non-host. BossGoma_UpdateHit
+            // (z_boss_goma.c:1823) reads `bumperFlags & BUMP_HIT` (NOT
+            // AC_HIT) and dereferences `acHitInfo->toucher.dmgFlags` for
+            // the FloorStunned damage and patience-stun branches. Both
+            // need to be synthesised here so non-host hits actually
+            // register on the host's authoritative boss.
+            //
+            // Without this:
+            //   - P2's slingshot eye-hits don't knock Goma off the
+            //     ceiling — `bumperFlags` never has BUMP_HIT set, and
+            //     SetupFallStruckDown is gated on it (line 1831).
+            //   - P2's sword hits don't damage the stunned boss —
+            //     CollisionCheck_GetSwordDamage(acHitInfo->toucher.
+            //     dmgFlags, ...) returns 0 because the deref is into
+            //     stale memory or null.
+            //   - Symptom (log 271): boss soft-locks walking the
+            //     ceiling with eye closed once P1 can't keep landing
+            //     all the eye-hits alone.
+            //
+            // dmgFlags is set to the sword bit (0x1). `0x1 & 0x5 != 0`
+            // satisfies the patience-stun gate at line 1854 (which
+            // accepts sword 0x1 OR slingshot 0x4), and
+            // CollisionCheck_GetSwordDamage(0x1) returns 1 (Kokiri
+            // Sword damage), matching the most common attacker. A
+            // Giant's-Knife/Biggoron under-damages by 1 per hit on
+            // peer until atDmgFlags is added to DAMAGE_ENEMY in a
+            // follow-up; acceptable for demo.
+            BossGoma* boss = (BossGoma*)actor;
+            static ColliderInfo sBossGomaSynthAcHitInfo = {};
+            sBossGomaSynthAcHitInfo.toucher.dmgFlags = 0x1;  // sword bit
+            sBossGomaSynthAcHitInfo.toucher.damage   = (u8)damage;
+            boss->collider.elements[0].info.acHitInfo    = &sBossGomaSynthAcHitInfo;
+            boss->collider.elements[0].info.bumperFlags |= BUMP_HIT;
+            break;
+        }
         case ACTOR_EN_SKB:
             // Stalchild damage block (z_en_skb.c:456) reads
             // `collider.base.acFlags & 2` (AC_HIT). No acHitInfo->toucher

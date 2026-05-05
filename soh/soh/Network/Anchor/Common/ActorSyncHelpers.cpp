@@ -160,6 +160,29 @@ bool IsSyncedBossActor(int16_t actorId) {
     }
 }
 
+bool IsSyncedBossExit(int16_t sourceSceneNum, int16_t destEntranceIndex) {
+    // Allowlist of (boss-scene, dungeon-clear-entrance) pairs. Checked
+    // by the BOSS_EXIT_TEAM_WARP send-side hook to gate which transition
+    // edges pull teammates along. Each scene typically has TWO valid
+    // exit entrances: the first-time-clear path (carries the post-fight
+    // cutscene) and the subsequent-visit path (no cutscene). z_door_warp1
+    // chooses between them based on whether the dungeon-clear EVENTCHKINF
+    // flag has already been set for the boss.
+    switch (sourceSceneNum) {
+        case SCENE_DEKU_TREE_BOSS:  // 0x12 — Queen Gohma
+            return destEntranceIndex == ENTR_KOKIRI_FOREST_0 ||
+                   destEntranceIndex == ENTR_KOKIRI_FOREST_DEKU_TREE_BLUE_WARP;
+        // Future bosses — add as IsSyncedBossActor entries land:
+        // case SCENE_DODONGOS_CAVERN_BOSS:  // 0x13 — King Dodongo
+        //     return destEntranceIndex == ENTR_DEATH_MOUNTAIN_TRAIL_BOTTOM_EXIT ||
+        //            destEntranceIndex == ENTR_DEATH_MOUNTAIN_TRAIL_DODONGO_BLUE_WARP;
+        // case SCENE_JABU_JABU_BOSS:  // 0x14 — Barinade
+        //     return destEntranceIndex == ENTR_ZORAS_FOUNTAIN_JABU_JABU_BLUE_WARP;
+        default:
+            return false;
+    }
+}
+
 uint32_t EncodeEnemyNetId(Actor* actor) {
     uint8_t posHash = (uint8_t)((int16_t)actor->home.pos.x) ^
                       (uint8_t)((int16_t)actor->home.pos.y >> 2) ^  // #162 Proposal A

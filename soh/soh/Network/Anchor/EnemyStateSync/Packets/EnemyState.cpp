@@ -959,7 +959,15 @@ actor_found:
         }
         actor->world.rot = rot;
 
-        if (health <= actor->colChkInfo.health) {
+        // Multi-hit guard for regular enemies (only apply network HP if it's
+        // <= local HP, so peer's locally-dealt damage isn't undone). For boss
+        // actors, REVERSE — host is the sole HP authority. Without this, peer's
+        // local UpdateHit decrements peer's HP independently of host, peer races
+        // to 0 HP, and peer fires OnBossDefeat from peer's local SetupDefeated
+        // path (field test 273: Goma killed after just 1 cross-network hit
+        // because peer's local HP path beat the host's authoritative HP).
+        const bool forceNetHealth = IsSyncedBossActor(actor->id);
+        if (forceNetHealth || health <= actor->colChkInfo.health) {
             actor->colChkInfo.health = health;
             ext->netHealth           = health;
         }
@@ -1192,6 +1200,33 @@ void Anchor::HandlePacket_EnemySpawn(nlohmann::json payload) {
 
     SPDLOG_INFO("[EnemySpawn] Received spawn actorId={} pos=({:.1f},{:.1f},{:.1f}) params={}",
                 actorId, pos.x, pos.y, pos.z, params);
+
+    // Idempotency guard for #186 — drop the spawn if an actor with this
+    // netId already exists in any synced category. Without this, a
+    // duplicate ENEMY_SPAWN (from the echo cascade or a legitimate
+    // late-replay) creates a second instance of the same logical
+    // actor; subsequent ENEMY_STATE updates pick whichever lookup hits
+    // first and the duplicate accumulates garbage state until it
+    // crashes the F3DEX interpreter. Layer 1 (host re-broadcast guard
+    // in HookHandlers.cpp) is the primary closer; this layer is
+    // defence in depth covering legit duplicate-delivery cases too.
+    if (payload.contains("netId")) {
+        uint32_t incomingNetId = payload["netId"].get<uint32_t>();
+        for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
+            Actor* existing = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
+            while (existing != nullptr) {
+                const EnemyNetId* ext =
+                    ObjectExtension::GetInstance().Get<EnemyNetId>(existing);
+                if (ext != nullptr && ext->netId == incomingNetId) {
+                    SPDLOG_INFO("[EnemySpawn] Drop duplicate spawn — netId={} already "
+                                "exists for actorId={} ptr={} (idempotency guard)",
+                                incomingNetId, existing->id, (void*)existing);
+                    return;
+                }
+                existing = existing->next;
+            }
+        }
+    }
 
     isSpawningNetworkActor = true;
     Actor* spawned = Actor_Spawn(&gPlayState->actorCtx, gPlayState, actorId,
