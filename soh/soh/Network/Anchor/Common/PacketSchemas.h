@@ -24,7 +24,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"DAMAGE_PLAYER", 1},
     {"DISABLE_ANCHOR", 1},
     {"ENEMY_HIT_PLAYER", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
-    {"ENEMY_STATE", 3},  // bump-history: 1 (Pillar C2 Phase 4 — unified enemy lifecycle), 2 (Generic NPC State Sync Phase 0 — added "scope" field), 3 (per-torch lit-state sync — added "syokudaiLitTimer" field).
+    {"ENEMY_STATE", 4},  // bump-history: 1 (Pillar C2 Phase 4 — unified enemy lifecycle), 2 (Generic NPC State Sync Phase 0 — added "scope" field), 3 (per-torch lit-state sync — added "syokudaiLitTimer" field), 4 (KB-44 — added "bossGomaChildrenState" array field for Boss_Goma larva death tracking sync).
     {"ENTRANCE_DISCOVERED", 1},
     {"GAME_COMPLETE", 1},
     {"GIVE_ITEM", 1},

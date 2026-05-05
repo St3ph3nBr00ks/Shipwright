@@ -141,6 +141,15 @@ struct EnemyUpdateExtras {
     s16  bossGomaInvincibilityFrames  = 0;
     s16  bossGomaVisualState          = 0;
     s16  bossGomaEyeState             = 0;
+    // KB-44 — childrenGohmaState[3] gates the CeilingIdle exit. Slots:
+    // 0 = not spawned, 1 = spawned/alive, -1 = dead. BossGoma_CeilingIdle
+    // (z_boss_goma.c:1601-1622) only fires SetupFallJump (drop from
+    // ceiling, fight resumes) when ALL three are -1; otherwise loops
+    // back to MoveToCenter forever. Vanilla writes happen inside the
+    // larva's own update — peer's larvae have parent=NULL (spawned via
+    // Actor_Spawn, not SpawnAsChild) so peer can't write to its
+    // BossGoma at all. Host-authoritative copy from host's BossGoma.
+    s16  bossGomaChildrenState[3]     = {0, 0, 0};
 
     // Per-torch lit-state sync (Obj_Syokudai). Host-authoritative
     // `litTimer` for individual torches so partial multi-torch puzzle
@@ -259,6 +268,9 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.bossGomaInvincibilityFrames     = bg->invincibilityFrames;
         e.bossGomaVisualState             = bg->visualState;
         e.bossGomaEyeState                = bg->eyeState;
+        e.bossGomaChildrenState[0]        = bg->childrenGohmaState[0];
+        e.bossGomaChildrenState[1]        = bg->childrenGohmaState[1];
+        e.bossGomaChildrenState[2]        = bg->childrenGohmaState[2];
     } else if (actor->id == ACTOR_OBJ_SYOKUDAI) {
         ObjSyokudai* torch  = (ObjSyokudai*)actor;
         e.hasSyokudai       = true;
@@ -325,6 +337,9 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
         if (cur.bossGomaInvincibilityFrames != prev.bossGomaInvincibilityFrames) return true;
         if (cur.bossGomaVisualState         != prev.bossGomaVisualState)         return true;
         if (cur.bossGomaEyeState            != prev.bossGomaEyeState)            return true;
+        if (cur.bossGomaChildrenState[0]    != prev.bossGomaChildrenState[0])    return true;
+        if (cur.bossGomaChildrenState[1]    != prev.bossGomaChildrenState[1])    return true;
+        if (cur.bossGomaChildrenState[2]    != prev.bossGomaChildrenState[2])    return true;
     }
     if (cur.hasSyokudai != prev.hasSyokudai) return true;
     if (cur.hasSyokudai) {
@@ -617,6 +632,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         payload["bossGomaInvincibilityFrames"] = (int)extras.bossGomaInvincibilityFrames;
         payload["bossGomaVisualState"]         = (int)extras.bossGomaVisualState;
         payload["bossGomaEyeState"]            = (int)extras.bossGomaEyeState;
+        payload["bossGomaChildrenState"]       = nlohmann::json::array({
+            (int)extras.bossGomaChildrenState[0],
+            (int)extras.bossGomaChildrenState[1],
+            (int)extras.bossGomaChildrenState[2],
+        });
     }
 
     // Per-torch lit-state sync (Obj_Syokudai).
@@ -1082,6 +1102,22 @@ actor_found:
             }
             if (payload.contains("bossGomaEyeState")) {
                 bg->eyeState = (s16)payload["bossGomaEyeState"].get<int>();
+            }
+            // KB-44 — childrenGohmaState[3] sync. Peer's larvae have
+            // parent=NULL (spawned via Actor_Spawn from ENEMY_SPAWN
+            // receive, not Actor_SpawnAsChild) so peer's local EnGoma
+            // can never write to peer's BossGoma — the slot stays at
+            // 1 (alive) forever, BossGoma_CeilingIdle's all-dead
+            // exit condition (z_boss_goma.c:1604-1609) never fires,
+            // and the boss loops on the ceiling indefinitely.
+            // Mirror host's authoritative array.
+            if (payload.contains("bossGomaChildrenState")) {
+                const auto& arr = payload["bossGomaChildrenState"];
+                if (arr.is_array() && arr.size() >= 3) {
+                    bg->childrenGohmaState[0] = (s16)arr[0].get<int>();
+                    bg->childrenGohmaState[1] = (s16)arr[1].get<int>();
+                    bg->childrenGohmaState[2] = (s16)arr[2].get<int>();
+                }
             }
         }
         // Bug 2 follow-on — apply host's stem angles directly to the local
@@ -1615,6 +1651,30 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     Flags_SetClear(gPlayState, actor->room);
                     SPDLOG_INFO("[EnemyDefeated] Hintnut #3 netId={} — puzzle complete (sPuzzleCounter=3, room clear flag set)",
                                 netId);
+                }
+
+                // KB-44 — egg-state EnGoma kill bypasses the natural
+                // death cycle (vanilla writes parent->childrenGohmaState
+                // = -1 inside EnGoma_UpdateDamage's egg-die block at
+                // z_en_goma.c:691-697 OR EnGoma_Dead at z_en_goma.c:444).
+                // When a peer kills an egg locally, peer broadcasts
+                // ENEMY_DEFEATED; host falls through to the generic
+                // Actor_Kill below without running either vanilla write,
+                // leaving host's BossGoma::childrenGohmaState slot at
+                // 1 forever. BossGoma_CeilingIdle then loops because
+                // the all-dead exit needs ALL three slots = -1.
+                // Apply the slot write here as host-side compensation.
+                // (Hatched larvae are routed through SetupDyingNet
+                // above and reach EnGoma_Dead's natural write; this
+                // branch only catches the egg-state fall-through.)
+                if (actor->id == ACTOR_EN_GOMA && actor->params < 3 &&
+                    actor->parent != nullptr) {
+                    BossGoma* parent = (BossGoma*)actor->parent;
+                    parent->childrenGohmaState[actor->params] = -1;
+                    SPDLOG_INFO("[EnemyDefeated] EnGoma egg netId={} — set parent "
+                                "childrenGohmaState[{}] = -1 (compensation for "
+                                "Actor_Kill bypassing natural cycle)",
+                                netId, (int)actor->params);
                 }
 
                 SPDLOG_INFO("[EnemyDefeated] Killing actor id={} netId={}", actor->id, netId);
