@@ -128,6 +128,54 @@ static constexpr int      kMaxFloorsPerColumn  = 8;      // defensive cap
 static constexpr int      kMaxScanIterations   = 50000;  // floodfill runaway guard
 static constexpr int64_t  kMaxScanWallTimeMs   = 1000;   // per-scan budget
 
+// ---------------------------------------------------------------------------
+// Hazard + water classification predicates. Plan §5 — bit positions
+// verified against z_player.c usage patterns.
+// ---------------------------------------------------------------------------
+
+// v1 hazard predicate. Returns true for surfaces that should bias the
+// navigator AWAY (consumer-side preference, not absolute exclusion).
+//
+// Confirmed hazards (verified from z_player.c references):
+//   Floor Property 5  = pit/void (Play_TriggerRespawn on landing)
+//   Floor Property 12 = deep-fall (void-out trigger via fall-distance)
+//   Floor Type 5      = slippery/ice (slip-recovery interaction)
+//   Floor Type 7      = ice/no-friction (defeats iron boots)
+//
+// NOT marked hazardous here:
+//   Floor Type 6 = shallow water — gets UNDERWATER flag instead
+//   Floor Type 9 = deep water    — gets UNDERWATER flag instead
+//   Floor Type 8 = scene-exit    — navigation-relevant but not a hazard
+//
+// Lava / hot-floor / quicksand are NOT identifiable from these bit fields
+// alone in vanilla OoT. Likely encoded in roomCtx.curRoom.behaviorType1/2
+// or detected by separate code paths in Player_UpdateCommon. Future work
+// per plan §5: add room-behavior-based hazard tagging during scan.
+static bool IsHazardousSurface(CollisionPoly* poly, s32 bgId, CollisionContext* colCtx) {
+    if (poly == nullptr) return false;
+
+    u32 floorProperty = func_80041EA4(colCtx, poly, bgId); // data[0] >> 26 & 0xF
+    u32 floorType     = func_80041D4C(colCtx, poly, bgId); // data[0] >> 13 & 0x1F
+
+    if (floorProperty == 5)  return true;  // pit/void
+    if (floorProperty == 12) return true;  // deep-fall
+    if (floorType == 5)      return true;  // slippery/ice
+    if (floorType == 7)      return true;  // ice/no-friction
+    return false;
+}
+
+// Water-volume detection. Returns true if the (x, floorY, z) sample lies
+// below a water surface — i.e., the floor at that XZ is submerged.
+// Swim-capable navigators (Link-rigged: AI Follower, NPC Invader) traverse
+// underwater nodes; non-swimming navigators skip them via NavTraits filter.
+static bool IsUnderwater(f32 x, f32 floorY, f32 z, PlayState* play) {
+    f32 waterSurfaceY = 0.0f;
+    WaterBox* wb = nullptr;
+    s32 hit = WaterBox_GetSurface1(play, &play->colCtx, x, z, &waterSurfaceY, &wb);
+    if (!hit) return false;
+    return floorY < waterSurfaceY;
+}
+
 // Pelvis-height movement-clearance line test. Used by BuildEdges to
 // determine whether two nodes can be traversed between without hitting
 // a wall. Per plan §2 — body offset 20u places the ray above ground but
@@ -204,6 +252,22 @@ static int ClassifyAndAddNode(RoomNavData* nav,
         flags |= NODE_STEEP_SLOPE;
     } else {
         flags |= NODE_WALKABLE;
+    }
+
+    // Hazard classification (commit 5) — see IsHazardousSurface above for
+    // verified bit positions and rationale. Hazard nodes are still
+    // walkable in the navigation sense (a navigator CAN end up on one
+    // and walk off it) but consumer-side preference routes around them.
+    if (IsHazardousSurface(floorPoly, floorBgId, &play->colCtx)) {
+        flags |= NODE_HAZARD;
+    }
+
+    // Underwater classification (commit 5) — water-volume detection via
+    // WaterBox_GetSurface1. Underwater nodes are walkable for swim-capable
+    // navigators (Link-rigged: AI Follower, NPC Invader) and skipped by
+    // non-swimming navigators at consumer-side via the NavTraits filter.
+    if (IsUnderwater(x, floorY, z, play)) {
+        flags |= NODE_UNDERWATER;
     }
 
     // Commit 5 will add: HAZARD and UNDERWATER flags.
