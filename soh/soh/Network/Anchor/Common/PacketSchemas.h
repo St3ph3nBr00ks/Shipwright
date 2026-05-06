@@ -29,6 +29,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"GAME_COMPLETE", 1},
     {"GIVE_ITEM", 1},
     {"HANDSHAKE", 1},
+    {"HEARTBEAT", 1},  // #194 follow-up — every-client liveness signal sent from network thread.
     {"OCARINA_SFX", 1},
     {"PLAYER_SFX", 1},
     {"PLAYER_UPDATE", 2},  // bumped for unk_860 (Deku-Stick burning timer) — drives remote flame VFX.

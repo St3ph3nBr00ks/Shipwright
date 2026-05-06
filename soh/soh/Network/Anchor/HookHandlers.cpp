@@ -415,11 +415,13 @@ extern "C" bool Anchor_ShouldSuppressEnSwDrop(Actor* actor) {
 
 // C-callable: non-host tells host that its local Link was just hit by this enemy
 // so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
-// Phase 2). No-op when Anchor is disconnected, when this client is the host, or
-// when the actor lacks an EnemyNetId extension (never reached the sync pipeline).
+// Phase 2). No-op when Anchor is disconnected, when this client is the room
+// host (it would handle the hit locally), or when the actor lacks an EnemyNetId
+// extension (never reached the sync pipeline). Uses Pillar A Phase 2 per-room
+// authority so the gate stays correct when the original room owner is offline.
 extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
-    if (Anchor::Instance->roomState.ownerClientId == Anchor::Instance->ownClientId) return;
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     if (ext == nullptr) return;
     Anchor::Instance->SendPacket_EnemyHitPlayer(ext->netId);
@@ -747,6 +749,14 @@ void Anchor::RegisterHooks() {
 
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
         ProcessIncomingPacketQueue();
+
+        // Heartbeat liveness counter (#194 follow-up) — read by the
+        // network thread when building the heartbeat payload. If this
+        // hook stops firing (game thread frozen), the counter stops
+        // advancing; peers detect a stale counter as IsClientGameFrozen
+        // even though the network-thread heartbeat itself keeps flowing.
+        Anchor::Instance->gameFrameCounter.fetch_add(
+            1, std::memory_order_relaxed);
 
         // #191 — host countdown for cutscene-textbox vote-skip. No-op
         // when no active textbox vote is in progress; broadcasts
@@ -4031,6 +4041,65 @@ void Anchor::RegisterHooks() {
                                 extMut->netId, curState);
                 }
             }
+
+            // #67 / KB-44 follow-up — Boss_Goma periodic larva scan.
+            //
+            // Defense in depth against childrenGohmaState[3] desync surfaced in
+            // the 4-player log 299/300 sessions: the boss got stuck on the
+            // ceiling after the second batch of larvae was defeated because
+            // childrenGohmaState[] still showed live entries despite zero live
+            // EnGoma actors in the scene. KB-44's wire-field sync (commit
+            // 9bf853f56) closed the primary host→peer channel; this scan is a
+            // secondary safety net that uses the actor list itself as ground
+            // truth.
+            //
+            // Gate to CeilingIdle and CeilingMoveToCenter only — both run after
+            // BossGoma_CeilingSpawnGohmas completes, so the scan never fires
+            // mid-spawn. Tick every 60 frames (~3s at 20fps).
+            //
+            // Counts EnGoma actors with gomaType ∈ {ENGOMA_NORMAL, ENGOMA_EGG}.
+            // Including ENGOMA_EGG covers the brief post-spawn window where
+            // childrenGohmaState[i]==1 but the egg hasn't hatched into NORMAL
+            // yet — without this, the scan could misfire and force-drop the
+            // boss before larvae can engage.
+            //
+            // Trigger: liveCriticalGoma == 0 AND any childrenGohmaState[i] >= 1
+            // (spawn happened; was alive; should now be dead). Forces all
+            // slots to -1 so the vanilla CeilingIdle drop branch fires on the
+            // next tick. KB-44's wire field carries the corrected values to
+            // peers in the next ENEMY_STATE packet.
+            if (actor->id == ACTOR_BOSS_GOMA) {
+                BossGoma* bg = (BossGoma*)actor;
+                if ((bg->actionFunc == BossGoma_CeilingIdle ||
+                     bg->actionFunc == BossGoma_CeilingMoveToCenter) &&
+                    (bg->frameCount % 60 == 0)) {
+                    int liveCriticalGoma = 0;
+                    Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
+                    while (it != nullptr) {
+                        if (it->id == ACTOR_EN_GOMA && it->update != nullptr) {
+                            EnGoma* lg = (EnGoma*)it;
+                            if (lg->gomaType == ENGOMA_NORMAL ||
+                                lg->gomaType == ENGOMA_EGG) {
+                                liveCriticalGoma++;
+                            }
+                        }
+                        it = it->next;
+                    }
+                    bool anySpawned = (bg->childrenGohmaState[0] >= 1 ||
+                                       bg->childrenGohmaState[1] >= 1 ||
+                                       bg->childrenGohmaState[2] >= 1);
+                    if (liveCriticalGoma == 0 && anySpawned) {
+                        SPDLOG_INFO("[BossGoma] larva scan: 0 live ENGOMA_NORMAL/EGG but childrenGohmaState=[{},{},{}] — forcing all -1 to drop",
+                                    bg->childrenGohmaState[0],
+                                    bg->childrenGohmaState[1],
+                                    bg->childrenGohmaState[2]);
+                        bg->childrenGohmaState[0] = -1;
+                        bg->childrenGohmaState[1] = -1;
+                        bg->childrenGohmaState[2] = -1;
+                    }
+                }
+            }
+
             SendPacket_EnemyUpdate(ext->netId, actor);
         } else {
             // Non-host: re-apply last received network state after AI update ran.

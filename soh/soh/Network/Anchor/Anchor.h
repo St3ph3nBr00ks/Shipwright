@@ -6,7 +6,9 @@
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/resource/type/Skeleton.h"
 #include <libultraship/libultraship.h>
+#include <atomic>
 #include <climits>
+#include <map>
 #include <queue>
 #include <mutex>
 #include <chrono>
@@ -701,6 +703,23 @@ class Anchor : public Network {
     // home.pos non-determinism (En_Sw raycast + future actors).
     inline static const std::string SCENE_ACTOR_NETIDS = "SCENE_ACTOR_NETIDS";
 
+    // HEARTBEAT — every client → all clients. Sent every ~2s from the
+    // network thread (NOT the game thread) so it survives game-thread
+    // freezes (textbox stuck, cutscene gate, pause). Carries:
+    //   - sendTimeMs: monotonic-clock timestamp at network-thread send,
+    //     used by receivers to detect connection liveness.
+    //   - gameFrameCounter: monotonic counter incremented from
+    //     OnGameFrameUpdate, used by receivers to detect game-thread
+    //     liveness (counter stale → game frozen, but heartbeats
+    //     arriving → connection alive).
+    // The two-axis liveness model lets peers distinguish "client offline"
+    // from "client connected but frozen" — surfaced via
+    // IsClientLikelyFrozen() and IsClientGameFrozen() respectively.
+    // See #194 for the originating bug class (host's send loop stalled
+    // during a hintnut dialog freeze, relay timed out, peers had no
+    // signal until reconnect).
+    inline static const std::string HEARTBEAT = "HEARTBEAT";
+
     static Anchor* Instance;
     std::map<uint32_t, AnchorClient> clients;
     RoomState roomState;
@@ -851,6 +870,66 @@ class Anchor : public Network {
     // consume the same advance signal.
     bool     cutsceneTextAdvanceConsumed = false;
     uint16_t cutsceneTextAdvanceConsumedTextId = 0;
+
+    // Heartbeat (#194 follow-up) — two-axis liveness signal.
+    //
+    // gameFrameCounter is incremented from OnGameFrameUpdate on the game
+    // thread. Read from the network thread when building the heartbeat
+    // payload. atomic so the cross-thread read is well-defined without
+    // touching the heartbeat mutex.
+    std::atomic<uint64_t> gameFrameCounter{0};
+
+    // Network-thread-side bookkeeping. Written from the network thread
+    // (TickHeartbeat sender; HandlePacket_Heartbeat receiver) and read
+    // from the game thread via the IsClientLikely{Frozen,GameFrozen}
+    // getters. Mutex is held only for short map operations.
+    std::mutex heartbeatMutex;
+    std::chrono::steady_clock::time_point lastHeartbeatTx{};
+    // Per-peer last network-thread receive time. Stale → connection
+    // dropped or relay-blocked.
+    std::map<uint32_t, std::chrono::steady_clock::time_point> lastHeartbeatRxByClientId;
+    // Per-peer last gameFrameCounter we received in their heartbeat
+    // and the local time we received it. If the counter stops advancing
+    // across multiple heartbeats, the peer's game thread is frozen
+    // even though their network thread is fine.
+    std::map<uint32_t, uint64_t> lastHeartbeatGameFrameByClientId;
+    std::map<uint32_t, std::chrono::steady_clock::time_point>
+        lastHeartbeatGameFrameAtByClientId;
+    // Per-peer "currently flagged frozen" so transitions log once
+    // instead of per-tick. Toggled inside the getters.
+    std::map<uint32_t, bool> heartbeatFrozenFlaggedByClientId;
+    std::map<uint32_t, bool> heartbeatGameFrozenFlaggedByClientId;
+
+    // Heartbeat tunables. Defaults match #194 description: 2s tx
+    // cadence, 5s connection-frozen threshold, 3s game-frozen
+    // threshold. Future: surface as CVars if a user-tunable shape is
+    // wanted (low priority — defaults should suit every realistic
+    // network).
+    static constexpr float kHeartbeatTxIntervalSec        = 2.0f;
+    static constexpr float kClientFrozenThresholdSec      = 5.0f;
+    static constexpr float kClientGameFrozenThresholdSec  = 3.0f;
+
+    // Network-thread tick: called from ProcessOutgoingPackets after
+    // the queue drain. No-op when not connected or before
+    // kHeartbeatTxIntervalSec has elapsed since last send.
+    void TickHeartbeat();
+
+    // Network-thread fast-path: called from OnIncomingJson when
+    // type==HEARTBEAT, BEFORE the packet is queued for the game thread.
+    // Updates lastHeartbeatRx + lastHeartbeatGameFrame maps under
+    // heartbeatMutex. Doesn't enqueue (no game-thread work needed —
+    // detection runs on whichever thread queries the getters).
+    void HandlePacket_Heartbeat(nlohmann::json payload);
+
+    void SendPacket_Heartbeat();
+
+    // Game-thread-callable getters. Return true when the named peer's
+    // last heartbeat is older than the threshold, indicating either
+    // a dead connection (Likely) or a frozen game thread (Game).
+    // Returns false for the local client (we can't observe our own
+    // freeze) and for unknown clientIds.
+    bool IsClientLikelyFrozen(uint32_t clientId);
+    bool IsClientGameFrozen(uint32_t clientId);
 
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     //

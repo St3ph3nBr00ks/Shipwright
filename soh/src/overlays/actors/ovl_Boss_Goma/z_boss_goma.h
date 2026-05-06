@@ -204,4 +204,13 @@ void BossGoma_SetupEncounterState4(struct BossGoma* actor, PlayState* play);
 void BossGoma_SetupFloorDamaged(struct BossGoma* actor);
 void BossGoma_SetupDefeated(struct BossGoma* actor, PlayState* play);
 
+// Ceiling-phase actionFuncs exposed so HookHandlers.cpp's host-side
+// periodic-larva-scan (KB-44 follow-up) can identify when the boss is
+// hovering post-spawn and waiting for the larvae to die. Both run only
+// after BossGoma_CeilingSpawnGohmas completes, so they encode the
+// "all eggs laid" precondition for the scan gate. Parameter named
+// `actor` (not `this`) so the header parses under C++.
+void BossGoma_CeilingIdle(struct BossGoma* actor, PlayState* play);
+void BossGoma_CeilingMoveToCenter(struct BossGoma* actor, PlayState* play);
+
 #endif

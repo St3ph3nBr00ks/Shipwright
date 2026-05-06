@@ -143,6 +143,18 @@ void Anchor::Disable() {
     sceneActorNetIdSnapshots.clear();
     pendingSceneActorNetIdsBroadcast = false;
 
+    // Heartbeat (#194 follow-up) — drop per-peer liveness state.
+    // A reconnect (or fresh Enable into a different room) shouldn't
+    // inherit the previous session's "client X frozen" flagging.
+    {
+        std::lock_guard<std::mutex> lock(heartbeatMutex);
+        lastHeartbeatRxByClientId.clear();
+        lastHeartbeatGameFrameByClientId.clear();
+        lastHeartbeatGameFrameAtByClientId.clear();
+        heartbeatFrozenFlaggedByClientId.clear();
+        heartbeatGameFrozenFlaggedByClientId.clear();
+    }
+    lastHeartbeatTx = std::chrono::steady_clock::time_point{};
 }
 
 void Anchor::OnConnected() {
@@ -211,6 +223,13 @@ void Anchor::ProcessOutgoingPackets() {
         Network::SendJsonToRemote(payload);
     }
     FlushProfileIfDue();
+
+    // Heartbeat (#194 follow-up) — runs on the network thread (this
+    // function is invoked from Network::ReceiveFromServer's loop). No-op
+    // until kHeartbeatTxIntervalSec has elapsed since the last send.
+    // Survives game-thread freezes because this thread keeps ticking
+    // even when OnGameFrameUpdate is starved.
+    TickHeartbeat();
 }
 
 void Anchor::SendJsonToRemote(nlohmann::json payload) {
@@ -255,6 +274,16 @@ void Anchor::OnIncomingJson(nlohmann::json payload) {
     }
 
     std::string packetType = payload["type"].get<std::string>();
+
+    // Heartbeat fast-path (#194 follow-up) — handled directly on the
+    // network thread, NOT queued for the game thread. This way a peer's
+    // own game-thread freeze doesn't delay updating its view of OTHER
+    // peers' liveness; lastHeartbeatRx maps stay current regardless of
+    // whether this client's game tick is running.
+    if (packetType == HEARTBEAT) {
+        HandlePacket_Heartbeat(payload);
+        return;
+    }
 
     // Pillar F — schema-driven compatibility. Packets carrying a "schema"
     // field opt into the schema layer and DO NOT need the clientVersion
