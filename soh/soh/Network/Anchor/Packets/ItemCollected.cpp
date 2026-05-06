@@ -75,11 +75,36 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
         return;
     }
 
-    uint32_t itemNetId       = (uint32_t)payload.value("netId", (uint32_t)0);
+    uint32_t itemNetId         = (uint32_t)payload.value("netId", (uint32_t)0);
     uint32_t collectorClientId = (uint32_t)payload.value("clientId", (uint32_t)0);
+    if (itemNetId == 0) {
+        SPDLOG_WARN("[ItemCollected] Drop — netId == 0");
+        return;
+    }
+    // Self-echo: relay shouldn't but defensively skip our own broadcasts.
+    if (collectorClientId == ownClientId) {
+        return;
+    }
 
-    // Phase 1 stub — Phase 3 will walk ACTORCAT_MISC for the matching
-    // ItemDropNetId extension and Actor_Kill the local copy.
-    SPDLOG_INFO("[ItemCollected] (Phase 1 stub) rx netId={} collector={}",
-                itemNetId, collectorClientId);
+    // Walk ACTORCAT_MISC for the matching ItemDropNetId extension and
+    // Actor_Kill the local copy. Idempotent — if the drop doesn't
+    // exist locally (already collected, never spawned, scene transition
+    // race), the packet is a no-op.
+    Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
+    while (it != nullptr) {
+        if (it->id == ACTOR_EN_ITEM00 && it->update != nullptr) {
+            const ItemDropNetId* ext =
+                ObjectExtension::GetInstance().Get<ItemDropNetId>(it);
+            if (ext != nullptr && ext->netId == itemNetId) {
+                SPDLOG_INFO("[ItemCollected] rx netId={} collector={} — killing local copy",
+                            itemNetId, collectorClientId);
+                Actor_Kill(it);
+                return;
+            }
+        }
+        it = it->next;
+    }
+
+    SPDLOG_DEBUG("[ItemCollected] rx netId={} collector={} — no local copy found",
+                 itemNetId, collectorClientId);
 }

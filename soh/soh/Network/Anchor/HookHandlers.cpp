@@ -5432,6 +5432,114 @@ void Anchor::RegisterHooks() {
         }
     });
 
+    // #193 Phase 3 — EnItem00 pickup gate.
+    //
+    // Two-layer gate, applied only to drops that have an ItemDropNetId
+    // extension (i.e., went through the host-broadcast path). Local-only
+    // drops (no extension — scripted spawns, env actors not yet wrapped
+    // in Phase 4) keep vanilla pickup behaviour.
+    //
+    // Layer 1: 3s killer-exclusivity. Within `kKillerExclusiveMs` of
+    // spawnTimeMs, only `killerClientId` can pick up. Other players
+    // walk through the drop with no effect (gate sets *should = false).
+    //
+    // Layer 2: per-player eligibility via ItemEligibility::CanPlayerCollectItem00
+    // with `walletCapAware = true`. Wallet-capped, full-HP, ammo-capped,
+    // etc. all block local pickup so the drop stays available for a
+    // teammate who CAN benefit. Vanilla single-player just truncated
+    // surplus silently.
+    //
+    // On gate-pass: broadcast ITEM_COLLECTED so peers Actor_Kill their
+    // local copy. Vanilla pickup body proceeds (Item_Give credits the
+    // local gSaveContext). On gate-fail: *should = false; vanilla
+    // pickup is suppressed; drop persists for someone else.
+    COND_VB_SHOULD(VB_GIVE_ITEM_FROM_ITEM_00, isConnected, {
+        EnItem00* item00 = va_arg(args, EnItem00*);
+        if (item00 == nullptr) return;
+
+        const ItemDropNetId* ext =
+            ObjectExtension::GetInstance().Get<ItemDropNetId>(&item00->actor);
+        if (ext == nullptr) {
+            // No extension -> local-only drop. Vanilla pickup proceeds
+            // with no MP coordination (current behaviour pre-#193).
+            return;
+        }
+
+        const int64_t kKillerExclusiveMs = 3000;
+        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const bool inExclusiveWindow =
+            (ext->killerClientId != 0) &&
+            (nowMs - ext->spawnTimeMs < kKillerExclusiveMs);
+        const bool isLocalKiller =
+            (ext->killerClientId == Anchor::Instance->ownClientId);
+
+        // Layer 1.
+        if (inExclusiveWindow && !isLocalKiller) {
+            *should = false;
+            SPDLOG_DEBUG("[ItemDrop] netId={} blocked — exclusive window ({} ms remaining) for killer={}",
+                         ext->netId,
+                         (long long)(kKillerExclusiveMs - (nowMs - ext->spawnTimeMs)),
+                         ext->killerClientId);
+            return;
+        }
+
+        // Layer 2 — per-player eligibility.
+        s16 itemType = (s16)(item00->actor.params & 0xFF);
+        if (!ItemEligibility::CanPlayerCollectItem00(itemType, /*walletCapAware=*/true)) {
+            *should = false;
+            SPDLOG_DEBUG("[ItemDrop] netId={} blocked — local player ineligible (type=0x{:02X})",
+                         ext->netId, (int)itemType);
+            return;
+        }
+
+        // Gate passes — broadcast collection BEFORE vanilla pickup body
+        // runs so peers Actor_Kill in lockstep. The broadcast carries
+        // only the netId; the relay enriches with our clientId.
+        SPDLOG_INFO("[ItemDrop] netId={} pickup by local — broadcasting ITEM_COLLECTED type=0x{:02X}",
+                    ext->netId, (int)itemType);
+        Anchor::Instance->SendPacket_ItemCollected(ext->netId);
+        // *should stays true (vanilla pickup proceeds).
+    });
+
+    // #193 Phase 3 — visual cue for non-killer during exclusive window.
+    //
+    // Apply a scale-down to drops the local player CANNOT pick up yet
+    // (still inside the killer's 3s window AND not the local player's
+    // kill). Reverts to vanilla scale once the window expires. Cheap +
+    // visible: peer sees a smaller drop that "pops" to full size at the
+    // 3s mark, signaling "now anyone can collect".
+    //
+    // Hook fires post-update each frame; the EnItem00 update itself
+    // smooth-steps `actor.scale` toward `this->scale` (the actor's
+    // intended target scale). Overwriting scale.x/y/z directly takes
+    // immediate visual effect.
+    COND_ID_HOOK(OnActorUpdate, ACTOR_EN_ITEM00, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor == nullptr || actor->update == nullptr) return;
+
+        const ItemDropNetId* ext =
+            ObjectExtension::GetInstance().Get<ItemDropNetId>(actor);
+        if (ext == nullptr) return;
+        if (ext->killerClientId == 0) return;
+        if (ext->killerClientId == Anchor::Instance->ownClientId) return;
+
+        const int64_t kKillerExclusiveMs = 3000;
+        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (nowMs - ext->spawnTimeMs >= kKillerExclusiveMs) {
+            // Window expired. Don't keep clamping scale — vanilla
+            // smooth-step will restore it on the next update tick.
+            return;
+        }
+
+        // Inside the window: shrink to 60% so non-killer drops are
+        // visually distinct.
+        actor->scale.x *= 0.6f;
+        actor->scale.y *= 0.6f;
+        actor->scale.z *= 0.6f;
+    });
+
     COND_VB_SHOULD(VB_FIRE_TEMPLE_BOMBABLE_WALL_BREAK, isConnected, {
         BgHidanKowarerukabe* actor = va_arg(args, BgHidanKowarerukabe*);
 
