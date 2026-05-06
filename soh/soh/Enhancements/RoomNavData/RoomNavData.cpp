@@ -37,6 +37,7 @@ extern "C" {
 #include "z64.h"
 #include "macros.h"
 #include "functions.h"
+#include "variables.h" // declares extern SaveContext gSaveContext (variables.h:189)
 extern PlayState* gPlayState;
 }
 

@@ -28,6 +28,13 @@
 #include "soh/ShipInit.hpp"
 #include "soh/cvar_prefixes.h"
 
+// soh/ActorDB.h declares ActorDB_Retrieve only inside its `#else`
+// (C-only) branch (ActorDB.h:78-83). When included from a C++ TU the
+// C function is not visible, producing C3861. The implementation in
+// soh/ActorDB.cpp:619 is already `extern "C"`, so a local extern "C"
+// forward-declaration is the minimum-risk fix.
+extern "C" ActorDBEntry* ActorDB_Retrieve(const int id);
+
 #include <libultraship/bridge.h>
 #include <libultraship/libultraship.h>
 #include <nlohmann/json.hpp>
