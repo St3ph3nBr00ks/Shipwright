@@ -157,8 +157,10 @@ void AnchorMainMenu(WidgetInfo& info) {
 
     // AI Follower — dev testing tool, non-host only.
     // Activates the P2 shadow-AI that auto-follows P1 and engages nearby enemies.
-    // Only visible when not the host; any controller input cancels it mid-session.
-    if (anchor->roomState.ownerClientId != anchor->ownClientId) {
+    // Only visible when not the effective host; any controller input cancels it
+    // mid-session. Pillar A Phase 1 — gate on effective-host so the menu stays
+    // consistent when the original room owner has disconnected.
+    if (anchor->effectiveHostClientId != anchor->ownClientId) {
         ImGui::Spacing();
         ImGui::SeparatorText("Developer Tools");
         bool followerActive = anchor->IsFollowerActive();

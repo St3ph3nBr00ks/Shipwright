@@ -101,17 +101,21 @@ void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, 
     payload["quiet"]        = true;
     PacketTimeline::SetTimelineField(payload);
 
-    // Send only to the host — it is the authority on enemy health.
-    for (auto& [clientId, client] : clients) {
-        if (client.online && client.isSaveLoaded && clientId == roomState.ownerClientId) {
-            payload["targetClientId"] = clientId;
+    // Send only to the room host — it is the authority on enemy health
+    // for actors in our current room. Per-room targeting (Pillar A Phase 2)
+    // ensures the packet reaches the actual authoritative client even when
+    // the original room owner is offline or in a different scene.
+    uint32_t targetId = ::SceneAuthority::GetRoomHostClientId(
+        (int16_t)gPlayState->sceneNum,
+        (int8_t)gPlayState->roomCtx.curRoom.num,
+        (uint8_t)(gSaveContext.linkAge & 0x1));
+    if (targetId != 0 && targetId != ownClientId) {
+        auto it = clients.find(targetId);
+        if (it != clients.end() && it->second.online && it->second.isSaveLoaded) {
+            payload["targetClientId"] = targetId;
             SendJsonToRemote(payload);
-            // Test 15 (log 85) — raised DEBUG→INFO so the next test log reveals
-            // whether the send side fires per hit. Will demote back to DEBUG
-            // once client→host health sync is verified working.
-            SPDLOG_INFO("[DamageEnemy] Sent netId={} damage={} damageEffect={} atHitEffect={}",
-                        netId, (int)damage, (int)damageEffect, (int)atHitEffect);
-            break;
+            SPDLOG_INFO("[DamageEnemy] Sent netId={} damage={} damageEffect={} atHitEffect={} target={}",
+                        netId, (int)damage, (int)damageEffect, (int)atHitEffect, targetId);
         }
     }
 }
