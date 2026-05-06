@@ -30,6 +30,8 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"GIVE_ITEM", 1},
     {"HANDSHAKE", 1},
     {"HEARTBEAT", 1},  // #194 follow-up — every-client liveness signal sent from network thread.
+    {"ITEM_DROP_SYNC", 1},  // #193 Phase 1 — host-fanout of EnItem00 drops with killer attribution.
+    {"ITEM_COLLECTED", 1},  // #193 Phase 1 — collector→all broadcast; receivers Actor_Kill the local copy.
     {"OCARINA_SFX", 1},
     {"PLAYER_SFX", 1},
     {"PLAYER_UPDATE", 2},  // bumped for unk_860 (Deku-Stick burning timer) — drives remote flame VFX.

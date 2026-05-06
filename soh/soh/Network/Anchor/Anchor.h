@@ -703,6 +703,25 @@ class Anchor : public Network {
     // home.pos non-determinism (En_Sw raycast + future actors).
     inline static const std::string SCENE_ACTOR_NETIDS = "SCENE_ACTOR_NETIDS";
 
+    // ITEM_DROP_SYNC — host → all clients (team-broadcast). Sent on
+    // each host-side `OnActorSpawn(ACTOR_EN_ITEM00)` for transient
+    // drop types (rupees, hearts, ammo, magic, sticks, nuts, seeds).
+    // Carries the drop's authoritative netId, ITEM00_* params, world
+    // position, killerClientId (the player who triggered the drop —
+    // captured at the `Item_DropCollectible*` call site via the
+    // Anchor_BeginItemDrop / EndItemDrop shim), and spawnTimeMs (host
+    // monotonic clock at drop time, used for the killer-exclusive
+    // grace window). Receivers spawn a matching local EnItem00 with
+    // an `ItemDropNetId` extension stamped from the payload. See #193.
+    inline static const std::string ITEM_DROP_SYNC = "ITEM_DROP_SYNC";
+
+    // ITEM_COLLECTED — collector client → all (team-broadcast). Sent
+    // when a local pickup gate passes and the player's gSaveContext
+    // has been credited. Receivers walk their actor list for the
+    // matching itemNetId and Actor_Kill the local copy. Per-player
+    // pickup attribution: only one client claims the drop. See #193.
+    inline static const std::string ITEM_COLLECTED = "ITEM_COLLECTED";
+
     // HEARTBEAT — every client → all clients. Sent every ~2s from the
     // network thread (NOT the game thread) so it survives game-thread
     // freezes (textbox stuck, cutscene gate, pause). Carries:
@@ -829,6 +848,25 @@ class Anchor : public Network {
     // SetFlag(SPOKE) sync arrives. See #184 follow-up.
     void SendPacket_MidoPostDekuLeave();
     void HandlePacket_MidoPostDekuLeave(nlohmann::json payload);
+
+    // ITEM_DROP_SYNC (#193 Phase 1) — host fans out the authoritative
+    // drop after its local Item_DropCollectible* call site spawns the
+    // EnItem00 actor. Receivers spawn a matching local EnItem00 with
+    // an `ItemDropNetId` extension stamped from the payload. Caller
+    // (host's `OnActorSpawn(ACTOR_EN_ITEM00)`) is responsible for the
+    // transient-only allowlist filter (Q7) — progression items
+    // (heart pieces, small keys, tunics, shields) are NOT broadcast.
+    void SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
+                                 Vec3f pos, uint32_t killerClientId,
+                                 int64_t spawnTimeMs);
+    void HandlePacket_ItemDropSync(nlohmann::json payload);
+
+    // ITEM_COLLECTED (#193 Phase 1) — local pickup gate has fired and
+    // the local player's gSaveContext has been credited. Receivers
+    // walk their actor list for the matching itemNetId and Actor_Kill
+    // the local copy. Per-player attribution: only one client wins.
+    void SendPacket_ItemCollected(uint32_t itemNetId);
+    void HandlePacket_ItemCollected(nlohmann::json payload);
 
     // CUTSCENE_TEXT_ADVANCE — peer → effective scene host. Sent when a
     // local A/B/CUP press fires Message_ShouldAdvance during a cutscene-

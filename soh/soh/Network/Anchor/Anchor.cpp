@@ -404,6 +404,10 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_BossGomaLookedAt(payload);
             else if (packetType == MIDO_POST_DEKU_LEAVE)
                 HandlePacket_MidoPostDekuLeave(payload);
+            else if (packetType == ITEM_DROP_SYNC)
+                HandlePacket_ItemDropSync(payload);
+            else if (packetType == ITEM_COLLECTED)
+                HandlePacket_ItemCollected(payload);
             else if (packetType == CUTSCENE_TEXT_ADVANCE)
                 HandlePacket_CutsceneTextAdvance(payload);
             else if (packetType == CUTSCENE_TEXT_ADVANCED)
