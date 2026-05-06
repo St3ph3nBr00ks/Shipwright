@@ -33,6 +33,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"ITEM_DROP_SYNC", 1},  // #193 Phase 1 — host-fanout of EnItem00 drops with killer attribution.
     {"ITEM_COLLECTED", 1},  // #193 Phase 1 — collector→all broadcast; receivers Actor_Kill the local copy.
     {"ITEM_DROP_SNAPSHOT", 1},  // #193 Phase 5 — late-join replay of in-flight EnItem00 drops.
+    {"ENV_ACTOR_DROP", 1},      // #193 Phase 4 v2 — peer→host env-actor cut drop request.
     {"OCARINA_SFX", 1},
     {"PLAYER_SFX", 1},
     {"PLAYER_UPDATE", 2},  // bumped for unk_860 (Deku-Stick burning timer) — drives remote flame VFX.

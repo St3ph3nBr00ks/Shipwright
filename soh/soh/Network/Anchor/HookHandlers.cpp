@@ -500,6 +500,81 @@ extern "C" void Anchor_EndItemDrop(void) {
     }
 }
 
+// #193 Phase 4 v2 — explicit-killer override. Used by
+// `HandlePacket_EnvActorDrop` to attribute the host-side
+// `Item_DropCollectible*` to the peer who cut the grass (peer's
+// clientId carried in the packet's relay-injected `clientId` field).
+// Pairs with the standard `Anchor_EndItemDrop`.
+extern "C" void Anchor_BeginItemDropForKiller(uint32_t killerClientId) {
+    if (g_pendingItemDropDepth++ > 0) {
+        return;  // nested; outer scope wins
+    }
+    g_pendingItemDropSpawnTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    g_pendingItemDropKillerClientId = killerClientId;
+}
+
+// #193 Phase 4 v2 — env-actor drop wrapper, replaces direct
+// `Item_DropCollectible(play, pos, params)` calls in env-actor
+// destroy paths (En_Kusa, etc.). Behavioural matrix:
+//
+//   Disconnected:       call vanilla Item_DropCollectible.
+//   Connected, host:    call vanilla Item_DropCollectible. The
+//                       OnActorSpawn(EN_ITEM00) hook broadcasts
+//                       ITEM_DROP_SYNC.
+//   Connected, peer,
+//   actor has netId:    suppress local drop; send ENV_ACTOR_DROP to
+//                       host. Host runs the drop and broadcasts; peer
+//                       receives the broadcast and spawns the drop.
+//   Connected, peer,
+//   actor has no netId: call vanilla (env actor not in the synced
+//                       allowlist — fall back to v1 behaviour). Should
+//                       not occur once Phase 4 v2 admits all four
+//                       env-actor IDs to IsSyncedWorldActor.
+extern "C" void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                Vec3f* pos, s16 params) {
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) {
+        Item_DropCollectible(play, pos, params);
+        return;
+    }
+    if (::SceneAuthority::IsMyCurrentRoomHost()) {
+        Item_DropCollectible(play, pos, params);
+        return;
+    }
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(envActor);
+    if (ext == nullptr || ext->netId == 0) {
+        Item_DropCollectible(play, pos, params);
+        return;
+    }
+    // Peer with a synced env actor: notify host, suppress local drop.
+    Anchor::Instance->SendPacket_EnvActorDrop(ext->netId, params, /*forRandom=*/0, *pos);
+}
+
+// #193 Phase 4 v2 — sibling for `Item_DropCollectibleRandom` from
+// env-actor sites (En_Kusa TYPE_0/TYPE_2 path passes a "drop group"
+// param shifted up by 4, NOT a specific ITEM00_*). Same behavioural
+// matrix as Anchor_DropCollectibleEnvActor; routes the random param
+// through `dropParamForRandom` so the host re-dispatches via
+// `Item_DropCollectibleRandom`.
+extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
+                                                     Vec3f* pos, s16 dropGroupParams) {
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) {
+        Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
+        return;
+    }
+    if (::SceneAuthority::IsMyCurrentRoomHost()) {
+        Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
+        return;
+    }
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(envActor);
+    if (ext == nullptr || ext->netId == 0) {
+        Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
+        return;
+    }
+    Anchor::Instance->SendPacket_EnvActorDrop(ext->netId, /*dropParam=*/0,
+                                               dropGroupParams, *pos);
+}
+
 // Receive-side helper called from HandlePacket_ItemDropSync to bracket
 // the local Actor_Spawn so the OnActorSpawn EN_ITEM00 hook stamps the
 // extension with the host's broadcast netId/killer/spawnTimeMs and

@@ -23,6 +23,15 @@ void EnKusa_SetupLiftedUp(EnKusa* this);
 void EnKusa_SetupWaitObject(EnKusa* this);
 void EnKusa_SetupMain(EnKusa* this);
 void EnKusa_SetupFall(EnKusa* this);
+
+// #193 Phase 4 v2 — env-actor drop wrappers. Defined in
+// soh/soh/Network/Anchor/HookHandlers.cpp. On connected peer with a
+// synced env actor, suppress local drop and notify host via
+// ENV_ACTOR_DROP; otherwise fall through to vanilla Item_Drop*.
+extern void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                            Vec3f* pos, s16 params);
+extern void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
+                                                 Vec3f* pos, s16 dropGroupParams);
 void EnKusa_SetupCut(EnKusa* this);
 void EnKusa_SetupUprootedWaitRegrow(EnKusa* this);
 void EnKusa_SetupRegrow(EnKusa* this);
@@ -139,16 +148,22 @@ void EnKusa_DropCollectible(EnKusa* this, PlayState* play) {
             if (dropParams >= 0xD) {
                 dropParams = 0;
             }
-            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, dropParams << 4);
+            // #193 Phase 4 v2 — peer suppresses local drop + notifies
+            // host. Single-player / host: vanilla Item_DropCollectibleRandom.
+            Anchor_DropCollectibleRandomEnvActor(play, &this->actor, &this->actor.world.pos,
+                                                  dropParams << 4);
             break;
         case ENKUSA_TYPE_1:
             if (CVarGetInteger(CVAR_ENHANCEMENT("NoRandomDrops"), 0)) {
             } else if (CVarGetInteger(CVAR_ENHANCEMENT("NoHeartDrops"), 0)) {
-                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_SEEDS);
+                Anchor_DropCollectibleEnvActor(play, &this->actor, &this->actor.world.pos,
+                                                ITEM00_SEEDS);
             } else if (Rand_ZeroOne() < 0.5f) {
-                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_SEEDS);
+                Anchor_DropCollectibleEnvActor(play, &this->actor, &this->actor.world.pos,
+                                                ITEM00_SEEDS);
             } else {
-                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_HEART);
+                Anchor_DropCollectibleEnvActor(play, &this->actor, &this->actor.world.pos,
+                                                ITEM00_HEART);
             }
             break;
     }

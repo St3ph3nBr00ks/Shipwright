@@ -31,6 +31,15 @@ SkelAnime* GetEnemySkelAnime(Actor* actor) {
         case ACTOR_EN_ISHI:
         case ACTOR_EN_GOROIWA:
         case ACTOR_OBJ_SYOKUDAI:
+        // #193 Phase 4 v2 — env actors with no SkelAnime substruct.
+        // En_Kusa / Obj_Mure store an actionFunc pointer at 0x14C
+        // (high bits could plausibly bypass the limbCount heuristic);
+        // Obj_Bombiwa / Obj_Hamishi store ColliderCylinder.base which
+        // could similarly false-positive. Explicit reject.
+        case ACTOR_EN_KUSA:
+        case ACTOR_OBJ_MURE:
+        case ACTOR_OBJ_BOMBIWA:
+        case ACTOR_OBJ_HAMISHI:
             return nullptr;
         default: break;
     }
@@ -132,6 +141,28 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_ISHI:        return true;  // Small/large gray rocks
                                                  // (lift + throw,
                                                  // ACTORCAT_PROP).
+
+        // #193 Phase 4 v2 — env-actor host-authoritative sync. Admits
+        // grass shrubs, grass clusters, and bombable rocks so their
+        // alive/dead state propagates via ENEMY_DEFEATED. Peer's local
+        // cuts are kept (vanilla cosmetic — animation, particle effect,
+        // Actor_Kill) but peer suppresses its local Item_DropCollectible
+        // call and notifies host via ENV_ACTOR_DROP. Host runs the drop
+        // on its side and broadcasts ITEM_DROP_SYNC. Result: one drop
+        // per cut event regardless of which client triggered it,
+        // eliminating the Phase 4 v1 simultaneous-cut double-drop.
+        //
+        // Obj_Mure (grass cluster) spawns child En_Kusa actors at runtime
+        // — admitting it lets host broadcast its child-spawn pattern so
+        // peers see the same cluster layout. Obj_Bombiwa / Obj_Hamishi
+        // are bombable rocks; vanilla they have no direct drop calls
+        // (the rock itself doesn't drop), but admitting the actor id
+        // ensures their alive/dead state syncs so peers' rocks stay in
+        // lockstep with host's destruction.
+        case ACTOR_EN_KUSA:        return true;  // Single grass shrub.
+        case ACTOR_OBJ_MURE:       return true;  // Grass cluster (spawns En_Kusa children).
+        case ACTOR_OBJ_BOMBIWA:    return true;  // Bombable rock.
+        case ACTOR_OBJ_HAMISHI:    return true;  // Bombable rock variant.
 
         default:                return false;
     }

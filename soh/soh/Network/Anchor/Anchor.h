@@ -753,6 +753,20 @@ class Anchor : public Network {
     // the SCENE_ACTOR_NETIDS pattern. See #193 Phase 5.
     inline static const std::string ITEM_DROP_SNAPSHOT = "ITEM_DROP_SNAPSHOT";
 
+    // ENV_ACTOR_DROP — peer → host (targeted). Phase 4 v2. When peer's
+    // local env actor (En_Kusa grass, Obj_Mure cluster child, etc.) is
+    // cut/destroyed and would have dropped an item, peer suppresses
+    // its local `Item_DropCollectible*` call and broadcasts this packet
+    // with the env actor's netId + the drop param peer chose. Host
+    // walks its actor list for the matching netId; if the actor is
+    // still alive on host (peer's cut beat host's own potential cut
+    // of the same shrub), host fires `Item_DropCollectible` with the
+    // peer-supplied param, attributed to peer. The OnActorSpawn
+    // EN_ITEM00 hook then broadcasts ITEM_DROP_SYNC. Net result: one
+    // drop per cut event, regardless of which client triggered it.
+    // See #193 Phase 4 v2.
+    inline static const std::string ENV_ACTOR_DROP = "ENV_ACTOR_DROP";
+
     // HEARTBEAT — every client → all clients. Sent every ~2s from the
     // network thread (NOT the game thread) so it survives game-thread
     // freezes (textbox stuck, cutscene gate, pause). Carries:
@@ -907,6 +921,18 @@ class Anchor : public Network {
     // duplicated).
     void SendPacket_ItemDropSnapshot(uint32_t targetClientId);
     void HandlePacket_ItemDropSnapshot(nlohmann::json payload);
+
+    // ENV_ACTOR_DROP (#193 Phase 4 v2) — peer → host. Sent when peer's
+    // local env actor would have dropped an item locally; peer
+    // suppresses the local drop and asks host to do it instead.
+    // `dropParamForRandom` distinguishes the two `Item_DropCollectible*`
+    // entry points: when nonzero, host dispatches to
+    // `Item_DropCollectibleRandom(play, fromActor, pos, dropParamForRandom)`
+    // (vanilla En_Kusa TYPE_0/TYPE_2 path); when zero, host dispatches
+    // to `Item_DropCollectible(play, pos, dropParam)` (TYPE_1 path).
+    void SendPacket_EnvActorDrop(uint32_t netId, s16 dropParam,
+                                 s16 dropParamForRandom, Vec3f pos);
+    void HandlePacket_EnvActorDrop(nlohmann::json payload);
 
     // CUTSCENE_TEXT_ADVANCE — peer → effective scene host. Sent when a
     // local A/B/CUP press fires Message_ShouldAdvance during a cutscene-
