@@ -30,6 +30,14 @@ void EnIshi_SpawnFragmentsLarge(EnIshi* this, PlayState* play);
 void EnIshi_SpawnDustSmall(EnIshi* this, PlayState* play);
 void EnIshi_SpawnDustLarge(EnIshi* this, PlayState* play);
 
+// #193 Phase 4 v2 — env-actor drop wrapper. Defined in
+// soh/soh/Network/Anchor/HookHandlers.cpp. En_Ishi was already in
+// IsSyncedWorldActor for the lift+throw realtime sync; wrapping the
+// drop call promotes it from Phase 4 v1 to v2 (peer suppresses local
+// drop + notifies host).
+extern void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
+                                                 Vec3f* pos, s16 dropGroupParams);
+
 s16 sRockRotSpeedX = 0;
 s16 sRockRotSpeedY = 0;
 
@@ -258,7 +266,8 @@ void EnIshi_DropCollectible(EnIshi* this, PlayState* play) {
             dropParams = 0;
         }
 
-        Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, dropParams << 4);
+        Anchor_DropCollectibleRandomEnvActor(play, &this->actor, &this->actor.world.pos,
+                                              dropParams << 4);
     }
 }
 

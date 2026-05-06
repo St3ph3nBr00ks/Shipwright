@@ -32,6 +32,13 @@ void ObjTsubo_LiftedUp(ObjTsubo* this, PlayState* play);
 void ObjTsubo_SetupThrown(ObjTsubo* this);
 void ObjTsubo_Thrown(ObjTsubo* this, PlayState* play);
 
+// #193 Phase 4 v2 — env-actor drop wrapper. Defined in
+// soh/soh/Network/Anchor/HookHandlers.cpp. On connected peer with a
+// synced env actor, suppress local drop and notify host via
+// ENV_ACTOR_DROP; otherwise fall through to vanilla Item_Drop*.
+extern void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                            Vec3f* pos, s16 params);
+
 static s16 D_80BA1B50 = 0;
 static s16 D_80BA1B54 = 0;
 static s16 D_80BA1B58 = 0;
@@ -89,7 +96,8 @@ void ObjTsubo_SpawnCollectible(ObjTsubo* this, PlayState* play) {
 
     if (GameInteractor_Should(VB_POT_DROP_ITEM,
                               (dropParams >= ITEM00_RUPEE_GREEN) && (dropParams <= ITEM00_BOMBS_SPECIAL), this)) {
-        Item_DropCollectible(play, &this->actor.world.pos, (dropParams | (((this->actor.params >> 9) & 0x3F) << 8)));
+        Anchor_DropCollectibleEnvActor(play, &this->actor, &this->actor.world.pos,
+                                        (dropParams | (((this->actor.params >> 9) & 0x3F) << 8)));
     }
 }
 

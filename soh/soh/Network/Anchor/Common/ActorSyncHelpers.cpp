@@ -40,6 +40,14 @@ SkelAnime* GetEnemySkelAnime(Actor* actor) {
         case ACTOR_OBJ_MURE:
         case ACTOR_OBJ_BOMBIWA:
         case ACTOR_OBJ_HAMISHI:
+        // #193 Phase 4 v2 extension — pots / crates. None have
+        // SkelAnime; Obj_Tsubo / Obj_Kibako store collider data at
+        // 0x14C; Obj_Kibako2 is a DynaPolyActor whose dyna struct
+        // overlaps the same range. Same false-positive risk as the
+        // grass / rock family above.
+        case ACTOR_OBJ_TSUBO:
+        case ACTOR_OBJ_KIBAKO:
+        case ACTOR_OBJ_KIBAKO2:
             return nullptr;
         default: break;
     }
@@ -163,6 +171,17 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_OBJ_MURE:       return true;  // Grass cluster (spawns En_Kusa children).
         case ACTOR_OBJ_BOMBIWA:    return true;  // Bombable rock.
         case ACTOR_OBJ_HAMISHI:    return true;  // Bombable rock variant.
+
+        // #193 Phase 4 v2 extension — breakable container family.
+        // Pots and crates have direct `Item_DropCollectible` calls
+        // that previously fell through to Phase 4 v1 (host-only
+        // broadcast; peer's local cut produced a non-broadcast drop,
+        // simultaneous-cut → double-drop on peer). Promoting to v2
+        // routes through `Anchor_DropCollectibleEnvActor` for
+        // host-authoritative drop attribution.
+        case ACTOR_OBJ_TSUBO:      return true;  // Breakable clay pot.
+        case ACTOR_OBJ_KIBAKO:     return true;  // Small wooden crate.
+        case ACTOR_OBJ_KIBAKO2:    return true;  // Large wooden crate (DynaPoly).
 
         default:                return false;
     }

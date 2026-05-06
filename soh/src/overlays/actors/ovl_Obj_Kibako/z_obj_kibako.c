@@ -23,6 +23,10 @@ void ObjKibako_Held(ObjKibako* this, PlayState* play);
 void ObjKibako_SetupThrown(ObjKibako* this);
 void ObjKibako_Thrown(ObjKibako* this, PlayState* play);
 
+// #193 Phase 4 v2 — env-actor drop wrapper. See HookHandlers.cpp.
+extern void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                            Vec3f* pos, s16 params);
+
 const ActorInit Obj_Kibako_InitVars = {
     ACTOR_OBJ_KIBAKO,
     ACTORCAT_PROP,
@@ -70,7 +74,8 @@ void ObjKibako_SpawnCollectible(ObjKibako* this, PlayState* play) {
 
     collectible = this->actor.params & 0x1F;
     if (GameInteractor_Should(VB_SMALL_CRATE_DROP_ITEM, (collectible >= 0) && (collectible <= 0x19), this)) {
-        Item_DropCollectible(play, &this->actor.world.pos, collectible | (((this->actor.params >> 8) & 0x3F) << 8));
+        Anchor_DropCollectibleEnvActor(play, &this->actor, &this->actor.world.pos,
+                                        collectible | (((this->actor.params >> 8) & 0x3F) << 8));
     }
 }
 
