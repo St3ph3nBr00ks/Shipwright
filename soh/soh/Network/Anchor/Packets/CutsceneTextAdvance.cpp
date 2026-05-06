@@ -59,19 +59,31 @@ int GetCutscenePerPressReductionMs() {
                           kDefaultPerPressReductionMs);
 }
 
-// Count team members currently in the same scene + same timeline as
-// the local client. The all-pressed advance condition needs the
-// expected team size to compare against `pressedClientIds.size()`.
+// Count team members currently in the same scene + same timeline +
+// also in cutscene state as the local client. The all-pressed advance
+// condition needs the expected vote count — peers NOT in cutscene
+// (e.g. P2 in Kokiri Forest while P1 is in the Great Deku Tree
+// opening cutscene) can't vote because they have no textbox; counting
+// them blocks the all-pressed condition until the timer elapses.
 //
-// "Online + saveLoaded + same scene + same timeline" matches the
-// receive scope for cutscene-text packets. Includes self.
+// "Online + saveLoaded + same scene + same timeline + csCtxState !=
+// CS_STATE_IDLE" matches the actual cutscene-participant scope.
+// Includes self (the host's local cutscene state is non-IDLE
+// whenever this function is called from the per-textbox vote tally).
+//
+// Multi-player dialogue redesign (#191 follow-up): the previous
+// version counted ALL team members in scene, including peers not
+// participating in the cutscene — those peers never voted, so the
+// all-pressed condition only fired when teamSize was exactly the
+// number of voters. Now teamSize equals the voter set, so all-
+// pressed fires as soon as every cutscene-participant has voted.
 size_t CountInSceneTeamSize() {
     if (gPlayState == nullptr) return 0;
     if (!::Anchor::Instance) return 1;
     int16_t  scene    = (int16_t)gPlayState->sceneNum;
     uint8_t  timeline = (uint8_t)(gSaveContext.linkAge & 0x1);
     std::string ownTeamId = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
-    size_t count = 1;  // self
+    size_t count = 1;  // self (always in cutscene when tallying)
     for (auto& [cid, client] : ::Anchor::Instance->clients) {
         if (client.self) continue;
         if (!client.online) continue;
@@ -79,6 +91,7 @@ size_t CountInSceneTeamSize() {
         if (client.sceneNum != scene) continue;
         if ((uint8_t)(client.linkAge & 0x1) != timeline) continue;
         if (client.teamId != ownTeamId) continue;
+        if (client.csCtxState == 0 /* CS_STATE_IDLE */) continue;
         count++;
     }
     return count;

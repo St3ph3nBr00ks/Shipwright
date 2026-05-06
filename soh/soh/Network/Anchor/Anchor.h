@@ -290,6 +290,18 @@ typedef struct AnchorClient {
     f32 ocarinaModulator;
     s8 ocarinaBend;
 
+    // Multi-player dialogue redesign (#191 follow-up) — peer's
+    // current `play->csCtx.state`. Used by `Anchor_ShouldAdvanceCutsceneTextLocal`
+    // to detect "alone in cutscene": when no online team-member in the
+    // local scene has `csCtxState != CS_STATE_IDLE`, the local player
+    // is the only one with the active cutscene textbox and should
+    // advance immediately on button press (vanilla parity), not
+    // through the voting countdown which would block until the timer
+    // elapses (no peer to vote). Defaults to CS_STATE_IDLE (0) for
+    // pre-update peers — they're treated as out-of-cutscene, which
+    // is the safe assumption when state is unknown.
+    s8 csCtxState = 0;
+
     // AI follower mode (remote client is running the follower AI and should not be
     // selected as a follower's leader target). Defaults to false for pre-update peers.
     bool followerActive = false;
