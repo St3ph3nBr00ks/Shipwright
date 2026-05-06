@@ -29,6 +29,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -91,12 +92,30 @@ const RoomNavData* GetForRoom(int16_t sceneNum, int8_t roomNum) {
     return &it->second;
 }
 
-int FindNearestNode(const RoomNavData* data, const Vec3f& /*pos*/) {
+int FindNearestNode(const RoomNavData* data, const Vec3f& pos) {
     if (data == nullptr || data->nodes.empty()) {
         return -1;
     }
-    // Commit 1: stub — actual nearest-node lookup lands in commit 8.
-    return -1;
+    // v1: linear search across all nodes. ~1,100 nodes per average room
+    // → ~1,100 distance calcs per call. Steady-state cost is bounded;
+    // callers (subgoal selection) cache results between target moves so
+    // this fires once per ~30 frames per navigator. Spatial-index
+    // optimization (cell-bucket lookup) deferred until profiling shows
+    // need.
+    int bestIdx = -1;
+    float bestDistSq = std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < data->nodes.size(); i++) {
+        const NavNode& n = data->nodes[i];
+        float dx = n.pos.x - pos.x;
+        float dy = n.pos.y - pos.y;
+        float dz = n.pos.z - pos.z;
+        float distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            bestIdx = (int)i;
+        }
+    }
+    return bestIdx;
 }
 
 int FindBestReachableSubgoalNode(const RoomNavData* data,
@@ -105,7 +124,14 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
     if (data == nullptr) {
         return -1;
     }
-    // Commit 1: stub — BFS lands in Phase 2 when nav system integration ships.
+    // Phase 2 (commit 9 — nav system integration) implements the
+    // hazard-aware BFS per plan §10 (kHazardEscapeHops = 2 + fallback to
+    // FindNearestNonHazardExit). Requires NavTraits flags
+    // (eligibleForSwimming / avoidHazardNodes / consumeRoomNavData) which
+    // land in Phase 2 commit 10. Until those flags exist, this stub
+    // returns -1 unconditionally — consumers (GetBestReachableSubgoal
+    // Layer 3) treat that as "no static graph available" and fall
+    // through to other layers per nav plan §5.
     return -1;
 }
 
@@ -744,12 +770,31 @@ static void OnGameFrameTick() {
 }
 
 // ---------------------------------------------------------------------------
+// Lifecycle. Plan §11 — cache is never evicted within a session; once a
+// room is scanned/loaded it stays resident. Cleared on game exit so the
+// next session starts clean. Scene transitions DO NOT clear the cache —
+// the polling delta-detection in OnGameFrameTick handles re-entry to
+// already-cached rooms by short-circuiting before scan dispatch.
+// ---------------------------------------------------------------------------
+
+static void OnExitGameClear(int32_t /*fileNum*/) {
+    if (!sCache.empty()) {
+        SPDLOG_INFO("[RoomNav] OnExitGame: clearing {} cached rooms", sCache.size());
+        sCache.clear();
+    }
+    sLastScene = -1;
+    sLastRoom  = -1;
+}
+
+// ---------------------------------------------------------------------------
 // Registration. Single ShipInit entry point; called once at startup.
 // ---------------------------------------------------------------------------
 
 static void RegisterRoomNavData() {
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(
         OnGameFrameTick);
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnExitGame>(
+        OnExitGameClear);
 }
 
 } // namespace Anchor::Nav::Room
