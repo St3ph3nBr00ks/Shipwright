@@ -3877,6 +3877,34 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // EnGoma debris filter (#67 follow-up, log 299 bandwidth audit).
+        //
+        // Vanilla EnGoma_SpawnHatchDebris spawns ~16-20 EnGoma actors as
+        // visual eggshell fragments during egg-hatch and natural-death
+        // sequences. They share `actorId == ACTOR_EN_GOMA` with the
+        // actual larvae but have `gomaType != ENGOMA_NORMAL` (and
+        // limbCount=0 — no SkelAnime). They cannot be damaged, do not
+        // affect the boss state machine, and despawn on a short timer.
+        //
+        // Without filtering, each fragment broadcasts ENEMY_STATE every
+        // frame the host's bookkeeping detects a state delta, and there
+        // are dozens of them per Goma egg-laying cycle. Log 299 showed
+        // ENEMY_STATE tx peaking at 315.4 pps / 252 KB/s during the
+        // boss fight — the debris was the dominant contributor.
+        //
+        // Skip ENEMY_STATE entirely for non-NORMAL EnGoma instances.
+        // Visual debris remains local to each client (each runs its own
+        // EnGoma_SpawnHatchDebris call when the host's
+        // SetupHatch / SetupDying packets arrive); cross-client
+        // debris position drift is invisible because the fragments are
+        // small, short-lived, and decorative.
+        if (actor->id == ACTOR_EN_GOMA) {
+            EnGoma* lg = (EnGoma*)actor;
+            if (lg->gomaType != ENGOMA_NORMAL) {
+                return;
+            }
+        }
+
         // Push-block bidirectional sync (resolves limitations 1-3 of dcd2f7d47):
         // whichever client is locally pushing the block is authoritative for
         // that frame. Standard host-only broadcast leaves peer pushes

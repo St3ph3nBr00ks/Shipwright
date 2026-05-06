@@ -195,4 +195,13 @@ void BossGoma_SetupDyingNet(struct BossGoma* actor, PlayState* play);
 // else-branch resets lookedAtFrames every frame).
 void BossGoma_SetupEncounterState4(struct BossGoma* actor, PlayState* play);
 
+// Damage-receive boss-state setups exposed so DamageEnemy.cpp's
+// peer→host damage path can apply state changes directly on the host
+// without going through BossGoma_UpdateHit's FloorStunned-only damage
+// gate (which races with network latency and silently drops sword
+// damage in MP — see #67 follow-up). Setups are file-static in
+// z_boss_goma.c by default; declared here for cross-TU use.
+void BossGoma_SetupFloorDamaged(struct BossGoma* actor);
+void BossGoma_SetupDefeated(struct BossGoma* actor, PlayState* play);
+
 #endif

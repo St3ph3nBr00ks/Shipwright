@@ -6,8 +6,11 @@
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
 
+#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+
 extern "C" {
 #include "variables.h"
+#include "functions.h"
 #include "z64.h"
 // Per-actor AC_HIT setter — Phase 3 of #174/#175. Each enemy's collider lives
 // at a different field path on its own struct, so we cast and set per actor id.
@@ -266,39 +269,91 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             ((EnGoma*)actor)->colCyl2.base.acFlags |= AC_HIT;
             break;
         case ACTOR_BOSS_GOMA: {
-            // Boss Gohma damage from non-host. BossGoma_UpdateHit
-            // (z_boss_goma.c:1823) reads `bumperFlags & BUMP_HIT` (NOT
-            // AC_HIT) and dereferences `acHitInfo->toucher.dmgFlags` for
-            // the FloorStunned damage and patience-stun branches. Both
-            // need to be synthesised here so non-host hits actually
-            // register on the host's authoritative boss.
+            // Boss Gohma damage from non-host (#67 follow-up, log 299).
             //
-            // Without this:
-            //   - P2's slingshot eye-hits don't knock Goma off the
-            //     ceiling — `bumperFlags` never has BUMP_HIT set, and
-            //     SetupFallStruckDown is gated on it (line 1831).
-            //   - P2's sword hits don't damage the stunned boss —
-            //     CollisionCheck_GetSwordDamage(acHitInfo->toucher.
-            //     dmgFlags, ...) returns 0 because the deref is into
-            //     stale memory or null.
-            //   - Symptom (log 271): boss soft-locks walking the
-            //     ceiling with eye closed once P1 can't keep landing
-            //     all the eye-hits alone.
+            // Hybrid approach split by Goma's actionFunc state:
             //
-            // dmgFlags is set to the sword bit (0x1). `0x1 & 0x5 != 0`
-            // satisfies the patience-stun gate at line 1854 (which
-            // accepts sword 0x1 OR slingshot 0x4), and
-            // CollisionCheck_GetSwordDamage(0x1) returns 1 (Kokiri
-            // Sword damage), matching the most common attacker. A
-            // Giant's-Knife/Biggoron under-damages by 1 per hit on
-            // peer until atDmgFlags is added to DAMAGE_ENEMY in a
-            // follow-up; acceptable for demo.
+            //   - **Ceiling state** (CeilingMoveToCenter / CeilingIdle /
+            //     CeilingPrepareSpawnGohmas — state-index 0x0B-0x0D):
+            //     synthesise BUMP_HIT + acHitInfo. BossGoma_UpdateHit's
+            //     ceiling branch (z_boss_goma.c:1867) fires
+            //     SetupFallStruckDown — this is the slingshot eye-shot
+            //     knockdown. The ceiling actionFuncs are sustained for
+            //     many frames so timing is reliable; vanilla path works.
+            //     This is the SAME synthetic-collider approach the
+            //     previous code used for all states.
+            //
+            //   - **Floor state** (any non-ceiling, non-CeilingSpawnGohmas
+            //     state): direct HP decrement, bypassing
+            //     BossGoma_UpdateHit's FloorStunned-only damage gate.
+            //     Vanilla's gate requires `actionFunc == FloorStunned` at
+            //     the moment the synthetic BUMP_HIT is processed; the
+            //     stun window is just 4 frames (~200ms) before
+            //     transitioning to FloorDamaged or FloorMain. Network
+            //     latency (50-150ms RTT) plus host/peer state-machine
+            //     drift means peer hits while peer's Goma is stunned,
+            //     but the packet arrives at host AFTER host's Goma has
+            //     already exited FloorStunned. The synthetic BUMP_HIT
+            //     then routes to the patience-stun branch (line 1886)
+            //     which re-stuns Goma instead of damaging her, AND
+            //     consumes the bumper bit. invincibilityFrames=10 set
+            //     by patience-stun blocks any subsequent hit for 10
+            //     frames. Net effect: peer's hits never damaged, only
+            //     stunned. Log 299 confirms preHp=10 across ~200
+            //     received DAMAGE_ENEMY packets.
+            //
+            //     Direct HP write trusts the peer's local hit detection
+            //     — peer's UpdateHit gates damage broadcast on its own
+            //     state machine, so if peer broadcast DAMAGE_ENEMY,
+            //     peer saw a legitimate hit. Apply damage authoritatively
+            //     on host. visualState transition handled by
+            //     SetupFloorDamaged for the hit-reaction; SetupDefeated
+            //     fires the boss-defeat cycle when HP reaches 0.
+            //
+            //   - **CeilingSpawnGohmas (state 0x0E)**: vanilla blocks
+            //     damage entirely during this state (z_boss_goma.c:1863
+            //     `actionFunc != BossGoma_CeilingSpawnGohmas`). Drop the
+            //     packet — Goma is mid-egg-laying and intentionally
+            //     invulnerable.
             BossGoma* boss = (BossGoma*)actor;
-            static ColliderInfo sBossGomaSynthAcHitInfo = {};
-            sBossGomaSynthAcHitInfo.toucher.dmgFlags = 0x1;  // sword bit
-            sBossGomaSynthAcHitInfo.toucher.damage   = (u8)damage;
-            boss->collider.elements[0].info.acHitInfo    = &sBossGomaSynthAcHitInfo;
-            boss->collider.elements[0].info.bumperFlags |= BUMP_HIT;
+            s16 stateIdx = BossGoma_GetStateIndex(boss);
+            const bool inCeilingState = (stateIdx == 0x0B || stateIdx == 0x0C ||
+                                         stateIdx == 0x0D);
+            const bool inSpawnGohmas  = (stateIdx == 0x0E);
+
+            if (inSpawnGohmas) {
+                break;  // intentionally invulnerable; matches vanilla
+            }
+
+            if (inCeilingState) {
+                // Slingshot eye-shot knockdown via vanilla path.
+                static ColliderInfo sBossGomaSynthAcHitInfo = {};
+                sBossGomaSynthAcHitInfo.toucher.dmgFlags = 0x1;  // sword bit
+                sBossGomaSynthAcHitInfo.toucher.damage   = (u8)damage;
+                boss->collider.elements[0].info.acHitInfo    = &sBossGomaSynthAcHitInfo;
+                boss->collider.elements[0].info.bumperFlags |= BUMP_HIT;
+                break;
+            }
+
+            // Floor-state direct HP write. Skip if invincibility is
+            // currently active so back-to-back peer hits don't double-
+            // damage past the vanilla cooldown.
+            if (boss->invincibilityFrames > 0) {
+                break;
+            }
+            s8 newHp = (s8)boss->actor.colChkInfo.health - (s8)damage;
+            boss->invincibilityFrames = 10;  // matches vanilla post-hit cooldown
+            if (newHp > 0) {
+                boss->actor.colChkInfo.health = newHp;
+                BossGoma_SetupFloorDamaged(boss);
+            } else {
+                boss->actor.colChkInfo.health = 0;
+                BossGoma_SetupDefeated(boss, gPlayState);
+                Enemy_StartFinishingBlow(gPlayState, &boss->actor);
+                GameInteractor_ExecuteOnBossDefeat(&boss->actor);
+            }
+            SPDLOG_INFO("[DamageEnemy] Boss_Goma direct HP {}→{} (state=0x{:02X}, damage={})",
+                        (int)(newHp + (s8)damage), (int)newHp, (int)stateIdx, (int)damage);
             break;
         }
         case ACTOR_EN_SKB:
