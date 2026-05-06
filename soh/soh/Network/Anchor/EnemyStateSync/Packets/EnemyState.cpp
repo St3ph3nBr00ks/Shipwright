@@ -1546,6 +1546,22 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.Dekubaba.dupDetect");
                     if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                         SPDLOG_INFO("[EnemyDefeated] Dekubaba netId={} already dying — duplicate, dedup only", netId);
+                        // Peer-side dual-drop fix (field log 2026-05-06): peer's
+                        // local OnEnemyDefeat fired before this packet arrived
+                        // (state-machine sync drove health to 0; vanilla
+                        // EnDekubaba_Hit → SetupShrinkDie at z_en_dekubaba.c:972),
+                        // setting phase=DyingByLocal. Without upgrading to
+                        // DyingByNetwork, Anchor_ShouldSuppressDekubabaDrop's
+                        // PhaseImpliesPendingNaturalDeath check returns false
+                        // and peer's ShrinkDie spawns a local EN_ITEM00 — then
+                        // ITEM_DROP_SYNC adds a second one. Upgrading the phase
+                        // here ensures the suppressor catches the next
+                        // ShrinkDie tick (Math_StepToF gates the drop on the
+                        // final shrink frame, which arrives after this packet
+                        // in every observed timing).
+                        if (ext->phase == EnemyStateSync::LifecyclePhase::DyingByLocal) {
+                            EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                        }
                         EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                         return;
                     }

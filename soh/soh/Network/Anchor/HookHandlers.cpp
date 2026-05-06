@@ -5751,27 +5751,62 @@ void Anchor::RegisterHooks() {
         // loaded. Vanilla pickup proceeds; Item_Give either credits
         // the player (if eligible) or is a silent no-op (if capped /
         // missing inventory slot).
-        bool anyTeammateOnline = false;
-        for (auto& [otherId, other] : Anchor::Instance->clients) {
-            if (other.self) continue;
-            if (other.online && other.isSaveLoaded) {
-                anyTeammateOnline = true;
-                break;
-            }
-        }
+        //
+        // Field-test 2026-05-06 (build b0ea6f1 MP session, Inside
+        // Deku Tree): in MP both P1 and P2 lacked the nut bag, so
+        // Layer 2 blocked everyone — host's Dekubaba kill drops were
+        // permanently un-collectible until despawn. Narrow fix:
+        // bypass Layer 2 for the killer during their own 3 s
+        // exclusive window. Rationale: the killer is owed first
+        // attempt regardless of eligibility (vanilla single-player
+        // would silently truncate surplus for that same player; MP
+        // shouldn't be stricter than vanilla for the killer's own
+        // drops). After the window expires, Layer 2 resumes for all
+        // players including the original killer — the drop falls
+        // back to "first eligible teammate" semantics. The wider
+        // "no teammate is eligible" relaxation is left for a future
+        // pass where peers broadcast bag/wallet eligibility on
+        // UPDATE_CLIENT_STATE.
+        //
+        // Note on phantom-grant risk (Bug Report 2026-05-06,
+        // BugReport_HeartPickupSoundOnDoorEntry.md): Layer 2 is the
+        // last barrier against any future code path that spawns an
+        // EN_ITEM00 with an ItemDropNetId extension during scene-
+        // spawn. The killer-bypass here only fires when the drop is
+        // a real on-the-ground EN_ITEM00 the killer is adjacent to
+        // within 3 s of their own kill (VB_GIVE_ITEM_FROM_ITEM_00
+        // fires from EnItem00's collide path); the WorldStateSync
+        // flag-replay phantom-grant chain goes through `Item_Give`
+        // directly and does NOT pass through this gate. The
+        // relaxation is safe with respect to that bug.
         s16 itemType = (s16)(item00->actor.params & 0xFF);
-        if (anyTeammateOnline) {
-            if (!ItemEligibility::CanPlayerCollectItem00(itemType, /*walletCapAware=*/true)) {
-                *should = false;
-                SPDLOG_DEBUG("[ItemDrop] netId={} blocked — local player ineligible (type=0x{:02X}); "
-                             "deferring to teammate",
-                             ext->netId, (int)itemType);
-                return;
-            }
-        } else {
-            SPDLOG_DEBUG("[ItemDrop] netId={} solo session — skipping Layer 2 eligibility "
+        const bool killerExclusiveBypass = isLocalKiller && inExclusiveWindow;
+        if (killerExclusiveBypass) {
+            SPDLOG_DEBUG("[ItemDrop] netId={} killer-exclusive bypass — skipping Layer 2 "
                          "(type=0x{:02X})",
                          ext->netId, (int)itemType);
+        } else {
+            bool anyTeammateOnline = false;
+            for (auto& [otherId, other] : Anchor::Instance->clients) {
+                if (other.self) continue;
+                if (other.online && other.isSaveLoaded) {
+                    anyTeammateOnline = true;
+                    break;
+                }
+            }
+            if (anyTeammateOnline) {
+                if (!ItemEligibility::CanPlayerCollectItem00(itemType, /*walletCapAware=*/true)) {
+                    *should = false;
+                    SPDLOG_DEBUG("[ItemDrop] netId={} blocked — local player ineligible (type=0x{:02X}); "
+                                 "deferring to teammate",
+                                 ext->netId, (int)itemType);
+                    return;
+                }
+            } else {
+                SPDLOG_DEBUG("[ItemDrop] netId={} solo session — skipping Layer 2 eligibility "
+                             "(type=0x{:02X})",
+                             ext->netId, (int)itemType);
+            }
         }
 
         // Gate passes. Diverge by host vs peer.

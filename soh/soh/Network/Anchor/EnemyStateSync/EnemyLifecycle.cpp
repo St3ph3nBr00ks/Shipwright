@@ -42,9 +42,23 @@ bool IsRecognisedTransition(LifecyclePhase from, LifecyclePhase to) {
             // Karebaba respawn detector on host → Alive (the existing code
             // skips a separate Regrowing intermediate; the actor reaches
             // Idle and the flags clear in one step).
+            //
+            // DyingByLocal → DyingByNetwork: peer's local OnEnemyDefeat
+            // fired because state-machine sync drove peer's actor health
+            // to 0 (vanilla EnDekubaba_Hit transitions to ShrinkDie when
+            // health == 0). When the authoritative ENEMY_DEFEATED packet
+            // then arrives, the receive handler's dedup branch upgrades
+            // the phase so Anchor_ShouldSuppress*Drop predicates (which
+            // read PhaseImpliesPendingNaturalDeath) catch subsequent
+            // dying-state actionFunc ticks and suppress the local
+            // Item_DropCollectible call. Without this upgrade peer
+            // double-drops: one local EN_ITEM00 + one host-broadcast
+            // EN_ITEM00 for the same kill (field log 2026-05-06,
+            // Inside Deku Tree).
             return to == LifecyclePhase::Dead ||
                    to == LifecyclePhase::Regrowing ||
-                   to == LifecyclePhase::Alive;
+                   to == LifecyclePhase::Alive ||
+                   to == LifecyclePhase::DyingByNetwork;
         case LifecyclePhase::DyingByNetwork:
             // Karebaba respawn detector on non-host → Alive (same direct
             // transition as DyingByLocal — Regrowing is in the formal model

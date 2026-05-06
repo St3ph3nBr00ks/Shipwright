@@ -1449,14 +1449,23 @@ void EnDekuBaba_Reset(void) {
 // already be in StunnedVertical (synced from host via the state-machine
 // sync at index 9) for PATH B to fire. Otherwise default to PATH A,
 // which is the visually-correct path for any other death scenario.
+//
+// 2026-05-06: dropped the `params == DEKUBABA_BIG` restriction. Vanilla
+// `EnDekubaba_UpdateDamage` line 1148-1153 reaches PATH B for any size
+// dekubaba in StunnedVertical when struck with sword/boomerang — host
+// proved this in field log 2026-05-06 Run 2 by transitioning a small
+// (params=0x00) dekubaba 9 → 11 (PrunedSomersault → DeadStickDrop).
+// The DEKUBABA_BIG check forced peer to always take PATH A, producing
+// a cosmetic mismatch (host plays head-somersault + stick drop, peer
+// plays head-shrink). The inlined PATH B body uses `this->size` for
+// scaling so the small-baba case is naturally sized.
 void EnDekubaba_SetupDyingNet(EnDekubaba* this, PlayState* play) {
     Enemy_StartFinishingBlow(play, &this->actor);
     this->actor.colChkInfo.health = 0;
 
-    // Path B — big Baba mid-stun. Inline SetupPrunedSomersault body
+    // Path B — Baba mid-stun. Inline SetupPrunedSomersault body
     // (lines 484-494) MINUS GameInteractor_ExecuteOnEnemyDefeat at line 494.
-    if (this->actor.params == DEKUBABA_BIG &&
-        this->actionFunc == EnDekubaba_StunnedVertical) {
+    if (this->actionFunc == EnDekubaba_StunnedVertical) {
         this->timer = 0;
         this->skelAnime.playSpeed = 0.0f;
         this->actor.gravity = -0.8f;
