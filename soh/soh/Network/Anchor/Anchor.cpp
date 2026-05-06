@@ -490,6 +490,7 @@ struct DummyPlayerClientId {
 };
 static ObjectExtension::Register<DummyPlayerClientId> DummyPlayerClientIdRegister;
 ObjectExtension::Register<EnemyNetId> EnemyNetIdRegister;
+ObjectExtension::Register<ItemDropNetId> ItemDropNetIdRegister;
 
 uint32_t Anchor::GetDummyPlayerClientId(const Actor* actor) {
     const DummyPlayerClientId* clientId = ObjectExtension::GetInstance().Get<DummyPlayerClientId>(actor);

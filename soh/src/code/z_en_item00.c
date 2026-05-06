@@ -19,6 +19,14 @@ void func_8001E1C8(EnItem00* this, PlayState* play);
 void func_8001E304(EnItem00* this, PlayState* play);
 void func_8001E5C8(EnItem00* this, PlayState* play);
 
+// #193 Phase 2 — Anchor item-drop killer-attribution shim. Defined in
+// soh/soh/Network/Anchor/HookHandlers.cpp. The outer
+// Item_DropCollectibleRandom invocation records killerClientId for the
+// duration of its body so the OnActorSpawn(ACTOR_EN_ITEM00) hook can
+// stamp the right player on the resulting EnItem00 actor.
+extern void Anchor_BeginItemDrop(Actor* fromActor);
+extern void Anchor_EndItemDrop(void);
+
 void EnItem00_DrawRupee(EnItem00* this, PlayState* play);
 void EnItem00_DrawCollectible(EnItem00* this, PlayState* play);
 void EnItem00_DrawHeartContainer(EnItem00* this, PlayState* play);
@@ -1665,10 +1673,16 @@ void Item_DropCollectibleRandom(PlayState* play, Actor* fromActor, Vec3f* spawnP
     s16 dropTableIndex = Rand_ZeroOne() * 16.0f;
     u8 dropId;
 
+    // #193 Phase 2 — bracket the entire body so any Actor_Spawn fired
+    // by this call (or by inner Item_DropCollectible recursive calls)
+    // sees the correct killerClientId in the OnActorSpawn hook.
+    Anchor_BeginItemDrop(fromActor);
+
     param8000 = params & 0x8000;
     params &= 0x7FFF;
 
     if (CVarGetInteger(CVAR_ENHANCEMENT("NoRandomDrops"), 0)) {
+        Anchor_EndItemDrop();
         return;
     }
 
@@ -1712,6 +1726,7 @@ void Item_DropCollectibleRandom(PlayState* play, Actor* fromActor, Vec3f* spawnP
                         FAIRY_HEAL_TIMED);
             EffectSsDeadSound_SpawnStationary(play, spawnPos, NA_SE_EV_BUTTERFRY_TO_FAIRY, true,
                                               DEADSOUND_REPEAT_MODE_OFF, 40);
+            Anchor_EndItemDrop();
             return;
         } else if (gSaveContext.health <= 0x30 &&
                    !CVarGetInteger(CVAR_ENHANCEMENT("NoHeartDrops"), 0)) { // 3 hearts or less
@@ -1748,6 +1763,7 @@ void Item_DropCollectibleRandom(PlayState* play, Actor* fromActor, Vec3f* spawnP
             dropTableIndex = 0x0;
             dropId = ITEM00_RUPEE_RED;
         } else {
+            Anchor_EndItemDrop();
             return;
         }
     }
@@ -1786,4 +1802,6 @@ void Item_DropCollectibleRandom(PlayState* play, Actor* fromActor, Vec3f* spawnP
             dropQuantity--;
         }
     }
+
+    Anchor_EndItemDrop();
 }

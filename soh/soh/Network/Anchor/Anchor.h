@@ -142,6 +142,29 @@ struct EnemyNetId {
     bool bossGomaPeerSignaled = false;
 };
 
+// #193 Phase 2 — attached to ACTOR_EN_ITEM00 actors so the receive-side
+// pickup gate can read the host-authoritative drop metadata.
+//   netId           — unique per-drop identifier (matches ITEM_DROP_SYNC).
+//   killerClientId  — player who triggered the drop. Used by the 3s
+//                     killer-exclusive window in the pickup gate.
+//                     0 means unattributed (no exclusivity).
+//   spawnTimeMs     — host's monotonic clock at drop time, in ms. Used
+//                     by `now - spawnTimeMs < kKillerExclusiveMs` for
+//                     the grace window. Stamped from the broadcast on
+//                     receivers; stamped from `steady_clock::now()` on
+//                     the host.
+//   isFromBroadcast — true on receivers (drop was spawned from
+//                     ITEM_DROP_SYNC). False on the host (local drop
+//                     that the host then broadcasts). Used to suppress
+//                     the OnActorSpawn-side broadcast on receivers so
+//                     they don't echo the packet back.
+struct ItemDropNetId {
+    uint32_t netId           = 0;
+    uint32_t killerClientId  = 0;
+    int64_t  spawnTimeMs     = 0;
+    bool     isFromBroadcast = false;
+};
+
 void DummyPlayer_Init(Actor* actor, PlayState* play);
 void DummyPlayer_Update(Actor* actor, PlayState* play);
 void DummyPlayer_Draw(Actor* actor, PlayState* play);

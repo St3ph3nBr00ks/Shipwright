@@ -428,6 +428,83 @@ extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
     Anchor::Instance->SendPacket_EnemyHitPlayer(ext->netId);
 }
 
+// #193 Phase 2 — Item-drop killer-attribution shim.
+//
+// Game thread is single-threaded so file-scope statics suffice. Begin
+// records the killerClientId before vanilla `Item_DropCollectible*`
+// fires `Actor_Spawn(ACTOR_EN_ITEM00)`. End clears.
+//
+// Killer resolution:
+//   - Item_DropCollectibleRandom(play, fromActor, ...): if fromActor's
+//     EnemyNetId has a recorded damager (host-side bookkeeping populated
+//     by ENEMY_DEFEATED arrival from a peer), use that. Else fall back
+//     to the local client's id. Covers both "host kills a peer's enemy"
+//     (rare; host's own kill) and "peer kills via DAMAGE_ENEMY routed
+//     to host" (the dominant MP path — Damager map is populated).
+//   - Item_DropCollectible / Item_DropCollectible2 (no fromActor): caller
+//     uses the no-arg form, killer = local client. Phase 4 will refine
+//     for env-actor drops if needed.
+//
+// State scope: only one `Item_DropCollectible*` invocation can be active
+// at a time on the game thread, so a single static suffices.
+static uint32_t g_pendingItemDropKillerClientId = 0;
+static int64_t  g_pendingItemDropSpawnTimeMs   = 0;
+static bool     g_pendingItemDropActive         = false;
+
+// Receive-side gate: set true while HandlePacket_ItemDropSync is calling
+// Actor_Spawn so the OnActorSpawn ACTOR_EN_ITEM00 hook knows not to
+// re-broadcast the drop (it's already a network drop). Mirrors the
+// `isSpawningNetworkActor` pattern from ENEMY_SPAWN.
+static bool     g_isSpawningNetworkItemDrop     = false;
+static uint32_t g_pendingNetworkItemDropNetId   = 0;
+
+extern "C" void Anchor_BeginItemDrop(Actor* fromActor) {
+    g_pendingItemDropActive = true;
+    g_pendingItemDropSpawnTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (!Anchor::Instance) {
+        g_pendingItemDropKillerClientId = 0;
+        return;
+    }
+    // Default: local client owns the kill (host's own kill OR an env actor
+    // cut by local Link).
+    g_pendingItemDropKillerClientId = Anchor::Instance->ownClientId;
+    if (fromActor != nullptr) {
+        const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(fromActor);
+        if (ext != nullptr) {
+            uint32_t damager = EnemyStateSync::HostBookkeeping::Instance().LookupDamager(ext->netId);
+            if (damager != 0) {
+                g_pendingItemDropKillerClientId = damager;
+            }
+        }
+    }
+}
+
+extern "C" void Anchor_EndItemDrop(void) {
+    g_pendingItemDropActive = false;
+    g_pendingItemDropKillerClientId = 0;
+    g_pendingItemDropSpawnTimeMs = 0;
+}
+
+// Receive-side helper called from HandlePacket_ItemDropSync to bracket
+// the local Actor_Spawn so the OnActorSpawn EN_ITEM00 hook stamps the
+// extension with the host's broadcast netId/killer/spawnTimeMs and
+// suppresses re-broadcast.
+void Anchor_BeginNetworkItemDropSpawn(uint32_t netId, uint32_t killerClientId,
+                                       int64_t spawnTimeMs) {
+    g_isSpawningNetworkItemDrop      = true;
+    g_pendingNetworkItemDropNetId    = netId;
+    g_pendingItemDropKillerClientId  = killerClientId;
+    g_pendingItemDropSpawnTimeMs     = spawnTimeMs;
+}
+
+void Anchor_EndNetworkItemDropSpawn(void) {
+    g_isSpawningNetworkItemDrop      = false;
+    g_pendingNetworkItemDropNetId    = 0;
+    g_pendingItemDropKillerClientId  = 0;
+    g_pendingItemDropSpawnTimeMs     = 0;
+}
+
 bool Anchor::IsLocalPlayerClimbing() const {
     if (gPlayState == nullptr) { return false; }
     Player* p = GET_PLAYER(gPlayState);
@@ -3821,6 +3898,128 @@ void Anchor::RegisterHooks() {
         Actor* actor = static_cast<Actor*>(refActor);
         if (actor == nullptr) return;
         AnchorSync::SetActorSyncScope(actor, AnchorSync::ActorSyncScope::Global);
+    });
+
+    // #193 Phase 2 — host-side ITEM_DROP_SYNC broadcast on local
+    // Item_DropCollectible* spawn. Receive-side (network drop) skips
+    // the broadcast and stamps the host-supplied netId/killer onto
+    // the extension instead.
+    //
+    // Q7 transient-only allowlist: progression items (heart pieces,
+    // heart containers, small keys, tunics, shields) keep per-player
+    // semantics. Each client spawns its own copy via the vanilla
+    // scripted path; broadcast skipped.
+    //
+    // Suppression of locally-spawned EN_ITEM00 on receivers (so peer's
+    // own RNG doesn't double-drop) is the existing
+    // `Anchor_ShouldSuppressXxxDrop` guard at SetupDyingNet sites.
+    // For env-actor drops (Phase 4), Phase 2 doesn't fan-out yet —
+    // env actors don't currently route through `Anchor_BeginItemDrop`.
+    COND_ID_HOOK(OnActorSpawn, ACTOR_EN_ITEM00, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        if (actor == nullptr) return;
+        if (!IsSaveLoaded() || gPlayState == nullptr) return;
+
+        // Mask down to the resolved ITEM00_* type. The caller passes
+        // (params | flag-bits); the actor's Init has not run yet so
+        // we mask explicitly. Some types (FLEXIBLE) resolve at Init —
+        // OnActorSpawn fires BEFORE Init, so a FLEXIBLE here means
+        // the resolution hasn't happened. Skip; the next OnActorSpawn
+        // pass after Init will see the resolved type. (Currently
+        // OnActorSpawn fires once per actor lifetime — FLEXIBLE
+        // drops are skipped from broadcast in this version, which
+        // is acceptable for Phase 2 since FLEXIBLE drops are rare.)
+        s16 resolvedType = (s16)(actor->params & 0xFF);
+
+        // Receive-side: extension stamping only. Skip broadcast.
+        if (g_isSpawningNetworkItemDrop) {
+            ItemDropNetId ext;
+            ext.netId           = g_pendingNetworkItemDropNetId;
+            ext.killerClientId  = g_pendingItemDropKillerClientId;
+            ext.spawnTimeMs     = g_pendingItemDropSpawnTimeMs;
+            ext.isFromBroadcast = true;
+            ObjectExtension::GetInstance().Set<ItemDropNetId>(actor, std::move(ext));
+            SPDLOG_DEBUG("[ItemDropSync] Network drop: stamped netId={} killer={} type=0x{:02X}",
+                         g_pendingNetworkItemDropNetId, g_pendingItemDropKillerClientId,
+                         (int)resolvedType);
+            return;
+        }
+
+        // Host-side: broadcast iff this is the room host and the type
+        // is on the transient allowlist (Q7).
+        if (!::SceneAuthority::IsMyCurrentRoomHost()) {
+            return;
+        }
+
+        // Q7 transient-only allowlist. Anything else stays per-player.
+        bool isTransient = false;
+        switch (resolvedType) {
+            case ITEM00_RUPEE_GREEN:
+            case ITEM00_RUPEE_BLUE:
+            case ITEM00_RUPEE_RED:
+            case ITEM00_RUPEE_ORANGE:
+            case ITEM00_RUPEE_PURPLE:
+            case ITEM00_HEART:
+            case ITEM00_MAGIC_SMALL:
+            case ITEM00_MAGIC_LARGE:
+            case ITEM00_BOMBS_A:
+            case ITEM00_BOMBS_B:
+            case ITEM00_BOMBS_SPECIAL:
+            case ITEM00_ARROWS_SINGLE:
+            case ITEM00_ARROWS_SMALL:
+            case ITEM00_ARROWS_MEDIUM:
+            case ITEM00_ARROWS_LARGE:
+            case ITEM00_NUTS:
+            case ITEM00_STICK:
+            case ITEM00_SEEDS:
+            case ITEM00_BOMBCHU:
+                isTransient = true;
+                break;
+            default:
+                isTransient = false;
+                break;
+        }
+        if (!isTransient) {
+            return;
+        }
+
+        // Compute item netId. Items are dynamic spawns by definition;
+        // use the unique-dynamic encoder to avoid posHash collision
+        // when several drops share the same world position (e.g. a
+        // tightly-packed enemy cluster all dropping at once).
+        uint32_t itemNetId = EncodeUniqueDynamicNetId(actor);
+
+        // Killer attribution. If `Anchor_BeginItemDrop` was called by
+        // the wrapping shim around `Item_DropCollectible*`, the active
+        // killer is recorded. Otherwise (call sites not yet wrapped in
+        // Phase 2 — Item_DropCollectible / _2 still un-wrapped) fall
+        // back to local clientId.
+        uint32_t killerClientId = g_pendingItemDropActive
+            ? g_pendingItemDropKillerClientId
+            : Anchor::Instance->ownClientId;
+        int64_t spawnTimeMs = g_pendingItemDropActive
+            ? g_pendingItemDropSpawnTimeMs
+            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        // Stamp local extension first so the pickup gate can read it
+        // even on the host. isFromBroadcast=false marks "local drop".
+        ItemDropNetId ext;
+        ext.netId           = itemNetId;
+        ext.killerClientId  = killerClientId;
+        ext.spawnTimeMs     = spawnTimeMs;
+        ext.isFromBroadcast = false;
+        ObjectExtension::GetInstance().Set<ItemDropNetId>(actor, std::move(ext));
+
+        // Broadcast.
+        Anchor::Instance->SendPacket_ItemDropSync(itemNetId, (u8)resolvedType,
+                                                   actor->world.pos,
+                                                   killerClientId, spawnTimeMs);
+        SPDLOG_INFO("[ItemDropSync] Host broadcast netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
+                    "killer={} spawnTimeMs={}",
+                    itemNetId, (int)resolvedType,
+                    actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
+                    killerClientId, (long long)spawnTimeMs);
     });
 
     // Host sends enemy positions every frame to all clients in the same scene.

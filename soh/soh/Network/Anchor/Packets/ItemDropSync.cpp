@@ -11,6 +11,15 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
+// Phase 2 receive-side gate — implemented in HookHandlers.cpp (file-scope
+// statics). Forward-declared here so HandlePacket_ItemDropSync can bracket
+// its `Actor_Spawn` call with the network-spawn flag, ensuring the
+// `OnActorSpawn(ACTOR_EN_ITEM00)` hook stamps the host-supplied netId
+// onto the receiver's local extension and skips re-broadcast.
+void Anchor_BeginNetworkItemDropSpawn(uint32_t netId, uint32_t killerClientId,
+                                       int64_t spawnTimeMs);
+void Anchor_EndNetworkItemDropSpawn(void);
+
 /**
  * ITEM_DROP_SYNC — host → all clients (team-broadcast).
  *
@@ -93,10 +102,51 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
     uint32_t killerClientId  = (uint32_t)payload.value("killerClientId", (uint32_t)0);
     int64_t  spawnTimeMs     = (int64_t)payload.value("spawnTimeMs", (int64_t)0);
 
-    // Phase 1 stub — Phase 2 will Actor_Spawn ACTOR_EN_ITEM00 here at
-    // the broadcast pos with `params`, then stamp an ItemDropNetId
-    // extension with {itemNetId, killerClientId, spawnTimeMs} for the
-    // pickup gate to read.
-    SPDLOG_INFO("[ItemDropSync] (Phase 1 stub) rx netId={} params=0x{:02X} killer={} spawnTimeMs={}",
-                itemNetId, (int)itemParams, killerClientId, (long long)spawnTimeMs);
+    Vec3f pos = { 0.0f, 0.0f, 0.0f };
+    if (payload.contains("pos") && payload["pos"].is_array() && payload["pos"].size() == 3) {
+        pos.x = payload["pos"][0].get<float>();
+        pos.y = payload["pos"][1].get<float>();
+        pos.z = payload["pos"][2].get<float>();
+    } else {
+        SPDLOG_WARN("[ItemDropSync] Drop — malformed pos field");
+        return;
+    }
+
+    // Idempotency: walk ACTORCAT_MISC for an existing EN_ITEM00 with a
+    // matching ItemDropNetId extension. Skip if found (we already
+    // spawned this drop, e.g. duplicate broadcast or self-echo).
+    Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
+    while (it != nullptr) {
+        if (it->id == ACTOR_EN_ITEM00 && it->update != nullptr) {
+            const ItemDropNetId* existing =
+                ObjectExtension::GetInstance().Get<ItemDropNetId>(it);
+            if (existing != nullptr && existing->netId == itemNetId) {
+                SPDLOG_DEBUG("[ItemDropSync] Drop — netId={} already spawned locally",
+                             itemNetId);
+                return;
+            }
+        }
+        it = it->next;
+    }
+
+    // Spawn the receiver's local EN_ITEM00 with the host's params.
+    // The `0x8000` flag tells `Item_DropCollectible*` not to apply the
+    // post-spawn velocity/gravity setup (vanilla "spawn pre-positioned"
+    // path) — we want the actor at the exact broadcast pos without
+    // bouncing on receive. ACTOR_FLAG_UPDATE_CULLING_DISABLED is
+    // applied by Init via the same path.
+    Anchor_BeginNetworkItemDropSpawn(itemNetId, killerClientId, spawnTimeMs);
+    Actor* spawned = Actor_Spawn(&gPlayState->actorCtx, gPlayState,
+                                  ACTOR_EN_ITEM00, pos.x, pos.y, pos.z,
+                                  0, 0, 0, (s16)itemParams);
+    Anchor_EndNetworkItemDropSpawn();
+
+    if (spawned == nullptr) {
+        SPDLOG_WARN("[ItemDropSync] Actor_Spawn failed for netId={} type=0x{:02X}",
+                    itemNetId, (int)itemParams);
+        return;
+    }
+
+    SPDLOG_INFO("[ItemDropSync] rx netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) killer={}",
+                itemNetId, (int)itemParams, pos.x, pos.y, pos.z, killerClientId);
 }
