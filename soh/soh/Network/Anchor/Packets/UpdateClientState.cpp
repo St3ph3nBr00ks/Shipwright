@@ -257,6 +257,16 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                     SendJsonToRemote(killPayload);
                 }
             }
+
+            // #193 Phase 5 — late-join replay of in-flight EN_ITEM00
+            // drops. Only fire when the joining peer's scene matches
+            // host's current scene (the snapshot is host-local —
+            // sending it for a different scene than host occupies
+            // would carry zero entries).
+            if (gPlayState != nullptr &&
+                (s16)gPlayState->sceneNum == newScene) {
+                SendPacket_ItemDropSnapshot(clientId);
+            }
         }
 
         // #166 sub-item (6) — mid-boss late-join immediate snapshot.

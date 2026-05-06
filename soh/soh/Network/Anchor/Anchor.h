@@ -745,6 +745,14 @@ class Anchor : public Network {
     // pickup attribution: only one client claims the drop. See #193.
     inline static const std::string ITEM_COLLECTED = "ITEM_COLLECTED";
 
+    // ITEM_DROP_SNAPSHOT — host → joining peer (targeted). Late-join
+    // replay of in-flight EN_ITEM00 drops in the joining peer's scene.
+    // Sent when a peer transitions into the host's scene (UPDATE_CLIENT_STATE
+    // edge): host walks ACTORCAT_MISC for live EN_ITEM00 with
+    // ItemDropNetId, packs the list, sends to the named client. Mirrors
+    // the SCENE_ACTOR_NETIDS pattern. See #193 Phase 5.
+    inline static const std::string ITEM_DROP_SNAPSHOT = "ITEM_DROP_SNAPSHOT";
+
     // HEARTBEAT — every client → all clients. Sent every ~2s from the
     // network thread (NOT the game thread) so it survives game-thread
     // freezes (textbox stuck, cutscene gate, pause). Carries:
@@ -890,6 +898,15 @@ class Anchor : public Network {
     // the local copy. Per-player attribution: only one client wins.
     void SendPacket_ItemCollected(uint32_t itemNetId);
     void HandlePacket_ItemCollected(nlohmann::json payload);
+
+    // ITEM_DROP_SNAPSHOT (#193 Phase 5) — late-join replay. Host
+    // enumerates live EN_ITEM00 drops in the joining peer's scene+
+    // timeline and sends them targeted at `targetClientId`. Receiver
+    // spawns matching local drops with extension stamped (idempotent
+    // per drop netId — drops the peer already spawned locally aren't
+    // duplicated).
+    void SendPacket_ItemDropSnapshot(uint32_t targetClientId);
+    void HandlePacket_ItemDropSnapshot(nlohmann::json payload);
 
     // CUTSCENE_TEXT_ADVANCE — peer → effective scene host. Sent when a
     // local A/B/CUP press fires Message_ShouldAdvance during a cutscene-
