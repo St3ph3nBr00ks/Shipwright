@@ -129,6 +129,48 @@ static constexpr int      kMaxScanIterations   = 50000;  // floodfill runaway gu
 static constexpr int64_t  kMaxScanWallTimeMs   = 1000;   // per-scan budget
 
 // ---------------------------------------------------------------------------
+// Climb anchor detection. Plan §5 — Path A scene-actor allowlist.
+// ---------------------------------------------------------------------------
+
+// Confirmed climbable scene actors. Each entry's actorId triggers a
+// ClimbAnchor record at the actor's world.pos with an estimated topPos
+// `kEstimatedClimbHeight` units above. Field testing extends this list
+// when new climbable actor types surface.
+struct ClimbableActorEntry {
+    int16_t actorId;
+    float   estimatedHeight; // climb-top Y delta from actor.world.pos.y
+};
+static const ClimbableActorEntry kClimbableActors[] = {
+    { ACTOR_BG_SPOT18_OBJ,      150.0f }, // Goron City interior ladder
+    { ACTOR_BG_DDAN_KD,         200.0f }, // Dodongo's Cavern ladder
+    { ACTOR_BG_SPOT06_OBJECTS,  120.0f }, // Lake Hylia (some climbables)
+};
+
+static void DetectClimbAnchors(RoomNavData* out, PlayState* play) {
+    // Walk both ACTORCAT_BG and ACTORCAT_PROP — climbable scene actors
+    // may live in either category depending on the actor's setup.
+    constexpr ActorCategory kCategoriesToScan[] = { ACTORCAT_BG, ACTORCAT_PROP };
+
+    for (ActorCategory cat : kCategoriesToScan) {
+        Actor* actor = play->actorCtx.actorLists[cat].head;
+        while (actor != nullptr) {
+            for (const ClimbableActorEntry& entry : kClimbableActors) {
+                if (actor->id != entry.actorId) continue;
+                ClimbAnchor anchor{};
+                anchor.basePos = actor->world.pos;
+                anchor.topPos  = { actor->world.pos.x,
+                                   actor->world.pos.y + entry.estimatedHeight,
+                                   actor->world.pos.z };
+                anchor.actorId = actor->id;
+                out->climbAnchors.push_back(anchor);
+                break;
+            }
+            actor = actor->next;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Hazard + water classification predicates. Plan §5 — bit positions
 // verified against z_player.c usage patterns.
 // ---------------------------------------------------------------------------
@@ -458,13 +500,19 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
         std::chrono::steady_clock::now() - edgeStart).count();
     auto totalMs = scanMs + edgeMs;
 
-    SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} nodes={} edges={} cells={} "
+    // Climb anchor detection (commit 6) — Path A scene-actor allowlist.
+    // Iterates ACTORCAT_BG and ACTORCAT_PROP actor lists for known
+    // climbable scene actors and records (basePos, topPos) anchors.
+    // Path B (surface-flag query for vine walls) deferred — bit position
+    // unidentified in vanilla source. v1 covers ladders only.
+    DetectClimbAnchors(out, play);
+
+    auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - scanStart).count();
+    SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} nodes={} edges={} climbs={} cells={} "
                 "scanMs={} edgeMs={} totalMs={}",
                 sceneNum, (int)roomNum, out->nodes.size(), out->edges.size(),
-                visited.size(), scanMs, edgeMs, totalMs);
-
-    // Commit 5 will add: HAZARD / UNDERWATER classification refinement
-    // Commit 6 will add: DetectClimbAnchors(out, play)
+                out->climbAnchors.size(), visited.size(), scanMs, edgeMs, totalMsFinal);
 }
 
 // Top-level lookup-then-scan dispatch. Called once per (scene, room)
