@@ -2,6 +2,7 @@
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
+#include "Common/ItemEligibility.h"   // CanPlayerCollectItem00 (#193 Phase 0)
 #include "Common/PauseLinkBuffer.h"   // Anchor_IsDrawingPauseLink (#182 follow-up)
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
@@ -1167,74 +1168,20 @@ void Anchor::RegisterHooks() {
                 // it, the follower walks forward during the swing-cycle gap.
                 static constexpr f32 kSwingReach = 50.0f;
 
-                // Item pickup — need-gated whitelist. Returns true only if
-                // the follower has a legitimate use for this ITEM00_* type
-                // AND it's not a class reserved for the leader (keys,
-                // ammo, heart pieces, etc.). After EnItem00_Init runs,
-                // actor.params is masked down to the ITEM00_* enum value
-                // directly (z_en_item00.c:363 — `this->actor.params &= 0xFF`);
-                // still AND with 0xFF to handle the one-frame window
-                // between spawn and Init when the 0x3F00 collectible-flag
-                // and 0x8000 spawn-type bits are still set.
+                // Item pickup — need-gated whitelist via shared helper
+                // (#193 Phase 0). Reserved for the human leader: progression
+                // items, shields, tunics, keys, heart pieces — all return
+                // false. AI follower keeps the legacy "rupees always" rule
+                // (`walletCapAware = false`) since vanilla truncates surplus
+                // and the follower acts in the local player's stead.
                 auto FollowerWantsItem = [](Actor* item) -> bool {
                     if (item == nullptr || item->id != ACTOR_EN_ITEM00 ||
                         item->update == nullptr) {
                         return false;
                     }
                     s16 itemType = (s16)(item->params & 0xFF);
-                    switch (itemType) {
-                        // --- Always-collect: rupees are capacity-capped at
-                        // the wallet level, so surplus just no-ops.
-                        case ITEM00_RUPEE_GREEN:
-                        case ITEM00_RUPEE_BLUE:
-                        case ITEM00_RUPEE_RED:
-                        case ITEM00_RUPEE_ORANGE:
-                        case ITEM00_RUPEE_PURPLE:
-                            return true;
-                        // --- Need-gated recovery.
-                        case ITEM00_HEART:
-                            return gSaveContext.health < gSaveContext.healthCapacity;
-                        case ITEM00_MAGIC_SMALL:
-                        case ITEM00_MAGIC_LARGE:
-                            return gSaveContext.isMagicAcquired &&
-                                   gSaveContext.magic < gSaveContext.magicCapacity;
-                        // --- Consumable ammo. Gate on (a) player owns the
-                        // weapon/upgrade (CUR_CAPACITY > 0 ⇒ bag acquired)
-                        // AND (b) ammo < capacity (OoT silently discards
-                        // drops when the bag is full — picking them up
-                        // would deprive the human for no gain). Plentiful
-                        // in the first dungeon so the human rarely loses
-                        // something meaningful.
-                        case ITEM00_STICK:
-                            return CUR_CAPACITY(UPG_STICKS) > 0 &&
-                                   AMMO(ITEM_STICK) < CUR_CAPACITY(UPG_STICKS);
-                        case ITEM00_NUTS:
-                            return CUR_CAPACITY(UPG_NUTS) > 0 &&
-                                   AMMO(ITEM_NUT) < CUR_CAPACITY(UPG_NUTS);
-                        case ITEM00_SEEDS:
-                            return CUR_CAPACITY(UPG_BULLET_BAG) > 0 &&
-                                   AMMO(ITEM_SLINGSHOT) < CUR_CAPACITY(UPG_BULLET_BAG);
-                        case ITEM00_ARROWS_SINGLE:
-                        case ITEM00_ARROWS_SMALL:
-                        case ITEM00_ARROWS_MEDIUM:
-                        case ITEM00_ARROWS_LARGE:
-                            return CUR_CAPACITY(UPG_QUIVER) > 0 &&
-                                   AMMO(ITEM_BOW) < CUR_CAPACITY(UPG_QUIVER);
-                        case ITEM00_BOMBS_A:
-                        case ITEM00_BOMBS_B:
-                        case ITEM00_BOMBS_SPECIAL:
-                            return CUR_CAPACITY(UPG_BOMB_BAG) > 0 &&
-                                   AMMO(ITEM_BOMB) < CUR_CAPACITY(UPG_BOMB_BAG);
-                        case ITEM00_BOMBCHU:
-                            // Bombchus have no upgrade slot (fixed 50-cap).
-                            // Gate on "player has bombchus in inventory".
-                            return INV_CONTENT(ITEM_BOMBCHU) != ITEM_NONE &&
-                                   AMMO(ITEM_BOMBCHU) < 50;
-                        // --- Reserved for human: progression items, shields,
-                        // tunics, keys, heart pieces, flexible-drop resolver.
-                        default:
-                            return false;
-                    }
+                    return ItemEligibility::CanPlayerCollectItem00(
+                        itemType, /*walletCapAware=*/false);
                 };
 
                 // Item pickup — scan ACTORCAT_MISC for eligible En_Item00
