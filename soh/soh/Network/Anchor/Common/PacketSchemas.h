@@ -31,7 +31,8 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"HANDSHAKE", 1},
     {"HEARTBEAT", 1},  // #194 follow-up — every-client liveness signal sent from network thread.
     {"ITEM_DROP_SYNC", 1},  // #193 Phase 1 — host-fanout of EnItem00 drops with killer attribution.
-    {"ITEM_COLLECTED", 1},  // #193 Phase 1 — collector→all broadcast; receivers Actor_Kill the local copy.
+    {"ITEM_COLLECTED", 1},  // #193 Phase 1 / race A — host arbitration broadcast; receivers Actor_Kill or apply pickup based on winner clientId.
+    {"ITEM_PICKUP_REQUEST", 1},  // #193 race A mitigation — peer→host pickup arbitration request.
     {"ITEM_DROP_SNAPSHOT", 1},  // #193 Phase 5 — late-join replay of in-flight EnItem00 drops.
     {"ENV_ACTOR_DROP", 1},      // #193 Phase 4 v2 — peer→host env-actor cut drop request.
     {"OCARINA_SFX", 1},

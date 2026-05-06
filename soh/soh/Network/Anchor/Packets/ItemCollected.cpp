@@ -75,29 +75,57 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
         return;
     }
 
-    uint32_t itemNetId         = (uint32_t)payload.value("netId", (uint32_t)0);
-    uint32_t collectorClientId = (uint32_t)payload.value("clientId", (uint32_t)0);
+    uint32_t itemNetId = (uint32_t)payload.value("netId", (uint32_t)0);
     if (itemNetId == 0) {
         SPDLOG_WARN("[ItemCollected] Drop — netId == 0");
         return;
     }
-    // Self-echo: relay shouldn't but defensively skip our own broadcasts.
-    if (collectorClientId == ownClientId) {
-        return;
+
+    // Winner resolution. Two broadcast paths:
+    //  - Host's direct pickup: relay-injected `clientId` IS the winner
+    //    (host picked up locally, broadcasts as itself).
+    //  - Host's arbitration grant (race A): explicit `winnerClientId`
+    //    field carries the requesting peer's id; the relay-injected
+    //    `clientId` is the host (broadcaster), not the winner.
+    // Prefer winnerClientId if present; fall back to clientId.
+    uint32_t winnerClientId = (uint32_t)payload.value("winnerClientId", (uint32_t)0);
+    if (winnerClientId == 0) {
+        winnerClientId = (uint32_t)payload.value("clientId", (uint32_t)0);
     }
 
-    // Walk ACTORCAT_MISC for the matching ItemDropNetId extension and
-    // Actor_Kill the local copy. Idempotent — if the drop doesn't
-    // exist locally (already collected, never spawned, scene transition
-    // race), the packet is a no-op.
+    // Walk ACTORCAT_MISC for the matching ItemDropNetId extension.
     Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
     while (it != nullptr) {
         if (it->id == ACTOR_EN_ITEM00 && it->update != nullptr) {
             const ItemDropNetId* ext =
                 ObjectExtension::GetInstance().Get<ItemDropNetId>(it);
             if (ext != nullptr && ext->netId == itemNetId) {
-                SPDLOG_INFO("[ItemCollected] rx netId={} collector={} — killing local copy",
-                            itemNetId, collectorClientId);
+                if (winnerClientId == ownClientId) {
+                    // We won the arbitration. Two sub-cases:
+                    //   - Our extension state was Pending (we sent
+                    //     ITEM_PICKUP_REQUEST and host granted): transition
+                    //     to Granted so the next pickup-gate fire allows
+                    //     vanilla pickup. Don't kill the actor — vanilla
+                    //     pickup body needs it alive to call Item_Give.
+                    //   - We're the host echoing our own broadcast back:
+                    //     extension state is None (host doesn't go through
+                    //     Pending). Vanilla pickup already credited; the
+                    //     drop's natural lifecycle (or our own Actor_Kill
+                    //     in the pickup body) will clean up. Treat as
+                    //     no-op.
+                    if (ext->pickupState == ItemPickupState::Pending) {
+                        ItemDropNetId* mut = const_cast<ItemDropNetId*>(ext);
+                        mut->pickupState = ItemPickupState::Granted;
+                        SPDLOG_INFO("[ItemCollected] rx netId={} GRANT for local — transitioning Pending → Granted",
+                                    itemNetId);
+                    }
+                    // else: host-self-echo; no action.
+                    return;
+                }
+
+                // Winner is someone else: Actor_Kill the local copy.
+                SPDLOG_INFO("[ItemCollected] rx netId={} winner={} — killing local copy",
+                            itemNetId, winnerClientId);
                 Actor_Kill(it);
                 return;
             }
@@ -105,6 +133,6 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
         it = it->next;
     }
 
-    SPDLOG_DEBUG("[ItemCollected] rx netId={} collector={} — no local copy found",
-                 itemNetId, collectorClientId);
+    SPDLOG_DEBUG("[ItemCollected] rx netId={} winner={} — no local copy found",
+                 itemNetId, winnerClientId);
 }

@@ -5554,6 +5554,28 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // Race A mitigation: Granted state means host has arbitrated
+        // this drop in our favour. Clear the flag (back to None for
+        // safety / re-entry) and allow vanilla pickup to run.
+        if (ext->pickupState == ItemPickupState::Granted) {
+            ItemDropNetId* mut = const_cast<ItemDropNetId*>(ext);
+            mut->pickupState = ItemPickupState::None;
+            SPDLOG_INFO("[ItemDrop] netId={} grant consumed — applying pickup",
+                        ext->netId);
+            // *should stays true; vanilla pickup runs.
+            return;
+        }
+
+        // Pending: request is in flight to host. Suppress vanilla pickup
+        // until the host's ITEM_COLLECTED arbitration broadcast arrives.
+        // The gate re-fires every frame the player is adjacent — when
+        // ITEM_COLLECTED grants us, pickupState transitions to Granted
+        // and the next gate fire (above) lets vanilla pickup run.
+        if (ext->pickupState == ItemPickupState::Pending) {
+            *should = false;
+            return;
+        }
+
         const int64_t kKillerExclusiveMs = 3000;
         const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -5582,13 +5604,31 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        // Gate passes — broadcast collection BEFORE vanilla pickup body
-        // runs so peers Actor_Kill in lockstep. The broadcast carries
-        // only the netId; the relay enriches with our clientId.
-        SPDLOG_INFO("[ItemDrop] netId={} pickup by local — broadcasting ITEM_COLLECTED type=0x{:02X}",
-                    ext->netId, (int)itemType);
-        Anchor::Instance->SendPacket_ItemCollected(ext->netId);
-        // *should stays true (vanilla pickup proceeds).
+        // Gate passes. Diverge by host vs peer.
+        //
+        // Host: vanilla pickup proceeds + broadcast ITEM_COLLECTED with
+        // host's own clientId as the winner. Other peers see this and
+        // Actor_Kill their local copies.
+        //
+        // Peer: race A mitigation — request host arbitration. Set
+        // pickupState=Pending, send ITEM_PICKUP_REQUEST, suppress
+        // vanilla. Vanilla runs on the next gate fire after host's
+        // ITEM_COLLECTED grant transitions state to Granted.
+        if (::SceneAuthority::IsMyCurrentRoomHost()) {
+            SPDLOG_INFO("[ItemDrop] netId={} pickup by host — broadcasting ITEM_COLLECTED type=0x{:02X}",
+                        ext->netId, (int)itemType);
+            Anchor::Instance->SendPacket_ItemCollected(ext->netId);
+            // *should stays true.
+            return;
+        }
+
+        // Peer pickup: request host arbitration.
+        ItemDropNetId* mut = const_cast<ItemDropNetId*>(ext);
+        mut->pickupState = ItemPickupState::Pending;
+        Anchor::Instance->SendPacket_ItemPickupRequest(ext->netId);
+        SPDLOG_INFO("[ItemDrop] netId={} pickup request sent to host — suppressing vanilla pickup pending grant",
+                    ext->netId);
+        *should = false;
     });
 
     // #193 Phase 3 — visual cue for non-killer during exclusive window.

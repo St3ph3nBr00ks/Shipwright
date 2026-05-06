@@ -158,11 +158,28 @@ struct EnemyNetId {
 //                     that the host then broadcasts). Used to suppress
 //                     the OnActorSpawn-side broadcast on receivers so
 //                     they don't echo the packet back.
+// #193 race A mitigation — three-state pickup-claim machine for
+// host-arbitrated pickup. Peer's local pickup gate transitions
+// None → Pending when a request is sent. Host's ITEM_COLLECTED grant
+// (winner == ownClientId) transitions Pending → Granted. Vanilla
+// pickup runs on the next gate fire when state is Granted.
+//
+// Rationale: simultaneous-pickup post-window races could double-credit
+// because each peer's local gate ran independently and credited
+// gSaveContext before the other's broadcast arrived. Host arbitration
+// serialises pickup so only one client's gSaveContext is credited.
+enum class ItemPickupState : uint8_t {
+    None    = 0,
+    Pending = 1,
+    Granted = 2,
+};
+
 struct ItemDropNetId {
-    uint32_t netId           = 0;
-    uint32_t killerClientId  = 0;
-    int64_t  spawnTimeMs     = 0;
-    bool     isFromBroadcast = false;
+    uint32_t        netId           = 0;
+    uint32_t        killerClientId  = 0;
+    int64_t         spawnTimeMs     = 0;
+    bool            isFromBroadcast = false;
+    ItemPickupState pickupState     = ItemPickupState::None;
 };
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
@@ -753,6 +770,17 @@ class Anchor : public Network {
     // the SCENE_ACTOR_NETIDS pattern. See #193 Phase 5.
     inline static const std::string ITEM_DROP_SNAPSHOT = "ITEM_DROP_SNAPSHOT";
 
+    // ITEM_PICKUP_REQUEST — peer → room host (targeted). Race A
+    // mitigation. Sent when peer's local pickup gate passes Layers 1+2
+    // (3s exclusivity + per-player eligibility). Peer's vanilla pickup
+    // is suppressed; peer waits for host's ITEM_COLLECTED arbitration
+    // broadcast. Host walks for the matching netId; if alive, kills
+    // the drop locally (claim) and broadcasts ITEM_COLLECTED with the
+    // sender's clientId; if dead (already collected by host or another
+    // peer), drops the request silently. Eliminates the post-window
+    // simultaneous-pickup double-credit.
+    inline static const std::string ITEM_PICKUP_REQUEST = "ITEM_PICKUP_REQUEST";
+
     // ENV_ACTOR_DROP — peer → host (targeted). Phase 4 v2. When peer's
     // local env actor (En_Kusa grass, Obj_Mure cluster child, etc.) is
     // cut/destroyed and would have dropped an item, peer suppresses
@@ -921,6 +949,13 @@ class Anchor : public Network {
     // duplicated).
     void SendPacket_ItemDropSnapshot(uint32_t targetClientId);
     void HandlePacket_ItemDropSnapshot(nlohmann::json payload);
+
+    // ITEM_PICKUP_REQUEST (#193 race A mitigation) — peer → room host.
+    // Sent when peer's local pickup gate passes; peer suppresses
+    // vanilla pickup, transitions extension's pickupState to Pending,
+    // and awaits host's ITEM_COLLECTED arbitration response.
+    void SendPacket_ItemPickupRequest(uint32_t itemNetId);
+    void HandlePacket_ItemPickupRequest(nlohmann::json payload);
 
     // ENV_ACTOR_DROP (#193 Phase 4 v2) — peer → host. Sent when peer's
     // local env actor would have dropped an item locally; peer
