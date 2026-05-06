@@ -128,6 +128,30 @@ static constexpr int      kMaxFloorsPerColumn  = 8;      // defensive cap
 static constexpr int      kMaxScanIterations   = 50000;  // floodfill runaway guard
 static constexpr int64_t  kMaxScanWallTimeMs   = 1000;   // per-scan budget
 
+// Pelvis-height movement-clearance line test. Used by BuildEdges to
+// determine whether two nodes can be traversed between without hitting
+// a wall. Per plan §2 — body offset 20u places the ray above ground but
+// below most chest-high obstacles.
+//
+// Returns true when the segment from `from` to `to` is CLEAR (navigator
+// can walk between), false if any wall poly blocks the segment.
+//
+// In nav system Phase 1 this helper will live in Common/ActorTrail.cpp;
+// for Phase 1 of RoomNavData (which lands first) it lives here as a
+// file-scope helper. Once both modules co-exist, extract to a shared
+// Common/LineOfSight.{h,cpp} module per nav plan §5.
+static constexpr float kBodyOffset = 20.0f;
+
+static bool MovementClear(const Vec3f& from, const Vec3f& to, PlayState* play) {
+    Vec3f a = { from.x, from.y + kBodyOffset, from.z };
+    Vec3f b = { to.x,   to.y   + kBodyOffset, to.z   };
+    Vec3f hitPos;
+    CollisionPoly* hitPoly = nullptr;
+    // Returns nonzero on hit. We want clear (no hit), so invert.
+    s32 hit = BgCheck_AnyLineTest1(&play->colCtx, &a, &b, &hitPos, &hitPoly, 0);
+    return !hit;
+}
+
 // Encodes an integer cell coordinate for the visited-cells set. Cell
 // coordinates are XZ grid indices (signed; can go negative if room
 // extends below world origin).
@@ -300,12 +324,81 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
         }
     }
 
-    auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+    auto scanMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
-    SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} nodes={} cells={} elapsed={}ms",
-                sceneNum, (int)roomNum, out->nodes.size(), visited.size(), totalMs);
 
-    // Commit 4 will add: BuildEdges(out)
+    // Edge generation (commit 4) — connect nodes whose centers are within
+    // one grid step in any direction (8-neighbor + same-XZ stacked-floor)
+    // AND for which MovementClear succeeds. Cost weighted by distance plus
+    // slope/hazard penalty.
+    auto edgeStart = std::chrono::steady_clock::now();
+
+    // Spatial index: bucket nodes by (cellX, cellZ) so adjacency lookup
+    // is O(1) per node instead of O(N) over all nodes.
+    std::unordered_map<CellKey, std::vector<uint16_t>, CellKeyHash> nodesByCell;
+    for (uint16_t i = 0; i < out->nodes.size(); i++) {
+        const NavNode& n = out->nodes[i];
+        CellKey k{ (int32_t)(int16_t)n.cellIdxX, (int32_t)(int16_t)n.cellIdxZ };
+        nodesByCell[k].push_back(i);
+    }
+
+    constexpr float kSlopePenalty = 2.0f;  // discourage routing through steep
+    constexpr float kHazardPenalty = 5.0f; // strongly discourage hazard (commit 5 sets HAZARD flag)
+
+    for (uint16_t i = 0; i < out->nodes.size(); i++) {
+        const NavNode& a = out->nodes[i];
+        CellKey aCell{ (int32_t)(int16_t)a.cellIdxX, (int32_t)(int16_t)a.cellIdxZ };
+
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) {
+                    // Same-XZ stacked-floor edges (multi-level rooms): connect
+                    // nodes at the same cell with different Y if MovementClear
+                    // succeeds. Rare (the cells are vertically separated by
+                    // floor/ceiling typically) but valid for some geometry.
+                } else {
+                    // skip will be handled by neighbor lookup below
+                }
+                CellKey nCell{ aCell.x + dx, aCell.z + dz };
+                auto it = nodesByCell.find(nCell);
+                if (it == nodesByCell.end()) continue;
+                for (uint16_t j : it->second) {
+                    if (j <= i) continue; // dedupe (only insert each undirected edge once)
+                    const NavNode& b = out->nodes[j];
+                    if (!MovementClear(a.pos, b.pos, play)) continue;
+
+                    float dxf = b.pos.x - a.pos.x;
+                    float dyf = b.pos.y - a.pos.y;
+                    float dzf = b.pos.z - a.pos.z;
+                    float dist = std::sqrt(dxf*dxf + dyf*dyf + dzf*dzf);
+
+                    float cost = dist;
+                    if ((a.flags & NODE_STEEP_SLOPE) || (b.flags & NODE_STEEP_SLOPE)) {
+                        cost *= kSlopePenalty;
+                    }
+                    if ((a.flags & NODE_HAZARD) || (b.flags & NODE_HAZARD)) {
+                        cost *= kHazardPenalty;
+                    }
+
+                    NavEdge edge{};
+                    edge.fromIdx = i;
+                    edge.toIdx   = j;
+                    edge.cost    = cost;
+                    out->edges.push_back(edge);
+                }
+            }
+        }
+    }
+
+    auto edgeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - edgeStart).count();
+    auto totalMs = scanMs + edgeMs;
+
+    SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} nodes={} edges={} cells={} "
+                "scanMs={} edgeMs={} totalMs={}",
+                sceneNum, (int)roomNum, out->nodes.size(), out->edges.size(),
+                visited.size(), scanMs, edgeMs, totalMs);
+
     // Commit 5 will add: HAZARD / UNDERWATER classification refinement
     // Commit 6 will add: DetectClimbAnchors(out, play)
 }
