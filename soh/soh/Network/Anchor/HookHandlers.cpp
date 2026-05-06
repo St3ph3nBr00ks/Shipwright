@@ -404,6 +404,22 @@ extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
     return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// #193 field-test fix — same predicate shape as En_St / En_Sw /
+// En_Dekunuts suppressors, applied to En_Dekubaba's ShrinkDie drop
+// site. Field log 2026-05-06: Dekubaba killed by peer (race B routes
+// kill to host → host fires drop + broadcasts) AND peer's
+// SetupDyingNet → ShrinkDie path also called Item_DropCollectible
+// locally, producing duplicate drops. This guard suppresses the
+// peer-side natural-cycle drop call when phase indicates the actor
+// is dying via a network-driven path (DyingByNetwork /
+// AwaitingDeadItemDrop).
+extern "C" bool Anchor_ShouldSuppressDekubabaDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // #148 / en_sw_sync_plan.md §5 — same predicate shape, applied to
 // En_Sw's combat-variant drop site (line 686). Gold-variant En_Si
 // spawn deliberately NOT suppressed (cooperative collectible Design A).
