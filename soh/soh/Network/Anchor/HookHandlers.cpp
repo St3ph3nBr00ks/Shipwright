@@ -575,23 +575,37 @@ extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* env
                                                dropGroupParams, *pos);
 }
 
-// Receive-side helper called from HandlePacket_ItemDropSync to bracket
-// the local Actor_Spawn so the OnActorSpawn EN_ITEM00 hook stamps the
-// extension with the host's broadcast netId/killer/spawnTimeMs and
-// suppresses re-broadcast.
+// Receive-side helper called from HandlePacket_ItemDropSync /
+// HandlePacket_ItemDropSnapshot to bracket the local Actor_Spawn so
+// the OnActorSpawn EN_ITEM00 hook stamps the extension with the
+// host's broadcast netId/killer/spawnTimeMs and suppresses
+// re-broadcast.
+//
+// Increments the shim's depth counter so any inner
+// `Anchor_BeginItemDrop` call (e.g., from a vanilla
+// `Item_DropCollectible` invocation made during the receive-side
+// re-spawn for animation-replication) sees depth>0 and bails out
+// without overwriting the broadcast-supplied killer/spawnTime state.
+// Pairs symmetrically with `Anchor_EndNetworkItemDropSpawn`.
 void Anchor_BeginNetworkItemDropSpawn(uint32_t netId, uint32_t killerClientId,
                                        int64_t spawnTimeMs) {
     g_isSpawningNetworkItemDrop      = true;
     g_pendingNetworkItemDropNetId    = netId;
     g_pendingItemDropKillerClientId  = killerClientId;
     g_pendingItemDropSpawnTimeMs     = spawnTimeMs;
+    g_pendingItemDropDepth++;
 }
 
 void Anchor_EndNetworkItemDropSpawn(void) {
+    if (g_pendingItemDropDepth > 0) {
+        --g_pendingItemDropDepth;
+    }
     g_isSpawningNetworkItemDrop      = false;
     g_pendingNetworkItemDropNetId    = 0;
-    g_pendingItemDropKillerClientId  = 0;
-    g_pendingItemDropSpawnTimeMs     = 0;
+    if (g_pendingItemDropDepth == 0) {
+        g_pendingItemDropKillerClientId  = 0;
+        g_pendingItemDropSpawnTimeMs     = 0;
+    }
 }
 
 bool Anchor::IsLocalPlayerClimbing() const {
@@ -4072,11 +4086,44 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        // Compute item netId. Items are dynamic spawns by definition;
-        // use the unique-dynamic encoder to avoid posHash collision
-        // when several drops share the same world position (e.g. a
-        // tightly-packed enemy cluster all dropping at once).
-        uint32_t itemNetId = EncodeUniqueDynamicNetId(actor);
+        // Compute item netId. Items are dynamic spawns by definition.
+        //
+        // EncodeUniqueDynamicNetId from ActorSyncHelpers.cpp probes
+        // against `EnemyNetId` extensions only — it doesn't see
+        // `ItemDropNetId` extensions. For grass-cluster drops where
+        // `Item_DropCollectibleRandom`'s loop spawns 3+ rupees at the
+        // same world position in the same frame, every Actor_Spawn
+        // produces an actor with identical posHash and the probe
+        // never finds a collision (because no prior actor has an
+        // EnemyNetId match). All N drops broadcast with the SAME
+        // netId — peer's HandlePacket_ItemDropSync idempotency check
+        // then drops N-1 of them silently, leaving peer with only one
+        // drop while host has N. (Field log 2026-05-06: 3 ITEM_DROP_SYNC
+        // broadcasts at 03:01:18.330 with identical netId/pos/params.)
+        //
+        // Inline a probe that walks ACTORCAT_MISC for EnItem00 actors
+        // with ItemDropNetId and bumps posHash on collision.
+        uint32_t itemNetId = EncodeEnemyNetId(actor);
+        {
+            const uint32_t base = itemNetId & 0xFFFFFF00;
+            for (int probe = 0; probe < 256; probe++) {
+                bool collides = false;
+                Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
+                while (a != nullptr) {
+                    if (a != actor && a->id == ACTOR_EN_ITEM00) {
+                        const ItemDropNetId* iext =
+                            ObjectExtension::GetInstance().Get<ItemDropNetId>(a);
+                        if (iext != nullptr && iext->netId == itemNetId) {
+                            collides = true;
+                            break;
+                        }
+                    }
+                    a = a->next;
+                }
+                if (!collides) break;
+                itemNetId = base | (((itemNetId + 1) & 0xFF));
+            }
+        }
 
         // Killer attribution. If `Anchor_BeginItemDrop` was called by
         // the wrapping shim around `Item_DropCollectible*`, the active

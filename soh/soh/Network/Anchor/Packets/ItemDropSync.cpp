@@ -130,19 +130,29 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
     }
 
     // Spawn the receiver's local EN_ITEM00 with the host's params.
-    // The `0x8000` flag tells `Item_DropCollectible*` not to apply the
-    // post-spawn velocity/gravity setup (vanilla "spawn pre-positioned"
-    // path) — we want the actor at the exact broadcast pos without
-    // bouncing on receive. ACTOR_FLAG_UPDATE_CULLING_DISABLED is
-    // applied by Init via the same path.
+    //
+    // Use vanilla `Item_DropCollectible` (NOT raw `Actor_Spawn`) so the
+    // peer's drop runs the same bouncy-fall animation as host's: post-
+    // spawn velocity setup (`velocity.y = 8.0f`, `speedXZ = 2.0f`,
+    // `gravity = -0.9f`), random rotation, scale-grow, and the
+    // `func_8001E304` actionFunc that drives the falling/bouncing.
+    //
+    // Without this, peer's drop appears static at the exact spawn
+    // position (raw Actor_Spawn → Init runs default actionFunc, no
+    // velocity setup) — observed in field log 2026-05-06.
+    //
+    // `Anchor_BeginNetworkItemDropSpawn` increments the shim's depth
+    // counter so the inner `Anchor_BeginItemDrop(NULL)` call inside
+    // Item_DropCollectible sees depth>0 and skips overwriting the
+    // host-supplied killer/spawnTime state. The OnActorSpawn EN_ITEM00
+    // hook reads `g_isSpawningNetworkItemDrop = true` and routes to
+    // the receive-side branch (stamp extension, skip broadcast).
     Anchor_BeginNetworkItemDropSpawn(itemNetId, killerClientId, spawnTimeMs);
-    Actor* spawned = Actor_Spawn(&gPlayState->actorCtx, gPlayState,
-                                  ACTOR_EN_ITEM00, pos.x, pos.y, pos.z,
-                                  0, 0, 0, (s16)itemParams);
+    EnItem00* spawned = Item_DropCollectible(gPlayState, &pos, (s16)itemParams);
     Anchor_EndNetworkItemDropSpawn();
 
     if (spawned == nullptr) {
-        SPDLOG_WARN("[ItemDropSync] Actor_Spawn failed for netId={} type=0x{:02X}",
+        SPDLOG_WARN("[ItemDropSync] Item_DropCollectible failed for netId={} type=0x{:02X}",
                     itemNetId, (int)itemParams);
         return;
     }
