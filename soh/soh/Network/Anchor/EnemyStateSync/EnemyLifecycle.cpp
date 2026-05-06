@@ -91,6 +91,19 @@ void TransitionTo(EnemyNetId& state, LifecyclePhase newPhase) {
     ValidatePhaseTransition(oldPhase, newPhase);
     state.phase = newPhase;
 
+    // Reset the peer-side network-drive-dying flag whenever the actor
+    // returns to a live state. Karebaba respawn detector, scene re-init
+    // replay, and any future regrow-class enemy all funnel through
+    // TransitionTo(Alive) / TransitionTo(Regrowing); centralising the
+    // reset here means per-actor respawn paths don't need to remember
+    // to clear it. Without this, a respawned Karebaba whose previous
+    // cycle's ENEMY_STATE carried health=0 would carry the suppression
+    // flag forward and silently drop nothing on its next death.
+    if (newPhase == LifecyclePhase::Alive ||
+        newPhase == LifecyclePhase::Regrowing) {
+        state.networkDriveDying = false;
+    }
+
     // Phase 1: phase tracks alongside the legacy booleans without writing
     // them. Each existing call site keeps its current boolean writes — this
     // function adds the phase as a shadow signal so step 3's read-side

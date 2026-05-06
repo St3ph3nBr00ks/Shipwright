@@ -170,7 +170,13 @@ extern "C" bool Anchor_IsAnyPeerOnDyna(Actor* dynaActor) {
 extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+    // OR with networkDriveDying — engages the moment ENEMY_STATE
+    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
+    // packet arrives. Closes the peer-side dual-drop race documented
+    // in EnemyNetId::networkDriveDying (Anchor.h).
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
 }
 
 // Receive-side state-machine logging dedup.
@@ -207,7 +213,13 @@ extern "C" bool Anchor_ShouldSuppressDekunutsDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+    // OR with networkDriveDying — engages the moment ENEMY_STATE
+    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
+    // packet arrives. Closes the peer-side dual-drop race documented
+    // in EnemyNetId::networkDriveDying (Anchor.h).
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
 }
 
 // En_Hintnuts (Inside Deku Tree Compound Room) — suppresses the
@@ -239,7 +251,13 @@ extern "C" bool Anchor_ShouldSuppressHintnutsDrop(Actor* actor) {
     // network-driven death cycles (not currently exercised by Hintnuts;
     // kept for when a future change routes Leave through ENEMY_DEFEATED).
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+    // OR with networkDriveDying — engages the moment ENEMY_STATE
+    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
+    // packet arrives. Closes the peer-side dual-drop race documented
+    // in EnemyNetId::networkDriveDying (Anchor.h).
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
 }
 
 // Hintnut state machine is host-authoritative (room host runs the AI;
@@ -401,7 +419,13 @@ extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+    // OR with networkDriveDying — engages the moment ENEMY_STATE
+    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
+    // packet arrives. Closes the peer-side dual-drop race documented
+    // in EnemyNetId::networkDriveDying (Anchor.h).
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
 }
 
 // #193 field-test fix — same predicate shape as En_St / En_Sw /
@@ -417,7 +441,13 @@ extern "C" bool Anchor_ShouldSuppressDekubabaDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+    // OR with networkDriveDying — engages the moment ENEMY_STATE
+    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
+    // packet arrives. Closes the peer-side dual-drop race documented
+    // in EnemyNetId::networkDriveDying (Anchor.h).
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
 }
 
 // #148 / en_sw_sync_plan.md §5 — same predicate shape, applied to
@@ -427,7 +457,13 @@ extern "C" bool Anchor_ShouldSuppressEnSwDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    return ext != nullptr && EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+    // OR with networkDriveDying — engages the moment ENEMY_STATE
+    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
+    // packet arrives. Closes the peer-side dual-drop race documented
+    // in EnemyNetId::networkDriveDying (Anchor.h).
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
 }
 
 // C-callable: non-host tells host that its local Link was just hit by this enemy

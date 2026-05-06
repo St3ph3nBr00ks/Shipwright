@@ -990,6 +990,18 @@ actor_found:
         if (forceNetHealth || health <= actor->colChkInfo.health) {
             actor->colChkInfo.health = health;
             ext->netHealth           = health;
+            // Peer-side network-drive-dying signal — see EnemyNetId
+            // declaration in Anchor.h for full rationale. Engages
+            // Anchor_ShouldSuppress*Drop on the SAME frame health
+            // reaches 0 from host's authoritative track, closing the
+            // race against peer's vanilla actionFunc reading the same
+            // health value and reaching Item_DropCollectible before
+            // ENEMY_DEFEATED arrives. Gated on !IsMyCurrentRoomHost so
+            // host's legitimate own-kill drop call isn't blocked by
+            // its own outgoing/echoed ENEMY_STATE.
+            if (health <= 0 && !::SceneAuthority::IsMyCurrentRoomHost()) {
+                ext->networkDriveDying = true;
+            }
         }
         actor->scale = scale;
 

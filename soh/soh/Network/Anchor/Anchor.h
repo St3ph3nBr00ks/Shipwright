@@ -48,6 +48,31 @@ struct EnemyNetId {
     // Default Alive — initialised at OnActorSpawn for new enemies.
     EnemyStateSync::LifecyclePhase phase = EnemyStateSync::LifecyclePhase::Alive;
 
+    // Peer-side drop-suppression signal. Set true the instant
+    // `ENEMY_STATE` from host carries `health <= 0`, regardless of
+    // whether `ENEMY_DEFEATED` has arrived yet. Read by the per-actor
+    // `Anchor_ShouldSuppress*Drop` predicates (Dekubaba / En_St / En_Sw
+    // / En_Dekunuts / En_Goma) ORed alongside `PhaseImpliesPendingNaturalDeath`.
+    //
+    // Closes the race documented by 2026-05-06 field test (Inside Deku
+    // Tree, b0ea6f1): peer's vanilla `EnDekubaba_Hit` reads `health == 0`
+    // from the same `ENEMY_STATE` and transitions to `ShrinkDie` on the
+    // same frame; peer's local `OnEnemyDefeat` fires from there with
+    // `phase = DyingByLocal`. The legacy phase-only suppressor returns
+    // false on `DyingByLocal` and peer spawns a duplicate local drop.
+    // Driving this bool from the same packet that drives the kill itself
+    // closes the race entirely — both signals land on the same frame.
+    //
+    // Cleared by `EnemyStateSync::TransitionTo(Alive | Regrowing)` so
+    // Karebaba (and any future regrow-class enemy) doesn't carry the
+    // flag across respawn.
+    //
+    // Host-side: never set, gated on `!IsMyCurrentRoomHost()` at the
+    // write site. Host's own kill drives the broadcast normally via
+    // `OnActorSpawn(EN_ITEM00)`; a stale flag here would block host's
+    // legitimate drop call.
+    bool networkDriveDying = false;
+
     // Last state received from the host via ENEMY_UPDATE (non-host clients only).
     // Re-applied each frame in OnActorUpdate so the enemy update() can run (enabling
     // collision registration) without drifting from the authoritative host position.
