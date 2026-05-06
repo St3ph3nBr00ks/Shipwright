@@ -68,6 +68,9 @@ void Anchor::SendPacket_PlayerUpdate() {
     payload["unk_85C"] = player->unk_85C;
     payload["unk_860"] = player->unk_860;  // Deku-Stick burning timer
     payload["actionVar1"] = player->av1.actionVar1;
+    // Multi-player dialogue redesign (#191 follow-up) — peer's csCtx.state
+    // for "alone in cutscene" detection in Anchor_ShouldAdvanceCutsceneTextLocal.
+    payload["csCtxState"] = (int)gPlayState->csCtx.state;
     payload["quiet"] = true;
 
     for (auto& [clientId, client] : clients) {
@@ -116,5 +119,8 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
         client.unk_85C = payload.value("unk_85C", (f32)0);
         client.unk_860 = payload.value("unk_860", (s16)0);
         client.actionVar1 = payload.value("actionVar1", (s8)0);
+        // Pre-update peers default to CS_STATE_IDLE (0) — treated as
+        // out-of-cutscene for the multi-player dialogue detection.
+        client.csCtxState = (s8)payload.value("csCtxState", 0);
     }
 }

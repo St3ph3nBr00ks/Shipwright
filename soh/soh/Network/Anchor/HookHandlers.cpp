@@ -366,6 +366,85 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
         Anchor::Instance->cutsceneTextAdvanceConsumed = false;
     }
 
+    // Multi-player dialogue redesign (#191 follow-up) —
+    // "alone in cutscene" detection.
+    //
+    // Vote-and-countdown semantics only make sense when MULTIPLE team
+    // members share the same cutscene (e.g. the post-Goma sequence
+    // both clients see). When the local player is the only client in
+    // a cutscene state — typical for NPC dialog and per-player
+    // scripted scenes like the Great Deku Tree opening cutscene where
+    // only the player who triggered it sees the textbox — the
+    // countdown becomes pure friction (the timer must elapse before
+    // the local player's button press takes effect).
+    //
+    // Walk online team members in the same scene + timeline. If none
+    // is in cutscene state with us, treat as solo and return the
+    // vanilla input directly. Otherwise route through the voting
+    // flow.
+    //
+    // The csCtxState field on AnchorClient is updated from PLAYER_UPDATE
+    // (60 pps), so the detection picks up peer transitions into/out of
+    // the cutscene within ~16 ms. Pre-update peers default to
+    // CS_STATE_IDLE — safe (treated as not-in-cutscene).
+    if (gPlayState != nullptr) {
+        bool peerInCutscene = false;
+        int16_t myScene    = (int16_t)gPlayState->sceneNum;
+        uint8_t myTimeline = (uint8_t)(gSaveContext.linkAge & 0x1);
+        std::string myTeamId =
+            CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+        for (auto& [cid, client] : Anchor::Instance->clients) {
+            if (client.self) continue;
+            if (!client.online) continue;
+            if (!client.isSaveLoaded) continue;
+            if (client.sceneNum != myScene) continue;
+            if ((uint8_t)(client.linkAge & 0x1) != myTimeline) continue;
+            if (client.teamId != myTeamId) continue;
+            if (client.csCtxState == 0 /* CS_STATE_IDLE */) continue;
+            peerInCutscene = true;
+            break;
+        }
+        if (!peerInCutscene) {
+            // Solo cutscene — vanilla parity for input.
+            //
+            // Solo idle auto-advance (#191 follow-up): if no input
+            // for `kSoloDialogIdleAdvanceMs` (default 10s, tunable
+            // via gAnchor.SoloDialogIdleAutoAdvanceMs), force-advance
+            // so AFK / accessibility players don't get stuck on a
+            // single textbox indefinitely. Resets on textId edge
+            // (new textbox starts fresh) and on input (player is
+            // engaged again).
+            //
+            // File-scope statics suffice since this is per-Anchor
+            // state on the game thread (Message_ShouldAdvance is
+            // called from the game tick).
+            static int64_t  s_soloIdleStartMs    = 0;
+            static uint16_t s_soloIdleLastTextId = 0;
+
+            int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            int64_t idleThresholdMs = (int64_t)CVarGetInteger(
+                CVAR_REMOTE_ANCHOR("SoloDialogIdleAutoAdvanceMs"), 10000);
+
+            if (s_soloIdleLastTextId != (uint16_t)currentTextId) {
+                s_soloIdleLastTextId = (uint16_t)currentTextId;
+                s_soloIdleStartMs = nowMs;
+            }
+            if (wasLocalPressDetected) {
+                s_soloIdleStartMs = nowMs;
+                return 1;
+            }
+            if (idleThresholdMs > 0 &&
+                nowMs - s_soloIdleStartMs >= idleThresholdMs) {
+                SPDLOG_INFO("[CutsceneText] Solo idle auto-advance after {} ms (textId=0x{:04X})",
+                            (long long)idleThresholdMs, (unsigned)currentTextId);
+                s_soloIdleStartMs = nowMs;  // prevent immediate re-fire next frame
+                return 1;
+            }
+            return 0;
+        }
+    }
+
     // Local press → forward to host as a vote.
     if (wasLocalPressDetected) {
         Anchor::Instance->SendPacket_CutsceneTextAdvance((uint16_t)currentTextId);
