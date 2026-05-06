@@ -127,6 +127,17 @@ struct EnemyNetId {
     u8 pendingSyncDamageEffect  = 0;
     u8 pendingSyncAtHitEffect   = 0;
 
+    // Race B mitigation (#203) — peer-killing-blow stash. When peer's
+    // ShouldActorUpdate hook detects a would-kill damage value, it
+    // clamps colChkInfo.damage to leave 1 HP locally AND records the
+    // original damage value here so the OnActorUpdate forwarder can
+    // broadcast the un-clamped value to host. Without this stash, the
+    // forwarder would broadcast the clamped value (e.g. 0 if peer's
+    // hit was a one-shot at 1 HP), causing host's enemy to be
+    // unkillable from peer hits. Cleared by the forwarder after each
+    // broadcast.
+    u8 peerKillingBlowOriginalDamage = 0;
+
     // Boss_Goma — sticky "peer is signaling encounter advance" flag (#67).
     // Set true on receipt of any BOSS_GOMA_LOOKED_AT. Stays true until
     // case 3 of BossGoma_Encounter consumes-and-clears it via

@@ -4359,7 +4359,18 @@ void Anchor::RegisterHooks() {
             // sets hasLocalDeath = true. ENEMY_DEFEATED already handles the kill;
             // sending DAMAGE_ENEMY for the final hit would be redundant.
             EnemyStateSync::AuditBooleansVsPhase(*ext, "OnActorUpdate.nonhost.DamageEnemyForward");
-            if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) && actor->colChkInfo.damage > 0) {
+            // Race B mitigation (#203) — when ShouldActorUpdate clamped a
+            // peer-killing-blow this frame, the original damage was stashed
+            // on the extension so we broadcast the un-clamped value here.
+            // Without this, the forwarder would broadcast the clamped value
+            // (potentially 0 for one-shot kills at 1 HP) and host's enemy
+            // would receive less damage than peer dealt — leaving host's
+            // enemy unkillable from peer attacks.
+            u8 forwardDamage =
+                (ext->peerKillingBlowOriginalDamage > 0)
+                    ? ext->peerKillingBlowOriginalDamage
+                    : (u8)actor->colChkInfo.damage;
+            if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) && forwardDamage > 0) {
                 // #174/#175: forward damageEffect (set on enemy by collision damage-table
                 // lookup) and atHitEffect (set on the player by CollisionCheck_SetATvsAC
                 // when the player's AT element lands a hit). Many OoT enemies branch on
@@ -4367,9 +4378,12 @@ void Anchor::RegisterHooks() {
                 // only `damage` left those enemies silently ignoring the synthetic hit.
                 Player* localPlayer = GET_PLAYER(gPlayState);
                 u8 atHitEffect = (localPlayer != nullptr) ? localPlayer->actor.colChkInfo.atHitEffect : 0;
-                SendPacket_DamageEnemy(ext->netId, (u8)actor->colChkInfo.damage,
+                SendPacket_DamageEnemy(ext->netId, forwardDamage,
                                        actor->colChkInfo.damageEffect, atHitEffect);
             }
+            // Clear the killing-blow stash regardless of whether we
+            // forwarded (forward gate could have been blocked by phase).
+            ext->peerKillingBlowOriginalDamage = 0;
 
             // Karebaba respawn detection (non-host path, Fix 24 + Fix 30c):
             // Must run BEFORE the hasNetState gate. When a Karebaba is killed via
@@ -4907,15 +4921,78 @@ void Anchor::RegisterHooks() {
     // Actor_IsFacingAndNearPlayer — will then target the correct player with no
     // per-enemy changes required.
     COND_HOOK(ShouldActorUpdate, isConnected, [&](void* refActor, bool* should) {
-        if (!::SceneAuthority::IsMyCurrentRoomHost()) {
-            return;
-        }
         Actor* actor = static_cast<Actor*>(refActor);
         // Issue #153 — gate accepts ACTORCAT_ENEMY OR an allowlisted world-actor id.
         if (!IsSyncableActor(actor)) {
             return;
         }
         if (!IsSaveLoaded() || gPlayState == nullptr) {
+            return;
+        }
+
+        // Race B mitigation (#203) — prevent peer-local death so kill
+        // attribution + drop pipeline runs through host-authoritative
+        // path uniformly.
+        //
+        // ShouldActorUpdate fires BEFORE actor->update. By this point,
+        // collision damage for this frame has already been written to
+        // colChkInfo.damage (CollisionCheck_Damage runs in the system
+        // pre-update pass), but actor->update has NOT yet applied it.
+        // If peer's incoming damage would drop HP to 0, clamp it so HP
+        // lands at 1 instead. Peer's enemy stays alive; peer's
+        // DAMAGE_ENEMY broadcast routes to host; host applies + dies +
+        // broadcasts ENEMY_DEFEATED + drop fires through ITEM_DROP_SYNC.
+        // Fixes the asymmetric drop on peer-killed synced enemies with
+        // SetupDyingNet (En_St / En_Sw / En_Dekunuts / En_Goma) where
+        // the Anchor_ShouldSuppressXxxDrop guard's PhaseImpliesPending
+        // NaturalDeath check returned false for DyingByLocal.
+        //
+        // Gates:
+        //   IsMyCurrentRoomHost — only on peer; host's local kill is
+        //     authoritative and should proceed normally.
+        //   IsSyncedBossActor — bosses already use forceNetHealth in
+        //     OnActorUpdate (peer's HP overwritten from host's track
+        //     each frame); the clamp here is redundant for them.
+        //   ext exists + Alive phase — only intervene for live synced
+        //     enemies. Already-dying / freshly-spawned (no extension)
+        //     pass through.
+        //   damage > 0 — only when peer dealt damage this frame. Non-
+        //     damage HP transitions (state-machine self-decrements,
+        //     environmental kills) pass through; host runs the same
+        //     logic and broadcasts the resulting death naturally.
+        //
+        // UX cost: ~RTT/2 visible delay between peer's killing blow and
+        // the death animation starting. Typical 25-75 ms — barely
+        // perceptible at network latencies expected for typical home
+        // connections.
+        if (!::SceneAuthority::IsMyCurrentRoomHost()) {
+            if (!IsSyncedBossActor(actor->id)) {
+                EnemyNetId* ext = const_cast<EnemyNetId*>(
+                    ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+                if (ext != nullptr &&
+                    !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
+                    actor->colChkInfo.damage > 0 &&
+                    actor->colChkInfo.damage >= actor->colChkInfo.health) {
+                    s8 reducedDamage =
+                        (actor->colChkInfo.health > 1)
+                            ? (s8)(actor->colChkInfo.health - 1)
+                            : (s8)0;
+                    // Stash the original damage so the OnActorUpdate
+                    // forwarder broadcasts the un-clamped value to
+                    // host. Without this, the forwarder reads the
+                    // clamped value and host's enemy receives less
+                    // damage than peer dealt — host's enemy stays
+                    // alive forever from peer's killing blows.
+                    ext->peerKillingBlowOriginalDamage =
+                        (u8)actor->colChkInfo.damage;
+                    SPDLOG_INFO("[RaceB] peer-killing-blow clamp actorId={} netId={} hp={} dmg={}→{} (deferring death to host)",
+                                actor->id, ext->netId,
+                                (int)actor->colChkInfo.health,
+                                (int)actor->colChkInfo.damage,
+                                (int)reducedDamage);
+                    actor->colChkInfo.damage = reducedDamage;
+                }
+            }
             return;
         }
 
