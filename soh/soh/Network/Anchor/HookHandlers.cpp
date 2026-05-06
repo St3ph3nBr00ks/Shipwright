@@ -446,10 +446,16 @@ extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
 //     for env-actor drops if needed.
 //
 // State scope: only one `Item_DropCollectible*` invocation can be active
-// at a time on the game thread, so a single static suffices.
+// at a time on the game thread, so a single static suffices. Depth
+// counter handles nested calls (Phase 2 + 4): when
+// `Item_DropCollectibleRandom` fires its inner-loop recursive
+// `Item_DropCollectible` (z_en_item00.c:1797/1799), the outer Begin's
+// killer attribution must persist through the inner Begin/End — depth
+// counter ensures only the outermost Begin sets state and only the
+// outermost End clears it.
 static uint32_t g_pendingItemDropKillerClientId = 0;
 static int64_t  g_pendingItemDropSpawnTimeMs   = 0;
-static bool     g_pendingItemDropActive         = false;
+static int      g_pendingItemDropDepth         = 0;
 
 // Receive-side gate: set true while HandlePacket_ItemDropSync is calling
 // Actor_Spawn so the OnActorSpawn ACTOR_EN_ITEM00 hook knows not to
@@ -459,7 +465,10 @@ static bool     g_isSpawningNetworkItemDrop     = false;
 static uint32_t g_pendingNetworkItemDropNetId   = 0;
 
 extern "C" void Anchor_BeginItemDrop(Actor* fromActor) {
-    g_pendingItemDropActive = true;
+    // Inner / nested call: keep outer's killer attribution intact.
+    if (g_pendingItemDropDepth++ > 0) {
+        return;
+    }
     g_pendingItemDropSpawnTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (!Anchor::Instance) {
@@ -481,9 +490,14 @@ extern "C" void Anchor_BeginItemDrop(Actor* fromActor) {
 }
 
 extern "C" void Anchor_EndItemDrop(void) {
-    g_pendingItemDropActive = false;
-    g_pendingItemDropKillerClientId = 0;
-    g_pendingItemDropSpawnTimeMs = 0;
+    if (g_pendingItemDropDepth > 0) {
+        --g_pendingItemDropDepth;
+    }
+    // Only clear at the outermost End.
+    if (g_pendingItemDropDepth == 0) {
+        g_pendingItemDropKillerClientId = 0;
+        g_pendingItemDropSpawnTimeMs = 0;
+    }
 }
 
 // Receive-side helper called from HandlePacket_ItemDropSync to bracket
@@ -3991,13 +4005,13 @@ void Anchor::RegisterHooks() {
 
         // Killer attribution. If `Anchor_BeginItemDrop` was called by
         // the wrapping shim around `Item_DropCollectible*`, the active
-        // killer is recorded. Otherwise (call sites not yet wrapped in
-        // Phase 2 — Item_DropCollectible / _2 still un-wrapped) fall
-        // back to local clientId.
-        uint32_t killerClientId = g_pendingItemDropActive
+        // killer is recorded. Otherwise (Actor_Spawn for EN_ITEM00
+        // outside the wrapped paths — defensive fallback) fall back
+        // to local clientId.
+        uint32_t killerClientId = (g_pendingItemDropDepth > 0)
             ? g_pendingItemDropKillerClientId
             : Anchor::Instance->ownClientId;
-        int64_t spawnTimeMs = g_pendingItemDropActive
+        int64_t spawnTimeMs = (g_pendingItemDropDepth > 0)
             ? g_pendingItemDropSpawnTimeMs
             : std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now().time_since_epoch()).count();

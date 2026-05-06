@@ -1594,6 +1594,16 @@ EnItem00* Item_DropCollectible(PlayState* play, Vec3f* spawnPos, s16 params) {
         return NULL;
     }
 
+    // #193 Phase 4 — env actor / chest / scripted drop attribution.
+    // No fromActor available — killerClientId defaults to local
+    // clientId in Anchor_BeginItemDrop. The OnActorSpawn(EN_ITEM00)
+    // hook reads the active state and broadcasts iff the local client
+    // is the room host AND the resolved type is on the transient
+    // allowlist. Inner Actor_Spawn calls (including the recursive
+    // Item_DropCollectible from Item_DropCollectibleRandom's loop)
+    // inherit the outer's state.
+    Anchor_BeginItemDrop(NULL);
+
     if (((params & 0x00FF) == ITEM00_FLEXIBLE) && !param4000) {
         // TODO: Prevent the cast to EnItem00 here since this is a different actor (En_Elf)
         spawnedActor = (EnItem00*)Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ELF, spawnPos->x, spawnPos->y + 40.0f,
@@ -1625,6 +1635,8 @@ EnItem00* Item_DropCollectible(PlayState* play, Vec3f* spawnPos, s16 params) {
             }
         }
     }
+
+    Anchor_EndItemDrop();
     return spawnedActor;
 }
 
@@ -1640,6 +1652,9 @@ EnItem00* Item_DropCollectible2(PlayState* play, Vec3f* spawnPos, s16 params) {
     if ((params & 0x00FF) == ITEM00_HEART && CVarGetInteger(CVAR_ENHANCEMENT("NoHeartDrops"), 0)) {
         return NULL;
     }
+
+    // #193 Phase 4 — see Item_DropCollectible above. Same shim.
+    Anchor_BeginItemDrop(NULL);
 
     if (((params & 0x00FF) == ITEM00_FLEXIBLE) && !param4000) {
         // TODO: Prevent the cast to EnItem00 here since this is a different actor (En_Elf)
@@ -1662,6 +1677,7 @@ EnItem00* Item_DropCollectible2(PlayState* play, Vec3f* spawnPos, s16 params) {
         }
     }
 
+    Anchor_EndItemDrop();
     return spawnedActor;
 }
 
