@@ -5736,12 +5736,42 @@ void Anchor::RegisterHooks() {
         }
 
         // Layer 2 — per-player eligibility.
+        //
+        // Field-test 2026-05-06 (build 7f2ceab solo session, Inside
+        // Deku Tree): host killed Dekubabas pre-nut-bag-acquisition.
+        // ITEM00_NUTS dropped, Layer 2 blocked pickup because
+        // `CUR_CAPACITY(UPG_NUTS) == 0` (no bag yet) → drops were
+        // permanently unreachable until despawn. Eligibility gate's
+        // purpose is "defer to teammate who CAN benefit", but in a
+        // solo session there's no teammate → deferral is pointless;
+        // vanilla single-player just truncates surplus silently
+        // (no-op pickup).
+        //
+        // Skip Layer 2 when no other team member is online + save-
+        // loaded. Vanilla pickup proceeds; Item_Give either credits
+        // the player (if eligible) or is a silent no-op (if capped /
+        // missing inventory slot).
+        bool anyTeammateOnline = false;
+        for (auto& [otherId, other] : Anchor::Instance->clients) {
+            if (other.self) continue;
+            if (other.online && other.isSaveLoaded) {
+                anyTeammateOnline = true;
+                break;
+            }
+        }
         s16 itemType = (s16)(item00->actor.params & 0xFF);
-        if (!ItemEligibility::CanPlayerCollectItem00(itemType, /*walletCapAware=*/true)) {
-            *should = false;
-            SPDLOG_DEBUG("[ItemDrop] netId={} blocked — local player ineligible (type=0x{:02X})",
+        if (anyTeammateOnline) {
+            if (!ItemEligibility::CanPlayerCollectItem00(itemType, /*walletCapAware=*/true)) {
+                *should = false;
+                SPDLOG_DEBUG("[ItemDrop] netId={} blocked — local player ineligible (type=0x{:02X}); "
+                             "deferring to teammate",
+                             ext->netId, (int)itemType);
+                return;
+            }
+        } else {
+            SPDLOG_DEBUG("[ItemDrop] netId={} solo session — skipping Layer 2 eligibility "
+                         "(type=0x{:02X})",
                          ext->netId, (int)itemType);
-            return;
         }
 
         // Gate passes. Diverge by host vs peer.
