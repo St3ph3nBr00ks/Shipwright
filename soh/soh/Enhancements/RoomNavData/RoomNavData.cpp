@@ -25,7 +25,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -113,20 +116,174 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // register the room as "attempted" and avoid re-attempting every frame.
 // ---------------------------------------------------------------------------
 
-static void TryLoadFromDisk(int16_t /*sceneNum*/, int8_t /*roomNum*/, RoomNavData* /*out*/) {
-    // Commit 7 implements binary file I/O. Until then this is a no-op:
-    // disk cache always misses, scan path always fires.
+// ---------------------------------------------------------------------------
+// Binary file format. Plan §4 — magic + version + per-room layout.
+// kCurrentSchemaVersion bumps on any layout change; mismatch = silent
+// regenerate (no migration logic). Magic guards against wrong-file-type
+// or partial-write corruption.
+// ---------------------------------------------------------------------------
+
+static constexpr uint16_t kCurrentSchemaVersion = 1;
+static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
+
+// Scan / sampling constants — declared early so persistence code can
+// validate against them. See plan §11 (resolution) and §5 (caps).
+static constexpr float    kGridResolution      = 30.0f;  // §11 lock
+static constexpr int      kMaxFloorsPerColumn  = 8;      // defensive cap
+static constexpr int      kMaxScanIterations   = 50000;  // floodfill runaway guard
+static constexpr int64_t  kMaxScanWallTimeMs   = 1000;   // per-scan budget
+
+// Path resolution. roomnavdata/ lives at the executable cwd, sibling to
+// logs/. Per plan §8.
+static std::filesystem::path RoomNavFilePath(int16_t sceneNum, int8_t roomNum) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "roomnavdata/roomnavdata_%d_%d.bin",
+                  (int)sceneNum, (int)roomNum);
+    return std::filesystem::path(buf);
+}
+
+template <typename T>
+static bool ReadValue(std::ifstream& f, T& out) {
+    f.read(reinterpret_cast<char*>(&out), sizeof(T));
+    return f.good();
+}
+
+template <typename T>
+static void WriteValue(std::ofstream& f, const T& in) {
+    f.write(reinterpret_cast<const char*>(&in), sizeof(T));
+}
+
+template <typename T>
+static bool ReadVector(std::ifstream& f, std::vector<T>& out, uint32_t count) {
+    if (count > 1000000) return false; // sanity cap; corrupted file
+    out.resize(count);
+    if (count == 0) return true;
+    f.read(reinterpret_cast<char*>(out.data()), (std::streamsize)(count * sizeof(T)));
+    return f.good();
+}
+
+template <typename T>
+static void WriteVector(std::ofstream& f, const std::vector<T>& in) {
+    if (in.empty()) return;
+    f.write(reinterpret_cast<const char*>(in.data()), (std::streamsize)(in.size() * sizeof(T)));
+}
+
+// Save the in-memory RoomNavData to disk. Lazy-creates the roomnavdata/
+// directory. Best-effort; logs and continues on I/O failure (the
+// in-memory copy is canonical for this session regardless).
+static void SaveToDisk(const RoomNavData& nav) {
+    std::error_code ec;
+    std::filesystem::create_directories("roomnavdata", ec);
+    if (ec) {
+        SPDLOG_WARN("[RoomNav] SaveToDisk: create_directories failed: {}", ec.message());
+        return;
+    }
+
+    auto path = RoomNavFilePath(nav.sceneNum, nav.roomNum);
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f.good()) {
+        SPDLOG_WARN("[RoomNav] SaveToDisk: open failed for {}", path.string());
+        return;
+    }
+
+    WriteValue(f, kMagic);
+    WriteValue(f, kCurrentSchemaVersion);
+    WriteValue(f, nav.sceneNum);
+    WriteValue(f, nav.roomNum);
+    uint8_t pad3[3] = { 0, 0, 0 }; // align scanTimestamp to 4-byte boundary
+    f.write(reinterpret_cast<const char*>(pad3), sizeof(pad3));
+    WriteValue(f, nav.scanTimestamp);
+    WriteValue(f, nav.bboxMin);
+    WriteValue(f, nav.bboxMax);
+    WriteValue(f, nav.gridResolution);
+
+    uint32_t nodeCount    = (uint32_t)nav.nodes.size();
+    uint32_t edgeCount    = (uint32_t)nav.edges.size();
+    uint32_t climbCount   = (uint32_t)nav.climbAnchors.size();
+    uint32_t hazardCount  = (uint32_t)nav.hazardCentroids.size();
+    WriteValue(f, nodeCount);
+    WriteValue(f, edgeCount);
+    WriteValue(f, climbCount);
+    WriteValue(f, hazardCount);
+
+    WriteVector(f, nav.nodes);
+    WriteVector(f, nav.edges);
+    WriteVector(f, nav.climbAnchors);
+    WriteVector(f, nav.hazardCentroids);
+
+    if (!f.good()) {
+        SPDLOG_WARN("[RoomNav] SaveToDisk: write error for {}", path.string());
+    }
+}
+
+static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) {
+    auto path = RoomNavFilePath(sceneNum, roomNum);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec) {
+        return; // no file; cache miss (caller falls through to scan)
+    }
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f.good()) return;
+
+    uint32_t magic = 0;
+    uint16_t version = 0;
+    int16_t fileScene = -1;
+    int8_t fileRoom = -1;
+    uint8_t pad3[3] = { 0, 0, 0 };
+    uint32_t scanTimestamp = 0;
+    Vec3f bboxMin{}, bboxMax{};
+    uint16_t gridRes = 0;
+    uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, hazardCount = 0;
+
+    if (!ReadValue(f, magic) || magic != kMagic) {
+        SPDLOG_WARN("[RoomNav] LoadFromDisk: magic mismatch for {} (got 0x{:08x}); regenerating",
+                    path.string(), magic);
+        return;
+    }
+    if (!ReadValue(f, version) || version != kCurrentSchemaVersion) {
+        SPDLOG_INFO("[RoomNav] LoadFromDisk: schema version {} != {} for {}; regenerating",
+                    version, kCurrentSchemaVersion, path.string());
+        return;
+    }
+    if (!ReadValue(f, fileScene) || fileScene != sceneNum) return;
+    if (!ReadValue(f, fileRoom)  || fileRoom  != roomNum)  return;
+    f.read(reinterpret_cast<char*>(pad3), sizeof(pad3));
+    if (!ReadValue(f, scanTimestamp))                       return;
+    if (!ReadValue(f, bboxMin))                             return;
+    if (!ReadValue(f, bboxMax))                             return;
+    if (!ReadValue(f, gridRes) || gridRes != (uint16_t)kGridResolution) {
+        SPDLOG_INFO("[RoomNav] LoadFromDisk: grid resolution {} != {} for {}; regenerating",
+                    gridRes, (uint16_t)kGridResolution, path.string());
+        return;
+    }
+    if (!ReadValue(f, nodeCount))   return;
+    if (!ReadValue(f, edgeCount))   return;
+    if (!ReadValue(f, climbCount))  return;
+    if (!ReadValue(f, hazardCount)) return;
+
+    if (!ReadVector(f, out->nodes, nodeCount))                   return;
+    if (!ReadVector(f, out->edges, edgeCount))                   return;
+    if (!ReadVector(f, out->climbAnchors, climbCount))           return;
+    if (!ReadVector(f, out->hazardCentroids, hazardCount))       return;
+
+    out->magic           = magic;
+    out->version         = version;
+    out->sceneNum        = fileScene;
+    out->roomNum         = fileRoom;
+    out->scanTimestamp   = scanTimestamp;
+    out->bboxMin         = bboxMin;
+    out->bboxMax         = bboxMax;
+    out->gridResolution  = gridRes;
 }
 
 // ---------------------------------------------------------------------------
 // Scan implementation. Plan §5 — multi-cast per XZ + floodfill from player
 // position, bounded by scene-level colCtx.minBounds/maxBounds.
+// kGridResolution and defensive caps are declared earlier in the file
+// (with the persistence constants) so binary-format validation can
+// reference them without forward-reference issues.
 // ---------------------------------------------------------------------------
-
-static constexpr float    kGridResolution      = 30.0f;  // §11 lock
-static constexpr int      kMaxFloorsPerColumn  = 8;      // defensive cap
-static constexpr int      kMaxScanIterations   = 50000;  // floodfill runaway guard
-static constexpr int64_t  kMaxScanWallTimeMs   = 1000;   // per-scan budget
 
 // ---------------------------------------------------------------------------
 // Climb anchor detection. Plan §5 — Path A scene-actor allowlist.
@@ -365,7 +522,7 @@ static int ScanColumnAt(RoomNavData* nav, float x, float z, PlayState* play, con
 static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavData* out) {
     out->sceneNum       = sceneNum;
     out->roomNum        = roomNum;
-    out->scanTimestamp  = 0; // commit 7 fills this from wall-clock seconds.
+    out->scanTimestamp  = (uint32_t)std::time(nullptr); // wall-clock seconds for debug
     out->bboxMin        = play->colCtx.minBounds;
     out->bboxMax        = play->colCtx.maxBounds;
     out->gridResolution = (uint16_t)kGridResolution;
@@ -544,8 +701,10 @@ static void OnRoomEntered(int16_t sceneNum, int8_t roomNum, PlayState* play) {
 
     RoomNavData scanned{};
     ScanRoom(sceneNum, roomNum, play, &scanned);
+    if (!scanned.nodes.empty()) {
+        SaveToDisk(scanned);
+    }
     sCache.emplace(key, std::move(scanned));
-    // Commit 7 will add: SaveToDisk(sceneNum, roomNum, sCache.at(key));
 }
 
 // ---------------------------------------------------------------------------
