@@ -3411,6 +3411,21 @@ Actor* Actor_Spawn(ActorContext* actorCtx, PlayState* play, s16 actorId, f32 pos
 
     GameInteractor_ExecuteOnActorSpawn(actor);
 
+    // SoH scene-data logging — single-line spawn enumeration for pre-flight audits.
+    // Gated behind gDeveloperTools.SceneLog.Level >= 1 (default 0 = no log output).
+    // See Claude/Plans/implementation_plan_logging_and_scene_data.md Phase 1.
+    if (CVarGetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.Level"), 0) >= 1) {
+        LUSLOG_INFO("[Spawn] scene=%d room=%d actor=0x%04X \"%s\" params=0x%04X pos=(%.0f,%.0f,%.0f) cat=%d setup=%d",
+                    play->sceneNum,
+                    play->roomCtx.curRoom.num,
+                    actorId,
+                    (dbEntry->name != NULL) ? dbEntry->name : "<unnamed>",
+                    params,
+                    posX, posY, posZ,
+                    dbEntry->category,
+                    play->numSetupActors > 0 ? 1 : 0);
+    }
+
     return actor;
 }
 
