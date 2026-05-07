@@ -580,6 +580,32 @@ static bool FloorBelongsToOtherRoom(s32 floorBgId, s8 currentRoom, PlayState* pl
     return owner->room != currentRoom;
 }
 
+// Per-actor floor rejection allowlist. When the discovered floor is owned
+// by a Bg actor whose actor->id is in this list, treat it as if the floor
+// didn't exist for nav purposes. Common case: chest tops (En_Box) and push
+// blocks (Obj_Oshihiki) — physically walkable but undesirable as nav
+// targets because their position is dynamic (chests open in place but
+// might rise; push blocks move) and stepping onto them is rarely useful
+// for AI.
+//
+// Maintenance: extend kFloorActorRejectList as new problematic dynamic
+// actors surface during field testing. Keep entries sorted by ascending
+// actor ID for diff readability.
+static const int16_t kFloorActorRejectList[] = {
+    ACTOR_OBJ_OSHIHIKI, // 0x0140 — push blocks
+    ACTOR_EN_BOX,       // 0x000A — chests
+};
+
+static bool FloorIsRejectedByAllowlist(s32 floorBgId, PlayState* play) {
+    if (floorBgId < 0 || floorBgId >= BG_ACTOR_MAX) return false; // not dynamic
+    Actor* owner = play->colCtx.dyna.bgActors[floorBgId].actor;
+    if (owner == nullptr) return false;
+    for (int16_t rejectId : kFloorActorRejectList) {
+        if (owner->id == rejectId) return true;
+    }
+    return false;
+}
+
 static int ScanColumnAt(RoomNavData* nav, float x, float z, PlayState* play, const CellKey& cell) {
     int firstNodeIdx = -1;
     float startY = nav->bboxMax.y + 50.0f; // start above scene ceiling
@@ -600,6 +626,15 @@ static int ScanColumnAt(RoomNavData* nav, float x, float z, PlayState* play, con
         // dynamic actors (room == -1) pass through.
         if (FloorBelongsToOtherRoom(floorBgId, currentRoom, play)) {
             startY = floorY - 1.0f;  // skip past this floor; keep looking below
+            continue;
+        }
+
+        // Per-actor allowlist: chest tops, push-block tops, etc. are
+        // physically walkable but should not be navigable. Treat the
+        // floor as if it didn't exist; the column scan continues past
+        // it to find the real floor below.
+        if (FloorIsRejectedByAllowlist(floorBgId, play)) {
+            startY = floorY - 1.0f;
             continue;
         }
 
