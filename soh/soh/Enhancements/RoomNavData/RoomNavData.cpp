@@ -70,6 +70,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_DEBUG_DRAW            CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
 #define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE    CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
 #define CVAR_ROOM_NAV_DEBUG_DRAW_COMPONENTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawComponents")
+#define CVAR_ROOM_NAV_LOG_REJECTED_FLOORS   CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -619,12 +620,30 @@ static const int16_t kFloorActorRejectList[] = {
     ACTOR_EN_BOX,       // 0x000A — chests
 };
 
-static bool FloorIsRejectedByAllowlist(s32 floorBgId, PlayState* play) {
+// Returns true if the floor at (x, floorY, z) sitting on Bg actor `floorBgId`
+// is in the per-actor rejection allowlist. When `nav` is non-null AND the
+// LogRejectedFloors CVar is on AND a rejection fires, the (x, floorY, z)
+// position is appended to nav->rejectedFloorPositions for the DebugDraw
+// magenta-cross overlay.
+//
+// `nav` may be null when called from contexts that don't have a target
+// RoomNavData (none today, but the contract leaves the door open).
+static bool FloorIsRejectedByAllowlist(s32 floorBgId, PlayState* play,
+                                       RoomNavData* nav, float x, float floorY, float z) {
     if (floorBgId < 0 || floorBgId >= BG_ACTOR_MAX) return false; // not dynamic
     Actor* owner = play->colCtx.dyna.bgActors[floorBgId].actor;
     if (owner == nullptr) return false;
     for (int16_t rejectId : kFloorActorRejectList) {
-        if (owner->id == rejectId) return true;
+        if (owner->id == rejectId) {
+            // Diagnostic capture (DebugDraw v3e, polish wave commit 6).
+            // Cheap to leave gated here so the predicate stays a single
+            // call site for callers; the inner CVar check resolves to a
+            // fast path-1 lookup when off.
+            if (nav != nullptr && CVarGetInteger(CVAR_ROOM_NAV_LOG_REJECTED_FLOORS, 0) != 0) {
+                nav->rejectedFloorPositions.push_back(Vec3f{ x, floorY, z });
+            }
+            return true;
+        }
     }
     return false;
 }
@@ -655,8 +674,10 @@ static int ScanColumnAt(RoomNavData* nav, float x, float z, PlayState* play, con
         // Per-actor allowlist: chest tops, push-block tops, etc. are
         // physically walkable but should not be navigable. Treat the
         // floor as if it didn't exist; the column scan continues past
-        // it to find the real floor below.
-        if (FloorIsRejectedByAllowlist(floorBgId, play)) {
+        // it to find the real floor below. When the LogRejectedFloors
+        // diagnostic CVar is on, the rejected (x, floorY, z) is captured
+        // into nav->rejectedFloorPositions for the DebugDraw overlay.
+        if (FloorIsRejectedByAllowlist(floorBgId, play, nav, x, floorY, z)) {
             startY = floorY - 1.0f;
             continue;
         }
@@ -1311,6 +1332,8 @@ static constexpr float kEdgeLineHalfWidth      = 1.0f;  // 2u thick line on floo
 static constexpr float kClimbPostHalfWidth     = 3.0f;  // 6u-wide vertical post at climb anchors
 static constexpr float kHazardCentroidHalfExt  = 8.0f;  // 16u square per hazard-centroid marker
 static constexpr float kClimbFlagHalfExt       = 7.0f;  // 14u square at NODE_CLIMB_BASE/TOP flagged nodes
+static constexpr float kRejectedFloorCrossArmLen    = 8.0f; // half-length of each '+' arm (16u tip-to-tip)
+static constexpr float kRejectedFloorCrossHalfWidth = 1.0f; // perpendicular thickness of each '+' arm
 
 // Reset buffer + reserve based on prior frame (matches colViewer pattern).
 template <typename T> static size_t ResetGfxBuffer(T& vec) {
@@ -1441,6 +1464,41 @@ static void AddVerticalPost(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
     Vtx b1 = MakeVtxN(bx, by, (short)(bz + h), 0, 0, 127, 0xFF);
     Vtx b2 = MakeVtxN(tx, ty, (short)(tz + h), 0, 0, 127, 0xFF);
     Vtx b3 = MakeVtxN(tx, ty, (short)(tz - h), 0, 0, 127, 0xFF);
+    vtxDl.push_back(b0);
+    vtxDl.push_back(b1);
+    vtxDl.push_back(b2);
+    vtxDl.push_back(b3);
+    dl.push_back(gsSPVertex((uintptr_t)&vtxDl[vtxDl.size() - 4], 4, 0));
+    dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+}
+
+// Append a small ground-aligned '+' cross marker at `pos`. Two
+// perpendicular thin XZ-plane quads — one extending along ±X, one along
+// ±Z — produce a clear cross visible from any top-down camera angle.
+// Used for the rejected-floor diagnostic overlay (DebugDraw v3e, polish
+// wave commit 6).
+static void AddCrossMarker(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl, const Vec3f& pos) {
+    float arm = kRejectedFloorCrossArmLen;
+    float w   = kRejectedFloorCrossHalfWidth;
+    float y   = pos.y + kNodeQuadYLift;
+
+    // Arm 1: long axis along X. Thin in Z direction.
+    Vtx a0 = MakeVtxN((short)(pos.x - arm), (short)y, (short)(pos.z - w), 0, 127, 0, 0xFF);
+    Vtx a1 = MakeVtxN((short)(pos.x + arm), (short)y, (short)(pos.z - w), 0, 127, 0, 0xFF);
+    Vtx a2 = MakeVtxN((short)(pos.x + arm), (short)y, (short)(pos.z + w), 0, 127, 0, 0xFF);
+    Vtx a3 = MakeVtxN((short)(pos.x - arm), (short)y, (short)(pos.z + w), 0, 127, 0, 0xFF);
+    vtxDl.push_back(a0);
+    vtxDl.push_back(a1);
+    vtxDl.push_back(a2);
+    vtxDl.push_back(a3);
+    dl.push_back(gsSPVertex((uintptr_t)&vtxDl[vtxDl.size() - 4], 4, 0));
+    dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+
+    // Arm 2: long axis along Z. Thin in X direction.
+    Vtx b0 = MakeVtxN((short)(pos.x - w), (short)y, (short)(pos.z - arm), 0, 127, 0, 0xFF);
+    Vtx b1 = MakeVtxN((short)(pos.x + w), (short)y, (short)(pos.z - arm), 0, 127, 0, 0xFF);
+    Vtx b2 = MakeVtxN((short)(pos.x + w), (short)y, (short)(pos.z + arm), 0, 127, 0, 0xFF);
+    Vtx b3 = MakeVtxN((short)(pos.x - w), (short)y, (short)(pos.z + arm), 0, 127, 0, 0xFF);
     vtxDl.push_back(b0);
     vtxDl.push_back(b1);
     vtxDl.push_back(b2);
@@ -1759,6 +1817,16 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         sXluDl.push_back(gsSPVertex((uintptr_t)&sVtxDl[sVtxDl.size() - 4], 4, 0));
         sXluDl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
     }
+
+    // Rejected-floor crosses — magenta. DebugDraw v3e, polish wave commit 6.
+    // Populated only when LogRejectedFloors is on at scan time; empty
+    // otherwise. Magenta-coloured '+' crosses at each rejected floor sample
+    // so the user can confirm allowlist hits visually (e.g. crosses on top
+    // of every chest in the room).
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0x00, 0xFF, 0xFF));
+    for (const Vec3f& pos : data->rejectedFloorPositions) {
+        AddCrossMarker(sXluDl, sVtxDl, pos);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1833,23 +1901,26 @@ static void OnDebugDrawRender() {
     // (nodes.size() * 4 verts, nodes.size() * 2 Gfx) for worst-case
     // all-orphan rooms. Climb-base/top flag overlay adds at most 2×
     // climbAnchors (one node tagged per basePos + one per topPos via
-    // FindNearestNode), 4 verts + 2 Gfx commands per flagged node. The
-    // mutual-exclusion continue chains in BuildOverlayDrawData mean actual
-    // usage is bounded tighter; reserves are additive across groups for
-    // forward-compat with parallel workstreams that may add their own
+    // FindNearestNode), 4 verts + 2 Gfx commands per flagged node.
+    // Rejected-floor crosses are 2 quads each → 8 verts + 4 Gfx commands.
+    // The mutual-exclusion continue chains in BuildOverlayDrawData mean
+    // actual usage is bounded tighter; reserves are additive across groups
+    // for forward-compat with parallel workstreams that may add their own
     // groups.
     sVtxDl.reserve(data->nodes.size() * 4
                    + data->nodes.size() * 4 // orphan group
                    + data->edges.size() * 4
                    + data->climbAnchors.size() * 16
                    + data->climbAnchors.size() * 8 // climb-flag overlay (2 nodes × 4 verts)
-                   + data->hazardCentroids.size() * 4);
+                   + data->hazardCentroids.size() * 4
+                   + data->rejectedFloorPositions.size() * 8);
     // Gfx commands: 2 per node-quad / edge-quad / hazard-centroid quad; 8
-    // per climb anchor (2 ground quads + 4 vertical-post quad pairs); 64
-    // for setup + fixed per-color-group PrimColor switches. When
-    // DebugDrawComponents is on, each connected component adds one extra
-    // gsDPSetPrimColor — worst case is one component per walkable node.
-    // Adding `nodes.size()` here absorbs that bound.
+    // per climb anchor (2 ground quads + 4 vertical-post quad pairs); 4 per
+    // rejected-floor cross (2 quads); 64 for setup + fixed per-color-group
+    // PrimColor switches. When DebugDrawComponents is on, each connected
+    // component adds one extra gsDPSetPrimColor — worst case is one
+    // component per walkable node. Adding `nodes.size()` here absorbs that
+    // bound.
     sXluDl.reserve(data->nodes.size() * 2
                    + data->nodes.size() * 2 // orphan group
                    + data->nodes.size()     // worst-case per-component PrimColor switches
@@ -1857,6 +1928,7 @@ static void OnDebugDrawRender() {
                    + data->climbAnchors.size() * 8
                    + data->climbAnchors.size() * 4 // climb-flag overlay (2 nodes × 2 Gfx)
                    + data->hazardCentroids.size() * 2
+                   + data->rejectedFloorPositions.size() * 4
                    + 64);
 
     InitDebugGfx(sXluDl);

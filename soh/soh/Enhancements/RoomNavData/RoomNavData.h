@@ -86,6 +86,17 @@ struct RoomNavData {
     Vec3f bboxMin = { 0.0f, 0.0f, 0.0f };
     Vec3f bboxMax = { 0.0f, 0.0f, 0.0f };
     uint16_t gridResolution = 30; // matches kGridResolution at scan time
+
+    // Diagnostic: positions of floor candidates rejected by the per-actor
+    // allowlist (FloorIsRejectedByAllowlist). Populated only when
+    // gEnhancements.RoomNavData.LogRejectedFloors is on at scan time;
+    // empty otherwise. Used by the DebugDraw overlay (magenta '+' crosses)
+    // to tune the rejection list as new scene-furniture surfaces.
+    //
+    // NOT persisted — SaveToDisk and TryLoadFromDisk skip this field. A
+    // disk-loaded RoomNavData has an empty vector; the user re-scans
+    // (Force Rescan) to populate.
+    std::vector<Vec3f> rejectedFloorPositions; // not persisted
 };
 
 // ---------------------------------------------------------------------------

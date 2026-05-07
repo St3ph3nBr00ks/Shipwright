@@ -2001,6 +2001,17 @@ void SohMenu::AddMenuEnhancements() {
             "distinct hue from a golden-angle HSV distribution. Cached per-room; "
             "invalidated on Force Rescan and on game exit."));
 
+    AddWidget(path, "Debug Draw — Log Rejected Floors", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, every floor rejected by the per-actor allowlist (chests, push "
+            "blocks, etc.) is captured at scan time and rendered as a magenta '+' cross "
+            "in the Debug Draw overlay. Used to tune the rejection list as new "
+            "scene-furniture surfaces. Re-scan the room (Force Rescan) after toggling "
+            "to populate the cross positions."));
+
     AddWidget(path, "Force Rescan Current Room", WIDGET_BUTTON)
         .Callback([](WidgetInfo& info) { AnchorNavRoom::ForceRescanCurrentRoom(); })
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
