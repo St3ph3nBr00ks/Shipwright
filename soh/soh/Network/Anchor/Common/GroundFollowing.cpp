@@ -104,7 +104,7 @@ int16_t GetGroundFollowingBearing(Actor* navigator, const Vec3f* targetPos, Play
             navigator->world.pos.z + Math_CosS(yaw) * kProbeDistance,
         };
 
-        CollisionPoly* floorPoly = nullptr;
+        CollisionPoly floorPoly{};  // filled by-reference; result unused beyond Y
         f32 floorY = BgCheck_AnyRaycastFloor1(&play->colCtx, &floorPoly, &probe);
         if (floorY <= BGCHECK_Y_MIN) {
             continue;  // no floor at all (off the world)
@@ -135,7 +135,7 @@ bool HasGroundContact(Actor* navigator, PlayState* play) {
         navigator->world.pos.y + kProbeAboveFeet,
         navigator->world.pos.z,
     };
-    CollisionPoly* floorPoly = nullptr;
+    CollisionPoly floorPoly{};  // filled by-reference; result unused beyond Y
     f32 floorY = BgCheck_AnyRaycastFloor1(&play->colCtx, &floorPoly, &probe);
     if (floorY <= BGCHECK_Y_MIN) return false;
     float drop = navigator->world.pos.y - floorY;
