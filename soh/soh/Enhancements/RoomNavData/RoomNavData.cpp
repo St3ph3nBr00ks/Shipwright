@@ -1368,9 +1368,7 @@ static void OnDebugDraw() {
 
     if (nowEnabled != sDebugDrawWasEnabled) {
         sDebugDrawWasEnabled = nowEnabled;
-        SPDLOG_INFO("[RoomNav] DebugDraw {} (in-world overlay rendering deferred — "
-                    "stub commit; v1 emits room summary log lines on entry).",
-                    nowEnabled ? "enabled" : "disabled");
+        SPDLOG_INFO("[RoomNav] DebugDraw {}", nowEnabled ? "enabled" : "disabled");
     }
 
     if (!nowEnabled) return;
