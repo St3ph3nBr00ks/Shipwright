@@ -1363,14 +1363,16 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
     if (data == nullptr) return;
 
     // Walkable nodes — green. Color precedence: HAZARD > UNDERWATER >
-    // STEEP_SLOPE > WALKABLE, so each later group's continue clauses skip
-    // any node already drawn by an earlier higher-priority group.
+    // STEEP_SLOPE > ORPHANED > WALKABLE, so each later group's continue
+    // clauses skip any node already drawn by an earlier higher-priority
+    // group.
     sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0xC8, 0x00, 0xFF));
     for (const NavNode& node : data->nodes) {
         if (!(node.flags & NODE_WALKABLE)) continue;
         if (node.flags & NODE_HAZARD)      continue;
         if (node.flags & NODE_UNDERWATER)  continue;
         if (node.flags & NODE_STEEP_SLOPE) continue;
+        if (node.flags & NODE_ORPHANED)    continue;
         AddGroundQuad(sXluDl, sVtxDl, node.pos);
     }
 
@@ -1395,6 +1397,22 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         if (!(node.flags & NODE_STEEP_SLOPE)) continue;
         if (node.flags & NODE_HAZARD)         continue;
         if (node.flags & NODE_UNDERWATER)     continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+
+    // Orphaned nodes — dim gray. Walkable in geometry but unreachable
+    // from any seed cell via the edge graph (stacked floors on top of
+    // walls / fences / scenery; see ScanRoom orphan-pass comment for
+    // detection algorithm). Drawn after higher-priority groups so a node
+    // that's BOTH orphaned AND hazard/underwater gets the more
+    // safety-critical color. Skip if those groups already claimed the
+    // node.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x60, 0x60, 0x60, 0xC0));
+    for (const NavNode& node : data->nodes) {
+        if (!(node.flags & NODE_ORPHANED))   continue;
+        if (node.flags & NODE_HAZARD)        continue;
+        if (node.flags & NODE_UNDERWATER)    continue;
+        if (node.flags & NODE_STEEP_SLOPE)   continue;
         AddGroundQuad(sXluDl, sVtxDl, node.pos);
     }
 
@@ -1516,12 +1534,20 @@ static void OnDebugDrawRender() {
     // gsSPVertex pointers we embed into sXluDl below.
     // Upper bounds: 4 verts + 2 Gfx commands per node-quad / edge-quad /
     // hazard-centroid; 4 quads (2 ground + 2 perpendicular vertical) per
-    // climb anchor → 16 verts + 8 Gfx commands.
+    // climb anchor → 16 verts + 8 Gfx commands. Orphan group adds another
+    // (nodes.size() * 4 verts, nodes.size() * 2 Gfx) for worst-case
+    // all-orphan rooms (handoff plan §5 commit 2). The mutual-exclusion
+    // continue chain in BuildOverlayDrawData means actual usage is
+    // bounded tighter, but the reserve is additive across groups for
+    // forward-compat with parallel workstreams that may add their own
+    // groups.
     sVtxDl.reserve(data->nodes.size() * 4
+                   + data->nodes.size() * 4 // orphan group
                    + data->edges.size() * 4
                    + data->climbAnchors.size() * 16
                    + data->hazardCentroids.size() * 4);
     sXluDl.reserve(data->nodes.size() * 2
+                   + data->nodes.size() * 2 // orphan group
                    + data->edges.size() * 2
                    + data->climbAnchors.size() * 8
                    + data->hazardCentroids.size() * 2
