@@ -1669,6 +1669,23 @@ static int8_t  sLastRoom  = -1;
 static bool sPendingAnchorRefresh = false;
 static bool sPendingFullRescan    = false;
 
+// Delay countdown (frames). When a scene flag fires, the dispatch is
+// deferred by kDynamicRefreshDelayFrames so multi-frame animations
+// (e.g. Bg_Ydan_Maruta's falling ladder, push-block push completion)
+// have time to settle BEFORE we capture the post-event geometry.
+// Without the delay, the rescan fires at the START of the animation
+// and records actor positions that are about to change.
+//
+// The countdown resets on every new flag set, so a sequence of flag
+// writes (one event setting multiple flags across several frames)
+// gets one dispatch at the END of the sequence, not multiple.
+//
+// 90 frames ≈ 1.5s at 60fps. Generous enough for the longest OoT
+// scripted scenery animations; short enough that AI reactivity
+// remains responsive.
+static int32_t sRescanDelayCountdown = 0;
+static constexpr int32_t kDynamicRefreshDelayFrames = 90;
+
 // Forward declaration — definition lives further down the file with the
 // other dynamic-refresh helpers, but this function is called from
 // OnGameFrameTick (right below).
@@ -1731,6 +1748,7 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
     // current room which is about to become invalid.
     sPendingAnchorRefresh = false;
     sPendingFullRescan    = false;
+    sRescanDelayCountdown = 0;
     sLastScene = -1;
     sLastRoom  = -1;
     sLastStuckLogFrame.clear();
@@ -2544,7 +2562,9 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
 }
 
 // Hook handler — fires for every Flags_SetSwitch / scene flag write.
-// Sets the appropriate pending flag based on which Tier CVars are on.
+// Sets the appropriate pending flag based on which Tier CVars are on,
+// AND resets the dispatch delay countdown so the actual rescan fires
+// AFTER the multi-frame animation triggered by the flag set has settled.
 // Tier 2 (full rescan) takes precedence over Tier 1 if both are
 // enabled, since a full rescan implicitly refreshes anchors too.
 static void OnSceneFlagSetHookHandler(int16_t /*sceneNum*/, int16_t /*flagType*/,
@@ -2552,16 +2572,33 @@ static void OnSceneFlagSetHookHandler(int16_t /*sceneNum*/, int16_t /*flagType*/
     if (!IsEnabled()) return;
     bool fullRescan    = CVarGetInteger(CVAR_ROOM_NAV_AUTO_FULL_RESCAN, 0) != 0;
     bool anchorRefresh = CVarGetInteger(CVAR_ROOM_NAV_AUTO_REFRESH_ANCHORS, 0) != 0;
+    if (!fullRescan && !anchorRefresh) return;
+
     if (fullRescan) {
         sPendingFullRescan = true;
-    } else if (anchorRefresh) {
+    } else {
         sPendingAnchorRefresh = true;
     }
+    // (Re)arm the delay countdown — every new flag set extends the
+    // dispatch wait. The actual refresh fires when no further flags
+    // have set for kDynamicRefreshDelayFrames frames.
+    sRescanDelayCountdown = kDynamicRefreshDelayFrames;
 }
 
 // Called from OnGameFrameTick (after the per-frame logic) to drain
-// pending refresh/rescan requests.
+// pending refresh/rescan requests. Handles the delay countdown so
+// multi-frame triggering animations (ladder fall, push-block push)
+// settle before the rescan captures the post-event geometry.
 static void DispatchPendingDynamicRefresh() {
+    // No pending work — short-circuit.
+    if (!sPendingFullRescan && !sPendingAnchorRefresh) return;
+
+    // Still waiting for the triggering animation to settle.
+    if (sRescanDelayCountdown > 0) {
+        sRescanDelayCountdown--;
+        return;
+    }
+
     if (sPendingFullRescan) {
         sPendingFullRescan    = false;
         sPendingAnchorRefresh = false; // full rescan supersedes
