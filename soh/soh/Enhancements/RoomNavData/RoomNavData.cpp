@@ -1019,6 +1019,32 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     // unidentified in vanilla source. v1 covers ladders only.
     DetectClimbAnchors(out, play);
 
+    // Climb-flag population (polish wave commit 4) — for each climb anchor
+    // discovered above, find the nearest walkable nav-node to its basePos
+    // and topPos and tag them NODE_CLIMB_BASE / NODE_CLIMB_TOP. Lets nav
+    // consumers locate climb entry/exit points by graph node lookup
+    // instead of re-querying the climbAnchors vector.
+    //
+    // FindNearestNode is a linear scan over nav.nodes (~1,100 nodes per
+    // typical room). Climb anchors are rare per room (1-3 typical), so the
+    // total cost is bounded — well under 10ms even on the largest scenes.
+    //
+    // -1 returns from FindNearestNode (empty graph) are silently skipped.
+    // Same NavNode CAN receive both NODE_CLIMB_BASE and NODE_CLIMB_TOP if
+    // base and top happen to map to the same node (degenerate climb with
+    // estimatedHeight smaller than kGridResolution); harmless — viz will
+    // still draw a single yellow ring at that position.
+    for (const ClimbAnchor& anchor : out->climbAnchors) {
+        int baseIdx = FindNearestNode(out, anchor.basePos);
+        if (baseIdx >= 0) {
+            out->nodes[(size_t)baseIdx].flags |= NODE_CLIMB_BASE;
+        }
+        int topIdx = FindNearestNode(out, anchor.topPos);
+        if (topIdx >= 0) {
+            out->nodes[(size_t)topIdx].flags |= NODE_CLIMB_TOP;
+        }
+    }
+
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
     SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} nodes={} edges={} climbs={} cells={} "
@@ -1264,6 +1290,7 @@ static constexpr float kNodeQuadYLift          = 1.0f;  // small lift above floo
 static constexpr float kEdgeLineHalfWidth      = 1.0f;  // 2u thick line on floor
 static constexpr float kClimbPostHalfWidth     = 3.0f;  // 6u-wide vertical post at climb anchors
 static constexpr float kHazardCentroidHalfExt  = 8.0f;  // 16u square per hazard-centroid marker
+static constexpr float kClimbFlagHalfExt       = 7.0f;  // 14u square at NODE_CLIMB_BASE/TOP flagged nodes
 
 // Reset buffer + reserve based on prior frame (matches colViewer pattern).
 template <typename T> static size_t ResetGfxBuffer(T& vec) {
@@ -1521,6 +1548,34 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AddVerticalPost(sXluDl, sVtxDl, anchor.basePos, anchor.topPos);
     }
 
+    // Climb-base / climb-top flagged nodes (polish wave commit 4) — bright
+    // yellow ring overlay at every node carrying NODE_CLIMB_BASE or
+    // NODE_CLIMB_TOP. Slightly larger than ordinary node quads
+    // (kClimbFlagHalfExt = 7.0f vs kNodeQuadHalfExtent = 5.0f) so they
+    // read as a distinct "this node is a climb endpoint" marker. Distinct
+    // from the climb-anchor group above (which renders the raw scene-actor
+    // basePos / topPos as smaller solid squares + a vertical post); these
+    // markers live on the nav-graph nodes that consumers will actually
+    // navigate to. Drawn inline via open-coded quad rather than
+    // AddGroundQuad so the larger half-extent doesn't require a helper
+    // parameterisation for a single additional caller.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xFF, 0x40, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if (!(node.flags & (NODE_CLIMB_BASE | NODE_CLIMB_TOP))) continue;
+        float h = kClimbFlagHalfExt;
+        float y = node.pos.y + kNodeQuadYLift;
+        Vtx v0 = MakeVtxN((short)(node.pos.x - h), (short)y, (short)(node.pos.z - h), 0, 127, 0, 0xFF);
+        Vtx v1 = MakeVtxN((short)(node.pos.x + h), (short)y, (short)(node.pos.z - h), 0, 127, 0, 0xFF);
+        Vtx v2 = MakeVtxN((short)(node.pos.x + h), (short)y, (short)(node.pos.z + h), 0, 127, 0, 0xFF);
+        Vtx v3 = MakeVtxN((short)(node.pos.x - h), (short)y, (short)(node.pos.z + h), 0, 127, 0, 0xFF);
+        sVtxDl.push_back(v0);
+        sVtxDl.push_back(v1);
+        sVtxDl.push_back(v2);
+        sVtxDl.push_back(v3);
+        sXluDl.push_back(gsSPVertex((uintptr_t)&sVtxDl[sVtxDl.size() - 4], 4, 0));
+        sXluDl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+    }
+
     // Hazard centroids — deep red, slightly larger than node quads so they
     // read as "this whole region is bad." Currently unpopulated by the v1
     // scan; loop is a no-op until a future commit clusters HAZARD nodes
@@ -1616,20 +1671,24 @@ static void OnDebugDrawRender() {
     // hazard-centroid; 4 quads (2 ground + 2 perpendicular vertical) per
     // climb anchor → 16 verts + 8 Gfx commands. Orphan group adds another
     // (nodes.size() * 4 verts, nodes.size() * 2 Gfx) for worst-case
-    // all-orphan rooms (handoff plan §5 commit 2). The mutual-exclusion
-    // continue chain in BuildOverlayDrawData means actual usage is
-    // bounded tighter, but the reserve is additive across groups for
+    // all-orphan rooms. Climb-base/top flag overlay adds at most 2×
+    // climbAnchors (one node tagged per basePos + one per topPos via
+    // FindNearestNode), 4 verts + 2 Gfx commands per flagged node. The
+    // mutual-exclusion continue chains in BuildOverlayDrawData mean actual
+    // usage is bounded tighter; reserves are additive across groups for
     // forward-compat with parallel workstreams that may add their own
     // groups.
     sVtxDl.reserve(data->nodes.size() * 4
                    + data->nodes.size() * 4 // orphan group
                    + data->edges.size() * 4
                    + data->climbAnchors.size() * 16
+                   + data->climbAnchors.size() * 8 // climb-flag overlay (2 nodes × 4 verts)
                    + data->hazardCentroids.size() * 4);
     sXluDl.reserve(data->nodes.size() * 2
                    + data->nodes.size() * 2 // orphan group
                    + data->edges.size() * 2
                    + data->climbAnchors.size() * 8
+                   + data->climbAnchors.size() * 4 // climb-flag overlay (2 nodes × 2 Gfx)
                    + data->hazardCentroids.size() * 2
                    + 64); // setup + per-color-group PrimColor switches
 
