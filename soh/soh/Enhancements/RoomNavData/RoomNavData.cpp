@@ -893,7 +893,53 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
         std::chrono::steady_clock::now() - edgeStart).count();
     auto totalMs = scanMs + edgeMs;
 
-    // ----- Orphan detection pass (schema v2). -------------------------------
+    // ----- Reserved-flag population (workstream B). -------------------------
+    //
+    // Populate NODE_EDGE and NODE_HAZARD_ADJACENT for walkable nodes by
+    // inspecting the 8 XZ neighbor cells in `nodesByCell`. Both flags are
+    // set at scan time so consumers (debug draw, future cautious-pathing)
+    // can read them without re-walking the spatial index.
+    //
+    // Predicate per walkable node A:
+    //   - If any of the 8 neighbor cells contains zero nodes → A gets
+    //     NODE_EDGE (A is on a ledge / room perimeter).
+    //   - For each node B at a populated neighbor cell, if B has
+    //     NODE_HAZARD → A gets NODE_HAZARD_ADJACENT.
+    //
+    // Cost is O(N × 8) cell lookups + O(N × 8 × avg-stack-depth) flag
+    // checks. Well under 1ms for typical rooms. Reuses the same
+    // nodesByCell built for edge generation; no extra spatial indexing.
+    //
+    // Runs BEFORE the orphan pass so orphan precedence later can mask
+    // these flags visually without disturbing the underlying classification.
+    for (uint16_t i = 0; i < out->nodes.size(); i++) {
+        NavNode& a = out->nodes[i];
+        if (!(a.flags & NODE_WALKABLE)) continue;
+
+        CellKey aCell{ (int32_t)(int16_t)a.cellIdxX, (int32_t)(int16_t)a.cellIdxZ };
+
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                CellKey nCell{ aCell.x + dx, aCell.z + dz };
+                auto it = nodesByCell.find(nCell);
+                if (it == nodesByCell.end()) {
+                    // Empty neighbor cell → A is on a ledge / perimeter.
+                    a.flags |= NODE_EDGE;
+                    continue;
+                }
+                // Populated neighbor cell — scan its nodes for hazards.
+                for (uint16_t j : it->second) {
+                    if (out->nodes[j].flags & NODE_HAZARD) {
+                        a.flags |= NODE_HAZARD_ADJACENT;
+                        break; // one hazard neighbor is enough
+                    }
+                }
+            }
+        }
+    }
+
+    // ----- Orphan detection pass (workstream A, schema v2). ----------------
     //
     // The multi-cast column scan finds every floor at every visited XZ cell,
     // including stacked floors on top of walls / fences / scenery. The
@@ -1362,17 +1408,51 @@ static void AddVerticalPost(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
 static void BuildOverlayDrawData(const RoomNavData* data) {
     if (data == nullptr) return;
 
-    // Walkable nodes — green. Color precedence: HAZARD > UNDERWATER >
-    // STEEP_SLOPE > ORPHANED > WALKABLE, so each later group's continue
-    // clauses skip any node already drawn by an earlier higher-priority
-    // group.
+    // Walkable nodes — green. Color precedence (post-merge of A + B):
+    // HAZARD > UNDERWATER > STEEP_SLOPE > ORPHANED > HAZARD_ADJACENT >
+    // EDGE > WALKABLE. Each later group's continue clauses skip any node
+    // already drawn by an earlier higher-priority group. Orphan wins over
+    // HAZARD_ADJACENT/EDGE so an unreachable node is unambiguously gray
+    // regardless of its other walkable-flags.
     sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0xC8, 0x00, 0xFF));
     for (const NavNode& node : data->nodes) {
-        if (!(node.flags & NODE_WALKABLE)) continue;
-        if (node.flags & NODE_HAZARD)      continue;
-        if (node.flags & NODE_UNDERWATER)  continue;
-        if (node.flags & NODE_STEEP_SLOPE) continue;
-        if (node.flags & NODE_ORPHANED)    continue;
+        if (!(node.flags & NODE_WALKABLE))       continue;
+        if (node.flags & NODE_HAZARD)             continue;
+        if (node.flags & NODE_UNDERWATER)         continue;
+        if (node.flags & NODE_STEEP_SLOPE)        continue;
+        if (node.flags & NODE_ORPHANED)           continue;
+        if (node.flags & NODE_HAZARD_ADJACENT)    continue;
+        if (node.flags & NODE_EDGE)               continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+
+    // Edge nodes — darker green. Walkable nodes whose 8 XZ neighbor cells
+    // include at least one empty cell (ledge / room perimeter). Visualizes
+    // the boundary of the walkable region.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0x80, 0x00, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if (!(node.flags & NODE_WALKABLE))       continue;
+        if (node.flags & NODE_HAZARD)             continue;
+        if (node.flags & NODE_UNDERWATER)         continue;
+        if (node.flags & NODE_STEEP_SLOPE)        continue;
+        if (node.flags & NODE_ORPHANED)           continue;
+        if (node.flags & NODE_HAZARD_ADJACENT)    continue;
+        if (!(node.flags & NODE_EDGE))            continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+
+    // Hazard-adjacent nodes — yellow-green. Walkable nodes whose 8 XZ
+    // neighbor cells contain at least one node with NODE_HAZARD set. Reads
+    // as "caution: walkable but next to a hazard." Wins over NODE_EDGE
+    // because caution > edge per the polish wave plan.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xA0, 0xC0, 0x00, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if (!(node.flags & NODE_WALKABLE))         continue;
+        if (node.flags & NODE_HAZARD)               continue;
+        if (node.flags & NODE_UNDERWATER)           continue;
+        if (node.flags & NODE_STEEP_SLOPE)          continue;
+        if (node.flags & NODE_ORPHANED)             continue;
+        if (!(node.flags & NODE_HAZARD_ADJACENT))   continue;
         AddGroundQuad(sXluDl, sVtxDl, node.pos);
     }
 
