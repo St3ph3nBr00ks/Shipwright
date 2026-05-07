@@ -78,6 +78,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_AUTO_REFRESH_ANCHORS  CVAR_ENHANCEMENT("RoomNavData.AutoRefreshAnchorsOnSceneFlag")
 #define CVAR_ROOM_NAV_AUTO_FULL_RESCAN      CVAR_ENHANCEMENT("RoomNavData.AutoFullRescanOnSceneFlag")
 #define CVAR_ROOM_NAV_CRAWLSPACE            CVAR_ENHANCEMENT("RoomNavData.CrawlspaceDetection")
+#define CVAR_ROOM_NAV_DROP_ANCHOR           CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -196,6 +197,56 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
     return -1;
 }
 
+bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toPos) {
+    if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;
+
+    int fromIdx = FindNearestNode(data, fromPos);
+    int toIdx   = FindNearestNode(data, toPos);
+    if (fromIdx < 0 || toIdx < 0) return false;
+
+    // Reject orphan endpoints — by definition they're not reachable
+    // from the seed-rooted main graph. If the navigator's spawn or
+    // target is on an orphan island, no walkable path exists.
+    if (data->nodes[(size_t)fromIdx].flags & NODE_ORPHANED) return false;
+    if (data->nodes[(size_t)toIdx].flags   & NODE_ORPHANED) return false;
+
+    // Trivial case: same node.
+    if (fromIdx == toIdx) return true;
+
+    // BFS from fromIdx through the existing edges. Each edge is
+    // bidirectional in this graph (stored once but traversable both
+    // ways). Build a sparse adjacency list on the fly — for a
+    // one-shot reachability query the up-front cost is fine.
+    std::vector<std::vector<uint16_t>> adjacency(data->nodes.size());
+    for (const NavEdge& e : data->edges) {
+        if (e.fromIdx >= data->nodes.size() || e.toIdx >= data->nodes.size()) continue;
+        adjacency[e.fromIdx].push_back(e.toIdx);
+        adjacency[e.toIdx].push_back(e.fromIdx);
+    }
+
+    std::vector<bool> visited(data->nodes.size(), false);
+    std::deque<uint16_t> q;
+    visited[(size_t)fromIdx] = true;
+    q.push_back((uint16_t)fromIdx);
+
+    while (!q.empty()) {
+        uint16_t cur = q.front();
+        q.pop_front();
+        if (cur == (uint16_t)toIdx) return true;
+        for (uint16_t nb : adjacency[cur]) {
+            if (nb >= visited.size())  continue;
+            if (visited[nb])           continue;
+            // Skip orphan nodes — they shouldn't have outbound edges to
+            // non-orphan nodes anyway, but defensive belt: never let
+            // BFS traverse through an orphan island.
+            if (data->nodes[nb].flags & NODE_ORPHANED) continue;
+            visited[nb] = true;
+            q.push_back(nb);
+        }
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Scan dispatch. Commit 2 implements the lookup-then-scan FLOW; the actual
 // scan logic lands in commit 3 (multi-cast + node classification). Until
@@ -216,7 +267,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // shift is a single-byte addition in the flags field's slot). Existing
 // v1 .bin files become unreadable; TryLoadFromDisk's version-mismatch
 // branch silently regenerates them on next room entry.
-static constexpr uint16_t kCurrentSchemaVersion = 4;
+static constexpr uint16_t kCurrentSchemaVersion = 5;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -295,12 +346,14 @@ static void SaveToDisk(const RoomNavData& nav) {
     uint32_t climbCount      = (uint32_t)nav.climbAnchors.size();
     uint32_t ledgeCount      = (uint32_t)nav.ledgeAnchors.size();      // schema v3+
     uint32_t crawlspaceCount = (uint32_t)nav.crawlspaceAnchors.size(); // schema v4+
+    uint32_t dropCount       = (uint32_t)nav.dropAnchors.size();       // schema v5+
     uint32_t hazardCount     = (uint32_t)nav.hazardCentroids.size();
     WriteValue(f, nodeCount);
     WriteValue(f, edgeCount);
     WriteValue(f, climbCount);
     WriteValue(f, ledgeCount);
     WriteValue(f, crawlspaceCount);
+    WriteValue(f, dropCount);
     WriteValue(f, hazardCount);
 
     WriteVector(f, nav.nodes);
@@ -308,6 +361,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     WriteVector(f, nav.climbAnchors);
     WriteVector(f, nav.ledgeAnchors);
     WriteVector(f, nav.crawlspaceAnchors);
+    WriteVector(f, nav.dropAnchors);
     WriteVector(f, nav.hazardCentroids);
 
     if (!f.good()) {
@@ -333,7 +387,8 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     uint32_t scanTimestamp = 0;
     Vec3f bboxMin{}, bboxMax{};
     uint16_t gridRes = 0;
-    uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, ledgeCount = 0, crawlspaceCount = 0, hazardCount = 0;
+    uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, ledgeCount = 0,
+             crawlspaceCount = 0, dropCount = 0, hazardCount = 0;
 
     if (!ReadValue(f, magic) || magic != kMagic) {
         SPDLOG_WARN("[RoomNav] LoadFromDisk: magic mismatch for {} (got 0x{:08x}); regenerating",
@@ -361,6 +416,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadValue(f, climbCount))      return;
     if (!ReadValue(f, ledgeCount))      return;
     if (!ReadValue(f, crawlspaceCount)) return;
+    if (!ReadValue(f, dropCount))       return;
     if (!ReadValue(f, hazardCount))     return;
 
     if (!ReadVector(f, out->nodes,             nodeCount))       return;
@@ -368,6 +424,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadVector(f, out->climbAnchors,      climbCount))      return;
     if (!ReadVector(f, out->ledgeAnchors,      ledgeCount))      return;
     if (!ReadVector(f, out->crawlspaceAnchors, crawlspaceCount)) return;
+    if (!ReadVector(f, out->dropAnchors,       dropCount))       return;
     if (!ReadVector(f, out->hazardCentroids,   hazardCount))     return;
 
     out->magic           = magic;
@@ -1003,6 +1060,112 @@ static void DetectCrawlspaces(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Drop anchor detection. Symmetric to ledge-grab detection but for
+// descent — pairs of (highPos, landingPos) where a navigator can step
+// off and safely fall to the lower position.
+//
+// Detection: for each pair of walkable nodes (A, B) where:
+//   - A is HIGHER than B by [30, kDropMaxDeltaY] (above step-up;
+//     within survivable fall distance)
+//   - XZ distance within ~80u (drop is mostly downward; large lateral
+//     drops require explicit jump mechanics not modeled here)
+//   - MovementClear from A to B SUCCEEDS (no wall in between — opposite
+//     of the ledge predicate)
+// Register a DropAnchor (highPos = A.pos, landingPos = B.pos).
+//
+// Cluster duplicates by proximity at both endpoints (same shape as
+// ledge clustering).
+//
+// Phase 1: detection + viz only. Phase 2 wires consumers (autonomous
+// nav for AI Invader / similar) to actually USE drop anchors as
+// descent edges in pathfinding. NavTraits gates per-navigator opt-in;
+// adult Link can survive larger drops than child Link.
+// ---------------------------------------------------------------------------
+
+static void DetectDropAnchors(
+    RoomNavData* out,
+    PlayState* play,
+    const std::unordered_map<CellKey, std::vector<uint16_t>, CellKeyHash>& nodesByCell)
+{
+    if (CVarGetInteger(CVAR_ROOM_NAV_DROP_ANCHOR, 0) == 0) return;
+
+    // Drop range: above step-up height (covered by walkable edges
+    // already), below survivable-fall height. 200u is roughly child
+    // Link's pain threshold; adult Link can take larger. Could be
+    // CVar-tuned later if needed.
+    constexpr float kDropMinDeltaY     = 30.0f;
+    constexpr float kDropMaxDeltaY     = 200.0f;
+    constexpr float kDropMaxXZSq       = 80.0f * 80.0f;
+    constexpr float kClusterRadiusSq   = 40.0f * 40.0f;
+
+    size_t added = 0, merged = 0;
+
+    for (uint16_t i = 0; i < out->nodes.size(); i++) {
+        const NavNode& a = out->nodes[i];
+        if (!(a.flags & NODE_WALKABLE)) continue;
+
+        CellKey aCell{ (int32_t)(int16_t)a.cellIdxX, (int32_t)(int16_t)a.cellIdxZ };
+
+        // 3×3 cell neighborhood. Same-cell pairs catch verticals where
+        // landing is directly below the high position.
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                CellKey nCell{ aCell.x + dx, aCell.z + dz };
+                auto it = nodesByCell.find(nCell);
+                if (it == nodesByCell.end()) continue;
+                for (uint16_t j : it->second) {
+                    if (j == i) continue;
+                    const NavNode& b = out->nodes[j];
+                    if (!(b.flags & NODE_WALKABLE)) continue;
+
+                    // b is the landing candidate (must be LOWER than a).
+                    f32 dy = a.pos.y - b.pos.y;
+                    if (dy < kDropMinDeltaY || dy > kDropMaxDeltaY) continue;
+
+                    f32 dxf = b.pos.x - a.pos.x;
+                    f32 dzf = b.pos.z - a.pos.z;
+                    if (dxf*dxf + dzf*dzf > kDropMaxXZSq) continue;
+
+                    // Drop predicate: line from high to low must be
+                    // CLEAR (no wall blocking the fall path). Opposite
+                    // of the ledge-grab predicate which requires a
+                    // wall between approach and top.
+                    if (!MovementClear(a.pos, b.pos, play)) continue;
+
+                    // Cluster: skip if both endpoints match an existing
+                    // anchor's endpoints within radius.
+                    bool isDuplicate = false;
+                    for (const DropAnchor& existing : out->dropAnchors) {
+                        f32 hx = existing.highPos.x    - a.pos.x;
+                        f32 hz = existing.highPos.z    - a.pos.z;
+                        f32 lx = existing.landingPos.x - b.pos.x;
+                        f32 lz = existing.landingPos.z - b.pos.z;
+                        if ((hx*hx + hz*hz < kClusterRadiusSq) &&
+                            (lx*lx + lz*lz < kClusterRadiusSq)) {
+                            isDuplicate = true;
+                            merged++;
+                            break;
+                        }
+                    }
+                    if (isDuplicate) continue;
+
+                    DropAnchor anchor{};
+                    anchor.highPos    = a.pos;
+                    anchor.landingPos = b.pos;
+                    out->dropAnchors.push_back(anchor);
+                    added++;
+                }
+            }
+        }
+    }
+
+    if (added > 0 || merged > 0) {
+        SPDLOG_INFO("[RoomNav] Drop-anchor detection: {} anchors added, {} duplicates merged",
+                    added, merged);
+    }
+}
+
 // Classify a single floor candidate as a NavNode and append to nav.
 // Returns the index of the appended node, or -1 if the candidate was
 // rejected entirely. v1 classifies WALKABLE / STEEP_SLOPE only; HAZARD
@@ -1620,6 +1783,12 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     // a crawlspace volume and inject the crawl input.
     DetectCrawlspaces(out, play, visited);
 
+    // Drop anchor detection — symmetric to ledge-grab but for descent.
+    // Pairs walkable nodes where falling from high to low is safe and
+    // unobstructed. Future autonomous-nav consumers use these as
+    // descent edges in pathfinding.
+    DetectDropAnchors(out, play, nodesByCell);
+
     // Climb-flag population (polish wave commit 4) — for each climb anchor
     // discovered above, find the nearest walkable nav-node to its basePos
     // and topPos and tag them NODE_CLIMB_BASE / NODE_CLIMB_TOP. Lets nav
@@ -1649,13 +1818,13 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
     SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}) "
-                "nodes={} edges={} climbs={} ledges={} crawls={} cells={} seeds={} "
+                "nodes={} edges={} climbs={} ledges={} crawls={} drops={} cells={} seeds={} "
                 "orphans={} recovered={} scanMs={} edgeMs={} totalMs={}",
                 sceneNum, (int)roomNum,
                 playerPos.x, playerPos.y, playerPos.z,
                 out->nodes.size(), out->edges.size(),
                 out->climbAnchors.size(), out->ledgeAnchors.size(),
-                out->crawlspaceAnchors.size(),
+                out->crawlspaceAnchors.size(), out->dropAnchors.size(),
                 visited.size(), 1 + extraSeeds, orphanCount,
                 recoveredOrphanCount, scanMs, edgeMs, totalMsFinal);
 
@@ -1688,6 +1857,15 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
                     i,
                     c.entryPos.x,    c.entryPos.y,    c.entryPos.z,
                     c.entryNormal.x, c.entryNormal.y, c.entryNormal.z);
+    }
+    for (size_t i = 0; i < out->dropAnchors.size(); i++) {
+        const DropAnchor& d = out->dropAnchors[i];
+        SPDLOG_INFO("[RoomNav]   DropAnchor[{}] highPos=({:.0f},{:.0f},{:.0f}) "
+                    "landingPos=({:.0f},{:.0f},{:.0f}) deltaY={:.0f}",
+                    i,
+                    d.highPos.x,    d.highPos.y,    d.highPos.z,
+                    d.landingPos.x, d.landingPos.y, d.landingPos.z,
+                    d.highPos.y - d.landingPos.y);
     }
 }
 
@@ -2444,6 +2622,18 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AddGroundLineQuad(sXluDl, sVtxDl, anchor.entryPos, tip);
     }
 
+    // Drop anchors — pink. Distinct from climb-yellow (climb-up),
+    // ledge-purple (jump-grab), and crawlspace-cyan (crawl-through).
+    // Ground quad at high position + ground quad at landing + thin
+    // vertical post connecting them so the descent direction is
+    // visible at a glance.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0x80, 0xC0, 0xFF));
+    for (const DropAnchor& anchor : data->dropAnchors) {
+        AddGroundQuad(sXluDl, sVtxDl, anchor.highPos);
+        AddGroundQuad(sXluDl, sVtxDl, anchor.landingPos);
+        AddVerticalPost(sXluDl, sVtxDl, anchor.landingPos, anchor.highPos);
+    }
+
     // Climb-base / climb-top flagged nodes (polish wave commit 4) — bright
     // yellow ring overlay at every node carrying NODE_CLIMB_BASE or
     // NODE_CLIMB_TOP. Slightly larger than ordinary node quads
@@ -2592,6 +2782,7 @@ static void OnDebugDrawRender() {
                    + data->climbAnchors.size() * 8 // climb-flag overlay (2 nodes × 4 verts)
                    + data->ledgeAnchors.size() * 16  // ledge: 2 ground quads + 2 perp posts
                    + data->crawlspaceAnchors.size() * 8  // entry quad + direction line
+                   + data->dropAnchors.size() * 16    // drop: 2 ground quads + 2 perp posts
                    + data->hazardCentroids.size() * 4
                    + data->rejectedFloorPositions.size() * 8);
     // Gfx commands: 2 per node-quad / edge-quad / hazard-centroid quad; 8
@@ -2609,6 +2800,7 @@ static void OnDebugDrawRender() {
                    + data->climbAnchors.size() * 4 // climb-flag overlay (2 nodes × 2 Gfx)
                    + data->ledgeAnchors.size() * 8  // ledge: same shape as climb anchor
                    + data->crawlspaceAnchors.size() * 4  // entry quad + direction line
+                   + data->dropAnchors.size() * 8    // drop: same shape as ledge
                    + data->hazardCentroids.size() * 2
                    + data->rejectedFloorPositions.size() * 4
                    + 64);
@@ -2717,6 +2909,7 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     nav.climbAnchors.clear();
     nav.ledgeAnchors.clear();
     nav.crawlspaceAnchors.clear();
+    nav.dropAnchors.clear();
 
     // Reconstruct visited + nodesByCell from persistent node data.
     std::unordered_set<CellKey, CellKeyHash> visited;
@@ -2736,6 +2929,7 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     DetectClimbAnchorsViaSurfaceFlags(&nav, play, visited);
     DetectLedgeAnchors(&nav, play, nodesByCell);
     DetectCrawlspaces(&nav, play, visited);
+    DetectDropAnchors(&nav, play, nodesByCell);
 
     // Re-tag climb-base / climb-top flags from the refreshed anchors.
     for (const ClimbAnchor& anchor : nav.climbAnchors) {

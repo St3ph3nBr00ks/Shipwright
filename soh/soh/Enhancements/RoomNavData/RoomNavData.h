@@ -111,6 +111,30 @@ struct CrawlspaceAnchor {
     Vec3f entryNormal;   // wall normal (direction OUT OF the wall — face this way to enter)
 };
 
+// Drop anchor — symmetric to ClimbAnchor / LedgeAnchor but for descent.
+// A drop is a vertical traversal where a navigator standing at highPos
+// can step off (or fall) and safely land at landingPos. Unlike a ledge
+// anchor (where a wall blocks the line between approach and top), a
+// drop anchor's high→low line is CLEAR — the navigator simply walks off
+// the edge.
+//
+// Detection criteria:
+//   - highPos.y - landingPos.y in [30, 200] (above step-up height,
+//     within survivable fall distance for child Link)
+//   - XZ distance within ~80u (drop is mostly downward; large lateral
+//     drops are rare and require explicit jump mechanics)
+//   - MovementClear from highPos to landingPos SUCCEEDS (no wall in
+//     between — opposite of the ledge predicate)
+//
+// Consumer use: future autonomous navigators (AI Invader) descending
+// from a high walkable area to a lower one. Pairs naturally with
+// climb anchors for round-trip routes (climb up here → drop down
+// there). NavTraits gates per-navigator opt-in.
+struct DropAnchor {
+    Vec3f highPos;       // walkable position at the top edge
+    Vec3f landingPos;    // walkable position where navigator lands
+};
+
 struct RoomNavData {
     // Header
     uint32_t magic = 0x52564E41; // 'RNAV' little-endian — file-format identifier
@@ -125,6 +149,7 @@ struct RoomNavData {
     std::vector<ClimbAnchor>      climbAnchors;
     std::vector<LedgeAnchor>      ledgeAnchors;       // schema v3+
     std::vector<CrawlspaceAnchor> crawlspaceAnchors;  // schema v4+
+    std::vector<DropAnchor>       dropAnchors;        // schema v5+
     std::vector<Vec3f>            hazardCentroids;
 
     // Scan metadata
@@ -168,6 +193,26 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // True when both gEnhancements.RoomNavData.Enabled is on AND the system
 // has been initialized. Used as the master gate by all Phase 1+2 features.
 bool IsEnabled();
+
+// True if there's a path through the nav graph from `fromPos` to
+// `toPos`. BFS over the existing edges from the node nearest to
+// `fromPos`; checks whether the node nearest to `toPos` is in the
+// reachable set.
+//
+// Phase 1: simple yes/no reachability (no movement-mode awareness).
+// Doesn't currently distinguish climb/ledge/crawlspace anchors —
+// reachability via those requires consumer-side traversal logic that
+// isn't part of the basic graph. Phase 2 may extend this with edge
+// type tagging for state-aware reachability.
+//
+// Use case: AI directors validating that a proposed spawn position
+// can reach the player before committing to spawn. Returns false for
+// orphaned regions (NODE_ORPHANED nodes are excluded from BFS).
+//
+// Cost: O(N + E) per query. Rooms typically have ~1100 nodes and
+// ~3500 edges, so a query runs in ~5-15ms. Suitable for one-shot
+// spawn validation; cache results if calling repeatedly.
+bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toPos);
 
 // Drops the cached nav data for the current (scene, room) — both the
 // in-memory cache entry and the on-disk .bin if present — and re-triggers

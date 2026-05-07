@@ -2083,6 +2083,30 @@ void SohMenu::AddMenuEnhancements() {
             "with no static-wall geometry.\n\n"
             "Apply via Force Rescan after changing."));
 
+    AddWidget(path, "Drop Anchor Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, scans for walkable-node pairs separated by 30-200u "
+            "of vertical drop with no wall between them (the line from "
+            "high to low is clear). These are descent points where a "
+            "navigator can step off and safely fall to a lower walkable "
+            "area.\n\n"
+            "Symmetric to ledge-grab anchors (which require a wall "
+            "between approach and top — that's the rim Link grabs). "
+            "Drop anchors instead require NO wall — the navigator just "
+            "walks off the edge.\n\n"
+            "Visualized in the debug overlay as pink ground quads "
+            "(high + landing) with a thin connecting post showing the "
+            "fall direction.\n\n"
+            "Phase 1 implements detection + viz only. Phase 2 wires "
+            "consumers (autonomous nav for AI Invader) to use drops as "
+            "descent edges in pathfinding.\n\n"
+            "Schema bumps to v5 when first scan runs with this on; "
+            "existing v4 .bin files regenerate. Apply via Force Rescan. "
+            "Default: off."));
+
     AddWidget(path, "Crawlspace Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.CrawlspaceDetection"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
