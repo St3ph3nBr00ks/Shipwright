@@ -169,6 +169,10 @@ extern "C" bool Anchor_IsAnyPeerOnDyna(Actor* dynaActor) {
 // Called from EnKarebaba_DeadItemDrop in z_en_karebaba.c.
 extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    // Host gate — see Anchor_ShouldSuppressDekubabaDrop for the field-
+    // test rationale. Host is the canonical drop source; suppressing on
+    // host eliminates the OnActorSpawn(EN_ITEM00) broadcast entirely.
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     // OR with networkDriveDying — engages the moment ENEMY_STATE
     // carries health<=0 from host, before the explicit ENEMY_DEFEATED
@@ -212,6 +216,24 @@ bool ShouldLogStateChange(uint32_t netId, int16_t cur, int16_t net, bool blocked
 extern "C" bool Anchor_ShouldSuppressDekunutsDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    // Host is the canonical drop source — its Item_DropCollectible call
+    // fires OnActorSpawn(EN_ITEM00) which broadcasts ITEM_DROP_SYNC.
+    // Suppressing on host eliminates the broadcast entirely. The
+    // suppressor's whole purpose is "stop peer from spawning a duplicate
+    // local drop alongside the broadcast"; host has no duplicate to
+    // suppress.
+    //
+    // Field log 2026-05-07 (Inside Deku Tree, b7025ac20): peer killed
+    // dekubaba via DAMAGE_ENEMY routing; host's local OnEnemyDefeat
+    // hadn't fired yet by the time peer's "Non-host route-to-host"
+    // defeat packet arrived. Host took the `triggering natural death
+    // cycle` branch (SetupDyingNet on host's still-alive actor), which
+    // wrote phase=DyingByNetwork on host. The suppressor's phase check
+    // then returned true on host, killing host's vanilla ShrinkDie drop
+    // call and its OnActorSpawn(EN_ITEM00) broadcast — no nuts on
+    // either client. The host gate keeps host's drop path open
+    // regardless of how phase got written.
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     // OR with networkDriveDying — engages the moment ENEMY_STATE
     // carries health<=0 from host, before the explicit ENEMY_DEFEATED
@@ -238,26 +260,16 @@ extern "C" bool Anchor_ShouldSuppressHintnutsDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
     if (gPlayState == nullptr) return false;
-    // Defense-in-depth against the logs-216 actor-flood crash: peers
-    // (non-room-hosts) must never spawn the recovery heart. Host's
-    // local SetupLeave fires the canonical Actor_Spawn(EnItem00); the
-    // resulting heart replicates to peer through standard item-spawn
-    // flow. Without this gate, any code path that calls SetupLeave on
-    // peer (today's DIALOG_END routing prevents the Talk→Leave path,
-    // but future paths could reach SetupLeave directly) would dup the
-    // heart per call and overflow MISC actor list.
-    if (!::SceneAuthority::IsMyCurrentRoomHost()) return true;
-    // Phase-based suppression — preserved as the original guard for
-    // network-driven death cycles (not currently exercised by Hintnuts;
-    // kept for when a future change routes Leave through ENEMY_DEFEATED).
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    // OR with networkDriveDying — engages the moment ENEMY_STATE
-    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
-    // packet arrives. Closes the peer-side dual-drop race documented
-    // in EnemyNetId::networkDriveDying (Anchor.h).
-    return ext != nullptr &&
-           (ext->networkDriveDying ||
-            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
+    // Two-branch decision after the 2026-05-07 host-gate fix:
+    //   - Host: always run the drop. Host's Item_DropCollectible
+    //     fires OnActorSpawn(EN_ITEM00) → ITEM_DROP_SYNC broadcast,
+    //     and peer respawns the heart via the receive path.
+    //   - Peer: always suppress. Defense-in-depth against the
+    //     logs-216 actor-flood crash — any code path that reached
+    //     SetupLeave on peer (DIALOG_END routing prevents the
+    //     Talk→Leave path today, but future paths could) would
+    //     dup the heart per call and overflow MISC actor list.
+    return !::SceneAuthority::IsMyCurrentRoomHost();
 }
 
 // Hintnut state machine is host-authoritative (room host runs the AI;
@@ -497,6 +509,24 @@ extern "C" int Anchor_BossGomaConsumePeerSignaled(Actor* boss) {
 extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    // Host is the canonical drop source — its Item_DropCollectible call
+    // fires OnActorSpawn(EN_ITEM00) which broadcasts ITEM_DROP_SYNC.
+    // Suppressing on host eliminates the broadcast entirely. The
+    // suppressor's whole purpose is "stop peer from spawning a duplicate
+    // local drop alongside the broadcast"; host has no duplicate to
+    // suppress.
+    //
+    // Field log 2026-05-07 (Inside Deku Tree, b7025ac20): peer killed
+    // dekubaba via DAMAGE_ENEMY routing; host's local OnEnemyDefeat
+    // hadn't fired yet by the time peer's "Non-host route-to-host"
+    // defeat packet arrived. Host took the `triggering natural death
+    // cycle` branch (SetupDyingNet on host's still-alive actor), which
+    // wrote phase=DyingByNetwork on host. The suppressor's phase check
+    // then returned true on host, killing host's vanilla ShrinkDie drop
+    // call and its OnActorSpawn(EN_ITEM00) broadcast — no nuts on
+    // either client. The host gate keeps host's drop path open
+    // regardless of how phase got written.
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     // OR with networkDriveDying — engages the moment ENEMY_STATE
     // carries health<=0 from host, before the explicit ENEMY_DEFEATED
@@ -519,6 +549,24 @@ extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
 extern "C" bool Anchor_ShouldSuppressDekubabaDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    // Host is the canonical drop source — its Item_DropCollectible call
+    // fires OnActorSpawn(EN_ITEM00) which broadcasts ITEM_DROP_SYNC.
+    // Suppressing on host eliminates the broadcast entirely. The
+    // suppressor's whole purpose is "stop peer from spawning a duplicate
+    // local drop alongside the broadcast"; host has no duplicate to
+    // suppress.
+    //
+    // Field log 2026-05-07 (Inside Deku Tree, b7025ac20): peer killed
+    // dekubaba via DAMAGE_ENEMY routing; host's local OnEnemyDefeat
+    // hadn't fired yet by the time peer's "Non-host route-to-host"
+    // defeat packet arrived. Host took the `triggering natural death
+    // cycle` branch (SetupDyingNet on host's still-alive actor), which
+    // wrote phase=DyingByNetwork on host. The suppressor's phase check
+    // then returned true on host, killing host's vanilla ShrinkDie drop
+    // call and its OnActorSpawn(EN_ITEM00) broadcast — no nuts on
+    // either client. The host gate keeps host's drop path open
+    // regardless of how phase got written.
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     // OR with networkDriveDying — engages the moment ENEMY_STATE
     // carries health<=0 from host, before the explicit ENEMY_DEFEATED
@@ -535,6 +583,24 @@ extern "C" bool Anchor_ShouldSuppressDekubabaDrop(Actor* actor) {
 extern "C" bool Anchor_ShouldSuppressEnSwDrop(Actor* actor) {
     if (actor == nullptr) return false;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    // Host is the canonical drop source — its Item_DropCollectible call
+    // fires OnActorSpawn(EN_ITEM00) which broadcasts ITEM_DROP_SYNC.
+    // Suppressing on host eliminates the broadcast entirely. The
+    // suppressor's whole purpose is "stop peer from spawning a duplicate
+    // local drop alongside the broadcast"; host has no duplicate to
+    // suppress.
+    //
+    // Field log 2026-05-07 (Inside Deku Tree, b7025ac20): peer killed
+    // dekubaba via DAMAGE_ENEMY routing; host's local OnEnemyDefeat
+    // hadn't fired yet by the time peer's "Non-host route-to-host"
+    // defeat packet arrived. Host took the `triggering natural death
+    // cycle` branch (SetupDyingNet on host's still-alive actor), which
+    // wrote phase=DyingByNetwork on host. The suppressor's phase check
+    // then returned true on host, killing host's vanilla ShrinkDie drop
+    // call and its OnActorSpawn(EN_ITEM00) broadcast — no nuts on
+    // either client. The host gate keeps host's drop path open
+    // regardless of how phase got written.
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     // OR with networkDriveDying — engages the moment ENEMY_STATE
     // carries health<=0 from host, before the explicit ENEMY_DEFEATED
