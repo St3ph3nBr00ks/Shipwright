@@ -777,6 +777,21 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     constexpr float kSlopePenalty = 2.0f;  // discourage routing through steep
     constexpr float kHazardPenalty = 5.0f; // strongly discourage hazard (commit 5 sets HAZARD flag)
 
+    // Step-height edge gate. Reject candidate edges whose endpoint Y delta
+    // exceeds Link's step-up height. Defends against a class of
+    // "physically walkable but bad nav target" geometry that the
+    // FloorActorRejectList allowlist doesn't cover: small ledges, scene-
+    // static furniture lacking a dedicated actor, etc. Nodes still get
+    // scanned so the data exists; they simply don't get edges connecting
+    // them to the surrounding ground level, leaving them as unreachable
+    // graph islands. Consumers (FindBestReachableSubgoalNode) treat
+    // unreachable nodes as no-ops, which is the desired behaviour.
+    //
+    // 30u matches Link's vanilla step-up tolerance — anything taller
+    // requires explicit climb input from the player and shouldn't be a
+    // ground-walk edge. Tune downward if too permissive in field tests.
+    constexpr float kMaxStepUpHeight = 30.0f;
+
     for (uint16_t i = 0; i < out->nodes.size(); i++) {
         const NavNode& a = out->nodes[i];
         CellKey aCell{ (int32_t)(int16_t)a.cellIdxX, (int32_t)(int16_t)a.cellIdxZ };
@@ -797,6 +812,10 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
                 for (uint16_t j : it->second) {
                     if (j <= i) continue; // dedupe (only insert each undirected edge once)
                     const NavNode& b = out->nodes[j];
+                    // Step-height gate: reject before MovementClear (the
+                    // line test is O(scene polys); the Y comparison is
+                    // O(1) — failing fast keeps the inner-loop cost down).
+                    if (std::fabs(b.pos.y - a.pos.y) > kMaxStepUpHeight) continue;
                     if (!MovementClear(a.pos, b.pos, play)) continue;
 
                     float dxf = b.pos.x - a.pos.x;
