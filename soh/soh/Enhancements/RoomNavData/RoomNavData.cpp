@@ -554,19 +554,34 @@ static Vec3f CellCenterWorld(const CellKey& cell, const Vec3f& bboxMin) {
 // Path B handles climb surfaces baked into static scene collision.
 // ---------------------------------------------------------------------------
 
-// Wall-flag bit semantics (verified against z_bgcheck.c:4022-4028 and the
-// `CVAR_CHEAT("ClimbEverything")` cheat):
+// Wall-flag bit semantics (verified against z_bgcheck.c:4022-4028, the
+// `CVAR_CHEAT("ClimbEverything")` cheat, and field-test diagnostic data
+// captured for Inside Deku Tree main entrance ladder log 9):
+//
 //   func_80041D94(...)   → 5-bit wall-property INDEX (bits 21-25 of data[0])
 //   D_80119D90[index]    → wall-flag BITMASK (lookup table at z_bgcheck.c:32)
 //   func_80041DB8(...)   → returns the bitmask, with `(1 << 3)` OR'd in when
 //                          ClimbEverything is on.
 //
-// The cheat adds (1 << 3) to make every wall climbable, so bit 3 of the
-// returned bitmask IS the "this wall is a ladder/climbable surface" flag.
-// In the lookup table, only index 4 (value 8 = 1 << 3) carries that bit
-// natively — that's the wall-property index used by ladders and vine
-// walls in scene authoring.
-static constexpr s32 kWallFlagClimbable = (1 << 3);
+// Lookup table values for indices 0-7 (rest are 0):
+//   idx 0 → 0   (solid wall)
+//   idx 1 → 1   (bit 0 — no-clip / curtain pass-through)
+//   idx 2 → 3   (bits 0+1 — climbable; observed on Inside Deku Tree
+//                main entrance ladder polys)
+//   idx 3 → 5   (bits 0+2 — climbable; also observed on the same ladder)
+//   idx 4 → 8   (bit 3 — climbable; used by vine walls and the
+//                ClimbEverything cheat OR's this in to make any wall
+//                climbable)
+//   idx 5 → 16  (bit 4 — unknown; may catch additional climbables)
+//   idx 6 → 32  (bit 5 — unknown)
+//   idx 7 → 64  (bit 6 — unknown)
+//
+// The climbable mask catches indices 2, 3, AND 4 by matching ANY of
+// bits 1, 2, OR 3. We deliberately skip bit 0 alone (idx 1) because
+// that's no-clip-only without an additional climb bit. If a future
+// field test surfaces a climbable surface using bits 4+, we extend
+// the mask further.
+static constexpr s32 kWallFlagClimbableMask = (1 << 1) | (1 << 2) | (1 << 3); // 0x0E
 
 // Cluster radius for merging adjacent climbable polys into one anchor.
 // Vine walls are typically multi-poly meshes; a radius of ~30u (one grid
@@ -672,8 +687,10 @@ static void DetectClimbAnchorsViaSurfaceFlags(
             diagLoggedWalls++;
         }
 
-        // Climbable-flag check (production filter).
-        if ((wallFlags & kWallFlagClimbable) == 0) continue;
+        // Climbable-flag check (production filter). Matches any of
+        // wall-property indices 2, 3, or 4 — see kWallFlagClimbableMask
+        // declaration above for index→bitmask semantics.
+        if ((wallFlags & kWallFlagClimbableMask) == 0) continue;
 
         // If only the diagnostic CVar is on (production Path B off),
         // we've already logged this wall — skip the anchor-creation
