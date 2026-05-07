@@ -31,7 +31,7 @@ namespace AnchorNavRoom {
 // Per-node flags. Bitfield in NavNode::flags.
 // ---------------------------------------------------------------------------
 
-enum NodeFlags : uint8_t {
+enum NodeFlags : uint16_t {
     NODE_NONE            = 0,
     NODE_WALKABLE        = 0x01, // floor exists, slope ≤ 2, no hazard, no water
     NODE_EDGE            = 0x02, // walkable AND adjacent to non-walkable cell (ledge)
@@ -41,6 +41,8 @@ enum NodeFlags : uint8_t {
     NODE_UNDERWATER      = 0x20, // submerged below water surface (swimming-capable navigators only)
     NODE_STEEP_SLOPE     = 0x40, // SurfaceType_GetSlope == 3, transient pass-through (slide-down recovery target)
     NODE_HAZARD_ADJACENT = 0x80, // walkable AND adjacent to a hazard cell (used for cautious pathing)
+    NODE_ORPHANED        = 0x100, // walkable but no edges connect this node to any seed-rooted component
+                                  // (stacked floor on top of wall/fence with no traversable path from seeds)
 };
 
 // ---------------------------------------------------------------------------
@@ -49,7 +51,7 @@ enum NodeFlags : uint8_t {
 
 struct NavNode {
     Vec3f pos;
-    uint8_t flags;       // bitfield of NodeFlags
+    uint16_t flags;      // bitfield of NodeFlags (widened to uint16 in schema v2 for NODE_ORPHANED)
     uint16_t cellIdxX;   // grid cell X (for spatial lookup)
     uint16_t cellIdxZ;   // grid cell Z
 };

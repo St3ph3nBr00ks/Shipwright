@@ -185,7 +185,13 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // or partial-write corruption.
 // ---------------------------------------------------------------------------
 
-static constexpr uint16_t kCurrentSchemaVersion = 1;
+// Schema v1 → v2 (workstream A polish): NavNode::flags widened from uint8_t
+// to uint16_t to make room for NODE_ORPHANED (0x100). The struct grows by
+// 1 byte (the cell indices were already 16-bit aligned, so the layout
+// shift is a single-byte addition in the flags field's slot). Existing
+// v1 .bin files become unreadable; TryLoadFromDisk's version-mismatch
+// branch silently regenerates them on next room entry.
+static constexpr uint16_t kCurrentSchemaVersion = 2;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -504,7 +510,7 @@ static int ClassifyAndAddNode(RoomNavData* nav,
                               const CellKey& cell) {
     if (floorPoly == nullptr) return -1;
 
-    uint8_t flags = 0;
+    uint16_t flags = 0;
 
     // Slope filter — reject 3 (very-steep) for walkable destinations,
     // tag as STEEP_SLOPE for transient pass-through (slide-down recovery).
@@ -673,6 +679,15 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     std::deque<CellKey> pending;
     pending.push_back(seedCell);
 
+    // Stash every seed cell pushed to `pending` so the post-edge orphan
+    // pass below can identify which scanned nodes are reachable from a
+    // seed (and which are not). We use the stashed list rather than
+    // re-walking the actor lists at orphan-pass time because actors may
+    // move or despawn between seed-time and orphan-pass-time, producing a
+    // different cell set. Per handoff plan §5 commit 1.
+    std::vector<CellKey> seedCells;
+    seedCells.push_back(seedCell);
+
     // Multi-seed: every actor whose room field matches the room being
     // scanned (or is global, room == -1) becomes an additional seed.
     // Required because OoT engine rooms can contain multiple sub-chambers
@@ -699,6 +714,7 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
             if (a->room == roomNum || a->room == -1) {
                 CellKey actorCell = CellKeyForXZ(a->world.pos.x, a->world.pos.z, out->bboxMin);
                 pending.push_back(actorCell);
+                seedCells.push_back(actorCell);
                 extraSeeds++;
             }
             a = a->next;
@@ -877,6 +893,79 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
         std::chrono::steady_clock::now() - edgeStart).count();
     auto totalMs = scanMs + edgeMs;
 
+    // ----- Orphan detection pass (schema v2). -------------------------------
+    //
+    // The multi-cast column scan finds every floor at every visited XZ cell,
+    // including stacked floors on top of walls / fences / scenery. The
+    // floodfill never traverses to those upper floors (its MovementClear
+    // gate stops at the wall), so the resulting nodes have no edges
+    // connecting them to the main graph. They would mislead nav consumers
+    // (FindBestReachableSubgoalNode) if treated as legitimate targets.
+    //
+    // Algorithm (handoff plan §5 commit 1):
+    //   1. Pick the first node at each stashed seed cell as a "seed-rooted"
+    //      starting point. Use the nodesByCell spatial index built for edge
+    //      generation; it's still in scope here.
+    //   2. BFS via the edges vector from every seed-rooted node. Edges are
+    //      undirected (each {fromIdx, toIdx} traverses both ways).
+    //   3. For every node not visited by the BFS, set NODE_ORPHANED.
+    //
+    // Cost: O(|nodes| + |edges|). For a typical room (~1100 nodes, ~3500
+    // edges) this is ~4600 ops, negligible compared to the line tests in
+    // edge generation.
+    auto orphanStart = std::chrono::steady_clock::now();
+    size_t orphanCount = 0;
+    {
+        // Build adjacency list from the (undirected) edges vector.
+        std::vector<std::vector<uint16_t>> adjacency(out->nodes.size());
+        for (const NavEdge& e : out->edges) {
+            if (e.fromIdx >= out->nodes.size() || e.toIdx >= out->nodes.size()) continue;
+            adjacency[e.fromIdx].push_back(e.toIdx);
+            adjacency[e.toIdx].push_back(e.fromIdx);
+        }
+
+        std::vector<bool> visitedNode(out->nodes.size(), false);
+        std::deque<uint16_t> bfs;
+
+        // Enqueue the first node at each seed cell as a BFS root.
+        for (const CellKey& sc : seedCells) {
+            auto it = nodesByCell.find(sc);
+            if (it == nodesByCell.end()) continue;
+            if (it->second.empty()) continue;
+            uint16_t rootIdx = it->second.front();
+            if (rootIdx >= out->nodes.size()) continue;
+            if (visitedNode[rootIdx]) continue;
+            visitedNode[rootIdx] = true;
+            bfs.push_back(rootIdx);
+        }
+
+        // Standard BFS over the bidirectional adjacency list.
+        while (!bfs.empty()) {
+            uint16_t cur = bfs.front();
+            bfs.pop_front();
+            for (uint16_t nb : adjacency[cur]) {
+                if (nb >= visitedNode.size()) continue;
+                if (visitedNode[nb]) continue;
+                visitedNode[nb] = true;
+                bfs.push_back(nb);
+            }
+        }
+
+        // Flag every unvisited node. We don't drop them — keeping the data
+        // means consumers can still reason about "is there a floor here?"
+        // even when the graph layer can't reach the node.
+        for (size_t i = 0; i < out->nodes.size(); i++) {
+            if (!visitedNode[i]) {
+                out->nodes[i].flags |= NODE_ORPHANED;
+                orphanCount++;
+            }
+        }
+    }
+    auto orphanMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - orphanStart).count();
+    (void)totalMs;       // shadowed by totalMsFinal below; keep symbol for callers
+    (void)orphanMs;      // exposed via totalMsFinal aggregate; not separately logged
+
     // Climb anchor detection (commit 6) — Path A scene-actor allowlist.
     // Iterates ACTORCAT_BG and ACTORCAT_PROP actor lists for known
     // climbable scene actors and records (basePos, topPos) anchors.
@@ -887,9 +976,9 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
     SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} nodes={} edges={} climbs={} cells={} "
-                "seeds={} scanMs={} edgeMs={} totalMs={}",
+                "seeds={} orphans={} scanMs={} edgeMs={} totalMs={}",
                 sceneNum, (int)roomNum, out->nodes.size(), out->edges.size(),
-                out->climbAnchors.size(), visited.size(), 1 + extraSeeds,
+                out->climbAnchors.size(), visited.size(), 1 + extraSeeds, orphanCount,
                 scanMs, edgeMs, totalMsFinal);
 }
 
