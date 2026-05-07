@@ -377,16 +377,34 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
 
 // Confirmed climbable scene actors. Each entry's actorId triggers a
 // ClimbAnchor record at the actor's world.pos with an estimated topPos
-// `kEstimatedClimbHeight` units above. Field testing extends this list
-// when new climbable actor types surface.
+// `estimatedHeight` units above. Field testing extends this list when
+// new climbable actor types surface.
+//
+// `requiredParams` is an optional discriminator for actors that share an
+// actor-id between climbable and non-climbable variants (e.g.
+// Bg_Ydan_Maruta is both the rotating spike-log and the falling ladder
+// in Inside Deku Tree, distinguished by params at runtime). -1 means
+// "match any params". For positive values, the comparison is against
+// `actor->params & 0xFF` to absorb the high-byte switch-flag layout
+// some actors use.
 struct ClimbableActorEntry {
     int16_t actorId;
+    int16_t requiredParams;  // -1 = any
     float   estimatedHeight; // climb-top Y delta from actor.world.pos.y
 };
 static const ClimbableActorEntry kClimbableActors[] = {
-    { ACTOR_BG_SPOT18_OBJ,      150.0f }, // Goron City interior ladder
-    { ACTOR_BG_DDAN_KD,         200.0f }, // Dodongo's Cavern ladder
-    { ACTOR_BG_SPOT06_OBJECTS,  120.0f }, // Lake Hylia (some climbables)
+    { ACTOR_BG_SPOT18_OBJ,      -1,  150.0f }, // Goron City interior ladder
+    { ACTOR_BG_DDAN_KD,         -1,  200.0f }, // Dodongo's Cavern ladder
+    { ACTOR_BG_SPOT06_OBJECTS,  -1,  120.0f }, // Lake Hylia (some climbables)
+    // Inside Deku Tree falling ladder. params==0 is the rotating spike
+    // log (NOT climbable); params==1 is the ladder. `actor->params` is
+    // already shifted to the high byte during BgYdanMaruta_Init
+    // (z_bg_ydan_maruta.c:93), so checking `params & 0xFF == 1` works
+    // post-init regardless of the original 16-bit scene-data layout.
+    // Estimated height 280u: BgYdanMaruta_Init pulls home.pos.y down by
+    // 280u for the params==1 variant (z_bg_ydan_maruta.c:103), so the
+    // ladder spans that range.
+    { ACTOR_BG_YDAN_MARUTA,      1,  280.0f }, // Inside Deku Tree falling ladder
 };
 
 static void DetectClimbAnchors(RoomNavData* out, PlayState* play) {
@@ -399,6 +417,10 @@ static void DetectClimbAnchors(RoomNavData* out, PlayState* play) {
         while (actor != nullptr) {
             for (const ClimbableActorEntry& entry : kClimbableActors) {
                 if (actor->id != entry.actorId) continue;
+                if (entry.requiredParams >= 0 &&
+                    (actor->params & 0xFF) != entry.requiredParams) {
+                    continue; // wrong variant of this actor type
+                }
                 ClimbAnchor anchor{};
                 anchor.basePos = actor->world.pos;
                 anchor.topPos  = { actor->world.pos.x,
