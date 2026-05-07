@@ -18,6 +18,15 @@
 #include "soh/ShipInit.hpp"
 #include "soh/cvar_prefixes.h"
 
+// frame_interpolation.h declares the FrameInterpolation_Record{Open,Close}Child
+// helpers with extern "C" linkage. The OPEN_DISPS / CLOSE_DISPS macros in
+// soh/include/macros.h embed an inline forward-declaration without the
+// extern "C" qualifier, which MSVC otherwise mangles as a C++ symbol and
+// fails to link against the C-linkage definition. Including the header
+// up front puts the proper declaration in scope so the macro expansion
+// resolves correctly.
+#include "soh/frame_interpolation.h"
+
 // Phase 2 commit 11 — slope-3 stuck-on-slope diagnostic. Iterates the
 // syncable-actor categories per frame, reads the EnemyNetId extension,
 // and updates the per-navigator stuck-on-slope counter.
