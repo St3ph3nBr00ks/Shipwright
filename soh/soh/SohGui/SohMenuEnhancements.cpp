@@ -1931,6 +1931,65 @@ void SohMenu::AddMenuEnhancements() {
             .CVar(timer.timeEnable)
             .Callback([](WidgetInfo& info) { TimeDisplayUpdateDisplayOptions(); });
     }
+
+    // AI Navigation — multiplayer navigation system. All features default-off
+    // permanently per Flotilla policy for vanilla-altering features.
+    // See Plans/nav_system_implementation_plan.md and Plans/room_nav_data_plan.md.
+    path.sidebarName = "AI Navigation";
+    AddSidebarEntry("Enhancements", path.sidebarName, 3);
+    path.column = SECTION_COLUMN_1;
+
+    AddWidget(path, "Improve enemy navigation.", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Room Nav Data", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Enabled", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.Enabled"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Master toggle for the Room Nav Data system. When enabled, each room is "
+            "scanned on first entry to produce a per-room navigation graph stored at "
+            "roomnavdata/roomnavdata_<scene>_<room>.bin. Subsequent room entries load "
+            "the cached graph from disk.\n\n"
+            "Default: off. Required for nav system Phase 2 features that consume the graph."));
+
+    AddWidget(path, "Auto Scan", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.AutoScan"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "When on (default), rooms with no cached graph are scanned on first entry. "
+            "When off, only existing cached graphs are loaded — no new scans run. Useful "
+            "for 'play with this exact baked set, don't generate more' mode."));
+
+    AddWidget(path, "Log Stuck-On-Slope Diagnostic", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Detection-only diagnostic. Logs when a synced navigator ends up on a slope-3 "
+            "(very-steep) surface and is not sliding down naturally. Used to identify "
+            "actors that need active slope-recovery intervention. Dev-only.\n\n"
+            "Active recovery itself is deferred to v2 pending evidence of need."));
+
+    AddWidget(path, "Active Slope Recovery (deferred)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.ActiveSlopeRecovery"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Reserved for v2: navigator stuck on slope-3 actively driven toward nearest "
+            "non-slope-3 node. Implementation pending field-test evidence from the "
+            "Log Stuck-On-Slope Diagnostic above."));
+
+    AddWidget(path, "Debug Draw (overlay)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.DebugDraw"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Renders the room's nav graph as an in-world overlay: green spheres for "
+            "walkable nodes, red for hazards, blue for underwater, orange for steep "
+            "slopes, yellow arrows for climb anchors, white lines for edges.\n\n"
+            "Overlay rendering itself is implemented as part of nav system Phase 2; the "
+            "toggle is wired in advance so the CVar exists when that lands."));
 }
 
 } // namespace SohGui

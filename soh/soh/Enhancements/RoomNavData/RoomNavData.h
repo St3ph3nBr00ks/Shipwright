@@ -25,7 +25,7 @@ extern "C" {
 #include "z64.h"
 }
 
-namespace Anchor::Nav::Room {
+namespace AnchorNavRoom {
 
 // ---------------------------------------------------------------------------
 // Per-node flags. Bitfield in NavNode::flags.
@@ -111,4 +111,4 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // has been initialized. Used as the master gate by all Phase 1+2 features.
 bool IsEnabled();
 
-} // namespace Anchor::Nav::Room
+} // namespace AnchorNavRoom

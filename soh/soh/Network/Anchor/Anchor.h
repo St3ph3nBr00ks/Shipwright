@@ -176,6 +176,21 @@ struct EnemyNetId {
     // (~228 frames) so peer's signal — which arrives ~11s before
     // host enters case 3 — isn't lost.
     bool bossGomaPeerSignaled = false;
+
+    // RoomNavData Phase 2 commit 11 — slope-3 stuck-on-slope diagnostic.
+    // Detection-only; intervention deferred to v2 (gEnhancements.RoomNavData
+    // .ActiveSlopeRecovery) pending field-test evidence of need.
+    //
+    // stuckOnSlopeFrames counts up while the predicate is true (actor on
+    // slope-3 surface AND velocity.y not consistently descending). Resets
+    // to 0 when predicate becomes false. On rising edge above
+    // kStuckFrameThreshold, RoomNavData increments stuckOnSlopeEventCount
+    // and emits a rate-limited SPDLOG_WARN.
+    //
+    // Both reset on actor death / scene transition (via the same
+    // EnemyNetId reset paths that clear netState fields).
+    uint16_t stuckOnSlopeFrames     = 0;
+    uint16_t stuckOnSlopeEventCount = 0;
 };
 
 // #193 Phase 2 — attached to ACTOR_EN_ITEM00 actors so the receive-side

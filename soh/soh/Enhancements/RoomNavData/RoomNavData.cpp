@@ -18,6 +18,13 @@
 #include "soh/ShipInit.hpp"
 #include "soh/cvar_prefixes.h"
 
+// Phase 2 commit 11 — slope-3 stuck-on-slope diagnostic. Iterates the
+// syncable-actor categories per frame, reads the EnemyNetId extension,
+// and updates the per-navigator stuck-on-slope counter.
+#include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
+#include "soh/ObjectExtension/ObjectExtension.h"
+
 #include <libultraship/bridge.h>
 #include <libultraship/libultraship.h>
 
@@ -45,11 +52,12 @@ extern PlayState* gPlayState;
 // CVar definitions — see plan §3 for full layout.
 // ---------------------------------------------------------------------------
 
-#define CVAR_ROOM_NAV_ENABLED       CVAR_ENHANCEMENT("RoomNavData.Enabled")
-#define CVAR_ROOM_NAV_AUTO_SCAN     CVAR_ENHANCEMENT("RoomNavData.AutoScan")
-#define CVAR_ROOM_NAV_DEBUG_DRAW    CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
+#define CVAR_ROOM_NAV_ENABLED            CVAR_ENHANCEMENT("RoomNavData.Enabled")
+#define CVAR_ROOM_NAV_AUTO_SCAN          CVAR_ENHANCEMENT("RoomNavData.AutoScan")
+#define CVAR_ROOM_NAV_DEBUG_DRAW         CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
+#define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
 
-namespace Anchor::Nav::Room {
+namespace AnchorNavRoom {
 
 // ---------------------------------------------------------------------------
 // Master gate. Every per-feature query short-circuits to vanilla behaviour
@@ -807,6 +815,97 @@ static void OnRoomEntered(int16_t sceneNum, int8_t roomNum, PlayState* play) {
 }
 
 // ---------------------------------------------------------------------------
+// Slope-3 stuck-on-slope diagnostic (Phase 2 commit 11). Detection-only;
+// active intervention deferred to v2 (gEnhancements.RoomNavData
+// .ActiveSlopeRecovery) pending evidence the predicate fires in real
+// gameplay.
+//
+// Per-frame predicate: actor's floor poly slope is 3 (very-steep) AND the
+// actor isn't sliding down (velocity.y not consistently negative) for more
+// than kStuckFrameThreshold frames. On rising edge above the threshold,
+// increment the per-actor stuckOnSlopeEventCount and emit a rate-limited
+// SPDLOG_WARN.
+// ---------------------------------------------------------------------------
+
+static constexpr uint16_t kStuckFrameThreshold     = 30;   // ~0.5s at 60fps
+static constexpr uint64_t kStuckLogCooldownFrames  = 300;  // ~5s rate-limit per-actor
+
+// Per-actor last-log frame, keyed by actor pointer (cleared on actor
+// destruction implicitly — stale pointers in this map just lose their
+// cooldown, no functional issue).
+static std::unordered_map<Actor*, uint64_t> sLastStuckLogFrame;
+static uint64_t sFrameCounter = 0;
+
+static bool IsStuckOnSlope(Actor* actor, EnemyNetId* ext, PlayState* play) {
+    if (actor == nullptr || ext == nullptr) return false;
+    if (actor->update == nullptr) return false;          // dead actor
+    if (actor->floorPoly == nullptr) return false;       // not standing on anything
+
+    s32 slope = SurfaceType_GetSlope(&play->colCtx, actor->floorPoly, actor->floorBgId);
+    if (slope != 3) return false;                         // not on a steep slope
+
+    // Vanilla physics slides actors down slope-3 surfaces. If velocity.y
+    // is meaningfully negative the actor is sliding correctly — predicate
+    // false. Threshold is permissive (>= -0.5) to allow brief settling
+    // moments without false-positive log spam.
+    if (actor->velocity.y < -0.5f) return false;
+
+    return true;
+}
+
+static void TickStuckOnSlopeDetection(PlayState* play) {
+    bool diagnosticOn = CVarGetInteger(CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE, 0) != 0;
+    if (!diagnosticOn) return;
+
+    sFrameCounter++;
+
+    for (uint8_t cat : kSyncableActorCategories /* ActorSyncHelpers.h:22 */) {
+        Actor* actor = play->actorCtx.actorLists[cat].head;
+        while (actor != nullptr) {
+            Actor* next = actor->next; // capture before any mutation
+
+            if (IsSyncableActor(actor)) {
+                EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+                if (ext != nullptr) {
+                    if (IsStuckOnSlope(actor, ext, play)) {
+                        // Rising edge into the stuck condition counts up.
+                        if (ext->stuckOnSlopeFrames < UINT16_MAX) {
+                            ext->stuckOnSlopeFrames++;
+                        }
+                        // Threshold cross: log + accumulate event count.
+                        if (ext->stuckOnSlopeFrames == kStuckFrameThreshold) {
+                            if (ext->stuckOnSlopeEventCount < UINT16_MAX) {
+                                ext->stuckOnSlopeEventCount++;
+                            }
+                            uint64_t lastLogFrame = sLastStuckLogFrame.count(actor)
+                                ? sLastStuckLogFrame[actor]
+                                : 0;
+                            if (sFrameCounter - lastLogFrame >= kStuckLogCooldownFrames) {
+                                sLastStuckLogFrame[actor] = sFrameCounter;
+                                SPDLOG_WARN("[RoomNav] actor 0x{:04X} stuck on slope-3 at "
+                                            "({:.0f},{:.0f},{:.0f}) for {} frames "
+                                            "(event #{} this session)",
+                                            (int)actor->id,
+                                            actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
+                                            ext->stuckOnSlopeFrames,
+                                            ext->stuckOnSlopeEventCount);
+                            }
+                        }
+                    } else {
+                        // Predicate false — reset frame counter. Do NOT reset
+                        // stuckOnSlopeEventCount; it accumulates across the
+                        // session for visibility.
+                        ext->stuckOnSlopeFrames = 0;
+                    }
+                }
+            }
+
+            actor = next;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // OnGameFrameUpdate hook — polling trigger. Detects (sceneNum, roomNum)
 // delta and dispatches OnRoomEntered. Scan-skip conditions verified
 // against soh/include/z64.h and soh/include/z64save.h.
@@ -829,6 +928,10 @@ static void OnGameFrameTick() {
     if (play->transitionTrigger != TRANS_TRIGGER_OFF)  return; // mid-scene-transition
     if (gSaveContext.gameMode != GAMEMODE_NORMAL)      return; // file-select / title-screen
     if (gSaveContext.fileNum < 0)                       return; // no save loaded
+
+    // Slope-3 stuck-on-slope diagnostic (commit 11) runs every frame regardless
+    // of whether the room has changed. Internally CVar-gated; no-op when off.
+    TickStuckOnSlopeDetection(play);
 
     int16_t currentScene = play->sceneNum;
     int8_t  currentRoom  = (int8_t)play->roomCtx.curRoom.num;
@@ -857,6 +960,71 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
     }
     sLastScene = -1;
     sLastRoom  = -1;
+    sLastStuckLogFrame.clear();
+    sFrameCounter = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Debug overlay (Phase 2 commit 12) — stub for v1.
+//
+// Plan §3 calls for in-world rendering: green spheres for walkable nodes,
+// red for hazards, blue for underwater, orange for steep-slope, white
+// lines for edges, yellow arrows for climb anchors.
+//
+// Full in-world primitive rendering requires building Gfx display lists
+// for icosphere geometry (see colViewer.cpp:262 for the pattern), color
+// coding via gDPSetEnvColor, and POLY_XLU_DISP integration. That's
+// ~200-400 lines of OoT gfx pipeline work — substantial enough to
+// warrant its own focused commit when visual validation actually
+// matters (i.e., when nav system Phase 2 starts consuming this data).
+//
+// v1 stub: register the hook + log on rising-edge of CVar transitions
+// so the user knows the toggle is wired. Per-frame draw is a no-op
+// until the rendering implementation lands.
+// ---------------------------------------------------------------------------
+
+static bool sDebugDrawWasEnabled = false;
+static int16_t sDebugDrawLastSummaryScene = -1;
+static int8_t  sDebugDrawLastSummaryRoom  = -1;
+
+static void OnDebugDraw() {
+    bool nowEnabled = IsEnabled() && CVarGetInteger(CVAR_ROOM_NAV_DEBUG_DRAW, 0) != 0;
+
+    if (nowEnabled != sDebugDrawWasEnabled) {
+        sDebugDrawWasEnabled = nowEnabled;
+        SPDLOG_INFO("[RoomNav] DebugDraw {} (in-world overlay rendering deferred — "
+                    "stub commit; v1 emits room summary log lines on entry).",
+                    nowEnabled ? "enabled" : "disabled");
+    }
+
+    if (!nowEnabled) return;
+
+    // Per-room one-shot summary: when the active room changes while
+    // DebugDraw is on, emit the loaded nav graph's stats. Useful for
+    // "is the data loaded?" verification without requiring the in-world
+    // overlay to be implemented yet.
+    PlayState* play = gPlayState;
+    if (play == nullptr) return;
+    int16_t scene = play->sceneNum;
+    int8_t  room  = (int8_t)play->roomCtx.curRoom.num;
+    if (scene == sDebugDrawLastSummaryScene && room == sDebugDrawLastSummaryRoom) return;
+
+    const RoomNavData* data = GetForRoom(scene, room);
+    if (data == nullptr) {
+        SPDLOG_INFO("[RoomNav][DebugDraw] scene={} room={} — no nav data loaded", scene, (int)room);
+    } else {
+        SPDLOG_INFO("[RoomNav][DebugDraw] scene={} room={} loaded: nodes={} edges={} climbs={} hazards={}",
+                    scene, (int)room,
+                    data->nodes.size(), data->edges.size(),
+                    data->climbAnchors.size(), data->hazardCentroids.size());
+    }
+    sDebugDrawLastSummaryScene = scene;
+    sDebugDrawLastSummaryRoom  = room;
+
+    // TODO Phase 2 follow-up: render in-world primitives at data->nodes /
+    // data->edges / data->climbAnchors per plan §3 color spec. Pattern
+    // reference: colViewer.cpp::DrawColViewer (icosphere mesh, POLY_XLU_DISP,
+    // gDPSetEnvColor for color coding).
 }
 
 // ---------------------------------------------------------------------------
@@ -868,8 +1036,10 @@ static void RegisterRoomNavData() {
         OnGameFrameTick);
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnExitGame>(
         OnExitGameClear);
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnPlayDrawEnd>(
+        OnDebugDraw);
 }
 
-} // namespace Anchor::Nav::Room
+} // namespace AnchorNavRoom
 
-static RegisterShipInitFunc registerRoomNavData(Anchor::Nav::Room::RegisterRoomNavData);
+static RegisterShipInitFunc registerRoomNavData(AnchorNavRoom::RegisterRoomNavData);
