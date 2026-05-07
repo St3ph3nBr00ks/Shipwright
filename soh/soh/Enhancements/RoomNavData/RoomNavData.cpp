@@ -1024,6 +1024,26 @@ template <typename T> static size_t ResetGfxBuffer(T& vec) {
     return vec.capacity();
 }
 
+// Construct a Vtx with the normal-bearing layout (Vtx_tn). colViewer.cpp
+// uses libgfxd's gdSPDefVtxN macro for the same purpose, but that macro
+// lives in ZAPDTR/lib/libgfxd/gbi.h which isn't on the include path
+// reached from this TU. Local helper avoids the dependency.
+//
+// Args mirror gdSPDefVtxN(x, y, z, /*s,t omitted*/, nx, ny, nz, a) — the
+// s/t texture coords are always 0 in our overlay (no textured quads), so
+// we drop them from the signature.
+static Vtx MakeVtxN(short x, short y, short z,
+                    signed char nx, signed char ny, signed char nz,
+                    unsigned char a) {
+    Vtx v{};
+    v.n.ob[0] = x;  v.n.ob[1] = y;  v.n.ob[2] = z;
+    v.n.flag  = 0;
+    v.n.tc[0] = 0;  v.n.tc[1] = 0;
+    v.n.n[0]  = nx; v.n.n[1]  = ny; v.n.n[2]  = nz;
+    v.n.a     = a;
+    return v;
+}
+
 // Mirrors colViewer::InitGfx for transparent overlay rendering. Sets up
 // the RDP for primitive-color blending, with ZMODE_DEC so quads layer
 // cleanly on top of floor geometry without z-fighting.
@@ -1049,10 +1069,10 @@ static void AddGroundQuad(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl, const V
     float y = pos.y + kNodeQuadYLift;
 
     // Four corners, CCW from top-down (winding for upward-facing normal).
-    Vtx v0 = gdSPDefVtxN((short)(pos.x - h), (short)y, (short)(pos.z - h), 0, 0, 0, 127, 0, 0xFF);
-    Vtx v1 = gdSPDefVtxN((short)(pos.x + h), (short)y, (short)(pos.z - h), 0, 0, 0, 127, 0, 0xFF);
-    Vtx v2 = gdSPDefVtxN((short)(pos.x + h), (short)y, (short)(pos.z + h), 0, 0, 0, 127, 0, 0xFF);
-    Vtx v3 = gdSPDefVtxN((short)(pos.x - h), (short)y, (short)(pos.z + h), 0, 0, 0, 127, 0, 0xFF);
+    Vtx v0 = MakeVtxN((short)(pos.x - h), (short)y, (short)(pos.z - h), 0, 127, 0, 0xFF);
+    Vtx v1 = MakeVtxN((short)(pos.x + h), (short)y, (short)(pos.z - h), 0, 127, 0, 0xFF);
+    Vtx v2 = MakeVtxN((short)(pos.x + h), (short)y, (short)(pos.z + h), 0, 127, 0, 0xFF);
+    Vtx v3 = MakeVtxN((short)(pos.x - h), (short)y, (short)(pos.z + h), 0, 127, 0, 0xFF);
 
     vtxDl.push_back(v0);
     vtxDl.push_back(v1);
@@ -1084,10 +1104,10 @@ static void AddGroundLineQuad(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
     float yB = posB.y + kNodeQuadYLift;
 
     // Corners CCW from top-down for upward-facing normal.
-    Vtx v0 = gdSPDefVtxN((short)(posA.x + px), (short)yA, (short)(posA.z + pz), 0, 0, 0, 127, 0, 0xFF);
-    Vtx v1 = gdSPDefVtxN((short)(posA.x - px), (short)yA, (short)(posA.z - pz), 0, 0, 0, 127, 0, 0xFF);
-    Vtx v2 = gdSPDefVtxN((short)(posB.x - px), (short)yB, (short)(posB.z - pz), 0, 0, 0, 127, 0, 0xFF);
-    Vtx v3 = gdSPDefVtxN((short)(posB.x + px), (short)yB, (short)(posB.z + pz), 0, 0, 0, 127, 0, 0xFF);
+    Vtx v0 = MakeVtxN((short)(posA.x + px), (short)yA, (short)(posA.z + pz), 0, 127, 0, 0xFF);
+    Vtx v1 = MakeVtxN((short)(posA.x - px), (short)yA, (short)(posA.z - pz), 0, 127, 0, 0xFF);
+    Vtx v2 = MakeVtxN((short)(posB.x - px), (short)yB, (short)(posB.z - pz), 0, 127, 0, 0xFF);
+    Vtx v3 = MakeVtxN((short)(posB.x + px), (short)yB, (short)(posB.z + pz), 0, 127, 0, 0xFF);
 
     vtxDl.push_back(v0);
     vtxDl.push_back(v1);
@@ -1109,10 +1129,10 @@ static void AddVerticalPost(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
     short tx = (short)topPos.x,  ty = (short)topPos.y,  tz = (short)topPos.z;
 
     // Quad 1: extends in ±X direction (visible looking along Z).
-    Vtx a0 = gdSPDefVtxN((short)(bx - h), by, bz, 0, 0, 0, 0, 127, 0xFF);
-    Vtx a1 = gdSPDefVtxN((short)(bx + h), by, bz, 0, 0, 0, 0, 127, 0xFF);
-    Vtx a2 = gdSPDefVtxN((short)(tx + h), ty, tz, 0, 0, 0, 0, 127, 0xFF);
-    Vtx a3 = gdSPDefVtxN((short)(tx - h), ty, tz, 0, 0, 0, 0, 127, 0xFF);
+    Vtx a0 = MakeVtxN((short)(bx - h), by, bz, 0, 0, 127, 0xFF);
+    Vtx a1 = MakeVtxN((short)(bx + h), by, bz, 0, 0, 127, 0xFF);
+    Vtx a2 = MakeVtxN((short)(tx + h), ty, tz, 0, 0, 127, 0xFF);
+    Vtx a3 = MakeVtxN((short)(tx - h), ty, tz, 0, 0, 127, 0xFF);
     vtxDl.push_back(a0);
     vtxDl.push_back(a1);
     vtxDl.push_back(a2);
@@ -1121,10 +1141,10 @@ static void AddVerticalPost(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
     dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
 
     // Quad 2: extends in ±Z direction (visible looking along X).
-    Vtx b0 = gdSPDefVtxN(bx, by, (short)(bz - h), 0, 0, 0, 0, 127, 0xFF);
-    Vtx b1 = gdSPDefVtxN(bx, by, (short)(bz + h), 0, 0, 0, 0, 127, 0xFF);
-    Vtx b2 = gdSPDefVtxN(tx, ty, (short)(tz + h), 0, 0, 0, 0, 127, 0xFF);
-    Vtx b3 = gdSPDefVtxN(tx, ty, (short)(tz - h), 0, 0, 0, 0, 127, 0xFF);
+    Vtx b0 = MakeVtxN(bx, by, (short)(bz - h), 0, 0, 127, 0xFF);
+    Vtx b1 = MakeVtxN(bx, by, (short)(bz + h), 0, 0, 127, 0xFF);
+    Vtx b2 = MakeVtxN(tx, ty, (short)(tz + h), 0, 0, 127, 0xFF);
+    Vtx b3 = MakeVtxN(tx, ty, (short)(tz - h), 0, 0, 127, 0xFF);
     vtxDl.push_back(b0);
     vtxDl.push_back(b1);
     vtxDl.push_back(b2);
@@ -1212,10 +1232,10 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
     for (const Vec3f& centroid : data->hazardCentroids) {
         float h = kHazardCentroidHalfExt;
         float y = centroid.y + kNodeQuadYLift;
-        Vtx v0 = gdSPDefVtxN((short)(centroid.x - h), (short)y, (short)(centroid.z - h), 0, 0, 0, 127, 0, 0xFF);
-        Vtx v1 = gdSPDefVtxN((short)(centroid.x + h), (short)y, (short)(centroid.z - h), 0, 0, 0, 127, 0, 0xFF);
-        Vtx v2 = gdSPDefVtxN((short)(centroid.x + h), (short)y, (short)(centroid.z + h), 0, 0, 0, 127, 0, 0xFF);
-        Vtx v3 = gdSPDefVtxN((short)(centroid.x - h), (short)y, (short)(centroid.z + h), 0, 0, 0, 127, 0, 0xFF);
+        Vtx v0 = MakeVtxN((short)(centroid.x - h), (short)y, (short)(centroid.z - h), 0, 127, 0, 0xFF);
+        Vtx v1 = MakeVtxN((short)(centroid.x + h), (short)y, (short)(centroid.z - h), 0, 127, 0, 0xFF);
+        Vtx v2 = MakeVtxN((short)(centroid.x + h), (short)y, (short)(centroid.z + h), 0, 127, 0, 0xFF);
+        Vtx v3 = MakeVtxN((short)(centroid.x - h), (short)y, (short)(centroid.z + h), 0, 127, 0, 0xFF);
         sVtxDl.push_back(v0);
         sVtxDl.push_back(v1);
         sVtxDl.push_back(v2);
