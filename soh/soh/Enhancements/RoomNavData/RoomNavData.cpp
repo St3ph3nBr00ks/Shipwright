@@ -521,9 +521,34 @@ static int ClassifyAndAddNode(RoomNavData* nav,
 // by value AND returns the bgId; the bgId is needed for SurfaceType_*
 // accessors when the floor lies on a Bg actor's dynamic collision rather
 // than scene static collision.
+// Solution B from Plans/room_nav_floodfill_scoping_investigation.md.
+// Defensive filter: when the discovered floor lies on a dynamic Bg actor
+// (bgId != BGCHECK_SCENE), check whether that actor belongs to a different
+// room than the one currently being scanned. Reject if so.
+//
+// In practice this filter rarely fires — OoT typically despawns a room's
+// Bg actors when the player enters a different room, so cross-room dynamic
+// floor isn't usually present in colCtx.dyna at scan time. But the check
+// is essentially free (1 pointer deref + 1 comparison) and catches the
+// edge case where a transition-in-progress race leaves cross-room actors
+// momentarily registered. Defensive layer atop Solution A's MovementClear
+// floodfill gate.
+//
+// `actor->room == -1` means "global; doesn't despawn on room change" —
+// these are explicitly NOT rejected. Only mismatched non-negative rooms
+// are filtered.
+static bool FloorBelongsToOtherRoom(s32 floorBgId, s8 currentRoom, PlayState* play) {
+    if (floorBgId < 0 || floorBgId >= BG_ACTOR_MAX) return false; // not dynamic
+    Actor* owner = play->colCtx.dyna.bgActors[floorBgId].actor;
+    if (owner == nullptr) return false;
+    if (owner->room < 0) return false;         // global actor
+    return owner->room != currentRoom;
+}
+
 static int ScanColumnAt(RoomNavData* nav, float x, float z, PlayState* play, const CellKey& cell) {
     int firstNodeIdx = -1;
     float startY = nav->bboxMax.y + 50.0f; // start above scene ceiling
+    s8 currentRoom = (s8)play->roomCtx.curRoom.num;
 
     for (int i = 0; i < kMaxFloorsPerColumn; i++) {
         Vec3f castOrigin = { x, startY, z };
@@ -534,6 +559,14 @@ static int ScanColumnAt(RoomNavData* nav, float x, float z, PlayState* play, con
         if (floorY <= BGCHECK_Y_MIN) break;       // no floor below
         if (floorY <= nav->bboxMin.y) break;      // below scene
         if (floorY >= startY) break;              // raycast didn't make progress (degenerate)
+
+        // Solution B: skip floors whose owning Bg actor is in a different
+        // room. Static-collision floors (bgId == BGCHECK_SCENE) and global
+        // dynamic actors (room == -1) pass through.
+        if (FloorBelongsToOtherRoom(floorBgId, currentRoom, play)) {
+            startY = floorY - 1.0f;  // skip past this floor; keep looking below
+            continue;
+        }
 
         int idx = ClassifyAndAddNode(nav, x, floorY, z, &floorPoly, floorBgId, play, cell);
         if (idx >= 0 && firstNodeIdx < 0) {
