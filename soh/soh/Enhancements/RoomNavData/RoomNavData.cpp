@@ -600,14 +600,53 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
 
         int firstIdx = ScanColumnAt(out, cellWorld.x, cellWorld.z, play, cell);
 
-        // Enqueue 8-neighbors only if we found at least one floor here.
-        // Cells with no floor are terminal (open space, walls, off-room).
+        // Enqueue 8-neighbors only if (a) we found at least one floor here AND
+        // (b) we can actually walk from here to the neighbor without hitting a
+        // wall (MovementClear). The (b) gate is the room-scoping fix surfaced
+        // by the 2026-05-06 field-test review:
+        //
+        // Without (b), the floodfill propagates wherever floor exists in the
+        // scene — including across door thresholds and into adjacent rooms,
+        // because OoT's static scene collision is shared across rooms. Result
+        // (verified in Release_b0ea6f1 logs): three rooms in scene 0 produced
+        // identical 6644-node / 23563-edge / 5435-cell scans, and Kokiri
+        // Forest hit kMaxScanIterations every entry.
+        //
+        // With (b), the line-test stops at walls (inter-room walls AND
+        // closed-door collisions), confining the floodfill to the connected
+        // walkable region the navigator can actually reach from the seed.
+        // Open doors at scan time still bleed into the adjacent room, which
+        // matches the static-only-scan policy (plan §7).
+        //
+        // Cost: ~1 line-test per neighbor enqueue. ~5,435 cells × ~8 neighbors
+        // ≈ 43,480 additional line tests per scan, ~40ms wall time. Within
+        // the kMaxScanWallTimeMs = 1000ms budget.
+        //
+        // See Plans/room_nav_floodfill_scoping_investigation.md for full
+        // analysis. Implements Solution A from that document.
         if (firstIdx >= 0) {
+            // The "from" pos is the cell's world center at the floor height
+            // we just discovered. Use the first node's pos for accuracy
+            // (multi-cast may produce stacked floors; we use the topmost).
+            const Vec3f& fromPos = out->nodes[firstIdx].pos;
+
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     if (dx == 0 && dz == 0) continue;
                     CellKey neighbor{ cell.x + dx, cell.z + dz };
                     if (visited.count(neighbor)) continue;
+
+                    // Pelvis-height line test toward the neighbor's center.
+                    // We don't yet know the neighbor's floor Y, so use this
+                    // cell's Y as the test elevation. If the neighbor's floor
+                    // is at a similar Y the test is meaningful; if drastically
+                    // different the floodfill stops at the elevation gap
+                    // (correctly — that's a cliff or wall).
+                    Vec3f neighborProbe = CellCenterWorld(neighbor, out->bboxMin);
+                    neighborProbe.y = fromPos.y;
+
+                    if (!MovementClear(fromPos, neighborProbe, play)) continue;
+
                     pending.push_back(neighbor);
                 }
             }
