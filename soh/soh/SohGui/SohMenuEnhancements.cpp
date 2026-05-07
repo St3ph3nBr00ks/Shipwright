@@ -1943,7 +1943,7 @@ void SohMenu::AddMenuEnhancements() {
     AddWidget(path, "Improve enemy navigation.", WIDGET_SEPARATOR_TEXT);
 
     AddWidget(path, "Nav System", WIDGET_SEPARATOR_TEXT);
-    AddWidget(path, "Enabled", WIDGET_CVAR_CHECKBOX)
+    AddWidget(path, "Enabled##NavSystem", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("Nav.Enabled"))
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip(
@@ -2013,7 +2013,7 @@ void SohMenu::AddMenuEnhancements() {
             "at instead of the vanilla home.pos default."));
 
     AddWidget(path, "Room Nav Data", WIDGET_SEPARATOR_TEXT);
-    AddWidget(path, "Enabled", WIDGET_CVAR_CHECKBOX)
+    AddWidget(path, "Enabled##RoomNavData", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.Enabled"))
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip(
