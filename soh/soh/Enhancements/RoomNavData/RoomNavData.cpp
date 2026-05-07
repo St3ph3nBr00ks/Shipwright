@@ -20,11 +20,14 @@
 
 // frame_interpolation.h declares the FrameInterpolation_Record{Open,Close}Child
 // helpers with extern "C" linkage. The OPEN_DISPS / CLOSE_DISPS macros in
-// soh/include/macros.h embed an inline forward-declaration without the
-// extern "C" qualifier, which MSVC otherwise mangles as a C++ symbol and
-// fails to link against the C-linkage definition. Including the header
-// up front puts the proper declaration in scope so the macro expansion
-// resolves correctly.
+// soh/include/macros.h embed an inline forward-declaration WITHOUT the
+// extern "C" qualifier, so when the macro expands inside a `namespace
+// AnchorNavRoom { ... }` block the block-scope decl introduces the name
+// as a C++-mangled symbol — defeating the global extern "C" decl from
+// the header and producing an unresolved-external link error against the
+// real C-linkage definition. Confining the macro expansion to a
+// file-scope helper at global namespace (see RoomNavSpliceXluDispList
+// below) sidesteps the issue.
 #include "soh/frame_interpolation.h"
 
 // Phase 2 commit 11 — slope-3 stuck-on-slope diagnostic. Iterates the
@@ -65,6 +68,21 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_AUTO_SCAN          CVAR_ENHANCEMENT("RoomNavData.AutoScan")
 #define CVAR_ROOM_NAV_DEBUG_DRAW         CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
 #define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
+
+// File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
+// expand to a block containing an inline forward-declaration of
+// FrameInterpolation_Record{Open,Close}Child without an extern "C"
+// qualifier; that block-scope declaration would shadow the C-linkage
+// declaration from frame_interpolation.h when the macro expands inside
+// a C++ namespace block (yielding LNK2001 against the C++-mangled
+// symbol). Keeping the splice at global scope preserves the C-linkage
+// resolution. Forward-declared in the namespace via the `::`-qualified
+// call site below.
+static void RoomNavSpliceXluDispList(PlayState* play, Gfx* dl) {
+    OPEN_DISPS(play->state.gfxCtx);
+    gSPDisplayList(POLY_XLU_DISP++, dl);
+    CLOSE_DISPS(play->state.gfxCtx);
+}
 
 namespace AnchorNavRoom {
 
@@ -1339,10 +1357,11 @@ static void OnDebugDrawRender() {
     BuildOverlayDrawData(data);
     sXluDl.push_back(gsSPEndDisplayList());
 
-    // Splice into the frame's transparent display list.
-    OPEN_DISPS(play->state.gfxCtx);
-    gSPDisplayList(POLY_XLU_DISP++, sXluDl.data());
-    CLOSE_DISPS(play->state.gfxCtx);
+    // Splice into the frame's transparent display list. Delegated to a
+    // file-scope helper at global namespace so the OPEN_DISPS / CLOSE_DISPS
+    // macros expand outside namespace AnchorNavRoom — see comment on the
+    // frame_interpolation.h include for the linkage rationale.
+    ::RoomNavSpliceXluDispList(play, sXluDl.data());
 }
 
 // ---------------------------------------------------------------------------
