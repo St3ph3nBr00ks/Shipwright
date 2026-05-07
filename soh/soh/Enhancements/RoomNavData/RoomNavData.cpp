@@ -970,11 +970,18 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
 // v1 (commit 81b28da07): toggle-edge log + per-room summary, no in-world
 // rendering.
 //
-// v2 commit 1 (this commit): in-world ground-aligned quads for walkable
-// (green) and hazard (red) nodes. Renders one ~10u quad per node, slightly
-// lifted above the floor (ZMODE_DEC handles z-fight prevention).
-// Subsequent commits add edges (lines on floor), then polish (underwater /
-// steep-slope / climb anchors / hazard centroids).
+// v2 commit 1: in-world ground-aligned quads for walkable (green) and
+// hazard (red) nodes. Renders one ~10u quad per node, slightly lifted
+// above the floor (ZMODE_DEC handles z-fight prevention).
+//
+// v2 commit 2 (this commit): edges as thin ground-aligned line quads
+// (white) connecting node centres. Same kNodeQuadYLift as nodes so the
+// edge sits on the same render plane; endpoint indices bounds-checked
+// against node count so a stale-schema disk cache can't escape into the
+// gfx pipeline.
+//
+// Subsequent commit 3 (polish): underwater (blue) / steep-slope (orange) /
+// climb anchor verticals (yellow) / hazard centroids.
 //
 // Approach: ground-aligned quads instead of icospheres — 10× cheaper
 // geometry (4 verts vs 12 vert × 20 tri), no per-instance billboard math
@@ -1003,6 +1010,7 @@ static std::vector<Vtx> sVtxDl;
 // Quad parameters.
 static constexpr float kNodeQuadHalfExtent = 5.0f;  // 10u square per node
 static constexpr float kNodeQuadYLift      = 1.0f;  // small lift above floor
+static constexpr float kEdgeLineHalfWidth  = 1.0f;  // 2u thick line on floor
 
 // Reset buffer + reserve based on prior frame (matches colViewer pattern).
 template <typename T> static size_t ResetGfxBuffer(T& vec) {
@@ -1051,6 +1059,41 @@ static void AddGroundQuad(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl, const V
     dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
 }
 
+// Append a thin ground-aligned line quad from posA to posB, both lifted
+// slightly above the floor. The "line" is actually a thin rectangle in
+// the XZ plane; long axis = A→B, perpendicular extent = kEdgeLineHalfWidth.
+// Each end uses its own Y so edges across slight height differences (e.g.
+// at room thresholds) render at the correct elevation per end.
+static void AddGroundLineQuad(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
+                              const Vec3f& posA, const Vec3f& posB) {
+    float dx = posB.x - posA.x;
+    float dz = posB.z - posA.z;
+    float lenSq = dx * dx + dz * dz;
+    if (lenSq < 0.01f) return;  // degenerate; skip
+    float invLen = 1.0f / std::sqrt(lenSq);
+
+    // Perpendicular vector in XZ plane, scaled to half-width.
+    float px = -dz * invLen * kEdgeLineHalfWidth;
+    float pz =  dx * invLen * kEdgeLineHalfWidth;
+
+    float yA = posA.y + kNodeQuadYLift;
+    float yB = posB.y + kNodeQuadYLift;
+
+    // Corners CCW from top-down for upward-facing normal.
+    Vtx v0 = gdSPDefVtxN((short)(posA.x + px), (short)yA, (short)(posA.z + pz), 0, 0, 0, 127, 0, 0xFF);
+    Vtx v1 = gdSPDefVtxN((short)(posA.x - px), (short)yA, (short)(posA.z - pz), 0, 0, 0, 127, 0, 0xFF);
+    Vtx v2 = gdSPDefVtxN((short)(posB.x - px), (short)yB, (short)(posB.z - pz), 0, 0, 0, 127, 0, 0xFF);
+    Vtx v3 = gdSPDefVtxN((short)(posB.x + px), (short)yB, (short)(posB.z + pz), 0, 0, 0, 127, 0, 0xFF);
+
+    vtxDl.push_back(v0);
+    vtxDl.push_back(v1);
+    vtxDl.push_back(v2);
+    vtxDl.push_back(v3);
+
+    dl.push_back(gsSPVertex((uintptr_t)&vtxDl[vtxDl.size() - 4], 4, 0));
+    dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+}
+
 // Build the in-world overlay for one room's nav data. Groups nodes by
 // color (PrimColor switches between groups) so the RDP doesn't reload
 // state per quad.
@@ -1074,7 +1117,21 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AddGroundQuad(sXluDl, sVtxDl, node.pos);
     }
 
-    // Edges — commit 2 will add line draws here.
+    // Edges — white. Drawn as thin ground-aligned quads from one node to
+    // the next so the connectivity graph is visible against the floor.
+    // Endpoint indices are bounds-checked because a corrupted disk cache
+    // could carry indices that no longer resolve (stale schema, partial
+    // write). nodeCount==0 is already handled by the empty-data early-out
+    // in the caller.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xFF, 0xFF, 0xC0));
+    const size_t nodeCount = data->nodes.size();
+    for (const NavEdge& edge : data->edges) {
+        if (edge.fromIdx >= nodeCount || edge.toIdx >= nodeCount) continue;
+        const Vec3f& posA = data->nodes[edge.fromIdx].pos;
+        const Vec3f& posB = data->nodes[edge.toIdx].pos;
+        AddGroundLineQuad(sXluDl, sVtxDl, posA, posB);
+    }
+
     // Underwater / steep-slope / climb / hazard centroids — commit 3 will add.
 }
 
@@ -1146,8 +1203,8 @@ static void OnDebugDrawRender() {
     ResetGfxBuffer(sVtxDl);
     // Reserve up front so vector reallocation doesn't invalidate the
     // gsSPVertex pointers we embed into sXluDl below.
-    sVtxDl.reserve(data->nodes.size() * 4);     // 4 verts per quad upper bound
-    sXluDl.reserve(data->nodes.size() * 2 + 32); // ~2 Gfx commands per node + setup
+    sVtxDl.reserve(data->nodes.size() * 4 + data->edges.size() * 4);     // 4 verts per quad upper bound
+    sXluDl.reserve(data->nodes.size() * 2 + data->edges.size() * 2 + 32); // ~2 Gfx commands per quad + setup
 
     InitDebugGfx(sXluDl);
     BuildOverlayDrawData(data);
