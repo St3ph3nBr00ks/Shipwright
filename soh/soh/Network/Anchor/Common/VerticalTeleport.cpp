@@ -100,6 +100,21 @@ bool IsPlayerDerivedNavigator(const Actor* actor) {
     return actor->id == ACTOR_PLAYER || actor->id == ACTOR_EN_OE2;
 }
 
+bool IsShapeAEligible(const Actor* actor) {
+    // Shape A is the player-derived path. It opts in only when the
+    // master Nav CVar + per-feature CVar are both on AND the actor is
+    // Link-rigged AND its NavTraits row has eligibleForVerticalTeleport
+    // true. Bosses fall through via kBossDefaults; the legacy follower
+    // pipeline still runs when the nav system is off (the existing
+    // gRemoteAnchor.FollowerEnabled CVar gate is the canonical
+    // master switch for follower behaviour itself).
+    if (actor == nullptr) return false;
+    if (!IsVerticalTeleportEnabled()) return false;
+    if (!IsPlayerDerivedNavigator(actor)) return false;
+    const NavTraits& traits = GetTraitsForActor(actor->id);
+    return traits.eligibleForVerticalTeleport;
+}
+
 bool IsTargetClimbing(const Actor* target) {
     if (target == nullptr) return false;
     if (target->id == ACTOR_PLAYER) {

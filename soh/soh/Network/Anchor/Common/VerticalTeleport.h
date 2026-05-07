@@ -87,9 +87,39 @@ bool IsTargetClimbing(const Actor* target);
 // NPCs join via additional entries.
 bool IsPlayerDerivedNavigator(const Actor* actor);
 
+// ── Shape A — player-derived navigator climb (commit 6b) ───────────
+//
+// The existing follower CLIMBING pipeline at HookHandlers.cpp:2241-
+// 2260 (entry) and :2800-2831 (state body) IS Shape A: XZ-only snap
+// on rising edge, raw stick injection while leader.isClimbing,
+// dismount forward-hold on falling edge. This commit does NOT
+// re-implement that mechanism — the existing logic produces the
+// real climb animation, real physics, and vine lateral tracking,
+// and any rewrite would risk regressing those behaviours.
+//
+// Instead, the nav system exposes Shape A as a discoverable concept:
+// callers that want to know "should the navigator route through the
+// follower-style input-injection climb" check `IsShapeAEligible(actor)`
+// before falling through to Shape B's `TryVerticalTeleportEnemy`.
+// The two are mutually exclusive: an actor is either Link-rigged
+// (Shape A) or it isn't (Shape B). Bosses opt out of both by
+// kBossDefaults.
+//
+// `IsShapeAEligible` returns true when:
+//   - master Nav CVar is on (so the system as a whole is active)
+//   - Nav.VerticalTeleport per-feature CVar is on
+//   - the actor is a player-derived navigator
+//   - NavTraits.eligibleForVerticalTeleport is true (default for
+//     non-bosses; false for bosses)
+//
+// When false, callers should bypass Shape A and use the legacy follower
+// CVar gates (gRemoteAnchor.FollowerEnabled etc.) for the existing
+// pipeline. With master CVar off, the existing pipeline runs untouched
+// — the nav system never blocks legacy behaviour.
+bool IsShapeAEligible(const Actor* actor);
+
 // ShipInit registration. Currently a no-op (no per-frame hooks at
-// this layer); kept for parity with sibling modules so commits 6b/6c
-// can land without re-touching the wiring.
+// this layer); kept for parity with sibling modules.
 void RegisterVerticalTeleport();
 
 } // namespace AnchorNav

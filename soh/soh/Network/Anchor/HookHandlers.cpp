@@ -2234,6 +2234,19 @@ void Anchor::RegisterHooks() {
                 // physics, and avoids the gravity-fight "hover slightly below
                 // P1" symptom from log 68.
                 //
+                // Nav system Shape A (commit 6b): this block IS the
+                // canonical Shape A — input-injection + XZ-only snap +
+                // dismount forward-hold. AnchorNav::IsShapeAEligible
+                // exposes the predicate that future Link-rigged ally
+                // NPCs would consult before delegating into this path.
+                // Per the plan §9, Shape A is preserved verbatim — any
+                // rewrite risks regressing real climb animation /
+                // physics / vine lateral tracking. The legacy follower
+                // CVar (gRemoteAnchor.FollowerEnabled) remains the
+                // master switch; nav.VerticalTeleport's master toggle
+                // does NOT gate this code path because Shape A is
+                // owned by the follower system, not the nav system.
+                //
                 // Edge-triggered: only enter CLIMBING if we aren't already
                 // there. The XZ-only teleport makes follower adjacent to the
                 // ladder rim; subsequent stick_y forward injection causes the
