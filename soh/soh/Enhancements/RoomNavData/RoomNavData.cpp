@@ -673,6 +673,38 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     std::deque<CellKey> pending;
     pending.push_back(seedCell);
 
+    // Multi-seed: every actor whose room field matches the room being
+    // scanned (or is global, room == -1) becomes an additional seed.
+    // Required because OoT engine rooms can contain multiple sub-chambers
+    // connected only by climbs / drops / jumps, none of which the
+    // horizontal MovementClear test traverses. A single player-position
+    // seed reaches only the chamber the player entered through; sub-
+    // chambers (e.g. the slingshot chamber and the hintnut antechamber
+    // sharing one engine room in Inside Deku Tree) end up with zero
+    // coverage.
+    //
+    // Seeding from every in-room actor guarantees each connected sub-
+    // region gets at least one seed somewhere inside it. Duplicate seeds
+    // (multiple actors in the same cell) are absorbed at the
+    // `if (visited.count(cell)) continue;` early-out — no extra work.
+    //
+    // Solution A's room-scoping is preserved because we only seed from
+    // actors whose room field matches the current scan target. The
+    // floodfill from each seed is still gated by MovementClear and
+    // can't bleed into adjacent rooms.
+    int extraSeeds = 0;
+    for (int cat = 0; cat < ACTORCAT_MAX; cat++) {
+        Actor* a = play->actorCtx.actorLists[cat].head;
+        while (a != nullptr) {
+            if (a->room == roomNum || a->room == -1) {
+                CellKey actorCell = CellKeyForXZ(a->world.pos.x, a->world.pos.z, out->bboxMin);
+                pending.push_back(actorCell);
+                extraSeeds++;
+            }
+            a = a->next;
+        }
+    }
+
     int iterations = 0;
 
     while (!pending.empty()) {
@@ -855,9 +887,10 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
     SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} nodes={} edges={} climbs={} cells={} "
-                "scanMs={} edgeMs={} totalMs={}",
+                "seeds={} scanMs={} edgeMs={} totalMs={}",
                 sceneNum, (int)roomNum, out->nodes.size(), out->edges.size(),
-                out->climbAnchors.size(), visited.size(), scanMs, edgeMs, totalMsFinal);
+                out->climbAnchors.size(), visited.size(), 1 + extraSeeds,
+                scanMs, edgeMs, totalMsFinal);
 }
 
 // Top-level lookup-then-scan dispatch. Called once per (scene, room)
