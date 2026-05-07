@@ -521,9 +521,34 @@ static int ClassifyAndAddNode(RoomNavData* nav,
 // by value AND returns the bgId; the bgId is needed for SurfaceType_*
 // accessors when the floor lies on a Bg actor's dynamic collision rather
 // than scene static collision.
+// Solution B from Plans/room_nav_floodfill_scoping_investigation.md.
+// Defensive filter: when the discovered floor lies on a dynamic Bg actor
+// (bgId != BGCHECK_SCENE), check whether that actor belongs to a different
+// room than the one currently being scanned. Reject if so.
+//
+// In practice this filter rarely fires — OoT typically despawns a room's
+// Bg actors when the player enters a different room, so cross-room dynamic
+// floor isn't usually present in colCtx.dyna at scan time. But the check
+// is essentially free (1 pointer deref + 1 comparison) and catches the
+// edge case where a transition-in-progress race leaves cross-room actors
+// momentarily registered. Defensive layer atop Solution A's MovementClear
+// floodfill gate.
+//
+// `actor->room == -1` means "global; doesn't despawn on room change" —
+// these are explicitly NOT rejected. Only mismatched non-negative rooms
+// are filtered.
+static bool FloorBelongsToOtherRoom(s32 floorBgId, s8 currentRoom, PlayState* play) {
+    if (floorBgId < 0 || floorBgId >= BG_ACTOR_MAX) return false; // not dynamic
+    Actor* owner = play->colCtx.dyna.bgActors[floorBgId].actor;
+    if (owner == nullptr) return false;
+    if (owner->room < 0) return false;         // global actor
+    return owner->room != currentRoom;
+}
+
 static int ScanColumnAt(RoomNavData* nav, float x, float z, PlayState* play, const CellKey& cell) {
     int firstNodeIdx = -1;
     float startY = nav->bboxMax.y + 50.0f; // start above scene ceiling
+    s8 currentRoom = (s8)play->roomCtx.curRoom.num;
 
     for (int i = 0; i < kMaxFloorsPerColumn; i++) {
         Vec3f castOrigin = { x, startY, z };
@@ -534,6 +559,14 @@ static int ScanColumnAt(RoomNavData* nav, float x, float z, PlayState* play, con
         if (floorY <= BGCHECK_Y_MIN) break;       // no floor below
         if (floorY <= nav->bboxMin.y) break;      // below scene
         if (floorY >= startY) break;              // raycast didn't make progress (degenerate)
+
+        // Solution B: skip floors whose owning Bg actor is in a different
+        // room. Static-collision floors (bgId == BGCHECK_SCENE) and global
+        // dynamic actors (room == -1) pass through.
+        if (FloorBelongsToOtherRoom(floorBgId, currentRoom, play)) {
+            startY = floorY - 1.0f;  // skip past this floor; keep looking below
+            continue;
+        }
 
         int idx = ClassifyAndAddNode(nav, x, floorY, z, &floorPoly, floorBgId, play, cell);
         if (idx >= 0 && firstNodeIdx < 0) {
@@ -600,14 +633,53 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
 
         int firstIdx = ScanColumnAt(out, cellWorld.x, cellWorld.z, play, cell);
 
-        // Enqueue 8-neighbors only if we found at least one floor here.
-        // Cells with no floor are terminal (open space, walls, off-room).
+        // Enqueue 8-neighbors only if (a) we found at least one floor here AND
+        // (b) we can actually walk from here to the neighbor without hitting a
+        // wall (MovementClear). The (b) gate is the room-scoping fix surfaced
+        // by the 2026-05-06 field-test review:
+        //
+        // Without (b), the floodfill propagates wherever floor exists in the
+        // scene — including across door thresholds and into adjacent rooms,
+        // because OoT's static scene collision is shared across rooms. Result
+        // (verified in Release_b0ea6f1 logs): three rooms in scene 0 produced
+        // identical 6644-node / 23563-edge / 5435-cell scans, and Kokiri
+        // Forest hit kMaxScanIterations every entry.
+        //
+        // With (b), the line-test stops at walls (inter-room walls AND
+        // closed-door collisions), confining the floodfill to the connected
+        // walkable region the navigator can actually reach from the seed.
+        // Open doors at scan time still bleed into the adjacent room, which
+        // matches the static-only-scan policy (plan §7).
+        //
+        // Cost: ~1 line-test per neighbor enqueue. ~5,435 cells × ~8 neighbors
+        // ≈ 43,480 additional line tests per scan, ~40ms wall time. Within
+        // the kMaxScanWallTimeMs = 1000ms budget.
+        //
+        // See Plans/room_nav_floodfill_scoping_investigation.md for full
+        // analysis. Implements Solution A from that document.
         if (firstIdx >= 0) {
+            // The "from" pos is the cell's world center at the floor height
+            // we just discovered. Use the first node's pos for accuracy
+            // (multi-cast may produce stacked floors; we use the topmost).
+            const Vec3f& fromPos = out->nodes[firstIdx].pos;
+
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     if (dx == 0 && dz == 0) continue;
                     CellKey neighbor{ cell.x + dx, cell.z + dz };
                     if (visited.count(neighbor)) continue;
+
+                    // Pelvis-height line test toward the neighbor's center.
+                    // We don't yet know the neighbor's floor Y, so use this
+                    // cell's Y as the test elevation. If the neighbor's floor
+                    // is at a similar Y the test is meaningful; if drastically
+                    // different the floodfill stops at the elevation gap
+                    // (correctly — that's a cliff or wall).
+                    Vec3f neighborProbe = CellCenterWorld(neighbor, out->bboxMin);
+                    neighborProbe.y = fromPos.y;
+
+                    if (!MovementClear(fromPos, neighborProbe, play)) continue;
+
                     pending.push_back(neighbor);
                 }
             }
