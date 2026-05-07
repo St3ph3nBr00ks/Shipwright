@@ -12,9 +12,11 @@
  * Two output streams:
  *   - Standard log file: human-readable [Tag] scene=N room=M ... lines
  *     via SPDLOG_INFO (alongside existing log content).
- *   - Manifest sidecar (logs/scenelog_<timestamp>.manifest.jsonl):
+ *   - Manifest sidecar (roommanifests/scenelog_<timestamp>.manifest.jsonl):
  *     one JSON event per line, machine-readable. Consumed by
  *     scripts/manifest_to_scene_data.py (see #202).
+ *     The roommanifests/ directory lives at the executable cwd, sibling
+ *     to logs/ and roomnavdata/.
  *
  * See:
  *   - Claude/Plans/implementation_plan_logging_and_scene_data.md
@@ -75,8 +77,9 @@ static const char* GetActorSymbolicName(int16_t actorId) {
 
 // ---------------------------------------------------------------------------
 // Manifest sidecar — appends one JSON event per line to a per-session file
-// at logs/scenelog_<timestamp>.manifest.jsonl. Lazy-opens on first emit.
-// First event of every file is a BuildInfo header.
+// at roommanifests/scenelog_<timestamp>.manifest.jsonl. Lazy-opens on first
+// emit; first event of every file is a BuildInfo header. Mirrors the
+// roomnavdata/ directory convention used by RoomNavData.cpp.
 // ---------------------------------------------------------------------------
 
 namespace ManifestSidecar {
@@ -112,11 +115,18 @@ static void EnsureOpen() {
         return;
     }
     Opened() = true;
-    try {
-        std::filesystem::create_directories("logs");
-    } catch (...) {
-        // Best-effort; logs/ usually exists.
+
+    // Lazy-create roommanifests/ at the executable cwd, sibling to logs/
+    // and roomnavdata/. Mirrors RoomNavData.cpp:201-207 style — best-effort,
+    // log + return on failure (no exception propagation into caller).
+    std::error_code ec;
+    std::filesystem::create_directories("roommanifests", ec);
+    if (ec) {
+        SPDLOG_WARN("[SceneLog] EnsureOpen: create_directories(roommanifests) failed: {}",
+                    ec.message());
+        return;
     }
+
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     std::tm tm{};
@@ -127,7 +137,7 @@ static void EnsureOpen() {
 #endif
     char buf[80];
     std::strftime(buf, sizeof(buf), "scenelog_%Y%m%d_%H%M%S.manifest.jsonl", &tm);
-    Stream().open(std::string("logs/") + buf, std::ios::out | std::ios::app);
+    Stream().open(std::string("roommanifests/") + buf, std::ios::out | std::ios::app);
 }
 
 static void EmitHeader() {
