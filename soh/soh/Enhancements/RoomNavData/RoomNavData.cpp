@@ -72,6 +72,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_DEBUG_DRAW_COMPONENTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawComponents")
 #define CVAR_ROOM_NAV_LOG_REJECTED_FLOORS   CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors")
 #define CVAR_ROOM_NAV_PATH_B_CLIMB          CVAR_ENHANCEMENT("RoomNavData.PathBClimbDetection")
+#define CVAR_ROOM_NAV_LEDGE_GRAB            CVAR_ENHANCEMENT("RoomNavData.LedgeGrabDetection")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -210,7 +211,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // shift is a single-byte addition in the flags field's slot). Existing
 // v1 .bin files become unreadable; TryLoadFromDisk's version-mismatch
 // branch silently regenerates them on next room entry.
-static constexpr uint16_t kCurrentSchemaVersion = 2;
+static constexpr uint16_t kCurrentSchemaVersion = 3;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -287,15 +288,18 @@ static void SaveToDisk(const RoomNavData& nav) {
     uint32_t nodeCount    = (uint32_t)nav.nodes.size();
     uint32_t edgeCount    = (uint32_t)nav.edges.size();
     uint32_t climbCount   = (uint32_t)nav.climbAnchors.size();
+    uint32_t ledgeCount   = (uint32_t)nav.ledgeAnchors.size();    // schema v3+
     uint32_t hazardCount  = (uint32_t)nav.hazardCentroids.size();
     WriteValue(f, nodeCount);
     WriteValue(f, edgeCount);
     WriteValue(f, climbCount);
+    WriteValue(f, ledgeCount);
     WriteValue(f, hazardCount);
 
     WriteVector(f, nav.nodes);
     WriteVector(f, nav.edges);
     WriteVector(f, nav.climbAnchors);
+    WriteVector(f, nav.ledgeAnchors);
     WriteVector(f, nav.hazardCentroids);
 
     if (!f.good()) {
@@ -321,7 +325,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     uint32_t scanTimestamp = 0;
     Vec3f bboxMin{}, bboxMax{};
     uint16_t gridRes = 0;
-    uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, hazardCount = 0;
+    uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, ledgeCount = 0, hazardCount = 0;
 
     if (!ReadValue(f, magic) || magic != kMagic) {
         SPDLOG_WARN("[RoomNav] LoadFromDisk: magic mismatch for {} (got 0x{:08x}); regenerating",
@@ -347,11 +351,13 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadValue(f, nodeCount))   return;
     if (!ReadValue(f, edgeCount))   return;
     if (!ReadValue(f, climbCount))  return;
+    if (!ReadValue(f, ledgeCount))  return;
     if (!ReadValue(f, hazardCount)) return;
 
     if (!ReadVector(f, out->nodes, nodeCount))                   return;
     if (!ReadVector(f, out->edges, edgeCount))                   return;
     if (!ReadVector(f, out->climbAnchors, climbCount))           return;
+    if (!ReadVector(f, out->ledgeAnchors, ledgeCount))           return;
     if (!ReadVector(f, out->hazardCentroids, hazardCount))       return;
 
     out->magic           = magic;
@@ -661,6 +667,118 @@ static void DetectClimbAnchorsViaSurfaceFlags(
     if (pathBAdded > 0 || pathBMerged > 0) {
         SPDLOG_INFO("[RoomNav] Path B climb detection: {} anchors added, {} polys merged",
                     pathBAdded, pathBMerged);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ledge-grab detection (Phase 1 — detection only). Identifies pairs of
+// walkable nodes (approachPos, topPos) where:
+//   - topPos.y - approachPos.y is in the ledge-grab range (above step-up
+//     height, below Link's max jump-grab reach)
+//   - The two are within an XZ tolerance (so the player can plausibly
+//     jump from approachPos and reach topPos's edge)
+//   - A wall exists between them (the grabbable rim)
+//
+// The wall-existence check is the key quality filter: stairs and
+// elevation steps satisfy the Y-delta + XZ predicate but DON'T have a
+// wall between them, so MovementClear succeeds and they're rejected.
+// True ledges have a wall blocking the line test.
+//
+// Phase 1 (this commit) populates `ledgeAnchors` and supports debug-draw
+// visualization. Phase 2 (separate commit) wires AI Follower to USE the
+// anchors via jump-injection in HookHandlers.cpp's input hook.
+// ---------------------------------------------------------------------------
+
+static void DetectLedgeAnchors(
+    RoomNavData* out,
+    PlayState* play,
+    const std::unordered_map<CellKey, std::vector<uint16_t>, CellKeyHash>& nodesByCell)
+{
+    if (CVarGetInteger(CVAR_ROOM_NAV_LEDGE_GRAB, 0) == 0) return;
+
+    // Step-up edges already cover deltas <= 30; below that range it's a
+    // walkable edge, not a ledge. 150 is a generous upper bound on
+    // Link's vertical reach in a jump-grab; anything taller would
+    // require additional traversal mechanism (climb anchor, teleport).
+    constexpr float kLedgeMinDeltaY    = 30.0f;
+    constexpr float kLedgeMaxDeltaY    = 150.0f;
+    // Approach and top must be within ~80u XZ — the player jumps roughly
+    // forward; targets further than that aren't physically reachable.
+    constexpr float kLedgeMaxXZSq      = 80.0f * 80.0f;
+    // Cluster radius: anchors with both endpoints within ~40u of an
+    // existing anchor are considered duplicates (different node pairs
+    // discovering the same physical ledge from slightly different
+    // approach positions).
+    constexpr float kClusterRadiusSq   = 40.0f * 40.0f;
+
+    size_t added = 0, merged = 0;
+
+    for (uint16_t i = 0; i < out->nodes.size(); i++) {
+        const NavNode& a = out->nodes[i];
+        if (!(a.flags & NODE_WALKABLE)) continue;
+
+        CellKey aCell{ (int32_t)(int16_t)a.cellIdxX, (int32_t)(int16_t)a.cellIdxZ };
+
+        // 3×3 cell neighborhood including same cell. Same-cell pairs
+        // catch verticals where approach is directly under the ledge.
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                CellKey nCell{ aCell.x + dx, aCell.z + dz };
+                auto it = nodesByCell.find(nCell);
+                if (it == nodesByCell.end()) continue;
+                for (uint16_t j : it->second) {
+                    if (j == i) continue;
+                    const NavNode& b = out->nodes[j];
+                    if (!(b.flags & NODE_WALKABLE)) continue;
+
+                    // b is the top candidate (must be HIGHER than a).
+                    f32 dy = b.pos.y - a.pos.y;
+                    if (dy < kLedgeMinDeltaY || dy > kLedgeMaxDeltaY) continue;
+
+                    f32 dxf = b.pos.x - a.pos.x;
+                    f32 dzf = b.pos.z - a.pos.z;
+                    if (dxf*dxf + dzf*dzf > kLedgeMaxXZSq) continue;
+
+                    // Wall-confirmation: MovementClear at body height
+                    // returns true when the line is unblocked. We need
+                    // a wall to exist (NOT clear) between approach and
+                    // top — that's the rim Link grabs. Walls are what
+                    // distinguishes a ledge from a step or staircase.
+                    if (MovementClear(a.pos, b.pos, play)) continue;
+
+                    // Cluster: skip if both endpoints match an existing
+                    // anchor's endpoints within radius. Different (i, j)
+                    // pairs that discover the same physical ledge from
+                    // slightly different approach positions collapse to
+                    // one anchor.
+                    bool isDuplicate = false;
+                    for (const LedgeAnchor& existing : out->ledgeAnchors) {
+                        f32 ax = existing.approachPos.x - a.pos.x;
+                        f32 az = existing.approachPos.z - a.pos.z;
+                        f32 tx = existing.topPos.x      - b.pos.x;
+                        f32 tz = existing.topPos.z      - b.pos.z;
+                        if ((ax*ax + az*az < kClusterRadiusSq) &&
+                            (tx*tx + tz*tz < kClusterRadiusSq)) {
+                            isDuplicate = true;
+                            merged++;
+                            break;
+                        }
+                    }
+                    if (isDuplicate) continue;
+
+                    LedgeAnchor anchor{};
+                    anchor.approachPos = a.pos;
+                    anchor.topPos      = b.pos;
+                    out->ledgeAnchors.push_back(anchor);
+                    added++;
+                }
+            }
+        }
+    }
+
+    if (added > 0 || merged > 0) {
+        SPDLOG_INFO("[RoomNav] Ledge-grab detection: {} anchors added, {} duplicates merged",
+                    added, merged);
     }
 }
 
@@ -1260,6 +1378,15 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     DetectClimbAnchors(out, play);
     DetectClimbAnchorsViaSurfaceFlags(out, play, visited);
 
+    // Ledge-grab anchor detection (Phase 1) — distinct motion semantics
+    // from climb anchors (jump+grab+pull-up vs climb-up animation). Uses
+    // the same nodesByCell spatial index built for edge generation.
+    // Requires the orphan pass to have run first so NODE_ORPHANED is
+    // populated, but we don't currently filter by that flag — orphan
+    // tops can still be valid ledge-grab destinations (small platforms
+    // disconnected from the floodfill but reachable via jump+grab).
+    DetectLedgeAnchors(out, play, nodesByCell);
+
     // Climb-flag population (polish wave commit 4) — for each climb anchor
     // discovered above, find the nearest walkable nav-node to its basePos
     // and topPos and tag them NODE_CLIMB_BASE / NODE_CLIMB_TOP. Lets nav
@@ -1289,12 +1416,13 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
     SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}) "
-                "nodes={} edges={} climbs={} cells={} seeds={} orphans={} recovered={} "
+                "nodes={} edges={} climbs={} ledges={} cells={} seeds={} orphans={} recovered={} "
                 "scanMs={} edgeMs={} totalMs={}",
                 sceneNum, (int)roomNum,
                 playerPos.x, playerPos.y, playerPos.z,
                 out->nodes.size(), out->edges.size(),
-                out->climbAnchors.size(), visited.size(), 1 + extraSeeds, orphanCount,
+                out->climbAnchors.size(), out->ledgeAnchors.size(),
+                visited.size(), 1 + extraSeeds, orphanCount,
                 recoveredOrphanCount, scanMs, edgeMs, totalMsFinal);
 
     // Per-anchor diagnostic log — emit one line per discovered climb
@@ -1309,6 +1437,15 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
                     (int)a.actorId,
                     a.basePos.x, a.basePos.y, a.basePos.z,
                     a.topPos.x,  a.topPos.y,  a.topPos.z);
+    }
+    for (size_t i = 0; i < out->ledgeAnchors.size(); i++) {
+        const LedgeAnchor& l = out->ledgeAnchors[i];
+        SPDLOG_INFO("[RoomNav]   LedgeAnchor[{}] approachPos=({:.0f},{:.0f},{:.0f}) "
+                    "topPos=({:.0f},{:.0f},{:.0f}) deltaY={:.0f}",
+                    i,
+                    l.approachPos.x, l.approachPos.y, l.approachPos.z,
+                    l.topPos.x,      l.topPos.y,      l.topPos.z,
+                    l.topPos.y - l.approachPos.y);
     }
 }
 
@@ -1986,6 +2123,17 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AddVerticalPost(sXluDl, sVtxDl, anchor.basePos, anchor.topPos);
     }
 
+    // Ledge anchors — light purple / lavender. Distinct hue from climb
+    // anchors (yellow) so the user can visually tell ladder/vine climbs
+    // apart from jump-grab ledge points. Same marker shape: ground quad
+    // at approach + ground quad at top + thin connecting post.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xC0, 0x80, 0xFF, 0xFF));
+    for (const LedgeAnchor& anchor : data->ledgeAnchors) {
+        AddGroundQuad(sXluDl, sVtxDl, anchor.approachPos);
+        AddGroundQuad(sXluDl, sVtxDl, anchor.topPos);
+        AddVerticalPost(sXluDl, sVtxDl, anchor.approachPos, anchor.topPos);
+    }
+
     // Climb-base / climb-top flagged nodes (polish wave commit 4) — bright
     // yellow ring overlay at every node carrying NODE_CLIMB_BASE or
     // NODE_CLIMB_TOP. Slightly larger than ordinary node quads
@@ -2132,6 +2280,7 @@ static void OnDebugDrawRender() {
                    + data->edges.size() * 4
                    + data->climbAnchors.size() * 16
                    + data->climbAnchors.size() * 8 // climb-flag overlay (2 nodes × 4 verts)
+                   + data->ledgeAnchors.size() * 16  // ledge: 2 ground quads + 2 perp posts
                    + data->hazardCentroids.size() * 4
                    + data->rejectedFloorPositions.size() * 8);
     // Gfx commands: 2 per node-quad / edge-quad / hazard-centroid quad; 8
@@ -2147,6 +2296,7 @@ static void OnDebugDrawRender() {
                    + data->edges.size() * 2
                    + data->climbAnchors.size() * 8
                    + data->climbAnchors.size() * 4 // climb-flag overlay (2 nodes × 2 Gfx)
+                   + data->ledgeAnchors.size() * 8  // ledge: same shape as climb anchor
                    + data->hazardCentroids.size() * 2
                    + data->rejectedFloorPositions.size() * 4
                    + 64);

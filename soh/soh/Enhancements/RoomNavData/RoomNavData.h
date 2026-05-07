@@ -68,6 +68,26 @@ struct ClimbAnchor {
     int16_t actorId;     // 0 if static-geometry (vine wall); nonzero if scene actor
 };
 
+// Ledge-grab anchor — distinct from ClimbAnchor in motion semantics. A
+// climb anchor is something the navigator CLIMBS UP (engine attaches to
+// ladder/vine, plays climb animation). A ledge anchor is something the
+// navigator JUMPS UP onto and grabs at the rim — the engine then pulls
+// the navigator up via the climb-up animation.
+//
+// Geometry: approachPos is a walkable node BELOW the ledge where the
+// navigator stands to begin the jump. topPos is a walkable node above
+// where the navigator ends up after the climb-up. A wall exists between
+// the two (the ledge edge that gets grabbed).
+//
+// Consumer pattern (Phase 2): only Link-rigged navigators (AI Follower,
+// future allied NPCs) can use ledge grab — it's an engine-level Link
+// state, not generally available to enemies. NavTraits.eligibleForLedgeGrab
+// gates per-navigator opt-in.
+struct LedgeAnchor {
+    Vec3f approachPos;   // walkable position below the ledge (jump from here)
+    Vec3f topPos;        // walkable position on top after climb-up
+};
+
 struct RoomNavData {
     // Header
     uint32_t magic = 0x52564E41; // 'RNAV' little-endian — file-format identifier
@@ -80,6 +100,7 @@ struct RoomNavData {
     std::vector<NavNode>     nodes;
     std::vector<NavEdge>     edges;
     std::vector<ClimbAnchor> climbAnchors;
+    std::vector<LedgeAnchor> ledgeAnchors;     // schema v3+
     std::vector<Vec3f>       hazardCentroids;
 
     // Scan metadata

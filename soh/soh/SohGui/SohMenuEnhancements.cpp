@@ -2046,6 +2046,22 @@ void SohMenu::AddMenuEnhancements() {
             "floodfill-visited cell set.\n\n"
             "Apply via Force Rescan after toggling. Default: off."));
 
+    AddWidget(path, "Ledge-Grab Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.LedgeGrabDetection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, scans for walkable-node pairs separated by 30-150u of vertical "
+            "delta with a wall between them — the geometry signature of a ledge that "
+            "Link can jump up and grab. Distinct from climb anchors (ladders/vines): "
+            "ledge anchors are JUMP+GRAB targets where the engine pulls Link up after "
+            "he grabs the rim.\n\n"
+            "Visualized in the debug overlay as light-purple ground quads (approach + "
+            "top) with a thin connecting post. Phase 1 implements detection + viz "
+            "only; Phase 2 wires AI Follower to USE the anchors via jump injection.\n\n"
+            "Schema bumps to v3 when first scan runs with this on; existing v2 .bin "
+            "files regenerate on next room entry. Apply via Force Rescan. Default: off."));
+
     AddWidget(path, "Log Stuck-On-Slope Diagnostic", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
