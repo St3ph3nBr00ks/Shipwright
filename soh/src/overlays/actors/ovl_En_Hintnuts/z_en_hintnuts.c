@@ -216,6 +216,9 @@ void EnHintnuts_SetupLeave(EnHintnuts* this, PlayState* play) {
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
     if (!Anchor_ShouldSuppressHintnutsDrop(&this->actor)) {
+        // #193 instrumentation 2026-05-07 — see Item_DropCollectible.
+        LUSLOG_INFO("[ItemDropTrace] En_Hintnuts direct Actor_Spawn EN_ITEM00 params=0x0003 (heart) pos=(%.0f,%.0f,%.0f)",
+                    this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z);
         Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, this->actor.world.pos.x, this->actor.world.pos.y,
                     this->actor.world.pos.z, 0x0, 0x0, 0x0, 0x3); // recovery heart
     }

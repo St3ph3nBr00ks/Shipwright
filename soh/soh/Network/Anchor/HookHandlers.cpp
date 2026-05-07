@@ -4231,6 +4231,22 @@ void Anchor::RegisterHooks() {
         // is acceptable for Phase 2 since FLEXIBLE drops are rare.)
         s16 resolvedType = (s16)(actor->params & 0xFF);
 
+        // #193 instrumentation 2026-05-07 — diagnose mystery STICK
+        // spawn origin. Log every EN_ITEM00 spawn with resolved type +
+        // raw params + the depth/sequence flags so it can be matched
+        // against the [ItemDropTrace] entries from the three vanilla
+        // drop functions (z_en_item00.c). For unknown-source spawns
+        // (no matching trace line in the same frame), the spawn came
+        // from an Actor_Spawn(ACTOR_EN_ITEM00) call outside the
+        // wrapped paths — that's the path we're hunting. Drop after
+        // diagnosis.
+        SPDLOG_INFO("[ItemDropTrace] OnActorSpawn EN_ITEM00 params=0x{:04X} resolvedType=0x{:02X} "
+                    "pos=({:.0f},{:.0f},{:.0f}) g_isSpawningNetworkItemDrop={} g_pendingItemDropDepth={}",
+                    (uint16_t)actor->params, (int)resolvedType,
+                    actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
+                    (int)g_isSpawningNetworkItemDrop,
+                    g_pendingItemDropDepth);
+
         // Receive-side: extension stamping only. Skip broadcast.
         if (g_isSpawningNetworkItemDrop) {
             ItemDropNetId ext;

@@ -1590,6 +1590,14 @@ EnItem00* Item_DropCollectible(PlayState* play, Vec3f* spawnPos, s16 params) {
 
     params &= 0x3FFF;
 
+    // #193 instrumentation 2026-05-07 — diagnose mystery STICK spawn
+    // origin. Every EN_ITEM00 spawn that reaches this path logs its
+    // entry point + raw params so test logs can be grep'd by call
+    // site to identify which drop-pipeline produced an unexpected
+    // type. Drop after diagnosis.
+    LUSLOG_INFO("[ItemDropTrace] Item_DropCollectible params=0x%04X pos=(%.0f,%.0f,%.0f)",
+                (u16)params, spawnPos->x, spawnPos->y, spawnPos->z);
+
     if ((params & 0x00FF) == ITEM00_HEART && CVarGetInteger(CVAR_ENHANCEMENT("NoHeartDrops"), 0)) {
         return NULL;
     }
@@ -1649,6 +1657,10 @@ EnItem00* Item_DropCollectible2(PlayState* play, Vec3f* spawnPos, s16 params) {
 
     params &= 0x3FFF;
 
+    // #193 instrumentation 2026-05-07 — see Item_DropCollectible above.
+    LUSLOG_INFO("[ItemDropTrace] Item_DropCollectible2 params=0x%04X pos=(%.0f,%.0f,%.0f)",
+                (u16)params, spawnPos->x, spawnPos->y, spawnPos->z);
+
     if ((params & 0x00FF) == ITEM00_HEART && CVarGetInteger(CVAR_ENHANCEMENT("NoHeartDrops"), 0)) {
         return NULL;
     }
@@ -1688,6 +1700,14 @@ void Item_DropCollectibleRandom(PlayState* play, Actor* fromActor, Vec3f* spawnP
     s16 param8000;
     s16 dropTableIndex = Rand_ZeroOne() * 16.0f;
     u8 dropId;
+
+    // #193 instrumentation 2026-05-07 — see Item_DropCollectible above.
+    // fromActor->id helps disambiguate which actor's death/random table
+    // produced this call.
+    LUSLOG_INFO("[ItemDropTrace] Item_DropCollectibleRandom params=0x%04X fromActorId=0x%04X pos=(%.0f,%.0f,%.0f)",
+                (u16)params,
+                (u16)(fromActor != NULL ? fromActor->id : 0xFFFF),
+                spawnPos->x, spawnPos->y, spawnPos->z);
 
     // #193 Phase 2 — bracket the entire body so any Actor_Spawn fired
     // by this call (or by inner Item_DropCollectible recursive calls)
