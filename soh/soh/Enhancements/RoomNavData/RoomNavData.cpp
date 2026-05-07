@@ -1288,11 +1288,28 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
 
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
-    SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} nodes={} edges={} climbs={} cells={} "
-                "seeds={} orphans={} recovered={} scanMs={} edgeMs={} totalMs={}",
-                sceneNum, (int)roomNum, out->nodes.size(), out->edges.size(),
+    SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}) "
+                "nodes={} edges={} climbs={} cells={} seeds={} orphans={} recovered={} "
+                "scanMs={} edgeMs={} totalMs={}",
+                sceneNum, (int)roomNum,
+                playerPos.x, playerPos.y, playerPos.z,
+                out->nodes.size(), out->edges.size(),
                 out->climbAnchors.size(), visited.size(), 1 + extraSeeds, orphanCount,
                 recoveredOrphanCount, scanMs, edgeMs, totalMsFinal);
+
+    // Per-anchor diagnostic log — emit one line per discovered climb
+    // anchor with basePos, topPos, and source (Path A actorId or 0 for
+    // Path B static-geometry). Lets the user grep for anchors discovered
+    // near a known surface position to validate detection coverage.
+    for (size_t i = 0; i < out->climbAnchors.size(); i++) {
+        const ClimbAnchor& a = out->climbAnchors[i];
+        SPDLOG_INFO("[RoomNav]   ClimbAnchor[{}] kind={} actorId=0x{:04X} "
+                    "basePos=({:.0f},{:.0f},{:.0f}) topPos=({:.0f},{:.0f},{:.0f})",
+                    i, a.actorId == 0 ? "PathB-static" : "PathA-actor",
+                    (int)a.actorId,
+                    a.basePos.x, a.basePos.y, a.basePos.z,
+                    a.topPos.x,  a.topPos.y,  a.topPos.z);
+    }
 }
 
 // Top-level lookup-then-scan dispatch. Called once per (scene, room)
@@ -2185,8 +2202,19 @@ void ForceRescanCurrentRoom() {
     sDebugDrawLastSummaryScene = -1;
     sDebugDrawLastSummaryRoom  = -1;
 
-    SPDLOG_INFO("[RoomNav] ForceRescanCurrentRoom: dropped cache + disk for scene={} room={}; "
-                "re-scan triggers next frame", scene, (int)room);
+    // Capture Link's position at trigger time so the user can correlate
+    // a rescan event with where they were standing — useful for locating
+    // surfaces that should-have-been-detected but weren't.
+    f32 px = 0.0f, py = 0.0f, pz = 0.0f;
+    Player* player = GET_PLAYER(play);
+    if (player != nullptr) {
+        px = player->actor.world.pos.x;
+        py = player->actor.world.pos.y;
+        pz = player->actor.world.pos.z;
+    }
+    SPDLOG_INFO("[RoomNav] ForceRescanCurrentRoom: scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}); "
+                "dropped cache + disk; re-scan triggers next frame",
+                scene, (int)room, px, py, pz);
 }
 
 // ---------------------------------------------------------------------------
