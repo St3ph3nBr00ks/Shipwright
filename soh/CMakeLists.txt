@@ -426,6 +426,7 @@ if(MSVC)
             /sdl-;
             /permissive-;
             /MP;
+            /FS;  # synchronize .pdb writes under /MP — see root CMakeLists.txt comment
             ${DEFAULT_CXX_DEBUG_INFORMATION_FORMAT};
             ${DEFAULT_CXX_EXCEPTION_HANDLING}
         )
@@ -442,6 +443,7 @@ if(MSVC)
             >
             /permissive-;
             /MP;
+            /FS;  # synchronize .pdb writes under /MP — see root CMakeLists.txt comment
             /sdl-;
             /w;
             ${DEFAULT_CXX_DEBUG_INFORMATION_FORMAT};

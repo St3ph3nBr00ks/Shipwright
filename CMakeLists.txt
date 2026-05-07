@@ -77,6 +77,11 @@ set(CMAKE_PROJECT_GIT_COMMIT_TAG "${GIT_COMMIT_TAG}" CACHE STRING "Git commit ta
 
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT soh)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/MP>)
+# /FS — force synchronous .pdb writes when /MP is on. Without /FS, parallel
+# CL.EXE instances racing to write vc143.pdb produce intermittent C1041
+# errors on otherwise-correct source files. Cost: negligible serialization
+# of debug-symbol writes only.
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/FS>)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/Zc:preprocessor>)
 
