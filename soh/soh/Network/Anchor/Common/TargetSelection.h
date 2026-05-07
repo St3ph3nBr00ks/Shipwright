@@ -96,10 +96,11 @@ void ResetTargetLock(Actor* navigator);
 void SetCustomCandidates(Actor* navigator, const std::vector<Actor*>& candidates);
 
 // True when the master Nav CVar is on AND Nav.TargetSelection is on.
-bool IsEnabled();
+bool IsTargetSelectionEnabled();
 
-// ShipInit registration. Currently registers an OnExitGame clear hook so
-// the per-navigator candidate-store doesn't leak across save loads.
-void Register();
+// ShipInit registration. Registers an OnExitGame clear hook so the
+// per-navigator custom-candidate store doesn't leak across save loads.
+void RegisterTargetSelection();
+
 
 } // namespace AnchorNav

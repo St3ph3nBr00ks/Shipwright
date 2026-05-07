@@ -255,7 +255,7 @@ void ClearHeld(EnemyNetId* ext) {
 // Public API.
 // ---------------------------------------------------------------------------
 
-bool IsEnabled() {
+bool IsTargetSelectionEnabled() {
     return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0
         && CVarGetInteger(CVAR_NAV_TARGET_SELECTION, 0) != 0;
 }
@@ -265,7 +265,7 @@ Actor* AcquireOrHoldTarget(Actor* navigator, TargetSet set, PlayState* play) {
 
     // Master-off / per-feature-off / per-actor opt-out: pure nearest-of-set
     // (no state mutation).
-    if (!IsEnabled()) return NearestInSet(navigator, set, play);
+    if (!IsTargetSelectionEnabled()) return NearestInSet(navigator, set, play);
 
     const NavTraits& traits = GetTraitsForActor(navigator->id);
     if (!traits.useStickyTargeting || traits.targetStickyFrames == 0) {
@@ -391,21 +391,17 @@ void SetCustomCandidates(Actor* navigator, const std::vector<Actor*>& candidates
 
 namespace {
 
-void OnExitGameClear(int32_t /*fileNum*/) {
+void TargetSelectionOnExitGameClear(int32_t /*fileNum*/) {
     CustomCandidatesMap().clear();
 }
 
+}  // anonymous namespace
+
 void RegisterTargetSelection() {
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnExitGame>(
-        OnExitGameClear);
-}
-
-} // anonymous namespace
-
-void Register() {
-    RegisterTargetSelection();
+        TargetSelectionOnExitGameClear);
 }
 
 } // namespace AnchorNav
 
-static RegisterShipInitFunc registerTargetSelection(AnchorNav::Register);
+static RegisterShipInitFunc registerTargetSelection(AnchorNav::RegisterTargetSelection);
