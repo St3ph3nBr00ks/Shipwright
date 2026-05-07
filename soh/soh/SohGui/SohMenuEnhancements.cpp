@@ -2083,6 +2083,29 @@ void SohMenu::AddMenuEnhancements() {
             "with no static-wall geometry.\n\n"
             "Apply via Force Rescan after changing."));
 
+    AddWidget(path, "Crawlspace Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.CrawlspaceDetection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, scans static scene collision polys for the "
+            "crawlspace wall-flag bits (4 + 5 — 0x30 mask, what player "
+            "code at z_player.c:7639 checks). Each cluster of "
+            "crawlspace-flagged walls produces one CrawlspaceAnchor; "
+            "walkable nav nodes within ~60u of any anchor are tagged "
+            "NODE_CRAWLSPACE.\n\n"
+            "Visualized in the debug overlay as cyan ground quads + a "
+            "short direction line showing the wall normal (which way "
+            "the navigator faces to enter).\n\n"
+            "Phase 1 implements detection + viz only. Phase 2 wires "
+            "consumers (AI Follower, AI Invader child variant) to "
+            "actually USE the anchors via crawl-input injection. Adult "
+            "Link / non-child-rigged enemies cannot use crawlspaces — "
+            "that gating happens consumer-side in Phase 2.\n\n"
+            "Schema bumps to v4 when first scan runs with this on; "
+            "existing v3 .bin files regenerate. Apply via Force Rescan. "
+            "Default: off."));
+
     AddWidget(path, "Auto Refresh Anchors on Scene Flag (Tier 1)", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.AutoRefreshAnchorsOnSceneFlag"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })

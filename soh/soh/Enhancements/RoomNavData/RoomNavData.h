@@ -43,6 +43,11 @@ enum NodeFlags : uint16_t {
     NODE_HAZARD_ADJACENT = 0x80, // walkable AND adjacent to a hazard cell (used for cautious pathing)
     NODE_ORPHANED        = 0x100, // walkable but no edges connect this node to any seed-rooted component
                                   // (stacked floor on top of wall/fence with no traversable path from seeds)
+    NODE_CRAWLSPACE      = 0x200, // walkable but accessible only via crawlspace traversal (low-clearance
+                                  // tunnel; navigator must be in PLAYER_STATE2_CRAWLING). Tagged by
+                                  // proximity to a CrawlspaceAnchor. Only child-Link-rigged navigators
+                                  // (AI Follower, AI Invader child variant) can use these — adult Link
+                                  // and most enemies cannot crawl. Consumer-side gating per NavTraits.
 };
 
 // ---------------------------------------------------------------------------
@@ -88,6 +93,24 @@ struct LedgeAnchor {
     Vec3f topPos;        // walkable position on top after climb-up
 };
 
+// Crawlspace anchor — marks a crawlspace entrance (a wall poly with
+// the crawlspace flag bit set; engine-detected at z_player.c:7639 via
+// `interactWallFlags & 0x30`). Each entry is identified by a clustered
+// position + the wall normal direction; an entry-exit pair is implicit
+// via the fact that crawlspaces have walls on both ends, both
+// independently registered as anchors. Consumers (Phase 2) pair them
+// at navigation time by looking for matching anchors with opposing
+// normals along the path.
+//
+// NavTraits gate (Phase 2): consumer must have `useCrawlspaces = true`
+// to traverse these. Only child-Link-rigged navigators (AI Follower,
+// AI Invader child variant) qualify; adult-rigged or non-Link
+// navigators (most enemies, bosses) skip them.
+struct CrawlspaceAnchor {
+    Vec3f entryPos;      // approximate centroid of the crawlspace-flagged wall(s)
+    Vec3f entryNormal;   // wall normal (direction OUT OF the wall — face this way to enter)
+};
+
 struct RoomNavData {
     // Header
     uint32_t magic = 0x52564E41; // 'RNAV' little-endian — file-format identifier
@@ -97,11 +120,12 @@ struct RoomNavData {
     uint32_t scanTimestamp = 0;  // wall-clock seconds, for debug
 
     // Geometry
-    std::vector<NavNode>     nodes;
-    std::vector<NavEdge>     edges;
-    std::vector<ClimbAnchor> climbAnchors;
-    std::vector<LedgeAnchor> ledgeAnchors;     // schema v3+
-    std::vector<Vec3f>       hazardCentroids;
+    std::vector<NavNode>          nodes;
+    std::vector<NavEdge>          edges;
+    std::vector<ClimbAnchor>      climbAnchors;
+    std::vector<LedgeAnchor>      ledgeAnchors;       // schema v3+
+    std::vector<CrawlspaceAnchor> crawlspaceAnchors;  // schema v4+
+    std::vector<Vec3f>            hazardCentroids;
 
     // Scan metadata
     Vec3f bboxMin = { 0.0f, 0.0f, 0.0f };

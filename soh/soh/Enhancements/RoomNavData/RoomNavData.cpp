@@ -77,6 +77,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_PATH_B_DEBUG          CVAR_ENHANCEMENT("RoomNavData.PathBDebugLogWallTypes")
 #define CVAR_ROOM_NAV_AUTO_REFRESH_ANCHORS  CVAR_ENHANCEMENT("RoomNavData.AutoRefreshAnchorsOnSceneFlag")
 #define CVAR_ROOM_NAV_AUTO_FULL_RESCAN      CVAR_ENHANCEMENT("RoomNavData.AutoFullRescanOnSceneFlag")
+#define CVAR_ROOM_NAV_CRAWLSPACE            CVAR_ENHANCEMENT("RoomNavData.CrawlspaceDetection")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -215,7 +216,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // shift is a single-byte addition in the flags field's slot). Existing
 // v1 .bin files become unreadable; TryLoadFromDisk's version-mismatch
 // branch silently regenerates them on next room entry.
-static constexpr uint16_t kCurrentSchemaVersion = 3;
+static constexpr uint16_t kCurrentSchemaVersion = 4;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -289,21 +290,24 @@ static void SaveToDisk(const RoomNavData& nav) {
     WriteValue(f, nav.bboxMax);
     WriteValue(f, nav.gridResolution);
 
-    uint32_t nodeCount    = (uint32_t)nav.nodes.size();
-    uint32_t edgeCount    = (uint32_t)nav.edges.size();
-    uint32_t climbCount   = (uint32_t)nav.climbAnchors.size();
-    uint32_t ledgeCount   = (uint32_t)nav.ledgeAnchors.size();    // schema v3+
-    uint32_t hazardCount  = (uint32_t)nav.hazardCentroids.size();
+    uint32_t nodeCount       = (uint32_t)nav.nodes.size();
+    uint32_t edgeCount       = (uint32_t)nav.edges.size();
+    uint32_t climbCount      = (uint32_t)nav.climbAnchors.size();
+    uint32_t ledgeCount      = (uint32_t)nav.ledgeAnchors.size();      // schema v3+
+    uint32_t crawlspaceCount = (uint32_t)nav.crawlspaceAnchors.size(); // schema v4+
+    uint32_t hazardCount     = (uint32_t)nav.hazardCentroids.size();
     WriteValue(f, nodeCount);
     WriteValue(f, edgeCount);
     WriteValue(f, climbCount);
     WriteValue(f, ledgeCount);
+    WriteValue(f, crawlspaceCount);
     WriteValue(f, hazardCount);
 
     WriteVector(f, nav.nodes);
     WriteVector(f, nav.edges);
     WriteVector(f, nav.climbAnchors);
     WriteVector(f, nav.ledgeAnchors);
+    WriteVector(f, nav.crawlspaceAnchors);
     WriteVector(f, nav.hazardCentroids);
 
     if (!f.good()) {
@@ -329,7 +333,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     uint32_t scanTimestamp = 0;
     Vec3f bboxMin{}, bboxMax{};
     uint16_t gridRes = 0;
-    uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, ledgeCount = 0, hazardCount = 0;
+    uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, ledgeCount = 0, crawlspaceCount = 0, hazardCount = 0;
 
     if (!ReadValue(f, magic) || magic != kMagic) {
         SPDLOG_WARN("[RoomNav] LoadFromDisk: magic mismatch for {} (got 0x{:08x}); regenerating",
@@ -352,17 +356,19 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
                     gridRes, (uint16_t)kGridResolution, path.string());
         return;
     }
-    if (!ReadValue(f, nodeCount))   return;
-    if (!ReadValue(f, edgeCount))   return;
-    if (!ReadValue(f, climbCount))  return;
-    if (!ReadValue(f, ledgeCount))  return;
-    if (!ReadValue(f, hazardCount)) return;
+    if (!ReadValue(f, nodeCount))       return;
+    if (!ReadValue(f, edgeCount))       return;
+    if (!ReadValue(f, climbCount))      return;
+    if (!ReadValue(f, ledgeCount))      return;
+    if (!ReadValue(f, crawlspaceCount)) return;
+    if (!ReadValue(f, hazardCount))     return;
 
-    if (!ReadVector(f, out->nodes, nodeCount))                   return;
-    if (!ReadVector(f, out->edges, edgeCount))                   return;
-    if (!ReadVector(f, out->climbAnchors, climbCount))           return;
-    if (!ReadVector(f, out->ledgeAnchors, ledgeCount))           return;
-    if (!ReadVector(f, out->hazardCentroids, hazardCount))       return;
+    if (!ReadVector(f, out->nodes,             nodeCount))       return;
+    if (!ReadVector(f, out->edges,             edgeCount))       return;
+    if (!ReadVector(f, out->climbAnchors,      climbCount))      return;
+    if (!ReadVector(f, out->ledgeAnchors,      ledgeCount))      return;
+    if (!ReadVector(f, out->crawlspaceAnchors, crawlspaceCount)) return;
+    if (!ReadVector(f, out->hazardCentroids,   hazardCount))     return;
 
     out->magic           = magic;
     out->version         = version;
@@ -858,6 +864,142 @@ static void DetectLedgeAnchors(
     if (added > 0 || merged > 0) {
         SPDLOG_INFO("[RoomNav] Ledge-grab detection: {} anchors added, {} duplicates merged",
                     added, merged);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Crawlspace detection. Identifies wall polys with the crawlspace flag
+// bits set and registers them as CrawlspaceAnchor entries. Also tags
+// nearby walkable nodes with NODE_CRAWLSPACE.
+//
+// Detection mechanism (verified against z_player.c:7639):
+//   if (!LINK_IS_ADULT && (interactWallFlags & 0x30)) { ...crawlspace
+//   prompt + entry... }
+//
+// 0x30 = bits 4 + 5. In the wall-property lookup table D_80119D90:
+//   idx 5 → 0x10 (bit 4) — crawlspace flag part A
+//   idx 6 → 0x20 (bit 5) — crawlspace flag part B
+//
+// OoT crawlspaces have walls on BOTH ends (entry-front + entry-back per
+// z_player.c:7758-7762). Each side gets its own set of polys with
+// these flags, registered as separate anchors. The consumer (Phase 2)
+// pairs them at navigation time.
+//
+// Nodes within kCrawlspaceTagRadius of any anchor get NODE_CRAWLSPACE
+// set. Heuristic — the actual crawlspace tunnel volume isn't bounded
+// by the wall polys alone; the tunnel extends between entry and exit
+// walls. Future refinement could ray-cast between paired anchors and
+// tag nodes along the line.
+// ---------------------------------------------------------------------------
+
+static constexpr s32   kWallFlagCrawlspaceMask    = (1 << 4) | (1 << 5);   // 0x30
+static constexpr float kCrawlspaceClusterRadiusXZ = 30.0f;
+static constexpr float kCrawlspaceTagRadius       = 60.0f; // node tagging proximity
+
+static void DetectCrawlspaces(
+    RoomNavData* out,
+    PlayState* play,
+    const std::unordered_set<CellKey, CellKeyHash>& visited)
+{
+    if (CVarGetInteger(CVAR_ROOM_NAV_CRAWLSPACE, 0) == 0) return;
+
+    CollisionHeader* hdr = play->colCtx.colHeader;
+    if (hdr == nullptr || hdr->polyList == nullptr || hdr->vtxList == nullptr) return;
+
+    Vec3s* vtxList = hdr->vtxList;
+    u16    numPolys = hdr->numPolygons;
+    u16    numVtx   = hdr->numVertices;
+
+    constexpr float kClusterRadiusSq = kCrawlspaceClusterRadiusXZ * kCrawlspaceClusterRadiusXZ;
+
+    size_t added = 0, merged = 0;
+
+    // Pass 1 — discover crawlspace-flagged walls, cluster, register anchors.
+    for (u16 i = 0; i < numPolys; i++) {
+        CollisionPoly* poly = &hdr->polyList[i];
+
+        // Wall classification (same threshold as Path B).
+        f32 normalY = (f32)poly->normal.y / 32767.0f;
+        if (std::fabs(normalY) > 0.5f) continue;
+
+        // Crawlspace-flag check.
+        s32 wallFlags = func_80041DB8(&play->colCtx, poly, BGCHECK_SCENE);
+        if ((wallFlags & kWallFlagCrawlspaceMask) == 0) continue;
+
+        // Vertex indices.
+        u16 viA = poly->flags_vIA & 0x1FFF;
+        u16 viB = poly->flags_vIB & 0x1FFF;
+        u16 viC = poly->vIC       & 0x1FFF;
+        if (viA >= numVtx || viB >= numVtx || viC >= numVtx) continue;
+
+        const Vec3s& vA = vtxList[viA];
+        const Vec3s& vB = vtxList[viB];
+        const Vec3s& vC = vtxList[viC];
+
+        f32 cx = ((f32)vA.x + (f32)vB.x + (f32)vC.x) / 3.0f;
+        f32 cy = ((f32)vA.y + (f32)vB.y + (f32)vC.y) / 3.0f;
+        f32 cz = ((f32)vA.z + (f32)vB.z + (f32)vC.z) / 3.0f;
+
+        // Wall normal in world units (Vec3s, /32767 ≈ unit length).
+        f32 nx = (f32)poly->normal.x / 32767.0f;
+        f32 nz = (f32)poly->normal.z / 32767.0f;
+
+        // Room scoping.
+        CellKey centroidCell = CellKeyForXZ(cx, cz, out->bboxMin);
+        if (visited.count(centroidCell) == 0) continue;
+
+        // Cluster with existing anchors.
+        bool clustered = false;
+        for (CrawlspaceAnchor& existing : out->crawlspaceAnchors) {
+            f32 dx = existing.entryPos.x - cx;
+            f32 dz = existing.entryPos.z - cz;
+            if (dx*dx + dz*dz < kClusterRadiusSq) {
+                // Average the centroid + normal over clustered polys for
+                // a more stable representative position. Simple running
+                // mean — not weighted by poly area, which would be more
+                // accurate but adds complexity.
+                existing.entryPos.x    = (existing.entryPos.x    + cx) * 0.5f;
+                existing.entryPos.y    = (existing.entryPos.y    + cy) * 0.5f;
+                existing.entryPos.z    = (existing.entryPos.z    + cz) * 0.5f;
+                existing.entryNormal.x = (existing.entryNormal.x + nx) * 0.5f;
+                existing.entryNormal.y = (existing.entryNormal.y +  0.0f) * 0.5f;
+                existing.entryNormal.z = (existing.entryNormal.z + nz) * 0.5f;
+                clustered = true;
+                merged++;
+                break;
+            }
+        }
+
+        if (!clustered) {
+            CrawlspaceAnchor anchor{};
+            anchor.entryPos    = { cx, cy, cz };
+            anchor.entryNormal = { nx, 0.0f, nz };
+            out->crawlspaceAnchors.push_back(anchor);
+            added++;
+        }
+    }
+
+    // Pass 2 — tag walkable nodes near any anchor with NODE_CRAWLSPACE.
+    if (!out->crawlspaceAnchors.empty()) {
+        constexpr float kTagRadiusSq = kCrawlspaceTagRadius * kCrawlspaceTagRadius;
+        size_t taggedNodes = 0;
+        for (NavNode& node : out->nodes) {
+            if (!(node.flags & NODE_WALKABLE)) continue;
+            for (const CrawlspaceAnchor& anchor : out->crawlspaceAnchors) {
+                f32 dx = node.pos.x - anchor.entryPos.x;
+                f32 dy = node.pos.y - anchor.entryPos.y;
+                f32 dz = node.pos.z - anchor.entryPos.z;
+                if (dx*dx + dy*dy + dz*dz < kTagRadiusSq) {
+                    node.flags |= NODE_CRAWLSPACE;
+                    taggedNodes++;
+                    break;
+                }
+            }
+        }
+
+        SPDLOG_INFO("[RoomNav] Crawlspace detection: {} anchors added, {} polys merged, "
+                    "{} nodes tagged NODE_CRAWLSPACE",
+                    added, merged, taggedNodes);
     }
 }
 
@@ -1471,6 +1613,13 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     // disconnected from the floodfill but reachable via jump+grab).
     DetectLedgeAnchors(out, play, nodesByCell);
 
+    // Crawlspace detection — narrow-passage tunnels gated by wall-flag
+    // bits 4 + 5 (per z_player.c:7639's `interactWallFlags & 0x30`
+    // check). Tags nearby walkable nodes with NODE_CRAWLSPACE so
+    // consumers (Phase 2) can detect when their navigation path enters
+    // a crawlspace volume and inject the crawl input.
+    DetectCrawlspaces(out, play, visited);
+
     // Climb-flag population (polish wave commit 4) — for each climb anchor
     // discovered above, find the nearest walkable nav-node to its basePos
     // and topPos and tag them NODE_CLIMB_BASE / NODE_CLIMB_TOP. Lets nav
@@ -1500,12 +1649,13 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
     SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}) "
-                "nodes={} edges={} climbs={} ledges={} cells={} seeds={} orphans={} recovered={} "
-                "scanMs={} edgeMs={} totalMs={}",
+                "nodes={} edges={} climbs={} ledges={} crawls={} cells={} seeds={} "
+                "orphans={} recovered={} scanMs={} edgeMs={} totalMs={}",
                 sceneNum, (int)roomNum,
                 playerPos.x, playerPos.y, playerPos.z,
                 out->nodes.size(), out->edges.size(),
                 out->climbAnchors.size(), out->ledgeAnchors.size(),
+                out->crawlspaceAnchors.size(),
                 visited.size(), 1 + extraSeeds, orphanCount,
                 recoveredOrphanCount, scanMs, edgeMs, totalMsFinal);
 
@@ -1530,6 +1680,14 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
                     l.approachPos.x, l.approachPos.y, l.approachPos.z,
                     l.topPos.x,      l.topPos.y,      l.topPos.z,
                     l.topPos.y - l.approachPos.y);
+    }
+    for (size_t i = 0; i < out->crawlspaceAnchors.size(); i++) {
+        const CrawlspaceAnchor& c = out->crawlspaceAnchors[i];
+        SPDLOG_INFO("[RoomNav]   CrawlspaceAnchor[{}] entryPos=({:.0f},{:.0f},{:.0f}) "
+                    "entryNormal=({:.2f},{:.2f},{:.2f})",
+                    i,
+                    c.entryPos.x,    c.entryPos.y,    c.entryPos.z,
+                    c.entryNormal.x, c.entryNormal.y, c.entryNormal.z);
     }
 }
 
@@ -2268,6 +2426,24 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AddVerticalPost(sXluDl, sVtxDl, anchor.approachPos, anchor.topPos);
     }
 
+    // Crawlspace anchors — cyan / teal. Distinct from climb-yellow and
+    // ledge-purple. Ground quad at the entry position; a short ground
+    // line extending in the wall-normal direction shows which way the
+    // crawlspace opens (the AI navigator faces this direction to enter).
+    constexpr float kCrawlNormalArrowLen = 24.0f;
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x40, 0xE0, 0xE0, 0xFF));
+    for (const CrawlspaceAnchor& anchor : data->crawlspaceAnchors) {
+        AddGroundQuad(sXluDl, sVtxDl, anchor.entryPos);
+        // Direction line: extend from entry centroid along the wall
+        // normal so the user can see which way the crawlspace faces.
+        Vec3f tip = {
+            anchor.entryPos.x + anchor.entryNormal.x * kCrawlNormalArrowLen,
+            anchor.entryPos.y,
+            anchor.entryPos.z + anchor.entryNormal.z * kCrawlNormalArrowLen,
+        };
+        AddGroundLineQuad(sXluDl, sVtxDl, anchor.entryPos, tip);
+    }
+
     // Climb-base / climb-top flagged nodes (polish wave commit 4) — bright
     // yellow ring overlay at every node carrying NODE_CLIMB_BASE or
     // NODE_CLIMB_TOP. Slightly larger than ordinary node quads
@@ -2415,6 +2591,7 @@ static void OnDebugDrawRender() {
                    + data->climbAnchors.size() * 16
                    + data->climbAnchors.size() * 8 // climb-flag overlay (2 nodes × 4 verts)
                    + data->ledgeAnchors.size() * 16  // ledge: 2 ground quads + 2 perp posts
+                   + data->crawlspaceAnchors.size() * 8  // entry quad + direction line
                    + data->hazardCentroids.size() * 4
                    + data->rejectedFloorPositions.size() * 8);
     // Gfx commands: 2 per node-quad / edge-quad / hazard-centroid quad; 8
@@ -2431,6 +2608,7 @@ static void OnDebugDrawRender() {
                    + data->climbAnchors.size() * 8
                    + data->climbAnchors.size() * 4 // climb-flag overlay (2 nodes × 2 Gfx)
                    + data->ledgeAnchors.size() * 8  // ledge: same shape as climb anchor
+                   + data->crawlspaceAnchors.size() * 4  // entry quad + direction line
                    + data->hazardCentroids.size() * 2
                    + data->rejectedFloorPositions.size() * 4
                    + 64);
@@ -2528,8 +2706,17 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
         node.flags &= ~(NODE_CLIMB_BASE | NODE_CLIMB_TOP);
     }
 
+    // Also clear NODE_CRAWLSPACE flags on nodes (DetectCrawlspaces below
+    // re-tags them). Doing this in the same pass as the climb-flag
+    // reset would be cleaner but the loop above already ran; one extra
+    // pass is cheap (O(N) over typical 1000-node rooms).
+    for (NavNode& node : nav.nodes) {
+        node.flags &= ~NODE_CRAWLSPACE;
+    }
+
     nav.climbAnchors.clear();
     nav.ledgeAnchors.clear();
+    nav.crawlspaceAnchors.clear();
 
     // Reconstruct visited + nodesByCell from persistent node data.
     std::unordered_set<CellKey, CellKeyHash> visited;
@@ -2548,6 +2735,7 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     DetectClimbAnchors(&nav, play);
     DetectClimbAnchorsViaSurfaceFlags(&nav, play, visited);
     DetectLedgeAnchors(&nav, play, nodesByCell);
+    DetectCrawlspaces(&nav, play, visited);
 
     // Re-tag climb-base / climb-top flags from the refreshed anchors.
     for (const ClimbAnchor& anchor : nav.climbAnchors) {
