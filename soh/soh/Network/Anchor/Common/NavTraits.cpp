@@ -27,7 +27,7 @@ extern "C" {
 
 #define CVAR_NAV_ENABLED CVAR_ENHANCEMENT("Nav.Enabled")
 
-namespace Anchor::Nav {
+namespace AnchorNav {
 
 bool IsNavSystemEnabled() {
     return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0;
@@ -152,4 +152,4 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
     return kDefaultTraits;
 }
 
-} // namespace Anchor::Nav
+} // namespace AnchorNav

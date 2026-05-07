@@ -36,7 +36,7 @@ extern PlayState* gPlayState;
 #define CVAR_NAV_ENABLED      CVAR_ENHANCEMENT("Nav.Enabled")
 #define CVAR_NAV_ACTOR_TRAIL  CVAR_ENHANCEMENT("Nav.ActorTrail")
 
-namespace Anchor::Nav {
+namespace AnchorNav {
 
 // ---------------------------------------------------------------------------
 // Line-of-sight primitives.
@@ -284,6 +284,6 @@ static void RegisterActorTrail() {
         OnExitGameClear);
 }
 
-} // namespace Anchor::Nav
+} // namespace AnchorNav
 
-static RegisterShipInitFunc registerActorTrail(Anchor::Nav::RegisterActorTrail);
+static RegisterShipInitFunc registerActorTrail(AnchorNav::RegisterActorTrail);

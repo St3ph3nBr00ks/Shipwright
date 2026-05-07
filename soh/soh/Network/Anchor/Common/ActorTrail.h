@@ -33,7 +33,7 @@ extern "C" {
 #include "z64.h"
 }
 
-namespace Anchor::Nav {
+namespace AnchorNav {
 
 // ---------------------------------------------------------------------------
 // Trail data structures.
@@ -155,4 +155,4 @@ bool MovementClear(const Actor* navigator, const Vec3f& candidatePos, PlayState*
 // detection). v1 has no consumer.
 bool VisualLineOfSight(const Actor* navigator, const Vec3f& targetPos, PlayState* play);
 
-} // namespace Anchor::Nav
+} // namespace AnchorNav

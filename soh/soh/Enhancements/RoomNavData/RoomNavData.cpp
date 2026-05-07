@@ -57,7 +57,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_DEBUG_DRAW         CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
 #define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
 
-namespace Anchor::Nav::Room {
+namespace AnchorNavRoom {
 
 // ---------------------------------------------------------------------------
 // Master gate. Every per-feature query short-circuits to vanilla behaviour
@@ -1040,6 +1040,6 @@ static void RegisterRoomNavData() {
         OnDebugDraw);
 }
 
-} // namespace Anchor::Nav::Room
+} // namespace AnchorNavRoom
 
-static RegisterShipInitFunc registerRoomNavData(Anchor::Nav::Room::RegisterRoomNavData);
+static RegisterShipInitFunc registerRoomNavData(AnchorNavRoom::RegisterRoomNavData);

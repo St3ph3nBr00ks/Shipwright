@@ -33,7 +33,7 @@ extern "C" {
 #include "z64.h"
 }
 
-namespace Anchor::Nav {
+namespace AnchorNav {
 
 struct NavTraits {
     // Consumer-side flags — modify the actor's behaviour.
@@ -64,4 +64,4 @@ const NavTraits& GetTraitsForActor(s16 actorId);
 // permanently.
 bool IsNavSystemEnabled();
 
-} // namespace Anchor::Nav
+} // namespace AnchorNav
