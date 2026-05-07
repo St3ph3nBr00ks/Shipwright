@@ -965,27 +965,122 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
 }
 
 // ---------------------------------------------------------------------------
-// Debug overlay (Phase 2 commit 12) — stub for v1.
+// Debug overlay (Phase 2 commit 12 + v2 polish).
 //
-// Plan §3 calls for in-world rendering: green spheres for walkable nodes,
-// red for hazards, blue for underwater, orange for steep-slope, white
-// lines for edges, yellow arrows for climb anchors.
+// v1 (commit 81b28da07): toggle-edge log + per-room summary, no in-world
+// rendering.
 //
-// Full in-world primitive rendering requires building Gfx display lists
-// for icosphere geometry (see colViewer.cpp:262 for the pattern), color
-// coding via gDPSetEnvColor, and POLY_XLU_DISP integration. That's
-// ~200-400 lines of OoT gfx pipeline work — substantial enough to
-// warrant its own focused commit when visual validation actually
-// matters (i.e., when nav system Phase 2 starts consuming this data).
+// v2 commit 1 (this commit): in-world ground-aligned quads for walkable
+// (green) and hazard (red) nodes. Renders one ~10u quad per node, slightly
+// lifted above the floor (ZMODE_DEC handles z-fight prevention).
+// Subsequent commits add edges (lines on floor), then polish (underwater /
+// steep-slope / climb anchors / hazard centroids).
 //
-// v1 stub: register the hook + log on rising-edge of CVar transitions
-// so the user knows the toggle is wired. Per-frame draw is a no-op
-// until the rendering implementation lands.
+// Approach: ground-aligned quads instead of icospheres — 10× cheaper
+// geometry (4 verts vs 12 vert × 20 tri), no per-instance billboard math
+// required, and reads more naturally as a top-down "walkable area" map
+// overlay than floating spheres would.
+//
+// Reference pattern from colViewer.cpp (sibling debug-draw module):
+//   - sXluDl / sVtxDl static buffers, reset each frame
+//   - InitDebugGfx → gsDPSetCycleType + gsDPSetRenderMode + gsDPSetCombineMode
+//   - gsSPMatrix(&gMtxClear, ...) to render in world space
+//   - gsDPSetPrimColor between color-grouped batches
+//   - gsSPVertex + gsSP2Triangles per quad
+//   - splice into POLY_XLU_DISP at end
 // ---------------------------------------------------------------------------
 
 static bool sDebugDrawWasEnabled = false;
 static int16_t sDebugDrawLastSummaryScene = -1;
 static int8_t  sDebugDrawLastSummaryRoom  = -1;
+
+// Per-frame display-list buffers. Reset every frame; capacity grows as
+// needed. References from sXluDl into sVtxDl require sVtxDl to outlive
+// the frame — both vectors are static and reused.
+static std::vector<Gfx> sXluDl;
+static std::vector<Vtx> sVtxDl;
+
+// Quad parameters.
+static constexpr float kNodeQuadHalfExtent = 5.0f;  // 10u square per node
+static constexpr float kNodeQuadYLift      = 1.0f;  // small lift above floor
+
+// Reset buffer + reserve based on prior frame (matches colViewer pattern).
+template <typename T> static size_t ResetGfxBuffer(T& vec) {
+    size_t oldSize = vec.size();
+    vec.clear();
+    vec.reserve((size_t)(oldSize * 1.2));
+    return vec.capacity();
+}
+
+// Mirrors colViewer::InitGfx for transparent overlay rendering. Sets up
+// the RDP for primitive-color blending, with ZMODE_DEC so quads layer
+// cleanly on top of floor geometry without z-fighting.
+static void InitDebugGfx(std::vector<Gfx>& gfx) {
+    uint32_t rm   = Z_CMP | IM_RD | CVG_DST_FULL | FORCE_BL | ZMODE_DEC;
+    uint32_t blc1 = GBL_c1(G_BL_CLR_IN, G_BL_A_IN, G_BL_CLR_MEM, G_BL_1MA);
+    uint32_t blc2 = GBL_c2(G_BL_CLR_IN, G_BL_A_IN, G_BL_CLR_MEM, G_BL_1MA);
+    uint8_t  alpha = 0xC0; // fairly visible but not opaque
+
+    gfx.push_back(gsSPTexture(0, 0, 0, G_TX_RENDERTILE, G_OFF));
+    gfx.push_back(gsDPSetCycleType(G_CYC_1CYCLE));
+    gfx.push_back(gsDPSetRenderMode(rm | blc1, rm | blc2));
+    gfx.push_back(gsDPSetCombineMode(G_CC_PRIMITIVE, G_CC_PRIMITIVE));
+    gfx.push_back(gsSPLoadGeometryMode(G_ZBUFFER));
+    gfx.push_back(gsDPSetEnvColor(0xFF, 0xFF, 0xFF, alpha));
+    gfx.push_back(gsSPMatrix(&gMtxClear, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH));
+}
+
+// Append a ground-aligned quad centred at `pos` to the buffers. Quad is
+// flat in the XZ plane (Y constant), oriented as if "lying on the floor."
+static void AddGroundQuad(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl, const Vec3f& pos) {
+    float h = kNodeQuadHalfExtent;
+    float y = pos.y + kNodeQuadYLift;
+
+    // Four corners, CCW from top-down (winding for upward-facing normal).
+    Vtx v0 = gdSPDefVtxN((short)(pos.x - h), (short)y, (short)(pos.z - h), 0, 0, 0, 127, 0, 0xFF);
+    Vtx v1 = gdSPDefVtxN((short)(pos.x + h), (short)y, (short)(pos.z - h), 0, 0, 0, 127, 0, 0xFF);
+    Vtx v2 = gdSPDefVtxN((short)(pos.x + h), (short)y, (short)(pos.z + h), 0, 0, 0, 127, 0, 0xFF);
+    Vtx v3 = gdSPDefVtxN((short)(pos.x - h), (short)y, (short)(pos.z + h), 0, 0, 0, 127, 0, 0xFF);
+
+    vtxDl.push_back(v0);
+    vtxDl.push_back(v1);
+    vtxDl.push_back(v2);
+    vtxDl.push_back(v3);
+
+    dl.push_back(gsSPVertex((uintptr_t)&vtxDl[vtxDl.size() - 4], 4, 0));
+    dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+}
+
+// Build the in-world overlay for one room's nav data. Groups nodes by
+// color (PrimColor switches between groups) so the RDP doesn't reload
+// state per quad.
+static void BuildOverlayDrawData(const RoomNavData* data) {
+    if (data == nullptr) return;
+
+    // Walkable nodes — green.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0xC8, 0x00, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if (!(node.flags & NODE_WALKABLE)) continue;
+        if (node.flags & NODE_HAZARD)      continue; // hazard wins color
+        if (node.flags & NODE_UNDERWATER)  continue; // commit 3 covers
+        if (node.flags & NODE_STEEP_SLOPE) continue; // commit 3 covers
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+
+    // Hazard nodes — red.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xE0, 0x20, 0x20, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if (!(node.flags & NODE_HAZARD)) continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+
+    // Edges — commit 2 will add line draws here.
+    // Underwater / steep-slope / climb / hazard centroids — commit 3 will add.
+}
+
+// ---------------------------------------------------------------------------
+// Debug overlay registration glue.
+// ---------------------------------------------------------------------------
 
 static void OnDebugDraw() {
     bool nowEnabled = IsEnabled() && CVarGetInteger(CVAR_ROOM_NAV_DEBUG_DRAW, 0) != 0;
@@ -1029,11 +1124,39 @@ static void OnDebugDraw() {
                 data->climbAnchors.size(), data->hazardCentroids.size());
     sDebugDrawLastSummaryScene = scene;
     sDebugDrawLastSummaryRoom  = room;
+}
 
-    // TODO Phase 2 follow-up: render in-world primitives at data->nodes /
-    // data->edges / data->climbAnchors per plan §3 color spec. Pattern
-    // reference: colViewer.cpp::DrawColViewer (icosphere mesh, POLY_XLU_DISP,
-    // gDPSetEnvColor for color coding).
+// Per-frame in-world overlay rendering. Called from OnPlayDrawEnd hook.
+// Builds a display list of ground-aligned quads for the active room's
+// nav graph and splices it into POLY_XLU_DISP.
+static void OnDebugDrawRender() {
+    if (!IsEnabled()) return;
+    if (CVarGetInteger(CVAR_ROOM_NAV_DEBUG_DRAW, 0) == 0) return;
+
+    PlayState* play = gPlayState;
+    if (play == nullptr) return;
+
+    int16_t scene = play->sceneNum;
+    int8_t  room  = (int8_t)play->roomCtx.curRoom.num;
+    const RoomNavData* data = GetForRoom(scene, room);
+    if (data == nullptr) return;
+    if (data->nodes.empty()) return;
+
+    ResetGfxBuffer(sXluDl);
+    ResetGfxBuffer(sVtxDl);
+    // Reserve up front so vector reallocation doesn't invalidate the
+    // gsSPVertex pointers we embed into sXluDl below.
+    sVtxDl.reserve(data->nodes.size() * 4);     // 4 verts per quad upper bound
+    sXluDl.reserve(data->nodes.size() * 2 + 32); // ~2 Gfx commands per node + setup
+
+    InitDebugGfx(sXluDl);
+    BuildOverlayDrawData(data);
+    sXluDl.push_back(gsSPEndDisplayList());
+
+    // Splice into the frame's transparent display list.
+    OPEN_DISPS(play->state.gfxCtx);
+    gSPDisplayList(POLY_XLU_DISP++, sXluDl.data());
+    CLOSE_DISPS(play->state.gfxCtx);
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,6 +1170,8 @@ static void RegisterRoomNavData() {
         OnExitGameClear);
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnPlayDrawEnd>(
         OnDebugDraw);
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnPlayDrawEnd>(
+        OnDebugDrawRender);
 }
 
 } // namespace AnchorNavRoom
