@@ -40,6 +40,7 @@
 #include <libultraship/bridge.h>
 #include <libultraship/libultraship.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -64,10 +65,11 @@ extern PlayState* gPlayState;
 // CVar definitions — see plan §3 for full layout.
 // ---------------------------------------------------------------------------
 
-#define CVAR_ROOM_NAV_ENABLED            CVAR_ENHANCEMENT("RoomNavData.Enabled")
-#define CVAR_ROOM_NAV_AUTO_SCAN          CVAR_ENHANCEMENT("RoomNavData.AutoScan")
-#define CVAR_ROOM_NAV_DEBUG_DRAW         CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
-#define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
+#define CVAR_ROOM_NAV_ENABLED               CVAR_ENHANCEMENT("RoomNavData.Enabled")
+#define CVAR_ROOM_NAV_AUTO_SCAN             CVAR_ENHANCEMENT("RoomNavData.AutoScan")
+#define CVAR_ROOM_NAV_DEBUG_DRAW            CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
+#define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE    CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
+#define CVAR_ROOM_NAV_DEBUG_DRAW_COMPONENTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawComponents")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -114,6 +116,21 @@ static uint32_t MakeCacheKey(int16_t sceneNum, int8_t roomNum) {
 }
 
 static std::unordered_map<uint32_t, RoomNavData> sCache;
+
+// ---------------------------------------------------------------------------
+// Connected-component cache (DebugDraw v3d, polish wave commit 5). Computed
+// lazily on first DebugDraw render of a given room and cached per
+// MakeCacheKey(scene, room). The vector is parallel to RoomNavData::nodes
+// — sComponentCache[key][i] = canonical component-root index for node i.
+//
+// Invalidation:
+//   - OnExitGameClear() clears the entire cache (alongside sCache).
+//   - ForceRescanCurrentRoom() erases the entry for the current room.
+//
+// NOT persisted; transient debug-only state. Memory cost is ~2 bytes per
+// node, capped by the underlying nav graph's size.
+// ---------------------------------------------------------------------------
+static std::unordered_map<uint32_t, std::vector<uint16_t>> sComponentCache;
 
 // ---------------------------------------------------------------------------
 // Public API. GetForRoom now returns from the in-memory cache. Subsequent
@@ -1233,6 +1250,9 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
         SPDLOG_INFO("[RoomNav] OnExitGame: clearing {} cached rooms", sCache.size());
         sCache.clear();
     }
+    // Drop the component cache (DebugDraw v3d, polish wave commit 5).
+    // Transient debug data; recomputed on next debug-draw of each room.
+    sComponentCache.clear();
     sLastScene = -1;
     sLastRoom  = -1;
     sLastStuckLogFrame.clear();
@@ -1429,58 +1449,198 @@ static void AddVerticalPost(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
     dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
 }
 
+// ---------------------------------------------------------------------------
+// Connected-component computation (DebugDraw v3d, polish wave commit 5).
+//
+// Union-find over RoomNavData::edges. Result is a parallel vector keyed by
+// node index where each element is the canonical component-root index.
+// Cached per-room in sComponentCache; invalidated on game-exit and
+// per-room on Force Rescan.
+// ---------------------------------------------------------------------------
+
+static uint16_t UnionFindFind(std::vector<uint16_t>& parent, uint16_t i) {
+    // Iterative path-walk + flatten. Avoids deep recursion on long chains.
+    uint16_t root = i;
+    while (parent[root] != root) {
+        root = parent[root];
+    }
+    uint16_t cur = i;
+    while (parent[cur] != root) {
+        uint16_t next = parent[cur];
+        parent[cur] = root;
+        cur = next;
+    }
+    return root;
+}
+
+static void UnionFindUnion(std::vector<uint16_t>& parent, uint16_t a, uint16_t b) {
+    uint16_t ra = UnionFindFind(parent, a);
+    uint16_t rb = UnionFindFind(parent, b);
+    if (ra == rb) return;
+    // Attach larger-index root to smaller-index root for determinism so the
+    // golden-angle palette assignment is stable across cache regenerations.
+    if (ra < rb) parent[rb] = ra;
+    else         parent[ra] = rb;
+}
+
+// Compute (or reuse cached) component-root vector for one room. Returns a
+// reference into sComponentCache that remains valid until the next cache
+// invalidation. Caller must not hold the reference across cache mutations.
+static const std::vector<uint16_t>& GetOrComputeComponents(const RoomNavData* data) {
+    uint32_t key = MakeCacheKey(data->sceneNum, data->roomNum);
+    auto it = sComponentCache.find(key);
+    if (it != sComponentCache.end() && it->second.size() == data->nodes.size()) {
+        return it->second;
+    }
+
+    std::vector<uint16_t> parent(data->nodes.size());
+    for (size_t i = 0; i < parent.size(); i++) {
+        parent[i] = (uint16_t)i;
+    }
+    for (const NavEdge& edge : data->edges) {
+        if (edge.fromIdx >= parent.size() || edge.toIdx >= parent.size()) continue;
+        UnionFindUnion(parent, edge.fromIdx, edge.toIdx);
+    }
+    // Final pass to flatten every entry to its root so callers can read
+    // parent[i] directly without re-walking the chain.
+    for (size_t i = 0; i < parent.size(); i++) {
+        parent[i] = UnionFindFind(parent, (uint16_t)i);
+    }
+
+    auto& slot = sComponentCache[key];
+    slot = std::move(parent);
+    return slot;
+}
+
+// HSV → RGB. h ∈ [0, 360), s/v ∈ [0, 1]. Output channels in [0, 255].
+// Used for the golden-angle component palette so neighboring components
+// get visually distinct hues.
+static void HsvToRgb(float h, float s, float v, uint8_t* outR, uint8_t* outG, uint8_t* outB) {
+    float c = v * s;
+    float hp = h / 60.0f;
+    float x = c * (1.0f - std::fabs(std::fmod(hp, 2.0f) - 1.0f));
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+    if      (hp < 1.0f) { r = c; g = x; b = 0; }
+    else if (hp < 2.0f) { r = x; g = c; b = 0; }
+    else if (hp < 3.0f) { r = 0; g = c; b = x; }
+    else if (hp < 4.0f) { r = 0; g = x; b = c; }
+    else if (hp < 5.0f) { r = x; g = 0; b = c; }
+    else                { r = c; g = 0; b = x; }
+    float m = v - c;
+    auto sat = [](float v8) {
+        if (v8 < 0.0f)   return (uint8_t)0;
+        if (v8 > 255.0f) return (uint8_t)255;
+        return (uint8_t)v8;
+    };
+    *outR = sat((r + m) * 255.0f);
+    *outG = sat((g + m) * 255.0f);
+    *outB = sat((b + m) * 255.0f);
+}
+
+// Emit walkable nodes grouped by connected component, each component
+// colored from a golden-angle-distributed HSV palette. Replaces the
+// single green walkable group when DebugDrawComponents is on.
+//
+// Skips nodes drawn by higher-priority later groups (HAZARD / UNDERWATER /
+// STEEP_SLOPE) so cells aren't double-drawn.
+static void EmitComponentColoredWalkables(const RoomNavData* data) {
+    if (data->nodes.empty()) return;
+    const std::vector<uint16_t>& components = GetOrComputeComponents(data);
+    if (components.size() != data->nodes.size()) return; // defensive
+
+    // Bucket walkable node indices by their component root.
+    std::unordered_map<uint16_t, std::vector<uint16_t>> bucket;
+    for (size_t i = 0; i < data->nodes.size(); i++) {
+        const NavNode& node = data->nodes[i];
+        if (!(node.flags & NODE_WALKABLE)) continue;
+        if (node.flags & NODE_HAZARD)      continue;
+        if (node.flags & NODE_UNDERWATER)  continue;
+        if (node.flags & NODE_STEEP_SLOPE) continue;
+        bucket[components[i]].push_back((uint16_t)i);
+    }
+
+    // Sort by root index so palette assignment is stable across frames
+    // (unordered_map iteration order is not portable).
+    std::vector<uint16_t> roots;
+    roots.reserve(bucket.size());
+    for (auto& kv : bucket) roots.push_back(kv.first);
+    std::sort(roots.begin(), roots.end());
+
+    // One color group per component. Hue distributed by golden angle (137°)
+    // so neighboring components are visually distinct.
+    for (size_t cIdx = 0; cIdx < roots.size(); cIdx++) {
+        float hue = std::fmod((float)cIdx * 137.0f, 360.0f);
+        uint8_t r, g, b;
+        HsvToRgb(hue, 0.7f, 0.8f, &r, &g, &b);
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, r, g, b, 0xFF));
+        for (uint16_t nodeIdx : bucket[roots[cIdx]]) {
+            AddGroundQuad(sXluDl, sVtxDl, data->nodes[nodeIdx].pos);
+        }
+    }
+}
+
 // Build the in-world overlay for one room's nav data. Groups nodes by
 // color (PrimColor switches between groups) so the RDP doesn't reload
 // state per quad.
 static void BuildOverlayDrawData(const RoomNavData* data) {
     if (data == nullptr) return;
 
-    // Walkable nodes — green. Color precedence (post-merge of A + B):
-    // HAZARD > UNDERWATER > STEEP_SLOPE > ORPHANED > HAZARD_ADJACENT >
-    // EDGE > WALKABLE. Each later group's continue clauses skip any node
-    // already drawn by an earlier higher-priority group. Orphan wins over
-    // HAZARD_ADJACENT/EDGE so an unreachable node is unambiguously gray
-    // regardless of its other walkable-flags.
-    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0xC8, 0x00, 0xFF));
-    for (const NavNode& node : data->nodes) {
-        if (!(node.flags & NODE_WALKABLE))       continue;
-        if (node.flags & NODE_HAZARD)             continue;
-        if (node.flags & NODE_UNDERWATER)         continue;
-        if (node.flags & NODE_STEEP_SLOPE)        continue;
-        if (node.flags & NODE_ORPHANED)           continue;
-        if (node.flags & NODE_HAZARD_ADJACENT)    continue;
-        if (node.flags & NODE_EDGE)               continue;
-        AddGroundQuad(sXluDl, sVtxDl, node.pos);
-    }
+    // Walkable family — green / darker-green / yellow-green node groups.
+    //
+    // Color precedence (post-merge of A + B): HAZARD > UNDERWATER >
+    // STEEP_SLOPE > ORPHANED > HAZARD_ADJACENT > EDGE > WALKABLE. Each
+    // later group's continue clauses skip any node already drawn by an
+    // earlier higher-priority group. Orphan wins over HAZARD_ADJACENT/EDGE
+    // so an unreachable node is unambiguously gray regardless of its
+    // other walkable-flags.
+    //
+    // When DebugDrawComponents (workstream C) is on, the entire walkable
+    // family is replaced by a per-connected-component palette (golden-
+    // angle HSV distribution) over every walkable node, so the user can
+    // see how the multi-seed floodfill partitioned the graph into
+    // sub-chambers. The component view subsumes EDGE/HAZARD_ADJACENT
+    // distinctions — they remain in the underlying flag data but are not
+    // separately visualized.
+    if (CVarGetInteger(CVAR_ROOM_NAV_DEBUG_DRAW_COMPONENTS, 0) != 0) {
+        EmitComponentColoredWalkables(data);
+    } else {
+        // Walkable nodes — green.
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0xC8, 0x00, 0xFF));
+        for (const NavNode& node : data->nodes) {
+            if (!(node.flags & NODE_WALKABLE))       continue;
+            if (node.flags & NODE_HAZARD)             continue;
+            if (node.flags & NODE_UNDERWATER)         continue;
+            if (node.flags & NODE_STEEP_SLOPE)        continue;
+            if (node.flags & NODE_ORPHANED)           continue;
+            if (node.flags & NODE_HAZARD_ADJACENT)    continue;
+            if (node.flags & NODE_EDGE)               continue;
+            AddGroundQuad(sXluDl, sVtxDl, node.pos);
+        }
 
-    // Edge nodes — darker green. Walkable nodes whose 8 XZ neighbor cells
-    // include at least one empty cell (ledge / room perimeter). Visualizes
-    // the boundary of the walkable region.
-    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0x80, 0x00, 0xFF));
-    for (const NavNode& node : data->nodes) {
-        if (!(node.flags & NODE_WALKABLE))       continue;
-        if (node.flags & NODE_HAZARD)             continue;
-        if (node.flags & NODE_UNDERWATER)         continue;
-        if (node.flags & NODE_STEEP_SLOPE)        continue;
-        if (node.flags & NODE_ORPHANED)           continue;
-        if (node.flags & NODE_HAZARD_ADJACENT)    continue;
-        if (!(node.flags & NODE_EDGE))            continue;
-        AddGroundQuad(sXluDl, sVtxDl, node.pos);
-    }
+        // Edge nodes — darker green.
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0x80, 0x00, 0xFF));
+        for (const NavNode& node : data->nodes) {
+            if (!(node.flags & NODE_WALKABLE))       continue;
+            if (node.flags & NODE_HAZARD)             continue;
+            if (node.flags & NODE_UNDERWATER)         continue;
+            if (node.flags & NODE_STEEP_SLOPE)        continue;
+            if (node.flags & NODE_ORPHANED)           continue;
+            if (node.flags & NODE_HAZARD_ADJACENT)    continue;
+            if (!(node.flags & NODE_EDGE))            continue;
+            AddGroundQuad(sXluDl, sVtxDl, node.pos);
+        }
 
-    // Hazard-adjacent nodes — yellow-green. Walkable nodes whose 8 XZ
-    // neighbor cells contain at least one node with NODE_HAZARD set. Reads
-    // as "caution: walkable but next to a hazard." Wins over NODE_EDGE
-    // because caution > edge per the polish wave plan.
-    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xA0, 0xC0, 0x00, 0xFF));
-    for (const NavNode& node : data->nodes) {
-        if (!(node.flags & NODE_WALKABLE))         continue;
-        if (node.flags & NODE_HAZARD)               continue;
-        if (node.flags & NODE_UNDERWATER)           continue;
-        if (node.flags & NODE_STEEP_SLOPE)          continue;
-        if (node.flags & NODE_ORPHANED)             continue;
-        if (!(node.flags & NODE_HAZARD_ADJACENT))   continue;
-        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+        // Hazard-adjacent nodes — yellow-green.
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xA0, 0xC0, 0x00, 0xFF));
+        for (const NavNode& node : data->nodes) {
+            if (!(node.flags & NODE_WALKABLE))         continue;
+            if (node.flags & NODE_HAZARD)               continue;
+            if (node.flags & NODE_UNDERWATER)           continue;
+            if (node.flags & NODE_STEEP_SLOPE)          continue;
+            if (node.flags & NODE_ORPHANED)             continue;
+            if (!(node.flags & NODE_HAZARD_ADJACENT))   continue;
+            AddGroundQuad(sXluDl, sVtxDl, node.pos);
+        }
     }
 
     // Hazard nodes — red.
@@ -1684,13 +1844,20 @@ static void OnDebugDrawRender() {
                    + data->climbAnchors.size() * 16
                    + data->climbAnchors.size() * 8 // climb-flag overlay (2 nodes × 4 verts)
                    + data->hazardCentroids.size() * 4);
+    // Gfx commands: 2 per node-quad / edge-quad / hazard-centroid quad; 8
+    // per climb anchor (2 ground quads + 4 vertical-post quad pairs); 64
+    // for setup + fixed per-color-group PrimColor switches. When
+    // DebugDrawComponents is on, each connected component adds one extra
+    // gsDPSetPrimColor — worst case is one component per walkable node.
+    // Adding `nodes.size()` here absorbs that bound.
     sXluDl.reserve(data->nodes.size() * 2
                    + data->nodes.size() * 2 // orphan group
+                   + data->nodes.size()     // worst-case per-component PrimColor switches
                    + data->edges.size() * 2
                    + data->climbAnchors.size() * 8
                    + data->climbAnchors.size() * 4 // climb-flag overlay (2 nodes × 2 Gfx)
                    + data->hazardCentroids.size() * 2
-                   + 64); // setup + per-color-group PrimColor switches
+                   + 64);
 
     InitDebugGfx(sXluDl);
     BuildOverlayDrawData(data);
@@ -1721,6 +1888,11 @@ void ForceRescanCurrentRoom() {
     // path will return nullptr until the next OnRoomEntered re-scan
     // populates a fresh entry.
     sCache.erase(key);
+
+    // Drop the component cache entry for this room (DebugDraw v3d, polish
+    // wave commit 5). The next debug-draw frame will recompute components
+    // from the freshly-scanned graph.
+    sComponentCache.erase(key);
 
     // Best-effort delete on-disk .bin. Failure is silent — the in-memory
     // re-scan will overwrite the file via SaveToDisk anyway.

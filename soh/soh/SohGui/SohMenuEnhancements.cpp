@@ -1990,6 +1990,17 @@ void SohMenu::AddMenuEnhancements() {
             "walkable nodes, red for hazards, blue for underwater, orange for steep "
             "slopes, yellow posts for climb anchors, white lines for edges."));
 
+    AddWidget(path, "Debug Draw — Component Coloring", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.DebugDrawComponents"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on (in addition to Debug Draw), the green walkable group is replaced "
+            "by a per-connected-component palette so the user can see how the multi-seed "
+            "floodfill partitioned the graph into sub-chambers. Each component gets a "
+            "distinct hue from a golden-angle HSV distribution. Cached per-room; "
+            "invalidated on Force Rescan and on game exit."));
+
     AddWidget(path, "Force Rescan Current Room", WIDGET_BUTTON)
         .Callback([](WidgetInfo& info) { AnchorNavRoom::ForceRescanCurrentRoom(); })
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
