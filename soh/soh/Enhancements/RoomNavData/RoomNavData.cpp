@@ -18,6 +18,13 @@
 #include "soh/ShipInit.hpp"
 #include "soh/cvar_prefixes.h"
 
+// Phase 2 commit 11 — slope-3 stuck-on-slope diagnostic. Iterates the
+// syncable-actor categories per frame, reads the EnemyNetId extension,
+// and updates the per-navigator stuck-on-slope counter.
+#include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
+#include "soh/ObjectExtension/ObjectExtension.h"
+
 #include <libultraship/bridge.h>
 #include <libultraship/libultraship.h>
 
@@ -45,9 +52,10 @@ extern PlayState* gPlayState;
 // CVar definitions — see plan §3 for full layout.
 // ---------------------------------------------------------------------------
 
-#define CVAR_ROOM_NAV_ENABLED       CVAR_ENHANCEMENT("RoomNavData.Enabled")
-#define CVAR_ROOM_NAV_AUTO_SCAN     CVAR_ENHANCEMENT("RoomNavData.AutoScan")
-#define CVAR_ROOM_NAV_DEBUG_DRAW    CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
+#define CVAR_ROOM_NAV_ENABLED            CVAR_ENHANCEMENT("RoomNavData.Enabled")
+#define CVAR_ROOM_NAV_AUTO_SCAN          CVAR_ENHANCEMENT("RoomNavData.AutoScan")
+#define CVAR_ROOM_NAV_DEBUG_DRAW         CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
+#define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
 
 namespace Anchor::Nav::Room {
 
@@ -807,6 +815,97 @@ static void OnRoomEntered(int16_t sceneNum, int8_t roomNum, PlayState* play) {
 }
 
 // ---------------------------------------------------------------------------
+// Slope-3 stuck-on-slope diagnostic (Phase 2 commit 11). Detection-only;
+// active intervention deferred to v2 (gEnhancements.RoomNavData
+// .ActiveSlopeRecovery) pending evidence the predicate fires in real
+// gameplay.
+//
+// Per-frame predicate: actor's floor poly slope is 3 (very-steep) AND the
+// actor isn't sliding down (velocity.y not consistently negative) for more
+// than kStuckFrameThreshold frames. On rising edge above the threshold,
+// increment the per-actor stuckOnSlopeEventCount and emit a rate-limited
+// SPDLOG_WARN.
+// ---------------------------------------------------------------------------
+
+static constexpr uint16_t kStuckFrameThreshold     = 30;   // ~0.5s at 60fps
+static constexpr uint64_t kStuckLogCooldownFrames  = 300;  // ~5s rate-limit per-actor
+
+// Per-actor last-log frame, keyed by actor pointer (cleared on actor
+// destruction implicitly — stale pointers in this map just lose their
+// cooldown, no functional issue).
+static std::unordered_map<Actor*, uint64_t> sLastStuckLogFrame;
+static uint64_t sFrameCounter = 0;
+
+static bool IsStuckOnSlope(Actor* actor, EnemyNetId* ext, PlayState* play) {
+    if (actor == nullptr || ext == nullptr) return false;
+    if (actor->update == nullptr) return false;          // dead actor
+    if (actor->floorPoly == nullptr) return false;       // not standing on anything
+
+    s32 slope = SurfaceType_GetSlope(&play->colCtx, actor->floorPoly, actor->floorBgId);
+    if (slope != 3) return false;                         // not on a steep slope
+
+    // Vanilla physics slides actors down slope-3 surfaces. If velocity.y
+    // is meaningfully negative the actor is sliding correctly — predicate
+    // false. Threshold is permissive (>= -0.5) to allow brief settling
+    // moments without false-positive log spam.
+    if (actor->velocity.y < -0.5f) return false;
+
+    return true;
+}
+
+static void TickStuckOnSlopeDetection(PlayState* play) {
+    bool diagnosticOn = CVarGetInteger(CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE, 0) != 0;
+    if (!diagnosticOn) return;
+
+    sFrameCounter++;
+
+    for (uint8_t cat : kSyncableActorCategories /* ActorSyncHelpers.h:22 */) {
+        Actor* actor = play->actorCtx.actorLists[cat].head;
+        while (actor != nullptr) {
+            Actor* next = actor->next; // capture before any mutation
+
+            if (IsSyncableActor(actor)) {
+                EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+                if (ext != nullptr) {
+                    if (IsStuckOnSlope(actor, ext, play)) {
+                        // Rising edge into the stuck condition counts up.
+                        if (ext->stuckOnSlopeFrames < UINT16_MAX) {
+                            ext->stuckOnSlopeFrames++;
+                        }
+                        // Threshold cross: log + accumulate event count.
+                        if (ext->stuckOnSlopeFrames == kStuckFrameThreshold) {
+                            if (ext->stuckOnSlopeEventCount < UINT16_MAX) {
+                                ext->stuckOnSlopeEventCount++;
+                            }
+                            uint64_t lastLogFrame = sLastStuckLogFrame.count(actor)
+                                ? sLastStuckLogFrame[actor]
+                                : 0;
+                            if (sFrameCounter - lastLogFrame >= kStuckLogCooldownFrames) {
+                                sLastStuckLogFrame[actor] = sFrameCounter;
+                                SPDLOG_WARN("[RoomNav] actor 0x{:04X} stuck on slope-3 at "
+                                            "({:.0f},{:.0f},{:.0f}) for {} frames "
+                                            "(event #{} this session)",
+                                            (int)actor->id,
+                                            actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
+                                            ext->stuckOnSlopeFrames,
+                                            ext->stuckOnSlopeEventCount);
+                            }
+                        }
+                    } else {
+                        // Predicate false — reset frame counter. Do NOT reset
+                        // stuckOnSlopeEventCount; it accumulates across the
+                        // session for visibility.
+                        ext->stuckOnSlopeFrames = 0;
+                    }
+                }
+            }
+
+            actor = next;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // OnGameFrameUpdate hook — polling trigger. Detects (sceneNum, roomNum)
 // delta and dispatches OnRoomEntered. Scan-skip conditions verified
 // against soh/include/z64.h and soh/include/z64save.h.
@@ -829,6 +928,10 @@ static void OnGameFrameTick() {
     if (play->transitionTrigger != TRANS_TRIGGER_OFF)  return; // mid-scene-transition
     if (gSaveContext.gameMode != GAMEMODE_NORMAL)      return; // file-select / title-screen
     if (gSaveContext.fileNum < 0)                       return; // no save loaded
+
+    // Slope-3 stuck-on-slope diagnostic (commit 11) runs every frame regardless
+    // of whether the room has changed. Internally CVar-gated; no-op when off.
+    TickStuckOnSlopeDetection(play);
 
     int16_t currentScene = play->sceneNum;
     int8_t  currentRoom  = (int8_t)play->roomCtx.curRoom.num;
@@ -857,6 +960,8 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
     }
     sLastScene = -1;
     sLastRoom  = -1;
+    sLastStuckLogFrame.clear();
+    sFrameCounter = 0;
 }
 
 // ---------------------------------------------------------------------------
