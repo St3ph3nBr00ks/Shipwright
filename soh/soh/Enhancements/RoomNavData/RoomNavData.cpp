@@ -974,14 +974,16 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
 // hazard (red) nodes. Renders one ~10u quad per node, slightly lifted
 // above the floor (ZMODE_DEC handles z-fight prevention).
 //
-// v2 commit 2 (this commit): edges as thin ground-aligned line quads
-// (white) connecting node centres. Same kNodeQuadYLift as nodes so the
-// edge sits on the same render plane; endpoint indices bounds-checked
-// against node count so a stale-schema disk cache can't escape into the
-// gfx pipeline.
+// v2 commit 2: edges as thin ground-aligned line quads (white) connecting
+// node centres. Same kNodeQuadYLift as nodes so the edge sits on the same
+// render plane; endpoint indices bounds-checked against node count so a
+// stale-schema disk cache can't escape into the gfx pipeline.
 //
-// Subsequent commit 3 (polish): underwater (blue) / steep-slope (orange) /
-// climb anchor verticals (yellow) / hazard centroids.
+// v2 commit 3 (this commit): polish — underwater nodes (blue), steep-slope
+// nodes (orange), climb anchors (yellow ground quads at base+top with a
+// vertical post connecting them), hazard centroids (deep red, larger
+// markers; loop currently no-op since v1 scan doesn't populate the
+// centroid list yet).
 //
 // Approach: ground-aligned quads instead of icospheres — 10× cheaper
 // geometry (4 verts vs 12 vert × 20 tri), no per-instance billboard math
@@ -1008,9 +1010,11 @@ static std::vector<Gfx> sXluDl;
 static std::vector<Vtx> sVtxDl;
 
 // Quad parameters.
-static constexpr float kNodeQuadHalfExtent = 5.0f;  // 10u square per node
-static constexpr float kNodeQuadYLift      = 1.0f;  // small lift above floor
-static constexpr float kEdgeLineHalfWidth  = 1.0f;  // 2u thick line on floor
+static constexpr float kNodeQuadHalfExtent     = 5.0f;  // 10u square per node
+static constexpr float kNodeQuadYLift          = 1.0f;  // small lift above floor
+static constexpr float kEdgeLineHalfWidth      = 1.0f;  // 2u thick line on floor
+static constexpr float kClimbPostHalfWidth     = 3.0f;  // 6u-wide vertical post at climb anchors
+static constexpr float kHazardCentroidHalfExt  = 8.0f;  // 16u square per hazard-centroid marker
 
 // Reset buffer + reserve based on prior frame (matches colViewer pattern).
 template <typename T> static size_t ResetGfxBuffer(T& vec) {
@@ -1094,19 +1098,56 @@ static void AddGroundLineQuad(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
     dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
 }
 
+// Append a vertical "post" connecting basePos to topPos at the same XZ.
+// Drawn as two perpendicular vertical quads (X-aligned and Z-aligned) so
+// the marker is visible from any camera angle without true billboarding.
+// Cheaper than billboard math and reads as a clear vertical climb indicator.
+static void AddVerticalPost(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
+                            const Vec3f& basePos, const Vec3f& topPos) {
+    float h = kClimbPostHalfWidth;
+    short bx = (short)basePos.x, by = (short)basePos.y, bz = (short)basePos.z;
+    short tx = (short)topPos.x,  ty = (short)topPos.y,  tz = (short)topPos.z;
+
+    // Quad 1: extends in ±X direction (visible looking along Z).
+    Vtx a0 = gdSPDefVtxN((short)(bx - h), by, bz, 0, 0, 0, 0, 127, 0xFF);
+    Vtx a1 = gdSPDefVtxN((short)(bx + h), by, bz, 0, 0, 0, 0, 127, 0xFF);
+    Vtx a2 = gdSPDefVtxN((short)(tx + h), ty, tz, 0, 0, 0, 0, 127, 0xFF);
+    Vtx a3 = gdSPDefVtxN((short)(tx - h), ty, tz, 0, 0, 0, 0, 127, 0xFF);
+    vtxDl.push_back(a0);
+    vtxDl.push_back(a1);
+    vtxDl.push_back(a2);
+    vtxDl.push_back(a3);
+    dl.push_back(gsSPVertex((uintptr_t)&vtxDl[vtxDl.size() - 4], 4, 0));
+    dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+
+    // Quad 2: extends in ±Z direction (visible looking along X).
+    Vtx b0 = gdSPDefVtxN(bx, by, (short)(bz - h), 0, 0, 0, 0, 127, 0xFF);
+    Vtx b1 = gdSPDefVtxN(bx, by, (short)(bz + h), 0, 0, 0, 0, 127, 0xFF);
+    Vtx b2 = gdSPDefVtxN(tx, ty, (short)(tz + h), 0, 0, 0, 0, 127, 0xFF);
+    Vtx b3 = gdSPDefVtxN(tx, ty, (short)(tz - h), 0, 0, 0, 0, 127, 0xFF);
+    vtxDl.push_back(b0);
+    vtxDl.push_back(b1);
+    vtxDl.push_back(b2);
+    vtxDl.push_back(b3);
+    dl.push_back(gsSPVertex((uintptr_t)&vtxDl[vtxDl.size() - 4], 4, 0));
+    dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+}
+
 // Build the in-world overlay for one room's nav data. Groups nodes by
 // color (PrimColor switches between groups) so the RDP doesn't reload
 // state per quad.
 static void BuildOverlayDrawData(const RoomNavData* data) {
     if (data == nullptr) return;
 
-    // Walkable nodes — green.
+    // Walkable nodes — green. Color precedence: HAZARD > UNDERWATER >
+    // STEEP_SLOPE > WALKABLE, so each later group's continue clauses skip
+    // any node already drawn by an earlier higher-priority group.
     sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0xC8, 0x00, 0xFF));
     for (const NavNode& node : data->nodes) {
         if (!(node.flags & NODE_WALKABLE)) continue;
-        if (node.flags & NODE_HAZARD)      continue; // hazard wins color
-        if (node.flags & NODE_UNDERWATER)  continue; // commit 3 covers
-        if (node.flags & NODE_STEEP_SLOPE) continue; // commit 3 covers
+        if (node.flags & NODE_HAZARD)      continue;
+        if (node.flags & NODE_UNDERWATER)  continue;
+        if (node.flags & NODE_STEEP_SLOPE) continue;
         AddGroundQuad(sXluDl, sVtxDl, node.pos);
     }
 
@@ -1114,6 +1155,23 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
     sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xE0, 0x20, 0x20, 0xFF));
     for (const NavNode& node : data->nodes) {
         if (!(node.flags & NODE_HAZARD)) continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+
+    // Underwater nodes — blue. Skip if also hazard (drawn red above).
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x40, 0x80, 0xFF, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if (!(node.flags & NODE_UNDERWATER)) continue;
+        if (node.flags & NODE_HAZARD)        continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+
+    // Steep-slope nodes — orange. Skip if also hazard or underwater.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0x90, 0x10, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if (!(node.flags & NODE_STEEP_SLOPE)) continue;
+        if (node.flags & NODE_HAZARD)         continue;
+        if (node.flags & NODE_UNDERWATER)     continue;
         AddGroundQuad(sXluDl, sVtxDl, node.pos);
     }
 
@@ -1132,7 +1190,39 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AddGroundLineQuad(sXluDl, sVtxDl, posA, posB);
     }
 
-    // Underwater / steep-slope / climb / hazard centroids — commit 3 will add.
+    // Climb anchors — yellow. Ground quad at base + ground quad at top +
+    // a vertical post (two perpendicular thin quads) connecting them so
+    // the marker reads as a clear vertical climb indicator from any angle.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xE0, 0x10, 0xFF));
+    for (const ClimbAnchor& anchor : data->climbAnchors) {
+        AddGroundQuad(sXluDl, sVtxDl, anchor.basePos);
+        AddGroundQuad(sXluDl, sVtxDl, anchor.topPos);
+        AddVerticalPost(sXluDl, sVtxDl, anchor.basePos, anchor.topPos);
+    }
+
+    // Hazard centroids — deep red, slightly larger than node quads so they
+    // read as "this whole region is bad." Currently unpopulated by the v1
+    // scan; loop is a no-op until a future commit clusters HAZARD nodes
+    // into centroid markers. Drawn via the per-node helper with a temp
+    // pos that adopts the hazard-centroid half-extent (the helper uses
+    // kNodeQuadHalfExtent unconditionally, so we open-code the larger
+    // marker directly inline rather than parameterise the helper for one
+    // additional caller).
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x80, 0x00, 0x00, 0xFF));
+    for (const Vec3f& centroid : data->hazardCentroids) {
+        float h = kHazardCentroidHalfExt;
+        float y = centroid.y + kNodeQuadYLift;
+        Vtx v0 = gdSPDefVtxN((short)(centroid.x - h), (short)y, (short)(centroid.z - h), 0, 0, 0, 127, 0, 0xFF);
+        Vtx v1 = gdSPDefVtxN((short)(centroid.x + h), (short)y, (short)(centroid.z - h), 0, 0, 0, 127, 0, 0xFF);
+        Vtx v2 = gdSPDefVtxN((short)(centroid.x + h), (short)y, (short)(centroid.z + h), 0, 0, 0, 127, 0, 0xFF);
+        Vtx v3 = gdSPDefVtxN((short)(centroid.x - h), (short)y, (short)(centroid.z + h), 0, 0, 0, 127, 0, 0xFF);
+        sVtxDl.push_back(v0);
+        sVtxDl.push_back(v1);
+        sVtxDl.push_back(v2);
+        sVtxDl.push_back(v3);
+        sXluDl.push_back(gsSPVertex((uintptr_t)&sVtxDl[sVtxDl.size() - 4], 4, 0));
+        sXluDl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,8 +1293,18 @@ static void OnDebugDrawRender() {
     ResetGfxBuffer(sVtxDl);
     // Reserve up front so vector reallocation doesn't invalidate the
     // gsSPVertex pointers we embed into sXluDl below.
-    sVtxDl.reserve(data->nodes.size() * 4 + data->edges.size() * 4);     // 4 verts per quad upper bound
-    sXluDl.reserve(data->nodes.size() * 2 + data->edges.size() * 2 + 32); // ~2 Gfx commands per quad + setup
+    // Upper bounds: 4 verts + 2 Gfx commands per node-quad / edge-quad /
+    // hazard-centroid; 4 quads (2 ground + 2 perpendicular vertical) per
+    // climb anchor → 16 verts + 8 Gfx commands.
+    sVtxDl.reserve(data->nodes.size() * 4
+                   + data->edges.size() * 4
+                   + data->climbAnchors.size() * 16
+                   + data->hazardCentroids.size() * 4);
+    sXluDl.reserve(data->nodes.size() * 2
+                   + data->edges.size() * 2
+                   + data->climbAnchors.size() * 8
+                   + data->hazardCentroids.size() * 2
+                   + 64); // setup + per-color-group PrimColor switches
 
     InitDebugGfx(sXluDl);
     BuildOverlayDrawData(data);
