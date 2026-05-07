@@ -1003,6 +1003,13 @@ static void OnDebugDraw() {
     // DebugDraw is on, emit the loaded nav graph's stats. Useful for
     // "is the data loaded?" verification without requiring the in-world
     // overlay to be implemented yet.
+    //
+    // Update tracking variables ONLY on successful summary. If data is
+    // nullptr (scan hasn't run yet — common on the first frame after a
+    // room transition because OnGameFrameTick's scan dispatch is gated
+    // on transitionTrigger == TRANS_TRIGGER_OFF, while OnPlayDrawEnd
+    // fires regardless), retry silently on subsequent frames until the
+    // scan populates the cache.
     PlayState* play = gPlayState;
     if (play == nullptr) return;
     int16_t scene = play->sceneNum;
@@ -1011,13 +1018,15 @@ static void OnDebugDraw() {
 
     const RoomNavData* data = GetForRoom(scene, room);
     if (data == nullptr) {
-        SPDLOG_INFO("[RoomNav][DebugDraw] scene={} room={} — no nav data loaded", scene, (int)room);
-    } else {
-        SPDLOG_INFO("[RoomNav][DebugDraw] scene={} room={} loaded: nodes={} edges={} climbs={} hazards={}",
-                    scene, (int)room,
-                    data->nodes.size(), data->edges.size(),
-                    data->climbAnchors.size(), data->hazardCentroids.size());
+        // Silent — wait for the scan to populate the cache. Tracking
+        // variables NOT updated, so the next frame retries.
+        return;
     }
+
+    SPDLOG_INFO("[RoomNav][DebugDraw] scene={} room={} loaded: nodes={} edges={} climbs={} hazards={}",
+                scene, (int)room,
+                data->nodes.size(), data->edges.size(),
+                data->climbAnchors.size(), data->hazardCentroids.size());
     sDebugDrawLastSummaryScene = scene;
     sDebugDrawLastSummaryRoom  = room;
 
