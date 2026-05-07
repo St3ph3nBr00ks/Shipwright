@@ -774,7 +774,10 @@ static void DetectLedgeAnchors(
     // the navigator can't actually jump-grab those — they're effectively
     // mis-typed climb anchors).
     constexpr float kLedgeMinDeltaY    = 30.0f;
-    int32_t maxDeltaInt = CVarGetInteger(CVAR_ROOM_NAV_LEDGE_MAX_DELTA, 150);
+    // Default 70u matches realistic child-Link jump-grab reach. Adult
+    // Link can grab slightly higher (~90u). User can tune via the
+    // RoomNavData.LedgeGrabMaxDeltaY CVar slider (range 30-500).
+    int32_t maxDeltaInt = CVarGetInteger(CVAR_ROOM_NAV_LEDGE_MAX_DELTA, 70);
     if (maxDeltaInt < 30)   maxDeltaInt = 30;
     if (maxDeltaInt > 1000) maxDeltaInt = 1000;
     const float kLedgeMaxDeltaY = (float)maxDeltaInt;
@@ -958,7 +961,12 @@ static bool FloorBelongsToOtherRoom(s32 floorBgId, s8 currentRoom, PlayState* pl
 // actors surface during field testing. Keep entries sorted by ascending
 // actor ID for diff readability.
 static const int16_t kFloorActorRejectList[] = {
-    ACTOR_OBJ_OSHIHIKI, // 0x0140 — push blocks
+    // Push blocks (Obj_Oshihiki, 0x0140) used to be on this list, but
+    // their tops ARE legitimately walkable — and their vertical edges
+    // are climbable ledges that NPCs should be able to grab. Removed
+    // 2026-05-08 per field-test feedback. The block-top floors now
+    // become regular nav nodes; their wall faces feed into Path B
+    // and ledge-grab detection naturally.
     ACTOR_EN_BOX,       // 0x000A — chests
 };
 
@@ -1669,22 +1677,28 @@ static int8_t  sLastRoom  = -1;
 static bool sPendingAnchorRefresh = false;
 static bool sPendingFullRescan    = false;
 
-// Delay countdown (frames). When a scene flag fires, the dispatch is
-// deferred by kDynamicRefreshDelayFrames so multi-frame animations
-// (e.g. Bg_Ydan_Maruta's falling ladder, push-block push completion)
-// have time to settle BEFORE we capture the post-event geometry.
-// Without the delay, the rescan fires at the START of the animation
-// and records actor positions that are about to change.
+// Position-stability dispatch. When a scene flag fires, we wait until
+// all BG + PROP actors in the room have held their positions stable
+// for a settle window before dispatching the rescan. This adapts
+// naturally to any animation duration:
+//   - Falling ladder settles in ~1s → dispatch ~1.5s after flag fire
+//   - Push block reaches destination in ~2s → dispatch ~2.5s
+//   - Floor-switch raises 3 platforms over 4s → dispatch ~4.5s
 //
-// The countdown resets on every new flag set, so a sequence of flag
-// writes (one event setting multiple flags across several frames)
-// gets one dispatch at the END of the sequence, not multiple.
+// Hash all BG + PROP actor positions each frame. When the hash matches
+// the previous frame for kStabilityRequiredFrames consecutive frames,
+// dispatch. A kMaxWaitFrames safety net dispatches anyway if actors
+// never settle (e.g. continuously moving platforms with no flag at
+// each cycle endpoint), so we don't hang forever.
 //
-// 90 frames ≈ 1.5s at 60fps. Generous enough for the longest OoT
-// scripted scenery animations; short enough that AI reactivity
-// remains responsive.
-static int32_t sRescanDelayCountdown = 0;
-static constexpr int32_t kDynamicRefreshDelayFrames = 90;
+// Hash uses position quantized to 1u to avoid floating-point jitter
+// flapping the stability counter on actors that "hover" with tiny
+// per-frame motion.
+static uint64_t sLastBgPropPositionHash = 0;
+static int32_t  sStabilityCounter       = 0;
+static int32_t  sMaxWaitCountdown       = 0;
+static constexpr int32_t kStabilityRequiredFrames = 30;  // ~0.5s settle window
+static constexpr int32_t kMaxWaitFrames           = 600; // 10s safety net
 
 // Forward declaration — definition lives further down the file with the
 // other dynamic-refresh helpers, but this function is called from
@@ -1746,9 +1760,11 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
     sComponentCache.clear();
     // Drop any pending dynamic-refresh requests — those reference the
     // current room which is about to become invalid.
-    sPendingAnchorRefresh = false;
-    sPendingFullRescan    = false;
-    sRescanDelayCountdown = 0;
+    sPendingAnchorRefresh   = false;
+    sPendingFullRescan      = false;
+    sStabilityCounter       = 0;
+    sMaxWaitCountdown       = 0;
+    sLastBgPropPositionHash = 0;
     sLastScene = -1;
     sLastRoom  = -1;
     sLastStuckLogFrame.clear();
@@ -2561,15 +2577,49 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
                 ms);
 }
 
-// Hook handler — fires for every Flags_SetSwitch / scene flag write.
-// Sets the appropriate pending flag based on which Tier CVars are on,
-// AND resets the dispatch delay countdown so the actual rescan fires
-// AFTER the multi-frame animation triggered by the flag set has settled.
+// Hash positions of all BG + PROP actors in the current room. Called
+// each frame during a pending-dispatch window to detect when actors
+// have settled. Quantized to 1u to absorb floating-point jitter.
+static uint64_t HashBgPropPositions(PlayState* play) {
+    uint64_t hash = 14695981039346656037ULL; // FNV-1a offset basis
+    constexpr ActorCategory kCats[] = { ACTORCAT_BG, ACTORCAT_PROP };
+    for (ActorCategory cat : kCats) {
+        Actor* actor = play->actorCtx.actorLists[cat].head;
+        while (actor != nullptr) {
+            // Quantize to 1u — small per-frame jitter on hovering or
+            // physics-settling actors won't reset the stability counter.
+            int32_t qx = (int32_t)actor->world.pos.x;
+            int32_t qy = (int32_t)actor->world.pos.y;
+            int32_t qz = (int32_t)actor->world.pos.z;
+            hash ^= (uint64_t)qx;          hash *= 1099511628211ULL;
+            hash ^= (uint64_t)qy;          hash *= 1099511628211ULL;
+            hash ^= (uint64_t)qz;          hash *= 1099511628211ULL;
+            hash ^= (uint64_t)actor->id;   hash *= 1099511628211ULL;
+            actor = actor->next;
+        }
+    }
+    return hash;
+}
+
+// Hook handler — fires for every Flags_*Set / scene flag write. Sets
+// the appropriate pending flag based on which Tier CVars are on, AND
+// arms the position-stability tracking so the actual rescan fires
+// AFTER the multi-frame animation triggered by the flag set has
+// settled.
+//
+// Filter: only react to FLAG_SCENE_SWITCH (push blocks, falling
+// ladders, scripted scenery, switch-driven events). Other flagTypes
+// (treasure, clear, collectible, inf-table, etc.) are item-pickup or
+// progress-tracking flags that don't change room topology — reacting
+// to them produces wasteful rescans.
+//
 // Tier 2 (full rescan) takes precedence over Tier 1 if both are
 // enabled, since a full rescan implicitly refreshes anchors too.
-static void OnSceneFlagSetHookHandler(int16_t /*sceneNum*/, int16_t /*flagType*/,
+static void OnSceneFlagSetHookHandler(int16_t /*sceneNum*/, int16_t flagType,
                                        int16_t /*flag*/) {
     if (!IsEnabled()) return;
+    if (flagType != FLAG_SCENE_SWITCH) return; // skip non-topology flags
+
     bool fullRescan    = CVarGetInteger(CVAR_ROOM_NAV_AUTO_FULL_RESCAN, 0) != 0;
     bool anchorRefresh = CVarGetInteger(CVAR_ROOM_NAV_AUTO_REFRESH_ANCHORS, 0) != 0;
     if (!fullRescan && !anchorRefresh) return;
@@ -2579,34 +2629,48 @@ static void OnSceneFlagSetHookHandler(int16_t /*sceneNum*/, int16_t /*flagType*/
     } else {
         sPendingAnchorRefresh = true;
     }
-    // (Re)arm the delay countdown — every new flag set extends the
-    // dispatch wait. The actual refresh fires when no further flags
-    // have set for kDynamicRefreshDelayFrames frames.
-    sRescanDelayCountdown = kDynamicRefreshDelayFrames;
+    // (Re)arm stability tracking — each new flag set restarts the
+    // settle window. Hash captured next frame in
+    // DispatchPendingDynamicRefresh becomes the new baseline.
+    sStabilityCounter = 0;
+    sMaxWaitCountdown = kMaxWaitFrames;
 }
 
 // Called from OnGameFrameTick (after the per-frame logic) to drain
-// pending refresh/rescan requests. Handles the delay countdown so
-// multi-frame triggering animations (ladder fall, push-block push)
-// settle before the rescan captures the post-event geometry.
+// pending refresh/rescan requests. Watches BG + PROP actor positions
+// for a settle window: dispatches when positions have been stable for
+// kStabilityRequiredFrames consecutive frames, OR when kMaxWaitFrames
+// safety net elapses (in case actors never settle).
 static void DispatchPendingDynamicRefresh() {
-    // No pending work — short-circuit.
     if (!sPendingFullRescan && !sPendingAnchorRefresh) return;
 
-    // Still waiting for the triggering animation to settle.
-    if (sRescanDelayCountdown > 0) {
-        sRescanDelayCountdown--;
-        return;
+    PlayState* play = gPlayState;
+    if (play == nullptr) return;
+
+    uint64_t hash = HashBgPropPositions(play);
+    if (hash != sLastBgPropPositionHash) {
+        sLastBgPropPositionHash = hash;
+        sStabilityCounter       = 0; // motion detected — restart window
+    } else {
+        sStabilityCounter++;
     }
 
+    if (sMaxWaitCountdown > 0) sMaxWaitCountdown--;
+    bool stable          = (sStabilityCounter   >= kStabilityRequiredFrames);
+    bool maxWaitExpired  = (sMaxWaitCountdown   <= 0);
+    if (!stable && !maxWaitExpired) return; // keep waiting
+
+    const char* trigger = maxWaitExpired ? "scene-flag-timeout" : "scene-flag";
     if (sPendingFullRescan) {
         sPendingFullRescan    = false;
         sPendingAnchorRefresh = false; // full rescan supersedes
-        DoTriggerFullRescan("scene-flag");
+        DoTriggerFullRescan(trigger);
     } else if (sPendingAnchorRefresh) {
         sPendingAnchorRefresh = false;
-        DoRefreshAnchorsCurrentRoom("scene-flag");
+        DoRefreshAnchorsCurrentRoom(trigger);
     }
+    sStabilityCounter = 0;
+    sMaxWaitCountdown = 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -2068,13 +2068,14 @@ void SohMenu::AddMenuEnhancements() {
         .Options(IntSliderOptions()
                      .Min(30)
                      .Max(500)
-                     .DefaultValue(150)
+                     .DefaultValue(70)
                      .Format("%du")
                      .Tooltip(
             "Upper bound on Y-delta between ledge approach and top. "
-            "150 (default) matches Link's true jump-grab reach; higher "
-            "values catch tall climbables (e.g. multi-rung ladders) that "
-            "aren't covered by Path A or Path B.\n\n"
+            "70 (default) matches realistic child-Link jump-grab reach. "
+            "Adult Link grabs slightly higher (~90u). Higher values "
+            "catch tall climbables but also flag steps Link can't "
+            "actually grab.\n\n"
             "Diagnostic use: bump to 250+ to test whether a tall climb "
             "shows up as a ledge anchor. If it does, the geometry has a "
             "wall between approach and top (the ladder is in static "
