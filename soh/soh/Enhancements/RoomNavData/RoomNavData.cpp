@@ -73,6 +73,8 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_LOG_REJECTED_FLOORS   CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors")
 #define CVAR_ROOM_NAV_PATH_B_CLIMB          CVAR_ENHANCEMENT("RoomNavData.PathBClimbDetection")
 #define CVAR_ROOM_NAV_LEDGE_GRAB            CVAR_ENHANCEMENT("RoomNavData.LedgeGrabDetection")
+#define CVAR_ROOM_NAV_LEDGE_MAX_DELTA       CVAR_ENHANCEMENT("RoomNavData.LedgeGrabMaxDeltaY")
+#define CVAR_ROOM_NAV_PATH_B_DEBUG          CVAR_ENHANCEMENT("RoomNavData.PathBDebugLogWallTypes")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -588,7 +590,13 @@ static void DetectClimbAnchorsViaSurfaceFlags(
     PlayState* play,
     const std::unordered_set<CellKey, CellKeyHash>& visited)
 {
-    if (CVarGetInteger(CVAR_ROOM_NAV_PATH_B_CLIMB, 0) == 0) return;
+    // Run when EITHER the production Path B CVar is on OR the diagnostic
+    // wall-types log is on. The diagnostic wants to see walls even if
+    // the user hasn't enabled Path B for production climb-anchor
+    // generation.
+    const bool pathBProduction = CVarGetInteger(CVAR_ROOM_NAV_PATH_B_CLIMB, 0) != 0;
+    const bool pathBDiagnostic = CVarGetInteger(CVAR_ROOM_NAV_PATH_B_DEBUG, 0) != 0;
+    if (!pathBProduction && !pathBDiagnostic) return;
 
     CollisionHeader* hdr = play->colCtx.colHeader;
     if (hdr == nullptr || hdr->polyList == nullptr || hdr->vtxList == nullptr) return;
@@ -599,6 +607,14 @@ static void DetectClimbAnchorsViaSurfaceFlags(
 
     // Pre-cluster radius squared to avoid per-poly sqrt.
     constexpr float kClusterRadiusSq = kClimbClusterRadiusXZ * kClimbClusterRadiusXZ;
+
+    // Diagnostic mode: when on, log every wall poly with non-zero
+    // wall-property index regardless of whether bit 3 (climbable) is
+    // set. Lets the user discover wall-flag patterns we DON'T currently
+    // match — useful when a known climbable surface (e.g. Inside Deku
+    // Tree main entrance ladder) doesn't show up as a Path B anchor.
+    const bool diagLogWallTypes = CVarGetInteger(CVAR_ROOM_NAV_PATH_B_DEBUG, 0) != 0;
+    size_t diagLoggedWalls = 0;
 
     size_t pathBAdded   = 0;
     size_t pathBMerged  = 0;
@@ -613,9 +629,13 @@ static void DetectClimbAnchorsViaSurfaceFlags(
         f32 normalY = (f32)poly->normal.y / 32767.0f;
         if (std::fabs(normalY) > 0.5f) continue;
 
-        // Climbable-flag check via the existing wall-flags helper.
+        // Read both the wall-property INDEX (5-bit value 0-31) and the
+        // wall-flag BITMASK (lookup-table value, with the cheat's bit-3
+        // injection if active). Diagnostic mode logs both for any poly
+        // with a non-trivial property; production mode skips polys that
+        // don't carry the climbable bit.
+        u32 wallIdx   = func_80041D94(&play->colCtx, poly, BGCHECK_SCENE);
         s32 wallFlags = func_80041DB8(&play->colCtx, poly, BGCHECK_SCENE);
-        if ((wallFlags & kWallFlagClimbable) == 0) continue;
 
         // Vertex indices (low 13 bits of each field).
         u16 viA = poly->flags_vIA & 0x1FFF;
@@ -635,6 +655,30 @@ static void DetectClimbAnchorsViaSurfaceFlags(
         // Room scoping: poly must be in a floodfill-visited cell.
         CellKey centroidCell = CellKeyForXZ(cx, cz, out->bboxMin);
         if (visited.count(centroidCell) == 0) continue;
+
+        // Diagnostic logging — runs after wall + room-scope filtering
+        // (so we don't drown in irrelevant polys), but BEFORE the
+        // climbable-bit filter (so the user sees walls we'd otherwise
+        // skip). Only emit for non-trivial wall properties so plain
+        // solid walls don't spam.
+        if (diagLogWallTypes && wallIdx != 0) {
+            // Compact log so a room with many special walls stays
+            // readable. Y centroid included so the user can spot
+            // walls at known altitudes.
+            f32 cy = ((f32)vA.y + (f32)vB.y + (f32)vC.y) / 3.0f;
+            SPDLOG_INFO("[RoomNav][PathBDiag] poly@({:.0f},{:.0f},{:.0f}) "
+                        "idx={} flags=0x{:02X} normalY={:.2f}",
+                        cx, cy, cz, wallIdx, (unsigned)wallFlags, normalY);
+            diagLoggedWalls++;
+        }
+
+        // Climbable-flag check (production filter).
+        if ((wallFlags & kWallFlagClimbable) == 0) continue;
+
+        // If only the diagnostic CVar is on (production Path B off),
+        // we've already logged this wall — skip the anchor-creation
+        // path so diagnostic-only runs don't pollute climbAnchors.
+        if (!pathBProduction) continue;
 
         // Proximity-merge with existing anchors. Two anchors within
         // kClimbClusterRadiusXZ collapse into one whose Y range covers both.
@@ -668,6 +712,11 @@ static void DetectClimbAnchorsViaSurfaceFlags(
         SPDLOG_INFO("[RoomNav] Path B climb detection: {} anchors added, {} polys merged",
                     pathBAdded, pathBMerged);
     }
+    if (diagLogWallTypes) {
+        SPDLOG_INFO("[RoomNav][PathBDiag] summary: {} wall polys logged "
+                    "(non-zero wall-property index, in-room only)",
+                    diagLoggedWalls);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -697,11 +746,19 @@ static void DetectLedgeAnchors(
     if (CVarGetInteger(CVAR_ROOM_NAV_LEDGE_GRAB, 0) == 0) return;
 
     // Step-up edges already cover deltas <= 30; below that range it's a
-    // walkable edge, not a ledge. 150 is a generous upper bound on
-    // Link's vertical reach in a jump-grab; anything taller would
-    // require additional traversal mechanism (climb anchor, teleport).
+    // walkable edge, not a ledge. The upper bound is CVar-tunable so the
+    // user can extend the range to catch taller climbables that aren't
+    // caught by Path A or Path B (e.g. a static-geometry ladder whose
+    // collision polys don't carry the climbable wall-flag bit). 150 is
+    // the realistic Link jump-grab reach; values up to ~500 catch
+    // multi-rung ladders for diagnostic purposes (with the caveat that
+    // the navigator can't actually jump-grab those — they're effectively
+    // mis-typed climb anchors).
     constexpr float kLedgeMinDeltaY    = 30.0f;
-    constexpr float kLedgeMaxDeltaY    = 150.0f;
+    int32_t maxDeltaInt = CVarGetInteger(CVAR_ROOM_NAV_LEDGE_MAX_DELTA, 150);
+    if (maxDeltaInt < 30)   maxDeltaInt = 30;
+    if (maxDeltaInt > 1000) maxDeltaInt = 1000;
+    const float kLedgeMaxDeltaY = (float)maxDeltaInt;
     // Approach and top must be within ~80u XZ — the player jumps roughly
     // forward; targets further than that aren't physically reachable.
     constexpr float kLedgeMaxXZSq      = 80.0f * 80.0f;

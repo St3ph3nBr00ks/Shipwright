@@ -2062,6 +2062,44 @@ void SohMenu::AddMenuEnhancements() {
             "Schema bumps to v3 when first scan runs with this on; existing v2 .bin "
             "files regenerate on next room entry. Apply via Force Rescan. Default: off."));
 
+    AddWidget(path, "Ledge-Grab Max Y Delta: %du", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.LedgeGrabMaxDeltaY"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .Options(IntSliderOptions()
+                     .Min(30)
+                     .Max(500)
+                     .DefaultValue(150)
+                     .Format("%du")
+                     .Tooltip(
+            "Upper bound on Y-delta between ledge approach and top. "
+            "150 (default) matches Link's true jump-grab reach; higher "
+            "values catch tall climbables (e.g. multi-rung ladders) that "
+            "aren't covered by Path A or Path B.\n\n"
+            "Diagnostic use: bump to 250+ to test whether a tall climb "
+            "shows up as a ledge anchor. If it does, the geometry has a "
+            "wall between approach and top (the ladder is in static "
+            "collision); if it doesn't, the ladder is likely a Bg actor "
+            "with no static-wall geometry.\n\n"
+            "Apply via Force Rescan after changing."));
+
+    AddWidget(path, "Path B Debug — Log All Wall Types", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.PathBDebugLogWallTypes"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Diagnostic mode for Path B. When on, every wall poly the "
+            "scan encounters with a non-zero wall-property index is "
+            "logged with its centroid (X,Y,Z), wall-property index "
+            "(0-31), wall-flag bitmask, and normal-Y. Use to discover "
+            "wall-flag patterns we DON'T currently match (e.g. a ladder "
+            "that uses a different bit than bit 3).\n\n"
+            "Runs even if Path B production is off — diagnostic-only "
+            "mode logs walls without creating climb anchors. Output "
+            "lines look like:\n"
+            "  [RoomNav][PathBDiag] poly@(X,Y,Z) idx=N flags=0xMM "
+            "normalY=...\n\n"
+            "Apply via Force Rescan after toggling."));
+
     AddWidget(path, "Log Stuck-On-Slope Diagnostic", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
