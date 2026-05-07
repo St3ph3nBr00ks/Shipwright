@@ -986,19 +986,37 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     // connecting them to the main graph. They would mislead nav consumers
     // (FindBestReachableSubgoalNode) if treated as legitimate targets.
     //
-    // Algorithm (handoff plan §5 commit 1):
+    // Algorithm (handoff plan §5 commit 1, refined for component-size
+    // thresholding):
     //   1. Pick the first node at each stashed seed cell as a "seed-rooted"
     //      starting point. Use the nodesByCell spatial index built for edge
     //      generation; it's still in scope here.
     //   2. BFS via the edges vector from every seed-rooted node. Edges are
-    //      undirected (each {fromIdx, toIdx} traverses both ways).
-    //   3. For every node not visited by the BFS, set NODE_ORPHANED.
+    //      undirected (each {fromIdx, toIdx} traverses both ways). Mark
+    //      visited nodes — these are reachable from a seed.
+    //   3. For each unvisited node, BFS its connected component (within the
+    //      unvisited set). If the component size exceeds
+    //      kMinValidComponentSize, treat it as a legitimate sub-area that
+    //      simply had no actor inside it to seed from (e.g. the slingshot
+    //      chamber after the chest is taken on the active save). Don't
+    //      flag those nodes — consumers can still reach them via vertical
+    //      teleport / climb anchors / future cross-component pathing.
+    //   4. For each unvisited component below the threshold, flag every
+    //      node in the component as NODE_ORPHANED. These are the small
+    //      stacked-floor remnants on top of walls / fences / scenery —
+    //      typically 1-20 nodes each.
     //
-    // Cost: O(|nodes| + |edges|). For a typical room (~1100 nodes, ~3500
-    // edges) this is ~4600 ops, negligible compared to the line tests in
-    // edge generation.
+    // Threshold rationale: legitimate sub-rooms in OoT scenes have hundreds
+    // of nodes (Inside Deku Tree slingshot chamber ≈ 200-500 nodes typical).
+    // Wall-top remnants are <30 nodes. 50 is the conservative midpoint.
+    //
+    // Cost: O(|nodes| + |edges|). The component-size pass adds another
+    // |nodes| + |edges| traversal; total still negligible compared to edge
+    // generation's line tests.
+    static constexpr size_t kMinValidComponentSize = 50;
     auto orphanStart = std::chrono::steady_clock::now();
     size_t orphanCount = 0;
+    size_t recoveredOrphanCount = 0;
     {
         // Build adjacency list from the (undirected) edges vector.
         std::vector<std::vector<uint16_t>> adjacency(out->nodes.size());
@@ -1035,20 +1053,51 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
             }
         }
 
-        // Flag every unvisited node. We don't drop them — keeping the data
-        // means consumers can still reason about "is there a floor here?"
-        // even when the graph layer can't reach the node.
+        // Component-size pass over the unvisited set. Each unvisited node
+        // belongs to some unvisited connected component; classify by size.
+        std::vector<bool> classifiedComponent(out->nodes.size(), false);
         for (size_t i = 0; i < out->nodes.size(); i++) {
-            if (!visitedNode[i]) {
-                out->nodes[i].flags |= NODE_ORPHANED;
-                orphanCount++;
+            if (visitedNode[i]) continue;          // reachable from a seed
+            if (classifiedComponent[i]) continue;  // already handled
+
+            // BFS the unvisited component containing i.
+            std::vector<uint16_t> componentNodes;
+            std::deque<uint16_t> q;
+            q.push_back((uint16_t)i);
+            classifiedComponent[i] = true;
+            while (!q.empty()) {
+                uint16_t cur = q.front();
+                q.pop_front();
+                componentNodes.push_back(cur);
+                for (uint16_t nb : adjacency[cur]) {
+                    if (nb >= classifiedComponent.size()) continue;
+                    if (visitedNode[nb]) continue;          // shouldn't happen; defensive
+                    if (classifiedComponent[nb]) continue;
+                    classifiedComponent[nb] = true;
+                    q.push_back(nb);
+                }
+            }
+
+            if (componentNodes.size() > kMinValidComponentSize) {
+                // Large unreachable component — legitimate sub-area that
+                // happened to have no actor inside it to seed from. Leave
+                // the orphan flag CLEAR; treat as walkable.
+                recoveredOrphanCount += componentNodes.size();
+            } else {
+                // Small unreachable component — wall-top / fence-top
+                // remnant. Flag every node so consumers and viz can
+                // distinguish.
+                for (uint16_t idx : componentNodes) {
+                    out->nodes[idx].flags |= NODE_ORPHANED;
+                    orphanCount++;
+                }
             }
         }
     }
     auto orphanMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - orphanStart).count();
-    (void)totalMs;       // shadowed by totalMsFinal below; keep symbol for callers
-    (void)orphanMs;      // exposed via totalMsFinal aggregate; not separately logged
+    (void)totalMs;            // shadowed by totalMsFinal below; keep symbol for callers
+    (void)orphanMs;           // exposed via totalMsFinal aggregate; not separately logged
 
     // Climb anchor detection (commit 6) — Path A scene-actor allowlist.
     // Iterates ACTORCAT_BG and ACTORCAT_PROP actor lists for known
@@ -1086,10 +1135,10 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
     SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} nodes={} edges={} climbs={} cells={} "
-                "seeds={} orphans={} scanMs={} edgeMs={} totalMs={}",
+                "seeds={} orphans={} recovered={} scanMs={} edgeMs={} totalMs={}",
                 sceneNum, (int)roomNum, out->nodes.size(), out->edges.size(),
                 out->climbAnchors.size(), visited.size(), 1 + extraSeeds, orphanCount,
-                scanMs, edgeMs, totalMsFinal);
+                recoveredOrphanCount, scanMs, edgeMs, totalMsFinal);
 }
 
 // Top-level lookup-then-scan dispatch. Called once per (scene, room)
