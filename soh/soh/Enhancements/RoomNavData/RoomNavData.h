@@ -111,4 +111,15 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // has been initialized. Used as the master gate by all Phase 1+2 features.
 bool IsEnabled();
 
+// Drops the cached nav data for the current (scene, room) — both the
+// in-memory cache entry and the on-disk .bin if present — and re-triggers
+// a scan on the next frame. Useful for testing scan-algorithm changes
+// without restarting the session, and for refreshing rooms whose cached
+// graph predates a scan-quality fix.
+//
+// No-op if gPlayState is null, or if RoomNavData.AutoScan is off (the
+// disk file is still removed in that case so a future enable+re-entry
+// regenerates).
+void ForceRescanCurrentRoom();
+
 } // namespace AnchorNavRoom

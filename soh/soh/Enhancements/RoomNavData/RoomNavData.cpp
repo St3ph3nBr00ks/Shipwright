@@ -1450,6 +1450,45 @@ static void OnDebugDrawRender() {
 }
 
 // ---------------------------------------------------------------------------
+// Public force-rescan API. See header for semantics.
+// ---------------------------------------------------------------------------
+
+void ForceRescanCurrentRoom() {
+    PlayState* play = gPlayState;
+    if (play == nullptr) {
+        SPDLOG_WARN("[RoomNav] ForceRescanCurrentRoom: gPlayState is null; ignoring");
+        return;
+    }
+    int16_t scene = play->sceneNum;
+    int8_t  room  = (int8_t)play->roomCtx.curRoom.num;
+    uint32_t key = MakeCacheKey(scene, room);
+
+    // Drop in-memory cache entry. GetForRoom and the OnDebugDrawRender
+    // path will return nullptr until the next OnRoomEntered re-scan
+    // populates a fresh entry.
+    sCache.erase(key);
+
+    // Best-effort delete on-disk .bin. Failure is silent — the in-memory
+    // re-scan will overwrite the file via SaveToDisk anyway.
+    auto path = RoomNavFilePath(scene, room);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    // Reset the polling tracker so OnGameFrameTick's delta-detection
+    // re-fires OnRoomEntered next frame.
+    sLastScene = -1;
+    sLastRoom  = -1;
+
+    // Reset DebugDraw summary tracker so the post-rescan log reports the
+    // refreshed counts even if the (scene, room) didn't change.
+    sDebugDrawLastSummaryScene = -1;
+    sDebugDrawLastSummaryRoom  = -1;
+
+    SPDLOG_INFO("[RoomNav] ForceRescanCurrentRoom: dropped cache + disk for scene={} room={}; "
+                "re-scan triggers next frame", scene, (int)room);
+}
+
+// ---------------------------------------------------------------------------
 // Registration. Single ShipInit entry point; called once at startup.
 // ---------------------------------------------------------------------------
 

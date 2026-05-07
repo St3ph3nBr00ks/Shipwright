@@ -5,6 +5,7 @@
 #include <soh/OTRGlobals.h>
 #include <soh/Enhancements/cosmetics/authenticGfxPatches.h>
 #include <soh/Enhancements/TimeDisplay/TimeDisplay.h>
+#include <soh/Enhancements/RoomNavData/RoomNavData.h>
 
 extern "C" {
 #include "functions.h"
@@ -1985,11 +1986,19 @@ void SohMenu::AddMenuEnhancements() {
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip(
-            "Renders the room's nav graph as an in-world overlay: green spheres for "
+            "Renders the room's nav graph as an in-world overlay: green quads for "
             "walkable nodes, red for hazards, blue for underwater, orange for steep "
-            "slopes, yellow arrows for climb anchors, white lines for edges.\n\n"
-            "Overlay rendering itself is implemented as part of nav system Phase 2; the "
-            "toggle is wired in advance so the CVar exists when that lands."));
+            "slopes, yellow posts for climb anchors, white lines for edges."));
+
+    AddWidget(path, "Force Rescan Current Room", WIDGET_BUTTON)
+        .Callback([](WidgetInfo& info) { AnchorNavRoom::ForceRescanCurrentRoom(); })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .Options(ButtonOptions()
+                     .Tooltip("Drops the cached nav data (in-memory + disk) for the room you're "
+                              "currently in and re-scans on the next frame. Useful for testing "
+                              "scan-algorithm changes without restarting, or for refreshing rooms "
+                              "whose cached graph predates a fix.")
+                     .Size(UIWidgets::Sizes::Inline));
 }
 
 } // namespace SohGui
