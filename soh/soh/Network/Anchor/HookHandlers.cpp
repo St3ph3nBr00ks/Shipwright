@@ -1,4 +1,5 @@
 #include "Anchor.h"
+#include "soh/cvar_prefixes.h"        // CVAR_REMOTE_ANCHOR / CVAR_ENHANCEMENT (Nav system commit 6c)
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
@@ -1299,6 +1300,18 @@ void Anchor::RegisterHooks() {
                           player->doorType != PLAYER_DOORTYPE_FAKE))) {
                         deactivateCheck &= ~BTN_A;
                     }
+                    // Nav system Shape A hang-state resolution (commit 6c).
+                    // The hang-state injection block in ShouldActorUpdate
+                    // injects BTN_A or BTN_B based on Δy to leader; mask
+                    // both from the deactivate check so our own press
+                    // doesn't self-cancel follower mode while resolving
+                    // the hang.
+                    if (player != nullptr &&
+                        (player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) &&
+                        CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
+                        CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0) {
+                        deactivateCheck &= ~(BTN_A | BTN_B);
+                    }
                     if (deactivateCheck != 0) {
                         // Include state name + the UNMASKED residue so future
                         // self-cancel regressions are easy to diagnose: any
@@ -1774,6 +1787,24 @@ void Anchor::RegisterHooks() {
                     s8    ourRoom    = (s8)gPlayState->roomCtx.curRoom.num;
                     s8    leaderRoom = (it != clients.end()) ? it->second.curRoomNum : ourRoom;
                     bool  roomsDiffer = (leaderRoom != -1 && ourRoom != -1 && leaderRoom != ourRoom);
+                    // Nav system Shape A hang-state guard (commit 6c).
+                    // Suppress same-room world.pos writes while Link is in
+                    // PLAYER_STATE1_HANGING_OFF_LEDGE — writing under that
+                    // state produces the "slide while hanging" residual
+                    // (#169 hang-on-ledge has-no-exit-logic). The hang-
+                    // state resolution below injects BTN_A or BTN_B
+                    // instead so OoT's own state machine resolves the
+                    // hang in the right direction. Cross-room teleport
+                    // stays unaffected — it goes through RESPAWN_MODE_TOP
+                    // / scene-reload, not a direct world.pos write.
+                    if (!roomsDiffer && (player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) &&
+                        CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
+                        CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0) {
+                        SPDLOG_INFO("[Follower] Teleport SUPPRESSED ({}) — hang-state guard "
+                                    "(stateFlags1 & HANGING_OFF_LEDGE)",
+                                    reason);
+                        return false;
+                    }
                     // Reset ALL the "how long have I been unable to reach
                     // the leader" counters on every teleport. Also arm the
                     // post-teleport hold so ShouldActorUpdate zeroes stick
@@ -2053,7 +2084,17 @@ void Anchor::RegisterHooks() {
                                 // G10/G12 will handle via scene-reload.
                                 bool teleportSafe =
                                     (followerLeaderLastInOurRoomNumber == ourRoom);
-                                if (teleportSafe) {
+                                // Nav system Shape A hang-state guard (commit 6c).
+                                // Same reasoning as TeleportToLeader's guard
+                                // — suppress world.pos writes while Link is
+                                // hanging off a ledge so the BTN_A/BTN_B
+                                // resolution path can resolve the hang
+                                // cleanly without sliding.
+                                bool hangActive =
+                                    (player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) != 0 &&
+                                    CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
+                                    CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0;
+                                if (teleportSafe && !hangActive) {
                                     player->actor.world.pos = followerLeaderLastInOurRoom;
                                     player->actor.prevPos   = followerLeaderLastInOurRoom;
                                     player->actor.shape.rot.y = leaderActor->shape.rot.y;
@@ -3334,6 +3375,57 @@ void Anchor::RegisterHooks() {
                         input.press.button |= BTN_A;
                         input.cur.button   |= BTN_A;
                         SPDLOG_INFO("[Follower] BTN_A climb (DO_ACTION_CLIMB)");
+                    }
+
+                    // --- Nav system Shape A hang-state resolution (commit 6c) ---
+                    // Closes the documented #169 residual: when the follower
+                    // enters PLAYER_STATE1_HANGING_OFF_LEDGE, no system decided
+                    // whether to climb up (BTN_A) or drop down (BTN_B). The
+                    // existing DO_ACTION_CLIMB path handles climb-up but not
+                    // drop-down. With nav.VerticalTeleport on, we read leader
+                    // altitude vs follower altitude and inject the right
+                    // button. Plan §9 thresholds:
+                    //   target Y > follower Y + 30  → climb up   (BTN_A)
+                    //   target Y < follower Y - 80  → drop down  (BTN_B)
+                    //   otherwise                   → BTN_A (default — bias
+                    //                                  toward climb up).
+                    // BTN_A path overlaps DO_ACTION_CLIMB above; idempotent.
+                    // BTN_B is the new edge case.
+                    {
+                        const bool hangFlag = (sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) != 0;
+                        const bool navOn    =
+                            CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
+                            CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0;
+                        static bool sWasHanging = false;
+                        if (hangFlag && navOn) {
+                            constexpr f32 kHangResolveAboveThreshold = 30.0f;
+                            constexpr f32 kHangResolveBelowThreshold = 80.0f;
+                            f32 targetY  = leaderPos.y;
+                            f32 dy       = targetY - player->actor.world.pos.y;
+                            bool dropDown = (dy < -kHangResolveBelowThreshold);
+                            if (dropDown) {
+                                input.press.button |= BTN_B;
+                                input.cur.button   |= BTN_B;
+                            } else {
+                                // BTN_A injection above (DO_ACTION_CLIMB) covers
+                                // climb-up. If the prompt isn't showing for some
+                                // reason, force the press anyway so the
+                                // resolution still fires.
+                                input.press.button |= BTN_A;
+                                input.cur.button   |= BTN_A;
+                            }
+                            if (!sWasHanging) {
+                                SPDLOG_INFO("[Follower] BTN_{} hang-state resolution "
+                                            "(dy={:.1f}, above={:.1f}, below={:.1f})",
+                                            dropDown ? "B" : "A", dy,
+                                            kHangResolveAboveThreshold,
+                                            kHangResolveBelowThreshold);
+                                sWasHanging = true;
+                            }
+                        } else if (sWasHanging) {
+                            sWasHanging = false;
+                        }
+                        (void)hangFlag;  // suppress unused-warning when navOn is false
                     }
 
                     // --- Phase A — auto-press A when OoT prompts "Enter" ---
