@@ -75,6 +75,8 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_LEDGE_GRAB            CVAR_ENHANCEMENT("RoomNavData.LedgeGrabDetection")
 #define CVAR_ROOM_NAV_LEDGE_MAX_DELTA       CVAR_ENHANCEMENT("RoomNavData.LedgeGrabMaxDeltaY")
 #define CVAR_ROOM_NAV_PATH_B_DEBUG          CVAR_ENHANCEMENT("RoomNavData.PathBDebugLogWallTypes")
+#define CVAR_ROOM_NAV_AUTO_REFRESH_ANCHORS  CVAR_ENHANCEMENT("RoomNavData.AutoRefreshAnchorsOnSceneFlag")
+#define CVAR_ROOM_NAV_AUTO_FULL_RESCAN      CVAR_ENHANCEMENT("RoomNavData.AutoFullRescanOnSceneFlag")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -1658,6 +1660,20 @@ static void TickStuckOnSlopeDetection(PlayState* play) {
 static int16_t sLastScene = -1;
 static int8_t  sLastRoom  = -1;
 
+// Tier 1 / Tier 2 dynamic refresh — pending flags. Set from the
+// OnSceneFlagSet hook (which can fire multiple times per frame);
+// drained once per frame from DispatchPendingDynamicRefresh inside
+// OnGameFrameTick. Both stay false when neither tier's CVar is on.
+// Defined here (before OnExitGameClear) so the lifecycle-clear paths
+// can reset them.
+static bool sPendingAnchorRefresh = false;
+static bool sPendingFullRescan    = false;
+
+// Forward declaration — definition lives further down the file with the
+// other dynamic-refresh helpers, but this function is called from
+// OnGameFrameTick (right below).
+static void DispatchPendingDynamicRefresh();
+
 static void OnGameFrameTick() {
     if (!IsEnabled()) {
         return;
@@ -1676,6 +1692,12 @@ static void OnGameFrameTick() {
     // Slope-3 stuck-on-slope diagnostic (commit 11) runs every frame regardless
     // of whether the room has changed. Internally CVar-gated; no-op when off.
     TickStuckOnSlopeDetection(play);
+
+    // Tier 1 / Tier 2 dynamic refresh — drain any pending refresh/rescan
+    // requests queued by the OnSceneFlagSet hook. Runs every frame so
+    // multi-flag-per-frame events absorb into a single dispatch. Internally
+    // CVar-gated; both pending bools stay false when neither tier is on.
+    DispatchPendingDynamicRefresh();
 
     int16_t currentScene = play->sceneNum;
     int8_t  currentRoom  = (int8_t)play->roomCtx.curRoom.num;
@@ -1705,6 +1727,10 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
     // Drop the component cache (DebugDraw v3d, polish wave commit 5).
     // Transient debug data; recomputed on next debug-draw of each room.
     sComponentCache.clear();
+    // Drop any pending dynamic-refresh requests — those reference the
+    // current room which is about to become invalid.
+    sPendingAnchorRefresh = false;
+    sPendingFullRescan    = false;
     sLastScene = -1;
     sLastRoom  = -1;
     sLastStuckLogFrame.clear();
@@ -2390,45 +2416,33 @@ static void OnDebugDrawRender() {
 // Public force-rescan API. See header for semantics.
 // ---------------------------------------------------------------------------
 
-void ForceRescanCurrentRoom() {
+// Internal helper. Drops cache + disk + tracker state for the current
+// room and lets OnGameFrameTick re-trigger the scan next frame.
+// `trigger` is a short tag included in the log line so the user can tell
+// user-initiated Force Rescans apart from auto-triggered ones (Tier 2
+// rescan-on-scene-flag).
+static void DoTriggerFullRescan(const char* trigger) {
     PlayState* play = gPlayState;
     if (play == nullptr) {
-        SPDLOG_WARN("[RoomNav] ForceRescanCurrentRoom: gPlayState is null; ignoring");
+        SPDLOG_WARN("[RoomNav] TriggerFullRescan({}): gPlayState is null; ignoring", trigger);
         return;
     }
     int16_t scene = play->sceneNum;
     int8_t  room  = (int8_t)play->roomCtx.curRoom.num;
     uint32_t key = MakeCacheKey(scene, room);
 
-    // Drop in-memory cache entry. GetForRoom and the OnDebugDrawRender
-    // path will return nullptr until the next OnRoomEntered re-scan
-    // populates a fresh entry.
     sCache.erase(key);
-
-    // Drop the component cache entry for this room (DebugDraw v3d, polish
-    // wave commit 5). The next debug-draw frame will recompute components
-    // from the freshly-scanned graph.
     sComponentCache.erase(key);
 
-    // Best-effort delete on-disk .bin. Failure is silent — the in-memory
-    // re-scan will overwrite the file via SaveToDisk anyway.
     auto path = RoomNavFilePath(scene, room);
     std::error_code ec;
     std::filesystem::remove(path, ec);
 
-    // Reset the polling tracker so OnGameFrameTick's delta-detection
-    // re-fires OnRoomEntered next frame.
     sLastScene = -1;
     sLastRoom  = -1;
-
-    // Reset DebugDraw summary tracker so the post-rescan log reports the
-    // refreshed counts even if the (scene, room) didn't change.
     sDebugDrawLastSummaryScene = -1;
     sDebugDrawLastSummaryRoom  = -1;
 
-    // Capture Link's position at trigger time so the user can correlate
-    // a rescan event with where they were standing — useful for locating
-    // surfaces that should-have-been-detected but weren't.
     f32 px = 0.0f, py = 0.0f, pz = 0.0f;
     Player* player = GET_PLAYER(play);
     if (player != nullptr) {
@@ -2436,9 +2450,126 @@ void ForceRescanCurrentRoom() {
         py = player->actor.world.pos.y;
         pz = player->actor.world.pos.z;
     }
-    SPDLOG_INFO("[RoomNav] ForceRescanCurrentRoom: scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}); "
+    SPDLOG_INFO("[RoomNav] FullRescan({}): scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}); "
                 "dropped cache + disk; re-scan triggers next frame",
-                scene, (int)room, px, py, pz);
+                trigger, scene, (int)room, px, py, pz);
+}
+
+void ForceRescanCurrentRoom() {
+    DoTriggerFullRescan("user");
+}
+
+// Internal helper. Refreshes only the climb + ledge anchors for the
+// current room WITHOUT rerunning floodfill or edge generation. Cost is
+// ~5-30ms depending on Path B mask and scene size. Used by the Tier 1
+// auto-refresh path (OnSceneFlagSet → anchor-only refresh) so cheap
+// state changes (e.g. slingshot ladder fall) don't pay the full
+// 50-150ms scan cost.
+//
+// The detection passes need `visited` (cell set, room-scoping) and
+// `nodesByCell` (spatial index). Both are scan-time locals in
+// ScanRoom. We reconstruct them from the persisted nav data: every
+// node's cellIdxX/Z field tells us which cell it belongs to, so the
+// `visited` set is "every cell that has at least one node" and
+// `nodesByCell` is the obvious inverse mapping.
+static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
+    PlayState* play = gPlayState;
+    if (play == nullptr) return;
+    int16_t scene = play->sceneNum;
+    int8_t  room  = (int8_t)play->roomCtx.curRoom.num;
+    uint32_t key = MakeCacheKey(scene, room);
+
+    auto it = sCache.find(key);
+    if (it == sCache.end()) return; // no cache → nothing to refresh
+    RoomNavData& nav = it->second;
+    if (nav.nodes.empty()) return;
+
+    auto refreshStart = std::chrono::steady_clock::now();
+
+    size_t prevClimbs = nav.climbAnchors.size();
+    size_t prevLedges = nav.ledgeAnchors.size();
+
+    // Clear the anchor flags from nodes so re-tagging is correct.
+    for (NavNode& node : nav.nodes) {
+        node.flags &= ~(NODE_CLIMB_BASE | NODE_CLIMB_TOP);
+    }
+
+    nav.climbAnchors.clear();
+    nav.ledgeAnchors.clear();
+
+    // Reconstruct visited + nodesByCell from persistent node data.
+    std::unordered_set<CellKey, CellKeyHash> visited;
+    std::unordered_map<CellKey, std::vector<uint16_t>, CellKeyHash> nodesByCell;
+    for (uint16_t i = 0; i < nav.nodes.size(); i++) {
+        CellKey k{ (int32_t)(int16_t)nav.nodes[i].cellIdxX,
+                   (int32_t)(int16_t)nav.nodes[i].cellIdxZ };
+        visited.insert(k);
+        nodesByCell[k].push_back(i);
+    }
+
+    // Re-run anchor detection using the reconstructed sets. The detection
+    // functions read live actor / collision state via gPlayState, so they
+    // pick up any actor moves / wall changes that happened since the
+    // previous scan.
+    DetectClimbAnchors(&nav, play);
+    DetectClimbAnchorsViaSurfaceFlags(&nav, play, visited);
+    DetectLedgeAnchors(&nav, play, nodesByCell);
+
+    // Re-tag climb-base / climb-top flags from the refreshed anchors.
+    for (const ClimbAnchor& anchor : nav.climbAnchors) {
+        int baseIdx = FindNearestNode(&nav, anchor.basePos);
+        if (baseIdx >= 0) {
+            nav.nodes[(size_t)baseIdx].flags |= NODE_CLIMB_BASE;
+        }
+        int topIdx = FindNearestNode(&nav, anchor.topPos);
+        if (topIdx >= 0) {
+            nav.nodes[(size_t)topIdx].flags |= NODE_CLIMB_TOP;
+        }
+    }
+
+    // Reset the debug-draw summary tracker so the next overlay frame
+    // re-emits the loaded-summary line with the refreshed counts.
+    sDebugDrawLastSummaryScene = -1;
+    sDebugDrawLastSummaryRoom  = -1;
+
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - refreshStart).count();
+
+    SPDLOG_INFO("[RoomNav] RefreshAnchors({}): scene={} room={} climbs {}->{} ledges {}->{} "
+                "in {}ms",
+                trigger, scene, (int)room,
+                prevClimbs, nav.climbAnchors.size(),
+                prevLedges, nav.ledgeAnchors.size(),
+                ms);
+}
+
+// Hook handler — fires for every Flags_SetSwitch / scene flag write.
+// Sets the appropriate pending flag based on which Tier CVars are on.
+// Tier 2 (full rescan) takes precedence over Tier 1 if both are
+// enabled, since a full rescan implicitly refreshes anchors too.
+static void OnSceneFlagSetHookHandler(int16_t /*sceneNum*/, int16_t /*flagType*/,
+                                       int16_t /*flag*/) {
+    if (!IsEnabled()) return;
+    bool fullRescan    = CVarGetInteger(CVAR_ROOM_NAV_AUTO_FULL_RESCAN, 0) != 0;
+    bool anchorRefresh = CVarGetInteger(CVAR_ROOM_NAV_AUTO_REFRESH_ANCHORS, 0) != 0;
+    if (fullRescan) {
+        sPendingFullRescan = true;
+    } else if (anchorRefresh) {
+        sPendingAnchorRefresh = true;
+    }
+}
+
+// Called from OnGameFrameTick (after the per-frame logic) to drain
+// pending refresh/rescan requests.
+static void DispatchPendingDynamicRefresh() {
+    if (sPendingFullRescan) {
+        sPendingFullRescan    = false;
+        sPendingAnchorRefresh = false; // full rescan supersedes
+        DoTriggerFullRescan("scene-flag");
+    } else if (sPendingAnchorRefresh) {
+        sPendingAnchorRefresh = false;
+        DoRefreshAnchorsCurrentRoom("scene-flag");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2454,6 +2585,12 @@ static void RegisterRoomNavData() {
         OnDebugDraw);
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnPlayDrawEnd>(
         OnDebugDrawRender);
+    // Tier 1 + Tier 2 dynamic refresh — fires for every Flags_SetSwitch /
+    // scene flag write. Hook handler is internally CVar-gated; no-op
+    // when neither AutoRefreshAnchorsOnSceneFlag nor
+    // AutoFullRescanOnSceneFlag is on.
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneFlagSet>(
+        OnSceneFlagSetHookHandler);
 }
 
 } // namespace AnchorNavRoom

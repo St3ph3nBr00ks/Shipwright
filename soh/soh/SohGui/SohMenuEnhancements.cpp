@@ -2082,6 +2082,39 @@ void SohMenu::AddMenuEnhancements() {
             "with no static-wall geometry.\n\n"
             "Apply via Force Rescan after changing."));
 
+    AddWidget(path, "Auto Refresh Anchors on Scene Flag (Tier 1)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.AutoRefreshAnchorsOnSceneFlag"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Tier 1 dynamic refresh. When on, every scene-flag-set event "
+            "(switch flags, treasure flags, room-cleared flags, etc.) "
+            "triggers an anchor-only refresh of the current room: clears "
+            "and re-detects climb + ledge anchors without rerunning "
+            "floodfill or edge generation.\n\n"
+            "Cost: ~5-30ms per refresh. Catches the slingshot-ladder-fall "
+            "pattern (and any other discrete climbable-actor state change "
+            "that fires a scene flag).\n\n"
+            "Tier 2 (full rescan) takes precedence if both are on. "
+            "Default: off."));
+
+    AddWidget(path, "Auto Full Rescan on Scene Flag (Tier 2)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.AutoFullRescanOnSceneFlag"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Tier 2 dynamic refresh. When on, every scene-flag-set event "
+            "drops the cached scan and re-runs the full ScanRoom pipeline. "
+            "Catches topology-changing events (push blocks reaching their "
+            "destination, moving platforms reaching an endpoint, ferries "
+            "/ scripted scenery changes) that Tier 1's anchor-only refresh "
+            "can't see.\n\n"
+            "Cost: 50-150ms per rescan. The hitch is typically masked by "
+            "the multi-second animation of the triggering event (push "
+            "block animation, cutscene fade, etc.) so it's rarely visible "
+            "in practice.\n\n"
+            "Supersedes Tier 1 when both are enabled. Default: off."));
+
     AddWidget(path, "Path B Debug — Log All Wall Types", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.PathBDebugLogWallTypes"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
