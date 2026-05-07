@@ -939,6 +939,11 @@ class Anchor : public Network {
     // Returns false when there is no live PlayState or local Player. Used in
     // PrepClientState so remote clients see this client's climbing state.
     bool IsLocalPlayerClimbing() const;
+    // Nav system (plan §9 / commit 6a) — read the broadcast `isClimbing` flag
+    // for a remote client by clientId. Returns false when the clientId is
+    // not present in the clients map (e.g. caller passed 0 / unknown id) or
+    // the field hasn't been set since the last UPDATE_CLIENT_STATE.
+    bool GetClientIsClimbing(uint32_t clientId) const;
 
     // Test 5 (log 71) — whether the local Player is in a crawlspace.
     // Returns false when there is no live PlayState or local Player.
