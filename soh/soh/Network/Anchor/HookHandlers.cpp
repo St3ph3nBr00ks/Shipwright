@@ -3400,7 +3400,13 @@ void Anchor::RegisterHooks() {
                         if (hangFlag && navOn) {
                             constexpr f32 kHangResolveAboveThreshold = 30.0f;
                             constexpr f32 kHangResolveBelowThreshold = 80.0f;
-                            f32 targetY  = leaderPos.y;
+                            // followerMoveTarget carries the follower's
+                            // current navigation goal (leader pos in
+                            // FOLLOW; tracked target in ENGAGE/ATTACK).
+                            // leaderPos itself is only in scope at the
+                            // top-level frame block — not here inside
+                            // the CLIMBING-state input-injection branch.
+                            f32 targetY  = followerMoveTarget.y;
                             f32 dy       = targetY - player->actor.world.pos.y;
                             bool dropDown = (dy < -kHangResolveBelowThreshold);
                             if (dropDown) {
