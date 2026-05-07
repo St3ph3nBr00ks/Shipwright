@@ -965,6 +965,69 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
 }
 
 // ---------------------------------------------------------------------------
+// Debug overlay (Phase 2 commit 12) — stub for v1.
+//
+// Plan §3 calls for in-world rendering: green spheres for walkable nodes,
+// red for hazards, blue for underwater, orange for steep-slope, white
+// lines for edges, yellow arrows for climb anchors.
+//
+// Full in-world primitive rendering requires building Gfx display lists
+// for icosphere geometry (see colViewer.cpp:262 for the pattern), color
+// coding via gDPSetEnvColor, and POLY_XLU_DISP integration. That's
+// ~200-400 lines of OoT gfx pipeline work — substantial enough to
+// warrant its own focused commit when visual validation actually
+// matters (i.e., when nav system Phase 2 starts consuming this data).
+//
+// v1 stub: register the hook + log on rising-edge of CVar transitions
+// so the user knows the toggle is wired. Per-frame draw is a no-op
+// until the rendering implementation lands.
+// ---------------------------------------------------------------------------
+
+static bool sDebugDrawWasEnabled = false;
+static int16_t sDebugDrawLastSummaryScene = -1;
+static int8_t  sDebugDrawLastSummaryRoom  = -1;
+
+static void OnDebugDraw() {
+    bool nowEnabled = IsEnabled() && CVarGetInteger(CVAR_ROOM_NAV_DEBUG_DRAW, 0) != 0;
+
+    if (nowEnabled != sDebugDrawWasEnabled) {
+        sDebugDrawWasEnabled = nowEnabled;
+        SPDLOG_INFO("[RoomNav] DebugDraw {} (in-world overlay rendering deferred — "
+                    "stub commit; v1 emits room summary log lines on entry).",
+                    nowEnabled ? "enabled" : "disabled");
+    }
+
+    if (!nowEnabled) return;
+
+    // Per-room one-shot summary: when the active room changes while
+    // DebugDraw is on, emit the loaded nav graph's stats. Useful for
+    // "is the data loaded?" verification without requiring the in-world
+    // overlay to be implemented yet.
+    PlayState* play = gPlayState;
+    if (play == nullptr) return;
+    int16_t scene = play->sceneNum;
+    int8_t  room  = (int8_t)play->roomCtx.curRoom.num;
+    if (scene == sDebugDrawLastSummaryScene && room == sDebugDrawLastSummaryRoom) return;
+
+    const RoomNavData* data = GetForRoom(scene, room);
+    if (data == nullptr) {
+        SPDLOG_INFO("[RoomNav][DebugDraw] scene={} room={} — no nav data loaded", scene, (int)room);
+    } else {
+        SPDLOG_INFO("[RoomNav][DebugDraw] scene={} room={} loaded: nodes={} edges={} climbs={} hazards={}",
+                    scene, (int)room,
+                    data->nodes.size(), data->edges.size(),
+                    data->climbAnchors.size(), data->hazardCentroids.size());
+    }
+    sDebugDrawLastSummaryScene = scene;
+    sDebugDrawLastSummaryRoom  = room;
+
+    // TODO Phase 2 follow-up: render in-world primitives at data->nodes /
+    // data->edges / data->climbAnchors per plan §3 color spec. Pattern
+    // reference: colViewer.cpp::DrawColViewer (icosphere mesh, POLY_XLU_DISP,
+    // gDPSetEnvColor for color coding).
+}
+
+// ---------------------------------------------------------------------------
 // Registration. Single ShipInit entry point; called once at startup.
 // ---------------------------------------------------------------------------
 
@@ -973,6 +1036,8 @@ static void RegisterRoomNavData() {
         OnGameFrameTick);
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnExitGame>(
         OnExitGameClear);
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnPlayDrawEnd>(
+        OnDebugDraw);
 }
 
 } // namespace Anchor::Nav::Room
