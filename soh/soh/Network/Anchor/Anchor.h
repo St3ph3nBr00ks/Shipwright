@@ -191,6 +191,35 @@ struct EnemyNetId {
     // EnemyNetId reset paths that clear netState fields).
     uint16_t stuckOnSlopeFrames     = 0;
     uint16_t stuckOnSlopeEventCount = 0;
+
+    // ── Nav system per-navigator state (Plans/nav_system_implementation_plan.md §6 + §9)
+    //
+    // Despite the struct's historical name (EnemyNetId), this extension is
+    // the canonical "per-actor nav state" — attached to any navigator that
+    // participates, not only enemies. AI Follower (ACTOR_EN_OE2) and any
+    // future Link-rigged navigator share it.
+    //
+    // navHeldKind discriminates the held-target representation:
+    //   None     → no target held; AcquireOrHoldTarget will evaluate fresh.
+    //   Player   → navTargetClientId is the held target's client ID.
+    //   Enemy    → navTargetNetId is the held actor's netId.
+    //   FixedPos → navHeldTargetPos is a pinned world position
+    //              (HoldPositionTarget).
+    enum class HeldTargetKind : uint8_t { None = 0, Player, Enemy, FixedPos };
+    HeldTargetKind navHeldKind          = HeldTargetKind::None;
+    uint8_t        navTargetClientId    = 0xFF;        // valid when navHeldKind == Player
+    uint32_t       navTargetNetId       = 0;           // valid when navHeldKind == Enemy
+    Vec3f          navHeldTargetPos     = { 0.0f, 0.0f, 0.0f }; // valid when navHeldKind == FixedPos OR cached for trails
+    uint16_t       navTargetTimerFrames = 0;           // counts down from NavTraits.targetStickyFrames
+    bool           navTargetIsStale     = false;       // true if returning a held target despite invalidation signals
+
+    // VerticalTeleport (plan §9). Counts up while |Δy(target, navigator)|
+    // exceeds NavTraits.verticalTeleportYThreshold; reaches
+    // verticalTeleportDelayFrames before the slow-path teleport fires.
+    // Cooldown counts down after a slow-path teleport to avoid rapid
+    // re-fire.
+    uint16_t navVerticalMismatchFrames = 0;
+    uint16_t navTeleportCooldownFrames = 0;
 };
 
 // #193 Phase 2 — attached to ACTOR_EN_ITEM00 actors so the receive-side

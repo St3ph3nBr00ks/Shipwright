@@ -1942,6 +1942,76 @@ void SohMenu::AddMenuEnhancements() {
 
     AddWidget(path, "Improve enemy navigation.", WIDGET_SEPARATOR_TEXT);
 
+    AddWidget(path, "Nav System", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Enabled", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.Enabled"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Master toggle for the multiplayer navigation system. When on, enables the "
+            "feature toggles below to layer onto enemy AI: sticky target acquisition, "
+            "ground-following steering, climb-anchor detection, vertical teleport, and "
+            "leash-driven respawn rehydration. Bosses are categorically excluded from "
+            "every consumer-side feature.\n\n"
+            "Default: off. Each sub-feature also defaults off."));
+
+    AddWidget(path, "Actor Trail (breadcrumbs)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.ActorTrail"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Captures recent positions for players, AI Followers, and synced enemies that "
+            "opt in via NavTraits. Other navigators consult the trail when direct line-of-"
+            "sight pursuit is blocked, picking the furthest reachable breadcrumb that's "
+            "progress toward the target.\n\n"
+            "Default: off. Foundation for trail-aware features below."));
+
+    AddWidget(path, "Target Selection (sticky)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.TargetSelection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Navigators commit to a chosen target across multiple frames instead of "
+            "flickering between equidistant candidates. Re-evaluation is gated by a "
+            "per-actor sticky timer (default ~2s) and a hysteresis factor that requires "
+            "a different candidate to be meaningfully closer before switching."));
+
+    AddWidget(path, "Ground Following", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.GroundFollowing"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Steering yaw biases toward continuous floor contact, reducing the chance of "
+            "navigators walking off cliffs while pursuing a target. Probes a short "
+            "forward-down ray for several angular samples around the direct bearing."));
+
+    AddWidget(path, "Climbable Surfaces (helper)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.ClimbableSurfaces"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Pure detection helper — surfaces nothing on its own. Drives Vertical Teleport "
+            "below by enumerating climbable scene actors (ladders, vines) within range of "
+            "a candidate position."));
+
+    AddWidget(path, "Vertical Teleport", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.VerticalTeleport"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Two-shape vertical reach. Shape A wraps the existing AI Follower climb "
+            "pipeline (real ladder/vine animation, hang-state resolution). Shape B "
+            "teleports synced enemies upward when their target is on a higher Y level "
+            "and a climb path exists."));
+
+    AddWidget(path, "Leash Respawn", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.LeashRespawn"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When a player re-enters a vacated scene, synced enemies that the host expected "
+            "alive there respawn at the trail-derived position the player last engaged them "
+            "at instead of the vanilla home.pos default."));
+
     AddWidget(path, "Room Nav Data", WIDGET_SEPARATOR_TEXT);
     AddWidget(path, "Enabled", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.Enabled"))
