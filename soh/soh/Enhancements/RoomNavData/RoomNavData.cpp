@@ -437,6 +437,109 @@ static void DetectClimbAnchors(RoomNavData* out, PlayState* play) {
 }
 
 // ---------------------------------------------------------------------------
+// Hazard + water classification predicates. Plan §5 — bit positions
+// verified against z_player.c usage patterns.
+// ---------------------------------------------------------------------------
+
+// v1 hazard predicate. Returns true for surfaces that should bias the
+// navigator AWAY (consumer-side preference, not absolute exclusion).
+//
+// Confirmed hazards (verified from z_player.c references):
+//   Floor Property 5  = pit/void (Play_TriggerRespawn on landing)
+//   Floor Property 12 = deep-fall (void-out trigger via fall-distance)
+//   Floor Type 5      = slippery/ice (slip-recovery interaction)
+//   Floor Type 7      = ice/no-friction (defeats iron boots)
+//
+// NOT marked hazardous here:
+//   Floor Type 6 = shallow water — gets UNDERWATER flag instead
+//   Floor Type 9 = deep water    — gets UNDERWATER flag instead
+//   Floor Type 8 = scene-exit    — navigation-relevant but not a hazard
+//
+// Lava / hot-floor / quicksand are NOT identifiable from these bit fields
+// alone in vanilla OoT. Likely encoded in roomCtx.curRoom.behaviorType1/2
+// or detected by separate code paths in Player_UpdateCommon. Future work
+// per plan §5: add room-behavior-based hazard tagging during scan.
+static bool IsHazardousSurface(CollisionPoly* poly, s32 bgId, CollisionContext* colCtx) {
+    if (poly == nullptr) return false;
+
+    u32 floorProperty = func_80041EA4(colCtx, poly, bgId); // data[0] >> 26 & 0xF
+    u32 floorType     = func_80041D4C(colCtx, poly, bgId); // data[0] >> 13 & 0x1F
+
+    if (floorProperty == 5)  return true;  // pit/void
+    if (floorProperty == 12) return true;  // deep-fall
+    if (floorType == 5)      return true;  // slippery/ice
+    if (floorType == 7)      return true;  // ice/no-friction
+    return false;
+}
+
+// Water-volume detection. Returns true if the (x, floorY, z) sample lies
+// below a water surface — i.e., the floor at that XZ is submerged.
+// Swim-capable navigators (Link-rigged: AI Follower, NPC Invader) traverse
+// underwater nodes; non-swimming navigators skip them via NavTraits filter.
+static bool IsUnderwater(f32 x, f32 floorY, f32 z, PlayState* play) {
+    f32 waterSurfaceY = 0.0f;
+    WaterBox* wb = nullptr;
+    s32 hit = WaterBox_GetSurface1(play, &play->colCtx, x, z, &waterSurfaceY, &wb);
+    if (!hit) return false;
+    return floorY < waterSurfaceY;
+}
+
+// Pelvis-height movement-clearance line test. Used by BuildEdges to
+// determine whether two nodes can be traversed between without hitting
+// a wall. Per plan §2 — body offset 20u places the ray above ground but
+// below most chest-high obstacles.
+//
+// Returns true when the segment from `from` to `to` is CLEAR (navigator
+// can walk between), false if any wall poly blocks the segment.
+//
+// In nav system Phase 1 this helper will live in Common/ActorTrail.cpp;
+// for Phase 1 of RoomNavData (which lands first) it lives here as a
+// file-scope helper. Once both modules co-exist, extract to a shared
+// Common/LineOfSight.{h,cpp} module per nav plan §5.
+static constexpr float kBodyOffset = 20.0f;
+
+static bool MovementClear(const Vec3f& from, const Vec3f& to, PlayState* play) {
+    Vec3f a = { from.x, from.y + kBodyOffset, from.z };
+    Vec3f b = { to.x,   to.y   + kBodyOffset, to.z   };
+    Vec3f hitPos;
+    CollisionPoly* hitPoly = nullptr;
+    // Returns nonzero on hit. We want clear (no hit), so invert.
+    s32 hit = BgCheck_AnyLineTest1(&play->colCtx, &a, &b, &hitPos, &hitPoly, 0);
+    return !hit;
+}
+
+// Encodes an integer cell coordinate for the visited-cells set. Cell
+// coordinates are XZ grid indices (signed; can go negative if room
+// extends below world origin).
+struct CellKey {
+    int32_t x;
+    int32_t z;
+    bool operator==(const CellKey& other) const { return x == other.x && z == other.z; }
+};
+struct CellKeyHash {
+    size_t operator()(const CellKey& k) const noexcept {
+        return ((size_t)(uint32_t)k.x * 0x9E3779B1u) ^ (size_t)(uint32_t)k.z;
+    }
+};
+
+// Compute the integer cell index for a world XZ position relative to the
+// scan's bounding-box origin and grid resolution.
+static CellKey CellKeyForXZ(float x, float z, const Vec3f& bboxMin) {
+    return CellKey{
+        (int32_t)std::floor((x - bboxMin.x) / kGridResolution),
+        (int32_t)std::floor((z - bboxMin.z) / kGridResolution),
+    };
+}
+
+static Vec3f CellCenterWorld(const CellKey& cell, const Vec3f& bboxMin) {
+    return Vec3f{
+        bboxMin.x + (cell.x + 0.5f) * kGridResolution,
+        0.0f, // caller fills Y from raycast
+        bboxMin.z + (cell.z + 0.5f) * kGridResolution,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Path B — surface-flag-based climb detection. Catches vine walls and any
 // other static-scene geometry whose collision polys carry the "ladder"
 // wall-flag bit. Path A (above) handles discrete climbable scene actors;
@@ -559,109 +662,6 @@ static void DetectClimbAnchorsViaSurfaceFlags(
         SPDLOG_INFO("[RoomNav] Path B climb detection: {} anchors added, {} polys merged",
                     pathBAdded, pathBMerged);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Hazard + water classification predicates. Plan §5 — bit positions
-// verified against z_player.c usage patterns.
-// ---------------------------------------------------------------------------
-
-// v1 hazard predicate. Returns true for surfaces that should bias the
-// navigator AWAY (consumer-side preference, not absolute exclusion).
-//
-// Confirmed hazards (verified from z_player.c references):
-//   Floor Property 5  = pit/void (Play_TriggerRespawn on landing)
-//   Floor Property 12 = deep-fall (void-out trigger via fall-distance)
-//   Floor Type 5      = slippery/ice (slip-recovery interaction)
-//   Floor Type 7      = ice/no-friction (defeats iron boots)
-//
-// NOT marked hazardous here:
-//   Floor Type 6 = shallow water — gets UNDERWATER flag instead
-//   Floor Type 9 = deep water    — gets UNDERWATER flag instead
-//   Floor Type 8 = scene-exit    — navigation-relevant but not a hazard
-//
-// Lava / hot-floor / quicksand are NOT identifiable from these bit fields
-// alone in vanilla OoT. Likely encoded in roomCtx.curRoom.behaviorType1/2
-// or detected by separate code paths in Player_UpdateCommon. Future work
-// per plan §5: add room-behavior-based hazard tagging during scan.
-static bool IsHazardousSurface(CollisionPoly* poly, s32 bgId, CollisionContext* colCtx) {
-    if (poly == nullptr) return false;
-
-    u32 floorProperty = func_80041EA4(colCtx, poly, bgId); // data[0] >> 26 & 0xF
-    u32 floorType     = func_80041D4C(colCtx, poly, bgId); // data[0] >> 13 & 0x1F
-
-    if (floorProperty == 5)  return true;  // pit/void
-    if (floorProperty == 12) return true;  // deep-fall
-    if (floorType == 5)      return true;  // slippery/ice
-    if (floorType == 7)      return true;  // ice/no-friction
-    return false;
-}
-
-// Water-volume detection. Returns true if the (x, floorY, z) sample lies
-// below a water surface — i.e., the floor at that XZ is submerged.
-// Swim-capable navigators (Link-rigged: AI Follower, NPC Invader) traverse
-// underwater nodes; non-swimming navigators skip them via NavTraits filter.
-static bool IsUnderwater(f32 x, f32 floorY, f32 z, PlayState* play) {
-    f32 waterSurfaceY = 0.0f;
-    WaterBox* wb = nullptr;
-    s32 hit = WaterBox_GetSurface1(play, &play->colCtx, x, z, &waterSurfaceY, &wb);
-    if (!hit) return false;
-    return floorY < waterSurfaceY;
-}
-
-// Pelvis-height movement-clearance line test. Used by BuildEdges to
-// determine whether two nodes can be traversed between without hitting
-// a wall. Per plan §2 — body offset 20u places the ray above ground but
-// below most chest-high obstacles.
-//
-// Returns true when the segment from `from` to `to` is CLEAR (navigator
-// can walk between), false if any wall poly blocks the segment.
-//
-// In nav system Phase 1 this helper will live in Common/ActorTrail.cpp;
-// for Phase 1 of RoomNavData (which lands first) it lives here as a
-// file-scope helper. Once both modules co-exist, extract to a shared
-// Common/LineOfSight.{h,cpp} module per nav plan §5.
-static constexpr float kBodyOffset = 20.0f;
-
-static bool MovementClear(const Vec3f& from, const Vec3f& to, PlayState* play) {
-    Vec3f a = { from.x, from.y + kBodyOffset, from.z };
-    Vec3f b = { to.x,   to.y   + kBodyOffset, to.z   };
-    Vec3f hitPos;
-    CollisionPoly* hitPoly = nullptr;
-    // Returns nonzero on hit. We want clear (no hit), so invert.
-    s32 hit = BgCheck_AnyLineTest1(&play->colCtx, &a, &b, &hitPos, &hitPoly, 0);
-    return !hit;
-}
-
-// Encodes an integer cell coordinate for the visited-cells set. Cell
-// coordinates are XZ grid indices (signed; can go negative if room
-// extends below world origin).
-struct CellKey {
-    int32_t x;
-    int32_t z;
-    bool operator==(const CellKey& other) const { return x == other.x && z == other.z; }
-};
-struct CellKeyHash {
-    size_t operator()(const CellKey& k) const noexcept {
-        return ((size_t)(uint32_t)k.x * 0x9E3779B1u) ^ (size_t)(uint32_t)k.z;
-    }
-};
-
-// Compute the integer cell index for a world XZ position relative to the
-// scan's bounding-box origin and grid resolution.
-static CellKey CellKeyForXZ(float x, float z, const Vec3f& bboxMin) {
-    return CellKey{
-        (int32_t)std::floor((x - bboxMin.x) / kGridResolution),
-        (int32_t)std::floor((z - bboxMin.z) / kGridResolution),
-    };
-}
-
-static Vec3f CellCenterWorld(const CellKey& cell, const Vec3f& bboxMin) {
-    return Vec3f{
-        bboxMin.x + (cell.x + 0.5f) * kGridResolution,
-        0.0f, // caller fills Y from raycast
-        bboxMin.z + (cell.z + 0.5f) * kGridResolution,
-    };
 }
 
 // Classify a single floor candidate as a NavNode and append to nav.
