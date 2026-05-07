@@ -2032,6 +2032,20 @@ void SohMenu::AddMenuEnhancements() {
             "When off, only existing cached graphs are loaded — no new scans run. Useful "
             "for 'play with this exact baked set, don't generate more' mode."));
 
+    AddWidget(path, "Path B Climb Detection (vine walls / static climbables)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.PathBClimbDetection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, scans static scene collision polys for the climbable wall-flag "
+            "(bit 3 — same flag used by the ClimbEverything cheat). Catches vine walls "
+            "and any other climbable surface baked into static collision that the actor "
+            "allowlist (Path A) doesn't cover.\n\n"
+            "Anchors are merged by XZ proximity (~30u) so a multi-poly vine wall produces "
+            "one anchor with the full mesh's Y range, not dozens. Room-scoped via the "
+            "floodfill-visited cell set.\n\n"
+            "Apply via Force Rescan after toggling. Default: off."));
+
     AddWidget(path, "Log Stuck-On-Slope Diagnostic", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })

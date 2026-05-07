@@ -71,6 +71,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE    CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
 #define CVAR_ROOM_NAV_DEBUG_DRAW_COMPONENTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawComponents")
 #define CVAR_ROOM_NAV_LOG_REJECTED_FLOORS   CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors")
+#define CVAR_ROOM_NAV_PATH_B_CLIMB          CVAR_ENHANCEMENT("RoomNavData.PathBClimbDetection")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -432,6 +433,131 @@ static void DetectClimbAnchors(RoomNavData* out, PlayState* play) {
             }
             actor = actor->next;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path B — surface-flag-based climb detection. Catches vine walls and any
+// other static-scene geometry whose collision polys carry the "ladder"
+// wall-flag bit. Path A (above) handles discrete climbable scene actors;
+// Path B handles climb surfaces baked into static scene collision.
+// ---------------------------------------------------------------------------
+
+// Wall-flag bit semantics (verified against z_bgcheck.c:4022-4028 and the
+// `CVAR_CHEAT("ClimbEverything")` cheat):
+//   func_80041D94(...)   → 5-bit wall-property INDEX (bits 21-25 of data[0])
+//   D_80119D90[index]    → wall-flag BITMASK (lookup table at z_bgcheck.c:32)
+//   func_80041DB8(...)   → returns the bitmask, with `(1 << 3)` OR'd in when
+//                          ClimbEverything is on.
+//
+// The cheat adds (1 << 3) to make every wall climbable, so bit 3 of the
+// returned bitmask IS the "this wall is a ladder/climbable surface" flag.
+// In the lookup table, only index 4 (value 8 = 1 << 3) carries that bit
+// natively — that's the wall-property index used by ladders and vine
+// walls in scene authoring.
+static constexpr s32 kWallFlagClimbable = (1 << 3);
+
+// Cluster radius for merging adjacent climbable polys into one anchor.
+// Vine walls are typically multi-poly meshes; a radius of ~30u (one grid
+// cell) collapses adjacent polys into a single anchor whose Y range
+// spans the full mesh height.
+static constexpr float kClimbClusterRadiusXZ = 30.0f;
+
+// Surface-flag-based climb detection. Iterates static scene polys (NOT
+// dynamic Bg-actor polys; those are out of scope for v1 because the raw
+// vtxList stores actor-local space and applying the per-actor transform
+// per poly is complex). For each wall poly with the climbable flag set,
+// computes centroid + Y range and merges into the anchor list with
+// proximity clustering.
+//
+// Room scoping is enforced via the `visited` cell set the floodfill
+// already produced — only polys whose centroid cell was floodfill-reached
+// contribute. This keeps shared static-scene walls from leaking
+// cross-room anchors.
+static void DetectClimbAnchorsViaSurfaceFlags(
+    RoomNavData* out,
+    PlayState* play,
+    const std::unordered_set<CellKey, CellKeyHash>& visited)
+{
+    if (CVarGetInteger(CVAR_ROOM_NAV_PATH_B_CLIMB, 0) == 0) return;
+
+    CollisionHeader* hdr = play->colCtx.colHeader;
+    if (hdr == nullptr || hdr->polyList == nullptr || hdr->vtxList == nullptr) return;
+
+    Vec3s* vtxList = hdr->vtxList;
+    u16 numPolys   = hdr->numPolygons;
+    u16 numVtx     = hdr->numVertices;
+
+    // Pre-cluster radius squared to avoid per-poly sqrt.
+    constexpr float kClusterRadiusSq = kClimbClusterRadiusXZ * kClimbClusterRadiusXZ;
+
+    size_t pathBAdded   = 0;
+    size_t pathBMerged  = 0;
+
+    for (u16 i = 0; i < numPolys; i++) {
+        CollisionPoly* poly = &hdr->polyList[i];
+
+        // Wall classification: |normal.y| small ≈ poly is vertical (a wall).
+        // Threshold 0.5 catches anything significantly more vertical than
+        // horizontal; floors (normal.y near 1.0) and ceilings (near -1.0)
+        // are excluded.
+        f32 normalY = (f32)poly->normal.y / 32767.0f;
+        if (std::fabs(normalY) > 0.5f) continue;
+
+        // Climbable-flag check via the existing wall-flags helper.
+        s32 wallFlags = func_80041DB8(&play->colCtx, poly, BGCHECK_SCENE);
+        if ((wallFlags & kWallFlagClimbable) == 0) continue;
+
+        // Vertex indices (low 13 bits of each field).
+        u16 viA = poly->flags_vIA & 0x1FFF;
+        u16 viB = poly->flags_vIB & 0x1FFF;
+        u16 viC = poly->vIC       & 0x1FFF;
+        if (viA >= numVtx || viB >= numVtx || viC >= numVtx) continue;
+
+        const Vec3s& vA = vtxList[viA];
+        const Vec3s& vB = vtxList[viB];
+        const Vec3s& vC = vtxList[viC];
+
+        f32 cx   = ((f32)vA.x + (f32)vB.x + (f32)vC.x) / 3.0f;
+        f32 cz   = ((f32)vA.z + (f32)vB.z + (f32)vC.z) / 3.0f;
+        f32 minY = (f32)std::min({vA.y, vB.y, vC.y});
+        f32 maxY = (f32)std::max({vA.y, vB.y, vC.y});
+
+        // Room scoping: poly must be in a floodfill-visited cell.
+        CellKey centroidCell = CellKeyForXZ(cx, cz, out->bboxMin);
+        if (visited.count(centroidCell) == 0) continue;
+
+        // Proximity-merge with existing anchors. Two anchors within
+        // kClimbClusterRadiusXZ collapse into one whose Y range covers both.
+        // Only static-geometry anchors (actorId == 0) are merge candidates;
+        // Path A actor-based anchors stay distinct.
+        bool merged = false;
+        for (ClimbAnchor& existing : out->climbAnchors) {
+            if (existing.actorId != 0) continue;
+            f32 dx = existing.basePos.x - cx;
+            f32 dz = existing.basePos.z - cz;
+            if (dx * dx + dz * dz < kClusterRadiusSq) {
+                if (minY < existing.basePos.y) existing.basePos.y = minY;
+                if (maxY > existing.topPos.y)  existing.topPos.y  = maxY;
+                merged = true;
+                pathBMerged++;
+                break;
+            }
+        }
+
+        if (!merged) {
+            ClimbAnchor anchor{};
+            anchor.basePos = { cx, minY, cz };
+            anchor.topPos  = { cx, maxY, cz };
+            anchor.actorId = 0; // 0 = static-geometry per ClimbAnchor struct
+            out->climbAnchors.push_back(anchor);
+            pathBAdded++;
+        }
+    }
+
+    if (pathBAdded > 0 || pathBMerged > 0) {
+        SPDLOG_INFO("[RoomNav] Path B climb detection: {} anchors added, {} polys merged",
+                    pathBAdded, pathBMerged);
     }
 }
 
@@ -1121,12 +1247,18 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     (void)totalMs;            // shadowed by totalMsFinal below; keep symbol for callers
     (void)orphanMs;           // exposed via totalMsFinal aggregate; not separately logged
 
-    // Climb anchor detection (commit 6) — Path A scene-actor allowlist.
-    // Iterates ACTORCAT_BG and ACTORCAT_PROP actor lists for known
-    // climbable scene actors and records (basePos, topPos) anchors.
-    // Path B (surface-flag query for vine walls) deferred — bit position
-    // unidentified in vanilla source. v1 covers ladders only.
+    // Climb anchor detection. Two paths run sequentially when their CVars
+    // are on:
+    //   - Path A (always-on): scene-actor allowlist iteration. Catches
+    //     discrete climbable actors like ladders and Inside Deku Tree's
+    //     falling ladder.
+    //   - Path B (gated by RoomNavData.PathBClimbDetection): surface-flag
+    //     scan over static scene polys. Catches vine walls and any other
+    //     climbable surface baked into static collision (wall-flag bit 3
+    //     set). Anchors merge by XZ proximity so a multi-poly vine wall
+    //     produces one anchor with the full mesh's Y range, not dozens.
     DetectClimbAnchors(out, play);
+    DetectClimbAnchorsViaSurfaceFlags(out, play, visited);
 
     // Climb-flag population (polish wave commit 4) — for each climb anchor
     // discovered above, find the nearest walkable nav-node to its basePos
