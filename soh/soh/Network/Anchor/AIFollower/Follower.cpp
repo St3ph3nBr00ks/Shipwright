@@ -23,6 +23,7 @@
 #include "../Common/ItemEligibility.h"
 #include "../Common/PauseLinkBuffer.h"
 #include "../Common/ActorSyncScope.h"
+#include "../Common/NavTraits.h"  // AnchorNav::IsNavSystemEnabled — Phase 2 master gate
 #include "../WorldStateSync/WorldStateSync.h"
 #include "soh/ShipInit.hpp"
 
@@ -107,6 +108,40 @@ float OTRGetDimensionFromRightEdge(float v);
 }
 
 namespace AnchorFollower {
+
+// ---------------------------------------------------------------------------
+// Phase 2 — nav substrate consumer gate.
+//
+// Phase 2 of the SRP refactor (#173 / #169) replaces the bespoke pursuit /
+// target-selection / steering code in the per-state handlers
+// (HandleStateFollow, HandleStateEngage, HandleStateReturn, HandleStateStuck,
+// HandleStateClimbing) with calls to the Anchor nav substrate
+// (ActorTrail::ComputePathTo, TargetSelection::ChooseTarget,
+// GroundFollowing::GetGroundFollowingBearing, JumpResolver::ResolveLedgeAhead,
+// VerticalTeleport's Shape A wrapper). Plan refs:
+// Plans/anchor_code_decoupling.md (#173) +
+// Plans/nav_system_implementation_plan.md §Phase 2 consumer wiring.
+//
+// This gate sits on top of the master Nav CVar so a user enabling Nav.* for
+// debug-overlay viewing or other consumers does NOT inadvertently change
+// follower behaviour. The Phase 2 substrate-consumer path engages only when
+// BOTH gates are on:
+//   gEnhancements.Nav.Enabled              (master)
+//   gEnhancements.Nav.AiFollowerConsumer   (this gate)
+//
+// Default off; ships and stays off permanently per Flotilla policy for
+// vanilla-altering features (memory: feedback_vanilla_altering_default_off.md).
+// Per-state handlers branch on this predicate to pick between the legacy
+// bespoke code path (when off — current default) and nav substrate calls
+// (when on — Phase 2 work in progress).
+// ---------------------------------------------------------------------------
+
+#define CVAR_NAV_AI_FOLLOWER_CONSUMER CVAR_ENHANCEMENT("Nav.AiFollowerConsumer")
+
+bool IsAiFollowerNavSubstrateEnabled() {
+    return AnchorNav::IsNavSystemEnabled() &&
+           CVarGetInteger(CVAR_NAV_AI_FOLLOWER_CONSUMER, 0) != 0;
+}
 
 void RegisterFollowerModule() {
     // No-op log. The two follower hooks (OnGameFrameUpdate state-machine

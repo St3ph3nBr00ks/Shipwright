@@ -89,4 +89,18 @@ void TickFollower(FollowerFrameContext& ctx);
 // on each enable/disable cycle.
 void RegisterFollowerModule();
 
+// Phase 2 master gate. True when both gEnhancements.Nav.Enabled AND
+// gEnhancements.Nav.AiFollowerConsumer are non-zero. Per-state handlers
+// (HandleStateFollow, HandleStateEngage, HandleStateReturn, HandleStateStuck,
+// HandleStateClimbing) consult this to pick between:
+//   - false (default): legacy bespoke pursuit / steering code (the
+//     verbatim Phase 1 extraction).
+//   - true: nav substrate (ActorTrail::ComputePathTo,
+//     TargetSelection::ChooseTarget, GroundFollowing,
+//     JumpResolver::ResolveLedgeAhead, VerticalTeleport Shape A wrapper).
+//
+// Default off; ships and stays off permanently per Flotilla policy.
+// See feedback_vanilla_altering_default_off.md.
+bool IsAiFollowerNavSubstrateEnabled();
+
 } // namespace AnchorFollower
