@@ -431,6 +431,12 @@ typedef struct {
     u8 syncItemsAndFlags; // 0 = off, 1 = on
 } RoomState;
 
+// Forward-decl for the Anchor::TickFollower parameter — defined in
+// AIFollower/Follower.h (Phase 1 commit 3 of the SRP refactor).
+namespace AnchorFollower {
+    struct FollowerFrameContext;
+}
+
 class Anchor : public Network {
   private:
     uint32_t spawningDummyPlayerForClientId = 0;
@@ -961,6 +967,20 @@ class Anchor : public Network {
     // is active. Called on every RANGED_ATTACK exit path and unconditionally
     // on SetFollowerActive(false) as a safety net.
     void FollowerRestoreItems();
+
+    // Per-frame follower state-machine entry point. Body lives in
+    // AIFollower/Follower.cpp (Phase 1 commit 4 of the SRP refactor —
+    // moved verbatim from the OnGameFrameUpdate lambda body in
+    // HookHandlers.cpp). Method on Anchor:: rather than a free function
+    // so the body's accesses to private members (followerActive, clients,
+    // followerAIState, etc.) work unchanged.
+    //
+    // Caller (HookHandlers.cpp's OnGameFrameUpdate hook) does the early-
+    // out checks (effective-host, save-loaded, gPlayState non-null,
+    // player non-null), populates `ctx`, then calls TickFollower(ctx).
+    // ctx is currently used minimally; future per-state-extraction
+    // commits expand its use.
+    void TickFollower(AnchorFollower::FollowerFrameContext& ctx);
 
     // Pillar C2 Phase 4 — phase-specific senders for the unified
     // ENEMY_STATE wire packet. All four emit type=ENEMY_STATE with the
