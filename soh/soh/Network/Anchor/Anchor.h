@@ -1003,6 +1003,8 @@ class Anchor : public Network {
     // TickFollower's switch becomes a thin dispatcher.
     void HandleStateStandby();
     void HandleStateBlock(Player* player, const Vec3f& p2Pos);
+    void HandleStateReturn(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos);
+    void HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* leaderActor);
 
     // Pillar C2 Phase 4 — phase-specific senders for the unified
     // ENEMY_STATE wire packet. All four emit type=ENEMY_STATE with the

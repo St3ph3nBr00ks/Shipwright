@@ -152,6 +152,15 @@ inline s16 YawToward(f32 dx, f32 dz) {
 // handlers reference the same value.
 static constexpr int kAttackDuration = 60;
 
+// Distance at which FOLLOW switches back to IDLE (and RETURN settles).
+// Was static constexpr inside TickFollower; promoted for HandleStateReturn.
+static constexpr f32 kFollowThreshold = 100.0f;
+
+// Frames the dismount-forward-hold counter is armed for after CLIMBING→IDLE
+// (Bug C, log 69). Was static constexpr inside TickFollower; promoted for
+// HandleStateClimbing.
+static constexpr int kClimbDismountHoldFrames = 9;
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -473,7 +482,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 // falls in. 25 u keeps the follower visibly offset without
                 // straying as far into hazardous geometry.
                 static constexpr f32 kFollowOffset       = 25.0f;  // world +X from leader
-                static constexpr f32 kFollowThreshold    = 100.0f; // dist to switch FOLLOW↔IDLE
+                // kFollowThreshold moved to file-scope anonymous namespace
+                // (Phase 1 commit 7) so per-state handlers can reference it.
                 static constexpr f32 kEngageRange        = 350.0f; // enemy detection radius (XZ)
                 static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius (XZ)
                 static constexpr f32 kMaxYDelta          = 120.0f; // reject enemies on a different floor
@@ -505,7 +515,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 // Covers both ladder dismount and vine top-rim climb-over
                 // (HANGING_OFF_LEDGE / CLIMBING_LEDGE clears fire the same
                 // CLIMBING→IDLE arm path).
-                static constexpr int kClimbDismountHoldFrames = 9;
+                // kClimbDismountHoldFrames moved to file-scope anonymous
+                // namespace (Phase 1 commit 7) so HandleStateClimbing can
+                // reference it.
                 // Item pickup (Claude/Plans/ai_follower_item_pickup.md).
                 // kItemProximity — XZ radius of the ACTORCAT_MISC scan.
                 //     User-specified 200 units: far enough to catch most
@@ -1893,26 +1905,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     }
 
                     case FollowerAIState::RETURN: {
-                        // Test 8 — same door-handoff carve-out as FOLLOW:
-                        // preserve the handoff's door-centerline target.
-                        Vec3f returnTarget = sideTarget;
-                        if (!followerDoorHandoff) {
-                            followerMoveTarget = returnTarget;
-                        } else {
-                            returnTarget = followerMoveTarget;
-                        }
-                        f32 dist = sqrtf(SQ(returnTarget.x - p2Pos.x) + SQ(returnTarget.z - p2Pos.z));
-                        // Stick injection in ShouldActorUpdate drives actual movement.
-                        if (dist > 0.001f) {
-                            player->actor.shape.rot.y = YawToward(
-                                returnTarget.x - player->actor.world.pos.x,
-                                returnTarget.z - player->actor.world.pos.z);
-                        }
-                        if (dist < kFollowThreshold) {
-                            followerAIState     = FollowerAIState::IDLE;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] RETURN→IDLE dist={:.1f}", dist);
-                        }
+                        // Body extracted to Anchor::HandleStateReturn
+                        // (Phase 1 commit 7 of the SRP refactor).
+                        HandleStateReturn(player, sideTarget, p2Pos);
                         break;
                     }
 
@@ -1938,35 +1933,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     // don't loop back into CLIMBING if leader's still
                     // sticky-eligible.
                     case FollowerAIState::CLIMBING: {
-                        auto it = clients.find(followerLeaderClientId);
-                        if (it == clients.end() || !it->second.isClimbing) {
-                            // Bug C (log 69) — arm the dismount-forward-hold.
-                            // Immediately after CLIMBING→IDLE, follower is on
-                            // the rim of the top/bottom floor. Without this
-                            // hold, the next-frame state machine recomputes
-                            // the move target around leaderPos — and leader
-                            // often stands right at the climb exit, so the
-                            // follower's stick-math points BACKWARD off the
-                            // rim. Snapshot the current facing (set every
-                            // frame during CLIMBING to leaderActor->shape.rot.y),
-                            // arm the hold counter, then IDLE.
-                            followerClimbDismountYaw    = player->actor.shape.rot.y;
-                            followerClimbDismountFrames = kClimbDismountHoldFrames;
-                            followerAIState     = FollowerAIState::IDLE;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] CLIMBING→IDLE (leader stopped climbing); "
-                                        "armed dismount forward-hold {} frames at yaw={}",
-                                        kClimbDismountHoldFrames,
-                                        (int)followerClimbDismountYaw);
-                            break;
-                        }
-                        // followerMoveTarget = leader's XZ at the leader's
-                        // current Y. ShouldActorUpdate's CLIMBING-aware
-                        // injection reads this for direction (leader.y vs
-                        // p2Pos.y).
-                        followerMoveTarget = leaderPos;
-                        // Match leader's facing so dismount looks clean.
-                        player->actor.shape.rot.y = leaderActor->shape.rot.y;
+                        // Body extracted to Anchor::HandleStateClimbing
+                        // (Phase 1 commit 7 of the SRP refactor).
+                        HandleStateClimbing(player, leaderPos, leaderActor);
                         break;
                     }
 
@@ -2832,4 +2801,63 @@ void Anchor::HandleStateBlock(Player* player, const Vec3f& p2Pos) {
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] BLOCK→ATTACK (shield cycle complete)");
     }
+}
+
+void Anchor::HandleStateReturn(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos) {
+    // RETURN: walk back to leader's side after combat. Test 8 — same
+    // door-handoff carve-out as FOLLOW: preserve the handoff's door-
+    // centerline target instead of overwriting it with sideTarget.
+    Vec3f returnTarget = sideTarget;
+    if (!followerDoorHandoff) {
+        followerMoveTarget = returnTarget;
+    } else {
+        returnTarget = followerMoveTarget;
+    }
+    f32 dist = sqrtf(SQ(returnTarget.x - p2Pos.x) + SQ(returnTarget.z - p2Pos.z));
+    // Stick injection in TickFollowerInput drives actual movement.
+    if (dist > 0.001f) {
+        player->actor.shape.rot.y = YawToward(
+            returnTarget.x - player->actor.world.pos.x,
+            returnTarget.z - player->actor.world.pos.z);
+    }
+    if (dist < kFollowThreshold) {
+        followerAIState     = FollowerAIState::IDLE;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] RETURN→IDLE dist={:.1f}", dist);
+    }
+}
+
+void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* leaderActor) {
+    // G1/G2 — leader is climbing. Bug 2 redesign (2026-04-22): instead
+    // of writing world.pos = leaderPos every frame (which fights gravity
+    // between actor-update and our hook, producing the "hover slightly
+    // below leader" symptom), we point followerMoveTarget at leader's
+    // XZ at follower's current Y (the ladder base / current rung) and
+    // let TickFollowerInput's stick injection drive Link.
+    //
+    // Once Link's PLAYER_STATE1_CLIMBING_LADDER fires (Link physically
+    // grabbed the ladder), stick_y direction toggles based on Δy to
+    // leader. OoT plays the real climb animation natively.
+    //
+    // Exit when leader's isClimbing flips back to false. Bug C (log 69)
+    // — arm the dismount-forward-hold so the next-frame state machine
+    // doesn't immediately point Link backward off the rim.
+    auto it = clients.find(followerLeaderClientId);
+    if (it == clients.end() || !it->second.isClimbing) {
+        followerClimbDismountYaw    = player->actor.shape.rot.y;
+        followerClimbDismountFrames = kClimbDismountHoldFrames;
+        followerAIState     = FollowerAIState::IDLE;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] CLIMBING→IDLE (leader stopped climbing); "
+                    "armed dismount forward-hold {} frames at yaw={}",
+                    kClimbDismountHoldFrames,
+                    (int)followerClimbDismountYaw);
+        return;
+    }
+    // followerMoveTarget = leader's XZ at the leader's current Y.
+    // TickFollowerInput's CLIMBING-aware injection reads this for
+    // direction (leader.y vs p2Pos.y).
+    followerMoveTarget = leaderPos;
+    // Match leader's facing so dismount looks clean.
+    player->actor.shape.rot.y = leaderActor->shape.rot.y;
 }
