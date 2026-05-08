@@ -87,6 +87,181 @@ extern PlayState* gPlayState;
 
 namespace AutoTraverse {
 
+// ---------------------------------------------------------------------------
+// SkipList — Phase 3. Persistent across game restarts.
+//
+// File: roommanifests/_autotraverse_skip.json
+//
+// Schema:
+//   {
+//     "schemaVersion": 1,
+//     "skipEntries": [
+//       { "entrance": 20, "reason": "crashed", "scene": 5,
+//         "addedAtMs": 1778252770187 }
+//     ],
+//     "inFlight": {
+//       "entrance": 24,
+//       "triggeredAtMs": 1778252790000
+//     }
+//   }
+//
+// Crash-recovery flow:
+//   1. TriggerEntranceLoad writes inFlight = { entrance, ts } BEFORE
+//      starting the warp. Survives a hard crash mid-warp.
+//   2. On warp commit, ClearInFlight removes the field.
+//   3. At boot, LoadSkipList checks if inFlight is non-null. If so,
+//      that entrance crashed last session — promotes it to skipEntries
+//      with reason="crashed-or-hung" and clears inFlight.
+//   4. On commit-reason "timeout", AddSkip stores reason="timeout".
+//   5. Cursor advance loops past any cursor in skipEntries.
+//
+// In-memory mirror: std::set<int> for O(log N) cursor lookups during
+// the advance loop. File written via atomic write (temp + rename).
+// ---------------------------------------------------------------------------
+
+namespace SkipList {
+
+static std::set<int>& InMemory() {
+    static std::set<int> s;
+    return s;
+}
+
+// -1 == no in-flight warp; non-negative == cursor of warp in progress.
+static int& InFlightCursor() {
+    static int c = -1;
+    return c;
+}
+
+static std::filesystem::path FilePath() {
+    return "roommanifests/_autotraverse_skip.json";
+}
+
+// Write current in-memory state to disk via atomic temp-and-rename.
+static void Save() {
+    std::error_code ec;
+    std::filesystem::create_directories("roommanifests", ec);
+    if (ec) return;
+
+    nlohmann::json entries = nlohmann::json::array();
+    for (int e : InMemory()) {
+        // Existing entries preserve their original reason/scene/addedAt
+        // by being read from disk and merged at boot. Re-emitting the
+        // in-memory set here intentionally collapses to a minimal
+        // representation; richer per-entry metadata is preserved across
+        // sessions only if explicitly maintained on every Add() call.
+        entries.push_back({ { "entrance", e } });
+    }
+
+    nlohmann::json j;
+    j["schemaVersion"] = 1;
+    j["skipEntries"] = entries;
+    if (InFlightCursor() >= 0) {
+        j["inFlight"] = {
+            { "entrance",      InFlightCursor() },
+            { "triggeredAtMs", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count() },
+        };
+    } else {
+        j["inFlight"] = nullptr;
+    }
+
+    auto target = FilePath();
+    auto tmp = target;
+    tmp += ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::out | std::ios::trunc | std::ios::binary);
+        if (!f.is_open()) return;
+        f << j.dump(2) << '\n';
+        if (!f.good()) return;
+    }
+    std::filesystem::rename(tmp, target, ec);
+    if (ec) {
+        std::error_code ignored;
+        std::filesystem::remove(tmp, ignored);
+    }
+}
+
+// Read file, populate in-memory set, and PROMOTE any in-flight entry
+// to a skipEntry (because if inFlight survived, last session crashed
+// during that warp).
+static void LoadAndPromoteCrashed() {
+    InMemory().clear();
+    InFlightCursor() = -1;
+
+    std::ifstream f(FilePath(), std::ios::in | std::ios::binary);
+    if (!f.is_open()) {
+        return;  // first-ever boot; no skip list yet.
+    }
+
+    nlohmann::json j;
+    try {
+        f >> j;
+    } catch (const std::exception& e) {
+        SPDLOG_WARN("[AutoTraverse] SkipList: parse failed for {}: {} (treating as empty)",
+                    FilePath().string(), e.what());
+        return;
+    }
+
+    if (j.contains("skipEntries") && j["skipEntries"].is_array()) {
+        for (const auto& entry : j["skipEntries"]) {
+            if (entry.contains("entrance") && entry["entrance"].is_number_integer()) {
+                InMemory().insert(entry["entrance"].get<int>());
+            }
+        }
+    }
+
+    bool promoted = false;
+    if (j.contains("inFlight") && j["inFlight"].is_object()) {
+        if (j["inFlight"].contains("entrance") &&
+            j["inFlight"]["entrance"].is_number_integer()) {
+            int crashedEntrance = j["inFlight"]["entrance"].get<int>();
+            InMemory().insert(crashedEntrance);
+            SPDLOG_WARN("[AutoTraverse] SkipList: prior session crashed mid-warp on "
+                        "entrance 0x{:04X}; promoting to skip list",
+                        crashedEntrance);
+            promoted = true;
+        }
+    }
+    InFlightCursor() = -1;
+
+    if (promoted) {
+        Save();  // persist the promotion immediately
+    }
+
+    if (!InMemory().empty()) {
+        SPDLOG_INFO("[AutoTraverse] SkipList loaded: {} entries (cursor advance will skip these)",
+                    InMemory().size());
+    }
+}
+
+static bool IsSkipped(int cursor) {
+    return InMemory().count(cursor) > 0;
+}
+
+// Add an entrance to the skip list and persist. Reason logged but not
+// preserved per-entry (Save() collapses to {entrance:N} entries).
+// Future enhancement: full reason/scene/timestamp preservation.
+static void Add(int entrance, const char* reason) {
+    if (IsSkipped(entrance)) return;
+    InMemory().insert(entrance);
+    SPDLOG_WARN("[AutoTraverse] SkipList: adding entrance 0x{:04X} (reason: {})",
+                entrance, reason);
+    Save();
+}
+
+static void MarkInFlight(int entrance) {
+    InFlightCursor() = entrance;
+    Save();
+}
+
+static void ClearInFlight() {
+    InFlightCursor() = -1;
+    Save();
+}
+
+}  // namespace SkipList
+
 // In-flight = a warp has been triggered but hasn't committed yet. We
 // watch for either scene/room number to change OR for transitionTrigger
 // to return to OFF after a non-zero observation, OR a frame timeout —
@@ -170,6 +345,11 @@ static void WriteStateFile(int cursor, int maxEntrance, const char* status) {
 static void TriggerEntranceLoad(int entranceIndex) {
     if (gPlayState == nullptr) return;
     SPDLOG_INFO("[AutoTraverse] Triggering entrance 0x{:04X}", entranceIndex);
+    // Phase 3: write inFlight to skip-list file BEFORE actually triggering
+    // the warp. If the engine crashes mid-warp, this entry survives in
+    // _autotraverse_skip.json and the next boot promotes it to a
+    // permanent skip entry — preventing infinite re-crash loops.
+    SkipList::MarkInFlight(entranceIndex);
     gPlayState->nextEntranceIndex = entranceIndex;
     gPlayState->transitionTrigger = TRANS_TRIGGER_START;
     gPlayState->transitionType = TRANS_TYPE_FADE_BLACK_FAST;
@@ -231,6 +411,24 @@ static void OnFrameTick() {
         ScenesCovered().clear();
         int initialCursor = CVarGetInteger(CVAR_AT_CURSOR, 0);
         int maxEntrance = CVarGetInteger(CVAR_AT_MAX_ENTRANCE, 0xFFFF);
+        constexpr int kEntranceGroupStride = 4;
+        constexpr int kEntranceTableMax = ENTR_MAX;
+        int ceiling = std::min(maxEntrance, kEntranceTableMax - 1);
+        // Phase 3: skip past any initial cursor in the persistent skip
+        // list (prior crashes/hangs); ensures resumption after a crash
+        // doesn't immediately re-trigger the same fatal entrance.
+        while (initialCursor <= ceiling && SkipList::IsSkipped(initialCursor)) {
+            SPDLOG_INFO("[AutoTraverse] Initial cursor 0x{:04X} in skip list; advancing", initialCursor);
+            initialCursor += kEntranceGroupStride;
+        }
+        if (initialCursor > ceiling) {
+            SPDLOG_INFO("[AutoTraverse] Session complete at start: all entrances skipped or beyond ceiling");
+            CVarSetInteger(CVAR_AT_MODE, AT_MODE_COMPLETE);
+            sCompleteEmitted = true;
+            WriteStateFile(initialCursor, maxEntrance, "complete");
+            return;
+        }
+        CVarSetInteger(CVAR_AT_CURSOR, initialCursor);
         SPDLOG_INFO("[AutoTraverse] Session start: cursor={} max={} step=4 (entrance-group stride)",
                     initialCursor, maxEntrance);
         WriteStateFile(initialCursor, maxEntrance, "starting");
@@ -273,6 +471,14 @@ static void OnFrameTick() {
                                        : roomChanged         ? "room-changed"
                                        : triggerReturnedToOff ? "trigger-off"
                                                               : "timeout";
+            // Phase 3: timeouts indicate the engine fizzled the warp —
+            // record so future sessions skip this entrance. Otherwise the
+            // warp committed successfully; clear in-flight only.
+            int inFlightEntrance = SkipList::InFlightCursor();
+            if (timedOut && inFlightEntrance >= 0) {
+                SkipList::Add(inFlightEntrance, "timeout");
+            }
+            SkipList::ClearInFlight();
             SPDLOG_INFO("[AutoTraverse] Warp committed ({}): scene={} room={}; visited={}, scenes_covered={}; holding {} frames",
                         commitReason,
                         gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num,
@@ -303,7 +509,14 @@ static void OnFrameTick() {
     // Effective ceiling is min(MaxEntrance CVar, last valid index).
     int ceiling = std::min(maxEntrance, kEntranceTableMax - 1);
 
+    // Advance by stride, then skip past any entries the persistent skip
+    // list has marked as crashed-or-hung from prior sessions.
     cursor += kEntranceGroupStride;
+    while (cursor <= ceiling && SkipList::IsSkipped(cursor)) {
+        SPDLOG_INFO("[AutoTraverse] Skipping entrance 0x{:04X} (in skip list)", cursor);
+        cursor += kEntranceGroupStride;
+    }
+
     if (cursor > ceiling) {
         SPDLOG_INFO("[AutoTraverse] Session complete: cursor={} ceiling={} (cap from {} = ENTR_MAX-1, MaxEntrance={}); "
                     "entrances={}, scenes_covered={}, elapsed_ms={}",
@@ -336,6 +549,11 @@ void RegisterAutoTraverse() {
     // MaxEntrance / Cursor values).
     CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.Mode"), AT_MODE_OFF);
     CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.OneClickStart"), 0);
+
+    // Phase 3: load persistent skip list and promote any in-flight entry
+    // from the prior session to a permanent skip (means last session
+    // crashed mid-warp on that entrance — see SkipList::LoadAndPromoteCrashed).
+    SkipList::LoadAndPromoteCrashed();
 
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(OnFrameTick);
 }
