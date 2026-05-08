@@ -79,6 +79,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_AUTO_FULL_RESCAN      CVAR_ENHANCEMENT("RoomNavData.AutoFullRescanOnSceneFlag")
 #define CVAR_ROOM_NAV_CRAWLSPACE            CVAR_ENHANCEMENT("RoomNavData.CrawlspaceDetection")
 #define CVAR_ROOM_NAV_DROP_ANCHOR           CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection")
+#define CVAR_ROOM_NAV_INITIAL_SCAN_DELAY    CVAR_ENHANCEMENT("RoomNavData.InitialScanDelayFrames")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -2004,6 +2005,26 @@ static void TickStuckOnSlopeDetection(PlayState* play) {
 static int16_t sLastScene = -1;
 static int8_t  sLastRoom  = -1;
 
+// Initial-scan delay state. When OnGameFrameTick detects a room change,
+// it doesn't trigger ScanRoom immediately — it queues the scan for
+// kInitialScanDelayFrames frames later. Gives actors and dynamic
+// collision time to fully initialize before we capture the geometry.
+//
+// Field-test feedback (2026-05-08): scans on first room entry sometimes
+// missed significant geometry that a force-rescan a few seconds later
+// captured. Root cause: transitionTrigger == TRANS_TRIGGER_OFF only
+// indicates the fade animation is done. Bg actors continue registering
+// dynamic collision (DynaPoly_SetBgActor) for many frames after that;
+// some script-driven scenery doesn't register until later still.
+//
+// 30 frames (~0.5s) covers most actor-init settling without an obvious
+// user-visible delay. Tunable via the
+// RoomNavData.InitialScanDelayFrames CVar.
+static int32_t sFramesUntilInitialScan = 0;
+static int16_t sPendingInitialScene    = -1;
+static int8_t  sPendingInitialRoom     = -1;
+static constexpr int32_t kInitialScanDelayFramesDefault = 30;
+
 // Tier 1 / Tier 2 dynamic refresh — pending flags. Set from the
 // OnSceneFlagSet hook (which can fire multiple times per frame);
 // drained once per frame from DispatchPendingDynamicRefresh inside
@@ -2069,13 +2090,46 @@ static void OnGameFrameTick() {
     int16_t currentScene = play->sceneNum;
     int8_t  currentRoom  = (int8_t)play->roomCtx.curRoom.num;
 
+    // Drain a queued delayed scan — the actual ScanRoom call happens
+    // here, kInitialScanDelayFrames after the room change was first
+    // detected. If the scene/room changed AGAIN during the delay
+    // (player walked through two rooms quickly), the queue gets
+    // re-armed below with the new target — supersedes the prior
+    // pending scan.
+    if (sFramesUntilInitialScan > 0) {
+        sFramesUntilInitialScan--;
+        if (sFramesUntilInitialScan == 0 &&
+            currentScene == sPendingInitialScene &&
+            currentRoom  == sPendingInitialRoom) {
+            // Conditions still match the queued target — fire scan.
+            OnRoomEntered(currentScene, currentRoom, play);
+        }
+    }
+
     if (currentScene == sLastScene && currentRoom == sLastRoom) {
-        return; // unchanged; nothing to do
+        return; // unchanged; nothing else to do this frame
     }
     sLastScene = currentScene;
     sLastRoom  = currentRoom;
 
-    OnRoomEntered(currentScene, currentRoom, play);
+    // Queue a delayed scan for kInitialScanDelayFrames frames out.
+    // Don't call OnRoomEntered immediately — actors / dyna collision
+    // may not be fully registered yet on the first post-transition
+    // frame. The delayed dispatch above runs ScanRoom once enough
+    // settling has occurred.
+    int32_t delay = CVarGetInteger(CVAR_ROOM_NAV_INITIAL_SCAN_DELAY,
+                                    kInitialScanDelayFramesDefault);
+    if (delay < 0)   delay = 0;
+    if (delay > 600) delay = 600;
+    if (delay == 0) {
+        // Zero delay restores immediate-scan behavior for diagnostic
+        // purposes (compare against delayed behavior side by side).
+        OnRoomEntered(currentScene, currentRoom, play);
+    } else {
+        sFramesUntilInitialScan = delay;
+        sPendingInitialScene    = currentScene;
+        sPendingInitialRoom     = currentRoom;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2101,6 +2155,9 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
     sStabilityCounter       = 0;
     sMaxWaitCountdown       = 0;
     sLastBgPropPositionHash = 0;
+    sFramesUntilInitialScan = 0;
+    sPendingInitialScene    = -1;
+    sPendingInitialRoom     = -1;
     sLastScene = -1;
     sLastRoom  = -1;
     sLastStuckLogFrame.clear();
@@ -3074,6 +3131,24 @@ static void RegisterRoomNavData() {
     // AutoFullRescanOnSceneFlag is on.
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneFlagSet>(
         OnSceneFlagSetHookHandler);
+
+    // Backup signal for room-change detection. The polling-based
+    // delta detection in OnGameFrameTick can theoretically miss a
+    // single-frame state change if csCtx.state or transitionTrigger
+    // is in a "skip" state during the room delta. Hooking OnTransitionEnd
+    // lets us reset the polling tracker so the next OnGameFrameTick
+    // unconditionally re-detects the current room as "new" and queues
+    // the delayed initial scan. Belt-and-suspenders for missed
+    // transitions.
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnTransitionEnd>(
+        [](int16_t /*sceneNum*/) {
+            // Force the next OnGameFrameTick to treat the room as
+            // changed regardless of the current sLastScene/sLastRoom
+            // values. Doesn't fire the scan directly — lets the
+            // existing delayed-scan machinery handle it normally.
+            sLastScene = -1;
+            sLastRoom  = -1;
+        });
 }
 
 } // namespace AnchorNavRoom

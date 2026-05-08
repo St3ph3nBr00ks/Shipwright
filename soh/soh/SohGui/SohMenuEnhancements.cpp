@@ -2083,6 +2083,29 @@ void SohMenu::AddMenuEnhancements() {
             "with no static-wall geometry.\n\n"
             "Apply via Force Rescan after changing."));
 
+    AddWidget(path, "Initial Scan Delay: %d frames", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.InitialScanDelayFrames"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .Options(IntSliderOptions()
+                     .Min(0)
+                     .Max(180)
+                     .DefaultValue(30)
+                     .Format("%d frames")
+                     .Tooltip(
+            "Frames to wait after a detected room change before "
+            "running the initial scan. 30 frames (~0.5s) is the "
+            "default — enough for actor Init() functions and dynamic "
+            "collision registration to settle.\n\n"
+            "Without the delay, scans on first room entry sometimes "
+            "miss significant geometry that a force-rescan a few "
+            "seconds later captures. Bg actors continue registering "
+            "dynamic collision (DynaPoly_SetBgActor) for many frames "
+            "after transitionTrigger returns to TRANS_TRIGGER_OFF.\n\n"
+            "Set to 0 to restore immediate-scan behavior (diagnostic "
+            "only). Higher values (60-120) catch slower-initializing "
+            "scenery at the cost of a more visible delay before nav "
+            "data is available."));
+
     AddWidget(path, "Drop Anchor Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
