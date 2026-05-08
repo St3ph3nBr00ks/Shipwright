@@ -38,6 +38,15 @@ void RegisterFollowerModule() {
     SPDLOG_DEBUG("[AiFollower] Follower module scaffolded (no hooks yet)");
 }
 
+// Phase 1 commit 3 stub. Phase 1 commit 4 will populate this with the
+// follower body lifted from HookHandlers.cpp's OnGameFrameUpdate
+// callback. Until then, calling TickFollower is a no-op — the existing
+// lambda body in HookHandlers.cpp continues to drive follower behaviour
+// unchanged.
+void TickFollower(FollowerFrameContext& /*ctx*/) {
+    // Intentionally empty. Implementation arrives in Phase 1 commit 4.
+}
+
 } // namespace AnchorFollower
 
 // ---------------------------------------------------------------------------

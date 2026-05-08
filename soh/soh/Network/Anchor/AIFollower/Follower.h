@@ -37,19 +37,48 @@ extern "C" {
 
 namespace AnchorFollower {
 
-// Phase 1 commit 1: scaffolding only. No logic moved yet.
+// Per-frame frame-input bundle for the follower state machine.
 //
-// Subsequent Phase 1 commits will populate this module with:
-//   - State enum (FollowerAIState) + per-frame state struct
-//   - Helper functions (TryEquipRangedWeapon, RestoreItems,
-//     SetActive, IsLocalPlayerClimbing, TeleportToLeader, ...)
-//   - State machine body (currently inside OnGameFrameUpdate)
-//   - Input injection (currently inside ShouldActorUpdate)
-//   - Tunable constants (kClimbDismountFrames, kPostTeleportFrames,
-//     kFollowerButtons, etc.)
+// HookHandlers.cpp's OnGameFrameUpdate body computes a number of
+// per-frame derived values (leader pointer, leader position, distance,
+// transition state, etc.) before the follower's state machine consumes
+// them. Currently those values live as named locals in the giant
+// OnGameFrameUpdate lambda; the state machine accesses them via lambda
+// capture. This is what makes the state machine code hard to extract
+// — the captures couple it to the enclosing scope.
 //
-// Each move-commit is behaviour-preserving — the new home for code
-// that already exists, with no semantic change.
+// FollowerFrameContext is the explicit data dependency. The HookHandlers
+// callback builds one of these per frame, then calls
+// AnchorFollower::TickFollower(ctx). Subsequent Phase 1 commits move
+// state-machine logic from the lambda into TickFollower (and from there
+// into per-state helpers), reading from `ctx` instead of from lambda
+// captures. The architectural value: at the end of Phase 1, the data
+// flow into the follower is documented in one struct definition rather
+// than spread across hundreds of lines of capture references.
+//
+// All fields are caller-owned references / value snapshots — TickFollower
+// reads from `ctx` but doesn't outlive it. The struct is never stored or
+// retained.
+struct FollowerFrameContext {
+    PlayState* play             = nullptr;       // gPlayState
+    Player*    player           = nullptr;       // local player (the follower)
+    Actor*     leaderActor      = nullptr;       // leader's DummyPlayer or nullptr
+    Vec3f      leaderPos        = { 0, 0, 0 };   // leaderActor->world.pos snapshot
+    f32        distToLeaderSq   = 0.0f;          // 3D squared dist; cached
+    f32        distToLeaderXZ   = 0.0f;          // XZ-only dist; for proximity gates
+    bool       roomsDiffer      = false;         // leader and follower in different rooms
+    int8_t     leaderRoom       = -1;            // leader's room number per UPDATE_CLIENT_STATE
+    bool       leaderIsClimbing = false;         // leader's UPDATE_CLIENT_STATE.isClimbing
+    bool       leaderIsCrawling = false;         // leader's UPDATE_CLIENT_STATE.isCrawling
+};
+
+// Per-frame entry point. Called from HookHandlers.cpp's OnGameFrameUpdate
+// after the context is built. Currently a stub — Phase 1 commit 4 will
+// move the OnGameFrameUpdate follower body into this function.
+//
+// Returns nothing; mutates the Anchor:: follower-state members and
+// optionally `ctx.player->actor.world.pos` for STUCK / teleport paths.
+void TickFollower(FollowerFrameContext& ctx);
 
 // Module registration. Called once by ShipInit at boot. Sets up any
 // hooks the follower module needs separately from Anchor's hook
