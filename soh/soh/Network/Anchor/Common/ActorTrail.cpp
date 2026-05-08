@@ -23,6 +23,7 @@
 #include <libultraship/bridge.h>
 #include <libultraship/libultraship.h>
 
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -108,22 +109,31 @@ void ActorTrail::ClearForScene(int16_t sceneNum) {
 
 void ActorTrail::ClearAll() {
     mTrails.clear();
-    mFrameCounter = 0;
+    mNowMs = 0;
+    mLastCaptureMs = 0;
+}
+
+uint64_t ActorTrail::NowMs() {
+    using clock = std::chrono::steady_clock;
+    static const auto epoch = clock::now();
+    auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
+        clock::now() - epoch);
+    return (uint64_t)delta.count();
 }
 
 void ActorTrail::CaptureWaypoint(TrailKey key, const Vec3f& pos, int16_t sceneNum,
                                   int8_t roomNum, uint8_t timeline) {
     EntityTrail& trail = mTrails[key];
     TrailWaypoint& wp = trail.waypoints[trail.head];
-    wp.pos      = pos;
-    wp.sceneNum = sceneNum;
-    wp.roomNum  = roomNum;
-    wp.timeline = timeline;
-    wp.frameIdx = mFrameCounter;
+    wp.pos       = pos;
+    wp.sceneNum  = sceneNum;
+    wp.roomNum   = roomNum;
+    wp.timeline  = timeline;
+    wp.captureMs = mNowMs;
 
     trail.head = (trail.head + 1) % kMaxWaypoints;
     if (trail.count < kMaxWaypoints) trail.count++;
-    trail.lastFrame = mFrameCounter;
+    trail.lastCaptureMs = mNowMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,8 +143,14 @@ void ActorTrail::CaptureWaypoint(TrailKey key, const Vec3f& pos, int16_t sceneNu
 void ActorTrail::Tick(PlayState* play) {
     if (play == nullptr) return;
 
-    mFrameCounter++;
-    if ((mFrameCounter % kCaptureRateFrames) != 0) return;  // 5Hz throttle
+    mNowMs = NowMs();
+
+    // Wall-clock throttle. Frame-based throttle drifts because SoH game
+    // logic ticks at variable rates (20 Hz vanilla up to display refresh
+    // depending on FPS settings, plus VirtualBox slowdowns). Wall-clock
+    // keeps user-facing capture rate consistent regardless.
+    if (mLastCaptureMs != 0 && (mNowMs - mLastCaptureMs) < kCaptureIntervalMs) return;
+    mLastCaptureMs = mNowMs;
 
     // Skip capture during cutscenes — scripted positions would mislead
     // trail consumers. Per plan §5 capture rules.
@@ -209,7 +225,7 @@ bool ActorTrail::FindTrailWaypointBeyondGap(TrailKey key,
         const TrailWaypoint& wp = trail.waypoints[idx];
 
         // Stale filter (matches GetBestReachableSubgoal — 12s).
-        if (mFrameCounter > wp.frameIdx && (mFrameCounter - wp.frameIdx) > 720) continue;
+        if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
         // Within jump range of reference?
         if (distSq(wp.pos, referencePos) > maxGapSq) continue;
         // Strict progress: closer to target than referencePos.
@@ -237,20 +253,26 @@ void ActorTrail::SnapshotActiveWaypoints(int16_t sceneFilter,
     }
 }
 
-bool ActorTrail::GetWaypointBefore(TrailKey key, uint32_t framesAgo, TrailWaypoint& out) const {
+bool ActorTrail::GetWaypointBefore(TrailKey key, uint32_t msAgo, TrailWaypoint& out) const {
     auto it = mTrails.find(key);
     if (it == mTrails.end() || it->second.count == 0) return false;
 
     const EntityTrail& trail = it->second;
-    // Each capture is kCaptureRateFrames apart; convert framesAgo → buffer index lag.
-    size_t lagIndex = framesAgo / kCaptureRateFrames;
-    if (lagIndex >= trail.count) {
-        lagIndex = trail.count - 1; // fall back to oldest
+    // Walk newest→oldest; first waypoint at least `msAgo` old wins. With
+    // captures at kCaptureIntervalMs intervals, this typically resolves
+    // in 1-2 steps. Falls back to oldest entry if nothing matches.
+    const uint64_t cutoff = (mNowMs > msAgo) ? (mNowMs - msAgo) : 0;
+    for (size_t i = 0; i < trail.count; ++i) {
+        size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
+        const TrailWaypoint& wp = trail.waypoints[idx];
+        if (wp.captureMs <= cutoff) {
+            out = wp;
+            return true;
+        }
     }
-
-    // Newest = (head - 1) mod kMaxWaypoints. Step back lagIndex from newest.
-    size_t idx = (trail.head + kMaxWaypoints - 1 - lagIndex) % kMaxWaypoints;
-    out = trail.waypoints[idx];
+    // No waypoint that old — return oldest available.
+    size_t oldestIdx = (trail.head + kMaxWaypoints - trail.count) % kMaxWaypoints;
+    out = trail.waypoints[oldestIdx];
     return true;
 }
 
@@ -293,11 +315,11 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
         // Reject cross-scene waypoints.
         if (wp.sceneNum != gPlayState->sceneNum) continue;
 
-        // Reject stale waypoints (>12s old). Buffer rolls over at 10s
-        // (50 × 12 frames at 60fps), so the 12s threshold gives a small
-        // margin where the most-recent overwritten slot would be skipped
-        // even if its memory wasn't yet reused.
-        if (mFrameCounter > wp.frameIdx && (mFrameCounter - wp.frameIdx) > 720) continue;
+        // Reject stale waypoints (> kStaleAgeMs = 12s wall-clock). Buffer
+        // rolls over at 50 × 200ms = 10s wall-clock, so the 12s threshold
+        // gives a small margin where the most-recent overwritten slot
+        // would be skipped even if its memory wasn't yet reused.
+        if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
 
         // Reject non-progress waypoints (would walk away from target).
         if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
@@ -392,7 +414,7 @@ bool ActorTrail::ComputePathTo(TrailKey key,
     // Stamp metadata up front. Even if no layer succeeds, the caller may
     // want to introspect why (e.g. the scene actually changed mid-pursuit).
     out.sceneNum          = gPlayState->sceneNum;
-    out.frameAtCapture    = mFrameCounter;
+    out.msAtCapture       = mNowMs;
     out.capturedTargetPos = targetPos;
 
     // Layer 1 — direct reachability.
@@ -421,7 +443,7 @@ bool ActorTrail::ComputePathTo(TrailKey key,
             const TrailWaypoint& wp = trail.waypoints[idx];
 
             if (wp.sceneNum != gPlayState->sceneNum) continue;
-            if (mFrameCounter > wp.frameIdx && (mFrameCounter - wp.frameIdx) > 720) continue;
+            if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
             if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
             if (!MovementClear(navigator, wp.pos, play)) continue;
 
