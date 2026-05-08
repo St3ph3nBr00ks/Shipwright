@@ -90,6 +90,10 @@ void GameInteractor_ExecuteOnSceneSpawnActors() {
     GameInteractor::Instance->ExecuteHooks<GameInteractor::OnSceneSpawnActors>();
 }
 
+void GameInteractor_ExecuteOnCutsceneStart(PlayState* play, void* segment) {
+    GameInteractor::Instance->ExecuteHooks<GameInteractor::OnCutsceneStart>(play, segment);
+}
+
 void GameInteractor_ExecuteOnLinkSkeletonInit(SkelAnime* skelAnime) {
     GameInteractor::Instance->ExecuteHooks<GameInteractor::OnLinkSkeletonInit>(skelAnime);
 }

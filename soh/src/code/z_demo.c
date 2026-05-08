@@ -2266,4 +2266,8 @@ void Cutscene_SetSegment(PlayState* play, void* segment) {
     } else {
         play->csCtx.segment = segment;
     }
+    // SoH SceneLog hook — fires OnCutsceneStart so SceneLog (and any other
+    // GameInteractor consumer) can record per-room cutscene observations.
+    // See Claude/Plans/agent_brief_scenelog_completion.md §4 for rationale.
+    GameInteractor_ExecuteOnCutsceneStart(play, segment);
 }

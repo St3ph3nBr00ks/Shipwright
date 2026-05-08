@@ -48,6 +48,11 @@ extern "C" ActorDBEntry* ActorDB_Retrieve(const int id);
 #include <libultraship/libultraship.h>
 #include <nlohmann/json.hpp>
 
+#include "ship/utils/StrHash64.h"  // update_crc64, INITIAL_CRC64
+#include "ship/Context.h"
+#include "ship/resource/ResourceManager.h"
+#include "ship/resource/File.h"
+
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -56,6 +61,8 @@ extern "C" ActorDBEntry* ActorDB_Retrieve(const int id);
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 extern "C" {
@@ -198,6 +205,67 @@ static const char* GetSceneSymbolicName(int sceneNum) {
     }
 }
 
+// Asset-slug lookup matching scene_table.h's first DEFINE_SCENE argument
+// (minus "_scene" suffix). Used to construct OTR resource paths of the
+// form "scenes/nonmq/<slug>_scene/<slug>_scene" for the scene file and
+// "scenes/nonmq/<slug>_scene/<slug>_room_<n>" for room files.
+//
+// Returns nullptr for scenes not in this lookup; caller skips OTR hash
+// emission for those. Extend as needed; the table follows the SoH
+// naming convention from scene_table.h verbatim.
+static const char* GetSceneAssetSlug(int sceneNum) {
+    switch (sceneNum) {
+        case 0x00: return "ydan";
+        case 0x01: return "ddan";
+        case 0x02: return "bdan";
+        case 0x03: return "Bmori1";
+        case 0x04: return "HIDAN";
+        case 0x05: return "MIZUsin";
+        case 0x06: return "jyasinzou";
+        case 0x07: return "HAKAdan";
+        case 0x08: return "HAKAdanCH";
+        case 0x09: return "ice_doukutu";
+        case 0x0A: return "ganon";
+        case 0x0B: return "men";
+        case 0x0C: return "gerudoway";
+        case 0x0D: return "ganontika";
+        case 0x0E: return "ganon_sonogo";
+        case 0x0F: return "ganontikasonogo";
+        case 0x10: return "takaraya";
+        case 0x11: return "ydan_boss";
+        case 0x12: return "ddan_boss";
+        case 0x13: return "bdan_boss";
+        case 0x14: return "moribossroom";
+        case 0x15: return "FIRE_bs";
+        case 0x16: return "MIZUsin_bs";
+        case 0x17: return "jyasinboss";
+        case 0x18: return "HAKAdan_bs";
+        case 0x19: return "ganon_boss";
+        case 0x1A: return "ganon_final";
+        case 0x51: return "spot00";
+        case 0x52: return "spot01";
+        case 0x53: return "spot02";
+        case 0x54: return "spot03";
+        case 0x55: return "spot04";
+        case 0x56: return "spot05";
+        case 0x57: return "spot06";
+        case 0x58: return "spot07";
+        case 0x59: return "spot08";
+        case 0x5A: return "spot09";
+        case 0x5B: return "spot10";
+        case 0x5C: return "spot11";
+        case 0x5D: return "spot12";
+        case 0x5E: return "spot13";
+        case 0x5F: return "spot15";
+        case 0x60: return "spot16";
+        case 0x61: return "spot17";
+        case 0x62: return "spot18";
+        case 0x63: return "souko";
+        case 0x64: return "ganon_tou";
+        default:   return nullptr;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RoomManifest — per-room static manifest writer.
 //
@@ -325,6 +393,88 @@ static void AppendStaticActor(int16_t sceneNum, int16_t roomNum, const ActorEntr
     Buffer()[{sceneNum, roomNum}].push_back(entry);
 }
 
+// Append a cutscene observation to the per-(scene, room) cutscenesObserved
+// list. Called from OnCutsceneStart. Deduped by (segPtr, firstCmd) so a
+// repeated visit to a room doesn't grow the list unboundedly.
+static void AppendCutsceneObservation(int16_t sceneNum, int16_t roomNum,
+                                       uintptr_t segAddr, uint16_t firstCmd) {
+    if (SceneLogLevel() < SCENE_LOG_LEVEL_PREFLIGHT) return;
+    if (!EnsureDirectory()) return;
+
+    auto path = RoomManifestPath(sceneNum, roomNum);
+    nlohmann::json j = ReadExisting(sceneNum, roomNum);
+
+    // Ensure base structure for first-write case (file may not exist yet
+    // if cutscene fires before OnSceneSpawnActors flush).
+    if (!j.contains("schemaVersion")) j["schemaVersion"] = SCENELOG_SCHEMA_VERSION;
+    if (!j.contains("scene"))         j["scene"] = sceneNum;
+    if (!j.contains("sceneName"))     j["sceneName"] = GetSceneSymbolicName(sceneNum);
+    if (!j.contains("room"))          j["room"] = roomNum;
+    if (!j.contains("cutscenesObserved") || !j["cutscenesObserved"].is_array()) {
+        j["cutscenesObserved"] = nlohmann::json::array();
+    }
+
+    // Dedupe by firstCmd value (segAddr is non-deterministic across runs).
+    char firstCmdHex[8];
+    std::snprintf(firstCmdHex, sizeof(firstCmdHex), "0x%04X",
+                  static_cast<unsigned>(firstCmd) & 0xFFFFu);
+    bool found = false;
+    for (auto& entry : j["cutscenesObserved"]) {
+        if (entry.contains("firstCmd") && entry["firstCmd"].is_string() &&
+            entry["firstCmd"].get<std::string>() == firstCmdHex) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        char segHex[24];
+        std::snprintf(segHex, sizeof(segHex), "0x%016llX",
+                      static_cast<unsigned long long>(segAddr));
+        j["cutscenesObserved"].push_back({
+            { "firstCmd",          firstCmdHex },
+            { "firstObservedAddr", segHex },
+            { "firstObservedAt",   NowMs() },
+        });
+    }
+
+    std::string content = j.dump(2);
+    content += '\n';
+    if (!WriteAtomic(path, content)) {
+        SPDLOG_WARN("[SceneLog] AppendCutsceneObservation: WriteAtomic failed for scene={} room={}",
+                    sceneNum, roomNum);
+    }
+}
+
+// Compute CRC64 of an OTR resource's raw bytes via libultraship's
+// LoadFileProcess (returns the file pre-deserialization). Used to populate
+// otrResourceHashes in the per-room manifest, providing the content-hash
+// freshness signal for #202's scene_data system.
+//
+// Returns 0 if the resource isn't found (or the resource manager isn't
+// available); caller skips that entry rather than emitting a bogus hash.
+static uint64_t ComputeResourceCrc64(const std::string& resourcePath) {
+    auto ctx = Ship::Context::GetInstance();
+    if (ctx == nullptr) return 0;
+    auto rm = ctx->GetResourceManager();
+    if (rm == nullptr) return 0;
+    auto file = rm->LoadFileProcess(resourcePath);
+    if (!file || !file->Buffer || file->Buffer->empty()) return 0;
+    const char* data = file->Buffer->data() + file->BufferOffset;
+    size_t len = file->Buffer->size() > file->BufferOffset
+                     ? file->Buffer->size() - file->BufferOffset
+                     : 0;
+    if (len == 0) return 0;
+    return update_crc64(data, static_cast<uint32_t>(len), INITIAL_CRC64);
+}
+
+// Returns true if we've already hashed this resource path during this
+// session (resource bytes don't change at runtime, so re-hashing is
+// wasted work). Caches by string path.
+static bool& HashedThisSession(const std::string& path) {
+    static std::unordered_map<std::string, bool> cache;
+    return cache[path];
+}
+
 // Flush the per-(scene, room) buffer to disk via read-modify-write.
 // Reads existing JSON, overwrites staticActors[] and provenance with
 // current visit's data, increments visitCount, preserves
@@ -392,11 +542,53 @@ static void FlushRoom(int16_t sceneNum, int16_t roomNum) {
     j["staticActors"] = std::move(arr);
 
     // Phase B fields — preserve if present, default to empty if missing.
-    if (!j.contains("cutscenesObserved")) {
+    if (!j.contains("cutscenesObserved") || !j["cutscenesObserved"].is_array()) {
         j["cutscenesObserved"] = nlohmann::json::array();
     }
-    if (!j.contains("otrResourceHashes")) {
+    if (!j.contains("otrResourceHashes") || !j["otrResourceHashes"].is_object()) {
         j["otrResourceHashes"] = nlohmann::json::object();
+    }
+
+    // OTR resource hashes (Phase B). Compute CRC64 of the scene file and
+    // the current room file via libultraship's LoadFileProcess. Hashes
+    // change when the underlying OTR bytes change; consumers (#202) use
+    // these to detect when the manifest data has gone stale relative to
+    // the current build's assets. Skip if the slug isn't in our lookup.
+    const char* slug = GetSceneAssetSlug(sceneNum);
+    if (slug != nullptr) {
+        std::string scenePath = std::string("scenes/nonmq/") + slug + "_scene/" + slug + "_scene";
+        if (!HashedThisSession(scenePath)) {
+            uint64_t crc = ComputeResourceCrc64(scenePath);
+            if (crc != 0) {
+                char crcHex[24];
+                std::snprintf(crcHex, sizeof(crcHex), "0x%016llX",
+                              static_cast<unsigned long long>(crc));
+                j["otrResourceHashes"][scenePath] = {
+                    { "crc64",      crcHex },
+                    { "lastHashed", NowMs() },
+                };
+                HashedThisSession(scenePath) = true;
+            }
+        } else if (j["otrResourceHashes"].contains(scenePath)) {
+            // Already hashed this session and present in the file —
+            // preserve unchanged (no need to recompute).
+        }
+
+        std::string roomPath = std::string("scenes/nonmq/") + slug + "_scene/" +
+                               slug + "_room_" + std::to_string(roomNum);
+        if (!HashedThisSession(roomPath)) {
+            uint64_t crc = ComputeResourceCrc64(roomPath);
+            if (crc != 0) {
+                char crcHex[24];
+                std::snprintf(crcHex, sizeof(crcHex), "0x%016llX",
+                              static_cast<unsigned long long>(crc));
+                j["otrResourceHashes"][roomPath] = {
+                    { "crc64",      crcHex },
+                    { "lastHashed", NowMs() },
+                };
+                HashedThisSession(roomPath) = true;
+            }
+        }
     }
 
     auto path = RoomManifestPath(sceneNum, roomNum);
@@ -487,6 +679,30 @@ static void OnSceneSpawnActorsLog() {
     RoomManifest::FlushRoom(sceneNum, roomNum);
 }
 
+static void OnCutsceneStartLog(PlayState* play, void* segment) {
+    if (SceneLogLevel() < SCENE_LOG_LEVEL_PREFLIGHT) return;
+    if (play == nullptr) return;
+
+    // Read the first 2 bytes of the cutscene segment as the opening
+    // CS_CMD opcode — informative for cutscene family classification at
+    // a glance. Gracefully handle nullptr segment.
+    uint16_t firstCmd = 0;
+    if (segment != nullptr) {
+        firstCmd = *static_cast<uint16_t*>(segment);
+    }
+
+    int16_t sceneNum = play->sceneNum;
+    int16_t roomNum = play->roomCtx.curRoom.num;
+
+    SPDLOG_INFO("[CS] scene={} room={} segAddr={} firstCmd=0x{:04X}",
+                sceneNum, roomNum, segment, firstCmd);
+
+    RoomManifest::AppendCutsceneObservation(
+        sceneNum, roomNum,
+        reinterpret_cast<uintptr_t>(segment),
+        firstCmd);
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -496,6 +712,7 @@ void RegisterSceneLog() {
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnTransitionEnd>(OnTransitionEndLog);
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneInit>(OnSceneInitLog);
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneSpawnActors>(OnSceneSpawnActorsLog);
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnCutsceneStart>(OnCutsceneStartLog);
 }
 
 static RegisterShipInitFunc registerSceneLog(RegisterSceneLog);
