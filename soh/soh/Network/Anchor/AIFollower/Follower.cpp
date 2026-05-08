@@ -25,7 +25,8 @@
 extern "C" {
 #include "z64.h"
 #include "macros.h"     // BTN_*, ITEM_*, SLOT_*, GET_PLAYER
-#include "variables.h"  // gSaveContext, gPlayState
+#include "variables.h"  // gSaveContext + other game globals
+extern PlayState* gPlayState;  // required despite variables.h include — see Pitfall 9
 }
 
 namespace AnchorFollower {
