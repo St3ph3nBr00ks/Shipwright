@@ -2083,6 +2083,29 @@ void SohMenu::AddMenuEnhancements() {
             "with no static-wall geometry.\n\n"
             "Apply via Force Rescan after changing."));
 
+    AddWidget(path, "Auto-Expand on Exploration", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.AutoExpandOnExploration"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "When the player walks into a cell that wasn't visited "
+            "by the most recent scan, automatically queue a full "
+            "rescan to extend coverage. Combined with persisted "
+            "historicalSeeds, each rescan strictly EXPANDS coverage "
+            "without losing previously-mapped geometry — even when "
+            "the actors that originally seeded an area have died "
+            "or despawned.\n\n"
+            "Three layers of cooldown/dedup prevent thrash:\n"
+            "  - 10-second cooldown between auto-expand triggers\n"
+            "  - Position-stability dispatch absorbs multiple "
+            "triggers in one settle window\n"
+            "  - Cell-based dedup on historicalSeeds — same cell "
+            "can't be added twice\n\n"
+            "Default: on. Eliminates the need for manual Force "
+            "Rescan in normal gameplay; force-rescan remains useful "
+            "for developer tooling (e.g. baking nav data after "
+            "tuning detection algorithms)."));
+
     AddWidget(path, "Initial Scan Delay: %d frames", WIDGET_CVAR_SLIDER_INT)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.InitialScanDelayFrames"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })

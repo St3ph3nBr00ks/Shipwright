@@ -80,6 +80,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_CRAWLSPACE            CVAR_ENHANCEMENT("RoomNavData.CrawlspaceDetection")
 #define CVAR_ROOM_NAV_DROP_ANCHOR           CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection")
 #define CVAR_ROOM_NAV_INITIAL_SCAN_DELAY    CVAR_ENHANCEMENT("RoomNavData.InitialScanDelayFrames")
+#define CVAR_ROOM_NAV_AUTO_EXPAND           CVAR_ENHANCEMENT("RoomNavData.AutoExpandOnExploration")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -268,7 +269,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // shift is a single-byte addition in the flags field's slot). Existing
 // v1 .bin files become unreadable; TryLoadFromDisk's version-mismatch
 // branch silently regenerates them on next room entry.
-static constexpr uint16_t kCurrentSchemaVersion = 5;
+static constexpr uint16_t kCurrentSchemaVersion = 6;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -348,6 +349,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     uint32_t ledgeCount      = (uint32_t)nav.ledgeAnchors.size();      // schema v3+
     uint32_t crawlspaceCount = (uint32_t)nav.crawlspaceAnchors.size(); // schema v4+
     uint32_t dropCount       = (uint32_t)nav.dropAnchors.size();       // schema v5+
+    uint32_t histSeedCount   = (uint32_t)nav.historicalSeeds.size();   // schema v6+
     uint32_t hazardCount     = (uint32_t)nav.hazardCentroids.size();
     WriteValue(f, nodeCount);
     WriteValue(f, edgeCount);
@@ -355,6 +357,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     WriteValue(f, ledgeCount);
     WriteValue(f, crawlspaceCount);
     WriteValue(f, dropCount);
+    WriteValue(f, histSeedCount);
     WriteValue(f, hazardCount);
 
     WriteVector(f, nav.nodes);
@@ -363,6 +366,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     WriteVector(f, nav.ledgeAnchors);
     WriteVector(f, nav.crawlspaceAnchors);
     WriteVector(f, nav.dropAnchors);
+    WriteVector(f, nav.historicalSeeds);
     WriteVector(f, nav.hazardCentroids);
 
     if (!f.good()) {
@@ -389,7 +393,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     Vec3f bboxMin{}, bboxMax{};
     uint16_t gridRes = 0;
     uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, ledgeCount = 0,
-             crawlspaceCount = 0, dropCount = 0, hazardCount = 0;
+             crawlspaceCount = 0, dropCount = 0, histSeedCount = 0, hazardCount = 0;
 
     if (!ReadValue(f, magic) || magic != kMagic) {
         SPDLOG_WARN("[RoomNav] LoadFromDisk: magic mismatch for {} (got 0x{:08x}); regenerating",
@@ -418,6 +422,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadValue(f, ledgeCount))      return;
     if (!ReadValue(f, crawlspaceCount)) return;
     if (!ReadValue(f, dropCount))       return;
+    if (!ReadValue(f, histSeedCount))   return;
     if (!ReadValue(f, hazardCount))     return;
 
     if (!ReadVector(f, out->nodes,             nodeCount))       return;
@@ -426,6 +431,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadVector(f, out->ledgeAnchors,      ledgeCount))      return;
     if (!ReadVector(f, out->crawlspaceAnchors, crawlspaceCount)) return;
     if (!ReadVector(f, out->dropAnchors,       dropCount))       return;
+    if (!ReadVector(f, out->historicalSeeds,   histSeedCount))   return;
     if (!ReadVector(f, out->hazardCentroids,   hazardCount))     return;
 
     out->magic           = magic;
@@ -1415,6 +1421,20 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
         }
     }
 
+    // Historical seeds — positions used as floodfill seeds in prior
+    // scans of this room, persisted across sessions. Re-seeding from
+    // them preserves coverage even when the actors that originally
+    // seeded an area have died or despawned. Cell-deduped at insertion
+    // time, so the historical list is naturally bounded to one entry
+    // per grid cell.
+    int historicalSeedsUsed = 0;
+    for (const Vec3f& histPos : out->historicalSeeds) {
+        CellKey histCell = CellKeyForXZ(histPos.x, histPos.z, out->bboxMin);
+        pending.push_back(histCell);
+        seedCells.push_back(histCell);
+        historicalSeedsUsed++;
+    }
+
     int iterations = 0;
 
     while (!pending.empty()) {
@@ -1816,17 +1836,50 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
         }
     }
 
+    // Update historicalSeeds with the union of (current player + actor
+    // + previously-historical seed positions). Cell-deduped at insertion
+    // so the persisted list stays bounded at one entry per grid cell.
+    // Capped at kMaxHistoricalSeeds to prevent unbounded growth even
+    // for multi-session, heavily-explored rooms.
+    static constexpr size_t kMaxHistoricalSeeds = 1000;
+    std::unordered_set<CellKey, CellKeyHash> existingHistoricalCells;
+    for (const Vec3f& p : out->historicalSeeds) {
+        existingHistoricalCells.insert(CellKeyForXZ(p.x, p.z, out->bboxMin));
+    }
+    // Accumulate this scan's seed positions (player + actors). Each
+    // converted to a cell; only cells not already in the historical
+    // list are appended. Vec3f stored is the world position; cell key
+    // is reconstituted on next scan from the current bbox.
+    auto addHistoricalCandidate = [&](const Vec3f& pos) {
+        if (out->historicalSeeds.size() >= kMaxHistoricalSeeds) return;
+        CellKey ck = CellKeyForXZ(pos.x, pos.z, out->bboxMin);
+        if (existingHistoricalCells.count(ck)) return;
+        existingHistoricalCells.insert(ck);
+        out->historicalSeeds.push_back(pos);
+    };
+    addHistoricalCandidate(playerPos);
+    for (int cat = 0; cat < ACTORCAT_MAX; cat++) {
+        Actor* a = play->actorCtx.actorLists[cat].head;
+        while (a != nullptr) {
+            if (a->room == roomNum || a->room == -1) {
+                addHistoricalCandidate(a->world.pos);
+            }
+            a = a->next;
+        }
+    }
+
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
     SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}) "
                 "nodes={} edges={} climbs={} ledges={} crawls={} drops={} cells={} seeds={} "
-                "orphans={} recovered={} scanMs={} edgeMs={} totalMs={}",
+                "histSeeds={} orphans={} recovered={} scanMs={} edgeMs={} totalMs={}",
                 sceneNum, (int)roomNum,
                 playerPos.x, playerPos.y, playerPos.z,
                 out->nodes.size(), out->edges.size(),
                 out->climbAnchors.size(), out->ledgeAnchors.size(),
                 out->crawlspaceAnchors.size(), out->dropAnchors.size(),
-                visited.size(), 1 + extraSeeds, orphanCount,
+                visited.size(), 1 + extraSeeds + historicalSeedsUsed,
+                out->historicalSeeds.size(), orphanCount,
                 recoveredOrphanCount, scanMs, edgeMs, totalMsFinal);
 
     // Per-anchor diagnostic log — emit one line per discovered climb
@@ -1872,6 +1925,21 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
 
 // Top-level lookup-then-scan dispatch. Called once per (scene, room)
 // transition by OnGameFrameTick.
+// Build the visitedCells set for a room from its nodes. Each node's
+// cellIdxX/Z fields encode the cell it occupies; insert each into the
+// per-room set. Used after both fresh scan and disk-load paths.
+static void RebuildVisitedCellsCache(uint32_t cacheKey, const RoomNavData& nav) {
+    auto& cells = sVisitedCellsCache[cacheKey];
+    cells.clear();
+    cells.reserve(nav.nodes.size());
+    for (const NavNode& node : nav.nodes) {
+        cells.insert(CellKey{
+            (int32_t)(int16_t)node.cellIdxX,
+            (int32_t)(int16_t)node.cellIdxZ,
+        });
+    }
+}
+
 static void OnRoomEntered(int16_t sceneNum, int8_t roomNum, PlayState* play) {
     uint32_t key = MakeCacheKey(sceneNum, roomNum);
 
@@ -1880,17 +1948,19 @@ static void OnRoomEntered(int16_t sceneNum, int8_t roomNum, PlayState* play) {
         return;
     }
 
-    // Step 2: disk cache (stub until commit 7).
+    // Step 2: disk cache.
     RoomNavData fresh{};
     TryLoadFromDisk(sceneNum, roomNum, &fresh);
     if (fresh.sceneNum == sceneNum && fresh.roomNum == roomNum && !fresh.nodes.empty()) {
+        // Build visited-cells lookup from disk-loaded nodes for the
+        // auto-expand-on-exploration check.
+        RebuildVisitedCellsCache(key, fresh);
         sCache.emplace(key, std::move(fresh));
         SPDLOG_INFO("[RoomNav] Loaded cached scene={} room={} from disk", sceneNum, (int)roomNum);
         return;
     }
 
-    // Step 3: scan + persist (scan stubbed in commit 2; populated in commits 3-6;
-    // disk-write stubbed until commit 7).
+    // Step 3: scan + persist.
     if (!IsAutoScanEnabled()) {
         // AutoScan off: never scan, even if no cached data exists. Used for
         // "play with this exact baked set, don't generate more" mode.
@@ -1901,6 +1971,7 @@ static void OnRoomEntered(int16_t sceneNum, int8_t roomNum, PlayState* play) {
     ScanRoom(sceneNum, roomNum, play, &scanned);
     if (!scanned.nodes.empty()) {
         SaveToDisk(scanned);
+        RebuildVisitedCellsCache(key, scanned);
     }
     sCache.emplace(key, std::move(scanned));
 }
@@ -2005,6 +2076,24 @@ static void TickStuckOnSlopeDetection(PlayState* play) {
 static int16_t sLastScene = -1;
 static int8_t  sLastRoom  = -1;
 
+// Auto-expand-on-exploration state. When the player walks into a cell
+// that wasn't visited by the last scan, we trigger a full rescan to
+// extend coverage. The seed-history persistence (RoomNavData::
+// historicalSeeds) ensures the rescan never LOSES coverage — it only
+// adds to it.
+//
+// Cooldown prevents rapid re-triggering when the player paces back
+// and forth across the visited/unvisited boundary. 600 frames = 10s.
+static int32_t sExpansionCooldown = 0;
+static constexpr int32_t kExpansionCooldownFrames = 600;
+
+// Per-room visited-cell cache. Built post-scan from the floodfill
+// `visited` set, or from disk-loaded node cellIdx fields. Used by
+// the auto-expand check to determine whether the player's current
+// cell has been scanned. Transient — never written to disk.
+static std::unordered_map<uint32_t, std::unordered_set<CellKey, CellKeyHash>>
+    sVisitedCellsCache;
+
 // Initial-scan delay state. When OnGameFrameTick detects a room change,
 // it doesn't trigger ScanRoom immediately — it queues the scan for
 // kInitialScanDelayFrames frames later. Gives actors and dynamic
@@ -2087,6 +2176,56 @@ static void OnGameFrameTick() {
     // CVar-gated; both pending bools stay false when neither tier is on.
     DispatchPendingDynamicRefresh();
 
+    // Auto-expand on exploration. When the player walks into a cell
+    // that wasn't visited by the current cached scan, queue a full
+    // rescan to extend coverage. Combined with the persisted
+    // historicalSeeds vector (which preserves prior seed positions),
+    // each rescan strictly expands coverage — never regresses.
+    //
+    // Cooldown prevents rapid re-triggering when the player paces
+    // back and forth across the visited/unvisited boundary. Position-
+    // stability dispatch (existing Tier 2 mechanism) absorbs multiple
+    // triggers within a settle window.
+    if (sExpansionCooldown > 0) {
+        sExpansionCooldown--;
+    }
+    if (sExpansionCooldown == 0 &&
+        CVarGetInteger(CVAR_ROOM_NAV_AUTO_EXPAND, 1) != 0) {
+        int16_t curScene = play->sceneNum;
+        int8_t  curRoom  = (int8_t)play->roomCtx.curRoom.num;
+        uint32_t curKey  = MakeCacheKey(curScene, curRoom);
+        auto cacheIt    = sCache.find(curKey);
+        auto visitedIt  = sVisitedCellsCache.find(curKey);
+        if (cacheIt    != sCache.end()           &&
+            visitedIt  != sVisitedCellsCache.end() &&
+            !cacheIt->second.nodes.empty()) {
+            Player* p = GET_PLAYER(play);
+            if (p != nullptr) {
+                CellKey playerCell = CellKeyForXZ(
+                    p->actor.world.pos.x, p->actor.world.pos.z,
+                    cacheIt->second.bboxMin);
+                if (visitedIt->second.count(playerCell) == 0) {
+                    // Player is in an unvisited cell. Queue a full
+                    // rescan with the existing position-stability
+                    // dispatch path. The historicalSeeds vector
+                    // ensures the rescan keeps prior coverage.
+                    sPendingFullRescan      = true;
+                    sStabilityCounter       = 0;
+                    sMaxWaitCountdown       = kMaxWaitFrames;
+                    sExpansionCooldown      = kExpansionCooldownFrames;
+                    SPDLOG_INFO("[RoomNav] Auto-expand triggered: scene={} room={} "
+                                "playerPos=({:.0f},{:.0f},{:.0f}) "
+                                "playerCell=({},{}) — rescan queued",
+                                curScene, (int)curRoom,
+                                p->actor.world.pos.x,
+                                p->actor.world.pos.y,
+                                p->actor.world.pos.z,
+                                playerCell.x, playerCell.z);
+                }
+            }
+        }
+    }
+
     int16_t currentScene = play->sceneNum;
     int8_t  currentRoom  = (int8_t)play->roomCtx.curRoom.num;
 
@@ -2158,6 +2297,8 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
     sFramesUntilInitialScan = 0;
     sPendingInitialScene    = -1;
     sPendingInitialRoom     = -1;
+    sExpansionCooldown      = 0;
+    sVisitedCellsCache.clear();
     sLastScene = -1;
     sLastRoom  = -1;
     sLastStuckLogFrame.clear();
@@ -2894,6 +3035,7 @@ static void DoTriggerFullRescan(const char* trigger) {
 
     sCache.erase(key);
     sComponentCache.erase(key);
+    sVisitedCellsCache.erase(key);
 
     auto path = RoomNavFilePath(scene, room);
     std::error_code ec;

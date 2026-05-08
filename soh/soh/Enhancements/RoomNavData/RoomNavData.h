@@ -150,6 +150,13 @@ struct RoomNavData {
     std::vector<LedgeAnchor>      ledgeAnchors;       // schema v3+
     std::vector<CrawlspaceAnchor> crawlspaceAnchors;  // schema v4+
     std::vector<DropAnchor>       dropAnchors;        // schema v5+
+    // Historical seed positions accumulated across scans of this room
+    // (schema v6+). Each entry is a world-space position used as a
+    // floodfill seed in some prior scan. On rescan, these positions
+    // are re-used as additional seeds — preserves coverage even when
+    // the actors that originally seeded an area have died or
+    // despawned. Deduplicated by grid cell; capped at ~1000 entries.
+    std::vector<Vec3f>            historicalSeeds;
     std::vector<Vec3f>            hazardCentroids;
 
     // Scan metadata
