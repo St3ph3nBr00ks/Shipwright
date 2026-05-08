@@ -186,6 +186,11 @@ static constexpr f32 kItemProximity      = 200.0f;
 static constexpr int kItemGraceFrames    = 180;
 static constexpr int kItemCollectTimeout = 300;
 
+// Stuck-detection tunables for HandleStateFollow.
+static constexpr int kStuckCheckInterval = 20;     // frames between progress checks
+static constexpr f32 kStuckMinProgress   = 5.0f;   // min units travelled per interval
+static constexpr int kStuckCycleWindow   = 300;    // G12 cycle-count reset window (frames)
+
 // Item filter — does the follower's character class want this drop?
 // Was a parent-function lambda with `[]` empty capture (no parent-state
 // dependencies); promoted to a file-scope free function so per-state
@@ -532,8 +537,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 // (Phase 1 commit 9) — used by HandleStateCollectItem.
                 // kMoveSpeed moved to file-scope anonymous namespace
                 // (Phase 1 commit 8) — used by HandleStateStuck.
-                static constexpr int kStuckCheckInterval = 20;     // frames between stuck checks
-                static constexpr f32 kStuckMinProgress   = 5.0f;   // min units per check interval
+                // kStuckCheckInterval / kStuckMinProgress moved to file-scope
+                // anonymous namespace (Phase 1 commit 11) — used by HandleStateFollow.
                 // kStuckRecovery moved to file-scope anonymous namespace
                 // (Phase 1 commit 8) — used by HandleStateStuck.
                 // kAttackDuration moved to file-scope anonymous namespace
@@ -543,7 +548,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 static constexpr int kTeleportDelayFrames = 120;     // ~2s at 60fps; debounces brief overshoots
                 // G12 — STUCK escalation: N STUCK entries within window → teleport.
                 static constexpr int kStuckCycleEscalation = 3;     // count threshold
-                static constexpr int kStuckCycleWindow     = 300;   // frames; resets count if exceeded
+                // kStuckCycleWindow moved to file-scope anonymous namespace
+                // (Phase 1 commit 11) — used by HandleStateFollow.
                 // Phase B (Bug 7) — door handoff timeout. After leader crosses a
                 // room boundary, the follower has this many frames to navigate
                 // to the door / cross the threshold itself. On timeout, teleport.
@@ -1415,113 +1421,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     }
 
                     case FollowerAIState::FOLLOW: {
-                        // Stuck detection: every kStuckCheckInterval frames check progress.
-                        if (followerStateFrames % kStuckCheckInterval == 0) {
-                            f32 progDx   = p2Pos.x - followerLastPos.x;
-                            f32 progDz   = p2Pos.z - followerLastPos.z;
-                            f32 progress = sqrtf(progDx * progDx + progDz * progDz);
-                            f32 toTarget = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
-                            SPDLOG_INFO("[Follower] FOLLOW check: progress={:.1f} distToTarget={:.0f} "
-                                        "p2=({:.0f},{:.0f}) last=({:.0f},{:.0f}) target=({:.0f},{:.0f})",
-                                        progress, toTarget,
-                                        p2Pos.x, p2Pos.z,
-                                        followerLastPos.x, followerLastPos.z,
-                                        sideTarget.x, sideTarget.z);
-                            followerLastPos = p2Pos; // update checkpoint
-                            if (progress < kStuckMinProgress) {
-                                // Stick input failed to make progress. Enter the
-                                // STUCK fallback, which nudges the follower
-                                // directly toward followerMoveTarget via
-                                // position override until kStuckRecovery frames
-                                // elapse. (followerStuckDir is no longer used:
-                                // the perpendicular strafe pattern was dropped
-                                // when movement switched to stick input. Field
-                                // kept in the header for a future strafe variant.)
-                                followerAIState     = FollowerAIState::STUCK;
-                                followerStuckFrames = 0;
-                                followerStateFrames = 0;
-                                // G12 — count this entry; arm the reset window.
-                                // The top-of-hook check escalates to teleport when
-                                // count >= kStuckCycleEscalation within the window.
-                                followerStuckCycleCount++;
-                                followerStuckCycleResetFrames = kStuckCycleWindow;
-                                SPDLOG_INFO("[Follower] FOLLOW→STUCK (stick input stalled, cycle={})",
-                                            followerStuckCycleCount);
-                                break;
-                            }
-                        }
-                        // Item pickup — scan every 10 frames inside FOLLOW (less
-                        // frequent than IDLE; we're actively traversing so a
-                        // tight scan window is less useful). On finding an
-                        // eligible drop, abandon FOLLOW and divert to COLLECT_ITEM.
-                        if (followerStateFrames % 10 == 0) {
-                            Actor* item = this->ScanForItemCandidate(player);
-                            if (item != nullptr) {
-                                followerTargetItem = item;
-                                followerCollectItemTimeoutFrames = kItemCollectTimeout;
-                                followerAIState     = FollowerAIState::COLLECT_ITEM;
-                                followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] FOLLOW→COLLECT_ITEM item=0x{:02X} at ({:.0f},{:.0f},{:.0f})",
-                                            (int)(item->params & 0xFF),
-                                            item->world.pos.x, item->world.pos.y, item->world.pos.z);
-                                break;
-                            }
-                        }
-                        // Test 8 (user report) — during door handoff, the
-                        // G11 safety-net block above this switch sets
-                        // followerMoveTarget to the transition-actor
-                        // position (door centerline). FOLLOW was then
-                        // overwriting that with sideTarget (+kFollowOffset
-                        // on X), pushing the follower 50 u off the door
-                        // centerline into the adjacent wall. Skip the
-                        // overwrite while handoff is active — the handoff
-                        // block owns the move target in that case. Same
-                        // pattern crawlspaces already use via the leader-
-                        // Crawling sideTarget collapse.
-                        Vec3f followTarget = sideTarget;
-                        if (!followerDoorHandoff) {
-                            followerMoveTarget = followTarget;
-                        } else {
-                            // Route through the handoff target without
-                            // offset; yaw/dist computations below use
-                            // followerMoveTarget as the ground truth.
-                            followTarget = followerMoveTarget;
-                        }
-                        {
-                            f32 dist = sqrtf(SQ(followTarget.x - p2Pos.x) + SQ(followTarget.z - p2Pos.z));
-                            // Stick injection in ShouldActorUpdate drives actual movement;
-                            // here we just transition when we're close enough.
-                            if (dist > 0.001f) {
-                                player->actor.shape.rot.y = YawToward(
-                                    followTarget.x - player->actor.world.pos.x,
-                                    followTarget.z - player->actor.world.pos.z);
-                            }
-                            // Bug 2 (log 184 Karebaba corridor) — skip the
-                            // FOLLOW→IDLE transition while a door handoff is
-                            // armed. The handoff block at the top of the hook
-                            // re-arms `followerDoorHandoff` every frame the
-                            // rooms differ, and (when state was IDLE) flips
-                            // back to FOLLOW on the same frame. Without this
-                            // guard, FOLLOW→IDLE→FOLLOW oscillates at frame
-                            // cadence whenever dist-to-door < kFollowThreshold,
-                            // which is exactly the moment the follower is
-                            // close enough for the BTN_A door-open injection
-                            // to fire — and the oscillation prevents that
-                            // injection from sticking.
-                            //
-                            // Stay in FOLLOW until either:
-                            //   (a) follower crosses into leader's room (door
-                            //       opens, walks through; rooms re-match and
-                            //       the handoff clears at the top of the hook
-                            //       at line 1449-1453), or
-                            //   (b) followerDoorHandoffFrames hits zero
-                            //       (timeout → fallback teleport).
-                            if (dist < kFollowThreshold && !followerDoorHandoff) {
-                                followerAIState     = FollowerAIState::IDLE;
-                                followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", dist);
-                            }
-                        }
+                        // Body extracted to Anchor::HandleStateFollow
+                        // (Phase 1 commit 11 of the SRP refactor).
+                        HandleStateFollow(player, sideTarget, p2Pos);
                         break;
                     }
 
@@ -2925,5 +2827,93 @@ void Anchor::HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sid
     // to the door centerline; don't overwrite with side-offset.
     if (!followerDoorHandoff) {
         followerMoveTarget = sideTarget;
+    }
+}
+
+void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos) {
+    // FOLLOW: stick-driven movement toward leader's side. Periodically
+    // checks progress (every kStuckCheckInterval frames); enters STUCK
+    // if no progress AND increments G12 stuck-cycle counter for the
+    // teleport-escalation safety net. Scans for opportunistic item
+    // drops every 10 frames. Transitions to IDLE when within
+    // kFollowThreshold of the target — except during door handoff,
+    // where the FOLLOW→IDLE→FOLLOW oscillation would prevent the
+    // BTN_A door-open injection from sticking.
+    //
+    // Stuck detection: every kStuckCheckInterval frames check progress.
+    if (followerStateFrames % kStuckCheckInterval == 0) {
+        f32 progDx   = p2Pos.x - followerLastPos.x;
+        f32 progDz   = p2Pos.z - followerLastPos.z;
+        f32 progress = sqrtf(progDx * progDx + progDz * progDz);
+        f32 toTarget = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+        SPDLOG_INFO("[Follower] FOLLOW check: progress={:.1f} distToTarget={:.0f} "
+                    "p2=({:.0f},{:.0f}) last=({:.0f},{:.0f}) target=({:.0f},{:.0f})",
+                    progress, toTarget,
+                    p2Pos.x, p2Pos.z,
+                    followerLastPos.x, followerLastPos.z,
+                    sideTarget.x, sideTarget.z);
+        followerLastPos = p2Pos; // update checkpoint
+        if (progress < kStuckMinProgress) {
+            // Stick input failed to make progress. Enter STUCK fallback.
+            followerAIState     = FollowerAIState::STUCK;
+            followerStuckFrames = 0;
+            followerStateFrames = 0;
+            // G12 — count this entry; arm the reset window. The
+            // top-of-hook check escalates to teleport when count >=
+            // kStuckCycleEscalation within the window.
+            followerStuckCycleCount++;
+            followerStuckCycleResetFrames = kStuckCycleWindow;
+            SPDLOG_INFO("[Follower] FOLLOW→STUCK (stick input stalled, cycle={})",
+                        followerStuckCycleCount);
+            return;
+        }
+    }
+    // Item pickup — scan every 10 frames inside FOLLOW. On finding an
+    // eligible drop, abandon FOLLOW and divert to COLLECT_ITEM.
+    if (followerStateFrames % 10 == 0) {
+        Actor* item = this->ScanForItemCandidate(player);
+        if (item != nullptr) {
+            followerTargetItem = item;
+            followerCollectItemTimeoutFrames = kItemCollectTimeout;
+            followerAIState     = FollowerAIState::COLLECT_ITEM;
+            followerStateFrames = 0;
+            SPDLOG_INFO("[Follower] FOLLOW→COLLECT_ITEM item=0x{:02X} at ({:.0f},{:.0f},{:.0f})",
+                        (int)(item->params & 0xFF),
+                        item->world.pos.x, item->world.pos.y, item->world.pos.z);
+            return;
+        }
+    }
+    // Test 8 — during door handoff, the G11 safety-net block above
+    // sets followerMoveTarget to the transition-actor position (door
+    // centerline). FOLLOW was overwriting that with sideTarget
+    // (+kFollowOffset on X), pushing the follower 50 u off the door
+    // centerline into the adjacent wall. Skip the overwrite while
+    // handoff is active — the handoff block owns the move target in
+    // that case.
+    Vec3f followTarget = sideTarget;
+    if (!followerDoorHandoff) {
+        followerMoveTarget = followTarget;
+    } else {
+        followTarget = followerMoveTarget;
+    }
+    f32 dist = sqrtf(SQ(followTarget.x - p2Pos.x) + SQ(followTarget.z - p2Pos.z));
+    // Stick injection in TickFollowerInput drives actual movement;
+    // here we just face the target and transition when close enough.
+    if (dist > 0.001f) {
+        player->actor.shape.rot.y = YawToward(
+            followTarget.x - player->actor.world.pos.x,
+            followTarget.z - player->actor.world.pos.z);
+    }
+    // Bug 2 (log 184 Karebaba corridor) — skip the FOLLOW→IDLE
+    // transition while a door handoff is armed. Without this guard,
+    // FOLLOW→IDLE→FOLLOW oscillates at frame cadence and the BTN_A
+    // door-open injection never sticks. Stay in FOLLOW until either
+    // the follower crosses into leader's room (handoff clears at the
+    // top of the hook) or followerDoorHandoffFrames hits zero
+    // (timeout → fallback teleport).
+    if (dist < kFollowThreshold && !followerDoorHandoff) {
+        followerAIState     = FollowerAIState::IDLE;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", dist);
     }
 }
