@@ -1944,6 +1944,20 @@ static constexpr int32_t kExpansionCooldownFrames = 600;
 static std::unordered_map<uint32_t, std::unordered_set<CellKey, CellKeyHash>>
     sVisitedCellsCache;
 
+// Historical-seed preservation across DoTriggerFullRescan. The full-
+// rescan path drops the in-memory cache AND deletes the on-disk .bin
+// before letting the polling re-trigger the scan. Without this
+// parallel cache, historicalSeeds would be lost across every rescan
+// because OnRoomEntered constructs a fresh empty RoomNavData and
+// TryLoadFromDisk fails (file just deleted).
+//
+// On rescan trigger, copy historicalSeeds to this map BEFORE erasing
+// the cache. On the subsequent ScanRoom call, restore them onto the
+// fresh RoomNavData so seed accumulation continues across the rescan
+// boundary.
+static std::unordered_map<uint32_t, std::vector<Vec3f>>
+    sPreservedHistoricalSeeds;
+
 // Top-level lookup-then-scan dispatch. Called once per (scene, room)
 // transition by OnGameFrameTick.
 // Build the visitedCells set for a room from its nodes. Each node's
@@ -1989,6 +2003,15 @@ static void OnRoomEntered(int16_t sceneNum, int8_t roomNum, PlayState* play) {
     }
 
     RoomNavData scanned{};
+    // Restore historicalSeeds preserved by a prior DoTriggerFullRescan
+    // call so seed accumulation continues across the rescan boundary.
+    // If no preservation entry exists, scanned starts with an empty
+    // historicalSeeds vector (fresh-room baseline).
+    auto preservedIt = sPreservedHistoricalSeeds.find(key);
+    if (preservedIt != sPreservedHistoricalSeeds.end()) {
+        scanned.historicalSeeds = std::move(preservedIt->second);
+        sPreservedHistoricalSeeds.erase(preservedIt);
+    }
     ScanRoom(sceneNum, roomNum, play, &scanned);
     if (!scanned.nodes.empty()) {
         SaveToDisk(scanned);
@@ -2302,6 +2325,7 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
     sPendingInitialRoom     = -1;
     sExpansionCooldown      = 0;
     sVisitedCellsCache.clear();
+    sPreservedHistoricalSeeds.clear();
     sLastScene = -1;
     sLastRoom  = -1;
     sLastStuckLogFrame.clear();
@@ -3035,6 +3059,14 @@ static void DoTriggerFullRescan(const char* trigger) {
     int16_t scene = play->sceneNum;
     int8_t  room  = (int8_t)play->roomCtx.curRoom.num;
     uint32_t key = MakeCacheKey(scene, room);
+
+    // Preserve historicalSeeds across the rescan. ScanRoom on the
+    // next polling tick gets a fresh empty RoomNavData; without this,
+    // accumulated seed positions from prior scans would be lost.
+    auto cacheIt = sCache.find(key);
+    if (cacheIt != sCache.end() && !cacheIt->second.historicalSeeds.empty()) {
+        sPreservedHistoricalSeeds[key] = cacheIt->second.historicalSeeds;
+    }
 
     sCache.erase(key);
     sComponentCache.erase(key);
