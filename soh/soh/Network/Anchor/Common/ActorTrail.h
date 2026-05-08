@@ -12,8 +12,9 @@
  * tagged uint32 — high bit = player (low byte is clientId);
  * high bit clear = actor (low 31 bits are netId).
  *
- * Sampling rate: 30 captures/sec/entity at 60fps (kCaptureRateFrames=2).
- * Buffer size: 64 waypoints per entity (~2.1s of history).
+ * Sampling rate: 5 captures/sec/entity at 60fps (kCaptureRateFrames=12).
+ * Buffer size: 50 waypoints per entity (10.0s of history before the
+ * oldest is overwritten).
  *
  * The MovementClear and VisualLineOfSight primitives also live here as
  * file-scope helpers (perception vs movement layer split per plan §2).
@@ -107,6 +108,66 @@ public:
                                           const Vec3f& targetPos, PlayState* play,
                                           Vec3f& out) const;
 
+    // ---- Path snapshot API ---------------------------------------------------
+    //
+    // Multi-waypoint path the navigator commits to following, captured at
+    // decision time. Caller owns the buffer; trail clears, graph rescans,
+    // and target despawns between captures cannot strand the navigator
+    // mid-pursuit because the waypoints live in the caller's own memory,
+    // not the underlying ActorTrail / RoomNavData state.
+    //
+    // Usage:
+    //   1. At decision time (target acquired / changed / current path
+    //      exhausted / current step blocked), call ComputePathTo.
+    //   2. Each frame, steer toward `path.CurrentSubgoal()`.
+    //   3. When close enough to the current subgoal, call `path.Advance()`.
+    //      When `path.Empty()` returns true, query again (target may have
+    //      moved meanwhile).
+    //   4. Optionally re-query if `play->sceneNum != path.sceneNum` or
+    //      `dist(currentTargetPos, path.capturedTargetPos)` exceeds a
+    //      consumer-defined tolerance.
+    struct NavPath {
+        std::vector<Vec3f> waypoints;          // [0] = next subgoal; [N-1] = path tail
+        size_t   cursorIdx          = 0;       // index of current active waypoint
+        int16_t  sceneNum           = -1;      // scene at capture time
+        uint64_t frameAtCapture     = 0;       // for diagnostics + max-age policy
+        Vec3f    capturedTargetPos  = { 0, 0, 0 };  // for "target moved" invalidation
+
+        void Reset() {
+            waypoints.clear();
+            cursorIdx = 0;
+            sceneNum = -1;
+        }
+        bool Empty() const { return waypoints.empty() || cursorIdx >= waypoints.size(); }
+        const Vec3f& CurrentSubgoal() const { return waypoints[cursorIdx]; }
+        // Advance cursor by one waypoint. Returns true if more waypoints remain.
+        bool Advance() {
+            ++cursorIdx;
+            return cursorIdx < waypoints.size();
+        }
+    };
+
+    // Computes a complete path from `navigator` to `targetPos`. Caller-owned
+    // result; the AI commits to following these waypoints in order without
+    // re-querying ActorTrail / RoomNavData each frame.
+    //
+    // Same 3-layer algorithm as GetBestReachableSubgoal, but materializes
+    // the full chain instead of a single subgoal:
+    //   Layer 1: target directly reachable → [target]
+    //   Layer 2: trail breadcrumb           → [breadcrumb] or [breadcrumb, target]
+    //                                          (target appended when breadcrumb→target
+    //                                          is line-clear)
+    //   Layer 3: RoomNavData BFS chain      → [node1, ..., nodeN]
+    //                                          (+ target if line-clear from nodeN)
+    //
+    // Returns true on a non-empty path; false if nothing reachable. Caller
+    // treats false as "stuck" — route to recovery / direct-yaw.
+    bool ComputePathTo(TrailKey key,
+                       const Actor* navigator,
+                       const Vec3f& targetPos,
+                       PlayState* play,
+                       NavPath& out) const;
+
     // Diagnostic: snapshot every captured waypoint whose sceneNum matches
     // `sceneFilter` into `out`. Used by the DebugDraw overlay so the
     // overlay doesn't need access to internal storage. Filter is required
@@ -131,8 +192,8 @@ public:
 private:
     ActorTrail() = default;
 
-    static constexpr size_t  kMaxWaypoints       = 64; // ring buffer size per entity
-    static constexpr uint8_t kCaptureRateFrames  = 2;  // capture every 2 game frames
+    static constexpr size_t  kMaxWaypoints       = 50; // 50 × 12f = 10.0s history at 60fps
+    static constexpr uint8_t kCaptureRateFrames  = 12; // capture every 12 game frames = 5Hz
 
     struct EntityTrail {
         std::array<TrailWaypoint, kMaxWaypoints> waypoints;
@@ -162,6 +223,12 @@ constexpr float kHeadOffset = 60.0f;  // eye-height visual-LOS ray (Link referen
 // walls (navigator can walk there). Used by GetBestReachableSubgoal and
 // future GroundFollowing refinements.
 bool MovementClear(const Actor* navigator, const Vec3f& candidatePos, PlayState* play);
+
+// Position-to-position variant of MovementClear. Used by path-snapshot
+// algorithms that need to validate a step from a chosen waypoint to
+// another (the navigator isn't there yet, but we want to know whether
+// the consecutive segment will be walkable). Body offset still applies.
+bool MovementClearAtPosition(const Vec3f& fromPos, const Vec3f& toPos, PlayState* play);
 
 // Returns true if the segment from navigator to targetPos is clear of
 // walls (navigator can "see" the target). Defined for completeness;

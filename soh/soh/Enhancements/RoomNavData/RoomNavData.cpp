@@ -386,6 +386,95 @@ int FindNearestNonHazardExit(const RoomNavData* data,
     return -1;
 }
 
+bool FindBestReachableSubgoalPath(const RoomNavData* data,
+                                   int fromIdx,
+                                   const Vec3f& targetPos,
+                                   bool eligibleForSwimming,
+                                   bool avoidHazardNodes,
+                                   std::vector<Vec3f>& out) {
+    out.clear();
+    if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;
+    if (fromIdx < 0 || (size_t)fromIdx >= data->nodes.size()) return false;
+
+    // Same hazard-aware BFS as FindBestReachableSubgoalNode but with a
+    // parents array so we can reconstruct the full path from `bestIdx`
+    // back to `fromIdx`. Caller wants the materialised chain so they can
+    // copy it into their own state and walk it without re-querying the
+    // graph each frame.
+
+    auto distSqToTarget = [&](const Vec3f& p) {
+        float dx = p.x - targetPos.x;
+        float dy = p.y - targetPos.y;
+        float dz = p.z - targetPos.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+
+    const float fromDistSq = distSqToTarget(data->nodes[(size_t)fromIdx].pos);
+
+    struct QueueEntry { uint16_t idx; uint8_t hopsInHazard; };
+    std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data);
+    std::vector<bool> visited(data->nodes.size(), false);
+    std::vector<int>  parents(data->nodes.size(), -1);
+    std::deque<QueueEntry> frontier;
+    visited[(size_t)fromIdx] = true;
+    frontier.push_back({(uint16_t)fromIdx, 0});
+
+    int   bestIdx    = -1;
+    float bestDistSq = fromDistSq;
+
+    while (!frontier.empty()) {
+        QueueEntry entry = frontier.front();
+        frontier.pop_front();
+
+        const NavNode& node = data->nodes[entry.idx];
+        if (!(node.flags & NODE_WALKABLE)) continue;
+        if (node.flags & (NODE_ORPHANED | NODE_STEEP_SLOPE)) continue;
+        if ((node.flags & NODE_UNDERWATER) && !eligibleForSwimming) continue;
+
+        const bool isHazard = (node.flags & NODE_HAZARD) != 0;
+        uint8_t curHazardHops = isHazard ? (uint8_t)(entry.hopsInHazard + 1) : 0;
+        if (avoidHazardNodes && curHazardHops > kHazardEscapeHops) continue;
+
+        const bool destinationOK = !isHazard || !avoidHazardNodes;
+        if (destinationOK) {
+            float d = distSqToTarget(node.pos);
+            if (d < bestDistSq) {
+                bestDistSq = d;
+                bestIdx    = (int)entry.idx;
+            }
+        }
+
+        for (uint16_t nb : adjacency[entry.idx]) {
+            if (nb >= visited.size()) continue;
+            if (visited[nb]) continue;
+            if (data->nodes[nb].flags & NODE_ORPHANED) continue;
+            visited[nb] = true;
+            parents[nb] = (int)entry.idx;
+            frontier.push_back({nb, curHazardHops});
+        }
+    }
+
+    if (bestIdx < 0) return false;
+
+    // Reconstruct path: walk parents from bestIdx back to fromIdx, then
+    // reverse. Skip fromIdx itself — navigator is already there. The
+    // resulting path has `bestIdx` at the END (closest to target), with
+    // intermediate nodes ordered first-to-last.
+    std::vector<int> reversed;
+    reversed.reserve(32);  // typical path length cap
+    int cur = bestIdx;
+    while (cur != -1 && cur != fromIdx) {
+        reversed.push_back(cur);
+        cur = parents[cur];
+    }
+    if (reversed.empty()) return false;
+    out.reserve(reversed.size());
+    for (auto it = reversed.rbegin(); it != reversed.rend(); ++it) {
+        out.push_back(data->nodes[(size_t)*it].pos);
+    }
+    return true;
+}
+
 bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toPos) {
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;
 
@@ -3210,12 +3299,12 @@ static void OnDebugDrawRender() {
     // actual usage is bounded tighter; reserves are additive across groups
     // for forward-compat with parallel workstreams that may add their own
     // groups.
-    // ActorTrail breadcrumb upper bound — kMaxWaypoints (64) per entity ×
+    // ActorTrail breadcrumb upper bound — kMaxWaypoints (50) per entity ×
     // peak entity set (~8 = local player + remote DummyPlayers + AI Follower
     // + synced enemies with leavesTrail=true). Each marker is a 2-quad
     // vertical post → 8 verts + 2 Gfx commands. Reserve slop is fine; the
     // capacity-overshoot is a one-time scene-change allocation.
-    constexpr size_t kMaxTrailWaypointsForReserve = 64 * 8;
+    constexpr size_t kMaxTrailWaypointsForReserve = 50 * 8;
     sVtxDl.reserve(data->nodes.size() * 4
                    + data->nodes.size() * 4 // orphan group
                    + data->edges.size() * 4
