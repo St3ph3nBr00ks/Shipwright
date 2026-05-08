@@ -80,10 +80,13 @@ struct FollowerFrameContext {
 // optionally `ctx.player->actor.world.pos` for STUCK / teleport paths.
 void TickFollower(FollowerFrameContext& ctx);
 
-// Module registration. Called once by ShipInit at boot. Sets up any
-// hooks the follower module needs separately from Anchor's hook
-// registration (currently none — hook bodies still live in
-// HookHandlers.cpp; they migrate here in subsequent Phase 1 commits).
+// Module registration. Called once by ShipInit at boot. Currently a
+// no-op log line — verifies the new namespace + ShipInit boot path
+// work end-to-end. Anchor's two follower hooks (state-machine driver +
+// input injection) are (re-)registered per-connect from
+// Anchor::RegisterFollowerHooks (declared in Anchor.h, defined in
+// Follower.cpp) since they need Anchor:: state access and re-registration
+// on each enable/disable cycle.
 void RegisterFollowerModule();
 
 } // namespace AnchorFollower

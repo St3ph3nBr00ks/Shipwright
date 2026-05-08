@@ -658,6 +658,13 @@ class Anchor : public Network {
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();
     void RegisterHooks();
+    // Follower hook (re-)registration. Body lives in AIFollower/Follower.cpp
+    // (Phase 1 commit 13 of the SRP refactor — moved from RegisterHooks
+    // body in HookHandlers.cpp). Called from RegisterHooks at the same
+    // point in the enable/disable cycle. The two registrations (OnGameFrameUpdate
+    // for the state machine, ShouldActorUpdate for input injection) are both
+    // re-registered on every Anchor enable/disable to track isConnected.
+    void RegisterFollowerHooks(bool isConnected);
     void RefreshClientActors();
     // Backfill EnemyNetId extensions on actors that are already loaded but
     // missing the extension. Recovery path for the case where a scene init

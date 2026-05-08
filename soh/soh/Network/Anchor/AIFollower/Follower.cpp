@@ -109,11 +109,14 @@ float OTRGetDimensionFromRightEdge(float v);
 namespace AnchorFollower {
 
 void RegisterFollowerModule() {
-    // Stub. Subsequent Phase 1 commits register OnGameFrameUpdate /
-    // ShouldActorUpdate hooks here, mirroring (and eventually
-    // replacing) the registrations currently performed inside
-    // Anchor::RegisterHooks for follower-specific behaviour.
-    SPDLOG_DEBUG("[AiFollower] Follower module scaffolded (no hooks yet)");
+    // No-op log. The two follower hooks (OnGameFrameUpdate state-machine
+    // driver + ShouldActorUpdate input injection) are (re-)registered from
+    // Anchor::RegisterFollowerHooks per-connect, not from this ShipInit
+    // boot-time entry, because they need Anchor:: state access and
+    // isConnected re-registration. Kept so the namespace + ShipInit boot
+    // path stays exercised; serves as the natural extension point if the
+    // module ever needs boot-time setup independent of Anchor enable/disable.
+    SPDLOG_DEBUG("[AiFollower] Follower module loaded; per-connect hooks live in Anchor::RegisterFollowerHooks");
 }
 
 // Phase 1 commit 3 stub. Phase 1 commit 4 will populate this with the
@@ -2879,5 +2882,113 @@ void Anchor::HandleStateAttack(Player* player, const Vec3f& p2Pos) {
         followerAIState     = FollowerAIState::RETURN;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] ATTACK\u2192RETURN (cycle complete)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Anchor::RegisterFollowerHooks — (re-)register the two follower hooks
+// (OnGameFrameUpdate state-machine driver + ShouldActorUpdate input injector).
+//
+// Phase 1 commit 13 of the SRP refactor (#173 / #169). Body moved verbatim
+// from HookHandlers.cpp's Anchor::RegisterHooks. Called from RegisterHooks
+// at the same point in the enable/disable cycle, so the hook IDs persist
+// (function-scope statics) across re-registrations.
+//
+// Position source for the follower: the host's DummyPlayer actor (ACTORCAT_NPC,
+// id=ACTOR_EN_OE2, update=DummyPlayer_Update, clientId==roomState.ownerClientId).
+// Its world.pos is updated every frame by DummyPlayer_Update to the host's
+// authoritative position. Activation: toggled via the Anchor settings menu
+// (AI Follower checkbox). Any controller input while active immediately cancels
+// it and returns manual control.
+//
+// Note: COND_HOOK cannot be used here — the registered lambdas (or the bodies
+// they would inline if COND_HOOK macros expanded over them in the future)
+// contain brace-initializer lists for Vec3f, and the C preprocessor does NOT
+// treat {} as grouping, so their commas split the macro's argument list.
+// ---------------------------------------------------------------------------
+void Anchor::RegisterFollowerHooks(bool isConnected) {
+    // Follower state-machine driver. Fires from OnGameFrameUpdate; reads
+    // host position, transitions follower state, computes followerMoveTarget,
+    // and (in some states) writes player->actor.world.pos directly.
+    //
+    // Early-out checks live in this lambda since OnGameFrameUpdate fires
+    // every frame regardless of relevance; we short-circuit before the
+    // TickFollower call when not on a follower-relevant frame.
+    {
+        static HOOK_ID followerHookId = 0;
+        GameInteractor::Instance->UnregisterGameHook<GameInteractor::OnGameFrameUpdate>(followerHookId);
+        followerHookId = 0;
+        if (isConnected) {
+            followerHookId = GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>([&]() {
+                // Only run on non-host clients with a save loaded.
+                if (::SceneAuthority::IsEffectiveHost()) { return; }
+                if (!IsSaveLoaded()) { return; }
+                if (gPlayState == nullptr) { return; }
+
+                Player* player = GET_PLAYER(gPlayState);
+                if (player == nullptr) { return; }
+                AnchorFollower::FollowerFrameContext ctx;
+                ctx.play   = gPlayState;
+                ctx.player = player;
+                this->TickFollower(ctx);
+            });
+        }
+    }
+
+    // Follower input injection (non-host only).
+    //
+    // Fires via ShouldActorUpdate immediately BEFORE the player actor's update()
+    // so the player's own action state machine sees synthetic input and moves /
+    // swings / climbs in response. (OnGameFrameUpdate fires too late — after
+    // update() — so inputs written there would miss the current frame.)
+    //
+    // This hook is the PRIMARY driver of follower movement. The state machine
+    // in OnGameFrameUpdate computes `followerMoveTarget`; this hook projects
+    // that target into camera-relative stick input and lets Link's own
+    // Player_Update carry him there — respecting walls, slopes, ledges,
+    // water, cutscenes, and every other state transition OoT handles natively.
+    //
+    // Walk/run: stick is deflected toward followerMoveTarget with magnitude
+    // scaled by distance (sprint > 250 units, run > 60, walk > 30, zero
+    // within 30 so Link's own deceleration handles the last few units).
+    //
+    // State guard: stick is zeroed when Link is in a state that can't accept
+    // free movement (ladder climb, ledge hang / climb-up, water, cutscene,
+    // hit-react, talking, input disabled). Injecting during these can corrupt
+    // the associated state machine.
+    //
+    // Ledge-climb: BTN_A is injected whenever PLAYER_STATE1_HANGING_OFF_LEDGE
+    // is set — the follower runs up to a tall ledge, Link hangs, we press A,
+    // Link hoists up. This replaces the old position-override-through-geometry
+    // behaviour that clipped through ledges.
+    //
+    // Attack: BTN_B as an edge-press every 20 frames while in ATTACK state.
+    // Stick is ALSO driven during ATTACK so the follower keeps closing the
+    // gap between kAttackRange (80) and actual sword reach (~30-40 units);
+    // without it the follower stops at 80 and swings at empty air. The stick
+    // points at enemyPos, agreeing with shape.rot.y, so swing direction is
+    // unambiguous regardless of which field OoT consults on the BTN_B frame.
+    //
+    // Timing note: ShouldActorUpdate sees followerStateFrames from the PREVIOUS
+    // OnGameFrameUpdate (one frame before the next increment).  BTN_B is injected
+    // when followerStateFrames % 20 == 0, which corresponds to frame 1, 21, 41
+    // inside the ATTACK state after the next increment. The sword swing takes
+    // ~20 frames, matching the cycle period.
+    {
+        static HOOK_ID followerAnimHookId = 0;
+        GameInteractor::Instance->UnregisterGameHook<GameInteractor::ShouldActorUpdate>(followerAnimHookId);
+        followerAnimHookId = 0;
+        if (isConnected) {
+            followerAnimHookId = GameInteractor::Instance->RegisterGameHook<GameInteractor::ShouldActorUpdate>(
+                [&](void* refActor, bool* should) {
+                    (void)should; // we never block; only inject input
+                    if (!followerActive)        { return; }
+                    if (gPlayState == nullptr)  { return; }
+                    Actor* actor = static_cast<Actor*>(refActor);
+                    if (actor->id != ACTOR_PLAYER) { return; }
+
+                    this->TickFollowerInput(actor);
+                });
+        }
     }
 }
