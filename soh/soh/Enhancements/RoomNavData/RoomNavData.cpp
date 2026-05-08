@@ -35,6 +35,7 @@
 // and updates the per-navigator stuck-on-slope counter.
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
+#include "soh/Network/Anchor/Common/ActorTrail.h"  // breadcrumb overlay (DebugDraw)
 #include "soh/ObjectExtension/ObjectExtension.h"
 
 #include <libultraship/bridge.h>
@@ -3107,6 +3108,28 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
     for (const Vec3f& pos : data->rejectedFloorPositions) {
         AddCrossMarker(sXluDl, sVtxDl, pos);
     }
+
+    // ActorTrail breadcrumbs — hot pink/magenta vertical posts (kTrailMarkerHeight
+    // tall) at every captured waypoint in the current scene. Distinct hue from
+    // every nav-graph colour (yellow climb, lavender ledge, cyan crawlspace,
+    // green drop, red hazard, gray orphan) so trail markers don't blend with
+    // static graph geometry.
+    //
+    // Snapshot is filtered to the current scene at copy time (cross-scene
+    // waypoints are stale and would just clutter the overlay). When the
+    // ActorTrail master CVar (Nav.Enabled + Nav.ActorTrail) is off, the trail
+    // map is empty and the snapshot returns nothing — no per-frame cost.
+    constexpr float kTrailMarkerHeight = 20.0f;
+    static thread_local std::vector<AnchorNav::ActorTrail::WaypointSnapshot> sTrailSnapshot;
+    AnchorNav::ActorTrail::GetInstance().SnapshotActiveWaypoints(
+        gPlayState->sceneNum, sTrailSnapshot);
+    if (!sTrailSnapshot.empty()) {
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0x20, 0xC0, 0xFF));
+        for (const auto& wp : sTrailSnapshot) {
+            Vec3f topPos = { wp.pos.x, wp.pos.y + kTrailMarkerHeight, wp.pos.z };
+            AddVerticalPost(sXluDl, sVtxDl, wp.pos, topPos);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3187,6 +3210,12 @@ static void OnDebugDrawRender() {
     // actual usage is bounded tighter; reserves are additive across groups
     // for forward-compat with parallel workstreams that may add their own
     // groups.
+    // ActorTrail breadcrumb upper bound — kMaxWaypoints (64) per entity ×
+    // peak entity set (~8 = local player + remote DummyPlayers + AI Follower
+    // + synced enemies with leavesTrail=true). Each marker is a 2-quad
+    // vertical post → 8 verts + 2 Gfx commands. Reserve slop is fine; the
+    // capacity-overshoot is a one-time scene-change allocation.
+    constexpr size_t kMaxTrailWaypointsForReserve = 64 * 8;
     sVtxDl.reserve(data->nodes.size() * 4
                    + data->nodes.size() * 4 // orphan group
                    + data->edges.size() * 4
@@ -3196,7 +3225,8 @@ static void OnDebugDrawRender() {
                    + data->crawlspaceAnchors.size() * 8  // entry quad + direction line
                    + data->dropAnchors.size() * 16    // drop: 2 ground quads + 2 perp posts
                    + data->hazardCentroids.size() * 4
-                   + data->rejectedFloorPositions.size() * 8);
+                   + data->rejectedFloorPositions.size() * 8
+                   + kMaxTrailWaypointsForReserve * 8);
     // Gfx commands: 2 per node-quad / edge-quad / hazard-centroid quad; 8
     // per climb anchor (2 ground quads + 4 vertical-post quad pairs); 4 per
     // rejected-floor cross (2 quads); 64 for setup + fixed per-color-group
@@ -3212,6 +3242,7 @@ static void OnDebugDrawRender() {
                    + data->climbAnchors.size() * 4 // climb-flag overlay (2 nodes × 2 Gfx)
                    + data->ledgeAnchors.size() * 8  // ledge: same shape as climb anchor
                    + data->crawlspaceAnchors.size() * 4  // entry quad + direction line
+                   + kMaxTrailWaypointsForReserve * 2 + 1  // trail posts: 2 Gfx each + 1 PrimColor
                    + data->dropAnchors.size() * 8    // drop: same shape as ledge
                    + data->hazardCentroids.size() * 2
                    + data->rejectedFloorPositions.size() * 4
