@@ -995,6 +995,15 @@ class Anchor : public Network {
     // happen via stick + button injection on input[0].
     void TickFollowerInput(Actor* actor);
 
+    // Per-state handlers — peeled off TickFollower's switch (Phase 1
+    // commit 6+ of the SRP refactor). Each handler reads/writes
+    // Anchor:: state directly through `this` and takes explicit
+    // parameters for parent-function locals it needs (e.g., player,
+    // p2Pos). Future commits in Phase 1 add more handlers; eventually
+    // TickFollower's switch becomes a thin dispatcher.
+    void HandleStateStandby();
+    void HandleStateBlock(Player* player, const Vec3f& p2Pos);
+
     // Pillar C2 Phase 4 — phase-specific senders for the unified
     // ENEMY_STATE wire packet. All four emit type=ENEMY_STATE with the
     // matching phase tag; bodies live in EnemyStateSync/Packets/EnemyState.cpp.

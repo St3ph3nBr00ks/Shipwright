@@ -128,6 +128,33 @@ void TickFollower(FollowerFrameContext& /*ctx*/) {
 } // namespace AnchorFollower
 
 // ---------------------------------------------------------------------------
+// File-scope tunables and helpers shared between TickFollower and the
+// per-state handler methods peeled off in Phase 1 commit 6+. Promoted
+// from local statics inside the original TickFollower lambda. Anonymous
+// namespace gives internal linkage so symbols don't leak to other TUs.
+// Values must stay in sync with their counterparts elsewhere — the
+// tunables-cleanup commit folds the in-TickFollower locals away once
+// every state has been peeled into its own helper.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Yaw toward (dx, dz). Math_Atan2S(z, x) per OoT convention. Was a local
+// lambda inside TickFollower; promoted to file scope so per-state handlers
+// (HandleStateBlock, future HandleStateAttack/Engage/etc.) can call it
+// without re-declaring or capturing.
+inline s16 YawToward(f32 dx, f32 dz) {
+    return Math_Atan2S(dz, dx); // z first, x second — OoT convention
+}
+
+// Frames per ATTACK / BLOCK / STANDBY cycle. Was `static constexpr int
+// kAttackDuration = 60` inside TickFollower; promoted so per-state
+// handlers reference the same value.
+static constexpr int kAttackDuration = 60;
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
 // Anchor:: follower-specific member implementations. Declarations stay in
 // Anchor.h; bodies relocated here from HookHandlers.cpp per Phase 1
 // commit 2 of the SRP refactor (#173 / #169). Behaviour preserved
@@ -455,7 +482,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 static constexpr int kStuckCheckInterval = 20;     // frames between stuck checks
                 static constexpr f32 kStuckMinProgress   = 5.0f;   // min units per check interval
                 static constexpr int kStuckRecovery      = 25;     // frames of strafe before retry
-                static constexpr int kAttackDuration     = 60;     // frames per ATTACK cycle
+                // kAttackDuration moved to file-scope anonymous namespace
+                // (Phase 1 commit 6) so per-state handlers can reference it.
                 // G10 — leash-timeout teleport thresholds.
                 static constexpr f32 kTeleportThreshold   = 1200.0f; // sustained XZ overrun that triggers teleport
                 static constexpr int kTeleportDelayFrames = 120;     // ~2s at 60fps; debounces brief overshoots
@@ -805,10 +833,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     ? leaderPos
                     : Vec3f{ leaderPos.x + kFollowOffset, leaderPos.y, leaderPos.z };
 
-                // Yaw toward (dx, dz).  Math_Atan2S(x, y) with OoT param order.
-                auto YawToward = [](f32 dx, f32 dz) -> s16 {
-                    return Math_Atan2S(dz, dx); // z first, x second — OoT convention
-                };
+                // YawToward moved to file-scope anonymous namespace
+                // (Phase 1 commit 6) so per-state handlers can call it.
 
                 // Bug B (log 69) — cross-room teleport helper. Plain
                 // world.pos=leaderPos teleports do not update OoT's
@@ -1949,28 +1975,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     // (no stick) so Link plants the shield. Returns to ENGAGE
                     // when target leaves the reflect-class window or is defeated.
                     case FollowerAIState::BLOCK: {
-                        if (followerTargetEnemy == nullptr ||
-                            followerTargetEnemy->update == nullptr) {
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] BLOCK→RETURN (target gone)");
-                            break;
-                        }
-                        // shape.rot.y points at target so the shield faces the
-                        // incoming projectile. Position is held by zeroed stick
-                        // (see ShouldActorUpdate isMoving exclusion).
-                        f32 ex = followerTargetEnemy->world.pos.x - p2Pos.x;
-                        f32 ez = followerTargetEnemy->world.pos.z - p2Pos.z;
-                        if (ex * ex + ez * ez > 1.0f) {
-                            player->actor.shape.rot.y = YawToward(ex, ez);
-                        }
-                        // Hold the shield for kAttackDuration frames per cycle,
-                        // then drop to ATTACK to swing on the (now-stunned) scrub.
-                        if (followerStateFrames >= kAttackDuration) {
-                            followerAIState     = FollowerAIState::ATTACK;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] BLOCK→ATTACK (shield cycle complete)");
-                        }
+                        // Body extracted to Anchor::HandleStateBlock
+                        // (Phase 1 commit 6 of the SRP refactor).
+                        HandleStateBlock(player, p2Pos);
                         break;
                     }
 
@@ -2024,11 +2031,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     // Reserved — placeholder for G19 (Gohma weak-point window).
                     // No transitions wired today; ENGAGE never picks STANDBY.
                     case FollowerAIState::STANDBY: {
-                        if (followerStateFrames >= kAttackDuration) {
-                            followerAIState     = FollowerAIState::ENGAGE;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] STANDBY→ENGAGE (window expired)");
-                        }
+                        // Body extracted to Anchor::HandleStateStandby
+                        // (Phase 1 commit 6 of the SRP refactor).
+                        HandleStateStandby();
                         break;
                     }
 
@@ -2777,4 +2782,54 @@ void Anchor::TickFollowerInput(Actor* actor) {
                         // above fires reliably once draw completes, so the
                         // A-press backup isn't needed.
                     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-state handlers (Phase 1 commit 6+) — peeled off TickFollower's switch.
+// Each handler reads / writes Anchor:: state directly through `this` and takes
+// explicit parameters for parent-function locals it needs (player, p2Pos,
+// etc.). Handlers don't see the lambda-locals (leaderPos / leaderActor /
+// distToLeader) unless explicitly passed. Future commits expand the set as
+// more states are extracted.
+// ---------------------------------------------------------------------------
+
+void Anchor::HandleStateStandby() {
+    // STANDBY: hold position for kAttackDuration frames, then drop to
+    // ENGAGE so the next swing fires. Reserved for the G19 Gohma weak-
+    // point window; currently entered only as a placeholder. No locals
+    // from TickFollower required.
+    if (followerStateFrames >= kAttackDuration) {
+        followerAIState     = FollowerAIState::ENGAGE;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] STANDBY→ENGAGE (window expired)");
+    }
+}
+
+void Anchor::HandleStateBlock(Player* player, const Vec3f& p2Pos) {
+    // BLOCK: shield up, faces the incoming projectile. Used against
+    // Mad Scrub (En_Dekunuts) deku-nut shots to reflect them. Holds for
+    // kAttackDuration frames per cycle, then drops to ATTACK to swing
+    // on the (now-stunned) scrub. Bails to RETURN if target despawns.
+    if (followerTargetEnemy == nullptr ||
+        followerTargetEnemy->update == nullptr) {
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] BLOCK→RETURN (target gone)");
+        return;
+    }
+    // shape.rot.y points at target so the shield faces the incoming
+    // projectile. Position is held by zeroed stick (see TickFollowerInput
+    // isMoving exclusion).
+    f32 ex = followerTargetEnemy->world.pos.x - p2Pos.x;
+    f32 ez = followerTargetEnemy->world.pos.z - p2Pos.z;
+    if (ex * ex + ez * ez > 1.0f) {
+        player->actor.shape.rot.y = YawToward(ex, ez);
+    }
+    // Hold the shield for kAttackDuration frames per cycle, then drop
+    // to ATTACK to swing on the (now-stunned) scrub.
+    if (followerStateFrames >= kAttackDuration) {
+        followerAIState     = FollowerAIState::ATTACK;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] BLOCK→ATTACK (shield cycle complete)");
+    }
 }
