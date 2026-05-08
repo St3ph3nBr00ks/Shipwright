@@ -2012,6 +2012,18 @@ void SohMenu::AddMenuEnhancements() {
             "alive there respawn at the trail-derived position the player last engaged them "
             "at instead of the vanilla home.pos default."));
 
+    AddWidget(path, "Room Nav Consumer (Layer 3)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.RoomNavConsumer"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, ActorTrail's GetBestReachableSubgoal extends from a 2-source search "
+            "(direct + trail breadcrumbs) to a 3-source search by adding the pre-scanned "
+            "Room Nav Data graph as Layer 3 fallback. Cold-spawned navigators (no trail) "
+            "and idle scenes (target hasn't moved enough to leave a useful trail) gain a "
+            "static-graph subgoal instead of returning the unreachable target. Implicitly "
+            "requires Room Nav Data → Enabled."));
+
     AddWidget(path, "Room Nav Data", WIDGET_SEPARATOR_TEXT);
     AddWidget(path, "Enabled##RoomNavData", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.Enabled"))

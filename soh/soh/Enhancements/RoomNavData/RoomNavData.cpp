@@ -183,20 +183,91 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos) {
 }
 
 int FindBestReachableSubgoalNode(const RoomNavData* data,
-                                  int /*fromIdx*/,
-                                  const Vec3f& /*targetPos*/) {
-    if (data == nullptr) {
+                                  int fromIdx,
+                                  const Vec3f& targetPos) {
+    if (data == nullptr || data->nodes.empty() || data->edges.empty()) {
         return -1;
     }
-    // Phase 2 (commit 9 — nav system integration) implements the
-    // hazard-aware BFS per plan §10 (kHazardEscapeHops = 2 + fallback to
-    // FindNearestNonHazardExit). Requires NavTraits flags
-    // (eligibleForSwimming / avoidHazardNodes / consumeRoomNavData) which
-    // land in Phase 2 commit 10. Until those flags exist, this stub
-    // returns -1 unconditionally — consumers (GetBestReachableSubgoal
-    // Layer 3) treat that as "no static graph available" and fall
-    // through to other layers per nav plan §5.
-    return -1;
+    if (fromIdx < 0 || (size_t)fromIdx >= data->nodes.size()) {
+        return -1;
+    }
+
+    // v1 baseline (per room_nav_data_plan.md §9): closest-to-target reachable
+    // walkable node via BFS through edges. Conservative defaults this commit:
+    // skip NODE_UNDERWATER, NODE_HAZARD, NODE_ORPHANED, NODE_STEEP_SLOPE.
+    // Commit 10 promotes Underwater/Hazard skip-decisions to per-actor
+    // NavTraits flags (eligibleForSwimming, avoidHazardNodes); the
+    // hazard-aware BFS with kHazardEscapeHops + FindNearestNonHazardExit
+    // fallback (plan §10) lands then. Steep-slope nodes are transient
+    // pass-through markers and never valid destinations regardless of
+    // traits.
+    constexpr uint16_t kRejectFlagsBase =
+        NODE_UNDERWATER | NODE_HAZARD | NODE_ORPHANED | NODE_STEEP_SLOPE;
+
+    // Build sparse adjacency on the fly (same pattern as IsReachable).
+    // Bidirectional traversal — each NavEdge is stored once.
+    std::vector<std::vector<uint16_t>> adjacency(data->nodes.size());
+    for (const NavEdge& e : data->edges) {
+        if (e.fromIdx >= data->nodes.size() || e.toIdx >= data->nodes.size()) continue;
+        adjacency[e.fromIdx].push_back(e.toIdx);
+        adjacency[e.toIdx].push_back(e.fromIdx);
+    }
+
+    auto distSqToTarget = [&](const Vec3f& p) {
+        float dx = p.x - targetPos.x;
+        float dy = p.y - targetPos.y;
+        float dz = p.z - targetPos.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+
+    // Progress filter: chosen subgoal must improve distance-to-target
+    // strictly over the navigator's starting node. Without this, an
+    // unreachable target (target on the other side of a wall the BFS can't
+    // cross) would trivially return fromIdx itself — the navigator would
+    // freeze. With the filter, no-improvement returns -1 and the caller
+    // falls through to the next layer.
+    const float fromDistSq = distSqToTarget(data->nodes[(size_t)fromIdx].pos);
+
+    std::vector<bool> visited(data->nodes.size(), false);
+    std::deque<uint16_t> q;
+    visited[(size_t)fromIdx] = true;
+    q.push_back((uint16_t)fromIdx);
+
+    int   bestIdx    = -1;
+    float bestDistSq = fromDistSq;  // strict improvement required
+
+    while (!q.empty()) {
+        uint16_t cur = q.front();
+        q.pop_front();
+
+        const NavNode& node = data->nodes[cur];
+
+        // Walkable + reject-mask gate. fromIdx itself participates so an
+        // already-on-an-orphan starting node still seeds the BFS, but the
+        // strict-improvement comparison below skips selecting it.
+        const bool isWalkable = (node.flags & NODE_WALKABLE) != 0;
+        const bool isRejected = (node.flags & kRejectFlagsBase) != 0;
+        if (isWalkable && !isRejected) {
+            float d = distSqToTarget(node.pos);
+            if (d < bestDistSq) {
+                bestDistSq = d;
+                bestIdx    = (int)cur;
+            }
+        }
+
+        for (uint16_t nb : adjacency[cur]) {
+            if (nb >= visited.size()) continue;
+            if (visited[nb]) continue;
+            // Don't traverse THROUGH orphan nodes — defensive belt; orphan
+            // edges to non-orphan nodes shouldn't exist after orphan
+            // detection (commit 7158c2664) but guard anyway.
+            if (data->nodes[nb].flags & NODE_ORPHANED) continue;
+            visited[nb] = true;
+            q.push_back(nb);
+        }
+    }
+
+    return bestIdx;
 }
 
 bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toPos) {
