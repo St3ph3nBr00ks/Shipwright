@@ -208,7 +208,9 @@ static void OnFrameTick() {
     }
 
     // First-frame-of-session setup. Records the start time and clears
-    // counters; subsequent frames keep accumulating.
+    // counters; subsequent frames keep accumulating. Triggers the warp
+    // to the initial cursor immediately — without this, the advance-
+    // then-warp loop below skips the user-provided starting entrance.
     if (!sSessionInitialized) {
         sSessionInitialized = true;
         sSessionStartMs = NowMs();
@@ -219,6 +221,10 @@ static void OnFrameTick() {
         SPDLOG_INFO("[AutoTraverse] Session start: cursor={} max={} step=4 (entrance-group stride)",
                     initialCursor, maxEntrance);
         WriteStateFile(initialCursor, maxEntrance, "starting");
+        // Trigger the first warp (cursor as-is). Subsequent ticks advance
+        // by step 4 and warp to the next primary entrance.
+        TriggerEntranceLoad(initialCursor);
+        return;
     }
 
     if (sInFlight) {
