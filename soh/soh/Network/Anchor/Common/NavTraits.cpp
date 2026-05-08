@@ -105,17 +105,48 @@ static NavTraits MakeFollowerTraits() {
     //   - Sticky targeting helps follower commit to a leader / enemy
     //     across frames.
     //   - Trail enabled so other navigators can chase a follower if needed.
-    //   - Link-rigged: eligible to swim through Underwater nodes when
-    //     Layer 3 routes a path under water. Adult Link can swim; child
-    //     Link cannot dive but can wade — at the resolution of the room
-    //     graph (~30 cells) this distinction isn't represented and
-    //     enabling swimming for the follower is the safe default.
+    //   - Link-rigged: eligible to swim through Underwater nodes.
+    //   - Jump distance: 110u — adult Link broad-jump is ~120u; child
+    //     somewhat less. 110 is a reasonable midpoint.
     NavTraits t = {};
     t.eligibleForLeashRespawn = false;
     t.useStickyTargeting      = true;
     t.targetStickyFrames      = 180;
     t.eligibleForSwimming     = true;
     t.leavesTrail             = true;
+    t.maxJumpDistance         = 110;
+    return t;
+}
+
+// Athletic melee — Stalfos, Wolfos. Long stride; commits to charges
+// across small gaps.
+static NavTraits MakeAthleticMeleeTraits() {
+    NavTraits t = {};
+    t.maxJumpDistance = 130;
+    return t;
+}
+
+// Heavy / armoured — Iron Knuckle. Slow, plodding; minimal jump
+// capability. Should usually fail JumpAcross and divert via PathAround.
+static NavTraits MakeHeavyMeleeTraits() {
+    NavTraits t = {};
+    t.maxJumpDistance = 50;
+    return t;
+}
+
+// Slow shamblers — Stalchild, Redead. Don't really jump; small step-up
+// distance to let them catch low ledges but no broad-jump.
+static NavTraits MakeShamblerTraits() {
+    NavTraits t = {};
+    t.maxJumpDistance = 60;
+    return t;
+}
+
+// Acrobat — Tektite. Specifically designed to leap on water/lava,
+// makes wide hops a natural part of pursuit.
+static NavTraits MakeAcrobatTraits() {
+    NavTraits t = {};
+    t.maxJumpDistance = 200;
     return t;
 }
 
@@ -139,6 +170,22 @@ static const std::unordered_map<s16, NavTraits>& GetOverrides() {
 
         // AI Follower (DummyPlayer-derived).
         { ACTOR_EN_OE2,      MakeFollowerTraits() },
+
+        // maxJumpDistance overrides per enemy type. Defaults are 100u;
+        // overrides are educated guesses pending field-test validation.
+        // Athletic melee (130u): wide stride, commits to short charges.
+        { ACTOR_EN_TEST,     MakeAthleticMeleeTraits() },  // Stalfos
+        { ACTOR_EN_WF,       MakeAthleticMeleeTraits() },  // Wolfos
+
+        // Heavy / armoured (50u): minimal jump.
+        { ACTOR_EN_IK,       MakeHeavyMeleeTraits() },     // Iron Knuckle
+
+        // Slow shamblers (60u).
+        { ACTOR_EN_SKB,      MakeShamblerTraits() },       // Stalchild
+        { ACTOR_EN_RD,       MakeShamblerTraits() },       // ReDead / Gibdo
+
+        // Acrobat (200u): naturally leaps wide gaps.
+        { ACTOR_EN_TITE,     MakeAcrobatTraits() },        // Tektite
     };
     return kOverrides;
 }

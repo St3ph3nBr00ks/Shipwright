@@ -30,6 +30,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 extern "C" {
 #include "z64.h"
@@ -58,10 +59,25 @@ struct JumpResolutionResult {
     JumpResolution kind        = JumpResolution::SafeTerrain;
     Vec3f          landingPos  = { 0, 0, 0 }; // valid for JumpAcross, TrailContinues
     Vec3f          retreatPos  = { 0, 0, 0 }; // valid for Retreat
+    // PathAround: caller can adopt this directly into its own NavPath.
+    // Excludes the navigator's current node (already there); ordered
+    // first-to-last; ends near targetPos. Empty for non-PathAround
+    // outcomes.
+    std::vector<Vec3f> pathAround;
 };
 
 // Evaluates whether `navigator` can safely commit to walking toward
 // `desiredStepPos`. See JumpResolution enum for the five outcomes.
+//
+// Recommended activation point: invoke when the navigator is about to
+// advance its NavPath cursor onto a non-walkable cell — i.e., when the
+// next subgoal in the path would have it stepping off a ledge. NOT every
+// frame. Typical pattern:
+//
+//     if (path.Empty() || nextSubgoalIsNonWalkable) {
+//         auto r = ResolveLedgeAhead(...);
+//         dispatch on r.kind;
+//     }
 //
 // Parameters:
 //   navigator       — the AI doing the pursuing.
@@ -73,16 +89,21 @@ struct JumpResolutionResult {
 //   targetKey       — TrailKey identifying `targetPos`'s trail (for
 //                     the breadcrumb fallback). Pass
 //                     TrailKeyForPlayer/TrailKeyForActor as appropriate.
+//   navigatorKey    — TrailKey identifying `navigator`'s OWN trail (for
+//                     the Retreat fallback — retreats to the navigator's
+//                     oldest valid trail waypoint when available). Pass 0
+//                     to fall back to navigator->home.pos directly.
 //   play            — current PlayState.
 //
 // Cost: 1 floor raycast (the SafeTerrain check) on the happy path.
-// Worst case (Retreat): ~5-7 forward floor raycasts + O(N) trail walk
-// + 1 BFS reachability call. Suitable for per-step (not per-frame)
-// invocation; throttle by calling only when a step is about to commit.
+// Worst case (Retreat): forward fan of (5 distances × 3 angles)
+// raycasts + horizontal line-clear tests + O(N) trail walk + 1 BFS
+// path search. Suitable for per-step (not per-frame) invocation.
 JumpResolutionResult ResolveLedgeAhead(const Actor* navigator,
                                         const Vec3f& targetPos,
                                         const Vec3f& desiredStepPos,
                                         TrailKey     targetKey,
+                                        TrailKey     navigatorKey,
                                         PlayState* play);
 
 } // namespace AnchorNav
