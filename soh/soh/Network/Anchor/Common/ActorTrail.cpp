@@ -176,6 +176,22 @@ void ActorTrail::Tick(PlayState* play) {
 // Read APIs.
 // ---------------------------------------------------------------------------
 
+void ActorTrail::SnapshotActiveWaypoints(int16_t sceneFilter,
+                                          std::vector<WaypointSnapshot>& out) const {
+    out.clear();
+    for (const auto& [key, trail] : mTrails) {
+        for (size_t i = 0; i < trail.count; ++i) {
+            // Iterate newest→oldest. Overlay consumers can ignore order if
+            // they don't care; the ordering is just a side-effect of the
+            // ring-buffer layout.
+            size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
+            const TrailWaypoint& wp = trail.waypoints[idx];
+            if (wp.sceneNum != sceneFilter) continue;
+            out.push_back({key, wp.pos});
+        }
+    }
+}
+
 bool ActorTrail::GetWaypointBefore(TrailKey key, uint32_t framesAgo, TrailWaypoint& out) const {
     auto it = mTrails.find(key);
     if (it == mTrails.end() || it->second.count == 0) return false;

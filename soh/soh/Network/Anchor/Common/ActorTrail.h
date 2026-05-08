@@ -28,6 +28,7 @@
 #include <array>
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
 
 extern "C" {
 #include "z64.h"
@@ -105,6 +106,19 @@ public:
     bool GetBestReachableSubgoalForActor(uint32_t netId, const Actor* navigator,
                                           const Vec3f& targetPos, PlayState* play,
                                           Vec3f& out) const;
+
+    // Diagnostic: snapshot every captured waypoint whose sceneNum matches
+    // `sceneFilter` into `out`. Used by the DebugDraw overlay so the
+    // overlay doesn't need access to internal storage. Filter is required
+    // because cross-scene waypoints aren't navigable from the current
+    // scene anyway and would just clutter the overlay. Output is cleared
+    // before append.
+    struct WaypointSnapshot {
+        TrailKey key;
+        Vec3f    pos;
+    };
+    void SnapshotActiveWaypoints(int16_t sceneFilter,
+                                  std::vector<WaypointSnapshot>& out) const;
 
     // Lifecycle.
     void ClearForKey(TrailKey key);
