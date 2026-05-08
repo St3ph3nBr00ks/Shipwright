@@ -186,6 +186,41 @@ void ActorTrail::Tick(PlayState* play) {
 // Read APIs.
 // ---------------------------------------------------------------------------
 
+bool ActorTrail::FindTrailWaypointBeyondGap(TrailKey key,
+                                              const Vec3f& referencePos,
+                                              float maxGapDistance,
+                                              const Vec3f& targetPos,
+                                              Vec3f& outLanding) const {
+    auto it = mTrails.find(key);
+    if (it == mTrails.end() || it->second.count == 0) return false;
+
+    const EntityTrail& trail = it->second;
+    auto distSq = [](const Vec3f& a, const Vec3f& b) {
+        float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+    const float maxGapSq      = maxGapDistance * maxGapDistance;
+    const float refToTargetSq = distSq(referencePos, targetPos);
+
+    // Walk newest→oldest. Newest match wins because it's the freshest
+    // evidence of where target actually went.
+    for (size_t i = 0; i < trail.count; i++) {
+        size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
+        const TrailWaypoint& wp = trail.waypoints[idx];
+
+        // Stale filter (matches GetBestReachableSubgoal — 12s).
+        if (mFrameCounter > wp.frameIdx && (mFrameCounter - wp.frameIdx) > 720) continue;
+        // Within jump range of reference?
+        if (distSq(wp.pos, referencePos) > maxGapSq) continue;
+        // Strict progress: closer to target than referencePos.
+        if (distSq(wp.pos, targetPos) >= refToTargetSq) continue;
+
+        outLanding = wp.pos;
+        return true;
+    }
+    return false;
+}
+
 void ActorTrail::SnapshotActiveWaypoints(int16_t sceneFilter,
                                           std::vector<WaypointSnapshot>& out) const {
     out.clear();

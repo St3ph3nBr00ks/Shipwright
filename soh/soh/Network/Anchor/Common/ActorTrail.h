@@ -168,6 +168,23 @@ public:
                        PlayState* play,
                        NavPath& out) const;
 
+    // Find any captured waypoint of `key`'s trail that lies within
+    // `maxGapDistance` of `referencePos` AND closer to `targetPos` than
+    // `referencePos` is. Used by JumpResolver to detect when a target's
+    // own breadcrumbs offer evidence the gap was crossed (target was
+    // there → there's likely walkable ground there → navigator can
+    // jump there too).
+    //
+    // Walks newest→oldest. The first matching waypoint wins (newest =
+    // freshest evidence of where target went). Stale waypoints (>12s
+    // old, matching GetBestReachableSubgoal's filter) are excluded.
+    // Returns true and populates `outLanding` on hit; false otherwise.
+    bool FindTrailWaypointBeyondGap(TrailKey key,
+                                     const Vec3f& referencePos,
+                                     float maxGapDistance,
+                                     const Vec3f& targetPos,
+                                     Vec3f& outLanding) const;
+
     // Diagnostic: snapshot every captured waypoint whose sceneNum matches
     // `sceneFilter` into `out`. Used by the DebugDraw overlay so the
     // overlay doesn't need access to internal storage. Filter is required
