@@ -191,6 +191,50 @@ static constexpr int kStuckCheckInterval = 20;     // frames between progress ch
 static constexpr f32 kStuckMinProgress   = 5.0f;   // min units travelled per interval
 static constexpr int kStuckCycleWindow   = 300;    // G12 cycle-count reset window (frames)
 
+// Combat tunables for HandleStateEngage / HandleStateAttack.
+// kSwordVerticalReach — Link's effective vertical sword reach. Above this,
+// ranged-required enemies are routed to RANGED_ATTACK instead of ATTACK.
+// kSwingReach          — sword arc XZ reach. Standoff = attackRange - kSwingReach.
+static constexpr f32 kSwordVerticalReach = 40.0f;
+static constexpr f32 kSwingReach         = 50.0f;
+
+// Per-enemy combat policy (G4 / G6-G8). Promoted from TickFollower-local
+// arrays so HandleStateEngage / HandleStateAttack can reach them.
+//   kShieldReflectEnemyIds — ENGAGE routes to BLOCK (shield reflect).
+//   kRangedRequiredEnemyIds — ENGAGE routes to RANGED_ATTACK when target
+//                             is also above kSwordVerticalReach.
+static constexpr s16 kShieldReflectEnemyIds[] = { ACTOR_EN_DEKUNUTS };
+static constexpr s16 kRangedRequiredEnemyIds[] = {
+    ACTOR_BOSS_GOMA, // Queen Gohma — ceiling phase
+    ACTOR_EN_GOMA,   // Gohma larvae on the ceiling
+    ACTOR_EN_SW,     // Skullwalltula on a wall vine
+    ACTOR_EN_ST,     // Skulltula hanging from ceiling
+};
+
+inline bool IsShieldReflectEnemy(s16 id) {
+    for (s16 e : kShieldReflectEnemyIds) { if (e == id) return true; }
+    return false;
+}
+
+inline bool IsRangedRequiredEnemy(s16 id) {
+    for (s16 e : kRangedRequiredEnemyIds) { if (e == id) return true; }
+    return false;
+}
+
+// Per-enemy attack-range override. Default kAttackRange (80) stops Link
+// at sword-tip contact, which walks the follower into the lunge arc of
+// enemies whose damage volume sits ahead of world.pos (Karebaba head,
+// Deku Baba stem-tip, Bari body-AoE). Promoted from a TickFollower-local
+// lambda; was [] empty-capture so the move is trivial.
+inline f32 GetAttackRangeForEnemy(s16 id) {
+    switch (id) {
+        case ACTOR_EN_KAREBABA: return 100.0f; // head lunges ~40 u
+        case ACTOR_EN_DEKUBABA: return  90.0f; // stem-tip head
+        case ACTOR_EN_VALI:     return 120.0f; // body AoE discharge
+        default:                return  80.0f; // kAttackRange
+    }
+}
+
 // Item filter — does the follower's character class want this drop?
 // Was a parent-function lambda with `[]` empty capture (no parent-state
 // dependencies); promoted to a file-scope free function so per-state
@@ -589,57 +633,11 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     for (s16 s : kBossScenes) { if (s == scene) return true; }
                     return false;
                 };
-                // G4 — enemies that require shield-reflect to defeat. ENGAGE routes
-                // to BLOCK instead of ATTACK when the target is one of these.
-                static constexpr s16 kShieldReflectEnemyIds[] = { ACTOR_EN_DEKUNUTS };
-                auto IsShieldReflectEnemy = [&](s16 id) -> bool {
-                    for (s16 e : kShieldReflectEnemyIds) { if (e == id) return true; }
-                    return false;
-                };
-                // G6/G7/G8 — enemies that require ranged attack (slingshot/bow).
-                // ENGAGE routes to RANGED_ATTACK when the target is one of these
-                // AND the target is above Link's sword vertical reach (see Fix 2,
-                // 2026-04-22). Previously gated on |Δy| >= kMaxYDelta=120, which
-                // was far too loose — Link's sword vertical reach is ~30 units,
-                // so a Skullwalltula at Δy=118 still slipped through into ATTACK
-                // and the follower swung at empty air for 60 frames (P2 log 67,
-                // 15:21:03).
-                static constexpr f32 kSwordVerticalReach = 40.0f;
-                static constexpr s16 kRangedRequiredEnemyIds[] = {
-                    ACTOR_BOSS_GOMA, // Queen Gohma — ceiling phase
-                    ACTOR_EN_GOMA,   // Gohma larvae on the ceiling
-                    ACTOR_EN_SW,     // Skullwalltula on a wall vine
-                    ACTOR_EN_ST,     // Skulltula hanging from ceiling on its thread (Fix 2)
-                };
-                auto IsRangedRequiredEnemy = [&](s16 id) -> bool {
-                    for (s16 e : kRangedRequiredEnemyIds) { if (e == id) return true; }
-                    return false;
-                };
-
-                // Bug D (combat upgrade) — per-enemy approach distance.
-                // Default kAttackRange (80) stops Link at sword-tip contact,
-                // which is fine for Stalfos-class melee but walks the
-                // follower straight into the lunge arc of enemies whose
-                // damage volume sits ahead of world.pos (Karebaba head,
-                // Deku Baba stem-tip, Bari body-AoE). Override per actor id.
-                // The override is used BOTH for ENGAGE→ATTACK admission and
-                // for the point-blank shield trigger (see SwingReach below).
-                auto GetAttackRangeForEnemy = [](s16 id) -> f32 {
-                    // Test 5 (log 71) tuning: user reported "10 units closer"
-                    // for Karebaba + Dekubaba — swings were reaching but
-                    // sword often whiffed because standoff put Link just
-                    // outside arc. Karebaba 110→100, Dekubaba 100→90.
-                    switch (id) {
-                        case ACTOR_EN_KAREBABA: return 100.0f; // head lunges ~40 u
-                        case ACTOR_EN_DEKUBABA: return  90.0f; // stem-tip head
-                        case ACTOR_EN_VALI:     return 120.0f; // body AoE discharge
-                        default:                return  80.0f; // kAttackRange
-                    }
-                };
-                // Sword arc reach — Link's effective swing distance. Inside
-                // this radius we switch to shield-up-between-swings; outside
-                // it, the follower walks forward during the swing-cycle gap.
-                static constexpr f32 kSwingReach = 50.0f;
+                // Combat helpers (IsShieldReflectEnemy, IsRangedRequiredEnemy,
+                // GetAttackRangeForEnemy) and constants (kShieldReflectEnemyIds,
+                // kRangedRequiredEnemyIds, kSwordVerticalReach, kSwingReach)
+                // moved to file-scope anonymous namespace (Phase 1 commit 12)
+                // so HandleStateEngage / HandleStateAttack can reach them.
 
                 // Item pickup — need-gated whitelist via shared helper
                 // (#193 Phase 0). Reserved for the human leader: progression
@@ -1435,237 +1433,16 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     }
 
                     case FollowerAIState::ENGAGE: {
-                        // Abandon if leader is too far or target is gone.
-                        {
-                            f32 ldx = leaderPos.x - p2Pos.x;
-                            f32 ldz = leaderPos.z - p2Pos.z;
-                            if (ldx * ldx + ldz * ldz > kMaxLeash * kMaxLeash) {
-                                followerAIState     = FollowerAIState::RETURN;
-                                followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] ENGAGE→RETURN (leader too far)");
-                                break;
-                            }
-                        }
-                        if (followerTargetEnemy == nullptr ||
-                            followerTargetEnemy->update == nullptr) {
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy gone)");
-                            break;
-                        }
-                        // Vertical-reach handling. Three layered checks:
-                        //  1. Cross-floor (|Δy| >= kMaxYDelta, 120 units): target
-                        //     is on a different logical level. If it's ranged-
-                        //     required, route to RANGED_ATTACK; otherwise bail.
-                        //  2. Above sword reach but same-floor (Δy > kSwordVerticalReach,
-                        //     40 units) AND ranged-required: route to RANGED_ATTACK.
-                        //     Fix 2 (2026-04-22) — before this check existed, a
-                        //     Skullwalltula at Δy=118 (just under kMaxYDelta) was
-                        //     routed to ATTACK and the follower whiffed for the
-                        //     full 60-frame cycle (P2 log 67, 15:21:03).
-                        //  3. Otherwise fall through to XZ close + ATTACK.
-                        // (Room-equality side of this check disabled — see banner note above.)
-                        {
-                            f32 dy = followerTargetEnemy->world.pos.y - p2Pos.y;
-                            if (fabsf(dy) >= kMaxYDelta) {
-                                if (IsRangedRequiredEnemy(followerTargetEnemy->id)) {
-                                    FollowerTryEquipRangedWeapon();
-                                    followerAIState     = FollowerAIState::RANGED_ATTACK;
-                                    followerStateFrames = 0;
-                                    SPDLOG_INFO("[Follower] ENGAGE→RANGED_ATTACK (off-floor target id={})",
-                                                followerTargetEnemy->id);
-                                    break;
-                                }
-                                followerAIState     = FollowerAIState::RETURN;
-                                followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] ENGAGE→RETURN (enemy off-floor)");
-                                break;
-                            }
-                            if (dy > kSwordVerticalReach &&
-                                IsRangedRequiredEnemy(followerTargetEnemy->id)) {
-                                FollowerTryEquipRangedWeapon();
-                                followerAIState     = FollowerAIState::RANGED_ATTACK;
-                                followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] ENGAGE→RANGED_ATTACK (above sword reach Δy={:.0f} target id={})",
-                                            dy, followerTargetEnemy->id);
-                                break;
-                            }
-                        }
-                        Vec3f enemyPos = followerTargetEnemy->world.pos;
-                        f32   edx      = enemyPos.x - p2Pos.x;
-                        f32   edz      = enemyPos.z - p2Pos.z;
-                        f32   distSq   = edx * edx + edz * edz;
-                        // Bug D — per-enemy attackRange keeps the follower
-                        // outside lunge arcs of enemies whose damage volume
-                        // sits ahead of world.pos.
-                        f32   attackRange = GetAttackRangeForEnemy(followerTargetEnemy->id);
-                        if (distSq < attackRange * attackRange) {
-                            // G4 — Mad Scrub class: shield first, then swing on
-                            // the stunned scrub. BLOCK→ATTACK is wired in BLOCK.
-                            if (IsShieldReflectEnemy(followerTargetEnemy->id)) {
-                                followerAIState     = FollowerAIState::BLOCK;
-                                followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] ENGAGE→BLOCK (shield-reflect target id={})",
-                                            followerTargetEnemy->id);
-                                break;
-                            }
-                            followerAIState     = FollowerAIState::ATTACK;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ENGAGE→ATTACK enemy=({:.0f},{:.0f},{:.0f}) dist={:.0f} "
-                                        "range={:.0f} id={}",
-                                        enemyPos.x, enemyPos.y, enemyPos.z, sqrtf(distSq),
-                                        attackRange, followerTargetEnemy->id);
-                            break;
-                        }
-                        // Every 20 frames log distance to enemy so we can see approach progress.
-                        if (followerStateFrames % 20 == 0) {
-                            SPDLOG_INFO("[Follower] ENGAGE progress: distToEnemy={:.0f} p2=({:.0f},{:.0f})",
-                                        sqrtf(distSq), p2Pos.x, p2Pos.z);
-                        }
-                        // Test 6 (log 74) — dangling Skulltula safety gap.
-                        // User: "AI Follower gets too close to dangling
-                        // Skulltulas and takes damage without waiting for
-                        // them to reveal their weak spot." En_St on the
-                        // ceiling drops on Link when he walks underneath;
-                        // without state-machine sync (#90 pending) the
-                        // follower can't tell if the Skulltula is safe to
-                        // approach. Keep a 150 u XZ safety gap for any
-                        // EN_ST target whose Y is well above the follower
-                        // (ceiling/wall mounted). Pulls the move target
-                        // back along the follower→enemy vector so Link
-                        // stops at 150 u XZ even though the slingshot
-                        // still has line-of-fire. ENGAGE→RANGED_ATTACK
-                        // admission distance (350 u) covers this.
-                        Vec3f navTarget = enemyPos;
-                        if (followerTargetEnemy->id == ACTOR_EN_ST) {
-                            f32 targetDy = enemyPos.y - p2Pos.y;
-                            if (targetDy > 40.0f) {
-                                // Test 7 (user): "extend 50 units" — 150→200
-                                // so follower stands further back and the
-                                // slingshot arc has a better downward angle
-                                // to the ground Skulltula vs a Link that
-                                // walked directly under it.
-                                static constexpr f32 kEnStSafeStandoffXZ = 200.0f;
-                                f32 distXZ = sqrtf(distSq);
-                                if (distXZ > kEnStSafeStandoffXZ) {
-                                    f32 shrink = (distXZ - kEnStSafeStandoffXZ) / distXZ;
-                                    navTarget.x = p2Pos.x + edx * shrink;
-                                    navTarget.z = p2Pos.z + edz * shrink;
-                                } else {
-                                    // Already inside safe gap — hold position
-                                    // so we don't drift closer.
-                                    navTarget.x = p2Pos.x;
-                                    navTarget.z = p2Pos.z;
-                                }
-                                navTarget.y = enemyPos.y;
-                            }
-                        }
-                        followerMoveTarget = navTarget;
-                        // Stick injection in ShouldActorUpdate drives actual movement.
-                        if (distSq > 1.0f) {
-                            player->actor.shape.rot.y = YawToward(edx, edz);
-                        }
+                        // Body extracted to Anchor::HandleStateEngage
+                        // (Phase 1 commit 12 of the SRP refactor).
+                        HandleStateEngage(player, leaderPos, p2Pos);
                         break;
                     }
 
                     case FollowerAIState::ATTACK: {
-                        if (followerTargetEnemy == nullptr ||
-                            followerTargetEnemy->update == nullptr) {
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy gone)");
-                            break;
-                        }
-                        // Task 3 — stop swinging when the target is defeated.
-                        // Two complementary signals because OoT doesn't have one
-                        // universal "dead" field:
-                        //   (a) colChkInfo.health <= 0 — catches actors that
-                        //       decrement their own health (Dekubaba, En_Ba,
-                        //       most bosses — ~14 overlays total).
-                        //   (b) EnemyNetId::hasLocalDeath / pendingNaturalDeath —
-                        //       covers the AC_HIT-only pattern (Karebaba,
-                        //       En_Firefly, En_St, most Phase-4A enemies) where
-                        //       health is initialised once in sColCheckInfoInit
-                        //       and never written again. Their death is signalled
-                        //       by the collision AC_HIT flag driving SetupDying,
-                        //       and our OnEnemyDefeat / HandlePacket_EnemyDefeated
-                        //       paths flip these flags on the EnemyNetId extension.
-                        // Initial Task 3 implementation used only (a) and was a
-                        // no-op for Karebaba (health stays at 1 through the entire
-                        // Dying cycle, P2 log 62 2026-04-21).
-                        bool targetDefeated = (followerTargetEnemy->colChkInfo.health <= 0);
-                        if (!targetDefeated) {
-                            const EnemyNetId* ext =
-                                ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
-                            if (ext != nullptr) {
-                                EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.A");
-                                if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
-                                    EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
-                                    targetDefeated = true;
-                                }
-                            }
-                        }
-                        if (targetDefeated) {
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy dead)");
-                            break;
-                        }
-                        // Room-equality side of this check disabled — see banner note above.
-                        if (/* followerTargetEnemy->room != player->actor.room || */
-                            fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ATTACK→RETURN (enemy off-floor)");
-                            break;
-                        }
-                        Vec3f enemyPos = followerTargetEnemy->world.pos;
-                        // Bug D — point followerMoveTarget at a standoff
-                        // offset from enemyPos instead of enemyPos itself.
-                        // Stopping radius is attackRange - kSwingReach:
-                        // sword can still reach (kSwingReach), but Link
-                        // holds outside the enemy's damage volume. For
-                        // Karebaba (range=110, swing=50), standoff is 60 u
-                        // from root — outside the head's lunge arc. For
-                        // Stalfos-class (range=80, swing=50), standoff is
-                        // 30 u — the original sword-tip contact distance.
-                        f32 attackRange = GetAttackRangeForEnemy(followerTargetEnemy->id);
-                        f32 standoff    = attackRange - kSwingReach;
-                        if (standoff < 20.0f) standoff = 20.0f; // sanity floor
-                        {
-                            f32 edx      = enemyPos.x - p2Pos.x;
-                            f32 edz      = enemyPos.z - p2Pos.z;
-                            f32 enemyDistSq = edx * edx + edz * edz;
-                            f32 enemyDist   = sqrtf(enemyDistSq);
-                            if (enemyDist > 1.0f) {
-                                // Move target = enemyPos pulled back toward
-                                // the follower by `standoff` units. Avoids
-                                // walking into the damage volume even while
-                                // the enemy walks toward us.
-                                f32 shrink = (enemyDist > standoff)
-                                             ? (enemyDist - standoff) / enemyDist
-                                             : 0.0f;
-                                followerMoveTarget.x = p2Pos.x + edx * shrink;
-                                followerMoveTarget.y = enemyPos.y;
-                                followerMoveTarget.z = p2Pos.z + edz * shrink;
-                            } else {
-                                followerMoveTarget = enemyPos;
-                            }
-                            if (followerStateFrames % 10 == 0) {
-                                SPDLOG_INFO("[Follower] ATTACK frame={} distToEnemy={:.0f} "
-                                            "standoff={:.0f} p2=({:.0f},{:.0f})",
-                                            followerStateFrames, enemyDist, standoff,
-                                            p2Pos.x, p2Pos.z);
-                            }
-                            if (enemyDistSq > 1.0f) {
-                                player->actor.shape.rot.y = YawToward(edx, edz);
-                            }
-                        }
-                        if (followerStateFrames >= kAttackDuration) {
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] ATTACK→RETURN (cycle complete)");
-                        }
+                        // Body extracted to Anchor::HandleStateAttack
+                        // (Phase 1 commit 12 of the SRP refactor).
+                        HandleStateAttack(player, p2Pos);
                         break;
                     }
 
@@ -2915,5 +2692,192 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
         followerAIState     = FollowerAIState::IDLE;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", dist);
+    }
+}
+
+void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos) {
+    // ENGAGE: walking toward the locked-on enemy. Bails to RETURN on
+    // leader leash exceed, target loss, or target on a different floor
+    // (unless ranged-required, then RANGED_ATTACK). When in attackRange,
+    // routes to ATTACK or BLOCK depending on enemy class.
+    //
+    // Abandon if leader is too far.
+    {
+        f32 ldx = leaderPos.x - p2Pos.x;
+        f32 ldz = leaderPos.z - p2Pos.z;
+        if (ldx * ldx + ldz * ldz > kMaxLeash * kMaxLeash) {
+            followerAIState     = FollowerAIState::RETURN;
+            followerStateFrames = 0;
+            SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RETURN (leader too far)");
+            return;
+        }
+    }
+    if (followerTargetEnemy == nullptr ||
+        followerTargetEnemy->update == nullptr) {
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RETURN (enemy gone)");
+        return;
+    }
+    // Vertical-reach handling. Three layered checks:
+    //  1. Cross-floor (|dy| >= kMaxYDelta): target on a different
+    //     logical level. If ranged-required, RANGED_ATTACK; else bail.
+    //  2. Above sword reach but same-floor (dy > kSwordVerticalReach)
+    //     AND ranged-required: route to RANGED_ATTACK.
+    //  3. Otherwise fall through to XZ close + ATTACK.
+    {
+        f32 dy = followerTargetEnemy->world.pos.y - p2Pos.y;
+        if (fabsf(dy) >= kMaxYDelta) {
+            if (IsRangedRequiredEnemy(followerTargetEnemy->id)) {
+                FollowerTryEquipRangedWeapon();
+                followerAIState     = FollowerAIState::RANGED_ATTACK;
+                followerStateFrames = 0;
+                SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RANGED_ATTACK (off-floor target id={})",
+                            followerTargetEnemy->id);
+                return;
+            }
+            followerAIState     = FollowerAIState::RETURN;
+            followerStateFrames = 0;
+            SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RETURN (enemy off-floor)");
+            return;
+        }
+        if (dy > kSwordVerticalReach &&
+            IsRangedRequiredEnemy(followerTargetEnemy->id)) {
+            FollowerTryEquipRangedWeapon();
+            followerAIState     = FollowerAIState::RANGED_ATTACK;
+            followerStateFrames = 0;
+            SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RANGED_ATTACK (above sword reach \xCE\x94y={:.0f} target id={})",
+                        dy, followerTargetEnemy->id);
+            return;
+        }
+    }
+    Vec3f enemyPos = followerTargetEnemy->world.pos;
+    f32   edx      = enemyPos.x - p2Pos.x;
+    f32   edz      = enemyPos.z - p2Pos.z;
+    f32   distSq   = edx * edx + edz * edz;
+    // Bug D - per-enemy attackRange keeps the follower outside lunge
+    // arcs of enemies whose damage volume sits ahead of world.pos.
+    f32   attackRange = GetAttackRangeForEnemy(followerTargetEnemy->id);
+    if (distSq < attackRange * attackRange) {
+        // G4 - Mad Scrub class: shield first, then swing on the stunned
+        // scrub. BLOCK->ATTACK is wired in BLOCK.
+        if (IsShieldReflectEnemy(followerTargetEnemy->id)) {
+            followerAIState     = FollowerAIState::BLOCK;
+            followerStateFrames = 0;
+            SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92BLOCK (shield-reflect target id={})",
+                        followerTargetEnemy->id);
+            return;
+        }
+        followerAIState     = FollowerAIState::ATTACK;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92ATTACK enemy=({:.0f},{:.0f},{:.0f}) dist={:.0f} "
+                    "range={:.0f} id={}",
+                    enemyPos.x, enemyPos.y, enemyPos.z, sqrtf(distSq),
+                    attackRange, followerTargetEnemy->id);
+        return;
+    }
+    if (followerStateFrames % 20 == 0) {
+        SPDLOG_INFO("[Follower] ENGAGE progress: distToEnemy={:.0f} p2=({:.0f},{:.0f})",
+                    sqrtf(distSq), p2Pos.x, p2Pos.z);
+    }
+    // Test 6 (log 74) - dangling Skulltula safety gap. Keep a 200u XZ
+    // standoff for any EN_ST target whose Y is well above the follower.
+    Vec3f navTarget = enemyPos;
+    if (followerTargetEnemy->id == ACTOR_EN_ST) {
+        f32 targetDy = enemyPos.y - p2Pos.y;
+        if (targetDy > 40.0f) {
+            static constexpr f32 kEnStSafeStandoffXZ = 200.0f;
+            f32 distXZ = sqrtf(distSq);
+            if (distXZ > kEnStSafeStandoffXZ) {
+                f32 shrink = (distXZ - kEnStSafeStandoffXZ) / distXZ;
+                navTarget.x = p2Pos.x + edx * shrink;
+                navTarget.z = p2Pos.z + edz * shrink;
+            } else {
+                navTarget.x = p2Pos.x;
+                navTarget.z = p2Pos.z;
+            }
+            navTarget.y = enemyPos.y;
+        }
+    }
+    followerMoveTarget = navTarget;
+    if (distSq > 1.0f) {
+        player->actor.shape.rot.y = YawToward(edx, edz);
+    }
+}
+
+void Anchor::HandleStateAttack(Player* player, const Vec3f& p2Pos) {
+    // ATTACK: 60-frame swing cycle (kAttackDuration). TickFollowerInput
+    // injects BTN_B / BTN_R / BTN_A on cadence; this method tracks pose,
+    // standoff target, and defeat / cycle-end transitions.
+    //
+    // Two-signal defeat check: colChkInfo.health <= 0 OR EnemyNetId
+    // phase predicates (handles AC_HIT-only enemies whose health stays
+    // at 1 through the whole death cycle).
+    if (followerTargetEnemy == nullptr ||
+        followerTargetEnemy->update == nullptr) {
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] ATTACK\xE2\x86\x92RETURN (enemy gone)");
+        return;
+    }
+    bool targetDefeated = (followerTargetEnemy->colChkInfo.health <= 0);
+    if (!targetDefeated) {
+        const EnemyNetId* ext =
+            ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
+        if (ext != nullptr) {
+            EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.A");
+            if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
+                EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
+                targetDefeated = true;
+            }
+        }
+    }
+    if (targetDefeated) {
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] ATTACK\xE2\x86\x92RETURN (enemy dead)");
+        return;
+    }
+    if (fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] ATTACK\xE2\x86\x92RETURN (enemy off-floor)");
+        return;
+    }
+    Vec3f enemyPos = followerTargetEnemy->world.pos;
+    // Bug D - point followerMoveTarget at a standoff offset from
+    // enemyPos. Stopping radius = attackRange - kSwingReach.
+    f32 attackRange = GetAttackRangeForEnemy(followerTargetEnemy->id);
+    f32 standoff    = attackRange - kSwingReach;
+    if (standoff < 20.0f) standoff = 20.0f; // sanity floor
+    {
+        f32 edx         = enemyPos.x - p2Pos.x;
+        f32 edz         = enemyPos.z - p2Pos.z;
+        f32 enemyDistSq = edx * edx + edz * edz;
+        f32 enemyDist   = sqrtf(enemyDistSq);
+        if (enemyDist > 1.0f) {
+            f32 shrink = (enemyDist > standoff)
+                         ? (enemyDist - standoff) / enemyDist
+                         : 0.0f;
+            followerMoveTarget.x = p2Pos.x + edx * shrink;
+            followerMoveTarget.y = enemyPos.y;
+            followerMoveTarget.z = p2Pos.z + edz * shrink;
+        } else {
+            followerMoveTarget = enemyPos;
+        }
+        if (followerStateFrames % 10 == 0) {
+            SPDLOG_INFO("[Follower] ATTACK frame={} distToEnemy={:.0f} "
+                        "standoff={:.0f} p2=({:.0f},{:.0f})",
+                        followerStateFrames, enemyDist, standoff,
+                        p2Pos.x, p2Pos.z);
+        }
+        if (enemyDistSq > 1.0f) {
+            player->actor.shape.rot.y = YawToward(edx, edz);
+        }
+    }
+    if (followerStateFrames >= kAttackDuration) {
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] ATTACK\xE2\x86\x92RETURN (cycle complete)");
     }
 }

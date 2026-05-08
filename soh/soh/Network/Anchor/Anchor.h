@@ -1010,6 +1010,8 @@ class Anchor : public Network {
     void HandleStateCollectItem(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);
     void HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sideTarget, const Vec3f& p2Pos);
     void HandleStateFollow(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos);
+    void HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);
+    void HandleStateAttack(Player* player, const Vec3f& p2Pos);
 
     // Helper for IDLE / FOLLOW state — scans ACTORCAT_MISC for an eligible
     // EN_ITEM00 drop the follower should engage. Maintains the
