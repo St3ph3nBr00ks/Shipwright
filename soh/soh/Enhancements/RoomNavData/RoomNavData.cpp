@@ -1923,6 +1923,27 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     }
 }
 
+// Auto-expand-on-exploration state. When the player walks into a cell
+// that wasn't visited by the last scan, we trigger a full rescan to
+// extend coverage. The seed-history persistence (RoomNavData::
+// historicalSeeds) ensures the rescan never LOSES coverage — it only
+// adds to it.
+//
+// Cooldown prevents rapid re-triggering when the player paces back
+// and forth across the visited/unvisited boundary. 600 frames = 10s.
+static int32_t sExpansionCooldown = 0;
+static constexpr int32_t kExpansionCooldownFrames = 600;
+
+// Per-room visited-cell cache. Built post-scan from the floodfill
+// `visited` set, or from disk-loaded node cellIdx fields. Used by
+// the auto-expand check to determine whether the player's current
+// cell has been scanned. Transient — never written to disk.
+//
+// Defined here (above RebuildVisitedCellsCache) so the helper can
+// reference it without forward-decl gymnastics.
+static std::unordered_map<uint32_t, std::unordered_set<CellKey, CellKeyHash>>
+    sVisitedCellsCache;
+
 // Top-level lookup-then-scan dispatch. Called once per (scene, room)
 // transition by OnGameFrameTick.
 // Build the visitedCells set for a room from its nodes. Each node's
@@ -2075,24 +2096,6 @@ static void TickStuckOnSlopeDetection(PlayState* play) {
 
 static int16_t sLastScene = -1;
 static int8_t  sLastRoom  = -1;
-
-// Auto-expand-on-exploration state. When the player walks into a cell
-// that wasn't visited by the last scan, we trigger a full rescan to
-// extend coverage. The seed-history persistence (RoomNavData::
-// historicalSeeds) ensures the rescan never LOSES coverage — it only
-// adds to it.
-//
-// Cooldown prevents rapid re-triggering when the player paces back
-// and forth across the visited/unvisited boundary. 600 frames = 10s.
-static int32_t sExpansionCooldown = 0;
-static constexpr int32_t kExpansionCooldownFrames = 600;
-
-// Per-room visited-cell cache. Built post-scan from the floodfill
-// `visited` set, or from disk-loaded node cellIdx fields. Used by
-// the auto-expand check to determine whether the player's current
-// cell has been scanned. Transient — never written to disk.
-static std::unordered_map<uint32_t, std::unordered_set<CellKey, CellKeyHash>>
-    sVisitedCellsCache;
 
 // Initial-scan delay state. When OnGameFrameTick detects a room change,
 // it doesn't trigger ScanRoom immediately — it queues the scan for
