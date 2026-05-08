@@ -138,6 +138,63 @@ void SohMenu::AddMenuDevTools() {
                      .DefaultValue(true));
     AddWidget(path, "Warp Points", WIDGET_CUSTOM).CustomFunction(WarpPointsWidget).HideInSearch(true);
 
+    // Scene Log / Auto-Traverse — one-click full-game data capture.
+    // See Plans/agent_brief_scenelog_completion.md for the full design.
+    AddWidget(path, "Scene Log", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Manifest Logging Enabled", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_DEVELOPER_TOOLS("SceneLog.Level"))
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Master toggle for the Scene Log system. When on (Level >= 1), each room "
+            "visited during play produces a per-room manifest at "
+            "roommanifests/scene_<n>_room_<m>.json with: schemaVersion, scene, "
+            "sceneName, room, provenance (build commit + version + date + visitCount), "
+            "staticActors[] (actorId, name, params, pos, category), cutscenesObserved[] "
+            "(populated when Cutscene_SetSegment fires), and otrResourceHashes (CRC64 "
+            "of the scene + current-room OTR resources for content-hash freshness).\n\n"
+            "Used in conjunction with SoH's built-in log: SoH log says \"Room Init - "
+            "curRoom.num: 0xN\" → look up roommanifests/scene_<scene>_room_<N>.json "
+            "to confirm room contents during bug investigations.\n\n"
+            "Default: off. Zero overhead when disabled."));
+
+    AddWidget(path, "Auto-Traverse Full Game##SceneLog", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.OneClickStart"))
+        .Callback([](WidgetInfo& info) {
+            bool turningOn = CVarGetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.OneClickStart"), 0) != 0;
+            if (turningOn) {
+                // Force-enable the manifest logger so the auto-traverse data
+                // actually lands on disk. User can later turn the master log
+                // toggle off but auto-traverse needs it on while running.
+                CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.Level"), 1);
+                // Set defaults for a full-game traversal. Order matters:
+                // Mode is set LAST so the state machine picks up valid
+                // Cursor/MaxEntrance/HoldFrames on session-init.
+                CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.Cursor"), 0);
+                CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.MaxEntrance"), 65535);
+                CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.HoldFrames"), 120);
+                CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.Mode"), 1);
+            } else {
+                // Stop the traversal. Mode=0 also resets the session
+                // counters in OnFrameTick (sSessionInitialized flips
+                // back to false).
+                CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.Mode"), 0);
+            }
+            Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+        })
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "One-click toggle for the auto-traverse data-capture pass. When ON: forces "
+            "Manifest Logging Enabled, sets Cursor=0, MaxEntrance=65535 (entire entrance "
+            "table), HoldFrames=120 (~2sec/entrance), then starts traversal. The game "
+            "will warp through every primary entrance in the table (~390 unique "
+            "entrances over ~13 minutes), populating roommanifests/scene_*_room_*.json "
+            "and roomnavdata/roomnavdata_*_*.bin for every visited room. Status writes "
+            "to roommanifests/_autotraverse_state.json on every advance.\n\n"
+            "When OFF: stops the traversal (sets Mode=0 and resets session counters). "
+            "The cursor preserves its current value — toggling back ON resumes from "
+            "where you stopped.\n\n"
+            "Prerequisite: must be in a loaded save (not at title screen / file "
+            "select). The state machine will wait silently until gameplay begins."));
+
     // Stats
     path.sidebarName = "Stats";
     AddSidebarEntry("Dev Tools", path.sidebarName, 1);
