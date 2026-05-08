@@ -322,6 +322,21 @@ static void OnFrameTick() {
 }
 
 void RegisterAutoTraverse() {
+    // Force Mode and OneClickStart back to OFF at boot. Both are session-
+    // state CVars that should not persist across game restarts: prior
+    // sessions writing Mode=1 (running) or OneClickStart=1 to
+    // shipofharkinian.json would otherwise auto-resume traversal on the
+    // next launch with stale Cursor/MaxEntrance/HoldFrames values from
+    // the JSON file (often zero or partially set), producing pathological
+    // behavior like "session completes after 1 entrance because
+    // MaxEntrance=0" without the user knowing AutoTraverse is active.
+    //
+    // User must explicitly opt in each session via the UI toggle (which
+    // sets all values consistently) or via console (with explicit
+    // MaxEntrance / Cursor values).
+    CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.Mode"), AT_MODE_OFF);
+    CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.OneClickStart"), 0);
+
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(OnFrameTick);
 }
 
