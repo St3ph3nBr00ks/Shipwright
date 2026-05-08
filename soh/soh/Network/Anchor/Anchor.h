@@ -982,6 +982,19 @@ class Anchor : public Network {
     // commits expand its use.
     void TickFollower(AnchorFollower::FollowerFrameContext& ctx);
 
+    // Per-frame follower input-injection entry point. Body lives in
+    // AIFollower/Follower.cpp (Phase 1 commit 5 of the SRP refactor —
+    // moved verbatim from the ShouldActorUpdate lambda body in
+    // HookHandlers.cpp). Caller (HookHandlers.cpp's ShouldActorUpdate
+    // hook) does the early-outs (followerActive, gPlayState non-null,
+    // actor->id == ACTOR_PLAYER) and passes the player Actor*.
+    //
+    // ShouldActorUpdate fires immediately BEFORE the player's update()
+    // each frame, so input written here is consumed by Player_Update on
+    // the same frame. Driving locomotion / sword swings / climb-ups all
+    // happen via stick + button injection on input[0].
+    void TickFollowerInput(Actor* actor);
+
     // Pillar C2 Phase 4 — phase-specific senders for the unified
     // ENEMY_STATE wire packet. All four emit type=ENEMY_STATE with the
     // matching phase tag; bodies live in EnemyStateSync/Packets/EnemyState.cpp.

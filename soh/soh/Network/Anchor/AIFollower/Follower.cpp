@@ -2104,3 +2104,677 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 // that now writes to player->actor.world.pos is the STUCK state
                 // fallback above — see that case's comment block for rationale.
 }
+
+// ---------------------------------------------------------------------------
+// Anchor::TickFollowerInput — per-frame follower input-injection body. Moved
+// verbatim from HookHandlers.cpp's ShouldActorUpdate lambda body. Phase 1
+// commit 5 of the SRP refactor (#173 / #169). The hook fires immediately
+// BEFORE the player actor's update(), so input written here is consumed by
+// Player_Update on the same frame — that's why locomotion / swing / climb
+// can be driven by writing to input[0] from this site.
+//
+// Indentation preserved at the lambda's original 20-space depth so the diff
+// against pre-commit-5 HookHandlers.cpp is line-aligned. A future cleanup
+// commit can dedent to standard 4-space function-body depth alongside the
+// equivalent dedent of TickFollower.
+// ---------------------------------------------------------------------------
+void Anchor::TickFollowerInput(Actor* actor) {
+    (void)actor;  // body uses player/actor as locals declared inline below
+
+                    Input& input = gPlayState->state.input[0];
+                    // States where we drive locomotion via stick input.
+                    // ATTACK included: under stick-input movement the follower
+                    // needs to close the last few tens of units between
+                    // kAttackRange (80) and actual sword reach (~40). Without
+                    // stick injection during ATTACK the follower stops at 80
+                    // and swings into empty air (observed 2026-04-21, P2 log 64
+                    // — 60-frame cycles with distToEnemy 75-85). Stick points
+                    // at enemyPos, so the swing also goes toward the enemy
+                    // — OoT reads stick on the BTN_B edge-press frame to set
+                    // swing direction, which agrees with the approach direction.
+                    bool isMoving = (followerAIState == FollowerAIState::FOLLOW       ||
+                                     followerAIState == FollowerAIState::STUCK        ||
+                                     followerAIState == FollowerAIState::ENGAGE       ||
+                                     followerAIState == FollowerAIState::ATTACK       ||
+                                     followerAIState == FollowerAIState::RETURN       ||
+                                     followerAIState == FollowerAIState::CLIMBING     ||
+                                     followerAIState == FollowerAIState::COLLECT_ITEM);
+
+                    // --- Joystick cancel ---
+                    // Read hardware values BEFORE we inject anything. OoT resets input.cur
+                    // from hardware at the start of each frame, so these are the real values.
+                    {
+                        s8 hwX = input.cur.stick_x;
+                        s8 hwY = input.cur.stick_y;
+                        if ((s32)hwX * hwX + (s32)hwY * hwY > 25 * 25) {
+                            SetFollowerActive(false);
+                            SPDLOG_INFO("[Follower] Deactivated (joystick hw=({}, {}))", hwX, hwY);
+                            return;
+                        }
+                    }
+
+                    // --- State guard — don't inject stick while Link is in a
+                    // non-walkable state. Injecting during these can corrupt the
+                    // ladder/cutscene state machines. Button presses (BTN_A for
+                    // climb) are handled below, separately from stick.
+                    //
+                    // IN_WATER is intentionally NOT blocked — swimming uses the
+                    // same camera-relative stick input as walking, and the
+                    // follower needs to be able to swim forward into a ledge
+                    // to trigger the water-exit climb-out animation. (Observed
+                    // 2026-04-21: blocking IN_WATER left the follower sliding
+                    // along the water's edge unable to exit.)
+                    Player* player = (Player*)actor;
+                    u32 sf1 = player->stateFlags1;
+                    u32 sf2 = player->stateFlags2;
+                    bool nowOnLadder = (sf1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
+                    // CLIMBING_LADDER is normally blocked (stick during a real
+                    // climb would spam OoT's input). Bug 2 (2026-04-22): when
+                    // our follower state is CLIMBING, we WANT stick injection
+                    // to drive Link up/down the ladder. The CLIMBING-aware
+                    // injection block below handles it via a different code
+                    // path; here we just exempt CLIMBING_LADDER from the
+                    // blocked list when we're actively driving.
+                    bool blockedByPlayerState =
+                        (sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) ||
+                        (sf1 & PLAYER_STATE1_CLIMBING_LEDGE)    ||
+                        (sf1 & PLAYER_STATE1_IN_CUTSCENE)       ||
+                        (sf1 & PLAYER_STATE1_DAMAGED)           ||
+                        (sf1 & PLAYER_STATE1_TALKING)           ||
+                        (sf1 & PLAYER_STATE1_INPUT_DISABLED);
+                    if (nowOnLadder && followerAIState != FollowerAIState::CLIMBING) {
+                        // On a ladder but our state machine isn't in CLIMBING:
+                        // user manually grabbed it, or we mis-entered from a
+                        // non-climbing state. Block stick injection — let the
+                        // human resume control via the joystick-cancel path.
+                        blockedByPlayerState = true;
+                    }
+
+                    // --- Walk/run: camera-relative stick toward followerMoveTarget ---
+                    // OoT's movement pipeline: worldYaw = Camera_GetInputDirYaw(cam) + stickAngle,
+                    // where stickAngle = Math_Atan2S(relY, -relX).  To move in world direction
+                    // (dx, dz), invert that pipeline:
+                    //   worldYaw    = Math_Atan2S(dz, dx)          [OoT convention: z first]
+                    //   stickAngle  = worldYaw - inputDirYaw
+                    //   relY        = Math_CosS(stickAngle) * mag
+                    //   relX        = -Math_SinS(stickAngle) * mag
+                    // Magnitude is distance-scaled: sprint when far, walk when
+                    // close, zero within the stop radius so Link's own
+                    // deceleration carries him the last few units.
+                    static bool sAnimHookLogged = false;
+                    if (!sAnimHookLogged) {
+                        SPDLOG_INFO("[Follower] animHook firing for ACTOR_PLAYER");
+                        sAnimHookLogged = true;
+                    }
+
+                    // --- Crawlspace override (2026-04-22) ---
+                    // When Link is in PLAYER_STATE2_CRAWLING, the camera is
+                    // locked to the tunnel axis and input is simplified to
+                    // forward/back along that axis. Our camera-relative stick
+                    // projection may or may not land on that axis cleanly, so
+                    // we hardcode full forward (stick_y = 127) while the flag
+                    // is set — crawlspaces in OoT are always "push forward to
+                    // advance, press backward to back out". Zero X because X
+                    // input during crawl is ignored anyway.
+                    //
+                    // Edge-logged: one log entry on entry into CRAWLING, one
+                    // on exit — so we can tell from the test log whether this
+                    // path fired. Not per-frame (would flood the log).
+                    static bool sWasCrawling = false;
+                    bool nowCrawling = (sf2 & PLAYER_STATE2_CRAWLING) != 0;
+                    if (nowCrawling && !sWasCrawling) {
+                        SPDLOG_INFO("[Follower] Crawlspace override ENTER "
+                                    "(PLAYER_STATE2_CRAWLING set) — forcing stick_y=127");
+                    } else if (!nowCrawling && sWasCrawling) {
+                        SPDLOG_INFO("[Follower] Crawlspace override EXIT "
+                                    "(PLAYER_STATE2_CRAWLING cleared)");
+                    }
+                    sWasCrawling = nowCrawling;
+
+                    if (followerPostTeleportFrames > 0) {
+                        // Test 5 post-teleport hold. Zero the stick (and
+                        // press-button stick bits) for kPostTeleportHoldFrames
+                        // after any teleport so Link settles at leaderPos
+                        // before state-machine movement drives him toward
+                        // sideTarget (which can be inside a wall if the
+                        // leader was standing next to one).
+                        input.cur.stick_x = 0;
+                        input.cur.stick_y = 0;
+                        input.rel.stick_x = 0;
+                        input.rel.stick_y = 0;
+                        followerPostTeleportFrames--;
+                        if (followerPostTeleportFrames == 0) {
+                            SPDLOG_INFO("[Follower] Post-teleport hold complete");
+                        }
+                    } else if (isMoving && nowCrawling) {
+                        input.cur.stick_x = 0;
+                        input.cur.stick_y = 127;
+                        input.rel.stick_x = 0;
+                        input.rel.stick_y = 127;
+                    } else if (followerClimbDismountFrames > 0 && !blockedByPlayerState) {
+                        // Bug C (log 69) — ladder/vine dismount forward-hold.
+                        // Project the held world-space yaw (captured at the
+                        // CLIMBING→IDLE transition as Link's shape.rot.y,
+                        // which matches the leader's facing per the CLIMBING
+                        // state body) into camera-relative stick axes. Full
+                        // magnitude so Link walks briskly inward past the
+                        // ledge rim. Counter decrements every frame; when it
+                        // reaches zero, the normal move logic resumes.
+                        Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                        s16 inputDirYaw = Camera_GetInputDirYaw(cam);
+                        s16 stickAngle  = followerClimbDismountYaw - inputDirYaw;
+                        s8  stickY = (s8)( Math_CosS(stickAngle) * 127.0f);
+                        s8  stickX = (s8)(-Math_SinS(stickAngle) * 127.0f);
+                        input.cur.stick_x = stickX;
+                        input.cur.stick_y = stickY;
+                        input.rel.stick_x = stickX;
+                        input.rel.stick_y = stickY;
+                        followerClimbDismountFrames--;
+                        if (followerClimbDismountFrames == 0) {
+                            SPDLOG_INFO("[Follower] Dismount forward-hold complete");
+                        }
+                    } else if (followerAIState == FollowerAIState::CLIMBING) {
+                        // Bug 2 (2026-04-22): natural ladder grab + climb.
+                        // Two phases:
+                        //   (a) Not on ladder yet (nowOnLadder == false):
+                        //       follower is approaching the ladder from the
+                        //       side. Drive stick forward toward
+                        //       followerMoveTarget (= leader's XZ at leader's
+                        //       Y) using the standard camera-relative
+                        //       projection so OoT's collision sees Link
+                        //       walking into the ladder face-first and
+                        //       attaches him.
+                        //   (b) On ladder (nowOnLadder == true): OoT uses
+                        //       raw stick_y for vertical motion. Direction
+                        //       comes from comparing leader.y to follower.y:
+                        //       leader higher → up, lower → down, within
+                        //       tolerance → zero (we've reached them).
+                        //       Stick_x is irrelevant during climb.
+                        Vec3f p2w = actor->world.pos;
+                        if (nowOnLadder) {
+                            // Vertical: compare leader Y to follower Y.
+                            f32 dyL = followerMoveTarget.y - p2w.y;
+                            static constexpr f32 kClimbYTolerance = 8.0f;
+                            s8  ladderY = 0;
+                            if (dyL >  kClimbYTolerance)      ladderY =  127;
+                            else if (dyL < -kClimbYTolerance) ladderY = -127;
+                            // Test 6 (log 74) — lateral tracking on vine
+                            // walls. OoT's ladder climb code ignores
+                            // stick_x (ladder is single-column), but vine
+                            // climb uses stick_x for lateral movement along
+                            // the wall face. Inject a camera-relative
+                            // horizontal component from the XZ delta so the
+                            // follower tracks the leader sideways; on
+                            // ladders this is a no-op (OoT clamps it), on
+                            // vines it slides Link along the vine face.
+                            //
+                            // Gate on Δxz > tolerance so idle stand-still
+                            // climbs (follower holding at leader Y) don't
+                            // emit phantom lateral input.
+                            f32 dxL = followerMoveTarget.x - p2w.x;
+                            f32 dzL = followerMoveTarget.z - p2w.z;
+                            f32 dxzSq = dxL * dxL + dzL * dzL;
+                            s8  ladderX = 0;
+                            static constexpr f32 kClimbXzTolerance = 10.0f;
+                            if (dxzSq > kClimbXzTolerance * kClimbXzTolerance) {
+                                Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                                s16 inputDirYaw = Camera_GetInputDirYaw(cam);
+                                s16 worldYaw    = Math_Atan2S(dzL, dxL);
+                                s16 stickAngle  = worldYaw - inputDirYaw;
+                                ladderX = (s8)(-Math_SinS(stickAngle) * 127.0f);
+                            }
+                            input.cur.stick_x = ladderX;
+                            input.cur.stick_y = ladderY;
+                            input.rel.stick_x = ladderX;
+                            input.rel.stick_y = ladderY;
+                        } else {
+                            // Walk toward ladder. Reuse the standard
+                            // camera-relative inversion (smaller copy here so
+                            // we can ignore the magnitude curve — full
+                            // forward into the ladder gets the grab).
+                            f32 dx = followerMoveTarget.x - p2w.x;
+                            f32 dz = followerMoveTarget.z - p2w.z;
+                            if (dx * dx + dz * dz > 1.0f) {
+                                Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                                s16 inputDirYaw = Camera_GetInputDirYaw(cam);
+                                s16 worldYaw    = Math_Atan2S(dz, dx);
+                                s16 stickAngle  = worldYaw - inputDirYaw;
+                                s8  stickY = (s8)( Math_CosS(stickAngle) * 127.0f);
+                                s8  stickX = (s8)(-Math_SinS(stickAngle) * 127.0f);
+                                input.cur.stick_x = stickX;
+                                input.cur.stick_y = stickY;
+                                input.rel.stick_x = stickX;
+                                input.rel.stick_y = stickY;
+                            } else {
+                                input.cur.stick_x = 0; input.cur.stick_y = 0;
+                                input.rel.stick_x = 0; input.rel.stick_y = 0;
+                            }
+                        }
+                    } else if (isMoving && !blockedByPlayerState) {
+                        Vec3f p2w = actor->world.pos;
+                        f32 dx = followerMoveTarget.x - p2w.x;
+                        f32 dz = followerMoveTarget.z - p2w.z;
+                        f32 distSq = dx * dx + dz * dz;
+                        if (distSq > 1.0f) {
+                            f32 dist = sqrtf(distSq);
+                            f32 magF;
+                            if      (dist > 250.0f) magF = 127.0f; // sprint — leader far ahead
+                            else if (dist >  60.0f) magF = 100.0f; // run
+                            else if (dist >  30.0f) magF =  60.0f; // walk (decelerate)
+                            else                    magF =   0.0f; // coast to a stop
+                            Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                            s16 inputDirYaw  = Camera_GetInputDirYaw(cam);
+                            s16 worldYaw     = Math_Atan2S(dz, dx); // z first per OoT convention
+                            s16 stickAngle   = worldYaw - inputDirYaw;
+                            s8  stickY = (s8)( Math_CosS(stickAngle) * magF);
+                            s8  stickX = (s8)(-Math_SinS(stickAngle) * magF);
+                            input.cur.stick_x = stickX;
+                            input.cur.stick_y = stickY;
+                            input.rel.stick_x = stickX;
+                            input.rel.stick_y = stickY;
+                        } else {
+                            // Already at target — no stick
+                            input.cur.stick_x = 0; input.cur.stick_y = 0;
+                            input.rel.stick_x = 0; input.rel.stick_y = 0;
+                        }
+                    } else {
+                        input.cur.stick_x = 0; input.cur.stick_y = 0;
+                        input.rel.stick_x = 0; input.rel.stick_y = 0;
+                    }
+
+                    // --- Auto-press A when the "Climb" action is available ---
+                    // PLAYER_STATE2_DO_ACTION_CLIMB is the flag the engine uses
+                    // to show "Climb" on the A-button prompt. It covers:
+                    //   - Link hanging off a land ledge (PLAYER_STATE1_HANGING_OFF_LEDGE
+                    //     is also set; the two flags agree).
+                    //   - Link swimming at a water-exit ledge where the engine
+                    //     accepts an A-press to climb out of the water.
+                    // Injecting BTN_A whenever DO_ACTION_CLIMB is set handles
+                    // both cases without needing to distinguish land vs water.
+                    // (Observed 2026-04-21: relying on HANGING_OFF_LEDGE alone
+                    // left the follower stuck at the water's edge.)
+                    if (sf2 & PLAYER_STATE2_DO_ACTION_CLIMB) {
+                        input.press.button |= BTN_A;
+                        input.cur.button   |= BTN_A;
+                        SPDLOG_INFO("[Follower] BTN_A climb (DO_ACTION_CLIMB)");
+                    }
+
+                    // --- Nav system Shape A hang-state resolution (commit 6c) ---
+                    // Closes the documented #169 residual: when the follower
+                    // enters PLAYER_STATE1_HANGING_OFF_LEDGE, no system decided
+                    // whether to climb up (BTN_A) or drop down (BTN_B). The
+                    // existing DO_ACTION_CLIMB path handles climb-up but not
+                    // drop-down. With nav.VerticalTeleport on, we read leader
+                    // altitude vs follower altitude and inject the right
+                    // button. Plan §9 thresholds:
+                    //   target Y > follower Y + 30  → climb up   (BTN_A)
+                    //   target Y < follower Y - 80  → drop down  (BTN_B)
+                    //   otherwise                   → BTN_A (default — bias
+                    //                                  toward climb up).
+                    // BTN_A path overlaps DO_ACTION_CLIMB above; idempotent.
+                    // BTN_B is the new edge case.
+                    {
+                        const bool hangFlag = (sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) != 0;
+                        const bool navOn    =
+                            CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
+                            CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0;
+                        static bool sWasHanging = false;
+                        if (hangFlag && navOn) {
+                            constexpr f32 kHangResolveAboveThreshold = 30.0f;
+                            constexpr f32 kHangResolveBelowThreshold = 80.0f;
+                            // followerMoveTarget carries the follower's
+                            // current navigation goal (leader pos in
+                            // FOLLOW; tracked target in ENGAGE/ATTACK).
+                            // leaderPos itself is only in scope at the
+                            // top-level frame block — not here inside
+                            // the CLIMBING-state input-injection branch.
+                            f32 targetY  = followerMoveTarget.y;
+                            f32 dy       = targetY - player->actor.world.pos.y;
+                            bool dropDown = (dy < -kHangResolveBelowThreshold);
+                            if (dropDown) {
+                                input.press.button |= BTN_B;
+                                input.cur.button   |= BTN_B;
+                            } else {
+                                // BTN_A injection above (DO_ACTION_CLIMB) covers
+                                // climb-up. If the prompt isn't showing for some
+                                // reason, force the press anyway so the
+                                // resolution still fires.
+                                input.press.button |= BTN_A;
+                                input.cur.button   |= BTN_A;
+                            }
+                            if (!sWasHanging) {
+                                SPDLOG_INFO("[Follower] BTN_{} hang-state resolution "
+                                            "(dy={:.1f}, above={:.1f}, below={:.1f})",
+                                            dropDown ? "B" : "A", dy,
+                                            kHangResolveAboveThreshold,
+                                            kHangResolveBelowThreshold);
+                                sWasHanging = true;
+                            }
+                        } else if (sWasHanging) {
+                            sWasHanging = false;
+                        }
+                        (void)hangFlag;  // suppress unused-warning when navOn is false
+                    }
+
+                    // --- Phase A — auto-press A when OoT prompts "Enter" ---
+                    // PLAYER_STATE2_DO_ACTION_ENTER is the flag the engine
+                    // sets to display "Enter" on the A-button prompt — fires
+                    // whenever Link is adjacent to an openable door / passage
+                    // that accepts A. OoT handles the actor-specific detection
+                    // (En_Door trigger volume, Door_Shutter cylinder, grotto
+                    // Door_Ana, certain transition actors) for us; we just
+                    // inject the press.
+                    //
+                    // Doesn't solve the G11 "leader in different room"
+                    // deactivation on its own — Phase B (#169, deferred) is
+                    // the handoff that keeps the follower active long enough
+                    // to WALK to the door. Phase A is still valuable standalone:
+                    // any time the follower is naturally near an openable
+                    // passage (FOLLOW toward a leader beside an open doorway,
+                    // RETURN pathway, or manual user re-activate after G11
+                    // placed the follower near a door), the door opens without
+                    // user intervention.
+                    //
+                    // Edge-logged so the test log shows when this fires. Not
+                    // per-frame (would flood when follower is idle near a door).
+                    {
+                        // Test 7 (user report) — Phase A was catching
+                        // crawlspaces only. Doors set a different field:
+                        // player->doorType becomes nonzero when Link is
+                        // adjacent to an openable door (En_Door /
+                        // Door_Shutter / Door_Toki — anything with a
+                        // transition actor collider). PLAYER_DOORTYPE_FAKE
+                        // (=3) is the trap-door variant that damages Link;
+                        // explicitly exclude it so the follower doesn't
+                        // self-inflict.
+                        bool enterPromptActive = (sf2 & PLAYER_STATE2_DO_ACTION_ENTER) != 0;
+                        bool doorInRange       = (player->doorType != PLAYER_DOORTYPE_NONE) &&
+                                                 (player->doorType != PLAYER_DOORTYPE_FAKE);
+                        bool promptActive      = enterPromptActive || doorInRange;
+                        static bool sWasAtDoor = false;
+                        if (promptActive && !sWasAtDoor) {
+                            SPDLOG_INFO("[Follower] BTN_A door prompt ({}{})",
+                                        enterPromptActive ? "DO_ACTION_ENTER" : "",
+                                        doorInRange
+                                            ? (enterPromptActive ? " + doorType" : "doorType")
+                                            : "");
+                        } else if (!promptActive && sWasAtDoor) {
+                            SPDLOG_INFO("[Follower] BTN_A door EXIT (prompt cleared)");
+                        }
+                        sWasAtDoor = promptActive;
+                        if (promptActive) {
+                            input.press.button |= BTN_A;
+                            input.cur.button   |= BTN_A;
+                            // Test 10 (log 79, Bug 1) — arm cooldown.
+                            // Player_Update consumes this press THIS FRAME
+                            // to start the door-open animation and clears
+                            // doorType in the same pass, before OnGameFrame-
+                            // Update's deactivate-check reads press.button.
+                            // Without this counter, the mask's doorType
+                            // condition has already flipped to NONE by
+                            // deactivate-check time → BTN_A in press,
+                            // mask doesn't strip, follower self-cancels
+                            // ("state=IDLE press=0x8000").
+                            static constexpr int kDoorPressCooldownFrames = 5;
+                            followerDoorPressCooldown = kDoorPressCooldownFrames;
+                        }
+                    }
+
+                    // Test 6 (log 74) — BTN_Z tap-to-refresh (was hold).
+                    // User reported: a held Z without an acquirable target
+                    // just locks the CAMERA (OoT's fallback when no lock
+                    // candidate is in the attention cone), which keeps Link
+                    // facing whichever direction he was looking when Z went
+                    // down. Wall Skulltulas above/beside the follower never
+                    // enter the cone, so the camera-hold makes the problem
+                    // worse — follower can't face targets above him.
+                    //
+                    // New pattern: edge-press Z once every kZTapIntervalFrames
+                    // (0.5 s at 60 fps; scales naturally at P2's 20 fps). The
+                    // press is consumed by OoT's target-scan each time — if
+                    // the enemy drifts into range (leader walks closer, or
+                    // pitch injection lands the cone on target) a later tap
+                    // catches it. No cur.button hold, so the camera is free
+                    // to adjust between taps.
+                    //
+                    // RANGED_ATTACK keeps its own Z cycle (below) — first-
+                    // person aim mode does need Z held. The two states are
+                    // mutually exclusive so there's no double-fire.
+                    static constexpr int kZTapIntervalFrames = 30;
+                    if (followerAIState == FollowerAIState::ENGAGE ||
+                        followerAIState == FollowerAIState::ATTACK) {
+                        if (followerStateFrames % kZTapIntervalFrames == 0) {
+                            input.press.button |= BTN_Z;
+                            input.cur.button   |= BTN_Z;
+                        }
+                    }
+
+                    // --- Attack: face enemy + inject BTN_B at start of each charge phase ---
+                    if (followerAIState == FollowerAIState::ATTACK) {
+                        // Keep shape.rot.y facing the enemy here (BEFORE Player_Update) so
+                        // that when BTN_B is processed by OoT this frame, the swing direction
+                        // is current.  OnGameFrameUpdate also sets it (after Player_Update) to
+                        // maintain facing during the animation; both assignments are consistent.
+                        // Task 3: suppress both the facing update and the BTN_B injection
+                        // when the target is dead or dying. The state-machine RETURN
+                        // transition above catches it one frame earlier on the next
+                        // OnGameFrameUpdate; this gate prevents a final rogue swing in the
+                        // gap between the killing hit and the state transition.
+                        //
+                        // Mirrors the two-signal check in the ATTACK state (see banner
+                        // comment there): colChkInfo.health catches actors that decrement
+                        // their own health; EnemyNetId::hasLocalDeath / pendingNaturalDeath
+                        // catches AC_HIT-only actors whose health never moves (Karebaba
+                        // and most simple enemies).
+                        bool targetAlive = (followerTargetEnemy != nullptr &&
+                                            followerTargetEnemy->update != nullptr &&
+                                            followerTargetEnemy->colChkInfo.health > 0);
+                        if (targetAlive) {
+                            const EnemyNetId* ext =
+                                ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
+                            if (ext != nullptr) {
+                                EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetAliveCheck");
+                                if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
+                                    EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
+                                    targetAlive = false;
+                                }
+                            }
+                        }
+                        if (targetAlive) {
+                            f32 ex = followerTargetEnemy->world.pos.x - actor->world.pos.x;
+                            f32 ez = followerTargetEnemy->world.pos.z - actor->world.pos.z;
+                            f32 eDistSq = ex * ex + ez * ez;
+                            if (eDistSq > 1.0f) {
+                                actor->shape.rot.y = Math_Atan2S(ez, ex); // z first per OoT convention
+                            }
+                            if (followerStateFrames % 20 == 0) {
+                                // Test 6 (log 74) — sword-range jump-attack
+                                // gate. Vanilla sword reach is ~50 u (kSwingReach);
+                                // when standoff puts the follower at 60-96 u
+                                // from enemy, BTN_B swings whiff. Jump attack
+                                // (locked + A + stick-forward) lunges Link
+                                // ~80+ u and connects at the end of the swing.
+                                //
+                                // Gate BTN_A on PLAYER_STATE1_HOSTILE_LOCK_ON
+                                // because A without lock-on triggers a roll
+                                // instead of jump-attack. If we're not yet
+                                // locked, fall back to BTN_B — worse reach
+                                // but no wrong-input risk (Z-tap cadence
+                                // above will retry the lock next cycle).
+                                bool locked = (sf1 & PLAYER_STATE1_HOSTILE_LOCK_ON) != 0;
+                                bool tooFarForSwing = (eDistSq > 50.0f * 50.0f); // kSwingReach²
+                                if (locked && tooFarForSwing) {
+                                    input.press.button |= BTN_A;
+                                    input.cur.button   |= BTN_A;
+                                    SPDLOG_INFO("[Follower] ATTACK jump-slash BTN_A "
+                                                "(dist={:.0f} locked)", sqrtf(eDistSq));
+                                } else {
+                                    input.press.button |= BTN_B;
+                                    input.cur.button   |= BTN_B;
+                                    SPDLOG_INFO("[Follower] ATTACK injecting BTN_B (stateFrames={} "
+                                                "dist={:.0f} locked={})",
+                                                followerStateFrames, sqrtf(eDistSq), locked ? 1 : 0);
+                                }
+                            } else {
+                                // Bug D / Test 5 (log 71) — shield between
+                                // swings. Previous gate `eDistSq < 50*50`
+                                // almost never fired: typical ATTACK frames
+                                // sit at 69-96 u from enemy (user's test had
+                                // zero BTN_R log lines). Any time we're in
+                                // ATTACK state (already inside attackRange)
+                                // and NOT on a swing frame, shield up.
+                                // BLOCK pattern below sets both press+cur
+                                // every frame; R-hold is continuous so
+                                // edge-replay is harmless (unlike BTN_A
+                                // which would mis-interpret as new press).
+                                input.press.button |= BTN_R;
+                                input.cur.button   |= BTN_R;
+                                if (followerStateFrames % 20 == 10) {
+                                    SPDLOG_INFO("[Follower] ATTACK shield BTN_R "
+                                                "(stateFrames={} distToEnemy={:.0f})",
+                                                followerStateFrames, sqrtf(eDistSq));
+                                }
+                            }
+                        }
+                    }
+
+                    // G4 — BLOCK: hold BTN_R to plant the shield. OoT treats
+                    // R-hold as a continuous shielding input, so set both .cur
+                    // and .press every frame.
+                    if (followerAIState == FollowerAIState::BLOCK) {
+                        input.press.button |= BTN_R;
+                        input.cur.button   |= BTN_R;
+                    }
+
+                    // Item pickup — dismiss item-get and talking text boxes
+                    // with BTN_A every 20 frames. PLAYER_STATE1_GETTING_ITEM
+                    // is set during the "raised-item" cutscene (first-time
+                    // pickups of bombs, arrows, keys, heart pieces); TALKING
+                    // catches the text-advance portion. Matches the BTN_B
+                    // swing cadence so we're not slamming BTN_A every frame.
+                    // Fires regardless of follower state (pickup can occur
+                    // during COLLECT_ITEM, but also in any other state if
+                    // Link steps on an item by accident).
+                    if (sf1 & (PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_TALKING)) {
+                        if (followerStateFrames % 20 == 0) {
+                            input.press.button |= BTN_A;
+                            input.cur.button   |= BTN_A;
+                        }
+                    }
+
+                    // G6/G7/G8 — RANGED_ATTACK: draw weapon, aim, release-to-fire.
+                    //
+                    // Bug 4 (2026-04-22) — release-to-fire cycle. Prior code
+                    // pressed Z + C-button + A every frame. Three problems:
+                    //   1. Setting input.press.button every frame = OoT sees
+                    //      "just pressed" every frame, so the slingshot draw
+                    //      animation never settles into ready-to-fire.
+                    //   2. A-press before Link is fully drawn = roll/jump
+                    //      attack, not fire (matches user's "rolled instead").
+                    //   3. The natural OoT firing path is "release the
+                    //      C-button to auto-fire the primed shot" — A-press
+                    //      is the secondary path.
+                    //
+                    // New cycle: hold Z + C-button (cur only, press on entry
+                    // edge), drop the C-button for one frame every kFireCycleFrames
+                    // to trigger auto-fire. Re-press the next frame to re-draw.
+                    //
+                    // Option B — the C-button press is only meaningful if
+                    // followerActiveCSlot != 0xFF (CVar enabled AND player has
+                    // a slingshot/bow). Otherwise the C-button block is
+                    // skipped; Z is still held but no fire happens.
+                    if (followerAIState == FollowerAIState::RANGED_ATTACK) {
+                        static constexpr int kFireCycleFrames = 60;
+                        // Z: edge-press on entry, hold via cur thereafter.
+                        if (followerStateFrames == 0) {
+                            input.press.button |= BTN_Z;
+                        }
+                        input.cur.button |= BTN_Z;
+
+                        u16 cBtn = 0;
+                        switch (followerActiveCSlot) {
+                            case 0: cBtn = BTN_CLEFT;  break;
+                            case 1: cBtn = BTN_CDOWN;  break;
+                            case 2: cBtn = BTN_CRIGHT; break;
+                            default: break;
+                        }
+                        if (cBtn != 0) {
+                            int phase = followerStateFrames % kFireCycleFrames;
+                            // Phase 0: edge-press the C-button (start draw)
+                            // Phase 1 .. (kFireCycleFrames-3): hold via cur (aim/prime)
+                            // Phase (kFireCycleFrames-2, -1): RELEASE for TWO frames
+                            //   (don't set cur/press). Test 5 (log 71) — early
+                            //   cycles missed the fire entirely despite the
+                            //   release-to-fire path; one-frame release was
+                            //   too short for OoT to consume as a fire event.
+                            //   Two frames is more reliable; later cycles in
+                            //   the same log did fire successfully, so the
+                            //   pattern works once OoT's state settles.
+                            if (phase == 0) {
+                                input.press.button |= cBtn;
+                                input.cur.button   |= cBtn;
+                                SPDLOG_INFO("[Follower] RANGED_ATTACK draw cycle (cSlot={})",
+                                            (int)followerActiveCSlot);
+                            } else if (phase >= kFireCycleFrames - 2) {
+                                // Release window — do NOT add cBtn to cur
+                                // or press for these two frames.
+                                if (phase == kFireCycleFrames - 2) {
+                                    SPDLOG_INFO("[Follower] RANGED_ATTACK release-to-fire "
+                                                "(cSlot={} 2-frame window)",
+                                                (int)followerActiveCSlot);
+                                }
+                            } else {
+                                input.cur.button |= cBtn;
+                            }
+                        }
+
+                        // Test 5 (log 71) — aim-pitch injection. First-person
+                        // aim (slingshot/bow drawn) uses stick_y for camera
+                        // pitch. Ceiling Skulltulas (target Δy > ~60 u)
+                        // require aiming UP — without this injection Link
+                        // fires forward into nothing when unlocked.
+                        //
+                        // Test 7 (user report): "When locked on, aiming is
+                        // automatic, no additional input should be required."
+                        // OoT's Z-lock drives the camera onto the target
+                        // directly; injecting stick_y on top overrides that
+                        // and points aim elsewhere. Gate on HOSTILE_LOCK_ON
+                        // being CLEAR — inject pitch only as a fallback
+                        // when lock-on hasn't acquired the target.
+                        //
+                        // Sign convention: OoT first-person aim uses
+                        // positive stick_y = look up.
+                        bool lockedOn = (sf1 & PLAYER_STATE1_HOSTILE_LOCK_ON) != 0;
+                        if (!lockedOn &&
+                            followerTargetEnemy != nullptr &&
+                            followerTargetEnemy->update != nullptr) {
+                            f32 dy = followerTargetEnemy->world.pos.y - actor->world.pos.y;
+                            s8  pitchY = 0;
+                            if      (dy >  60.0f) pitchY =  64;  // look up
+                            else if (dy < -60.0f) pitchY = -64;  // look down
+                            if (pitchY != 0) {
+                                input.cur.stick_x = 0;
+                                input.cur.stick_y = pitchY;
+                                input.rel.stick_x = 0;
+                                input.rel.stick_y = pitchY;
+                                if (followerStateFrames % 20 == 0) {
+                                    SPDLOG_INFO("[Follower] RANGED_ATTACK aim-pitch (no lock) "
+                                                "stick_y={} dy={:.0f}",
+                                                (int)pitchY, dy);
+                                }
+                            }
+                        }
+
+                        // Test 6 (log 74) — BTN_A "backup fire" path REMOVED.
+                        // User reported follower rolling into walls when
+                        // engaging Skullwalltulas; we guarded BTN_A on
+                        // PLAYER_STATE1_READY_TO_FIRE but that flag has a
+                        // transient window where Link's pose is still
+                        // "walking with slingshot drawn" rather than
+                        // "aim stance primed". BTN_A in that window triggers
+                        // a jump-roll forward, which is exactly the wall-
+                        // dive symptom. The C-button release-to-fire cycle
+                        // above fires reliably once draw completes, so the
+                        // A-press backup isn't needed.
+                    }
+}
