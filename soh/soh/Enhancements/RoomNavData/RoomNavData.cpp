@@ -2847,12 +2847,13 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AddGroundLineQuad(sXluDl, sVtxDl, anchor.entryPos, tip);
     }
 
-    // Drop anchors — pink. Distinct from climb-yellow (climb-up),
-    // ledge-purple (jump-grab), and crawlspace-cyan (crawl-through).
-    // Ground quad at high position + ground quad at landing + thin
-    // vertical post connecting them so the descent direction is
-    // visible at a glance.
-    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0x80, 0xC0, 0xFF));
+    // Drop anchors — bright green. Opposite side of the colour wheel
+    // from ledge-purple so the two are unambiguous at a glance, and
+    // also distinct from climb-yellow (climb-up) and crawlspace-cyan
+    // (crawl-through). Ground quad at high position + ground quad at
+    // landing + thin vertical post connecting them so the descent
+    // direction is visible at a glance.
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x40, 0xFF, 0x40, 0xFF));
     for (const DropAnchor& anchor : data->dropAnchors) {
         AddGroundQuad(sXluDl, sVtxDl, anchor.highPos);
         AddGroundQuad(sXluDl, sVtxDl, anchor.landingPos);
