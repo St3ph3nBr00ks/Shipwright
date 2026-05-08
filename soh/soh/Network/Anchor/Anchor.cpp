@@ -507,6 +507,11 @@ void Anchor::SetDummyPlayerClientId(const Actor* actor, uint32_t clientId) {
     ObjectExtension::GetInstance().Set<DummyPlayerClientId>(actor, DummyPlayerClientId{ clientId });
 }
 
+bool Anchor::GetClientIsClimbing(uint32_t clientId) const {
+    auto it = clients.find(clientId);
+    return (it != clients.end()) ? it->second.isClimbing : false;
+}
+
 void Anchor::RefreshClientActors() {
     if (!IsSaveLoaded()) {
         return;

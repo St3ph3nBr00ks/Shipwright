@@ -191,6 +191,35 @@ struct EnemyNetId {
     // EnemyNetId reset paths that clear netState fields).
     uint16_t stuckOnSlopeFrames     = 0;
     uint16_t stuckOnSlopeEventCount = 0;
+
+    // ── Nav system per-navigator state (Plans/nav_system_implementation_plan.md §6 + §9)
+    //
+    // Despite the struct's historical name (EnemyNetId), this extension is
+    // the canonical "per-actor nav state" — attached to any navigator that
+    // participates, not only enemies. AI Follower (ACTOR_EN_OE2) and any
+    // future Link-rigged navigator share it.
+    //
+    // navHeldKind discriminates the held-target representation:
+    //   None     → no target held; AcquireOrHoldTarget will evaluate fresh.
+    //   Player   → navTargetClientId is the held target's client ID.
+    //   Enemy    → navTargetNetId is the held actor's netId.
+    //   FixedPos → navHeldTargetPos is a pinned world position
+    //              (HoldPositionTarget).
+    enum class HeldTargetKind : uint8_t { None = 0, Player, Enemy, FixedPos };
+    HeldTargetKind navHeldKind          = HeldTargetKind::None;
+    uint8_t        navTargetClientId    = 0xFF;        // valid when navHeldKind == Player
+    uint32_t       navTargetNetId       = 0;           // valid when navHeldKind == Enemy
+    Vec3f          navHeldTargetPos     = { 0.0f, 0.0f, 0.0f }; // valid when navHeldKind == FixedPos OR cached for trails
+    uint16_t       navTargetTimerFrames = 0;           // counts down from NavTraits.targetStickyFrames
+    bool           navTargetIsStale     = false;       // true if returning a held target despite invalidation signals
+
+    // VerticalTeleport (plan §9). Counts up while |Δy(target, navigator)|
+    // exceeds NavTraits.verticalTeleportYThreshold; reaches
+    // verticalTeleportDelayFrames before the slow-path teleport fires.
+    // Cooldown counts down after a slow-path teleport to avoid rapid
+    // re-fire.
+    uint16_t navVerticalMismatchFrames = 0;
+    uint16_t navTeleportCooldownFrames = 0;
 };
 
 // #193 Phase 2 — attached to ACTOR_EN_ITEM00 actors so the receive-side
@@ -910,6 +939,11 @@ class Anchor : public Network {
     // Returns false when there is no live PlayState or local Player. Used in
     // PrepClientState so remote clients see this client's climbing state.
     bool IsLocalPlayerClimbing() const;
+    // Nav system (plan §9 / commit 6a) — read the broadcast `isClimbing` flag
+    // for a remote client by clientId. Returns false when the clientId is
+    // not present in the clients map (e.g. caller passed 0 / unknown id) or
+    // the field hasn't been set since the last UPDATE_CLIENT_STATE.
+    bool GetClientIsClimbing(uint32_t clientId) const;
 
     // Test 5 (log 71) — whether the local Player is in a crawlspace.
     // Returns false when there is no live PlayState or local Player.

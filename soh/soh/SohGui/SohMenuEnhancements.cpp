@@ -5,6 +5,7 @@
 #include <soh/OTRGlobals.h>
 #include <soh/Enhancements/cosmetics/authenticGfxPatches.h>
 #include <soh/Enhancements/TimeDisplay/TimeDisplay.h>
+#include <soh/Enhancements/RoomNavData/RoomNavData.h>
 
 extern "C" {
 #include "functions.h"
@@ -1941,8 +1942,78 @@ void SohMenu::AddMenuEnhancements() {
 
     AddWidget(path, "Improve enemy navigation.", WIDGET_SEPARATOR_TEXT);
 
+    AddWidget(path, "Nav System", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Enabled##NavSystem", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.Enabled"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Master toggle for the multiplayer navigation system. When on, enables the "
+            "feature toggles below to layer onto enemy AI: sticky target acquisition, "
+            "ground-following steering, climb-anchor detection, vertical teleport, and "
+            "leash-driven respawn rehydration. Bosses are categorically excluded from "
+            "every consumer-side feature.\n\n"
+            "Default: off. Each sub-feature also defaults off."));
+
+    AddWidget(path, "Actor Trail (breadcrumbs)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.ActorTrail"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Captures recent positions for players, AI Followers, and synced enemies that "
+            "opt in via NavTraits. Other navigators consult the trail when direct line-of-"
+            "sight pursuit is blocked, picking the furthest reachable breadcrumb that's "
+            "progress toward the target.\n\n"
+            "Default: off. Foundation for trail-aware features below."));
+
+    AddWidget(path, "Target Selection (sticky)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.TargetSelection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Navigators commit to a chosen target across multiple frames instead of "
+            "flickering between equidistant candidates. Re-evaluation is gated by a "
+            "per-actor sticky timer (default ~2s) and a hysteresis factor that requires "
+            "a different candidate to be meaningfully closer before switching."));
+
+    AddWidget(path, "Ground Following", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.GroundFollowing"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Steering yaw biases toward continuous floor contact, reducing the chance of "
+            "navigators walking off cliffs while pursuing a target. Probes a short "
+            "forward-down ray for several angular samples around the direct bearing."));
+
+    AddWidget(path, "Climbable Surfaces (helper)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.ClimbableSurfaces"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Pure detection helper — surfaces nothing on its own. Drives Vertical Teleport "
+            "below by enumerating climbable scene actors (ladders, vines) within range of "
+            "a candidate position."));
+
+    AddWidget(path, "Vertical Teleport", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.VerticalTeleport"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Two-shape vertical reach. Shape A wraps the existing AI Follower climb "
+            "pipeline (real ladder/vine animation, hang-state resolution). Shape B "
+            "teleports synced enemies upward when their target is on a higher Y level "
+            "and a climb path exists."));
+
+    AddWidget(path, "Leash Respawn", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Nav.LeashRespawn"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When a player re-enters a vacated scene, synced enemies that the host expected "
+            "alive there respawn at the trail-derived position the player last engaged them "
+            "at instead of the vanilla home.pos default."));
+
     AddWidget(path, "Room Nav Data", WIDGET_SEPARATOR_TEXT);
-    AddWidget(path, "Enabled", WIDGET_CVAR_CHECKBOX)
+    AddWidget(path, "Enabled##RoomNavData", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.Enabled"))
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip(
@@ -1960,6 +2031,201 @@ void SohMenu::AddMenuEnhancements() {
             "When on (default), rooms with no cached graph are scanned on first entry. "
             "When off, only existing cached graphs are loaded — no new scans run. Useful "
             "for 'play with this exact baked set, don't generate more' mode."));
+
+    AddWidget(path, "Path B Climb Detection (vine walls / static climbables)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.PathBClimbDetection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, scans static scene collision polys for the climbable wall-flag "
+            "(bit 3 — same flag used by the ClimbEverything cheat). Catches vine walls "
+            "and any other climbable surface baked into static collision that the actor "
+            "allowlist (Path A) doesn't cover.\n\n"
+            "Anchors are merged by XZ proximity (~30u) so a multi-poly vine wall produces "
+            "one anchor with the full mesh's Y range, not dozens. Room-scoped via the "
+            "floodfill-visited cell set.\n\n"
+            "Apply via Force Rescan after toggling. Default: off."));
+
+    AddWidget(path, "Ledge-Grab Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.LedgeGrabDetection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, scans for walkable-node pairs separated by 30-150u of vertical "
+            "delta with a wall between them — the geometry signature of a ledge that "
+            "Link can jump up and grab. Distinct from climb anchors (ladders/vines): "
+            "ledge anchors are JUMP+GRAB targets where the engine pulls Link up after "
+            "he grabs the rim.\n\n"
+            "Visualized in the debug overlay as light-purple ground quads (approach + "
+            "top) with a thin connecting post. Phase 1 implements detection + viz "
+            "only; Phase 2 wires AI Follower to USE the anchors via jump injection.\n\n"
+            "Schema bumps to v3 when first scan runs with this on; existing v2 .bin "
+            "files regenerate on next room entry. Apply via Force Rescan. Default: off."));
+
+    AddWidget(path, "Ledge-Grab Max Y Delta: %du", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.LedgeGrabMaxDeltaY"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .Options(IntSliderOptions()
+                     .Min(30)
+                     .Max(500)
+                     .DefaultValue(70)
+                     .Format("%du")
+                     .Tooltip(
+            "Upper bound on Y-delta between ledge approach and top. "
+            "70 (default) matches realistic child-Link jump-grab reach. "
+            "Adult Link grabs slightly higher (~90u). Higher values "
+            "catch tall climbables but also flag steps Link can't "
+            "actually grab.\n\n"
+            "Diagnostic use: bump to 250+ to test whether a tall climb "
+            "shows up as a ledge anchor. If it does, the geometry has a "
+            "wall between approach and top (the ladder is in static "
+            "collision); if it doesn't, the ladder is likely a Bg actor "
+            "with no static-wall geometry.\n\n"
+            "Apply via Force Rescan after changing."));
+
+    AddWidget(path, "Auto-Expand on Exploration", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.AutoExpandOnExploration"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "When the player walks into a cell that wasn't visited "
+            "by the most recent scan, automatically queue a full "
+            "rescan to extend coverage. Combined with persisted "
+            "historicalSeeds, each rescan strictly EXPANDS coverage "
+            "without losing previously-mapped geometry — even when "
+            "the actors that originally seeded an area have died "
+            "or despawned.\n\n"
+            "Three layers of cooldown/dedup prevent thrash:\n"
+            "  - 10-second cooldown between auto-expand triggers\n"
+            "  - Position-stability dispatch absorbs multiple "
+            "triggers in one settle window\n"
+            "  - Cell-based dedup on historicalSeeds — same cell "
+            "can't be added twice\n\n"
+            "Default: on. Eliminates the need for manual Force "
+            "Rescan in normal gameplay; force-rescan remains useful "
+            "for developer tooling (e.g. baking nav data after "
+            "tuning detection algorithms)."));
+
+    AddWidget(path, "Initial Scan Delay: %d frames", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.InitialScanDelayFrames"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .Options(IntSliderOptions()
+                     .Min(0)
+                     .Max(180)
+                     .DefaultValue(30)
+                     .Format("%d frames")
+                     .Tooltip(
+            "Frames to wait after a detected room change before "
+            "running the initial scan. 30 frames (~0.5s) is the "
+            "default — enough for actor Init() functions and dynamic "
+            "collision registration to settle.\n\n"
+            "Without the delay, scans on first room entry sometimes "
+            "miss significant geometry that a force-rescan a few "
+            "seconds later captures. Bg actors continue registering "
+            "dynamic collision (DynaPoly_SetBgActor) for many frames "
+            "after transitionTrigger returns to TRANS_TRIGGER_OFF.\n\n"
+            "Set to 0 to restore immediate-scan behavior (diagnostic "
+            "only). Higher values (60-120) catch slower-initializing "
+            "scenery at the cost of a more visible delay before nav "
+            "data is available."));
+
+    AddWidget(path, "Drop Anchor Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, scans for walkable-node pairs separated by 30-200u "
+            "of vertical drop with no wall between them (the line from "
+            "high to low is clear). These are descent points where a "
+            "navigator can step off and safely fall to a lower walkable "
+            "area.\n\n"
+            "Symmetric to ledge-grab anchors (which require a wall "
+            "between approach and top — that's the rim Link grabs). "
+            "Drop anchors instead require NO wall — the navigator just "
+            "walks off the edge.\n\n"
+            "Visualized in the debug overlay as pink ground quads "
+            "(high + landing) with a thin connecting post showing the "
+            "fall direction.\n\n"
+            "Phase 1 implements detection + viz only. Phase 2 wires "
+            "consumers (autonomous nav for AI Invader) to use drops as "
+            "descent edges in pathfinding.\n\n"
+            "Schema bumps to v5 when first scan runs with this on; "
+            "existing v4 .bin files regenerate. Apply via Force Rescan. "
+            "Default: off."));
+
+    AddWidget(path, "Crawlspace Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.CrawlspaceDetection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, scans static scene collision polys for the "
+            "crawlspace wall-flag bits (4 + 5 — 0x30 mask, what player "
+            "code at z_player.c:7639 checks). Each cluster of "
+            "crawlspace-flagged walls produces one CrawlspaceAnchor; "
+            "walkable nav nodes within ~60u of any anchor are tagged "
+            "NODE_CRAWLSPACE.\n\n"
+            "Visualized in the debug overlay as cyan ground quads + a "
+            "short direction line showing the wall normal (which way "
+            "the navigator faces to enter).\n\n"
+            "Phase 1 implements detection + viz only. Phase 2 wires "
+            "consumers (AI Follower, AI Invader child variant) to "
+            "actually USE the anchors via crawl-input injection. Adult "
+            "Link / non-child-rigged enemies cannot use crawlspaces — "
+            "that gating happens consumer-side in Phase 2.\n\n"
+            "Schema bumps to v4 when first scan runs with this on; "
+            "existing v3 .bin files regenerate. Apply via Force Rescan. "
+            "Default: off."));
+
+    AddWidget(path, "Auto Refresh Anchors on Scene Flag (Tier 1)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.AutoRefreshAnchorsOnSceneFlag"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Tier 1 dynamic refresh. When on, every scene-flag-set event "
+            "(switch flags, treasure flags, room-cleared flags, etc.) "
+            "triggers an anchor-only refresh of the current room: clears "
+            "and re-detects climb + ledge anchors without rerunning "
+            "floodfill or edge generation.\n\n"
+            "Cost: ~5-30ms per refresh. Catches the slingshot-ladder-fall "
+            "pattern (and any other discrete climbable-actor state change "
+            "that fires a scene flag).\n\n"
+            "Tier 2 (full rescan) takes precedence if both are on. "
+            "Default: off."));
+
+    AddWidget(path, "Auto Full Rescan on Scene Flag (Tier 2)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.AutoFullRescanOnSceneFlag"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Tier 2 dynamic refresh. When on, every scene-flag-set event "
+            "drops the cached scan and re-runs the full ScanRoom pipeline. "
+            "Catches topology-changing events (push blocks reaching their "
+            "destination, moving platforms reaching an endpoint, ferries "
+            "/ scripted scenery changes) that Tier 1's anchor-only refresh "
+            "can't see.\n\n"
+            "Cost: 50-150ms per rescan. The hitch is typically masked by "
+            "the multi-second animation of the triggering event (push "
+            "block animation, cutscene fade, etc.) so it's rarely visible "
+            "in practice.\n\n"
+            "Supersedes Tier 1 when both are enabled. Default: off."));
+
+    AddWidget(path, "Path B Debug — Log All Wall Types", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.PathBDebugLogWallTypes"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Diagnostic mode for Path B. When on, every wall poly the "
+            "scan encounters with a non-zero wall-property index is "
+            "logged with its centroid (X,Y,Z), wall-property index "
+            "(0-31), wall-flag bitmask, and normal-Y. Use to discover "
+            "wall-flag patterns we DON'T currently match (e.g. a ladder "
+            "that uses a different bit than bit 3).\n\n"
+            "Runs even if Path B production is off — diagnostic-only "
+            "mode logs walls without creating climb anchors. Output "
+            "lines look like:\n"
+            "  [RoomNav][PathBDiag] poly@(X,Y,Z) idx=N flags=0xMM "
+            "normalY=...\n\n"
+            "Apply via Force Rescan after toggling."));
 
     AddWidget(path, "Log Stuck-On-Slope Diagnostic", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope"))
@@ -1985,11 +2251,41 @@ void SohMenu::AddMenuEnhancements() {
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip(
-            "Renders the room's nav graph as an in-world overlay: green spheres for "
+            "Renders the room's nav graph as an in-world overlay: green quads for "
             "walkable nodes, red for hazards, blue for underwater, orange for steep "
-            "slopes, yellow arrows for climb anchors, white lines for edges.\n\n"
-            "Overlay rendering itself is implemented as part of nav system Phase 2; the "
-            "toggle is wired in advance so the CVar exists when that lands."));
+            "slopes, yellow posts for climb anchors, white lines for edges."));
+
+    AddWidget(path, "Debug Draw — Component Coloring", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.DebugDrawComponents"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on (in addition to Debug Draw), the green walkable group is replaced "
+            "by a per-connected-component palette so the user can see how the multi-seed "
+            "floodfill partitioned the graph into sub-chambers. Each component gets a "
+            "distinct hue from a golden-angle HSV distribution. Cached per-room; "
+            "invalidated on Force Rescan and on game exit."));
+
+    AddWidget(path, "Debug Draw — Log Rejected Floors", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, every floor rejected by the per-actor allowlist (chests, push "
+            "blocks, etc.) is captured at scan time and rendered as a magenta '+' cross "
+            "in the Debug Draw overlay. Used to tune the rejection list as new "
+            "scene-furniture surfaces. Re-scan the room (Force Rescan) after toggling "
+            "to populate the cross positions."));
+
+    AddWidget(path, "Force Rescan Current Room", WIDGET_BUTTON)
+        .Callback([](WidgetInfo& info) { AnchorNavRoom::ForceRescanCurrentRoom(); })
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .Options(ButtonOptions()
+                     .Tooltip("Drops the cached nav data (in-memory + disk) for the room you're "
+                              "currently in and re-scans on the next frame. Useful for testing "
+                              "scan-algorithm changes without restarting, or for refreshing rooms "
+                              "whose cached graph predates a fix.")
+                     .Size(UIWidgets::Sizes::Inline));
 }
 
 } // namespace SohGui
