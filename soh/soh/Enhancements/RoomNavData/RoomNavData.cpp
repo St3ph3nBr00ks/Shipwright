@@ -182,9 +182,32 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos) {
     return bestIdx;
 }
 
+// Threshold for hazard-traversal rejection — see plan §10 for the
+// derivation. A path that crosses 1-2 hazard cells before exiting is
+// fine; deeper hazard exposure causes that branch of the search to be
+// abandoned. Per-actor override (NavTraits.hazardEscapeHops) deferred
+// until evidence of need.
+static constexpr uint8_t kHazardEscapeHops = 2;
+
+// Helper. Builds a bidirectional adjacency list from data->edges. Each
+// NavEdge stored once but traversable both ways. Used by the hazard-aware
+// BFS and FindNearestNonHazardExit.
+static std::vector<std::vector<uint16_t>>
+BuildAdjacencyList(const RoomNavData* data) {
+    std::vector<std::vector<uint16_t>> adjacency(data->nodes.size());
+    for (const NavEdge& e : data->edges) {
+        if (e.fromIdx >= data->nodes.size() || e.toIdx >= data->nodes.size()) continue;
+        adjacency[e.fromIdx].push_back(e.toIdx);
+        adjacency[e.toIdx].push_back(e.fromIdx);
+    }
+    return adjacency;
+}
+
 int FindBestReachableSubgoalNode(const RoomNavData* data,
                                   int fromIdx,
-                                  const Vec3f& targetPos) {
+                                  const Vec3f& targetPos,
+                                  bool eligibleForSwimming,
+                                  bool avoidHazardNodes) {
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) {
         return -1;
     }
@@ -192,26 +215,23 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
         return -1;
     }
 
-    // v1 baseline (per room_nav_data_plan.md §9): closest-to-target reachable
-    // walkable node via BFS through edges. Conservative defaults this commit:
-    // skip NODE_UNDERWATER, NODE_HAZARD, NODE_ORPHANED, NODE_STEEP_SLOPE.
-    // Commit 10 promotes Underwater/Hazard skip-decisions to per-actor
-    // NavTraits flags (eligibleForSwimming, avoidHazardNodes); the
-    // hazard-aware BFS with kHazardEscapeHops + FindNearestNonHazardExit
-    // fallback (plan §10) lands then. Steep-slope nodes are transient
-    // pass-through markers and never valid destinations regardless of
-    // traits.
-    constexpr uint16_t kRejectFlagsBase =
-        NODE_UNDERWATER | NODE_HAZARD | NODE_ORPHANED | NODE_STEEP_SLOPE;
-
-    // Build sparse adjacency on the fly (same pattern as IsReachable).
-    // Bidirectional traversal — each NavEdge is stored once.
-    std::vector<std::vector<uint16_t>> adjacency(data->nodes.size());
-    for (const NavEdge& e : data->edges) {
-        if (e.fromIdx >= data->nodes.size() || e.toIdx >= data->nodes.size()) continue;
-        adjacency[e.fromIdx].push_back(e.toIdx);
-        adjacency[e.toIdx].push_back(e.fromIdx);
-    }
+    // Hazard-aware BFS per room_nav_data_plan.md §10. The frontier carries
+    // a per-entry "consecutive hazard hops" accumulator alongside the node
+    // index; candidates exceeding kHazardEscapeHops are rejected. This is
+    // cheaper than running a separate hazard-recovery predicate and
+    // produces the same emergent three-way behaviour:
+    //
+    //   1. Hazard surrounds navigator, target on opposite side: target's
+    //      path crosses hazard for many hops → diverted to nearest exit
+    //      via FindNearestNonHazardExit fallback.
+    //   2. Navigator on hazard edge, target right next to hazard: target's
+    //      path exits within 1-2 hops → continues toward target.
+    //   3. Navigator on hazard, no non-hazard reachable: best-effort
+    //      fallback returns -1; caller falls through to direct yaw.
+    //
+    // NODE_ORPHANED and NODE_STEEP_SLOPE always rejected (orphan = not
+    // graph-connected to seed; steep-slope = transient pass-through, never
+    // a valid destination).
 
     auto distSqToTarget = [&](const Vec3f& p) {
         float dx = p.x - targetPos.x;
@@ -220,54 +240,149 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
         return dx * dx + dy * dy + dz * dz;
     };
 
-    // Progress filter: chosen subgoal must improve distance-to-target
-    // strictly over the navigator's starting node. Without this, an
-    // unreachable target (target on the other side of a wall the BFS can't
-    // cross) would trivially return fromIdx itself — the navigator would
-    // freeze. With the filter, no-improvement returns -1 and the caller
-    // falls through to the next layer.
+    // Strict-improvement filter: chosen subgoal must improve distance-to-
+    // target over the navigator's starting node. Without this, an
+    // unreachable target (BFS can't cross to it) would trivially return
+    // fromIdx itself and the navigator would freeze in place.
     const float fromDistSq = distSqToTarget(data->nodes[(size_t)fromIdx].pos);
 
+    struct QueueEntry {
+        uint16_t idx;
+        uint8_t  hopsInHazard;  // running count of consecutive hazard hops
+    };
+
+    std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data);
+    std::vector<bool> visited(data->nodes.size(), false);
+    std::deque<QueueEntry> frontier;
+    visited[(size_t)fromIdx] = true;
+    frontier.push_back({(uint16_t)fromIdx, 0});
+
+    int   bestIdx    = -1;
+    float bestDistSq = fromDistSq;  // strict improvement required
+
+    while (!frontier.empty()) {
+        QueueEntry entry = frontier.front();
+        frontier.pop_front();
+
+        const NavNode& node = data->nodes[entry.idx];
+
+        // Walkability + always-reject filters.
+        if (!(node.flags & NODE_WALKABLE)) continue;
+        if (node.flags & (NODE_ORPHANED | NODE_STEEP_SLOPE)) continue;
+
+        // Underwater filter: navigators not eligible for swimming reject
+        // these as both pass-through and destination.
+        if ((node.flags & NODE_UNDERWATER) && !eligibleForSwimming) continue;
+
+        // Hazard-hop accumulator: increment on hazard nodes, reset on
+        // clear nodes. The hop count for the CURRENT node is one more
+        // than the path that brought us here when this node is hazard,
+        // or zero when it's clear.
+        const bool isHazard = (node.flags & NODE_HAZARD) != 0;
+        uint8_t curHazardHops = isHazard ? (uint8_t)(entry.hopsInHazard + 1) : 0;
+
+        // Reject branches that would exceed the hazard-hop budget. Honors
+        // avoidHazardNodes — heat-resistant navigators (avoidHazardNodes
+        // false) skip the rejection so hazard traversal is unbounded.
+        if (avoidHazardNodes && curHazardHops > kHazardEscapeHops) {
+            continue;
+        }
+
+        // Destination filter: when avoidHazardNodes, hazard nodes are
+        // valid pass-through (within budget) but never valid destinations.
+        // When not avoiding hazards, any walkable node qualifies.
+        const bool destinationOK = !isHazard || !avoidHazardNodes;
+        if (destinationOK) {
+            float d = distSqToTarget(node.pos);
+            if (d < bestDistSq) {
+                bestDistSq = d;
+                bestIdx    = (int)entry.idx;
+            }
+        }
+
+        // Expand neighbours.
+        for (uint16_t nb : adjacency[entry.idx]) {
+            if (nb >= visited.size()) continue;
+            if (visited[nb]) continue;
+            // Don't traverse THROUGH orphan nodes (defensive belt; the
+            // orphan-detection pass should've severed orphan↔seed edges).
+            if (data->nodes[nb].flags & NODE_ORPHANED) continue;
+            visited[nb] = true;
+            frontier.push_back({nb, curHazardHops});
+        }
+    }
+
+    if (bestIdx >= 0) return bestIdx;
+
+    // Cornered fallback: every reachable destination either failed the
+    // strict-improvement filter (target genuinely unreachable through the
+    // graph) OR was rejected by the hazard-hop budget. The latter case
+    // means the navigator is in/near hazard and target is on the other
+    // side. Try FindNearestNonHazardExit which ignores target direction
+    // and just gets the navigator off hazard. The former case (target
+    // unreachable) also produces a useful exit fallback if the navigator
+    // happens to be on hazard, but is otherwise harmless because the
+    // exit will likely be fromIdx itself or an immediate non-hazard
+    // neighbour — the caller's MovementClear gate filters out trivial
+    // self-pointing returns.
+    if (avoidHazardNodes) {
+        return FindNearestNonHazardExit(data, fromIdx, eligibleForSwimming);
+    }
+    return -1;
+}
+
+int FindNearestNonHazardExit(const RoomNavData* data,
+                              int fromIdx,
+                              bool eligibleForSwimming) {
+    if (data == nullptr || data->nodes.empty() || data->edges.empty()) {
+        return -1;
+    }
+    if (fromIdx < 0 || (size_t)fromIdx >= data->nodes.size()) {
+        return -1;
+    }
+
+    // Plain unfiltered BFS — first non-hazard walkable node encountered
+    // wins. No target-direction bias; exit IS the goal. Honors swimming
+    // eligibility so non-swimmers don't get pointed at an underwater
+    // exit.
+    std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data);
     std::vector<bool> visited(data->nodes.size(), false);
     std::deque<uint16_t> q;
     visited[(size_t)fromIdx] = true;
     q.push_back((uint16_t)fromIdx);
-
-    int   bestIdx    = -1;
-    float bestDistSq = fromDistSq;  // strict improvement required
 
     while (!q.empty()) {
         uint16_t cur = q.front();
         q.pop_front();
 
         const NavNode& node = data->nodes[cur];
+        if (!(node.flags & NODE_WALKABLE)) continue;
+        if (node.flags & (NODE_ORPHANED | NODE_STEEP_SLOPE)) continue;
 
-        // Walkable + reject-mask gate. fromIdx itself participates so an
-        // already-on-an-orphan starting node still seeds the BFS, but the
-        // strict-improvement comparison below skips selecting it.
-        const bool isWalkable = (node.flags & NODE_WALKABLE) != 0;
-        const bool isRejected = (node.flags & kRejectFlagsBase) != 0;
-        if (isWalkable && !isRejected) {
-            float d = distSqToTarget(node.pos);
-            if (d < bestDistSq) {
-                bestDistSq = d;
-                bestIdx    = (int)cur;
+        const bool isHazard = (node.flags & NODE_HAZARD) != 0;
+        if (!isHazard) {
+            // Found a non-hazard candidate. Validate eligibility before
+            // returning — non-swimmers can't use an underwater exit.
+            if ((node.flags & NODE_UNDERWATER) && !eligibleForSwimming) {
+                // Underwater non-hazard but navigator can't swim — skip,
+                // keep searching.
+            } else {
+                return (int)cur;
             }
         }
 
         for (uint16_t nb : adjacency[cur]) {
             if (nb >= visited.size()) continue;
             if (visited[nb]) continue;
-            // Don't traverse THROUGH orphan nodes — defensive belt; orphan
-            // edges to non-orphan nodes shouldn't exist after orphan
-            // detection (commit 7158c2664) but guard anyway.
             if (data->nodes[nb].flags & NODE_ORPHANED) continue;
             visited[nb] = true;
             q.push_back(nb);
         }
     }
 
-    return bestIdx;
+    // Fully surrounded by hazard with no reachable non-hazard exit, or
+    // exits all behind the swimming gate.
+    return -1;
 }
 
 bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toPos) {
