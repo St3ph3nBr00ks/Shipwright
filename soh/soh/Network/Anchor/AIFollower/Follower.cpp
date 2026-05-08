@@ -161,6 +161,10 @@ static constexpr f32 kFollowThreshold = 100.0f;
 // HandleStateClimbing.
 static constexpr int kClimbDismountHoldFrames = 9;
 
+// STUCK fallback-nudge tunables. Promoted for HandleStateStuck.
+static constexpr f32 kMoveSpeed     = 4.0f;  // units/frame for the position-override nudge
+static constexpr int kStuckRecovery = 25;    // frames of nudge before retrying FOLLOW
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -488,10 +492,12 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius (XZ)
                 static constexpr f32 kMaxYDelta          = 120.0f; // reject enemies on a different floor
                 static constexpr f32 kMaxLeash           = 800.0f; // abandon ENGAGE if leader this far
-                static constexpr f32 kMoveSpeed          = 4.0f;   // units/frame for STUCK fallback nudge only
+                // kMoveSpeed moved to file-scope anonymous namespace
+                // (Phase 1 commit 8) — used by HandleStateStuck.
                 static constexpr int kStuckCheckInterval = 20;     // frames between stuck checks
                 static constexpr f32 kStuckMinProgress   = 5.0f;   // min units per check interval
-                static constexpr int kStuckRecovery      = 25;     // frames of strafe before retry
+                // kStuckRecovery moved to file-scope anonymous namespace
+                // (Phase 1 commit 8) — used by HandleStateStuck.
                 // kAttackDuration moved to file-scope anonymous namespace
                 // (Phase 1 commit 6) so per-state handlers can reference it.
                 // G10 — leash-timeout teleport thresholds.
@@ -1642,30 +1648,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     }
 
                     case FollowerAIState::STUCK: {
-                        // Fallback path: stick-input hit a wall / corner / doorway
-                        // the simulation can't navigate. Apply a small position nudge
-                        // directly toward followerMoveTarget for up to kStuckRecovery
-                        // frames. This bypasses Link's physics just enough to get
-                        // past the obstacle. Stick injection stays active in this
-                        // state (see ShouldActorUpdate) so Link's legs still try to
-                        // walk — the nudge is additive, not a replacement.
-                        // This is the ONLY path in the follower state machine that
-                        // writes to player->actor.world.pos in the stick-input design.
-                        followerStuckFrames++;
-                        f32 ndx = followerMoveTarget.x - player->actor.world.pos.x;
-                        f32 ndz = followerMoveTarget.z - player->actor.world.pos.z;
-                        f32 nd  = sqrtf(ndx * ndx + ndz * ndz);
-                        if (nd > 0.001f) {
-                            f32 step = (nd < kMoveSpeed) ? nd : kMoveSpeed;
-                            player->actor.world.pos.x += ndx / nd * step;
-                            player->actor.world.pos.z += ndz / nd * step;
-                        }
-                        if (followerStuckFrames >= kStuckRecovery) {
-                            followerAIState     = FollowerAIState::FOLLOW;
-                            followerLastPos     = player->actor.world.pos;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] STUCK→FOLLOW (fallback nudge complete)");
-                        }
+                        // Body extracted to Anchor::HandleStateStuck
+                        // (Phase 1 commit 8 of the SRP refactor).
+                        HandleStateStuck(player);
                         break;
                     }
 
@@ -1954,46 +1939,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     // target is a known ranged-required class (Gohma ceiling, larvae,
                     // Skullwalltulas on vines). Movement freezes so Link aims.
                     case FollowerAIState::RANGED_ATTACK: {
-                        if (followerTargetEnemy == nullptr ||
-                            followerTargetEnemy->update == nullptr) {
-                            FollowerRestoreItems();
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target gone)");
-                            break;
-                        }
-                        // Two-signal defeat check, mirroring the ATTACK state.
-                        bool defeated = (followerTargetEnemy->colChkInfo.health <= 0);
-                        if (!defeated) {
-                            const EnemyNetId* ext =
-                                ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
-                            if (ext != nullptr) {
-                                EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.B");
-                                if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
-                                    EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
-                                    defeated = true;
-                                }
-                            }
-                        }
-                        if (defeated) {
-                            FollowerRestoreItems();
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target dead)");
-                            break;
-                        }
-                        // Face the target so the slingshot aim line is correct.
-                        f32 ex = followerTargetEnemy->world.pos.x - p2Pos.x;
-                        f32 ez = followerTargetEnemy->world.pos.z - p2Pos.z;
-                        if (ex * ex + ez * ez > 1.0f) {
-                            player->actor.shape.rot.y = YawToward(ex, ez);
-                        }
-                        if (followerStateFrames >= kAttackDuration) {
-                            FollowerRestoreItems();
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (cycle complete)");
-                        }
+                        // Body extracted to Anchor::HandleStateRangedAttack
+                        // (Phase 1 commit 8 of the SRP refactor).
+                        HandleStateRangedAttack(player, p2Pos);
                         break;
                     }
 
@@ -2860,4 +2808,80 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
     followerMoveTarget = leaderPos;
     // Match leader's facing so dismount looks clean.
     player->actor.shape.rot.y = leaderActor->shape.rot.y;
+}
+
+void Anchor::HandleStateStuck(Player* player) {
+    // STUCK: stick-input hit a wall / corner / doorway the simulation
+    // can't navigate. Apply a small position nudge directly toward
+    // followerMoveTarget for up to kStuckRecovery frames. Bypasses
+    // Link's physics just enough to get past the obstacle. Stick
+    // injection stays active during this state (see TickFollowerInput)
+    // so Link's legs still try to walk — the nudge is additive, not
+    // a replacement.
+    //
+    // This is the ONLY path in the follower state machine that writes
+    // to player->actor.world.pos in the stick-input design.
+    followerStuckFrames++;
+    f32 ndx = followerMoveTarget.x - player->actor.world.pos.x;
+    f32 ndz = followerMoveTarget.z - player->actor.world.pos.z;
+    f32 nd  = sqrtf(ndx * ndx + ndz * ndz);
+    if (nd > 0.001f) {
+        f32 step = (nd < kMoveSpeed) ? nd : kMoveSpeed;
+        player->actor.world.pos.x += ndx / nd * step;
+        player->actor.world.pos.z += ndz / nd * step;
+    }
+    if (followerStuckFrames >= kStuckRecovery) {
+        followerAIState     = FollowerAIState::FOLLOW;
+        followerLastPos     = player->actor.world.pos;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] STUCK→FOLLOW (fallback nudge complete)");
+    }
+}
+
+void Anchor::HandleStateRangedAttack(Player* player, const Vec3f& p2Pos) {
+    // G6/G7/G8 — ranged attack. Inject BTN_Z + BTN_A while ENGAGE
+    // target is a known ranged-required class (Gohma ceiling, larvae,
+    // Skullwalltulas on vines). Movement freezes (no stick) so Link
+    // can aim. Item-override system (FollowerRestoreItems) restores
+    // the player's C-button loadout on every exit path.
+    if (followerTargetEnemy == nullptr ||
+        followerTargetEnemy->update == nullptr) {
+        FollowerRestoreItems();
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target gone)");
+        return;
+    }
+    // Two-signal defeat check, mirroring the ATTACK state.
+    bool defeated = (followerTargetEnemy->colChkInfo.health <= 0);
+    if (!defeated) {
+        const EnemyNetId* ext =
+            ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
+        if (ext != nullptr) {
+            EnemyStateSync::AuditBooleansVsPhase(*ext, "Follower.targetDefeatedCheck.B");
+            if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) ||
+                EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
+                defeated = true;
+            }
+        }
+    }
+    if (defeated) {
+        FollowerRestoreItems();
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target dead)");
+        return;
+    }
+    // Face the target so the slingshot aim line is correct.
+    f32 ex = followerTargetEnemy->world.pos.x - p2Pos.x;
+    f32 ez = followerTargetEnemy->world.pos.z - p2Pos.z;
+    if (ex * ex + ez * ez > 1.0f) {
+        player->actor.shape.rot.y = YawToward(ex, ez);
+    }
+    if (followerStateFrames >= kAttackDuration) {
+        FollowerRestoreItems();
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (cycle complete)");
+    }
 }
