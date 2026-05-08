@@ -385,6 +385,11 @@ static void OnFrameTick() {
             sSessionInitialized = false;
             sEntrancesVisited = 0;
             ScenesCovered().clear();
+            // Phase 3: clear in-flight on user-initiated stop. Without
+            // this, toggling off mid-traversal would leave the last
+            // entrance flagged as in-flight, and the next boot would
+            // promote it to "crashed" — false positive.
+            SkipList::ClearInFlight();
         }
         return;
     }
@@ -426,6 +431,7 @@ static void OnFrameTick() {
             CVarSetInteger(CVAR_AT_MODE, AT_MODE_COMPLETE);
             sCompleteEmitted = true;
             WriteStateFile(initialCursor, maxEntrance, "complete");
+            SkipList::ClearInFlight();
             return;
         }
         CVarSetInteger(CVAR_AT_CURSOR, initialCursor);
@@ -472,13 +478,19 @@ static void OnFrameTick() {
                                        : triggerReturnedToOff ? "trigger-off"
                                                               : "timeout";
             // Phase 3: timeouts indicate the engine fizzled the warp —
-            // record so future sessions skip this entrance. Otherwise the
-            // warp committed successfully; clear in-flight only.
+            // record so future sessions skip this entrance. We do NOT
+            // clear in-flight on commit; the inFlight window is held
+            // through the hold period AND through scene-load / cutscene
+            // settling, until the cursor advances to the next entrance.
+            // This catches post-commit crashes (Water Temple class:
+            // entrance 0x14 commits cleanly, then the cutscene init
+            // crashes ~120ms later — log 24, 2026-05-08). ClearInFlight
+            // is now called just before the next TriggerEntranceLoad.
             int inFlightEntrance = SkipList::InFlightCursor();
             if (timedOut && inFlightEntrance >= 0) {
                 SkipList::Add(inFlightEntrance, "timeout");
+                SkipList::ClearInFlight();  // safe: timeout = no further work for this entrance
             }
-            SkipList::ClearInFlight();
             SPDLOG_INFO("[AutoTraverse] Warp committed ({}): scene={} room={}; visited={}, scenes_covered={}; holding {} frames",
                         commitReason,
                         gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num,
@@ -526,11 +538,19 @@ static void OnFrameTick() {
         CVarSetInteger(CVAR_AT_MODE, AT_MODE_COMPLETE);
         sCompleteEmitted = true;
         WriteStateFile(cursor, maxEntrance, "complete");
+        // Phase 3: traversal finished cleanly; the last entrance was
+        // verified through its hold period without crashing.
+        SkipList::ClearInFlight();
         return;
     }
 
     CVarSetInteger(CVAR_AT_CURSOR, cursor);
     WriteStateFile(cursor, maxEntrance, "running");
+    // Phase 3: clear the prior entrance's in-flight marker now — it
+    // survived the hold period without crashing, so it's verified safe.
+    // MarkInFlight inside TriggerEntranceLoad immediately re-arms for
+    // the new cursor.
+    SkipList::ClearInFlight();
     TriggerEntranceLoad(cursor);
 }
 
