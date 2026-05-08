@@ -87,13 +87,24 @@ extern PlayState* gPlayState;
 
 namespace AutoTraverse {
 
-// In-flight = a warp has been triggered but the scene/room hasn't
-// committed yet. We watch for play->sceneNum to change before starting
-// the hold timer.
+// In-flight = a warp has been triggered but hasn't committed yet. We
+// watch for either scene/room number to change OR for transitionTrigger
+// to return to OFF after a non-zero observation, OR a frame timeout —
+// whichever fires first. The timeout handles the edge case where the
+// warp's destination is the SAME (scene, room) as the source (e.g.,
+// user is in scene 0 room 0 and warps to entrance 0 which lands there).
 static bool sInFlight = false;
 static int sLastObservedSceneNum = -1;
 static int sLastObservedRoomNum = -1;
+static int sInFlightFrames = 0;
+static bool sObservedNonZeroTrigger = false;
 static int sHoldFrameCounter = 0;
+
+// Timeout after which a stuck in-flight warp is considered complete.
+// 360 frames at 60fps = 6 seconds; long enough for any vanilla scene
+// load (boss arenas with heavy texture banks land in <3s) but short
+// enough that pathological hangs don't stall traversal indefinitely.
+#define AT_INFLIGHT_TIMEOUT_FRAMES 360
 
 // One-shot: emit a [Complete] log line once when we transition to
 // AT_MODE_COMPLETE. Without this, the log spams the same line every
@@ -166,6 +177,8 @@ static void TriggerEntranceLoad(int entranceIndex) {
     sInFlight = true;
     sLastObservedSceneNum = gPlayState->sceneNum;
     sLastObservedRoomNum = gPlayState->roomCtx.curRoom.num;
+    sInFlightFrames = 0;
+    sObservedNonZeroTrigger = false;
     sHoldFrameCounter = 0;
 }
 
@@ -228,17 +241,40 @@ static void OnFrameTick() {
     }
 
     if (sInFlight) {
-        // Wait for the engine to commit the scene/room change before
-        // starting the hold timer. Either the scene number or the room
-        // number changed signals the warp landed.
+        // Detect warp commit. Three signals, any one triggers commit:
+        //   1. scene or room number changed (fast path; most warps)
+        //   2. transitionTrigger returned to OFF after going non-zero
+        //      (handles same-(scene, room) warps where (1) misses)
+        //   3. timeout (failsafe; handles the engine fizzling the warp
+        //      or unusual cases (1) and (2) both miss)
+        sInFlightFrames++;
+
         bool sceneChanged = (gPlayState->sceneNum != sLastObservedSceneNum);
         bool roomChanged = (gPlayState->roomCtx.curRoom.num != sLastObservedRoomNum);
-        if (sceneChanged || roomChanged) {
+
+        // Track the trigger state machine. After TriggerEntranceLoad,
+        // transitionTrigger should be non-zero (TRANS_TRIGGER_START or
+        // ..._END during the in-flight period); when it returns to OFF
+        // we know the engine finished the transition.
+        if (gPlayState->transitionTrigger != TRANS_TRIGGER_OFF) {
+            sObservedNonZeroTrigger = true;
+        }
+        bool triggerReturnedToOff = sObservedNonZeroTrigger &&
+                                    (gPlayState->transitionTrigger == TRANS_TRIGGER_OFF);
+
+        bool timedOut = sInFlightFrames >= AT_INFLIGHT_TIMEOUT_FRAMES;
+
+        if (sceneChanged || roomChanged || triggerReturnedToOff || timedOut) {
             sInFlight = false;
             sHoldFrameCounter = CVarGetInteger(CVAR_AT_HOLD_FRAMES, AT_DEFAULT_HOLD_FRAMES);
             sEntrancesVisited++;
             ScenesCovered().insert(gPlayState->sceneNum);
-            SPDLOG_INFO("[AutoTraverse] Warp committed: scene={} room={}; visited={}/group, scenes_covered={}; holding {} frames",
+            const char* commitReason = sceneChanged          ? "scene-changed"
+                                       : roomChanged         ? "room-changed"
+                                       : triggerReturnedToOff ? "trigger-off"
+                                                              : "timeout";
+            SPDLOG_INFO("[AutoTraverse] Warp committed ({}): scene={} room={}; visited={}, scenes_covered={}; holding {} frames",
+                        commitReason,
                         gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num,
                         sEntrancesVisited, ScenesCovered().size(), sHoldFrameCounter);
         }
