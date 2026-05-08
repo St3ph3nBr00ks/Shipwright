@@ -3210,12 +3210,12 @@ static void OnDebugDrawRender() {
     // actual usage is bounded tighter; reserves are additive across groups
     // for forward-compat with parallel workstreams that may add their own
     // groups.
-    // ActorTrail breadcrumb upper bound — kMaxWaypoints (64) per entity ×
+    // ActorTrail breadcrumb upper bound — kMaxWaypoints (50) per entity ×
     // peak entity set (~8 = local player + remote DummyPlayers + AI Follower
     // + synced enemies with leavesTrail=true). Each marker is a 2-quad
     // vertical post → 8 verts + 2 Gfx commands. Reserve slop is fine; the
     // capacity-overshoot is a one-time scene-change allocation.
-    constexpr size_t kMaxTrailWaypointsForReserve = 64 * 8;
+    constexpr size_t kMaxTrailWaypointsForReserve = 50 * 8;
     sVtxDl.reserve(data->nodes.size() * 4
                    + data->nodes.size() * 4 // orphan group
                    + data->edges.size() * 4

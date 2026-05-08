@@ -12,8 +12,9 @@
  * tagged uint32 — high bit = player (low byte is clientId);
  * high bit clear = actor (low 31 bits are netId).
  *
- * Sampling rate: 30 captures/sec/entity at 60fps (kCaptureRateFrames=2).
- * Buffer size: 64 waypoints per entity (~2.1s of history).
+ * Sampling rate: 5 captures/sec/entity at 60fps (kCaptureRateFrames=12).
+ * Buffer size: 50 waypoints per entity (10.0s of history before the
+ * oldest is overwritten).
  *
  * The MovementClear and VisualLineOfSight primitives also live here as
  * file-scope helpers (perception vs movement layer split per plan §2).
@@ -131,8 +132,8 @@ public:
 private:
     ActorTrail() = default;
 
-    static constexpr size_t  kMaxWaypoints       = 64; // ring buffer size per entity
-    static constexpr uint8_t kCaptureRateFrames  = 2;  // capture every 2 game frames
+    static constexpr size_t  kMaxWaypoints       = 50; // 50 × 12f = 10.0s history at 60fps
+    static constexpr uint8_t kCaptureRateFrames  = 12; // capture every 12 game frames = 5Hz
 
     struct EntityTrail {
         std::array<TrailWaypoint, kMaxWaypoints> waypoints;

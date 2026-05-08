@@ -124,7 +124,7 @@ void ActorTrail::Tick(PlayState* play) {
     if (play == nullptr) return;
 
     mFrameCounter++;
-    if ((mFrameCounter % kCaptureRateFrames) != 0) return;  // 30Hz throttle
+    if ((mFrameCounter % kCaptureRateFrames) != 0) return;  // 5Hz throttle
 
     // Skip capture during cutscenes — scripted positions would mislead
     // trail consumers. Per plan §5 capture rules.
@@ -248,8 +248,11 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
         // Reject cross-scene waypoints.
         if (wp.sceneNum != gPlayState->sceneNum) continue;
 
-        // Reject stale waypoints (>6s old).
-        if (mFrameCounter > wp.frameIdx && (mFrameCounter - wp.frameIdx) > 360) continue;
+        // Reject stale waypoints (>12s old). Buffer rolls over at 10s
+        // (50 × 12 frames at 60fps), so the 12s threshold gives a small
+        // margin where the most-recent overwritten slot would be skipped
+        // even if its memory wasn't yet reused.
+        if (mFrameCounter > wp.frameIdx && (mFrameCounter - wp.frameIdx) > 720) continue;
 
         // Reject non-progress waypoints (would walk away from target).
         if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
