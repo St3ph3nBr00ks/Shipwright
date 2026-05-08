@@ -1008,6 +1008,15 @@ class Anchor : public Network {
     void HandleStateStuck(Player* player);
     void HandleStateRangedAttack(Player* player, const Vec3f& p2Pos);
     void HandleStateCollectItem(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);
+    void HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sideTarget, const Vec3f& p2Pos);
+
+    // Helper for IDLE / FOLLOW state — scans ACTORCAT_MISC for an eligible
+    // EN_ITEM00 drop the follower should engage. Maintains the
+    // itemFirstSeenFrame grace-period map. Returns the nearest in-range
+    // item whose grace window has elapsed, or nullptr. Was a parent-
+    // function lambda inside TickFollower; promoted in Phase 1 commit 10
+    // so HandleStateIdle / HandleStateFollow can reference it.
+    Actor* ScanForItemCandidate(Player* player);
 
     // Pillar C2 Phase 4 — phase-specific senders for the unified
     // ENEMY_STATE wire packet. All four emit type=ENEMY_STATE with the

@@ -175,6 +175,31 @@ static constexpr f32 kMaxYDelta = 120.0f;
 // this distance. Promoted for HandleStateCollectItem.
 static constexpr f32 kMaxLeash = 800.0f;
 
+// Enemy detection radius (XZ) for IDLE→ENGAGE transitions. Promoted for
+// HandleStateIdle.
+static constexpr f32 kEngageRange = 350.0f;
+
+// Item-pickup tunables — XZ scan radius, grace-period (human-first-pick
+// window), and the COLLECT_ITEM walking timeout. Promoted for
+// HandleStateIdle / HandleStateFollow / HandleStateCollectItem.
+static constexpr f32 kItemProximity      = 200.0f;
+static constexpr int kItemGraceFrames    = 180;
+static constexpr int kItemCollectTimeout = 300;
+
+// Item filter — does the follower's character class want this drop?
+// Was a parent-function lambda with `[]` empty capture (no parent-state
+// dependencies); promoted to a file-scope free function so per-state
+// handlers + Anchor::ScanForItemCandidate can call it.
+inline bool FollowerWantsItem(Actor* item) {
+    if (item == nullptr || item->id != ACTOR_EN_ITEM00 ||
+        item->update == nullptr) {
+        return false;
+    }
+    s16 itemType = (s16)(item->params & 0xFF);
+    return ItemEligibility::CanPlayerCollectItem00(
+        itemType, /*walletCapAware=*/false);
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -498,7 +523,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 static constexpr f32 kFollowOffset       = 25.0f;  // world +X from leader
                 // kFollowThreshold moved to file-scope anonymous namespace
                 // (Phase 1 commit 7) so per-state handlers can reference it.
-                static constexpr f32 kEngageRange        = 350.0f; // enemy detection radius (XZ)
+                // kEngageRange moved to file-scope anonymous namespace
+                // (Phase 1 commit 10) — used by HandleStateIdle.
                 static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius (XZ)
                 // kMaxYDelta moved to file-scope anonymous namespace
                 // (Phase 1 commit 9) — used by HandleStateCollectItem.
@@ -547,9 +573,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 //     Walking from kEngageRange (350) → item at ~4 u/frame
                 //     is < 90 frames; 300 gives plenty of slack for
                 //     collision mishaps. Drops back to RETURN on expiry.
-                static constexpr f32 kItemProximity      = 200.0f;
-                static constexpr int kItemGraceFrames    = 180;
-                static constexpr int kItemCollectTimeout = 300;
+                // kItemProximity / kItemGraceFrames / kItemCollectTimeout
+                // moved to file-scope anonymous namespace (Phase 1 commit 10).
                 // G13 — boss scenes that warrant pre-emptive teleport on leader entry.
                 // Only Deku Tree boss is in scope for the first dungeon demo (#167);
                 // extend this list as later dungeons land.
@@ -616,87 +641,12 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 // false. AI follower keeps the legacy "rupees always" rule
                 // (`walletCapAware = false`) since vanilla truncates surplus
                 // and the follower acts in the local player's stead.
-                auto FollowerWantsItem = [](Actor* item) -> bool {
-                    if (item == nullptr || item->id != ACTOR_EN_ITEM00 ||
-                        item->update == nullptr) {
-                        return false;
-                    }
-                    s16 itemType = (s16)(item->params & 0xFF);
-                    return ItemEligibility::CanPlayerCollectItem00(
-                        itemType, /*walletCapAware=*/false);
-                };
-
-                // Item pickup — scan ACTORCAT_MISC for eligible En_Item00
-                // drops. Maintains itemFirstSeenFrame (grace-period tracker)
-                // and returns the nearest eligible in-range item whose
-                // grace window has elapsed. Called once per tick from the
-                // IDLE/FOLLOW state bodies. Pointer-reuse is handled by
-                // purging entries whose key is no longer in the current
-                // MISC list.
-                auto ScanForItemCandidate = [&]() -> Actor* {
-                    // Pass 1: collect current live EN_ITEM00 pointers.
-                    std::unordered_set<Actor*> liveItems;
-                    Actor* cand = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
-                    while (cand != nullptr) {
-                        if (cand->id == ACTOR_EN_ITEM00 && cand->update != nullptr) {
-                            liveItems.insert(cand);
-                        }
-                        cand = cand->next;
-                    }
-                    // Pass 2: purge itemFirstSeenFrame entries whose key is
-                    // no longer in the MISC list (item was collected / unloaded).
-                    for (auto it = itemFirstSeenFrame.begin();
-                         it != itemFirstSeenFrame.end();) {
-                        if (liveItems.find(it->first) == liveItems.end()) {
-                            it = itemFirstSeenFrame.erase(it);
-                        } else {
-                            ++it;
-                        }
-                    }
-                    // Pass 3: register newly-seen items + evaluate eligibility.
-                    Vec3f selfPos = player->actor.world.pos;
-                    Actor* bestItem  = nullptr;
-                    f32    bestDistSq = kItemProximity * kItemProximity;
-                    for (Actor* item : liveItems) {
-                        auto firstIt = itemFirstSeenFrame.find(item);
-                        if (firstIt == itemFirstSeenFrame.end()) {
-                            itemFirstSeenFrame[item] = followerTickCounter; // arm grace
-                            continue;
-                        }
-                        // Grace check first — cheap int compare before physics math.
-                        if (followerTickCounter - firstIt->second < kItemGraceFrames) {
-                            continue;
-                        }
-                        // Test 5 diagnostics — log item type at the first
-                        // post-grace scan for each actor, sparse per type.
-                        // Lets us see why sticks/seeds/etc. don't engage.
-                        bool wants = FollowerWantsItem(item);
-                        if (followerTickCounter - firstIt->second == kItemGraceFrames) {
-                            s16 itemType = (s16)(item->params & 0xFF);
-                            SPDLOG_INFO("[Follower] item grace expired ptr=0x{:x} type=0x{:02X} "
-                                        "wants={} y-delta={:.0f}",
-                                        (uintptr_t)item, (int)itemType, wants ? 1 : 0,
-                                        item->world.pos.y - selfPos.y);
-                        }
-                        if (!wants) {
-                            continue;
-                        }
-                        // Same-floor gate (mirrors enemy-target Y gate).
-                        if (fabsf(item->world.pos.y - selfPos.y) >= kMaxYDelta) {
-                            continue;
-                        }
-                        // Room-equality check disabled: player->actor.room is
-                        // stale across room transitions. See earlier banner.
-                        f32 dx = item->world.pos.x - selfPos.x;
-                        f32 dz = item->world.pos.z - selfPos.z;
-                        f32 d2 = dx * dx + dz * dz;
-                        if (d2 < bestDistSq) {
-                            bestDistSq = d2;
-                            bestItem   = item;
-                        }
-                    }
-                    return bestItem;
-                };
+                // FollowerWantsItem + ScanForItemCandidate moved (Phase 1
+                // commit 10): the wants-filter is now a file-scope free
+                // function in the anonymous namespace; the scan is now
+                // Anchor::ScanForItemCandidate. Both are called via
+                // member-function syntax / file-scope name lookup at the
+                // existing call sites.
 
                 // -----------------------------------------------------------------
                 // Room-equality check — DISABLED 2026-04-21.
@@ -1458,93 +1408,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 switch (followerAIState) {
 
                     case FollowerAIState::IDLE: {
-                        // Drift back to side-target if P1 moved.
-                        f32 dx = sideTarget.x - p2Pos.x;
-                        f32 dz = sideTarget.z - p2Pos.z;
-                        if (dx * dx + dz * dz > kFollowThreshold * kFollowThreshold) {
-                            followerAIState     = FollowerAIState::FOLLOW;
-                            followerStateFrames = 0;
-                            followerLastPos     = p2Pos;
-                            SPDLOG_INFO("[Follower] IDLE→FOLLOW p2=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) dist={:.0f}",
-                                        p2Pos.x, p2Pos.y, p2Pos.z,
-                                        sideTarget.x, sideTarget.y, sideTarget.z,
-                                        sqrtf(dx * dx + dz * dz));
-                            break;
-                        }
-                        // Scan for the nearest live enemy within ENGAGE range.
-                        // Reject enemies on a different vertical level — the
-                        // follower only moves in XZ, so targets on another floor
-                        // (e.g. a room below the Deku Tree entrance) otherwise
-                        // cause it to walk into walls and swing at air.
-                        // (Room-equality check disabled — see banner note above.)
-                        //
-                        // Target blacklist: actors that can only be defeated by
-                        // shield-reflect of their own projectiles. The follower
-                        // can't perform reflect (no shield input in current
-                        // RANGED_ATTACK mode), and the underground "wait" state
-                        // for these scrubs has the AC collider disabled +
-                        // collider height shrunk to 5, so a melee swing hits
-                        // nothing but the targeting logic still picks them up
-                        // because ACTOR_FLAG_ATTENTION_ENABLED stays set.
-                        // Symptom on the demo path: follower "runs at empty
-                        // Hintnut nest" in Compound Room.
-                        auto IsScrubPuzzleActor = [](int16_t id) -> bool {
-                            return id == ACTOR_EN_HINTNUTS ||
-                                   id == ACTOR_EN_DEKUNUTS;
-                        };
-                        Actor* nearest    = nullptr;
-                        f32    nearDistSq = kEngageRange * kEngageRange;
-                        Actor* eActor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
-                        while (eActor != nullptr) {
-                            if (eActor->update != nullptr &&
-                                /* eActor->room == player->actor.room && */
-                                !IsScrubPuzzleActor(eActor->id) &&
-                                fabsf(eActor->world.pos.y - p2Pos.y) < kMaxYDelta) {
-                                f32 edx     = eActor->world.pos.x - p2Pos.x;
-                                f32 edz     = eActor->world.pos.z - p2Pos.z;
-                                f32 eDistSq = edx * edx + edz * edz;
-                                if (eDistSq < nearDistSq) {
-                                    nearDistSq = eDistSq;
-                                    nearest    = eActor;
-                                }
-                            }
-                            eActor = eActor->next;
-                        }
-                        if (nearest != nullptr) {
-                            followerTargetEnemy = nearest;
-                            followerAIState     = FollowerAIState::ENGAGE;
-                            followerStateFrames = 0;
-                            SPDLOG_INFO("[Follower] IDLE→ENGAGE enemy id={} at ({:.0f},{:.0f},{:.0f}) dist={:.0f}",
-                                        nearest->id,
-                                        nearest->world.pos.x, nearest->world.pos.y, nearest->world.pos.z,
-                                        sqrtf(nearDistSq));
-                            break;
-                        }
-                        // Item pickup — no enemy to engage; scan for eligible drops.
-                        // Grace/filter/Y-gate are all handled inside ScanForItemCandidate.
-                        {
-                            Actor* item = ScanForItemCandidate();
-                            if (item != nullptr) {
-                                followerTargetItem = item;
-                                followerCollectItemTimeoutFrames = kItemCollectTimeout;
-                                followerAIState     = FollowerAIState::COLLECT_ITEM;
-                                followerStateFrames = 0;
-                                SPDLOG_INFO("[Follower] IDLE→COLLECT_ITEM item=0x{:02X} at ({:.0f},{:.0f},{:.0f})",
-                                            (int)(item->params & 0xFF),
-                                            item->world.pos.x, item->world.pos.y, item->world.pos.z);
-                                break;
-                            }
-                        }
-                        // In IDLE, match P1's facing direction.
-                        player->actor.shape.rot.y = dummyActor->shape.rot.y;
-                        // Pre-populate move target so the first FOLLOW frame's
-                        // ShouldActorUpdate sees the correct direction immediately.
-                        // Test 8 — during door handoff the G11 block above
-                        // already set followerMoveTarget to the door
-                        // centerline; don't overwrite with side-offset.
-                        if (!followerDoorHandoff) {
-                            followerMoveTarget = sideTarget;
-                        }
+                        // Body extracted to Anchor::HandleStateIdle
+                        // (Phase 1 commit 10 of the SRP refactor).
+                        HandleStateIdle(player, dummyActor, sideTarget, p2Pos);
                         break;
                     }
 
@@ -1589,7 +1455,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                         // tight scan window is less useful). On finding an
                         // eligible drop, abandon FOLLOW and divert to COLLECT_ITEM.
                         if (followerStateFrames % 10 == 0) {
-                            Actor* item = ScanForItemCandidate();
+                            Actor* item = this->ScanForItemCandidate(player);
                             if (item != nullptr) {
                                 followerTargetItem = item;
                                 followerCollectItemTimeoutFrames = kItemCollectTimeout;
@@ -2908,5 +2774,156 @@ void Anchor::HandleStateCollectItem(Player* player, const Vec3f& leaderPos, cons
         if (idx * idx + idz * idz > 1.0f) {
             player->actor.shape.rot.y = YawToward(idx, idz);
         }
+    }
+}
+
+Actor* Anchor::ScanForItemCandidate(Player* player) {
+    // Item pickup — scan ACTORCAT_MISC for eligible En_Item00 drops.
+    // Maintains itemFirstSeenFrame (grace-period tracker) and returns
+    // the nearest eligible in-range item whose grace window has elapsed.
+    // Called once per tick from IDLE / FOLLOW state bodies. Pointer-
+    // reuse is handled by purging entries whose key is no longer in
+    // the current MISC list.
+    //
+    // Was a parent-function lambda inside TickFollower; promoted to an
+    // Anchor:: method so per-state handlers can call it. Caller passes
+    // `player` for the proximity reference position.
+    //
+    // Pass 1: collect current live EN_ITEM00 pointers.
+    std::unordered_set<Actor*> liveItems;
+    Actor* cand = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
+    while (cand != nullptr) {
+        if (cand->id == ACTOR_EN_ITEM00 && cand->update != nullptr) {
+            liveItems.insert(cand);
+        }
+        cand = cand->next;
+    }
+    // Pass 2: purge itemFirstSeenFrame entries whose key is no longer
+    // in the MISC list (item was collected / unloaded).
+    for (auto it = itemFirstSeenFrame.begin();
+         it != itemFirstSeenFrame.end();) {
+        if (liveItems.find(it->first) == liveItems.end()) {
+            it = itemFirstSeenFrame.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // Pass 3: register newly-seen items + evaluate eligibility.
+    Vec3f selfPos = player->actor.world.pos;
+    Actor* bestItem  = nullptr;
+    f32    bestDistSq = kItemProximity * kItemProximity;
+    for (Actor* item : liveItems) {
+        auto firstIt = itemFirstSeenFrame.find(item);
+        if (firstIt == itemFirstSeenFrame.end()) {
+            itemFirstSeenFrame[item] = followerTickCounter; // arm grace
+            continue;
+        }
+        // Grace check first — cheap int compare before physics math.
+        if (followerTickCounter - firstIt->second < kItemGraceFrames) {
+            continue;
+        }
+        // Test 5 diagnostics — log item type at the first post-grace
+        // scan for each actor, sparse per type.
+        bool wants = FollowerWantsItem(item);
+        if (followerTickCounter - firstIt->second == kItemGraceFrames) {
+            s16 itemType = (s16)(item->params & 0xFF);
+            SPDLOG_INFO("[Follower] item grace expired ptr=0x{:x} type=0x{:02X} "
+                        "wants={} y-delta={:.0f}",
+                        (uintptr_t)item, (int)itemType, wants ? 1 : 0,
+                        item->world.pos.y - selfPos.y);
+        }
+        if (!wants) {
+            continue;
+        }
+        // Same-floor gate (mirrors enemy-target Y gate).
+        if (fabsf(item->world.pos.y - selfPos.y) >= kMaxYDelta) {
+            continue;
+        }
+        f32 dx = item->world.pos.x - selfPos.x;
+        f32 dz = item->world.pos.z - selfPos.z;
+        f32 d2 = dx * dx + dz * dz;
+        if (d2 < bestDistSq) {
+            bestDistSq = d2;
+            bestItem   = item;
+        }
+    }
+    return bestItem;
+}
+
+void Anchor::HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sideTarget, const Vec3f& p2Pos) {
+    // IDLE: hold position next to leader. Drift back to side-target if
+    // leader moved out of FollowThreshold; else scan for nearby enemies
+    // → ENGAGE; else scan for eligible item drops → COLLECT_ITEM; else
+    // match leader facing.
+    f32 dx = sideTarget.x - p2Pos.x;
+    f32 dz = sideTarget.z - p2Pos.z;
+    if (dx * dx + dz * dz > kFollowThreshold * kFollowThreshold) {
+        followerAIState     = FollowerAIState::FOLLOW;
+        followerStateFrames = 0;
+        followerLastPos     = p2Pos;
+        SPDLOG_INFO("[Follower] IDLE→FOLLOW p2=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) dist={:.0f}",
+                    p2Pos.x, p2Pos.y, p2Pos.z,
+                    sideTarget.x, sideTarget.y, sideTarget.z,
+                    sqrtf(dx * dx + dz * dz));
+        return;
+    }
+    // Scan for the nearest live enemy within ENGAGE range. Reject
+    // enemies on a different vertical level (XZ-only follower can't
+    // reach them). Target blacklist: scrub-puzzle actors that can only
+    // be defeated by shield-reflect — follower can't perform reflect
+    // and would otherwise run at empty Hintnut nests.
+    auto IsScrubPuzzleActor = [](int16_t id) -> bool {
+        return id == ACTOR_EN_HINTNUTS ||
+               id == ACTOR_EN_DEKUNUTS;
+    };
+    Actor* nearest    = nullptr;
+    f32    nearDistSq = kEngageRange * kEngageRange;
+    Actor* eActor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
+    while (eActor != nullptr) {
+        if (eActor->update != nullptr &&
+            !IsScrubPuzzleActor(eActor->id) &&
+            fabsf(eActor->world.pos.y - p2Pos.y) < kMaxYDelta) {
+            f32 edx     = eActor->world.pos.x - p2Pos.x;
+            f32 edz     = eActor->world.pos.z - p2Pos.z;
+            f32 eDistSq = edx * edx + edz * edz;
+            if (eDistSq < nearDistSq) {
+                nearDistSq = eDistSq;
+                nearest    = eActor;
+            }
+        }
+        eActor = eActor->next;
+    }
+    if (nearest != nullptr) {
+        followerTargetEnemy = nearest;
+        followerAIState     = FollowerAIState::ENGAGE;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] IDLE→ENGAGE enemy id={} at ({:.0f},{:.0f},{:.0f}) dist={:.0f}",
+                    nearest->id,
+                    nearest->world.pos.x, nearest->world.pos.y, nearest->world.pos.z,
+                    sqrtf(nearDistSq));
+        return;
+    }
+    // Item pickup — no enemy to engage; scan for eligible drops.
+    {
+        Actor* item = this->ScanForItemCandidate(player);
+        if (item != nullptr) {
+            followerTargetItem = item;
+            followerCollectItemTimeoutFrames = kItemCollectTimeout;
+            followerAIState     = FollowerAIState::COLLECT_ITEM;
+            followerStateFrames = 0;
+            SPDLOG_INFO("[Follower] IDLE→COLLECT_ITEM item=0x{:02X} at ({:.0f},{:.0f},{:.0f})",
+                        (int)(item->params & 0xFF),
+                        item->world.pos.x, item->world.pos.y, item->world.pos.z);
+            return;
+        }
+    }
+    // In IDLE, match leader's facing direction.
+    player->actor.shape.rot.y = dummyActor->shape.rot.y;
+    // Pre-populate move target so the first FOLLOW frame's
+    // TickFollowerInput sees the correct direction immediately. Test 8
+    // — during door handoff the G11 block already set followerMoveTarget
+    // to the door centerline; don't overwrite with side-offset.
+    if (!followerDoorHandoff) {
+        followerMoveTarget = sideTarget;
     }
 }
