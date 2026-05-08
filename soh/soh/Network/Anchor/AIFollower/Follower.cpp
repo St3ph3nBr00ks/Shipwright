@@ -2708,7 +2708,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
         if (ldx * ldx + ldz * ldz > kMaxLeash * kMaxLeash) {
             followerAIState     = FollowerAIState::RETURN;
             followerStateFrames = 0;
-            SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RETURN (leader too far)");
+            SPDLOG_INFO("[Follower] ENGAGE\u2192RETURN (leader too far)");
             return;
         }
     }
@@ -2716,7 +2716,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
         followerTargetEnemy->update == nullptr) {
         followerAIState     = FollowerAIState::RETURN;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RETURN (enemy gone)");
+        SPDLOG_INFO("[Follower] ENGAGE\u2192RETURN (enemy gone)");
         return;
     }
     // Vertical-reach handling. Three layered checks:
@@ -2732,13 +2732,13 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
                 FollowerTryEquipRangedWeapon();
                 followerAIState     = FollowerAIState::RANGED_ATTACK;
                 followerStateFrames = 0;
-                SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RANGED_ATTACK (off-floor target id={})",
+                SPDLOG_INFO("[Follower] ENGAGE\u2192RANGED_ATTACK (off-floor target id={})",
                             followerTargetEnemy->id);
                 return;
             }
             followerAIState     = FollowerAIState::RETURN;
             followerStateFrames = 0;
-            SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RETURN (enemy off-floor)");
+            SPDLOG_INFO("[Follower] ENGAGE\u2192RETURN (enemy off-floor)");
             return;
         }
         if (dy > kSwordVerticalReach &&
@@ -2746,7 +2746,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
             FollowerTryEquipRangedWeapon();
             followerAIState     = FollowerAIState::RANGED_ATTACK;
             followerStateFrames = 0;
-            SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92RANGED_ATTACK (above sword reach \xCE\x94y={:.0f} target id={})",
+            SPDLOG_INFO("[Follower] ENGAGE\u2192RANGED_ATTACK (above sword reach \u0394y={:.0f} target id={})",
                         dy, followerTargetEnemy->id);
             return;
         }
@@ -2764,13 +2764,13 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
         if (IsShieldReflectEnemy(followerTargetEnemy->id)) {
             followerAIState     = FollowerAIState::BLOCK;
             followerStateFrames = 0;
-            SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92BLOCK (shield-reflect target id={})",
+            SPDLOG_INFO("[Follower] ENGAGE\u2192BLOCK (shield-reflect target id={})",
                         followerTargetEnemy->id);
             return;
         }
         followerAIState     = FollowerAIState::ATTACK;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] ENGAGE\xE2\x86\x92ATTACK enemy=({:.0f},{:.0f},{:.0f}) dist={:.0f} "
+        SPDLOG_INFO("[Follower] ENGAGE\u2192ATTACK enemy=({:.0f},{:.0f},{:.0f}) dist={:.0f} "
                     "range={:.0f} id={}",
                     enemyPos.x, enemyPos.y, enemyPos.z, sqrtf(distSq),
                     attackRange, followerTargetEnemy->id);
@@ -2817,7 +2817,7 @@ void Anchor::HandleStateAttack(Player* player, const Vec3f& p2Pos) {
         followerTargetEnemy->update == nullptr) {
         followerAIState     = FollowerAIState::RETURN;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] ATTACK\xE2\x86\x92RETURN (enemy gone)");
+        SPDLOG_INFO("[Follower] ATTACK\u2192RETURN (enemy gone)");
         return;
     }
     bool targetDefeated = (followerTargetEnemy->colChkInfo.health <= 0);
@@ -2835,13 +2835,13 @@ void Anchor::HandleStateAttack(Player* player, const Vec3f& p2Pos) {
     if (targetDefeated) {
         followerAIState     = FollowerAIState::RETURN;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] ATTACK\xE2\x86\x92RETURN (enemy dead)");
+        SPDLOG_INFO("[Follower] ATTACK\u2192RETURN (enemy dead)");
         return;
     }
     if (fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
         followerAIState     = FollowerAIState::RETURN;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] ATTACK\xE2\x86\x92RETURN (enemy off-floor)");
+        SPDLOG_INFO("[Follower] ATTACK\u2192RETURN (enemy off-floor)");
         return;
     }
     Vec3f enemyPos = followerTargetEnemy->world.pos;
@@ -2878,6 +2878,6 @@ void Anchor::HandleStateAttack(Player* player, const Vec3f& p2Pos) {
     if (followerStateFrames >= kAttackDuration) {
         followerAIState     = FollowerAIState::RETURN;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] ATTACK\xE2\x86\x92RETURN (cycle complete)");
+        SPDLOG_INFO("[Follower] ATTACK\u2192RETURN (cycle complete)");
     }
 }
