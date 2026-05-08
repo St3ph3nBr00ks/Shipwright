@@ -165,6 +165,16 @@ static constexpr int kClimbDismountHoldFrames = 9;
 static constexpr f32 kMoveSpeed     = 4.0f;  // units/frame for the position-override nudge
 static constexpr int kStuckRecovery = 25;    // frames of nudge before retrying FOLLOW
 
+// Y-axis floor-difference threshold — reject targets / items more than
+// this many units above or below the follower. Promoted for
+// HandleStateCollectItem. Multiple TickFollower references will continue
+// to resolve here once the local declaration is removed.
+static constexpr f32 kMaxYDelta = 120.0f;
+
+// Leader leash — abandon COLLECT_ITEM when the leader strays beyond
+// this distance. Promoted for HandleStateCollectItem.
+static constexpr f32 kMaxLeash = 800.0f;
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -490,8 +500,10 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 // (Phase 1 commit 7) so per-state handlers can reference it.
                 static constexpr f32 kEngageRange        = 350.0f; // enemy detection radius (XZ)
                 static constexpr f32 kAttackRange        = 80.0f;  // melee-contact radius (XZ)
-                static constexpr f32 kMaxYDelta          = 120.0f; // reject enemies on a different floor
-                static constexpr f32 kMaxLeash           = 800.0f; // abandon ENGAGE if leader this far
+                // kMaxYDelta moved to file-scope anonymous namespace
+                // (Phase 1 commit 9) — used by HandleStateCollectItem.
+                // kMaxLeash moved to file-scope anonymous namespace
+                // (Phase 1 commit 9) — used by HandleStateCollectItem.
                 // kMoveSpeed moved to file-scope anonymous namespace
                 // (Phase 1 commit 8) — used by HandleStateStuck.
                 static constexpr int kStuckCheckInterval = 20;     // frames between stuck checks
@@ -1964,59 +1976,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     //   - leader started climbing → let top-of-hook G1/G2 take over
                     //   - item on a different floor (|Δy| ≥ kMaxYDelta) → RETURN
                     case FollowerAIState::COLLECT_ITEM: {
-                        if (followerTargetItem == nullptr ||
-                            followerTargetItem->update == nullptr) {
-                            SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (item gone — collected or unloaded)");
-                            followerTargetItem  = nullptr;
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            break;
-                        }
-                        // Leader leash — don't stray too far from the leader
-                        // just for a rupee.
-                        {
-                            f32 lx = leaderPos.x - p2Pos.x;
-                            f32 lz = leaderPos.z - p2Pos.z;
-                            if (lx * lx + lz * lz > kMaxLeash * kMaxLeash) {
-                                SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (leader beyond leash)");
-                                followerTargetItem  = nullptr;
-                                followerAIState     = FollowerAIState::RETURN;
-                                followerStateFrames = 0;
-                                break;
-                            }
-                        }
-                        // Y-gate — item ended up on a different floor (bounce
-                        // off a ledge between grace expiry and pickup start).
-                        if (fabsf(followerTargetItem->world.pos.y - p2Pos.y) >= kMaxYDelta) {
-                            SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (item off-floor)");
-                            followerTargetItem  = nullptr;
-                            followerAIState     = FollowerAIState::RETURN;
-                            followerStateFrames = 0;
-                            break;
-                        }
-                        // Timeout — couldn't reach the item in kItemCollectTimeout
-                        // frames (geometry / collision mishap).
-                        if (followerCollectItemTimeoutFrames > 0) {
-                            followerCollectItemTimeoutFrames--;
-                            if (followerCollectItemTimeoutFrames == 0) {
-                                SPDLOG_WARN("[Follower] COLLECT_ITEM→RETURN (timeout)");
-                                followerTargetItem  = nullptr;
-                                followerAIState     = FollowerAIState::RETURN;
-                                followerStateFrames = 0;
-                                break;
-                            }
-                        }
-                        // Drive ShouldActorUpdate toward the item. En_Item00's
-                        // own collision handler attaches to Link on contact —
-                        // no BTN_A or other interaction needed for pickup.
-                        followerMoveTarget = followerTargetItem->world.pos;
-                        {
-                            f32 idx = followerTargetItem->world.pos.x - p2Pos.x;
-                            f32 idz = followerTargetItem->world.pos.z - p2Pos.z;
-                            if (idx * idx + idz * idz > 1.0f) {
-                                player->actor.shape.rot.y = YawToward(idx, idz);
-                            }
-                        }
+                        // Body extracted to Anchor::HandleStateCollectItem
+                        // (Phase 1 commit 9 of the SRP refactor).
+                        HandleStateCollectItem(player, leaderPos, p2Pos);
                         break;
                     }
                 }
@@ -2883,5 +2845,68 @@ void Anchor::HandleStateRangedAttack(Player* player, const Vec3f& p2Pos) {
         followerAIState     = FollowerAIState::RETURN;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (cycle complete)");
+    }
+}
+
+void Anchor::HandleStateCollectItem(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos) {
+    // COLLECT_ITEM: opportunistic pickup of En_Item00 drops after an
+    // enemy kill. Walks toward followerTargetItem until pickup fires
+    // (En_Item00's own collision handler attaches to Link on contact —
+    // no BTN_A or other interaction needed for pickup).
+    //
+    // Exit paths:
+    //   - target actor gone (collected by us OR by leader) → RETURN
+    //   - leader beyond leash → RETURN (follow takes priority)
+    //   - item on a different floor (|Δy| ≥ kMaxYDelta) → RETURN
+    //   - timeout elapsed (couldn't reach) → RETURN
+    if (followerTargetItem == nullptr ||
+        followerTargetItem->update == nullptr) {
+        SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (item gone — collected or unloaded)");
+        followerTargetItem  = nullptr;
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        return;
+    }
+    // Leader leash — don't stray too far from the leader just for a rupee.
+    {
+        f32 lx = leaderPos.x - p2Pos.x;
+        f32 lz = leaderPos.z - p2Pos.z;
+        if (lx * lx + lz * lz > kMaxLeash * kMaxLeash) {
+            SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (leader beyond leash)");
+            followerTargetItem  = nullptr;
+            followerAIState     = FollowerAIState::RETURN;
+            followerStateFrames = 0;
+            return;
+        }
+    }
+    // Y-gate — item ended up on a different floor (bounce off a ledge
+    // between grace expiry and pickup start).
+    if (fabsf(followerTargetItem->world.pos.y - p2Pos.y) >= kMaxYDelta) {
+        SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (item off-floor)");
+        followerTargetItem  = nullptr;
+        followerAIState     = FollowerAIState::RETURN;
+        followerStateFrames = 0;
+        return;
+    }
+    // Timeout — couldn't reach the item in kItemCollectTimeout frames
+    // (geometry / collision mishap).
+    if (followerCollectItemTimeoutFrames > 0) {
+        followerCollectItemTimeoutFrames--;
+        if (followerCollectItemTimeoutFrames == 0) {
+            SPDLOG_WARN("[Follower] COLLECT_ITEM→RETURN (timeout)");
+            followerTargetItem  = nullptr;
+            followerAIState     = FollowerAIState::RETURN;
+            followerStateFrames = 0;
+            return;
+        }
+    }
+    // Drive TickFollowerInput toward the item.
+    followerMoveTarget = followerTargetItem->world.pos;
+    {
+        f32 idx = followerTargetItem->world.pos.x - p2Pos.x;
+        f32 idz = followerTargetItem->world.pos.z - p2Pos.z;
+        if (idx * idx + idz * idz > 1.0f) {
+            player->actor.shape.rot.y = YawToward(idx, idz);
+        }
     }
 }

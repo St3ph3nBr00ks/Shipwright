@@ -1007,6 +1007,7 @@ class Anchor : public Network {
     void HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* leaderActor);
     void HandleStateStuck(Player* player);
     void HandleStateRangedAttack(Player* player, const Vec3f& p2Pos);
+    void HandleStateCollectItem(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);
 
     // Pillar C2 Phase 4 — phase-specific senders for the unified
     // ENEMY_STATE wire packet. All four emit type=ENEMY_STATE with the
