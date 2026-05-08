@@ -12,8 +12,8 @@
  * tagged uint32 — high bit = player (low byte is clientId);
  * high bit clear = actor (low 31 bits are netId).
  *
- * Sampling rate: 5 captures/sec/entity wall-clock (kCaptureIntervalMs=200).
- * Buffer size: 50 waypoints per entity (~10 s of history wall-clock
+ * Sampling rate: 3 captures/sec/entity wall-clock (kCaptureIntervalMs=333).
+ * Buffer size: 30 waypoints per entity (~10 s of history wall-clock
  * before the oldest is overwritten). Frame-rate-independent — SoH's
  * game logic ticks at 20 Hz vanilla (interpolation handles render),
  * so per-frame throttles drift; wall-clock throttle keeps the rate
@@ -214,10 +214,10 @@ public:
 private:
     ActorTrail() = default;
 
-    static constexpr size_t   kMaxWaypoints      = 50;    // ring buffer size per entity
-    static constexpr uint64_t kCaptureIntervalMs = 200;   // 5 Hz wall-clock throttle
+    static constexpr size_t   kMaxWaypoints      = 30;    // ring buffer size per entity
+    static constexpr uint64_t kCaptureIntervalMs = 333;   // 3 Hz wall-clock throttle
     static constexpr uint64_t kStaleAgeMs        = 12000; // 12 s — slight margin > buffer
-                                                          // duration (50 × 200ms = 10 s)
+                                                          // duration (30 × 333ms ≈ 10 s)
 
     struct EntityTrail {
         std::array<TrailWaypoint, kMaxWaypoints> waypoints;
