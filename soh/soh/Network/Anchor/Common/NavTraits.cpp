@@ -51,6 +51,7 @@ static const NavTraits kBossDefaults = []() {
     t.eligibleForLeashRespawn     = false;
     t.useGroundFollowing          = false;
     t.useStickyTargeting          = false;
+    t.consumeRoomNavData          = false;  // bosses don't path through the static graph
     t.targetStickyFrames          = 0;
     t.leavesTrail                 = true;  // emit-side stays on
     return t;
@@ -66,6 +67,7 @@ static NavTraits MakeGoroiwaTraits() {
     NavTraits t = {};
     t.useStickyTargeting  = false;  // waypoint-driven path; steering must match host's track
     t.useGroundFollowing  = false;
+    t.consumeRoomNavData  = false;  // path is host-authoritative waypoints, not static graph
     return t;
 }
 
@@ -78,9 +80,13 @@ static NavTraits MakeNoVerticalTeleportTraits() {
 }
 
 static NavTraits MakeFlierTraits() {
-    // Peehat, Firefly (Keese): fliers should not snap to ground.
+    // Peehat, Firefly (Keese): fliers should not snap to ground, and the
+    // ground-only RoomNavData graph doesn't represent air paths — Layer 3
+    // fallback would point them at a useless walkable subgoal beneath
+    // their actual flight path.
     NavTraits t = {};
     t.useGroundFollowing = false;
+    t.consumeRoomNavData = false;
     return t;
 }
 
@@ -99,10 +105,16 @@ static NavTraits MakeFollowerTraits() {
     //   - Sticky targeting helps follower commit to a leader / enemy
     //     across frames.
     //   - Trail enabled so other navigators can chase a follower if needed.
+    //   - Link-rigged: eligible to swim through Underwater nodes when
+    //     Layer 3 routes a path under water. Adult Link can swim; child
+    //     Link cannot dive but can wade — at the resolution of the room
+    //     graph (~30 cells) this distinction isn't represented and
+    //     enabling swimming for the follower is the safe default.
     NavTraits t = {};
     t.eligibleForLeashRespawn = false;
     t.useStickyTargeting      = true;
     t.targetStickyFrames      = 180;
+    t.eligibleForSwimming     = true;
     t.leavesTrail             = true;
     return t;
 }

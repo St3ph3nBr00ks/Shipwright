@@ -14,6 +14,7 @@
 #include "NavTraits.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Layer 3 fallback
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/ShipInit.hpp"
@@ -33,8 +34,9 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
-#define CVAR_NAV_ENABLED      CVAR_ENHANCEMENT("Nav.Enabled")
-#define CVAR_NAV_ACTOR_TRAIL  CVAR_ENHANCEMENT("Nav.ActorTrail")
+#define CVAR_NAV_ENABLED          CVAR_ENHANCEMENT("Nav.Enabled")
+#define CVAR_NAV_ACTOR_TRAIL      CVAR_ENHANCEMENT("Nav.ActorTrail")
+#define CVAR_NAV_ROOM_NAV_LAYER   CVAR_ENHANCEMENT("Nav.RoomNavConsumer")
 
 namespace AnchorNav {
 
@@ -244,7 +246,61 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
         return true;
     }
 
-    // No reachable progress — fallback.
+    // Layer 3 — RoomNavData static graph (room_nav_data_plan.md §9). Cold
+    // navigators (just-spawned, no trail) and idle scenes (target hasn't
+    // moved enough to leave a useful breadcrumb trail) fall through Layer 1
+    // and 2 to here. The pre-scanned graph picks the closest-to-target
+    // reachable node within the room.
+    //
+    // Two-stage gating:
+    //   (a) CVar Nav.RoomNavConsumer — global toggle; default off.
+    //   (b) Per-actor NavTraits.consumeRoomNavData — actors whose nav
+    //       requirements aren't well-represented by the ground graph
+    //       (fliers, waypoint-driven actors, bosses) opt out.
+    //
+    // Implicitly also gated on RoomNavData.Enabled because GetForRoom
+    // returns nullptr when the master switch is off.
+    //
+    // The hazard-aware BFS inside FindBestReachableSubgoalNode honors
+    // traits.eligibleForSwimming + traits.avoidHazardNodes so swimming-
+    // capable navigators (AI Follower, NPC Invader) and heat-resistant
+    // navigators (none v1) get appropriate path filtering.
+    if (CVarGetInteger(CVAR_NAV_ROOM_NAV_LAYER, 0) != 0) {
+        const NavTraits& traits = GetTraitsForActor(navigator->id);
+        if (traits.consumeRoomNavData) {
+            int16_t scene = gPlayState->sceneNum;
+            int8_t  room  = (int8_t)gPlayState->roomCtx.curRoom.num;
+            const ::AnchorNavRoom::RoomNavData* navData =
+                ::AnchorNavRoom::GetForRoom(scene, room);
+            if (navData != nullptr) {
+                int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navPos);
+                if (fromIdx >= 0) {
+                    int bestIdx = ::AnchorNavRoom::FindBestReachableSubgoalNode(
+                        navData, fromIdx, targetPos,
+                        traits.eligibleForSwimming,
+                        traits.avoidHazardNodes);
+                    if (bestIdx >= 0 && (size_t)bestIdx < navData->nodes.size()) {
+                        const Vec3f& nodePos = navData->nodes[(size_t)bestIdx].pos;
+                        // MovementClear gate so the chosen node is reachable
+                        // from the navigator's current position via a straight
+                        // line. The graph BFS proves graph-reachability across
+                        // edges; this proves the FIRST step is line-clear,
+                        // which is what the steering layer can actually drive
+                        // toward this frame. Failure here is unusual but
+                        // possible when the navigator is between graph cells
+                        // with a wall between fromIdx and bestIdx — fall
+                        // through.
+                        if (MovementClear(navigator, nodePos, play)) {
+                            out = nodePos;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // No reachable progress across all three layers — fallback.
     out = targetPos;
     return false;
 }

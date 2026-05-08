@@ -42,6 +42,25 @@ struct NavTraits {
     bool useGroundFollowing          = true;
     bool useStickyTargeting          = true;
 
+    // Layer 3 (RoomNavData) consumer-side flags. Per
+    // Plans/room_nav_data_plan.md §9. All three default to the
+    // most-common-case settings for ground-bound non-aquatic
+    // hazard-vulnerable navigators.
+    //   - consumeRoomNavData: navigator participates in the Layer 3
+    //     fallback when LOS and trail both fail. Off for fliers /
+    //     waypoint-driven actors / bosses (the ground graph doesn't
+    //     model their navigable space).
+    //   - eligibleForSwimming: Underwater nodes are valid pass-through
+    //     and destination. On for Link-rigged navigators (AI Follower,
+    //     NPC Invader); future per-actor opt-in for canonically aquatic
+    //     enemies.
+    //   - avoidHazardNodes: hazard nodes are limited to kHazardEscapeHops
+    //     pass-through and rejected as destinations. Off for heat-/ice-
+    //     resistant navigators (none v1).
+    bool consumeRoomNavData          = true;
+    bool eligibleForSwimming         = false;
+    bool avoidHazardNodes            = true;
+
     // Emit-side flag — other actors observe this actor through the trail.
     bool leavesTrail                 = true;
 

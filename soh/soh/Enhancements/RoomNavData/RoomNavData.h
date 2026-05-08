@@ -191,11 +191,47 @@ const RoomNavData* GetForRoom(int16_t sceneNum, int8_t roomNum);
 int FindNearestNode(const RoomNavData* data, const Vec3f& pos);
 
 // Returns the index of the node closest to `targetPos` that's reachable
-// from `fromIdx` via graph edges. -1 if no reachable progress node exists.
-// v1 implementation: closest-reachable lookup, no A* path search.
+// from `fromIdx` via graph edges, with hazard-aware filtering.
+//
+// Parameters:
+//   `eligibleForSwimming`: when false, NODE_UNDERWATER nodes are rejected
+//     as both pass-through and destination. When true (Link-rigged
+//     navigators: AI Follower, NPC Invader), underwater nodes are valid.
+//   `avoidHazardNodes`: when true (default for most navigators), the BFS
+//     limits hazard-node traversal to kHazardEscapeHops (= 2) — a path
+//     that crosses 1-2 hazard cells before exiting is fine, but deeper
+//     hazard exposure causes the path to be rejected. Hazard nodes are
+//     also excluded as destinations. When false (heat-resistant
+//     navigators), hazard nodes are valid pass-through and destination
+//     and the hop-counter rejection short-circuits.
+//
+// Returns -1 when:
+//   - no reachable node beats fromIdx's distance to target (no progress
+//     possible — target is unreachable through the graph), or
+//   - the navigator is cornered in hazard with no non-hazard exit
+//     reachable within the hop budget.
+//
+// In both cases the caller falls through to direct yaw / the next nav
+// layer.
+//
+// Hazard-aware BFS per Plans/room_nav_data_plan.md §10. NODE_ORPHANED
+// and NODE_STEEP_SLOPE always rejected as destinations.
 int FindBestReachableSubgoalNode(const RoomNavData* data,
                                   int fromIdx,
-                                  const Vec3f& targetPos);
+                                  const Vec3f& targetPos,
+                                  bool eligibleForSwimming = false,
+                                  bool avoidHazardNodes    = true);
+
+// Cornered-in-hazard fallback. Returns the nearest non-hazard walkable
+// node reachable from `fromIdx`, ignoring target direction — exit is the
+// only goal. Used by FindBestReachableSubgoalNode when the hazard-hop
+// accumulator rejects every otherwise-suitable destination. Honors
+// `eligibleForSwimming` (rejects NODE_UNDERWATER when false). Returns -1
+// when the navigator is fully surrounded by hazard with no reachable
+// non-hazard exit anywhere in the room.
+int FindNearestNonHazardExit(const RoomNavData* data,
+                              int fromIdx,
+                              bool eligibleForSwimming = false);
 
 // True when both gEnhancements.RoomNavData.Enabled is on AND the system
 // has been initialized. Used as the master gate by all Phase 1+2 features.
