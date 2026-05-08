@@ -206,15 +206,21 @@ static const char* GetSceneSymbolicName(int sceneNum) {
 }
 
 // Asset-slug lookup matching scene_table.h's first DEFINE_SCENE argument
-// (minus "_scene" suffix). Used to construct OTR resource paths of the
-// form "scenes/nonmq/<slug>_scene/<slug>_scene" for the scene file and
-// "scenes/nonmq/<slug>_scene/<slug>_room_<n>" for room files.
+// (minus "_scene" suffix). Used to construct OTR resource paths.
 //
 // Returns nullptr for scenes not in this lookup; caller skips OTR hash
-// emission for those. Extend as needed; the table follows the SoH
-// naming convention from scene_table.h verbatim.
+// emission for those.
+//
+// OTR path layout (verified empirically + via soh/assets/scenes/<cat>/
+// header file __OTR__ prefixes):
+//   - Dungeons (0x00-0x1A) live under "scenes/nonmq/<slug>_scene/...".
+//   - Indoor / overworld / misc scenes live under
+//     "scenes/shared/<slug>_scene/...".
+// FlushRoom probes both prefixes and uses whichever one returns valid
+// bytes — robust to misclassification and future content additions.
 static const char* GetSceneAssetSlug(int sceneNum) {
     switch (sceneNum) {
+        // Dungeons + boss arenas (0x00-0x1A).
         case 0x00: return "ydan";
         case 0x01: return "ddan";
         case 0x02: return "bdan";
@@ -242,6 +248,59 @@ static const char* GetSceneAssetSlug(int sceneNum) {
         case 0x18: return "HAKAdan_bs";
         case 0x19: return "ganon_boss";
         case 0x1A: return "ganon_final";
+
+        // Town / shop / house indoor scenes (0x20-0x4D).
+        case 0x20: return "market_day";
+        case 0x21: return "market_night";
+        case 0x22: return "market_ruins";
+        case 0x23: return "shrine";
+        case 0x24: return "shrine_n";
+        case 0x25: return "shrine_r";
+        case 0x26: return "kokiri_home";
+        case 0x27: return "kokiri_home3";
+        case 0x28: return "kokiri_home4";
+        case 0x29: return "kokiri_home5";
+        case 0x2A: return "kakariko";
+        case 0x2B: return "kakariko3";
+        case 0x2C: return "shop1";
+        case 0x2D: return "kokiri_shop";
+        case 0x2E: return "golon";
+        case 0x2F: return "zoora";
+        case 0x30: return "drag";
+        case 0x31: return "alley_shop";
+        case 0x32: return "night_shop";
+        case 0x33: return "face_shop";
+        case 0x34: return "link_home";
+        case 0x35: return "impa";
+        case 0x36: return "malon_stable";
+        case 0x37: return "labo";
+        case 0x38: return "hylia_labo";
+        case 0x39: return "tent";
+        case 0x3A: return "hut";
+        case 0x3B: return "daiyousei_izumi";
+        case 0x3C: return "yousei_izumi_yoko";
+        case 0x3D: return "yousei_izumi_tate";
+        case 0x3E: return "kakusiana";
+        case 0x3F: return "hakaana";
+        case 0x40: return "hakaana2";
+        case 0x41: return "hakaana_ouke";
+        case 0x42: return "syatekijyou";
+        case 0x43: return "tokinoma";
+        case 0x44: return "kenjyanoma";
+        case 0x45: return "hairal_niwa";
+        case 0x46: return "hairal_niwa_n";
+        case 0x47: return "hiral_demo";
+        case 0x48: return "hakasitarelay";
+        case 0x49: return "turibori";
+        case 0x4A: return "nakaniwa";
+        case 0x4B: return "bowling";
+        case 0x4C: return "souko";
+        case 0x4D: return "miharigoya";
+        case 0x4E: return "mahouya";
+        case 0x4F: return "ganon_demo";
+        case 0x50: return "kinsuta";
+
+        // Overworld scenes (0x51-0x64).
         case 0x51: return "spot00";
         case 0x52: return "spot01";
         case 0x53: return "spot02";
@@ -467,13 +526,9 @@ static uint64_t ComputeResourceCrc64(const std::string& resourcePath) {
     return update_crc64(data, static_cast<uint32_t>(len), INITIAL_CRC64);
 }
 
-// Returns true if we've already hashed this resource path during this
-// session (resource bytes don't change at runtime, so re-hashing is
-// wasted work). Caches by string path.
-static bool& HashedThisSession(const std::string& path) {
-    static std::unordered_map<std::string, bool> cache;
-    return cache[path];
-}
+// (HashedThisSession cache removed — over-optimization. LoadFileProcess
+//  + the resource manager's internal cache make repeat hashes cheap
+//  enough that per-flush recomputation is acceptable.)
 
 // Flush the per-(scene, room) buffer to disk via read-modify-write.
 // Reads existing JSON, overwrites staticActors[] and provenance with
@@ -553,42 +608,44 @@ static void FlushRoom(int16_t sceneNum, int16_t roomNum) {
     // the current room file via libultraship's LoadFileProcess. Hashes
     // change when the underlying OTR bytes change; consumers (#202) use
     // these to detect when the manifest data has gone stale relative to
-    // the current build's assets. Skip if the slug isn't in our lookup.
+    // the current build's assets.
+    //
+    // Probes both "scenes/nonmq/" (dungeon scenes) and "scenes/shared/"
+    // (overworld / indoor / misc) prefixes; uses whichever returns valid
+    // bytes. Robust to misclassification and future content additions.
+    // First-success wins; if neither matches, the resource isn't hashed
+    // for this scene (rare; usually means the slug lookup is wrong).
     const char* slug = GetSceneAssetSlug(sceneNum);
     if (slug != nullptr) {
-        std::string scenePath = std::string("scenes/nonmq/") + slug + "_scene/" + slug + "_scene";
-        if (!HashedThisSession(scenePath)) {
-            uint64_t crc = ComputeResourceCrc64(scenePath);
-            if (crc != 0) {
-                char crcHex[24];
-                std::snprintf(crcHex, sizeof(crcHex), "0x%016llX",
-                              static_cast<unsigned long long>(crc));
-                j["otrResourceHashes"][scenePath] = {
-                    { "crc64",      crcHex },
-                    { "lastHashed", NowMs() },
-                };
-                HashedThisSession(scenePath) = true;
-            }
-        } else if (j["otrResourceHashes"].contains(scenePath)) {
-            // Already hashed this session and present in the file —
-            // preserve unchanged (no need to recompute).
-        }
+        static const char* kPathPrefixes[] = {
+            "scenes/nonmq/",
+            "scenes/shared/",
+        };
 
-        std::string roomPath = std::string("scenes/nonmq/") + slug + "_scene/" +
-                               slug + "_room_" + std::to_string(roomNum);
-        if (!HashedThisSession(roomPath)) {
-            uint64_t crc = ComputeResourceCrc64(roomPath);
-            if (crc != 0) {
-                char crcHex[24];
-                std::snprintf(crcHex, sizeof(crcHex), "0x%016llX",
-                              static_cast<unsigned long long>(crc));
-                j["otrResourceHashes"][roomPath] = {
-                    { "crc64",      crcHex },
-                    { "lastHashed", NowMs() },
-                };
-                HashedThisSession(roomPath) = true;
+        auto tryHashWithPrefixes = [&](const std::string& sceneFolder,
+                                       const std::string& fileName) {
+            for (const char* prefix : kPathPrefixes) {
+                std::string path = std::string(prefix) + sceneFolder + "/" + fileName;
+                uint64_t crc = ComputeResourceCrc64(path);
+                if (crc != 0) {
+                    char crcHex[24];
+                    std::snprintf(crcHex, sizeof(crcHex), "0x%016llX",
+                                  static_cast<unsigned long long>(crc));
+                    j["otrResourceHashes"][path] = {
+                        { "crc64",      crcHex },
+                        { "lastHashed", NowMs() },
+                    };
+                    return;  // first-success wins
+                }
             }
-        }
+        };
+
+        std::string sceneFolder = std::string(slug) + "_scene";
+        std::string sceneFile = std::string(slug) + "_scene";
+        std::string roomFile = std::string(slug) + "_room_" + std::to_string(roomNum);
+
+        tryHashWithPrefixes(sceneFolder, sceneFile);
+        tryHashWithPrefixes(sceneFolder, roomFile);
     }
 
     auto path = RoomManifestPath(sceneNum, roomNum);
