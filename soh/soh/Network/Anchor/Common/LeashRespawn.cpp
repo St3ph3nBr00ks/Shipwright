@@ -55,8 +55,8 @@ namespace {
 constexpr float kPlayerProximityRadiusSq = 600.0f * 600.0f;
 
 // How far back to look in the player's trail for the proximity check.
-// 30 frames @ 30Hz capture = ~1s of recent history.
-constexpr uint32_t kPlayerTrailLookbackFrames = 30;
+// 1 second of recent wall-clock history.
+constexpr uint32_t kPlayerTrailLookbackMs = 1000;
 
 float DistSq(const Vec3f& a, const Vec3f& b) {
     float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
@@ -133,7 +133,7 @@ void OnSceneEnter(int16_t sceneNum, PlayState* play) {
                             // recent trail history.
                             TrailWaypoint wp{};
                             const TrailKey playerKey = TrailKeyForPlayer(0);
-                            if (trail.GetWaypointBefore(playerKey, kPlayerTrailLookbackFrames, wp) &&
+                            if (trail.GetWaypointBefore(playerKey, kPlayerTrailLookbackMs, wp) &&
                                 DistSq(wp.pos, it->second) < kPlayerProximityRadiusSq) {
                                 actor->world.pos = it->second;
                                 actor->prevPos   = it->second;

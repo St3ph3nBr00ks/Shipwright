@@ -12,9 +12,12 @@
  * tagged uint32 — high bit = player (low byte is clientId);
  * high bit clear = actor (low 31 bits are netId).
  *
- * Sampling rate: 5 captures/sec/entity at 60fps (kCaptureRateFrames=12).
- * Buffer size: 50 waypoints per entity (10.0s of history before the
- * oldest is overwritten).
+ * Sampling rate: 5 captures/sec/entity wall-clock (kCaptureIntervalMs=200).
+ * Buffer size: 50 waypoints per entity (~10 s of history wall-clock
+ * before the oldest is overwritten). Frame-rate-independent — SoH's
+ * game logic ticks at 20 Hz vanilla (interpolation handles render),
+ * so per-frame throttles drift; wall-clock throttle keeps the rate
+ * consistent regardless of game-logic FPS or VirtualBox slowdowns.
  *
  * The MovementClear and VisualLineOfSight primitives also live here as
  * file-scope helpers (perception vs movement layer split per plan §2).
@@ -46,7 +49,7 @@ struct TrailWaypoint {
     int16_t sceneNum;
     int8_t  roomNum;
     uint8_t timeline;     // linkAge & 1 for players; 0 for non-player actors
-    uint64_t frameIdx;    // global frame counter at capture time
+    uint64_t captureMs;   // wall-clock ms since program start at capture time
 };
 
 // Tagged identifier for a trailed entity.
@@ -75,9 +78,11 @@ public:
     // / when actor->update == nullptr / out-of-scene sentinel positions.
     void Tick(PlayState* play);
 
-    // Low-level: fetch a specific waypoint by age. Used by debug tooling
-    // and callers that need explicit lag control.
-    bool GetWaypointBefore(TrailKey key, uint32_t framesAgo, TrailWaypoint& out) const;
+    // Low-level: fetch a specific waypoint by wall-clock age. Used by
+    // debug tooling and callers that need explicit lag control. Returns
+    // the captured waypoint that's closest to (but no younger than)
+    // `msAgo` milliseconds before now.
+    bool GetWaypointBefore(TrailKey key, uint32_t msAgo, TrailWaypoint& out) const;
 
     // Primary navigation API — returns the optimal navigable subgoal for
     // `navigator` pursuing entity `key` (player or actor) toward `targetPos`.
@@ -130,7 +135,7 @@ public:
         std::vector<Vec3f> waypoints;          // [0] = next subgoal; [N-1] = path tail
         size_t   cursorIdx          = 0;       // index of current active waypoint
         int16_t  sceneNum           = -1;      // scene at capture time
-        uint64_t frameAtCapture     = 0;       // for diagnostics + max-age policy
+        uint64_t msAtCapture        = 0;       // wall-clock ms; for diagnostics + max-age policy
         Vec3f    capturedTargetPos  = { 0, 0, 0 };  // for "target moved" invalidation
 
         void Reset() {
@@ -168,6 +173,23 @@ public:
                        PlayState* play,
                        NavPath& out) const;
 
+    // Find any captured waypoint of `key`'s trail that lies within
+    // `maxGapDistance` of `referencePos` AND closer to `targetPos` than
+    // `referencePos` is. Used by JumpResolver to detect when a target's
+    // own breadcrumbs offer evidence the gap was crossed (target was
+    // there → there's likely walkable ground there → navigator can
+    // jump there too).
+    //
+    // Walks newest→oldest. The first matching waypoint wins (newest =
+    // freshest evidence of where target went). Stale waypoints (>12s
+    // old, matching GetBestReachableSubgoal's filter) are excluded.
+    // Returns true and populates `outLanding` on hit; false otherwise.
+    bool FindTrailWaypointBeyondGap(TrailKey key,
+                                     const Vec3f& referencePos,
+                                     float maxGapDistance,
+                                     const Vec3f& targetPos,
+                                     Vec3f& outLanding) const;
+
     // Diagnostic: snapshot every captured waypoint whose sceneNum matches
     // `sceneFilter` into `out`. Used by the DebugDraw overlay so the
     // overlay doesn't need access to internal storage. Filter is required
@@ -192,21 +214,27 @@ public:
 private:
     ActorTrail() = default;
 
-    static constexpr size_t  kMaxWaypoints       = 50; // 50 × 12f = 10.0s history at 60fps
-    static constexpr uint8_t kCaptureRateFrames  = 12; // capture every 12 game frames = 5Hz
+    static constexpr size_t   kMaxWaypoints      = 50;    // ring buffer size per entity
+    static constexpr uint64_t kCaptureIntervalMs = 200;   // 5 Hz wall-clock throttle
+    static constexpr uint64_t kStaleAgeMs        = 12000; // 12 s — slight margin > buffer
+                                                          // duration (50 × 200ms = 10 s)
 
     struct EntityTrail {
         std::array<TrailWaypoint, kMaxWaypoints> waypoints;
         size_t head = 0;       // next slot to write
         size_t count = 0;      // number of valid entries
-        uint64_t lastFrame = 0;
+        uint64_t lastCaptureMs = 0;
     };
 
     std::unordered_map<TrailKey, EntityTrail> mTrails;
-    uint64_t mFrameCounter = 0;
+    uint64_t mNowMs           = 0;  // wall-clock ms at most-recent Tick
+    uint64_t mLastCaptureMs   = 0;  // wall-clock ms at most-recent capture
 
     void CaptureWaypoint(TrailKey key, const Vec3f& pos, int16_t sceneNum,
                          int8_t roomNum, uint8_t timeline);
+
+    // Returns wall-clock milliseconds since process start (steady_clock).
+    static uint64_t NowMs();
 };
 
 // ---------------------------------------------------------------------------

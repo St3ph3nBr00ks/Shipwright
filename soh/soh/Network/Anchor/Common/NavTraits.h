@@ -70,6 +70,11 @@ struct NavTraits {
     uint16_t verticalTeleportYThreshold  = 80; // require |Δy| > this before teleport considered
     uint16_t verticalTeleportDelayFrames = 90; // require mismatch to persist this long
     uint16_t approachRange             = 80;   // distance at which navigator stops closing on target
+    uint16_t maxJumpDistance           = 100;  // horizontal jump cap (units) — used by JumpResolver
+                                                // to decide whether a navigator can clear a void
+                                                // ahead. Adult-Link broad-jump distance is ~120u;
+                                                // most enemies can manage less. Per-actor override
+                                                // for athletic / sluggish navigators.
 };
 
 // Returns the traits row for this actor. If IsSyncedBossActor(actorId) is
