@@ -64,6 +64,16 @@ bool VisualLineOfSight(const Actor* navigator, const Vec3f& targetPos, PlayState
     return !hit;
 }
 
+bool MovementClearAtPosition(const Vec3f& fromPos, const Vec3f& toPos, PlayState* play) {
+    if (play == nullptr) return false;
+    Vec3f a = { fromPos.x, fromPos.y + kBodyOffset, fromPos.z };
+    Vec3f b = { toPos.x,   toPos.y   + kBodyOffset, toPos.z   };
+    Vec3f hitPos;
+    CollisionPoly* hitPoly = nullptr;
+    s32 hit = BgCheck_AnyLineTest1(&play->colCtx, &a, &b, &hitPos, &hitPoly, 0);
+    return !hit;
+}
+
 // ---------------------------------------------------------------------------
 // ActorTrail singleton + lifecycle.
 // ---------------------------------------------------------------------------
@@ -334,6 +344,96 @@ bool ActorTrail::GetBestReachableSubgoalForActor(uint32_t netId, const Actor* na
                                                    const Vec3f& targetPos, PlayState* play,
                                                    Vec3f& out) const {
     return GetBestReachableSubgoal(TrailKeyForActor(netId), navigator, targetPos, play, out);
+}
+
+bool ActorTrail::ComputePathTo(TrailKey key,
+                                const Actor* navigator,
+                                const Vec3f& targetPos,
+                                PlayState* play,
+                                NavPath& out) const {
+    out.Reset();
+    if (navigator == nullptr || play == nullptr || gPlayState == nullptr) return false;
+
+    // Stamp metadata up front. Even if no layer succeeds, the caller may
+    // want to introspect why (e.g. the scene actually changed mid-pursuit).
+    out.sceneNum          = gPlayState->sceneNum;
+    out.frameAtCapture    = mFrameCounter;
+    out.capturedTargetPos = targetPos;
+
+    // Layer 1 — direct reachability.
+    if (MovementClear(navigator, targetPos, play)) {
+        out.waypoints.push_back(targetPos);
+        return true;
+    }
+
+    auto distSq = [](const Vec3f& a, const Vec3f& b) {
+        float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+
+    // Layer 2 — trail breadcrumbs. Same selection rules as
+    // GetBestReachableSubgoal; on success, optimistically append `target`
+    // when the breadcrumb→target segment is also line-clear so the AI
+    // doesn't need an immediate re-query at the breadcrumb.
+    auto it = mTrails.find(key);
+    if (it != mTrails.end() && it->second.count > 0) {
+        const EntityTrail& trail = it->second;
+        const Vec3f& navPos = navigator->world.pos;
+        float distNavToTargetSq = distSq(navPos, targetPos);
+
+        for (size_t i = 0; i < trail.count; i++) {
+            size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
+            const TrailWaypoint& wp = trail.waypoints[idx];
+
+            if (wp.sceneNum != gPlayState->sceneNum) continue;
+            if (mFrameCounter > wp.frameIdx && (mFrameCounter - wp.frameIdx) > 720) continue;
+            if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
+            if (!MovementClear(navigator, wp.pos, play)) continue;
+
+            out.waypoints.push_back(wp.pos);
+            if (MovementClearAtPosition(wp.pos, targetPos, play)) {
+                out.waypoints.push_back(targetPos);
+            }
+            return true;
+        }
+    }
+
+    // Layer 3 — RoomNavData BFS path. Two-stage gating: CVar and
+    // per-actor traits.consumeRoomNavData (matches GetBestReachableSubgoal).
+    // The BFS materialises the full chain; we append `target` to the end
+    // when the final node has line-clear to the target so the path
+    // terminates at the desired destination instead of at a graph node
+    // near it.
+    if (CVarGetInteger(CVAR_NAV_ROOM_NAV_LAYER, 0) != 0) {
+        const NavTraits& traits = GetTraitsForActor(navigator->id);
+        if (traits.consumeRoomNavData) {
+            int16_t scene = gPlayState->sceneNum;
+            int8_t  room  = (int8_t)gPlayState->roomCtx.curRoom.num;
+            const ::AnchorNavRoom::RoomNavData* navData =
+                ::AnchorNavRoom::GetForRoom(scene, room);
+            if (navData != nullptr) {
+                int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navigator->world.pos);
+                if (fromIdx >= 0) {
+                    std::vector<Vec3f> graphPath;
+                    bool ok = ::AnchorNavRoom::FindBestReachableSubgoalPath(
+                        navData, fromIdx, targetPos,
+                        traits.eligibleForSwimming,
+                        traits.avoidHazardNodes,
+                        graphPath);
+                    if (ok && !graphPath.empty()) {
+                        out.waypoints = std::move(graphPath);
+                        if (MovementClearAtPosition(out.waypoints.back(), targetPos, play)) {
+                            out.waypoints.push_back(targetPos);
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Nothing reachable — caller falls through to direct yaw / recovery.
+    return false;
 }
 
 // ---------------------------------------------------------------------------

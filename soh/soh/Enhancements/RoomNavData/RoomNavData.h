@@ -233,6 +233,27 @@ int FindNearestNonHazardExit(const RoomNavData* data,
                               int fromIdx,
                               bool eligibleForSwimming = false);
 
+// Path-returning sibling of FindBestReachableSubgoalNode. Same hazard-aware
+// BFS, but records predecessor pointers and reconstructs the full chain of
+// node positions from `fromIdx` to the chosen `bestIdx`. The path EXCLUDES
+// `fromIdx` itself (navigator is already there) and includes every node up
+// to and including `bestIdx`. Output ordered first-to-last along the path,
+// so consumers walk waypoint[0] → waypoint[N-1].
+//
+// Returns true on a non-empty path; false when no reachable destination
+// improves on `fromIdx`'s distance to target (consumer falls through to
+// direct yaw / next nav layer). `out` is cleared before append.
+//
+// Cost: same BFS as FindBestReachableSubgoalNode plus a parents array
+// (~2 KB for a 1100-node room) and a reverse-walk pass (worst-case ~30
+// iterations for typical room paths).
+bool FindBestReachableSubgoalPath(const RoomNavData* data,
+                                   int fromIdx,
+                                   const Vec3f& targetPos,
+                                   bool eligibleForSwimming,
+                                   bool avoidHazardNodes,
+                                   std::vector<Vec3f>& out);
+
 // True when both gEnhancements.RoomNavData.Enabled is on AND the system
 // has been initialized. Used as the master gate by all Phase 1+2 features.
 bool IsEnabled();
