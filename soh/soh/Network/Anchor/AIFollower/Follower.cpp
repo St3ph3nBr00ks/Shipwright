@@ -1243,7 +1243,27 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                         (player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) != 0 &&
                         CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
                         CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0;
-                    if (teleportSafe && !hangActive) {
+                    // P3.5 part 2 (user 2026-05-09 — "forced teleport-
+                    // across-room should not be needed anymore. NPCs
+                    // should snap the correct position when they are
+                    // already within ~30 units"): proximity-gate the
+                    // arm-edge teleport. Within 30u XZ of the leader's
+                    // last-same-room position, snap as a fine
+                    // alignment so the follower lines up with the
+                    // door trigger volume. Farther, skip — FOLLOW
+                    // (substrate path consumer + DummyPlayer trail
+                    // breadcrumbs) paths the follower naturally
+                    // toward `doorTarget` set below. Gives the
+                    // visible behaviour the user expects: the
+                    // follower walks up to the door rather than
+                    // teleport-snapping to it.
+                    constexpr f32 kDoorHandoffSnapRadius = 30.0f;
+                    f32 snapDx = followerLeaderLastInOurRoom.x - p2Pos.x;
+                    f32 snapDz = followerLeaderLastInOurRoom.z - p2Pos.z;
+                    bool withinSnapRange =
+                        (snapDx * snapDx + snapDz * snapDz) <=
+                        (kDoorHandoffSnapRadius * kDoorHandoffSnapRadius);
+                    if (teleportSafe && !hangActive && withinSnapRange) {
                         player->actor.world.pos = followerLeaderLastInOurRoom;
                         player->actor.prevPos   = followerLeaderLastInOurRoom;
                         player->actor.shape.rot.y = leaderActor->shape.rot.y;
@@ -1255,12 +1275,17 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                         followerStuckCycleResetFrames = 0;
                         followerOverrunFrames      = 0;
                     }
+                    const char* teleportStatus =
+                        !teleportSafe   ? "SKIPPED(room-mismatch)" :
+                        hangActive      ? "SKIPPED(hang-active)"   :
+                        !withinSnapRange ? "SKIPPED(>30u proximity)" :
+                                           "fired";
                     SPDLOG_INFO("[Follower] Leader crossed room boundary (ours={} leader={}) "
                                 "— door handoff armed; teleport={} last-pos=({:.0f},{:.0f},{:.0f}) "
                                 "last-room={} yaw={} target={:.0f},{:.0f},{:.0f} {} "
                                 "timeout={} frames",
                                 (int)ourRoom, (int)leaderRoom,
-                                teleportSafe ? "fired" : "SKIPPED(room-mismatch)",
+                                teleportStatus,
                                 followerLeaderLastInOurRoom.x,
                                 followerLeaderLastInOurRoom.y,
                                 followerLeaderLastInOurRoom.z,
