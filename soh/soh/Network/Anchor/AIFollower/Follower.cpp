@@ -1273,61 +1273,29 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     // back into the hole from sideTarget. Skip
                     // the teleport in that case; handoff nav +
                     // G10/G12 will handle via scene-reload.
-                    bool teleportSafe =
-                        (followerLeaderLastInOurRoomNumber == ourRoom);
-                    // Nav system Shape A hang-state guard (commit 6c).
-                    // Same reasoning as TeleportToLeader's guard
-                    // — suppress world.pos writes while Link is
-                    // hanging off a ledge so the BTN_A/BTN_B
-                    // resolution path can resolve the hang
-                    // cleanly without sliding.
-                    bool hangActive =
-                        (player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) != 0 &&
-                        CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
-                        CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0;
-                    // P3.5 part 2 (user 2026-05-09 — "forced teleport-
-                    // across-room should not be needed anymore. NPCs
-                    // should snap the correct position when they are
-                    // already within ~30 units"): proximity-gate the
-                    // arm-edge teleport. Within 30u XZ of the leader's
-                    // last-same-room position, snap as a fine
-                    // alignment so the follower lines up with the
-                    // door trigger volume. Farther, skip — FOLLOW
-                    // (substrate path consumer + DummyPlayer trail
-                    // breadcrumbs) paths the follower naturally
-                    // toward `doorTarget` set below. Gives the
-                    // visible behaviour the user expects: the
-                    // follower walks up to the door rather than
-                    // teleport-snapping to it.
-                    constexpr f32 kDoorHandoffSnapRadius = 30.0f;
-                    f32 snapDx = followerLeaderLastInOurRoom.x - p2Pos.x;
-                    f32 snapDz = followerLeaderLastInOurRoom.z - p2Pos.z;
-                    bool withinSnapRange =
-                        (snapDx * snapDx + snapDz * snapDz) <=
-                        (kDoorHandoffSnapRadius * kDoorHandoffSnapRadius);
-                    if (teleportSafe && !hangActive && withinSnapRange) {
-                        player->actor.world.pos = followerLeaderLastInOurRoom;
-                        player->actor.prevPos   = followerLeaderLastInOurRoom;
-                        player->actor.shape.rot.y = leaderActor->shape.rot.y;
-                        // Post-teleport hold: zero stick for
-                        // the hold window so Link settles
-                        // before the state machine resumes.
-                        followerPostTeleportFrames = 30;
-                        followerStuckCycleCount    = 0;
-                        followerStuckCycleResetFrames = 0;
-                        followerOverrunFrames      = 0;
-                    }
-                    const char* teleportStatus =
-                        !teleportSafe   ? "SKIPPED(room-mismatch)" :
-                        hangActive      ? "SKIPPED(hang-active)"   :
-                        !withinSnapRange ? "SKIPPED(>30u proximity)" :
-                                           "fired";
+                    // P3.5 part 3 (user 2026-05-09 follow-up — "the AI
+                    // Follower should not teleport when the leader
+                    // crosses threshold into a different room, the AI
+                    // Follower should continue navigating to the leader.
+                    // Teleporting should only be used when is not
+                    // possible to navigate to the leader"): drop the
+                    // arm-edge teleport entirely. P3.5 part 2 still
+                    // fired it within 30u as a "fine alignment" snap;
+                    // the user's feedback says even that is wrong. The
+                    // follower should always navigate to the door via
+                    // FOLLOW. Only G10 leash overrun / G14 close-fail
+                    // / G15 hang-state safety nets should ever
+                    // teleport — those are "navigation actually
+                    // impossible" detectors.
+                    //
+                    // doorTarget is still set below for FOLLOW to
+                    // path toward; only the BONUS instant-snap is
+                    // removed.
                     SPDLOG_INFO("[Follower] Leader crossed room boundary (ours={} leader={}) "
-                                "— door handoff armed; teleport={} last-pos=({:.0f},{:.0f},{:.0f}) "
-                                "last-room={} yaw={} target={:.0f},{:.0f},{:.0f} {} "
-                                "timeout={} frames",
+                                "— door handoff armed; teleport=NEVER(P3.5p3) "
+                                "last-pos=({:.0f},{:.0f},{:.0f}) last-room={} yaw={} "
+                                "target={:.0f},{:.0f},{:.0f} {} timeout={} frames",
                                 (int)ourRoom, (int)leaderRoom,
-                                teleportStatus,
                                 followerLeaderLastInOurRoom.x,
                                 followerLeaderLastInOurRoom.y,
                                 followerLeaderLastInOurRoom.z,
