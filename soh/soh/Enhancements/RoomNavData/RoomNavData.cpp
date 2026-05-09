@@ -201,6 +201,36 @@ BuildAdjacencyList(const RoomNavData* data) {
         adjacency[e.fromIdx].push_back(e.toIdx);
         adjacency[e.toIdx].push_back(e.fromIdx);
     }
+    // P3.8 (user 2026-05-09 — "AI Follower is not targeting ladders
+    // and climbable surfaces as part of its pathfinding"): inject
+    // bidirectional edges between each climb anchor's base and top
+    // nodes. The floodfill edge graph only contains step-up-allowed
+    // grid neighbours; climb anchors (vine walls, ladders, gameplay-
+    // relevant climbable surfaces) require a vertical traversal that
+    // floodfill never connected. Adding base↔top edges lets the BFS
+    // route through climbable surfaces just like ordinary ground
+    // edges.
+    //
+    // Consumers (AI Follower / AI Invader) must recognise that a
+    // path waypoint near a NODE_CLIMB_BASE precedes a vertical
+    // traversal and engage their climb pipeline (Shape A for the
+    // follower; Shape B for non-Link navigators). Without that,
+    // the consumer paths to the base and stalls because stick
+    // injection alone can't cross the wall the vines/ladder are
+    // mounted on. Follow-up commit wires the consumer side.
+    for (const ClimbAnchor& anchor : data->climbAnchors) {
+        // Find base / top node indices the same way the scan
+        // populates NODE_CLIMB_BASE / NODE_CLIMB_TOP flags. Using
+        // FindNearestNode here matches that flagging convention.
+        int baseIdx = FindNearestNode(data, anchor.basePos);
+        int topIdx  = FindNearestNode(data, anchor.topPos);
+        if (baseIdx < 0 || topIdx < 0) continue;
+        if (baseIdx == topIdx) continue;
+        if ((size_t)baseIdx >= adjacency.size() ||
+            (size_t)topIdx  >= adjacency.size()) continue;
+        adjacency[(size_t)baseIdx].push_back((uint16_t)topIdx);
+        adjacency[(size_t)topIdx].push_back((uint16_t)baseIdx);
+    }
     return adjacency;
 }
 
