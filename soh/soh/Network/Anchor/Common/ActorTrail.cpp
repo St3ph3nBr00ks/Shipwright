@@ -509,11 +509,43 @@ static void OnExitGameClear(int32_t /*fileNum*/) {
     ActorTrail::GetInstance().ClearAll();
 }
 
+// Clear an actor's trail when the actor dies. Without this, navigators
+// pursuing a dead target follow stale breadcrumbs to a corpse-position
+// (or, after Actor_Kill, to wherever the actor's last waypoint was
+// captured before the kill). Two hook sites cover the two death paths:
+//
+//   OnEnemyDefeat — fires from EnemyNetId-tagged enemy deaths via the
+//                   standard combat pipeline.
+//   OnActorKill   — fires from any Actor_Kill call. Catches enemies
+//                   that die outside the OnEnemyDefeat path (Karebaba
+//                   stem, En_Skb at dawn) and any other actor whose
+//                   trail was being captured (e.g. NPCs with
+//                   leavesTrail=true if added later).
+//
+// Both call paths look up the EnemyNetId extension to find the netId →
+// TrailKey. If no extension is present, the actor wasn't being trailed
+// anyway, so the clear is a no-op.
+//
+// Player trails (TrailKeyForPlayer) are not cleared here — players
+// don't "die" in the actor-death sense; their trails reset on scene
+// change / disconnect via separate paths.
+static void ClearTrailForDeadActor(void* refActor) {
+    if (refActor == nullptr) return;
+    Actor* actor = static_cast<Actor*>(refActor);
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return;
+    ActorTrail::GetInstance().ClearForKey(TrailKeyForActor(ext->netId));
+}
+
 static void RegisterActorTrail() {
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(
         OnGameFrameTick);
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnExitGame>(
         OnExitGameClear);
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnEnemyDefeat>(
+        ClearTrailForDeadActor);
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnActorKill>(
+        ClearTrailForDeadActor);
 }
 
 } // namespace AnchorNav
