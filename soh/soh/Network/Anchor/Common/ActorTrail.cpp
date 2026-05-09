@@ -318,8 +318,18 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
         return false;
     }
 
-    // Step 1 — direct pursuit.
-    if (MovementClear(navigator, targetPos, play)) {
+    // Step 1 — direct pursuit. P3.10 part 2: gate on Y-delta so the
+    // navigator doesn't short-circuit to "target reachable" when the
+    // target is significantly above/below despite a clear horizontal
+    // line. MovementClear is a horizontal line test; a target on a
+    // platform 200u up with clear airspace below passes the test but
+    // the navigator can't walk vertically. Forces Layer 2/3 fall-
+    // through so the trail breadcrumb / RoomNavData BFS can locate
+    // the actual route up (slope / ladder / climb anchor).
+    constexpr float kLayer1YGate = 50.0f;
+    float dyToTarget = std::fabs(targetPos.y - navigator->world.pos.y);
+    if (dyToTarget < kLayer1YGate &&
+        MovementClear(navigator, targetPos, play)) {
         out = targetPos;
         return true;
     }
@@ -449,8 +459,15 @@ bool ActorTrail::ComputePathTo(TrailKey key,
     out.msAtCapture       = mNowMs;
     out.capturedTargetPos = targetPos;
 
-    // Layer 1 — direct reachability.
-    if (MovementClear(navigator, targetPos, play)) {
+    // Layer 1 — direct reachability. P3.10 part 2: same Y-delta gate
+    // as GetBestReachableSubgoal — skip when target is significantly
+    // above/below so the path consumer routes through the trail
+    // breadcrumbs / RoomNavData edges that actually encode vertical
+    // traversal (slope / ladder / climb anchor).
+    constexpr float kLayer1YGate = 50.0f;
+    float dyToTarget = std::fabs(targetPos.y - navigator->world.pos.y);
+    if (dyToTarget < kLayer1YGate &&
+        MovementClear(navigator, targetPos, play)) {
         out.waypoints.push_back(targetPos);
         return true;
     }
