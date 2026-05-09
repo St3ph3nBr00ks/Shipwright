@@ -28,6 +28,12 @@ extern "C" {
 // availability to all consumers that include Anchor.h.
 #include "Common/ActorSyncHelpers.h"
 
+// AnchorNav::ActorTrail::NavPath is held as a follower-state member.
+// Phase 2 commit 2 of the SRP refactor (#173 / #169) wires HandleStateFollow
+// to consume an ActorTrail-computed path snapshot. Definition needed at the
+// class level because NavPath is a value-type member.
+#include "Common/ActorTrail.h"
+
 #include "EnemyStateSync/EnemyLifecycle.h"
 #include "EnemyStateSync/EnemyHostBookkeeping.h"
 
@@ -609,6 +615,18 @@ class Anchor : public Network {
     //       When >= kG14TimeoutFrames, fire the teleport.
     f32             followerCloseFailBaseline     = 0.0f;
     int             followerCloseFailFrames       = 0;
+
+    // Phase 2 — held NavPath snapshot for follower pursuit. Refreshed when
+    // stale (path empty / cursor exhausted), when the leader changes, when
+    // the leader's side-target moves significantly, or on scene change.
+    // Consumed by HandleStateFollow when AnchorFollower::IsAiFollowerNavSubstrateEnabled()
+    // returns true; ignored when the gate is off (legacy bespoke
+    // sideTarget-as-direct-move-target path stays in effect). See
+    // Plans/anchor_code_decoupling.md + Plans/nav_system_implementation_plan.md
+    // §Phase 2 consumer wiring.
+    AnchorNav::ActorTrail::NavPath followerNavPath;
+    uint32_t                       followerNavPathLeaderClientId = 0;        // detect leader change
+    Vec3f                          followerNavPathLastTarget = { 0, 0, 0 };  // detect significant target movement
 
     // Item pickup (Claude/Plans/ai_follower_item_pickup.md). An IDLE/FOLLOW
     // tick scans ACTORCAT_MISC for ACTOR_EN_ITEM00 drops. Eligible drops

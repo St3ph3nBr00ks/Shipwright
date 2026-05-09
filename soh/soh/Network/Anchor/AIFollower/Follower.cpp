@@ -194,6 +194,17 @@ static constexpr int kAttackDuration = 60;
 // Was static constexpr inside TickFollower; promoted for HandleStateReturn.
 static constexpr f32 kFollowThreshold = 100.0f;
 
+// Phase 2 — NavPath subgoal-reach threshold (XZ distance). When the
+// follower is closer than this to the current subgoal, advance the path
+// cursor to the next subgoal. Tighter than kFollowThreshold so intermediate
+// subgoals are visited en route, not skipped.
+static constexpr f32 kNavPathSubgoalReach    = 40.0f;
+// Phase 2 — distance at which the held NavPath is considered stale due to
+// the leader having drifted far from where the path was originally captured.
+// 50u matches a single FOLLOW-step's typical movement; once the leader has
+// moved that far, recompute rather than chasing the captured target.
+static constexpr f32 kNavPathTargetDriftRefresh = 50.0f;
+
 // Frames the dismount-forward-hold counter is armed for after CLIMBING→IDLE
 // (Bug C, log 69). Was static constexpr inside TickFollower; promoted for
 // HandleStateClimbing.
@@ -2700,14 +2711,70 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // that case.
     Vec3f followTarget = sideTarget;
     if (!followerDoorHandoff) {
+        // Phase 2 — when the nav substrate consumer gate is on, drive the
+        // follower along an ActorTrail-computed path to the leader's side-
+        // target instead of pointing the stick directly at sideTarget. The
+        // path is recomputed when the cursor is exhausted, when the leader
+        // changes, when the leader has drifted >kNavPathTargetDriftRefresh
+        // from the captured target, or on scene change. Each HandleStateFollow
+        // tick advances the cursor when the follower comes within
+        // kNavPathSubgoalReach of the current subgoal, so intermediate
+        // subgoals are visited en route. ComputePathTo's three-layer fallback
+        // (LOS → trail breadcrumb → RoomNavData BFS) gracefully degrades
+        // when individual nav features are off; it returns false only when
+        // nothing is reachable, in which case we fall back to the legacy
+        // direct sideTarget for this tick. Door handoff stays on the
+        // bespoke path because the door centerline is hand-picked by G11.
+        if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
+            const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
+            const bool leaderChanged =
+                (followerNavPathLeaderClientId != followerLeaderClientId);
+            const f32 driftDx = sideTarget.x - followerNavPathLastTarget.x;
+            const f32 driftDz = sideTarget.z - followerNavPathLastTarget.z;
+            const bool targetDrifted =
+                (driftDx * driftDx + driftDz * driftDz) >
+                (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
+            const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
+                                       leaderChanged || targetDrifted;
+            if (needsRefresh) {
+                AnchorNav::TrailKey leaderKey =
+                    AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
+                followerNavPath.Reset();
+                bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
+                    leaderKey, &player->actor, sideTarget, gPlayState, followerNavPath);
+                followerNavPathLeaderClientId = followerLeaderClientId;
+                followerNavPathLastTarget     = sideTarget;
+                if (!gotPath) {
+                    // Nothing reachable per ComputePathTo's three layers.
+                    // Leave path empty; the !Empty() check below falls
+                    // through to legacy direct sideTarget for this tick.
+                    SPDLOG_DEBUG("[Follower] FOLLOW NavPath empty (ComputePathTo "
+                                 "returned false; falling back to direct sideTarget)");
+                }
+            }
+            if (!followerNavPath.Empty()) {
+                Vec3f sg = followerNavPath.CurrentSubgoal();
+                f32   sgDx = sg.x - p2Pos.x;
+                f32   sgDz = sg.z - p2Pos.z;
+                if (sgDx * sgDx + sgDz * sgDz <
+                    kNavPathSubgoalReach * kNavPathSubgoalReach) {
+                    followerNavPath.Advance();
+                }
+                if (!followerNavPath.Empty()) {
+                    followTarget = followerNavPath.CurrentSubgoal();
+                }
+            }
+        }
         followerMoveTarget = followTarget;
     } else {
         followTarget = followerMoveTarget;
     }
-    f32 dist = sqrtf(SQ(followTarget.x - p2Pos.x) + SQ(followTarget.z - p2Pos.z));
+    f32 distToFollowTarget = sqrtf(SQ(followTarget.x - p2Pos.x) + SQ(followTarget.z - p2Pos.z));
     // Stick injection in TickFollowerInput drives actual movement;
-    // here we just face the target and transition when close enough.
-    if (dist > 0.001f) {
+    // here we just face the immediate move target. Under Phase 2 nav
+    // substrate the immediate target may be an intermediate subgoal —
+    // facing that subgoal is the right thing for stick injection.
+    if (distToFollowTarget > 0.001f) {
         player->actor.shape.rot.y = YawToward(
             followTarget.x - player->actor.world.pos.x,
             followTarget.z - player->actor.world.pos.z);
@@ -2719,10 +2786,17 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // the follower crosses into leader's room (handoff clears at the
     // top of the hook) or followerDoorHandoffFrames hits zero
     // (timeout → fallback teleport).
-    if (dist < kFollowThreshold && !followerDoorHandoff) {
+    //
+    // Phase 2: gate on distance to the final goal (sideTarget), not the
+    // immediate subgoal. With nav substrate off this is identical
+    // (followTarget == sideTarget); with nav substrate on it prevents
+    // FOLLOW→IDLE from firing when the follower merely reaches an
+    // intermediate breadcrumb en route to the leader.
+    f32 distToFinalGoal = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+    if (distToFinalGoal < kFollowThreshold && !followerDoorHandoff) {
         followerAIState     = FollowerAIState::IDLE;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", dist);
+        SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", distToFinalGoal);
     }
 }
 
