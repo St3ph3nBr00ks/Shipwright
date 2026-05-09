@@ -2625,8 +2625,21 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
     // TickFollowerInput's CLIMBING-aware injection reads this for
     // direction (leader.y vs p2Pos.y).
     followerMoveTarget = leaderPos;
-    // Match leader's facing so dismount looks clean.
-    player->actor.shape.rot.y = leaderActor->shape.rot.y;
+    // P3.12 (user 2026-05-09 — "when climbing, NPCs should stop
+    // attempting to face toward the target they are pursuing. When
+    // climbing, NPCs must face the surface geometry that they are
+    // climbing on"): do NOT overwrite shape.rot.y per-frame during
+    // CLIMBING. OoT's ladder/vine code sets shape.rot.y to the
+    // surface normal when Link grabs the climbable, and re-orients
+    // automatically as the climb progresses. The pre-existing
+    // "Match leader's facing so dismount looks clean" write fought
+    // OoT's correct orientation every frame, producing the
+    // visible "follower facing away from the wall while climbing"
+    // bug. The dismount-forward-hold still captures shape.rot.y
+    // AT EXIT (followerClimbDismountYaw) — by then OoT has
+    // already oriented the player for the dismount frame, so the
+    // captured yaw is the right thing to hold.
+    (void)leaderActor;  // referenced via signature; explicit no-op now
 }
 
 void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos) {
