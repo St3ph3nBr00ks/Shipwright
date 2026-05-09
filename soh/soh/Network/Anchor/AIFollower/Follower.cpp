@@ -568,16 +568,27 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
               player->doorType != PLAYER_DOORTYPE_FAKE))) {
             deactivateCheck &= ~BTN_A;
         }
-        // Nav system Shape A hang-state resolution (commit 6c).
-        // The hang-state injection block in ShouldActorUpdate
-        // injects BTN_A or BTN_B based on Δy to leader; mask
-        // both from the deactivate check so our own press
-        // doesn't self-cancel follower mode while resolving
-        // the hang.
+        // Hang-state resolution mask (originally Phase 1 commit 6c,
+        // ungated in P3.4): the hang-state input-injection block in
+        // TickFollowerInput injects BTN_A (climb-up) or BTN_B (drop)
+        // based on Δy to leader. P3.4 ungated the INJECTION from the
+        // Nav.VerticalTeleport CVar, but the corresponding mask
+        // here was left gated — so when the gate is off and BTN_B
+        // injection fires, the deactivate-check sees BTN_B unmasked
+        // and turns the follower off (user 2026-05-09 follow-up
+        // report: "AI Follower is still turning off when the
+        // follower climbs onto a ledge"). Mirror the ungating here.
+        //
+        // Also extend the mask to cover the entire climb-state
+        // family (HANGING_OFF_LEDGE | CLIMBING_LEDGE |
+        // CLIMBING_LADDER) — same race as BTN_A in P3.7: any BTN_B
+        // injected during hang may persist in press.button into
+        // the CLIMBING_LEDGE / CLIMBING_LADDER frames.
         if (player != nullptr &&
-            (player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) &&
-            CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
-            CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0) {
+            (player->stateFlags1 &
+             (PLAYER_STATE1_HANGING_OFF_LEDGE |
+              PLAYER_STATE1_CLIMBING_LEDGE |
+              PLAYER_STATE1_CLIMBING_LADDER))) {
             deactivateCheck &= ~(BTN_A | BTN_B);
         }
         if (deactivateCheck != 0) {
