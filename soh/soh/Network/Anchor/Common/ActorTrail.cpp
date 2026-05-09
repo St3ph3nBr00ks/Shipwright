@@ -171,11 +171,43 @@ void ActorTrail::Tick(PlayState* play) {
         }
     }
 
-    // Remote players + AI Followers + syncable actors with leavesTrail=true.
-    // The follower (ACTOR_EN_OE2) is in ACTORCAT_NPC; covered by the
-    // syncable-actor scan below (NavTraits explicitly opts it in via the
-    // override map's leavesTrail=true). Remote DummyPlayers are also in
-    // ACTORCAT_NPC and look like ACTOR_EN_OE2 — same path.
+    // Remote DummyPlayers — represent OTHER (remote) players' Links on
+    // the local client. Spawned as ACTOR_PLAYER, then immediately moved
+    // to ACTORCAT_NPC with id=ACTOR_EN_OE2 and update=DummyPlayer_Update
+    // (per session_state.md "DummyPlayer Actor Facts"). Each maps to a
+    // remote clientId via Anchor::GetDummyPlayerClientId; capture under
+    // TrailKeyForPlayer(clientId) so the AI Follower's substrate path
+    // consumer (HandleStateFollow / RETURN) finds the leader's
+    // breadcrumb trail when it queries TrailKeyForPlayer(leaderClientId).
+    //
+    // Without this capture, ComputePathTo Layer 2 (trail breadcrumb
+    // walk) returns nothing for the leader and the follower has only
+    // Layer 1 (direct LOS) and Layer 3 (RoomNavData BFS) — exactly the
+    // "follower can't truly follow leader effectively, relying only on
+    // room nav data" symptom reported 2026-05-09.
+    if (Anchor::Instance != nullptr) {
+        Actor* npc = play->actorCtx.actorLists[ACTORCAT_NPC].head;
+        while (npc != nullptr) {
+            Actor* nextNpc = npc->next;
+            if (npc->id == ACTOR_EN_OE2 &&
+                npc->update == (ActorFunc)DummyPlayer_Update) {
+                uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(npc);
+                const Vec3f& pos = npc->world.pos;
+                if (pos.x > -9000.0f) {  // not the out-of-scene sentinel
+                    // Cross-timeline gating happens at substrate consumer
+                    // sites (Pillar B); capture the timeline tag for
+                    // future filtering. clientId fits in 8 bits per the
+                    // Anchor handshake design (max 4 clients in v1).
+                    uint8_t timeline = (uint8_t)(gSaveContext.linkAge & 1);
+                    CaptureWaypoint(TrailKeyForPlayer((uint8_t)clientId), pos,
+                                    sceneNum, roomNum, timeline);
+                }
+            }
+            npc = nextNpc;
+        }
+    }
+
+    // Syncable actors with leavesTrail=true (enemies, etc.).
     for (uint8_t cat : kSyncableActorCategories) {
         Actor* actor = play->actorCtx.actorLists[cat].head;
         while (actor != nullptr) {
