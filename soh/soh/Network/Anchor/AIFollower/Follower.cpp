@@ -2306,21 +2306,75 @@ void Anchor::HandleStateReturn(Player* player, const Vec3f& sideTarget, const Ve
     // centerline target instead of overwriting it with sideTarget.
     Vec3f returnTarget = sideTarget;
     if (!followerDoorHandoff) {
+        // Phase 2 — when the nav substrate consumer gate is on, plan a
+        // path back to the leader's side-target instead of walking a
+        // straight line. Mirrors FOLLOW exactly: same TrailKey (leader's
+        // player trail), same NavPath state shared via key-mismatch
+        // invalidation, same refresh predicate, same subgoal-advance
+        // policy. ComputePathTo's three-layer fallback gracefully
+        // degrades; on returned-empty path, falls through to the legacy
+        // direct sideTarget for that tick.
+        if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
+            AnchorNav::TrailKey leaderKey =
+                AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
+            const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
+            const bool keyChanged   = (followerNavPathTargetKey != leaderKey);
+            const f32 driftDx = sideTarget.x - followerNavPathLastTarget.x;
+            const f32 driftDz = sideTarget.z - followerNavPathLastTarget.z;
+            const bool targetDrifted =
+                (driftDx * driftDx + driftDz * driftDz) >
+                (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
+            const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
+                                       keyChanged || targetDrifted;
+            if (needsRefresh) {
+                followerNavPath.Reset();
+                bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
+                    leaderKey, &player->actor, sideTarget, gPlayState, followerNavPath);
+                followerNavPathTargetKey  = leaderKey;
+                followerNavPathLastTarget = sideTarget;
+                if (!gotPath) {
+                    SPDLOG_DEBUG("[Follower] RETURN NavPath empty (ComputePathTo "
+                                 "returned false; falling back to direct sideTarget)");
+                }
+            }
+            if (!followerNavPath.Empty()) {
+                Vec3f sg = followerNavPath.CurrentSubgoal();
+                f32   sgDx = sg.x - p2Pos.x;
+                f32   sgDz = sg.z - p2Pos.z;
+                if (sgDx * sgDx + sgDz * sgDz <
+                    kNavPathSubgoalReach * kNavPathSubgoalReach) {
+                    followerNavPath.Advance();
+                }
+                if (!followerNavPath.Empty()) {
+                    returnTarget = followerNavPath.CurrentSubgoal();
+                }
+            }
+        }
         followerMoveTarget = returnTarget;
     } else {
         returnTarget = followerMoveTarget;
     }
-    f32 dist = sqrtf(SQ(returnTarget.x - p2Pos.x) + SQ(returnTarget.z - p2Pos.z));
-    // Stick injection in TickFollowerInput drives actual movement.
-    if (dist > 0.001f) {
+    f32 distToReturnTarget = sqrtf(SQ(returnTarget.x - p2Pos.x) +
+                                    SQ(returnTarget.z - p2Pos.z));
+    // Stick injection in TickFollowerInput drives actual movement; we
+    // face the immediate move target so Player_Update's auto-rotate
+    // aligns with stick direction.
+    if (distToReturnTarget > 0.001f) {
         player->actor.shape.rot.y = YawToward(
             returnTarget.x - player->actor.world.pos.x,
             returnTarget.z - player->actor.world.pos.z);
     }
-    if (dist < kFollowThreshold) {
+    // RETURN→IDLE gates on distance to the FINAL goal (sideTarget), not
+    // the immediate subgoal. With nav substrate off this is identical
+    // (returnTarget == sideTarget); with nav substrate on it prevents
+    // RETURN→IDLE from firing when the follower reaches an intermediate
+    // breadcrumb en route to the leader.
+    f32 distToFinalGoal = sqrtf(SQ(sideTarget.x - p2Pos.x) +
+                                 SQ(sideTarget.z - p2Pos.z));
+    if (distToFinalGoal < kFollowThreshold) {
         followerAIState     = FollowerAIState::IDLE;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] RETURN→IDLE dist={:.1f}", dist);
+        SPDLOG_INFO("[Follower] RETURN→IDLE dist={:.1f}", distToFinalGoal);
     }
 }
 
