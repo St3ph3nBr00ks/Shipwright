@@ -1927,27 +1927,34 @@ void Anchor::TickFollowerInput(Actor* actor) {
         SPDLOG_INFO("[Follower] BTN_A climb (DO_ACTION_CLIMB)");
     }
 
-    // --- Nav system Shape A hang-state resolution (commit 6c) ---
-    // Closes the documented #169 residual: when the follower
-    // enters PLAYER_STATE1_HANGING_OFF_LEDGE, no system decided
-    // whether to climb up (BTN_A) or drop down (BTN_B). The
-    // existing DO_ACTION_CLIMB path handles climb-up but not
-    // drop-down. With nav.VerticalTeleport on, we read leader
-    // altitude vs follower altitude and inject the right
-    // button. Plan §9 thresholds:
+    // --- Hang-state resolution (P3.4, originally Phase 1 commit 6c) ---
+    // When the follower enters PLAYER_STATE1_HANGING_OFF_LEDGE, decide
+    // whether to climb up (BTN_A) or drop down (BTN_B). The existing
+    // DO_ACTION_CLIMB path above handles climb-up but not drop-down,
+    // so a follower hanging from a ledge with the leader BELOW would
+    // climb up (wrong direction) instead of letting go.
+    //
+    // Thresholds:
     //   target Y > follower Y + 30  → climb up   (BTN_A)
     //   target Y < follower Y - 80  → drop down  (BTN_B)
     //   otherwise                   → BTN_A (default — bias
     //                                  toward climb up).
     // BTN_A path overlaps DO_ACTION_CLIMB above; idempotent.
-    // BTN_B is the new edge case.
+    // BTN_B is the case the previous gate-on-only design left
+    // unhandled.
+    //
+    // P3.4 (user 2026-05-09 — "NPCs in the hold-on/hang-on/ledge
+    // state need to climb up or let go and drop to pursue a
+    // target"): originally gated behind gEnhancements.Nav.Enabled +
+    // Nav.VerticalTeleport. That made this basic NPC capability
+    // dependent on enabling experimental nav CVars. Now always-on
+    // for the AI Follower — hang-state resolution is core to "follow
+    // the leader through vertical terrain". Future per-NPC opt-out
+    // can route through NavTraits when AI Invader / ally NPCs join.
     {
         const bool hangFlag = (sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) != 0;
-        const bool navOn    =
-            CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
-            CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0;
         static bool sWasHanging = false;
-        if (hangFlag && navOn) {
+        if (hangFlag) {
             constexpr f32 kHangResolveAboveThreshold = 30.0f;
             constexpr f32 kHangResolveBelowThreshold = 80.0f;
             // followerMoveTarget carries the follower's
@@ -1981,7 +1988,6 @@ void Anchor::TickFollowerInput(Actor* actor) {
         } else if (sWasHanging) {
             sWasHanging = false;
         }
-        (void)hangFlag;  // suppress unused-warning when navOn is false
     }
 
     // --- Phase A — auto-press A when OoT prompts "Enter" ---
