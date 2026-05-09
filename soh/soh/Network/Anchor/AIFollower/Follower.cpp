@@ -2822,8 +2822,15 @@ void Anchor::HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sid
             return;
         }
     }
-    // In IDLE, match leader's facing direction.
-    player->actor.shape.rot.y = dummyActor->shape.rot.y;
+    // Per user 2026-05-09: do NOT match leader's facing in IDLE — the
+    // synchronised swivel looked unnatural. Follower keeps whatever yaw
+    // it last had (from arriving in IDLE), which is more natural and
+    // matches how an actual companion would idle. The only intentional
+    // facing reset is on FOLLOW/ENGAGE/RETURN entry where the move
+    // direction supplies a sensible yaw. (Suppress the unused parameter
+    // warning explicitly so the dummyActor reference is preserved for
+    // future re-use without a signature change.)
+    (void)dummyActor;
     // Pre-populate move target so the first FOLLOW frame's
     // TickFollowerInput sees the correct direction immediately. Test 8
     // — during door handoff the G11 block already set followerMoveTarget
