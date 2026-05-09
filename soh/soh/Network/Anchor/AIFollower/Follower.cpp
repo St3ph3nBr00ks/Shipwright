@@ -1326,6 +1326,39 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         }
     }
 
+    // G15 — hang-state safety teleport (P3.3, user 2026-05-09).
+    // When the follower is in PLAYER_STATE1_HANGING_OFF_LEDGE without
+    // transitioning into the CLIMBING_LEDGE hoist for an extended
+    // period, the hang-state resolution (BTN_A climb-up / BTN_B drop)
+    // either never fired or couldn't make progress. Teleporting to
+    // the leader breaks the deadlock. Faster than G10 (no leash
+    // distance threshold) since hanging is a known broken-state
+    // signal in itself; G14's progress-delta heuristic also wouldn't
+    // fire because the follower's XYZ is locked while hanging.
+    //
+    // Counter is gated so an actively-hoisting follower (CLIMBING_LEDGE
+    // set) doesn't accumulate — the hoist is the desired transition.
+    static constexpr int kHangTimeoutFrames = 180; // ~3 s at 60 fps
+    if (player != nullptr) {
+        const u32 sf1 = player->stateFlags1;
+        const bool hanging  = (sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) != 0;
+        const bool hoisting = (sf1 & PLAYER_STATE1_CLIMBING_LEDGE)   != 0;
+        if (hanging && !hoisting) {
+            followerHangFrames++;
+            if (followerHangFrames >= kHangTimeoutFrames) {
+                bool triggered = TeleportToLeader("G15 hang-state timeout");
+                followerHangFrames = 0;
+                followerAIState    = FollowerAIState::IDLE;
+                followerStateFrames = 0;
+                if (triggered) {
+                    return;
+                }
+            }
+        } else {
+            followerHangFrames = 0;
+        }
+    }
+
     // G12 — STUCK escalation teleport. If the follower has entered
     // STUCK kStuckCycleEscalation times within kStuckCycleWindow,
     // bail to a teleport. Counter is incremented at the FOLLOW→STUCK

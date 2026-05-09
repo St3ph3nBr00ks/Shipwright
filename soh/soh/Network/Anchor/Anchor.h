@@ -616,6 +616,15 @@ class Anchor : public Network {
     f32             followerCloseFailBaseline     = 0.0f;
     int             followerCloseFailFrames       = 0;
 
+    // P3.3 (user 2026-05-09) — G15 hang-state safety teleport.
+    // Counts continuous frames the follower has been in
+    // PLAYER_STATE1_HANGING_OFF_LEDGE WITHOUT transitioning into the
+    // CLIMBING_LEDGE hoist. Long persistence indicates the hang-state
+    // resolution (hold-on/let-go decision) failed to fire or the
+    // follower can't reach the climb threshold; teleport to leader
+    // breaks the deadlock. Resets to 0 on any non-hang frame.
+    int             followerHangFrames            = 0;
+
     // Phase 2 — held NavPath snapshot for follower pursuit. Refreshed when
     // stale (path empty / cursor exhausted), when the target's TrailKey
     // changes (leader → enemy, leader changed, target enemy changed),
