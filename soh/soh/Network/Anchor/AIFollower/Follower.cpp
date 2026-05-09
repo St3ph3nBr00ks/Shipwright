@@ -1463,24 +1463,54 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     // there. The XZ-only teleport makes follower adjacent to the
     // ladder rim; subsequent stick_y forward injection causes the
     // ladder collider to attach Link.
+    //
+    // P3.5 (user 2026-05-09 — "AI Follower does not need to snap to
+    // the position of the player to enter doors, crawlspaces, and
+    // ladders anymore. NPCs should snap the correct position when
+    // they are already within ~30 units of the climbable surface
+    // they intend to use"): gate the snap on XZ proximity to the
+    // leader's position. When far, defer CLIMBING entry and let the
+    // FOLLOW state drive the follower toward the ladder base via
+    // stick injection / nav substrate. CLIMBING will enter on a
+    // subsequent tick once the follower is within reach. Removes
+    // the across-scene "leader started climbing → instant teleport"
+    // behaviour the user objected to.
     {
         auto it = clients.find(followerLeaderClientId);
         if (it != clients.end() && it->second.isClimbing &&
             followerAIState != FollowerAIState::CLIMBING) {
-            // Snap to leader's XZ but keep follower's Y. If
-            // follower is already higher (leader climbing down to
-            // us), we don't drop them; if follower is lower (the
-            // common case), they're now at the ladder base.
-            Vec3f ladderXz = { leaderPos.x, p2Pos.y, leaderPos.z };
-            player->actor.world.pos = ladderXz;
-            player->actor.prevPos   = ladderXz;
-            followerAIState     = FollowerAIState::CLIMBING;
-            followerStateFrames = 0;
-            SPDLOG_INFO("[Follower] Leader started climbing → CLIMBING "
-                        "(snap to ladder XZ at {:.0f},{:.0f},{:.0f})",
-                        ladderXz.x, ladderXz.y, ladderXz.z);
-            // Refresh p2Pos snapshot since we just moved.
-            p2Pos = player->actor.world.pos;
+            constexpr f32 kClimbApproachRadius = 30.0f;
+            f32 dx = leaderPos.x - p2Pos.x;
+            f32 dz = leaderPos.z - p2Pos.z;
+            f32 distSq = dx * dx + dz * dz;
+            if (distSq <= kClimbApproachRadius * kClimbApproachRadius) {
+                // Within proximity — snap to ladder XZ and enter CLIMBING.
+                // Snap stays as-is (was Bug 2's solution): puts follower
+                // adjacent to the ladder collider so the next stick_y
+                // injection actually attaches.
+                Vec3f ladderXz = { leaderPos.x, p2Pos.y, leaderPos.z };
+                player->actor.world.pos = ladderXz;
+                player->actor.prevPos   = ladderXz;
+                followerAIState     = FollowerAIState::CLIMBING;
+                followerStateFrames = 0;
+                SPDLOG_INFO("[Follower] Leader climbing + within {:.0f}u → CLIMBING "
+                            "(snap to ladder XZ at {:.0f},{:.0f},{:.0f})",
+                            sqrtf(distSq),
+                            ladderXz.x, ladderXz.y, ladderXz.z);
+                // Refresh p2Pos snapshot since we just moved.
+                p2Pos = player->actor.world.pos;
+            } else {
+                // Too far from the ladder base — point FOLLOW toward
+                // it and let the substrate path / stick injection bring
+                // us close. CLIMBING entry retried on next tick.
+                followerMoveTarget = leaderPos;
+                if (followerStateFrames % 60 == 0) {
+                    SPDLOG_INFO("[Follower] Leader climbing but follower "
+                                "{:.0f}u from ladder base — approaching "
+                                "before CLIMBING entry",
+                                sqrtf(distSq));
+                }
+            }
         }
     }
 
