@@ -196,6 +196,17 @@ static constexpr int kAttackDuration = 60;
 // Was static constexpr inside TickFollower; promoted for HandleStateReturn.
 static constexpr f32 kFollowThreshold = 100.0f;
 
+// P3.10 (user 2026-05-09 — "if the leader is standing on a platform,
+// the AI Follower will stand under the leader instead of walking up a
+// sloped surface to get onto the platform"): vertical gate for the
+// FOLLOW→IDLE / RETURN→IDLE transitions. When |dy| to the final goal
+// exceeds this threshold, the follower hasn't really arrived even if
+// XZ distance is small — it's standing UNDER the leader rather than
+// AT the leader. Keep FOLLOW/RETURN active so the path consumer keeps
+// trying to find a slope / stairs / ladder route. G10 / G14 leash-
+// timeout safety nets eventually fire if no path exists.
+static constexpr f32 kFollowYThreshold = 50.0f;
+
 // Phase 2 — NavPath subgoal-reach threshold (XZ distance). When the
 // follower is closer than this to the current subgoal, advance the path
 // cursor to the next subgoal. Tighter than kFollowThreshold so intermediate
@@ -2462,12 +2473,19 @@ void Anchor::HandleStateReturn(Player* player, const Vec3f& sideTarget, const Ve
     // (returnTarget == sideTarget); with nav substrate on it prevents
     // RETURN→IDLE from firing when the follower reaches an intermediate
     // breadcrumb en route to the leader.
+    //
+    // P3.10: also gate on |Δy| so the follower doesn't settle into IDLE
+    // while standing UNDER the leader (e.g., leader on a platform above).
+    // See kFollowYThreshold doc.
     f32 distToFinalGoal = sqrtf(SQ(sideTarget.x - p2Pos.x) +
                                  SQ(sideTarget.z - p2Pos.z));
-    if (distToFinalGoal < kFollowThreshold) {
+    f32 dyToFinalGoal = fabsf(sideTarget.y - p2Pos.y);
+    if (distToFinalGoal < kFollowThreshold &&
+        dyToFinalGoal    < kFollowYThreshold) {
         followerAIState     = FollowerAIState::IDLE;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] RETURN→IDLE dist={:.1f}", distToFinalGoal);
+        SPDLOG_INFO("[Follower] RETURN→IDLE dist={:.1f} dy={:.1f}",
+                    distToFinalGoal, dyToFinalGoal);
     }
 }
 
@@ -3071,11 +3089,23 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // (followTarget == sideTarget); with nav substrate on it prevents
     // FOLLOW→IDLE from firing when the follower merely reaches an
     // intermediate breadcrumb en route to the leader.
+    //
+    // P3.10 (user 2026-05-09): also gate on |Δy|. Pre-fix, the
+    // follower would settle into IDLE under the leader's platform —
+    // visible "follower walks under target and stops" symptom. With
+    // the Y gate, FOLLOW persists; the substrate path consumer keeps
+    // trying to find a route up (slope / stairs / ladder via Layer 2
+    // breadcrumbs). G10/G14 leash teleport eventually fires if no
+    // route is found — safer than locking-in on the wrong altitude.
     f32 distToFinalGoal = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
-    if (distToFinalGoal < kFollowThreshold && !followerDoorHandoff) {
+    f32 dyToFinalGoal = fabsf(sideTarget.y - p2Pos.y);
+    if (distToFinalGoal < kFollowThreshold &&
+        dyToFinalGoal    < kFollowYThreshold &&
+        !followerDoorHandoff) {
         followerAIState     = FollowerAIState::IDLE;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f}", distToFinalGoal);
+        SPDLOG_INFO("[Follower] FOLLOW→IDLE dist={:.1f} dy={:.1f}",
+                    distToFinalGoal, dyToFinalGoal);
     }
 }
 
