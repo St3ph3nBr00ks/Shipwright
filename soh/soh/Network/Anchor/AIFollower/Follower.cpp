@@ -2726,24 +2726,23 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
         // direct sideTarget for this tick. Door handoff stays on the
         // bespoke path because the door centerline is hand-picked by G11.
         if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
+            AnchorNav::TrailKey leaderKey =
+                AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
             const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
-            const bool leaderChanged =
-                (followerNavPathLeaderClientId != followerLeaderClientId);
+            const bool keyChanged   = (followerNavPathTargetKey != leaderKey);
             const f32 driftDx = sideTarget.x - followerNavPathLastTarget.x;
             const f32 driftDz = sideTarget.z - followerNavPathLastTarget.z;
             const bool targetDrifted =
                 (driftDx * driftDx + driftDz * driftDz) >
                 (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
             const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
-                                       leaderChanged || targetDrifted;
+                                       keyChanged || targetDrifted;
             if (needsRefresh) {
-                AnchorNav::TrailKey leaderKey =
-                    AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
                 followerNavPath.Reset();
                 bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
                     leaderKey, &player->actor, sideTarget, gPlayState, followerNavPath);
-                followerNavPathLeaderClientId = followerLeaderClientId;
-                followerNavPathLastTarget     = sideTarget;
+                followerNavPathTargetKey  = leaderKey;
+                followerNavPathLastTarget = sideTarget;
                 if (!gotPath) {
                     // Nothing reachable per ComputePathTo's three layers.
                     // Leave path empty; the !Empty() check below falls
@@ -2904,8 +2903,80 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
             navTarget.y = enemyPos.y;
         }
     }
+    // Phase 2 — when the nav substrate consumer gate is on, plan a path
+    // to the per-enemy navTarget (the standoff-adjusted enemy position)
+    // rather than walking a straight line toward the enemy. The enemy's
+    // own ActorTrail (keyed by EnemyNetId) feeds Layer 2 breadcrumbs;
+    // Layer 3 RoomNavData provides BFS routing when the enemy is around
+    // a corner. As in FOLLOW, ComputePathTo's three-layer fallback
+    // gracefully degrades to direct-yaw when no substrate features are
+    // active. On returned-empty path, we fall through to the bespoke
+    // direct navTarget for this tick — never stalling.
+    //
+    // Sticky targeting (TargetSelection::ChooseTarget) is intentionally
+    // NOT used here: the follower already has its own well-tuned target
+    // stickiness via followerTargetEnemy (set in IDLE's enemy scan and
+    // held until ENGAGE/ATTACK/RETURN cycle exits). TargetSelection's
+    // per-navigator state lives on EnemyNetId, which the local Player
+    // actor doesn't carry. Re-evaluating with TargetSelection here
+    // would require a parallel state path; not worth the complexity
+    // when the bespoke targeting already does the right thing.
+    bool useSubgoalFacing = false;
+    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
+        const EnemyNetId* targetExt =
+            ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
+        AnchorNav::TrailKey enemyKey =
+            AnchorNav::TrailKeyForActor(targetExt != nullptr ? targetExt->netId : 0);
+        const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
+        const bool keyChanged   = (followerNavPathTargetKey != enemyKey);
+        const f32 driftDx = navTarget.x - followerNavPathLastTarget.x;
+        const f32 driftDz = navTarget.z - followerNavPathLastTarget.z;
+        const bool targetDrifted =
+            (driftDx * driftDx + driftDz * driftDz) >
+            (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
+        const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
+                                   keyChanged || targetDrifted;
+        if (needsRefresh) {
+            followerNavPath.Reset();
+            bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
+                enemyKey, &player->actor, navTarget, gPlayState, followerNavPath);
+            followerNavPathTargetKey  = enemyKey;
+            followerNavPathLastTarget = navTarget;
+            if (!gotPath) {
+                SPDLOG_DEBUG("[Follower] ENGAGE NavPath empty (ComputePathTo "
+                             "returned false; falling back to direct enemy yaw)");
+            }
+        }
+        if (!followerNavPath.Empty()) {
+            Vec3f sg = followerNavPath.CurrentSubgoal();
+            f32   sgDx = sg.x - p2Pos.x;
+            f32   sgDz = sg.z - p2Pos.z;
+            if (sgDx * sgDx + sgDz * sgDz <
+                kNavPathSubgoalReach * kNavPathSubgoalReach) {
+                followerNavPath.Advance();
+            }
+            if (!followerNavPath.Empty()) {
+                navTarget         = followerNavPath.CurrentSubgoal();
+                useSubgoalFacing  = true;
+            }
+        }
+    }
     followerMoveTarget = navTarget;
-    if (distSq > 1.0f) {
+    // Facing: under nav substrate with an intermediate subgoal, face the
+    // subgoal so Player_Update's auto-rotate aligns the body with stick
+    // direction (reduces moonwalk-strafe visual). Otherwise face the
+    // enemy directly — legacy behaviour, also covers En_St standoff
+    // where navTarget != enemyPos but the body should still look at
+    // the threat.
+    if (useSubgoalFacing) {
+        f32 aimDx = navTarget.x - p2Pos.x;
+        f32 aimDz = navTarget.z - p2Pos.z;
+        if (aimDx * aimDx + aimDz * aimDz > 1.0f) {
+            player->actor.shape.rot.y = YawToward(aimDx, aimDz);
+        } else if (distSq > 1.0f) {
+            player->actor.shape.rot.y = YawToward(edx, edz);
+        }
+    } else if (distSq > 1.0f) {
         player->actor.shape.rot.y = YawToward(edx, edz);
     }
 }

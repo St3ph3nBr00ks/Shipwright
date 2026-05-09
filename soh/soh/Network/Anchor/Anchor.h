@@ -617,15 +617,17 @@ class Anchor : public Network {
     int             followerCloseFailFrames       = 0;
 
     // Phase 2 — held NavPath snapshot for follower pursuit. Refreshed when
-    // stale (path empty / cursor exhausted), when the leader changes, when
-    // the leader's side-target moves significantly, or on scene change.
-    // Consumed by HandleStateFollow when AnchorFollower::IsAiFollowerNavSubstrateEnabled()
-    // returns true; ignored when the gate is off (legacy bespoke
-    // sideTarget-as-direct-move-target path stays in effect). See
-    // Plans/anchor_code_decoupling.md + Plans/nav_system_implementation_plan.md
-    // §Phase 2 consumer wiring.
+    // stale (path empty / cursor exhausted), when the target's TrailKey
+    // changes (leader → enemy, leader changed, target enemy changed),
+    // when the destination position drifts significantly, or on scene
+    // change. Shared between HandleStateFollow (leader's side-target) and
+    // HandleStateEngage (enemy position with per-enemy standoff). The
+    // per-state target-key disambiguates which context most recently
+    // refreshed the path; switching state implicitly invalidates the
+    // path via the key check. Consumed only when
+    // AnchorFollower::IsAiFollowerNavSubstrateEnabled() returns true.
     AnchorNav::ActorTrail::NavPath followerNavPath;
-    uint32_t                       followerNavPathLeaderClientId = 0;        // detect leader change
+    AnchorNav::TrailKey            followerNavPathTargetKey = 0;             // captured at last refresh
     Vec3f                          followerNavPathLastTarget = { 0, 0, 0 };  // detect significant target movement
 
     // Item pickup (Claude/Plans/ai_follower_item_pickup.md). An IDLE/FOLLOW
