@@ -524,10 +524,30 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         // deactivate-check then reads press.button with no
         // matching mask condition. Counter armed on injection,
         // decremented below in the post-check tick.
+        //
+        // P3.7 (user 2026-05-09 — "When the AI Follower starts to
+        // climb onto a ledge, the AI Follower system appears to
+        // disable"): also mask during the three Player_State1 climb
+        // flags. The hoist transition fires this race:
+        //   Frame N    : DO_ACTION_CLIMB set; we inject BTN_A; mask
+        //                exempts BTN_A from deactivation. ✓
+        //   Frame N+1  : Link enters CLIMBING_LEDGE animation;
+        //                DO_ACTION_CLIMB clears. press.button may
+        //                still carry BTN_A residue OR OoT itself may
+        //                synthesise an input as part of the hoist.
+        //                Without the climb-flag mask below, the
+        //                check sees BTN_A unmasked → deactivate.
+        // Adding HANGING_OFF_LEDGE | CLIMBING_LEDGE | CLIMBING_LADDER
+        // to the mask covers the residual-press race AND any in-
+        // climb state where OoT internally consumes A.
         if (player != nullptr &&
             (followerDoorPressCooldown > 0 ||
              (player->stateFlags2 &
               (PLAYER_STATE2_DO_ACTION_CLIMB | PLAYER_STATE2_DO_ACTION_ENTER)) ||
+             (player->stateFlags1 &
+              (PLAYER_STATE1_HANGING_OFF_LEDGE |
+               PLAYER_STATE1_CLIMBING_LEDGE |
+               PLAYER_STATE1_CLIMBING_LADDER)) ||
              (player->doorType != PLAYER_DOORTYPE_NONE &&
               player->doorType != PLAYER_DOORTYPE_FAKE))) {
             deactivateCheck &= ~BTN_A;
