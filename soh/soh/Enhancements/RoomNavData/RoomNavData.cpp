@@ -505,6 +505,36 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
     return true;
 }
 
+bool FindClimbAnchorAbove(const RoomNavData* data,
+                          const Vec3f& pos,
+                          float xzRadius,
+                          float minHeight,
+                          Vec3f& outBase,
+                          Vec3f& outTop) {
+    if (data == nullptr) return false;
+    const float r2 = xzRadius * xzRadius;
+    int   bestIdx   = -1;
+    float bestDistSq = std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < data->climbAnchors.size(); ++i) {
+        const ClimbAnchor& a = data->climbAnchors[i];
+        // Top must be at least minHeight above `pos` — caller's
+        // signal that they want an UPWARD anchor, not a side or down.
+        if (a.topPos.y < pos.y + minHeight) continue;
+        float dx = a.basePos.x - pos.x;
+        float dz = a.basePos.z - pos.z;
+        float d2 = dx * dx + dz * dz;
+        if (d2 > r2) continue;
+        if (d2 < bestDistSq) {
+            bestDistSq = d2;
+            bestIdx    = (int)i;
+        }
+    }
+    if (bestIdx < 0) return false;
+    outBase = data->climbAnchors[(size_t)bestIdx].basePos;
+    outTop  = data->climbAnchors[(size_t)bestIdx].topPos;
+    return true;
+}
+
 bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toPos) {
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;
 

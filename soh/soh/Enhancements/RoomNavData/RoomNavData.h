@@ -289,4 +289,21 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // regenerates).
 void ForceRescanCurrentRoom();
 
+// P3.8 part 2 / P3.6 — find the climb anchor whose base is closest to
+// `pos` within `xzRadius` XZ, AND whose top is above `pos.y` by at
+// least `minHeight` (so consumer is actually pursuing an upward
+// traversal, not a descent or sibling drop). Returns true and writes
+// the anchor's basePos / topPos to `outBase` / `outTop` on hit.
+//
+// Used by autonomous-climb-engagement consumers (AI Follower's FOLLOW
+// state, future AI Invader) to detect "I'm at a ladder / vine wall /
+// climbable surface and the path I want goes up." Pure read; no graph
+// mutation.
+bool FindClimbAnchorAbove(const RoomNavData* data,
+                          const Vec3f& pos,
+                          float xzRadius,
+                          float minHeight,
+                          Vec3f& outBase,
+                          Vec3f& outTop);
+
 } // namespace AnchorNavRoom

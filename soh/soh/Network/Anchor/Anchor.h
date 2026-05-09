@@ -625,6 +625,20 @@ class Anchor : public Network {
     // breaks the deadlock. Resets to 0 on any non-hang frame.
     int             followerHangFrames            = 0;
 
+    // P3.8 part 2 / P3.6 (user 2026-05-09) — autonomous climb mode.
+    // When the substrate path consumer detects the follower is at a
+    // climb anchor (vine wall / ladder / climbable surface) and the
+    // path goes up, CLIMBING is entered with followerAutonomousClimb
+    // = true. The climb top position is captured into
+    // followerClimbTopTarget so the existing CLIMBING input-injection
+    // (which uses followerMoveTarget for stick_y direction) drives
+    // upward autonomously. Exit when follower Y reaches the top
+    // tolerance OR when the autonomous-frames safety counter elapses.
+    // Cleared when CLIMBING exits.
+    bool            followerAutonomousClimb       = false;
+    Vec3f           followerClimbTopTarget        = { 0.0f, 0.0f, 0.0f };
+    int             followerAutonomousClimbFrames = 0;
+
     // Phase 2 — held NavPath snapshot for follower pursuit. Refreshed when
     // stale (path empty / cursor exhausted), when the target's TrailKey
     // changes (leader → enemy, leader changed, target enemy changed),

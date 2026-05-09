@@ -26,6 +26,7 @@
 #include "../Common/NavTraits.h"        // AnchorNav::IsNavSystemEnabled — Phase 2 master gate
 #include "../Common/JumpResolver.h"     // AnchorNav::ResolveLedgeAhead — Phase 2 STUCK consumer
 #include "../Common/VerticalTeleport.h" // AnchorNav::IsShapeAEligible — Phase 2 CLIMBING consumer
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // FindClimbAnchorAbove — autonomous climb
 #include "../WorldStateSync/WorldStateSync.h"
 #include "soh/ShipInit.hpp"
 
@@ -401,6 +402,8 @@ void Anchor::SetFollowerActive(bool active) {
         followerClimbDismountFrames = 0;
         followerCloseFailBaseline = 0.0f;
         followerCloseFailFrames = 0;
+        followerAutonomousClimb = false;
+        followerAutonomousClimbFrames = 0;
         SPDLOG_INFO("[Follower] Activated (menu)");
     } else {
         hasPendingTransition = false;
@@ -410,6 +413,8 @@ void Anchor::SetFollowerActive(bool active) {
         followerClimbDismountFrames = 0;
         followerCloseFailBaseline = 0.0f;
         followerCloseFailFrames = 0;
+        followerAutonomousClimb = false;
+        followerAutonomousClimbFrames = 0;
         // Safety: always restore the player's C-button loadout on any
         // deactivation path (menu toggle, joystick cancel, scene boundary,
         // leash timeout, …). FollowerRestoreItems is a no-op when no
@@ -2589,6 +2594,42 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
             sShapeAWarned = true;
         }
     }
+
+    // P3.8 part 2 / P3.6: autonomous climb path. Entered from
+    // HandleStateFollow when the follower is at a climb anchor and
+    // the path goes up. Target is followerClimbTopTarget (set on
+    // entry) instead of the leader's position. Exits when the
+    // follower reaches the top tolerance OR when a safety counter
+    // elapses (anchor was bad / can't make progress).
+    if (followerAutonomousClimb) {
+        followerAutonomousClimbFrames++;
+        constexpr f32 kAutonomousClimbReachY = 16.0f;       // within 16u Y of top → done
+        constexpr int kAutonomousClimbMaxFrames = 600;      // ~10s safety
+        bool reachedTop =
+            (player->actor.world.pos.y >= followerClimbTopTarget.y - kAutonomousClimbReachY);
+        bool timedOut = (followerAutonomousClimbFrames >= kAutonomousClimbMaxFrames);
+        if (reachedTop || timedOut) {
+            followerClimbDismountYaw    = player->actor.shape.rot.y;
+            followerClimbDismountFrames = kClimbDismountHoldFrames;
+            followerAIState     = FollowerAIState::IDLE;
+            followerStateFrames = 0;
+            followerAutonomousClimb       = false;
+            followerAutonomousClimbFrames = 0;
+            SPDLOG_INFO("[Follower] CLIMBING→IDLE (autonomous {}); "
+                        "follower y={:.0f} top={:.0f}",
+                        reachedTop ? "reached top" : "TIMEOUT",
+                        player->actor.world.pos.y,
+                        followerClimbTopTarget.y);
+            return;
+        }
+        // followerMoveTarget = climb-top position. TickFollowerInput's
+        // CLIMBING-aware injection reads this for stick_y direction
+        // and for walk-to-ladder approach when not yet on the climb
+        // collider. No leader-yaw match — leader may be far away.
+        followerMoveTarget = followerClimbTopTarget;
+        return;
+    }
+
     auto it = clients.find(followerLeaderClientId);
     if (it == clients.end() || !it->second.isClimbing) {
         followerClimbDismountYaw    = player->actor.shape.rot.y;
@@ -3007,6 +3048,55 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // kFollowThreshold of the target — except during door handoff,
     // where the FOLLOW→IDLE→FOLLOW oscillation would prevent the
     // BTN_A door-open injection from sticking.
+    //
+    // P3.8 part 2 / P3.6 (user 2026-05-09): autonomous CLIMBING
+    // engagement. When the substrate gate is on AND the final goal
+    // (sideTarget) is significantly above the follower AND there's a
+    // climb anchor (vine wall / ladder / climbable surface) within
+    // ~30u XZ whose top is also above, transition to CLIMBING with
+    // followerAutonomousClimb=true. The existing CLIMBING input-
+    // injection (which uses followerMoveTarget for stick_y direction)
+    // drives the upward climb from there. Throttled to every 10
+    // frames to keep the RoomNavData query off the per-frame critical
+    // path.
+    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
+        followerAIState != FollowerAIState::CLIMBING &&
+        !followerAutonomousClimb &&
+        (followerStateFrames % 10 == 0)) {
+        constexpr f32 kAutonomousClimbXZRadius = 30.0f;
+        constexpr f32 kAutonomousClimbMinHeight = 50.0f; // top must be at least this high
+        // Only consider engaging when the FINAL goal is meaningfully
+        // above the follower — avoids climbing for siblings on the
+        // same floor where the substrate path happens to pass near a
+        // climb base en route to a non-climbable destination.
+        if (sideTarget.y > p2Pos.y + kAutonomousClimbMinHeight) {
+            const ::AnchorNavRoom::RoomNavData* navData =
+                ::AnchorNavRoom::GetForRoom((int16_t)gPlayState->sceneNum,
+                                             (int8_t)gPlayState->roomCtx.curRoom.num);
+            if (navData != nullptr) {
+                Vec3f anchorBase, anchorTop;
+                if (::AnchorNavRoom::FindClimbAnchorAbove(
+                        navData, p2Pos,
+                        kAutonomousClimbXZRadius,
+                        kAutonomousClimbMinHeight,
+                        anchorBase, anchorTop)) {
+                    followerAutonomousClimb       = true;
+                    followerClimbTopTarget        = anchorTop;
+                    followerAutonomousClimbFrames = 0;
+                    followerAIState               = FollowerAIState::CLIMBING;
+                    followerStateFrames           = 0;
+                    SPDLOG_INFO("[Follower] FOLLOW→CLIMBING (autonomous; "
+                                "anchor base=({:.0f},{:.0f},{:.0f}) "
+                                "top=({:.0f},{:.0f},{:.0f}) "
+                                "follower=({:.0f},{:.0f},{:.0f}))",
+                                anchorBase.x, anchorBase.y, anchorBase.z,
+                                anchorTop.x, anchorTop.y, anchorTop.z,
+                                p2Pos.x, p2Pos.y, p2Pos.z);
+                    return;
+                }
+            }
+        }
+    }
     //
     // Stuck detection: every kStuckCheckInterval frames check progress.
     if (followerStateFrames % kStuckCheckInterval == 0) {
