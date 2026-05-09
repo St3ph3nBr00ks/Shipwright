@@ -23,8 +23,9 @@
 #include "../Common/ItemEligibility.h"
 #include "../Common/PauseLinkBuffer.h"
 #include "../Common/ActorSyncScope.h"
-#include "../Common/NavTraits.h"     // AnchorNav::IsNavSystemEnabled — Phase 2 master gate
-#include "../Common/JumpResolver.h"  // AnchorNav::ResolveLedgeAhead — Phase 2 STUCK consumer
+#include "../Common/NavTraits.h"        // AnchorNav::IsNavSystemEnabled — Phase 2 master gate
+#include "../Common/JumpResolver.h"     // AnchorNav::ResolveLedgeAhead — Phase 2 STUCK consumer
+#include "../Common/VerticalTeleport.h" // AnchorNav::IsShapeAEligible — Phase 2 CLIMBING consumer
 #include "../WorldStateSync/WorldStateSync.h"
 #include "soh/ShipInit.hpp"
 
@@ -2396,6 +2397,40 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
     // Exit when leader's isClimbing flips back to false. Bug C (log 69)
     // — arm the dismount-forward-hold so the next-frame state machine
     // doesn't immediately point Link backward off the rim.
+    //
+    // ── Phase 2: this state IS the Shape A reference implementation ──
+    // VerticalTeleport.h:90-118 documents Shape A as "the existing
+    // follower CLIMBING pipeline" — the input-injection climb that
+    // produces the real animation, real physics, and vine lateral
+    // tracking. The plan-doc deliberately does not re-implement this
+    // mechanism in VerticalTeleport.cpp; rewriting would risk
+    // regressing those behaviours. Instead, AnchorNav::IsShapeAEligible
+    // exposes a discoverable predicate so OTHER navigators (synced
+    // enemies, AI Invader) can decide whether to use this style of
+    // climb (Shape A, for Link-rigged actors) or a direct world.pos
+    // teleport (Shape B, for non-Link actors).
+    //
+    // We diagnostic-check IsShapeAEligible here when the substrate
+    // gate is on. The follower is always Shape A-eligible by
+    // construction (Player actor, eligibleForVerticalTeleport=true
+    // by default), so a false return surfaces a config inconsistency:
+    // Nav.VerticalTeleport CVar off while AiFollowerConsumer is on,
+    // or a NavTraits override has been added that disables the
+    // follower. Log-only — never blocks the existing pipeline,
+    // because the existing pipeline IS the reference implementation
+    // of Shape A. The legacy follower CLIMBING runs untouched
+    // regardless of the substrate gate.
+    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
+        !AnchorNav::IsShapeAEligible(&player->actor)) {
+        static bool sShapeAWarned = false;
+        if (!sShapeAWarned) {
+            SPDLOG_WARN("[Follower] CLIMBING: IsShapeAEligible=false despite "
+                        "substrate gate on. Check Nav.VerticalTeleport CVar / "
+                        "NavTraits eligibleForVerticalTeleport for ACTOR_PLAYER. "
+                        "Following pipeline runs unchanged.");
+            sShapeAWarned = true;
+        }
+    }
     auto it = clients.find(followerLeaderClientId);
     if (it == clients.end() || !it->second.isClimbing) {
         followerClimbDismountYaw    = player->actor.shape.rot.y;
