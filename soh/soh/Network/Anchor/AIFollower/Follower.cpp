@@ -23,7 +23,8 @@
 #include "../Common/ItemEligibility.h"
 #include "../Common/PauseLinkBuffer.h"
 #include "../Common/ActorSyncScope.h"
-#include "../Common/NavTraits.h"  // AnchorNav::IsNavSystemEnabled — Phase 2 master gate
+#include "../Common/NavTraits.h"     // AnchorNav::IsNavSystemEnabled — Phase 2 master gate
+#include "../Common/JumpResolver.h"  // AnchorNav::ResolveLedgeAhead — Phase 2 STUCK consumer
 #include "../WorldStateSync/WorldStateSync.h"
 #include "soh/ShipInit.hpp"
 
@@ -1473,8 +1474,10 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
 
         case FollowerAIState::STUCK: {
             // Body extracted to Anchor::HandleStateStuck
-            // (Phase 1 commit 8 of the SRP refactor).
-            HandleStateStuck(player);
+            // (Phase 1 commit 8 of the SRP refactor). Phase 2 commit 5
+            // added leaderPos / p2Pos so JumpResolver can evaluate the
+            // gap with the right reference points.
+            HandleStateStuck(player, leaderPos, p2Pos);
             break;
         }
 
@@ -2413,17 +2416,109 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
     player->actor.shape.rot.y = leaderActor->shape.rot.y;
 }
 
-void Anchor::HandleStateStuck(Player* player) {
-    // STUCK: stick-input hit a wall / corner / doorway the simulation
-    // can't navigate. Apply a small position nudge directly toward
-    // followerMoveTarget for up to kStuckRecovery frames. Bypasses
-    // Link's physics just enough to get past the obstacle. Stick
-    // injection stays active during this state (see TickFollowerInput)
-    // so Link's legs still try to walk — the nudge is additive, not
-    // a replacement.
+void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos) {
+    // STUCK: stick-input hit a wall / corner / doorway / void the
+    // simulation can't navigate. Apply a small position nudge directly
+    // toward followerMoveTarget for up to kStuckRecovery frames.
+    // Bypasses Link's physics just enough to get past the obstacle.
+    // Stick injection stays active during this state (see
+    // TickFollowerInput) so Link's legs still try to walk — the nudge
+    // is additive, not a replacement.
     //
     // This is the ONLY path in the follower state machine that writes
     // to player->actor.world.pos in the stick-input design.
+    //
+    // Phase 2 — when the nav substrate consumer gate is on, evaluate
+    // the obstacle on the FIRST stuck frame via
+    // JumpResolver::ResolveLedgeAhead and dispatch:
+    //   SafeTerrain     → STUCK→FOLLOW immediately (the desired step
+    //                     was actually safe; STUCK was a false alarm,
+    //                     let the next FOLLOW tick retry).
+    //   JumpAcross      → write world.pos = landingPos, exit STUCK.
+    //                     Crosses the gap in one frame (matches the
+    //                     existing "STUCK is the only world.pos
+    //                     write" pattern, just a longer nudge).
+    //   TrailContinues  → same as JumpAcross — landing chosen by the
+    //                     target's breadcrumb evidence rather than a
+    //                     forward fan probe; mechanically identical
+    //                     for the follower.
+    //   PathAround      → adopt result.pathAround into followerNavPath
+    //                     so FOLLOW's substrate path consumer picks
+    //                     it up on the next tick. STUCK→FOLLOW.
+    //   Retreat         → write world.pos = retreatPos. Mirrors the
+    //                     existing G10/G12/G14 teleport-back-to-leader
+    //                     safety net, scoped to one step. Exit STUCK.
+    //
+    // The legacy nudge (one step toward followerMoveTarget per tick
+    // for kStuckRecovery frames) remains the default and the gate-off
+    // fallback. JumpResolver runs only on entry frame 0 — subsequent
+    // STUCK frames continue with the legacy nudge. Frames-zero gate
+    // ensures the predicate runs once per stuck cycle, not every frame.
+    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
+        followerStuckFrames == 0) {
+        AnchorNav::TrailKey leaderKey =
+            AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
+        AnchorNav::JumpResolutionResult r =
+            AnchorNav::ResolveLedgeAhead(&player->actor,
+                                          leaderPos,
+                                          followerMoveTarget,
+                                          leaderKey,
+                                          /*navigatorKey=*/0,
+                                          gPlayState);
+        switch (r.kind) {
+            case AnchorNav::JumpResolution::SafeTerrain:
+                SPDLOG_INFO("[Follower] STUCK JumpResolver: SafeTerrain — "
+                            "returning to FOLLOW (false alarm)");
+                followerAIState     = FollowerAIState::FOLLOW;
+                followerLastPos     = p2Pos;
+                followerStateFrames = 0;
+                return;
+            case AnchorNav::JumpResolution::JumpAcross:
+            case AnchorNav::JumpResolution::TrailContinues:
+                SPDLOG_INFO("[Follower] STUCK JumpResolver: {} → landing "
+                            "({:.0f},{:.0f},{:.0f})",
+                            r.kind == AnchorNav::JumpResolution::JumpAcross
+                                ? "JumpAcross" : "TrailContinues",
+                            r.landingPos.x, r.landingPos.y, r.landingPos.z);
+                player->actor.world.pos = r.landingPos;
+                followerAIState     = FollowerAIState::FOLLOW;
+                followerLastPos     = r.landingPos;
+                followerStateFrames = 0;
+                // Drop any held NavPath — its waypoints don't account
+                // for our teleport. FOLLOW will recompute on next tick.
+                followerNavPath.Reset();
+                return;
+            case AnchorNav::JumpResolution::PathAround: {
+                SPDLOG_INFO("[Follower] STUCK JumpResolver: PathAround "
+                            "({} waypoints) — adopting into NavPath",
+                            (int)r.pathAround.size());
+                followerNavPath.Reset();
+                followerNavPath.waypoints       = std::move(r.pathAround);
+                followerNavPath.cursorIdx       = 0;
+                followerNavPath.sceneNum        = (int16_t)gPlayState->sceneNum;
+                followerNavPath.capturedTargetPos = leaderPos;
+                followerNavPathTargetKey  = leaderKey;
+                followerNavPathLastTarget = leaderPos;
+                followerAIState     = FollowerAIState::FOLLOW;
+                followerLastPos     = p2Pos;
+                followerStateFrames = 0;
+                return;
+            }
+            case AnchorNav::JumpResolution::Retreat:
+                SPDLOG_INFO("[Follower] STUCK JumpResolver: Retreat → "
+                            "({:.0f},{:.0f},{:.0f})",
+                            r.retreatPos.x, r.retreatPos.y, r.retreatPos.z);
+                player->actor.world.pos = r.retreatPos;
+                followerAIState     = FollowerAIState::FOLLOW;
+                followerLastPos     = r.retreatPos;
+                followerStateFrames = 0;
+                followerNavPath.Reset();
+                return;
+        }
+        // Fall through if a future enum variant is added without a
+        // case — the legacy nudge below still applies.
+    }
+
     followerStuckFrames++;
     f32 ndx = followerMoveTarget.x - player->actor.world.pos.x;
     f32 ndz = followerMoveTarget.z - player->actor.world.pos.z;

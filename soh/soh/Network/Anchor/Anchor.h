@@ -1032,7 +1032,7 @@ class Anchor : public Network {
     void HandleStateBlock(Player* player, const Vec3f& p2Pos);
     void HandleStateReturn(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos);
     void HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* leaderActor);
-    void HandleStateStuck(Player* player);
+    void HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);
     void HandleStateRangedAttack(Player* player, const Vec3f& p2Pos);
     void HandleStateCollectItem(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);
     void HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sideTarget, const Vec3f& p2Pos);
