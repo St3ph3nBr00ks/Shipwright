@@ -1080,14 +1080,40 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                                 pendingTransitionPos.z, sqrtf(d2));
                 }
             }
+            // P3.9 (user 2026-05-09 — "NPCs need the ability to target
+            // the last door a player went into open it to pursue"):
+            // pre-fix, the pending transition timed out at 720 frames
+            // (~12 s @ 60 fps) and DEACTIVATED the follower. That was
+            // too aggressive — if the follower couldn't reach the door
+            // within the timeout (long room, blocked path, slow
+            // pursuit), the follower simply gave up and turned off
+            // rather than persisting toward the door.
+            //
+            // New behaviour: keep the pending transition active
+            // indefinitely until one of these clears it:
+            //   (a) follower's scene matches leader's destination
+            //       (we already crossed the boundary somehow);
+            //   (b) follower reaches the trigger and fires the
+            //       transition (path (b) above);
+            //   (c) a NEW SCENE_TRANSITION_HANDOFF arrives (newer
+            //       leader transition supersedes — handled in the
+            //       packet receive site, not here);
+            //   (d) follower deactivates for an unrelated reason
+            //       (manual stop, joystick cancel, etc).
+            // Existing G10 leash + G14 close-fail timeouts still fire
+            // when the follower is genuinely stuck; those are the
+            // correct safety nets for "can't reach trigger." The
+            // counter is kept for diagnostic logging only.
             if (pendingTransitionTimeoutFrames > 0) {
                 pendingTransitionTimeoutFrames--;
                 if (pendingTransitionTimeoutFrames == 0) {
-                    SPDLOG_WARN("[Follower] Pending transition TIMEOUT — leader is gone, "
-                                "can't reach trigger. Deactivating.");
-                    hasPendingTransition = false;
-                    SetFollowerActive(false);
-                    return;
+                    SPDLOG_INFO("[Follower] Pending transition timeout window "
+                                "elapsed; persisting pursuit (G10/G14 safety "
+                                "nets handle genuinely stuck cases).");
+                    // Intentionally do NOT clear hasPendingTransition or
+                    // deactivate. The follower keeps pathing toward
+                    // pendingTransitionPos until it succeeds or a safety
+                    // net fires.
                 }
             }
         }
