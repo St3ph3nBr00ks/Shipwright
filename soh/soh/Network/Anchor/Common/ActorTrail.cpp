@@ -334,14 +334,6 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
         return true;
     }
 
-    // Step 2 — search trail for furthest reachable progress.
-    auto it = mTrails.find(key);
-    if (it == mTrails.end() || it->second.count == 0) {
-        out = targetPos;
-        return false;
-    }
-
-    const EntityTrail& trail = it->second;
     const Vec3f& navPos = navigator->world.pos;
     auto distSq = [](const Vec3f& a, const Vec3f& b) {
         float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
@@ -349,50 +341,18 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
     };
     float distNavToTargetSq = distSq(navPos, targetPos);
 
-    // Walk newest→oldest.
-    for (size_t i = 0; i < trail.count; i++) {
-        size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
-        const TrailWaypoint& wp = trail.waypoints[idx];
-
-        // Reject cross-scene waypoints.
-        if (wp.sceneNum != gPlayState->sceneNum) continue;
-
-        // Reject stale waypoints (> kStaleAgeMs = 12s wall-clock). Buffer
-        // rolls over at 50 × 200ms = 10s wall-clock, so the 12s threshold
-        // gives a small margin where the most-recent overwritten slot
-        // would be skipped even if its memory wasn't yet reused.
-        if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
-
-        // Reject non-progress waypoints (would walk away from target).
-        if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
-
-        // Reject blocked waypoints.
-        if (!MovementClear(navigator, wp.pos, play)) continue;
-
-        // Found furthest reachable progress.
-        out = wp.pos;
-        return true;
-    }
-
-    // Layer 3 — RoomNavData static graph (room_nav_data_plan.md §9). Cold
-    // navigators (just-spawned, no trail) and idle scenes (target hasn't
-    // moved enough to leave a useful breadcrumb trail) fall through Layer 1
-    // and 2 to here. The pre-scanned graph picks the closest-to-target
-    // reachable node within the room.
-    //
-    // Two-stage gating:
-    //   (a) CVar Nav.RoomNavConsumer — global toggle; default off.
-    //   (b) Per-actor NavTraits.consumeRoomNavData — actors whose nav
-    //       requirements aren't well-represented by the ground graph
-    //       (fliers, waypoint-driven actors, bosses) opt out.
-    //
-    // Implicitly also gated on RoomNavData.Enabled because GetForRoom
-    // returns nullptr when the master switch is off.
-    //
-    // The hazard-aware BFS inside FindBestReachableSubgoalNode honors
-    // traits.eligibleForSwimming + traits.avoidHazardNodes so swimming-
-    // capable navigators (AI Follower, NPC Invader) and heat-resistant
-    // navigators (none v1) get appropriate path filtering.
+    // Step 2 — RoomNavData static graph. Pre-scanned per-room nav graph
+    // with edges built via MovementClearAtPosition + step-up gating
+    // between adjacent grid cells, so paths are robustly walkable
+    // (short walls and voids excluded at scan time). Now runs BEFORE
+    // the trail breadcrumb walk (post P3.11 reorder) — Layer 2's
+    // pelvis-pelvis MovementClear test was returning "valid"
+    // breadcrumbs the follower couldn't actually reach (short walls
+    // / voids the line passes over), and the trail walk would
+    // short-circuit before this graph layer ran. User 2026-05-09
+    // follow-up reported "AI Follower stuck running into a wall
+    // trying to reach the leader instead of using nav data to walk
+    // around" — exactly that failure mode.
     if (CVarGetInteger(CVAR_NAV_ROOM_NAV_LAYER, 0) != 0) {
         const NavTraits& traits = GetTraitsForActor(navigator->id);
         if (traits.consumeRoomNavData) {
@@ -426,6 +386,39 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
                 }
             }
         }
+    }
+
+    // Step 3 (fallback) — search trail for furthest reachable progress.
+    // Falls through here when the graph layer is unavailable
+    // (CVar off, navigator opted out, no scan loaded, or BFS failed
+    // / chosen node was line-blocked).
+    auto it = mTrails.find(key);
+    if (it == mTrails.end() || it->second.count == 0) {
+        out = targetPos;
+        return false;
+    }
+
+    const EntityTrail& trail = it->second;
+    // Walk newest→oldest.
+    for (size_t i = 0; i < trail.count; i++) {
+        size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
+        const TrailWaypoint& wp = trail.waypoints[idx];
+
+        // Reject cross-scene waypoints.
+        if (wp.sceneNum != gPlayState->sceneNum) continue;
+
+        // Reject stale waypoints (> kStaleAgeMs = 12s wall-clock).
+        if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
+
+        // Reject non-progress waypoints (would walk away from target).
+        if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
+
+        // Reject blocked waypoints.
+        if (!MovementClear(navigator, wp.pos, play)) continue;
+
+        // Found furthest reachable progress.
+        out = wp.pos;
+        return true;
     }
 
     // No reachable progress across all three layers — fallback.
@@ -477,39 +470,38 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         return dx * dx + dy * dy + dz * dz;
     };
 
-    // Layer 2 — trail breadcrumbs. Same selection rules as
-    // GetBestReachableSubgoal; on success, optimistically append `target`
-    // when the breadcrumb→target segment is also line-clear so the AI
-    // doesn't need an immediate re-query at the breadcrumb.
-    auto it = mTrails.find(key);
-    if (it != mTrails.end() && it->second.count > 0) {
-        const EntityTrail& trail = it->second;
-        const Vec3f& navPos = navigator->world.pos;
-        float distNavToTargetSq = distSq(navPos, targetPos);
-
-        for (size_t i = 0; i < trail.count; i++) {
-            size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
-            const TrailWaypoint& wp = trail.waypoints[idx];
-
-            if (wp.sceneNum != gPlayState->sceneNum) continue;
-            if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
-            if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
-            if (!MovementClear(navigator, wp.pos, play)) continue;
-
-            out.waypoints.push_back(wp.pos);
-            if (MovementClearAtPosition(wp.pos, targetPos, play)) {
-                out.waypoints.push_back(targetPos);
-            }
-            return true;
-        }
-    }
+    // Layer 2/3 ordering note (user 2026-05-09 follow-up — "AI Follower
+    // is prioritizing following the leader's breadcrumbs even when the
+    // next breadcrumb is not reachable. I observed the AI Follower
+    // multiple times get stuck running into a wall trying to reach the
+    // leader instead of using nav data to walk around"):
+    //
+    // Pre-fix: Layer 2 (trail breadcrumbs) ran BEFORE Layer 3
+    // (RoomNavData BFS). Layer 2's MovementClear is a single-height
+    // pelvis-pelvis line test — passes over short walls and across
+    // voids that the follower can't actually traverse. When Layer 2
+    // returned a "valid" but unreachable breadcrumb, Layer 3 was
+    // never consulted and the follower walked at the wall.
+    //
+    // Layer 3's BFS doesn't have this problem because the room nav
+    // graph's edges were built at scan time with MovementClearAtPosition
+    // + step-up checks between adjacent grid cells; short walls and
+    // voids properly exclude edges from the graph. Paths through
+    // Layer 3 are always graph-walkable.
+    //
+    // New ordering: Layer 1 → Layer 3 (graph) → Layer 2 (trail).
+    // Layer 3 takes priority whenever RoomNavConsumer CVar is on AND
+    // the navigator has consumeRoomNavData=true. Layer 2 becomes the
+    // fallback when the graph is unavailable (CVar off, no scan,
+    // navigator opt-out, or BFS failure). This trades some short-hop
+    // freshness for robustness on longer or geometrically-tricky
+    // pursuits — the user's reported failure mode.
 
     // Layer 3 — RoomNavData BFS path. Two-stage gating: CVar and
-    // per-actor traits.consumeRoomNavData (matches GetBestReachableSubgoal).
-    // The BFS materialises the full chain; we append `target` to the end
-    // when the final node has line-clear to the target so the path
-    // terminates at the desired destination instead of at a graph node
-    // near it.
+    // per-actor traits.consumeRoomNavData. The BFS materialises the
+    // full chain; we append `target` to the end when the final node
+    // has line-clear to the target so the path terminates at the
+    // desired destination instead of at a graph node near it.
     if (CVarGetInteger(CVAR_NAV_ROOM_NAV_LAYER, 0) != 0) {
         const NavTraits& traits = GetTraitsForActor(navigator->id);
         if (traits.consumeRoomNavData) {
@@ -535,6 +527,43 @@ bool ActorTrail::ComputePathTo(TrailKey key,
                     }
                 }
             }
+        }
+    }
+
+    // Layer 2 (fallback) — trail breadcrumbs. Walked newest→oldest;
+    // first MovementClear-passing waypoint that improves distance to
+    // target wins. Optimistically appends `target` when the
+    // breadcrumb→target segment is also line-clear so the AI doesn't
+    // need an immediate re-query at the breadcrumb.
+    //
+    // Now runs AFTER Layer 3 (post P3.11 reorder). Layer 2 is fast
+    // and uses freshest leader data, but its MovementClear test is a
+    // single-height line that misses short walls and voids — the
+    // user-reported "follower stuck running into a wall trying to
+    // reach the leader" failure. Layer 3's graph paths are robust
+    // when available; Layer 2 stays as fallback when the room nav
+    // graph isn't loaded (RoomNavConsumer off, scan pending, or
+    // navigator opted out).
+    auto it = mTrails.find(key);
+    if (it != mTrails.end() && it->second.count > 0) {
+        const EntityTrail& trail = it->second;
+        const Vec3f& navPos = navigator->world.pos;
+        float distNavToTargetSq = distSq(navPos, targetPos);
+
+        for (size_t i = 0; i < trail.count; i++) {
+            size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
+            const TrailWaypoint& wp = trail.waypoints[idx];
+
+            if (wp.sceneNum != gPlayState->sceneNum) continue;
+            if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
+            if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
+            if (!MovementClear(navigator, wp.pos, play)) continue;
+
+            out.waypoints.push_back(wp.pos);
+            if (MovementClearAtPosition(wp.pos, targetPos, play)) {
+                out.waypoints.push_back(targetPos);
+            }
+            return true;
         }
     }
 
