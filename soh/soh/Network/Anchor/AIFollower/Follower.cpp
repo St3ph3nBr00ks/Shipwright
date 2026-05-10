@@ -2060,13 +2060,31 @@ void Anchor::TickFollowerInput(Actor* actor) {
         if (hangFlag) {
             constexpr f32 kHangResolveAboveThreshold = 30.0f;
             constexpr f32 kHangResolveBelowThreshold = 80.0f;
-            // followerMoveTarget carries the follower's
-            // current navigation goal (leader pos in
-            // FOLLOW; tracked target in ENGAGE/ATTACK).
-            // leaderPos itself is only in scope at the
-            // top-level frame block — not here inside
-            // the CLIMBING-state input-injection branch.
-            f32 targetY  = followerMoveTarget.y;
+            // User 2026-05-10: previously used followerMoveTarget.y
+            // here, which carries the IMMEDIATE subgoal (often at
+            // follower's current Y level, especially when the substrate
+            // path's next waypoint is the ledge-bottom node the
+            // follower is hanging from). That gave dy≈0 across hang
+            // events even when the leader was clearly above on the
+            // ledge — climb-up was selected by default-bias but the
+            // log made the picture confusing. Switch to the leader's
+            // ACTUAL Y so the dy reading reflects "where do we need
+            // to end up vertically" instead of "where's the next
+            // waypoint." When climbing the ledge IS the way to reach
+            // the leader, leader.y > follower.y → climb-up. When the
+            // leader is below us (we hung off a ledge by mistake),
+            // dy < -80 → drop down.
+            //
+            // leaderPos itself is only in scope at the top-level
+            // frame block. Use the synced AnchorClient.posRot.pos
+            // for the leader instead — same data, different access
+            // path. Falls back to followerMoveTarget.y when the
+            // leader entry isn't found (rare; safety net).
+            f32 targetY = followerMoveTarget.y;
+            auto it = clients.find(followerLeaderClientId);
+            if (it != clients.end()) {
+                targetY = it->second.posRot.pos.y;
+            }
             f32 dy       = targetY - player->actor.world.pos.y;
             bool dropDown = (dy < -kHangResolveBelowThreshold);
             if (dropDown) {
@@ -2082,8 +2100,10 @@ void Anchor::TickFollowerInput(Actor* actor) {
             }
             if (!sWasHanging) {
                 SPDLOG_INFO("[Follower] BTN_{} hang-state resolution "
-                            "(dy={:.1f}, above={:.1f}, below={:.1f})",
-                            dropDown ? "B" : "A", dy,
+                            "(leaderY={:.1f} followerY={:.1f} dy={:.1f}, "
+                            "above={:.1f}, below={:.1f})",
+                            dropDown ? "B" : "A",
+                            targetY, player->actor.world.pos.y, dy,
                             kHangResolveAboveThreshold,
                             kHangResolveBelowThreshold);
                 sWasHanging = true;
