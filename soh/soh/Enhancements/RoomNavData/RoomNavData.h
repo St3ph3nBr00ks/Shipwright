@@ -198,6 +198,18 @@ struct RoomNavData {
     Vec3f bboxMax = { 0.0f, 0.0f, 0.0f };
     uint16_t gridResolution = 30; // matches kGridResolution at scan time
 
+    // Index in `nodes` where climb-surface nodes start (schema v7+).
+    // Floor nodes occupy [0 .. firstClimbSurfaceNodeIdx); climb-surface
+    // nodes occupy [firstClimbSurfaceNodeIdx .. nodes.size()). UINT16_MAX
+    // = "no climb-surface nodes appended yet" (the sentinel).
+    //
+    // Used by the rescan path (DoRefreshAnchorsCurrentRoom) to drop the
+    // previous round of climb-surface nodes via `nodes.resize(firstIdx)`
+    // before re-reconstructing nodesByCell — climb-surface nodes carry
+    // U/V cell indices in cellIdxX/Z (NOT world cells), so they would
+    // corrupt the spatial index if reconstructed alongside floor nodes.
+    uint16_t firstClimbSurfaceNodeIdx = UINT16_MAX;
+
     // Diagnostic: positions of floor candidates rejected by the per-actor
     // allowlist (FloorIsRejectedByAllowlist). Populated only when
     // gEnhancements.RoomNavData.LogRejectedFloors is on at scan time;

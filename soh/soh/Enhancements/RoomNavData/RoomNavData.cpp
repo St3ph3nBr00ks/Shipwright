@@ -167,10 +167,20 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos) {
     // this fires once per ~30 frames per navigator. Spatial-index
     // optimization (cell-bucket lookup) deferred until profiling shows
     // need.
+    //
+    // Climb-surface nodes (schema v7+) are skipped — every existing
+    // caller wants a FLOOR node nearest to a world position (Layer 3
+    // BFS entry, climb-base/top tagging, IsReachable endpoints). Climb-
+    // surface nodes sit on walls at arbitrary altitudes and would
+    // produce wrong-class hits when a navigator stands close to a
+    // climbable wall. Stage 6 of climb_surface_nav_grid_plan will add a
+    // separate FindNearestClimbSurfaceNode helper for the climb-aware
+    // path-engagement check.
     int bestIdx = -1;
     float bestDistSq = std::numeric_limits<float>::infinity();
     for (size_t i = 0; i < data->nodes.size(); i++) {
         const NavNode& n = data->nodes[i];
+        if (n.flags & NODE_CLIMB_ANY) continue;
         float dx = n.pos.x - pos.x;
         float dy = n.pos.y - pos.y;
         float dz = n.pos.z - pos.z;
@@ -687,6 +697,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     WriteValue(f, nav.bboxMin);
     WriteValue(f, nav.bboxMax);
     WriteValue(f, nav.gridResolution);
+    WriteValue(f, nav.firstClimbSurfaceNodeIdx); // schema v7+
 
     uint32_t nodeCount       = (uint32_t)nav.nodes.size();
     uint32_t edgeCount       = (uint32_t)nav.edges.size();
@@ -761,6 +772,8 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
                     gridRes, (uint16_t)kGridResolution, path.string());
         return;
     }
+    uint16_t firstClimbSurfaceNodeIdx = UINT16_MAX;
+    if (!ReadValue(f, firstClimbSurfaceNodeIdx)) return; // schema v7+
     if (!ReadValue(f, nodeCount))       return;
     if (!ReadValue(f, edgeCount))       return;
     if (!ReadValue(f, climbCount))      return;
@@ -779,14 +792,15 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadVector(f, out->historicalSeeds,   histSeedCount))   return;
     if (!ReadVector(f, out->hazardCentroids,   hazardCount))     return;
 
-    out->magic           = magic;
-    out->version         = version;
-    out->sceneNum        = fileScene;
-    out->roomNum         = fileRoom;
-    out->scanTimestamp   = scanTimestamp;
-    out->bboxMin         = bboxMin;
-    out->bboxMax         = bboxMax;
-    out->gridResolution  = gridRes;
+    out->magic                      = magic;
+    out->version                    = version;
+    out->sceneNum                   = fileScene;
+    out->roomNum                    = fileRoom;
+    out->scanTimestamp              = scanTimestamp;
+    out->bboxMin                    = bboxMin;
+    out->bboxMax                    = bboxMax;
+    out->gridResolution             = gridRes;
+    out->firstClimbSurfaceNodeIdx   = firstClimbSurfaceNodeIdx;
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,6 +1164,308 @@ static void DetectClimbAnchorsViaSurfaceFlags(
         SPDLOG_INFO("[RoomNav][PathBDiag] summary: {} wall polys logged "
                     "(non-zero wall-property index, in-room only)",
                     diagLoggedWalls);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Climb-surface grid generation (schema v7+). For each ClimbAnchor
+// discovered by Path A or Path B, raycast a 2D grid perpendicular to
+// the wall and emit a NavNode at every cell the raycast hits. Each
+// node is tagged with a NODE_CLIMB_* surface-type bit so the
+// permission-mask BFS gating in Stage 5 can decide which consumers
+// may traverse it.
+//
+// See Plans/climb_surface_nav_grid_plan.md for the full design.
+// ---------------------------------------------------------------------------
+
+// Surface-type discrimination from a hit poly's wall-flag bitmap.
+// Returns a single NODE_CLIMB_* bit, or 0 if not climbable.
+//
+// Wall-flag bit semantics from kWallFlagClimbableMask comments:
+//   bit 3 (mask 0x08) → vine wall (also injected by ClimbEverything cheat)
+//   bits 1-2 (mask 0x06) → designed climbable wall
+// We don't currently have a bit-level discriminator for "ladder vs
+// designed wall" — Path A scene actors are explicitly ladders and get
+// the LADDER tag at a different code path (anchor.actorId != 0 sets
+// expectedType in the per-anchor loop). Path B static-geometry surfaces
+// always classify as VINE or DESIGNATED_WALL based on the bit pattern.
+static uint16_t ClassifyClimbWallFlags(s32 wallFlags) {
+    if ((wallFlags & kWallFlagClimbableMask) == 0) return 0;
+    if (wallFlags & 0x08) return NODE_CLIMB_VINE;
+    if (wallFlags & 0x06) return NODE_CLIMB_DESIGNATED_WALL;
+    return NODE_CLIMB_DESIGNATED_WALL; // catch-all if mask matched some other bit
+}
+
+// Surface-grid scan tunables. Per-cell raycast cost is ~1 BgCheck call;
+// per-anchor cost is dominated by cellsU * cellsV. With the caps below
+// the worst case is 24 * 32 = 768 raycasts per anchor; typical room
+// has 1-3 anchors → ~2k extra raycasts. Floor scan does ~16k, so this
+// is +~12% in the worst case (rare; most rooms have 0-1 anchors).
+static constexpr float    kClimbGridCellSpacing  = 30.0f;  // matches kGridResolution
+static constexpr float    kClimbRayStandoff      = 100.0f; // ray origin distance from wall
+static constexpr float    kClimbRayLength        = 200.0f; // total ray length (standoff + penetration)
+static constexpr float    kClimbProbeYAtBase     = 30.0f;  // raise above floor for normal probe
+static constexpr int      kClimbWidthMaxStepsPerSide = 12; // ±360u max width search
+static constexpr float    kClimbMinAnchorHeight  = 30.0f;  // skip degenerate-height anchors
+static constexpr uint16_t kClimbMaxCellsU        = 24;     // width safety cap (~720u)
+static constexpr uint16_t kClimbMaxCellsV        = 32;     // height safety cap (~960u)
+static constexpr float    kClimbPathAActorWidth  = 30.0f;  // single-column ladder default
+
+// Eight horizontal directions for normal probing.
+struct ClimbProbeDir { float x; float z; };
+static const ClimbProbeDir kClimbProbeDirs[8] = {
+    { 1.0f,  0.0f}, { 0.7071f,  0.7071f}, { 0.0f,  1.0f}, {-0.7071f,  0.7071f},
+    {-1.0f,  0.0f}, {-0.7071f, -0.7071f}, { 0.0f, -1.0f}, { 0.7071f, -0.7071f},
+};
+
+// Vec3f minimal math (the codebase doesn't have a project-wide vec lib).
+static inline Vec3f V3Add(const Vec3f& a, const Vec3f& b) {
+    return { a.x + b.x, a.y + b.y, a.z + b.z };
+}
+static inline Vec3f V3Sub(const Vec3f& a, const Vec3f& b) {
+    return { a.x - b.x, a.y - b.y, a.z - b.z };
+}
+static inline Vec3f V3Scale(const Vec3f& a, float s) {
+    return { a.x * s, a.y * s, a.z * s };
+}
+static inline float V3Len(const Vec3f& a) {
+    return std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+}
+static inline Vec3f V3Cross(const Vec3f& a, const Vec3f& b) {
+    return { a.y * b.z - a.z * b.y,
+             a.z * b.x - a.x * b.z,
+             a.x * b.y - a.y * b.x };
+}
+static inline Vec3f V3Normalize(const Vec3f& a) {
+    float L = V3Len(a);
+    if (L < 1e-3f) return { 0.0f, 0.0f, 0.0f };
+    return { a.x / L, a.y / L, a.z / L };
+}
+
+// Cast one cell-probe ray. Returns true on hit; writes hit position +
+// the wall-flag bitmap. Floor/ceiling hits (|normal.y| > 0.5) are
+// rejected (not a wall — would corrupt grid placement).
+static bool RaycastClimbCell(PlayState* play,
+                              const Vec3f& cellCenter,
+                              const Vec3f& outwardNormal,
+                              Vec3f& outHitPos,
+                              s32& outWallFlags)
+{
+    Vec3f a = V3Add(cellCenter, V3Scale(outwardNormal,  kClimbRayStandoff));
+    Vec3f b = V3Add(cellCenter, V3Scale(outwardNormal, -(kClimbRayLength - kClimbRayStandoff)));
+    CollisionPoly* hitPoly = nullptr;
+    s32 hit = BgCheck_AnyLineTest1(&play->colCtx, &a, &b, &outHitPos, &hitPoly, 0);
+    if (!hit || hitPoly == nullptr) return false;
+    f32 normalY = (f32)hitPoly->normal.y / 32767.0f;
+    if (std::fabs(normalY) > 0.5f) return false;
+    outWallFlags = func_80041DB8(&play->colCtx, hitPoly, BGCHECK_SCENE);
+    return true;
+}
+
+// Probe the wall around basePos to determine its outward normal. Casts
+// horizontal rays in 8 directions; the direction with the shortest hit
+// distance is inward, and the OUTWARD normal is read from the hit
+// poly's own normal (more accurate than the probe direction).
+static bool ComputeClimbSurfaceNormal(const Vec3f& basePos,
+                                       PlayState* play,
+                                       Vec3f& outNormal)
+{
+    Vec3f probeOrigin = { basePos.x,
+                          basePos.y + kClimbProbeYAtBase,
+                          basePos.z };
+    float bestDistSq = (kClimbRayLength + 1.0f) * (kClimbRayLength + 1.0f);
+    int bestIdx = -1;
+    Vec3s bestPolyNormal = { 0, 0, 0 };
+    for (int i = 0; i < 8; i++) {
+        Vec3f rayEnd = { probeOrigin.x + kClimbProbeDirs[i].x * kClimbRayLength,
+                         probeOrigin.y,
+                         probeOrigin.z + kClimbProbeDirs[i].z * kClimbRayLength };
+        Vec3f hitPos;
+        CollisionPoly* hitPoly = nullptr;
+        s32 hit = BgCheck_AnyLineTest1(&play->colCtx, &probeOrigin, &rayEnd, &hitPos, &hitPoly, 0);
+        if (!hit || hitPoly == nullptr) continue;
+        float dx = hitPos.x - probeOrigin.x;
+        float dz = hitPos.z - probeOrigin.z;
+        float dSq = dx * dx + dz * dz;
+        if (dSq < bestDistSq) {
+            bestDistSq = dSq;
+            bestIdx = i;
+            bestPolyNormal = hitPoly->normal;
+        }
+    }
+    if (bestIdx < 0) return false;
+    Vec3f n = { (float)bestPolyNormal.x / 32767.0f,
+                (float)bestPolyNormal.y / 32767.0f,
+                (float)bestPolyNormal.z / 32767.0f };
+    n.y = 0.0f; // force horizontal — grid is rotated about vertical axis
+    float len = std::sqrt(n.x * n.x + n.z * n.z);
+    if (len < 1e-3f) return false;
+    n.x /= len;
+    n.z /= len;
+    outNormal = n;
+    return true;
+}
+
+// Probe outward from basePos in ±axisU at half-spacing increments.
+// Returns the total measured surface width (negSide + posSide + center
+// column's own kClimbGridCellSpacing). Stops on first non-climbable
+// hit OR on surface-type change (so a designed-wall strip adjacent to
+// a vine wall doesn't merge into one over-wide grid).
+static float DetermineClimbSurfaceWidth(PlayState* play,
+                                         const Vec3f& basePos,
+                                         const Vec3f& outwardNormal,
+                                         const Vec3f& axisU,
+                                         uint16_t expectedType)
+{
+    auto sideExtent = [&](float dir) -> float {
+        float lastValid = 0.0f;
+        for (int s = 1; s <= kClimbWidthMaxStepsPerSide; s++) {
+            float offset = dir * s * kClimbGridCellSpacing;
+            Vec3f probeCenter = { basePos.x + axisU.x * offset,
+                                   basePos.y + kClimbProbeYAtBase,
+                                   basePos.z + axisU.z * offset };
+            Vec3f hitPos;
+            s32 wallFlags = 0;
+            if (!RaycastClimbCell(play, probeCenter, outwardNormal, hitPos, wallFlags)) break;
+            uint16_t typeBit = ClassifyClimbWallFlags(wallFlags);
+            if (typeBit == 0) break;
+            if (expectedType != 0 && typeBit != expectedType) break;
+            lastValid = std::fabs(offset);
+        }
+        return lastValid;
+    };
+    float negSide = sideExtent(-1.0f);
+    float posSide = sideExtent(+1.0f);
+    return negSide + posSide + kClimbGridCellSpacing;
+}
+
+// For each ClimbAnchor, generate the surface grid: compute plane params
+// (normal, axes, origin, extents), raycast each cell, append a NavNode
+// per hit, and populate the anchor's firstNodeIdx/nodeCount/surfaceType.
+//
+// Append-only — never re-orders existing nodes. Caller must invoke this
+// AFTER BuildEdges and AFTER the floor-side NODE_CLIMB_BASE/TOP tagging
+// (which uses FindNearestNode and would otherwise match a climb-surface
+// node instead of the intended floor node). Caller MUST also track
+// the first appended index in `out->firstClimbSurfaceNodeIdx` so the
+// rescan path can drop the previous round before reconstructing
+// nodesByCell from cellIdxX/Z (climb-surface nodes use U/V coords
+// there, not world cells).
+static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play) {
+    if (out->climbAnchors.empty()) return;
+
+    out->firstClimbSurfaceNodeIdx = (uint16_t)out->nodes.size();
+    size_t totalNodesAdded = 0;
+
+    for (ClimbAnchor& anchor : out->climbAnchors) {
+        Vec3f rise = V3Sub(anchor.topPos, anchor.basePos);
+        float climbHeight = V3Len(rise);
+        if (climbHeight < kClimbMinAnchorHeight) continue;
+
+        Vec3f normal;
+        if (!ComputeClimbSurfaceNormal(anchor.basePos, play, normal)) continue;
+
+        // axisV = world-up; axisU = lateral (perpendicular to up + normal).
+        // Vertical-only climb (we don't model curved/spiral surfaces).
+        Vec3f axisV = { 0.0f, 1.0f, 0.0f };
+        Vec3f axisU = V3Normalize(V3Cross(axisV, normal));
+        if (V3Len(axisU) < 1e-3f) continue;
+
+        // Surface-type pre-classification: Path A → LADDER. Path B → probe
+        // a representative cell at basePos to read the wall-flag bits.
+        uint16_t expectedType = 0;
+        if (anchor.actorId != 0) {
+            expectedType = NODE_CLIMB_LADDER;
+        } else {
+            Vec3f probeCenter = { anchor.basePos.x,
+                                  anchor.basePos.y + kClimbProbeYAtBase,
+                                  anchor.basePos.z };
+            Vec3f hitPos;
+            s32 wallFlags = 0;
+            if (RaycastClimbCell(play, probeCenter, normal, hitPos, wallFlags)) {
+                expectedType = ClassifyClimbWallFlags(wallFlags);
+            }
+            if (expectedType == 0) {
+                expectedType = NODE_CLIMB_DESIGNATED_WALL; // conservative fallback
+            }
+        }
+
+        // Determine width (Path A actors are single-column; Path B is probed).
+        float climbWidth = (anchor.actorId != 0)
+            ? kClimbPathAActorWidth
+            : DetermineClimbSurfaceWidth(play, anchor.basePos, normal, axisU, expectedType);
+        if (climbWidth < kClimbGridCellSpacing) climbWidth = kClimbGridCellSpacing;
+
+        uint16_t cellsU = (uint16_t)std::min<int>(
+            (int)kClimbMaxCellsU,
+            std::max<int>(1, (int)std::ceil(climbWidth / kClimbGridCellSpacing)));
+        uint16_t cellsV = (uint16_t)std::min<int>(
+            (int)kClimbMaxCellsV,
+            std::max<int>(1, (int)std::ceil(climbHeight / kClimbGridCellSpacing)));
+
+        // Plane origin = basePos shifted half the width along -axisU
+        // (so column u==cellsU/2 is centered on basePos).
+        Vec3f origin = { anchor.basePos.x - axisU.x * (climbWidth * 0.5f),
+                         anchor.basePos.y,
+                         anchor.basePos.z - axisU.z * (climbWidth * 0.5f) };
+
+        uint16_t firstNodeIdx = (uint16_t)out->nodes.size();
+        uint16_t nodeCount    = 0;
+        for (uint16_t v = 0; v < cellsV; v++) {
+            for (uint16_t u = 0; u < cellsU; u++) {
+                Vec3f cellCenter = {
+                    origin.x + axisU.x * (u * kClimbGridCellSpacing),
+                    origin.y + axisV.y * (v * kClimbGridCellSpacing),
+                    origin.z + axisU.z * (u * kClimbGridCellSpacing),
+                };
+                Vec3f hitPos;
+                s32 wallFlags = 0;
+                if (!RaycastClimbCell(play, cellCenter, normal, hitPos, wallFlags)) continue;
+                uint16_t typeBit = ClassifyClimbWallFlags(wallFlags);
+                if (typeBit == 0) continue;
+                // For Path A actors we override with LADDER regardless of
+                // wall-flag classification (the actor's geometry may not
+                // carry the wall-flag bit; the actor's identity is the
+                // ground truth). For Path B we require type-match (so a
+                // mixed-type adjacent wall doesn't pollute the grid).
+                if (anchor.actorId != 0) {
+                    typeBit = NODE_CLIMB_LADDER;
+                } else if (typeBit != expectedType) {
+                    continue;
+                }
+                NavNode node;
+                node.pos      = hitPos;
+                node.flags    = typeBit;
+                if (v == 0 || v == (uint16_t)(cellsV - 1)) {
+                    node.flags |= NODE_CLIMB_BOUNDARY;
+                }
+                node.cellIdxX = u;  // U/V grid coord, NOT world cell
+                node.cellIdxZ = v;
+                out->nodes.push_back(node);
+                nodeCount++;
+            }
+        }
+
+        anchor.planeOrigin    = origin;
+        anchor.planeNormal    = normal;
+        anchor.planeAxisU     = axisU;
+        anchor.planeAxisV     = axisV;
+        anchor.cellsU         = cellsU;
+        anchor.cellsV         = cellsV;
+        anchor.firstNodeIdx   = firstNodeIdx;
+        anchor.nodeCount      = nodeCount;
+        anchor.surfaceType    = expectedType;
+        totalNodesAdded += nodeCount;
+    }
+
+    // If no anchor produced any node, restore sentinel so rescan won't
+    // try to truncate the already-empty climb section.
+    if (totalNodesAdded == 0) {
+        out->firstClimbSurfaceNodeIdx = UINT16_MAX;
+    } else {
+        SPDLOG_INFO("[RoomNav] Climb-surface grids: {} anchors, {} new nodes appended at idx {}",
+                    out->climbAnchors.size(), totalNodesAdded,
+                    (unsigned)out->firstClimbSurfaceNodeIdx);
     }
 }
 
@@ -2180,6 +2496,15 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
             out->nodes[(size_t)topIdx].flags |= NODE_CLIMB_TOP;
         }
     }
+
+    // Climb-surface grid generation (schema v7+). Runs AFTER the
+    // climb-base/top tagging above so FindNearestNode searches over
+    // floor-only nodes (climb-surface nodes use U/V cell indices,
+    // not world cells, and would corrupt the spatial-distance heuristic
+    // if they were already in nav.nodes when FindNearestNode runs).
+    // Stage 2 of climb_surface_nav_grid_plan — nodes only; edges land
+    // in Stage 3.
+    GenerateClimbSurfaceGrids(out, play);
 
     // Update historicalSeeds with the union of (current player + actor
     // + previously-historical seed positions). Cell-deduped at insertion
@@ -3516,12 +3841,26 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
         node.flags &= ~NODE_CRAWLSPACE;
     }
 
+    // Drop the previous round's climb-surface nodes (schema v7+). They
+    // live in `nav.nodes[firstClimbSurfaceNodeIdx ..]` with cellIdxX/Z
+    // holding U/V grid coords (NOT world cells); reconstructing
+    // `nodesByCell` from them would corrupt the floor-side spatial
+    // index. GenerateClimbSurfaceGrids re-creates them after detection
+    // re-runs and re-tagging completes.
+    if (nav.firstClimbSurfaceNodeIdx != UINT16_MAX &&
+        (size_t)nav.firstClimbSurfaceNodeIdx <= nav.nodes.size()) {
+        nav.nodes.resize((size_t)nav.firstClimbSurfaceNodeIdx);
+    }
+    nav.firstClimbSurfaceNodeIdx = UINT16_MAX;
+
     nav.climbAnchors.clear();
     nav.ledgeAnchors.clear();
     nav.crawlspaceAnchors.clear();
     nav.dropAnchors.clear();
 
     // Reconstruct visited + nodesByCell from persistent node data.
+    // Only floor nodes remain at this point — climb-surface nodes were
+    // resized away above.
     std::unordered_set<CellKey, CellKeyHash> visited;
     std::unordered_map<CellKey, std::vector<uint16_t>, CellKeyHash> nodesByCell;
     for (uint16_t i = 0; i < nav.nodes.size(); i++) {
@@ -3542,6 +3881,8 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     DetectDropAnchors(&nav, play, nodesByCell);
 
     // Re-tag climb-base / climb-top flags from the refreshed anchors.
+    // Must run BEFORE GenerateClimbSurfaceGrids appends climb-surface
+    // nodes, so FindNearestNode searches over floor-only nodes.
     for (const ClimbAnchor& anchor : nav.climbAnchors) {
         int baseIdx = FindNearestNode(&nav, anchor.basePos);
         if (baseIdx >= 0) {
@@ -3552,6 +3893,10 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
             nav.nodes[(size_t)topIdx].flags |= NODE_CLIMB_TOP;
         }
     }
+
+    // Re-generate climb-surface grids (schema v7+) for the refreshed
+    // anchors. Same ordering as the main scan path.
+    GenerateClimbSurfaceGrids(&nav, play);
 
     // Reset the debug-draw summary tracker so the next overlay frame
     // re-emits the loaded-summary line with the refreshed counts.
