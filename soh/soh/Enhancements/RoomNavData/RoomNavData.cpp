@@ -226,8 +226,20 @@ static inline bool IsNavNodeAdmissible(const NavNode& n, uint16_t climbSurfaceMa
 // Helper. Builds a bidirectional adjacency list from data->edges. Each
 // NavEdge stored once but traversable both ways. Used by the hazard-aware
 // BFS and FindNearestNonHazardExit.
+//
+// `climbSurfaceMask` (Stage 7): when 0 (consumer can't traverse any
+// climb-surface grid), the P3.8 base↔top bypass edges are injected
+// — gives non-climb consumers 1-hop access to the floor on the far
+// side of a climb anchor (preserves pre-v7 behaviour for callers
+// that don't consume climb data). When non-zero, the bypass is
+// SKIPPED — climb-aware consumers route through the multi-cell
+// grid path (Stages 2-3) so HandleStateFollow's Stage 6 trigger
+// fires on a climb-surface subgoal. Without this gating, the BFS
+// would always pick the 1-hop bypass over the N-hop grid path
+// (shortest-by-hops), and Stage 6 would never see a climb-surface
+// subgoal.
 static std::vector<std::vector<uint16_t>>
-BuildAdjacencyList(const RoomNavData* data) {
+BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0) {
     std::vector<std::vector<uint16_t>> adjacency(data->nodes.size());
     for (const NavEdge& e : data->edges) {
         if (e.fromIdx >= data->nodes.size() || e.toIdx >= data->nodes.size()) continue;
@@ -244,25 +256,24 @@ BuildAdjacencyList(const RoomNavData* data) {
     // route through climbable surfaces just like ordinary ground
     // edges.
     //
-    // Consumers (AI Follower / AI Invader) must recognise that a
-    // path waypoint near a NODE_CLIMB_BASE precedes a vertical
-    // traversal and engage their climb pipeline (Shape A for the
-    // follower; Shape B for non-Link navigators). Without that,
-    // the consumer paths to the base and stalls because stick
-    // injection alone can't cross the wall the vines/ladder are
-    // mounted on. Follow-up commit wires the consumer side.
-    for (const ClimbAnchor& anchor : data->climbAnchors) {
-        // Find base / top node indices the same way the scan
-        // populates NODE_CLIMB_BASE / NODE_CLIMB_TOP flags. Using
-        // FindNearestNode here matches that flagging convention.
-        int baseIdx = FindNearestNode(data, anchor.basePos);
-        int topIdx  = FindNearestNode(data, anchor.topPos);
-        if (baseIdx < 0 || topIdx < 0) continue;
-        if (baseIdx == topIdx) continue;
-        if ((size_t)baseIdx >= adjacency.size() ||
-            (size_t)topIdx  >= adjacency.size()) continue;
-        adjacency[(size_t)baseIdx].push_back((uint16_t)topIdx);
-        adjacency[(size_t)topIdx].push_back((uint16_t)baseIdx);
+    // Stage 7 gate: only inject this 1-hop bypass for non-climb
+    // consumers (mask 0). Climb-aware consumers traverse the multi-
+    // cell grid (Stages 2-3) for accurate per-cell waypoints — Stage 6
+    // engages CLIMBING based on the climb-surface subgoal flags.
+    if (climbSurfaceMask == 0) {
+        for (const ClimbAnchor& anchor : data->climbAnchors) {
+            // Find base / top node indices the same way the scan
+            // populates NODE_CLIMB_BASE / NODE_CLIMB_TOP flags. Using
+            // FindNearestNode here matches that flagging convention.
+            int baseIdx = FindNearestNode(data, anchor.basePos);
+            int topIdx  = FindNearestNode(data, anchor.topPos);
+            if (baseIdx < 0 || topIdx < 0) continue;
+            if (baseIdx == topIdx) continue;
+            if ((size_t)baseIdx >= adjacency.size() ||
+                (size_t)topIdx  >= adjacency.size()) continue;
+            adjacency[(size_t)baseIdx].push_back((uint16_t)topIdx);
+            adjacency[(size_t)topIdx].push_back((uint16_t)baseIdx);
+        }
     }
     return adjacency;
 }
@@ -316,7 +327,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
         uint8_t  hopsInHazard;  // running count of consecutive hazard hops
     };
 
-    std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data);
+    std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data, climbSurfaceMask);
     std::vector<bool> visited(data->nodes.size(), false);
     std::deque<QueueEntry> frontier;
     visited[(size_t)fromIdx] = true;
@@ -420,7 +431,7 @@ int FindNearestNonHazardExit(const RoomNavData* data,
     // eligibility so non-swimmers don't get pointed at an underwater
     // exit. Honors climbSurfaceMask so a climb-aware consumer cornered
     // in hazard can use a climb surface as the exit (rare but possible).
-    std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data);
+    std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data, climbSurfaceMask);
     std::vector<bool> visited(data->nodes.size(), false);
     std::deque<uint16_t> q;
     visited[(size_t)fromIdx] = true;
@@ -492,7 +503,7 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
     const float fromDistSq = distSqToTarget(data->nodes[(size_t)fromIdx].pos);
 
     struct QueueEntry { uint16_t idx; uint8_t hopsInHazard; };
-    std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data);
+    std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data, climbSurfaceMask);
     std::vector<bool> visited(data->nodes.size(), false);
     std::vector<int>  parents(data->nodes.size(), -1);
     std::deque<QueueEntry> frontier;

@@ -1573,7 +1573,19 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
             const ::AnchorNavRoom::RoomNavData* navData =
                 ::AnchorNavRoom::GetForRoom(gPlayState->sceneNum,
                                              (int8_t)gPlayState->roomCtx.curRoom.num);
-            if (navData != nullptr) {
+            // Stage 7: skip the legacy 2-point heuristic when the room
+            // has v7 climb-surface grid data AND the substrate gate is
+            // on. The substrate path's Stage 6 trigger handles
+            // engagement via the multi-cell grid (HandleStateFollow
+            // recomputes path on next tick when leader's pos drifts
+            // from the climb-up; subgoal flags include NODE_CLIMB_*).
+            // Fallback to legacy heuristic for v6-cached rooms (no
+            // grid) and when the substrate gate is off.
+            const bool useV7Substrate =
+                AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
+                navData != nullptr &&
+                navData->firstClimbSurfaceNodeIdx != UINT16_MAX;
+            if (!useV7Substrate && navData != nullptr) {
                 Vec3f anchorBase, anchorTop;
                 if (::AnchorNavRoom::FindClimbAnchorAbove(
                         navData, leaderPos, /*xzRadius=*/50.0f,
@@ -1586,13 +1598,21 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     SPDLOG_INFO("[Follower] Leader climbing + anchor near leader "
                                 "({:.0f},{:.0f},{:.0f}) base=({:.0f},{:.0f},{:.0f}) "
                                 "top=({:.0f},{:.0f},{:.0f}) — engaging autonomous "
-                                "CLIMBING (follower at {:.0f}u from leader)",
+                                "CLIMBING (legacy 2-point heuristic; follower "
+                                "at {:.0f}u from leader)",
                                 leaderPos.x, leaderPos.y, leaderPos.z,
                                 anchorBase.x, anchorBase.y, anchorBase.z,
                                 anchorTop.x, anchorTop.y, anchorTop.z,
                                 sqrtf(distSq));
                     engagedAutonomousClimb = true;
                 }
+            } else if (useV7Substrate) {
+                // v7 grid path: defer engagement to the substrate. Mark
+                // engagement as "in progress" so the proximity-snap
+                // fallback below doesn't fire — the follower will path-
+                // route to the climb naturally and Stage 6 fires on the
+                // climb-surface subgoal.
+                engagedAutonomousClimb = true;
             }
             if (!engagedAutonomousClimb) {
                 if (distSq <= kClimbApproachRadius * kClimbApproachRadius) {
@@ -3283,7 +3303,19 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
             const ::AnchorNavRoom::RoomNavData* navData =
                 ::AnchorNavRoom::GetForRoom((int16_t)gPlayState->sceneNum,
                                              (int8_t)gPlayState->roomCtx.curRoom.num);
-            if (navData != nullptr) {
+            // Stage 7: skip the legacy 2-point heuristic when the room
+            // has v7 climb-surface grid data. The substrate path's
+            // Stage 6 trigger handles engagement via the multi-cell
+            // grid (BFS routes through climb-surface waypoints since
+            // P3.8 base↔top bypass is disabled for mask-aware
+            // consumers; HandleStateFollow's substrate-engagement
+            // block fires when CurrentSubgoalFlags() carries a
+            // NODE_CLIMB_* type bit). Fallback to legacy heuristic
+            // for v6-cached rooms (no grid) only.
+            const bool useV7Substrate =
+                navData != nullptr &&
+                navData->firstClimbSurfaceNodeIdx != UINT16_MAX;
+            if (!useV7Substrate && navData != nullptr) {
                 Vec3f anchorBase, anchorTop;
                 if (::AnchorNavRoom::FindClimbAnchorAbove(
                         navData, p2Pos,
@@ -3295,8 +3327,9 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
                     followerAutonomousClimbFrames = 0;
                     followerAIState               = FollowerAIState::CLIMBING;
                     followerStateFrames           = 0;
-                    SPDLOG_INFO("[Follower] FOLLOW→CLIMBING (autonomous; "
-                                "anchor base=({:.0f},{:.0f},{:.0f}) "
+                    SPDLOG_INFO("[Follower] FOLLOW→CLIMBING (legacy "
+                                "2-point heuristic; anchor "
+                                "base=({:.0f},{:.0f},{:.0f}) "
                                 "top=({:.0f},{:.0f},{:.0f}) "
                                 "follower=({:.0f},{:.0f},{:.0f}))",
                                 anchorBase.x, anchorBase.y, anchorBase.z,
