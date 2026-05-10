@@ -203,11 +203,12 @@ void SohMenu::AddMenuDevTools() {
         .CVar(CVAR_DEVELOPER_TOOLS("FollowerRecorder.Enabled"))
         .Options(CheckboxOptions().DefaultValue(false).Tooltip(
             "Captures per-frame follower decision state to "
-            "roommanifests/follower_recordings/follower_<msEpoch>.jsonl, one JSON "
-            "object per line. Each line carries: scene/room, leader pos + state, "
-            "follower pos + state-machine state + state-frames, distances, NavPath "
-            "presence + cursor, all G10/G12/G14/G15 timer values, autonomous-climb "
-            "flag, and any teleport events fired this frame.\n\n"
+            "logs/Ship of Harkinian <N> follower.log (sibling to the matching "
+            "main log file <N>), one JSON object per line. Each line carries: "
+            "scene/room, leader pos + state, follower pos + state-machine state "
+            "+ state-frames, distances, NavPath presence + cursor, all G10/G12/"
+            "G14/G15 timer values, autonomous-climb flag, and any teleport "
+            "events fired this frame.\n\n"
             "Capture rate: gDeveloperTools.FollowerRecorder.CaptureHz (default 15). "
             "Auto-stop after gDeveloperTools.FollowerRecorder.MaxSeconds (default "
             "300 = 5 min) — the toggle flips back off when the cap is hit.\n\n"

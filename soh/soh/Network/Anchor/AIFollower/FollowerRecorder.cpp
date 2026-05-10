@@ -11,10 +11,13 @@
 #include "soh/ShipInit.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 
+#include "ship/Context.h"
+
 #include <libultraship/bridge.h>
 #include <libultraship/libultraship.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -66,19 +69,59 @@ uint64_t NowMs() {
             std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
-fs::path RecordingsDir() {
-    return fs::path("roommanifests") / "follower_recordings";
+// SoH's logs/ directory, sibling to the main `Ship of Harkinian <N>.log`
+// files. Resolved via the same AppDirectoryPath API that OTRGlobals.cpp:798
+// uses for the main log, so portable + dev-shell-friendly + matches the
+// path the user already knows from SPDLOG.
+fs::path LogsDir() {
+    return fs::path(Ship::Context::GetAppDirectoryPath()) / "logs";
 }
 
 bool EnsureDirectory() {
     std::error_code ec;
-    if (fs::exists(RecordingsDir(), ec)) return true;
-    fs::create_directories(RecordingsDir(), ec);
+    if (fs::exists(LogsDir(), ec)) return true;
+    fs::create_directories(LogsDir(), ec);
     if (ec) {
         SPDLOG_WARN("[FollowerRecorder] EnsureDirectory failed: {}", ec.message());
         return false;
     }
     return true;
+}
+
+// Find the index N of the current session's main log file. OTRGlobals.cpp:
+// 803-836 picks `maxN + 1` at SoH launch and writes "Ship of Harkinian <N>.log"
+// to logs/. By the time the recorder fires, that file exists and is the
+// highest-numbered match in logs/. Scanning for the max N here gives us the
+// session's index without needing to plumb it through libultraship.
+//
+// Returns -1 if no main-log file is found (recorder will fall back to a
+// timestamp-based filename in that edge case).
+int FindCurrentSessionLogIndex() {
+    std::error_code ec;
+    fs::path dir = LogsDir();
+    if (!fs::exists(dir, ec)) return -1;
+
+    const std::string prefix = "Ship of Harkinian ";
+    const std::string suffix = ".log";
+    int maxN = -1;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file()) continue;
+        const std::string name = entry.path().filename().generic_string();
+        if (name.size() <= prefix.size() + suffix.size()) continue;
+        if (name.compare(0, prefix.size(), prefix) != 0) continue;
+        if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+        const std::string middle =
+            name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+        if (middle.empty()) continue;
+        // Skip "<N> follower" filenames so a prior session's recorder log
+        // doesn't inflate the index. Only digits-only middles are main logs.
+        if (!std::all_of(middle.begin(), middle.end(), ::isdigit)) continue;
+        try {
+            int n = std::stoi(middle);
+            if (n > maxN) maxN = n;
+        } catch (...) { /* malformed; skip */ }
+    }
+    return maxN;
 }
 
 // Map followerAIState's underlying integer to a name. Lookup is by integer
@@ -103,12 +146,23 @@ const char* StateNameFromInt(int s) {
     return "UNKNOWN";
 }
 
-// Open a fresh recording file. Caller holds Mutex(). Filename uses ms-since-
-// epoch — unique per session, no platform-specific time formatting needed.
+// Open a fresh recording file. Caller holds Mutex(). Filename mirrors the
+// session's main log: "Ship of Harkinian <N> follower.log", same N as
+// "Ship of Harkinian <N>.log" so a recording pairs visually with its main
+// log. Falls back to a millisecond timestamp if N can't be discovered.
 bool OpenRecording() {
     if (!EnsureDirectory()) return false;
     uint64_t now = NowMs();
-    gFilePath = (RecordingsDir() / ("follower_" + std::to_string(now) + ".jsonl")).string();
+    int n = FindCurrentSessionLogIndex();
+    std::string fileName;
+    if (n >= 0) {
+        fileName = "Ship of Harkinian " + std::to_string(n) + " follower.log";
+    } else {
+        fileName = "Ship of Harkinian follower " + std::to_string(now) + ".log";
+        SPDLOG_WARN("[FollowerRecorder] No main-log index found; falling back to "
+                    "timestamp filename: {}", fileName);
+    }
+    gFilePath = (LogsDir() / fileName).string();
     gFile.open(gFilePath, std::ios::out | std::ios::trunc | std::ios::binary);
     if (!gFile.is_open()) {
         SPDLOG_WARN("[FollowerRecorder] Failed to open {}", gFilePath);
@@ -218,22 +272,63 @@ void CaptureFrame(const FollowerFrameContext& ctx) {
     Anchor* anchor = Anchor::Instance;
     if (anchor == nullptr) return;
 
+    // FollowerFrameContext only carries `play` and `player` populated by
+    // the OnGameFrameUpdate caller (Follower.cpp:3550-3552); leader fields
+    // remain default-zero because TickFollower's body resolves the leader
+    // via local lookups. Mirror that resolution here so the recorder gets
+    // ground-truth data instead of capturing zeros.
+    Actor* leaderActor = nullptr;
+    if (anchor->followerLeaderClientId != 0) {
+        Actor* cand = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
+        while (cand != nullptr) {
+            if (cand->id == ACTOR_EN_OE2 &&
+                anchor->GetDummyPlayerClientId(cand) == anchor->followerLeaderClientId) {
+                leaderActor = cand;
+                break;
+            }
+            cand = cand->next;
+        }
+    }
+    Vec3f leaderPos = (leaderActor != nullptr) ? leaderActor->world.pos
+                                                : Vec3f{ 0.0f, 0.0f, 0.0f };
+    s8   leaderRoomLive = -1;
+    bool leaderClimbing = false;
+    bool leaderCrawling = false;
+    if (anchor->followerLeaderClientId != 0) {
+        auto it = anchor->clients.find(anchor->followerLeaderClientId);
+        if (it != anchor->clients.end()) {
+            leaderRoomLive = it->second.curRoomNum;
+            leaderClimbing = it->second.isClimbing;
+            leaderCrawling = it->second.isCrawling;
+        }
+    }
+    s8   ourRoomLive   = (s8)gPlayState->roomCtx.curRoom.num;
+    bool roomsDiffer   = (leaderRoomLive != -1 && ourRoomLive != -1 &&
+                          leaderRoomLive != ourRoomLive);
+
+    const Vec3f& fp = ctx.player->actor.world.pos;
+    f32 dx = leaderPos.x - fp.x;
+    f32 dy = leaderPos.y - fp.y;
+    f32 dz = leaderPos.z - fp.z;
+    f32 distXZ  = (leaderActor != nullptr) ? std::sqrt(dx*dx + dz*dz) : 0.0f;
+    f32 distXYZ = (leaderActor != nullptr) ? std::sqrt(dx*dx + dy*dy + dz*dz) : 0.0f;
+
     nlohmann::json j;
     j["schema"]            = FR_SCHEMA_VERSION;
     j["frame"]             = anchor->followerTickCounter;
     j["tMs"]               = static_cast<uint64_t>(now - gStartMs);
     j["scene"]             = static_cast<int>(gPlayState->sceneNum);
-    j["room"]              = static_cast<int>(gPlayState->roomCtx.curRoom.num);
+    j["room"]              = static_cast<int>(ourRoomLive);
     j["transitionTrigger"] = static_cast<int>(gPlayState->transitionTrigger);
 
     j["leaderClientId"] = static_cast<uint64_t>(anchor->followerLeaderClientId);
-    j["leaderRoom"]     = static_cast<int>(ctx.leaderRoom);
-    j["leaderClimbing"] = ctx.leaderIsClimbing ? 1 : 0;
-    j["leaderCrawling"] = ctx.leaderIsCrawling ? 1 : 0;
-    j["roomsDiffer"]    = ctx.roomsDiffer ? 1 : 0;
-    j["leaderPos_f"]    = nlohmann::json::array({ ctx.leaderPos.x, ctx.leaderPos.y, ctx.leaderPos.z });
+    j["leaderResolved"] = (leaderActor != nullptr) ? 1 : 0;
+    j["leaderRoom"]     = static_cast<int>(leaderRoomLive);
+    j["leaderClimbing"] = leaderClimbing ? 1 : 0;
+    j["leaderCrawling"] = leaderCrawling ? 1 : 0;
+    j["roomsDiffer"]    = roomsDiffer ? 1 : 0;
+    j["leaderPos_f"]    = nlohmann::json::array({ leaderPos.x, leaderPos.y, leaderPos.z });
 
-    const Vec3f& fp = ctx.player->actor.world.pos;
     j["followerPos_f"]       = nlohmann::json::array({ fp.x, fp.y, fp.z });
     j["followerYaw"]         = static_cast<int>(ctx.player->actor.shape.rot.y);
     j["followerStateFlags1"] = static_cast<uint64_t>(ctx.player->stateFlags1);
@@ -241,8 +336,8 @@ void CaptureFrame(const FollowerFrameContext& ctx) {
     j["stateFramesIn"]       = anchor->followerStateFrames;
     j["stuckFrames"]         = anchor->followerStuckFrames;
 
-    j["distXZ_f"]  = ctx.distToLeaderXZ;
-    j["distXYZ_f"] = std::sqrt(ctx.distToLeaderSq);
+    j["distXZ_f"]  = distXZ;
+    j["distXYZ_f"] = distXYZ;
 
     bool pathPresent = !anchor->followerNavPath.Empty();
     j["navPathPresent"] = pathPresent ? 1 : 0;
