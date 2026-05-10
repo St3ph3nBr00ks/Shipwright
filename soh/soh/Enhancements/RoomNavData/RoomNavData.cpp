@@ -1339,6 +1339,135 @@ static float DetermineClimbSurfaceWidth(PlayState* play,
     return negSide + posSide + kClimbGridCellSpacing;
 }
 
+// Edge cost constants (Stage 3). Initial values; the plan's open
+// question Q5 calls for field-tuning once consumers wire up.
+//
+// kClimbCellEdgeCost: surface-to-surface step within a grid. Matches
+//   the floor-edge spacing-cost convention so a 7-cell ladder climb
+//   = 7 × 30 = 210u of "distance" (vs ~30u per floor cell).
+//
+// kFloorToClimbCost: bidirectional edge between the bottom row of the
+//   grid and the nearest floor at basePos (and similarly between the
+//   top row and the nearest floor at topPos). Set ABOVE the per-cell
+//   cost so BFS prefers an ALL-FLOOR route when one of comparable
+//   length exists, but doesn't refuse the climb when it's the
+//   only/shorter route.
+static constexpr float kClimbCellEdgeCost = 30.0f;
+static constexpr float kFloorToClimbCost  = 50.0f;
+static constexpr float kClimbToFloorCost  = 50.0f;
+
+// Generate edges for a single anchor's surface grid:
+//   1. Surface-to-surface 4-connected (cardinal neighbors only — diagonals
+//      are ambiguous on ladders/vines for stick-injection consumers).
+//   2. Bottom-row (cellIdxZ == 0) ↔ nearest floor near anchor.basePos.
+//   3. Top-row (cellIdxZ == cellsV - 1) ↔ nearest floor near anchor.topPos.
+//
+// Append-only on out->edges. Each undirected edge is emitted ONCE
+// (matches BuildEdges convention at line 1920+); BuildAdjacencyList
+// (line 207) walks both directions. MUST run AFTER the anchor's nodes
+// have been appended to out->nodes.
+//
+// Edges generated here are inert until Stage 5 modifies the BFS to
+// expand through NODE_CLIMB_* nodes (currently gated off by the
+// `node.flags & NODE_WALKABLE` check at FindBestReachableSubgoalPath
+// line ~470). Stage 3 lays the data; Stage 5 unlocks traversal.
+//
+// Rescan cleanup: caller drops climb-surface NODES via nodes.resize();
+// the matching edge cleanup (DropClimbSurfaceEdges) runs in the same
+// rescan path so edges don't dangle into discarded indices.
+static void GenerateClimbSurfaceEdges(RoomNavData* out,
+                                       const ClimbAnchor& anchor)
+{
+    if (anchor.nodeCount == 0) return;
+
+    // (u, v) → nodeIdx lookup for THIS anchor's grid only.
+    std::unordered_map<uint32_t, uint16_t> uvToIdx;
+    uvToIdx.reserve(anchor.nodeCount);
+    for (uint16_t i = 0; i < anchor.nodeCount; i++) {
+        const NavNode& n = out->nodes[(size_t)anchor.firstNodeIdx + i];
+        uint32_t key = ((uint32_t)n.cellIdxZ << 16) | (uint32_t)n.cellIdxX;
+        uvToIdx[key] = (uint16_t)(anchor.firstNodeIdx + i);
+    }
+
+    // Surface-to-surface edges. Cardinal (4-connected) only. Each
+    // undirected pair emitted once (toIdx > fromIdx guard).
+    static const int kClimbDeltas[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    size_t surfaceEdgeCount = 0;
+    for (uint16_t i = 0; i < anchor.nodeCount; i++) {
+        const NavNode& n = out->nodes[(size_t)anchor.firstNodeIdx + i];
+        uint16_t fromIdx = (uint16_t)(anchor.firstNodeIdx + i);
+        for (int d = 0; d < 4; d++) {
+            int nu = (int)n.cellIdxX + kClimbDeltas[d][0];
+            int nv = (int)n.cellIdxZ + kClimbDeltas[d][1];
+            if (nu < 0 || nu >= (int)anchor.cellsU) continue;
+            if (nv < 0 || nv >= (int)anchor.cellsV) continue;
+            uint32_t nbKey = ((uint32_t)nv << 16) | (uint32_t)nu;
+            auto it = uvToIdx.find(nbKey);
+            if (it == uvToIdx.end()) continue;  // grid hole
+            uint16_t toIdx = it->second;
+            if (toIdx <= fromIdx) continue;  // dedup undirected pair
+            NavEdge edge{};
+            edge.fromIdx = fromIdx;
+            edge.toIdx   = toIdx;
+            edge.cost    = kClimbCellEdgeCost;
+            out->edges.push_back(edge);
+            surfaceEdgeCount++;
+        }
+    }
+
+    // Floor ↔ climb boundary edges. FindNearestNode skips climb-surface
+    // nodes (Stage 2 defensive change) so these return floor indices.
+    int floorBaseIdx = FindNearestNode(out, anchor.basePos);
+    int floorTopIdx  = FindNearestNode(out, anchor.topPos);
+    size_t boundaryEdgeCount = 0;
+    for (uint16_t i = 0; i < anchor.nodeCount; i++) {
+        const NavNode& n = out->nodes[(size_t)anchor.firstNodeIdx + i];
+        uint16_t climbIdx = (uint16_t)(anchor.firstNodeIdx + i);
+        if (n.cellIdxZ == 0 && floorBaseIdx >= 0 &&
+            (uint16_t)floorBaseIdx != climbIdx) {
+            NavEdge edge{};
+            edge.fromIdx = (uint16_t)std::min<int>(floorBaseIdx, (int)climbIdx);
+            edge.toIdx   = (uint16_t)std::max<int>(floorBaseIdx, (int)climbIdx);
+            edge.cost    = kFloorToClimbCost;
+            out->edges.push_back(edge);
+            boundaryEdgeCount++;
+        }
+        if (n.cellIdxZ == (uint16_t)(anchor.cellsV - 1) && floorTopIdx >= 0 &&
+            (uint16_t)floorTopIdx != climbIdx) {
+            NavEdge edge{};
+            edge.fromIdx = (uint16_t)std::min<int>(floorTopIdx, (int)climbIdx);
+            edge.toIdx   = (uint16_t)std::max<int>(floorTopIdx, (int)climbIdx);
+            edge.cost    = kClimbToFloorCost;
+            out->edges.push_back(edge);
+            boundaryEdgeCount++;
+        }
+    }
+
+    SPDLOG_DEBUG("[RoomNav] Climb-surface edges (anchor surfaceType=0x{:04x}): "
+                 "{} surface, {} boundary",
+                 (unsigned)anchor.surfaceType, surfaceEdgeCount, boundaryEdgeCount);
+}
+
+// Drop edges that reference any climb-surface node (used by the rescan
+// path before nodes.resize() invalidates the indices). Also called when
+// no climb anchors exist after rescan (cleans up stale edges if they
+// somehow persisted).
+//
+// O(N) walk over edges. Climb edges sit at the tail of the vector
+// (always appended after BuildEdges runs floor-side), so a single
+// resize-from-back is correct in the typical case — but a defensive
+// erase-remove handles any out-of-order entries safely.
+static void DropClimbSurfaceEdges(RoomNavData* out) {
+    if (out->edges.empty()) return;
+    if (out->firstClimbSurfaceNodeIdx == UINT16_MAX) return;
+    uint16_t firstClimbIdx = out->firstClimbSurfaceNodeIdx;
+    auto newEnd = std::remove_if(out->edges.begin(), out->edges.end(),
+        [firstClimbIdx](const NavEdge& e) {
+            return e.fromIdx >= firstClimbIdx || e.toIdx >= firstClimbIdx;
+        });
+    out->edges.erase(newEnd, out->edges.end());
+}
+
 // For each ClimbAnchor, generate the surface grid: compute plane params
 // (normal, axes, origin, extents), raycast each cell, append a NavNode
 // per hit, and populate the anchor's firstNodeIdx/nodeCount/surfaceType.
@@ -1351,6 +1480,11 @@ static float DetermineClimbSurfaceWidth(PlayState* play,
 // rescan path can drop the previous round before reconstructing
 // nodesByCell from cellIdxX/Z (climb-surface nodes use U/V coords
 // there, not world cells).
+//
+// Stage 3: each anchor's edges are appended via GenerateClimbSurfaceEdges
+// immediately after its nodes — keeps per-anchor data co-located so a
+// debug overlay can iterate one anchor's footprint without scanning the
+// whole vector.
 static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play) {
     if (out->climbAnchors.empty()) return;
 
@@ -1456,6 +1590,12 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play) {
         anchor.nodeCount      = nodeCount;
         anchor.surfaceType    = expectedType;
         totalNodesAdded += nodeCount;
+
+        // Stage 3: append this anchor's edges (surface 4-connected +
+        // boundary↔floor). Edges are inert at the BFS layer until
+        // Stage 5 lifts the NODE_WALKABLE expansion gate; this just
+        // lays the data.
+        GenerateClimbSurfaceEdges(out, anchor);
     }
 
     // If no anchor produced any node, restore sentinel so rescan won't
@@ -3840,6 +3980,15 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     for (NavNode& node : nav.nodes) {
         node.flags &= ~NODE_CRAWLSPACE;
     }
+
+    // Drop the previous round's climb-surface edges BEFORE the matching
+    // node resize — the edges reference indices in
+    // [firstClimbSurfaceNodeIdx, oldNodeCount) and would dangle once
+    // those nodes go away. Stage 3 emits floor↔climb boundary edges
+    // whose floor endpoint is < firstClimbSurfaceNodeIdx but whose
+    // climb endpoint is >= it; both directions caught by the predicate
+    // in DropClimbSurfaceEdges.
+    DropClimbSurfaceEdges(&nav);
 
     // Drop the previous round's climb-surface nodes (schema v7+). They
     // live in `nav.nodes[firstClimbSurfaceNodeIdx ..]` with cellIdxX/Z
