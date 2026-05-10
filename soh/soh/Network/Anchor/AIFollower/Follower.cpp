@@ -2087,16 +2087,21 @@ void Anchor::TickFollowerInput(Actor* actor) {
             }
             f32 dy       = targetY - player->actor.world.pos.y;
             bool dropDown = (dy < -kHangResolveBelowThreshold);
-            // High-confidence climb-up: leader is meaningfully above the
-            // hang position (>+30u). In addition to BTN_A, inject forward
-            // stick so OoT's hang-action handler reads "intent to stay
-            // grabbed and climb" rather than "neutral input → auto-drop"
-            // (suspected cause of the 4-6-frame brief grabs in log 24).
-            // Skip forward-stick in the BTN_A default-bias range
-            // (-80 < dy < +30) so incidental wall-brushes during pursuit
-            // still drop naturally — only commit to forward-stick when
-            // the leader is clearly above and climbing IS the intent.
-            bool climbUp = (!dropDown && dy > kHangResolveAboveThreshold);
+            // User 2026-05-10 follow-up: removed the dy > +30 conditional
+            // on forward-stick injection. Reasoning behind the gate was
+            // "leader meaningfully above = real climb intent; same-Y =
+            // incidental brush-grab, let drop". Field test showed this
+            // reading was misleading: when Link grabs a ledge, his
+            // world.pos.y becomes the LEDGE Y (he hangs from the rim).
+            // If the leader is standing ON that same ledge, leader.y ==
+            // follower.y and dy == 0 — so "leader on the ledge above"
+            // produced exactly the dy=0 reading the gate interpreted as
+            // "let drop". Now: forward stick fires on every BTN_A
+            // (climb-up) branch regardless of dy. If incidental brush-
+            // grabs become a problem, the right discriminator is
+            // probably "is the substrate path's next subgoal on the
+            // other side of this hang surface" — defer until that
+            // pattern is observed.
             if (dropDown) {
                 input.press.button |= BTN_B;
                 input.cur.button   |= BTN_B;
@@ -2107,8 +2112,6 @@ void Anchor::TickFollowerInput(Actor* actor) {
                 // resolution still fires.
                 input.press.button |= BTN_A;
                 input.cur.button   |= BTN_A;
-            }
-            if (climbUp) {
                 // Forward stick using the same camera-relative inversion
                 // as the ground-walking block at line 1996-2001. World
                 // direction we want = Link's facing (shape.rot.y) which
@@ -2135,7 +2138,7 @@ void Anchor::TickFollowerInput(Actor* actor) {
                             targetY, player->actor.world.pos.y, dy,
                             kHangResolveAboveThreshold,
                             kHangResolveBelowThreshold,
-                            climbUp ? "yes" : "no");
+                            dropDown ? "no" : "yes");
                 sWasHanging = true;
             }
         } else if (sWasHanging) {
@@ -2526,7 +2529,31 @@ void Anchor::HandleStateReturn(Player* player, const Vec3f& sideTarget, const Ve
     // position has no trail; ComputePathTo's Layer 1 LOS + Layer 3 graph
     // handle the path.
     const bool useDoorTarget = followerDoorHandoff;
-    const Vec3f finalGoal    = useDoorTarget ? followerMoveTarget : sideTarget;
+    Vec3f finalGoal          = useDoorTarget ? followerMoveTarget : sideTarget;
+    // Same door-target snap as HandleStateFollow — see that site's
+    // comment block for rationale.
+    if (useDoorTarget) {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(gPlayState->sceneNum,
+                                         (int8_t)gPlayState->roomCtx.curRoom.num);
+        if (navData != nullptr) {
+            int snapIdx = ::AnchorNavRoom::FindNearestNode(navData, finalGoal);
+            if (snapIdx >= 0 && (size_t)snapIdx < navData->nodes.size()) {
+                Vec3f snapped = navData->nodes[snapIdx].pos;
+                static int64_t sLastSnapLogFrame = -1;
+                if (sLastSnapLogFrame < 0 ||
+                    followerStateFrames - sLastSnapLogFrame > 60) {
+                    SPDLOG_INFO("[Follower] RETURN door-snap: original "
+                                "({:.0f},{:.0f},{:.0f}) -> nearest node "
+                                "({:.0f},{:.0f},{:.0f})",
+                                finalGoal.x, finalGoal.y, finalGoal.z,
+                                snapped.x, snapped.y, snapped.z);
+                    sLastSnapLogFrame = followerStateFrames;
+                }
+                finalGoal = snapped;
+            }
+        }
+    }
     Vec3f returnTarget       = finalGoal;
     if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
         AnchorNav::TrailKey targetKey = useDoorTarget
@@ -3228,7 +3255,40 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // for a static position; ComputePathTo's Layer 1 LOS + Layer 3 graph
     // fallback handle it).
     const bool useDoorTarget = followerDoorHandoff;
-    const Vec3f finalGoal    = useDoorTarget ? followerMoveTarget : sideTarget;
+    Vec3f finalGoal          = useDoorTarget ? followerMoveTarget : sideTarget;
+    // Bug 2 follow-up #2 (user 2026-05-10): "snap" the door target to the
+    // nearest navigable node in the SOURCE room's RoomNavData graph
+    // before passing to ComputePathTo. Symptom: log 24 (570b108 build)
+    // showed pathLen=0 in 32% of door-handoff frames — Layer 3 BFS
+    // failed because the En_Holl transition-actor position the door
+    // target points at sits AT the room boundary, often outside the
+    // source room's navigable cells (or in a sub-graph disconnected
+    // from the follower's current node). Snapping to the nearest
+    // walkable node guarantees BFS has a reachable destination; OoT's
+    // transition-trigger volume is wide enough that being on the
+    // boundary node still fires the scene transition naturally.
+    if (useDoorTarget) {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(gPlayState->sceneNum,
+                                         (int8_t)gPlayState->roomCtx.curRoom.num);
+        if (navData != nullptr) {
+            int snapIdx = ::AnchorNavRoom::FindNearestNode(navData, finalGoal);
+            if (snapIdx >= 0 && (size_t)snapIdx < navData->nodes.size()) {
+                Vec3f snapped = navData->nodes[snapIdx].pos;
+                static int64_t sLastSnapLogFrame = -1;
+                if (sLastSnapLogFrame < 0 ||
+                    followerStateFrames - sLastSnapLogFrame > 60) {
+                    SPDLOG_INFO("[Follower] FOLLOW door-snap: original "
+                                "({:.0f},{:.0f},{:.0f}) -> nearest node "
+                                "({:.0f},{:.0f},{:.0f})",
+                                finalGoal.x, finalGoal.y, finalGoal.z,
+                                snapped.x, snapped.y, snapped.z);
+                    sLastSnapLogFrame = followerStateFrames;
+                }
+                finalGoal = snapped;
+            }
+        }
+    }
     Vec3f followTarget       = finalGoal;
     if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
         AnchorNav::TrailKey targetKey = useDoorTarget
