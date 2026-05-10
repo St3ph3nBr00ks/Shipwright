@@ -178,12 +178,28 @@ public:
     // (User 2026-05-10 follow-up to Bug 2 fix 1: door-handoff substrate
     // routing was returning pathLen=1 LOS through walls; follower walked
     // into wall, STUCK accumulated, G12 teleport fired.)
+    //
+    // `preferLeaderTrail` reorders Layer 2 (trail breadcrumbs) AHEAD of
+    // Layer 3 (RoomNavData BFS) for this call. Use when the caller has
+    // strong evidence the trail is the right path — specifically the
+    // "leader exited our room, follow their breadcrumbs to the
+    // boundary" case where the leader's recent waypoints in our room
+    // ARE the walkable path to wherever they went next. The Layer 2
+    // "MovementClear over short walls" weakness doesn't apply when the
+    // breadcrumbs come from a player who actually walked them. Pair
+    // with `key = TrailKeyForPlayer(leaderClientId)` and `targetPos =
+    // leader's current position` (which may be in a different room —
+    // Layer 2 finds the most-progress reachable breadcrumb anyway).
+    // (User 2026-05-10: "open" room boundaries with no transition-actor
+    // door — leader-trail-as-path bypasses the door-detection logic
+    // entirely.)
     bool ComputePathTo(TrailKey key,
                        const Actor* navigator,
                        const Vec3f& targetPos,
                        PlayState* play,
                        NavPath& out,
-                       bool skipLayer1LOS = false) const;
+                       bool skipLayer1LOS = false,
+                       bool preferLeaderTrail = false) const;
 
     // Find any captured waypoint of `key`'s trail that lies within
     // `maxGapDistance` of `referencePos` AND closer to `targetPos` than

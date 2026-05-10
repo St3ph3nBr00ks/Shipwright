@@ -443,7 +443,8 @@ bool ActorTrail::ComputePathTo(TrailKey key,
                                 const Vec3f& targetPos,
                                 PlayState* play,
                                 NavPath& out,
-                                bool skipLayer1LOS) const {
+                                bool skipLayer1LOS,
+                                bool preferLeaderTrail) const {
     out.Reset();
     if (navigator == nullptr || play == nullptr || gPlayState == nullptr) return false;
 
@@ -479,101 +480,84 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         return dx * dx + dy * dy + dz * dz;
     };
 
-    // Layer 2/3 ordering note (user 2026-05-09 follow-up — "AI Follower
-    // is prioritizing following the leader's breadcrumbs even when the
-    // next breadcrumb is not reachable. I observed the AI Follower
-    // multiple times get stuck running into a wall trying to reach the
-    // leader instead of using nav data to walk around"):
+    // Layer 2/3 ordering — user 2026-05-09: post-P3.11 default order is
+    // Layer 1 → Layer 3 (graph) → Layer 2 (trail). Layer 2's MovementClear
+    // is a single-height pelvis-pelvis line that misses short walls /
+    // voids; Layer 3's graph edges were built with proper step-up + line-
+    // clear checks at scan time so they're more robust for generic
+    // pursuit.
     //
-    // Pre-fix: Layer 2 (trail breadcrumbs) ran BEFORE Layer 3
-    // (RoomNavData BFS). Layer 2's MovementClear is a single-height
-    // pelvis-pelvis line test — passes over short walls and across
-    // voids that the follower can't actually traverse. When Layer 2
-    // returned a "valid" but unreachable breadcrumb, Layer 3 was
-    // never consulted and the follower walked at the wall.
-    //
-    // Layer 3's BFS doesn't have this problem because the room nav
-    // graph's edges were built at scan time with MovementClearAtPosition
-    // + step-up checks between adjacent grid cells; short walls and
-    // voids properly exclude edges from the graph. Paths through
-    // Layer 3 are always graph-walkable.
-    //
-    // New ordering: Layer 1 → Layer 3 (graph) → Layer 2 (trail).
-    // Layer 3 takes priority whenever RoomNavConsumer CVar is on AND
-    // the navigator has consumeRoomNavData=true. Layer 2 becomes the
-    // fallback when the graph is unavailable (CVar off, no scan,
-    // navigator opt-out, or BFS failure). This trades some short-hop
-    // freshness for robustness on longer or geometrically-tricky
-    // pursuits — the user's reported failure mode.
+    // preferLeaderTrail (user 2026-05-10) reverses to Layer 1 → Layer 2
+    // → Layer 3. Caller's contract: the trail under `key` is a player's
+    // actual walked path, so Layer 2's "MovementClear over short walls"
+    // weakness doesn't apply (the breadcrumbs are positions a player
+    // physically walked through). Use for door-handoff / open-room-
+    // boundary cases where "follow leader's footsteps to where they
+    // exited our room" is the right semantics.
 
-    // Layer 3 — RoomNavData BFS path. Two-stage gating: CVar and
-    // per-actor traits.consumeRoomNavData. The BFS materialises the
-    // full chain; we append `target` to the end when the final node
-    // has line-clear to the target so the path terminates at the
-    // desired destination instead of at a graph node near it.
-    if (CVarGetInteger(CVAR_NAV_ROOM_NAV_LAYER, 0) != 0) {
+    auto tryLayer3 = [&]() -> bool {
+        // Layer 3 — RoomNavData BFS path. Two-stage gating: CVar and
+        // per-actor traits.consumeRoomNavData. The BFS materialises the
+        // full chain; we append `target` to the end when the final node
+        // has line-clear to the target so the path terminates at the
+        // desired destination instead of at a graph node near it.
+        if (CVarGetInteger(CVAR_NAV_ROOM_NAV_LAYER, 0) == 0) return false;
         const NavTraits& traits = GetTraitsForActor(navigator->id);
-        if (traits.consumeRoomNavData) {
-            int16_t scene = gPlayState->sceneNum;
-            int8_t  room  = (int8_t)gPlayState->roomCtx.curRoom.num;
-            const ::AnchorNavRoom::RoomNavData* navData =
-                ::AnchorNavRoom::GetForRoom(scene, room);
-            if (navData != nullptr) {
-                int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navigator->world.pos);
-                if (fromIdx >= 0) {
-                    std::vector<Vec3f> graphPath;
-                    bool ok = ::AnchorNavRoom::FindBestReachableSubgoalPath(
-                        navData, fromIdx, targetPos,
-                        traits.eligibleForSwimming,
-                        traits.avoidHazardNodes,
-                        graphPath);
-                    if (ok && !graphPath.empty()) {
-                        out.waypoints = std::move(graphPath);
-                        if (MovementClearAtPosition(out.waypoints.back(), targetPos, play)) {
-                            out.waypoints.push_back(targetPos);
-                        }
-                        return true;
-                    }
-                }
-            }
+        if (!traits.consumeRoomNavData) return false;
+        int16_t scene = gPlayState->sceneNum;
+        int8_t  room  = (int8_t)gPlayState->roomCtx.curRoom.num;
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(scene, room);
+        if (navData == nullptr) return false;
+        int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navigator->world.pos);
+        if (fromIdx < 0) return false;
+        std::vector<Vec3f> graphPath;
+        bool ok = ::AnchorNavRoom::FindBestReachableSubgoalPath(
+            navData, fromIdx, targetPos,
+            traits.eligibleForSwimming,
+            traits.avoidHazardNodes,
+            graphPath);
+        if (!ok || graphPath.empty()) return false;
+        out.waypoints = std::move(graphPath);
+        if (MovementClearAtPosition(out.waypoints.back(), targetPos, play)) {
+            out.waypoints.push_back(targetPos);
         }
-    }
+        return true;
+    };
 
-    // Layer 2 (fallback) — trail breadcrumbs. Walked newest→oldest;
-    // first MovementClear-passing waypoint that improves distance to
-    // target wins. Optimistically appends `target` when the
-    // breadcrumb→target segment is also line-clear so the AI doesn't
-    // need an immediate re-query at the breadcrumb.
-    //
-    // Now runs AFTER Layer 3 (post P3.11 reorder). Layer 2 is fast
-    // and uses freshest leader data, but its MovementClear test is a
-    // single-height line that misses short walls and voids — the
-    // user-reported "follower stuck running into a wall trying to
-    // reach the leader" failure. Layer 3's graph paths are robust
-    // when available; Layer 2 stays as fallback when the room nav
-    // graph isn't loaded (RoomNavConsumer off, scan pending, or
-    // navigator opted out).
-    auto it = mTrails.find(key);
-    if (it != mTrails.end() && it->second.count > 0) {
+    auto tryLayer2 = [&]() -> bool {
+        // Layer 2 — trail breadcrumbs. Walked newest→oldest; first
+        // MovementClear-passing waypoint that improves distance to
+        // target wins. Optimistically appends `target` when the
+        // breadcrumb→target segment is also line-clear so the AI
+        // doesn't need an immediate re-query at the breadcrumb.
+        auto it = mTrails.find(key);
+        if (it == mTrails.end() || it->second.count == 0) return false;
         const EntityTrail& trail = it->second;
         const Vec3f& navPos = navigator->world.pos;
         float distNavToTargetSq = distSq(navPos, targetPos);
-
         for (size_t i = 0; i < trail.count; i++) {
             size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
             const TrailWaypoint& wp = trail.waypoints[idx];
-
             if (wp.sceneNum != gPlayState->sceneNum) continue;
             if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
             if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
             if (!MovementClear(navigator, wp.pos, play)) continue;
-
             out.waypoints.push_back(wp.pos);
             if (MovementClearAtPosition(wp.pos, targetPos, play)) {
                 out.waypoints.push_back(targetPos);
             }
             return true;
         }
+        return false;
+    };
+
+    if (preferLeaderTrail) {
+        if (tryLayer2()) return true;
+        if (tryLayer3()) return true;
+    } else {
+        if (tryLayer3()) return true;
+        if (tryLayer2()) return true;
     }
 
     // Nothing reachable — caller falls through to direct yaw / recovery.

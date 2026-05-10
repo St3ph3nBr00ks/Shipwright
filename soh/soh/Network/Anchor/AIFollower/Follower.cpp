@@ -1554,32 +1554,72 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
             f32 dx = leaderPos.x - p2Pos.x;
             f32 dz = leaderPos.z - p2Pos.z;
             f32 distSq = dx * dx + dz * dz;
-            if (distSq <= kClimbApproachRadius * kClimbApproachRadius) {
-                // Within proximity — snap to ladder XZ and enter CLIMBING.
-                // Snap stays as-is (was Bug 2's solution): puts follower
-                // adjacent to the ladder collider so the next stick_y
-                // injection actually attaches.
-                Vec3f ladderXz = { leaderPos.x, p2Pos.y, leaderPos.z };
-                player->actor.world.pos = ladderXz;
-                player->actor.prevPos   = ladderXz;
-                followerAIState     = FollowerAIState::CLIMBING;
-                followerStateFrames = 0;
-                SPDLOG_INFO("[Follower] Leader climbing + within {:.0f}u → CLIMBING "
-                            "(snap to ladder XZ at {:.0f},{:.0f},{:.0f})",
-                            sqrtf(distSq),
-                            ladderXz.x, ladderXz.y, ladderXz.z);
-                // Refresh p2Pos snapshot since we just moved.
-                p2Pos = player->actor.world.pos;
-            } else {
-                // Too far from the ladder base — point FOLLOW toward
-                // it and let the substrate path / stick injection bring
-                // us close. CLIMBING entry retried on next tick.
-                followerMoveTarget = leaderPos;
-                if (followerStateFrames % 60 == 0) {
-                    SPDLOG_INFO("[Follower] Leader climbing but follower "
-                                "{:.0f}u from ladder base — approaching "
-                                "before CLIMBING entry",
+            // Item 1 (user 2026-05-10): "Follower is not climbing onto
+            // ladders and vine walls when the leader does. The follower
+            // is waiting for the leader to get off." When the leader is
+            // climbing, find the climb anchor near the LEADER's position
+            // (not the follower's) — this is the ladder/vine the leader
+            // is using. Engage autonomous-CLIMBING with that anchor's
+            // top as the goal; the existing autonomous-climb pipeline
+            // (HandleStateClimbing's autonomousClimb branch) walks the
+            // follower TO the ladder base via stick injection, then UP
+            // via climb-aware injection. Works even when the follower
+            // is far from the ladder (no need for the 30u proximity gate
+            // below). Generous xzRadius (50u) tolerates leader drift /
+            // mid-climb XZ jitter; minHeight=-9999 means "any anchor
+            // near the leader regardless of top Y" since the leader's
+            // mid-climb Y can be above or below the anchor's top.
+            bool engagedAutonomousClimb = false;
+            const ::AnchorNavRoom::RoomNavData* navData =
+                ::AnchorNavRoom::GetForRoom(gPlayState->sceneNum,
+                                             (int8_t)gPlayState->roomCtx.curRoom.num);
+            if (navData != nullptr) {
+                Vec3f anchorBase, anchorTop;
+                if (::AnchorNavRoom::FindClimbAnchorAbove(
+                        navData, leaderPos, /*xzRadius=*/50.0f,
+                        /*minHeight=*/-9999.0f, anchorBase, anchorTop)) {
+                    followerClimbTopTarget        = anchorTop;
+                    followerAutonomousClimb       = true;
+                    followerAutonomousClimbFrames = 0;
+                    followerAIState               = FollowerAIState::CLIMBING;
+                    followerStateFrames           = 0;
+                    SPDLOG_INFO("[Follower] Leader climbing + anchor near leader "
+                                "({:.0f},{:.0f},{:.0f}) base=({:.0f},{:.0f},{:.0f}) "
+                                "top=({:.0f},{:.0f},{:.0f}) — engaging autonomous "
+                                "CLIMBING (follower at {:.0f}u from leader)",
+                                leaderPos.x, leaderPos.y, leaderPos.z,
+                                anchorBase.x, anchorBase.y, anchorBase.z,
+                                anchorTop.x, anchorTop.y, anchorTop.z,
                                 sqrtf(distSq));
+                    engagedAutonomousClimb = true;
+                }
+            }
+            if (!engagedAutonomousClimb) {
+                if (distSq <= kClimbApproachRadius * kClimbApproachRadius) {
+                    // Within proximity — snap to ladder XZ and enter CLIMBING.
+                    // Fallback when no climb anchor found near the leader
+                    // (RoomNavData not loaded / scan missed the anchor / etc.).
+                    Vec3f ladderXz = { leaderPos.x, p2Pos.y, leaderPos.z };
+                    player->actor.world.pos = ladderXz;
+                    player->actor.prevPos   = ladderXz;
+                    followerAIState     = FollowerAIState::CLIMBING;
+                    followerStateFrames = 0;
+                    SPDLOG_INFO("[Follower] Leader climbing + within {:.0f}u → CLIMBING "
+                                "(snap to ladder XZ at {:.0f},{:.0f},{:.0f}; "
+                                "no anchor found near leader)",
+                                sqrtf(distSq),
+                                ladderXz.x, ladderXz.y, ladderXz.z);
+                    p2Pos = player->actor.world.pos;
+                } else {
+                    // Too far from leader and no anchor data — point FOLLOW
+                    // toward leader; CLIMBING entry retried on next tick.
+                    followerMoveTarget = leaderPos;
+                    if (followerStateFrames % 60 == 0) {
+                        SPDLOG_INFO("[Follower] Leader climbing but follower "
+                                    "{:.0f}u from leader and no anchor found "
+                                    "near leader — approaching",
+                                    sqrtf(distSq));
+                    }
                 }
             }
         }
@@ -2529,36 +2569,21 @@ void Anchor::HandleStateReturn(Player* player, const Vec3f& sideTarget, const Ve
     // position has no trail; ComputePathTo's Layer 1 LOS + Layer 3 graph
     // handle the path.
     const bool useDoorTarget = followerDoorHandoff;
-    Vec3f finalGoal          = useDoorTarget ? followerMoveTarget : sideTarget;
-    // Same door-target snap as HandleStateFollow — see that site's
-    // comment block for rationale.
+    // Same Item 2 leader-trail routing as HandleStateFollow during door
+    // handoff — see that site's comment block for rationale.
+    Vec3f finalGoal = sideTarget;
     if (useDoorTarget) {
-        const ::AnchorNavRoom::RoomNavData* navData =
-            ::AnchorNavRoom::GetForRoom(gPlayState->sceneNum,
-                                         (int8_t)gPlayState->roomCtx.curRoom.num);
-        if (navData != nullptr) {
-            int snapIdx = ::AnchorNavRoom::FindNearestNode(navData, finalGoal);
-            if (snapIdx >= 0 && (size_t)snapIdx < navData->nodes.size()) {
-                Vec3f snapped = navData->nodes[snapIdx].pos;
-                static int64_t sLastSnapLogFrame = -1;
-                if (sLastSnapLogFrame < 0 ||
-                    followerStateFrames - sLastSnapLogFrame > 60) {
-                    SPDLOG_INFO("[Follower] RETURN door-snap: original "
-                                "({:.0f},{:.0f},{:.0f}) -> nearest node "
-                                "({:.0f},{:.0f},{:.0f})",
-                                finalGoal.x, finalGoal.y, finalGoal.z,
-                                snapped.x, snapped.y, snapped.z);
-                    sLastSnapLogFrame = followerStateFrames;
-                }
-                finalGoal = snapped;
-            }
+        auto it = clients.find(followerLeaderClientId);
+        if (it != clients.end()) {
+            finalGoal = it->second.posRot.pos;
+        } else {
+            finalGoal = followerMoveTarget;  // safety-net's door target
         }
     }
     Vec3f returnTarget       = finalGoal;
     if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
-        AnchorNav::TrailKey targetKey = useDoorTarget
-            ? AnchorNav::TrailKey{0}
-            : AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
+        AnchorNav::TrailKey targetKey =
+            AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
         const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
         const bool keyChanged   = (followerNavPathTargetKey != targetKey);
         const f32 driftDx = finalGoal.x - followerNavPathLastTarget.x;
@@ -2570,11 +2595,13 @@ void Anchor::HandleStateReturn(Player* player, const Vec3f& sideTarget, const Ve
                                    keyChanged || targetDrifted;
         if (needsRefresh) {
             followerNavPath.Reset();
-            // Same Layer 1 LOS skip as HandleStateFollow's door-handoff
-            // path — see that site for rationale.
+            // Same Layer 1 LOS skip + leader-trail preference as
+            // HandleStateFollow's door-handoff path — see that site for
+            // rationale.
             bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
                 targetKey, &player->actor, finalGoal, gPlayState, followerNavPath,
-                /*skipLayer1LOS=*/useDoorTarget);
+                /*skipLayer1LOS=*/useDoorTarget,
+                /*preferLeaderTrail=*/useDoorTarget);
             followerNavPathTargetKey  = targetKey;
             followerNavPathLastTarget = finalGoal;
             if (!gotPath) {
@@ -3255,45 +3282,43 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // for a static position; ComputePathTo's Layer 1 LOS + Layer 3 graph
     // fallback handle it).
     const bool useDoorTarget = followerDoorHandoff;
-    Vec3f finalGoal          = useDoorTarget ? followerMoveTarget : sideTarget;
-    // Bug 2 follow-up #2 (user 2026-05-10): "snap" the door target to the
-    // nearest navigable node in the SOURCE room's RoomNavData graph
-    // before passing to ComputePathTo. Symptom: log 24 (570b108 build)
-    // showed pathLen=0 in 32% of door-handoff frames — Layer 3 BFS
-    // failed because the En_Holl transition-actor position the door
-    // target points at sits AT the room boundary, often outside the
-    // source room's navigable cells (or in a sub-graph disconnected
-    // from the follower's current node). Snapping to the nearest
-    // walkable node guarantees BFS has a reachable destination; OoT's
-    // transition-trigger volume is wide enough that being on the
-    // boundary node still fires the scene transition naturally.
+    // Item 2 (user 2026-05-10): when door handoff is active, route via
+    // the LEADER's trail breadcrumbs instead of the door target. Reasoning
+    // ("when leader disappears from room → navigate to leader's last
+    // known breadcrumb"): the leader's recent waypoints in our room ARE
+    // the walkable path to wherever they exited. Layer 2 (trail-walk)
+    // with the leader's TrailKey + leader's actual position as target
+    // finds the most-progress reachable breadcrumb in our room — which
+    // is the position closest to where the leader crossed the boundary.
+    // OoT's transition-trigger volume catches the follower as they walk
+    // toward / through that position. Bypasses door-detection entirely;
+    // works for "open" room boundaries with no transition-actor door.
+    //
+    // ComputePathTo runs with preferLeaderTrail=true (Layer 2 ahead of
+    // Layer 3) and skipLayer1LOS=true (LOS to leader's pos in another
+    // room is wishful). Key = leader's player TrailKey so Layer 2
+    // walks the leader's breadcrumbs. Target = leader's CURRENT pos
+    // from the synced AnchorClient (may be in another room — Layer 2
+    // tolerates that, finds the closest reachable trail breadcrumb).
+    //
+    // Falls back to Layer 3 BFS if leader's trail has no reachable
+    // breadcrumbs (e.g. trail stale / leader took a route through a
+    // room we can't reach). Falls back to direct walk to leader's
+    // pos if both fail. Pre-existing G10/G12/G14 safety nets catch
+    // the "follower truly stuck" case.
+    Vec3f finalGoal = sideTarget;
     if (useDoorTarget) {
-        const ::AnchorNavRoom::RoomNavData* navData =
-            ::AnchorNavRoom::GetForRoom(gPlayState->sceneNum,
-                                         (int8_t)gPlayState->roomCtx.curRoom.num);
-        if (navData != nullptr) {
-            int snapIdx = ::AnchorNavRoom::FindNearestNode(navData, finalGoal);
-            if (snapIdx >= 0 && (size_t)snapIdx < navData->nodes.size()) {
-                Vec3f snapped = navData->nodes[snapIdx].pos;
-                static int64_t sLastSnapLogFrame = -1;
-                if (sLastSnapLogFrame < 0 ||
-                    followerStateFrames - sLastSnapLogFrame > 60) {
-                    SPDLOG_INFO("[Follower] FOLLOW door-snap: original "
-                                "({:.0f},{:.0f},{:.0f}) -> nearest node "
-                                "({:.0f},{:.0f},{:.0f})",
-                                finalGoal.x, finalGoal.y, finalGoal.z,
-                                snapped.x, snapped.y, snapped.z);
-                    sLastSnapLogFrame = followerStateFrames;
-                }
-                finalGoal = snapped;
-            }
+        auto it = clients.find(followerLeaderClientId);
+        if (it != clients.end()) {
+            finalGoal = it->second.posRot.pos;
+        } else {
+            finalGoal = followerMoveTarget;  // safety-net's door target
         }
     }
     Vec3f followTarget       = finalGoal;
     if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
-        AnchorNav::TrailKey targetKey = useDoorTarget
-            ? AnchorNav::TrailKey{0}
-            : AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
+        AnchorNav::TrailKey targetKey =
+            AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
         const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
         const bool keyChanged   = (followerNavPathTargetKey != targetKey);
         const f32 driftDx = finalGoal.x - followerNavPathLastTarget.x;
@@ -3305,19 +3330,16 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
                                    keyChanged || targetDrifted;
         if (needsRefresh) {
             followerNavPath.Reset();
-            // Bug 2 fix 1 follow-up (user 2026-05-10): skip Layer 1 LOS
-            // for door-handoff targets. ComputePathTo's Layer 1 returns
-            // pathLen=1 (direct vector to target) when MovementClear's
-            // pelvis-line says clear — but for a door target across
-            // village geometry, the pelvis-line passes over short walls
-            // / through gaps that the follower can't actually walk.
-            // Forcing Layer 1 skip drops to Layer 3 BFS through the
-            // RoomNavData graph (16k+ nodes for Kokiri Forest) whose
-            // edges were built with MovementClearAtPosition + step-up
-            // gates at scan time.
+            // Door-handoff: skipLayer1LOS=true (LOS to leader's pos in
+            // another room is wishful) + preferLeaderTrail=true (the
+            // leader's trail in our room IS the path to follow — see
+            // Item 2 comment block above). For non-handoff (regular
+            // leader pursuit in same room), use defaults — Layer 1 LOS
+            // works for short hops, Layer 3 BFS for obstacle navigation.
             bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
                 targetKey, &player->actor, finalGoal, gPlayState, followerNavPath,
-                /*skipLayer1LOS=*/useDoorTarget);
+                /*skipLayer1LOS=*/useDoorTarget,
+                /*preferLeaderTrail=*/useDoorTarget);
             followerNavPathTargetKey  = targetKey;
             followerNavPathLastTarget = finalGoal;
             if (!gotPath) {
