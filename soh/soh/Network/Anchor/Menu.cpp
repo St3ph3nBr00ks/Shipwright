@@ -249,6 +249,16 @@ void AnchorMainMenu(WidgetInfo& info) {
               "Pre-scans each visited room into a walkable-node graph stored on "
               "disk under roomnavdata/. The Use Room Graph toggle above reads "
               "from this. Recommended on whenever Use Room Graph is on." },
+            { "Detect Vine / Static Climb Surfaces (Path B)",
+              CVAR_ENHANCEMENT("RoomNavData.PathBClimbDetection"),
+              "Scan static scene collision for climbable wall flags (vine walls "
+              "and any climbable surface baked into static geometry). Without "
+              "this toggle, only discrete ladder ACTORS (Path A allowlist: "
+              "Goron City interior ladder, Dodongo's Cavern ladder, Inside Deku "
+              "Tree falling ladder) get climb anchors and grids — vine walls "
+              "stay invisible to the nav system. Required for the climb-surface "
+              "nav grid (schema v7) to cover vines. Recommended ON whenever "
+              "Pre-scan Room Data is on." },
             { "Use Vertical Teleport (climb)",
               CVAR_ENHANCEMENT("Nav.VerticalTeleport"),
               "Wraps the existing follower CLIMBING pipeline with the nav "

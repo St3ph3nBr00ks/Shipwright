@@ -26,8 +26,13 @@ extern "C" {
 #include "z64.h"
 }
 
-#define CVAR_NAV_ENABLED      CVAR_ENHANCEMENT("Nav.Enabled")
-#define CVAR_CLIMB_ANYWHERE   CVAR_ENHANCEMENT("ClimbAnywhere")
+#define CVAR_NAV_ENABLED        CVAR_ENHANCEMENT("Nav.Enabled")
+// SoH's "climb any wall" cheat. Lives under gCheats. (NOT
+// gEnhancements.ClimbAnywhere — that name doesn't exist; UI label is
+// "Climb Anywhere" but the CVar is gCheats.ClimbEverything per
+// SohMenuEnhancements.cpp:1738. Same flag is also OR'd into wall-flag
+// bitmaps by func_80041DB8 at runtime.)
+#define CVAR_CLIMB_EVERYTHING   CVAR_CHEAT("ClimbEverything")
 
 namespace AnchorNav {
 
@@ -220,14 +225,14 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
 }
 
 uint16_t ResolveDynamicClimbMask(s16 actorId, uint16_t baseMask) {
-    // Follower inherits Link's runtime CVar — when ClimbAnywhere is on,
-    // adult / child Link can climb any vertical wall, so the follower's
-    // mask gains GENERIC_WALL. CVar off → base mask only.
+    // Follower inherits Link's runtime cheat — when ClimbEverything is
+    // on, adult / child Link can climb any vertical wall, so the
+    // follower's mask gains GENERIC_WALL. Cheat off → base mask only.
     //
     // Other consumers (none yet wired; future Skullwalltula traits will
     // include GENERIC_WALL in their static base) get baseMask unchanged.
     if (actorId == ACTOR_EN_OE2) {
-        if (CVarGetInteger(CVAR_CLIMB_ANYWHERE, 0) != 0) {
+        if (CVarGetInteger(CVAR_CLIMB_EVERYTHING, 0) != 0) {
             return (uint16_t)(baseMask | ::AnchorNavRoom::NODE_CLIMB_GENERIC_WALL);
         }
     }
