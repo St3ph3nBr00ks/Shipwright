@@ -190,6 +190,81 @@ void AnchorMainMenu(WidgetInfo& info) {
                            allowChooseItems ? 1 : 0);
             CVarSave();
         }
+
+        // Nav data usage. Mirrors the canonical CVars under
+        // gEnhancements.Nav.* / gEnhancements.RoomNavData.* — flipping
+        // these here is identical to flipping them in
+        // Enhancements → Multiplayer Nav. Surfaced here so they're reachable
+        // in the same place the follower itself is enabled. All default
+        // off per the vanilla-altering-feature rule.
+        //
+        // Each toggle is independently load-bearing for a different layer
+        // of ComputePathTo (the substrate's path planner):
+        //   - Nav System          → master gate; everything else is no-op
+        //                           when this is off
+        //   - Pathfinding         → consumer gate; without this the follower
+        //                           uses legacy direct-yaw pursuit even with
+        //                           the layers below enabled
+        //   - Trail Breadcrumbs   → Layer 2 of ComputePathTo; without this
+        //                           the trail-walk fallback is empty
+        //   - Room Graph (BFS)    → Layer 3 of ComputePathTo; without this
+        //                           the BFS fallback is no-op
+        //   - Pre-scan Room Data  → data layer that Layer 3 reads from;
+        //                           without this Layer 3 has no graph
+        //   - Vertical Teleport   → Shape A wrapper around the climb
+        //                           pipeline (ladders/vines/hang-state
+        //                           resolution)
+        ImGui::SeparatorText("Nav Data Usage");
+
+        struct NavToggle {
+            const char* label;
+            const char* cvar;
+            const char* tooltip;
+        };
+        static const NavToggle kFollowerNavToggles[] = {
+            { "Nav System (master)",
+              CVAR_ENHANCEMENT("Nav.Enabled"),
+              "Master gate for the whole multiplayer nav system. When off, every "
+              "other nav toggle below is a no-op and the follower falls back to "
+              "legacy direct-yaw pursuit." },
+            { "Use Nav Pathfinding",
+              CVAR_ENHANCEMENT("Nav.AiFollowerConsumer"),
+              "Routes follower pursuit (FOLLOW / RETURN / ENGAGE / STUCK) through "
+              "the nav substrate's ComputePathTo planner instead of the legacy "
+              "bespoke direct-yaw steering. Requires Nav System on." },
+            { "Track Trail Breadcrumbs (Layer 2)",
+              CVAR_ENHANCEMENT("Nav.ActorTrail"),
+              "Captures recent leader / enemy / follower positions at 30 Hz. "
+              "ComputePathTo's Layer 2 walks the leader's trail to find a "
+              "reachable breadcrumb when direct line-of-sight pursuit is blocked. "
+              "Requires Nav System on." },
+            { "Use Room Graph (Layer 3)",
+              CVAR_ENHANCEMENT("Nav.RoomNavConsumer"),
+              "ComputePathTo's Layer 3 consults the pre-scanned RoomNavData graph "
+              "(BFS over walkable nodes) when LOS and trail layers fail. The "
+              "load-bearing fallback for cross-room and obstacle-rich pursuit. "
+              "Requires Nav System on AND Pre-scan Room Data on." },
+            { "Pre-scan Room Data (data layer)",
+              CVAR_ENHANCEMENT("RoomNavData.Enabled"),
+              "Pre-scans each visited room into a walkable-node graph stored on "
+              "disk under roomnavdata/. The Use Room Graph toggle above reads "
+              "from this. Recommended on whenever Use Room Graph is on." },
+            { "Use Vertical Teleport (climb)",
+              CVAR_ENHANCEMENT("Nav.VerticalTeleport"),
+              "Wraps the existing follower CLIMBING pipeline with the nav "
+              "substrate's Shape A logic (real ladder/vine animation + hang-"
+              "state BTN_A/BTN_B resolution). Requires Nav System on." },
+        };
+        for (const auto& t : kFollowerNavToggles) {
+            bool v = CVarGetInteger(t.cvar, 0) != 0;
+            if (UIWidgets::Checkbox(t.label, &v,
+                                    UIWidgets::CheckboxOptions()
+                                        .Color(THEME_COLOR)
+                                        .Tooltip(t.tooltip))) {
+                CVarSetInteger(t.cvar, v ? 1 : 0);
+                CVarSave();
+            }
+        }
     }
 
     ImGui::Spacing();
