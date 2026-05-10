@@ -2493,8 +2493,11 @@ void Anchor::HandleStateReturn(Player* player, const Vec3f& sideTarget, const Ve
                                    keyChanged || targetDrifted;
         if (needsRefresh) {
             followerNavPath.Reset();
+            // Same Layer 1 LOS skip as HandleStateFollow's door-handoff
+            // path — see that site for rationale.
             bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
-                targetKey, &player->actor, finalGoal, gPlayState, followerNavPath);
+                targetKey, &player->actor, finalGoal, gPlayState, followerNavPath,
+                /*skipLayer1LOS=*/useDoorTarget);
             followerNavPathTargetKey  = targetKey;
             followerNavPathLastTarget = finalGoal;
             if (!gotPath) {
@@ -3192,8 +3195,19 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
                                    keyChanged || targetDrifted;
         if (needsRefresh) {
             followerNavPath.Reset();
+            // Bug 2 fix 1 follow-up (user 2026-05-10): skip Layer 1 LOS
+            // for door-handoff targets. ComputePathTo's Layer 1 returns
+            // pathLen=1 (direct vector to target) when MovementClear's
+            // pelvis-line says clear — but for a door target across
+            // village geometry, the pelvis-line passes over short walls
+            // / through gaps that the follower can't actually walk.
+            // Forcing Layer 1 skip drops to Layer 3 BFS through the
+            // RoomNavData graph (16k+ nodes for Kokiri Forest) whose
+            // edges were built with MovementClearAtPosition + step-up
+            // gates at scan time.
             bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
-                targetKey, &player->actor, finalGoal, gPlayState, followerNavPath);
+                targetKey, &player->actor, finalGoal, gPlayState, followerNavPath,
+                /*skipLayer1LOS=*/useDoorTarget);
             followerNavPathTargetKey  = targetKey;
             followerNavPathLastTarget = finalGoal;
             if (!gotPath) {

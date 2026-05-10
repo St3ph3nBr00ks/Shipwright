@@ -167,11 +167,23 @@ public:
     //
     // Returns true on a non-empty path; false if nothing reachable. Caller
     // treats false as "stuck" — route to recovery / direct-yaw.
+    //
+    // `skipLayer1LOS` forces Layer 1 (direct LOS reachability) to be
+    // skipped even when MovementClear succeeds. Use when the caller knows
+    // LOS is unreliable for the target — e.g. door-handoff targets across
+    // complex collision where MovementClear's pelvis-line passes over
+    // short walls / through narrow gaps that the follower can't actually
+    // walk through. Forces fallback to Layer 3 (RoomNavData BFS) which
+    // gates edges on MovementClearAtPosition + step-up at scan time.
+    // (User 2026-05-10 follow-up to Bug 2 fix 1: door-handoff substrate
+    // routing was returning pathLen=1 LOS through walls; follower walked
+    // into wall, STUCK accumulated, G12 teleport fired.)
     bool ComputePathTo(TrailKey key,
                        const Actor* navigator,
                        const Vec3f& targetPos,
                        PlayState* play,
-                       NavPath& out) const;
+                       NavPath& out,
+                       bool skipLayer1LOS = false) const;
 
     // Find any captured waypoint of `key`'s trail that lies within
     // `maxGapDistance` of `referencePos` AND closer to `targetPos` than

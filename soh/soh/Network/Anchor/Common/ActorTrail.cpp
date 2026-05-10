@@ -442,7 +442,8 @@ bool ActorTrail::ComputePathTo(TrailKey key,
                                 const Actor* navigator,
                                 const Vec3f& targetPos,
                                 PlayState* play,
-                                NavPath& out) const {
+                                NavPath& out,
+                                bool skipLayer1LOS) const {
     out.Reset();
     if (navigator == nullptr || play == nullptr || gPlayState == nullptr) return false;
 
@@ -457,9 +458,17 @@ bool ActorTrail::ComputePathTo(TrailKey key,
     // above/below so the path consumer routes through the trail
     // breadcrumbs / RoomNavData edges that actually encode vertical
     // traversal (slope / ladder / climb anchor).
+    //
+    // skipLayer1LOS (user 2026-05-10): caller can force Layer 1 to be
+    // skipped when LOS is known unreliable for this target (e.g. door-
+    // handoff targets across complex collision — pelvis-line MovementClear
+    // passes over short walls and through narrow gaps that the follower
+    // can't actually walk through). Forces fallback to Layer 3 BFS whose
+    // graph edges encode actual walkability.
     constexpr float kLayer1YGate = 50.0f;
     float dyToTarget = std::fabs(targetPos.y - navigator->world.pos.y);
-    if (dyToTarget < kLayer1YGate &&
+    if (!skipLayer1LOS &&
+        dyToTarget < kLayer1YGate &&
         MovementClear(navigator, targetPos, play)) {
         out.waypoints.push_back(targetPos);
         return true;
