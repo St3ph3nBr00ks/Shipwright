@@ -441,9 +441,16 @@ typedef struct {
 // AIFollower/Follower.h (Phase 1 commit 3 of the SRP refactor).
 namespace AnchorFollower {
     struct FollowerFrameContext;
+    // Diagnostic recorder needs read access to private follower state.
+    // Friend-declared on Anchor below so it can read followerAIState /
+    // followerNavPath / G-timers without an API surface bloat.
+    // Spec: Plans/follower_recorder_plan.md.
+    void CaptureFrame(const FollowerFrameContext& ctx);
 }
 
 class Anchor : public Network {
+    friend void AnchorFollower::CaptureFrame(const AnchorFollower::FollowerFrameContext&);
+
   private:
     uint32_t spawningDummyPlayerForClientId = 0;
     // Local monotonic counter sent in UPDATE_CLIENT_STATE so the host can detect

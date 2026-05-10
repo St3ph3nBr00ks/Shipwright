@@ -195,6 +195,26 @@ void SohMenu::AddMenuDevTools() {
             "Prerequisite: must be in a loaded save (not at title screen / file "
             "select). The state machine will wait silently until gameplay begins."));
 
+    // AI Follower Recorder — per-frame JSONL capture of follower decision
+    // state for post-hoc debug analysis. See Plans/follower_recorder_plan.md.
+    AddWidget(path, "AI Follower Recorder", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Follower Recorder Enabled", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_DEVELOPER_TOOLS("FollowerRecorder.Enabled"))
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Captures per-frame follower decision state to "
+            "roommanifests/follower_recordings/follower_<msEpoch>.jsonl, one JSON "
+            "object per line. Each line carries: scene/room, leader pos + state, "
+            "follower pos + state-machine state + state-frames, distances, NavPath "
+            "presence + cursor, all G10/G12/G14/G15 timer values, autonomous-climb "
+            "flag, and any teleport events fired this frame.\n\n"
+            "Capture rate: gDeveloperTools.FollowerRecorder.CaptureHz (default 15). "
+            "Auto-stop after gDeveloperTools.FollowerRecorder.MaxSeconds (default "
+            "300 = 5 min) — the toggle flips back off when the cap is hit.\n\n"
+            "Hand the recording file to the next debug session instead of "
+            "describing what you saw.\n\n"
+            "Default: off. Zero overhead when disabled."));
+
     // Stats
     path.sidebarName = "Stats";
     AddSidebarEntry("Dev Tools", path.sidebarName, 1);

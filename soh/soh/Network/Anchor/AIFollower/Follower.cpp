@@ -15,6 +15,7 @@
  */
 
 #include "Follower.h"
+#include "FollowerRecorder.h"
 #include "../Anchor.h"
 #include "soh/cvar_prefixes.h"
 #include "../Common/ActorSyncHelpers.h"
@@ -982,6 +983,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         followerPostTeleportFrames    = kPostTeleportHoldFrames;
         followerCloseFailBaseline     = 0.0f;
         followerCloseFailFrames       = 0;
+        AnchorFollower::QueueRecorderEvent(std::string("teleport:") + reason);
         if (!roomsDiffer) {
             player->actor.world.pos = destPos;
             player->actor.prevPos   = destPos;
@@ -1711,6 +1713,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     // the follower switched to stick-input movement. The only path
     // that now writes to player->actor.world.pos is the STUCK state
     // fallback above — see that case's comment block for rationale.
+
+    AnchorFollower::CaptureFrame(ctx);
 }
 
 // ---------------------------------------------------------------------------
