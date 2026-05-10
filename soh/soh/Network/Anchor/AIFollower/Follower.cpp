@@ -2707,18 +2707,60 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
 
     // P3.8 part 2 / P3.6: autonomous climb path. Entered from
     // HandleStateFollow when the follower is at a climb anchor and
-    // the path goes up. Target is followerClimbTopTarget (set on
-    // entry) instead of the leader's position. Exits when the
-    // follower reaches the top tolerance OR when a safety counter
-    // elapses (anchor was bad / can't make progress).
+    // the path goes up, OR from the leader-climbing trigger when the
+    // leader is using a ladder/vine (Item 1 fix). Drives the follower
+    // through walk-to-anchor → grab-collider → climb-up via the
+    // CLIMBING-aware injection in TickFollowerInput.
+    //
+    // Target tracking (user 2026-05-10 follow-up to Item 1): when the
+    // leader is on the ladder, refresh followerClimbTopTarget to the
+    // LEADER's current position each frame so the follower stops at
+    // the leader's Y instead of continuing to the captured anchor top.
+    // Pre-fix: target was set ONCE at engagement to anchor.topPos and
+    // never refreshed → follower climbed all the way up regardless of
+    // leader Y, dismounted, ran forward past the leader who was still
+    // mid-climb. Mirror of non-autonomous CLIMBING branch's
+    // `followerMoveTarget = leaderPos` line.
+    //
+    // Exits:
+    //   - Leader stopped climbing (isClimbing edge true→false) →
+    //     dismount where we are; mirrors non-autonomous branch.
+    //   - Follower Y caught up to leader/anchor Y → reached-top
+    //     dismount.
+    //   - 600-frame safety timeout (~10s).
     if (followerAutonomousClimb) {
         followerAutonomousClimbFrames++;
+        // Refresh target to leader's current pos while leader is
+        // still on the ladder. CLIMBING-aware stick injection in
+        // TickFollowerInput reads followerMoveTarget.y for stick_y
+        // direction (leader above → climb up, leader below → climb
+        // down, within 8u → idle on ladder). When leader stops
+        // climbing, target stays at the last-captured leader position
+        // and reachedTop check finishes the climb.
+        bool leaderStillClimbing = false;
+        {
+            auto it = clients.find(followerLeaderClientId);
+            if (it != clients.end() && it->second.isClimbing) {
+                followerClimbTopTarget = it->second.posRot.pos;
+                leaderStillClimbing = true;
+            }
+        }
         constexpr f32 kAutonomousClimbReachY = 16.0f;       // within 16u Y of top → done
         constexpr int kAutonomousClimbMaxFrames = 600;      // ~10s safety
         bool reachedTop =
             (player->actor.world.pos.y >= followerClimbTopTarget.y - kAutonomousClimbReachY);
         bool timedOut = (followerAutonomousClimbFrames >= kAutonomousClimbMaxFrames);
-        if (reachedTop || timedOut) {
+        // While leader is still climbing, suppress the reachedTop exit
+        // — follower should stay on the ladder alongside the leader
+        // (CLIMBING-aware injection naturally idles stick_y when at
+        // leader's Y; no exit needed). Pre-fix without this gate:
+        // reachedTop fired when follower caught up to leader's Y,
+        // exited CLIMBING, dismount-forward-hold counter armed,
+        // follower walked forward off the ladder rim while leader was
+        // still mid-climb — exactly the user-reported bug ("follower
+        // climbs to the top and continues running in a straight line").
+        bool exitNow = (!leaderStillClimbing && reachedTop) || timedOut;
+        if (exitNow) {
             followerClimbDismountYaw    = player->actor.shape.rot.y;
             followerClimbDismountFrames = kClimbDismountHoldFrames;
             followerAIState     = FollowerAIState::IDLE;
@@ -2726,16 +2768,17 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
             followerAutonomousClimb       = false;
             followerAutonomousClimbFrames = 0;
             SPDLOG_INFO("[Follower] CLIMBING→IDLE (autonomous {}); "
-                        "follower y={:.0f} top={:.0f}",
-                        reachedTop ? "reached top" : "TIMEOUT",
+                        "follower y={:.0f} target y={:.0f}",
+                        timedOut ? "TIMEOUT" : "reached top, leader stopped",
                         player->actor.world.pos.y,
                         followerClimbTopTarget.y);
             return;
         }
-        // followerMoveTarget = climb-top position. TickFollowerInput's
-        // CLIMBING-aware injection reads this for stick_y direction
-        // and for walk-to-ladder approach when not yet on the climb
-        // collider. No leader-yaw match — leader may be far away.
+        // followerMoveTarget = climb target (leader pos when tracking,
+        // or last-captured pos when leader just stopped).
+        // TickFollowerInput's CLIMBING-aware injection reads this for
+        // stick_y direction and for walk-to-ladder approach when not
+        // yet on the climb collider.
         followerMoveTarget = followerClimbTopTarget;
         return;
     }
