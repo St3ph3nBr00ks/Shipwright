@@ -3766,6 +3766,58 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         sXluDl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
     }
 
+    // Climb-surface nodes (Stage 8 of climb_surface_nav_grid_plan).
+    // Each climb-surface node sits ON a climbable wall; the colour
+    // encodes the surface type:
+    //   NODE_CLIMB_LADDER          → bright orange
+    //   NODE_CLIMB_VINE            → lime green (distinct from walkable green)
+    //   NODE_CLIMB_DESIGNATED_WALL → cobalt blue
+    //   NODE_CLIMB_GENERIC_WALL    → light gray
+    // Quads render at the node's actual wall position via AddGroundQuad.
+    // For walls perpendicular to the camera, the quad appears as a thin
+    // line; from above it appears as a small flat square. Acceptable for
+    // diagnostic verification (the corresponding ClimbAnchor's vertical
+    // post above already shows the climb extent at-a-glance).
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0x90, 0x10, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if ((node.flags & NODE_CLIMB_LADDER) == 0) continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x60, 0xE0, 0x40, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if ((node.flags & NODE_CLIMB_VINE) == 0) continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x40, 0x80, 0xE0, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if ((node.flags & NODE_CLIMB_DESIGNATED_WALL) == 0) continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xC0, 0xC0, 0xC0, 0xFF));
+    for (const NavNode& node : data->nodes) {
+        if ((node.flags & NODE_CLIMB_GENERIC_WALL) == 0) continue;
+        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    }
+
+    // Climb-surface edges (Stage 8). Drawn in soft yellow-white so they
+    // read as "climb connectivity" without competing with the white
+    // floor-edge lines or the per-type node colors. Filtered to edges
+    // that touch a climb-surface node (either endpoint has NODE_CLIMB_ANY)
+    // — the floor-only edges were already drawn above.
+    if (data->firstClimbSurfaceNodeIdx != UINT16_MAX) {
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xE8, 0x80, 0xC0));
+        const uint16_t firstClimbIdx = data->firstClimbSurfaceNodeIdx;
+        for (const NavEdge& edge : data->edges) {
+            if (edge.fromIdx >= nodeCount || edge.toIdx >= nodeCount) continue;
+            // Edge touches a climb-surface node iff at least one endpoint
+            // index is in the climb-surface range.
+            if (edge.fromIdx < firstClimbIdx && edge.toIdx < firstClimbIdx) continue;
+            const Vec3f& posA = data->nodes[edge.fromIdx].pos;
+            const Vec3f& posB = data->nodes[edge.toIdx].pos;
+            AddGroundLineQuad(sXluDl, sVtxDl, posA, posB);
+        }
+    }
+
     // Hazard centroids — deep red, slightly larger than node quads so they
     // read as "this whole region is bad." Currently unpopulated by the v1
     // scan; loop is a no-op until a future commit clusters HAZARD nodes
@@ -3861,9 +3913,21 @@ static void OnDebugDraw() {
         return;
     }
 
-    SPDLOG_INFO("[RoomNav][DebugDraw] scene={} room={} loaded: nodes={} edges={} climbs={} hazards={}",
+    // Stage 8: also surface climb-surface node count so the user can
+    // verify that the v7 grid is actually populated (firstClimbSurfaceNodeIdx
+    // != UINT16_MAX → climb surface nodes follow).
+    size_t climbSurfaceNodes = 0;
+    if (data->firstClimbSurfaceNodeIdx != UINT16_MAX &&
+        (size_t)data->firstClimbSurfaceNodeIdx <= data->nodes.size()) {
+        climbSurfaceNodes = data->nodes.size() - data->firstClimbSurfaceNodeIdx;
+    }
+    SPDLOG_INFO("[RoomNav][DebugDraw] scene={} room={} loaded: nodes={} "
+                "(floor={} climbSurface={}) edges={} climbAnchors={} hazards={}",
                 scene, (int)room,
-                data->nodes.size(), data->edges.size(),
+                data->nodes.size(),
+                (size_t)data->nodes.size() - climbSurfaceNodes,
+                climbSurfaceNodes,
+                data->edges.size(),
                 data->climbAnchors.size(), data->hazardCentroids.size());
     sDebugDrawLastSummaryScene = scene;
     sDebugDrawLastSummaryRoom  = room;
