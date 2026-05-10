@@ -3402,6 +3402,101 @@ static void AddVerticalPost(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
     dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
 }
 
+// Append a wall-aligned quad at `pos` lying in the plane defined by
+// `axisU` (lateral on the wall) and `axisV` (up-along-wall). Offset
+// slightly along `outwardNormal` so the quad doesn't z-fight with the
+// wall poly itself. Stage 8 v2 of climb_surface_nav_grid_plan: the
+// previous Stage 8 used AddGroundQuad, which orients the marker on the
+// XZ plane regardless of the wall orientation — looked correct from
+// above but invisible from the side. Wall-aligned quads stay visible
+// at any camera angle.
+static void AddWallQuad(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
+                        const Vec3f& pos, const Vec3f& axisU,
+                        const Vec3f& axisV, const Vec3f& outwardNormal) {
+    constexpr float kStandoff = 1.5f;       // small offset along normal to avoid z-fight
+    constexpr float h = kNodeQuadHalfExtent; // 5u — same as floor nodes
+    Vec3f c = { pos.x + outwardNormal.x * kStandoff,
+                pos.y + outwardNormal.y * kStandoff,
+                pos.z + outwardNormal.z * kStandoff };
+    auto corner = [&](float du, float dv) -> Vec3f {
+        return { c.x + du * axisU.x + dv * axisV.x,
+                 c.y + du * axisU.y + dv * axisV.y,
+                 c.z + du * axisU.z + dv * axisV.z };
+    };
+    Vec3f p0 = corner(-h, -h);
+    Vec3f p1 = corner(+h, -h);
+    Vec3f p2 = corner(+h, +h);
+    Vec3f p3 = corner(-h, +h);
+    char nx = (char)(outwardNormal.x * 127.0f);
+    char ny = (char)(outwardNormal.y * 127.0f);
+    char nz = (char)(outwardNormal.z * 127.0f);
+    Vtx v0 = MakeVtxN((short)p0.x, (short)p0.y, (short)p0.z, nx, ny, nz, 0xFF);
+    Vtx v1 = MakeVtxN((short)p1.x, (short)p1.y, (short)p1.z, nx, ny, nz, 0xFF);
+    Vtx v2 = MakeVtxN((short)p2.x, (short)p2.y, (short)p2.z, nx, ny, nz, 0xFF);
+    Vtx v3 = MakeVtxN((short)p3.x, (short)p3.y, (short)p3.z, nx, ny, nz, 0xFF);
+    vtxDl.push_back(v0);
+    vtxDl.push_back(v1);
+    vtxDl.push_back(v2);
+    vtxDl.push_back(v3);
+    dl.push_back(gsSPVertex((uintptr_t)&vtxDl[vtxDl.size() - 4], 4, 0));
+    dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+}
+
+// Append a wall-aligned thin line quad connecting two points on the
+// same wall. Perpendicular vector is computed IN THE WALL PLANE via
+// cross(lineDir, normal) — gives a thin band that lies on the wall
+// surface regardless of the line's orientation (vertical, horizontal,
+// or diagonal). Solves the "vertical edges invisible" bug from the
+// previous Stage 8 (AddGroundLineQuad's XZ-perpendicular returned a
+// degenerate quad for same-XZ different-Y endpoints).
+static void AddWallLineQuad(std::vector<Gfx>& dl, std::vector<Vtx>& vtxDl,
+                            const Vec3f& posA, const Vec3f& posB,
+                            const Vec3f& outwardNormal) {
+    constexpr float kStandoff = 2.0f;
+    constexpr float kHalfWidth = kEdgeLineHalfWidth;
+    Vec3f line = { posB.x - posA.x, posB.y - posA.y, posB.z - posA.z };
+    float lineLen = std::sqrt(line.x * line.x + line.y * line.y + line.z * line.z);
+    if (lineLen < 0.01f) return;
+    Vec3f lineDir = { line.x / lineLen, line.y / lineLen, line.z / lineLen };
+    // perp = cross(lineDir, outwardNormal) — tangent to the wall plane,
+    // perpendicular to the line direction. Works for any line orientation
+    // because both inputs lie in the wall plane (well, normal is OUT of
+    // it, but the cross product is the in-plane perpendicular).
+    Vec3f perp = {
+        lineDir.y * outwardNormal.z - lineDir.z * outwardNormal.y,
+        lineDir.z * outwardNormal.x - lineDir.x * outwardNormal.z,
+        lineDir.x * outwardNormal.y - lineDir.y * outwardNormal.x,
+    };
+    float perpLen = std::sqrt(perp.x * perp.x + perp.y * perp.y + perp.z * perp.z);
+    if (perpLen < 0.01f) return;  // line parallel to normal (shouldn't happen on a wall grid)
+    perp.x /= perpLen; perp.y /= perpLen; perp.z /= perpLen;
+
+    Vec3f a = { posA.x + outwardNormal.x * kStandoff,
+                posA.y + outwardNormal.y * kStandoff,
+                posA.z + outwardNormal.z * kStandoff };
+    Vec3f b = { posB.x + outwardNormal.x * kStandoff,
+                posB.y + outwardNormal.y * kStandoff,
+                posB.z + outwardNormal.z * kStandoff };
+    Vec3f c0 = { a.x + perp.x * kHalfWidth, a.y + perp.y * kHalfWidth, a.z + perp.z * kHalfWidth };
+    Vec3f c1 = { a.x - perp.x * kHalfWidth, a.y - perp.y * kHalfWidth, a.z - perp.z * kHalfWidth };
+    Vec3f c2 = { b.x - perp.x * kHalfWidth, b.y - perp.y * kHalfWidth, b.z - perp.z * kHalfWidth };
+    Vec3f c3 = { b.x + perp.x * kHalfWidth, b.y + perp.y * kHalfWidth, b.z + perp.z * kHalfWidth };
+
+    char nx = (char)(outwardNormal.x * 127.0f);
+    char ny = (char)(outwardNormal.y * 127.0f);
+    char nz = (char)(outwardNormal.z * 127.0f);
+    Vtx v0 = MakeVtxN((short)c0.x, (short)c0.y, (short)c0.z, nx, ny, nz, 0xFF);
+    Vtx v1 = MakeVtxN((short)c1.x, (short)c1.y, (short)c1.z, nx, ny, nz, 0xFF);
+    Vtx v2 = MakeVtxN((short)c2.x, (short)c2.y, (short)c2.z, nx, ny, nz, 0xFF);
+    Vtx v3 = MakeVtxN((short)c3.x, (short)c3.y, (short)c3.z, nx, ny, nz, 0xFF);
+    vtxDl.push_back(v0);
+    vtxDl.push_back(v1);
+    vtxDl.push_back(v2);
+    vtxDl.push_back(v3);
+    dl.push_back(gsSPVertex((uintptr_t)&vtxDl[vtxDl.size() - 4], 4, 0));
+    dl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+}
+
 // Append a small ground-aligned '+' cross marker at `pos`. Two
 // perpendicular thin XZ-plane quads — one extending along ±X, one along
 // ±Z — produce a clear cross visible from any top-down camera angle.
@@ -3766,52 +3861,85 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         sXluDl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
     }
 
-    // Climb-surface nodes (Stage 8 of climb_surface_nav_grid_plan).
+    // Climb-surface nodes (Stage 8 v2 of climb_surface_nav_grid_plan).
     // Each climb-surface node sits ON a climbable wall; the colour
     // encodes the surface type:
     //   NODE_CLIMB_LADDER          → bright orange
     //   NODE_CLIMB_VINE            → lime green (distinct from walkable green)
     //   NODE_CLIMB_DESIGNATED_WALL → cobalt blue
     //   NODE_CLIMB_GENERIC_WALL    → light gray
-    // Quads render at the node's actual wall position via AddGroundQuad.
-    // For walls perpendicular to the camera, the quad appears as a thin
-    // line; from above it appears as a small flat square. Acceptable for
-    // diagnostic verification (the corresponding ClimbAnchor's vertical
-    // post above already shows the climb extent at-a-glance).
-    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0x90, 0x10, 0xFF));
-    for (const NavNode& node : data->nodes) {
-        if ((node.flags & NODE_CLIMB_LADDER) == 0) continue;
-        AddGroundQuad(sXluDl, sVtxDl, node.pos);
-    }
-    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x60, 0xE0, 0x40, 0xFF));
-    for (const NavNode& node : data->nodes) {
-        if ((node.flags & NODE_CLIMB_VINE) == 0) continue;
-        AddGroundQuad(sXluDl, sVtxDl, node.pos);
-    }
-    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x40, 0x80, 0xE0, 0xFF));
-    for (const NavNode& node : data->nodes) {
-        if ((node.flags & NODE_CLIMB_DESIGNATED_WALL) == 0) continue;
-        AddGroundQuad(sXluDl, sVtxDl, node.pos);
-    }
-    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xC0, 0xC0, 0xC0, 0xFF));
-    for (const NavNode& node : data->nodes) {
-        if ((node.flags & NODE_CLIMB_GENERIC_WALL) == 0) continue;
-        AddGroundQuad(sXluDl, sVtxDl, node.pos);
+    //
+    // v2 fix: render WALL-aligned quads (not ground-aligned) so the
+    // markers stay visible from any camera angle. Iterates climbAnchors
+    // (instead of all nodes) so each render call has access to the
+    // anchor's planeAxisU/V/Normal — used by AddWallQuad to orient
+    // the quad in the wall plane with a small standoff.
+    for (const ClimbAnchor& anchor : data->climbAnchors) {
+        if (anchor.nodeCount == 0) continue;
+        if ((size_t)anchor.firstNodeIdx + anchor.nodeCount > nodeCount) continue;
+        uint8_t r = 0, g = 0, b = 0;
+        switch (anchor.surfaceType) {
+            case NODE_CLIMB_LADDER:          r=0xFF; g=0x90; b=0x10; break;
+            case NODE_CLIMB_VINE:            r=0x60; g=0xE0; b=0x40; break;
+            case NODE_CLIMB_DESIGNATED_WALL: r=0x40; g=0x80; b=0xE0; break;
+            case NODE_CLIMB_GENERIC_WALL:    r=0xC0; g=0xC0; b=0xC0; break;
+            default: continue;
+        }
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, r, g, b, 0xFF));
+        for (uint16_t i = 0; i < anchor.nodeCount; i++) {
+            const NavNode& node = data->nodes[(size_t)anchor.firstNodeIdx + i];
+            AddWallQuad(sXluDl, sVtxDl, node.pos,
+                        anchor.planeAxisU, anchor.planeAxisV, anchor.planeNormal);
+        }
     }
 
-    // Climb-surface edges (Stage 8). Drawn in soft yellow-white so they
-    // read as "climb connectivity" without competing with the white
-    // floor-edge lines or the per-type node colors. Filtered to edges
-    // that touch a climb-surface node (either endpoint has NODE_CLIMB_ANY)
-    // — the floor-only edges were already drawn above.
-    if (data->firstClimbSurfaceNodeIdx != UINT16_MAX) {
+    // Climb-surface edges (Stage 8 v2). Two render passes:
+    //   1. In-grid edges (both endpoints in the same anchor's range) →
+    //      AddWallLineQuad with the anchor's normal. Includes the
+    //      VERTICAL V±1 edges that the previous Stage 8 rendered as
+    //      degenerate zero-area XZ quads (invisible).
+    //   2. Boundary edges (one endpoint floor, one endpoint climb-
+    //      surface) → AddGroundLineQuad. Boundary edges cross 3D space
+    //      with non-zero XZ separation, so the ground helper works
+    //      fine here.
+    //
+    // Build a node→anchor lookup so the per-edge classification is O(1)
+    // instead of O(anchors). Lookup is cheap (vector of uint16_t) and
+    // amortises well across the per-frame render.
+    if (data->firstClimbSurfaceNodeIdx != UINT16_MAX &&
+        !data->climbAnchors.empty()) {
+        std::vector<uint16_t> nodeToAnchor(nodeCount, UINT16_MAX);
+        for (uint16_t a = 0; a < (uint16_t)data->climbAnchors.size(); a++) {
+            const ClimbAnchor& anc = data->climbAnchors[a];
+            for (uint16_t i = 0; i < anc.nodeCount; i++) {
+                size_t idx = (size_t)anc.firstNodeIdx + i;
+                if (idx < nodeCount) nodeToAnchor[idx] = a;
+            }
+        }
+        // In-grid edges first — wall-aligned, soft yellow-white.
         sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xE8, 0x80, 0xC0));
-        const uint16_t firstClimbIdx = data->firstClimbSurfaceNodeIdx;
         for (const NavEdge& edge : data->edges) {
             if (edge.fromIdx >= nodeCount || edge.toIdx >= nodeCount) continue;
-            // Edge touches a climb-surface node iff at least one endpoint
-            // index is in the climb-surface range.
-            if (edge.fromIdx < firstClimbIdx && edge.toIdx < firstClimbIdx) continue;
+            uint16_t aFrom = nodeToAnchor[edge.fromIdx];
+            uint16_t aTo   = nodeToAnchor[edge.toIdx];
+            if (aFrom == UINT16_MAX || aTo == UINT16_MAX) continue; // not in-grid
+            if (aFrom != aTo) continue;                              // cross-anchor (rare; treat as boundary)
+            const ClimbAnchor& anc = data->climbAnchors[aFrom];
+            const Vec3f& posA = data->nodes[edge.fromIdx].pos;
+            const Vec3f& posB = data->nodes[edge.toIdx].pos;
+            AddWallLineQuad(sXluDl, sVtxDl, posA, posB, anc.planeNormal);
+        }
+        // Boundary edges — ground-aligned, slightly cooler hue (pure
+        // white) so they're distinguishable from the in-grid edges.
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xFF, 0xFF, 0xC0));
+        for (const NavEdge& edge : data->edges) {
+            if (edge.fromIdx >= nodeCount || edge.toIdx >= nodeCount) continue;
+            uint16_t aFrom = nodeToAnchor[edge.fromIdx];
+            uint16_t aTo   = nodeToAnchor[edge.toIdx];
+            bool fromIsClimb = (aFrom != UINT16_MAX);
+            bool toIsClimb   = (aTo   != UINT16_MAX);
+            // Boundary = exactly one endpoint is climb-surface.
+            if (fromIsClimb == toIsClimb) continue;
             const Vec3f& posA = data->nodes[edge.fromIdx].pos;
             const Vec3f& posB = data->nodes[edge.toIdx].pos;
             AddGroundLineQuad(sXluDl, sVtxDl, posA, posB);

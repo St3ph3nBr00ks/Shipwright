@@ -10,6 +10,7 @@
 #include "soh/cvar_prefixes.h"
 #include "soh/ShipInit.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // NODE_CLIMB_ANY for subgoal-flag breakdown
 
 #include "ship/Context.h"
 
@@ -35,7 +36,15 @@ extern PlayState* gPlayState;
 #define CVAR_FR_CAPTURE_HZ   CVAR_DEVELOPER_TOOLS("FollowerRecorder.CaptureHz")
 #define CVAR_FR_MAX_SECONDS  CVAR_DEVELOPER_TOOLS("FollowerRecorder.MaxSeconds")
 
-#define FR_SCHEMA_VERSION 1
+// Schema versions:
+//   v1 — initial release (frame, follower state/pos/yaw, leader fields,
+//         nav-path size + cursor, autonomousClimb flag, safety-net
+//         counters, events array).
+//   v2 — climb-surface diagnostics: subgoalFlags (NavNode flag bitmap of
+//         current waypoint), computedClimbMask (resolved consumer
+//         mask), climbNodesInPath (count of climb-surface waypoints
+//         remaining from cursor to end-of-path).
+#define FR_SCHEMA_VERSION 2
 
 namespace AnchorFollower {
 
@@ -343,6 +352,33 @@ void CaptureFrame(const FollowerFrameContext& ctx) {
     j["navPathPresent"] = pathPresent ? 1 : 0;
     j["navPathLen"]     = static_cast<uint64_t>(anchor->followerNavPath.waypoints.size());
     j["navPathCursor"]  = static_cast<uint64_t>(anchor->followerNavPath.cursorIdx);
+
+    // Climb-surface diagnostics (climb_surface_nav_grid_plan post-Stage-8
+    // investigation). subgoalFlags lets us see whether the current
+    // waypoint sits on a climb-surface node — the trigger condition for
+    // Stage 6's FOLLOW→CLIMBING engagement. computedClimbMask lets us
+    // confirm the resolved permission mask reaches the consumer
+    // correctly. climbNodesInPath counts climb-surface waypoints in the
+    // remaining path so a "path goes through climb but cursor hasn't
+    // reached one yet" case is visible.
+    j["subgoalFlags"]      = pathPresent
+        ? static_cast<uint64_t>(anchor->followerNavPath.CurrentSubgoalFlags())
+        : (uint64_t)0;
+    j["computedClimbMask"] = static_cast<uint64_t>(
+        anchor->followerNavPath.computedClimbMask);
+    if (pathPresent) {
+        size_t climbCount = 0;
+        for (size_t i = anchor->followerNavPath.cursorIdx;
+             i < anchor->followerNavPath.waypointFlags.size(); i++) {
+            if (anchor->followerNavPath.waypointFlags[i] &
+                ::AnchorNavRoom::NODE_CLIMB_ANY) {
+                climbCount++;
+            }
+        }
+        j["climbNodesInPath"] = static_cast<uint64_t>(climbCount);
+    } else {
+        j["climbNodesInPath"] = (uint64_t)0;
+    }
 
     j["g10LeashFrames"]    = anchor->followerOverrunFrames;
     j["g14CloseFailFrames"] = anchor->followerCloseFailFrames;
