@@ -1012,6 +1012,15 @@ void Anchor::RegisterHooks() {
             SPDLOG_INFO("[Follower] LocalPlayer isClimbing edge: {} -> {}",
                         !nowClimbing, nowClimbing);
             SendPacket_UpdateClientState();
+            // Bug 1 fix — arm BTN_A mask hold on climb-exit edge. The
+            // injected (or contact-grabbed) BTN_A can persist in
+            // press.button into the frame AFTER stateFlags1 climb bits
+            // clear; without this hold, the deactivate-check sees BTN_A
+            // unmasked and turns the follower off. ~10 frames covers the
+            // OoT input-clear race comfortably.
+            if (!nowClimbing) {
+                followerClimbExitCooldown = 10;
+            }
         }
 
         SendPacket_PlayerUpdate();

@@ -559,6 +559,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         // climb state where OoT internally consumes A.
         if (player != nullptr &&
             (followerDoorPressCooldown > 0 ||
+             followerClimbExitCooldown > 0 ||
              (player->stateFlags2 &
               (PLAYER_STATE2_DO_ACTION_CLIMB | PLAYER_STATE2_DO_ACTION_ENTER)) ||
              (player->stateFlags1 &
@@ -635,6 +636,9 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     // AFTER the mask has had its chance to strip BTN_A.
     if (followerDoorPressCooldown > 0) {
         followerDoorPressCooldown--;
+    }
+    if (followerClimbExitCooldown > 0) {
+        followerClimbExitCooldown--;
     }
 
     // G18 — full cutscene suspension. csCtx.state == CS_STATE_IDLE means
@@ -1320,7 +1324,26 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 }
 
                 if (followerDoorHandoffFrames > 0) {
-                    followerDoorHandoffFrames--;
+                    // Bug 2 fix 2 (user 2026-05-10): suspend the G11
+                    // countdown while the substrate has a non-empty
+                    // path. The path-routing change in Bug 2 fix 1
+                    // gives the follower a multi-waypoint route to
+                    // the door — but the route may take longer than
+                    // kDoorHandoffTimeout (6 sec) to traverse if the
+                    // follower starts far from the door or the route
+                    // is obstacle-rich. Pre-fix, G11 fired regardless
+                    // of substrate progress, forcing a teleport that
+                    // would have been unnecessary if given more time.
+                    // Post-fix, G11 only counts down when there's no
+                    // path to walk — preserves G11 as a "navigation
+                    // actually impossible" guard while letting the
+                    // substrate drive the common case.
+                    const bool substrateHasPath =
+                        AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
+                        !followerNavPath.Empty();
+                    if (!substrateHasPath) {
+                        followerDoorHandoffFrames--;
+                    }
                     if (followerDoorHandoffFrames == 0) {
                         SPDLOG_WARN("[Follower] Door handoff TIMEOUT "
                                     "(ours-room={} leader-room={})",
@@ -2444,59 +2467,56 @@ void Anchor::HandleStateBlock(Player* player, const Vec3f& p2Pos) {
 }
 
 void Anchor::HandleStateReturn(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos) {
-    // RETURN: walk back to leader's side after combat. Test 8 — same
-    // door-handoff carve-out as FOLLOW: preserve the handoff's door-
-    // centerline target instead of overwriting it with sideTarget.
-    Vec3f returnTarget = sideTarget;
-    if (!followerDoorHandoff) {
-        // Phase 2 — when the nav substrate consumer gate is on, plan a
-        // path back to the leader's side-target instead of walking a
-        // straight line. Mirrors FOLLOW exactly: same TrailKey (leader's
-        // player trail), same NavPath state shared via key-mismatch
-        // invalidation, same refresh predicate, same subgoal-advance
-        // policy. ComputePathTo's three-layer fallback gracefully
-        // degrades; on returned-empty path, falls through to the legacy
-        // direct sideTarget for that tick.
-        if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
-            AnchorNav::TrailKey leaderKey =
-                AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
-            const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
-            const bool keyChanged   = (followerNavPathTargetKey != leaderKey);
-            const f32 driftDx = sideTarget.x - followerNavPathLastTarget.x;
-            const f32 driftDz = sideTarget.z - followerNavPathLastTarget.z;
-            const bool targetDrifted =
-                (driftDx * driftDx + driftDz * driftDz) >
-                (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
-            const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
-                                       keyChanged || targetDrifted;
-            if (needsRefresh) {
-                followerNavPath.Reset();
-                bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
-                    leaderKey, &player->actor, sideTarget, gPlayState, followerNavPath);
-                followerNavPathTargetKey  = leaderKey;
-                followerNavPathLastTarget = sideTarget;
-                if (!gotPath) {
-                    SPDLOG_DEBUG("[Follower] RETURN NavPath empty (ComputePathTo "
-                                 "returned false; falling back to direct sideTarget)");
-                }
-            }
-            if (!followerNavPath.Empty()) {
-                Vec3f sg = followerNavPath.CurrentSubgoal();
-                f32   sgDx = sg.x - p2Pos.x;
-                f32   sgDz = sg.z - p2Pos.z;
-                if (sgDx * sgDx + sgDz * sgDz <
-                    kNavPathSubgoalReach * kNavPathSubgoalReach) {
-                    followerNavPath.Advance();
-                }
-                if (!followerNavPath.Empty()) {
-                    returnTarget = followerNavPath.CurrentSubgoal();
-                }
+    // RETURN: walk back to leader's side after combat. Bug 2 fix 1
+    // (user 2026-05-10): mirrors FOLLOW's door-handoff substrate routing.
+    // When followerDoorHandoff is active, the safety-net block has set
+    // followerMoveTarget to the door target; use that as the substrate's
+    // finalGoal so the path plans toward the door (not the leader who's
+    // in another room). TrailKey=0 for the door target since a static
+    // position has no trail; ComputePathTo's Layer 1 LOS + Layer 3 graph
+    // handle the path.
+    const bool useDoorTarget = followerDoorHandoff;
+    const Vec3f finalGoal    = useDoorTarget ? followerMoveTarget : sideTarget;
+    Vec3f returnTarget       = finalGoal;
+    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
+        AnchorNav::TrailKey targetKey = useDoorTarget
+            ? AnchorNav::TrailKey{0}
+            : AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
+        const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
+        const bool keyChanged   = (followerNavPathTargetKey != targetKey);
+        const f32 driftDx = finalGoal.x - followerNavPathLastTarget.x;
+        const f32 driftDz = finalGoal.z - followerNavPathLastTarget.z;
+        const bool targetDrifted =
+            (driftDx * driftDx + driftDz * driftDz) >
+            (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
+        const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
+                                   keyChanged || targetDrifted;
+        if (needsRefresh) {
+            followerNavPath.Reset();
+            bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
+                targetKey, &player->actor, finalGoal, gPlayState, followerNavPath);
+            followerNavPathTargetKey  = targetKey;
+            followerNavPathLastTarget = finalGoal;
+            if (!gotPath) {
+                SPDLOG_DEBUG("[Follower] RETURN NavPath empty (ComputePathTo "
+                             "returned false; falling back to direct finalGoal "
+                             "useDoorTarget={})", useDoorTarget);
             }
         }
-        followerMoveTarget = returnTarget;
-    } else {
-        returnTarget = followerMoveTarget;
+        if (!followerNavPath.Empty()) {
+            Vec3f sg = followerNavPath.CurrentSubgoal();
+            f32   sgDx = sg.x - p2Pos.x;
+            f32   sgDz = sg.z - p2Pos.z;
+            if (sgDx * sgDx + sgDz * sgDz <
+                kNavPathSubgoalReach * kNavPathSubgoalReach) {
+                followerNavPath.Advance();
+            }
+            if (!followerNavPath.Empty()) {
+                returnTarget = followerNavPath.CurrentSubgoal();
+            }
+        }
     }
+    followerMoveTarget = returnTarget;
     f32 distToReturnTarget = sqrtf(SQ(returnTarget.x - p2Pos.x) +
                                     SQ(returnTarget.z - p2Pos.z));
     // Stick injection in TickFollowerInput drives actual movement; we
@@ -3137,72 +3157,68 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
             return;
         }
     }
-    // Test 8 — during door handoff, the G11 safety-net block above
-    // sets followerMoveTarget to the transition-actor position (door
-    // centerline). FOLLOW was overwriting that with sideTarget
-    // (+kFollowOffset on X), pushing the follower 50 u off the door
-    // centerline into the adjacent wall. Skip the overwrite while
-    // handoff is active — the handoff block owns the move target in
-    // that case.
-    Vec3f followTarget = sideTarget;
-    if (!followerDoorHandoff) {
-        // Phase 2 — when the nav substrate consumer gate is on, drive the
-        // follower along an ActorTrail-computed path to the leader's side-
-        // target instead of pointing the stick directly at sideTarget. The
-        // path is recomputed when the cursor is exhausted, when the leader
-        // changes, when the leader has drifted >kNavPathTargetDriftRefresh
-        // from the captured target, or on scene change. Each HandleStateFollow
-        // tick advances the cursor when the follower comes within
-        // kNavPathSubgoalReach of the current subgoal, so intermediate
-        // subgoals are visited en route. ComputePathTo's three-layer fallback
-        // (LOS → trail breadcrumb → RoomNavData BFS) gracefully degrades
-        // when individual nav features are off; it returns false only when
-        // nothing is reachable, in which case we fall back to the legacy
-        // direct sideTarget for this tick. Door handoff stays on the
-        // bespoke path because the door centerline is hand-picked by G11.
-        if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
-            AnchorNav::TrailKey leaderKey =
-                AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
-            const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
-            const bool keyChanged   = (followerNavPathTargetKey != leaderKey);
-            const f32 driftDx = sideTarget.x - followerNavPathLastTarget.x;
-            const f32 driftDz = sideTarget.z - followerNavPathLastTarget.z;
-            const bool targetDrifted =
-                (driftDx * driftDx + driftDz * driftDz) >
-                (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
-            const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
-                                       keyChanged || targetDrifted;
-            if (needsRefresh) {
-                followerNavPath.Reset();
-                bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
-                    leaderKey, &player->actor, sideTarget, gPlayState, followerNavPath);
-                followerNavPathTargetKey  = leaderKey;
-                followerNavPathLastTarget = sideTarget;
-                if (!gotPath) {
-                    // Nothing reachable per ComputePathTo's three layers.
-                    // Leave path empty; the !Empty() check below falls
-                    // through to legacy direct sideTarget for this tick.
-                    SPDLOG_DEBUG("[Follower] FOLLOW NavPath empty (ComputePathTo "
-                                 "returned false; falling back to direct sideTarget)");
-                }
-            }
-            if (!followerNavPath.Empty()) {
-                Vec3f sg = followerNavPath.CurrentSubgoal();
-                f32   sgDx = sg.x - p2Pos.x;
-                f32   sgDz = sg.z - p2Pos.z;
-                if (sgDx * sgDx + sgDz * sgDz <
-                    kNavPathSubgoalReach * kNavPathSubgoalReach) {
-                    followerNavPath.Advance();
-                }
-                if (!followerNavPath.Empty()) {
-                    followTarget = followerNavPath.CurrentSubgoal();
-                }
+    // Bug 2 fix 1 (user 2026-05-10): during door handoff, route substrate
+    // pathfinding to the door target instead of skipping substrate entirely.
+    // The G11 safety-net block above sets followerMoveTarget to the
+    // transition-actor position (door centerline) when handoff is active.
+    // Pre-fix, FOLLOW used the door target directly via legacy direct-yaw
+    // steering — couldn't path around obstacles between follower and door.
+    // Post-fix, ComputePathTo plans a multi-waypoint route to the door
+    // through the navigable graph; the subgoal drives stick injection so
+    // the follower walks AROUND obstacles to reach the door, then OoT's
+    // transitionTrigger fires naturally when the follower hits the trigger
+    // volume. G11 timeout becomes a "navigation actually impossible" guard
+    // instead of a "we ran out of patience" forced teleport.
+    //
+    // TrailKey: leader's trail when targeting sideTarget (Layer 2 trail-
+    // walk applies); kTrailKeyNone (=0) when targeting door (no trail
+    // for a static position; ComputePathTo's Layer 1 LOS + Layer 3 graph
+    // fallback handle it).
+    const bool useDoorTarget = followerDoorHandoff;
+    const Vec3f finalGoal    = useDoorTarget ? followerMoveTarget : sideTarget;
+    Vec3f followTarget       = finalGoal;
+    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
+        AnchorNav::TrailKey targetKey = useDoorTarget
+            ? AnchorNav::TrailKey{0}
+            : AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
+        const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
+        const bool keyChanged   = (followerNavPathTargetKey != targetKey);
+        const f32 driftDx = finalGoal.x - followerNavPathLastTarget.x;
+        const f32 driftDz = finalGoal.z - followerNavPathLastTarget.z;
+        const bool targetDrifted =
+            (driftDx * driftDx + driftDz * driftDz) >
+            (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
+        const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
+                                   keyChanged || targetDrifted;
+        if (needsRefresh) {
+            followerNavPath.Reset();
+            bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
+                targetKey, &player->actor, finalGoal, gPlayState, followerNavPath);
+            followerNavPathTargetKey  = targetKey;
+            followerNavPathLastTarget = finalGoal;
+            if (!gotPath) {
+                // Nothing reachable per ComputePathTo's three layers.
+                // Leave path empty; the !Empty() check below falls
+                // through to direct finalGoal for this tick.
+                SPDLOG_DEBUG("[Follower] FOLLOW NavPath empty (ComputePathTo "
+                             "returned false; falling back to direct finalGoal "
+                             "useDoorTarget={})", useDoorTarget);
             }
         }
-        followerMoveTarget = followTarget;
-    } else {
-        followTarget = followerMoveTarget;
+        if (!followerNavPath.Empty()) {
+            Vec3f sg = followerNavPath.CurrentSubgoal();
+            f32   sgDx = sg.x - p2Pos.x;
+            f32   sgDz = sg.z - p2Pos.z;
+            if (sgDx * sgDx + sgDz * sgDz <
+                kNavPathSubgoalReach * kNavPathSubgoalReach) {
+                followerNavPath.Advance();
+            }
+            if (!followerNavPath.Empty()) {
+                followTarget = followerNavPath.CurrentSubgoal();
+            }
+        }
     }
+    followerMoveTarget = followTarget;
     f32 distToFollowTarget = sqrtf(SQ(followTarget.x - p2Pos.x) + SQ(followTarget.z - p2Pos.z));
     // Stick injection in TickFollowerInput drives actual movement;
     // here we just face the immediate move target. Under Phase 2 nav

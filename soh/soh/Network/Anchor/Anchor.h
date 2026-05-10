@@ -632,6 +632,20 @@ class Anchor : public Network {
     // breaks the deadlock. Resets to 0 on any non-hang frame.
     int             followerHangFrames            = 0;
 
+    // Bug 1 (user 2026-05-10 — "When P2 AI Follower attempts to climb onto
+    // a ledge, it lets go/drops down immediately, and disables the AI
+    // Follower system"): post-climb-exit BTN_A mask hold counter. The
+    // climb-state-flags mask at Follower.cpp:560-571 exempts BTN_A while
+    // stateFlags1 & (HANGING_OFF_LEDGE | CLIMBING_LEDGE | CLIMBING_LADDER)
+    // — but those flags can clear one frame BEFORE OoT consumes BTN_A
+    // from press.button. The deactivate-check then sees BTN_A unmasked
+    // and turns the follower off. Mirror of `followerDoorPressCooldown`
+    // for door-injection BTN_A: armed on the climb-state-flags
+    // true→false edge in HookHandlers.cpp's existing isClimbing edge
+    // detector; OR'd into the BTN_A mask condition for as long as it's
+    // > 0; decremented each TickFollower tick. Default 0.
+    int             followerClimbExitCooldown     = 0;
+
     // P3.8 part 2 / P3.6 (user 2026-05-09) — autonomous climb mode.
     // When the substrate path consumer detects the follower is at a
     // climb anchor (vine wall / ladder / climbable surface) and the
