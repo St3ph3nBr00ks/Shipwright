@@ -132,7 +132,20 @@ public:
     //      `dist(currentTargetPos, path.capturedTargetPos)` exceeds a
     //      consumer-defined tolerance.
     struct NavPath {
-        std::vector<Vec3f> waypoints;          // [0] = next subgoal; [N-1] = path tail
+        std::vector<Vec3f>    waypoints;       // [0] = next subgoal; [N-1] = path tail
+        // Per-waypoint NodeFlags bitmap; same length as `waypoints`. Subset
+        // of NavNode::flags that consumers care about — currently the
+        // NODE_CLIMB_* type bits (so the consumer can decide "is this
+        // subgoal on a climb surface, and if so what type"). Layer 1 (LOS
+        // direct-to-target) and Layer 2 (trail breadcrumbs) emit
+        // waypoints with `flags = 0`; Layer 3 (RoomNavData BFS) copies
+        // the source NavNode flags. Schema v7 / climb-surface nav grid.
+        std::vector<uint16_t> waypointFlags;
+        // Climb-surface mask the BFS used when this path was computed
+        // (NavTraits.climbSurfaceMask snapshot). Consumer re-AND's at
+        // engage time so a mid-session CVar flip can be detected
+        // defensively. 0 = no climb capability at compute time.
+        uint16_t computedClimbMask = 0;
         size_t   cursorIdx          = 0;       // index of current active waypoint
         int16_t  sceneNum           = -1;      // scene at capture time
         uint64_t msAtCapture        = 0;       // wall-clock ms; for diagnostics + max-age policy
@@ -140,11 +153,19 @@ public:
 
         void Reset() {
             waypoints.clear();
+            waypointFlags.clear();
+            computedClimbMask = 0;
             cursorIdx = 0;
             sceneNum = -1;
         }
         bool Empty() const { return waypoints.empty() || cursorIdx >= waypoints.size(); }
         const Vec3f& CurrentSubgoal() const { return waypoints[cursorIdx]; }
+        // Per-waypoint flags lookup. Returns 0 when the parallel array
+        // hasn't been populated (older callers / Layer 1+2 paths). Safe
+        // to call even when `waypointFlags.size() != waypoints.size()`.
+        uint16_t CurrentSubgoalFlags() const {
+            return (cursorIdx < waypointFlags.size()) ? waypointFlags[cursorIdx] : (uint16_t)0;
+        }
         // Advance cursor by one waypoint. Returns true if more waypoints remain.
         bool Advance() {
             ++cursorIdx;

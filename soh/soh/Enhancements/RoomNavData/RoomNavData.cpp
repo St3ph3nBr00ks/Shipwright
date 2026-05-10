@@ -605,7 +605,16 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // shift is a single-byte addition in the flags field's slot). Existing
 // v1 .bin files become unreadable; TryLoadFromDisk's version-mismatch
 // branch silently regenerates them on next room entry.
-static constexpr uint16_t kCurrentSchemaVersion = 6;
+//
+// Schema v6 → v7: ClimbAnchor extended with surface-grid params
+// (planeOrigin/Normal/AxisU/AxisV, cellsU/cellsV, firstNodeIdx,
+// nodeCount, surfaceType) for the climb-surface nav grid. NodeFlags
+// gains NODE_CLIMB_LADDER / VINE / DESIGNATED_WALL / GENERIC_WALL +
+// NODE_CLIMB_BOUNDARY. Stage 1 lands the data plumbing; v6 files
+// silently regenerate as v7 (matches every prior version bump). The
+// new ClimbAnchor fields default to zero / zero-vector — Stage 2 wires
+// the scan to populate them.
+static constexpr uint16_t kCurrentSchemaVersion = 7;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
