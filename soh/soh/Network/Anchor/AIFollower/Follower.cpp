@@ -2087,6 +2087,16 @@ void Anchor::TickFollowerInput(Actor* actor) {
             }
             f32 dy       = targetY - player->actor.world.pos.y;
             bool dropDown = (dy < -kHangResolveBelowThreshold);
+            // High-confidence climb-up: leader is meaningfully above the
+            // hang position (>+30u). In addition to BTN_A, inject forward
+            // stick so OoT's hang-action handler reads "intent to stay
+            // grabbed and climb" rather than "neutral input → auto-drop"
+            // (suspected cause of the 4-6-frame brief grabs in log 24).
+            // Skip forward-stick in the BTN_A default-bias range
+            // (-80 < dy < +30) so incidental wall-brushes during pursuit
+            // still drop naturally — only commit to forward-stick when
+            // the leader is clearly above and climbing IS the intent.
+            bool climbUp = (!dropDown && dy > kHangResolveAboveThreshold);
             if (dropDown) {
                 input.press.button |= BTN_B;
                 input.cur.button   |= BTN_B;
@@ -2098,14 +2108,34 @@ void Anchor::TickFollowerInput(Actor* actor) {
                 input.press.button |= BTN_A;
                 input.cur.button   |= BTN_A;
             }
+            if (climbUp) {
+                // Forward stick using the same camera-relative inversion
+                // as the ground-walking block at line 1996-2001. World
+                // direction we want = Link's facing (shape.rot.y) which
+                // points INTO the wall during hang. We already have the
+                // angle so no Math_Atan2S step is needed (vs the
+                // ground-walking case which derives the angle from a
+                // dx/dz target delta).
+                Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                s16 inputDirYaw = Camera_GetInputDirYaw(cam);
+                s16 worldYaw    = player->actor.shape.rot.y;
+                s16 stickAngle  = worldYaw - inputDirYaw;
+                s8  stickY = (s8)( Math_CosS(stickAngle) * 127.0f);
+                s8  stickX = (s8)(-Math_SinS(stickAngle) * 127.0f);
+                input.cur.stick_x = stickX;
+                input.cur.stick_y = stickY;
+                input.rel.stick_x = stickX;
+                input.rel.stick_y = stickY;
+            }
             if (!sWasHanging) {
                 SPDLOG_INFO("[Follower] BTN_{} hang-state resolution "
                             "(leaderY={:.1f} followerY={:.1f} dy={:.1f}, "
-                            "above={:.1f}, below={:.1f})",
+                            "above={:.1f}, below={:.1f}, forwardStick={})",
                             dropDown ? "B" : "A",
                             targetY, player->actor.world.pos.y, dy,
                             kHangResolveAboveThreshold,
-                            kHangResolveBelowThreshold);
+                            kHangResolveBelowThreshold,
+                            climbUp ? "yes" : "no");
                 sWasHanging = true;
             }
         } else if (sWasHanging) {
