@@ -1083,10 +1083,18 @@ static Vec3f CellCenterWorld(const CellKey& cell, const Vec3f& bboxMin) {
 static constexpr s32 kWallFlagClimbableMask = (1 << 1) | (1 << 2) | (1 << 3); // 0x0E
 
 // Cluster radius for merging adjacent climbable polys into one anchor.
-// Vine walls are typically multi-poly meshes; a radius of ~30u (one grid
-// cell) collapses adjacent polys into a single anchor whose Y range
-// spans the full mesh height.
-static constexpr float kClimbClusterRadiusXZ = 30.0f;
+// Vine walls are typically multi-poly meshes; collapsed into a single
+// anchor whose Y range spans the full mesh height.
+//
+// Bumped 30u → 150u (2026-05-11 field-test fix): the previous 30u was
+// "one grid cell" which is too tight — a 100u-wide vine wall would
+// split into 3-4 separate anchors, producing overlapping climb-surface
+// grids (visible in DebugDraw as multiple sets of green squares for
+// what should be one wall). Inside Deku Tree's first room had 16
+// anchors for ~2-3 actual walls. 150u handles vines up to ~300u wide
+// as a single anchor without spuriously merging unrelated climbs that
+// happen to be near each other in XZ.
+static constexpr float kClimbClusterRadiusXZ = 150.0f;
 
 // Surface-flag-based climb detection. Iterates static scene polys (NOT
 // dynamic Bg-actor polys; those are out of scope for v1 because the raw
@@ -1414,15 +1422,50 @@ static float DetermineClimbSurfaceWidth(PlayState* play,
 //   the floor-edge spacing-cost convention so a 7-cell ladder climb
 //   = 7 × 30 = 210u of "distance" (vs ~30u per floor cell).
 //
-// kFloorToClimbCost: bidirectional edge between the bottom row of the
-//   grid and the nearest floor at basePos (and similarly between the
-//   top row and the nearest floor at topPos). Set ABOVE the per-cell
-//   cost so BFS prefers an ALL-FLOOR route when one of comparable
-//   length exists, but doesn't refuse the climb when it's the
-//   only/shorter route.
-static constexpr float kClimbCellEdgeCost = 30.0f;
-static constexpr float kFloorToClimbCost  = 50.0f;
-static constexpr float kClimbToFloorCost  = 50.0f;
+// kFloorToClimbCost: bidirectional edge between a bottom-row climb
+//   cell and its NEAREST floor neighbor (per-cell, not per-anchor —
+//   field-test fix 2026-05-11 to avoid all bottom-row edges
+//   converging on a single floorBaseIdx point). Same cost for top-row
+//   ↔ floor edges. Set ABOVE the per-cell cost so BFS prefers an
+//   ALL-FLOOR route when one of comparable length exists, but doesn't
+//   refuse the climb when it's the only/shorter route.
+//
+// kBoundaryFloorRadiusXZ: max XZ distance from a climb cell to its
+//   nearest floor neighbor for boundary-edge eligibility. 60u = ~2
+//   grid cells; far enough to bridge the wall standoff (cells sit AT
+//   the wall surface; nearest floor is one cell INTO the room) but
+//   tight enough that an unrelated floor across the room doesn't get
+//   spuriously connected.
+static constexpr float kClimbCellEdgeCost      = 30.0f;
+static constexpr float kFloorToClimbCost       = 50.0f;
+static constexpr float kClimbToFloorCost       = 50.0f;
+static constexpr float kBoundaryFloorRadiusXZ  = 60.0f;
+
+// Find the nearest floor node (skipping climb-surface) to `pos` within
+// `maxRadiusXZ`. Returns -1 if no floor node exists within the radius.
+// Uses XZ-only proximity (Y is unconstrained — boundary edges may
+// connect to floor nodes at substantially different altitudes when the
+// climb's base or top is significantly above/below the floor immediately
+// outside the wall). Stage 3 boundary-edge per-cell lookup.
+static int FindNearestFloorNodeXZRadius(const RoomNavData* data,
+                                         const Vec3f& pos,
+                                         float maxRadiusXZ) {
+    if (data == nullptr || data->nodes.empty()) return -1;
+    int bestIdx = -1;
+    float bestDistSq = maxRadiusXZ * maxRadiusXZ;
+    for (size_t i = 0; i < data->nodes.size(); i++) {
+        const NavNode& n = data->nodes[i];
+        if (n.flags & NODE_CLIMB_ANY) continue;  // skip climb-surface
+        float dx = n.pos.x - pos.x;
+        float dz = n.pos.z - pos.z;
+        float d2 = dx * dx + dz * dz;
+        if (d2 < bestDistSq) {
+            bestDistSq = d2;
+            bestIdx = (int)i;
+        }
+    }
+    return bestIdx;
+}
 
 // Generate edges for a single anchor's surface grid:
 //   1. Surface-to-surface 4-connected (cardinal neighbors only — diagonals
@@ -1483,32 +1526,32 @@ static void GenerateClimbSurfaceEdges(RoomNavData* out,
         }
     }
 
-    // Floor ↔ climb boundary edges. FindNearestNode skips climb-surface
-    // nodes (Stage 2 defensive change) so these return floor indices.
-    int floorBaseIdx = FindNearestNode(out, anchor.basePos);
-    int floorTopIdx  = FindNearestNode(out, anchor.topPos);
+    // Floor ↔ climb boundary edges. Field-test fix 2026-05-11:
+    // PER-CELL nearest-floor lookup. Previous code used a single
+    // FindNearestNode(anchor.basePos) and edged EVERY bottom-row cell
+    // to that one floor node — for a wide grid, all bottom-row edges
+    // converged on a single floor chokepoint (visible as diagonal
+    // white lines in DebugDraw, all meeting at one floor square).
+    // Now each bottom/top cell finds its OWN nearest floor neighbor
+    // within kBoundaryFloorRadiusXZ. Cells too far from any floor
+    // (e.g. wall surfaces facing open air) emit no boundary edge —
+    // BFS reaches them only through adjacent in-grid cells.
     size_t boundaryEdgeCount = 0;
     for (uint16_t i = 0; i < anchor.nodeCount; i++) {
         const NavNode& n = out->nodes[(size_t)anchor.firstNodeIdx + i];
         uint16_t climbIdx = (uint16_t)(anchor.firstNodeIdx + i);
-        if (n.cellIdxZ == 0 && floorBaseIdx >= 0 &&
-            (uint16_t)floorBaseIdx != climbIdx) {
-            NavEdge edge{};
-            edge.fromIdx = (uint16_t)std::min<int>(floorBaseIdx, (int)climbIdx);
-            edge.toIdx   = (uint16_t)std::max<int>(floorBaseIdx, (int)climbIdx);
-            edge.cost    = kFloorToClimbCost;
-            out->edges.push_back(edge);
-            boundaryEdgeCount++;
-        }
-        if (n.cellIdxZ == (uint16_t)(anchor.cellsV - 1) && floorTopIdx >= 0 &&
-            (uint16_t)floorTopIdx != climbIdx) {
-            NavEdge edge{};
-            edge.fromIdx = (uint16_t)std::min<int>(floorTopIdx, (int)climbIdx);
-            edge.toIdx   = (uint16_t)std::max<int>(floorTopIdx, (int)climbIdx);
-            edge.cost    = kClimbToFloorCost;
-            out->edges.push_back(edge);
-            boundaryEdgeCount++;
-        }
+        const bool isBottomRow = (n.cellIdxZ == 0);
+        const bool isTopRow    = (n.cellIdxZ == (uint16_t)(anchor.cellsV - 1));
+        if (!isBottomRow && !isTopRow) continue;
+        int floorIdx = FindNearestFloorNodeXZRadius(out, n.pos, kBoundaryFloorRadiusXZ);
+        if (floorIdx < 0) continue;
+        if ((uint16_t)floorIdx == climbIdx) continue;
+        NavEdge edge{};
+        edge.fromIdx = (uint16_t)std::min<int>(floorIdx, (int)climbIdx);
+        edge.toIdx   = (uint16_t)std::max<int>(floorIdx, (int)climbIdx);
+        edge.cost    = isBottomRow ? kFloorToClimbCost : kClimbToFloorCost;
+        out->edges.push_back(edge);
+        boundaryEdgeCount++;
     }
 
     SPDLOG_DEBUG("[RoomNav] Climb-surface edges (anchor surfaceType=0x{:04x}): "
@@ -3781,11 +3824,20 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AddGroundLineQuad(sXluDl, sVtxDl, posA, posB);
     }
 
-    // Climb anchors — yellow. Ground quad at base + ground quad at top +
-    // a vertical post (two perpendicular thin quads) connecting them so
-    // the marker reads as a clear vertical climb indicator from any angle.
+    // Climb anchors — yellow. Legacy 2-point marker: ground quad at
+    // base + ground quad at top + a vertical post connecting them.
+    //
+    // Field-test fix 2026-05-11: skip this render for anchors that have
+    // v7 grid data (anchor.nodeCount > 0). The wall-aligned grid
+    // (Stage 8 v2) shows the actual climbable extent more accurately
+    // and makes the legacy yellow post redundant for the same anchor.
+    // Anchors without grid data (rare — Path B detection succeeded but
+    // GenerateClimbSurfaceGrids failed to emit cells, e.g. degenerate
+    // height) still render the legacy marker so the user can see
+    // there's an anchor with no grid.
     sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xE0, 0x10, 0xFF));
     for (const ClimbAnchor& anchor : data->climbAnchors) {
+        if (anchor.nodeCount > 0) continue;
         AddGroundQuad(sXluDl, sVtxDl, anchor.basePos);
         AddGroundQuad(sXluDl, sVtxDl, anchor.topPos);
         AddVerticalPost(sXluDl, sVtxDl, anchor.basePos, anchor.topPos);
