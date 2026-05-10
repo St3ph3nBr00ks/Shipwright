@@ -290,6 +290,14 @@ int FindNearestNonHazardExit(const RoomNavData* data,
 // improves on `fromIdx`'s distance to target (consumer falls through to
 // direct yaw / next nav layer). `out` is cleared before append.
 //
+// `outFlags` (schema v7+ / climb-surface nav grid Stage 4): when non-null,
+// receives the per-waypoint NavNode::flags bitmap aligned with `out`
+// (same length, same order). Consumers use this to decide e.g. whether
+// the next subgoal sits on a NODE_CLIMB_* surface and CLIMBING should be
+// engaged. Only the bits the consumer needs are typically inspected; the
+// full uint16 is copied. Cleared before append. Pass nullptr when flags
+// aren't needed (zero overhead — the populating push is skipped).
+//
 // Cost: same BFS as FindBestReachableSubgoalNode plus a parents array
 // (~2 KB for a 1100-node room) and a reverse-walk pass (worst-case ~30
 // iterations for typical room paths).
@@ -298,7 +306,8 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
                                    const Vec3f& targetPos,
                                    bool eligibleForSwimming,
                                    bool avoidHazardNodes,
-                                   std::vector<Vec3f>& out);
+                                   std::vector<Vec3f>& out,
+                                   std::vector<uint16_t>* outFlags = nullptr);
 
 // True when both gEnhancements.RoomNavData.Enabled is on AND the system
 // has been initialized. Used as the master gate by all Phase 1+2 features.

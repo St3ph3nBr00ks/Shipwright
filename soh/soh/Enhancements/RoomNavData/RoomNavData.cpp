@@ -431,8 +431,10 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
                                    const Vec3f& targetPos,
                                    bool eligibleForSwimming,
                                    bool avoidHazardNodes,
-                                   std::vector<Vec3f>& out) {
+                                   std::vector<Vec3f>& out,
+                                   std::vector<uint16_t>* outFlags) {
     out.clear();
+    if (outFlags) outFlags->clear();
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;
     if (fromIdx < 0 || (size_t)fromIdx >= data->nodes.size()) return false;
 
@@ -509,8 +511,11 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
     }
     if (reversed.empty()) return false;
     out.reserve(reversed.size());
+    if (outFlags) outFlags->reserve(reversed.size());
     for (auto it = reversed.rbegin(); it != reversed.rend(); ++it) {
-        out.push_back(data->nodes[(size_t)*it].pos);
+        const NavNode& n = data->nodes[(size_t)*it];
+        out.push_back(n.pos);
+        if (outFlags) outFlags->push_back(n.flags);
     }
     return true;
 }

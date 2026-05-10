@@ -472,6 +472,7 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         dyToTarget < kLayer1YGate &&
         MovementClear(navigator, targetPos, play)) {
         out.waypoints.push_back(targetPos);
+        out.waypointFlags.push_back(0); // Layer 1: target itself, no source node
         return true;
     }
 
@@ -512,15 +513,18 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navigator->world.pos);
         if (fromIdx < 0) return false;
         std::vector<Vec3f> graphPath;
+        std::vector<uint16_t> graphPathFlags;  // Stage 4: parallel array
         bool ok = ::AnchorNavRoom::FindBestReachableSubgoalPath(
             navData, fromIdx, targetPos,
             traits.eligibleForSwimming,
             traits.avoidHazardNodes,
-            graphPath);
+            graphPath, &graphPathFlags);
         if (!ok || graphPath.empty()) return false;
-        out.waypoints = std::move(graphPath);
+        out.waypoints     = std::move(graphPath);
+        out.waypointFlags = std::move(graphPathFlags);
         if (MovementClearAtPosition(out.waypoints.back(), targetPos, play)) {
             out.waypoints.push_back(targetPos);
+            out.waypointFlags.push_back(0); // target appended; not from any node
         }
         return true;
     };
@@ -544,8 +548,10 @@ bool ActorTrail::ComputePathTo(TrailKey key,
             if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
             if (!MovementClear(navigator, wp.pos, play)) continue;
             out.waypoints.push_back(wp.pos);
+            out.waypointFlags.push_back(0); // Layer 2: trail breadcrumb, no source NavNode
             if (MovementClearAtPosition(wp.pos, targetPos, play)) {
                 out.waypoints.push_back(targetPos);
+                out.waypointFlags.push_back(0); // target appended
             }
             return true;
         }
