@@ -61,6 +61,24 @@ struct NavTraits {
     bool eligibleForSwimming         = false;
     bool avoidHazardNodes            = true;
 
+    // Climb-surface permission mask (schema v7+ /
+    // climb_surface_nav_grid_plan Stage 5). Bitmap of NODE_CLIMB_*
+    // type bits the navigator may traverse via the wall-grid nodes.
+    // 0 = no climb capability (climb edges skipped during BFS
+    // expansion; equivalent to the pre-v7 behaviour of "ground only").
+    //
+    // This is the BASE mask. ResolveDynamicClimbMask layers session-
+    // dependent bits on top (e.g. follower picks up GENERIC_WALL when
+    // gEnhancements.ClimbAnywhere is on). ComputePathTo calls the
+    // resolver before BFS and stashes the snapshot into
+    // NavPath::computedClimbMask so the consumer can re-AND at
+    // engage time.
+    //
+    // Default 0 — consumer-side opt-in per actor. Bosses leave this
+    // zero (kBossDefaults); kDefaultTraits leaves it zero (most
+    // ground enemies don't climb walls).
+    uint16_t climbSurfaceMask        = 0;
+
     // Emit-side flag — other actors observe this actor through the trail.
     bool leavesTrail                 = true;
 
@@ -82,6 +100,22 @@ struct NavTraits {
 // true so other navigators can locate bosses). Otherwise checks the
 // per-actor override map; falls through to kDefaultTraits if no entry.
 const NavTraits& GetTraitsForActor(s16 actorId);
+
+// Resolve the dynamic (session-dependent) climb-surface mask for this
+// actor. Starts from the static `baseMask` (typically traits.climbSurfaceMask)
+// and overlays bits that depend on runtime state — currently only the
+// follower's gEnhancements.ClimbAnywhere CVar promoting GENERIC_WALL on top
+// of the base LADDER|VINE|DESIGNATED_WALL. For all other actors returns
+// `baseMask` unchanged.
+//
+// Call site contract: ComputePathTo (and the future climb-engagement
+// check) calls this immediately before passing the mask to BFS, then
+// stashes the result into NavPath::computedClimbMask so the consumer
+// can re-AND defensively at engage time. Mid-session CVar flips don't
+// invalidate in-flight paths automatically; the consumer either accepts
+// the stale mask until the path is exhausted, or recomputes on its own
+// schedule. (Plan open question Q8.)
+uint16_t ResolveDynamicClimbMask(s16 actorId, uint16_t baseMask);
 
 // Master gate for the entire navigation system. Every per-feature query
 // must check this AND its own CVar. Default off; ships and stays off

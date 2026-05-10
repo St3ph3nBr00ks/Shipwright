@@ -262,11 +262,17 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos);
 //
 // Hazard-aware BFS per Plans/room_nav_data_plan.md §10. NODE_ORPHANED
 // and NODE_STEEP_SLOPE always rejected as destinations.
+//
+// `climbSurfaceMask` (schema v7+ / Stage 5): bitmap of NODE_CLIMB_*
+// type bits the consumer is allowed to traverse via climb-surface
+// nodes. 0 = no climb capability (all climb-surface nodes rejected
+// during expansion — preserves pre-v7 behaviour).
 int FindBestReachableSubgoalNode(const RoomNavData* data,
                                   int fromIdx,
                                   const Vec3f& targetPos,
                                   bool eligibleForSwimming = false,
-                                  bool avoidHazardNodes    = true);
+                                  bool avoidHazardNodes    = true,
+                                  uint16_t climbSurfaceMask = 0);
 
 // Cornered-in-hazard fallback. Returns the nearest non-hazard walkable
 // node reachable from `fromIdx`, ignoring target direction — exit is the
@@ -275,9 +281,14 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // `eligibleForSwimming` (rejects NODE_UNDERWATER when false). Returns -1
 // when the navigator is fully surrounded by hazard with no reachable
 // non-hazard exit anywhere in the room.
+//
+// `climbSurfaceMask` (schema v7+ / Stage 5): same semantics as
+// FindBestReachableSubgoalNode. 0 = climb-surface nodes never
+// traversed during the exit search.
 int FindNearestNonHazardExit(const RoomNavData* data,
                               int fromIdx,
-                              bool eligibleForSwimming = false);
+                              bool eligibleForSwimming = false,
+                              uint16_t climbSurfaceMask = 0);
 
 // Path-returning sibling of FindBestReachableSubgoalNode. Same hazard-aware
 // BFS, but records predecessor pointers and reconstructs the full chain of
@@ -307,7 +318,8 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
                                    bool eligibleForSwimming,
                                    bool avoidHazardNodes,
                                    std::vector<Vec3f>& out,
-                                   std::vector<uint16_t>* outFlags = nullptr);
+                                   std::vector<uint16_t>* outFlags = nullptr,
+                                   uint16_t climbSurfaceMask = 0);
 
 // True when both gEnhancements.RoomNavData.Enabled is on AND the system
 // has been initialized. Used as the master gate by all Phase 1+2 features.

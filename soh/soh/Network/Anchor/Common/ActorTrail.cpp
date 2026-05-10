@@ -512,13 +512,21 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         if (navData == nullptr) return false;
         int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navigator->world.pos);
         if (fromIdx < 0) return false;
+        // Stage 5: resolve the per-call climb mask (overlays session-
+        // dependent bits like ClimbAnywhere on top of the static base
+        // from NavTraits). Stash on NavPath so the consumer can re-AND
+        // at engage time without re-reading the CVar.
+        const uint16_t climbMask = ResolveDynamicClimbMask(
+            navigator->id, traits.climbSurfaceMask);
+        out.computedClimbMask = climbMask;
         std::vector<Vec3f> graphPath;
         std::vector<uint16_t> graphPathFlags;  // Stage 4: parallel array
         bool ok = ::AnchorNavRoom::FindBestReachableSubgoalPath(
             navData, fromIdx, targetPos,
             traits.eligibleForSwimming,
             traits.avoidHazardNodes,
-            graphPath, &graphPathFlags);
+            graphPath, &graphPathFlags,
+            climbMask);
         if (!ok || graphPath.empty()) return false;
         out.waypoints     = std::move(graphPath);
         out.waypointFlags = std::move(graphPathFlags);

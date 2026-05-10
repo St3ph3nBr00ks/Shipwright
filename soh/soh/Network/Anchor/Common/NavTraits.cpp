@@ -14,6 +14,7 @@
 
 #include "NavTraits.h"
 #include "ActorSyncHelpers.h"  // IsSyncedBossActor
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // NodeFlags / NODE_CLIMB_*
 
 #include "soh/cvar_prefixes.h"
 #include <libultraship/bridge.h>
@@ -25,7 +26,8 @@ extern "C" {
 #include "z64.h"
 }
 
-#define CVAR_NAV_ENABLED CVAR_ENHANCEMENT("Nav.Enabled")
+#define CVAR_NAV_ENABLED      CVAR_ENHANCEMENT("Nav.Enabled")
+#define CVAR_CLIMB_ANYWHERE   CVAR_ENHANCEMENT("ClimbAnywhere")
 
 namespace AnchorNav {
 
@@ -108,6 +110,9 @@ static NavTraits MakeFollowerTraits() {
     //   - Link-rigged: eligible to swim through Underwater nodes.
     //   - Jump distance: 110u — adult Link broad-jump is ~120u; child
     //     somewhat less. 110 is a reasonable midpoint.
+    //   - Climb-surface base mask: ladder + vine + designed climb walls
+    //     (matches vanilla Link). ResolveDynamicClimbMask promotes this
+    //     to include GENERIC_WALL when gEnhancements.ClimbAnywhere is on.
     NavTraits t = {};
     t.eligibleForLeashRespawn = false;
     t.useStickyTargeting      = true;
@@ -115,6 +120,9 @@ static NavTraits MakeFollowerTraits() {
     t.eligibleForSwimming     = true;
     t.leavesTrail             = true;
     t.maxJumpDistance         = 110;
+    t.climbSurfaceMask = ::AnchorNavRoom::NODE_CLIMB_LADDER
+                       | ::AnchorNavRoom::NODE_CLIMB_VINE
+                       | ::AnchorNavRoom::NODE_CLIMB_DESIGNATED_WALL;
     return t;
 }
 
@@ -209,6 +217,21 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
     }
 
     return kDefaultTraits;
+}
+
+uint16_t ResolveDynamicClimbMask(s16 actorId, uint16_t baseMask) {
+    // Follower inherits Link's runtime CVar — when ClimbAnywhere is on,
+    // adult / child Link can climb any vertical wall, so the follower's
+    // mask gains GENERIC_WALL. CVar off → base mask only.
+    //
+    // Other consumers (none yet wired; future Skullwalltula traits will
+    // include GENERIC_WALL in their static base) get baseMask unchanged.
+    if (actorId == ACTOR_EN_OE2) {
+        if (CVarGetInteger(CVAR_CLIMB_ANYWHERE, 0) != 0) {
+            return (uint16_t)(baseMask | ::AnchorNavRoom::NODE_CLIMB_GENERIC_WALL);
+        }
+    }
+    return baseMask;
 }
 
 } // namespace AnchorNav

@@ -200,6 +200,29 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos) {
 // until evidence of need.
 static constexpr uint8_t kHazardEscapeHops = 2;
 
+// Climb-surface admission predicate (schema v7+ / Stage 5). Returns true
+// when the BFS may use this node:
+//   - Floor-class node (no NODE_CLIMB_* bits): admissible iff NODE_WALKABLE.
+//     Preserves pre-v7 behaviour for any caller passing climbSurfaceMask=0.
+//   - Climb-surface node (one of NODE_CLIMB_LADDER/VINE/DESIGNATED_WALL/
+//     GENERIC_WALL): admissible iff at least one of its type bits is in
+//     `climbSurfaceMask`. Climb-surface nodes intentionally lack
+//     NODE_WALKABLE (they sit on walls, not floors) — this predicate is
+//     the gate that lets climb-aware consumers traverse them while
+//     keeping ground-only consumers out.
+//
+// All other per-node filters (NODE_ORPHANED / NODE_STEEP_SLOPE / NODE_HAZARD
+// / NODE_UNDERWATER) apply uniformly afterwards. Climb-surface nodes
+// don't carry any of those bits at scan time, so they pass through
+// unaffected once admitted.
+static inline bool IsNavNodeAdmissible(const NavNode& n, uint16_t climbSurfaceMask) {
+    const uint16_t climbBits = n.flags & NODE_CLIMB_ANY;
+    if (climbBits != 0) {
+        return (climbBits & climbSurfaceMask) != 0;
+    }
+    return (n.flags & NODE_WALKABLE) != 0;
+}
+
 // Helper. Builds a bidirectional adjacency list from data->edges. Each
 // NavEdge stored once but traversable both ways. Used by the hazard-aware
 // BFS and FindNearestNonHazardExit.
@@ -248,7 +271,8 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
                                   int fromIdx,
                                   const Vec3f& targetPos,
                                   bool eligibleForSwimming,
-                                  bool avoidHazardNodes) {
+                                  bool avoidHazardNodes,
+                                  uint16_t climbSurfaceMask) {
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) {
         return -1;
     }
@@ -307,8 +331,9 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 
         const NavNode& node = data->nodes[entry.idx];
 
-        // Walkability + always-reject filters.
-        if (!(node.flags & NODE_WALKABLE)) continue;
+        // Admission gate (Stage 5): floor nodes need NODE_WALKABLE;
+        // climb-surface nodes need their type bit in climbSurfaceMask.
+        if (!IsNavNodeAdmissible(node, climbSurfaceMask)) continue;
         if (node.flags & (NODE_ORPHANED | NODE_STEEP_SLOPE)) continue;
 
         // Underwater filter: navigators not eligible for swimming reject
@@ -348,6 +373,13 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
             // Don't traverse THROUGH orphan nodes (defensive belt; the
             // orphan-detection pass should've severed orphan↔seed edges).
             if (data->nodes[nb].flags & NODE_ORPHANED) continue;
+            // Stage 5 climb-mask gate at expansion: skip enqueueing
+            // climb-surface neighbours whose type isn't in the mask.
+            // The body filter would catch them anyway via
+            // IsNavNodeAdmissible; gating here saves a queue push and a
+            // visit mark on dead branches.
+            const uint16_t nbClimbBits = data->nodes[nb].flags & NODE_CLIMB_ANY;
+            if (nbClimbBits != 0 && (nbClimbBits & climbSurfaceMask) == 0) continue;
             visited[nb] = true;
             frontier.push_back({nb, curHazardHops});
         }
@@ -367,14 +399,15 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
     // neighbour — the caller's MovementClear gate filters out trivial
     // self-pointing returns.
     if (avoidHazardNodes) {
-        return FindNearestNonHazardExit(data, fromIdx, eligibleForSwimming);
+        return FindNearestNonHazardExit(data, fromIdx, eligibleForSwimming, climbSurfaceMask);
     }
     return -1;
 }
 
 int FindNearestNonHazardExit(const RoomNavData* data,
                               int fromIdx,
-                              bool eligibleForSwimming) {
+                              bool eligibleForSwimming,
+                              uint16_t climbSurfaceMask) {
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) {
         return -1;
     }
@@ -385,7 +418,8 @@ int FindNearestNonHazardExit(const RoomNavData* data,
     // Plain unfiltered BFS — first non-hazard walkable node encountered
     // wins. No target-direction bias; exit IS the goal. Honors swimming
     // eligibility so non-swimmers don't get pointed at an underwater
-    // exit.
+    // exit. Honors climbSurfaceMask so a climb-aware consumer cornered
+    // in hazard can use a climb surface as the exit (rare but possible).
     std::vector<std::vector<uint16_t>> adjacency = BuildAdjacencyList(data);
     std::vector<bool> visited(data->nodes.size(), false);
     std::deque<uint16_t> q;
@@ -397,7 +431,8 @@ int FindNearestNonHazardExit(const RoomNavData* data,
         q.pop_front();
 
         const NavNode& node = data->nodes[cur];
-        if (!(node.flags & NODE_WALKABLE)) continue;
+        // Stage 5 admission: floor → walkable; climb-surface → mask gate.
+        if (!IsNavNodeAdmissible(node, climbSurfaceMask)) continue;
         if (node.flags & (NODE_ORPHANED | NODE_STEEP_SLOPE)) continue;
 
         const bool isHazard = (node.flags & NODE_HAZARD) != 0;
@@ -416,6 +451,8 @@ int FindNearestNonHazardExit(const RoomNavData* data,
             if (nb >= visited.size()) continue;
             if (visited[nb]) continue;
             if (data->nodes[nb].flags & NODE_ORPHANED) continue;
+            const uint16_t nbClimbBits = data->nodes[nb].flags & NODE_CLIMB_ANY;
+            if (nbClimbBits != 0 && (nbClimbBits & climbSurfaceMask) == 0) continue;
             visited[nb] = true;
             q.push_back(nb);
         }
@@ -432,7 +469,8 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
                                    bool eligibleForSwimming,
                                    bool avoidHazardNodes,
                                    std::vector<Vec3f>& out,
-                                   std::vector<uint16_t>* outFlags) {
+                                   std::vector<uint16_t>* outFlags,
+                                   uint16_t climbSurfaceMask) {
     out.clear();
     if (outFlags) outFlags->clear();
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;
@@ -469,7 +507,10 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
         frontier.pop_front();
 
         const NavNode& node = data->nodes[entry.idx];
-        if (!(node.flags & NODE_WALKABLE)) continue;
+        // Stage 5 admission gate: floor → walkable; climb-surface →
+        // mask gate (climbSurfaceMask=0 preserves pre-v7 floor-only
+        // behaviour for callers that don't pass a mask).
+        if (!IsNavNodeAdmissible(node, climbSurfaceMask)) continue;
         if (node.flags & (NODE_ORPHANED | NODE_STEEP_SLOPE)) continue;
         if ((node.flags & NODE_UNDERWATER) && !eligibleForSwimming) continue;
 
@@ -490,6 +531,10 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
             if (nb >= visited.size()) continue;
             if (visited[nb]) continue;
             if (data->nodes[nb].flags & NODE_ORPHANED) continue;
+            // Stage 5 climb-mask expansion gate: skip enqueueing
+            // climb-surface neighbours whose type isn't in the mask.
+            const uint16_t nbClimbBits = data->nodes[nb].flags & NODE_CLIMB_ANY;
+            if (nbClimbBits != 0 && (nbClimbBits & climbSurfaceMask) == 0) continue;
             visited[nb] = true;
             parents[nb] = (int)entry.idx;
             frontier.push_back({nb, curHazardHops});
@@ -593,6 +638,13 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
             // non-orphan nodes anyway, but defensive belt: never let
             // BFS traverse through an orphan island.
             if (data->nodes[nb].flags & NODE_ORPHANED) continue;
+            // Stage 5 conservative gate: IsReachable's only documented
+            // caller is spawn validation — answer "reachable" only when
+            // a FLOOR-only route exists. Erring on the side of "no" if
+            // the only path is via a climb keeps spawned actors out of
+            // climbs they may not be able to traverse. If a climb-aware
+            // caller surfaces, add a climbSurfaceMask parameter then.
+            if (data->nodes[nb].flags & NODE_CLIMB_ANY) continue;
             visited[nb] = true;
             q.push_back(nb);
         }
