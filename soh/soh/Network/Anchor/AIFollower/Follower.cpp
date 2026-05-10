@@ -2745,6 +2745,50 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
                 leaderStillClimbing = true;
             }
         }
+
+        // Stage 6: substrate-path-driven target refresh (when leader
+        // is NOT on the ladder — leader-tracking takes priority above
+        // when active). The substrate path may include a sequence of
+        // climb-surface waypoints (one per grid cell); refresh the
+        // climb target to the current subgoal each frame and advance
+        // the path when the follower reaches it. Use 3D proximity for
+        // climb waypoints (XZ-only would advance prematurely on a
+        // vertical climb where the follower is mid-cell).
+        //
+        // When the path advances PAST the climb-surface segment (next
+        // subgoal is a non-climb floor node), exit CLIMBING — the
+        // multi-cell climb is complete; FOLLOW resumes for the floor
+        // portion of the path.
+        if (!leaderStillClimbing &&
+            AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
+            !followerNavPath.Empty()) {
+            const uint16_t sgFlags = followerNavPath.CurrentSubgoalFlags();
+            const uint16_t climbBits = sgFlags & ::AnchorNavRoom::NODE_CLIMB_ANY;
+            if (climbBits != 0) {
+                Vec3f sg = followerNavPath.CurrentSubgoal();
+                followerClimbTopTarget = sg;
+                constexpr f32 kClimbSubgoalReach3D = 24.0f;
+                f32 dx = sg.x - player->actor.world.pos.x;
+                f32 dy = sg.y - player->actor.world.pos.y;
+                f32 dz = sg.z - player->actor.world.pos.z;
+                if (dx * dx + dy * dy + dz * dz <
+                    kClimbSubgoalReach3D * kClimbSubgoalReach3D) {
+                    followerNavPath.Advance();
+                }
+            } else {
+                // Path advanced past climb segment — climb done.
+                followerClimbDismountYaw    = player->actor.shape.rot.y;
+                followerClimbDismountFrames = kClimbDismountHoldFrames;
+                followerAIState     = FollowerAIState::IDLE;
+                followerStateFrames = 0;
+                followerAutonomousClimb       = false;
+                followerAutonomousClimbFrames = 0;
+                SPDLOG_INFO("[Follower] CLIMBING→IDLE (substrate path exited "
+                            "climb segment; next subgoal is floor)");
+                return;
+            }
+        }
+
         constexpr f32 kAutonomousClimbReachY = 16.0f;       // within 16u Y of top → done
         constexpr int kAutonomousClimbMaxFrames = 600;      // ~10s safety
         bool reachedTop =
@@ -3404,6 +3448,38 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
             }
             if (!followerNavPath.Empty()) {
                 followTarget = followerNavPath.CurrentSubgoal();
+
+                // Stage 6: substrate-path-driven CLIMBING engagement.
+                // The current subgoal sits on a climb-surface node
+                // (Stages 2-3 produced the grid; Stage 5's BFS gating
+                // ensures we only get a climb-surface subgoal when the
+                // resolved mask granted permission). Engage CLIMBING
+                // with the subgoal as the climb target; the autonomous
+                // branch in HandleStateClimbing takes over and refreshes
+                // the target as the path advances through the grid.
+                //
+                // The defensive AND against computedClimbMask guards
+                // against a mid-session CVar flip changing what the
+                // consumer is allowed to traverse between path-compute
+                // time and engagement time (plan Q8).
+                const uint16_t sgFlags   = followerNavPath.CurrentSubgoalFlags();
+                const uint16_t climbBits = sgFlags & ::AnchorNavRoom::NODE_CLIMB_ANY;
+                if (climbBits != 0 &&
+                    (climbBits & followerNavPath.computedClimbMask) != 0 &&
+                    followerAIState != FollowerAIState::CLIMBING &&
+                    !followerAutonomousClimb) {
+                    followerClimbTopTarget        = followTarget;
+                    followerAutonomousClimb       = true;
+                    followerAutonomousClimbFrames = 0;
+                    followerAIState               = FollowerAIState::CLIMBING;
+                    followerStateFrames           = 0;
+                    SPDLOG_INFO("[Follower] FOLLOW→CLIMBING (substrate path "
+                                "entered climb node type=0x{:04x} at "
+                                "{:.0f},{:.0f},{:.0f})",
+                                climbBits,
+                                followTarget.x, followTarget.y, followTarget.z);
+                    return;
+                }
             }
         }
     }
