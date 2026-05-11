@@ -84,6 +84,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_DROP_ANCHOR           CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection")
 #define CVAR_ROOM_NAV_INITIAL_SCAN_DELAY    CVAR_ENHANCEMENT("RoomNavData.InitialScanDelayFrames")
 #define CVAR_ROOM_NAV_AUTO_EXPAND           CVAR_ENHANCEMENT("RoomNavData.AutoExpandOnExploration")
+#define CVAR_ROOM_NAV_INTER_ANCHOR_BRIDGE_R CVAR_ENHANCEMENT("RoomNavData.InterAnchorBridgeRadius")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -1756,6 +1757,13 @@ static constexpr float kFloorToClimbCost       = 50.0f;
 static constexpr float kClimbToFloorCost       = 50.0f;
 static constexpr float kBoundaryFloorRadiusXZ  = 60.0f;
 static constexpr float kBoundaryFloorYDelta    = 50.0f;
+// Inter-anchor climb bridges (see Plans/inter_anchor_climb_bridges_plan.md).
+// Cost slots between intra-anchor (30) and floor↔climb (50): the BFS
+// prefers within-anchor routing when the geometry permits, falls through
+// to the bridge when the seam is the only way across, and prefers the
+// bridge over a 50+50=100 floor-detour for stacked-anchor cases.
+static constexpr float kInterAnchorBridgeCost  = 40.0f;
+static constexpr float kInterAnchorBridgeRadiusDefault = 45.0f;  // ~1.5× grid resolution
 
 // Find the nearest floor node (skipping climb-surface) to `pos` within
 // `maxRadiusXZ` AND |Δy| < `maxYDelta`. Returns -1 if no floor node
@@ -2217,6 +2225,139 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
         SPDLOG_INFO("[RoomNav] Climb-surface grids: {} anchors, {} new nodes appended at idx {}",
                     out->climbAnchors.size(), totalNodesAdded,
                     (unsigned)out->firstClimbSurfaceNodeIdx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inter-anchor climb bridges (Plans/inter_anchor_climb_bridges_plan.md).
+//
+// `ClimbAnchor` records are emitted per planar facet of a climbable
+// surface. Curved walls (corner of two vine faces) and stacked
+// climbables (vertical seam between tiers) produce SEPARATE anchors
+// whose grids are physically touching but graph-disconnected — each
+// anchor's `GenerateClimbSurfaceEdges` only emits intra-grid edges.
+//
+// This pass detects anchor pairs whose perimeter cells are within
+// `kBridgeRadius` of each other and emits bidirectional `NavEdge`s
+// between them. The edges go into `out->edges` like any other surface
+// edge; BFS treats them identically, climb-mask gated.
+//
+// Perimeter cells include both lateral edges (u == 0 or u == cellsU-1,
+// covering curved-wall corners) AND top/bottom rows (v == 0 or
+// v == cellsV-1, covering stacked-anchor vertical seams). The
+// existing `NODE_CLIMB_BOUNDARY` flag only covers the latter; we
+// compute the predicate at scan time to cover both axes without a
+// schema bump.
+// ---------------------------------------------------------------------------
+
+static void DetectInterAnchorClimbBridges(RoomNavData* out) {
+    if (out == nullptr) return;
+    if (out->climbAnchors.size() < 2) return;
+    if (out->firstClimbSurfaceNodeIdx == UINT16_MAX) return;
+
+    const float radius = std::max(
+        1.0f, (float)CVarGetFloat(CVAR_ROOM_NAV_INTER_ANCHOR_BRIDGE_R,
+                                  kInterAnchorBridgeRadiusDefault));
+    const float radiusSq = radius * radius;
+
+    // Predicate: cell on the perimeter of its anchor's grid. Covers
+    // both lateral edges and top/bottom rows. Corner cells (where both
+    // hold) are visited once because we iterate by node index, not by
+    // axis.
+    auto isPerimeter = [](const NavNode& n, const ClimbAnchor& a) -> bool {
+        const uint16_t u = n.cellIdxX;
+        const uint16_t v = n.cellIdxZ;
+        const uint16_t lastU = (a.cellsU > 0) ? (uint16_t)(a.cellsU - 1) : (uint16_t)0;
+        const uint16_t lastV = (a.cellsV > 0) ? (uint16_t)(a.cellsV - 1) : (uint16_t)0;
+        return (u == 0) || (u == lastU) || (v == 0) || (v == lastV);
+    };
+
+    // AABB inflated by bridge radius. Two anchors whose inflated
+    // bboxes don't overlap can't have cells within `radius` of each
+    // other; skip the inner O(perimeter²) loop entirely.
+    auto anchorAabb = [&](const ClimbAnchor& a, Vec3f& outMin, Vec3f& outMax) {
+        outMin = { std::numeric_limits<float>::infinity(),
+                   std::numeric_limits<float>::infinity(),
+                   std::numeric_limits<float>::infinity() };
+        outMax = { -std::numeric_limits<float>::infinity(),
+                   -std::numeric_limits<float>::infinity(),
+                   -std::numeric_limits<float>::infinity() };
+        const uint16_t end = (uint16_t)(a.firstNodeIdx + a.nodeCount);
+        for (uint16_t i = a.firstNodeIdx; i < end; i++) {
+            const Vec3f& p = out->nodes[i].pos;
+            if (p.x < outMin.x) outMin.x = p.x;
+            if (p.y < outMin.y) outMin.y = p.y;
+            if (p.z < outMin.z) outMin.z = p.z;
+            if (p.x > outMax.x) outMax.x = p.x;
+            if (p.y > outMax.y) outMax.y = p.y;
+            if (p.z > outMax.z) outMax.z = p.z;
+        }
+    };
+
+    auto aabbOverlaps = [&](const Vec3f& aMin, const Vec3f& aMax,
+                            const Vec3f& bMin, const Vec3f& bMax) -> bool {
+        return !(aMax.x + radius < bMin.x || bMax.x + radius < aMin.x ||
+                 aMax.y + radius < bMin.y || bMax.y + radius < aMin.y ||
+                 aMax.z + radius < bMin.z || bMax.z + radius < aMin.z);
+    };
+
+    // Pre-compute each anchor's AABB + its list of perimeter node
+    // indices. Avoids repeating the cell-flag predicate inside the
+    // O(N²) anchor-pair loop.
+    const size_t nAnchors = out->climbAnchors.size();
+    std::vector<Vec3f>                       aabbMin(nAnchors);
+    std::vector<Vec3f>                       aabbMax(nAnchors);
+    std::vector<std::vector<uint16_t>>       perimeter(nAnchors);
+    for (size_t i = 0; i < nAnchors; i++) {
+        const ClimbAnchor& a = out->climbAnchors[i];
+        anchorAabb(a, aabbMin[i], aabbMax[i]);
+        const uint16_t end = (uint16_t)(a.firstNodeIdx + a.nodeCount);
+        for (uint16_t k = a.firstNodeIdx; k < end; k++) {
+            if (isPerimeter(out->nodes[k], a)) {
+                perimeter[i].push_back(k);
+            }
+        }
+    }
+
+    size_t pairsConsidered = 0;
+    size_t pairsBridged    = 0;
+    size_t edgesEmitted    = 0;
+
+    for (size_t i = 0; i < nAnchors; i++) {
+        for (size_t j = i + 1; j < nAnchors; j++) {
+            pairsConsidered++;
+            if (!aabbOverlaps(aabbMin[i], aabbMax[i],
+                              aabbMin[j], aabbMax[j])) continue;
+
+            bool anyEmitted = false;
+            for (uint16_t ai : perimeter[i]) {
+                const Vec3f& aPos = out->nodes[ai].pos;
+                for (uint16_t bj : perimeter[j]) {
+                    const Vec3f& bPos = out->nodes[bj].pos;
+                    const float dx = aPos.x - bPos.x;
+                    const float dy = aPos.y - bPos.y;
+                    const float dz = aPos.z - bPos.z;
+                    if (dx*dx + dy*dy + dz*dz > radiusSq) continue;
+                    // Bidirectional. NavEdge is stored once but BuildAdjacencyList
+                    // pushes both directions, matching the existing edge convention.
+                    NavEdge edge{};
+                    edge.fromIdx = (uint16_t)std::min<int>((int)ai, (int)bj);
+                    edge.toIdx   = (uint16_t)std::max<int>((int)ai, (int)bj);
+                    edge.cost    = kInterAnchorBridgeCost;
+                    out->edges.push_back(edge);
+                    edgesEmitted++;
+                    anyEmitted = true;
+                }
+            }
+            if (anyEmitted) pairsBridged++;
+        }
+    }
+
+    if (edgesEmitted > 0 || pairsBridged > 0) {
+        SPDLOG_INFO("[RoomNav] Inter-anchor climb bridges: {} pairs bridged "
+                    "({}/{} considered), {} edges (radius={:.0f})",
+                    pairsBridged, pairsBridged, pairsConsidered,
+                    edgesEmitted, radius);
     }
 }
 
@@ -3267,6 +3408,12 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     // on the same wall. Anchor poly-list is unioned alongside.
     MergeOverlappingClimbAnchors(out, &anchorPolys);
     GenerateClimbSurfaceGrids(out, play, &anchorPolys);
+    // Inter-anchor bridges (Plans/inter_anchor_climb_bridges_plan.md). Bridges
+    // span anchor seams (lateral curved-wall corners + vertical stacked tiers)
+    // so the BFS treats touching-but-separate climb grids as one connected
+    // surface. Runs after grids are populated so anchor.firstNodeIdx + nodeCount
+    // are valid.
+    DetectInterAnchorClimbBridges(out);
 
     // Update historicalSeeds with the union of (current player + actor
     // + previously-historical seed positions). Cell-deduped at insertion
@@ -4578,6 +4725,22 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
             const Vec3f& posB = data->nodes[edge.toIdx].pos;
             AddGroundLineQuad(sXluDl, sVtxDl, posA, posB);
         }
+        // Inter-anchor climb bridges (Plans/inter_anchor_climb_bridges_plan.md)
+        // — bright cyan, ground-aligned so the lateral seams are visible from
+        // any camera angle. Both endpoints are climb-surface AND from different
+        // anchors. Field-tuning visual: confirms which anchor pairs the
+        // detector linked, useful when adjusting RoomNavData.InterAnchorBridgeRadius.
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0xFF, 0xC0, 0xE0));
+        for (const NavEdge& edge : data->edges) {
+            if (edge.fromIdx >= nodeCount || edge.toIdx >= nodeCount) continue;
+            uint16_t aFrom = nodeToAnchor[edge.fromIdx];
+            uint16_t aTo   = nodeToAnchor[edge.toIdx];
+            if (aFrom == UINT16_MAX || aTo == UINT16_MAX) continue; // not climb↔climb
+            if (aFrom == aTo) continue;                              // in-grid (already drawn)
+            const Vec3f& posA = data->nodes[edge.fromIdx].pos;
+            const Vec3f& posB = data->nodes[edge.toIdx].pos;
+            AddGroundLineQuad(sXluDl, sVtxDl, posA, posB);
+        }
     }
 
     // Hazard centroids — deep red, slightly larger than node quads so they
@@ -4940,9 +5103,11 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
 
     // Re-generate climb-surface grids (schema v7+) for the refreshed
     // anchors. Same ordering as the main scan path: merge overlaps
-    // (Q6 fix), then generate via AABB-driven hybrid.
+    // (Q6 fix), then generate via AABB-driven hybrid, then re-detect
+    // inter-anchor bridges (lateral + vertical seams).
     MergeOverlappingClimbAnchors(&nav, &anchorPolys);
     GenerateClimbSurfaceGrids(&nav, play, &anchorPolys);
+    DetectInterAnchorClimbBridges(&nav);
 
     // Reset the debug-draw summary tracker so the next overlay frame
     // re-emits the loaded-summary line with the refreshed counts.

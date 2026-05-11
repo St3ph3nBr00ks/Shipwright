@@ -2141,6 +2141,28 @@ void SohMenu::AddMenuEnhancements() {
             "scenery at the cost of a more visible delay before nav "
             "data is available."));
 
+    AddWidget(path, "Inter-Anchor Climb Bridge Radius: %.0fu", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.InterAnchorBridgeRadius"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .Options(FloatSliderOptions()
+                     .Min(15.0f)
+                     .Max(120.0f)
+                     .DefaultValue(45.0f)
+                     .Format("%.0fu")
+                     .Tooltip(
+            "Maximum 3D distance between perimeter cells of two adjacent "
+            "climb anchors at which they're considered physically touching "
+            "and a bridge edge is emitted between them.\n\n"
+            "Climb-surface grids are generated per planar facet, so curved "
+            "walls (vertical seam at a corner) and stacked climbables "
+            "(horizontal seam between tiers) produce SEPARATE anchors "
+            "whose grids are graph-disconnected. This pass connects them "
+            "so the BFS can route across the seam.\n\n"
+            "Default 45u (~1.5x grid resolution). Lower values miss real "
+            "seams; higher values bridge unrelated grids in the same room. "
+            "Visualized in the debug overlay as bright cyan ground lines.\n\n"
+            "Apply via Force Rescan after changing."));
+
     AddWidget(path, "Drop Anchor Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
