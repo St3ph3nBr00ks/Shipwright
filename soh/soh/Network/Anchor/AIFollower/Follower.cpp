@@ -2041,7 +2041,28 @@ void Anchor::TickFollowerInput(Actor* actor) {
             f32 dxzSq = dxL * dxL + dzL * dzL;
             s8  ladderX = 0;
             static constexpr f32 kClimbXzTolerance = 10.0f;
-            if (dxzSq > kClimbXzTolerance * kClimbXzTolerance) {
+            // Bug B fix (user 2026-05-12 log 29): block lateral stick
+            // injection on LADDER anchors. User: "horizontal/lateral
+            // movement on ladders is not allowed; the only movement
+            // options are up and down." OoT's ladder code clamps
+            // stick_x usually but the lateral input still rotates
+            // Link's facing — observable as Link sliding/rotating
+            // and eventually falling off. Vines correctly use lateral
+            // tracking; only ladders block.
+            bool isLadderAnchor = false;
+            if (followerClimbAnchorIdx != UINT16_MAX) {
+                const ::AnchorNavRoom::RoomNavData* navData =
+                    ::AnchorNavRoom::GetForRoom(
+                        gPlayState->sceneNum,
+                        (int8_t)gPlayState->roomCtx.curRoom.num);
+                if (navData != nullptr &&
+                    followerClimbAnchorIdx < navData->climbAnchors.size()) {
+                    isLadderAnchor = (navData->climbAnchors[followerClimbAnchorIdx]
+                                       .surfaceType == ::AnchorNavRoom::NODE_CLIMB_LADDER);
+                }
+            }
+            if (!isLadderAnchor &&
+                dxzSq > kClimbXzTolerance * kClimbXzTolerance) {
                 Camera* cam = GET_ACTIVE_CAM(gPlayState);
                 s16 inputDirYaw = Camera_GetInputDirYaw(cam);
                 s16 worldYaw    = Math_Atan2S(dzL, dxL);
@@ -2162,12 +2183,35 @@ void Anchor::TickFollowerInput(Actor* actor) {
                     }
                 }
             }
+            // Bug A fix (user 2026-05-12 log 29): Phase A approach
+            // target is the ANCHOR's basePos, not followerMoveTarget
+            // (which is the leader's pos when leader is climbing).
+            // Pre-fix the follower walked toward leader's mid-air XZ —
+            // typically offset 10-20u from the actual ladder XZ
+            // because the leader's pos drifts during climb animation.
+            // Result: follower walked PAST the ladder laterally
+            // instead of into it (the "stuck at base, walking in
+            // place" symptom). Anchor.basePos is the ladder's actual
+            // attach position; walking there produces a guaranteed
+            // OoT collision grab.
+            Vec3f approachTarget = followerMoveTarget;
+            if (followerClimbAnchorIdx != UINT16_MAX) {
+                const ::AnchorNavRoom::RoomNavData* navData =
+                    ::AnchorNavRoom::GetForRoom(
+                        gPlayState->sceneNum,
+                        (int8_t)gPlayState->roomCtx.curRoom.num);
+                if (navData != nullptr &&
+                    followerClimbAnchorIdx < navData->climbAnchors.size()) {
+                    approachTarget =
+                        navData->climbAnchors[followerClimbAnchorIdx].basePos;
+                }
+            }
             // Walk toward ladder. Reuse the standard
             // camera-relative inversion (smaller copy here so
             // we can ignore the magnitude curve — full
             // forward into the ladder gets the grab).
-            f32 dx = followerMoveTarget.x - p2w.x;
-            f32 dz = followerMoveTarget.z - p2w.z;
+            f32 dx = approachTarget.x - p2w.x;
+            f32 dz = approachTarget.z - p2w.z;
             if (dx * dx + dz * dz > 1.0f) {
                 Camera* cam = GET_ACTIVE_CAM(gPlayState);
                 s16 inputDirYaw = Camera_GetInputDirYaw(cam);
