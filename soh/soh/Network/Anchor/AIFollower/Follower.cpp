@@ -1907,11 +1907,27 @@ void Anchor::TickFollowerInput(Actor* actor) {
         (sf1 & PLAYER_STATE1_DAMAGED)           ||
         (sf1 & PLAYER_STATE1_TALKING)           ||
         (sf1 & PLAYER_STATE1_INPUT_DISABLED);
+    // Track whether the block reason is SPECIFICALLY "on a ladder
+    // outside our CLIMBING state". The dismount-hold injection below
+    // is exempt from this specific block so its forward-stick can
+    // tell OoT to walk OFF the ladder rim (auto-dismount). Other
+    // blocks (HANGING_OFF_LEDGE / CLIMBING_LEDGE / cutscene / damage /
+    // dialogue / disabled-input) still apply.
+    //
+    // Field-test fix from log 30 (user 2026-05-12): pre-fix, the
+    // dismount counter only decremented when blockedByPlayerState was
+    // false. After CLIMBING→IDLE Link's PLAYER_STATE1_CLIMBING_LADDER
+    // lingered for several seconds; nowOnLadder kept blockedByPlayerState
+    // true; dismount stick never fired; "Dismount forward-hold complete"
+    // log fired 7 seconds late, by which time Link had slid laterally
+    // off the ladder.
+    bool blockedOnlyByLadderNonClimbing = false;
     if (nowOnLadder && followerAIState != FollowerAIState::CLIMBING) {
         // On a ladder but our state machine isn't in CLIMBING:
         // user manually grabbed it, or we mis-entered from a
         // non-climbing state. Block stick injection — let the
         // human resume control via the joystick-cancel path.
+        if (!blockedByPlayerState) blockedOnlyByLadderNonClimbing = true;
         blockedByPlayerState = true;
     }
 
@@ -1976,7 +1992,8 @@ void Anchor::TickFollowerInput(Actor* actor) {
         input.cur.stick_y = 127;
         input.rel.stick_x = 0;
         input.rel.stick_y = 127;
-    } else if (followerClimbDismountFrames > 0 && !blockedByPlayerState) {
+    } else if (followerClimbDismountFrames > 0 &&
+               (!blockedByPlayerState || blockedOnlyByLadderNonClimbing)) {
         // Bug C (log 69) — ladder/vine dismount forward-hold.
         // Project the held world-space yaw (captured at the
         // CLIMBING→IDLE transition as Link's shape.rot.y,
