@@ -1366,7 +1366,18 @@ static uint16_t ClassifyClimbWallFlags(s32 wallFlags) {
 // like Inside Deku Tree main entrance Skullwalltula wall (~600u+).
 static constexpr float    kClimbGridCellSpacing  = 30.0f;  // matches kGridResolution
 static constexpr float    kClimbRayStandoff      = 100.0f; // ray origin distance from wall
-static constexpr float    kClimbRayLength        = 200.0f; // total ray length (standoff + penetration)
+static constexpr float    kClimbRayLength        = 400.0f; // total ray length (standoff + penetration)
+// Ray geometry: start = cellCenter + normal*100, end = cellCenter -
+// normal*(kClimbRayLength - 100). With kClimbRayLength=400 the ray
+// spans +100u to -300u along the normal. Catches walls offset by up
+// to 300u backward (typical for curved or non-planar walls where
+// middle sections sit further back than the predicted plane). Bumped
+// 200→400 (2026-05-12, log 32 ghost-cell diagnostic) — user reported
+// 4x4 ghost grid between two valid grids on a climbable vine wall;
+// AABB extent was correct but raycast missed the curved section.
+// False-positive risk: rays extending 300u backward could hit
+// unrelated walls in narrow rooms; mitigated by the climbable-flag
+// filter in ClassifyClimbWallFlags rejecting non-climbable hits.
 static constexpr float    kClimbProbeYAtBase     = 30.0f;  // raise above floor for normal probe
 static constexpr int      kClimbWidthMaxStepsPerSide = 12; // ±360u max width search (Path A only)
 static constexpr float    kClimbMinAnchorHeight  = 30.0f;  // skip degenerate-height anchors
