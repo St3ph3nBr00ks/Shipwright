@@ -2289,6 +2289,22 @@ void SohMenu::AddMenuEnhancements() {
             "scene-furniture surfaces. Re-scan the room (Force Rescan) after toggling "
             "to populate the cross positions."));
 
+    AddWidget(path, "Generate Generic-Wall Climb Grids", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.GenerateGenericWallGrids"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, Path B also generates climb-surface grids for vertical walls "
+            "that LACK the vanilla climbable wall-flag bits. The resulting anchors "
+            "are tagged NODE_CLIMB_GENERIC_WALL — accessible only to consumers "
+            "whose NavTraits.climbSurfaceMask includes GENERIC_WALL (planned: "
+            "Skullwalltula sync; AI Follower with gCheats.ClimbEverything on).\n\n"
+            "Tradeoff: scan time + memory grow proportionally — every interior "
+            "wall in the room generates a grid. Best left off unless an actor that "
+            "needs generic-wall climbing is in scope for the current room.\n\n"
+            "Re-scan the room (Force Rescan below) after toggling to populate "
+            "the new anchors. Default: off."));
+
     AddWidget(path, "Force Rescan Current Room", WIDGET_BUTTON)
         .Callback([](WidgetInfo& info) { AnchorNavRoom::ForceRescanCurrentRoom(); })
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })

@@ -72,6 +72,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE    CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
 #define CVAR_ROOM_NAV_DEBUG_DRAW_COMPONENTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawComponents")
 #define CVAR_ROOM_NAV_DEBUG_DRAW_CLIMB_GHOSTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawClimbGhosts")
+#define CVAR_ROOM_NAV_GEN_GENERIC_WALL_GRIDS  CVAR_ENHANCEMENT("RoomNavData.GenerateGenericWallGrids")
 #define CVAR_ROOM_NAV_LOG_REJECTED_FLOORS   CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors")
 #define CVAR_ROOM_NAV_PATH_B_CLIMB          CVAR_ENHANCEMENT("RoomNavData.PathBClimbDetection")
 #define CVAR_ROOM_NAV_LEDGE_GRAB            CVAR_ENHANCEMENT("RoomNavData.LedgeGrabDetection")
@@ -1272,21 +1273,44 @@ static void DetectClimbAnchorsViaSurfaceFlags(
         // Climbable-flag check (production filter). Matches any of
         // wall-property indices 2, 3, or 4 — see kWallFlagClimbableMask
         // declaration above for index→bitmask semantics.
-        if ((wallFlags & kWallFlagClimbableMask) == 0) continue;
+        //
+        // Generic-wall mode (Task 1 2026-05-12): when
+        // RoomNavData.GenerateGenericWallGrids is on, ALSO admit walls
+        // that LACK the climbable flag. These get clustered into a
+        // separate anchor set marked surfaceType=NODE_CLIMB_GENERIC_WALL
+        // at detection (vs the climbable anchors which get their type
+        // determined at grid-gen time). Skullwalltula nav consumers
+        // can use these via their NavTraits.climbSurfaceMask
+        // = NODE_CLIMB_ANY. Other consumers (follower with default
+        // mask LADDER|VINE|DESIGNATED_WALL) ignore generic walls.
+        const bool hasClimbFlag = (wallFlags & kWallFlagClimbableMask) != 0;
+        const bool genericWallsOn = CVarGetInteger(CVAR_ROOM_NAV_GEN_GENERIC_WALL_GRIDS, 0) != 0;
+        if (!hasClimbFlag && !genericWallsOn) continue;
 
         // If only the diagnostic CVar is on (production Path B off),
         // we've already logged this wall — skip the anchor-creation
         // path so diagnostic-only runs don't pollute climbAnchors.
         if (!pathBProduction) continue;
 
+        // The "kind" of cluster this poly belongs to. Climbable polys
+        // never merge into generic-wall anchors and vice-versa —
+        // surfaceType is set per-anchor at detection for generic
+        // walls (so the post-process at gen time can tell them
+        // apart). Climbable Path B anchors keep surfaceType=0 at
+        // detection; it's filled in at gen.
+        const uint16_t polyKind = hasClimbFlag ? 0 : NODE_CLIMB_GENERIC_WALL;
+
         // Proximity-merge with existing anchors. Two anchors within
         // kClimbClusterRadiusXZ collapse into one whose Y range covers both.
         // Only static-geometry anchors (actorId == 0) are merge candidates;
-        // Path A actor-based anchors stay distinct.
+        // Path A actor-based anchors stay distinct. Cluster KIND must
+        // match — a climbable poly doesn't merge with a generic-wall
+        // anchor.
         size_t mergedAnchorIdx = SIZE_MAX;
         for (size_t ai = 0; ai < out->climbAnchors.size(); ai++) {
             ClimbAnchor& existing = out->climbAnchors[ai];
             if (existing.actorId != 0) continue;
+            if (existing.surfaceType != polyKind) continue; // kind mismatch
             f32 dx = existing.basePos.x - cx;
             f32 dz = existing.basePos.z - cz;
             if (dx * dx + dz * dz < kClusterRadiusSq) {
@@ -1307,6 +1331,11 @@ static void DetectClimbAnchorsViaSurfaceFlags(
             anchor.basePos = { cx, minY, cz };
             anchor.topPos  = { cx, maxY, cz };
             anchor.actorId = 0; // 0 = static-geometry per ClimbAnchor struct
+            // Tag generic-wall anchors at detection so the merger,
+            // grid generator, and per-cell raycast can branch on kind
+            // without re-deriving it from the wall flags. Climbable
+            // anchors keep surfaceType=0; gen fills it in.
+            anchor.surfaceType = polyKind;
             out->climbAnchors.push_back(anchor);
             if (anchorPolys) {
                 anchorPolys->emplace_back();
@@ -1843,6 +1872,9 @@ static void MergeOverlappingClimbAnchors(RoomNavData* out,
         for (size_t j = i + 1; j < anchors.size(); j++) {
             if (!active[j]) continue;
             if (anchors[j].actorId != 0) continue; // Path A actors never merge
+            // Kind mismatch: climbable Path B (surfaceType=0 at detection)
+            // doesn't merge with generic-wall Path B (surfaceType=NODE_CLIMB_GENERIC_WALL).
+            if (anchors[i].surfaceType != anchors[j].surfaceType) continue;
             float dx = anchors[i].basePos.x - anchors[j].basePos.x;
             float dz = anchors[i].basePos.z - anchors[j].basePos.z;
             if (dx * dx + dz * dz > r2) continue;
@@ -1946,11 +1978,19 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
         Vec3f axisU = V3Normalize(V3Cross(axisV, normal));
         if (V3Len(axisU) < 1e-3f) continue;
 
-        // Surface-type pre-classification: Path A → LADDER. Path B → probe
-        // a representative cell at basePos to read the wall-flag bits.
+        // Surface-type pre-classification:
+        //   Path A → LADDER (actor identity).
+        //   Path B generic-wall anchor → GENERIC_WALL (Task 1 2026-05-12;
+        //     surfaceType is pre-set at detection when CVar on).
+        //   Path B climbable anchor → probe basePos to read wall-flag bits.
+        const bool isGenericWallAnchor =
+            (anchor.actorId == 0 &&
+             anchor.surfaceType == NODE_CLIMB_GENERIC_WALL);
         uint16_t expectedType = 0;
         if (anchor.actorId != 0) {
             expectedType = NODE_CLIMB_LADDER;
+        } else if (isGenericWallAnchor) {
+            expectedType = NODE_CLIMB_GENERIC_WALL;
         } else {
             Vec3f probeCenter = { anchor.basePos.x,
                                   anchor.basePos.y + kClimbProbeYAtBase,
@@ -2039,35 +2079,31 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                 // single-shot semantics — the actor's collision IS the
                 // climbable surface, so first-wall-hit is the right cell
                 // position.
+                // Path A & generic-wall: single-shot raycast (any wall
+                // hit OK — actor identity / wall-cluster identity is
+                // the ground truth).
+                // Path B climbable: pass-through raycast (skip
+                // non-climbable hits like platforms in the way).
+                const bool useSingleShot =
+                    (anchor.actorId != 0) || isGenericWallAnchor;
                 bool hit = RaycastClimbCell(play, cellCenter, normal,
                                             hitPos, wallFlags,
-                                            /*requireClimbable=*/anchor.actorId == 0);
-                // Field-test fix Q2 2026-05-11: for Path A actors,
-                // emit the cell at the GRID position whether or not
-                // the raycast hits a climbable poly. The ladder actor's
-                // identity is the ground truth — the actor IS the
-                // climbable surface, regardless of its dynamic
-                // collision wall-flag tagging. Pre-fix the per-cell
-                // "if (!hit) continue" + "if (typeBit == 0) continue"
-                // checks dropped most ladder cells (yields nodeCount=0
-                // and falls back to the legacy yellow post in
-                // DebugDraw). Post-fix: ladder cells are placed at the
-                // computed grid position; raycast hit position is used
-                // when available for accuracy, cellCenter as fallback.
+                                            /*requireClimbable=*/!useSingleShot);
                 if (anchor.actorId != 0) {
+                    // Path A — emit cell at GRID position whether or
+                    // not raycast hit. Actor identity is truth.
                     if (!hit) hitPos = cellCenter;
                     typeBit = NODE_CLIMB_LADDER;
+                } else if (isGenericWallAnchor) {
+                    // Path B generic-wall — emit only when raycast
+                    // hit a wall (the AABB extent is poly-driven, so
+                    // a missed cell means no wall there).
+                    if (!hit) continue;
+                    typeBit = NODE_CLIMB_GENERIC_WALL;
                 } else {
                     if (!hit) continue;
                     typeBit = ClassifyClimbWallFlags(wallFlags);
                     if (typeBit == 0) continue;
-                    // Hybrid 2026-05-11: removed `if (typeBit != expectedType) continue;`.
-                    // The poly cluster (after Q6 merge across ~250u
-                    // walls) may contain mixed surface types — accept
-                    // any climbable cell. The anchor's surfaceType
-                    // remains the dominant type for render color
-                    // (Stage 8 v2), but per-cell node.flags carries
-                    // the ACTUAL type bit hit at this cell.
                 }
                 NavNode node;
                 node.pos      = hitPos;
