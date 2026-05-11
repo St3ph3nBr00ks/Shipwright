@@ -8,6 +8,7 @@
 #include "Follower.h"
 #include "../Anchor.h"
 #include "../Common/DistanceMath.h"
+#include "../Common/NavCVars.h"
 #include "soh/cvar_prefixes.h"
 #include "soh/ShipInit.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -385,8 +386,8 @@ void CaptureFrame(const FollowerFrameContext& ctx) {
     j["postTeleportHold"]  = anchor->followerPostTeleportFrames;
     j["autonomousClimb"]   = anchor->followerAutonomousClimb ? 1 : 0;
 
-    j["navEnabled"]        = CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 ? 1 : 0;
-    j["consumerEnabled"]   = CVarGetInteger(CVAR_ENHANCEMENT("Nav.AiFollowerConsumer"), 0) != 0 ? 1 : 0;
+    j["navEnabled"]        = CVarGetInteger(AnchorNavCVars::kEnabled, 0) != 0 ? 1 : 0;
+    j["consumerEnabled"]   = CVarGetInteger(AnchorNavCVars::kAiFollowerConsumer, 0) != 0 ? 1 : 0;
 
     if (gPendingEvents.empty()) {
         j["events"] = nlohmann::json::array();

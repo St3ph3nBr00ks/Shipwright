@@ -14,6 +14,7 @@
 
 #include "NavTraits.h"
 #include "ActorSyncHelpers.h"  // IsSyncedBossActor
+#include "NavCVars.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // NodeFlags / NODE_CLIMB_*
 
 #include "soh/cvar_prefixes.h"
@@ -26,7 +27,6 @@ extern "C" {
 #include "z64.h"
 }
 
-#define CVAR_NAV_ENABLED        CVAR_ENHANCEMENT("Nav.Enabled")
 // SoH's "climb any wall" cheat. Lives under gCheats. (NOT
 // gEnhancements.ClimbAnywhere — that name doesn't exist; UI label is
 // "Climb Anywhere" but the CVar is gCheats.ClimbEverything per
@@ -37,7 +37,7 @@ extern "C" {
 namespace AnchorNav {
 
 bool IsNavSystemEnabled() {
-    return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0;
+    return AnchorNavCVars::IsMasterEnabled();
 }
 
 // ---------------------------------------------------------------------------

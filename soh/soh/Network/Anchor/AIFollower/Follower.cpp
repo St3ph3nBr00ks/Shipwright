@@ -25,6 +25,7 @@
 #include "../Common/ItemEligibility.h"
 #include "../Common/PauseLinkBuffer.h"
 #include "../Common/ActorSyncScope.h"
+#include "../Common/NavCVars.h"         // AnchorNavCVars::IsFeatureEnabled — central CVar manifest
 #include "../Common/NavTraits.h"        // AnchorNav::IsNavSystemEnabled — Phase 2 master gate
 #include "../Common/GroundFollowing.h"  // AnchorNav::ShouldZeroStickForEdge — Task 4
 #include "../Common/JumpResolver.h"     // AnchorNav::ResolveLedgeAhead — Phase 2 STUCK consumer
@@ -142,11 +143,8 @@ namespace AnchorFollower {
 // (when on — Phase 2 work in progress).
 // ---------------------------------------------------------------------------
 
-#define CVAR_NAV_AI_FOLLOWER_CONSUMER CVAR_ENHANCEMENT("Nav.AiFollowerConsumer")
-
 bool IsAiFollowerNavSubstrateEnabled() {
-    return AnchorNav::IsNavSystemEnabled() &&
-           CVarGetInteger(CVAR_NAV_AI_FOLLOWER_CONSUMER, 0) != 0;
+    return AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kAiFollowerConsumer);
 }
 
 void RegisterFollowerModule() {
@@ -972,8 +970,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         // stays unaffected — it goes through RESPAWN_MODE_TOP
         // / scene-reload, not a direct world.pos write.
         if (!roomsDiffer && (player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) &&
-            CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0) != 0 &&
-            CVarGetInteger(CVAR_ENHANCEMENT("Nav.VerticalTeleport"), 0) != 0) {
+            AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kVerticalTeleport)) {
             SPDLOG_INFO("[Follower] Teleport SUPPRESSED ({}) — hang-state guard "
                         "(stateFlags1 & HANGING_OFF_LEDGE)",
                         reason);

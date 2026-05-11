@@ -12,6 +12,7 @@
 #include "ActorTrail.h"
 #include "ActorSyncHelpers.h"  // kSyncableActorCategories, IsSyncableActor
 #include "DistanceMath.h"
+#include "NavCVars.h"
 #include "NavTraits.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
@@ -35,10 +36,6 @@ extern "C" {
 #include "variables.h"
 extern PlayState* gPlayState;
 }
-
-#define CVAR_NAV_ENABLED          CVAR_ENHANCEMENT("Nav.Enabled")
-#define CVAR_NAV_ACTOR_TRAIL      CVAR_ENHANCEMENT("Nav.ActorTrail")
-#define CVAR_NAV_ROOM_NAV_LAYER   CVAR_ENHANCEMENT("Nav.RoomNavConsumer")
 
 namespace AnchorNav {
 
@@ -86,8 +83,7 @@ ActorTrail& ActorTrail::GetInstance() {
 }
 
 bool ActorTrail::IsEnabled() {
-    return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0
-        && CVarGetInteger(CVAR_NAV_ACTOR_TRAIL, 0) != 0;
+    return AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kActorTrail);
 }
 
 void ActorTrail::ClearForKey(TrailKey key) {
@@ -346,7 +342,7 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
     // follow-up reported "AI Follower stuck running into a wall
     // trying to reach the leader instead of using nav data to walk
     // around" — exactly that failure mode.
-    if (CVarGetInteger(CVAR_NAV_ROOM_NAV_LAYER, 0) != 0) {
+    if (AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kRoomNavConsumer)) {
         const NavTraits& traits = GetTraitsForActor(navigator->id);
         if (traits.consumeRoomNavData) {
             int16_t scene = gPlayState->sceneNum;
@@ -490,7 +486,7 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         // full chain; we append `target` to the end when the final node
         // has line-clear to the target so the path terminates at the
         // desired destination instead of at a graph node near it.
-        if (CVarGetInteger(CVAR_NAV_ROOM_NAV_LAYER, 0) == 0) return false;
+        if (!AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kRoomNavConsumer)) return false;
         const NavTraits& traits = GetTraitsForActor(navigator->id);
         if (!traits.consumeRoomNavData) return false;
         int16_t scene = gPlayState->sceneNum;

@@ -16,6 +16,7 @@
 #include "ActorSyncHelpers.h"   // IsSyncableActor / kSyncableActorCategories
 #include "ActorTrail.h"         // GetWaypointBefore / TrailWaypoint
 #include "DistanceMath.h"
+#include "NavCVars.h"
 #include "NavTraits.h"
 #include "SceneAuthority.h"     // IsMyCurrentRoomHost
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -38,9 +39,6 @@ extern "C" {
 #include "variables.h"
 extern PlayState* gPlayState;
 }
-
-#define CVAR_NAV_ENABLED       CVAR_ENHANCEMENT("Nav.Enabled")
-#define CVAR_NAV_LEASH_RESPAWN CVAR_ENHANCEMENT("Nav.LeashRespawn")
 
 namespace AnchorNav {
 
@@ -86,8 +84,7 @@ void ClearAllKnownPositions() {
 }
 
 bool IsLeashRespawnEnabled() {
-    return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0
-        && CVarGetInteger(CVAR_NAV_LEASH_RESPAWN, 0) != 0;
+    return AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kLeashRespawn);
 }
 
 // ---------------------------------------------------------------------------

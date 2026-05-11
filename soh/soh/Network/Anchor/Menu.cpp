@@ -1,4 +1,5 @@
 #include "Anchor.h"
+#include "Common/NavCVars.h"
 #include <libultraship/libultraship.h>
 #include "soh/SohGui/SohGui.hpp"
 #include "soh/SohGui/SohMenu.h"
@@ -223,23 +224,23 @@ void AnchorMainMenu(WidgetInfo& info) {
         };
         static const NavToggle kFollowerNavToggles[] = {
             { "Nav System (master)",
-              CVAR_ENHANCEMENT("Nav.Enabled"),
+              AnchorNavCVars::kEnabled,
               "Master gate for the whole multiplayer nav system. When off, every "
               "other nav toggle below is a no-op and the follower falls back to "
               "legacy direct-yaw pursuit." },
             { "Use Nav Pathfinding",
-              CVAR_ENHANCEMENT("Nav.AiFollowerConsumer"),
+              AnchorNavCVars::kAiFollowerConsumer,
               "Routes follower pursuit (FOLLOW / RETURN / ENGAGE / STUCK) through "
               "the nav substrate's ComputePathTo planner instead of the legacy "
               "bespoke direct-yaw steering. Requires Nav System on." },
             { "Track Trail Breadcrumbs (Layer 2)",
-              CVAR_ENHANCEMENT("Nav.ActorTrail"),
+              AnchorNavCVars::kActorTrail,
               "Captures recent leader / enemy / follower positions at 30 Hz. "
               "ComputePathTo's Layer 2 walks the leader's trail to find a "
               "reachable breadcrumb when direct line-of-sight pursuit is blocked. "
               "Requires Nav System on." },
             { "Use Room Graph (Layer 3)",
-              CVAR_ENHANCEMENT("Nav.RoomNavConsumer"),
+              AnchorNavCVars::kRoomNavConsumer,
               "ComputePathTo's Layer 3 consults the pre-scanned RoomNavData graph "
               "(BFS over walkable nodes) when LOS and trail layers fail. The "
               "load-bearing fallback for cross-room and obstacle-rich pursuit. "
@@ -260,12 +261,12 @@ void AnchorMainMenu(WidgetInfo& info) {
               "nav grid (schema v7) to cover vines. Recommended ON whenever "
               "Pre-scan Room Data is on." },
             { "Use Vertical Teleport (climb)",
-              CVAR_ENHANCEMENT("Nav.VerticalTeleport"),
+              AnchorNavCVars::kVerticalTeleport,
               "Wraps the existing follower CLIMBING pipeline with the nav "
               "substrate's Shape A logic (real ladder/vine animation + hang-"
               "state BTN_A/BTN_B resolution). Requires Nav System on." },
             { "Edge Avoidance (suppress cliff steps)",
-              CVAR_ENHANCEMENT("Nav.EdgeAvoidance"),
+              AnchorNavCVars::kEdgeAvoidance,
               "Stalls the follower at the edge of a cliff instead of walking "
               "off it, unless the path planner has marked the next step as an "
               "intentional drop (via a pre-scanned DropAnchor). Pairs with "

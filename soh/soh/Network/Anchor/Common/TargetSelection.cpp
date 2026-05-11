@@ -18,6 +18,7 @@
 
 #include "ActorSyncHelpers.h"  // IsSyncableActor / IsSyncedBossActor / kSyncableActorCategories
 #include "DistanceMath.h"
+#include "NavCVars.h"
 #include "NavTraits.h"
 #include "PlayerLookup.h"     // FindNearestPlayerActor / GetSyncedPlayerActors
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -42,9 +43,6 @@ extern "C" {
 #include "variables.h"
 extern PlayState* gPlayState;
 }
-
-#define CVAR_NAV_ENABLED            CVAR_ENHANCEMENT("Nav.Enabled")
-#define CVAR_NAV_TARGET_SELECTION   CVAR_ENHANCEMENT("Nav.TargetSelection")
 
 namespace AnchorNav {
 
@@ -252,8 +250,7 @@ void ClearHeld(EnemyNetId* ext) {
 // ---------------------------------------------------------------------------
 
 bool IsTargetSelectionEnabled() {
-    return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0
-        && CVarGetInteger(CVAR_NAV_TARGET_SELECTION, 0) != 0;
+    return AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kTargetSelection);
 }
 
 Actor* AcquireOrHoldTarget(Actor* navigator, TargetSet set, PlayState* play) {

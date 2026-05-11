@@ -24,6 +24,7 @@
 
 #include "ActorSyncHelpers.h"  // IsSyncableActor (avoid teleporting non-syncable actors)
 #include "ClimbableSurfaces.h"
+#include "NavCVars.h"
 #include "NavTraits.h"
 #include "TargetSelection.h"   // GetHeldTargetClientId for FixedPos kind read-back
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -45,9 +46,6 @@ extern "C" {
 #include "variables.h"
 extern PlayState* gPlayState;
 }
-
-#define CVAR_NAV_ENABLED           CVAR_ENHANCEMENT("Nav.Enabled")
-#define CVAR_NAV_VERTICAL_TELEPORT CVAR_ENHANCEMENT("Nav.VerticalTeleport")
 
 namespace AnchorNav {
 
@@ -88,8 +86,7 @@ EnemyNetId* GetMutableNavExt(Actor* actor) {
 // ---------------------------------------------------------------------------
 
 bool IsVerticalTeleportEnabled() {
-    return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0
-        && CVarGetInteger(CVAR_NAV_VERTICAL_TELEPORT, 0) != 0;
+    return AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kVerticalTeleport);
 }
 
 bool IsPlayerDerivedNavigator(const Actor* actor) {

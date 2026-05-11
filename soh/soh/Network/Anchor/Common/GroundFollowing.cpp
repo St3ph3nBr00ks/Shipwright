@@ -14,6 +14,7 @@
 #include "GroundFollowing.h"
 
 #include "DistanceMath.h"
+#include "NavCVars.h"
 #include "NavTraits.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // NODE_DROP_FROM_ABOVE
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -35,10 +36,6 @@ extern "C" {
 #include "variables.h"
 extern PlayState* gPlayState;
 }
-
-#define CVAR_NAV_ENABLED          CVAR_ENHANCEMENT("Nav.Enabled")
-#define CVAR_NAV_GROUND_FOLLOWING CVAR_ENHANCEMENT("Nav.GroundFollowing")
-#define CVAR_NAV_EDGE_AVOIDANCE   CVAR_ENHANCEMENT("Nav.EdgeAvoidance")
 
 namespace AnchorNav {
 
@@ -89,8 +86,7 @@ inline int16_t DirectYaw(const Actor* navigator, const Vec3f& target) {
 // ---------------------------------------------------------------------------
 
 bool IsGroundFollowingEnabled() {
-    return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0
-        && CVarGetInteger(CVAR_NAV_GROUND_FOLLOWING, 0) != 0;
+    return AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kGroundFollowing);
 }
 
 int16_t GetGroundFollowingBearing(Actor* navigator, const Vec3f* targetPos, PlayState* play) {
@@ -166,8 +162,7 @@ bool HasGroundContact(Actor* navigator, PlayState* play) {
 }
 
 bool IsEdgeAvoidanceEnabled() {
-    return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0
-        && CVarGetInteger(CVAR_NAV_EDGE_AVOIDANCE, 0) != 0;
+    return AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kEdgeAvoidance);
 }
 
 bool HasFloorAhead(Actor* navigator, int16_t yaw, float probeDistance,

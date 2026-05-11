@@ -11,6 +11,7 @@
 
 #include "ClimbableSurfaces.h"
 #include "DistanceMath.h"
+#include "NavCVars.h"
 
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
@@ -30,9 +31,6 @@ extern "C" {
 #include "variables.h"
 extern PlayState* gPlayState;
 }
-
-#define CVAR_NAV_ENABLED            CVAR_ENHANCEMENT("Nav.Enabled")
-#define CVAR_NAV_CLIMBABLE_SURFACES CVAR_ENHANCEMENT("Nav.ClimbableSurfaces")
 
 namespace AnchorNav {
 
@@ -66,8 +64,7 @@ constexpr ClimbableActorEntry kClimbableActorIds[] = {
 // ---------------------------------------------------------------------------
 
 bool IsClimbableSurfacesEnabled() {
-    return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0
-        && CVarGetInteger(CVAR_NAV_CLIMBABLE_SURFACES, 0) != 0;
+    return AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kClimbableSurfaces);
 }
 
 std::optional<ClimbAnchor> FindNearestClimbable(const Vec3f& from, float maxRadius, PlayState* play) {
