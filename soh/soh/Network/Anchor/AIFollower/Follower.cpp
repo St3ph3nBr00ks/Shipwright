@@ -26,6 +26,7 @@
 #include "../Common/PauseLinkBuffer.h"
 #include "../Common/ActorSyncScope.h"
 #include "../Common/NavTraits.h"        // AnchorNav::IsNavSystemEnabled — Phase 2 master gate
+#include "../Common/GroundFollowing.h"  // AnchorNav::ShouldZeroStickForEdge — Task 4
 #include "../Common/JumpResolver.h"     // AnchorNav::ResolveLedgeAhead — Phase 2 STUCK consumer
 #include "../Common/VerticalTeleport.h" // AnchorNav::IsShapeAEligible — Phase 2 CLIMBING consumer
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // FindClimbAnchorAbove — autonomous climb
@@ -2249,6 +2250,28 @@ void Anchor::TickFollowerInput(Actor* actor) {
             else if (dist >  60.0f) magF = 100.0f; // run
             else if (dist >  30.0f) magF =  60.0f; // walk (decelerate)
             else                    magF =   0.0f; // coast to a stop
+
+            // Edge avoidance (Task 4): refuse the forward step when the
+            // step would walk off a cliff AND the path planner has not
+            // marked the next subgoal as an intentional drop. The
+            // next-subgoal info comes from followerNavPath when active;
+            // when the path is empty (Layer 1/2/3 fallback to direct
+            // pursuit), pass the same target — IsPlannedDropForSubgoal
+            // requires NODE_DROP_FROM_ABOVE which only set on BFS-built
+            // landings, so no-path callers reduce cleanly to
+            // "cliff ahead → suppress".
+            Vec3f   nextSubgoal      = followerMoveTarget;
+            uint16_t nextSubgoalFlags = 0;
+            if (!followerNavPath.Empty()) {
+                nextSubgoal      = followerNavPath.CurrentSubgoal();
+                nextSubgoalFlags = followerNavPath.CurrentSubgoalFlags();
+            }
+            if (AnchorNav::ShouldZeroStickForEdge(
+                    actor, followerMoveTarget,
+                    nextSubgoal, nextSubgoalFlags, gPlayState)) {
+                magF = 0.0f;
+            }
+
             Camera* cam = GET_ACTIVE_CAM(gPlayState);
             s16 inputDirYaw  = Camera_GetInputDirYaw(cam);
             s16 worldYaw     = Math_Atan2S(dz, dx); // z first per OoT convention

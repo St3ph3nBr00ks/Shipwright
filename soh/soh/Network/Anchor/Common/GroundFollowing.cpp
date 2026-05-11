@@ -13,7 +13,9 @@
 
 #include "GroundFollowing.h"
 
+#include "DistanceMath.h"
 #include "NavTraits.h"
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // NODE_DROP_FROM_ABOVE
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ShipInit.hpp"
@@ -36,6 +38,7 @@ extern PlayState* gPlayState;
 
 #define CVAR_NAV_ENABLED          CVAR_ENHANCEMENT("Nav.Enabled")
 #define CVAR_NAV_GROUND_FOLLOWING CVAR_ENHANCEMENT("Nav.GroundFollowing")
+#define CVAR_NAV_EDGE_AVOIDANCE   CVAR_ENHANCEMENT("Nav.EdgeAvoidance")
 
 namespace AnchorNav {
 
@@ -53,6 +56,26 @@ constexpr float kProbeAboveFeet  = 50.0f;    // raise probe origin Y above feet
                                              // before raycasting downward
 constexpr float kGroundProbeDepth = 60.0f;   // look this far below current foot
                                              // for HasGroundContact()
+
+// Edge-avoidance probe (Task 4). Forward step we test for floor when
+// deciding whether the navigator is about to walk off. kEdgeProbeDistance
+// is large enough to land on the next adjacent floor tile (~30u grid) yet
+// short enough that the lookahead doesn't slow the navigator's reaction.
+// kEdgeMaxDrop is the same threshold the existing fan-bearing search uses
+// — a small step-up / step-down range is fine, a real cliff is not.
+constexpr float kEdgeProbeDistance = 36.0f;
+constexpr float kEdgeMaxDrop       = 30.0f;
+
+// Drop-intent predicate (Task 4). A path subgoal is treated as a
+// planned drop when its Y is at least this far below the navigator
+// AND the subgoal is within kPlannedDropMaxXZ horizontally — matches
+// the detector's geometry (RoomNavData kDropMinDeltaY=30,
+// kDropMaxXZSq=80²). XZ widened slightly here to absorb path
+// imprecision while the navigator is still approaching the high-pos
+// waypoint.
+constexpr float kPlannedDropMinDeltaY = 30.0f;
+constexpr float kPlannedDropMaxXZ     = 120.0f;
+constexpr float kPlannedDropMaxXZSq   = kPlannedDropMaxXZ * kPlannedDropMaxXZ;
 
 inline int16_t DirectYaw(const Actor* navigator, const Vec3f& target) {
     return Math_Atan2S(target.z - navigator->world.pos.z,
@@ -140,6 +163,71 @@ bool HasGroundContact(Actor* navigator, PlayState* play) {
     if (floorY <= BGCHECK_Y_MIN) return false;
     float drop = navigator->world.pos.y - floorY;
     return drop < kGroundProbeDepth;
+}
+
+bool IsEdgeAvoidanceEnabled() {
+    return CVarGetInteger(CVAR_NAV_ENABLED, 0) != 0
+        && CVarGetInteger(CVAR_NAV_EDGE_AVOIDANCE, 0) != 0;
+}
+
+bool HasFloorAhead(Actor* navigator, int16_t yaw, float probeDistance,
+                   float maxDrop, PlayState* play) {
+    if (navigator == nullptr || play == nullptr) return false;
+    Vec3f probe = {
+        navigator->world.pos.x + Math_SinS(yaw) * probeDistance,
+        navigator->world.pos.y + kProbeAboveFeet,
+        navigator->world.pos.z + Math_CosS(yaw) * probeDistance,
+    };
+    CollisionPoly floorPoly{};
+    f32 floorY = BgCheck_AnyRaycastFloor1(&play->colCtx, &floorPoly, &probe);
+    if (floorY <= BGCHECK_Y_MIN) return false;          // off the world
+    float drop = navigator->world.pos.y - floorY;
+    return drop <= maxDrop;
+}
+
+bool IsPlannedDropForSubgoal(const Actor* navigator,
+                              const Vec3f& subgoalPos,
+                              uint16_t subgoalFlags) {
+    if (navigator == nullptr) return false;
+    if ((subgoalFlags & ::AnchorNavRoom::NODE_DROP_FROM_ABOVE) == 0) return false;
+    // Subgoal must be meaningfully below; spuriously-low Y on the
+    // landing waypoint would otherwise stack with the flag and pass
+    // through trivially.
+    if (subgoalPos.y > navigator->world.pos.y - kPlannedDropMinDeltaY) return false;
+    if (AnchorDist::DistXZSq(subgoalPos, navigator->world.pos) > kPlannedDropMaxXZSq) return false;
+    return true;
+}
+
+bool ShouldZeroStickForEdge(Actor* navigator,
+                             const Vec3f& targetPos,
+                             const Vec3f& nextSubgoalPos,
+                             uint16_t     nextSubgoalFlags,
+                             PlayState*   play) {
+    if (navigator == nullptr || play == nullptr) return false;
+    if (!IsEdgeAvoidanceEnabled()) return false;
+
+    const NavTraits& traits = GetTraitsForActor(navigator->id);
+    // useGroundFollowing is the natural per-actor gate — anything
+    // opted out of ground-fan steering is opted out of edge-avoidance
+    // too (fliers, waypoint-driven Goroiwa-class, bosses).
+    if (!traits.useGroundFollowing) return false;
+
+    // Already airborne — the step has already happened, no decision
+    // to make at the input layer. Let physics settle.
+    if (!HasGroundContact(navigator, play)) return false;
+
+    // Forward step has a survivable floor — no edge to avoid.
+    const int16_t yaw = DirectYaw(navigator, targetPos);
+    if (HasFloorAhead(navigator, yaw, kEdgeProbeDistance, kEdgeMaxDrop, play)) {
+        return false;
+    }
+
+    // No floor ahead — would be an edge step. Allow it iff the path
+    // planner has marked the next subgoal as an intentional drop.
+    if (IsPlannedDropForSubgoal(navigator, nextSubgoalPos, nextSubgoalFlags)) {
+        return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------

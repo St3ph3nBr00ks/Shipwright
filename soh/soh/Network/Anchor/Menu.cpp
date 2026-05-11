@@ -264,6 +264,13 @@ void AnchorMainMenu(WidgetInfo& info) {
               "Wraps the existing follower CLIMBING pipeline with the nav "
               "substrate's Shape A logic (real ladder/vine animation + hang-"
               "state BTN_A/BTN_B resolution). Requires Nav System on." },
+            { "Edge Avoidance (suppress cliff steps)",
+              CVAR_ENHANCEMENT("Nav.EdgeAvoidance"),
+              "Stalls the follower at the edge of a cliff instead of walking "
+              "off it, unless the path planner has marked the next step as an "
+              "intentional drop (via a pre-scanned DropAnchor). Pairs with "
+              "Use Room Graph + Pre-scan Room Data: drop anchors are only "
+              "available when the graph is built. Requires Nav System on." },
         };
         for (const auto& t : kFollowerNavToggles) {
             bool v = CVarGetInteger(t.cvar, 0) != 0;
