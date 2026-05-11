@@ -935,6 +935,25 @@ static void DetectClimbAnchors(RoomNavData* out, PlayState* play) {
                                    actor->world.pos.y + entry.estimatedHeight,
                                    actor->world.pos.z };
                 anchor.actorId = actor->id;
+                // Field-test fix Q2 2026-05-11: capture the actor's
+                // facing as a default outward normal. ComputeClimbSurfaceNormal's
+                // 8-direction probe sometimes fails for ladder actors
+                // because the surrounding walls aren't tagged climbable
+                // (the ladder IS the climbable surface, but its dynamic
+                // collision doesn't always have wall-flag bits visible
+                // to func_80041DB8). Without a normal, grid generation
+                // is abandoned (nodeCount=0) and the user sees the
+                // legacy yellow post on the ladder instead of a green
+                // grid. Convention: ladder actor's shape.rot.y points
+                // OUT from the wall behind the ladder (so a player
+                // grabbing the ladder faces the wall). If a future
+                // ladder type has a different orientation convention,
+                // it'll need a per-actor flip flag in ClimbableActorEntry.
+                {
+                    constexpr float kS16ToRad = 3.14159265358979f / 32768.0f;
+                    float yawRad = (float)actor->shape.rot.y * kS16ToRad;
+                    anchor.planeNormal = { sinf(yawRad), 0.0f, cosf(yawRad) };
+                }
                 out->climbAnchors.push_back(anchor);
                 break;
             }
@@ -1436,26 +1455,36 @@ static float DetermineClimbSurfaceWidth(PlayState* play,
 //   the wall surface; nearest floor is one cell INTO the room) but
 //   tight enough that an unrelated floor across the room doesn't get
 //   spuriously connected.
+//
+// kBoundaryFloorYDelta: max |Δy| from a climb cell to its candidate
+//   floor neighbor. Field-test fix Q5 2026-05-11: pre-fix, XZ-only
+//   proximity could pick a ceiling 400u above as the "nearest" floor
+//   because it was XZ-closer than the actual ground. 50u = ~1.5 cell
+//   spacings; tight enough to reject ceilings while permitting the
+//   normal "floor immediately at climb base/top altitude" case.
 static constexpr float kClimbCellEdgeCost      = 30.0f;
 static constexpr float kFloorToClimbCost       = 50.0f;
 static constexpr float kClimbToFloorCost       = 50.0f;
 static constexpr float kBoundaryFloorRadiusXZ  = 60.0f;
+static constexpr float kBoundaryFloorYDelta    = 50.0f;
 
 // Find the nearest floor node (skipping climb-surface) to `pos` within
-// `maxRadiusXZ`. Returns -1 if no floor node exists within the radius.
-// Uses XZ-only proximity (Y is unconstrained — boundary edges may
-// connect to floor nodes at substantially different altitudes when the
-// climb's base or top is significantly above/below the floor immediately
-// outside the wall). Stage 3 boundary-edge per-cell lookup.
+// `maxRadiusXZ` AND |Δy| < `maxYDelta`. Returns -1 if no floor node
+// matches. XZ proximity for the "near the wall" criterion + Y delta
+// for the "at the climb base/top altitude" criterion. Default
+// `maxYDelta=infinity` preserves the original XZ-only semantics for
+// any non-boundary caller (currently none).
 static int FindNearestFloorNodeXZRadius(const RoomNavData* data,
                                          const Vec3f& pos,
-                                         float maxRadiusXZ) {
+                                         float maxRadiusXZ,
+                                         float maxYDelta = 1e9f) {
     if (data == nullptr || data->nodes.empty()) return -1;
     int bestIdx = -1;
     float bestDistSq = maxRadiusXZ * maxRadiusXZ;
     for (size_t i = 0; i < data->nodes.size(); i++) {
         const NavNode& n = data->nodes[i];
         if (n.flags & NODE_CLIMB_ANY) continue;  // skip climb-surface
+        if (std::fabs(n.pos.y - pos.y) > maxYDelta) continue;  // Q5: Y-delta gate
         float dx = n.pos.x - pos.x;
         float dz = n.pos.z - pos.z;
         float d2 = dx * dx + dz * dz;
@@ -1500,16 +1529,32 @@ static void GenerateClimbSurfaceEdges(RoomNavData* out,
         uvToIdx[key] = (uint16_t)(anchor.firstNodeIdx + i);
     }
 
-    // Surface-to-surface edges. Cardinal (4-connected) only. Each
-    // undirected pair emitted once (toIdx > fromIdx guard).
-    static const int kClimbDeltas[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    // Surface-to-surface edges. 8-connected (cardinal + diagonal) —
+    // matches the floor-mesh edge pattern for visual consistency and
+    // gives BFS diagonal shortcuts. Climb-aware stick injection
+    // (HookHandlers.cpp:2960-2995) drives stick_y (vertical) and
+    // stick_x (lateral) independently, so a diagonal subgoal naturally
+    // produces both axes. Vines support lateral motion at any climb
+    // height in vanilla OoT — diagonal connectivity is faithful.
+    //
+    // Field-test fix Q4 2026-05-11: was 4-connected only with comment
+    // "diagonals are ambiguous" — the audit reversed that conclusion.
+    //
+    // Each undirected pair emitted once (toIdx > fromIdx guard).
+    // Diagonals get sqrt(2) cost multiplier so BFS prefers cardinal
+    // when distance is equal.
+    struct ClimbDelta { int du; int dv; float costMultiplier; };
+    static const ClimbDelta kClimbDeltas[8] = {
+        {-1,  0, 1.0f},      { 1,  0, 1.0f},      { 0, -1, 1.0f},      { 0,  1, 1.0f},
+        {-1, -1, 1.41421356f}, { 1, -1, 1.41421356f}, {-1,  1, 1.41421356f}, { 1,  1, 1.41421356f},
+    };
     size_t surfaceEdgeCount = 0;
     for (uint16_t i = 0; i < anchor.nodeCount; i++) {
         const NavNode& n = out->nodes[(size_t)anchor.firstNodeIdx + i];
         uint16_t fromIdx = (uint16_t)(anchor.firstNodeIdx + i);
-        for (int d = 0; d < 4; d++) {
-            int nu = (int)n.cellIdxX + kClimbDeltas[d][0];
-            int nv = (int)n.cellIdxZ + kClimbDeltas[d][1];
+        for (int d = 0; d < 8; d++) {
+            int nu = (int)n.cellIdxX + kClimbDeltas[d].du;
+            int nv = (int)n.cellIdxZ + kClimbDeltas[d].dv;
             if (nu < 0 || nu >= (int)anchor.cellsU) continue;
             if (nv < 0 || nv >= (int)anchor.cellsV) continue;
             uint32_t nbKey = ((uint32_t)nv << 16) | (uint32_t)nu;
@@ -1520,7 +1565,7 @@ static void GenerateClimbSurfaceEdges(RoomNavData* out,
             NavEdge edge{};
             edge.fromIdx = fromIdx;
             edge.toIdx   = toIdx;
-            edge.cost    = kClimbCellEdgeCost;
+            edge.cost    = kClimbCellEdgeCost * kClimbDeltas[d].costMultiplier;
             out->edges.push_back(edge);
             surfaceEdgeCount++;
         }
@@ -1543,7 +1588,9 @@ static void GenerateClimbSurfaceEdges(RoomNavData* out,
         const bool isBottomRow = (n.cellIdxZ == 0);
         const bool isTopRow    = (n.cellIdxZ == (uint16_t)(anchor.cellsV - 1));
         if (!isBottomRow && !isTopRow) continue;
-        int floorIdx = FindNearestFloorNodeXZRadius(out, n.pos, kBoundaryFloorRadiusXZ);
+        int floorIdx = FindNearestFloorNodeXZRadius(out, n.pos,
+                                                     kBoundaryFloorRadiusXZ,
+                                                     kBoundaryFloorYDelta);
         if (floorIdx < 0) continue;
         if ((uint16_t)floorIdx == climbIdx) continue;
         NavEdge edge{};
@@ -1579,6 +1626,71 @@ static void DropClimbSurfaceEdges(RoomNavData* out) {
     out->edges.erase(newEnd, out->edges.end());
 }
 
+// Merge overlapping ClimbAnchors before grid generation. Field-test fix
+// Q6 2026-05-11: Path B's poly clustering uses a flat XZ radius; for
+// very wide vine walls (e.g. the Skullwalltula wall in Inside Deku
+// Tree main entrance, ~300u+ wide), polys at the far ends don't merge
+// into a single anchor even with kClimbClusterRadiusXZ=150u. Result:
+// 2-3 separate anchors on the same wall, each generating its own
+// overlapping grid (visible as duplicate green-square sets).
+//
+// This pass detects anchors that are likely "the same wall" — XZ
+// proximity within kAnchorOverlapRadiusXZ AND Y range overlap — and
+// merges them by extending the keeper's basePos/topPos and dropping
+// the loser. Path A actors are NEVER merged (their identity is
+// authoritative; two ladders at the same XZ are still two ladders).
+//
+// Runs BEFORE GenerateClimbSurfaceGrids so the per-anchor grid emit
+// loop never produces overlapping cells.
+static constexpr float kAnchorOverlapRadiusXZ = 250.0f;
+static void MergeOverlappingClimbAnchors(RoomNavData* out) {
+    auto& anchors = out->climbAnchors;
+    if (anchors.size() < 2) return;
+    std::vector<bool> active(anchors.size(), true);
+    const float r2 = kAnchorOverlapRadiusXZ * kAnchorOverlapRadiusXZ;
+    size_t mergedCount = 0;
+    for (size_t i = 0; i < anchors.size(); i++) {
+        if (!active[i]) continue;
+        if (anchors[i].actorId != 0) continue; // Path A actors never merge
+        for (size_t j = i + 1; j < anchors.size(); j++) {
+            if (!active[j]) continue;
+            if (anchors[j].actorId != 0) continue; // Path A actors never merge
+            float dx = anchors[i].basePos.x - anchors[j].basePos.x;
+            float dz = anchors[i].basePos.z - anchors[j].basePos.z;
+            if (dx * dx + dz * dz > r2) continue;
+            // Y range overlap check — anchors should occupy overlapping
+            // vertical extents to be the same wall (a floor-anchor and
+            // a ceiling-anchor in the same XZ column are NOT one wall).
+            float iLow  = anchors[i].basePos.y, iHigh = anchors[i].topPos.y;
+            float jLow  = anchors[j].basePos.y, jHigh = anchors[j].topPos.y;
+            if (iLow > jHigh || jLow > iHigh) continue;
+            // Merge j into i: extend Y range, average XZ centroid so
+            // i's grid generation centers between the two original
+            // poly clusters.
+            anchors[i].basePos.x = (anchors[i].basePos.x + anchors[j].basePos.x) * 0.5f;
+            anchors[i].basePos.z = (anchors[i].basePos.z + anchors[j].basePos.z) * 0.5f;
+            anchors[i].basePos.y = std::min(iLow, jLow);
+            anchors[i].topPos.x  = anchors[i].basePos.x;
+            anchors[i].topPos.z  = anchors[i].basePos.z;
+            anchors[i].topPos.y  = std::max(iHigh, jHigh);
+            active[j] = false;
+            mergedCount++;
+        }
+    }
+    if (mergedCount == 0) return;
+    // Compact: remove inactive anchors.
+    size_t writeIdx = 0;
+    for (size_t readIdx = 0; readIdx < anchors.size(); readIdx++) {
+        if (active[readIdx]) {
+            if (writeIdx != readIdx) anchors[writeIdx] = anchors[readIdx];
+            writeIdx++;
+        }
+    }
+    anchors.resize(writeIdx);
+    SPDLOG_INFO("[RoomNav] Climb-anchor overlap merge: {} merged, {} remaining",
+                mergedCount, anchors.size());
+}
+
 // For each ClimbAnchor, generate the surface grid: compute plane params
 // (normal, axes, origin, extents), raycast each cell, append a NavNode
 // per hit, and populate the anchor's firstNodeIdx/nodeCount/surfaceType.
@@ -1607,8 +1719,21 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play) {
         float climbHeight = V3Len(rise);
         if (climbHeight < kClimbMinAnchorHeight) continue;
 
+        // Field-test fix Q2 2026-05-11: Path A actors carry a default
+        // outward normal captured from actor->shape.rot.y at detection
+        // (DetectClimbAnchors). Use it directly so grid generation
+        // doesn't fail when ComputeClimbSurfaceNormal's poly probe
+        // misses (which is common for ladder actors whose dynamic
+        // collision lacks wall-flag tagging visible to func_80041DB8).
+        // Path B anchors still use the probe — their detection was
+        // already poly-driven so the surrounding wall-flag polys
+        // exist.
         Vec3f normal;
-        if (!ComputeClimbSurfaceNormal(anchor.basePos, play, normal)) continue;
+        if (anchor.actorId != 0 && V3Len(anchor.planeNormal) > 0.5f) {
+            normal = anchor.planeNormal;
+        } else if (!ComputeClimbSurfaceNormal(anchor.basePos, play, normal)) {
+            continue;
+        }
 
         // axisV = world-up; axisU = lateral (perpendicular to up + normal).
         // Vertical-only climb (we don't model curved/spiral surfaces).
@@ -1665,18 +1790,28 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play) {
                 };
                 Vec3f hitPos;
                 s32 wallFlags = 0;
-                if (!RaycastClimbCell(play, cellCenter, normal, hitPos, wallFlags)) continue;
-                uint16_t typeBit = ClassifyClimbWallFlags(wallFlags);
-                if (typeBit == 0) continue;
-                // For Path A actors we override with LADDER regardless of
-                // wall-flag classification (the actor's geometry may not
-                // carry the wall-flag bit; the actor's identity is the
-                // ground truth). For Path B we require type-match (so a
-                // mixed-type adjacent wall doesn't pollute the grid).
+                uint16_t typeBit;
+                bool hit = RaycastClimbCell(play, cellCenter, normal, hitPos, wallFlags);
+                // Field-test fix Q2 2026-05-11: for Path A actors,
+                // emit the cell at the GRID position whether or not
+                // the raycast hits a climbable poly. The ladder actor's
+                // identity is the ground truth — the actor IS the
+                // climbable surface, regardless of its dynamic
+                // collision wall-flag tagging. Pre-fix the per-cell
+                // "if (!hit) continue" + "if (typeBit == 0) continue"
+                // checks dropped most ladder cells (yields nodeCount=0
+                // and falls back to the legacy yellow post in
+                // DebugDraw). Post-fix: ladder cells are placed at the
+                // computed grid position; raycast hit position is used
+                // when available for accuracy, cellCenter as fallback.
                 if (anchor.actorId != 0) {
+                    if (!hit) hitPos = cellCenter;
                     typeBit = NODE_CLIMB_LADDER;
-                } else if (typeBit != expectedType) {
-                    continue;
+                } else {
+                    if (!hit) continue;
+                    typeBit = ClassifyClimbWallFlags(wallFlags);
+                    if (typeBit == 0) continue;
+                    if (typeBit != expectedType) continue;
                 }
                 NavNode node;
                 node.pos      = hitPos;
@@ -2755,6 +2890,11 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     // if they were already in nav.nodes when FindNearestNode runs).
     // Stage 2 of climb_surface_nav_grid_plan — nodes only; edges land
     // in Stage 3.
+    //
+    // Q6 fix 2026-05-11: merge overlapping anchors BEFORE generation
+    // so the per-anchor grid emit loop never produces duplicate cells
+    // on the same wall.
+    MergeOverlappingClimbAnchors(out);
     GenerateClimbSurfaceGrids(out, play);
 
     // Update historicalSeeds with the union of (current player + actor
@@ -3896,21 +4036,31 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
     // navigate to. Drawn inline via open-coded quad rather than
     // AddGroundQuad so the larger half-extent doesn't require a helper
     // parameterisation for a single additional caller.
-    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xFF, 0x40, 0xFF));
-    for (const NavNode& node : data->nodes) {
-        if (!(node.flags & (NODE_CLIMB_BASE | NODE_CLIMB_TOP))) continue;
-        float h = kClimbFlagHalfExt;
-        float y = node.pos.y + kNodeQuadYLift;
-        Vtx v0 = MakeVtxN((short)(node.pos.x - h), (short)y, (short)(node.pos.z - h), 0, 127, 0, 0xFF);
-        Vtx v1 = MakeVtxN((short)(node.pos.x + h), (short)y, (short)(node.pos.z - h), 0, 127, 0, 0xFF);
-        Vtx v2 = MakeVtxN((short)(node.pos.x + h), (short)y, (short)(node.pos.z + h), 0, 127, 0, 0xFF);
-        Vtx v3 = MakeVtxN((short)(node.pos.x - h), (short)y, (short)(node.pos.z + h), 0, 127, 0, 0xFF);
-        sVtxDl.push_back(v0);
-        sVtxDl.push_back(v1);
-        sVtxDl.push_back(v2);
-        sVtxDl.push_back(v3);
-        sXluDl.push_back(gsSPVertex((uintptr_t)&sVtxDl[sVtxDl.size() - 4], 4, 0));
-        sXluDl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+    // Field-test fix Q3 2026-05-11: skip the floor-side ring overlay
+    // when the room has v7 grid data. Pre-Stage-3, NODE_CLIMB_BASE/TOP
+    // tagging picked ONE floor node per anchor as "the entry/exit
+    // point" — meaningful when there was a single boundary edge per
+    // side. Stage 3's per-cell boundary edges (Fix B) make EVERY climb
+    // cell its own entry/exit point; the single-node ring is no longer
+    // a useful summary. v6 fallback rooms still render it because they
+    // lack the per-cell grid.
+    if (data->firstClimbSurfaceNodeIdx == UINT16_MAX) {
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xFF, 0x40, 0xFF));
+        for (const NavNode& node : data->nodes) {
+            if (!(node.flags & (NODE_CLIMB_BASE | NODE_CLIMB_TOP))) continue;
+            float h = kClimbFlagHalfExt;
+            float y = node.pos.y + kNodeQuadYLift;
+            Vtx v0 = MakeVtxN((short)(node.pos.x - h), (short)y, (short)(node.pos.z - h), 0, 127, 0, 0xFF);
+            Vtx v1 = MakeVtxN((short)(node.pos.x + h), (short)y, (short)(node.pos.z - h), 0, 127, 0, 0xFF);
+            Vtx v2 = MakeVtxN((short)(node.pos.x + h), (short)y, (short)(node.pos.z + h), 0, 127, 0, 0xFF);
+            Vtx v3 = MakeVtxN((short)(node.pos.x - h), (short)y, (short)(node.pos.z + h), 0, 127, 0, 0xFF);
+            sVtxDl.push_back(v0);
+            sVtxDl.push_back(v1);
+            sVtxDl.push_back(v2);
+            sVtxDl.push_back(v3);
+            sXluDl.push_back(gsSPVertex((uintptr_t)&sVtxDl[sVtxDl.size() - 4], 4, 0));
+            sXluDl.push_back(gsSP2Triangles(0, 1, 2, 0, 0, 2, 3, 0));
+        }
     }
 
     // Climb-surface nodes (Stage 8 v2 of climb_surface_nav_grid_plan).
@@ -4356,7 +4506,9 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     }
 
     // Re-generate climb-surface grids (schema v7+) for the refreshed
-    // anchors. Same ordering as the main scan path.
+    // anchors. Same ordering as the main scan path: merge overlaps
+    // (Q6 fix), then generate.
+    MergeOverlappingClimbAnchors(&nav);
     GenerateClimbSurfaceGrids(&nav, play);
 
     // Reset the debug-draw summary tracker so the next overlay frame
