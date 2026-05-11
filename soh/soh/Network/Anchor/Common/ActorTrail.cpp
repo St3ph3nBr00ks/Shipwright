@@ -73,6 +73,42 @@ bool MovementClearAtPosition(const Vec3f& fromPos, const Vec3f& toPos, PlayState
     return !hit;
 }
 
+// Returns true when continuous floor exists along the segment from→to at
+// approximately the linearly-interpolated Y. Used by Layer 1 LOS to
+// reject "clear at pelvis but no floor below" cases — without this gate,
+// MovementClear succeeds across air gaps (raycast at pelvis height
+// doesn't see the void), Layer 1 returns the leader directly, and the
+// follower walks into the chasm. The fix forces Layer 1 to fall through
+// to Layer 3 BFS so jump anchors / climb bridges / drop anchors get
+// consulted.
+//
+// Samples down at ~grid-resolution intervals and verifies floor altitude
+// matches the segment's expected Y within ±kFloorTolY. Excludes
+// endpoints (they're walkable by construction). Cost: ~lenXZ/30 floor
+// raycasts per Layer 1 call.
+bool FloorPresentAlongPath(const Vec3f& from, const Vec3f& to, PlayState* play) {
+    if (play == nullptr) return true;  // can't verify; let LOS pass
+    const f32 dxf = to.x - from.x;
+    const f32 dzf = to.z - from.z;
+    const f32 dyf = to.y - from.y;
+    const f32 lenXZ = std::sqrt(dxf*dxf + dzf*dzf);
+    constexpr f32 kSampleSpacing = 30.0f;  // matches kGridResolution
+    constexpr f32 kFloorTolY     = 25.0f;  // step-up tolerance
+    const int samples = std::max(3, (int)(lenXZ / kSampleSpacing));
+    for (int s = 1; s < samples; s++) {
+        const f32 t = (f32)s / (f32)samples;
+        const f32 sx = from.x + dxf * t;
+        const f32 sz = from.z + dzf * t;
+        const f32 expectedY = from.y + dyf * t;
+        Vec3f probe = { sx, expectedY + 100.0f, sz };
+        CollisionPoly poly{};
+        f32 floorY = BgCheck_AnyRaycastFloor1(&play->colCtx, &poly, &probe);
+        if (floorY <= BGCHECK_Y_MIN) return false;          // no floor at all
+        if (std::fabs(floorY - expectedY) > kFloorTolY) return false;  // floor far off
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // ActorTrail singleton + lifecycle.
 // ---------------------------------------------------------------------------
@@ -322,7 +358,8 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
     constexpr float kLayer1YGate = 50.0f;
     float dyToTarget = std::fabs(targetPos.y - navigator->world.pos.y);
     if (dyToTarget < kLayer1YGate &&
-        MovementClear(navigator, targetPos, play)) {
+        MovementClear(navigator, targetPos, play) &&
+        FloorPresentAlongPath(navigator->world.pos, targetPos, play)) {
         out = targetPos;
         return true;
     }
@@ -455,11 +492,20 @@ bool ActorTrail::ComputePathTo(TrailKey key,
     // passes over short walls and through narrow gaps that the follower
     // can't actually walk through). Forces fallback to Layer 3 BFS whose
     // graph edges encode actual walkability.
+    //
+    // Floor-along-path gate (user 2026-05-12 fix): MovementClear's
+    // pelvis-height line passes OVER air gaps because raycast at +20u
+    // doesn't see the void. Without the floor check, Layer 1 always
+    // wins, returns the leader directly, and the follower walks into
+    // the chasm. The floor gate forces fall-through to Layer 3 BFS so
+    // jump-anchor / climb-bridge / drop-anchor edges actually get
+    // consulted on cross-gap pursuits.
     constexpr float kLayer1YGate = 50.0f;
     float dyToTarget = std::fabs(targetPos.y - navigator->world.pos.y);
     if (!skipLayer1LOS &&
         dyToTarget < kLayer1YGate &&
-        MovementClear(navigator, targetPos, play)) {
+        MovementClear(navigator, targetPos, play) &&
+        FloorPresentAlongPath(navigator->world.pos, targetPos, play)) {
         out.waypoints.push_back(targetPos);
         out.waypointFlags.push_back(0); // Layer 1: target itself, no source node
         return true;
