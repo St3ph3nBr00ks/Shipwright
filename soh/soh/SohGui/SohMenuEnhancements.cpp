@@ -2178,7 +2178,7 @@ void SohMenu::AddMenuEnhancements() {
             "floor is rejected via a per-segment 'is there floor at the "
             "expected altitude?' sampling predicate so the detector "
             "doesn't flood-fill open ground with redundant jump arcs.\n\n"
-            "XZ range: 18-200u. Y range: -30u to +80u (matching upward "
+            "XZ range: 18-160u. Y range: -30u to +80u (matching upward "
             "broad-jump apex). Per-actor caps via NavTraits.maxJumpDistance "
             "+ maxJumpUpDelta filter further at BFS time.\n\n"
             "Visualized in the debug overlay as orange ground quads with "
