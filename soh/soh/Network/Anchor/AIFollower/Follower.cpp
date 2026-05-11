@@ -35,6 +35,7 @@
 #include "soh/ShipInit.hpp"
 
 #include <chrono>
+#include <limits>
 #include <libultraship/bridge.h>
 #include <libultraship/libultraship.h>
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
@@ -3049,6 +3050,73 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
         if (it != clients.end() && it->second.isClimbing) {
             followerClimbTopTarget = it->second.posRot.pos;
             leaderStillClimbing = true;
+        }
+    }
+
+    // Inter-anchor climb-bridge re-anchor (Plans/inter_anchor_climb_bridges_plan
+    // §Step 4). When the leader has crossed a bridge (curved-wall corner or
+    // stacked-tier seam) and is now physically closer to a different anchor
+    // than our currently-tracked one, switch followerClimbAnchorIdx to the
+    // new anchor. The reachTopY derivation below reads anchor.topPos.y from
+    // the active anchor, so without this re-anchor the follower would climb
+    // toward the wrong tier's top once the leader crosses a vertical seam.
+    //
+    // The BFS bridge edges (Steps 1-3) handle the substrate-path-driven
+    // branch automatically — this re-anchor is the defensive fallback for
+    // when the leader teleports across a seam faster than BFS recomputes,
+    // OR when the substrate consumer is gated off but leader-tracking is
+    // still active. Hysteresis: new anchor must be ≥25% closer than the
+    // current one to prevent flicker at the boundary.
+    if (leaderStillClimbing &&
+        followerClimbAnchorIdx != UINT16_MAX) {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        if (navData != nullptr &&
+            followerClimbAnchorIdx < navData->climbAnchors.size()) {
+            const uint16_t baseMask =
+                AnchorNav::GetTraitsForActor(player->actor.id).climbSurfaceMask;
+            const uint16_t climbMask =
+                AnchorNav::ResolveDynamicClimbMask(player->actor.id, baseMask);
+            const Vec3f leaderPosLocal = followerClimbTopTarget;
+            auto anchorMinDistSq = [&](uint16_t anchorIdx) -> f32 {
+                const auto& anc = navData->climbAnchors[anchorIdx];
+                f32 best = std::numeric_limits<f32>::infinity();
+                const uint16_t end = (uint16_t)(anc.firstNodeIdx + anc.nodeCount);
+                for (uint16_t i = anc.firstNodeIdx; i < end && i < navData->nodes.size(); i++) {
+                    f32 d = AnchorDist::Dist3DSq(navData->nodes[i].pos, leaderPosLocal);
+                    if (d < best) best = d;
+                }
+                return best;
+            };
+            const f32 curDistSq = anchorMinDistSq(followerClimbAnchorIdx);
+            // Require a ≥25% improvement: candidate * 1.5625 < current
+            // (squared form of the 1.25 linear hysteresis margin).
+            constexpr f32 kHysteresisSqFactor = 1.5625f;
+            f32 bestDistSq = curDistSq;
+            uint16_t bestIdx = followerClimbAnchorIdx;
+            for (uint16_t a = 0; a < (uint16_t)navData->climbAnchors.size(); a++) {
+                if (a == followerClimbAnchorIdx) continue;
+                const auto& cand = navData->climbAnchors[a];
+                // Surface-type gate: only switch to anchors the follower
+                // can actually climb under its current mask. Skips e.g.
+                // GENERIC_WALL anchors when ClimbAnywhere is off.
+                if ((cand.surfaceType & climbMask) == 0) continue;
+                f32 candDistSq = anchorMinDistSq(a);
+                if (candDistSq * kHysteresisSqFactor < bestDistSq) {
+                    bestDistSq = candDistSq;
+                    bestIdx    = a;
+                }
+            }
+            if (bestIdx != followerClimbAnchorIdx) {
+                SPDLOG_INFO("[Follower] Climb re-anchor: {} → {} "
+                            "(leader pos closer; cur d²={:.0f} new d²={:.0f})",
+                            (int)followerClimbAnchorIdx, (int)bestIdx,
+                            curDistSq, bestDistSq);
+                followerClimbAnchorIdx = bestIdx;
+                followerClimbCellSet.clear();  // grid cell set is per-anchor
+            }
         }
     }
 
