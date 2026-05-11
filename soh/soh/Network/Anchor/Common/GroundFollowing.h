@@ -59,22 +59,27 @@ bool HasGroundContact(Actor* navigator, PlayState* play);
 bool HasFloorAhead(Actor* navigator, int16_t yaw, float probeDistance,
                    float maxDrop, PlayState* play);
 
-// True when stepping toward `subgoalPos` is a PLANNED drop — i.e. the
-// path planner deliberately routed the navigator through a drop
-// anchor. Returns true iff:
-//   - `subgoalFlags & NODE_DROP_FROM_ABOVE` is set (BFS tagged the
-//     landing waypoint at path-build time, Task 3), AND
-//   - the subgoal is significantly below the navigator
-//     (subgoalPos.y < navigator->y - kPlannedDropMinDeltaY), AND
-//   - the subgoal is within a reasonable drop-anchor footprint
-//     in XZ (kPlannedDropMaxXZ).
+// True when stepping toward `subgoalPos` is a PLANNED off-edge step —
+// the path planner deliberately routed the navigator through a drop,
+// jump, or climb-surface approach. Three intent categories the BFS
+// emits, all sharing "don't suppress this step at the cliff":
+//   - DropAnchor landing (NODE_DROP_FROM_ABOVE, downward, Task 3)
+//   - JumpAnchor landing (NODE_DROP_FROM_ABOVE, any direction in
+//     bounds, JumpAnchor reuse of the flag)
+//   - Climb-surface approach (NODE_CLIMB_* on the subgoal — the
+//     navigator is walking toward a ladder/vine to grab it; the
+//     ladder base often sits at the navmesh edge so the approach
+//     step crosses a non-walkable cell)
+//
+// Returns true iff any of these flags are set AND the subgoal lies
+// in a geometry envelope consistent with the intent.
 //
 // Consumer pattern: when EdgeAvoidance would otherwise zero the
 // stick at a cliff, also check this predicate — if true, the
-// "cliff" is actually the planned drop, so allow the step.
-bool IsPlannedDropForSubgoal(const Actor* navigator,
-                              const Vec3f& subgoalPos,
-                              uint16_t subgoalFlags);
+// "cliff" is actually a planned traversal, so allow the step.
+bool IsPlannedOffEdgeStep(const Actor* navigator,
+                           const Vec3f& subgoalPos,
+                           uint16_t subgoalFlags);
 
 // Integrated edge-avoidance check intended for AI navigator input
 // drivers. Returns true when the navigator should NOT take a forward

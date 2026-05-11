@@ -2251,13 +2251,14 @@ void Anchor::TickFollowerInput(Actor* actor) {
 
             // Edge avoidance (Task 4): refuse the forward step when the
             // step would walk off a cliff AND the path planner has not
-            // marked the next subgoal as an intentional drop. The
-            // next-subgoal info comes from followerNavPath when active;
-            // when the path is empty (Layer 1/2/3 fallback to direct
-            // pursuit), pass the same target — IsPlannedDropForSubgoal
-            // requires NODE_DROP_FROM_ABOVE which only set on BFS-built
-            // landings, so no-path callers reduce cleanly to
-            // "cliff ahead → suppress".
+            // marked the next subgoal as an intentional off-edge step
+            // (drop, jump, or climb-surface approach). The next-subgoal
+            // info comes from followerNavPath when active; when the
+            // path is empty (Layer 1/2/3 fallback to direct pursuit),
+            // pass the same target — IsPlannedOffEdgeStep requires
+            // NODE_DROP_FROM_ABOVE or NODE_CLIMB_*, which are only set
+            // on BFS-built waypoints, so no-path callers reduce cleanly
+            // to "cliff ahead → suppress".
             Vec3f   nextSubgoal      = followerMoveTarget;
             uint16_t nextSubgoalFlags = 0;
             if (!followerNavPath.Empty()) {

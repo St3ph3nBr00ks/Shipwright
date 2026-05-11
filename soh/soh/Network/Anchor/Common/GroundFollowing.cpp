@@ -200,19 +200,40 @@ bool HasFloorAhead(Actor* navigator, int16_t yaw, float probeDistance,
     return drop <= maxDrop;
 }
 
-bool IsPlannedDropForSubgoal(const Actor* navigator,
-                              const Vec3f& subgoalPos,
-                              uint16_t subgoalFlags) {
+bool IsPlannedOffEdgeStep(const Actor* navigator,
+                           const Vec3f& subgoalPos,
+                           uint16_t subgoalFlags) {
     if (navigator == nullptr) return false;
-    if ((subgoalFlags & ::AnchorNavRoom::NODE_DROP_FROM_ABOVE) == 0) return false;
-    // Subgoal Y must lie in the union of drop + jump Y ranges from
-    // the navigator's POV. Guards against the flag being spuriously
-    // set on a waypoint that's geometrically incompatible with both.
-    const float dy = subgoalPos.y - navigator->world.pos.y;
-    if (dy < kPlannedOffEdgeMinDownDeltaY) return false;  // too far down
-    if (dy > kPlannedOffEdgeMaxUpDeltaY)   return false;  // too far up
-    if (AnchorDist::DistXZSq(subgoalPos, navigator->world.pos) > kPlannedDropMaxXZSq) return false;
-    return true;
+
+    // Climb-surface subgoal: the navigator is approaching a ladder/
+    // vine to grab it. The climb anchor's base often sits at the
+    // navmesh edge — the floor immediately around the ladder isn't
+    // covered by the scan because the wall blocks floodfill — so the
+    // approach step crosses a non-walkable cell. Edge avoidance must
+    // permit this; the OoT climb-collider grab handles the actual
+    // transition once the navigator reaches the basePos.
+    //
+    // No geometric envelope check for climb intent: the subgoal IS
+    // the climb-surface cell position, which by construction may be
+    // at any Y relative to the navigator (bottom row of a tall vine
+    // wall might be 30u above floor; mid-grid cells higher).
+    if (subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY) {
+        return true;
+    }
+
+    // Drop/jump-anchor landing: NODE_DROP_FROM_ABOVE is set by the
+    // BFS path reconstruction for drop-anchor and jump-anchor edges
+    // (Task 3 + JumpAnchor reuse). Y range covers the union of both
+    // detectors' ranges. XZ check guards against spurious flag set.
+    if (subgoalFlags & ::AnchorNavRoom::NODE_DROP_FROM_ABOVE) {
+        const float dy = subgoalPos.y - navigator->world.pos.y;
+        if (dy < kPlannedOffEdgeMinDownDeltaY) return false;
+        if (dy > kPlannedOffEdgeMaxUpDeltaY)   return false;
+        if (AnchorDist::DistXZSq(subgoalPos, navigator->world.pos) > kPlannedDropMaxXZSq) return false;
+        return true;
+    }
+
+    return false;
 }
 
 bool ShouldZeroStickForEdge(Actor* navigator,
@@ -240,8 +261,9 @@ bool ShouldZeroStickForEdge(Actor* navigator,
     }
 
     // No floor ahead — would be an edge step. Allow it iff the path
-    // planner has marked the next subgoal as an intentional drop.
-    if (IsPlannedDropForSubgoal(navigator, nextSubgoalPos, nextSubgoalFlags)) {
+    // planner has marked the next subgoal as an intentional off-edge
+    // step (drop, jump, or climb-surface approach).
+    if (IsPlannedOffEdgeStep(navigator, nextSubgoalPos, nextSubgoalFlags)) {
         return false;
     }
     return true;
