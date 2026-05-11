@@ -46,7 +46,11 @@ extern PlayState* gPlayState;
 //         current waypoint), computedClimbMask (resolved consumer
 //         mask), climbNodesInPath (count of climb-surface waypoints
 //         remaining from cursor to end-of-path).
-#define FR_SCHEMA_VERSION 2
+//   v3 — pathFlagsAggregate (OR of remaining waypoint flags — see if
+//         path INCLUDES intent anywhere downstream of the cursor) +
+//         navPathWaypoints array (full per-waypoint position + flag
+//         dump for path-routing investigations).
+#define FR_SCHEMA_VERSION 3
 
 namespace AnchorFollower {
 
@@ -367,16 +371,44 @@ void CaptureFrame(const FollowerFrameContext& ctx) {
         anchor->followerNavPath.computedClimbMask);
     if (pathPresent) {
         size_t climbCount = 0;
+        uint16_t flagsAggregate = 0;  // OR of all remaining waypoint flags
         for (size_t i = anchor->followerNavPath.cursorIdx;
              i < anchor->followerNavPath.waypointFlags.size(); i++) {
-            if (anchor->followerNavPath.waypointFlags[i] &
-                ::AnchorNavRoom::NODE_CLIMB_ANY) {
+            const uint16_t f = anchor->followerNavPath.waypointFlags[i];
+            flagsAggregate |= f;
+            if (f & ::AnchorNavRoom::NODE_CLIMB_ANY) {
                 climbCount++;
             }
         }
         j["climbNodesInPath"] = static_cast<uint64_t>(climbCount);
+        // Aggregate of remaining-waypoint flags. Tells us whether the
+        // path INCLUDES drop / jump / climb intent anywhere downstream
+        // of the cursor — independent of whether the current subgoal
+        // happens to carry it. Critical for diagnosing "BFS routed
+        // through anchor but follower stalled before reaching the
+        // tagged waypoint" vs "BFS never used the anchor at all".
+        j["pathFlagsAggregate"] = static_cast<uint64_t>(flagsAggregate);
+        // Full waypoint dump (positions + per-waypoint flags). High-fidelity
+        // diagnostic for path-routing investigations. ~30-100 bytes per
+        // waypoint × N-waypoint paths × capture frequency. Worst-case
+        // 64-waypoint path × 30Hz × 100 bytes = ~200KB/s of recorder data;
+        // tolerable for diagnostic sessions.
+        nlohmann::json wpts = nlohmann::json::array();
+        for (size_t i = 0; i < anchor->followerNavPath.waypoints.size(); i++) {
+            const Vec3f& p = anchor->followerNavPath.waypoints[i];
+            uint16_t f = (i < anchor->followerNavPath.waypointFlags.size())
+                ? anchor->followerNavPath.waypointFlags[i] : (uint16_t)0;
+            wpts.push_back({
+                {"i", static_cast<uint64_t>(i)},
+                {"x", p.x}, {"y", p.y}, {"z", p.z},
+                {"f", static_cast<uint64_t>(f)},
+            });
+        }
+        j["navPathWaypoints"] = wpts;
     } else {
-        j["climbNodesInPath"] = (uint64_t)0;
+        j["climbNodesInPath"]   = (uint64_t)0;
+        j["pathFlagsAggregate"] = (uint64_t)0;
+        j["navPathWaypoints"]   = nlohmann::json::array();
     }
 
     j["g10LeashFrames"]    = anchor->followerOverrunFrames;
