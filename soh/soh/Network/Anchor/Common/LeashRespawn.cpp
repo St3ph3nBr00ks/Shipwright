@@ -15,6 +15,7 @@
 
 #include "ActorSyncHelpers.h"   // IsSyncableActor / kSyncableActorCategories
 #include "ActorTrail.h"         // GetWaypointBefore / TrailWaypoint
+#include "DistanceMath.h"
 #include "NavTraits.h"
 #include "SceneAuthority.h"     // IsMyCurrentRoomHost
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -57,11 +58,6 @@ constexpr float kPlayerProximityRadiusSq = 600.0f * 600.0f;
 // How far back to look in the player's trail for the proximity check.
 // 1 second of recent wall-clock history.
 constexpr uint32_t kPlayerTrailLookbackMs = 1000;
-
-float DistSq(const Vec3f& a, const Vec3f& b) {
-    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return dx * dx + dy * dy + dz * dz;
-}
 
 // Singleton registry. Host-only writers; OnSceneEnter is the reader.
 std::unordered_map<uint32_t, Vec3f>& Registry() {
@@ -134,7 +130,7 @@ void OnSceneEnter(int16_t sceneNum, PlayState* play) {
                             TrailWaypoint wp{};
                             const TrailKey playerKey = TrailKeyForPlayer(0);
                             if (trail.GetWaypointBefore(playerKey, kPlayerTrailLookbackMs, wp) &&
-                                DistSq(wp.pos, it->second) < kPlayerProximityRadiusSq) {
+                                AnchorDist::Dist3DSq(wp.pos, it->second) < kPlayerProximityRadiusSq) {
                                 actor->world.pos = it->second;
                                 actor->prevPos   = it->second;
                                 SPDLOG_INFO(
@@ -143,7 +139,7 @@ void OnSceneEnter(int16_t sceneNum, PlayState* play) {
                                     "(player wp dist² {:.0f})",
                                     ext->netId, (int)sceneNum,
                                     it->second.x, it->second.y, it->second.z,
-                                    std::sqrt(DistSq(wp.pos, it->second)));
+                                    std::sqrt(AnchorDist::Dist3DSq(wp.pos, it->second)));
                             }
                         }
                     }

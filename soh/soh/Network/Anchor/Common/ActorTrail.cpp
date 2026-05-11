@@ -11,6 +11,7 @@
 
 #include "ActorTrail.h"
 #include "ActorSyncHelpers.h"  // kSyncableActorCategories, IsSyncableActor
+#include "DistanceMath.h"
 #include "NavTraits.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
@@ -243,12 +244,8 @@ bool ActorTrail::FindTrailWaypointBeyondGap(TrailKey key,
     if (it == mTrails.end() || it->second.count == 0) return false;
 
     const EntityTrail& trail = it->second;
-    auto distSq = [](const Vec3f& a, const Vec3f& b) {
-        float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-        return dx * dx + dy * dy + dz * dz;
-    };
     const float maxGapSq      = maxGapDistance * maxGapDistance;
-    const float refToTargetSq = distSq(referencePos, targetPos);
+    const float refToTargetSq = AnchorDist::Dist3DSq(referencePos, targetPos);
 
     // Walk newest→oldest. Newest match wins because it's the freshest
     // evidence of where target actually went.
@@ -259,9 +256,9 @@ bool ActorTrail::FindTrailWaypointBeyondGap(TrailKey key,
         // Stale filter (matches GetBestReachableSubgoal — 12s).
         if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
         // Within jump range of reference?
-        if (distSq(wp.pos, referencePos) > maxGapSq) continue;
+        if (AnchorDist::Dist3DSq(wp.pos, referencePos) > maxGapSq) continue;
         // Strict progress: closer to target than referencePos.
-        if (distSq(wp.pos, targetPos) >= refToTargetSq) continue;
+        if (AnchorDist::Dist3DSq(wp.pos, targetPos) >= refToTargetSq) continue;
 
         outLanding = wp.pos;
         return true;
@@ -335,11 +332,7 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
     }
 
     const Vec3f& navPos = navigator->world.pos;
-    auto distSq = [](const Vec3f& a, const Vec3f& b) {
-        float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-        return dx * dx + dy * dy + dz * dz;
-    };
-    float distNavToTargetSq = distSq(navPos, targetPos);
+    float distNavToTargetSq = AnchorDist::Dist3DSq(navPos, targetPos);
 
     // Step 2 — RoomNavData static graph. Pre-scanned per-room nav graph
     // with edges built via MovementClearAtPosition + step-up gating
@@ -411,7 +404,7 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
         if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
 
         // Reject non-progress waypoints (would walk away from target).
-        if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
+        if (AnchorDist::Dist3DSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
 
         // Reject blocked waypoints.
         if (!MovementClear(navigator, wp.pos, play)) continue;
@@ -475,11 +468,6 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         out.waypointFlags.push_back(0); // Layer 1: target itself, no source node
         return true;
     }
-
-    auto distSq = [](const Vec3f& a, const Vec3f& b) {
-        float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-        return dx * dx + dy * dy + dz * dz;
-    };
 
     // Layer 2/3 ordering — user 2026-05-09: post-P3.11 default order is
     // Layer 1 → Layer 3 (graph) → Layer 2 (trail). Layer 2's MovementClear
@@ -547,13 +535,13 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         if (it == mTrails.end() || it->second.count == 0) return false;
         const EntityTrail& trail = it->second;
         const Vec3f& navPos = navigator->world.pos;
-        float distNavToTargetSq = distSq(navPos, targetPos);
+        float distNavToTargetSq = AnchorDist::Dist3DSq(navPos, targetPos);
         for (size_t i = 0; i < trail.count; i++) {
             size_t idx = (trail.head + kMaxWaypoints - 1 - i) % kMaxWaypoints;
             const TrailWaypoint& wp = trail.waypoints[idx];
             if (wp.sceneNum != gPlayState->sceneNum) continue;
             if (mNowMs > wp.captureMs && (mNowMs - wp.captureMs) > kStaleAgeMs) continue;
-            if (distSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
+            if (AnchorDist::Dist3DSq(wp.pos, targetPos) >= distNavToTargetSq) continue;
             if (!MovementClear(navigator, wp.pos, play)) continue;
             out.waypoints.push_back(wp.pos);
             out.waypointFlags.push_back(0); // Layer 2: trail breadcrumb, no source NavNode

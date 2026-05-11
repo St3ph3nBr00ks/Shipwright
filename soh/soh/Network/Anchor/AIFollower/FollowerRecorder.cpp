@@ -7,6 +7,7 @@
 #include "FollowerRecorder.h"
 #include "Follower.h"
 #include "../Anchor.h"
+#include "../Common/DistanceMath.h"
 #include "soh/cvar_prefixes.h"
 #include "soh/ShipInit.hpp"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -316,11 +317,8 @@ void CaptureFrame(const FollowerFrameContext& ctx) {
                           leaderRoomLive != ourRoomLive);
 
     const Vec3f& fp = ctx.player->actor.world.pos;
-    f32 dx = leaderPos.x - fp.x;
-    f32 dy = leaderPos.y - fp.y;
-    f32 dz = leaderPos.z - fp.z;
-    f32 distXZ  = (leaderActor != nullptr) ? std::sqrt(dx*dx + dz*dz) : 0.0f;
-    f32 distXYZ = (leaderActor != nullptr) ? std::sqrt(dx*dx + dy*dy + dz*dz) : 0.0f;
+    f32 distXZ  = (leaderActor != nullptr) ? AnchorDist::DistXZ(leaderPos, fp) : 0.0f;
+    f32 distXYZ = (leaderActor != nullptr) ? AnchorDist::Dist3D(leaderPos, fp) : 0.0f;
 
     nlohmann::json j;
     j["schema"]            = FR_SCHEMA_VERSION;

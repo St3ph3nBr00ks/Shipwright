@@ -17,6 +17,7 @@
 #include "TargetSelection.h"
 
 #include "ActorSyncHelpers.h"  // IsSyncableActor / IsSyncedBossActor / kSyncableActorCategories
+#include "DistanceMath.h"
 #include "NavTraits.h"
 #include "PlayerLookup.h"     // FindNearestPlayerActor / GetSyncedPlayerActors
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
@@ -72,11 +73,6 @@ std::unordered_map<const Actor*, std::vector<Actor*>>& CustomCandidatesMap() {
     return map;
 }
 
-float DistSq(const Vec3f& a, const Vec3f& b) {
-    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return dx * dx + dy * dy + dz * dz;
-}
-
 EnemyNetId* GetMutableNavExt(Actor* actor) {
     if (actor == nullptr) return nullptr;
     return const_cast<EnemyNetId*>(
@@ -112,7 +108,7 @@ Actor* NearestInSet(Actor* navigator, TargetSet set, PlayState* play) {
         float bestSq = std::numeric_limits<float>::infinity();
         for (Actor* c : it->second) {
             if (!ActorIsAlive(c)) continue;
-            float dSq = DistSq(navigator->world.pos, c->world.pos);
+            float dSq = AnchorDist::Dist3DSq(navigator->world.pos, c->world.pos);
             if (dSq < bestSq) {
                 bestSq = dSq;
                 best   = c;
@@ -134,7 +130,7 @@ Actor* NearestInSet(Actor* navigator, TargetSet set, PlayState* play) {
                     candidate = next;
                     continue;
                 }
-                float dSq = DistSq(navigator->world.pos, candidate->world.pos);
+                float dSq = AnchorDist::Dist3DSq(navigator->world.pos, candidate->world.pos);
                 if (dSq < bestSq) {
                     bestSq = dSq;
                     best   = candidate;
@@ -283,7 +279,7 @@ Actor* AcquireOrHoldTarget(Actor* navigator, TargetSet set, PlayState* play) {
 
     // Validate leash and timeline / scene presence.
     if (heldValid && play != nullptr) {
-        float dSq = DistSq(navigator->world.pos, held->world.pos);
+        float dSq = AnchorDist::Dist3DSq(navigator->world.pos, held->world.pos);
         if (dSq > kDefaultLeashMax * kDefaultLeashMax) {
             heldValid = false;
         }
@@ -311,8 +307,8 @@ Actor* AcquireOrHoldTarget(Actor* navigator, TargetSet set, PlayState* play) {
     // Timer expired — evaluate hysteresis.
     Actor* nearest = NearestInSet(navigator, set, play);
     if (nearest != nullptr && nearest != held) {
-        float distHeldSq    = DistSq(navigator->world.pos, held->world.pos);
-        float distNearestSq = DistSq(navigator->world.pos, nearest->world.pos);
+        float distHeldSq    = AnchorDist::Dist3DSq(navigator->world.pos, held->world.pos);
+        float distNearestSq = AnchorDist::Dist3DSq(navigator->world.pos, nearest->world.pos);
         // Compare squared distances against squared hysteresis factor.
         float threshold = kHysteresisFactor * kHysteresisFactor * distHeldSq;
         if (distNearestSq < threshold) {

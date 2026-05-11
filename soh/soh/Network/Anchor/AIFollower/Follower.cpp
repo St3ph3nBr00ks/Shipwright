@@ -19,6 +19,7 @@
 #include "../Anchor.h"
 #include "soh/cvar_prefixes.h"
 #include "../Common/ActorSyncHelpers.h"
+#include "../Common/DistanceMath.h"
 #include "../Common/PlayerLookup.h"
 #include "../Common/SceneAuthority.h"
 #include "../Common/ItemEligibility.h"
@@ -873,9 +874,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         Actor* cand = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
         while (cand != nullptr) {
             if (IsEligibleLeader(cand)) {
-                f32 dx = cand->world.pos.x - selfPos.x;
-                f32 dz = cand->world.pos.z - selfPos.z;
-                f32 d2 = dx * dx + dz * dz;
+                f32 d2 = AnchorDist::DistXZSq(cand->world.pos, selfPos);
                 if (d2 < nearestDistSq) {
                     nearestDistSq = d2;
                     nearestLeader = cand;
@@ -1077,9 +1076,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
             pendingTransitionTimeoutFrames = 0;
         } else {
             static constexpr f32 kHandoffProximity = 60.0f;
-            f32 dx = pendingTransitionPos.x - p2Pos.x;
-            f32 dz = pendingTransitionPos.z - p2Pos.z;
-            f32 d2 = dx * dx + dz * dz;
+            f32 d2 = AnchorDist::DistXZSq(pendingTransitionPos, p2Pos);
             if (d2 < kHandoffProximity * kHandoffProximity) {
                 SPDLOG_INFO("[Follower] Pending transition firing — entering scene via "
                             "entrance 0x{:04X} (from scene 0x{:02X})",
@@ -1480,10 +1477,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
             followerCloseFailBaseline = 0.0f;
             followerCloseFailFrames   = 0;
         } else {
-            f32 dxCL = leaderPos.x - p2Pos.x;
-            f32 dyCL = leaderPos.y - p2Pos.y;
-            f32 dzCL = leaderPos.z - p2Pos.z;
-            f32 distToLeader = sqrtf(dxCL * dxCL + dyCL * dyCL + dzCL * dzCL);
+            f32 distToLeader = AnchorDist::Dist3D(leaderPos, p2Pos);
             if (distToLeader < kG14MinDistance) {
                 followerCloseFailBaseline = 0.0f;
                 followerCloseFailFrames   = 0;
@@ -1555,9 +1549,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         if (it != clients.end() && it->second.isClimbing &&
             followerAIState != FollowerAIState::CLIMBING) {
             constexpr f32 kClimbApproachRadius = 30.0f;
-            f32 dx = leaderPos.x - p2Pos.x;
-            f32 dz = leaderPos.z - p2Pos.z;
-            f32 distSq = dx * dx + dz * dz;
+            f32 distSq = AnchorDist::DistXZSq(leaderPos, p2Pos);
             // Item 1 (user 2026-05-10): "Follower is not climbing onto
             // ladders and vine walls when the leader does. The follower
             // is waiting for the leader to get off." When the leader is
@@ -1683,7 +1675,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
 
     // Periodic heartbeat: log state + positions every 60 frames.
     if (followerStateFrames % 60 == 0) {
-        f32 toTarget = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+        f32 toTarget = AnchorDist::DistXZ(sideTarget, p2Pos);
         const char* stateStr = "?";
         switch (followerAIState) {
             case FollowerAIState::IDLE:          stateStr = "IDLE";          break;
@@ -3036,10 +3028,7 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
                 Vec3f sg = followerNavPath.CurrentSubgoal();
                 followerClimbTopTarget = sg;
                 constexpr f32 kClimbSubgoalReach3D = 24.0f;
-                f32 dx = sg.x - player->actor.world.pos.x;
-                f32 dy = sg.y - player->actor.world.pos.y;
-                f32 dz = sg.z - player->actor.world.pos.z;
-                if (dx * dx + dy * dy + dz * dz <
+                if (AnchorDist::Dist3DSq(sg, player->actor.world.pos) <
                     kClimbSubgoalReach3D * kClimbSubgoalReach3D) {
                     followerNavPath.Advance();
                 }
@@ -3481,9 +3470,7 @@ Actor* Anchor::ScanForItemCandidate(Player* player) {
         if (fabsf(item->world.pos.y - selfPos.y) >= kMaxYDelta) {
             continue;
         }
-        f32 dx = item->world.pos.x - selfPos.x;
-        f32 dz = item->world.pos.z - selfPos.z;
-        f32 d2 = dx * dx + dz * dz;
+        f32 d2 = AnchorDist::DistXZSq(item->world.pos, selfPos);
         if (d2 < bestDistSq) {
             bestDistSq = d2;
             bestItem   = item;
@@ -3663,7 +3650,7 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
         f32 progDx   = p2Pos.x - followerLastPos.x;
         f32 progDz   = p2Pos.z - followerLastPos.z;
         f32 progress = sqrtf(progDx * progDx + progDz * progDz);
-        f32 toTarget = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+        f32 toTarget = AnchorDist::DistXZ(sideTarget, p2Pos);
         SPDLOG_INFO("[Follower] FOLLOW check: progress={:.1f} distToTarget={:.0f} "
                     "p2=({:.0f},{:.0f}) last=({:.0f},{:.0f}) target=({:.0f},{:.0f})",
                     progress, toTarget,
@@ -3885,7 +3872,7 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
         }
     }
     followerMoveTarget = followTarget;
-    f32 distToFollowTarget = sqrtf(SQ(followTarget.x - p2Pos.x) + SQ(followTarget.z - p2Pos.z));
+    f32 distToFollowTarget = AnchorDist::DistXZ(followTarget, p2Pos);
     // Stick injection in TickFollowerInput drives actual movement;
     // here we just face the immediate move target. Under Phase 2 nav
     // substrate the immediate target may be an intermediate subgoal —
@@ -3916,7 +3903,7 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // trying to find a route up (slope / stairs / ladder via Layer 2
     // breadcrumbs). G10/G14 leash teleport eventually fires if no
     // route is found — safer than locking-in on the wrong altitude.
-    f32 distToFinalGoal = sqrtf(SQ(sideTarget.x - p2Pos.x) + SQ(sideTarget.z - p2Pos.z));
+    f32 distToFinalGoal = AnchorDist::DistXZ(sideTarget, p2Pos);
     f32 dyToFinalGoal = fabsf(sideTarget.y - p2Pos.y);
     if (distToFinalGoal < kFollowThreshold &&
         dyToFinalGoal    < kFollowYThreshold &&

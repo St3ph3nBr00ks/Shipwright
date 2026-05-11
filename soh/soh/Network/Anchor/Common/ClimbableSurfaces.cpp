@@ -10,6 +10,7 @@
  */
 
 #include "ClimbableSurfaces.h"
+#include "DistanceMath.h"
 
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
@@ -58,11 +59,6 @@ constexpr ClimbableActorEntry kClimbableActorIds[] = {
     { ACTOR_BG_SPOT06_OBJECTS, 120.0f }, // Lake Hylia (some climbables)
 };
 
-float DistSq(const Vec3f& a, const Vec3f& b) {
-    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return dx * dx + dy * dy + dz * dz;
-}
-
 }  // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -94,7 +90,7 @@ std::optional<ClimbAnchor> FindNearestClimbable(const Vec3f& from, float maxRadi
             Actor* next = actor->next;
             for (const ClimbableActorEntry& entry : kClimbableActorIds) {
                 if (actor->id != entry.actorId) continue;
-                const float dSq = DistSq(from, actor->world.pos);
+                const float dSq = AnchorDist::Dist3DSq(from, actor->world.pos);
                 if (dSq > maxRadiusSq) break;
                 if (dSq < bestDistSq) {
                     ClimbAnchor anchor{};
@@ -139,7 +135,7 @@ bool IsAnchorStillValid(const ClimbAnchor& anchor, PlayState* play) {
                     // Approximate position match (within 1u — actors
                     // can be re-emplaced at the same coords across
                     // scene reloads but conceptually be "the same").
-                    if (DistSq(a->world.pos, anchor.basePos) < 1.0f) {
+                    if (AnchorDist::Dist3DSq(a->world.pos, anchor.basePos) < 1.0f) {
                         return true;
                     }
                 }
