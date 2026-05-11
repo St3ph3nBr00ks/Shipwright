@@ -225,6 +225,19 @@ static inline bool IsNavNodeAdmissible(const NavNode& n, uint16_t climbSurfaceMa
     return (n.flags & NODE_WALKABLE) != 0;
 }
 
+// Squared 3D distance between two world-space points. File-scope helper
+// used by the hazard-aware BFS — previously duplicated as identical
+// distSqToTarget lambdas in FindBestReachableSubgoalNode +
+// FindBestReachableSubgoalPath. Cannot reuse AnchorDist::Dist3DSq
+// because RoomNavData lives under soh/Enhancements/ and the helper
+// lives under soh/Network/Anchor/Common/ (wrong-direction include).
+static inline float DistSqToTargetXYZ(const Vec3f& p, const Vec3f& target) {
+    const float dx = p.x - target.x;
+    const float dy = p.y - target.y;
+    const float dz = p.z - target.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
 // Helper. Builds a bidirectional adjacency list from data->edges. Each
 // NavEdge stored once but traversable both ways. Used by the hazard-aware
 // BFS and FindNearestNonHazardExit.
@@ -355,18 +368,11 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
     // graph-connected to seed; steep-slope = transient pass-through, never
     // a valid destination).
 
-    auto distSqToTarget = [&](const Vec3f& p) {
-        float dx = p.x - targetPos.x;
-        float dy = p.y - targetPos.y;
-        float dz = p.z - targetPos.z;
-        return dx * dx + dy * dy + dz * dz;
-    };
-
     // Strict-improvement filter: chosen subgoal must improve distance-to-
     // target over the navigator's starting node. Without this, an
     // unreachable target (BFS can't cross to it) would trivially return
     // fromIdx itself and the navigator would freeze in place.
-    const float fromDistSq = distSqToTarget(data->nodes[(size_t)fromIdx].pos);
+    const float fromDistSq = DistSqToTargetXYZ(data->nodes[(size_t)fromIdx].pos, targetPos);
 
     struct QueueEntry {
         uint16_t idx;
@@ -417,7 +423,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
         // When not avoiding hazards, any walkable node qualifies.
         const bool destinationOK = !isHazard || !avoidHazardNodes;
         if (destinationOK) {
-            float d = distSqToTarget(node.pos);
+            float d = DistSqToTargetXYZ(node.pos, targetPos);
             if (d < bestDistSq) {
                 bestDistSq = d;
                 bestIdx    = (int)entry.idx;
@@ -548,14 +554,7 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
     // copy it into their own state and walk it without re-querying the
     // graph each frame.
 
-    auto distSqToTarget = [&](const Vec3f& p) {
-        float dx = p.x - targetPos.x;
-        float dy = p.y - targetPos.y;
-        float dz = p.z - targetPos.z;
-        return dx * dx + dy * dy + dz * dz;
-    };
-
-    const float fromDistSq = distSqToTarget(data->nodes[(size_t)fromIdx].pos);
+    const float fromDistSq = DistSqToTargetXYZ(data->nodes[(size_t)fromIdx].pos, targetPos);
 
     struct QueueEntry { uint16_t idx; uint8_t hopsInHazard; };
     std::unordered_set<uint32_t> dropEdges;
@@ -589,7 +588,7 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
 
         const bool destinationOK = !isHazard || !avoidHazardNodes;
         if (destinationOK) {
-            float d = distSqToTarget(node.pos);
+            float d = DistSqToTargetXYZ(node.pos, targetPos);
             if (d < bestDistSq) {
                 bestDistSq = d;
                 bestIdx    = (int)entry.idx;
