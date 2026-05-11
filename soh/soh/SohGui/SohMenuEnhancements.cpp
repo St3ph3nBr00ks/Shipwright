@@ -2163,6 +2163,23 @@ void SohMenu::AddMenuEnhancements() {
             "Visualized in the debug overlay as bright cyan ground lines.\n\n"
             "Apply via Force Rescan after changing."));
 
+    AddWidget(path, "Jump Anchor Detection (pre-baked traversal pairs)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.JumpAnchorDetection"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on, scans for walkable-node pairs separated by an air gap "
+            "the navigator can jump across. Bidirectional, arc-clearance "
+            "validated at scan time so BFS can route through statically "
+            "instead of falling back to runtime JumpResolver.\n\n"
+            "XZ range: 18-150u. Y range: -200u (downward, drop-equivalent) "
+            "to +80u (upward broad-jump apex). Per-actor caps via "
+            "NavTraits.maxJumpDistance + maxJumpUpDelta gate at BFS time.\n\n"
+            "Visualized in the debug overlay as orange ground quads with "
+            "a connecting post.\n\n"
+            "Schema bumps to v8 when first scan runs with this on; existing "
+            "v7 .bin files regenerate. Apply via Force Rescan. Default: off."));
+
     AddWidget(path, "Drop Anchor Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })

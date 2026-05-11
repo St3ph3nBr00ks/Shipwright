@@ -177,6 +177,25 @@ struct DropAnchor {
     Vec3f landingPos;    // walkable position where navigator lands
 };
 
+// Jump anchor — pre-baked traversal pair (Plans/jump_anchor_plan.md).
+// A walkable pair (fromPos, toPos) where the navigator can jump across
+// an air gap and land safely. Bidirectional: BFS emits edges both ways
+// gated by the navigator's per-actor `maxJumpDistance` + `maxJumpUpDelta`.
+//
+// Distinction from DropAnchor:
+//   - Drop: line A→B is clear (straight fall through air), strictly
+//     directional (high → low only), passive gravity.
+//   - Jump: parabolic ARC A→B is clear (line may be blocked by an
+//     intervening obstacle the arc clears), bidirectional, active
+//     input (A-button press required).
+//
+// Pre-baked at scan time; runtime JumpResolver still handles
+// dynamic-geometry gaps that pre-baking can't predict. Schema v8+.
+struct JumpAnchor {
+    Vec3f fromPos;
+    Vec3f toPos;
+};
+
 struct RoomNavData {
     // Header
     uint32_t magic = 0x52564E41; // 'RNAV' little-endian — file-format identifier
@@ -192,6 +211,7 @@ struct RoomNavData {
     std::vector<LedgeAnchor>      ledgeAnchors;       // schema v3+
     std::vector<CrawlspaceAnchor> crawlspaceAnchors;  // schema v4+
     std::vector<DropAnchor>       dropAnchors;        // schema v5+
+    std::vector<JumpAnchor>       jumpAnchors;        // schema v8+
     // Historical seed positions accumulated across scans of this room
     // (schema v6+). Each entry is a world-space position used as a
     // floodfill seed in some prior scan. On rescan, these positions

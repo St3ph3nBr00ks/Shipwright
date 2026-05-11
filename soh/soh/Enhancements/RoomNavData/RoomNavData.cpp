@@ -85,6 +85,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_INITIAL_SCAN_DELAY    CVAR_ENHANCEMENT("RoomNavData.InitialScanDelayFrames")
 #define CVAR_ROOM_NAV_AUTO_EXPAND           CVAR_ENHANCEMENT("RoomNavData.AutoExpandOnExploration")
 #define CVAR_ROOM_NAV_INTER_ANCHOR_BRIDGE_R CVAR_ENHANCEMENT("RoomNavData.InterAnchorBridgeRadius")
+#define CVAR_ROOM_NAV_JUMP_ANCHOR           CVAR_ENHANCEMENT("RoomNavData.JumpAnchorDetection")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -805,7 +806,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // silently regenerate as v7 (matches every prior version bump). The
 // new ClimbAnchor fields default to zero / zero-vector — Stage 2 wires
 // the scan to populate them.
-static constexpr uint16_t kCurrentSchemaVersion = 7;
+static constexpr uint16_t kCurrentSchemaVersion = 8;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -888,6 +889,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     uint32_t dropCount       = (uint32_t)nav.dropAnchors.size();       // schema v5+
     uint32_t histSeedCount   = (uint32_t)nav.historicalSeeds.size();   // schema v6+
     uint32_t hazardCount     = (uint32_t)nav.hazardCentroids.size();
+    uint32_t jumpCount       = (uint32_t)nav.jumpAnchors.size();       // schema v8+
     WriteValue(f, nodeCount);
     WriteValue(f, edgeCount);
     WriteValue(f, climbCount);
@@ -896,6 +898,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     WriteValue(f, dropCount);
     WriteValue(f, histSeedCount);
     WriteValue(f, hazardCount);
+    WriteValue(f, jumpCount);
 
     WriteVector(f, nav.nodes);
     WriteVector(f, nav.edges);
@@ -905,6 +908,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     WriteVector(f, nav.dropAnchors);
     WriteVector(f, nav.historicalSeeds);
     WriteVector(f, nav.hazardCentroids);
+    WriteVector(f, nav.jumpAnchors);
 
     if (!f.good()) {
         SPDLOG_WARN("[RoomNav] SaveToDisk: write error for {}", path.string());
@@ -930,7 +934,8 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     Vec3f bboxMin{}, bboxMax{};
     uint16_t gridRes = 0;
     uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, ledgeCount = 0,
-             crawlspaceCount = 0, dropCount = 0, histSeedCount = 0, hazardCount = 0;
+             crawlspaceCount = 0, dropCount = 0, histSeedCount = 0, hazardCount = 0,
+             jumpCount = 0;
 
     if (!ReadValue(f, magic) || magic != kMagic) {
         SPDLOG_WARN("[RoomNav] LoadFromDisk: magic mismatch for {} (got 0x{:08x}); regenerating",
@@ -963,6 +968,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadValue(f, dropCount))       return;
     if (!ReadValue(f, histSeedCount))   return;
     if (!ReadValue(f, hazardCount))     return;
+    if (!ReadValue(f, jumpCount))       return; // schema v8+
 
     if (!ReadVector(f, out->nodes,             nodeCount))       return;
     if (!ReadVector(f, out->edges,             edgeCount))       return;
@@ -972,6 +978,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadVector(f, out->dropAnchors,       dropCount))       return;
     if (!ReadVector(f, out->historicalSeeds,   histSeedCount))   return;
     if (!ReadVector(f, out->hazardCentroids,   hazardCount))     return;
+    if (!ReadVector(f, out->jumpAnchors,       jumpCount))       return;
 
     out->magic                      = magic;
     out->version                    = version;
@@ -2726,6 +2733,161 @@ static void DetectDropAnchors(
     }
 }
 
+// ---------------------------------------------------------------------------
+// JumpAnchor detection (Plans/jump_anchor_plan.md).
+//
+// Identifies pairs of walkable nodes (A, B) where:
+//   - A and B are graph-disconnected via existing floor edges (≥2-hop apart)
+//   - XZ distance in [kJumpMinXZ, kJumpMaxXZ]
+//   - Y delta in [-kJumpDownMax, +kJumpUpMax] (B relative to A)
+//   - Parabolic arc midpoint clears collision (A → apex AND apex → B both
+//     line-clear). Apex is at midpoint XZ, max(A.y,B.y) + kArcApexLift.
+//
+// Distinction from DropAnchor: drops require the STRAIGHT line A→B clear
+// (passive fall). Jumps may have a blocker along the straight line that
+// the apex of the arc clears (e.g. jumping over a low pillar between
+// platforms). Bidirectional vs DropAnchor's strictly-directional shape.
+// ---------------------------------------------------------------------------
+
+static void DetectJumpAnchors(
+    RoomNavData* out,
+    PlayState* play,
+    const std::unordered_map<CellKey, std::vector<uint16_t>, CellKeyHash>& nodesByCell)
+{
+    if (CVarGetInteger(CVAR_ROOM_NAV_JUMP_ANCHOR, 0) == 0) return;
+
+    constexpr float kJumpMinXZ       = 18.0f;       // skip within-floor-edge pairs
+    constexpr float kJumpMaxXZ       = 150.0f;
+    constexpr float kJumpMaxXZSq     = kJumpMaxXZ * kJumpMaxXZ;
+    constexpr float kJumpMinXZSq     = kJumpMinXZ * kJumpMinXZ;
+    constexpr float kJumpUpMax       = 80.0f;
+    constexpr float kJumpDownMax     = 200.0f;
+    constexpr float kArcApexLift     = 30.0f;
+    constexpr float kClusterRadiusSq = 30.0f * 30.0f;
+    // Spatial neighbourhood: kJumpMaxXZ / kGridResolution rounded up, +1
+    // slop for cells whose nodes lie near a cell boundary. 5 cells per
+    // side (= ±2 in each axis) covers 150u at 30u resolution.
+    constexpr int   kCellRadius      = 3;
+
+    size_t added = 0, merged = 0, rejectedArc = 0, rejectedGraph = 0;
+
+    // Cheap 2-hop graph-proximity predicate. If B is within 2 floor-edge
+    // hops of A, the existing graph already serves the pair — emit nothing.
+    // Avoids materialising a full adjacency list (BFS only walks ≤ ~30
+    // neighbours via the localised frontier).
+    auto graphClose = [&](uint16_t aIdx, uint16_t bIdx) -> bool {
+        std::vector<bool> visited(out->nodes.size(), false);
+        visited[aIdx] = true;
+        std::vector<uint16_t> frontier{ aIdx };
+        for (int hop = 0; hop < 2; hop++) {
+            std::vector<uint16_t> next;
+            for (uint16_t cur : frontier) {
+                for (const NavEdge& e : out->edges) {
+                    uint16_t nb = UINT16_MAX;
+                    if (e.fromIdx == cur && !visited[e.toIdx]) nb = e.toIdx;
+                    else if (e.toIdx == cur && !visited[e.fromIdx]) nb = e.fromIdx;
+                    if (nb == UINT16_MAX) continue;
+                    if (nb == bIdx) return true;
+                    visited[nb] = true;
+                    next.push_back(nb);
+                }
+            }
+            frontier = std::move(next);
+            if (frontier.empty()) break;
+        }
+        return false;
+    };
+
+    for (uint16_t i = 0; i < out->nodes.size(); i++) {
+        const NavNode& a = out->nodes[i];
+        if (!(a.flags & NODE_WALKABLE)) continue;
+
+        CellKey aCell{ (int32_t)(int16_t)a.cellIdxX, (int32_t)(int16_t)a.cellIdxZ };
+
+        for (int dx = -kCellRadius; dx <= kCellRadius; dx++) {
+            for (int dz = -kCellRadius; dz <= kCellRadius; dz++) {
+                CellKey nCell{ aCell.x + dx, aCell.z + dz };
+                auto it = nodesByCell.find(nCell);
+                if (it == nodesByCell.end()) continue;
+                for (uint16_t j : it->second) {
+                    if (j <= i) continue;  // i < j ordering avoids dup pairs
+                    const NavNode& b = out->nodes[j];
+                    if (!(b.flags & NODE_WALKABLE)) continue;
+
+                    const f32 dxf = b.pos.x - a.pos.x;
+                    const f32 dzf = b.pos.z - a.pos.z;
+                    const f32 xzSq = dxf*dxf + dzf*dzf;
+                    if (xzSq < kJumpMinXZSq) continue;
+                    if (xzSq > kJumpMaxXZSq) continue;
+
+                    const f32 dyAB = b.pos.y - a.pos.y;
+                    // From A's POV: upward jump capped by kJumpUpMax;
+                    // downward by -kJumpDownMax. Bidirectional: also
+                    // verify B's POV doesn't exceed the upward cap from
+                    // B's side (i.e. -dyAB ≤ kJumpUpMax).
+                    if (dyAB > kJumpUpMax || -dyAB > kJumpDownMax) {
+                        // B is too high from A's POV OR too low.
+                        if (-dyAB > kJumpUpMax || dyAB > kJumpDownMax) continue;
+                        // Allowed from B→A direction only (asymmetric Y),
+                        // but the bidirectional edge would still serve
+                        // the navigator at B going to A.
+                    }
+
+                    // Graph-proximity reject: already walkable in ≤2 hops.
+                    if (graphClose(i, j)) {
+                        rejectedGraph++;
+                        continue;
+                    }
+
+                    // Arc clearance: apex at midpoint XZ + lifted Y.
+                    Vec3f apex = {
+                        (a.pos.x + b.pos.x) * 0.5f,
+                        std::max(a.pos.y, b.pos.y) + kArcApexLift,
+                        (a.pos.z + b.pos.z) * 0.5f,
+                    };
+                    if (!MovementClear(a.pos, apex, play)) { rejectedArc++; continue; }
+                    if (!MovementClear(apex, b.pos, play)) { rejectedArc++; continue; }
+
+                    // Dedup against existing JumpAnchors (endpoint
+                    // proximity, symmetric).
+                    bool dup = false;
+                    for (const JumpAnchor& ex : out->jumpAnchors) {
+                        const f32 fxa = ex.fromPos.x - a.pos.x;
+                        const f32 fza = ex.fromPos.z - a.pos.z;
+                        const f32 txb = ex.toPos.x   - b.pos.x;
+                        const f32 tzb = ex.toPos.z   - b.pos.z;
+                        const f32 fxb = ex.fromPos.x - b.pos.x;
+                        const f32 fzb = ex.fromPos.z - b.pos.z;
+                        const f32 txa = ex.toPos.x   - a.pos.x;
+                        const f32 tza = ex.toPos.z   - a.pos.z;
+                        if ((fxa*fxa + fza*fza < kClusterRadiusSq &&
+                             txb*txb + tzb*tzb < kClusterRadiusSq) ||
+                            (fxb*fxb + fzb*fzb < kClusterRadiusSq &&
+                             txa*txa + tza*tza < kClusterRadiusSq)) {
+                            dup = true;
+                            merged++;
+                            break;
+                        }
+                    }
+                    if (dup) continue;
+
+                    JumpAnchor anchor{};
+                    anchor.fromPos = a.pos;
+                    anchor.toPos   = b.pos;
+                    out->jumpAnchors.push_back(anchor);
+                    added++;
+                }
+            }
+        }
+    }
+
+    if (added > 0 || merged > 0 || rejectedArc > 0 || rejectedGraph > 0) {
+        SPDLOG_INFO("[RoomNav] Jump-anchor detection: {} anchors added, "
+                    "{} duplicates merged, {} arc-blocked, {} already graph-close",
+                    added, merged, rejectedArc, rejectedGraph);
+    }
+}
+
 // Classify a single floor candidate as a NavNode and append to nav.
 // Returns the index of the appended node, or -1 if the candidate was
 // rejected entirely. v1 classifies WALKABLE / STEEP_SLOPE only; HAZARD
@@ -3369,6 +3531,12 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     // descent edges in pathfinding.
     DetectDropAnchors(out, play, nodesByCell);
 
+    // Jump anchor detection — pre-baked traversal pairs where the
+    // navigator can jump across an air gap. Bidirectional; arc-clearance
+    // validated at scan time so BFS can route through statically without
+    // falling back to runtime JumpResolver.
+    DetectJumpAnchors(out, play, nodesByCell);
+
     // Climb-flag population (polish wave commit 4) — for each climb anchor
     // discovered above, find the nearest walkable nav-node to its basePos
     // and topPos and tag them NODE_CLIMB_BASE / NODE_CLIMB_TOP. Lets nav
@@ -3450,13 +3618,14 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     auto totalMsFinal = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - scanStart).count();
     SPDLOG_INFO("[RoomNav] ScanRoom: scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}) "
-                "nodes={} edges={} climbs={} ledges={} crawls={} drops={} cells={} seeds={} "
+                "nodes={} edges={} climbs={} ledges={} crawls={} drops={} jumps={} cells={} seeds={} "
                 "histSeeds={} orphans={} recovered={} scanMs={} edgeMs={} totalMs={}",
                 sceneNum, (int)roomNum,
                 playerPos.x, playerPos.y, playerPos.z,
                 out->nodes.size(), out->edges.size(),
                 out->climbAnchors.size(), out->ledgeAnchors.size(),
                 out->crawlspaceAnchors.size(), out->dropAnchors.size(),
+                out->jumpAnchors.size(),
                 visited.size(), 1 + extraSeeds + historicalSeedsUsed,
                 out->historicalSeeds.size(), orphanCount,
                 recoveredOrphanCount, scanMs, edgeMs, totalMsFinal);
@@ -3499,6 +3668,17 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
                     d.highPos.x,    d.highPos.y,    d.highPos.z,
                     d.landingPos.x, d.landingPos.y, d.landingPos.z,
                     d.highPos.y - d.landingPos.y);
+    }
+    for (size_t i = 0; i < out->jumpAnchors.size(); i++) {
+        const JumpAnchor& j = out->jumpAnchors[i];
+        const f32 dxz = std::sqrt((j.toPos.x - j.fromPos.x) * (j.toPos.x - j.fromPos.x) +
+                                  (j.toPos.z - j.fromPos.z) * (j.toPos.z - j.fromPos.z));
+        SPDLOG_INFO("[RoomNav]   JumpAnchor[{}] fromPos=({:.0f},{:.0f},{:.0f}) "
+                    "toPos=({:.0f},{:.0f},{:.0f}) dXZ={:.0f} dY={:.0f}",
+                    i,
+                    j.fromPos.x, j.fromPos.y, j.fromPos.z,
+                    j.toPos.x,   j.toPos.y,   j.toPos.z,
+                    dxz, j.toPos.y - j.fromPos.y);
     }
 }
 
@@ -4556,6 +4736,19 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AddVerticalPost(sXluDl, sVtxDl, anchor.landingPos, anchor.highPos);
     }
 
+    // Jump anchors — orange. Distinct hue from drop-green so the two
+    // pre-baked traversal classes don't blur together. Ground quad at
+    // each endpoint + a vertical post connecting them; the post slants
+    // to the higher endpoint to hint at the parabolic arc the engine
+    // actually executes. v1 uses a straight post for simplicity (a real
+    // curved arc would need a multi-segment line emit).
+    sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xA0, 0x00, 0xFF));
+    for (const JumpAnchor& anchor : data->jumpAnchors) {
+        AddGroundQuad(sXluDl, sVtxDl, anchor.fromPos);
+        AddGroundQuad(sXluDl, sVtxDl, anchor.toPos);
+        AddVerticalPost(sXluDl, sVtxDl, anchor.fromPos, anchor.toPos);
+    }
+
     // Climb-base / climb-top flagged nodes (polish wave commit 4) — bright
     // yellow ring overlay at every node carrying NODE_CLIMB_BASE or
     // NODE_CLIMB_TOP. Slightly larger than ordinary node quads
@@ -4904,6 +5097,7 @@ static void OnDebugDrawRender() {
                    + data->ledgeAnchors.size() * 16  // ledge: 2 ground quads + 2 perp posts
                    + data->crawlspaceAnchors.size() * 8  // entry quad + direction line
                    + data->dropAnchors.size() * 16    // drop: 2 ground quads + 2 perp posts
+                   + data->jumpAnchors.size() * 16    // jump: same shape as drop
                    + data->hazardCentroids.size() * 4
                    + data->rejectedFloorPositions.size() * 8
                    + kMaxTrailWaypointsForReserve * 8);
@@ -4924,6 +5118,7 @@ static void OnDebugDrawRender() {
                    + data->crawlspaceAnchors.size() * 4  // entry quad + direction line
                    + kMaxTrailWaypointsForReserve * 2 + 1  // trail posts: 2 Gfx each + 1 PrimColor
                    + data->dropAnchors.size() * 8    // drop: same shape as ledge
+                   + data->jumpAnchors.size() * 8    // jump: same shape as drop
                    + data->hazardCentroids.size() * 2
                    + data->rejectedFloorPositions.size() * 4
                    + 64);
@@ -5063,6 +5258,7 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     nav.ledgeAnchors.clear();
     nav.crawlspaceAnchors.clear();
     nav.dropAnchors.clear();
+    nav.jumpAnchors.clear();
 
     // Reconstruct visited + nodesByCell from persistent node data.
     // Only floor nodes remain at this point — climb-surface nodes were
@@ -5086,6 +5282,7 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     DetectLedgeAnchors(&nav, play, nodesByCell);
     DetectCrawlspaces(&nav, play, visited);
     DetectDropAnchors(&nav, play, nodesByCell);
+    DetectJumpAnchors(&nav, play, nodesByCell);
 
     // Re-tag climb-base / climb-top flags from the refreshed anchors.
     // Must run BEFORE GenerateClimbSurfaceGrids appends climb-surface
