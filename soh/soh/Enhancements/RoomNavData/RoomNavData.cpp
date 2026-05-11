@@ -2880,14 +2880,22 @@ static void DetectJumpAnchors(
 
     // pathOverGap: returns true when the segment A → B passes over an
     // actual air gap — at least one sampled XZ point along the segment
-    // has NO walkable node at the expected interpolated Y. Returns
-    // false when continuous floor is present (jump unnecessary).
+    // has NO walkable node at the expected interpolated Y AND a
+    // downward raycast confirms no collision floor at the expected
+    // altitude. Returns false when continuous floor is present (jump
+    // unnecessary).
     //
-    // This is the geometric replacement for the original 2-hop
-    // graph-proximity filter, which was both wrong (2 hops only
-    // covers ~60u on a 30u grid, but the jump search spans 150u, so
-    // flat-floor pairs slipped through) and slow (frontier BFS per
-    // pair).
+    // Two-stage design: cell-lookup is the fast filter (rejects most
+    // pairs); raycast verification confirms suspect samples to catch
+    // scanner-coverage gaps over real floor — those are NOT real
+    // air gaps, just cells the floodfill never visited (e.g.
+    // navmesh-edge cells adjacent to non-walkable terrain).
+    //
+    // Bug history: the original cell-only check produced false-
+    // positive jump anchors at navmesh edges where the scanner had
+    // simply not covered a continuous-floor cell. The raycast
+    // verification distinguishes "scanner missed floor" from
+    // "actual air gap" (2026-05-12 second-wave fix).
     auto pathOverGap = [&](const Vec3f& a, const Vec3f& b) -> bool {
         const f32 dxf = b.x - a.x;
         const f32 dzf = b.z - a.z;
@@ -2899,21 +2907,60 @@ static void DetectJumpAnchors(
             const f32 sx = a.x + dxf * t;
             const f32 sz = a.z + dzf * t;
             const f32 expectedY = a.y + dyf * t;
+
+            // Stage 1: cell-based fast lookup. Accept any non-climb
+            // floor node (walkable, hazard, steep slope, underwater)
+            // as evidence of floor at altitude — we're testing for
+            // FLOOR PRESENCE, not navigability. Climb-surface nodes
+            // don't count as floor.
+            bool cellHasFloor = false;
             const CellKey ck = CellKeyForXZ(sx, sz, out->bboxMin);
             auto it = nodesByCell.find(ck);
-            if (it == nodesByCell.end()) return true;  // empty cell = void
-            bool floorPresent = false;
-            for (uint16_t idx : it->second) {
-                const NavNode& n = out->nodes[idx];
-                if (!(n.flags & NODE_WALKABLE)) continue;
-                if (std::fabs(n.pos.y - expectedY) <= kFloorPresenceTolY) {
-                    floorPresent = true;
-                    break;
+            if (it != nodesByCell.end()) {
+                for (uint16_t idx : it->second) {
+                    const NavNode& n = out->nodes[idx];
+                    if (n.flags & NODE_CLIMB_ANY) continue;
+                    if (std::fabs(n.pos.y - expectedY) <= kFloorPresenceTolY) {
+                        cellHasFloor = true;
+                        break;
+                    }
                 }
             }
-            if (!floorPresent) return true;  // cell present but no floor at altitude
+            if (cellHasFloor) continue;  // fast-path: this sample over floor
+
+            // Stage 2: raycast verification. Cell said "no floor"
+            // but the scanner may have simply not visited this cell.
+            // Confirm with a downward collision raycast at the sample.
+            Vec3f probe = { sx, expectedY + 100.0f, sz };
+            CollisionPoly poly{};
+            f32 floorY = BgCheck_AnyRaycastFloor1(&play->colCtx, &poly, &probe);
+            if (floorY > BGCHECK_Y_MIN &&
+                std::fabs(floorY - expectedY) <= kFloorPresenceTolY) {
+                // Floor exists here at expected Y — scanner missed
+                // the cell but the floor is real. Not a gap sample.
+                continue;
+            }
+            // Confirmed: no floor at expected Y (either no collision
+            // hit or floor far below/above expected). Real gap.
+            return true;
         }
         return false;
+    };
+
+    // wallBelowBody: low-altitude line raycast catches walls/curbs
+    // shorter than MovementClear's 20u body-height offset. Used as
+    // a secondary wall filter for SAME-altitude pairs only — upward
+    // jumps need the line to clear the landing platform's edge,
+    // which is by definition a "wall" at low altitude that the
+    // body-height MovementClear correctly tolerates.
+    auto wallBelowBody = [&](const Vec3f& a, const Vec3f& b) -> bool {
+        constexpr float kLowProbeY = 5.0f;
+        Vec3f la = { a.x, a.y + kLowProbeY, a.z };
+        Vec3f lb = { b.x, b.y + kLowProbeY, b.z };
+        Vec3f hitPos;
+        CollisionPoly* hitPoly = nullptr;
+        return BgCheck_AnyLineTest1(&play->colCtx, &la, &lb,
+                                     &hitPos, &hitPoly, 0) != 0;
     };
 
     for (uint16_t i = 0; i < out->nodes.size(); i++) {
@@ -2953,12 +3000,22 @@ static void DetectJumpAnchors(
 
                     // Wall-blockage check (2026-05-12 fix for false
                     // positives at walkable-mesh edges against walls):
-                    // MovementClear at pelvis height fails when a wall
-                    // intervenes. For a true air gap the line passes
-                    // through clear air, so this filter ONLY catches
-                    // wall-protrusion cases — flat-floor walkable
-                    // pairs still need pathOverGap below.
+                    // MovementClear at body height (20u) fails when a
+                    // wall intervenes. For a true air gap the line
+                    // passes through clear air.
                     if (!MovementClear(a.pos, b.pos, play)) {
+                        rejectedWall++;
+                        continue;
+                    }
+                    // Low-altitude wall check for same-altitude pairs
+                    // (|dy| ≤ 15u). Catches walls / curbs shorter than
+                    // MovementClear's 20u offset that the body-height
+                    // check misses but actors can't actually jump
+                    // (they'd just walk / step over). Restricted to
+                    // same-altitude because upward jumps need the
+                    // line to clear the landing platform's edge.
+                    if (std::fabs(dyAB) <= 15.0f &&
+                        wallBelowBody(a.pos, b.pos)) {
                         rejectedWall++;
                         continue;
                     }
