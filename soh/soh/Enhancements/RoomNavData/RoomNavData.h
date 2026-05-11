@@ -397,4 +397,16 @@ bool ProjectPositionToAnchorCell(const ClimbAnchor& anchor,
 bool AnchorCellExists(const RoomNavData* data, const ClimbAnchor& anchor,
                       int u, int v);
 
+// Find the nearest floor node to `pos` within `maxRadiusXZ` AND |Δy|
+// < `maxYDelta`. Floor here means "any node without NODE_CLIMB_ANY".
+// Returns -1 if no floor matches. XZ proximity for the "near the
+// reference position" criterion + Y delta for the "at the right
+// altitude" criterion. Used by Stage 3 boundary-edge generation
+// (per-cell nearest floor) and by AI Follower dismount-direction
+// resolution (toward floor near anchor.topPos).
+int FindNearestFloorNodeXZRadius(const RoomNavData* data,
+                                  const Vec3f& pos,
+                                  float maxRadiusXZ,
+                                  float maxYDelta = 1e9f);
+
 } // namespace AnchorNavRoom

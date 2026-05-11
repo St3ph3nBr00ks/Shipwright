@@ -2970,39 +2970,25 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
             }
         }
 
-        // Dismount yaw should point AWAY from the ladder, onto the
-        // platform Link is now standing on. Three options ranked by
-        // reliability:
+        // Dismount yaw points from anchor.topPos toward the nearest
+        // floor node — the boundary edge by construction (Stage 3
+        // per-cell nearest-floor lookup). This IS the platform Link
+        // should walk onto after climbing.
         //
-        //   1. Toward the leader (PRIMARY). After climbing up, the
-        //      leader is on the upper platform; walking toward them
-        //      is guaranteed to step Link off the ladder onto solid
-        //      ground. Robust regardless of ladder actor orientation.
+        // Why not use leader pos: leader can move during the climb;
+        // by the time follower reaches the top, leader may have
+        // walked to a position that doesn't correspond to the
+        // climb-top platform direction.
         //
-        //   2. anchor.planeNormal direction (FALLBACK). For Path B
-        //      vine walls, the poly normal points outward (toward
-        //      where the player stands). For Path A LADDER actors,
-        //      planeNormal = actor's facing, which often points INTO
-        //      the wall (ladder actors face the wall they lean
-        //      against). User log 32 confirms this case: the dismount
-        //      stick drove Link back onto the ladder.
+        // Why not use anchor.planeNormal: for Path A ladder actors,
+        // planeNormal = actor's shape.rot.y direction, which often
+        // points INTO the wall (ladder actors face the wall they
+        // lean against), not away from it. Direction-from-topPos-to-
+        // nearest-floor doesn't have this geometry ambiguity.
         //
-        //   3. shape.rot.y (LAST RESORT). Whatever Link was facing
-        //      mid-climb. Usually pointing at the wall — same problem
-        //      as (2).
-        //
-        // Trying (1) first eliminates the geometry-ambiguity bug for
-        // any climb where the leader is reachable.
+        // Falls back to shape.rot.y if no nearby floor is found
+        // (rare — implies the climb top is over a void).
         auto computeDismountYaw = [&]() -> s16 {
-            auto itLead = clients.find(followerLeaderClientId);
-            if (itLead != clients.end()) {
-                Vec3f lp = itLead->second.posRot.pos;
-                f32 ldx = lp.x - player->actor.world.pos.x;
-                f32 ldz = lp.z - player->actor.world.pos.z;
-                if (ldx * ldx + ldz * ldz > 100.0f) {  // leader > 10u away
-                    return Math_Atan2S(ldz, ldx);
-                }
-            }
             if (followerClimbAnchorIdx != UINT16_MAX) {
                 const ::AnchorNavRoom::RoomNavData* navData =
                     ::AnchorNavRoom::GetForRoom(
@@ -3011,7 +2997,18 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
                 if (navData != nullptr &&
                     followerClimbAnchorIdx < navData->climbAnchors.size()) {
                     const auto& anc = navData->climbAnchors[followerClimbAnchorIdx];
-                    return Math_Atan2S(anc.planeNormal.z, anc.planeNormal.x);
+                    int floorIdx = ::AnchorNavRoom::FindNearestFloorNodeXZRadius(
+                        navData, anc.topPos, /*maxRadiusXZ=*/100.0f,
+                        /*maxYDelta=*/50.0f);
+                    if (floorIdx >= 0 &&
+                        (size_t)floorIdx < navData->nodes.size()) {
+                        const Vec3f& fp = navData->nodes[(size_t)floorIdx].pos;
+                        f32 dx = fp.x - anc.topPos.x;
+                        f32 dz = fp.z - anc.topPos.z;
+                        if (dx * dx + dz * dz > 1.0f) {
+                            return Math_Atan2S(dz, dx);
+                        }
+                    }
                 }
             }
             return player->actor.shape.rot.y;
@@ -3129,23 +3126,14 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
 
     auto it = clients.find(followerLeaderClientId);
     if (it == clients.end() || !it->second.isClimbing) {
-        // Compute dismount yaw using leader-direction (PRIMARY) →
-        // planeNormal (FALLBACK) → shape.rot.y (LAST RESORT).
+        // Dismount yaw: direction from anchor.topPos toward the
+        // nearest floor node (the platform Link should walk onto).
         // See computeDismountYaw lambda in the autonomous branch above
-        // for full ranking rationale; logic is duplicated here because
-        // the lambda is scoped to that branch.
+        // for rationale (leader pos unreliable; planeNormal ambiguous
+        // for ladder actors). Logic duplicated because the lambda is
+        // scoped to that branch.
         s16 dismountYaw = player->actor.shape.rot.y;
-        bool dismountYawSet = false;
-        if (it != clients.end()) {
-            Vec3f lp = it->second.posRot.pos;
-            f32 ldx = lp.x - player->actor.world.pos.x;
-            f32 ldz = lp.z - player->actor.world.pos.z;
-            if (ldx * ldx + ldz * ldz > 100.0f) {
-                dismountYaw = Math_Atan2S(ldz, ldx);
-                dismountYawSet = true;
-            }
-        }
-        if (!dismountYawSet && followerClimbAnchorIdx != UINT16_MAX) {
+        if (followerClimbAnchorIdx != UINT16_MAX) {
             const ::AnchorNavRoom::RoomNavData* navData =
                 ::AnchorNavRoom::GetForRoom(
                     gPlayState->sceneNum,
@@ -3153,7 +3141,18 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
             if (navData != nullptr &&
                 followerClimbAnchorIdx < navData->climbAnchors.size()) {
                 const auto& anc = navData->climbAnchors[followerClimbAnchorIdx];
-                dismountYaw = Math_Atan2S(anc.planeNormal.z, anc.planeNormal.x);
+                int floorIdx = ::AnchorNavRoom::FindNearestFloorNodeXZRadius(
+                    navData, anc.topPos, /*maxRadiusXZ=*/100.0f,
+                    /*maxYDelta=*/50.0f);
+                if (floorIdx >= 0 &&
+                    (size_t)floorIdx < navData->nodes.size()) {
+                    const Vec3f& fp = navData->nodes[(size_t)floorIdx].pos;
+                    f32 dx = fp.x - anc.topPos.x;
+                    f32 dz = fp.z - anc.topPos.z;
+                    if (dx * dx + dz * dz > 1.0f) {
+                        dismountYaw = Math_Atan2S(dz, dx);
+                    }
+                }
             }
         }
         followerClimbDismountYaw    = dismountYaw;

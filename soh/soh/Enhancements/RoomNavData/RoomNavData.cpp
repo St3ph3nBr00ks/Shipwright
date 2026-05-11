@@ -1591,10 +1591,10 @@ static constexpr float kBoundaryFloorYDelta    = 50.0f;
 // for the "at the climb base/top altitude" criterion. Default
 // `maxYDelta=infinity` preserves the original XZ-only semantics for
 // any non-boundary caller (currently none).
-static int FindNearestFloorNodeXZRadius(const RoomNavData* data,
-                                         const Vec3f& pos,
-                                         float maxRadiusXZ,
-                                         float maxYDelta = 1e9f) {
+int FindNearestFloorNodeXZRadius(const RoomNavData* data,
+                                  const Vec3f& pos,
+                                  float maxRadiusXZ,
+                                  float maxYDelta) {
     if (data == nullptr || data->nodes.empty()) return -1;
     int bestIdx = -1;
     float bestDistSq = maxRadiusXZ * maxRadiusXZ;
