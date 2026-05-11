@@ -96,6 +96,19 @@ struct NavTraits {
     bool useDropAnchors              = false;
     uint16_t maxDropDistance         = 200;  // max safe Y delta (units); matches kDropMaxDeltaY default
 
+    // Jump-anchor consumer flag (Plans/jump_anchor_plan.md). When true,
+    // this actor's BFS adjacency list gains bidirectional edges from
+    // the room's JumpAnchor table — pre-baked, arc-clearance validated
+    // traversal pairs. Per-actor caps filter at BFS time:
+    //   - `maxJumpDistance` (existing field): horizontal XZ cap
+    //   - `maxJumpUpDelta` (new): upward Y reach cap
+    // Downward Y is bounded by the scanner (`kJumpDownMax = 200u`).
+    //
+    // Default false — opt-in per actor. Bosses leave this off
+    // (kBossDefaults). Follower turns it on.
+    bool useJumpAnchors              = false;
+    uint16_t maxJumpUpDelta          = 50;   // upward reach cap (child Link ~50, adult ~70)
+
     // Emit-side flag — other actors observe this actor through the trail.
     bool leavesTrail                 = true;
 

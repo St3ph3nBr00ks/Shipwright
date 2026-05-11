@@ -257,14 +257,18 @@ static inline float DistSqToTargetXYZ(const Vec3f& p, const Vec3f& target) {
 // subgoal.
 // Returns adjacency[i] = list of neighbour indices reachable from node i.
 // When `outDropEdges` is non-null, fills it with the set of directed
-// (high → landing) drop-edge pairs injected this build, encoded as
-// `((uint32_t)highIdx << 16) | lowIdx`. Path-reconstruction consumers
-// use this to tag landing waypoints with NODE_DROP_FROM_ABOVE so the
-// downstream off-edge predicate (Task 4) can distinguish planned drops
-// from unintentional ledge falls.
+// edge pairs that should tag their landing waypoint with
+// NODE_DROP_FROM_ABOVE (drop-anchor high→landing AND jump-anchor
+// pairs — jumps also constitute planned off-edge motion that should
+// not be suppressed by the edge-avoidance predicate). Encoded as
+// `((uint32_t)fromIdx << 16) | toIdx`. Path-reconstruction consumers
+// use the set to OR the flag bit when the parent→child edge appears
+// in it.
 static std::vector<std::vector<uint16_t>>
 BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
                    bool useDropAnchors = false, float maxDropDistance = 0.0f,
+                   bool useJumpAnchors = false, float maxJumpDistance = 0.0f,
+                   float maxJumpUpDelta = 0.0f,
                    std::unordered_set<uint32_t>* outDropEdges = nullptr) {
     std::vector<std::vector<uint16_t>> adjacency(data->nodes.size());
     for (const NavEdge& e : data->edges) {
@@ -334,6 +338,55 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
             }
         }
     }
+
+    // Jump anchors (Plans/jump_anchor_plan.md §Step 3). For each pair
+    // detected at scan time, emit BIDIRECTIONAL edges gated by the
+    // per-actor caps:
+    //   - XZ distance ≤ maxJumpDistance (0.0f means "no cap")
+    //   - |Δy| ≤ maxJumpUpDelta for the upward direction
+    //   - Downward Δy already bounded by the scanner's kJumpDownMax
+    //
+    // Jump-landing waypoints also get tagged via outDropEdges so the
+    // edge-avoidance predicate treats them as planned drops (intent
+    // signal). Both directions of the jump pair register in the set
+    // because the landing depends on which way the BFS traverses the
+    // edge — symmetry preserved by inserting both orderings.
+    if (useJumpAnchors) {
+        for (const JumpAnchor& anchor : data->jumpAnchors) {
+            const float dxf = anchor.toPos.x - anchor.fromPos.x;
+            const float dzf = anchor.toPos.z - anchor.fromPos.z;
+            const float xzSq = dxf*dxf + dzf*dzf;
+            if (maxJumpDistance > 0.0f &&
+                xzSq > maxJumpDistance * maxJumpDistance) continue;
+            const float dy = anchor.toPos.y - anchor.fromPos.y;
+            // Upward cap applies in the direction of the larger Y. If
+            // |dy| exceeds maxJumpUpDelta AND the destination is HIGHER
+            // than the source, that direction's reach exceeds the
+            // actor's vertical jump capability — skip the whole anchor
+            // because the edge is bidirectional (we'd otherwise be
+            // letting the actor use the "downward" direction with a Y
+            // delta its model says it can't survive in the upward
+            // direction, which inverts the asymmetric cap's intent).
+            if (maxJumpUpDelta > 0.0f &&
+                std::fabs(dy) > maxJumpUpDelta) {
+                continue;
+            }
+            int fromIdx = FindNearestNode(data, anchor.fromPos);
+            int toIdx   = FindNearestNode(data, anchor.toPos);
+            if (fromIdx < 0 || toIdx < 0) continue;
+            if (fromIdx == toIdx) continue;
+            if ((size_t)fromIdx >= adjacency.size() ||
+                (size_t)toIdx   >= adjacency.size()) continue;
+            adjacency[(size_t)fromIdx].push_back((uint16_t)toIdx);
+            adjacency[(size_t)toIdx].push_back((uint16_t)fromIdx);
+            if (outDropEdges != nullptr) {
+                outDropEdges->insert(((uint32_t)(uint16_t)fromIdx << 16) |
+                                     (uint32_t)(uint16_t)toIdx);
+                outDropEdges->insert(((uint32_t)(uint16_t)toIdx << 16) |
+                                     (uint32_t)(uint16_t)fromIdx);
+            }
+        }
+    }
     return adjacency;
 }
 
@@ -346,6 +399,9 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
     const uint16_t climbSurfaceMask    = opts.climbSurfaceMask;
     const bool     useDropAnchors      = opts.useDropAnchors;
     const float    maxDropDistance     = opts.maxDropDistance;
+    const bool     useJumpAnchors      = opts.useJumpAnchors;
+    const float    maxJumpDistance     = opts.maxJumpDistance;
+    const float    maxJumpUpDelta      = opts.maxJumpUpDelta;
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) {
         return -1;
     }
@@ -383,7 +439,8 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
     };
 
     std::vector<std::vector<uint16_t>> adjacency =
-        BuildAdjacencyList(data, climbSurfaceMask, useDropAnchors, maxDropDistance);
+        BuildAdjacencyList(data, climbSurfaceMask, useDropAnchors, maxDropDistance,
+                           useJumpAnchors, maxJumpDistance, maxJumpUpDelta);
     std::vector<bool> visited(data->nodes.size(), false);
     std::deque<QueueEntry> frontier;
     visited[(size_t)fromIdx] = true;
@@ -478,6 +535,9 @@ int FindNearestNonHazardExit(const RoomNavData* data,
     const uint16_t climbSurfaceMask    = opts.climbSurfaceMask;
     const bool     useDropAnchors      = opts.useDropAnchors;
     const float    maxDropDistance     = opts.maxDropDistance;
+    const bool     useJumpAnchors      = opts.useJumpAnchors;
+    const float    maxJumpDistance     = opts.maxJumpDistance;
+    const float    maxJumpUpDelta      = opts.maxJumpUpDelta;
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) {
         return -1;
     }
@@ -490,10 +550,11 @@ int FindNearestNonHazardExit(const RoomNavData* data,
     // eligibility so non-swimmers don't get pointed at an underwater
     // exit. Honors climbSurfaceMask so a climb-aware consumer cornered
     // in hazard can use a climb surface as the exit (rare but possible).
-    // Honors drop anchors so a navigator stuck on a hazard platform can
-    // escape by dropping to a lower safe surface.
+    // Honors drop + jump anchors so a navigator stuck on a hazard
+    // platform can escape by dropping or jumping to a safer surface.
     std::vector<std::vector<uint16_t>> adjacency =
-        BuildAdjacencyList(data, climbSurfaceMask, useDropAnchors, maxDropDistance);
+        BuildAdjacencyList(data, climbSurfaceMask, useDropAnchors, maxDropDistance,
+                           useJumpAnchors, maxJumpDistance, maxJumpUpDelta);
     std::vector<bool> visited(data->nodes.size(), false);
     std::deque<uint16_t> q;
     visited[(size_t)fromIdx] = true;
@@ -547,6 +608,9 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
     const uint16_t climbSurfaceMask    = opts.climbSurfaceMask;
     const bool     useDropAnchors      = opts.useDropAnchors;
     const float    maxDropDistance     = opts.maxDropDistance;
+    const bool     useJumpAnchors      = opts.useJumpAnchors;
+    const float    maxJumpDistance     = opts.maxJumpDistance;
+    const float    maxJumpUpDelta      = opts.maxJumpUpDelta;
     out.clear();
     if (outFlags) outFlags->clear();
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;
@@ -562,9 +626,15 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
 
     struct QueueEntry { uint16_t idx; uint8_t hopsInHazard; };
     std::unordered_set<uint32_t> dropEdges;
+    // Pass the dropEdges set to BuildAdjacencyList when EITHER drops or
+    // jumps are on — both classes of edge get tagged as planned off-edge
+    // motion so the consumer's edge-avoidance predicate doesn't suppress
+    // them. See jump_anchor_plan.md §Step 4.
+    const bool collectIntentEdges = useDropAnchors || useJumpAnchors;
     std::vector<std::vector<uint16_t>> adjacency =
         BuildAdjacencyList(data, climbSurfaceMask, useDropAnchors, maxDropDistance,
-                           useDropAnchors ? &dropEdges : nullptr);
+                           useJumpAnchors, maxJumpDistance, maxJumpUpDelta,
+                           collectIntentEdges ? &dropEdges : nullptr);
     std::vector<bool> visited(data->nodes.size(), false);
     std::vector<int>  parents(data->nodes.size(), -1);
     std::deque<QueueEntry> frontier;
@@ -637,10 +707,13 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
         if (outFlags) {
             uint16_t flags = n.flags;
             // Tag the landing waypoint when it was reached from its
-            // parent via an injected drop edge. The downstream off-edge
-            // predicate (Task 4) uses this to distinguish a planned
-            // drop from an unintentional ledge fall.
-            if (useDropAnchors && parentIdx >= 0 && !dropEdges.empty()) {
+            // parent via an injected drop OR jump edge. The downstream
+            // off-edge predicate uses this to distinguish a planned
+            // step from an unintentional ledge fall. jump_anchor_plan
+            // §Step 4 reuses NODE_DROP_FROM_ABOVE for jump landings
+            // because the intent semantics are identical (and the
+            // 16-bit flag budget can't afford a separate jump bit).
+            if (collectIntentEdges && parentIdx >= 0 && !dropEdges.empty()) {
                 const uint32_t key = ((uint32_t)(uint16_t)parentIdx << 16) |
                                      (uint32_t)(uint16_t)childIdx;
                 if (dropEdges.count(key) != 0) {

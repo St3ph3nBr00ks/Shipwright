@@ -279,6 +279,9 @@ struct NavQueryOptions {
     uint16_t climbSurfaceMask    = 0;
     bool     useDropAnchors      = false;
     float    maxDropDistance     = 0.0f;
+    bool     useJumpAnchors      = false;
+    float    maxJumpDistance     = 0.0f;  // XZ cap per actor; 0 means "no cap"
+    float    maxJumpUpDelta      = 0.0f;  // upward Y reach cap per actor
 };
 
 // Returns the index of the node closest to `targetPos` that's reachable

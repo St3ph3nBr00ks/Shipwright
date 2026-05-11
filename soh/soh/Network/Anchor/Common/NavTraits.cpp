@@ -133,6 +133,11 @@ static NavTraits MakeFollowerTraits() {
     // any anchor the scanner registered is in-range for child Link.
     t.useDropAnchors          = true;
     t.maxDropDistance         = 200;
+    // Jump anchors: follower routes through pre-baked jump pairs.
+    // maxJumpDistance (110) already set above caps XZ; maxJumpUpDelta
+    // 60 matches adult-Link broad-jump apex.
+    t.useJumpAnchors          = true;
+    t.maxJumpUpDelta          = 60;
     return t;
 }
 
@@ -141,6 +146,8 @@ static NavTraits MakeFollowerTraits() {
 static NavTraits MakeAthleticMeleeTraits() {
     NavTraits t = {};
     t.maxJumpDistance = 130;
+    t.useJumpAnchors  = true;
+    t.maxJumpUpDelta  = 70;
     return t;
 }
 
@@ -255,6 +262,9 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
     opts.climbSurfaceMask    = ResolveDynamicClimbMask(navigator->id, traits.climbSurfaceMask);
     opts.useDropAnchors      = traits.useDropAnchors;
     opts.maxDropDistance     = (float)traits.maxDropDistance;
+    opts.useJumpAnchors      = traits.useJumpAnchors;
+    opts.maxJumpDistance     = (float)traits.maxJumpDistance;
+    opts.maxJumpUpDelta      = (float)traits.maxJumpUpDelta;
     return opts;
 }
 
