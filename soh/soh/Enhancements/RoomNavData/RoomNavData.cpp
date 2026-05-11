@@ -351,13 +351,25 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
     // signal). Both directions of the jump pair register in the set
     // because the landing depends on which way the BFS traverses the
     // edge — symmetry preserved by inserting both orderings.
+    // Diagnostic counters (Bug-tracking 2026-05-13). One-shot
+    // logging gated by a CVar so we can enable when debugging
+    // without log-spam by default. Counts per-reason rejections so
+    // we can see which filter is dropping anchors that we expect
+    // to be injected.
+    size_t jumpTotal = 0, jumpRejXZ = 0, jumpRejY = 0,
+           jumpRejFindNearest = 0, jumpRejDegenerate = 0,
+           jumpInjected = 0;
     if (useJumpAnchors) {
         for (const JumpAnchor& anchor : data->jumpAnchors) {
+            jumpTotal++;
             const float dxf = anchor.toPos.x - anchor.fromPos.x;
             const float dzf = anchor.toPos.z - anchor.fromPos.z;
             const float xzSq = dxf*dxf + dzf*dzf;
             if (maxJumpDistance > 0.0f &&
-                xzSq > maxJumpDistance * maxJumpDistance) continue;
+                xzSq > maxJumpDistance * maxJumpDistance) {
+                jumpRejXZ++;
+                continue;
+            }
             const float dy = anchor.toPos.y - anchor.fromPos.y;
             // Upward cap applies in the direction of the larger Y. If
             // |dy| exceeds maxJumpUpDelta AND the destination is HIGHER
@@ -369,16 +381,24 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
             // direction, which inverts the asymmetric cap's intent).
             if (maxJumpUpDelta > 0.0f &&
                 std::fabs(dy) > maxJumpUpDelta) {
+                jumpRejY++;
                 continue;
             }
             int fromIdx = FindNearestNode(data, anchor.fromPos);
             int toIdx   = FindNearestNode(data, anchor.toPos);
-            if (fromIdx < 0 || toIdx < 0) continue;
-            if (fromIdx == toIdx) continue;
+            if (fromIdx < 0 || toIdx < 0) {
+                jumpRejFindNearest++;
+                continue;
+            }
+            if (fromIdx == toIdx) {
+                jumpRejDegenerate++;
+                continue;
+            }
             if ((size_t)fromIdx >= adjacency.size() ||
                 (size_t)toIdx   >= adjacency.size()) continue;
             adjacency[(size_t)fromIdx].push_back((uint16_t)toIdx);
             adjacency[(size_t)toIdx].push_back((uint16_t)fromIdx);
+            jumpInjected++;
             if (outDropEdges != nullptr) {
                 outDropEdges->insert(((uint32_t)(uint16_t)fromIdx << 16) |
                                      (uint32_t)(uint16_t)toIdx);
@@ -386,6 +406,17 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
                                      (uint32_t)(uint16_t)fromIdx);
             }
         }
+    }
+    // Diagnostic — gated by gDeveloperTools.RoomNavData.LogAdjacencyStats
+    // CVar so it doesn't fire on every BFS call by default. Only relevant
+    // when investigating "why didn't the BFS use my jump anchor" bugs.
+    if (CVarGetInteger(CVAR_DEVELOPER_TOOLS("RoomNavData.LogAdjacencyStats"), 0) != 0) {
+        SPDLOG_INFO("[RoomNav][BuildAdj] jumps total={} injected={} "
+                    "rej[xz={} y={} findNearest={} degenerate={}] "
+                    "(maxJumpDist={:.0f} maxJumpUpDelta={:.0f})",
+                    jumpTotal, jumpInjected,
+                    jumpRejXZ, jumpRejY, jumpRejFindNearest, jumpRejDegenerate,
+                    maxJumpDistance, maxJumpUpDelta);
     }
     return adjacency;
 }
