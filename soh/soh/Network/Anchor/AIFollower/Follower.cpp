@@ -2970,17 +2970,39 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
             }
         }
 
-        // Item 3 fix (user 2026-05-12): dismount yaw should point OUT
-        // from the wall, not parallel to it. The follower's
-        // shape.rot.y is often pointing at the leader (lateral while
-        // climbing), so a dismount-stick along that direction would
-        // drive the follower BACK OFF the ledge they just climbed
-        // onto. The wall's outward normal (planeNormal) points away
-        // from the wall — for a top-of-ladder dismount, that's the
-        // direction onto the platform. Helper closes over the active
-        // anchor; falls back to shape.rot.y when no active anchor
-        // (legacy / non-substrate engagement).
+        // Dismount yaw should point AWAY from the ladder, onto the
+        // platform Link is now standing on. Three options ranked by
+        // reliability:
+        //
+        //   1. Toward the leader (PRIMARY). After climbing up, the
+        //      leader is on the upper platform; walking toward them
+        //      is guaranteed to step Link off the ladder onto solid
+        //      ground. Robust regardless of ladder actor orientation.
+        //
+        //   2. anchor.planeNormal direction (FALLBACK). For Path B
+        //      vine walls, the poly normal points outward (toward
+        //      where the player stands). For Path A LADDER actors,
+        //      planeNormal = actor's facing, which often points INTO
+        //      the wall (ladder actors face the wall they lean
+        //      against). User log 32 confirms this case: the dismount
+        //      stick drove Link back onto the ladder.
+        //
+        //   3. shape.rot.y (LAST RESORT). Whatever Link was facing
+        //      mid-climb. Usually pointing at the wall — same problem
+        //      as (2).
+        //
+        // Trying (1) first eliminates the geometry-ambiguity bug for
+        // any climb where the leader is reachable.
         auto computeDismountYaw = [&]() -> s16 {
+            auto itLead = clients.find(followerLeaderClientId);
+            if (itLead != clients.end()) {
+                Vec3f lp = itLead->second.posRot.pos;
+                f32 ldx = lp.x - player->actor.world.pos.x;
+                f32 ldz = lp.z - player->actor.world.pos.z;
+                if (ldx * ldx + ldz * ldz > 100.0f) {  // leader > 10u away
+                    return Math_Atan2S(ldz, ldx);
+                }
+            }
             if (followerClimbAnchorIdx != UINT16_MAX) {
                 const ::AnchorNavRoom::RoomNavData* navData =
                     ::AnchorNavRoom::GetForRoom(
@@ -3107,11 +3129,23 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
 
     auto it = clients.find(followerLeaderClientId);
     if (it == clients.end() || !it->second.isClimbing) {
-        // Item 3 fix (user 2026-05-12): use planeNormal-derived yaw
-        // when active anchor is known, so dismount-stick drives OUT
-        // from the wall (away from edge) instead of toward the leader.
+        // Compute dismount yaw using leader-direction (PRIMARY) →
+        // planeNormal (FALLBACK) → shape.rot.y (LAST RESORT).
+        // See computeDismountYaw lambda in the autonomous branch above
+        // for full ranking rationale; logic is duplicated here because
+        // the lambda is scoped to that branch.
         s16 dismountYaw = player->actor.shape.rot.y;
-        if (followerClimbAnchorIdx != UINT16_MAX) {
+        bool dismountYawSet = false;
+        if (it != clients.end()) {
+            Vec3f lp = it->second.posRot.pos;
+            f32 ldx = lp.x - player->actor.world.pos.x;
+            f32 ldz = lp.z - player->actor.world.pos.z;
+            if (ldx * ldx + ldz * ldz > 100.0f) {
+                dismountYaw = Math_Atan2S(ldz, ldx);
+                dismountYawSet = true;
+            }
+        }
+        if (!dismountYawSet && followerClimbAnchorIdx != UINT16_MAX) {
             const ::AnchorNavRoom::RoomNavData* navData =
                 ::AnchorNavRoom::GetForRoom(
                     gPlayState->sceneNum,
