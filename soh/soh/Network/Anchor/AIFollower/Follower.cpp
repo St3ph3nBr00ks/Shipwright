@@ -3499,14 +3499,23 @@ void Anchor::HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sid
     // match leader facing.
     f32 dx = sideTarget.x - p2Pos.x;
     f32 dz = sideTarget.z - p2Pos.z;
-    if (dx * dx + dz * dz > kFollowThreshold * kFollowThreshold) {
+    f32 dy = fabsf(sideTarget.y - p2Pos.y);
+    // Y-delta gate added 2026-05-12 (log 32 diagnosis): pre-fix this
+    // check was XZ-only, so when the leader was up high (e.g.,
+    // y=800) above the follower (y=0) at small XZ distance (e.g.,
+    // 58u), the follower stayed IDLE for 20+ seconds because XZ
+    // didn't exceed kFollowThreshold. Mirrors the FOLLOW→IDLE gate
+    // at line ~3551 which already factors Y.
+    bool xzExceeds = (dx * dx + dz * dz > kFollowThreshold * kFollowThreshold);
+    bool yExceeds  = (dy > kFollowYThreshold);
+    if (xzExceeds || yExceeds) {
         followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
         followerLastPos     = p2Pos;
-        SPDLOG_INFO("[Follower] IDLE→FOLLOW p2=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) dist={:.0f}",
+        SPDLOG_INFO("[Follower] IDLE→FOLLOW p2=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) dist={:.0f} dy={:.0f}",
                     p2Pos.x, p2Pos.y, p2Pos.z,
                     sideTarget.x, sideTarget.y, sideTarget.z,
-                    sqrtf(dx * dx + dz * dz));
+                    sqrtf(dx * dx + dz * dz), dy);
         return;
     }
     // Scan for the nearest live enemy within ENGAGE range. Reject
