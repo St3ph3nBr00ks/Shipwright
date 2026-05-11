@@ -63,15 +63,35 @@ constexpr float kGroundProbeDepth = 60.0f;   // look this far below current foot
 constexpr float kEdgeProbeDistance = 36.0f;
 constexpr float kEdgeMaxDrop       = 30.0f;
 
-// Drop-intent predicate (Task 4). A path subgoal is treated as a
-// planned drop when its Y is at least this far below the navigator
-// AND the subgoal is within kPlannedDropMaxXZ horizontally — matches
-// the detector's geometry (RoomNavData kDropMinDeltaY=30,
-// kDropMaxXZSq=80²). XZ widened slightly here to absorb path
-// imprecision while the navigator is still approaching the high-pos
-// waypoint.
-constexpr float kPlannedDropMinDeltaY = 30.0f;
-constexpr float kPlannedDropMaxXZ     = 120.0f;
+// Planned off-edge intent predicate (Task 4 + JumpAnchor reuse).
+//
+// NODE_DROP_FROM_ABOVE is set by the BFS path reconstruction on the
+// LANDING waypoint of any planned off-edge step — both DropAnchor
+// (downward, line-clear, passive fall) and JumpAnchor (any direction
+// within bounds, arc-cleared, active jump). Both share the "this
+// off-edge motion is intentional, don't suppress" intent semantic.
+//
+// The Y-delta range matches the UNION of both detectors' Y ranges:
+//   - DropAnchor: takeoff is up to kDropMaxDeltaY (200u) ABOVE landing
+//     → from the navigator's POV at takeoff, subgoal Y can be down to
+//     -200u.
+//   - JumpAnchor: subgoal Y in [-kJumpDownExcludeFloor=30u (downward
+//     mostly drops; small overlap permitted by detector), +kJumpUpMax
+//     (80u, upward broad-jump apex)] from takeoff.
+//
+// Union: subgoal Y in (-200, +80) from the navigator's POV. The XZ
+// cap (180u) is slightly wider than JumpAnchor's 160u max to absorb
+// path-imprecision when the navigator is still approaching the
+// takeoff waypoint.
+//
+// Bug history: original predicate required subgoal STRICTLY below by
+// ≥30u (drop-only semantics). After JumpAnchor reused the flag for
+// landings of upward/flat jumps, those landings failed the Y check
+// → edge avoidance suppressed the takeoff step → follower froze at
+// the cliff edge (field-test log 49, 2026-05-12).
+constexpr float kPlannedOffEdgeMinDownDeltaY = -200.0f;  // subgoal Y ≥ navY - 200u
+constexpr float kPlannedOffEdgeMaxUpDeltaY   = 80.0f;    // subgoal Y ≤ navY + 80u
+constexpr float kPlannedDropMaxXZ     = 180.0f;
 constexpr float kPlannedDropMaxXZSq   = kPlannedDropMaxXZ * kPlannedDropMaxXZ;
 
 inline int16_t DirectYaw(const Actor* navigator, const Vec3f& target) {
@@ -185,10 +205,12 @@ bool IsPlannedDropForSubgoal(const Actor* navigator,
                               uint16_t subgoalFlags) {
     if (navigator == nullptr) return false;
     if ((subgoalFlags & ::AnchorNavRoom::NODE_DROP_FROM_ABOVE) == 0) return false;
-    // Subgoal must be meaningfully below; spuriously-low Y on the
-    // landing waypoint would otherwise stack with the flag and pass
-    // through trivially.
-    if (subgoalPos.y > navigator->world.pos.y - kPlannedDropMinDeltaY) return false;
+    // Subgoal Y must lie in the union of drop + jump Y ranges from
+    // the navigator's POV. Guards against the flag being spuriously
+    // set on a waypoint that's geometrically incompatible with both.
+    const float dy = subgoalPos.y - navigator->world.pos.y;
+    if (dy < kPlannedOffEdgeMinDownDeltaY) return false;  // too far down
+    if (dy > kPlannedOffEdgeMaxUpDeltaY)   return false;  // too far up
     if (AnchorDist::DistXZSq(subgoalPos, navigator->world.pos) > kPlannedDropMaxXZSq) return false;
     return true;
 }
