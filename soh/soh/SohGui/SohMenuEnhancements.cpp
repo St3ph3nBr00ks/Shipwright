@@ -2298,6 +2298,26 @@ void SohMenu::AddMenuEnhancements() {
                               "scan-algorithm changes without restarting, or for refreshing rooms "
                               "whose cached graph predates a fix.")
                      .Size(UIWidgets::Sizes::Inline));
+
+    // Player Recorder — surfaced in the Navigation section per user
+    // request 2026-05-12. Captures per-frame local-player state to
+    // logs/Ship of Harkinian <N> player.log for manual-path analysis.
+    // Same CVar as the Dev Tools menu entry; both widgets bind to the
+    // same toggle.
+    AddWidget(path, "Player Recorder (record my path)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_DEVELOPER_TOOLS("PlayerRecorder.Enabled"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Captures per-frame local-player state (Link's position, "
+            "rotation, controller input, full PLAYER_STATE flag bitmaps "
+            "incl. on-ladder / hang-ledge / climb-ledge / crawling, and "
+            "actionFunc pointer) to logs/Ship of Harkinian <N> player.log. "
+            "Use to record your own movement through a difficult area, "
+            "then compare to the AI Follower's path (Follower Recorder "
+            "log) to identify where the follower's logic falls short.\n\n"
+            "Capture rate: gDeveloperTools.PlayerRecorder.CaptureHz (default 15). "
+            "Auto-stop after MaxSeconds (default 300 = 5 min).\n\n"
+            "Default: off. Zero overhead when disabled."));
 }
 
 } // namespace SohGui

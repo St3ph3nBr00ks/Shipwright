@@ -216,6 +216,26 @@ void SohMenu::AddMenuDevTools() {
             "describing what you saw.\n\n"
             "Default: off. Zero overhead when disabled."));
 
+    AddWidget(path, "Player Recorder Enabled", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_DEVELOPER_TOOLS("PlayerRecorder.Enabled"))
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Captures per-frame LOCAL PLAYER (Link) state to "
+            "logs/Ship of Harkinian <N> player.log (sibling to the matching "
+            "main log file <N>), one JSON object per line. Each line carries: "
+            "scene/room, world position + shape rotation + world rotation, "
+            "speedXZ, controller stick + button input + just-pressed buttons, "
+            "all PLAYER_STATE1/2/3 flag bitmaps, decoded climb / ladder / "
+            "hang-ledge / climb-ledge / crawl / damaged / talk / cutscene / "
+            "input-disabled booleans, and the player's actionFunc pointer.\n\n"
+            "Companion to the Follower Recorder. Record your own movement "
+            "through a difficult area; compare the player's path to what the "
+            "follower attempted; identify where the follower's logic falls "
+            "short.\n\n"
+            "Capture rate: gDeveloperTools.PlayerRecorder.CaptureHz (default 15). "
+            "Auto-stop after gDeveloperTools.PlayerRecorder.MaxSeconds (default "
+            "300 = 5 min) — the toggle flips back off when the cap is hit.\n\n"
+            "Default: off. Zero overhead when disabled."));
+
     // Stats
     path.sidebarName = "Stats";
     AddSidebarEntry("Dev Tools", path.sidebarName, 1);
