@@ -71,6 +71,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_DEBUG_DRAW            CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
 #define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE    CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
 #define CVAR_ROOM_NAV_DEBUG_DRAW_COMPONENTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawComponents")
+#define CVAR_ROOM_NAV_DEBUG_DRAW_CLIMB_GHOSTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawClimbGhosts")
 #define CVAR_ROOM_NAV_LOG_REJECTED_FLOORS   CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors")
 #define CVAR_ROOM_NAV_PATH_B_CLIMB          CVAR_ENHANCEMENT("RoomNavData.PathBClimbDetection")
 #define CVAR_ROOM_NAV_LEDGE_GRAB            CVAR_ENHANCEMENT("RoomNavData.LedgeGrabDetection")
@@ -4288,6 +4289,54 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
             const NavNode& node = data->nodes[(size_t)anchor.firstNodeIdx + i];
             AddWallQuad(sXluDl, sVtxDl, node.pos,
                         anchor.planeAxisU, anchor.planeAxisV, anchor.planeNormal);
+        }
+    }
+
+    // Climb-surface GHOST cells (option B from 2026-05-12 diagnostic
+    // tooling discussion). When DebugDrawClimbGhosts is on, render
+    // every theoretical grid cell that WASN'T emitted by the scan as
+    // a dim red wall-aligned quad. Shows where the per-cell raycast
+    // failed (no climbable poly hit) or the type filter rejected
+    // (Path B with type mismatch). Lets the user visually identify
+    // gaps in vine wall / ladder coverage and decide whether the
+    // gap is real (non-climbable poly genuinely missing) or a scan
+    // tuning issue (raycast offset / standoff / type classification).
+    //
+    // Diagnostic-only; doesn't change BFS data.
+    if (CVarGetInteger(CVAR_ROOM_NAV_DEBUG_DRAW_CLIMB_GHOSTS, 0) != 0 &&
+        !data->climbAnchors.empty()) {
+        constexpr float kClimbCellSpacingForGhosts = 30.0f;
+        sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xC0, 0x20, 0x20, 0x80)); // dim red
+        for (const ClimbAnchor& anchor : data->climbAnchors) {
+            if (anchor.cellsU == 0 || anchor.cellsV == 0) continue;
+            // Existing-cell hash for O(1) lookup.
+            std::unordered_set<uint32_t> existing;
+            existing.reserve(anchor.nodeCount);
+            for (uint16_t i = 0; i < anchor.nodeCount; i++) {
+                const NavNode& n = data->nodes[(size_t)anchor.firstNodeIdx + i];
+                existing.insert(((uint32_t)n.cellIdxZ << 16) | (uint32_t)n.cellIdxX);
+            }
+            // Render ghosts at missing positions in the anchor's full
+            // cellsU × cellsV grid AABB.
+            for (uint16_t v = 0; v < anchor.cellsV; v++) {
+                for (uint16_t u = 0; u < anchor.cellsU; u++) {
+                    uint32_t key = ((uint32_t)v << 16) | (uint32_t)u;
+                    if (existing.count(key)) continue;
+                    Vec3f pos = {
+                        anchor.planeOrigin.x +
+                            anchor.planeAxisU.x * u * kClimbCellSpacingForGhosts +
+                            anchor.planeAxisV.x * v * kClimbCellSpacingForGhosts,
+                        anchor.planeOrigin.y +
+                            anchor.planeAxisU.y * u * kClimbCellSpacingForGhosts +
+                            anchor.planeAxisV.y * v * kClimbCellSpacingForGhosts,
+                        anchor.planeOrigin.z +
+                            anchor.planeAxisU.z * u * kClimbCellSpacingForGhosts +
+                            anchor.planeAxisV.z * v * kClimbCellSpacingForGhosts,
+                    };
+                    AddWallQuad(sXluDl, sVtxDl, pos,
+                                anchor.planeAxisU, anchor.planeAxisV, anchor.planeNormal);
+                }
+            }
         }
     }
 
