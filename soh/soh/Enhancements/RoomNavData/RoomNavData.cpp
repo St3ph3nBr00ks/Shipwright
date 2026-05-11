@@ -1469,21 +1469,79 @@ static inline Vec3f V3Normalize(const Vec3f& a) {
 // Cast one cell-probe ray. Returns true on hit; writes hit position +
 // the wall-flag bitmap. Floor/ceiling hits (|normal.y| > 0.5) are
 // rejected (not a wall — would corrupt grid placement).
+//
+// `requireClimbable` (Path B mode) — pass-through behaviour:
+//   false (default, Path A): return on the FIRST wall hit, regardless
+//          of climbable flags. Suits ladder actors where the actor's
+//          identity is the ground truth and the per-cell flag is
+//          irrelevant.
+//   true  (Path B): return on the first CLIMBABLE wall hit, passing
+//          through non-climbable polys (overlapping platforms,
+//          decorative geometry, scene props) along the way. Solves
+//          the "vine wall behind a platform" gap visible in DebugDrawClimbGhosts.
+//          Up to kClimbRaycastMaxHits=5 iterations per cell; after
+//          each non-climbable hit, the ray origin advances 2u past
+//          the hit and re-casts.
+//
+// Cost increase: cells that hit climbable on the first try (the vast
+// majority) still pay 1 raycast. Only blocked cells iterate. Worst
+// case 5 raycasts per cell — still bounded.
+static constexpr int kClimbRaycastMaxHits = 5;
 static bool RaycastClimbCell(PlayState* play,
                               const Vec3f& cellCenter,
                               const Vec3f& outwardNormal,
                               Vec3f& outHitPos,
-                              s32& outWallFlags)
+                              s32& outWallFlags,
+                              bool requireClimbable = false)
 {
     Vec3f a = V3Add(cellCenter, V3Scale(outwardNormal,  kClimbRayStandoff));
     Vec3f b = V3Add(cellCenter, V3Scale(outwardNormal, -(kClimbRayLength - kClimbRayStandoff)));
-    CollisionPoly* hitPoly = nullptr;
-    s32 hit = BgCheck_AnyLineTest1(&play->colCtx, &a, &b, &outHitPos, &hitPoly, 0);
-    if (!hit || hitPoly == nullptr) return false;
-    f32 normalY = (f32)hitPoly->normal.y / 32767.0f;
-    if (std::fabs(normalY) > 0.5f) return false;
-    outWallFlags = func_80041DB8(&play->colCtx, hitPoly, BGCHECK_SCENE);
-    return true;
+
+    if (!requireClimbable) {
+        // Single-shot: any wall hit OK (Path A).
+        CollisionPoly* hitPoly = nullptr;
+        s32 hit = BgCheck_AnyLineTest1(&play->colCtx, &a, &b, &outHitPos, &hitPoly, 0);
+        if (!hit || hitPoly == nullptr) return false;
+        f32 normalY = (f32)hitPoly->normal.y / 32767.0f;
+        if (std::fabs(normalY) > 0.5f) return false;
+        outWallFlags = func_80041DB8(&play->colCtx, hitPoly, BGCHECK_SCENE);
+        return true;
+    }
+
+    // Pass-through mode (Path B): skip non-climbable hits and
+    // continue toward `b` until we find a climbable wall or exhaust
+    // the ray.
+    Vec3f rayDir = V3Sub(b, a);
+    float rayLen = V3Len(rayDir);
+    if (rayLen < 1e-3f) return false;
+    rayDir = V3Scale(rayDir, 1.0f / rayLen);
+
+    Vec3f origin = a;
+    for (int iter = 0; iter < kClimbRaycastMaxHits; iter++) {
+        CollisionPoly* hitPoly = nullptr;
+        s32 hit = BgCheck_AnyLineTest1(&play->colCtx, &origin, &b, &outHitPos, &hitPoly, 0);
+        if (!hit || hitPoly == nullptr) return false;  // ray exhausted, no climbable wall
+
+        f32 normalY = (f32)hitPoly->normal.y / 32767.0f;
+        if (std::fabs(normalY) <= 0.5f) {  // wall poly
+            s32 flags = func_80041DB8(&play->colCtx, hitPoly, BGCHECK_SCENE);
+            if ((flags & kWallFlagClimbableMask) != 0) {
+                outWallFlags = flags;
+                return true;  // climbable wall found
+            }
+            // Non-climbable wall — pass through.
+        }
+        // Advance 2u past the hit position toward `b` and re-cast.
+        origin.x = outHitPos.x + rayDir.x * 2.0f;
+        origin.y = outHitPos.y + rayDir.y * 2.0f;
+        origin.z = outHitPos.z + rayDir.z * 2.0f;
+        // Stop if we've crossed past the endpoint.
+        Vec3f remVec = V3Sub(b, origin);
+        if (remVec.x * rayDir.x + remVec.y * rayDir.y + remVec.z * rayDir.z <= 0.0f) {
+            return false;
+        }
+    }
+    return false;  // hit the iteration cap
 }
 
 // Probe the wall around basePos to determine its outward normal. Casts
@@ -1974,7 +2032,16 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                 Vec3f hitPos;
                 s32 wallFlags = 0;
                 uint16_t typeBit;
-                bool hit = RaycastClimbCell(play, cellCenter, normal, hitPos, wallFlags);
+                // Pass-through raycast for Path B (anchor.actorId == 0)
+                // so non-climbable polys overlapping the wall (e.g. a
+                // platform between the ray origin and the vine wall
+                // behind it) don't block detection. Path A actors keep
+                // single-shot semantics — the actor's collision IS the
+                // climbable surface, so first-wall-hit is the right cell
+                // position.
+                bool hit = RaycastClimbCell(play, cellCenter, normal,
+                                            hitPos, wallFlags,
+                                            /*requireClimbable=*/anchor.actorId == 0);
                 // Field-test fix Q2 2026-05-11: for Path A actors,
                 // emit the cell at the GRID position whether or not
                 // the raycast hits a climbable poly. The ladder actor's
