@@ -915,7 +915,12 @@ static const ClimbableActorEntry kClimbableActors[] = {
     { ACTOR_BG_YDAN_MARUTA,      1,  280.0f }, // Inside Deku Tree falling ladder
 };
 
-static void DetectClimbAnchors(RoomNavData* out, PlayState* play) {
+// Forward decl: AnchorPolyMap defined inside DetectClimbAnchorsViaSurfaceFlags
+// section; both Path A and Path B detection populate it (Path A pushes
+// empty per anchor; Path B captures cluster-poly indices).
+
+static void DetectClimbAnchors(RoomNavData* out, PlayState* play,
+                               std::vector<std::vector<uint16_t>>* anchorPolys) {
     // Walk both ACTORCAT_BG and ACTORCAT_PROP — climbable scene actors
     // may live in either category depending on the actor's setup.
     constexpr ActorCategory kCategoriesToScan[] = { ACTORCAT_BG, ACTORCAT_PROP };
@@ -955,6 +960,7 @@ static void DetectClimbAnchors(RoomNavData* out, PlayState* play) {
                     anchor.planeNormal = { sinf(yawRad), 0.0f, cosf(yawRad) };
                 }
                 out->climbAnchors.push_back(anchor);
+                if (anchorPolys) anchorPolys->emplace_back(); // empty list — Path A has no polys
                 break;
             }
             actor = actor->next;
@@ -1126,10 +1132,22 @@ static constexpr float kClimbClusterRadiusXZ = 150.0f;
 // already produced — only polys whose centroid cell was floodfill-reached
 // contribute. This keeps shared static-scene walls from leaking
 // cross-room anchors.
+// Per-anchor poly index list — scan-time only, not persisted. Indexed
+// parallel to out->climbAnchors. Used by GenerateClimbSurfaceGrids
+// (poly-driven hybrid 2026-05-11) to compute the grid AABB from the
+// member polys' vertices, instead of probing outward from a single
+// basePos. Solves the "wall-with-internal-gaps loses outer islands"
+// limitation of the prior single-basePos+width-probe approach.
+//
+// Path A anchors get an empty poly list (their identity comes from
+// the actor; no associated wall polys to AABB).
+using AnchorPolyMap = std::vector<std::vector<uint16_t>>;
+
 static void DetectClimbAnchorsViaSurfaceFlags(
     RoomNavData* out,
     PlayState* play,
-    const std::unordered_set<CellKey, CellKeyHash>& visited)
+    const std::unordered_set<CellKey, CellKeyHash>& visited,
+    AnchorPolyMap* anchorPolys)
 {
     // Run when EITHER the production Path B CVar is on OR the diagnostic
     // wall-types log is on. The diagnostic wants to see walls even if
@@ -1227,26 +1245,35 @@ static void DetectClimbAnchorsViaSurfaceFlags(
         // kClimbClusterRadiusXZ collapse into one whose Y range covers both.
         // Only static-geometry anchors (actorId == 0) are merge candidates;
         // Path A actor-based anchors stay distinct.
-        bool merged = false;
-        for (ClimbAnchor& existing : out->climbAnchors) {
+        size_t mergedAnchorIdx = SIZE_MAX;
+        for (size_t ai = 0; ai < out->climbAnchors.size(); ai++) {
+            ClimbAnchor& existing = out->climbAnchors[ai];
             if (existing.actorId != 0) continue;
             f32 dx = existing.basePos.x - cx;
             f32 dz = existing.basePos.z - cz;
             if (dx * dx + dz * dz < kClusterRadiusSq) {
                 if (minY < existing.basePos.y) existing.basePos.y = minY;
                 if (maxY > existing.topPos.y)  existing.topPos.y  = maxY;
-                merged = true;
+                mergedAnchorIdx = ai;
                 pathBMerged++;
                 break;
             }
         }
 
-        if (!merged) {
+        if (mergedAnchorIdx != SIZE_MAX) {
+            if (anchorPolys && mergedAnchorIdx < anchorPolys->size()) {
+                (*anchorPolys)[mergedAnchorIdx].push_back(i);
+            }
+        } else {
             ClimbAnchor anchor{};
             anchor.basePos = { cx, minY, cz };
             anchor.topPos  = { cx, maxY, cz };
             anchor.actorId = 0; // 0 = static-geometry per ClimbAnchor struct
             out->climbAnchors.push_back(anchor);
+            if (anchorPolys) {
+                anchorPolys->emplace_back();
+                anchorPolys->back().push_back(i);
+            }
             pathBAdded++;
         }
     }
@@ -1293,18 +1320,71 @@ static uint16_t ClassifyClimbWallFlags(s32 wallFlags) {
 
 // Surface-grid scan tunables. Per-cell raycast cost is ~1 BgCheck call;
 // per-anchor cost is dominated by cellsU * cellsV. With the caps below
-// the worst case is 24 * 32 = 768 raycasts per anchor; typical room
-// has 1-3 anchors → ~2k extra raycasts. Floor scan does ~16k, so this
-// is +~12% in the worst case (rare; most rooms have 0-1 anchors).
+// the worst case is 40 * 40 = 1600 raycasts per anchor; typical room
+// has 1-3 anchors → ~5k extra raycasts. Floor scan does ~16k, so this
+// is +~30% in the worst case (rare; most rooms have 0-1 anchors).
+//
+// Caps bumped 24→40 / 32→40 (2026-05-11) to handle very wide walls
+// like Inside Deku Tree main entrance Skullwalltula wall (~600u+).
 static constexpr float    kClimbGridCellSpacing  = 30.0f;  // matches kGridResolution
 static constexpr float    kClimbRayStandoff      = 100.0f; // ray origin distance from wall
 static constexpr float    kClimbRayLength        = 200.0f; // total ray length (standoff + penetration)
 static constexpr float    kClimbProbeYAtBase     = 30.0f;  // raise above floor for normal probe
-static constexpr int      kClimbWidthMaxStepsPerSide = 12; // ±360u max width search
+static constexpr int      kClimbWidthMaxStepsPerSide = 12; // ±360u max width search (Path A only)
 static constexpr float    kClimbMinAnchorHeight  = 30.0f;  // skip degenerate-height anchors
-static constexpr uint16_t kClimbMaxCellsU        = 24;     // width safety cap (~720u)
-static constexpr uint16_t kClimbMaxCellsV        = 32;     // height safety cap (~960u)
+static constexpr uint16_t kClimbMaxCellsU        = 40;     // width safety cap (~1200u)
+static constexpr uint16_t kClimbMaxCellsV        = 40;     // height safety cap (~1200u)
 static constexpr float    kClimbPathAActorWidth  = 30.0f;  // single-column ladder default
+
+// Wall-plane bounding box of a poly cluster, with U/V coords measured
+// relative to a plane origin. Hybrid poly-driven grid generation
+// 2026-05-11: instead of probing outward from a single basePos to find
+// the wall extent, project all member polys' vertices into wall-plane
+// coordinates and AABB them. Captures the FULL extent of the wall
+// regardless of internal climbable/non-climbable gaps.
+struct PlaneAABB { float uMin, uMax, vMin, vMax; bool valid; };
+
+static PlaneAABB ComputeClimbPolyClusterAABB(
+    PlayState* play,
+    const std::vector<uint16_t>& polyIndices,
+    const Vec3f& planeOrigin,
+    const Vec3f& axisU,
+    const Vec3f& axisV)
+{
+    PlaneAABB aabb = {
+        std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(),
+        false
+    };
+    if (polyIndices.empty() || play == nullptr) return aabb;
+    CollisionHeader* hdr = play->colCtx.colHeader;
+    if (hdr == nullptr || hdr->polyList == nullptr || hdr->vtxList == nullptr) return aabb;
+    Vec3s* vtxList = hdr->vtxList;
+    u16 numPolys = hdr->numPolygons;
+    u16 numVtx = hdr->numVertices;
+    for (uint16_t pIdx : polyIndices) {
+        if (pIdx >= numPolys) continue;
+        CollisionPoly* poly = &hdr->polyList[pIdx];
+        u16 viA = poly->flags_vIA & 0x1FFF;
+        u16 viB = poly->flags_vIB & 0x1FFF;
+        u16 viC = poly->vIC       & 0x1FFF;
+        if (viA >= numVtx || viB >= numVtx || viC >= numVtx) continue;
+        const Vec3s* verts[3] = { &vtxList[viA], &vtxList[viB], &vtxList[viC] };
+        for (int v = 0; v < 3; v++) {
+            float dx = (float)verts[v]->x - planeOrigin.x;
+            float dy = (float)verts[v]->y - planeOrigin.y;
+            float dz = (float)verts[v]->z - planeOrigin.z;
+            float u_proj = dx * axisU.x + dy * axisU.y + dz * axisU.z;
+            float v_proj = dx * axisV.x + dy * axisV.y + dz * axisV.z;
+            if (u_proj < aabb.uMin) aabb.uMin = u_proj;
+            if (u_proj > aabb.uMax) aabb.uMax = u_proj;
+            if (v_proj < aabb.vMin) aabb.vMin = v_proj;
+            if (v_proj > aabb.vMax) aabb.vMax = v_proj;
+            aabb.valid = true;
+        }
+    }
+    return aabb;
+}
 
 // Eight horizontal directions for normal probing.
 struct ClimbProbeDir { float x; float z; };
@@ -1643,7 +1723,8 @@ static void DropClimbSurfaceEdges(RoomNavData* out) {
 // Runs BEFORE GenerateClimbSurfaceGrids so the per-anchor grid emit
 // loop never produces overlapping cells.
 static constexpr float kAnchorOverlapRadiusXZ = 250.0f;
-static void MergeOverlappingClimbAnchors(RoomNavData* out) {
+static void MergeOverlappingClimbAnchors(RoomNavData* out,
+                                         std::vector<std::vector<uint16_t>>* anchorPolys) {
     auto& anchors = out->climbAnchors;
     if (anchors.size() < 2) return;
     std::vector<bool> active(anchors.size(), true);
@@ -1673,20 +1754,35 @@ static void MergeOverlappingClimbAnchors(RoomNavData* out) {
             anchors[i].topPos.x  = anchors[i].basePos.x;
             anchors[i].topPos.z  = anchors[i].basePos.z;
             anchors[i].topPos.y  = std::max(iHigh, jHigh);
+            // Union j's poly list into i's. Hybrid grid generation
+            // uses the merged poly list for AABB + per-cell raycast
+            // acceptance.
+            if (anchorPolys && i < anchorPolys->size() && j < anchorPolys->size()) {
+                auto& dst = (*anchorPolys)[i];
+                auto& src = (*anchorPolys)[j];
+                dst.insert(dst.end(), src.begin(), src.end());
+                src.clear();
+            }
             active[j] = false;
             mergedCount++;
         }
     }
     if (mergedCount == 0) return;
-    // Compact: remove inactive anchors.
+    // Compact: remove inactive anchors AND their poly lists in lockstep.
     size_t writeIdx = 0;
     for (size_t readIdx = 0; readIdx < anchors.size(); readIdx++) {
         if (active[readIdx]) {
-            if (writeIdx != readIdx) anchors[writeIdx] = anchors[readIdx];
+            if (writeIdx != readIdx) {
+                anchors[writeIdx] = anchors[readIdx];
+                if (anchorPolys && readIdx < anchorPolys->size()) {
+                    (*anchorPolys)[writeIdx] = std::move((*anchorPolys)[readIdx]);
+                }
+            }
             writeIdx++;
         }
     }
     anchors.resize(writeIdx);
+    if (anchorPolys) anchorPolys->resize(writeIdx);
     SPDLOG_INFO("[RoomNav] Climb-anchor overlap merge: {} merged, {} remaining",
                 mergedCount, anchors.size());
 }
@@ -1708,13 +1804,15 @@ static void MergeOverlappingClimbAnchors(RoomNavData* out) {
 // immediately after its nodes — keeps per-anchor data co-located so a
 // debug overlay can iterate one anchor's footprint without scanning the
 // whole vector.
-static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play) {
+static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
+                                      std::vector<std::vector<uint16_t>>* anchorPolys) {
     if (out->climbAnchors.empty()) return;
 
     out->firstClimbSurfaceNodeIdx = (uint16_t)out->nodes.size();
     size_t totalNodesAdded = 0;
 
-    for (ClimbAnchor& anchor : out->climbAnchors) {
+    for (size_t anchorIdx = 0; anchorIdx < out->climbAnchors.size(); anchorIdx++) {
+        ClimbAnchor& anchor = out->climbAnchors[anchorIdx];
         Vec3f rise = V3Sub(anchor.topPos, anchor.basePos);
         float climbHeight = V3Len(rise);
         if (climbHeight < kClimbMinAnchorHeight) continue;
@@ -1760,11 +1858,53 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play) {
             }
         }
 
-        // Determine width (Path A actors are single-column; Path B is probed).
-        float climbWidth = (anchor.actorId != 0)
-            ? kClimbPathAActorWidth
-            : DetermineClimbSurfaceWidth(play, anchor.basePos, normal, axisU, expectedType);
-        if (climbWidth < kClimbGridCellSpacing) climbWidth = kClimbGridCellSpacing;
+        // Grid extent + origin. Hybrid 2026-05-11:
+        //   - Path A (actor-based, no polys): single-column at fixed
+        //     width centered on basePos; height from basePos→topPos.
+        //   - Path B with polys: project all member polys' vertices
+        //     onto the wall plane, AABB the projections, derive
+        //     extent + origin from the AABB. Captures full wall extent
+        //     including across internal climbable/non-climbable gaps.
+        //   - Path B without polys (defensive fallback): probe outward
+        //     from basePos like the pre-hybrid code did.
+        float climbWidth;
+        Vec3f origin;
+        const std::vector<uint16_t>* myPolys =
+            (anchorPolys && anchorIdx < anchorPolys->size())
+            ? &(*anchorPolys)[anchorIdx] : nullptr;
+        if (anchor.actorId != 0) {
+            // Path A actor — single column.
+            climbWidth = kClimbPathAActorWidth;
+            origin = { anchor.basePos.x - axisU.x * (climbWidth * 0.5f),
+                       anchor.basePos.y,
+                       anchor.basePos.z - axisU.z * (climbWidth * 0.5f) };
+        } else if (myPolys != nullptr && !myPolys->empty()) {
+            // Path B with poly cluster — AABB-driven.
+            PlaneAABB aabb = ComputeClimbPolyClusterAABB(
+                play, *myPolys, anchor.basePos, axisU, axisV);
+            if (aabb.valid) {
+                climbWidth  = aabb.uMax - aabb.uMin;
+                climbHeight = aabb.vMax - aabb.vMin;
+                origin = { anchor.basePos.x + axisU.x * aabb.uMin + axisV.x * aabb.vMin,
+                           anchor.basePos.y + axisU.y * aabb.uMin + axisV.y * aabb.vMin,
+                           anchor.basePos.z + axisU.z * aabb.uMin + axisV.z * aabb.vMin };
+            } else {
+                // AABB invalid (no usable verts) — fall back to probe.
+                climbWidth = DetermineClimbSurfaceWidth(play, anchor.basePos, normal, axisU, expectedType);
+                origin = { anchor.basePos.x - axisU.x * (climbWidth * 0.5f),
+                           anchor.basePos.y,
+                           anchor.basePos.z - axisU.z * (climbWidth * 0.5f) };
+            }
+        } else {
+            // Path B with no poly tracking (legacy or empty cluster) —
+            // fall back to outward probe.
+            climbWidth = DetermineClimbSurfaceWidth(play, anchor.basePos, normal, axisU, expectedType);
+            origin = { anchor.basePos.x - axisU.x * (climbWidth * 0.5f),
+                       anchor.basePos.y,
+                       anchor.basePos.z - axisU.z * (climbWidth * 0.5f) };
+        }
+        if (climbWidth  < kClimbGridCellSpacing) climbWidth  = kClimbGridCellSpacing;
+        if (climbHeight < kClimbGridCellSpacing) climbHeight = kClimbGridCellSpacing;
 
         uint16_t cellsU = (uint16_t)std::min<int>(
             (int)kClimbMaxCellsU,
@@ -1772,12 +1912,6 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play) {
         uint16_t cellsV = (uint16_t)std::min<int>(
             (int)kClimbMaxCellsV,
             std::max<int>(1, (int)std::ceil(climbHeight / kClimbGridCellSpacing)));
-
-        // Plane origin = basePos shifted half the width along -axisU
-        // (so column u==cellsU/2 is centered on basePos).
-        Vec3f origin = { anchor.basePos.x - axisU.x * (climbWidth * 0.5f),
-                         anchor.basePos.y,
-                         anchor.basePos.z - axisU.z * (climbWidth * 0.5f) };
 
         uint16_t firstNodeIdx = (uint16_t)out->nodes.size();
         uint16_t nodeCount    = 0;
@@ -1811,7 +1945,13 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play) {
                     if (!hit) continue;
                     typeBit = ClassifyClimbWallFlags(wallFlags);
                     if (typeBit == 0) continue;
-                    if (typeBit != expectedType) continue;
+                    // Hybrid 2026-05-11: removed `if (typeBit != expectedType) continue;`.
+                    // The poly cluster (after Q6 merge across ~250u
+                    // walls) may contain mixed surface types — accept
+                    // any climbable cell. The anchor's surfaceType
+                    // remains the dominant type for render color
+                    // (Stage 8 v2), but per-cell node.flags carries
+                    // the ACTUAL type bit hit at this cell.
                 }
                 NavNode node;
                 node.pos      = hitPos;
@@ -2832,8 +2972,14 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     //     climbable surface baked into static collision (wall-flag bit 3
     //     set). Anchors merge by XZ proximity so a multi-poly vine wall
     //     produces one anchor with the full mesh's Y range, not dozens.
-    DetectClimbAnchors(out, play);
-    DetectClimbAnchorsViaSurfaceFlags(out, play, visited);
+    // Per-anchor poly tracking — scan-time-only, parallel to
+    // out->climbAnchors. Path A pushes empty per anchor; Path B
+    // captures the polys that clustered into each anchor. Used by
+    // GenerateClimbSurfaceGrids' AABB extent computation (hybrid
+    // poly-driven 2026-05-11).
+    AnchorPolyMap anchorPolys;
+    DetectClimbAnchors(out, play, &anchorPolys);
+    DetectClimbAnchorsViaSurfaceFlags(out, play, visited, &anchorPolys);
 
     // Ledge-grab anchor detection (Phase 1) — distinct motion semantics
     // from climb anchors (jump+grab+pull-up vs climb-up animation). Uses
@@ -2893,9 +3039,9 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     //
     // Q6 fix 2026-05-11: merge overlapping anchors BEFORE generation
     // so the per-anchor grid emit loop never produces duplicate cells
-    // on the same wall.
-    MergeOverlappingClimbAnchors(out);
-    GenerateClimbSurfaceGrids(out, play);
+    // on the same wall. Anchor poly-list is unioned alongside.
+    MergeOverlappingClimbAnchors(out, &anchorPolys);
+    GenerateClimbSurfaceGrids(out, play, &anchorPolys);
 
     // Update historicalSeeds with the union of (current player + actor
     // + previously-historical seed positions). Cell-deduped at insertion
@@ -4498,8 +4644,9 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     // functions read live actor / collision state via gPlayState, so they
     // pick up any actor moves / wall changes that happened since the
     // previous scan.
-    DetectClimbAnchors(&nav, play);
-    DetectClimbAnchorsViaSurfaceFlags(&nav, play, visited);
+    AnchorPolyMap anchorPolys;  // scan-time only; parallel to nav.climbAnchors
+    DetectClimbAnchors(&nav, play, &anchorPolys);
+    DetectClimbAnchorsViaSurfaceFlags(&nav, play, visited, &anchorPolys);
     DetectLedgeAnchors(&nav, play, nodesByCell);
     DetectCrawlspaces(&nav, play, visited);
     DetectDropAnchors(&nav, play, nodesByCell);
@@ -4520,9 +4667,9 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
 
     // Re-generate climb-surface grids (schema v7+) for the refreshed
     // anchors. Same ordering as the main scan path: merge overlaps
-    // (Q6 fix), then generate.
-    MergeOverlappingClimbAnchors(&nav);
-    GenerateClimbSurfaceGrids(&nav, play);
+    // (Q6 fix), then generate via AABB-driven hybrid.
+    MergeOverlappingClimbAnchors(&nav, &anchorPolys);
+    GenerateClimbSurfaceGrids(&nav, play, &anchorPolys);
 
     // Reset the debug-draw summary tracker so the next overlay frame
     // re-emits the loaded-summary line with the refreshed counts.
