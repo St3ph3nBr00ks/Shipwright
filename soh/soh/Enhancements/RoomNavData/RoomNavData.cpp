@@ -606,6 +606,43 @@ bool FindClimbAnchorAbove(const RoomNavData* data,
     return true;
 }
 
+bool ProjectPositionToAnchorCell(const ClimbAnchor& anchor,
+                                  const Vec3f& worldPos,
+                                  float cellSpacing,
+                                  int& outU,
+                                  int& outV) {
+    if (cellSpacing <= 0.0f) return false;
+    Vec3f rel = { worldPos.x - anchor.planeOrigin.x,
+                  worldPos.y - anchor.planeOrigin.y,
+                  worldPos.z - anchor.planeOrigin.z };
+    float u_proj = rel.x * anchor.planeAxisU.x
+                 + rel.y * anchor.planeAxisU.y
+                 + rel.z * anchor.planeAxisU.z;
+    float v_proj = rel.x * anchor.planeAxisV.x
+                 + rel.y * anchor.planeAxisV.y
+                 + rel.z * anchor.planeAxisV.z;
+    int u = (int)std::floor(u_proj / cellSpacing);
+    int v = (int)std::floor(v_proj / cellSpacing);
+    if (u < 0 || u >= (int)anchor.cellsU) return false;
+    if (v < 0 || v >= (int)anchor.cellsV) return false;
+    outU = u;
+    outV = v;
+    return true;
+}
+
+bool AnchorCellExists(const RoomNavData* data, const ClimbAnchor& anchor,
+                      int u, int v) {
+    if (data == nullptr) return false;
+    if (u < 0 || u >= (int)anchor.cellsU) return false;
+    if (v < 0 || v >= (int)anchor.cellsV) return false;
+    if ((size_t)anchor.firstNodeIdx + anchor.nodeCount > data->nodes.size()) return false;
+    for (uint16_t i = 0; i < anchor.nodeCount; i++) {
+        const NavNode& n = data->nodes[(size_t)anchor.firstNodeIdx + i];
+        if ((int)n.cellIdxX == u && (int)n.cellIdxZ == v) return true;
+    }
+    return false;
+}
+
 bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toPos) {
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;
 

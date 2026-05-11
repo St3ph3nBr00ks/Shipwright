@@ -373,4 +373,28 @@ bool FindClimbAnchorAbove(const RoomNavData* data,
                           Vec3f& outBase,
                           Vec3f& outTop);
 
+// Project a world position into the wall-plane (u, v) cell coords of
+// the given climb anchor. cellSpacing is the grid cell pitch (currently
+// 30u for the climb-surface grid). Returns true and writes outU/outV
+// when the projection falls within the anchor's [0, cellsU) × [0, cellsV)
+// bounds; false otherwise (position is laterally or vertically outside
+// the grid extent).
+//
+// Used by CLIMBING-aware stick injection (AI Follower edge-prediction):
+// "if I move in direction D, will the predicted cell still be on the
+// wall?" Project current pos and predicted-next pos, look up cells.
+bool ProjectPositionToAnchorCell(const ClimbAnchor& anchor,
+                                  const Vec3f& worldPos,
+                                  float cellSpacing,
+                                  int& outU,
+                                  int& outV);
+
+// True if the given (u, v) cell exists as a NavNode in the anchor's
+// grid. Some grid cells are pruned during scan (raycast missed, or
+// hit a non-climbable poly within a Path-B cluster). O(nodeCount) walk
+// — for hot-path use, build a per-anchor unordered_set<uint32_t> with
+// (cellIdxZ << 16) | cellIdxX keys at engagement time.
+bool AnchorCellExists(const RoomNavData* data, const ClimbAnchor& anchor,
+                      int u, int v);
+
 } // namespace AnchorNavRoom

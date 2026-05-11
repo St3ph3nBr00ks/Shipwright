@@ -660,6 +660,21 @@ class Anchor : public Network {
     Vec3f           followerClimbTopTarget        = { 0.0f, 0.0f, 0.0f };
     int             followerAutonomousClimbFrames = 0;
 
+    // Edge-prediction state (climb_surface_nav_grid_plan post-Stage-8
+    // 2026-05-12). When the substrate engages CLIMBING via Stage 6's
+    // trigger, we capture which ClimbAnchor the subgoal belonged to
+    // and pre-build a flat hash of its (u, v) cells for hot-path
+    // lookup. Per-frame stick injection projects the predicted next
+    // position into the anchor's plane and suppresses any axis whose
+    // predicted cell is missing from the set — prevents the follower
+    // from walking off the wall edge.
+    //
+    // followerClimbAnchorIdx == UINT16_MAX means "no active anchor"
+    // (legacy non-substrate engagement, or before Stage 6 fires).
+    // Cleared on CLIMBING exit.
+    uint16_t                       followerClimbAnchorIdx  = UINT16_MAX;
+    std::unordered_set<uint32_t>   followerClimbCellSet;
+
     // Phase 2 — held NavPath snapshot for follower pursuit. Refreshed when
     // stale (path empty / cursor exhausted), when the target's TrailKey
     // changes (leader → enemy, leader changed, target enemy changed),
