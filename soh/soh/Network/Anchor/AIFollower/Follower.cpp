@@ -3005,6 +3005,10 @@ void Anchor::ExitFollowerClimbToIdle(s16 dismountYaw, bool clearAutonomous) {
     followerStateFrames = 0;
     followerClimbAnchorIdx = UINT16_MAX;
     followerClimbCellSet.clear();
+    // Reset re-anchor latch (Bug 2 fix) — next CLIMBING entry should
+    // start with a clean candidate-tracking slate.
+    followerReanchorCandidateIdx    = UINT16_MAX;
+    followerReanchorCandidateFrames = 0;
     if (clearAutonomous) {
         followerAutonomousClimb       = false;
         followerAutonomousClimbFrames = 0;
@@ -3110,13 +3114,45 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
                     bestIdx    = a;
                 }
             }
+            // Frame-count latch (Bug 2 fix, 2026-05-12). The
+            // distance-hysteresis alone (1.25× linear) wasn't enough to
+            // prevent per-frame flip-flopping when the leader crossed
+            // a seam between touching anchors — the "closest anchor"
+            // decision alternates as the leader's position drifts
+            // around the bisecting plane. Each flip inverted the
+            // CLIMBING stick injection, follower netted zero motion
+            // for the seam-crossing duration, autonomous-climb timeout
+            // fired.
+            //
+            // Require the candidate to win for kReanchorLatchFrames
+            // consecutive checks before committing the switch.
+            constexpr uint16_t kReanchorLatchFrames = 30;  // ~0.5s @ 60fps
             if (bestIdx != followerClimbAnchorIdx) {
-                SPDLOG_INFO("[Follower] Climb re-anchor: {} → {} "
-                            "(leader pos closer; cur d²={:.0f} new d²={:.0f})",
-                            (int)followerClimbAnchorIdx, (int)bestIdx,
-                            curDistSq, bestDistSq);
-                followerClimbAnchorIdx = bestIdx;
-                followerClimbCellSet.clear();  // grid cell set is per-anchor
+                if (bestIdx == followerReanchorCandidateIdx) {
+                    followerReanchorCandidateFrames++;
+                } else {
+                    // Different candidate (or first observation) — reset latch.
+                    followerReanchorCandidateIdx    = bestIdx;
+                    followerReanchorCandidateFrames = 1;
+                }
+                if (followerReanchorCandidateFrames >= kReanchorLatchFrames) {
+                    SPDLOG_INFO("[Follower] Climb re-anchor: {} → {} "
+                                "(leader pos closer for {} frames; "
+                                "cur d²={:.0f} new d²={:.0f})",
+                                (int)followerClimbAnchorIdx, (int)bestIdx,
+                                (int)followerReanchorCandidateFrames,
+                                curDistSq, bestDistSq);
+                    followerClimbAnchorIdx = bestIdx;
+                    followerClimbCellSet.clear();  // grid cell set is per-anchor
+                    followerReanchorCandidateIdx    = UINT16_MAX;
+                    followerReanchorCandidateFrames = 0;
+                }
+            } else {
+                // Current anchor still wins — clear pending candidate so
+                // a transient mid-seam flip doesn't accumulate latch
+                // frames toward a stale candidate.
+                followerReanchorCandidateIdx    = UINT16_MAX;
+                followerReanchorCandidateFrames = 0;
             }
         }
     }

@@ -675,6 +675,15 @@ class Anchor : public Network {
     uint16_t                       followerClimbAnchorIdx  = UINT16_MAX;
     std::unordered_set<uint32_t>   followerClimbCellSet;
 
+    // Re-anchor latch state. Prevents per-frame flip-flopping between
+    // touching climb anchors when the leader crosses a seam — without
+    // the latch, alternating "closest anchor" decisions invert the
+    // CLIMBING stick injection per frame and the follower nets zero
+    // motion. Latch requires the candidate to win for kReanchorLatchFrames
+    // consecutive frames before the switch fires.
+    uint16_t                       followerReanchorCandidateIdx   = UINT16_MAX;
+    uint16_t                       followerReanchorCandidateFrames = 0;
+
     // Phase 2 — held NavPath snapshot for follower pursuit. Refreshed when
     // stale (path empty / cursor exhausted), when the target's TrailKey
     // changes (leader → enemy, leader changed, target enemy changed),
