@@ -2851,7 +2851,7 @@ static void DetectJumpAnchors(
     if (CVarGetInteger(CVAR_ROOM_NAV_JUMP_ANCHOR, 0) == 0) return;
 
     constexpr float kJumpMinXZ            = 18.0f;       // skip within-floor-edge pairs
-    constexpr float kJumpMaxXZ            = 150.0f;
+    constexpr float kJumpMaxXZ            = 200.0f;
     constexpr float kJumpMaxXZSq          = kJumpMaxXZ * kJumpMaxXZ;
     constexpr float kJumpMinXZSq          = kJumpMinXZ * kJumpMinXZ;
     constexpr float kJumpUpMax            = 80.0f;
@@ -2870,10 +2870,11 @@ static void DetectJumpAnchors(
     // along the path". Matches step-up height; covers minor stair-tier
     // variation on continuous floors.
     constexpr float kFloorPresenceTolY    = 20.0f;
-    // Spatial neighbourhood: kJumpMaxXZ / kGridResolution rounded up, +1
-    // slop for cells whose nodes lie near a cell boundary. 5 cells per
-    // side (= ±2 in each axis) covers 150u at 30u resolution.
-    constexpr int   kCellRadius           = 3;
+    // Spatial neighbourhood: kJumpMaxXZ / kGridResolution rounded up,
+    // plus 1 cell of slop for nodes lying near cell boundaries.
+    // kCellRadius=7 at 30u grid covers ±210u center-to-center, enough
+    // for the 200u jump cap with boundary slop.
+    constexpr int   kCellRadius           = 7;
     // Walking-detour rejection. If a walkable path exists between A and
     // B whose length is comparable to the direct jump distance (within
     // kDetourSlack), the actor should walk instead of jump. Common case:
