@@ -181,8 +181,25 @@ static const std::unordered_map<s16, NavTraits>& GetOverrides() {
         // Freezard — slow turn rate; longer commit.
         { ACTOR_EN_FZ,       MakeFreezardTraits() },
 
-        // AI Follower (DummyPlayer-derived).
+        // AI Follower. Two actor IDs map to the same traits:
+        //   ACTOR_EN_OE2 — DummyPlayer (a REMOTE peer's Link, rendered
+        //                  on this client; rare consumer of pathfinding
+        //                  but harmless to include).
+        //   ACTOR_PLAYER — the LOCAL Link, when AI Follower mode is
+        //                  active. HandleStateFollow / RETURN /
+        //                  COLLECT_ITEM call ComputePathTo with
+        //                  `&player->actor`, whose id is ACTOR_PLAYER
+        //                  (= 0), NOT ACTOR_EN_OE2. Without this
+        //                  override the lookup falls through to
+        //                  kDefaultTraits with climbSurfaceMask=0,
+        //                  the BFS gates ALL climb-surface nodes out,
+        //                  and BuildAdjacencyList re-injects the P3.8
+        //                  base↔top bypass — Stage 6's CLIMBING
+        //                  trigger never fires because the path never
+        //                  carries a NODE_CLIMB_* subgoal flag.
+        //                  Field-test fix from log 27 (2026-05-12).
         { ACTOR_EN_OE2,      MakeFollowerTraits() },
+        { ACTOR_PLAYER,      MakeFollowerTraits() },
 
         // maxJumpDistance overrides per enemy type. Defaults are 100u;
         // overrides are educated guesses pending field-test validation.
@@ -229,9 +246,13 @@ uint16_t ResolveDynamicClimbMask(s16 actorId, uint16_t baseMask) {
     // on, adult / child Link can climb any vertical wall, so the
     // follower's mask gains GENERIC_WALL. Cheat off → base mask only.
     //
+    // ACTOR_PLAYER alongside ACTOR_EN_OE2 — the LOCAL AI follower's
+    // navigator id is ACTOR_PLAYER (Link), not ACTOR_EN_OE2
+    // (DummyPlayer). See the override-map comment for full context.
+    //
     // Other consumers (none yet wired; future Skullwalltula traits will
     // include GENERIC_WALL in their static base) get baseMask unchanged.
-    if (actorId == ACTOR_EN_OE2) {
+    if (actorId == ACTOR_EN_OE2 || actorId == ACTOR_PLAYER) {
         if (CVarGetInteger(CVAR_CLIMB_EVERYTHING, 0) != 0) {
             return (uint16_t)(baseMask | ::AnchorNavRoom::NODE_CLIMB_GENERIC_WALL);
         }
