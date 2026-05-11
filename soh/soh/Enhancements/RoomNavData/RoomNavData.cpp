@@ -2874,9 +2874,61 @@ static void DetectJumpAnchors(
     // slop for cells whose nodes lie near a cell boundary. 5 cells per
     // side (= ±2 in each axis) covers 150u at 30u resolution.
     constexpr int   kCellRadius           = 3;
+    // Walking-detour rejection. If a walkable path exists between A and
+    // B whose length is comparable to the direct jump distance (within
+    // kDetourSlack), the actor should walk instead of jump. Common case:
+    // L- or C-shape platform where an indent cuts into the navmesh —
+    // air is technically between two edge markers but the path around
+    // the indent is short.
+    constexpr float kDetourSlack          = 100.0f;
 
     size_t added = 0, merged = 0, rejectedArc = 0, rejectedNoGap = 0,
-           rejectedWall = 0;
+           rejectedWall = 0, rejectedDetour = 0;
+
+    // Pre-compute floor-only adjacency for the walking-detour check.
+    // Excludes climb-surface edges (both endpoints checked) so the
+    // walking-distance estimate reflects pure floor traversal — the
+    // walker doesn't get to use climbs to shortcut the detour.
+    std::vector<std::vector<uint16_t>> floorAdj(out->nodes.size());
+    for (const NavEdge& e : out->edges) {
+        if (e.fromIdx >= out->nodes.size() || e.toIdx >= out->nodes.size()) continue;
+        if (out->nodes[e.fromIdx].flags & NODE_CLIMB_ANY) continue;
+        if (out->nodes[e.toIdx].flags   & NODE_CLIMB_ANY) continue;
+        floorAdj[e.fromIdx].push_back(e.toIdx);
+        floorAdj[e.toIdx].push_back(e.fromIdx);
+    }
+
+    // Bounded BFS for the walking-detour check. Reuses a generation
+    // counter so we don't pay O(N) clear-visited per call — one
+    // allocation amortised across thousands of pair queries.
+    //
+    // Hop count is an approximate distance proxy: 30u for cardinal
+    // edges, ~42u for diagonal (8-connected). Threshold converts
+    // (jumpDist + slack) into a max-hop count.
+    std::vector<uint32_t> walkVisitedGen(out->nodes.size(), 0);
+    uint32_t              walkGen = 0;
+    std::vector<uint16_t> walkFrontier;
+    std::vector<uint16_t> walkNext;
+    auto walkingHopsWithin = [&](uint16_t startIdx, uint16_t endIdx, int maxHops) -> bool {
+        if (startIdx == endIdx) return true;
+        walkGen++;
+        walkVisitedGen[startIdx] = walkGen;
+        walkFrontier.clear();
+        walkFrontier.push_back(startIdx);
+        for (int hop = 0; hop < maxHops && !walkFrontier.empty(); hop++) {
+            walkNext.clear();
+            for (uint16_t cur : walkFrontier) {
+                for (uint16_t nb : floorAdj[cur]) {
+                    if (walkVisitedGen[nb] == walkGen) continue;
+                    if (nb == endIdx) return true;
+                    walkVisitedGen[nb] = walkGen;
+                    walkNext.push_back(nb);
+                }
+            }
+            walkFrontier.swap(walkNext);
+        }
+        return false;
+    };
 
     // pathOverGap: returns true when the segment A → B passes over an
     // actual air gap — at least one sampled XZ point along the segment
@@ -3030,6 +3082,24 @@ static void DetectJumpAnchors(
                         continue;
                     }
 
+                    // Walking-detour rejection. Even when a real air
+                    // gap exists between A and B, if a comparable
+                    // walkable path exists around it (within
+                    // kDetourSlack of the direct distance), the
+                    // actor should walk instead of jump. Catches the
+                    // L- and C-shape platform indent case where two
+                    // edge nodes have technical air between them but
+                    // the navmesh wraps around with a short detour.
+                    {
+                        const f32 jumpDist = std::sqrt(xzSq);
+                        const int maxHops = (int)std::ceil(
+                            (jumpDist + kDetourSlack) / (f32)kGridResolution);
+                        if (walkingHopsWithin(i, j, maxHops)) {
+                            rejectedDetour++;
+                            continue;
+                        }
+                    }
+
                     // Arc clearance: apex at midpoint XZ + lifted Y.
                     Vec3f apex = {
                         (a.pos.x + b.pos.x) * 0.5f,
@@ -3073,11 +3143,12 @@ static void DetectJumpAnchors(
     }
 
     if (added > 0 || merged > 0 || rejectedArc > 0 ||
-        rejectedNoGap > 0 || rejectedWall > 0) {
+        rejectedNoGap > 0 || rejectedWall > 0 || rejectedDetour > 0) {
         SPDLOG_INFO("[RoomNav] Jump-anchor detection: {} anchors added, "
                     "{} duplicates merged, {} arc-blocked, {} no-gap (walkable), "
-                    "{} wall-blocked",
-                    added, merged, rejectedArc, rejectedNoGap, rejectedWall);
+                    "{} wall-blocked, {} walking-detour",
+                    added, merged, rejectedArc, rejectedNoGap, rejectedWall,
+                    rejectedDetour);
     }
 }
 
