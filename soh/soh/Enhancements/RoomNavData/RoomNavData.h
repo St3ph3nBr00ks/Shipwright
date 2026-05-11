@@ -244,6 +244,23 @@ const RoomNavData* GetForRoom(int16_t sceneNum, int8_t roomNum);
 // Returns -1 if data is null or has no nodes.
 int FindNearestNode(const RoomNavData* data, const Vec3f& pos);
 
+// Bundle of per-query knobs for the hazard-aware BFS. Consolidates the
+// param explosion that grew across Tasks 3 + 4 (climb mask + drop anchors
+// + per-actor caps) so callers pass one struct instead of 5+ positional
+// args. Defaults preserve the legacy "ground only / no swim / hazard
+// avoidance on / no climb / no drops" behaviour.
+//
+// Typically built from a navigator's NavTraits via the
+// `AnchorNav::BuildNavQueryOptions(actor*)` factory (see
+// soh/Network/Anchor/Common/NavTraits.h).
+struct NavQueryOptions {
+    bool     eligibleForSwimming = false;
+    bool     avoidHazardNodes    = true;
+    uint16_t climbSurfaceMask    = 0;
+    bool     useDropAnchors      = false;
+    float    maxDropDistance     = 0.0f;
+};
+
 // Returns the index of the node closest to `targetPos` that's reachable
 // from `fromIdx` via graph edges, with hazard-aware filtering.
 //
@@ -286,11 +303,7 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos);
 int FindBestReachableSubgoalNode(const RoomNavData* data,
                                   int fromIdx,
                                   const Vec3f& targetPos,
-                                  bool eligibleForSwimming = false,
-                                  bool avoidHazardNodes    = true,
-                                  uint16_t climbSurfaceMask = 0,
-                                  bool useDropAnchors      = false,
-                                  float maxDropDistance    = 0.0f);
+                                  const NavQueryOptions& opts = {});
 
 // Cornered-in-hazard fallback. Returns the nearest non-hazard walkable
 // node reachable from `fromIdx`, ignoring target direction — exit is the
@@ -305,10 +318,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 // traversed during the exit search.
 int FindNearestNonHazardExit(const RoomNavData* data,
                               int fromIdx,
-                              bool eligibleForSwimming = false,
-                              uint16_t climbSurfaceMask = 0,
-                              bool useDropAnchors      = false,
-                              float maxDropDistance    = 0.0f);
+                              const NavQueryOptions& opts = {});
 
 // Path-returning sibling of FindBestReachableSubgoalNode. Same hazard-aware
 // BFS, but records predecessor pointers and reconstructs the full chain of
@@ -335,13 +345,9 @@ int FindNearestNonHazardExit(const RoomNavData* data,
 bool FindBestReachableSubgoalPath(const RoomNavData* data,
                                    int fromIdx,
                                    const Vec3f& targetPos,
-                                   bool eligibleForSwimming,
-                                   bool avoidHazardNodes,
+                                   const NavQueryOptions& opts,
                                    std::vector<Vec3f>& out,
-                                   std::vector<uint16_t>* outFlags = nullptr,
-                                   uint16_t climbSurfaceMask = 0,
-                                   bool useDropAnchors      = false,
-                                   float maxDropDistance    = 0.0f);
+                                   std::vector<uint16_t>* outFlags = nullptr);
 
 // True when both gEnhancements.RoomNavData.Enabled is on AND the system
 // has been initialized. Used as the master gate by all Phase 1+2 features.

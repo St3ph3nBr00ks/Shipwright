@@ -338,11 +338,12 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
 int FindBestReachableSubgoalNode(const RoomNavData* data,
                                   int fromIdx,
                                   const Vec3f& targetPos,
-                                  bool eligibleForSwimming,
-                                  bool avoidHazardNodes,
-                                  uint16_t climbSurfaceMask,
-                                  bool useDropAnchors,
-                                  float maxDropDistance) {
+                                  const NavQueryOptions& opts) {
+    const bool     eligibleForSwimming = opts.eligibleForSwimming;
+    const bool     avoidHazardNodes    = opts.avoidHazardNodes;
+    const uint16_t climbSurfaceMask    = opts.climbSurfaceMask;
+    const bool     useDropAnchors      = opts.useDropAnchors;
+    const float    maxDropDistance     = opts.maxDropDistance;
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) {
         return -1;
     }
@@ -463,18 +464,18 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
     // neighbour — the caller's MovementClear gate filters out trivial
     // self-pointing returns.
     if (avoidHazardNodes) {
-        return FindNearestNonHazardExit(data, fromIdx, eligibleForSwimming,
-                                         climbSurfaceMask, useDropAnchors, maxDropDistance);
+        return FindNearestNonHazardExit(data, fromIdx, opts);
     }
     return -1;
 }
 
 int FindNearestNonHazardExit(const RoomNavData* data,
                               int fromIdx,
-                              bool eligibleForSwimming,
-                              uint16_t climbSurfaceMask,
-                              bool useDropAnchors,
-                              float maxDropDistance) {
+                              const NavQueryOptions& opts) {
+    const bool     eligibleForSwimming = opts.eligibleForSwimming;
+    const uint16_t climbSurfaceMask    = opts.climbSurfaceMask;
+    const bool     useDropAnchors      = opts.useDropAnchors;
+    const float    maxDropDistance     = opts.maxDropDistance;
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) {
         return -1;
     }
@@ -536,13 +537,14 @@ int FindNearestNonHazardExit(const RoomNavData* data,
 bool FindBestReachableSubgoalPath(const RoomNavData* data,
                                    int fromIdx,
                                    const Vec3f& targetPos,
-                                   bool eligibleForSwimming,
-                                   bool avoidHazardNodes,
+                                   const NavQueryOptions& opts,
                                    std::vector<Vec3f>& out,
-                                   std::vector<uint16_t>* outFlags,
-                                   uint16_t climbSurfaceMask,
-                                   bool useDropAnchors,
-                                   float maxDropDistance) {
+                                   std::vector<uint16_t>* outFlags) {
+    const bool     eligibleForSwimming = opts.eligibleForSwimming;
+    const bool     avoidHazardNodes    = opts.avoidHazardNodes;
+    const uint16_t climbSurfaceMask    = opts.climbSurfaceMask;
+    const bool     useDropAnchors      = opts.useDropAnchors;
+    const float    maxDropDistance     = opts.maxDropDistance;
     out.clear();
     if (outFlags) outFlags->clear();
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;

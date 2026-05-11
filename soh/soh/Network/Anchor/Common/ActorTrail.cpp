@@ -356,15 +356,10 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
             if (navData != nullptr) {
                 int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navPos);
                 if (fromIdx >= 0) {
-                    const uint16_t climbMaskSubgoal = ResolveDynamicClimbMask(
-                        navigator->id, traits.climbSurfaceMask);
+                    const ::AnchorNavRoom::NavQueryOptions opts =
+                        BuildNavQueryOptions(navigator);
                     int bestIdx = ::AnchorNavRoom::FindBestReachableSubgoalNode(
-                        navData, fromIdx, targetPos,
-                        traits.eligibleForSwimming,
-                        traits.avoidHazardNodes,
-                        climbMaskSubgoal,
-                        traits.useDropAnchors,
-                        (float)traits.maxDropDistance);
+                        navData, fromIdx, targetPos, opts);
                     if (bestIdx >= 0 && (size_t)bestIdx < navData->nodes.size()) {
                         const Vec3f& nodePos = navData->nodes[(size_t)bestIdx].pos;
                         // MovementClear gate so the chosen node is reachable
@@ -505,23 +500,17 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         if (navData == nullptr) return false;
         int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navigator->world.pos);
         if (fromIdx < 0) return false;
-        // Stage 5: resolve the per-call climb mask (overlays session-
-        // dependent bits like ClimbAnywhere on top of the static base
-        // from NavTraits). Stash on NavPath so the consumer can re-AND
-        // at engage time without re-reading the CVar.
-        const uint16_t climbMask = ResolveDynamicClimbMask(
-            navigator->id, traits.climbSurfaceMask);
-        out.computedClimbMask = climbMask;
+        // Stage 5: build per-call options including the dynamic climb-mask
+        // resolution (overlays session-dependent bits like ClimbAnywhere on
+        // top of the static base from NavTraits). Stash on NavPath so the
+        // consumer can re-AND at engage time without re-reading the CVar.
+        const ::AnchorNavRoom::NavQueryOptions opts = BuildNavQueryOptions(navigator);
+        out.computedClimbMask = opts.climbSurfaceMask;
         std::vector<Vec3f> graphPath;
         std::vector<uint16_t> graphPathFlags;  // Stage 4: parallel array
         bool ok = ::AnchorNavRoom::FindBestReachableSubgoalPath(
-            navData, fromIdx, targetPos,
-            traits.eligibleForSwimming,
-            traits.avoidHazardNodes,
-            graphPath, &graphPathFlags,
-            climbMask,
-            traits.useDropAnchors,
-            (float)traits.maxDropDistance);
+            navData, fromIdx, targetPos, opts,
+            graphPath, &graphPathFlags);
         if (!ok || graphPath.empty()) return false;
         out.waypoints     = std::move(graphPath);
         out.waypointFlags = std::move(graphPathFlags);

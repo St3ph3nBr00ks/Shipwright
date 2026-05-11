@@ -246,6 +246,18 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
     return kDefaultTraits;
 }
 
+::AnchorNavRoom::NavQueryOptions BuildNavQueryOptions(const Actor* navigator) {
+    ::AnchorNavRoom::NavQueryOptions opts{};
+    if (navigator == nullptr) return opts;
+    const NavTraits& traits = GetTraitsForActor(navigator->id);
+    opts.eligibleForSwimming = traits.eligibleForSwimming;
+    opts.avoidHazardNodes    = traits.avoidHazardNodes;
+    opts.climbSurfaceMask    = ResolveDynamicClimbMask(navigator->id, traits.climbSurfaceMask);
+    opts.useDropAnchors      = traits.useDropAnchors;
+    opts.maxDropDistance     = (float)traits.maxDropDistance;
+    return opts;
+}
+
 uint16_t ResolveDynamicClimbMask(s16 actorId, uint16_t baseMask) {
     // Follower inherits Link's runtime cheat — when ClimbEverything is
     // on, adult / child Link can climb any vertical wall, so the

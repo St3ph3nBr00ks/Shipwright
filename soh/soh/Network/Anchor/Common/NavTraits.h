@@ -29,6 +29,8 @@
 
 #include <cstdint>
 
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // AnchorNavRoom::NavQueryOptions
+
 extern "C" {
 #include "z64.h"
 }
@@ -131,6 +133,15 @@ const NavTraits& GetTraitsForActor(s16 actorId);
 // the stale mask until the path is exhausted, or recomputes on its own
 // schedule. (Plan open question Q8.)
 uint16_t ResolveDynamicClimbMask(s16 actorId, uint16_t baseMask);
+
+// Build a BFS NavQueryOptions from the navigator's traits row, including
+// the dynamic climb-mask resolution (ClimbEverything cheat etc.). Returns
+// defaulted options when `navigator` is null. Callers that need
+// non-defaulted climb mask in a sub-component (e.g. a non-pathing BFS
+// helper) can overwrite the field afterwards; ComputePathTo additionally
+// stashes the resolved mask onto NavPath::computedClimbMask so consumers
+// can re-AND at engage time.
+::AnchorNavRoom::NavQueryOptions BuildNavQueryOptions(const Actor* navigator);
 
 // Master gate for the entire navigation system. Every per-feature query
 // must check this AND its own CVar. Default off; ships and stays off

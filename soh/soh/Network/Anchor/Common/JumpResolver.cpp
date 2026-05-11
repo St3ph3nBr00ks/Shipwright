@@ -237,15 +237,16 @@ JumpResolutionResult ResolveLedgeAhead(const Actor* navigator,
         int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navPos);
         if (fromIdx >= 0) {
             std::vector<Vec3f> graphPath;
+            // JumpResolver's PathAround fallback runs as a peer of
+            // ComputePathTo, not from inside it — re-derive options
+            // here. Climb mask intentionally left at the resolver
+            // default (0) so PathAround returns ground-only routes
+            // around the gap; vertical traversal is JumpAcross's
+            // responsibility.
+            ::AnchorNavRoom::NavQueryOptions opts = BuildNavQueryOptions(navigator);
+            opts.climbSurfaceMask = 0;
             bool ok = ::AnchorNavRoom::FindBestReachableSubgoalPath(
-                navData, fromIdx, targetPos,
-                traits.eligibleForSwimming,
-                traits.avoidHazardNodes,
-                graphPath,
-                /*outFlags=*/nullptr,
-                /*climbSurfaceMask=*/0,
-                traits.useDropAnchors,
-                (float)traits.maxDropDistance);
+                navData, fromIdx, targetPos, opts, graphPath);
             if (ok && !graphPath.empty()) {
                 result.kind = JumpResolution::PathAround;
                 result.pathAround = std::move(graphPath);
