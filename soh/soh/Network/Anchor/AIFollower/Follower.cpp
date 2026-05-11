@@ -1602,6 +1602,17 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     followerAIState               = FollowerAIState::CLIMBING;
                     followerStateFrames           = 0;
 
+                    // Force facing toward anchor base at engagement —
+                    // OoT's ladder grab needs Link facing the wall.
+                    // (Same fix as Stage 6 trigger; see comment there.)
+                    {
+                        f32 fdx = anchorBase.x - p2Pos.x;
+                        f32 fdz = anchorBase.z - p2Pos.z;
+                        if (fdx * fdx + fdz * fdz > 1.0f) {
+                            player->actor.shape.rot.y = Math_Atan2S(fdz, fdx);
+                        }
+                    }
+
                     // Edge-prediction setup — find which anchor the
                     // top-target belongs to. Same logic as the Stage 6
                     // engagement in HandleStateFollow.
@@ -2970,8 +2981,33 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
 
         constexpr f32 kAutonomousClimbReachY = 16.0f;       // within 16u Y of top → done
         constexpr int kAutonomousClimbMaxFrames = 600;      // ~10s safety
+        // Bug fix (user 2026-05-12 log 27): the substrate refresh
+        // sets followerClimbTopTarget = currentSubgoal each frame.
+        // For a follower at the BASE of a climb, the bottom-row cell
+        // is at Y≈0 (same as the follower); reachedTop fires
+        // immediately on the very first frame after Stage 6 engages,
+        // before the ladder grab has time to attach. Result: tight
+        // CLIMBING→IDLE→FOLLOW→CLIMBING loop where the follower
+        // never actually climbs.
+        //
+        // Use the active anchor's REAL topPos.y instead of the
+        // refreshed followerClimbTopTarget.y. Falls back to the legacy
+        // followerClimbTopTarget.y when no active anchor (legacy
+        // snap-and-climb path; followerClimbTopTarget set to
+        // anchor.topPos at engagement, never refreshed mid-climb).
+        f32 reachTopY = followerClimbTopTarget.y;
+        if (followerClimbAnchorIdx != UINT16_MAX) {
+            const ::AnchorNavRoom::RoomNavData* navData =
+                ::AnchorNavRoom::GetForRoom(
+                    gPlayState->sceneNum,
+                    (int8_t)gPlayState->roomCtx.curRoom.num);
+            if (navData != nullptr &&
+                followerClimbAnchorIdx < navData->climbAnchors.size()) {
+                reachTopY = navData->climbAnchors[followerClimbAnchorIdx].topPos.y;
+            }
+        }
         bool reachedTop =
-            (player->actor.world.pos.y >= followerClimbTopTarget.y - kAutonomousClimbReachY);
+            (player->actor.world.pos.y >= reachTopY - kAutonomousClimbReachY);
         bool timedOut = (followerAutonomousClimbFrames >= kAutonomousClimbMaxFrames);
         // While leader is still climbing, suppress the reachedTop exit
         // — follower should stay on the ladder alongside the leader
@@ -3684,6 +3720,22 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
                     followerAutonomousClimbFrames = 0;
                     followerAIState               = FollowerAIState::CLIMBING;
                     followerStateFrames           = 0;
+
+                    // Force facing toward the climb subgoal at engagement.
+                    // Pre-fix the follower's shape.rot.y was whatever
+                    // FOLLOW set it to (often pointing AT the leader,
+                    // not the wall) — OoT's ladder collision needs
+                    // Link facing the wall to grab. Combined with the
+                    // reachedTop bug above, the follower never got a
+                    // properly-oriented frame and OoT never attached.
+                    // (User 2026-05-12 log 27 diagnosis.)
+                    {
+                        f32 fdx = followTarget.x - player->actor.world.pos.x;
+                        f32 fdz = followTarget.z - player->actor.world.pos.z;
+                        if (fdx * fdx + fdz * fdz > 1.0f) {
+                            player->actor.shape.rot.y = Math_Atan2S(fdz, fdx);
+                        }
+                    }
 
                     // Edge-prediction setup (post-Stage-8 2026-05-12):
                     // identify which ClimbAnchor the subgoal belongs to
