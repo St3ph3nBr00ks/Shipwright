@@ -2875,7 +2875,8 @@ static void DetectJumpAnchors(
     // side (= ±2 in each axis) covers 150u at 30u resolution.
     constexpr int   kCellRadius           = 3;
 
-    size_t added = 0, merged = 0, rejectedArc = 0, rejectedNoGap = 0;
+    size_t added = 0, merged = 0, rejectedArc = 0, rejectedNoGap = 0,
+           rejectedWall = 0;
 
     // pathOverGap: returns true when the segment A → B passes over an
     // actual air gap — at least one sampled XZ point along the segment
@@ -2950,6 +2951,18 @@ static void DetectJumpAnchors(
                     // upward side per pair.
                     if (dyAB > kJumpUpMax) continue;
 
+                    // Wall-blockage check (2026-05-12 fix for false
+                    // positives at walkable-mesh edges against walls):
+                    // MovementClear at pelvis height fails when a wall
+                    // intervenes. For a true air gap the line passes
+                    // through clear air, so this filter ONLY catches
+                    // wall-protrusion cases — flat-floor walkable
+                    // pairs still need pathOverGap below.
+                    if (!MovementClear(a.pos, b.pos, play)) {
+                        rejectedWall++;
+                        continue;
+                    }
+
                     // Geometric gap check: is there actually an air
                     // gap along the segment? Skip pairs where the
                     // line is over continuous floor (walking gets you
@@ -3002,10 +3015,12 @@ static void DetectJumpAnchors(
         }
     }
 
-    if (added > 0 || merged > 0 || rejectedArc > 0 || rejectedNoGap > 0) {
+    if (added > 0 || merged > 0 || rejectedArc > 0 ||
+        rejectedNoGap > 0 || rejectedWall > 0) {
         SPDLOG_INFO("[RoomNav] Jump-anchor detection: {} anchors added, "
-                    "{} duplicates merged, {} arc-blocked, {} no-gap (walkable)",
-                    added, merged, rejectedArc, rejectedNoGap);
+                    "{} duplicates merged, {} arc-blocked, {} no-gap (walkable), "
+                    "{} wall-blocked",
+                    added, merged, rejectedArc, rejectedNoGap, rejectedWall);
     }
 }
 
