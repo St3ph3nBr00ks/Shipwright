@@ -128,6 +128,11 @@ static NavTraits MakeFollowerTraits() {
     t.climbSurfaceMask = ::AnchorNavRoom::NODE_CLIMB_LADDER
                        | ::AnchorNavRoom::NODE_CLIMB_VINE
                        | ::AnchorNavRoom::NODE_CLIMB_DESIGNATED_WALL;
+    // Drop anchors: follower can route through descents the same way
+    // the leader does. 200u matches the detector's kDropMaxDeltaY —
+    // any anchor the scanner registered is in-range for child Link.
+    t.useDropAnchors          = true;
+    t.maxDropDistance         = 200;
     return t;
 }
 

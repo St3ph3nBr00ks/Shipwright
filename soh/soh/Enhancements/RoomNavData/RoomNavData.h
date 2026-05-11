@@ -63,6 +63,14 @@ enum NodeFlags : uint16_t {
     NODE_CLIMB_ANY             = NODE_CLIMB_LADDER | NODE_CLIMB_VINE
                                | NODE_CLIMB_DESIGNATED_WALL | NODE_CLIMB_GENERIC_WALL,
     NODE_CLIMB_BOUNDARY        = 0x4000, // bottom or top row of a climb grid; bridges to/from floor
+
+    // Synthetic flag — NOT set on any NavNode::flags at scan time.
+    // FindBestReachableSubgoalPath ORs this bit into the outFlags entry
+    // for a waypoint that was reached via a DropAnchor highPos→landingPos
+    // edge. Tells the consumer "your previous step was an intentional
+    // drop; suppress edge-avoidance for the high→low transition". Task 3
+    // (consumer-side recognition) + Task 4 (edge-avoidance predicate).
+    NODE_DROP_FROM_ABOVE       = 0x8000,
 };
 
 // ---------------------------------------------------------------------------
@@ -267,12 +275,22 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos);
 // type bits the consumer is allowed to traverse via climb-surface
 // nodes. 0 = no climb capability (all climb-surface nodes rejected
 // during expansion — preserves pre-v7 behaviour).
+//
+// `useDropAnchors` + `maxDropDistance` (Task 3, branch
+// feature/room-nav-data): when true, BFS includes DIRECTED
+// highPos→landingPos edges from the room's DropAnchor table so the
+// navigator can plan descent routes. `maxDropDistance` caps the
+// usable dy per anchor (passed via traits.maxDropDistance). 0.0f
+// means "no cap"; the scanner's kDropMaxDeltaY (200u) is the
+// effective ceiling regardless.
 int FindBestReachableSubgoalNode(const RoomNavData* data,
                                   int fromIdx,
                                   const Vec3f& targetPos,
                                   bool eligibleForSwimming = false,
                                   bool avoidHazardNodes    = true,
-                                  uint16_t climbSurfaceMask = 0);
+                                  uint16_t climbSurfaceMask = 0,
+                                  bool useDropAnchors      = false,
+                                  float maxDropDistance    = 0.0f);
 
 // Cornered-in-hazard fallback. Returns the nearest non-hazard walkable
 // node reachable from `fromIdx`, ignoring target direction — exit is the
@@ -288,7 +306,9 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
 int FindNearestNonHazardExit(const RoomNavData* data,
                               int fromIdx,
                               bool eligibleForSwimming = false,
-                              uint16_t climbSurfaceMask = 0);
+                              uint16_t climbSurfaceMask = 0,
+                              bool useDropAnchors      = false,
+                              float maxDropDistance    = 0.0f);
 
 // Path-returning sibling of FindBestReachableSubgoalNode. Same hazard-aware
 // BFS, but records predecessor pointers and reconstructs the full chain of
@@ -319,7 +339,9 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
                                    bool avoidHazardNodes,
                                    std::vector<Vec3f>& out,
                                    std::vector<uint16_t>* outFlags = nullptr,
-                                   uint16_t climbSurfaceMask = 0);
+                                   uint16_t climbSurfaceMask = 0,
+                                   bool useDropAnchors      = false,
+                                   float maxDropDistance    = 0.0f);
 
 // True when both gEnhancements.RoomNavData.Enabled is on AND the system
 // has been initialized. Used as the master gate by all Phase 1+2 features.

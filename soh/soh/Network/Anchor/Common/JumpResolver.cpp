@@ -241,7 +241,11 @@ JumpResolutionResult ResolveLedgeAhead(const Actor* navigator,
                 navData, fromIdx, targetPos,
                 traits.eligibleForSwimming,
                 traits.avoidHazardNodes,
-                graphPath);
+                graphPath,
+                /*outFlags=*/nullptr,
+                /*climbSurfaceMask=*/0,
+                traits.useDropAnchors,
+                (float)traits.maxDropDistance);
             if (ok && !graphPath.empty()) {
                 result.kind = JumpResolution::PathAround;
                 result.pathAround = std::move(graphPath);

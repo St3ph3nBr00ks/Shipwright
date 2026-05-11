@@ -356,10 +356,15 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
             if (navData != nullptr) {
                 int fromIdx = ::AnchorNavRoom::FindNearestNode(navData, navPos);
                 if (fromIdx >= 0) {
+                    const uint16_t climbMaskSubgoal = ResolveDynamicClimbMask(
+                        navigator->id, traits.climbSurfaceMask);
                     int bestIdx = ::AnchorNavRoom::FindBestReachableSubgoalNode(
                         navData, fromIdx, targetPos,
                         traits.eligibleForSwimming,
-                        traits.avoidHazardNodes);
+                        traits.avoidHazardNodes,
+                        climbMaskSubgoal,
+                        traits.useDropAnchors,
+                        (float)traits.maxDropDistance);
                     if (bestIdx >= 0 && (size_t)bestIdx < navData->nodes.size()) {
                         const Vec3f& nodePos = navData->nodes[(size_t)bestIdx].pos;
                         // MovementClear gate so the chosen node is reachable
@@ -514,7 +519,9 @@ bool ActorTrail::ComputePathTo(TrailKey key,
             traits.eligibleForSwimming,
             traits.avoidHazardNodes,
             graphPath, &graphPathFlags,
-            climbMask);
+            climbMask,
+            traits.useDropAnchors,
+            (float)traits.maxDropDistance);
         if (!ok || graphPath.empty()) return false;
         out.waypoints     = std::move(graphPath);
         out.waypointFlags = std::move(graphPathFlags);

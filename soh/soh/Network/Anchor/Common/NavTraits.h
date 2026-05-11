@@ -79,6 +79,21 @@ struct NavTraits {
     // ground enemies don't climb walls).
     uint16_t climbSurfaceMask        = 0;
 
+    // Drop-anchor consumer flag. When true, this actor's BFS adjacency
+    // list gains directed highPos→landingPos edges from the room's
+    // DropAnchor table (RoomNavData.cpp DetectDropAnchors). The
+    // navigator can plan descent routes — e.g. follow a leader who
+    // jumped off a cliff via the same drop anchor the leader used.
+    // Anchors with dy > `maxDropDistance` are skipped (per-actor cap
+    // for fragile / heavy navigators).
+    //
+    // Default false — opt-in per actor. Bosses leave this off
+    // (kBossDefaults). Follower (MakeFollowerTraits) turns it on.
+    // Drop edges are DIRECTED: high→low only; ascent requires a
+    // separate climb or ground path.
+    bool useDropAnchors              = false;
+    uint16_t maxDropDistance         = 200;  // max safe Y delta (units); matches kDropMaxDeltaY default
+
     // Emit-side flag — other actors observe this actor through the trail.
     bool leavesTrail                 = true;
 
