@@ -2809,17 +2809,38 @@ static void DetectDropAnchors(
 // ---------------------------------------------------------------------------
 // JumpAnchor detection (Plans/jump_anchor_plan.md).
 //
-// Identifies pairs of walkable nodes (A, B) where:
-//   - A and B are graph-disconnected via existing floor edges (≥2-hop apart)
-//   - XZ distance in [kJumpMinXZ, kJumpMaxXZ]
-//   - Y delta in [-kJumpDownMax, +kJumpUpMax] (B relative to A)
-//   - Parabolic arc midpoint clears collision (A → apex AND apex → B both
-//     line-clear). Apex is at midpoint XZ, max(A.y,B.y) + kArcApexLift.
+// Identifies pairs of walkable nodes (A, B) separated by a true air gap
+// — meaning the straight horizontal path from A to B does NOT have
+// walkable floor under it at the interpolated altitude. Two categories
+// qualify:
+//   - Same-altitude gap: A.y ≈ B.y, no floor between → jump across.
+//   - Upward gap: B.y > A.y by up to kJumpUpMax, no floor between →
+//     jump up to higher platform.
 //
-// Distinction from DropAnchor: drops require the STRAIGHT line A→B clear
-// (passive fall). Jumps may have a blocker along the straight line that
-// the apex of the arc clears (e.g. jumping over a low pillar between
-// platforms). Bidirectional vs DropAnchor's strictly-directional shape.
+// Distinction from DropAnchor: drops are STRICTLY DOWNWARD with a clear
+// straight line (passive fall, no input needed). Drops cover the
+// "high platform → lower floor" case. JumpAnchor explicitly skips
+// significantly-downward pairs (dy < -kJumpDownExcludeFloor) so we
+// don't emit a redundant bidirectional jump edge over what DropAnchor
+// already covers with a directional drop edge.
+//
+// Pair-rejection sequence (cheapest first):
+//   1. XZ in [kJumpMinXZ, kJumpMaxXZ]
+//   2. dy in [-kJumpDownExcludeFloor, +kJumpUpMax]
+//   3. pathOverGap(A, B) — sample cells along the segment; if every
+//      sample has a walkable node at the expected interpolated Y
+//      ±kFloorTolerance, the path is already walkable (no gap to
+//      jump). Reject.
+//   4. Arc clearance — A → apex AND apex → B both line-clear.
+//
+// Bug history (2026-05-12, log 38): the original detector used a
+// 2-hop graph BFS via floor edges as the "already walkable" filter.
+// With grid resolution 30u and search radius 150u, most flat-floor
+// pairs at the search-radius boundary are 5+ hops apart on the grid
+// — the 2-hop filter let them through, producing the orange-flood-
+// over-flat-ground symptom. The current pathOverGap predicate is the
+// geometrically correct test: "is there continuous floor along this
+// segment?"
 // ---------------------------------------------------------------------------
 
 static void DetectJumpAnchors(
@@ -2829,44 +2850,67 @@ static void DetectJumpAnchors(
 {
     if (CVarGetInteger(CVAR_ROOM_NAV_JUMP_ANCHOR, 0) == 0) return;
 
-    constexpr float kJumpMinXZ       = 18.0f;       // skip within-floor-edge pairs
-    constexpr float kJumpMaxXZ       = 150.0f;
-    constexpr float kJumpMaxXZSq     = kJumpMaxXZ * kJumpMaxXZ;
-    constexpr float kJumpMinXZSq     = kJumpMinXZ * kJumpMinXZ;
-    constexpr float kJumpUpMax       = 80.0f;
-    constexpr float kJumpDownMax     = 200.0f;
-    constexpr float kArcApexLift     = 30.0f;
-    constexpr float kClusterRadiusSq = 30.0f * 30.0f;
+    constexpr float kJumpMinXZ            = 18.0f;       // skip within-floor-edge pairs
+    constexpr float kJumpMaxXZ            = 150.0f;
+    constexpr float kJumpMaxXZSq          = kJumpMaxXZ * kJumpMaxXZ;
+    constexpr float kJumpMinXZSq          = kJumpMinXZ * kJumpMinXZ;
+    constexpr float kJumpUpMax            = 80.0f;
+    // Significantly-downward pairs (B.y < A.y - this) are DropAnchor's
+    // territory — emit nothing on the JumpAnchor side. Small downward
+    // deltas (≤30u, e.g. stepping down between flat-altitude platforms
+    // with a slight slope) stay in JumpAnchor's domain.
+    constexpr float kJumpDownExcludeFloor = 30.0f;
+    constexpr float kArcApexLift          = 30.0f;
+    constexpr float kClusterRadiusSq      = 30.0f * 30.0f;
+    // pathOverGap sample spacing. Slightly smaller than kJumpMinXZ so
+    // even the smallest qualifying gap gets at least one sample inside it.
+    constexpr float kGapSampleSpacing     = 18.0f;
+    // Floor-presence Y tolerance — how far from the segment's expected
+    // interpolated Y a walkable node can be and still count as "floor
+    // along the path". Matches step-up height; covers minor stair-tier
+    // variation on continuous floors.
+    constexpr float kFloorPresenceTolY    = 20.0f;
     // Spatial neighbourhood: kJumpMaxXZ / kGridResolution rounded up, +1
     // slop for cells whose nodes lie near a cell boundary. 5 cells per
     // side (= ±2 in each axis) covers 150u at 30u resolution.
-    constexpr int   kCellRadius      = 3;
+    constexpr int   kCellRadius           = 3;
 
-    size_t added = 0, merged = 0, rejectedArc = 0, rejectedGraph = 0;
+    size_t added = 0, merged = 0, rejectedArc = 0, rejectedNoGap = 0;
 
-    // Cheap 2-hop graph-proximity predicate. If B is within 2 floor-edge
-    // hops of A, the existing graph already serves the pair — emit nothing.
-    // Avoids materialising a full adjacency list (BFS only walks ≤ ~30
-    // neighbours via the localised frontier).
-    auto graphClose = [&](uint16_t aIdx, uint16_t bIdx) -> bool {
-        std::vector<bool> visited(out->nodes.size(), false);
-        visited[aIdx] = true;
-        std::vector<uint16_t> frontier{ aIdx };
-        for (int hop = 0; hop < 2; hop++) {
-            std::vector<uint16_t> next;
-            for (uint16_t cur : frontier) {
-                for (const NavEdge& e : out->edges) {
-                    uint16_t nb = UINT16_MAX;
-                    if (e.fromIdx == cur && !visited[e.toIdx]) nb = e.toIdx;
-                    else if (e.toIdx == cur && !visited[e.fromIdx]) nb = e.fromIdx;
-                    if (nb == UINT16_MAX) continue;
-                    if (nb == bIdx) return true;
-                    visited[nb] = true;
-                    next.push_back(nb);
+    // pathOverGap: returns true when the segment A → B passes over an
+    // actual air gap — at least one sampled XZ point along the segment
+    // has NO walkable node at the expected interpolated Y. Returns
+    // false when continuous floor is present (jump unnecessary).
+    //
+    // This is the geometric replacement for the original 2-hop
+    // graph-proximity filter, which was both wrong (2 hops only
+    // covers ~60u on a 30u grid, but the jump search spans 150u, so
+    // flat-floor pairs slipped through) and slow (frontier BFS per
+    // pair).
+    auto pathOverGap = [&](const Vec3f& a, const Vec3f& b) -> bool {
+        const f32 dxf = b.x - a.x;
+        const f32 dzf = b.z - a.z;
+        const f32 dyf = b.y - a.y;
+        const f32 lenXZ = std::sqrt(dxf*dxf + dzf*dzf);
+        const int samples = std::max(3, (int)(lenXZ / kGapSampleSpacing));
+        for (int s = 1; s < samples; s++) {
+            const f32 t = (f32)s / (f32)samples;
+            const f32 sx = a.x + dxf * t;
+            const f32 sz = a.z + dzf * t;
+            const f32 expectedY = a.y + dyf * t;
+            const CellKey ck = CellKeyForXZ(sx, sz, out->bboxMin);
+            auto it = nodesByCell.find(ck);
+            if (it == nodesByCell.end()) return true;  // empty cell = void
+            bool floorPresent = false;
+            for (uint16_t idx : it->second) {
+                const NavNode& n = out->nodes[idx];
+                if (!(n.flags & NODE_WALKABLE)) continue;
+                if (std::fabs(n.pos.y - expectedY) <= kFloorPresenceTolY) {
+                    floorPresent = true;
+                    break;
                 }
             }
-            frontier = std::move(next);
-            if (frontier.empty()) break;
+            if (!floorPresent) return true;  // cell present but no floor at altitude
         }
         return false;
     };
@@ -2894,21 +2938,25 @@ static void DetectJumpAnchors(
                     if (xzSq > kJumpMaxXZSq) continue;
 
                     const f32 dyAB = b.pos.y - a.pos.y;
-                    // From A's POV: upward jump capped by kJumpUpMax;
-                    // downward by -kJumpDownMax. Bidirectional: also
-                    // verify B's POV doesn't exceed the upward cap from
-                    // B's side (i.e. -dyAB ≤ kJumpUpMax).
-                    if (dyAB > kJumpUpMax || -dyAB > kJumpDownMax) {
-                        // B is too high from A's POV OR too low.
-                        if (-dyAB > kJumpUpMax || dyAB > kJumpDownMax) continue;
-                        // Allowed from B→A direction only (asymmetric Y),
-                        // but the bidirectional edge would still serve
-                        // the navigator at B going to A.
-                    }
+                    // Reject significantly-downward pairs — that's
+                    // DropAnchor's domain (directional, line-clear,
+                    // passive fall). Emitting a bidirectional jump
+                    // over what DropAnchor already serves would
+                    // duplicate the edge with worse cost.
+                    if (dyAB < -kJumpDownExcludeFloor) continue;
+                    // Upward jump cap. Bidirectional edge serves both
+                    // directions equally; only the upward side needs
+                    // a reach cap, and only one direction can be the
+                    // upward side per pair.
+                    if (dyAB > kJumpUpMax) continue;
 
-                    // Graph-proximity reject: already walkable in ≤2 hops.
-                    if (graphClose(i, j)) {
-                        rejectedGraph++;
+                    // Geometric gap check: is there actually an air
+                    // gap along the segment? Skip pairs where the
+                    // line is over continuous floor (walking gets you
+                    // there) or over a lower walkable surface (also
+                    // walkable via stepping down).
+                    if (!pathOverGap(a.pos, b.pos)) {
+                        rejectedNoGap++;
                         continue;
                     }
 
@@ -2954,10 +3002,10 @@ static void DetectJumpAnchors(
         }
     }
 
-    if (added > 0 || merged > 0 || rejectedArc > 0 || rejectedGraph > 0) {
+    if (added > 0 || merged > 0 || rejectedArc > 0 || rejectedNoGap > 0) {
         SPDLOG_INFO("[RoomNav] Jump-anchor detection: {} anchors added, "
-                    "{} duplicates merged, {} arc-blocked, {} already graph-close",
-                    added, merged, rejectedArc, rejectedGraph);
+                    "{} duplicates merged, {} arc-blocked, {} no-gap (walkable)",
+                    added, merged, rejectedArc, rejectedNoGap);
     }
 }
 
