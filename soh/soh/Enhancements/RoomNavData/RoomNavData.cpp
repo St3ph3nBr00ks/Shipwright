@@ -3955,10 +3955,23 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
     // could carry indices that no longer resolve (stale schema, partial
     // write). nodeCount==0 is already handled by the empty-data early-out
     // in the caller.
+    //
+    // Field-test fix 2026-05-11: skip edges that touch a climb-surface
+    // node — Stage 8 v2 renders those separately with wall-aligned
+    // helpers (in-grid: yellow on the wall; boundary: white XZ-band
+    // climb→floor). Pre-fix, this pass also drew climb-grid in-grid
+    // edges as XZ-projected white bands on top of the wall-aligned
+    // yellow ones (visible as a "double set of lines" in DebugDraw).
     sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0xFF, 0xFF, 0xC0));
     const size_t nodeCount = data->nodes.size();
+    const uint16_t firstClimbIdxForEdges = data->firstClimbSurfaceNodeIdx;
     for (const NavEdge& edge : data->edges) {
         if (edge.fromIdx >= nodeCount || edge.toIdx >= nodeCount) continue;
+        if (firstClimbIdxForEdges != UINT16_MAX &&
+            (edge.fromIdx >= firstClimbIdxForEdges ||
+             edge.toIdx   >= firstClimbIdxForEdges)) {
+            continue;  // climb-touching edge — Stage 8 v2 owns this one
+        }
         const Vec3f& posA = data->nodes[edge.fromIdx].pos;
         const Vec3f& posB = data->nodes[edge.toIdx].pos;
         AddGroundLineQuad(sXluDl, sVtxDl, posA, posB);
