@@ -1091,6 +1091,22 @@ class Anchor : public Network {
     void HandleStateBlock(Player* player, const Vec3f& p2Pos);
     void HandleStateReturn(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos);
     void HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* leaderActor);
+    // CLIMBING sub-phases (R1 of follower_nav_refactor). Same-file
+    // helpers, used by HandleStateClimbing as the thin dispatcher.
+    void HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos);
+    void HandleClimbStateLeaderFollowing(Player* player, const Vec3f& leaderPos, Actor* leaderActor);
+    // Compute the dismount yaw from the active climb anchor's topPos
+    // toward the nearest floor node. Falls back to the player's current
+    // shape.rot.y when no active anchor is set or no nearby floor
+    // exists. Encapsulates the geometry the two CLIMBING exit sites
+    // previously duplicated.
+    s16  ComputeFollowerDismountYaw(Player* player) const;
+    // Apply the state-machine cleanup common to every CLIMBING→IDLE
+    // exit. Writes followerClimbDismountYaw + arms the dismount
+    // forward-hold counter, transitions to IDLE, clears the anchor
+    // index + cell set, and (when `clearAutonomous`) zeroes the
+    // autonomous-climb tracking fields too.
+    void ExitFollowerClimbToIdle(s16 dismountYaw, bool clearAutonomous);
     void HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);
     void HandleStateRangedAttack(Player* player, const Vec3f& p2Pos);
     void HandleStateCollectItem(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);

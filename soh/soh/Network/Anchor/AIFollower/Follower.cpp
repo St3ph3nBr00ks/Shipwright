@@ -2941,6 +2941,77 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
         }
     }
 
+    // R1 of follower_nav_refactor: dispatch to one of two phase helpers
+    // based on followerAutonomousClimb. Both phases share the dismount-
+    // yaw + state-cleanup helpers (ComputeFollowerDismountYaw,
+    // ExitFollowerClimbToIdle) so the legacy duplicate `computeDismountYaw`
+    // lambda + 6-line reset boilerplate are gone.
+    if (followerAutonomousClimb) {
+        HandleClimbStateAutonomous(player, leaderPos);
+    } else {
+        HandleClimbStateLeaderFollowing(player, leaderPos, leaderActor);
+    }
+}
+
+s16 Anchor::ComputeFollowerDismountYaw(Player* player) const {
+    // Dismount yaw points from anchor.topPos toward the nearest floor
+    // node — the boundary edge by construction (Stage 3 per-cell
+    // nearest-floor lookup). This IS the platform Link should walk
+    // onto after climbing.
+    //
+    // Why not use leader pos: leader can move during the climb;
+    // by the time follower reaches the top, leader may have walked
+    // to a position that doesn't correspond to the climb-top platform.
+    //
+    // Why not use anchor.planeNormal: for Path A ladder actors,
+    // planeNormal = actor's shape.rot.y direction, which often points
+    // INTO the wall (ladder actors face the wall they lean against),
+    // not away from it. Direction-from-topPos-to-nearest-floor doesn't
+    // have this geometry ambiguity.
+    //
+    // Falls back to shape.rot.y if no nearby floor is found (rare —
+    // implies the climb top is over a void).
+    if (followerClimbAnchorIdx != UINT16_MAX) {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        if (navData != nullptr &&
+            followerClimbAnchorIdx < navData->climbAnchors.size()) {
+            const auto& anc = navData->climbAnchors[followerClimbAnchorIdx];
+            int floorIdx = ::AnchorNavRoom::FindNearestFloorNodeXZRadius(
+                navData, anc.topPos, /*maxRadiusXZ=*/100.0f,
+                /*maxYDelta=*/50.0f);
+            if (floorIdx >= 0 &&
+                (size_t)floorIdx < navData->nodes.size()) {
+                const Vec3f& fp = navData->nodes[(size_t)floorIdx].pos;
+                f32 dx = fp.x - anc.topPos.x;
+                f32 dz = fp.z - anc.topPos.z;
+                if (dx * dx + dz * dz > 1.0f) {
+                    return Math_Atan2S(dz, dx);
+                }
+            }
+        }
+    }
+    return player->actor.shape.rot.y;
+}
+
+void Anchor::ExitFollowerClimbToIdle(s16 dismountYaw, bool clearAutonomous) {
+    followerClimbDismountYaw    = dismountYaw;
+    followerClimbDismountFrames = kClimbDismountHoldFrames;
+    followerAIState     = FollowerAIState::IDLE;
+    followerStateFrames = 0;
+    followerClimbAnchorIdx = UINT16_MAX;
+    followerClimbCellSet.clear();
+    if (clearAutonomous) {
+        followerAutonomousClimb       = false;
+        followerAutonomousClimbFrames = 0;
+    }
+}
+
+void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) {
+    (void)leaderPos;  // unused — autonomous branch tracks leader via clients map
+
     // P3.8 part 2 / P3.6: autonomous climb path. Entered from
     // HandleStateFollow when the follower is at a climb anchor and
     // the path goes up, OR from the leader-climbing trigger when the
@@ -2964,212 +3035,126 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
     //   - Follower Y caught up to leader/anchor Y → reached-top
     //     dismount.
     //   - 600-frame safety timeout (~10s).
-    if (followerAutonomousClimb) {
-        followerAutonomousClimbFrames++;
-        // Refresh target to leader's current pos while leader is
-        // still on the ladder. CLIMBING-aware stick injection in
-        // TickFollowerInput reads followerMoveTarget.y for stick_y
-        // direction (leader above → climb up, leader below → climb
-        // down, within 8u → idle on ladder). When leader stops
-        // climbing, target stays at the last-captured leader position
-        // and reachedTop check finishes the climb.
-        bool leaderStillClimbing = false;
-        {
-            auto it = clients.find(followerLeaderClientId);
-            if (it != clients.end() && it->second.isClimbing) {
-                followerClimbTopTarget = it->second.posRot.pos;
-                leaderStillClimbing = true;
-            }
+    followerAutonomousClimbFrames++;
+    // Refresh target to leader's current pos while leader is
+    // still on the ladder. CLIMBING-aware stick injection in
+    // TickFollowerInput reads followerMoveTarget.y for stick_y
+    // direction (leader above → climb up, leader below → climb
+    // down, within 8u → idle on ladder). When leader stops
+    // climbing, target stays at the last-captured leader position
+    // and reachedTop check finishes the climb.
+    bool leaderStillClimbing = false;
+    {
+        auto it = clients.find(followerLeaderClientId);
+        if (it != clients.end() && it->second.isClimbing) {
+            followerClimbTopTarget = it->second.posRot.pos;
+            leaderStillClimbing = true;
         }
-
-        // Dismount yaw points from anchor.topPos toward the nearest
-        // floor node — the boundary edge by construction (Stage 3
-        // per-cell nearest-floor lookup). This IS the platform Link
-        // should walk onto after climbing.
-        //
-        // Why not use leader pos: leader can move during the climb;
-        // by the time follower reaches the top, leader may have
-        // walked to a position that doesn't correspond to the
-        // climb-top platform direction.
-        //
-        // Why not use anchor.planeNormal: for Path A ladder actors,
-        // planeNormal = actor's shape.rot.y direction, which often
-        // points INTO the wall (ladder actors face the wall they
-        // lean against), not away from it. Direction-from-topPos-to-
-        // nearest-floor doesn't have this geometry ambiguity.
-        //
-        // Falls back to shape.rot.y if no nearby floor is found
-        // (rare — implies the climb top is over a void).
-        auto computeDismountYaw = [&]() -> s16 {
-            if (followerClimbAnchorIdx != UINT16_MAX) {
-                const ::AnchorNavRoom::RoomNavData* navData =
-                    ::AnchorNavRoom::GetForRoom(
-                        gPlayState->sceneNum,
-                        (int8_t)gPlayState->roomCtx.curRoom.num);
-                if (navData != nullptr &&
-                    followerClimbAnchorIdx < navData->climbAnchors.size()) {
-                    const auto& anc = navData->climbAnchors[followerClimbAnchorIdx];
-                    int floorIdx = ::AnchorNavRoom::FindNearestFloorNodeXZRadius(
-                        navData, anc.topPos, /*maxRadiusXZ=*/100.0f,
-                        /*maxYDelta=*/50.0f);
-                    if (floorIdx >= 0 &&
-                        (size_t)floorIdx < navData->nodes.size()) {
-                        const Vec3f& fp = navData->nodes[(size_t)floorIdx].pos;
-                        f32 dx = fp.x - anc.topPos.x;
-                        f32 dz = fp.z - anc.topPos.z;
-                        if (dx * dx + dz * dz > 1.0f) {
-                            return Math_Atan2S(dz, dx);
-                        }
-                    }
-                }
-            }
-            return player->actor.shape.rot.y;
-        };
-
-        // Stage 6: substrate-path-driven target refresh (when leader
-        // is NOT on the ladder — leader-tracking takes priority above
-        // when active). The substrate path may include a sequence of
-        // climb-surface waypoints (one per grid cell); refresh the
-        // climb target to the current subgoal each frame and advance
-        // the path when the follower reaches it. Use 3D proximity for
-        // climb waypoints (XZ-only would advance prematurely on a
-        // vertical climb where the follower is mid-cell).
-        //
-        // When the path advances PAST the climb-surface segment (next
-        // subgoal is a non-climb floor node), exit CLIMBING — the
-        // multi-cell climb is complete; FOLLOW resumes for the floor
-        // portion of the path.
-        if (!leaderStillClimbing &&
-            AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
-            !followerNavPath.Empty()) {
-            const uint16_t sgFlags = followerNavPath.CurrentSubgoalFlags();
-            const uint16_t climbBits = sgFlags & ::AnchorNavRoom::NODE_CLIMB_ANY;
-            if (climbBits != 0) {
-                Vec3f sg = followerNavPath.CurrentSubgoal();
-                followerClimbTopTarget = sg;
-                constexpr f32 kClimbSubgoalReach3D = 24.0f;
-                if (AnchorDist::Dist3DSq(sg, player->actor.world.pos) <
-                    kClimbSubgoalReach3D * kClimbSubgoalReach3D) {
-                    followerNavPath.Advance();
-                }
-            } else {
-                // Path advanced past climb segment — climb done.
-                followerClimbDismountYaw    = computeDismountYaw();
-                followerClimbDismountFrames = kClimbDismountHoldFrames;
-                followerAIState     = FollowerAIState::IDLE;
-                followerStateFrames = 0;
-                followerAutonomousClimb       = false;
-                followerAutonomousClimbFrames = 0;
-                followerClimbAnchorIdx        = UINT16_MAX;
-                followerClimbCellSet.clear();
-                SPDLOG_INFO("[Follower] CLIMBING→IDLE (substrate path exited "
-                            "climb segment; next subgoal is floor)");
-                return;
-            }
-        }
-
-        constexpr f32 kAutonomousClimbReachY = 16.0f;       // within 16u Y of top → done
-        constexpr int kAutonomousClimbMaxFrames = 600;      // ~10s safety
-        // Bug fix (user 2026-05-12 log 27): the substrate refresh
-        // sets followerClimbTopTarget = currentSubgoal each frame.
-        // For a follower at the BASE of a climb, the bottom-row cell
-        // is at Y≈0 (same as the follower); reachedTop fires
-        // immediately on the very first frame after Stage 6 engages,
-        // before the ladder grab has time to attach. Result: tight
-        // CLIMBING→IDLE→FOLLOW→CLIMBING loop where the follower
-        // never actually climbs.
-        //
-        // Use the active anchor's REAL topPos.y instead of the
-        // refreshed followerClimbTopTarget.y. Falls back to the legacy
-        // followerClimbTopTarget.y when no active anchor (legacy
-        // snap-and-climb path; followerClimbTopTarget set to
-        // anchor.topPos at engagement, never refreshed mid-climb).
-        f32 reachTopY = followerClimbTopTarget.y;
-        if (followerClimbAnchorIdx != UINT16_MAX) {
-            const ::AnchorNavRoom::RoomNavData* navData =
-                ::AnchorNavRoom::GetForRoom(
-                    gPlayState->sceneNum,
-                    (int8_t)gPlayState->roomCtx.curRoom.num);
-            if (navData != nullptr &&
-                followerClimbAnchorIdx < navData->climbAnchors.size()) {
-                reachTopY = navData->climbAnchors[followerClimbAnchorIdx].topPos.y;
-            }
-        }
-        bool reachedTop =
-            (player->actor.world.pos.y >= reachTopY - kAutonomousClimbReachY);
-        bool timedOut = (followerAutonomousClimbFrames >= kAutonomousClimbMaxFrames);
-        // While leader is still climbing, suppress the reachedTop exit
-        // — follower should stay on the ladder alongside the leader
-        // (CLIMBING-aware injection naturally idles stick_y when at
-        // leader's Y; no exit needed). Pre-fix without this gate:
-        // reachedTop fired when follower caught up to leader's Y,
-        // exited CLIMBING, dismount-forward-hold counter armed,
-        // follower walked forward off the ladder rim while leader was
-        // still mid-climb — exactly the user-reported bug ("follower
-        // climbs to the top and continues running in a straight line").
-        bool exitNow = (!leaderStillClimbing && reachedTop) || timedOut;
-        if (exitNow) {
-            followerClimbDismountYaw    = computeDismountYaw();
-            followerClimbDismountFrames = kClimbDismountHoldFrames;
-            followerAIState     = FollowerAIState::IDLE;
-            followerStateFrames = 0;
-            followerAutonomousClimb       = false;
-            followerAutonomousClimbFrames = 0;
-            followerClimbAnchorIdx        = UINT16_MAX;
-            followerClimbCellSet.clear();
-            SPDLOG_INFO("[Follower] CLIMBING→IDLE (autonomous {}); "
-                        "follower y={:.0f} target y={:.0f}",
-                        timedOut ? "TIMEOUT" : "reached top, leader stopped",
-                        player->actor.world.pos.y,
-                        followerClimbTopTarget.y);
-            return;
-        }
-        // followerMoveTarget = climb target (leader pos when tracking,
-        // or last-captured pos when leader just stopped).
-        // TickFollowerInput's CLIMBING-aware injection reads this for
-        // stick_y direction and for walk-to-ladder approach when not
-        // yet on the climb collider.
-        followerMoveTarget = followerClimbTopTarget;
-        return;
     }
 
+    // Stage 6: substrate-path-driven target refresh (when leader
+    // is NOT on the ladder — leader-tracking takes priority above
+    // when active). The substrate path may include a sequence of
+    // climb-surface waypoints (one per grid cell); refresh the
+    // climb target to the current subgoal each frame and advance
+    // the path when the follower reaches it. Use 3D proximity for
+    // climb waypoints (XZ-only would advance prematurely on a
+    // vertical climb where the follower is mid-cell).
+    //
+    // When the path advances PAST the climb-surface segment (next
+    // subgoal is a non-climb floor node), exit CLIMBING — the
+    // multi-cell climb is complete; FOLLOW resumes for the floor
+    // portion of the path.
+    if (!leaderStillClimbing &&
+        AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
+        !followerNavPath.Empty()) {
+        const uint16_t sgFlags = followerNavPath.CurrentSubgoalFlags();
+        const uint16_t climbBits = sgFlags & ::AnchorNavRoom::NODE_CLIMB_ANY;
+        if (climbBits != 0) {
+            Vec3f sg = followerNavPath.CurrentSubgoal();
+            followerClimbTopTarget = sg;
+            constexpr f32 kClimbSubgoalReach3D = 24.0f;
+            if (AnchorDist::Dist3DSq(sg, player->actor.world.pos) <
+                kClimbSubgoalReach3D * kClimbSubgoalReach3D) {
+                followerNavPath.Advance();
+            }
+        } else {
+            // Path advanced past climb segment — climb done.
+            ExitFollowerClimbToIdle(ComputeFollowerDismountYaw(player),
+                                    /*clearAutonomous=*/true);
+            SPDLOG_INFO("[Follower] CLIMBING→IDLE (substrate path exited "
+                        "climb segment; next subgoal is floor)");
+            return;
+        }
+    }
+
+    constexpr f32 kAutonomousClimbReachY = 16.0f;       // within 16u Y of top → done
+    constexpr int kAutonomousClimbMaxFrames = 600;      // ~10s safety
+    // Bug fix (user 2026-05-12 log 27): the substrate refresh
+    // sets followerClimbTopTarget = currentSubgoal each frame.
+    // For a follower at the BASE of a climb, the bottom-row cell
+    // is at Y≈0 (same as the follower); reachedTop fires
+    // immediately on the very first frame after Stage 6 engages,
+    // before the ladder grab has time to attach. Result: tight
+    // CLIMBING→IDLE→FOLLOW→CLIMBING loop where the follower
+    // never actually climbs.
+    //
+    // Use the active anchor's REAL topPos.y instead of the
+    // refreshed followerClimbTopTarget.y. Falls back to the legacy
+    // followerClimbTopTarget.y when no active anchor (legacy
+    // snap-and-climb path; followerClimbTopTarget set to
+    // anchor.topPos at engagement, never refreshed mid-climb).
+    f32 reachTopY = followerClimbTopTarget.y;
+    if (followerClimbAnchorIdx != UINT16_MAX) {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        if (navData != nullptr &&
+            followerClimbAnchorIdx < navData->climbAnchors.size()) {
+            reachTopY = navData->climbAnchors[followerClimbAnchorIdx].topPos.y;
+        }
+    }
+    bool reachedTop =
+        (player->actor.world.pos.y >= reachTopY - kAutonomousClimbReachY);
+    bool timedOut = (followerAutonomousClimbFrames >= kAutonomousClimbMaxFrames);
+    // While leader is still climbing, suppress the reachedTop exit
+    // — follower should stay on the ladder alongside the leader
+    // (CLIMBING-aware injection naturally idles stick_y when at
+    // leader's Y; no exit needed). Pre-fix without this gate:
+    // reachedTop fired when follower caught up to leader's Y,
+    // exited CLIMBING, dismount-forward-hold counter armed,
+    // follower walked forward off the ladder rim while leader was
+    // still mid-climb — exactly the user-reported bug ("follower
+    // climbs to the top and continues running in a straight line").
+    bool exitNow = (!leaderStillClimbing && reachedTop) || timedOut;
+    if (exitNow) {
+        ExitFollowerClimbToIdle(ComputeFollowerDismountYaw(player),
+                                /*clearAutonomous=*/true);
+        SPDLOG_INFO("[Follower] CLIMBING→IDLE (autonomous {}); "
+                    "follower y={:.0f} target y={:.0f}",
+                    timedOut ? "TIMEOUT" : "reached top, leader stopped",
+                    player->actor.world.pos.y,
+                    followerClimbTopTarget.y);
+        return;
+    }
+    // followerMoveTarget = climb target (leader pos when tracking,
+    // or last-captured pos when leader just stopped).
+    // TickFollowerInput's CLIMBING-aware injection reads this for
+    // stick_y direction and for walk-to-ladder approach when not
+    // yet on the climb collider.
+    followerMoveTarget = followerClimbTopTarget;
+}
+
+void Anchor::HandleClimbStateLeaderFollowing(Player* player, const Vec3f& leaderPos, Actor* leaderActor) {
     auto it = clients.find(followerLeaderClientId);
     if (it == clients.end() || !it->second.isClimbing) {
         // Dismount yaw: direction from anchor.topPos toward the
         // nearest floor node (the platform Link should walk onto).
-        // See computeDismountYaw lambda in the autonomous branch above
-        // for rationale (leader pos unreliable; planeNormal ambiguous
-        // for ladder actors). Logic duplicated because the lambda is
-        // scoped to that branch.
-        s16 dismountYaw = player->actor.shape.rot.y;
-        if (followerClimbAnchorIdx != UINT16_MAX) {
-            const ::AnchorNavRoom::RoomNavData* navData =
-                ::AnchorNavRoom::GetForRoom(
-                    gPlayState->sceneNum,
-                    (int8_t)gPlayState->roomCtx.curRoom.num);
-            if (navData != nullptr &&
-                followerClimbAnchorIdx < navData->climbAnchors.size()) {
-                const auto& anc = navData->climbAnchors[followerClimbAnchorIdx];
-                int floorIdx = ::AnchorNavRoom::FindNearestFloorNodeXZRadius(
-                    navData, anc.topPos, /*maxRadiusXZ=*/100.0f,
-                    /*maxYDelta=*/50.0f);
-                if (floorIdx >= 0 &&
-                    (size_t)floorIdx < navData->nodes.size()) {
-                    const Vec3f& fp = navData->nodes[(size_t)floorIdx].pos;
-                    f32 dx = fp.x - anc.topPos.x;
-                    f32 dz = fp.z - anc.topPos.z;
-                    if (dx * dx + dz * dz > 1.0f) {
-                        dismountYaw = Math_Atan2S(dz, dx);
-                    }
-                }
-            }
-        }
-        followerClimbDismountYaw    = dismountYaw;
-        followerClimbDismountFrames = kClimbDismountHoldFrames;
-        followerAIState     = FollowerAIState::IDLE;
-        followerStateFrames = 0;
-        followerClimbAnchorIdx = UINT16_MAX;
-        followerClimbCellSet.clear();
+        // See ComputeFollowerDismountYaw for rationale (leader pos
+        // unreliable; planeNormal ambiguous for ladder actors).
+        const s16 dismountYaw = ComputeFollowerDismountYaw(player);
+        ExitFollowerClimbToIdle(dismountYaw, /*clearAutonomous=*/false);
         SPDLOG_INFO("[Follower] CLIMBING→IDLE (leader stopped climbing); "
                     "armed dismount forward-hold {} frames at yaw={}",
                     kClimbDismountHoldFrames,
