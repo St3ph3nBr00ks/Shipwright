@@ -879,7 +879,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // silently regenerate as v7 (matches every prior version bump). The
 // new ClimbAnchor fields default to zero / zero-vector — Stage 2 wires
 // the scan to populate them.
-static constexpr uint16_t kCurrentSchemaVersion = 8;
+static constexpr uint16_t kCurrentSchemaVersion = 9;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3633,128 +3633,24 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
         }
     }
 
-    // ----- Orphan detection pass (workstream A, schema v2). ----------------
+    // ----- (Orphan detection moved AFTER all anchor detection — schema v9.) -
     //
-    // The multi-cast column scan finds every floor at every visited XZ cell,
-    // including stacked floors on top of walls / fences / scenery. The
-    // floodfill never traverses to those upper floors (its MovementClear
-    // gate stops at the wall), so the resulting nodes have no edges
-    // connecting them to the main graph. They would mislead nav consumers
-    // (FindBestReachableSubgoalNode) if treated as legitimate targets.
+    // Pre-v9: orphan classification ran HERE, before drop/jump/ledge/climb
+    // anchor detection. This caused legitimate platforms reachable only by
+    // jumping/dropping to be flagged NODE_ORPHANED (no floor edges to a
+    // seed) and then SKIPPED by the BFS consumer (defensive
+    // "if (node.flags & NODE_ORPHANED) continue" guards). Anchors were
+    // injected into the BFS adjacency but their orphan-side endpoints
+    // were unreachable. Field-test 2026-05-12 log 54: follower stalls at
+    // takeoff edge of a gap whose landing platform is orphan-flagged.
     //
-    // Algorithm (handoff plan §5 commit 1, refined for component-size
-    // thresholding):
-    //   1. Pick the first node at each stashed seed cell as a "seed-rooted"
-    //      starting point. Use the nodesByCell spatial index built for edge
-    //      generation; it's still in scope here.
-    //   2. BFS via the edges vector from every seed-rooted node. Edges are
-    //      undirected (each {fromIdx, toIdx} traverses both ways). Mark
-    //      visited nodes — these are reachable from a seed.
-    //   3. For each unvisited node, BFS its connected component (within the
-    //      unvisited set). If the component size exceeds
-    //      kMinValidComponentSize, treat it as a legitimate sub-area that
-    //      simply had no actor inside it to seed from (e.g. the slingshot
-    //      chamber after the chest is taken on the active save). Don't
-    //      flag those nodes — consumers can still reach them via vertical
-    //      teleport / climb anchors / future cross-component pathing.
-    //   4. For each unvisited component below the threshold, flag every
-    //      node in the component as NODE_ORPHANED. These are the small
-    //      stacked-floor remnants on top of walls / fences / scenery —
-    //      typically 1-20 nodes each.
+    // Post-v9: orphan pass runs AFTER all anchor detection, with the
+    // anchors' edges injected into the orphan-pass adjacency. A node is
+    // orphaned only if NO traversal mechanism (walking, climbing,
+    // jumping, dropping, ledge-grabbing) reaches it. Junk geometry
+    // (fence tops, decorative scenery) stays orphaned because no anchor
+    // type connects them to the main graph.
     //
-    // Threshold rationale: legitimate sub-rooms in OoT scenes have hundreds
-    // of nodes (Inside Deku Tree slingshot chamber ≈ 200-500 nodes typical).
-    // Wall-top remnants are <30 nodes. 50 is the conservative midpoint.
-    //
-    // Cost: O(|nodes| + |edges|). The component-size pass adds another
-    // |nodes| + |edges| traversal; total still negligible compared to edge
-    // generation's line tests.
-    static constexpr size_t kMinValidComponentSize = 50;
-    auto orphanStart = std::chrono::steady_clock::now();
-    size_t orphanCount = 0;
-    size_t recoveredOrphanCount = 0;
-    {
-        // Build adjacency list from the (undirected) edges vector.
-        std::vector<std::vector<uint16_t>> adjacency(out->nodes.size());
-        for (const NavEdge& e : out->edges) {
-            if (e.fromIdx >= out->nodes.size() || e.toIdx >= out->nodes.size()) continue;
-            adjacency[e.fromIdx].push_back(e.toIdx);
-            adjacency[e.toIdx].push_back(e.fromIdx);
-        }
-
-        std::vector<bool> visitedNode(out->nodes.size(), false);
-        std::deque<uint16_t> bfs;
-
-        // Enqueue the first node at each seed cell as a BFS root.
-        for (const CellKey& sc : seedCells) {
-            auto it = nodesByCell.find(sc);
-            if (it == nodesByCell.end()) continue;
-            if (it->second.empty()) continue;
-            uint16_t rootIdx = it->second.front();
-            if (rootIdx >= out->nodes.size()) continue;
-            if (visitedNode[rootIdx]) continue;
-            visitedNode[rootIdx] = true;
-            bfs.push_back(rootIdx);
-        }
-
-        // Standard BFS over the bidirectional adjacency list.
-        while (!bfs.empty()) {
-            uint16_t cur = bfs.front();
-            bfs.pop_front();
-            for (uint16_t nb : adjacency[cur]) {
-                if (nb >= visitedNode.size()) continue;
-                if (visitedNode[nb]) continue;
-                visitedNode[nb] = true;
-                bfs.push_back(nb);
-            }
-        }
-
-        // Component-size pass over the unvisited set. Each unvisited node
-        // belongs to some unvisited connected component; classify by size.
-        std::vector<bool> classifiedComponent(out->nodes.size(), false);
-        for (size_t i = 0; i < out->nodes.size(); i++) {
-            if (visitedNode[i]) continue;          // reachable from a seed
-            if (classifiedComponent[i]) continue;  // already handled
-
-            // BFS the unvisited component containing i.
-            std::vector<uint16_t> componentNodes;
-            std::deque<uint16_t> q;
-            q.push_back((uint16_t)i);
-            classifiedComponent[i] = true;
-            while (!q.empty()) {
-                uint16_t cur = q.front();
-                q.pop_front();
-                componentNodes.push_back(cur);
-                for (uint16_t nb : adjacency[cur]) {
-                    if (nb >= classifiedComponent.size()) continue;
-                    if (visitedNode[nb]) continue;          // shouldn't happen; defensive
-                    if (classifiedComponent[nb]) continue;
-                    classifiedComponent[nb] = true;
-                    q.push_back(nb);
-                }
-            }
-
-            if (componentNodes.size() > kMinValidComponentSize) {
-                // Large unreachable component — legitimate sub-area that
-                // happened to have no actor inside it to seed from. Leave
-                // the orphan flag CLEAR; treat as walkable.
-                recoveredOrphanCount += componentNodes.size();
-            } else {
-                // Small unreachable component — wall-top / fence-top
-                // remnant. Flag every node so consumers and viz can
-                // distinguish.
-                for (uint16_t idx : componentNodes) {
-                    out->nodes[idx].flags |= NODE_ORPHANED;
-                    orphanCount++;
-                }
-            }
-        }
-    }
-    auto orphanMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - orphanStart).count();
-    (void)totalMs;            // shadowed by totalMsFinal below; keep symbol for callers
-    (void)orphanMs;           // exposed via totalMsFinal aggregate; not separately logged
-
     // Climb anchor detection. Two paths run sequentially when their CVars
     // are on:
     //   - Path A (always-on): scene-actor allowlist iteration. Catches
@@ -3847,6 +3743,158 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     // surface. Runs after grids are populated so anchor.firstNodeIdx + nodeCount
     // are valid.
     DetectInterAnchorClimbBridges(out);
+
+    // ----- Orphan detection pass (schema v9 — moved here from pre-anchor). --
+    //
+    // See the v9-rationale comment at the original orphan-pass site (above
+    // DetectClimbAnchors) for why this moved.
+    //
+    // Algorithm:
+    //   1. Pick the first node at each stashed seed cell as a "seed-rooted"
+    //      starting point.
+    //   2. BFS via the FULL traversal graph: out->edges (floor + climb-
+    //      surface intra-grid + floor↔climb-base/top + inter-anchor climb
+    //      bridges, all pushed into out->edges at scan time) PLUS
+    //      drop / jump / ledge anchor edges injected into the local
+    //      adjacency only for this pass.
+    //   3. Mark visited nodes — these are reachable from a seed via SOME
+    //      traversal mechanism.
+    //   4. For each unvisited connected component (within the unvisited
+    //      set), classify by size: > kMinValidComponentSize → leave the
+    //      orphan flag clear (legitimate sub-area that no actor seeded
+    //      from). ≤ threshold → flag every node NODE_ORPHANED.
+    //
+    // Threshold rationale: legitimate sub-rooms in OoT scenes have hundreds
+    // of nodes (Inside Deku Tree slingshot chamber ≈ 200-500 nodes typical).
+    // Wall-top remnants are <30 nodes. 50 is the conservative midpoint.
+    //
+    // Cost: O(|nodes| + |edges| + |anchors|).
+    static constexpr size_t kMinValidComponentSize = 50;
+    auto orphanStart = std::chrono::steady_clock::now();
+    size_t orphanCount = 0;
+    size_t recoveredOrphanCount = 0;
+    {
+        std::vector<std::vector<uint16_t>> adjacency(out->nodes.size());
+        // Floor + climb-surface intra-grid + floor↔climb-base/top +
+        // inter-anchor climb bridges — all already in out->edges.
+        for (const NavEdge& e : out->edges) {
+            if (e.fromIdx >= out->nodes.size() || e.toIdx >= out->nodes.size()) continue;
+            adjacency[e.fromIdx].push_back(e.toIdx);
+            adjacency[e.toIdx].push_back(e.fromIdx);
+        }
+        // Drop anchors — directional in the BFS consumer (only high→low
+        // for descent), but for ORPHAN reachability we mark both
+        // endpoints as connected. If the navigator can drop A→B, the
+        // platform B is reachable; symmetric reachability for orphan
+        // classification is the safe default.
+        for (const DropAnchor& a : out->dropAnchors) {
+            int hi = FindNearestNode(out, a.highPos);
+            int lo = FindNearestNode(out, a.landingPos);
+            if (hi < 0 || lo < 0 || hi == lo) continue;
+            if ((size_t)hi >= adjacency.size() || (size_t)lo >= adjacency.size()) continue;
+            adjacency[(size_t)hi].push_back((uint16_t)lo);
+            adjacency[(size_t)lo].push_back((uint16_t)hi);
+        }
+        // Jump anchors — bidirectional in both BFS consumer and orphan
+        // pass. Per-actor jump-distance caps don't apply at orphan time
+        // (we ask "is this node reachable to ANY actor with full jump
+        // capability"; per-actor masking happens at consume time).
+        for (const JumpAnchor& a : out->jumpAnchors) {
+            int fromIdx = FindNearestNode(out, a.fromPos);
+            int toIdx   = FindNearestNode(out, a.toPos);
+            if (fromIdx < 0 || toIdx < 0 || fromIdx == toIdx) continue;
+            if ((size_t)fromIdx >= adjacency.size() ||
+                (size_t)toIdx   >= adjacency.size()) continue;
+            adjacency[(size_t)fromIdx].push_back((uint16_t)toIdx);
+            adjacency[(size_t)toIdx].push_back((uint16_t)fromIdx);
+        }
+        // Ledge-grab anchors — approachPos ↔ topPos. Only Link-rigged
+        // navigators can use these in the BFS consumer, but orphan
+        // reachability is "can ANY traversal reach this", same as
+        // jumps.
+        for (const LedgeAnchor& a : out->ledgeAnchors) {
+            int ap = FindNearestNode(out, a.approachPos);
+            int tp = FindNearestNode(out, a.topPos);
+            if (ap < 0 || tp < 0 || ap == tp) continue;
+            if ((size_t)ap >= adjacency.size() ||
+                (size_t)tp >= adjacency.size()) continue;
+            adjacency[(size_t)ap].push_back((uint16_t)tp);
+            adjacency[(size_t)tp].push_back((uint16_t)ap);
+        }
+
+        std::vector<bool> visitedNode(out->nodes.size(), false);
+        std::deque<uint16_t> bfs;
+
+        // Enqueue the first node at each seed cell as a BFS root.
+        for (const CellKey& sc : seedCells) {
+            auto it = nodesByCell.find(sc);
+            if (it == nodesByCell.end()) continue;
+            if (it->second.empty()) continue;
+            uint16_t rootIdx = it->second.front();
+            if (rootIdx >= out->nodes.size()) continue;
+            if (visitedNode[rootIdx]) continue;
+            visitedNode[rootIdx] = true;
+            bfs.push_back(rootIdx);
+        }
+
+        // Standard BFS over the (anchor-augmented) bidirectional adjacency.
+        while (!bfs.empty()) {
+            uint16_t cur = bfs.front();
+            bfs.pop_front();
+            for (uint16_t nb : adjacency[cur]) {
+                if (nb >= visitedNode.size()) continue;
+                if (visitedNode[nb]) continue;
+                visitedNode[nb] = true;
+                bfs.push_back(nb);
+            }
+        }
+
+        // Component-size pass over the unvisited set. Each unvisited node
+        // belongs to some unvisited connected component; classify by size.
+        std::vector<bool> classifiedComponent(out->nodes.size(), false);
+        for (size_t i = 0; i < out->nodes.size(); i++) {
+            if (visitedNode[i]) continue;          // reachable from a seed
+            if (classifiedComponent[i]) continue;  // already handled
+
+            // BFS the unvisited component containing i.
+            std::vector<uint16_t> componentNodes;
+            std::deque<uint16_t> q;
+            q.push_back((uint16_t)i);
+            classifiedComponent[i] = true;
+            while (!q.empty()) {
+                uint16_t cur = q.front();
+                q.pop_front();
+                componentNodes.push_back(cur);
+                for (uint16_t nb : adjacency[cur]) {
+                    if (nb >= classifiedComponent.size()) continue;
+                    if (visitedNode[nb]) continue;          // shouldn't happen; defensive
+                    if (classifiedComponent[nb]) continue;
+                    classifiedComponent[nb] = true;
+                    q.push_back(nb);
+                }
+            }
+
+            if (componentNodes.size() > kMinValidComponentSize) {
+                // Large unreachable component — legitimate sub-area that
+                // happened to have no actor inside it to seed from. Leave
+                // the orphan flag CLEAR; treat as walkable.
+                recoveredOrphanCount += componentNodes.size();
+            } else {
+                // Small unreachable component — junk geometry (fence
+                // tops, decorative scenery) with no anchor connection
+                // to the main graph. Flag every node so consumers and
+                // viz can distinguish.
+                for (uint16_t idx : componentNodes) {
+                    out->nodes[idx].flags |= NODE_ORPHANED;
+                    orphanCount++;
+                }
+            }
+        }
+    }
+    auto orphanMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - orphanStart).count();
+    (void)totalMs;            // shadowed by totalMsFinal below; keep symbol for callers
+    (void)orphanMs;           // exposed via totalMsFinal aggregate; not separately logged
 
     // Update historicalSeeds with the union of (current player + actor
     // + previously-historical seed positions). Cell-deduped at insertion
