@@ -548,6 +548,15 @@ class Anchor : public Network {
     int             followerOverrunFrames = 0;                   // G10: consecutive frames distToLeader > kTeleportThreshold
     int             followerStuckCycleCount = 0;                 // G12: consecutive STUCK entries within the cycle window
     int             followerStuckCycleResetFrames = 0;           // G12: counts down each frame; resets cycle count to 0 on hit zero
+    // Resume-state for STUCK recovery (Plans/follower_pursue_target_consolidation_plan.md
+    // Step 2). HandleStateStuck reads this on every success-path exit
+    // (SafeTerrain / JumpAcross / TrailContinues / PathAround / Retreat /
+    // legacy nudge complete) instead of hardcoding FOLLOW. Set by
+    // CheckStuckAndEscalate at the FOLLOW→STUCK / ENGAGE→STUCK /
+    // COLLECT_ITEM→STUCK transition. Default FOLLOW preserves the
+    // pre-Step-2 behavior for any code path that enters STUCK without
+    // going through the helper.
+    FollowerAIState followerPreStuckState = FollowerAIState::FOLLOW;
     // Edge-trigger latch for cycle-2 cursor-advance
     // (Plans/follower_subgoal_teleport_plan.md). Stores the cycle
     // count at which we last fired the cursor-advance so the same
@@ -1166,6 +1175,56 @@ class Anchor : public Network {
     void HandleStateFollow(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos);
     void HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);
     void HandleStateAttack(Player* player, const Vec3f& p2Pos);
+
+    // ─────────────────────────────────────────────────────────────────
+    // Shared pursuit helpers (Plans/follower_pursue_target_consolidation_plan.md).
+    // FOLLOW / ENGAGE / COLLECT_ITEM all "walk toward a target"; these
+    // helpers extract the substrate pathfinding, stuck escalation, and
+    // auto-CLIMBING engagement that previously lived in FOLLOW only.
+    // ─────────────────────────────────────────────────────────────────
+
+    // Step 1 — substrate-driven subgoal resolution. Computes / refreshes /
+    // advances followerNavPath against the caller's finalGoal, returns
+    // the world position the caller should set as followerMoveTarget.
+    // May transition state to CLIMBING when the current subgoal carries
+    // a NODE_CLIMB_* flag. Caller must check followerAIState after the
+    // call and bail if it changed.
+    //
+    //   finalGoal     — destination position (leader / enemy / item)
+    //   trailKey      — Layer 2 trail to walk (leader's TrailKey, or
+    //                   per-enemy NetId-derived key, or 0 for static
+    //                   targets like items / door positions)
+    //   useDoorTarget — true only for FOLLOW with active door handoff
+    //                   (skipLayer1LOS=true + preferLeaderTrail=true)
+    Vec3f ComputePursuitSubgoal(Player* player,
+                                 const Vec3f& p2Pos,
+                                 const Vec3f& finalGoal,
+                                 AnchorNav::TrailKey trailKey,
+                                 bool useDoorTarget);
+
+    // Step 2 — stuck-detection helper. Runs the FOLLOW-style progress
+    // check every kStuckCheckInterval frames; on no-progress sets
+    // followerAIState=STUCK + increments the cycle counter + arms the
+    // post-stuck resume state. Returns true when a STUCK transition
+    // fired (caller should `return` from its handler).
+    //
+    //   resumeState — which state to return to after STUCK recovery
+    //                 completes (FOLLOW for normal pursuit; ENGAGE /
+    //                 COLLECT_ITEM for combat / pickup pursuit).
+    //                 Stored in followerPreStuckState; consumed by
+    //                 HandleStateStuck on every recovery exit path.
+    bool CheckStuckAndEscalate(const Vec3f& p2Pos,
+                                FollowerAIState resumeState);
+
+    // Step 3 — legacy 2-point auto-CLIMBING engagement. Throttled to
+    // every 10 frames internally. Returns true if CLIMBING engaged
+    // (caller should bail). Final goal must be meaningfully ABOVE the
+    // follower (Δy > kAutonomousClimbMinHeight). Skipped for v7
+    // climb-surface rooms where the substrate path's climb-flag check
+    // (inside ComputePursuitSubgoal) handles engagement instead.
+    bool TryEngageAutoClimb(Player* player,
+                             const Vec3f& p2Pos,
+                             const Vec3f& finalGoal);
 
     // Helper for IDLE / FOLLOW state — scans ACTORCAT_MISC for an eligible
     // EN_ITEM00 drop the follower should engage. Maintains the

@@ -415,6 +415,7 @@ void Anchor::SetFollowerActive(bool active) {
         followerStuckCycleCount = 0;
         followerStuckCycleResetFrames = 0;
         followerStuckCycleAdvancedAt = 0;
+        followerPreStuckState = FollowerAIState::FOLLOW;
         hasPendingTransition = false;
         pendingTransitionTimeoutFrames = 0;
         followerDoorHandoff = false;
@@ -3515,6 +3516,228 @@ void Anchor::HandleClimbStateLeaderFollowing(Player* player, const Vec3f& leader
     (void)leaderActor;  // referenced via signature; explicit no-op now
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Step 1 — substrate-driven subgoal resolution.
+// Plans/follower_pursue_target_consolidation_plan.md.
+//
+// Extracted from the FOLLOW / ENGAGE bodies (each had its own
+// near-duplicate copy). Now centralised so COLLECT_ITEM gets
+// pathfinding too, and any future tweak to the substrate-pursuit
+// pipeline applies uniformly to all three pursuing states.
+// ─────────────────────────────────────────────────────────────────────
+Vec3f Anchor::ComputePursuitSubgoal(Player* player,
+                                     const Vec3f& p2Pos,
+                                     const Vec3f& finalGoal,
+                                     AnchorNav::TrailKey trailKey,
+                                     bool useDoorTarget) {
+    Vec3f resolvedTarget = finalGoal;
+    if (!AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
+        return resolvedTarget;  // substrate disabled — direct yaw
+    }
+
+    // Compute / refresh path. Triggers: empty, scene changed, key
+    // changed, target drifted past kNavPathTargetDriftRefresh.
+    const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
+    const bool keyChanged   = (followerNavPathTargetKey != trailKey);
+    const f32 driftDx = finalGoal.x - followerNavPathLastTarget.x;
+    const f32 driftDz = finalGoal.z - followerNavPathLastTarget.z;
+    const bool targetDrifted =
+        (driftDx * driftDx + driftDz * driftDz) >
+        (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
+    const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
+                               keyChanged || targetDrifted;
+    if (needsRefresh) {
+        followerNavPath.Reset();
+        // Door-handoff routing (FOLLOW only): skipLayer1LOS=true
+        // (LOS to leader's pos in another room is wishful) +
+        // preferLeaderTrail=true (leader's trail in our room IS the
+        // path to follow). Non-handoff: defaults — Layer 1 LOS for
+        // short hops, Layer 3 BFS for obstacle navigation.
+        bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
+            trailKey, &player->actor, finalGoal, gPlayState, followerNavPath,
+            /*skipLayer1LOS=*/useDoorTarget,
+            /*preferLeaderTrail=*/useDoorTarget);
+        followerNavPathTargetKey  = trailKey;
+        followerNavPathLastTarget = finalGoal;
+        if (!gotPath) {
+            SPDLOG_DEBUG("[Follower] Pursuit NavPath empty (ComputePathTo "
+                         "returned false; falling back to direct finalGoal "
+                         "useDoorTarget={})", useDoorTarget);
+        }
+    }
+    if (followerNavPath.Empty()) {
+        return resolvedTarget;  // path empty — direct yaw fallback
+    }
+
+    // Advance cursor when within reach of current subgoal.
+    {
+        Vec3f sg = followerNavPath.CurrentSubgoal();
+        f32 sgDx = sg.x - p2Pos.x;
+        f32 sgDz = sg.z - p2Pos.z;
+        if (sgDx * sgDx + sgDz * sgDz <
+            kNavPathSubgoalReach * kNavPathSubgoalReach) {
+            followerNavPath.Advance();
+        }
+    }
+    if (followerNavPath.Empty()) {
+        return resolvedTarget;  // path consumed — direct yaw fallback
+    }
+
+    resolvedTarget = followerNavPath.CurrentSubgoal();
+
+    // Substrate-driven CLIMBING engagement. When the current subgoal
+    // sits on a climb-surface node AND the resolved climb mask permits
+    // it AND we're not already CLIMBING, transition to CLIMBING with
+    // the full attach choreography (force facing into wall, populate
+    // followerClimbReachableNodes for the cell-prediction gate).
+    //
+    // Defensive AND against computedClimbMask catches mid-session CVar
+    // flips that change what the consumer can traverse between path-
+    // compute time and engagement time (plan Q8).
+    const uint16_t sgFlags   = followerNavPath.CurrentSubgoalFlags();
+    const uint16_t climbBits = sgFlags & ::AnchorNavRoom::NODE_CLIMB_ANY;
+    if (climbBits != 0 &&
+        (climbBits & followerNavPath.computedClimbMask) != 0 &&
+        followerAIState != FollowerAIState::CLIMBING &&
+        !followerAutonomousClimb) {
+        followerClimbTopTarget        = resolvedTarget;
+        followerAutonomousClimb       = true;
+        followerAutonomousClimbFrames = 0;
+        followerAIState               = FollowerAIState::CLIMBING;
+        followerStateFrames           = 0;
+        // Force facing toward the climb subgoal — OoT's ladder/vine
+        // collision needs Link facing the wall to grab.
+        f32 fdx = resolvedTarget.x - player->actor.world.pos.x;
+        f32 fdz = resolvedTarget.z - player->actor.world.pos.z;
+        if (fdx * fdx + fdz * fdz > 1.0f) {
+            player->actor.shape.rot.y = Math_Atan2S(fdz, fdx);
+        }
+        // Edge-prediction setup — identify which ClimbAnchor the
+        // subgoal belongs to and seed followerClimbReachableNodes.
+        followerClimbAnchorIdx = UINT16_MAX;
+        followerClimbReachableNodes.clear();
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        if (navData != nullptr) {
+            constexpr float kClimbCellSpacing = 30.0f;
+            for (size_t a = 0; a < navData->climbAnchors.size(); a++) {
+                const auto& anc = navData->climbAnchors[a];
+                int u = 0, v = 0;
+                if (::AnchorNavRoom::ProjectPositionToAnchorCell(
+                        anc, resolvedTarget, kClimbCellSpacing, u, v) &&
+                    ::AnchorNavRoom::AnchorCellExists(navData, anc, u, v)) {
+                    followerClimbAnchorIdx = (uint16_t)a;
+                    PopulateClimbReachableNodes(navData, (uint16_t)a);
+                    break;
+                }
+            }
+        }
+        SPDLOG_INFO("[Follower] Pursuit→CLIMBING (substrate path entered "
+                    "climb node type=0x{:04x} at {:.0f},{:.0f},{:.0f}; "
+                    "anchorIdx={} reachableNodes={})",
+                    climbBits,
+                    resolvedTarget.x, resolvedTarget.y, resolvedTarget.z,
+                    (int)followerClimbAnchorIdx,
+                    (int)followerClimbReachableNodes.size());
+    }
+
+    return resolvedTarget;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Step 2 — stuck-detection consolidation.
+// ─────────────────────────────────────────────────────────────────────
+bool Anchor::CheckStuckAndEscalate(const Vec3f& p2Pos,
+                                    FollowerAIState resumeState) {
+    if (followerStateFrames % kStuckCheckInterval != 0) return false;
+
+    f32 progDx   = p2Pos.x - followerLastPos.x;
+    f32 progDz   = p2Pos.z - followerLastPos.z;
+    f32 progress = sqrtf(progDx * progDx + progDz * progDz);
+    f32 toTarget = AnchorDist::DistXZ(followerMoveTarget, p2Pos);
+    // Per-state log prefix so traces stay diagnosable across the three
+    // pursuing states. Compact switch keeps the log site cheap.
+    const char* stateStr = "PURSUE";
+    switch (resumeState) {
+        case FollowerAIState::FOLLOW:       stateStr = "FOLLOW";       break;
+        case FollowerAIState::ENGAGE:       stateStr = "ENGAGE";       break;
+        case FollowerAIState::COLLECT_ITEM: stateStr = "COLLECT_ITEM"; break;
+        default: break;
+    }
+    SPDLOG_INFO("[Follower] {} check: progress={:.1f} distToTarget={:.0f} "
+                "p2=({:.0f},{:.0f}) last=({:.0f},{:.0f}) target=({:.0f},{:.0f})",
+                stateStr, progress, toTarget,
+                p2Pos.x, p2Pos.z,
+                followerLastPos.x, followerLastPos.z,
+                followerMoveTarget.x, followerMoveTarget.z);
+    followerLastPos = p2Pos;
+    if (progress >= kStuckMinProgress) return false;
+
+    // No progress — enter STUCK fallback. Record resume state so the
+    // post-stuck recovery returns to the right pursuit context.
+    followerPreStuckState = resumeState;
+    followerAIState       = FollowerAIState::STUCK;
+    followerStuckFrames   = 0;
+    followerStateFrames   = 0;
+    followerStuckCycleCount++;
+    followerStuckCycleResetFrames = kStuckCycleWindow;
+    SPDLOG_INFO("[Follower] {}→STUCK (stick input stalled, cycle={})",
+                stateStr, followerStuckCycleCount);
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Step 3 — legacy 2-point auto-CLIMBING engagement.
+// ─────────────────────────────────────────────────────────────────────
+bool Anchor::TryEngageAutoClimb(Player* player,
+                                 const Vec3f& p2Pos,
+                                 const Vec3f& finalGoal) {
+    if (!AnchorFollower::IsAiFollowerNavSubstrateEnabled()) return false;
+    if (followerAIState == FollowerAIState::CLIMBING) return false;
+    if (followerAutonomousClimb) return false;
+    if ((followerStateFrames % 10) != 0) return false;  // throttle
+
+    constexpr f32 kAutonomousClimbXZRadius  = 30.0f;
+    constexpr f32 kAutonomousClimbMinHeight = 50.0f;
+    if (finalGoal.y <= p2Pos.y + kAutonomousClimbMinHeight) return false;
+
+    const ::AnchorNavRoom::RoomNavData* navData =
+        ::AnchorNavRoom::GetForRoom((int16_t)gPlayState->sceneNum,
+                                     (int8_t)gPlayState->roomCtx.curRoom.num);
+    if (navData == nullptr) return false;
+    // Stage 7: skip the legacy 2-point heuristic when the room has v7
+    // climb-surface grid data — the substrate path's climb-flag check
+    // (in ComputePursuitSubgoal) handles engagement instead. Fallback
+    // to legacy heuristic for v6-cached rooms only.
+    const bool useV7Substrate =
+        navData->firstClimbSurfaceNodeIdx != UINT16_MAX;
+    if (useV7Substrate) return false;
+
+    Vec3f anchorBase, anchorTop;
+    if (!::AnchorNavRoom::FindClimbAnchorAbove(
+            navData, p2Pos,
+            kAutonomousClimbXZRadius,
+            kAutonomousClimbMinHeight,
+            anchorBase, anchorTop)) {
+        return false;
+    }
+    followerAutonomousClimb       = true;
+    followerClimbTopTarget        = anchorTop;
+    followerAutonomousClimbFrames = 0;
+    followerAIState               = FollowerAIState::CLIMBING;
+    followerStateFrames           = 0;
+    SPDLOG_INFO("[Follower] Pursuit→CLIMBING (legacy 2-point heuristic; "
+                "anchor base=({:.0f},{:.0f},{:.0f}) "
+                "top=({:.0f},{:.0f},{:.0f}) "
+                "follower=({:.0f},{:.0f},{:.0f}))",
+                anchorBase.x, anchorBase.y, anchorBase.z,
+                anchorTop.x, anchorTop.y, anchorTop.z,
+                p2Pos.x, p2Pos.y, p2Pos.z);
+    return true;
+}
+
 void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos) {
     // STUCK: stick-input hit a wall / corner / doorway / void the
     // simulation can't navigate. Apply a small position nudge directly
@@ -3564,11 +3787,16 @@ void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3
                                           leaderKey,
                                           /*navigatorKey=*/0,
                                           gPlayState);
+        // Plan §Step 2: every recovery exit returns to followerPreStuckState
+        // (set by CheckStuckAndEscalate at the FOLLOW/ENGAGE/COLLECT_ITEM
+        // → STUCK transition). Pre-Step-2 these all hardcoded FOLLOW; now
+        // ENGAGE/COLLECT_ITEM correctly resume their pursuit context.
+        const FollowerAIState resume = followerPreStuckState;
         switch (r.kind) {
             case AnchorNav::JumpResolution::SafeTerrain:
                 SPDLOG_INFO("[Follower] STUCK JumpResolver: SafeTerrain — "
-                            "returning to FOLLOW (false alarm)");
-                followerAIState     = FollowerAIState::FOLLOW;
+                            "returning to pre-stuck state (false alarm)");
+                followerAIState     = resume;
                 followerLastPos     = p2Pos;
                 followerStateFrames = 0;
                 return;
@@ -3580,11 +3808,11 @@ void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3
                                 ? "JumpAcross" : "TrailContinues",
                             r.landingPos.x, r.landingPos.y, r.landingPos.z);
                 player->actor.world.pos = r.landingPos;
-                followerAIState     = FollowerAIState::FOLLOW;
+                followerAIState     = resume;
                 followerLastPos     = r.landingPos;
                 followerStateFrames = 0;
                 // Drop any held NavPath — its waypoints don't account
-                // for our teleport. FOLLOW will recompute on next tick.
+                // for our teleport. Resume state recomputes on next tick.
                 followerNavPath.Reset();
                 return;
             case AnchorNav::JumpResolution::PathAround: {
@@ -3598,7 +3826,7 @@ void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3
                 followerNavPath.capturedTargetPos = leaderPos;
                 followerNavPathTargetKey  = leaderKey;
                 followerNavPathLastTarget = leaderPos;
-                followerAIState     = FollowerAIState::FOLLOW;
+                followerAIState     = resume;
                 followerLastPos     = p2Pos;
                 followerStateFrames = 0;
                 return;
@@ -3608,7 +3836,7 @@ void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3
                             "({:.0f},{:.0f},{:.0f})",
                             r.retreatPos.x, r.retreatPos.y, r.retreatPos.z);
                 player->actor.world.pos = r.retreatPos;
-                followerAIState     = FollowerAIState::FOLLOW;
+                followerAIState     = resume;
                 followerLastPos     = r.retreatPos;
                 followerStateFrames = 0;
                 followerNavPath.Reset();
@@ -3628,10 +3856,11 @@ void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3
         player->actor.world.pos.z += ndz / nd * step;
     }
     if (followerStuckFrames >= kStuckRecovery) {
-        followerAIState     = FollowerAIState::FOLLOW;
+        const FollowerAIState resume = followerPreStuckState;
+        followerAIState     = resume;
         followerLastPos     = player->actor.world.pos;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] STUCK→FOLLOW (fallback nudge complete)");
+        SPDLOG_INFO("[Follower] STUCK→pre-stuck state (fallback nudge complete)");
     }
 }
 
@@ -3735,11 +3964,26 @@ void Anchor::HandleStateCollectItem(Player* player, const Vec3f& leaderPos, cons
             return;
         }
     }
-    // Drive TickFollowerInput toward the item.
-    followerMoveTarget = followerTargetItem->world.pos;
+    // Step 1: substrate subgoal resolution via shared helper. Items
+    // are static targets — no trail. Door-handoff is FOLLOW-specific;
+    // pass false here. ComputePursuitSubgoal returns the substrate
+    // subgoal when available, falls back to itemPos directly when
+    // substrate disabled / path empty.
+    const Vec3f itemPos = followerTargetItem->world.pos;
+    Vec3f navTarget = ComputePursuitSubgoal(
+        player, p2Pos, itemPos, /*trailKey=*/0, /*useDoorTarget=*/false);
+    if (followerAIState == FollowerAIState::CLIMBING) return;
+    // Step 2: stuck detection. Resume to COLLECT_ITEM so STUCK
+    // recovery returns here. If the item despawns during recovery,
+    // the next COLLECT_ITEM tick's exit-check transitions to FOLLOW.
+    if (CheckStuckAndEscalate(p2Pos, FollowerAIState::COLLECT_ITEM)) return;
+    // Step 3: auto-CLIMBING when item is on a platform above
+    // (v6 rooms only — substrate handles climb engagement for v7).
+    if (TryEngageAutoClimb(player, p2Pos, itemPos)) return;
+    followerMoveTarget = navTarget;
     {
-        f32 idx = followerTargetItem->world.pos.x - p2Pos.x;
-        f32 idz = followerTargetItem->world.pos.z - p2Pos.z;
+        f32 idx = navTarget.x - p2Pos.x;
+        f32 idz = navTarget.z - p2Pos.z;
         if (idx * idx + idz * idz > 1.0f) {
             player->actor.shape.rot.y = YawToward(idx, idz);
         }
@@ -3921,96 +4165,14 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // where the FOLLOW→IDLE→FOLLOW oscillation would prevent the
     // BTN_A door-open injection from sticking.
     //
-    // P3.8 part 2 / P3.6 (user 2026-05-09): autonomous CLIMBING
-    // engagement. When the substrate gate is on AND the final goal
-    // (sideTarget) is significantly above the follower AND there's a
-    // climb anchor (vine wall / ladder / climbable surface) within
-    // ~30u XZ whose top is also above, transition to CLIMBING with
-    // followerAutonomousClimb=true. The existing CLIMBING input-
-    // injection (which uses followerMoveTarget for stick_y direction)
-    // drives the upward climb from there. Throttled to every 10
-    // frames to keep the RoomNavData query off the per-frame critical
-    // path.
-    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
-        followerAIState != FollowerAIState::CLIMBING &&
-        !followerAutonomousClimb &&
-        (followerStateFrames % 10 == 0)) {
-        constexpr f32 kAutonomousClimbXZRadius = 30.0f;
-        constexpr f32 kAutonomousClimbMinHeight = 50.0f; // top must be at least this high
-        // Only consider engaging when the FINAL goal is meaningfully
-        // above the follower — avoids climbing for siblings on the
-        // same floor where the substrate path happens to pass near a
-        // climb base en route to a non-climbable destination.
-        if (sideTarget.y > p2Pos.y + kAutonomousClimbMinHeight) {
-            const ::AnchorNavRoom::RoomNavData* navData =
-                ::AnchorNavRoom::GetForRoom((int16_t)gPlayState->sceneNum,
-                                             (int8_t)gPlayState->roomCtx.curRoom.num);
-            // Stage 7: skip the legacy 2-point heuristic when the room
-            // has v7 climb-surface grid data. The substrate path's
-            // Stage 6 trigger handles engagement via the multi-cell
-            // grid (BFS routes through climb-surface waypoints since
-            // P3.8 base↔top bypass is disabled for mask-aware
-            // consumers; HandleStateFollow's substrate-engagement
-            // block fires when CurrentSubgoalFlags() carries a
-            // NODE_CLIMB_* type bit). Fallback to legacy heuristic
-            // for v6-cached rooms (no grid) only.
-            const bool useV7Substrate =
-                navData != nullptr &&
-                navData->firstClimbSurfaceNodeIdx != UINT16_MAX;
-            if (!useV7Substrate && navData != nullptr) {
-                Vec3f anchorBase, anchorTop;
-                if (::AnchorNavRoom::FindClimbAnchorAbove(
-                        navData, p2Pos,
-                        kAutonomousClimbXZRadius,
-                        kAutonomousClimbMinHeight,
-                        anchorBase, anchorTop)) {
-                    followerAutonomousClimb       = true;
-                    followerClimbTopTarget        = anchorTop;
-                    followerAutonomousClimbFrames = 0;
-                    followerAIState               = FollowerAIState::CLIMBING;
-                    followerStateFrames           = 0;
-                    SPDLOG_INFO("[Follower] FOLLOW→CLIMBING (legacy "
-                                "2-point heuristic; anchor "
-                                "base=({:.0f},{:.0f},{:.0f}) "
-                                "top=({:.0f},{:.0f},{:.0f}) "
-                                "follower=({:.0f},{:.0f},{:.0f}))",
-                                anchorBase.x, anchorBase.y, anchorBase.z,
-                                anchorTop.x, anchorTop.y, anchorTop.z,
-                                p2Pos.x, p2Pos.y, p2Pos.z);
-                    return;
-                }
-            }
-        }
-    }
-    //
-    // Stuck detection: every kStuckCheckInterval frames check progress.
-    if (followerStateFrames % kStuckCheckInterval == 0) {
-        f32 progDx   = p2Pos.x - followerLastPos.x;
-        f32 progDz   = p2Pos.z - followerLastPos.z;
-        f32 progress = sqrtf(progDx * progDx + progDz * progDz);
-        f32 toTarget = AnchorDist::DistXZ(sideTarget, p2Pos);
-        SPDLOG_INFO("[Follower] FOLLOW check: progress={:.1f} distToTarget={:.0f} "
-                    "p2=({:.0f},{:.0f}) last=({:.0f},{:.0f}) target=({:.0f},{:.0f})",
-                    progress, toTarget,
-                    p2Pos.x, p2Pos.z,
-                    followerLastPos.x, followerLastPos.z,
-                    sideTarget.x, sideTarget.z);
-        followerLastPos = p2Pos; // update checkpoint
-        if (progress < kStuckMinProgress) {
-            // Stick input failed to make progress. Enter STUCK fallback.
-            followerAIState     = FollowerAIState::STUCK;
-            followerStuckFrames = 0;
-            followerStateFrames = 0;
-            // G12 — count this entry; arm the reset window. The
-            // top-of-hook check escalates to teleport when count >=
-            // kStuckCycleEscalation within the window.
-            followerStuckCycleCount++;
-            followerStuckCycleResetFrames = kStuckCycleWindow;
-            SPDLOG_INFO("[Follower] FOLLOW→STUCK (stick input stalled, cycle={})",
-                        followerStuckCycleCount);
-            return;
-        }
-    }
+    // Step 3: legacy 2-point auto-CLIMBING engagement (extracted to
+    // shared helper). Bails if substrate-path-driven CLIMBING already
+    // fired OR room has v7 grid data OR final goal isn't meaningfully
+    // above the follower OR no climb anchor nearby.
+    if (TryEngageAutoClimb(player, p2Pos, sideTarget)) return;
+    // Step 2: stuck detection (extracted to shared helper). Resume
+    // state is FOLLOW so STUCK recovery returns here.
+    if (CheckStuckAndEscalate(p2Pos, FollowerAIState::FOLLOW)) return;
     // Item pickup — scan every 10 frames inside FOLLOW. On finding an
     // eligible drop, abandon FOLLOW and divert to COLLECT_ITEM.
     if (followerStateFrames % 10 == 0) {
@@ -4077,134 +4239,14 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
             finalGoal = followerMoveTarget;  // safety-net's door target
         }
     }
-    Vec3f followTarget       = finalGoal;
-    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
-        AnchorNav::TrailKey targetKey =
-            AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
-        const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
-        const bool keyChanged   = (followerNavPathTargetKey != targetKey);
-        const f32 driftDx = finalGoal.x - followerNavPathLastTarget.x;
-        const f32 driftDz = finalGoal.z - followerNavPathLastTarget.z;
-        const bool targetDrifted =
-            (driftDx * driftDx + driftDz * driftDz) >
-            (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
-        const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
-                                   keyChanged || targetDrifted;
-        if (needsRefresh) {
-            followerNavPath.Reset();
-            // Door-handoff: skipLayer1LOS=true (LOS to leader's pos in
-            // another room is wishful) + preferLeaderTrail=true (the
-            // leader's trail in our room IS the path to follow — see
-            // Item 2 comment block above). For non-handoff (regular
-            // leader pursuit in same room), use defaults — Layer 1 LOS
-            // works for short hops, Layer 3 BFS for obstacle navigation.
-            bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
-                targetKey, &player->actor, finalGoal, gPlayState, followerNavPath,
-                /*skipLayer1LOS=*/useDoorTarget,
-                /*preferLeaderTrail=*/useDoorTarget);
-            followerNavPathTargetKey  = targetKey;
-            followerNavPathLastTarget = finalGoal;
-            if (!gotPath) {
-                // Nothing reachable per ComputePathTo's three layers.
-                // Leave path empty; the !Empty() check below falls
-                // through to direct finalGoal for this tick.
-                SPDLOG_DEBUG("[Follower] FOLLOW NavPath empty (ComputePathTo "
-                             "returned false; falling back to direct finalGoal "
-                             "useDoorTarget={})", useDoorTarget);
-            }
-        }
-        if (!followerNavPath.Empty()) {
-            Vec3f sg = followerNavPath.CurrentSubgoal();
-            f32   sgDx = sg.x - p2Pos.x;
-            f32   sgDz = sg.z - p2Pos.z;
-            if (sgDx * sgDx + sgDz * sgDz <
-                kNavPathSubgoalReach * kNavPathSubgoalReach) {
-                followerNavPath.Advance();
-            }
-            if (!followerNavPath.Empty()) {
-                followTarget = followerNavPath.CurrentSubgoal();
-
-                // Stage 6: substrate-path-driven CLIMBING engagement.
-                // The current subgoal sits on a climb-surface node
-                // (Stages 2-3 produced the grid; Stage 5's BFS gating
-                // ensures we only get a climb-surface subgoal when the
-                // resolved mask granted permission). Engage CLIMBING
-                // with the subgoal as the climb target; the autonomous
-                // branch in HandleStateClimbing takes over and refreshes
-                // the target as the path advances through the grid.
-                //
-                // The defensive AND against computedClimbMask guards
-                // against a mid-session CVar flip changing what the
-                // consumer is allowed to traverse between path-compute
-                // time and engagement time (plan Q8).
-                const uint16_t sgFlags   = followerNavPath.CurrentSubgoalFlags();
-                const uint16_t climbBits = sgFlags & ::AnchorNavRoom::NODE_CLIMB_ANY;
-                if (climbBits != 0 &&
-                    (climbBits & followerNavPath.computedClimbMask) != 0 &&
-                    followerAIState != FollowerAIState::CLIMBING &&
-                    !followerAutonomousClimb) {
-                    followerClimbTopTarget        = followTarget;
-                    followerAutonomousClimb       = true;
-                    followerAutonomousClimbFrames = 0;
-                    followerAIState               = FollowerAIState::CLIMBING;
-                    followerStateFrames           = 0;
-
-                    // Force facing toward the climb subgoal at engagement.
-                    // Pre-fix the follower's shape.rot.y was whatever
-                    // FOLLOW set it to (often pointing AT the leader,
-                    // not the wall) — OoT's ladder collision needs
-                    // Link facing the wall to grab. Combined with the
-                    // reachedTop bug above, the follower never got a
-                    // properly-oriented frame and OoT never attached.
-                    // (User 2026-05-12 log 27 diagnosis.)
-                    {
-                        f32 fdx = followTarget.x - player->actor.world.pos.x;
-                        f32 fdz = followTarget.z - player->actor.world.pos.z;
-                        if (fdx * fdx + fdz * fdz > 1.0f) {
-                            player->actor.shape.rot.y = Math_Atan2S(fdz, fdx);
-                        }
-                    }
-
-                    // Edge-prediction setup (post-Stage-8 2026-05-12,
-                    // refactored to nearest-node-3D 2026-05-12 PM):
-                    // identify which ClimbAnchor the subgoal belongs to
-                    // and seed followerClimbReachableNodes with that
-                    // anchor's grid + bridge-connected neighbours.
-                    followerClimbAnchorIdx = UINT16_MAX;
-                    followerClimbReachableNodes.clear();
-                    {
-                        const ::AnchorNavRoom::RoomNavData* navData =
-                            ::AnchorNavRoom::GetForRoom(
-                                gPlayState->sceneNum,
-                                (int8_t)gPlayState->roomCtx.curRoom.num);
-                        if (navData != nullptr) {
-                            constexpr float kClimbCellSpacing = 30.0f;
-                            for (size_t a = 0; a < navData->climbAnchors.size(); a++) {
-                                const auto& anc = navData->climbAnchors[a];
-                                int u = 0, v = 0;
-                                if (::AnchorNavRoom::ProjectPositionToAnchorCell(
-                                        anc, followTarget, kClimbCellSpacing, u, v) &&
-                                    ::AnchorNavRoom::AnchorCellExists(navData, anc, u, v)) {
-                                    followerClimbAnchorIdx = (uint16_t)a;
-                                    PopulateClimbReachableNodes(navData, (uint16_t)a);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    SPDLOG_INFO("[Follower] FOLLOW→CLIMBING (substrate path "
-                                "entered climb node type=0x{:04x} at "
-                                "{:.0f},{:.0f},{:.0f}; anchorIdx={} reachableNodes={})",
-                                climbBits,
-                                followTarget.x, followTarget.y, followTarget.z,
-                                (int)followerClimbAnchorIdx,
-                                (int)followerClimbReachableNodes.size());
-                    return;
-                }
-            }
-        }
-    }
+    // Step 1: substrate subgoal resolution (extracted to shared helper).
+    // Helper handles ComputePathTo / cursor advance / climb-flag
+    // engagement. May transition state to CLIMBING — bail if so.
+    AnchorNav::TrailKey leaderTrailKey =
+        AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
+    Vec3f followTarget = ComputePursuitSubgoal(
+        player, p2Pos, finalGoal, leaderTrailKey, useDoorTarget);
+    if (followerAIState == FollowerAIState::CLIMBING) return;
     followerMoveTarget = followTarget;
     f32 distToFollowTarget = AnchorDist::DistXZ(followTarget, p2Pos);
     // Stick injection in TickFollowerInput drives actual movement;
@@ -4262,7 +4304,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
         if (ldx * ldx + ldz * ldz > kMaxLeash * kMaxLeash) {
             followerAIState     = FollowerAIState::FOLLOW;
             followerStateFrames = 0;
-            SPDLOG_INFO("[Follower] ENGAGE\u2192RETURN (leader too far)");
+            SPDLOG_INFO("[Follower] ENGAGE\u2192FOLLOW (leader too far)");
             return;
         }
     }
@@ -4270,7 +4312,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
         followerTargetEnemy->update == nullptr) {
         followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] ENGAGE\u2192RETURN (enemy gone)");
+        SPDLOG_INFO("[Follower] ENGAGE\u2192FOLLOW (enemy gone)");
         return;
     }
     // Vertical-reach handling. Three layered checks:
@@ -4292,7 +4334,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
             }
             followerAIState     = FollowerAIState::FOLLOW;
             followerStateFrames = 0;
-            SPDLOG_INFO("[Follower] ENGAGE\u2192RETURN (enemy off-floor)");
+            SPDLOG_INFO("[Follower] ENGAGE\u2192FOLLOW (enemy off-floor)");
             return;
         }
         if (dy > kSwordVerticalReach &&
@@ -4371,46 +4413,32 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
     // actor doesn't carry. Re-evaluating with TargetSelection here
     // would require a parallel state path; not worth the complexity
     // when the bespoke targeting already does the right thing.
-    bool useSubgoalFacing = false;
-    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
+    // Step 1: substrate subgoal resolution via shared helper.
+    // TrailKey: per-enemy via EnemyNetId so Layer 2 walks the enemy's
+    // breadcrumbs (their last observed positions). Falls back to
+    // direct navTarget when substrate disabled / path empty.
+    // Door-handoff is FOLLOW-specific; pass false here.
+    Vec3f navTargetIn = navTarget;
+    {
         const EnemyNetId* targetExt =
             ObjectExtension::GetInstance().Get<EnemyNetId>(followerTargetEnemy);
         AnchorNav::TrailKey enemyKey =
             AnchorNav::TrailKeyForActor(targetExt != nullptr ? targetExt->netId : 0);
-        const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
-        const bool keyChanged   = (followerNavPathTargetKey != enemyKey);
-        const f32 driftDx = navTarget.x - followerNavPathLastTarget.x;
-        const f32 driftDz = navTarget.z - followerNavPathLastTarget.z;
-        const bool targetDrifted =
-            (driftDx * driftDx + driftDz * driftDz) >
-            (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
-        const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
-                                   keyChanged || targetDrifted;
-        if (needsRefresh) {
-            followerNavPath.Reset();
-            bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
-                enemyKey, &player->actor, navTarget, gPlayState, followerNavPath);
-            followerNavPathTargetKey  = enemyKey;
-            followerNavPathLastTarget = navTarget;
-            if (!gotPath) {
-                SPDLOG_DEBUG("[Follower] ENGAGE NavPath empty (ComputePathTo "
-                             "returned false; falling back to direct enemy yaw)");
-            }
-        }
-        if (!followerNavPath.Empty()) {
-            Vec3f sg = followerNavPath.CurrentSubgoal();
-            f32   sgDx = sg.x - p2Pos.x;
-            f32   sgDz = sg.z - p2Pos.z;
-            if (sgDx * sgDx + sgDz * sgDz <
-                kNavPathSubgoalReach * kNavPathSubgoalReach) {
-                followerNavPath.Advance();
-            }
-            if (!followerNavPath.Empty()) {
-                navTarget         = followerNavPath.CurrentSubgoal();
-                useSubgoalFacing  = true;
-            }
-        }
+        navTarget = ComputePursuitSubgoal(player, p2Pos, navTargetIn,
+                                           enemyKey, /*useDoorTarget=*/false);
+        if (followerAIState == FollowerAIState::CLIMBING) return;
     }
+    // Step 2: stuck detection via shared helper. Resume to ENGAGE so
+    // STUCK recovery returns here (the held NavPath remains valid for
+    // the cycle 3 teleport-to-subgoal landing).
+    if (CheckStuckAndEscalate(p2Pos, FollowerAIState::ENGAGE)) return;
+    // Step 3: legacy 2-point auto-CLIMBING engagement when target is
+    // on a platform above the follower (v6 rooms only — v7 rooms get
+    // climb engagement via the substrate climb-flag check inside
+    // ComputePursuitSubgoal above).
+    if (TryEngageAutoClimb(player, p2Pos, navTargetIn)) return;
+    const bool useSubgoalFacing = (navTarget.x != navTargetIn.x ||
+                                    navTarget.z != navTargetIn.z);
     followerMoveTarget = navTarget;
     // Facing: under nav substrate with an intermediate subgoal, face the
     // subgoal so Player_Update's auto-rotate aligns the body with stick
