@@ -254,7 +254,15 @@ static constexpr int kItemCollectTimeout = 300;
 // Stuck-detection tunables for HandleStateFollow.
 static constexpr int kStuckCheckInterval = 20;     // frames between progress checks
 static constexpr f32 kStuckMinProgress   = 5.0f;   // min units travelled per interval
-static constexpr int kStuckCycleWindow   = 300;    // G12 cycle-count reset window (frames)
+static constexpr int kStuckCycleWindow   = 120;    // G12 cycle-count reset window (frames; 2s @ 60fps)
+// Reduced 300→120 (log 66 follow-up). 5s was too forgiving — if the
+// follower can't make progress for 2 seconds, additional nudges aren't
+// going to help; escalate to teleport-to-subgoal sooner. The
+// per-cycle dispatch (cursor-advance / teleport-to-subgoal /
+// teleport-to-leader fallback) is the actual recovery; window length
+// just controls how quickly cycles compound. After teleport, 2s
+// without re-entering STUCK auto-clears the count (so a single stuck
+// area doesn't poison subsequent navigation).
 
 // Combat tunables for HandleStateEngage / HandleStateAttack.
 // kSwordVerticalReach — Link's effective vertical sword reach. Above this,
