@@ -966,7 +966,14 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // LedgeAnchor BFS edges (added pre-v14, no schema bump because
 // only consumption logic changed) ride along — the v14 cached
 // data feeds them through BuildAdjacencyList the same as before.
-static constexpr uint16_t kCurrentSchemaVersion = 14;
+//
+// Schema v14 → v15: Obj_Hana (0x014F) added to kFloorActorRejectList
+// (user 2026-05-12 PM follow-up). Kokiri Forest tall-grass patches
+// were still placing nodes on top after v14; Obj_Hana (the rupee-
+// hiding tall grass) was the actual culprit, separate from En_Kusa.
+// Bump invalidates v14 caches so they regenerate with Obj_Hana
+// floors rejected.
+static constexpr uint16_t kCurrentSchemaVersion = 15;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3536,6 +3543,15 @@ static const int16_t kFloorActorRejectList[] = {
     // User 2026-05-12 PM; added with the jump-anchor ground-below
     // fix in the same field-test screenshot batch.
     ACTOR_EN_KUSA,      // 0x0125 — Kokiri Forest grass clumps
+    // Tall grass tufts that hide items (Obj_Hana, 0x014F). Distinct
+    // from En_Kusa: En_Kusa is the small green shrub that drops
+    // items when sword-cut; Obj_Hana is the LARGER decorative grass
+    // patch (e.g. the Kokiri Forest grass that hides 2 green rupees
+    // each). Same floor-collision-on-top problem — Link walks
+    // AROUND these visually, not ON TOP. User 2026-05-12 PM
+    // follow-up screenshot showed nodes still on top of Kokiri
+    // grass after the En_Kusa fix; Obj_Hana was the actual culprit.
+    ACTOR_OBJ_HANA,     // 0x014F — tall grass patches (rupee-hiding)
 };
 
 // Returns true if the floor at (x, floorY, z) sitting on Bg actor `floorBgId`
