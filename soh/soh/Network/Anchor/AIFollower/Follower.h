@@ -91,7 +91,7 @@ void RegisterFollowerModule();
 
 // Phase 2 master gate. True when both gEnhancements.Nav.Enabled AND
 // gEnhancements.Nav.AiFollowerConsumer are non-zero. Per-state handlers
-// (HandleStateFollow, HandleStateEngage, HandleStateReturn, HandleStateStuck,
+// (HandleStateFollow, HandleStateEngage, HandleStateStuck,
 // HandleStateClimbing) consult this to pick between:
 //   - false (default): legacy bespoke pursuit / steering code (the
 //     verbatim Phase 1 extraction).

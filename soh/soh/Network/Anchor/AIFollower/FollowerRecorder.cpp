@@ -144,6 +144,11 @@ int FindCurrentSessionLogIndex() {
 // granted only to CaptureFrame, not to free helpers in this anonymous
 // namespace. CaptureFrame casts the enum to int and passes it here; the
 // integer values match the enum declaration order in Anchor.h:515.
+//
+// 2026-05-12 PM: RETURN removed (merged into FOLLOW). Integer values for
+// CLIMBING and later states shifted down by 1 — old JSONL recordings
+// produced before this commit will name the post-RETURN states
+// incorrectly. Re-record any captures used as regression baselines.
 const char* StateNameFromInt(int s) {
     switch (s) {
         case  0: return "IDLE";
@@ -151,12 +156,11 @@ const char* StateNameFromInt(int s) {
         case  2: return "STUCK";
         case  3: return "ENGAGE";
         case  4: return "ATTACK";
-        case  5: return "RETURN";
-        case  6: return "CLIMBING";
-        case  7: return "BLOCK";
-        case  8: return "RANGED_ATTACK";
-        case  9: return "STANDBY";
-        case 10: return "COLLECT_ITEM";
+        case  5: return "CLIMBING";
+        case  6: return "BLOCK";
+        case  7: return "RANGED_ATTACK";
+        case  8: return "STANDBY";
+        case  9: return "COLLECT_ITEM";
     }
     return "UNKNOWN";
 }

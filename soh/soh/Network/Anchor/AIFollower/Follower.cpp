@@ -122,7 +122,7 @@ namespace AnchorFollower {
 //
 // Phase 2 of the SRP refactor (#173 / #169) replaces the bespoke pursuit /
 // target-selection / steering code in the per-state handlers
-// (HandleStateFollow, HandleStateEngage, HandleStateReturn, HandleStateStuck,
+// (HandleStateFollow, HandleStateEngage, HandleStateStuck,
 // HandleStateClimbing) with calls to the Anchor nav substrate
 // (ActorTrail::ComputePathTo, TargetSelection::ChooseTarget,
 // GroundFollowing::GetGroundFollowingBearing, JumpResolver::ResolveLedgeAhead,
@@ -196,13 +196,13 @@ inline s16 YawToward(f32 dx, f32 dz) {
 static constexpr int kAttackDuration = 60;
 
 // Distance at which FOLLOW switches back to IDLE (and RETURN settles).
-// Was static constexpr inside TickFollower; promoted for HandleStateReturn.
+// Was static constexpr inside TickFollower; promoted for HandleStateFollow's IDLE gate.
 static constexpr f32 kFollowThreshold = 100.0f;
 
 // P3.10 (user 2026-05-09 — "if the leader is standing on a platform,
 // the AI Follower will stand under the leader instead of walking up a
 // sloped surface to get onto the platform"): vertical gate for the
-// FOLLOW→IDLE / RETURN→IDLE transitions. When |dy| to the final goal
+// FOLLOW→IDLE transitions. When |dy| to the final goal
 // exceeds this threshold, the follower hasn't really arrived even if
 // XZ distance is small — it's standing UNDER the leader rather than
 // AT the leader. Keep FOLLOW/RETURN active so the path consumer keeps
@@ -631,7 +631,6 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 case FollowerAIState::STUCK:         stateStr = "STUCK";         break;
                 case FollowerAIState::ENGAGE:        stateStr = "ENGAGE";        break;
                 case FollowerAIState::ATTACK:        stateStr = "ATTACK";        break;
-                case FollowerAIState::RETURN:        stateStr = "RETURN";        break;
                 case FollowerAIState::CLIMBING:      stateStr = "CLIMBING";      break;
                 case FollowerAIState::BLOCK:         stateStr = "BLOCK";         break;
                 case FollowerAIState::RANGED_ATTACK: stateStr = "RANGED_ATTACK"; break;
@@ -1705,8 +1704,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
             (followerAIState == FollowerAIState::FOLLOW  ||
              followerAIState == FollowerAIState::STUCK   ||
              followerAIState == FollowerAIState::ENGAGE  ||
-             followerAIState == FollowerAIState::ATTACK  ||
-             followerAIState == FollowerAIState::RETURN);
+             followerAIState == FollowerAIState::ATTACK);
         if (!actingToClose) {
             // Non-closing state — reset so we don't inherit
             // stale counter on next movement state entry.
@@ -1920,7 +1918,6 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
             case FollowerAIState::STUCK:         stateStr = "STUCK";         break;
             case FollowerAIState::ENGAGE:        stateStr = "ENGAGE";        break;
             case FollowerAIState::ATTACK:        stateStr = "ATTACK";        break;
-            case FollowerAIState::RETURN:        stateStr = "RETURN";        break;
             case FollowerAIState::CLIMBING:      stateStr = "CLIMBING";      break;
             case FollowerAIState::BLOCK:         stateStr = "BLOCK";         break;
             case FollowerAIState::RANGED_ATTACK: stateStr = "RANGED_ATTACK"; break;
@@ -1973,12 +1970,6 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
             break;
         }
 
-        case FollowerAIState::RETURN: {
-            // Body extracted to Anchor::HandleStateReturn
-            // (Phase 1 commit 7 of the SRP refactor).
-            HandleStateReturn(player, sideTarget, p2Pos);
-            break;
-        }
 
         // G1/G2 — leader is climbing. Bug 2 redesign (2026-04-22):
         // instead of writing world.pos = leaderPos every frame
@@ -2090,7 +2081,6 @@ void Anchor::TickFollowerInput(Actor* actor) {
                      followerAIState == FollowerAIState::STUCK        ||
                      followerAIState == FollowerAIState::ENGAGE       ||
                      followerAIState == FollowerAIState::ATTACK       ||
-                     followerAIState == FollowerAIState::RETURN       ||
                      followerAIState == FollowerAIState::CLIMBING     ||
                      followerAIState == FollowerAIState::COLLECT_ITEM);
 
@@ -3024,9 +3014,9 @@ void Anchor::HandleStateBlock(Player* player, const Vec3f& p2Pos) {
     // on the (now-stunned) scrub. Bails to RETURN if target despawns.
     if (followerTargetEnemy == nullptr ||
         followerTargetEnemy->update == nullptr) {
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] BLOCK→RETURN (target gone)");
+        SPDLOG_INFO("[Follower] BLOCK→FOLLOW (target gone)");
         return;
     }
     // shape.rot.y points at target so the shield faces the incoming
@@ -3043,102 +3033,6 @@ void Anchor::HandleStateBlock(Player* player, const Vec3f& p2Pos) {
         followerAIState     = FollowerAIState::ATTACK;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] BLOCK→ATTACK (shield cycle complete)");
-    }
-}
-
-void Anchor::HandleStateReturn(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos) {
-    // RETURN: walk back to leader's side after combat. Bug 2 fix 1
-    // (user 2026-05-10): mirrors FOLLOW's door-handoff substrate routing.
-    // When followerDoorHandoff is active, the safety-net block has set
-    // followerMoveTarget to the door target; use that as the substrate's
-    // finalGoal so the path plans toward the door (not the leader who's
-    // in another room). TrailKey=0 for the door target since a static
-    // position has no trail; ComputePathTo's Layer 1 LOS + Layer 3 graph
-    // handle the path.
-    const bool useDoorTarget = followerDoorHandoff;
-    // Same Item 2 leader-trail routing as HandleStateFollow during door
-    // handoff — see that site's comment block for rationale.
-    Vec3f finalGoal = sideTarget;
-    if (useDoorTarget) {
-        auto it = clients.find(followerLeaderClientId);
-        if (it != clients.end()) {
-            finalGoal = it->second.posRot.pos;
-        } else {
-            finalGoal = followerMoveTarget;  // safety-net's door target
-        }
-    }
-    Vec3f returnTarget       = finalGoal;
-    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled()) {
-        AnchorNav::TrailKey targetKey =
-            AnchorNav::TrailKeyForPlayer((uint8_t)followerLeaderClientId);
-        const bool sceneChanged = (followerNavPath.sceneNum != gPlayState->sceneNum);
-        const bool keyChanged   = (followerNavPathTargetKey != targetKey);
-        const f32 driftDx = finalGoal.x - followerNavPathLastTarget.x;
-        const f32 driftDz = finalGoal.z - followerNavPathLastTarget.z;
-        const bool targetDrifted =
-            (driftDx * driftDx + driftDz * driftDz) >
-            (kNavPathTargetDriftRefresh * kNavPathTargetDriftRefresh);
-        const bool needsRefresh = followerNavPath.Empty() || sceneChanged ||
-                                   keyChanged || targetDrifted;
-        if (needsRefresh) {
-            followerNavPath.Reset();
-            // Same Layer 1 LOS skip + leader-trail preference as
-            // HandleStateFollow's door-handoff path — see that site for
-            // rationale.
-            bool gotPath = AnchorNav::ActorTrail::GetInstance().ComputePathTo(
-                targetKey, &player->actor, finalGoal, gPlayState, followerNavPath,
-                /*skipLayer1LOS=*/useDoorTarget,
-                /*preferLeaderTrail=*/useDoorTarget);
-            followerNavPathTargetKey  = targetKey;
-            followerNavPathLastTarget = finalGoal;
-            if (!gotPath) {
-                SPDLOG_DEBUG("[Follower] RETURN NavPath empty (ComputePathTo "
-                             "returned false; falling back to direct finalGoal "
-                             "useDoorTarget={})", useDoorTarget);
-            }
-        }
-        if (!followerNavPath.Empty()) {
-            Vec3f sg = followerNavPath.CurrentSubgoal();
-            f32   sgDx = sg.x - p2Pos.x;
-            f32   sgDz = sg.z - p2Pos.z;
-            if (sgDx * sgDx + sgDz * sgDz <
-                kNavPathSubgoalReach * kNavPathSubgoalReach) {
-                followerNavPath.Advance();
-            }
-            if (!followerNavPath.Empty()) {
-                returnTarget = followerNavPath.CurrentSubgoal();
-            }
-        }
-    }
-    followerMoveTarget = returnTarget;
-    f32 distToReturnTarget = sqrtf(SQ(returnTarget.x - p2Pos.x) +
-                                    SQ(returnTarget.z - p2Pos.z));
-    // Stick injection in TickFollowerInput drives actual movement; we
-    // face the immediate move target so Player_Update's auto-rotate
-    // aligns with stick direction.
-    if (distToReturnTarget > 0.001f) {
-        player->actor.shape.rot.y = YawToward(
-            returnTarget.x - player->actor.world.pos.x,
-            returnTarget.z - player->actor.world.pos.z);
-    }
-    // RETURN→IDLE gates on distance to the FINAL goal (sideTarget), not
-    // the immediate subgoal. With nav substrate off this is identical
-    // (returnTarget == sideTarget); with nav substrate on it prevents
-    // RETURN→IDLE from firing when the follower reaches an intermediate
-    // breadcrumb en route to the leader.
-    //
-    // P3.10: also gate on |Δy| so the follower doesn't settle into IDLE
-    // while standing UNDER the leader (e.g., leader on a platform above).
-    // See kFollowYThreshold doc.
-    f32 distToFinalGoal = sqrtf(SQ(sideTarget.x - p2Pos.x) +
-                                 SQ(sideTarget.z - p2Pos.z));
-    f32 dyToFinalGoal = fabsf(sideTarget.y - p2Pos.y);
-    if (distToFinalGoal < kFollowThreshold &&
-        dyToFinalGoal    < kFollowYThreshold) {
-        followerAIState     = FollowerAIState::IDLE;
-        followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] RETURN→IDLE dist={:.1f} dy={:.1f}",
-                    distToFinalGoal, dyToFinalGoal);
     }
 }
 
@@ -3750,9 +3644,9 @@ void Anchor::HandleStateRangedAttack(Player* player, const Vec3f& p2Pos) {
     if (followerTargetEnemy == nullptr ||
         followerTargetEnemy->update == nullptr) {
         FollowerRestoreItems();
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target gone)");
+        SPDLOG_INFO("[Follower] RANGED_ATTACK→FOLLOW (target gone)");
         return;
     }
     // Two-signal defeat check, mirroring the ATTACK state.
@@ -3770,9 +3664,9 @@ void Anchor::HandleStateRangedAttack(Player* player, const Vec3f& p2Pos) {
     }
     if (defeated) {
         FollowerRestoreItems();
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (target dead)");
+        SPDLOG_INFO("[Follower] RANGED_ATTACK→FOLLOW (target dead)");
         return;
     }
     // Face the target so the slingshot aim line is correct.
@@ -3783,9 +3677,9 @@ void Anchor::HandleStateRangedAttack(Player* player, const Vec3f& p2Pos) {
     }
     if (followerStateFrames >= kAttackDuration) {
         FollowerRestoreItems();
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
-        SPDLOG_INFO("[Follower] RANGED_ATTACK→RETURN (cycle complete)");
+        SPDLOG_INFO("[Follower] RANGED_ATTACK→FOLLOW (cycle complete)");
     }
 }
 
@@ -3802,9 +3696,9 @@ void Anchor::HandleStateCollectItem(Player* player, const Vec3f& leaderPos, cons
     //   - timeout elapsed (couldn't reach) → RETURN
     if (followerTargetItem == nullptr ||
         followerTargetItem->update == nullptr) {
-        SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (item gone — collected or unloaded)");
+        SPDLOG_INFO("[Follower] COLLECT_ITEM→FOLLOW (item gone — collected or unloaded)");
         followerTargetItem  = nullptr;
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
         return;
     }
@@ -3813,9 +3707,9 @@ void Anchor::HandleStateCollectItem(Player* player, const Vec3f& leaderPos, cons
         f32 lx = leaderPos.x - p2Pos.x;
         f32 lz = leaderPos.z - p2Pos.z;
         if (lx * lx + lz * lz > kMaxLeash * kMaxLeash) {
-            SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (leader beyond leash)");
+            SPDLOG_INFO("[Follower] COLLECT_ITEM→FOLLOW (leader beyond leash)");
             followerTargetItem  = nullptr;
-            followerAIState     = FollowerAIState::RETURN;
+            followerAIState     = FollowerAIState::FOLLOW;
             followerStateFrames = 0;
             return;
         }
@@ -3823,9 +3717,9 @@ void Anchor::HandleStateCollectItem(Player* player, const Vec3f& leaderPos, cons
     // Y-gate — item ended up on a different floor (bounce off a ledge
     // between grace expiry and pickup start).
     if (fabsf(followerTargetItem->world.pos.y - p2Pos.y) >= kMaxYDelta) {
-        SPDLOG_INFO("[Follower] COLLECT_ITEM→RETURN (item off-floor)");
+        SPDLOG_INFO("[Follower] COLLECT_ITEM→FOLLOW (item off-floor)");
         followerTargetItem  = nullptr;
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
         return;
     }
@@ -3834,9 +3728,9 @@ void Anchor::HandleStateCollectItem(Player* player, const Vec3f& leaderPos, cons
     if (followerCollectItemTimeoutFrames > 0) {
         followerCollectItemTimeoutFrames--;
         if (followerCollectItemTimeoutFrames == 0) {
-            SPDLOG_WARN("[Follower] COLLECT_ITEM→RETURN (timeout)");
+            SPDLOG_WARN("[Follower] COLLECT_ITEM→FOLLOW (timeout)");
             followerTargetItem  = nullptr;
-            followerAIState     = FollowerAIState::RETURN;
+            followerAIState     = FollowerAIState::FOLLOW;
             followerStateFrames = 0;
             return;
         }
@@ -4366,7 +4260,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
         f32 ldx = leaderPos.x - p2Pos.x;
         f32 ldz = leaderPos.z - p2Pos.z;
         if (ldx * ldx + ldz * ldz > kMaxLeash * kMaxLeash) {
-            followerAIState     = FollowerAIState::RETURN;
+            followerAIState     = FollowerAIState::FOLLOW;
             followerStateFrames = 0;
             SPDLOG_INFO("[Follower] ENGAGE\u2192RETURN (leader too far)");
             return;
@@ -4374,7 +4268,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
     }
     if (followerTargetEnemy == nullptr ||
         followerTargetEnemy->update == nullptr) {
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] ENGAGE\u2192RETURN (enemy gone)");
         return;
@@ -4396,7 +4290,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
                             followerTargetEnemy->id);
                 return;
             }
-            followerAIState     = FollowerAIState::RETURN;
+            followerAIState     = FollowerAIState::FOLLOW;
             followerStateFrames = 0;
             SPDLOG_INFO("[Follower] ENGAGE\u2192RETURN (enemy off-floor)");
             return;
@@ -4547,7 +4441,7 @@ void Anchor::HandleStateAttack(Player* player, const Vec3f& p2Pos) {
     // at 1 through the whole death cycle).
     if (followerTargetEnemy == nullptr ||
         followerTargetEnemy->update == nullptr) {
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] ATTACK\u2192RETURN (enemy gone)");
         return;
@@ -4565,13 +4459,13 @@ void Anchor::HandleStateAttack(Player* player, const Vec3f& p2Pos) {
         }
     }
     if (targetDefeated) {
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] ATTACK\u2192RETURN (enemy dead)");
         return;
     }
     if (fabsf(followerTargetEnemy->world.pos.y - p2Pos.y) >= kMaxYDelta) {
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] ATTACK\u2192RETURN (enemy off-floor)");
         return;
@@ -4608,7 +4502,7 @@ void Anchor::HandleStateAttack(Player* player, const Vec3f& p2Pos) {
         }
     }
     if (followerStateFrames >= kAttackDuration) {
-        followerAIState     = FollowerAIState::RETURN;
+        followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] ATTACK\u2192RETURN (cycle complete)");
     }

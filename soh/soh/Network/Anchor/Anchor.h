@@ -509,11 +509,16 @@ class Anchor : public Network {
 
     // AI follower state machine (runs each frame when followerActive is true).
     // IDLE     — at leader's side; scans for nearby enemies.
-    // FOLLOW   — stick-driven movement toward leader's side.
+    // FOLLOW   — stick-driven movement toward leader's side. Used for ALL
+    //            "walk toward target" pursuit, including the post-combat /
+    //            post-pickup walk back to leader (formerly RETURN —
+    //            removed 2026-05-12 PM, see commit message). Carries
+    //            stuck-detection, item-pickup scan, and auto-CLIMBING
+    //            engagement; previously these were FOLLOW-only and the
+    //            return-to-leader walk had to wait 10s for G14 to fire.
     // STUCK    — stick stalled; bounded position-override nudge toward target.
     // ENGAGE   — moving toward the nearest ACTORCAT_ENEMY actor.
     // ATTACK   — within sword reach; BTN_B injection, stick continues to track enemy.
-    // RETURN   — returning to leader's side after ENGAGE/ATTACK.
     // CLIMBING — leader is on a vine/ladder above the kMaxYDelta band; teleport
     //            follower to leader and ride along until leader stops climbing (G1/G2).
     // BLOCK    — ENGAGE target is shield-reflect class (Mad Scrub); inject BTN_R (G4).
@@ -524,11 +529,11 @@ class Anchor : public Network {
     //            future use (G19 Gohma weak-point timing).
     // COLLECT_ITEM — opportunistic pickup of ACTOR_EN_ITEM00 drops after an
     //            enemy kill (rupees, filtered hearts/magic). Interrupts IDLE
-    //            and FOLLOW when eligible; ATTACK→RETURN may divert through
+    //            and FOLLOW when eligible; ATTACK→FOLLOW may divert through
     //            this state if a drop just landed. See
     //            Claude/Plans/ai_follower_item_pickup.md.
     enum class FollowerAIState {
-        IDLE, FOLLOW, STUCK, ENGAGE, ATTACK, RETURN,
+        IDLE, FOLLOW, STUCK, ENGAGE, ATTACK,
         CLIMBING, BLOCK, RANGED_ATTACK, STANDBY,
         COLLECT_ITEM,
     };
@@ -1128,7 +1133,6 @@ class Anchor : public Network {
     // TickFollower's switch becomes a thin dispatcher.
     void HandleStateStandby();
     void HandleStateBlock(Player* player, const Vec3f& p2Pos);
-    void HandleStateReturn(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos);
     void HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* leaderActor);
     // CLIMBING sub-phases (R1 of follower_nav_refactor). Same-file
     // helpers, used by HandleStateClimbing as the thin dispatcher.
