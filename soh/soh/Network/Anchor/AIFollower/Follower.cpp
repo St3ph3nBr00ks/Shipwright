@@ -2471,6 +2471,44 @@ void Anchor::TickFollowerInput(Actor* actor) {
                 input.cur.stick_y = stickY;
                 input.rel.stick_x = stickX;
                 input.rel.stick_y = stickY;
+            } else if (followerClimbAnchorIdx != UINT16_MAX) {
+                // Bug 2 fix (log 68): the snap-to-basePos block above
+                // teleports world.pos to exactly anchor.basePos. After
+                // that, dx=dz=0 and the standard "walk to approach"
+                // injection produces zero stick — OoT's collision sees
+                // Link AT the wall but not PRESSING INTO it, so the
+                // grab logic never fires. Follower sat 30 seconds at
+                // anchor base waiting for autonomous-climb TIMEOUT.
+                //
+                // Fix: when at base and not yet on the ladder, inject
+                // a camera-relative stick INTO the wall (along
+                // -planeNormal). OoT's ladder/vine collision sees the
+                // forward press and triggers PLAYER_STATE1_CLIMBING_
+                // LADDER, advancing the phase to Phase B (vertical
+                // climb injection).
+                const ::AnchorNavRoom::RoomNavData* navData =
+                    ::AnchorNavRoom::GetForRoom(
+                        gPlayState->sceneNum,
+                        (int8_t)gPlayState->roomCtx.curRoom.num);
+                if (navData != nullptr &&
+                    followerClimbAnchorIdx < navData->climbAnchors.size()) {
+                    const auto& anc =
+                        navData->climbAnchors[followerClimbAnchorIdx];
+                    Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                    s16 inputDirYaw = Camera_GetInputDirYaw(cam);
+                    s16 worldYaw    = Math_Atan2S(-anc.planeNormal.z,
+                                                   -anc.planeNormal.x);
+                    s16 stickAngle  = worldYaw - inputDirYaw;
+                    s8  stickY = (s8)( Math_CosS(stickAngle) * 127.0f);
+                    s8  stickX = (s8)(-Math_SinS(stickAngle) * 127.0f);
+                    input.cur.stick_x = stickX;
+                    input.cur.stick_y = stickY;
+                    input.rel.stick_x = stickX;
+                    input.rel.stick_y = stickY;
+                } else {
+                    input.cur.stick_x = 0; input.cur.stick_y = 0;
+                    input.rel.stick_x = 0; input.rel.stick_y = 0;
+                }
             } else {
                 input.cur.stick_x = 0; input.cur.stick_y = 0;
                 input.rel.stick_x = 0; input.rel.stick_y = 0;
@@ -3350,35 +3388,32 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     }
 
     // Substrate-path cursor advancement for climb segments
-    // (Bug 3 fix, log 60 2026-05-12 PM). Run UNCONDITIONALLY (no
-    // !leaderStillClimbing gate) and use snap-to-closest semantics
-    // instead of one-step "advance when within 24u".
+    // (Bug 3 fix v2, log 68 2026-05-12). Runs UNCONDITIONALLY (no
+    // !leaderStillClimbing gate) so the cursor tracks leader-driven
+    // climb progress, per the log 60 fix.
     //
-    // Why unconditional: while the leader is climbing, leader-
-    // tracking sets followerMoveTarget = leaderPos and the CLIMBING
-    // stick injection drives the follower up the wall via OoT
-    // physics. The cursor has to stay in sync with that physical
-    // progress — pre-fix the cursor stayed at waypoint[1] (base of
-    // climb) for the entire ascent, then when the leader stopped
-    // and substrate refresh kicked in, the substrate target pointed
-    // BACK DOWN to waypoint[1], driving the follower into a
-    // direction-conflict freeze at the seam. (See log 60 follower
-    // p2=(406,553,231) frozen for ~6s scenario.)
+    // Semantics: advance to the FURTHEST climb-flagged waypoint
+    // within kClimbAdvanceReach3D (50u, ~1.5 cell spacings). Pure
+    // snap-to-closest landed the cursor at the cell nearest follower-
+    // Y, producing target-Y ≈ follower-Y; the CLIMBING stick
+    // injection's dy comparison hit the kClimbYTolerance=8u dead-zone
+    // and stick_y went to 0 — follower stalled mid-wall (log 68 Bug
+    // 3: 9 seconds frozen at Y=86 with cells at Y=60/90/120/...).
     //
-    // Why snap-to-closest: the follower can rapidly traverse
-    // multiple cells via OoT physics; one-step-per-tick advance
-    // can't keep up. Snap walks forward through the contiguous
-    // climb-flagged subsequence and picks the cursor that
-    // minimises 3D distance to the follower. Bounded scan within
-    // the current climb segment — no full-path search.
+    // Furthest-within-reach keeps the target consistently AHEAD of
+    // the follower (~30-50u above for an upward climb), so dy stays
+    // outside the dead-zone and stick_y stays at full +127. Direction-
+    // agnostic — works for downward climbs too (target stays below).
+    // Bounded scan within the current contiguous climb segment.
     if (AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
         !followerNavPath.Empty()) {
         const uint16_t curFlags = followerNavPath.CurrentSubgoalFlags();
         if ((curFlags & ::AnchorNavRoom::NODE_CLIMB_ANY) != 0) {
             const Vec3f& p2w = player->actor.world.pos;
+            constexpr f32 kClimbAdvanceReach3D = 50.0f;
+            constexpr f32 kClimbAdvanceReachSq =
+                kClimbAdvanceReach3D * kClimbAdvanceReach3D;
             size_t bestIdx = followerNavPath.cursorIdx;
-            f32 bestDistSq = AnchorDist::Dist3DSq(
-                followerNavPath.waypoints[bestIdx], p2w);
             for (size_t i = followerNavPath.cursorIdx + 1;
                  i < followerNavPath.waypoints.size(); i++) {
                 const uint16_t f = (i < followerNavPath.waypointFlags.size())
@@ -3389,9 +3424,8 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
                 }
                 f32 dSq = AnchorDist::Dist3DSq(
                     followerNavPath.waypoints[i], p2w);
-                if (dSq < bestDistSq) {
-                    bestDistSq = dSq;
-                    bestIdx    = i;
+                if (dSq <= kClimbAdvanceReachSq) {
+                    bestIdx = i;  // take FURTHEST within reach
                 }
             }
             if (bestIdx > followerNavPath.cursorIdx) {
