@@ -264,7 +264,16 @@ static constexpr int kItemCollectTimeout = 300;
 
 // Stuck-detection tunables for HandleStateFollow.
 static constexpr int kStuckCheckInterval = 20;     // frames between progress checks
-static constexpr f32 kStuckMinProgress   = 5.0f;   // min units travelled per interval
+// Raised 5→10 (user 2026-05-12 PM): "the actor frequently oscillates
+// significantly when stuck." A 10u threshold catches biased
+// oscillation patterns that net 6-8u of forward progress while
+// otherwise wobbling stuck against a wall. Normal walking covers
+// 25-30u per 333ms check interval on flat ground, so 10u still
+// has comfortable margin for genuine motion. May trigger false
+// positives on very slow walks (steep slopes with slope penalty);
+// revisit if field-test shows STUCK firing during legitimate
+// uphill traversal.
+static constexpr f32 kStuckMinProgress   = 10.0f;  // min units progress toward target per interval
 static constexpr int kStuckCycleWindow   = 120;    // G12 cycle-count reset window (frames; 2s @ 60fps)
 // Reduced 300→120 (log 66 follow-up). 5s was too forgiving — if the
 // follower can't make progress for 2 seconds, additional nudges aren't
