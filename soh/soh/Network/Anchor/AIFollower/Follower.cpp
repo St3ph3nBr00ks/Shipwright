@@ -3742,10 +3742,26 @@ bool Anchor::CheckStuckAndEscalate(const Vec3f& p2Pos,
                                     FollowerAIState resumeState) {
     if (followerStateFrames % kStuckCheckInterval != 0) return false;
 
+    // "Progress" is now measured as DISTANCE-TO-TARGET REDUCED, not raw
+    // XZ displacement (user 2026-05-12 PM follow-up). Raw displacement
+    // was direction-agnostic: an actor oscillating 6u left/6u right
+    // against a wall could land mid-cycle on the check tick and show
+    // 8u displacement — over the 5u threshold, falsely registering as
+    // genuine motion. Re-checking on the next cycle, the phase might
+    // give 2u and trigger stuck. Inconsistent.
+    //
+    // Distance-to-target-reduced is robust: oscillation in any
+    // direction that doesn't approach the target shows 0 progress.
+    // Lateral sliding along a wall: 0. Walking AWAY from target:
+    // negative progress. Only forward motion TOWARD the immediate
+    // move target counts.
+    f32 toTarget = AnchorDist::DistXZ(followerMoveTarget, p2Pos);
+    f32 prevToTarget = AnchorDist::DistXZ(followerMoveTarget, followerLastPos);
+    f32 progress = prevToTarget - toTarget;  // positive = approached
     f32 progDx   = p2Pos.x - followerLastPos.x;
     f32 progDz   = p2Pos.z - followerLastPos.z;
-    f32 progress = sqrtf(progDx * progDx + progDz * progDz);
-    f32 toTarget = AnchorDist::DistXZ(followerMoveTarget, p2Pos);
+    f32 rawDisp  = sqrtf(progDx * progDx + progDz * progDz);
+    (void)rawDisp;  // retained for the log line below
     // Per-state log prefix so traces stay diagnosable across the three
     // pursuing states. Compact switch keeps the log site cheap.
     const char* stateStr = "PURSUE";
@@ -3755,9 +3771,10 @@ bool Anchor::CheckStuckAndEscalate(const Vec3f& p2Pos,
         case FollowerAIState::COLLECT_ITEM: stateStr = "COLLECT_ITEM"; break;
         default: break;
     }
-    SPDLOG_INFO("[Follower] {} check: progress={:.1f} distToTarget={:.0f} "
+    SPDLOG_INFO("[Follower] {} check: progress={:.1f} (rawDisp={:.1f}) "
+                "distToTarget={:.0f} "
                 "p2=({:.0f},{:.0f}) last=({:.0f},{:.0f}) target=({:.0f},{:.0f})",
-                stateStr, progress, toTarget,
+                stateStr, progress, rawDisp, toTarget,
                 p2Pos.x, p2Pos.z,
                 followerLastPos.x, followerLastPos.z,
                 followerMoveTarget.x, followerMoveTarget.z);
