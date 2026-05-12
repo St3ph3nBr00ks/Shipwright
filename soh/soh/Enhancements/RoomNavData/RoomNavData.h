@@ -189,6 +189,14 @@ struct CrawlspaceAnchor {
 struct DropAnchor {
     Vec3f highPos;       // walkable position at the top edge
     Vec3f landingPos;    // walkable position where navigator lands
+    // Schema v21+: 1 when highPos is on a climb-surface cell (vine,
+    // designated wall, generic wall, ladder); 0 when highPos is on a
+    // floor node. BuildAdjacencyList uses this to pick the correct
+    // FindNearestNode lookup mode — the default floor-only lookup
+    // would miss the climb cell and edge to a nearby floor instead.
+    uint8_t highIsClimb;
+    uint8_t _pad0;
+    uint16_t _pad1;
 };
 
 // Jump anchor — pre-baked traversal pair (Plans/jump_anchor_plan.md).
@@ -352,7 +360,8 @@ const RoomNavData* GetForRoom(int16_t sceneNum, int8_t roomNum);
 
 // Returns the index of the node nearest to `pos` within `data->nodes`.
 // Returns -1 if data is null or has no nodes.
-int FindNearestNode(const RoomNavData* data, const Vec3f& pos);
+int FindNearestNode(const RoomNavData* data, const Vec3f& pos,
+                    bool includeClimb = false);
 
 // Bundle of per-query knobs for the hazard-aware BFS. Consolidates the
 // param explosion that grew across Tasks 3 + 4 (climb mask + drop anchors

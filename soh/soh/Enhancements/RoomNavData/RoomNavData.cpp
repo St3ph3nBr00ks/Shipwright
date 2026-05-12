@@ -163,7 +163,8 @@ const RoomNavData* GetForRoom(int16_t sceneNum, int8_t roomNum) {
     return &it->second;
 }
 
-int FindNearestNode(const RoomNavData* data, const Vec3f& pos) {
+int FindNearestNode(const RoomNavData* data, const Vec3f& pos,
+                    bool includeClimb) {
     if (data == nullptr || data->nodes.empty()) {
         return -1;
     }
@@ -174,19 +175,23 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos) {
     // optimization (cell-bucket lookup) deferred until profiling shows
     // need.
     //
-    // Climb-surface nodes (schema v7+) are skipped — every existing
-    // caller wants a FLOOR node nearest to a world position (Layer 3
+    // Climb-surface nodes (schema v7+) are skipped by default — most
+    // callers want a FLOOR node nearest to a world position (Layer 3
     // BFS entry, climb-base/top tagging, IsReachable endpoints). Climb-
     // surface nodes sit on walls at arbitrary altitudes and would
     // produce wrong-class hits when a navigator stands close to a
-    // climbable wall. Stage 6 of climb_surface_nav_grid_plan will add a
-    // separate FindNearestClimbSurfaceNode helper for the climb-aware
-    // path-engagement check.
+    // climbable wall.
+    //
+    // `includeClimb=true` opt-in (schema v21+) for callers that
+    // explicitly want to find a climb-cell node — currently used by
+    // BuildAdjacencyList's drop-anchor edge generation when the anchor
+    // has `highIsClimb=1` (climb-cell source for a drop). For those,
+    // skipping climb cells would mis-edge to a nearby floor.
     int bestIdx = -1;
     float bestDistSq = std::numeric_limits<float>::infinity();
     for (size_t i = 0; i < data->nodes.size(); i++) {
         const NavNode& n = data->nodes[i];
-        if (n.flags & NODE_CLIMB_ANY) continue;
+        if ((n.flags & NODE_CLIMB_ANY) && !includeClimb) continue;
         float dx = n.pos.x - pos.x;
         float dy = n.pos.y - pos.y;
         float dz = n.pos.z - pos.z;
@@ -369,7 +374,12 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
                 const float dy = anchor.highPos.y - anchor.landingPos.y;
                 if (dy > maxDropDistance) continue;
             }
-            int highIdx = FindNearestNode(data, anchor.highPos);
+            // v21: when highPos is on a climb-surface cell, search
+            // including climb nodes; default floor-only would miss
+            // the cell and edge to a nearby floor instead. Landing
+            // is always a floor node.
+            int highIdx = FindNearestNode(data, anchor.highPos,
+                                          /*includeClimb=*/anchor.highIsClimb != 0);
             int lowIdx  = FindNearestNode(data, anchor.landingPos);
             if (highIdx < 0 || lowIdx < 0) continue;
             if (highIdx == lowIdx) continue;
@@ -1210,7 +1220,17 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // — same-altitude and below-cell dismounts always allowed. Bump
 // invalidates v19 caches so they regenerate with valid same-
 // altitude edges restored.
-static constexpr uint16_t kCurrentSchemaVersion = 20;
+// v21 (2026-05-12 PM, log 87 followup): climb-cell drop anchors.
+// Vine/wall cells suspended above a floor (typical of vines hanging
+// from a ceiling that end 200u above the ground below) now emit
+// DropAnchor records with `highIsClimb=1`. BuildAdjacencyList's
+// drop-anchor edge generation uses FindNearestNode with
+// includeClimb=true for those anchors so the drop edge connects the
+// climb cell (not a nearby floor) to the landing. DropAnchor struct
+// extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
+// signature gained `bool includeClimb = false` opt-in (default keeps
+// existing floor-only semantics). Bump invalidates v20 caches.
+static constexpr uint16_t kCurrentSchemaVersion = 21;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3342,6 +3362,110 @@ static void DetectDropAnchors(
     }
 }
 
+// Schema v21 (2026-05-12 PM, log 87 followup) — climb-cell-to-floor
+// drop anchors. Companion to DetectDropAnchors but with climb-surface
+// cells as the high source. Must run AFTER GenerateClimbSurfaceGrids
+// so out->nodes contains the climb cells, AND AFTER the original
+// floor-only DetectDropAnchors so dedup picks up its anchors.
+//
+// Use case: vine hanging from a ceiling that ends 200u above the
+// floor; vine passing by a mid-altitude platform; ladder suspended
+// from a platform with floor below. The follower climbs to (or
+// past) the cell, drops, lands on the floor.
+//
+// All climb surface types eligible (vines, designated walls,
+// generic walls, ladders). Per-actor climbSurfaceMask still gates
+// which anchors a navigator can engage in the first place;
+// drop-anchor traversal here just adds a "drop off the climb"
+// option for anchors the navigator can already reach.
+//
+// Every cell is considered (not just bottom row). A vine running
+// past a mid-wall platform could drop off any of its cells onto
+// that platform — mirrors the v18 "every cell as boundary
+// candidate" approach.
+//
+// World-cell lookup: climb cells store U/V grid coords in
+// cellIdxX/Z (NOT world cells). Compute the world cell from pos
+// to use the same nodesByCell spatial index as the floor pass.
+static void DetectClimbCellDropAnchors(
+    RoomNavData* out,
+    PlayState* play,
+    const std::unordered_map<CellKey, std::vector<uint16_t>, CellKeyHash>& nodesByCell)
+{
+    if (CVarGetInteger(CVAR_ROOM_NAV_DROP_ANCHOR, 0) == 0) return;
+    if (out->firstClimbSurfaceNodeIdx == UINT16_MAX) return;
+
+    constexpr float kDropMinDeltaY   = 30.0f;
+    constexpr float kDropMaxDeltaY   = 200.0f;
+    constexpr float kDropMaxXZSq     = 80.0f * 80.0f;
+    constexpr float kClusterRadiusSq = 40.0f * 40.0f;
+
+    size_t added  = 0;
+    size_t merged = 0;
+
+    const uint16_t startIdx = out->firstClimbSurfaceNodeIdx;
+    for (size_t i = startIdx; i < out->nodes.size(); i++) {
+        const NavNode& a = out->nodes[i];
+        if ((a.flags & NODE_CLIMB_ANY) == 0) continue;
+
+        // World cell from pos.
+        int worldCellX = (int)std::floor(a.pos.x / kGridResolution);
+        int worldCellZ = (int)std::floor(a.pos.z / kGridResolution);
+
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                CellKey nCell{ worldCellX + dx, worldCellZ + dz };
+                auto it = nodesByCell.find(nCell);
+                if (it == nodesByCell.end()) continue;
+                for (uint16_t j : it->second) {
+                    const NavNode& b = out->nodes[j];
+                    if (!(b.flags & NODE_WALKABLE)) continue;
+
+                    // b must be LOWER than the climb cell.
+                    f32 dy = a.pos.y - b.pos.y;
+                    if (dy < kDropMinDeltaY || dy > kDropMaxDeltaY) continue;
+
+                    f32 dxf = b.pos.x - a.pos.x;
+                    f32 dzf = b.pos.z - a.pos.z;
+                    if (dxf*dxf + dzf*dzf > kDropMaxXZSq) continue;
+
+                    if (!MovementClear(a.pos, b.pos, play)) continue;
+
+                    // Dedup against existing drop anchors (floor-src
+                    // pass + prior iterations of this pass).
+                    bool isDuplicate = false;
+                    for (const DropAnchor& existing : out->dropAnchors) {
+                        f32 hx = existing.highPos.x    - a.pos.x;
+                        f32 hz = existing.highPos.z    - a.pos.z;
+                        f32 lx = existing.landingPos.x - b.pos.x;
+                        f32 lz = existing.landingPos.z - b.pos.z;
+                        if ((hx*hx + hz*hz < kClusterRadiusSq) &&
+                            (lx*lx + lz*lz < kClusterRadiusSq)) {
+                            isDuplicate = true;
+                            merged++;
+                            break;
+                        }
+                    }
+                    if (isDuplicate) continue;
+
+                    DropAnchor anc{};
+                    anc.highPos     = a.pos;
+                    anc.landingPos  = b.pos;
+                    anc.highIsClimb = 1;
+                    out->dropAnchors.push_back(anc);
+                    added++;
+                }
+            }
+        }
+    }
+
+    if (added > 0 || merged > 0) {
+        SPDLOG_INFO("[RoomNav] Climb-cell drop-anchor detection: {} anchors added, "
+                    "{} duplicates merged",
+                    added, merged);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JumpAnchor detection (Plans/jump_anchor_plan.md).
 //
@@ -4468,6 +4592,10 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
     // surface. Runs after grids are populated so anchor.firstNodeIdx + nodeCount
     // are valid.
     DetectInterAnchorClimbBridges(out);
+    // Climb-cell drop anchors (schema v21). Vine/wall cells suspended
+    // above a floor get drop edges to the floor below. Must run after
+    // GenerateClimbSurfaceGrids so climb cells exist in out->nodes.
+    DetectClimbCellDropAnchors(out, play, nodesByCell);
 
     // ----- Orphan detection pass (schema v9 — moved here from pre-anchor). --
     //
@@ -6351,6 +6479,7 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     MergeOverlappingClimbAnchors(&nav, &anchorPolys);
     GenerateClimbSurfaceGrids(&nav, play, &anchorPolys);
     DetectInterAnchorClimbBridges(&nav);
+    DetectClimbCellDropAnchors(&nav, play, nodesByCell);
 
     // Reset the debug-draw summary tracker so the next overlay frame
     // re-emits the loaded-summary line with the refreshed counts.
