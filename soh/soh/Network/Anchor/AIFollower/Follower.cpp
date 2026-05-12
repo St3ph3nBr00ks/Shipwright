@@ -199,6 +199,17 @@ static constexpr int kAttackDuration = 60;
 // Was static constexpr inside TickFollower; promoted for HandleStateFollow's IDLE gate.
 static constexpr f32 kFollowThreshold = 100.0f;
 
+// Post-teleport stick-hold duration. When a teleport (G10 / G12 /
+// G14 / TeleportToNextSubgoal / LedgeMantle) writes world.pos
+// directly, followerPostTeleportFrames is set to this value; the
+// stick injection in TickFollowerInput zeroes out for that window so
+// OoT can settle the new pose without the next-frame walk-into-wall
+// stick input re-triggering STUCK. Was static constexpr inside
+// TickFollower; promoted to file-scope 2026-05-12 so
+// ComputePursuitSubgoal's LedgeMantle path can reference it from
+// outside TickFollower's lambda scope.
+static constexpr int kPostTeleportHoldFrames = 30;
+
 // P3.10 (user 2026-05-09 — "if the leader is standing on a platform,
 // the AI Follower will stand under the leader instead of walking up a
 // sloped surface to get onto the platform"): vertical gate for the
@@ -971,7 +982,10 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     // didn't clear stuck-cycle, G11 didn't clear overrun), which
     // masked the Kokiri Forest 26-teleport loop until the hold
     // counter broke the cycle.
-    static constexpr int kPostTeleportHoldFrames = 30;
+    //
+    // kPostTeleportHoldFrames moved to file-scope so
+    // ComputePursuitSubgoal's LedgeMantle path can reference it from
+    // outside this lambda scope.
     auto TeleportToLeader = [&](const char* reason) -> bool {
         Vec3f destPos = leaderPos;
         s16   destYaw = leaderActor->shape.rot.y;
