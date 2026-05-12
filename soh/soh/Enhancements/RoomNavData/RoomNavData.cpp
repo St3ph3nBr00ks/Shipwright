@@ -1228,6 +1228,15 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // emitted. Loop also restructured to iterate per anchor (not per
 // node) so anchor.planeNormal is in scope for the offset. Bump
 // invalidates v21 caches so they regenerate with proper drops.
+// v23 (2026-05-12 PM, log 91 fix): worldCellX/Z computation in
+// DetectClimbCellDropAnchors was missing the bboxMin offset that
+// nodesByCell uses (CellKeyForXZ semantics: keys are
+// (pos - bboxMin)/resolution, not raw pos/resolution). The lookup
+// always returned no candidates → zero climb-source drops emitted
+// despite the v22 normal-offset fix. Now applies bboxMin offset.
+// Diagnostic log line also unconditional now so we can see "0
+// added, 0 merged" cases (previously silent and hard to debug).
+// Bump invalidates v22 caches.
 
 // v21 (2026-05-12 PM, log 87 followup): climb-cell drop anchors.
 // Vine/wall cells suspended above a floor (typical of vines hanging
@@ -1239,7 +1248,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 22;
+static constexpr uint16_t kCurrentSchemaVersion = 23;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3440,9 +3449,15 @@ static void DetectClimbCellDropAnchors(
             const NavNode& a = out->nodes[i];
             if ((a.flags & NODE_CLIMB_ANY) == 0) continue;
 
-            // World cell from pos.
-            int worldCellX = (int)std::floor(a.pos.x / kGridResolution);
-            int worldCellZ = (int)std::floor(a.pos.z / kGridResolution);
+            // Cell key relative to bboxMin (2026-05-12 PM log 91 fix).
+            // nodesByCell uses CellKeyForXZ semantics — keys are
+            // (pos - bboxMin) / resolution, NOT raw pos / resolution.
+            // The floor-source drop pass reads pre-computed cellIdxX/Z
+            // from each floor node (set during BuildEdges); we have to
+            // derive the same form here because climb cells store U/V
+            // grid coords in cellIdxX/Z, not world cells.
+            int worldCellX = (int)std::floor((a.pos.x - out->bboxMin.x) / kGridResolution);
+            int worldCellZ = (int)std::floor((a.pos.z - out->bboxMin.z) / kGridResolution);
 
             // Pre-compute the line-test origin: cell pos shifted
             // outward along the wall normal. Done once per cell.
@@ -3504,11 +3519,9 @@ static void DetectClimbCellDropAnchors(
         }
     }
 
-    if (added > 0 || merged > 0) {
-        SPDLOG_INFO("[RoomNav] Climb-cell drop-anchor detection: {} anchors added, "
-                    "{} duplicates merged",
-                    added, merged);
-    }
+    SPDLOG_INFO("[RoomNav] Climb-cell drop-anchor detection: {} anchors added, "
+                "{} duplicates merged ({} climb anchors scanned)",
+                added, merged, out->climbAnchors.size());
 }
 
 // ---------------------------------------------------------------------------
