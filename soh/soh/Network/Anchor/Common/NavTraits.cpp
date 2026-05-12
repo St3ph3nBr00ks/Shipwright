@@ -113,8 +113,13 @@ static NavTraits MakeFollowerTraits() {
     //     across frames.
     //   - Trail enabled so other navigators can chase a follower if needed.
     //   - Link-rigged: eligible to swim through Underwater nodes.
-    //   - Jump distance: 110u — adult Link broad-jump is ~120u; child
-    //     somewhat less. 110 is a reasonable midpoint.
+    //   - Jump distance: 140u — adult Link broad-jump covers ~120u in-game,
+    //     but anchors are measured node-to-node and nodes don't sit exactly
+    //     at platform rims, so each anchor's dXZ adds ~20-30u of grid slop
+    //     beyond the visual jump distance. Field-test (log 59) showed every
+    //     anchor at one failing takeoff measured 120-153u dXZ; the prior
+    //     110u cap rejected 76% of detected anchors globally. 140u admits
+    //     the 120-134u cluster with safety margin against the 150u+ outliers.
     //   - Climb-surface base mask: ladder + vine + designed climb walls
     //     (matches vanilla Link). ResolveDynamicClimbMask promotes this
     //     to include GENERIC_WALL when gEnhancements.ClimbAnywhere is on.
@@ -124,7 +129,7 @@ static NavTraits MakeFollowerTraits() {
     t.targetStickyFrames      = 180;
     t.eligibleForSwimming     = true;
     t.leavesTrail             = true;
-    t.maxJumpDistance         = 110;
+    t.maxJumpDistance         = 140;
     t.climbSurfaceMask = ::AnchorNavRoom::NODE_CLIMB_LADDER
                        | ::AnchorNavRoom::NODE_CLIMB_VINE
                        | ::AnchorNavRoom::NODE_CLIMB_DESIGNATED_WALL;
@@ -134,7 +139,7 @@ static NavTraits MakeFollowerTraits() {
     t.useDropAnchors          = true;
     t.maxDropDistance         = 200;
     // Jump anchors: follower routes through pre-baked jump pairs.
-    // maxJumpDistance (110) already set above caps XZ; maxJumpUpDelta
+    // maxJumpDistance (140) already set above caps XZ; maxJumpUpDelta
     // 60 matches adult-Link broad-jump apex.
     t.useJumpAnchors          = true;
     t.maxJumpUpDelta          = 60;
