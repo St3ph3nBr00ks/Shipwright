@@ -989,6 +989,18 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         followerPostTeleportFrames    = kPostTeleportHoldFrames;
         followerCloseFailBaseline     = 0.0f;
         followerCloseFailFrames       = 0;
+        // Invalidate the held nav path (log 66 fix, 2026-05-12 PM).
+        // Pre-fix: G10/G12/G14 teleport landed the follower in a
+        // completely different region but kept the OLD path with the
+        // cursor pointing at whatever waypoint the follower was
+        // walking toward when the leash escalated. The next FOLLOW
+        // tick steered the follower BACK toward the stale waypoint
+        // instead of computing a fresh path from the post-teleport
+        // position. Symptom: P2 in Kokiri Forest teleported toward
+        // leader, fell off the platform, then "ran toward Mido"
+        // because cursor was still parked at a Mido-adjacent waypoint.
+        // Reset() clears the path; FOLLOW will recompute on next tick.
+        followerNavPath.Reset();
         AnchorFollower::QueueRecorderEvent(std::string("teleport:") + reason);
         if (!roomsDiffer) {
             player->actor.world.pos = destPos;
