@@ -910,7 +910,11 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // silently regenerate as v7 (matches every prior version bump). The
 // new ClimbAnchor fields default to zero / zero-vector — Stage 2 wires
 // the scan to populate them.
-static constexpr uint16_t kCurrentSchemaVersion = 11;
+// Schema v11 → v12: kJumpMinXZ raised 18→60 (log 66 fix). Output of
+// DetectJumpAnchors changes — pairs in the 18-60u XZ band are no longer
+// emitted as jump anchors. Bump invalidates cached scans so they
+// regenerate without the spurious near-cell jump markers.
+static constexpr uint16_t kCurrentSchemaVersion = 12;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -2890,7 +2894,14 @@ static void DetectJumpAnchors(
 {
     if (CVarGetInteger(CVAR_ROOM_NAV_JUMP_ANCHOR, 0) == 0) return;
 
-    constexpr float kJumpMinXZ            = 18.0f;       // skip within-floor-edge pairs
+    // Min XZ raised from 18u → 60u (log 66 fix, 2026-05-12 PM). At 18u,
+    // pairs separated by less than one full cell width were qualifying
+    // as jump anchors — visible in field tests as orange jump markers
+    // bridging adjacent grid cells where the actual gameplay action is
+    // a step-down (DropAnchor's domain) or a step-up (walkable edge's
+    // domain). 60u = at least one missed cell width, which is the
+    // minimum span for a real air gap on the 30u grid.
+    constexpr float kJumpMinXZ            = 60.0f;
     constexpr float kJumpMaxXZ            = 160.0f;
     constexpr float kJumpMaxXZSq          = kJumpMaxXZ * kJumpMaxXZ;
     constexpr float kJumpMinXZSq          = kJumpMinXZ * kJumpMinXZ;
