@@ -191,6 +191,45 @@ struct DropAnchor {
 //
 // Pre-baked at scan time; runtime JumpResolver still handles
 // dynamic-geometry gaps that pre-baking can't predict. Schema v8+.
+// Adjacency-list cache (perf optimization, 2026-05-12 PM). Building
+// adjacency from data->edges + anchor edges every BFS query is the
+// dominant cost on large rooms (Kokiri Forest, 16-19k nodes, 60k+
+// edges). BFS path refreshes fire several times per minute during
+// chase; pre-fix each refresh rebuilt the full adjacency from
+// scratch. Cache key includes every parameter that BuildAdjacency
+// reads, so different consumers (current: AI Follower; future: AI
+// Invader, synced enemies) coexist in the cache without thrash.
+struct AdjacencyCacheKey {
+    uint16_t climbSurfaceMask = 0;
+    bool     useDropAnchors   = false;
+    bool     useJumpAnchors   = false;
+    bool     useLedgeAnchors  = false;  // v1 always-on internally; included
+                                        // in key for future per-actor gating
+    float    maxDropDistance  = 0.0f;
+    float    maxJumpDistance  = 0.0f;
+    float    maxJumpUpDelta   = 0.0f;
+    bool operator==(const AdjacencyCacheKey& o) const {
+        return climbSurfaceMask == o.climbSurfaceMask &&
+               useDropAnchors  == o.useDropAnchors &&
+               useJumpAnchors  == o.useJumpAnchors &&
+               useLedgeAnchors == o.useLedgeAnchors &&
+               maxDropDistance == o.maxDropDistance &&
+               maxJumpDistance == o.maxJumpDistance &&
+               maxJumpUpDelta  == o.maxJumpUpDelta;
+    }
+};
+
+struct AdjacencyCacheEntry {
+    AdjacencyCacheKey                  key;
+    std::vector<std::vector<uint16_t>> adjacency;
+    // Set of (fromIdx<<16 | toIdx) for drop-anchor + jump-anchor edges.
+    // Path-extraction reads this to tag waypoints reached via these
+    // edges with NODE_DROP_FROM_ABOVE so the consumer's edge-avoidance
+    // predicate doesn't suppress the planned off-edge motion. Empty
+    // when neither useDropAnchors nor useJumpAnchors is set on the key.
+    std::unordered_set<uint32_t>       dropEdges;
+};
+
 struct JumpAnchor {
     Vec3f fromPos;
     Vec3f toPos;
@@ -248,6 +287,15 @@ struct RoomNavData {
     // disk-loaded RoomNavData has an empty vector; the user re-scans
     // (Force Rescan) to populate.
     std::vector<Vec3f> rejectedFloorPositions; // not persisted
+
+    // Runtime adjacency-list cache (perf, 2026-05-12 PM). One entry per
+    // distinct trait combination seen during the room's lifetime.
+    // Cleared on every successful scan + on each room load from disk.
+    // Bounded to a small fixed size (FIFO eviction). `mutable` so
+    // const-qualified BFS query functions (FindBestReachableSubgoalNode,
+    // FindBestReachableSubgoalPath, FindNearestNonHazardExit) can lazily
+    // populate it on demand. NOT persisted.
+    mutable std::vector<AdjacencyCacheEntry> adjacencyCache;
 };
 
 // ---------------------------------------------------------------------------

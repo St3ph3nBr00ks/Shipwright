@@ -452,6 +452,65 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
     return adjacency;
 }
 
+// Cache wrapper for BuildAdjacencyList (perf, 2026-05-12 PM).
+// Returns a reference to a cached AdjacencyCacheEntry matching the
+// key, building + inserting on cache miss. FIFO eviction at
+// kMaxAdjacencyCacheEntries to bound memory.
+//
+// Thread safety: BFS queries are synchronous on the main thread; no
+// concurrent calls. Within a single BFS run, only one call to this
+// function fires — the returned reference stays valid for the
+// duration of that BFS. References from earlier BFS runs may be
+// invalidated by erase/push_back during later runs, but those earlier
+// callers no longer hold references.
+//
+// Bounded to 5 entries — current consumer set is small (AI Follower
+// only). Future consumers (AI Invader, synced enemies with different
+// traits) coexist without thrash up to this cap; beyond it, FIFO
+// eviction churns the oldest entry. Tune kMaxAdjacencyCacheEntries
+// upward if consumer count grows past 5 distinct trait combinations.
+static const AdjacencyCacheEntry&
+GetOrBuildAdjacency(const RoomNavData* data, const AdjacencyCacheKey& key) {
+    for (auto& e : data->adjacencyCache) {
+        if (e.key == key) return e;
+    }
+    constexpr size_t kMaxAdjacencyCacheEntries = 5;
+    if (data->adjacencyCache.size() >= kMaxAdjacencyCacheEntries) {
+        data->adjacencyCache.erase(data->adjacencyCache.begin());
+    }
+    AdjacencyCacheEntry entry;
+    entry.key = key;
+    // Pass dropEdges destination only when at least one of the two
+    // intent-tagging consumers (drops, jumps) is on. BuildAdjacencyList
+    // skips the set fills otherwise, so passing nullptr saves nothing
+    // beyond clarity — matches the original call-site convention.
+    std::unordered_set<uint32_t>* dropPtr =
+        (key.useDropAnchors || key.useJumpAnchors) ? &entry.dropEdges : nullptr;
+    entry.adjacency = BuildAdjacencyList(data,
+        key.climbSurfaceMask,
+        key.useDropAnchors, key.maxDropDistance,
+        key.useJumpAnchors, key.maxJumpDistance, key.maxJumpUpDelta,
+        dropPtr);
+    data->adjacencyCache.push_back(std::move(entry));
+    return data->adjacencyCache.back();
+}
+
+// Construct a cache key from a NavQueryOptions. Helper for the three
+// BFS query functions that historically read traits into local vars.
+static AdjacencyCacheKey MakeAdjacencyKey(const NavQueryOptions& opts) {
+    AdjacencyCacheKey k;
+    k.climbSurfaceMask = opts.climbSurfaceMask;
+    k.useDropAnchors   = opts.useDropAnchors;
+    k.useJumpAnchors   = opts.useJumpAnchors;
+    k.useLedgeAnchors  = true;  // v1: ledge edges always emitted by
+                                // BuildAdjacencyList; reserved in key
+                                // for future per-actor gating.
+    k.maxDropDistance  = opts.maxDropDistance;
+    k.maxJumpDistance  = opts.maxJumpDistance;
+    k.maxJumpUpDelta   = opts.maxJumpUpDelta;
+    return k;
+}
+
 int FindBestReachableSubgoalNode(const RoomNavData* data,
                                   int fromIdx,
                                   const Vec3f& targetPos,
@@ -500,9 +559,8 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
         uint8_t  hopsInHazard;  // running count of consecutive hazard hops
     };
 
-    std::vector<std::vector<uint16_t>> adjacency =
-        BuildAdjacencyList(data, climbSurfaceMask, useDropAnchors, maxDropDistance,
-                           useJumpAnchors, maxJumpDistance, maxJumpUpDelta);
+    const AdjacencyCacheEntry& adjEntry = GetOrBuildAdjacency(data, MakeAdjacencyKey(opts));
+    const auto& adjacency = adjEntry.adjacency;
     std::vector<bool> visited(data->nodes.size(), false);
     std::deque<QueueEntry> frontier;
     visited[(size_t)fromIdx] = true;
@@ -614,9 +672,8 @@ int FindNearestNonHazardExit(const RoomNavData* data,
     // in hazard can use a climb surface as the exit (rare but possible).
     // Honors drop + jump anchors so a navigator stuck on a hazard
     // platform can escape by dropping or jumping to a safer surface.
-    std::vector<std::vector<uint16_t>> adjacency =
-        BuildAdjacencyList(data, climbSurfaceMask, useDropAnchors, maxDropDistance,
-                           useJumpAnchors, maxJumpDistance, maxJumpUpDelta);
+    const AdjacencyCacheEntry& adjEntry = GetOrBuildAdjacency(data, MakeAdjacencyKey(opts));
+    const auto& adjacency = adjEntry.adjacency;
     std::vector<bool> visited(data->nodes.size(), false);
     std::deque<uint16_t> q;
     visited[(size_t)fromIdx] = true;
@@ -687,16 +744,15 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
     const float fromDistSq = DistSqToTargetXYZ(data->nodes[(size_t)fromIdx].pos, targetPos);
 
     struct QueueEntry { uint16_t idx; uint8_t hopsInHazard; };
-    std::unordered_set<uint32_t> dropEdges;
-    // Pass the dropEdges set to BuildAdjacencyList when EITHER drops or
-    // jumps are on — both classes of edge get tagged as planned off-edge
-    // motion so the consumer's edge-avoidance predicate doesn't suppress
-    // them. See jump_anchor_plan.md §Step 4.
-    const bool collectIntentEdges = useDropAnchors || useJumpAnchors;
-    std::vector<std::vector<uint16_t>> adjacency =
-        BuildAdjacencyList(data, climbSurfaceMask, useDropAnchors, maxDropDistance,
-                           useJumpAnchors, maxJumpDistance, maxJumpUpDelta,
-                           collectIntentEdges ? &dropEdges : nullptr);
+    // The dropEdges set (drop-anchor high→landing AND jump-anchor pairs
+    // — both flagged as planned off-edge motion to bypass edge-avoidance
+    // suppression) lives in the cached AdjacencyCacheEntry. Pre-cache
+    // this site declared a local set and passed its address to
+    // BuildAdjacencyList; now it reads from the cached entry. See
+    // jump_anchor_plan.md §Step 4.
+    const AdjacencyCacheEntry& adjEntry = GetOrBuildAdjacency(data, MakeAdjacencyKey(opts));
+    const auto& adjacency = adjEntry.adjacency;
+    const auto& dropEdges = adjEntry.dropEdges;
     std::vector<bool> visited(data->nodes.size(), false);
     std::vector<int>  parents(data->nodes.size(), -1);
     std::deque<QueueEntry> frontier;
@@ -5821,6 +5877,11 @@ static void DoRefreshAnchorsCurrentRoom(const char* trigger) {
     if (nav.nodes.empty()) return;
 
     auto refreshStart = std::chrono::steady_clock::now();
+
+    // Perf cache: any partial rescan that touches edges or anchors
+    // invalidates the prebuilt adjacency lists. Drop them now; the
+    // next BFS query rebuilds lazily.
+    nav.adjacencyCache.clear();
 
     size_t prevClimbs = nav.climbAnchors.size();
     size_t prevLedges = nav.ledgeAnchors.size();
