@@ -903,6 +903,30 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
 
     if (bestIdx < 0) return false;
 
+    // Q2 impossible-path gate (2026-05-12 PM, log 82 fix). A*'s
+    // best-so-far fallback returns the closest reachable node when
+    // the target itself is graph-disconnected — e.g. follower stands
+    // beside a climb-surface grid whose wall top doesn't have a
+    // boundary edge to the upper platform the leader is on (the
+    // FindNearestFloorNodeXZRadius |Δy| ≤ 50u gate excludes platforms
+    // far above/below the wall top). Without this guard, the consumer
+    // followed a path that climbed the wall toward a cell which
+    // wasn't actually a way to the target, then thrashed in CLIMBING
+    // recovery (logs 81/82).
+    //
+    // If best-so-far is more than kBestSoFarMaxDistance from target,
+    // reject the path. Caller (ComputePursuitSubgoal in Follower.cpp)
+    // falls back to direct yaw toward the final goal. 80u ≈ 2.5 grid
+    // cells; tight enough to reject "wrong room / wrong floor"
+    // fallbacks, loose enough that a path ending one or two cells
+    // short of a target inside the room still returns true.
+    constexpr float kBestSoFarMaxDistance = 80.0f;
+    constexpr float kBestSoFarMaxDistSq   =
+        kBestSoFarMaxDistance * kBestSoFarMaxDistance;
+    if (bestDistSq > kBestSoFarMaxDistSq) {
+        return false;
+    }
+
     // Reconstruct path: walk parents from bestIdx back to fromIdx, then
     // reverse. Skip fromIdx itself — navigator is already there. The
     // resulting path has `bestIdx` at the END (closest to target), with
