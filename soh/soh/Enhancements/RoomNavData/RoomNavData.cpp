@@ -86,6 +86,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_AUTO_EXPAND           CVAR_ENHANCEMENT("RoomNavData.AutoExpandOnExploration")
 #define CVAR_ROOM_NAV_INTER_ANCHOR_BRIDGE_R CVAR_ENHANCEMENT("RoomNavData.InterAnchorBridgeRadius")
 #define CVAR_ROOM_NAV_JUMP_ANCHOR           CVAR_ENHANCEMENT("RoomNavData.JumpAnchorDetection")
+#define CVAR_ROOM_NAV_JUMP_GROUND_BELOW_DY  CVAR_ENHANCEMENT("RoomNavData.JumpAnchorGroundBelowMaxDeltaY")
 
 // File-scope helper at global namespace. OPEN_DISPS / CLOSE_DISPS
 // expand to a block containing an inline forward-declaration of
@@ -2993,19 +2994,22 @@ static void DetectJumpAnchors(
     // Ground-below check (user 2026-05-12 PM). Jump anchors are
     // intended for true air gaps where neither endpoint can be reached
     // by dropping down + walking + climbing back up. When walkable
-    // ground exists DIRECTLY BELOW either endpoint within
-    // kLedgeMaxDeltaY (matches the ledge-grab reach, user-tunable via
-    // gEnhancements.RoomNavData.LedgeGrabMaxDeltaY, default 70u), the
-    // drop+walk+climb route is viable and the jump anchor is
-    // redundant — drop anchors + ledge anchors should handle it.
+    // ground exists DIRECTLY BELOW either endpoint within the
+    // configured max-dy, the drop+walk+climb route is viable and the
+    // jump anchor is redundant — drop anchors + ledge anchors should
+    // handle it.
     //
-    // Read the same CVar the ledge detector uses, with the same 70u
-    // default. Capture once outside the loop — value is stable for
-    // this scan.
-    int32_t ledgeDeltaInt = CVarGetInteger(CVAR_ROOM_NAV_LEDGE_MAX_DELTA, 70);
-    if (ledgeDeltaInt < 1) ledgeDeltaInt = 1;
-    if (ledgeDeltaInt > 500) ledgeDeltaInt = 500;
-    const float kGroundBelowMaxDy = (float)ledgeDeltaInt;
+    // Separate CVar from ledge-grab reach (user 2026-05-12 PM
+    // follow-up). Both default to 70u so behaviour matches the v14
+    // commit (ba1c1b4e8) at default; user can decouple if field-test
+    // suggests jump-anchor filtering needs a different reach than
+    // ledge-grab does. Capture once outside the loop — value is
+    // stable for this scan. Configured via
+    // gEnhancements.RoomNavData.JumpAnchorGroundBelowMaxDeltaY.
+    int32_t groundDeltaInt = CVarGetInteger(CVAR_ROOM_NAV_JUMP_GROUND_BELOW_DY, 70);
+    if (groundDeltaInt < 1) groundDeltaInt = 1;
+    if (groundDeltaInt > 500) groundDeltaInt = 500;
+    const float kGroundBelowMaxDy = (float)groundDeltaInt;
     auto hasWalkableGroundBelow = [&](const Vec3f& pos) -> bool {
         // Probe slightly above the endpoint to avoid self-cast onto
         // the endpoint's own floor poly. 5u offset matches the
