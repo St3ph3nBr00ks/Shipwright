@@ -951,12 +951,21 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // Bump invalidates cached scans so they regenerate with the cleaner
 // jump-anchor set.
 //
-static constexpr uint16_t kCurrentSchemaVersion = 13;
-// Note: LedgeAnchor edges were wired into BuildAdjacencyList
-// (Plans/follower_ledge_consumer_plan.md) WITHOUT a schema bump.
-// The cached scan data already contains the ledgeAnchors list;
-// only BFS-consumption logic changed (BFS now follows the edges).
-// Existing cached files at schema v13 are still valid.
+// Schema v13 → v14: scan-output changes (user 2026-05-12 PM
+// screenshot batch).
+//   - Jump-anchor detection rejects pairs where walkable ground
+//     exists within kLedgeMaxDeltaY (default 70u) below either
+//     endpoint — drop+ledge route is viable, jump is redundant.
+//   - Floor scan rejects En_Kusa (grass) actor tops via the
+//     kFloorActorRejectList allowlist; the column scan continues
+//     downward to find the real terrain.
+// Bump invalidates cached scans so they regenerate with the
+// cleaner anchor set and ground-only floor nodes.
+//
+// LedgeAnchor BFS edges (added pre-v14, no schema bump because
+// only consumption logic changed) ride along — the v14 cached
+// data feeds them through BuildAdjacencyList the same as before.
+static constexpr uint16_t kCurrentSchemaVersion = 14;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -2978,7 +2987,40 @@ static void DetectJumpAnchors(
 
     size_t added = 0, merged = 0, rejectedArc = 0, rejectedNoGap = 0,
            rejectedWall = 0, rejectedDetour = 0,
-           rejectedAnchorEndpoint = 0, rejectedUnderwater = 0;
+           rejectedAnchorEndpoint = 0, rejectedUnderwater = 0,
+           rejectedGroundBelow = 0;
+
+    // Ground-below check (user 2026-05-12 PM). Jump anchors are
+    // intended for true air gaps where neither endpoint can be reached
+    // by dropping down + walking + climbing back up. When walkable
+    // ground exists DIRECTLY BELOW either endpoint within
+    // kLedgeMaxDeltaY (matches the ledge-grab reach, user-tunable via
+    // gEnhancements.RoomNavData.LedgeGrabMaxDeltaY, default 70u), the
+    // drop+walk+climb route is viable and the jump anchor is
+    // redundant — drop anchors + ledge anchors should handle it.
+    //
+    // Read the same CVar the ledge detector uses, with the same 70u
+    // default. Capture once outside the loop — value is stable for
+    // this scan.
+    int32_t ledgeDeltaInt = CVarGetInteger(CVAR_ROOM_NAV_LEDGE_MAX_DELTA, 70);
+    if (ledgeDeltaInt < 1) ledgeDeltaInt = 1;
+    if (ledgeDeltaInt > 500) ledgeDeltaInt = 500;
+    const float kGroundBelowMaxDy = (float)ledgeDeltaInt;
+    auto hasWalkableGroundBelow = [&](const Vec3f& pos) -> bool {
+        // Probe slightly above the endpoint to avoid self-cast onto
+        // the endpoint's own floor poly. 5u offset matches the
+        // wallBelowBody convention.
+        Vec3f castOrigin = { pos.x, pos.y + 5.0f, pos.z };
+        CollisionPoly poly{};
+        f32 floorY = BgCheck_AnyRaycastFloor1(&play->colCtx, &poly, &castOrigin);
+        if (floorY <= BGCHECK_Y_MIN) return false;
+        const f32 dy = pos.y - floorY;
+        // 5u minimum keeps the endpoint's own floor from triggering
+        // (the raycast hits the SAME poly when no ground below exists);
+        // kGroundBelowMaxDy upper bound captures only ledge-reachable
+        // ground.
+        return (dy > 5.0f && dy <= kGroundBelowMaxDy);
+    };
 
     // Anchor-endpoint exclusion set (user 2026-05-12 PM). Jump anchors
     // emitted at nodes that are ALREADY drop-anchor or climb-anchor
@@ -3272,6 +3314,16 @@ static void DetectJumpAnchors(
                         continue;
                     }
 
+                    // Ground-below rejection. If either endpoint has
+                    // walkable ground within kGroundBelowMaxDy below
+                    // it, the drop+walk+climb route is viable —
+                    // jumping is not essential. Drop anchors + ledge
+                    // anchors handle these cases more naturally.
+                    if (hasWalkableGroundBelow(a.pos) ||
+                        hasWalkableGroundBelow(b.pos)) {
+                        rejectedGroundBelow++;
+                        continue;
+                    }
                     // Geometric gap check: is there actually an air
                     // gap along the segment? Skip pairs where the
                     // line is over continuous floor (walking gets you
@@ -3344,16 +3396,20 @@ static void DetectJumpAnchors(
 
     if (added > 0 || merged > 0 || rejectedArc > 0 ||
         rejectedNoGap > 0 || rejectedWall > 0 || rejectedDetour > 0 ||
-        rejectedAnchorEndpoint > 0 || rejectedUnderwater > 0) {
+        rejectedAnchorEndpoint > 0 || rejectedUnderwater > 0 ||
+        rejectedGroundBelow > 0) {
         SPDLOG_INFO("[RoomNav] Jump-anchor detection: {} anchors added, "
                     "{} duplicates merged, {} arc-blocked, {} no-gap (walkable), "
                     "{} wall-blocked, {} walking-detour, "
-                    "{} anchor-endpoint, {} underwater "
+                    "{} anchor-endpoint, {} underwater, {} ground-below "
                     "(anchor-endpoint excludes drop+climb endpoint nodes "
-                    "across {} drop, {} climb anchors)",
+                    "across {} drop, {} climb anchors; ground-below "
+                    "max-dy={:.0f}u)",
                     added, merged, rejectedArc, rejectedNoGap, rejectedWall,
                     rejectedDetour, rejectedAnchorEndpoint, rejectedUnderwater,
-                    out->dropAnchors.size(), out->climbAnchors.size());
+                    rejectedGroundBelow,
+                    out->dropAnchors.size(), out->climbAnchors.size(),
+                    kGroundBelowMaxDy);
     }
 }
 
@@ -3464,6 +3520,18 @@ static const int16_t kFloorActorRejectList[] = {
     // become regular nav nodes; their wall faces feed into Path B
     // and ledge-grab detection naturally.
     ACTOR_EN_BOX,       // 0x000A — chests
+    // Tall grass / bushes (En_Kusa, 0x0125). The grass actor has
+    // floor-class collision on top so Link's raycast lands on the
+    // grass tip rather than the ground below. Pre-fix the scan
+    // placed walkable nav nodes ON TOP of the grass, suspended above
+    // the real terrain — visible as "nodes floating on grass" in
+    // field-test screenshots, and the follower walked across them
+    // as if they were solid platforms. Adding En_Kusa here makes
+    // the floor scan skip the grass-top hit and continue downward
+    // to find the actual ground.
+    // User 2026-05-12 PM; added with the jump-anchor ground-below
+    // fix in the same field-test screenshot batch.
+    ACTOR_EN_KUSA,      // 0x0125 — Kokiri Forest grass clumps
 };
 
 // Returns true if the floor at (x, floorY, z) sitting on Bg actor `floorBgId`
