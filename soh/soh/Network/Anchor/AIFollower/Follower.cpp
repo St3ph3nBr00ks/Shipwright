@@ -1648,13 +1648,23 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         // up the new cursor when it next runs FOLLOW.
     }
     if (followerStuckCycleCount >= kStuckCycleEscalation) {
+        // Plan §implementation Step 3 — try TeleportToNextSubgoal
+        // first. The helper handles its own state setup (FOLLOW→IDLE
+        // for walkable destinations, FOLLOW→CLIMBING with attach
+        // choreography for climb destinations) and counter resets
+        // internally on success.
+        //
+        // Fallback to TeleportToLeader when the helper returns false:
+        // path is empty, OR all remaining waypoints within the scan
+        // window are jump/drop/hazard (per plan eligibility filter).
+        // The fallback path is the true "give up and rejoin" branch —
+        // TeleportToLeader is no longer the primary cycle-3 action.
         // Bug B (log 69) — route through TeleportToLeader for
-        // cross-room-safe teleport. Always return regardless of
-        // mode: STUCK escalation is a terminal reset.
-        // Plan §implementation Step 3 will replace this with a
-        // TeleportToNextSubgoal-first attempt; for now the existing
-        // teleport-to-leader behavior is preserved.
-        TeleportToLeader("G12 stuck-cycle escalation");
+        // cross-room-safe teleport when the fallback fires.
+        if (TeleportToNextSubgoal("G12 stuck-cycle escalation")) {
+            return;
+        }
+        TeleportToLeader("G12 stuck-cycle (no eligible subgoal)");
         followerStuckCycleCount       = 0;
         followerStuckCycleResetFrames = 0;
         followerStuckCycleAdvancedAt  = 0;  // reset cycle-2 latch
