@@ -1203,7 +1203,14 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // BgCheck_AnyLineTest1 from cell to floor; edges blocked by
 // collision are dropped. Bump invalidates v18 caches so they
 // regenerate with line-tested edges.
-static constexpr uint16_t kCurrentSchemaVersion = 19;
+// v20 (2026-05-12 PM, log 87 fix): v19's unconditional line-test
+// false-positive-rejected legitimate wall-top-to-platform edges
+// (test line at +5u above two same-altitude surfaces clips both
+// meshes). Now the line-test runs ONLY when floor.y > cell.y + 15u
+// — same-altitude and below-cell dismounts always allowed. Bump
+// invalidates v19 caches so they regenerate with valid same-
+// altitude edges restored.
+static constexpr uint16_t kCurrentSchemaVersion = 20;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -2360,31 +2367,38 @@ static void GenerateClimbSurfaceEdges(RoomNavData* out,
                                                      kBoundaryFloorYDelta);
         if (floorIdx < 0) continue;
         if ((uint16_t)floorIdx == climbIdx) continue;
-        // Line-of-sight gate (2026-05-12 PM, log 83 fix). Before
-        // emitting a boundary edge, raycast from a few units above
-        // the cell to a few units above the floor candidate. If
-        // anything blocks the line (a platform's bottom surface, an
-        // unrelated wall, etc.), the dismount is physically
-        // impossible — skip the edge. Without this gate, mid-wall
-        // boundary edges (v18 addition) and even top-row edges could
-        // create graph connections through collision (user-reported:
-        // a connection from a climb-wall top up through a platform's
-        // collision creating an illusory vertical path).
+        // Conditional line-of-sight gate (2026-05-12 PM, log 87 fix).
+        // The v19 unconditional line-test was over-rejecting: a test
+        // line at +5u above two same-altitude surfaces sits right
+        // against both meshes and false-positive-hits on legitimate
+        // wall-top-to-platform dismounts. Result: floor and upper
+        // platform graph-disconnected, follower had no path.
         //
-        // Y offsets prevent the test from hitting the floor mesh
-        // itself or the wall surface at the cell. 5u clears typical
-        // floor-mesh thickness without significantly altering the
-        // sweep direction.
+        // Only line-test when the floor is significantly ABOVE the
+        // cell (Δy > kBoundaryEdgeUpwardDeltaForTest). Same-altitude
+        // and below-cell floor connections are typical dismounts
+        // (climb-up-and-onto, drop-off-wall, mid-wall step-sideways)
+        // — always physically valid, no test needed.
+        //
+        // The buggy case the test catches: v18's mid-wall edges (and
+        // even pre-v18 top-row edges) could connect a cell to a
+        // floor far above it when the platform's bottom surface
+        // intervenes. The Δy gate firing > 15u upward catches that
+        // class of edge; the line-test then drops it if collision
+        // intervenes.
+        constexpr float kBoundaryEdgeUpwardDeltaForTest = 15.0f;
         const Vec3f& floorPos = out->nodes[(size_t)floorIdx].pos;
-        Vec3f testFrom = { n.pos.x, n.pos.y + 5.0f, n.pos.z };
-        Vec3f testTo   = { floorPos.x, floorPos.y + 5.0f, floorPos.z };
-        Vec3f hitPos;
-        CollisionPoly* hitPoly = nullptr;
-        if (play != nullptr &&
-            BgCheck_AnyLineTest1(&play->colCtx, &testFrom, &testTo,
-                                  &hitPos, &hitPoly, 0)) {
-            boundaryEdgesBlockedByCollision++;
-            continue;
+        const float floorDy = floorPos.y - n.pos.y;
+        if (floorDy > kBoundaryEdgeUpwardDeltaForTest && play != nullptr) {
+            Vec3f testFrom = { n.pos.x, n.pos.y + 5.0f, n.pos.z };
+            Vec3f testTo   = { floorPos.x, floorPos.y + 5.0f, floorPos.z };
+            Vec3f hitPos;
+            CollisionPoly* hitPoly = nullptr;
+            if (BgCheck_AnyLineTest1(&play->colCtx, &testFrom, &testTo,
+                                      &hitPos, &hitPoly, 0)) {
+                boundaryEdgesBlockedByCollision++;
+                continue;
+            }
         }
         NavEdge edge{};
         edge.fromIdx = (uint16_t)std::min<int>(floorIdx, (int)climbIdx);
