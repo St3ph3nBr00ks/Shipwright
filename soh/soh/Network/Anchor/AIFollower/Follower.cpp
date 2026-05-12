@@ -263,17 +263,30 @@ static constexpr int kItemGraceFrames    = 180;
 static constexpr int kItemCollectTimeout = 300;
 
 // Stuck-detection tunables for HandleStateFollow.
-static constexpr int kStuckCheckInterval = 20;     // frames between progress checks
-// Raised 5→10 (user 2026-05-12 PM): "the actor frequently oscillates
-// significantly when stuck." A 10u threshold catches biased
-// oscillation patterns that net 6-8u of forward progress while
-// otherwise wobbling stuck against a wall. Normal walking covers
-// 25-30u per 333ms check interval on flat ground, so 10u still
-// has comfortable margin for genuine motion. May trigger false
-// positives on very slow walks (steep slopes with slope penalty);
-// revisit if field-test shows STUCK firing during legitimate
-// uphill traversal.
-static constexpr f32 kStuckMinProgress   = 10.0f;  // min units progress toward target per interval
+//
+// Tuning history:
+//   Original: 0.33s / 5u    — too aggressive, fired on every wobble.
+//   2026-05-12 AM: 0.33s / 10u — caught biased oscillation, still noisy.
+//   2026-05-12 PM: 2s / 20u   — current. User-driven: log 75 showed
+//                              the 0.33s cadence firing ~10 false
+//                              alarms per genuine stall. Slowing to
+//                              2s makes the detector confirm a real
+//                              stall before escalating. 20u/2s =
+//                              10u/s average — plenty of margin over
+//                              kMoveSpeed even on steep slopes
+//                              (slope-penalised walking still covers
+//                              >50u/s). Lowered from initial 30u
+//                              draft per user concern about false
+//                              positives on bend-heavy paths.
+static constexpr int kStuckCheckInterval = 120;    // 2s @ 60fps
+static constexpr f32 kStuckMinProgress   = 20.0f;  // min units toward target per interval
+// STUCK-FWD action (2026-05-12 PM): on stuck detection, project this
+// far toward followerMoveTarget, snap to the nearest walkable nav
+// node, and teleport. If |target - p2| < this, teleport directly to
+// the subgoal instead. Tuned to clear single-obstacle stalls in one
+// step without the noise of repeated JumpResolver / cycle-2 advance
+// firings the old 0.33s detector produced.
+static constexpr f32 kStuckForwardTeleportDist = 60.0f;
 static constexpr int kStuckCycleWindow   = 120;    // G12 cycle-count reset window (frames; 2s @ 60fps)
 // Reduced 300→120 (log 66 follow-up). 5s was too forgiving — if the
 // follower can't make progress for 2 seconds, additional nudges aren't
@@ -3886,6 +3899,86 @@ void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3
     //                     existing G10/G12/G14 teleport-back-to-leader
     //                     safety net, scoped to one step. Exit STUCK.
     //
+    // STUCK-FWD (2026-05-12 PM, user request) — primary stuck action.
+    // Project kStuckForwardTeleportDist (60u) toward followerMoveTarget,
+    // snap to nearest walkable nav node, teleport. If the move target
+    // is closer than 60u, teleport directly to it. Runs only on entry
+    // frame 0; fall-through to JumpResolver / legacy nudge if no
+    // walkable node is reachable.
+    //
+    // followerMoveTarget is the current substrate subgoal (not the
+    // leader's raw position) — see ComputePursuitSubgoal. Projecting
+    // toward it lands the follower 1-2 waypoints ahead on a typical
+    // 30u-spaced path, clearing single-obstacle stalls in one step
+    // without the cycle-1/2/3 escalation churn the old 0.33s detector
+    // produced.
+    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
+        followerStuckFrames == 0) {
+        const f32 fwdDx = followerMoveTarget.x - p2Pos.x;
+        const f32 fwdDz = followerMoveTarget.z - p2Pos.z;
+        const f32 fwdDist = sqrtf(fwdDx * fwdDx + fwdDz * fwdDz);
+        if (fwdDist > 0.001f) {
+            Vec3f projected;
+            bool useDirectSubgoal = (fwdDist < kStuckForwardTeleportDist);
+            if (useDirectSubgoal) {
+                projected = followerMoveTarget;
+            } else {
+                const f32 scale = kStuckForwardTeleportDist / fwdDist;
+                projected.x = p2Pos.x + fwdDx * scale;
+                projected.y = followerMoveTarget.y;  // approximate Y of subgoal
+                projected.z = p2Pos.z + fwdDz * scale;
+            }
+            const ::AnchorNavRoom::RoomNavData* navData =
+                ::AnchorNavRoom::GetForRoom(
+                    (int16_t)gPlayState->sceneNum,
+                    (int8_t)gPlayState->roomCtx.curRoom.num);
+            int nodeIdx = -1;
+            if (navData != nullptr) {
+                nodeIdx = ::AnchorNavRoom::FindNearestNode(navData, projected);
+            }
+            if (nodeIdx >= 0) {
+                const auto& node = navData->nodes[(size_t)nodeIdx];
+                // Reject orphaned / steep / hazard / underwater nodes —
+                // those aren't safe teleport destinations.
+                constexpr uint32_t kRejectFlags =
+                    ::AnchorNavRoom::NODE_ORPHANED     |
+                    ::AnchorNavRoom::NODE_STEEP_SLOPE  |
+                    ::AnchorNavRoom::NODE_HAZARD       |
+                    ::AnchorNavRoom::NODE_UNDERWATER;
+                if ((node.flags & kRejectFlags) == 0) {
+                    const FollowerAIState resume = followerPreStuckState;
+                    SPDLOG_INFO("[Follower] STUCK-FWD: {} ({:.0f}u to subgoal) → "
+                                "node {} pos=({:.0f},{:.0f},{:.0f})",
+                                useDirectSubgoal ? "subgoal-direct" : "60u-forward",
+                                fwdDist, nodeIdx,
+                                node.pos.x, node.pos.y, node.pos.z);
+                    player->actor.world.pos = node.pos;
+                    followerAIState     = resume;
+                    followerLastPos     = node.pos;
+                    followerStateFrames = 0;
+                    // Arm post-teleport stick hold so the next FOLLOW
+                    // tick doesn't immediately re-stuck on residual
+                    // stick state. Matches G10/G12/G14 convention.
+                    followerPostTeleportFrames = kPostTeleportHoldFrames;
+                    // Advance navPath cursor past waypoints we landed
+                    // on or near — prevents the follower from steering
+                    // backward to a now-passed waypoint.
+                    if (!followerNavPath.Empty() && useDirectSubgoal) {
+                        followerNavPath.Advance();
+                    }
+                    return;
+                }
+                SPDLOG_DEBUG("[Follower] STUCK-FWD: nearest node {} rejected "
+                             "(flags=0x{:x}) — fall through to JumpResolver",
+                             nodeIdx, node.flags);
+            } else {
+                SPDLOG_DEBUG("[Follower] STUCK-FWD: no nav node near "
+                             "projected ({:.0f},{:.0f},{:.0f}) — fall through",
+                             projected.x, projected.y, projected.z);
+            }
+        }
+    }
+
     // The legacy nudge (one step toward followerMoveTarget per tick
     // for kStuckRecovery frames) remains the default and the gate-off
     // fallback. JumpResolver runs only on entry frame 0 — subsequent
