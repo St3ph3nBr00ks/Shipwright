@@ -1569,10 +1569,20 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         if (dxL * dxL + dyL * dyL + dzL * dzL > kTeleportThreshold * kTeleportThreshold) {
             followerOverrunFrames++;
             if (followerOverrunFrames >= kTeleportDelayFrames) {
-                // Bug B (log 69) — route through TeleportToLeader
-                // so cross-room overruns use the scene-reload path
-                // rather than a raw world.pos write.
-                bool triggered = TeleportToLeader("G10 3D leash overrun");
+                // Plan §implementation Step 4 — try TeleportToNextSubgoal
+                // first. The next eligible waypoint is closer to the
+                // follower than the leader is (path is the planned
+                // route TO the leader); teleporting forward along the
+                // path makes progress without skipping the entire
+                // route. Counters reset inside the helper.
+                if (TeleportToNextSubgoal("G10 3D leash overrun")) {
+                    return;
+                }
+                // Fallback: no eligible subgoal in scan window. Bug B
+                // (log 69) — route through TeleportToLeader so cross-
+                // room overruns use the scene-reload path rather than
+                // a raw world.pos write.
+                bool triggered = TeleportToLeader("G10 3D leash overrun (no eligible subgoal)");
                 followerOverrunFrames = 0;
                 followerAIState       = FollowerAIState::IDLE;
                 followerStateFrames   = 0;
@@ -1720,7 +1730,14 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                                     "(baseline={:.0f} now={:.0f} frames={})",
                                     followerCloseFailBaseline, distToLeader,
                                     followerCloseFailFrames);
-                        TeleportToLeader("G14 close-fail timeout");
+                        // Plan §implementation Step 4 — try
+                        // TeleportToNextSubgoal first; counters reset
+                        // inside the helper. Fall back to
+                        // TeleportToLeader if no eligible subgoal.
+                        if (TeleportToNextSubgoal("G14 close-fail timeout")) {
+                            return;
+                        }
+                        TeleportToLeader("G14 close-fail timeout (no eligible subgoal)");
                         followerCloseFailBaseline = 0.0f;
                         followerCloseFailFrames   = 0;
                         followerAIState           = FollowerAIState::IDLE;
