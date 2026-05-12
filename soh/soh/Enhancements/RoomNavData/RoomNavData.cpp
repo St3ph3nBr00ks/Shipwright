@@ -845,7 +845,7 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
             // step from an unintentional ledge fall. jump_anchor_plan
             // §Step 4 reuses NODE_DROP_FROM_ABOVE for jump landings
             // because the intent semantics are identical.
-            if (collectIntentEdges && parentIdx >= 0 && !dropEdges.empty()) {
+            if (parentIdx >= 0 && !dropEdges.empty()) {
                 const uint32_t key = ((uint32_t)(uint16_t)parentIdx << 16) |
                                      (uint32_t)(uint16_t)childIdx;
                 if (dropEdges.count(key) != 0) {
