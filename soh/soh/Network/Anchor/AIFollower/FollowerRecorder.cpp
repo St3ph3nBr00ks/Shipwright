@@ -375,10 +375,10 @@ void CaptureFrame(const FollowerFrameContext& ctx) {
         anchor->followerNavPath.computedClimbMask);
     if (pathPresent) {
         size_t climbCount = 0;
-        uint16_t flagsAggregate = 0;  // OR of all remaining waypoint flags
+        uint32_t flagsAggregate = 0;  // OR of all remaining waypoint flags
         for (size_t i = anchor->followerNavPath.cursorIdx;
              i < anchor->followerNavPath.waypointFlags.size(); i++) {
-            const uint16_t f = anchor->followerNavPath.waypointFlags[i];
+            const uint32_t f = anchor->followerNavPath.waypointFlags[i];
             flagsAggregate |= f;
             if (f & ::AnchorNavRoom::NODE_CLIMB_ANY) {
                 climbCount++;
@@ -400,8 +400,8 @@ void CaptureFrame(const FollowerFrameContext& ctx) {
         nlohmann::json wpts = nlohmann::json::array();
         for (size_t i = 0; i < anchor->followerNavPath.waypoints.size(); i++) {
             const Vec3f& p = anchor->followerNavPath.waypoints[i];
-            uint16_t f = (i < anchor->followerNavPath.waypointFlags.size())
-                ? anchor->followerNavPath.waypointFlags[i] : (uint16_t)0;
+            uint32_t f = (i < anchor->followerNavPath.waypointFlags.size())
+                ? anchor->followerNavPath.waypointFlags[i] : (uint32_t)0;
             wpts.push_back({
                 {"i", static_cast<uint64_t>(i)},
                 {"x", p.x}, {"y", p.y}, {"z", p.z},

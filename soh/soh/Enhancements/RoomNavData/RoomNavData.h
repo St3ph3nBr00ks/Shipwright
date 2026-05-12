@@ -71,6 +71,19 @@ enum NodeFlags : uint16_t {
     // drop; suppress edge-avoidance for the high→low transition". Task 3
     // (consumer-side recognition) + Task 4 (edge-avoidance predicate).
     NODE_DROP_FROM_ABOVE       = 0x8000,
+
+    // Synthetic flag (upper-16-bit slot — waypointFlags widened to
+    // uint32_t 2026-05-12 PM to accommodate). Set by
+    // FindBestReachableSubgoalPath on a waypoint reached via a
+    // LedgeAnchor approach→top edge. Tells the consumer's pursuit
+    // pipeline "mantle to this waypoint directly instead of walking"
+    // — saves the 2-second cycle-1-2-3 stuck-escalation wait + G12
+    // teleport at the wall base.
+    //
+    // Pre-Step-2 the consumer scanned navData->ledgeAnchors every
+    // tick to detect this. Replacing the scan with a flag check is
+    // the perf-optimization Step 2 from the consolidation plan.
+    NODE_REACHED_VIA_LEDGE_GRAB = 0x00010000,
 };
 
 // ---------------------------------------------------------------------------
@@ -228,6 +241,12 @@ struct AdjacencyCacheEntry {
     // predicate doesn't suppress the planned off-edge motion. Empty
     // when neither useDropAnchors nor useJumpAnchors is set on the key.
     std::unordered_set<uint32_t>       dropEdges;
+    // Set of (fromIdx<<16 | toIdx) for ledge-anchor approach→top edges.
+    // Path-extraction reads this to tag waypoints with
+    // NODE_REACHED_VIA_LEDGE_GRAB so the consumer mantles to the
+    // waypoint instead of walking + waiting for STUCK escalation.
+    // Empty when useLedgeAnchors=false on the key (v1: always true).
+    std::unordered_set<uint32_t>       ledgeEdges;
 };
 
 struct JumpAnchor {
@@ -418,7 +437,7 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
                                    const Vec3f& targetPos,
                                    const NavQueryOptions& opts,
                                    std::vector<Vec3f>& out,
-                                   std::vector<uint16_t>* outFlags = nullptr);
+                                   std::vector<uint32_t>* outFlags = nullptr);
 
 // True when both gEnhancements.RoomNavData.Enabled is on AND the system
 // has been initialized. Used as the master gate by all Phase 1+2 features.

@@ -270,7 +270,8 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
                    bool useDropAnchors = false, float maxDropDistance = 0.0f,
                    bool useJumpAnchors = false, float maxJumpDistance = 0.0f,
                    float maxJumpUpDelta = 0.0f,
-                   std::unordered_set<uint32_t>* outDropEdges = nullptr) {
+                   std::unordered_set<uint32_t>* outDropEdges = nullptr,
+                   std::unordered_set<uint32_t>* outLedgeEdges = nullptr) {
     std::vector<std::vector<uint16_t>> adjacency(data->nodes.size());
     for (const NavEdge& e : data->edges) {
         if (e.fromIdx >= data->nodes.size() || e.toIdx >= data->nodes.size()) continue;
@@ -335,6 +336,17 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
             (size_t)tp >= adjacency.size()) continue;
         adjacency[(size_t)ap].push_back((uint16_t)tp);
         adjacency[(size_t)tp].push_back((uint16_t)ap);
+        // Tag the directed approach→top edge for synthetic
+        // NODE_REACHED_VIA_LEDGE_GRAB flag emission at path
+        // extraction. Only the ap→tp direction needs tagging — the
+        // reverse direction is "drop off the ledge" which is fine
+        // for BFS to take but doesn't need the mantle signal at
+        // consume time. Path extraction looks up the
+        // (parent<<16 | child) key when reconstructing waypoints.
+        if (outLedgeEdges != nullptr) {
+            outLedgeEdges->insert(((uint32_t)(uint16_t)ap << 16) |
+                                  (uint32_t)(uint16_t)tp);
+        }
     }
 
     // Drop anchors — Phase 2 consumer wiring (Task 3, branch
@@ -486,11 +498,13 @@ GetOrBuildAdjacency(const RoomNavData* data, const AdjacencyCacheKey& key) {
     // beyond clarity — matches the original call-site convention.
     std::unordered_set<uint32_t>* dropPtr =
         (key.useDropAnchors || key.useJumpAnchors) ? &entry.dropEdges : nullptr;
+    std::unordered_set<uint32_t>* ledgePtr =
+        key.useLedgeAnchors ? &entry.ledgeEdges : nullptr;
     entry.adjacency = BuildAdjacencyList(data,
         key.climbSurfaceMask,
         key.useDropAnchors, key.maxDropDistance,
         key.useJumpAnchors, key.maxJumpDistance, key.maxJumpUpDelta,
-        dropPtr);
+        dropPtr, ledgePtr);
     data->adjacencyCache.push_back(std::move(entry));
     return data->adjacencyCache.back();
 }
@@ -721,7 +735,7 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
                                    const Vec3f& targetPos,
                                    const NavQueryOptions& opts,
                                    std::vector<Vec3f>& out,
-                                   std::vector<uint16_t>* outFlags) {
+                                   std::vector<uint32_t>* outFlags) {
     const bool     eligibleForSwimming = opts.eligibleForSwimming;
     const bool     avoidHazardNodes    = opts.avoidHazardNodes;
     const uint16_t climbSurfaceMask    = opts.climbSurfaceMask;
@@ -817,25 +831,36 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
     if (reversed.empty()) return false;
     out.reserve(reversed.size());
     if (outFlags) outFlags->reserve(reversed.size());
+    const auto& ledgeEdges = adjEntry.ledgeEdges;
     for (auto it = reversed.rbegin(); it != reversed.rend(); ++it) {
         const int   childIdx  = *it;
         const int   parentIdx = parents[(size_t)childIdx];
         const NavNode& n      = data->nodes[(size_t)childIdx];
         out.push_back(n.pos);
         if (outFlags) {
-            uint16_t flags = n.flags;
+            uint32_t flags = (uint32_t)n.flags;
             // Tag the landing waypoint when it was reached from its
             // parent via an injected drop OR jump edge. The downstream
             // off-edge predicate uses this to distinguish a planned
             // step from an unintentional ledge fall. jump_anchor_plan
             // §Step 4 reuses NODE_DROP_FROM_ABOVE for jump landings
-            // because the intent semantics are identical (and the
-            // 16-bit flag budget can't afford a separate jump bit).
+            // because the intent semantics are identical.
             if (collectIntentEdges && parentIdx >= 0 && !dropEdges.empty()) {
                 const uint32_t key = ((uint32_t)(uint16_t)parentIdx << 16) |
                                      (uint32_t)(uint16_t)childIdx;
                 if (dropEdges.count(key) != 0) {
                     flags |= NODE_DROP_FROM_ABOVE;
+                }
+            }
+            // Tag waypoints reached via a ledge-anchor approach→top
+            // edge so the consumer can mantle directly instead of
+            // walking + waiting for stuck-escalation. Same key
+            // encoding as drops.
+            if (parentIdx >= 0 && !ledgeEdges.empty()) {
+                const uint32_t key = ((uint32_t)(uint16_t)parentIdx << 16) |
+                                     (uint32_t)(uint16_t)childIdx;
+                if (ledgeEdges.count(key) != 0) {
+                    flags |= NODE_REACHED_VIA_LEDGE_GRAB;
                 }
             }
             outFlags->push_back(flags);

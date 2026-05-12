@@ -549,7 +549,7 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         const ::AnchorNavRoom::NavQueryOptions opts = BuildNavQueryOptions(navigator);
         out.computedClimbMask = opts.climbSurfaceMask;
         std::vector<Vec3f> graphPath;
-        std::vector<uint16_t> graphPathFlags;  // Stage 4: parallel array
+        std::vector<uint32_t> graphPathFlags;  // Stage 4: parallel array (widened to uint32 for synthetic flags)
         bool ok = ::AnchorNavRoom::FindBestReachableSubgoalPath(
             navData, fromIdx, targetPos, opts,
             graphPath, &graphPathFlags);
