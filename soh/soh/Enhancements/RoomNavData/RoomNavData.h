@@ -19,6 +19,7 @@
 #pragma once
 
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 extern "C" {
