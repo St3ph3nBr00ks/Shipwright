@@ -3619,6 +3619,65 @@ Vec3f Anchor::ComputePursuitSubgoal(Player* player,
 
     resolvedTarget = followerNavPath.CurrentSubgoal();
 
+    // LedgeAnchor mantle execution
+    // (Plans/follower_ledge_consumer_plan.md). When the current
+    // subgoal matches a LedgeAnchor.topPos AND the follower is at
+    // the corresponding approachPos, write world.pos = topPos and
+    // advance the cursor — the follower "mantles" the ledge in one
+    // frame instead of stalling at the wall and waiting for G12
+    // teleport-to-subgoal escalation. Resolves Bug 1 from log 68
+    // (P2 sat 2 seconds at a 60u wall before warping up).
+    //
+    // O(N_ledges) per tick. N is typically <50 per room, often
+    // <10; per-tick cost dominated by the two distance compares
+    // per anchor (cheap).
+    {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        if (navData != nullptr && !navData->ledgeAnchors.empty()) {
+            constexpr f32 kLedgeTopMatchSq    = 8.0f * 8.0f;      // tight match — exact node lookup
+            constexpr f32 kLedgeApproachXZSq  = 30.0f * 30.0f;    // ~1 cell radius
+            constexpr f32 kLedgeApproachYDelta = 30.0f;           // same floor
+            for (const ::AnchorNavRoom::LedgeAnchor& la : navData->ledgeAnchors) {
+                // Subgoal == topPos?
+                f32 sdx = resolvedTarget.x - la.topPos.x;
+                f32 sdy = resolvedTarget.y - la.topPos.y;
+                f32 sdz = resolvedTarget.z - la.topPos.z;
+                if (sdx*sdx + sdy*sdy + sdz*sdz > kLedgeTopMatchSq) continue;
+                // Follower at approachPos (XZ + same floor)?
+                f32 adx = p2Pos.x - la.approachPos.x;
+                f32 adz = p2Pos.z - la.approachPos.z;
+                if (adx*adx + adz*adz > kLedgeApproachXZSq) continue;
+                if (std::fabs(p2Pos.y - la.approachPos.y) > kLedgeApproachYDelta) continue;
+                // Mantle — instant teleport to topPos, advance cursor.
+                player->actor.world.pos = la.topPos;
+                player->actor.prevPos   = la.topPos;
+                followerNavPath.Advance();
+                // Arm the post-teleport hold so stick injection
+                // zeroes for a few frames (lets OoT settle the
+                // new pose; otherwise the next-frame walk-into-
+                // wall stick can re-trigger STUCK).
+                followerPostTeleportFrames = kPostTeleportHoldFrames;
+                SPDLOG_INFO("[Follower] LedgeMantle: approach=({:.0f},{:.0f},{:.0f}) "
+                            "top=({:.0f},{:.0f},{:.0f}) deltaY={:.0f}",
+                            la.approachPos.x, la.approachPos.y, la.approachPos.z,
+                            la.topPos.x, la.topPos.y, la.topPos.z,
+                            la.topPos.y - la.approachPos.y);
+                AnchorFollower::QueueRecorderEvent("ledge-mantle");
+                // Return the NEXT subgoal so the caller's followerMoveTarget
+                // points past the now-mantled top. If the path is empty
+                // after advance, return the topPos itself (caller will
+                // handle IDLE transition via the finalGoal distance check).
+                resolvedTarget = followerNavPath.Empty()
+                                     ? la.topPos
+                                     : followerNavPath.CurrentSubgoal();
+                return resolvedTarget;
+            }
+        }
+    }
+
     // Substrate-driven CLIMBING engagement. When the current subgoal
     // sits on a climb-surface node AND the resolved climb mask permits
     // it AND we're not already CLIMBING, transition to CLIMBING with

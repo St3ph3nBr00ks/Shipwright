@@ -306,6 +306,36 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
         }
     }
 
+    // Ledge anchors (Plans/follower_ledge_consumer_plan.md). Each
+    // anchor connects an `approachPos` walkable node BELOW a wall to a
+    // `topPos` walkable node ABOVE. Edges are BIDIRECTIONAL so BFS can
+    // route paths in either direction (planning a descent from
+    // topPos→approachPos is sometimes the shorter route too). The
+    // consumer-side mantle execution in `ComputePursuitSubgoal` only
+    // triggers when traversing approach→top (i.e. follower is at
+    // approachPos and current subgoal matches topPos).
+    //
+    // Cost is implicit — adjacency list doesn't carry per-edge cost
+    // here; BFS treats every edge as cost-1 hop. If ledge-heavy paths
+    // start over-preferring grabs vs. walking, revisit by switching
+    // BFS to weighted (Dijkstra) and assigning ledge edges a small
+    // positive bias.
+    //
+    // Per-actor gate is intentionally OFF for v1 — every consumer
+    // gets ledge edges. Enemies that can't grab ledges will still
+    // get stuck at the wall the same as before (no regression);
+    // Link-rigged AI Follower benefits via the mantle injection.
+    // Revisit if a NavTraits.useLedgeAnchors gate becomes necessary.
+    for (const LedgeAnchor& a : data->ledgeAnchors) {
+        int ap = FindNearestNode(data, a.approachPos);
+        int tp = FindNearestNode(data, a.topPos);
+        if (ap < 0 || tp < 0 || ap == tp) continue;
+        if ((size_t)ap >= adjacency.size() ||
+            (size_t)tp >= adjacency.size()) continue;
+        adjacency[(size_t)ap].push_back((uint16_t)tp);
+        adjacency[(size_t)tp].push_back((uint16_t)ap);
+    }
+
     // Drop anchors — Phase 2 consumer wiring (Task 3, branch
     // feature/room-nav-data). For each (highPos, landingPos) anchor
     // detected at scan time, inject a DIRECTED high→low edge into the
@@ -920,7 +950,13 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // endpoint, or whose endpoint is underwater, are no longer emitted.
 // Bump invalidates cached scans so they regenerate with the cleaner
 // jump-anchor set.
+//
 static constexpr uint16_t kCurrentSchemaVersion = 13;
+// Note: LedgeAnchor edges were wired into BuildAdjacencyList
+// (Plans/follower_ledge_consumer_plan.md) WITHOUT a schema bump.
+// The cached scan data already contains the ledgeAnchors list;
+// only BFS-consumption logic changed (BFS now follows the edges).
+// Existing cached files at schema v13 are still valid.
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
