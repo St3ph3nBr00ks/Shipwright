@@ -2191,6 +2191,30 @@ void SohMenu::AddMenuEnhancements() {
             "Schema bumps to v8 when first scan runs with this on; existing "
             "v7 .bin files regenerate. Apply via Force Rescan. Default: off."));
 
+    AddWidget(path, "Jump Anchor Ground-Below Max Y Delta: %du", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.JumpAnchorGroundBelowMaxDeltaY"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .Options(IntSliderOptions()
+                     .Min(1)
+                     .Max(500)
+                     .DefaultValue(70)
+                     .Format("%du")
+                     .Tooltip(
+            "Maximum Y distance from a jump-anchor endpoint downward "
+            "to walkable ground before the anchor is REJECTED. When "
+            "walkable ground exists this close below either endpoint, "
+            "the drop+walk+climb route is viable — the jump anchor "
+            "would be redundant. Drop anchors + ledge anchors should "
+            "handle these cases instead.\n\n"
+            "Default 70u matches the ledge-grab reach (separate but "
+            "aligned default). Raise this to be MORE aggressive about "
+            "rejecting jump anchors near floor (prefer drop+ledge "
+            "more often); lower to KEEP jump anchors that bridge "
+            "small steps. Independent of the Ledge-Grab Max Y Delta "
+            "above so the two can be tuned separately if field-test "
+            "suggests they should differ.\n\n"
+            "Apply via Force Rescan after changing."));
+
     AddWidget(path, "Drop Anchor Detection (Phase 1 — detection only)", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
