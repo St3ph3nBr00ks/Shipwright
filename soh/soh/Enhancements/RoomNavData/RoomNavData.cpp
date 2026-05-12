@@ -1220,6 +1220,15 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // — same-altitude and below-cell dismounts always allowed. Bump
 // invalidates v19 caches so they regenerate with valid same-
 // altitude edges restored.
+// v22 (2026-05-12 PM, log 89 fix): climb-cell drop anchors offset
+// the MovementClear test origin outward along the wall normal by
+// 30u. Pre-fix the test started AT the wall surface (cell.pos);
+// MovementClear's internal +20u Y bump didn't move it off the
+// vertical wall; line-test always failed; zero climb-source drops
+// emitted. Loop also restructured to iterate per anchor (not per
+// node) so anchor.planeNormal is in scope for the offset. Bump
+// invalidates v21 caches so they regenerate with proper drops.
+
 // v21 (2026-05-12 PM, log 87 followup): climb-cell drop anchors.
 // Vine/wall cells suspended above a floor (typical of vines hanging
 // from a ceiling that end 200u above the ground below) now emit
@@ -1230,7 +1239,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 21;
+static constexpr uint16_t kCurrentSchemaVersion = 22;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3399,61 +3408,97 @@ static void DetectClimbCellDropAnchors(
     constexpr float kDropMaxDeltaY   = 200.0f;
     constexpr float kDropMaxXZSq     = 80.0f * 80.0f;
     constexpr float kClusterRadiusSq = 40.0f * 40.0f;
+    // Offset along the wall's outward normal for the MovementClear
+    // test starting point (2026-05-12 PM, log 89 fix). The cell.pos
+    // sits ON the wall surface; MovementClear's internal +20u Y bump
+    // doesn't move it OFF the wall (walls extend vertically), so the
+    // line-test immediately registers the wall as collision and
+    // returns "blocked" — every climb-source candidate failed.
+    // Offsetting 30u outward (more than Link's body half-width)
+    // puts the line origin in clear air in front of the wall.
+    constexpr float kClimbDropTestNormalOffset = 30.0f;
 
     size_t added  = 0;
     size_t merged = 0;
 
-    const uint16_t startIdx = out->firstClimbSurfaceNodeIdx;
-    for (size_t i = startIdx; i < out->nodes.size(); i++) {
-        const NavNode& a = out->nodes[i];
-        if ((a.flags & NODE_CLIMB_ANY) == 0) continue;
+    // Iterate per anchor so we can use anchor.planeNormal to offset
+    // the line-test origin away from the wall. Anchor.firstNodeIdx
+    // and nodeCount delimit each anchor's cells in out->nodes.
+    for (const ClimbAnchor& anchor : out->climbAnchors) {
+        if (anchor.nodeCount == 0) continue;
+        // Some anchors (Path A actors with degenerate normal) may
+        // have zero planeNormal. Skip — without a normal we can't
+        // safely offset the test origin.
+        const float normalLen = std::sqrt(anchor.planeNormal.x * anchor.planeNormal.x +
+                                          anchor.planeNormal.y * anchor.planeNormal.y +
+                                          anchor.planeNormal.z * anchor.planeNormal.z);
+        if (normalLen < 0.5f) continue;
 
-        // World cell from pos.
-        int worldCellX = (int)std::floor(a.pos.x / kGridResolution);
-        int worldCellZ = (int)std::floor(a.pos.z / kGridResolution);
+        const uint16_t end = (uint16_t)(anchor.firstNodeIdx + anchor.nodeCount);
+        for (uint16_t i = anchor.firstNodeIdx;
+             i < end && i < out->nodes.size(); i++) {
+            const NavNode& a = out->nodes[i];
+            if ((a.flags & NODE_CLIMB_ANY) == 0) continue;
 
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dz = -1; dz <= 1; dz++) {
-                CellKey nCell{ worldCellX + dx, worldCellZ + dz };
-                auto it = nodesByCell.find(nCell);
-                if (it == nodesByCell.end()) continue;
-                for (uint16_t j : it->second) {
-                    const NavNode& b = out->nodes[j];
-                    if (!(b.flags & NODE_WALKABLE)) continue;
+            // World cell from pos.
+            int worldCellX = (int)std::floor(a.pos.x / kGridResolution);
+            int worldCellZ = (int)std::floor(a.pos.z / kGridResolution);
 
-                    // b must be LOWER than the climb cell.
-                    f32 dy = a.pos.y - b.pos.y;
-                    if (dy < kDropMinDeltaY || dy > kDropMaxDeltaY) continue;
+            // Pre-compute the line-test origin: cell pos shifted
+            // outward along the wall normal. Done once per cell.
+            Vec3f testFromBase = {
+                a.pos.x + anchor.planeNormal.x * kClimbDropTestNormalOffset,
+                a.pos.y + anchor.planeNormal.y * kClimbDropTestNormalOffset,
+                a.pos.z + anchor.planeNormal.z * kClimbDropTestNormalOffset,
+            };
 
-                    f32 dxf = b.pos.x - a.pos.x;
-                    f32 dzf = b.pos.z - a.pos.z;
-                    if (dxf*dxf + dzf*dzf > kDropMaxXZSq) continue;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    CellKey nCell{ worldCellX + dx, worldCellZ + dz };
+                    auto it = nodesByCell.find(nCell);
+                    if (it == nodesByCell.end()) continue;
+                    for (uint16_t j : it->second) {
+                        const NavNode& b = out->nodes[j];
+                        if (!(b.flags & NODE_WALKABLE)) continue;
 
-                    if (!MovementClear(a.pos, b.pos, play)) continue;
+                        // b must be LOWER than the climb cell.
+                        f32 dy = a.pos.y - b.pos.y;
+                        if (dy < kDropMinDeltaY || dy > kDropMaxDeltaY) continue;
 
-                    // Dedup against existing drop anchors (floor-src
-                    // pass + prior iterations of this pass).
-                    bool isDuplicate = false;
-                    for (const DropAnchor& existing : out->dropAnchors) {
-                        f32 hx = existing.highPos.x    - a.pos.x;
-                        f32 hz = existing.highPos.z    - a.pos.z;
-                        f32 lx = existing.landingPos.x - b.pos.x;
-                        f32 lz = existing.landingPos.z - b.pos.z;
-                        if ((hx*hx + hz*hz < kClusterRadiusSq) &&
-                            (lx*lx + lz*lz < kClusterRadiusSq)) {
-                            isDuplicate = true;
-                            merged++;
-                            break;
+                        f32 dxf = b.pos.x - a.pos.x;
+                        f32 dzf = b.pos.z - a.pos.z;
+                        if (dxf*dxf + dzf*dzf > kDropMaxXZSq) continue;
+
+                        // MovementClear from the wall-offset origin to
+                        // the floor candidate. The internal +20u Y bump
+                        // applied to BOTH endpoints is harmless here
+                        // because testFromBase is already in clear air
+                        // (offset outward from wall by 30u).
+                        if (!MovementClear(testFromBase, b.pos, play)) continue;
+
+                        // Dedup against existing drop anchors.
+                        bool isDuplicate = false;
+                        for (const DropAnchor& existing : out->dropAnchors) {
+                            f32 hx = existing.highPos.x    - a.pos.x;
+                            f32 hz = existing.highPos.z    - a.pos.z;
+                            f32 lx = existing.landingPos.x - b.pos.x;
+                            f32 lz = existing.landingPos.z - b.pos.z;
+                            if ((hx*hx + hz*hz < kClusterRadiusSq) &&
+                                (lx*lx + lz*lz < kClusterRadiusSq)) {
+                                isDuplicate = true;
+                                merged++;
+                                break;
+                            }
                         }
-                    }
-                    if (isDuplicate) continue;
+                        if (isDuplicate) continue;
 
-                    DropAnchor anc{};
-                    anc.highPos     = a.pos;
-                    anc.landingPos  = b.pos;
-                    anc.highIsClimb = 1;
-                    out->dropAnchors.push_back(anc);
-                    added++;
+                        DropAnchor anc{};
+                        anc.highPos     = a.pos;
+                        anc.landingPos  = b.pos;
+                        anc.highIsClimb = 1;
+                        out->dropAnchors.push_back(anc);
+                        added++;
+                    }
                 }
             }
         }
