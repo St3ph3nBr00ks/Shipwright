@@ -917,8 +917,17 @@ static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-e
 // validate against them. See plan §11 (resolution) and §5 (caps).
 static constexpr float    kGridResolution      = 30.0f;  // §11 lock
 static constexpr int      kMaxFloorsPerColumn  = 8;      // defensive cap
-static constexpr int      kMaxScanIterations   = 50000;  // floodfill runaway guard
-static constexpr int64_t  kMaxScanWallTimeMs   = 1000;   // per-scan budget
+static constexpr int      kMaxScanIterations   = 200000; // floodfill runaway guard
+static constexpr int64_t  kMaxScanWallTimeMs   = 4000;   // per-scan budget
+// Both caps bumped 2026-05-12 PM (log 63, Kokiri Forest test). The old
+// 50000-iteration / 1000ms caps cut off Kokiri Forest mid-floodfill,
+// leaving the leader's tree-platform position in unscanned territory and
+// the BFS path 122u short of the leader. Field-test (log 63) hit the
+// iteration cap; old wall-time cap would also have fired at ~1000ms (the
+// 178ms reported scanMs in that log was BELOW both caps because the scan
+// truncated at the iteration limit first). Both bumped 4× so the
+// iteration bump is actually effective. Per-room one-time cost — every
+// scan caches to disk and subsequent room entries reload instantly.
 
 // Path resolution. roomnavdata/ lives at the executable cwd, sibling to
 // logs/. Per plan §8.
