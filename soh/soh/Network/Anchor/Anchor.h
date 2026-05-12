@@ -37,6 +37,14 @@ extern "C" {
 #include "EnemyStateSync/EnemyLifecycle.h"
 #include "EnemyStateSync/EnemyHostBookkeeping.h"
 
+// Forward declaration — full type lives in
+// soh/Enhancements/RoomNavData/RoomNavData.h. Only Anchor.cpp /
+// Follower.cpp callers that USE the type need to include the
+// header; this forward decl keeps Anchor.h's transitive include
+// surface narrow while letting member function signatures
+// reference the type by pointer.
+namespace AnchorNavRoom { struct RoomNavData; }
+
 // Attached to enemy actors to give them a stable network id across all clients.
 struct EnemyNetId {
     uint32_t netId = 0;
@@ -661,19 +669,33 @@ class Anchor : public Network {
     int             followerAutonomousClimbFrames = 0;
 
     // Edge-prediction state (climb_surface_nav_grid_plan post-Stage-8
-    // 2026-05-12). When the substrate engages CLIMBING via Stage 6's
-    // trigger, we capture which ClimbAnchor the subgoal belonged to
-    // and pre-build a flat hash of its (u, v) cells for hot-path
-    // lookup. Per-frame stick injection projects the predicted next
-    // position into the anchor's plane and suppresses any axis whose
-    // predicted cell is missing from the set — prevents the follower
-    // from walking off the wall edge.
+    // 2026-05-12; refactored to nearest-node-3D 2026-05-12 PM). When
+    // the substrate engages CLIMBING, we capture which ClimbAnchor the
+    // subgoal belonged to AND pre-build a flat list of every climb-
+    // surface node position the follower can reach from there: the
+    // active anchor's own grid cells PLUS any node positions on
+    // neighbouring anchors that share an inter-anchor bridge edge with
+    // the active anchor (DetectInterAnchorClimbBridges).
+    //
+    // Per-frame stick injection's edge-prediction gate predicts the
+    // follower's next-frame position along anchor.planeAxisU/V and
+    // suppresses the stick if the prediction is more than
+    // kClimbNearestNodeThreshold (~30u) from any node in this list.
+    //
+    // Why nearest-node not planar (u, v) projection: planar projection
+    // breaks when the follower drifts off the wall plane (e.g. mid-
+    // bridge-crossing, where Link slides around a curved wall corner
+    // and his world.pos sits between two planar facets). The 3D
+    // proximity check works for any climbable topology, including
+    // bridge-connected adjacent anchors, without needing per-anchor
+    // bookkeeping or explicit bridge-edge lookups in the hot path.
     //
     // followerClimbAnchorIdx == UINT16_MAX means "no active anchor"
     // (legacy non-substrate engagement, or before Stage 6 fires).
-    // Cleared on CLIMBING exit.
+    // Cleared on CLIMBING exit and on re-anchor; refilled by
+    // PopulateClimbReachableNodes.
     uint16_t                       followerClimbAnchorIdx  = UINT16_MAX;
-    std::unordered_set<uint32_t>   followerClimbCellSet;
+    std::vector<Vec3f>             followerClimbReachableNodes;
 
     // Re-anchor latch state. Prevents per-frame flip-flopping between
     // touching climb anchors when the leader crosses a seam — without
@@ -1113,9 +1135,18 @@ class Anchor : public Network {
     // Apply the state-machine cleanup common to every CLIMBING→IDLE
     // exit. Writes followerClimbDismountYaw + arms the dismount
     // forward-hold counter, transitions to IDLE, clears the anchor
-    // index + cell set, and (when `clearAutonomous`) zeroes the
-    // autonomous-climb tracking fields too.
+    // index + reachable-nodes list, and (when `clearAutonomous`)
+    // zeroes the autonomous-climb tracking fields too.
     void ExitFollowerClimbToIdle(s16 dismountYaw, bool clearAutonomous);
+    // Repopulate followerClimbReachableNodes from the active anchor's
+    // grid PLUS any cell positions on bridge-connected neighbour
+    // anchors. Called from every CLIMBING engagement site AND from
+    // the in-flight re-anchor switch (so the gate stays seeded after
+    // the active anchor flips). No-op when navData is null or
+    // anchorIdx is out of range — caller should clear the list before
+    // dispatching when the failure semantics matter.
+    void PopulateClimbReachableNodes(
+        const ::AnchorNavRoom::RoomNavData* navData, uint16_t anchorIdx);
     void HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);
     void HandleStateRangedAttack(Player* player, const Vec3f& p2Pos);
     void HandleStateCollectItem(Player* player, const Vec3f& leaderPos, const Vec3f& p2Pos);

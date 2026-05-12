@@ -407,7 +407,7 @@ void Anchor::SetFollowerActive(bool active) {
         followerAutonomousClimb = false;
         followerAutonomousClimbFrames = 0;
         followerClimbAnchorIdx = UINT16_MAX;
-        followerClimbCellSet.clear();
+        followerClimbReachableNodes.clear();
         SPDLOG_INFO("[Follower] Activated (menu)");
     } else {
         hasPendingTransition = false;
@@ -420,7 +420,7 @@ void Anchor::SetFollowerActive(bool active) {
         followerAutonomousClimb = false;
         followerAutonomousClimbFrames = 0;
         followerClimbAnchorIdx = UINT16_MAX;
-        followerClimbCellSet.clear();
+        followerClimbReachableNodes.clear();
         // Safety: always restore the player's C-button loadout on any
         // deactivation path (menu toggle, joystick cancel, scene boundary,
         // leash timeout, …). FollowerRestoreItems is a no-op when no
@@ -1608,19 +1608,13 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     // top-target belongs to. Same logic as the Stage 6
                     // engagement in HandleStateFollow.
                     followerClimbAnchorIdx = UINT16_MAX;
-                    followerClimbCellSet.clear();
-                    constexpr float kClimbCellSpacing = 30.0f;
+                    followerClimbReachableNodes.clear();
                     for (size_t a = 0; a < navData->climbAnchors.size(); a++) {
                         const auto& anc = navData->climbAnchors[a];
                         if (std::fabs(anc.basePos.x - anchorBase.x) < 1.0f &&
                             std::fabs(anc.basePos.z - anchorBase.z) < 1.0f) {
                             followerClimbAnchorIdx = (uint16_t)a;
-                            followerClimbCellSet.reserve(anc.nodeCount);
-                            for (uint16_t i = 0; i < anc.nodeCount; i++) {
-                                const auto& n = navData->nodes[(size_t)anc.firstNodeIdx + i];
-                                followerClimbCellSet.insert(
-                                    ((uint32_t)n.cellIdxZ << 16) | (uint32_t)n.cellIdxX);
-                            }
+                            PopulateClimbReachableNodes(navData, (uint16_t)a);
                             break;
                         }
                     }
@@ -1628,13 +1622,13 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     SPDLOG_INFO("[Follower] Leader climbing + anchor near leader "
                                 "({:.0f},{:.0f},{:.0f}) base=({:.0f},{:.0f},{:.0f}) "
                                 "top=({:.0f},{:.0f},{:.0f}) — engaging autonomous "
-                                "CLIMBING (anchorIdx={} cells={} follower at "
+                                "CLIMBING (anchorIdx={} reachableNodes={} follower at "
                                 "{:.0f}u from leader)",
                                 leaderPos.x, leaderPos.y, leaderPos.z,
                                 anchorBase.x, anchorBase.y, anchorBase.z,
                                 anchorTop.x, anchorTop.y, anchorTop.z,
                                 (int)followerClimbAnchorIdx,
-                                (int)followerClimbCellSet.size(),
+                                (int)followerClimbReachableNodes.size(),
                                 sqrtf(distSq));
                     engagedAutonomousClimb = true;
                 }
@@ -2078,17 +2072,28 @@ void Anchor::TickFollowerInput(Actor* actor) {
                 ladderX = (s8)(-Math_SinS(stickAngle) * 127.0f);
             }
 
-            // Edge-prediction safety gate + soft inward bias
-            // (post-Stage-8 2026-05-12). When the substrate engaged
-            // CLIMBING (followerClimbAnchorIdx valid), project the
-            // current and predicted-next positions into the anchor's
-            // wall-plane (u, v) cells. Suppress any stick axis whose
-            // predicted cell falls outside the grid or lands on a
-            // pruned cell. If the current cell is at the grid border
-            // in any cardinal direction, halve the stick magnitude
-            // toward that direction so the follower approaches edges
-            // cautiously instead of barreling off them.
-            if (followerClimbAnchorIdx != UINT16_MAX) {
+            // Edge-prediction safety gate (refactored 2026-05-12 PM,
+            // log 60 Bug 2 fix). Predict the follower's next-frame
+            // position along the active anchor's planeAxisU/V and
+            // suppress any stick axis whose prediction lands more than
+            // ~30u (one cell radius) from any reachable climb-surface
+            // node. The reachable set (followerClimbReachableNodes)
+            // includes the active anchor's grid AND any nodes on
+            // bridge-connected neighbour anchors — so when the
+            // follower is at the perimeter of the active anchor with
+            // a bridge edge to an adjacent climbable surface, the
+            // prediction lands near the bridged neighbour's node and
+            // the stick stays alive. Pre-fix the gate used per-anchor
+            // (u, v) projection that broke at curved-wall corners
+            // (predicted cell off the active anchor's grid → stick
+            // zeroed → bridge un-traversable).
+            //
+            // Soft inward bias: predict twice as far; if the deeper
+            // prediction is off-surface, halve the stick magnitude so
+            // the follower decelerates into surface edges instead of
+            // barrelling off them.
+            if (followerClimbAnchorIdx != UINT16_MAX &&
+                !followerClimbReachableNodes.empty()) {
                 const ::AnchorNavRoom::RoomNavData* navData =
                     ::AnchorNavRoom::GetForRoom(
                         gPlayState->sceneNum,
@@ -2096,62 +2101,62 @@ void Anchor::TickFollowerInput(Actor* actor) {
                 if (navData != nullptr &&
                     followerClimbAnchorIdx < navData->climbAnchors.size()) {
                     const auto& anc = navData->climbAnchors[followerClimbAnchorIdx];
-                    constexpr float kClimbCellSpacing  = 30.0f;
-                    constexpr float kPredictDistance   = 30.0f; // ~one cell ahead
-                    auto cellOk = [&](int u, int v) -> bool {
-                        if (u < 0 || u >= (int)anc.cellsU) return false;
-                        if (v < 0 || v >= (int)anc.cellsV) return false;
-                        uint32_t key = ((uint32_t)v << 16) | (uint32_t)u;
-                        return followerClimbCellSet.find(key) != followerClimbCellSet.end();
+                    constexpr float kPredictDistance      = 30.0f;
+                    constexpr float kSoftBiasDistance     = 60.0f;
+                    constexpr float kReachableThresholdSq = 30.0f * 30.0f;
+                    auto nearReachable = [&](const Vec3f& pos) -> bool {
+                        for (const Vec3f& np : followerClimbReachableNodes) {
+                            if (AnchorDist::Dist3DSq(np, pos) < kReachableThresholdSq) {
+                                return true;
+                            }
+                        }
+                        return false;
                     };
-                    int curU = 0, curV = 0;
-                    bool curInGrid = ::AnchorNavRoom::ProjectPositionToAnchorCell(
-                        anc, p2w, kClimbCellSpacing, curU, curV);
-                    if (curInGrid) {
-                        // Hard gate: predict per-axis, suppress if off-grid.
-                        // X (lateral) axis — project +axisU direction by sign of ladderX.
-                        if (ladderX != 0) {
-                            float sign = (ladderX > 0) ? 1.0f : -1.0f;
-                            Vec3f predX = {
-                                p2w.x + anc.planeAxisU.x * kPredictDistance * sign,
-                                p2w.y,
-                                p2w.z + anc.planeAxisU.z * kPredictDistance * sign,
-                            };
-                            int pu = 0, pv = 0;
-                            if (!::AnchorNavRoom::ProjectPositionToAnchorCell(
-                                    anc, predX, kClimbCellSpacing, pu, pv) ||
-                                !cellOk(pu, pv)) {
-                                ladderX = 0; // would fall off lateral edge
-                            }
+                    // Hard gate per axis. Use the active anchor's
+                    // planeAxisU/V to translate stick direction into
+                    // world-space motion vectors (ladderX = lateral
+                    // along planeAxisU; ladderY = vertical along
+                    // planeAxisV).
+                    if (ladderX != 0) {
+                        float sign = (ladderX > 0) ? 1.0f : -1.0f;
+                        Vec3f predX = {
+                            p2w.x + anc.planeAxisU.x * kPredictDistance * sign,
+                            p2w.y + anc.planeAxisU.y * kPredictDistance * sign,
+                            p2w.z + anc.planeAxisU.z * kPredictDistance * sign,
+                        };
+                        if (!nearReachable(predX)) {
+                            ladderX = 0; // would fall off lateral edge
                         }
-                        // Y axis — project +axisV direction by sign of ladderY.
-                        if (ladderY != 0) {
-                            float sign = (ladderY > 0) ? 1.0f : -1.0f;
-                            Vec3f predY = {
-                                p2w.x,
-                                p2w.y + anc.planeAxisV.y * kPredictDistance * sign,
-                                p2w.z,
-                            };
-                            int pu = 0, pv = 0;
-                            if (!::AnchorNavRoom::ProjectPositionToAnchorCell(
-                                    anc, predY, kClimbCellSpacing, pu, pv) ||
-                                !cellOk(pu, pv)) {
-                                ladderY = 0; // would fall off top/bottom
-                            }
+                    }
+                    if (ladderY != 0) {
+                        float sign = (ladderY > 0) ? 1.0f : -1.0f;
+                        Vec3f predY = {
+                            p2w.x + anc.planeAxisV.x * kPredictDistance * sign,
+                            p2w.y + anc.planeAxisV.y * kPredictDistance * sign,
+                            p2w.z + anc.planeAxisV.z * kPredictDistance * sign,
+                        };
+                        if (!nearReachable(predY)) {
+                            ladderY = 0; // would fall off top/bottom
                         }
-                        // Soft inward bias: if current cell is at a grid border
-                        // in stick direction (next cell missing in that axis),
-                        // halve magnitude so follower approaches edges gently.
-                        // Combined with the hard gate above, this reduces
-                        // late-clamp jitter and stop-and-go pauses at edges.
-                        if (ladderX != 0) {
-                            int dirU = (ladderX > 0) ? 1 : -1;
-                            if (!cellOk(curU + dirU, curV)) ladderX = (s8)(ladderX / 2);
-                        }
-                        if (ladderY != 0) {
-                            int dirV = (ladderY > 0) ? 1 : -1;
-                            if (!cellOk(curU, curV + dirV)) ladderY = (s8)(ladderY / 2);
-                        }
+                    }
+                    // Soft inward bias.
+                    if (ladderX != 0) {
+                        float sign = (ladderX > 0) ? 1.0f : -1.0f;
+                        Vec3f predX2 = {
+                            p2w.x + anc.planeAxisU.x * kSoftBiasDistance * sign,
+                            p2w.y + anc.planeAxisU.y * kSoftBiasDistance * sign,
+                            p2w.z + anc.planeAxisU.z * kSoftBiasDistance * sign,
+                        };
+                        if (!nearReachable(predX2)) ladderX = (s8)(ladderX / 2);
+                    }
+                    if (ladderY != 0) {
+                        float sign = (ladderY > 0) ? 1.0f : -1.0f;
+                        Vec3f predY2 = {
+                            p2w.x + anc.planeAxisV.x * kSoftBiasDistance * sign,
+                            p2w.y + anc.planeAxisV.y * kSoftBiasDistance * sign,
+                            p2w.z + anc.planeAxisV.z * kSoftBiasDistance * sign,
+                        };
+                        if (!nearReachable(predY2)) ladderY = (s8)(ladderY / 2);
                     }
                 }
             }
@@ -3004,7 +3009,7 @@ void Anchor::ExitFollowerClimbToIdle(s16 dismountYaw, bool clearAutonomous) {
     followerAIState     = FollowerAIState::IDLE;
     followerStateFrames = 0;
     followerClimbAnchorIdx = UINT16_MAX;
-    followerClimbCellSet.clear();
+    followerClimbReachableNodes.clear();
     // Reset re-anchor latch (Bug 2 fix) — next CLIMBING entry should
     // start with a clean candidate-tracking slate.
     followerReanchorCandidateIdx    = UINT16_MAX;
@@ -3012,6 +3017,48 @@ void Anchor::ExitFollowerClimbToIdle(s16 dismountYaw, bool clearAutonomous) {
     if (clearAutonomous) {
         followerAutonomousClimb       = false;
         followerAutonomousClimbFrames = 0;
+    }
+}
+
+void Anchor::PopulateClimbReachableNodes(
+    const ::AnchorNavRoom::RoomNavData* navData, uint16_t anchorIdx) {
+    followerClimbReachableNodes.clear();
+    if (navData == nullptr) return;
+    if (anchorIdx >= navData->climbAnchors.size()) return;
+
+    const auto& anc = navData->climbAnchors[anchorIdx];
+
+    // Direct: every node belonging to the active anchor's grid.
+    const uint16_t end = (uint16_t)(anc.firstNodeIdx + anc.nodeCount);
+    followerClimbReachableNodes.reserve(anc.nodeCount + 16);
+    for (uint16_t i = anc.firstNodeIdx;
+         i < end && i < navData->nodes.size(); i++) {
+        followerClimbReachableNodes.push_back(navData->nodes[i].pos);
+    }
+
+    // Bridged: every node on a NEIGHBOUR anchor that shares a bridge
+    // edge with this anchor. DetectInterAnchorClimbBridges
+    // (RoomNavData.cpp) emits NavEdges between perimeter cells of
+    // different anchors that lie within ~45u of each other; that
+    // physical proximity is exactly the "OoT collision treats this as
+    // one continuous climbable surface" signal we need to let stick
+    // injection drive the follower across a curved-wall corner or
+    // stacked-tier seam. Walk the edge list, find edges with one
+    // endpoint in [anc.firstNodeIdx, end) and the other on a different
+    // climb-surface node, push that other endpoint's position.
+    if (navData->firstClimbSurfaceNodeIdx == UINT16_MAX) return;
+    const uint16_t firstClimb = navData->firstClimbSurfaceNodeIdx;
+    auto inActiveAnchor = [&](uint16_t nodeIdx) -> bool {
+        return nodeIdx >= anc.firstNodeIdx && nodeIdx < end;
+    };
+    for (const auto& edge : navData->edges) {
+        const bool fromIn = inActiveAnchor(edge.fromIdx);
+        const bool toIn   = inActiveAnchor(edge.toIdx);
+        if (fromIn == toIn) continue;  // both inside or both outside
+        const uint16_t farIdx = fromIn ? edge.toIdx : edge.fromIdx;
+        if (farIdx < firstClimb) continue;  // boundary edge to a floor node
+        if (farIdx >= navData->nodes.size()) continue;
+        followerClimbReachableNodes.push_back(navData->nodes[farIdx].pos);
     }
 }
 
@@ -3143,7 +3190,13 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
                                 (int)followerReanchorCandidateFrames,
                                 curDistSq, bestDistSq);
                     followerClimbAnchorIdx = bestIdx;
-                    followerClimbCellSet.clear();  // grid cell set is per-anchor
+                    // Bug 1 fix (log 60, 2026-05-12 PM): repopulate the
+                    // reachable-nodes list for the NEW anchor. Pre-fix the
+                    // list was only cleared and never refilled, so the
+                    // post-re-anchor edge-prediction gate suppressed every
+                    // stick direction (no nodes ever near predicted
+                    // positions) and the follower froze on the new anchor.
+                    PopulateClimbReachableNodes(navData, bestIdx);
                     followerReanchorCandidateIdx    = UINT16_MAX;
                     followerReanchorCandidateFrames = 0;
                 }
@@ -3157,32 +3210,69 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
         }
     }
 
-    // Stage 6: substrate-path-driven target refresh (when leader
-    // is NOT on the ladder — leader-tracking takes priority above
-    // when active). The substrate path may include a sequence of
-    // climb-surface waypoints (one per grid cell); refresh the
-    // climb target to the current subgoal each frame and advance
-    // the path when the follower reaches it. Use 3D proximity for
-    // climb waypoints (XZ-only would advance prematurely on a
-    // vertical climb where the follower is mid-cell).
+    // Substrate-path cursor advancement for climb segments
+    // (Bug 3 fix, log 60 2026-05-12 PM). Run UNCONDITIONALLY (no
+    // !leaderStillClimbing gate) and use snap-to-closest semantics
+    // instead of one-step "advance when within 24u".
     //
-    // When the path advances PAST the climb-surface segment (next
-    // subgoal is a non-climb floor node), exit CLIMBING — the
-    // multi-cell climb is complete; FOLLOW resumes for the floor
-    // portion of the path.
+    // Why unconditional: while the leader is climbing, leader-
+    // tracking sets followerMoveTarget = leaderPos and the CLIMBING
+    // stick injection drives the follower up the wall via OoT
+    // physics. The cursor has to stay in sync with that physical
+    // progress — pre-fix the cursor stayed at waypoint[1] (base of
+    // climb) for the entire ascent, then when the leader stopped
+    // and substrate refresh kicked in, the substrate target pointed
+    // BACK DOWN to waypoint[1], driving the follower into a
+    // direction-conflict freeze at the seam. (See log 60 follower
+    // p2=(406,553,231) frozen for ~6s scenario.)
+    //
+    // Why snap-to-closest: the follower can rapidly traverse
+    // multiple cells via OoT physics; one-step-per-tick advance
+    // can't keep up. Snap walks forward through the contiguous
+    // climb-flagged subsequence and picks the cursor that
+    // minimises 3D distance to the follower. Bounded scan within
+    // the current climb segment — no full-path search.
+    if (AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
+        !followerNavPath.Empty()) {
+        const uint16_t curFlags = followerNavPath.CurrentSubgoalFlags();
+        if ((curFlags & ::AnchorNavRoom::NODE_CLIMB_ANY) != 0) {
+            const Vec3f& p2w = player->actor.world.pos;
+            size_t bestIdx = followerNavPath.cursorIdx;
+            f32 bestDistSq = AnchorDist::Dist3DSq(
+                followerNavPath.waypoints[bestIdx], p2w);
+            for (size_t i = followerNavPath.cursorIdx + 1;
+                 i < followerNavPath.waypoints.size(); i++) {
+                const uint16_t f = (i < followerNavPath.waypointFlags.size())
+                                       ? followerNavPath.waypointFlags[i]
+                                       : (uint16_t)0;
+                if ((f & ::AnchorNavRoom::NODE_CLIMB_ANY) == 0) {
+                    break;  // exited contiguous climb segment
+                }
+                f32 dSq = AnchorDist::Dist3DSq(
+                    followerNavPath.waypoints[i], p2w);
+                if (dSq < bestDistSq) {
+                    bestDistSq = dSq;
+                    bestIdx    = i;
+                }
+            }
+            if (bestIdx > followerNavPath.cursorIdx) {
+                followerNavPath.cursorIdx = bestIdx;
+            }
+        }
+    }
+
+    // Stage 6: substrate-path-driven target refresh (when leader is
+    // NOT on the ladder — leader-tracking takes priority above when
+    // active). Re-points followerClimbTopTarget at the current
+    // climb-flagged subgoal each frame, OR exits CLIMBING when the
+    // path has advanced past the climb-surface segment.
     if (!leaderStillClimbing &&
         AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
         !followerNavPath.Empty()) {
         const uint16_t sgFlags = followerNavPath.CurrentSubgoalFlags();
         const uint16_t climbBits = sgFlags & ::AnchorNavRoom::NODE_CLIMB_ANY;
         if (climbBits != 0) {
-            Vec3f sg = followerNavPath.CurrentSubgoal();
-            followerClimbTopTarget = sg;
-            constexpr f32 kClimbSubgoalReach3D = 24.0f;
-            if (AnchorDist::Dist3DSq(sg, player->actor.world.pos) <
-                kClimbSubgoalReach3D * kClimbSubgoalReach3D) {
-                followerNavPath.Advance();
-            }
+            followerClimbTopTarget = followerNavPath.CurrentSubgoal();
         } else {
             // Path advanced past climb segment — climb done.
             ExitFollowerClimbToIdle(ComputeFollowerDismountYaw(player),
@@ -3937,12 +4027,13 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
                         }
                     }
 
-                    // Edge-prediction setup (post-Stage-8 2026-05-12):
+                    // Edge-prediction setup (post-Stage-8 2026-05-12,
+                    // refactored to nearest-node-3D 2026-05-12 PM):
                     // identify which ClimbAnchor the subgoal belongs to
-                    // and pre-build a flat (u<<16|v) hash of its cells
-                    // for hot-path lookup in TickFollowerInput.
+                    // and seed followerClimbReachableNodes with that
+                    // anchor's grid + bridge-connected neighbours.
                     followerClimbAnchorIdx = UINT16_MAX;
-                    followerClimbCellSet.clear();
+                    followerClimbReachableNodes.clear();
                     {
                         const ::AnchorNavRoom::RoomNavData* navData =
                             ::AnchorNavRoom::GetForRoom(
@@ -3957,12 +4048,7 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
                                         anc, followTarget, kClimbCellSpacing, u, v) &&
                                     ::AnchorNavRoom::AnchorCellExists(navData, anc, u, v)) {
                                     followerClimbAnchorIdx = (uint16_t)a;
-                                    followerClimbCellSet.reserve(anc.nodeCount);
-                                    for (uint16_t i = 0; i < anc.nodeCount; i++) {
-                                        const auto& n = navData->nodes[(size_t)anc.firstNodeIdx + i];
-                                        followerClimbCellSet.insert(
-                                            ((uint32_t)n.cellIdxZ << 16) | (uint32_t)n.cellIdxX);
-                                    }
+                                    PopulateClimbReachableNodes(navData, (uint16_t)a);
                                     break;
                                 }
                             }
@@ -3971,11 +4057,11 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
 
                     SPDLOG_INFO("[Follower] FOLLOW→CLIMBING (substrate path "
                                 "entered climb node type=0x{:04x} at "
-                                "{:.0f},{:.0f},{:.0f}; anchorIdx={} cells={})",
+                                "{:.0f},{:.0f},{:.0f}; anchorIdx={} reachableNodes={})",
                                 climbBits,
                                 followTarget.x, followTarget.y, followTarget.z,
                                 (int)followerClimbAnchorIdx,
-                                (int)followerClimbCellSet.size());
+                                (int)followerClimbReachableNodes.size());
                     return;
                 }
             }
