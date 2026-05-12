@@ -1195,7 +1195,15 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // platforms mid-wall are now reachable via the climb-surface graph.
 // Bump invalidates v17 caches so they regenerate with the new
 // boundary edges.
-static constexpr uint16_t kCurrentSchemaVersion = 18;
+// v19 (2026-05-12 PM, log 83 fix): boundary-edge collision line-
+// test. v18's mid-wall edges + existing top-row edges could create
+// boundary connections through platform collision (user-reported
+// case: edge from wall top up through a platform's bottom surface
+// to the floor above it). Now each boundary-edge candidate runs a
+// BgCheck_AnyLineTest1 from cell to floor; edges blocked by
+// collision are dropped. Bump invalidates v18 caches so they
+// regenerate with line-tested edges.
+static constexpr uint16_t kCurrentSchemaVersion = 19;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -2241,7 +2249,8 @@ int FindNearestFloorNodeXZRadius(const RoomNavData* data,
 // the matching edge cleanup (DropClimbSurfaceEdges) runs in the same
 // rescan path so edges don't dangle into discarded indices.
 static void GenerateClimbSurfaceEdges(RoomNavData* out,
-                                       const ClimbAnchor& anchor)
+                                       const ClimbAnchor& anchor,
+                                       PlayState* play)
 {
     if (anchor.nodeCount == 0) return;
 
@@ -2341,6 +2350,7 @@ static void GenerateClimbSurfaceEdges(RoomNavData* out,
     // kClimbToFloorCost (the dismount semantics). Mid-wall dismounts
     // are dismounts, not initial grabs.
     size_t boundaryEdgeCount = 0;
+    size_t boundaryEdgesBlockedByCollision = 0;
     for (uint16_t i = 0; i < anchor.nodeCount; i++) {
         const NavNode& n = out->nodes[(size_t)anchor.firstNodeIdx + i];
         uint16_t climbIdx = (uint16_t)(anchor.firstNodeIdx + i);
@@ -2350,12 +2360,44 @@ static void GenerateClimbSurfaceEdges(RoomNavData* out,
                                                      kBoundaryFloorYDelta);
         if (floorIdx < 0) continue;
         if ((uint16_t)floorIdx == climbIdx) continue;
+        // Line-of-sight gate (2026-05-12 PM, log 83 fix). Before
+        // emitting a boundary edge, raycast from a few units above
+        // the cell to a few units above the floor candidate. If
+        // anything blocks the line (a platform's bottom surface, an
+        // unrelated wall, etc.), the dismount is physically
+        // impossible — skip the edge. Without this gate, mid-wall
+        // boundary edges (v18 addition) and even top-row edges could
+        // create graph connections through collision (user-reported:
+        // a connection from a climb-wall top up through a platform's
+        // collision creating an illusory vertical path).
+        //
+        // Y offsets prevent the test from hitting the floor mesh
+        // itself or the wall surface at the cell. 5u clears typical
+        // floor-mesh thickness without significantly altering the
+        // sweep direction.
+        const Vec3f& floorPos = out->nodes[(size_t)floorIdx].pos;
+        Vec3f testFrom = { n.pos.x, n.pos.y + 5.0f, n.pos.z };
+        Vec3f testTo   = { floorPos.x, floorPos.y + 5.0f, floorPos.z };
+        Vec3f hitPos;
+        CollisionPoly* hitPoly = nullptr;
+        if (play != nullptr &&
+            BgCheck_AnyLineTest1(&play->colCtx, &testFrom, &testTo,
+                                  &hitPos, &hitPoly, 0)) {
+            boundaryEdgesBlockedByCollision++;
+            continue;
+        }
         NavEdge edge{};
         edge.fromIdx = (uint16_t)std::min<int>(floorIdx, (int)climbIdx);
         edge.toIdx   = (uint16_t)std::max<int>(floorIdx, (int)climbIdx);
         edge.cost    = isBottomRow ? kFloorToClimbCost : kClimbToFloorCost;
         out->edges.push_back(edge);
         boundaryEdgeCount++;
+    }
+    if (boundaryEdgesBlockedByCollision > 0) {
+        SPDLOG_DEBUG("[RoomNav] Climb-surface boundary edges: {} blocked by "
+                     "collision line-test (anchor surfaceType=0x{:04x})",
+                     boundaryEdgesBlockedByCollision,
+                     (unsigned)anchor.surfaceType);
     }
 
     SPDLOG_DEBUG("[RoomNav] Climb-surface edges (anchor surfaceType=0x{:04x}): "
@@ -2759,7 +2801,7 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
         // Stage 5 lifts the NODE_WALKABLE expansion gate; this just
         // lays the data. v16: reads climbCellEdgeAdjacent populated
         // immediately above.
-        GenerateClimbSurfaceEdges(out, anchor);
+        GenerateClimbSurfaceEdges(out, anchor, play);
     }
 
     // If no anchor produced any node, restore sentinel so rescan won't
