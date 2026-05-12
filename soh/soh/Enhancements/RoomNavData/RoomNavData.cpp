@@ -1151,7 +1151,17 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // continue to use actual emitted cell positions (no virtual
 // perimeter — that produced false bridges). Bump invalidates v15
 // caches so they regenerate with edge-adjacency data.
-static constexpr uint16_t kCurrentSchemaVersion = 16;
+// v17 (2026-05-12 PM, log 80 followup): refined Option 3 wide-probe
+// edge-avoidance gate, applied ONLY to interior Path B cells
+// (0 < v < cellsV-1, anchor.actorId == 0). Bottom and top rows are
+// exempt so floor↔climb and climb↔ledge engagement still work —
+// addresses the regressions from the original blanket-inset attempt.
+// Diagonal-top-clip and thin-wall cells (where Link's body would
+// straddle the wall edge even though the cell-center raycast hit)
+// are pruned at altitude; their 4-connected neighbours become
+// edge-adjacent via the v16 post-emit scan, triggering 3× lateral
+// cost in A*. Bump invalidates v16 caches.
+static constexpr uint16_t kCurrentSchemaVersion = 17;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -1853,6 +1863,17 @@ static constexpr float    kClimbMinAnchorHeight  = 30.0f;  // skip degenerate-he
 static constexpr uint16_t kClimbMaxCellsU        = 40;     // width safety cap (~1200u)
 static constexpr uint16_t kClimbMaxCellsV        = 40;     // height safety cap (~1200u)
 static constexpr float    kClimbPathAActorWidth  = 30.0f;  // single-column ladder default
+// Refined Option 3 inset (schema v17, log 80 followup). Path B
+// INTERIOR cells (0 < v < cellsV-1, anchor.actorId == 0) probe the
+// wall at ±this offset along axisU AND axisV in addition to the
+// cell center. Cell emitted only when all 5 probes hit a climbable
+// wall — prunes interior cells near a wall edge, notch, or
+// diagonal top clip. Bottom and top rows are EXEMPT to preserve
+// floor↔climb and climb↔ledge engagement (regressions from the
+// earlier blanket-inset attempt in v16/v17 history). Link's body
+// is ~25u wide; 15u inset (slightly more than half-body) gives
+// full-body clearance at every interior cell.
+static constexpr float    kClimbCellEdgeInset    = 15.0f;
 
 // Wall-plane bounding box of a poly cluster, with U/V coords measured
 // relative to a plane origin. Hybrid poly-driven grid generation
@@ -2563,6 +2584,43 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                 bool hit = RaycastClimbCell(play, cellCenter, normal,
                                             hitPos, wallFlags,
                                             /*requireClimbable=*/!useSingleShot);
+                // Refined Option 3 wide-probe edge-avoidance gate (log 80
+                // followup). For Path B INTERIOR cells only (0 < v < cellsV-1
+                // AND anchor.actorId == 0), require the wall to also be
+                // present at ±kClimbCellEdgeInset offsets along axisU AND
+                // axisV. Cells near a wall edge / interior notch / diagonal
+                // top-corner clip fail at least one probe and get pruned.
+                //
+                // Bottom row (v == 0) and top row (v == cellsV-1) are
+                // EXEMPT — pruning them breaks floor↔climb engagement
+                // and climb↔ledge engagement respectively (regressions
+                // from the earlier blanket-inset attempt, log 78).
+                //
+                // Cells pruned here naturally mark their 4-connected
+                // neighbours as edge-adjacent in the post-emit scan
+                // below, which then routes A* away from lateral
+                // movement through that region (3× cost via
+                // kClimbEdgeAdjacentLateralMult).
+                if (hit && anchor.actorId == 0 &&
+                    v > 0 && v < (uint16_t)(cellsV - 1)) {
+                    const Vec3f offsets[4] = {
+                        V3Scale(axisU,  kClimbCellEdgeInset),
+                        V3Scale(axisU, -kClimbCellEdgeInset),
+                        V3Scale(axisV,  kClimbCellEdgeInset),
+                        V3Scale(axisV, -kClimbCellEdgeInset),
+                    };
+                    for (int p = 0; p < 4; p++) {
+                        Vec3f probeCenter = V3Add(cellCenter, offsets[p]);
+                        Vec3f probeHit;
+                        s32   probeFlags = 0;
+                        if (!RaycastClimbCell(play, probeCenter, normal,
+                                              probeHit, probeFlags,
+                                              /*requireClimbable=*/true)) {
+                            hit = false;
+                            break;
+                        }
+                    }
+                }
                 if (anchor.actorId != 0) {
                     // Path A — emit cell at GRID position whether or
                     // not raycast hit. Actor identity is truth.
