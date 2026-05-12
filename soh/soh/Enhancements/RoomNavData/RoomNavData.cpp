@@ -914,7 +914,13 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // DetectJumpAnchors changes — pairs in the 18-60u XZ band are no longer
 // emitted as jump anchors. Bump invalidates cached scans so they
 // regenerate without the spurious near-cell jump markers.
-static constexpr uint16_t kCurrentSchemaVersion = 12;
+//
+// Schema v12 → v13: jump-anchor exclusions added (user 2026-05-12 PM).
+// Pairs whose endpoint coincides with a drop-anchor or climb-anchor
+// endpoint, or whose endpoint is underwater, are no longer emitted.
+// Bump invalidates cached scans so they regenerate with the cleaner
+// jump-anchor set.
+static constexpr uint16_t kCurrentSchemaVersion = 13;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -2935,7 +2941,40 @@ static void DetectJumpAnchors(
     constexpr float kDetourSlack          = 100.0f;
 
     size_t added = 0, merged = 0, rejectedArc = 0, rejectedNoGap = 0,
-           rejectedWall = 0, rejectedDetour = 0;
+           rejectedWall = 0, rejectedDetour = 0,
+           rejectedAnchorEndpoint = 0, rejectedUnderwater = 0;
+
+    // Anchor-endpoint exclusion set (user 2026-05-12 PM). Jump anchors
+    // emitted at nodes that are ALREADY drop-anchor or climb-anchor
+    // endpoints would create overlapping markers and ambiguous
+    // semantics ("should the actor jump or drop here?"). Build a set
+    // of node indices co-located with any DropAnchor.highPos /
+    // landingPos OR ClimbAnchor.basePos / topPos, then reject jump
+    // candidates whose A or B endpoint is in the set.
+    //
+    // Detection runs AFTER drop+climb anchor passes (see scan flow),
+    // so out->dropAnchors and out->climbAnchors are populated here.
+    // 30u XZ tolerance matches kGridResolution — covers anchor
+    // positions that don't sit exactly on a grid cell center.
+    std::unordered_set<uint16_t> anchorEndpointNodes;
+    constexpr float kAnchorEndpointRadius = 30.0f;
+    constexpr float kAnchorEndpointYDelta = 50.0f;
+    auto addAnchorEndpoint = [&](const Vec3f& pos) {
+        int idx = FindNearestFloorNodeXZRadius(out, pos,
+                                                kAnchorEndpointRadius,
+                                                kAnchorEndpointYDelta);
+        if (idx >= 0 && idx < (int)out->nodes.size()) {
+            anchorEndpointNodes.insert((uint16_t)idx);
+        }
+    };
+    for (const DropAnchor& da : out->dropAnchors) {
+        addAnchorEndpoint(da.highPos);
+        addAnchorEndpoint(da.landingPos);
+    }
+    for (const ClimbAnchor& ca : out->climbAnchors) {
+        addAnchorEndpoint(ca.basePos);
+        addAnchorEndpoint(ca.topPos);
+    }
 
     // Pre-compute floor-only adjacency for the walking-detour check.
     // Excludes climb-surface edges (both endpoints checked) so the
@@ -3113,6 +3152,17 @@ static void DetectJumpAnchors(
     for (uint16_t i = 0; i < out->nodes.size(); i++) {
         const NavNode& a = out->nodes[i];
         if (!(a.flags & NODE_WALKABLE)) continue;
+        // User 2026-05-12 PM exclusions (cheap checks first):
+        // - underwater: jumps don't traverse swimming surfaces
+        // - anchor endpoint: don't overlay jump on drop/climb markers
+        if (a.flags & NODE_UNDERWATER) {
+            rejectedUnderwater++;
+            continue;
+        }
+        if (anchorEndpointNodes.count(i)) {
+            rejectedAnchorEndpoint++;
+            continue;
+        }
         // Endpoint must be a platform rim — see isJumpRim docstring.
         // Filters out interior nodes that would emit spurious anchors
         // (visual noise + redundant BFS edges with no behavioural
@@ -3130,6 +3180,17 @@ static void DetectJumpAnchors(
                     if (j <= i) continue;  // i < j ordering avoids dup pairs
                     const NavNode& b = out->nodes[j];
                     if (!(b.flags & NODE_WALKABLE)) continue;
+                    // User 2026-05-12 PM exclusions (mirror of A-side
+                    // checks above; kept early to skip expensive
+                    // raycasts for pairs we'll reject anyway).
+                    if (b.flags & NODE_UNDERWATER) {
+                        rejectedUnderwater++;
+                        continue;
+                    }
+                    if (anchorEndpointNodes.count(j)) {
+                        rejectedAnchorEndpoint++;
+                        continue;
+                    }
                     // Both endpoints must be platform rims (gap/cliff
                     // adjacent). See isJumpRim docstring above.
                     if (!isJumpRim(b)) continue;
@@ -3246,12 +3307,17 @@ static void DetectJumpAnchors(
     }
 
     if (added > 0 || merged > 0 || rejectedArc > 0 ||
-        rejectedNoGap > 0 || rejectedWall > 0 || rejectedDetour > 0) {
+        rejectedNoGap > 0 || rejectedWall > 0 || rejectedDetour > 0 ||
+        rejectedAnchorEndpoint > 0 || rejectedUnderwater > 0) {
         SPDLOG_INFO("[RoomNav] Jump-anchor detection: {} anchors added, "
                     "{} duplicates merged, {} arc-blocked, {} no-gap (walkable), "
-                    "{} wall-blocked, {} walking-detour",
+                    "{} wall-blocked, {} walking-detour, "
+                    "{} anchor-endpoint, {} underwater "
+                    "(anchor-endpoint excludes drop+climb endpoint nodes "
+                    "across {} drop, {} climb anchors)",
                     added, merged, rejectedArc, rejectedNoGap, rejectedWall,
-                    rejectedDetour);
+                    rejectedDetour, rejectedAnchorEndpoint, rejectedUnderwater,
+                    out->dropAnchors.size(), out->climbAnchors.size());
     }
 }
 
