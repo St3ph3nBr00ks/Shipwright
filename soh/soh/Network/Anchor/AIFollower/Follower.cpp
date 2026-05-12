@@ -264,6 +264,15 @@ static constexpr int kStuckCycleWindow   = 120;    // G12 cycle-count reset wind
 // without re-entering STUCK auto-clears the count (so a single stuck
 // area doesn't poison subsequent navigation).
 
+// Subgoal-teleport tunables (Plans/follower_subgoal_teleport_plan.md).
+// kSubgoalScanHops — how many path waypoints forward of the current
+// cursor TeleportToNextSubgoal scans before giving up and falling back
+// to TeleportToLeader. 8 covers ~240u of path at 30u grid spacing,
+// enough to skip past most local obstacles while keeping the teleport
+// "near" the follower's current position. Field-test default; revisit
+// if symptom recurs in larger gaps.
+static constexpr int kSubgoalScanHops = 8;
+
 // Combat tunables for HandleStateEngage / HandleStateAttack.
 // kSwordVerticalReach — Link's effective vertical sword reach. Above this,
 // ranged-required enemies are routed to RANGED_ATTACK instead of ATTACK.
@@ -405,6 +414,7 @@ void Anchor::SetFollowerActive(bool active) {
         followerOverrunFrames = 0;
         followerStuckCycleCount = 0;
         followerStuckCycleResetFrames = 0;
+        followerStuckCycleAdvancedAt = 0;
         hasPendingTransition = false;
         pendingTransitionTimeoutFrames = 0;
         followerDoorHandoff = false;
@@ -670,7 +680,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     if (followerStuckCycleResetFrames > 0) {
         followerStuckCycleResetFrames--;
         if (followerStuckCycleResetFrames == 0) {
-            followerStuckCycleCount = 0;
+            followerStuckCycleCount      = 0;
+            followerStuckCycleAdvancedAt = 0;  // edge-trigger latch reset
         }
     }
 
@@ -994,6 +1005,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         followerStuckFrames           = 0;
         followerStuckCycleCount       = 0;
         followerStuckCycleResetFrames = 0;
+        followerStuckCycleAdvancedAt  = 0;  // edge-trigger latch reset
         followerPostTeleportFrames    = kPostTeleportHoldFrames;
         followerCloseFailBaseline     = 0.0f;
         followerCloseFailFrames       = 0;
@@ -1048,6 +1060,162 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         gPlayState->transitionTrigger   = TRANS_TRIGGER_START;
         gPlayState->nextEntranceIndex   = gSaveContext.entranceIndex;
         gPlayState->transitionType      = TRANS_TYPE_FADE_BLACK;
+        return true;
+    };
+
+    // ─────────────────────────────────────────────────────────────────────
+    // TeleportToNextSubgoal (Plans/follower_subgoal_teleport_plan.md).
+    //
+    // Graded-escalation step between cycle-2 cursor-advance and the
+    // last-resort TeleportToLeader. Walks forward from the current
+    // navPath cursor up to kSubgoalScanHops looking for a waypoint
+    // safe to land on, then teleports. Returns false when no eligible
+    // waypoint exists in the scan window — caller falls back to
+    // TeleportToLeader.
+    //
+    // Eligibility filter (per plan):
+    //   - Plain walkable      → eligible
+    //   - Climb-flagged       → eligible (LADDER/VINE/DESIGNATED/GENERIC
+    //                           or BOUNDARY); engages CLIMBING with
+    //                           attach choreography
+    //   - DROP_FROM_ABOVE     → reject (drop landings should be reached
+    //                           via gravity, not placement)
+    //   - HAZARD / ORPHANED   → reject
+    //
+    // Climb-attach choreography mirrors the leader-climbing trigger at
+    // ~line 1546: identify the ClimbAnchor whose grid contains the
+    // waypoint, set state vars, force facing toward the wall plane,
+    // populate followerClimbReachableNodes, arm post-teleport hold.
+    // Without this, Link lands at the wall but doesn't grab.
+    auto TeleportToNextSubgoal = [&](const char* reason) -> bool {
+        if (followerNavPath.Empty()) return false;
+
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+
+        // Walk forward from cursor; pick first eligible waypoint.
+        const size_t startIdx = followerNavPath.cursorIdx;
+        const size_t endIdx   = std::min(
+            startIdx + (size_t)kSubgoalScanHops,
+            followerNavPath.waypoints.size());
+        size_t chosenIdx = SIZE_MAX;
+        for (size_t i = startIdx; i < endIdx; i++) {
+            const uint16_t f = (i < followerNavPath.waypointFlags.size())
+                                   ? followerNavPath.waypointFlags[i]
+                                   : (uint16_t)0;
+            // Hard rejects (in priority order — DROP marker is the
+            // most common reject case in mixed paths).
+            if (f & ::AnchorNavRoom::NODE_DROP_FROM_ABOVE) continue;
+            if (f & ::AnchorNavRoom::NODE_HAZARD)          continue;
+            if (f & ::AnchorNavRoom::NODE_ORPHANED)        continue;
+            // Soft accepts — climb takes priority so
+            // climb-attach fires when applicable. NODE_CLIMB_BOUNDARY
+            // cells always carry a CLIMB type bit too (see e.g. log
+            // 66 path waypoint i=18 with f=0x4800), so the
+            // NODE_CLIMB_ANY mask catches both.
+            const bool climb    = (f & ::AnchorNavRoom::NODE_CLIMB_ANY) != 0;
+            const bool walkable = (f & ::AnchorNavRoom::NODE_WALKABLE)  != 0;
+            if (!climb && !walkable) continue;
+            chosenIdx = i;
+            break;
+        }
+        if (chosenIdx == SIZE_MAX) return false;
+
+        const Vec3f   chosenPos   = followerNavPath.waypoints[chosenIdx];
+        const uint16_t chosenFlags = (chosenIdx < followerNavPath.waypointFlags.size())
+                                         ? followerNavPath.waypointFlags[chosenIdx]
+                                         : (uint16_t)0;
+        const bool isClimbDest = (chosenFlags & ::AnchorNavRoom::NODE_CLIMB_ANY) != 0;
+
+        // Reset stuck/leash counters + arm post-teleport hold,
+        // mirroring TeleportToLeader. Counter reset = "fresh ladder
+        // for the next stuck event" per plan §counter-reset.
+        followerOverrunFrames         = 0;
+        followerStuckFrames           = 0;
+        followerStuckCycleCount       = 0;
+        followerStuckCycleResetFrames = 0;
+        followerStuckCycleAdvancedAt  = 0;  // edge-trigger latch reset
+        followerPostTeleportFrames    = kPostTeleportHoldFrames;
+        followerCloseFailBaseline     = 0.0f;
+        followerCloseFailFrames       = 0;
+
+        // Position write — both world.pos AND prevPos so OoT's
+        // velocity calc doesn't see a phantom delta.
+        player->actor.world.pos = chosenPos;
+        player->actor.prevPos   = chosenPos;
+
+        // Cursor advances PAST the chosen waypoint so the next
+        // FOLLOW tick steers toward the waypoint after.
+        followerNavPath.cursorIdx = chosenIdx + 1;
+
+        if (isClimbDest && navData != nullptr) {
+            // Climb-attach choreography (plan §climb-attach steps 2-7).
+            // Identify the anchor whose grid contains chosenPos.
+            constexpr float kClimbCellSpacing = 30.0f;
+            uint16_t resolvedAnchor = UINT16_MAX;
+            for (size_t a = 0; a < navData->climbAnchors.size(); a++) {
+                const auto& anc = navData->climbAnchors[a];
+                int u = 0, v = 0;
+                if (::AnchorNavRoom::ProjectPositionToAnchorCell(
+                        anc, chosenPos, kClimbCellSpacing, u, v) &&
+                    ::AnchorNavRoom::AnchorCellExists(navData, anc, u, v)) {
+                    resolvedAnchor = (uint16_t)a;
+                    break;
+                }
+            }
+            if (resolvedAnchor != UINT16_MAX) {
+                const auto& anc = navData->climbAnchors[resolvedAnchor];
+                followerClimbAnchorIdx        = resolvedAnchor;
+                followerAutonomousClimb       = true;
+                followerAutonomousClimbFrames = 0;
+                followerClimbTopTarget        = anc.topPos;
+                followerAIState               = FollowerAIState::CLIMBING;
+                followerStateFrames           = 0;
+                // Force facing INTO the wall (opposite the surface
+                // normal). OoT's ladder/vine collision needs Link's
+                // facing aligned with the wall surface to grab.
+                player->actor.shape.rot.y = Math_Atan2S(-anc.planeNormal.z,
+                                                        -anc.planeNormal.x);
+                PopulateClimbReachableNodes(navData, resolvedAnchor);
+                AnchorFollower::QueueRecorderEvent(
+                    std::string("teleport-subgoal:climb:") + reason);
+                SPDLOG_INFO("[Follower] TeleportToNextSubgoal CLIMB ({}) — "
+                            "chosen idx={}/{} pos=({:.0f},{:.0f},{:.0f}) "
+                            "anchor={} reachableNodes={} (hold {} frames)",
+                            reason, (int)chosenIdx,
+                            (int)followerNavPath.waypoints.size() - 1,
+                            chosenPos.x, chosenPos.y, chosenPos.z,
+                            (int)resolvedAnchor,
+                            (int)followerClimbReachableNodes.size(),
+                            kPostTeleportHoldFrames);
+                return true;
+            }
+            // Anchor resolution failed — fall through to plain
+            // walkable handling. CLIMBING won't engage; follower
+            // lands at chosenPos and the substrate refresh on the
+            // next tick will exit any stale climb state.
+            SPDLOG_WARN("[Follower] TeleportToNextSubgoal climb anchor not "
+                        "resolved for pos ({:.0f},{:.0f},{:.0f}) — falling "
+                        "back to walkable teleport semantics",
+                        chosenPos.x, chosenPos.y, chosenPos.z);
+        }
+
+        // Plain walkable teleport. Transition to IDLE so the next
+        // tick re-evaluates FOLLOW with the new cursor (mirrors
+        // TeleportToLeader's post-teleport state arrangement).
+        followerAIState     = FollowerAIState::IDLE;
+        followerStateFrames = 0;
+        AnchorFollower::QueueRecorderEvent(
+            std::string("teleport-subgoal:walk:") + reason);
+        SPDLOG_INFO("[Follower] TeleportToNextSubgoal WALK ({}) — "
+                    "chosen idx={}/{} pos=({:.0f},{:.0f},{:.0f}) "
+                    "(hold {} frames)",
+                    reason, (int)chosenIdx,
+                    (int)followerNavPath.waypoints.size() - 1,
+                    chosenPos.x, chosenPos.y, chosenPos.z,
+                    kPostTeleportHoldFrames);
         return true;
     };
 
@@ -1450,17 +1618,46 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         }
     }
 
-    // G12 — STUCK escalation teleport. If the follower has entered
-    // STUCK kStuckCycleEscalation times within kStuckCycleWindow,
-    // bail to a teleport. Counter is incremented at the FOLLOW→STUCK
-    // transition below; window is reset when we reach IDLE cleanly.
+    // G12 — STUCK escalation tiers (Plans/follower_subgoal_teleport_plan.md).
+    // Cycle 1: legacy nudge (handled inside HandleStateStuck).
+    // Cycle 2: skip current subgoal — advance navPath cursor by 1 so
+    //          the next FOLLOW tick steers toward a different waypoint.
+    //          Cheapest possible recovery, no position write.
+    // Cycle 3: teleport-to-subgoal (next step) → fall back to
+    //          teleport-to-leader if no eligible subgoal in scan window.
+    //
+    // Cycle 2 is edge-triggered via followerStuckCycleAdvancedAt, so a
+    // single STUCK→FOLLOW→STUCK sequence at count==2 only fires the
+    // advance once (not on every subsequent top-of-hook check while the
+    // follower is still in STUCK state with count==2). Without the
+    // edge-trigger guard the cursor would advance every frame the
+    // follower spends in STUCK during cycle 2, potentially walking off
+    // the end of the path before cycle 3 ever fires.
+    if (followerStuckCycleCount == 2 &&
+        followerStuckCycleAdvancedAt != 2 &&
+        !followerNavPath.Empty()) {
+        const size_t before = followerNavPath.cursorIdx;
+        followerNavPath.Advance();
+        followerStuckCycleAdvancedAt = 2;
+        SPDLOG_INFO("[Follower] STUCK cycle 2 — advance cursor (skip subgoal "
+                    "{} → {}/{})",
+                    (int)before, (int)followerNavPath.cursorIdx,
+                    (int)followerNavPath.waypoints.size() - 1);
+        // Do NOT return — let the existing state-machine dispatch
+        // continue. STUCK's nudge-then-FOLLOW transition will pick
+        // up the new cursor when it next runs FOLLOW.
+    }
     if (followerStuckCycleCount >= kStuckCycleEscalation) {
         // Bug B (log 69) — route through TeleportToLeader for
         // cross-room-safe teleport. Always return regardless of
         // mode: STUCK escalation is a terminal reset.
+        // Plan §implementation Step 3 will replace this with a
+        // TeleportToNextSubgoal-first attempt; for now the existing
+        // teleport-to-leader behavior is preserved.
         TeleportToLeader("G12 stuck-cycle escalation");
         followerStuckCycleCount       = 0;
         followerStuckCycleResetFrames = 0;
+        followerStuckCycleAdvancedAt  = 0;  // reset cycle-2 latch
         followerOverrunFrames         = 0;
         followerAIState               = FollowerAIState::IDLE;
         followerStateFrames           = 0;

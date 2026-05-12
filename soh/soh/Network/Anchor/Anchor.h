@@ -543,6 +543,14 @@ class Anchor : public Network {
     int             followerOverrunFrames = 0;                   // G10: consecutive frames distToLeader > kTeleportThreshold
     int             followerStuckCycleCount = 0;                 // G12: consecutive STUCK entries within the cycle window
     int             followerStuckCycleResetFrames = 0;           // G12: counts down each frame; resets cycle count to 0 on hit zero
+    // Edge-trigger latch for cycle-2 cursor-advance
+    // (Plans/follower_subgoal_teleport_plan.md). Stores the cycle
+    // count at which we last fired the cursor-advance so the same
+    // cycle doesn't re-fire on every top-of-hook pass while the
+    // follower remains in STUCK during cycle 2. Reset to 0 by every
+    // teleport (TeleportToLeader / TeleportToNextSubgoal) and on
+    // cycle-window auto-clear.
+    int             followerStuckCycleAdvancedAt = 0;
 
     // Bug 7 / Phase B (2026-04-22) — door handoff. Shadow-track the leader's
     // last-seen position WHILE THEY WERE IN OUR ROOM, so that when the
