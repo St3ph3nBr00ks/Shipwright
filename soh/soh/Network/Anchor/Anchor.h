@@ -694,12 +694,14 @@ class Anchor : public Network {
     // existing CheckStuckAndEscalate only runs in FOLLOW/ENGAGE/
     // COLLECT_ITEM — CLIMBING state had no progress-based exit and the
     // follower could loop in autonomous-climb indefinitely after
-    // falling off a wall. These fields drive a 2-second Y-progress
-    // check in HandleClimbStateAutonomous: snapshot Y on engagement,
-    // every kStuckCheckInterval (120 frames) compare current Y to
-    // snapshot. If |Δy| < kClimbStuckMinYProgress, exit climb (clears
-    // autonomous, returns to FOLLOW; G14 takes over from there).
-    f32             followerClimbStuckCheckY      = 0.0f;
+    // falling off a wall. These fields drive a 2-second 3D-progress
+    // check in HandleClimbStateAutonomous: snapshot position on
+    // engagement, every kClimbStuckInterval (120 frames) compare
+    // current 3D pos to snapshot. If 3D displacement <
+    // kClimbStuckMinProgress, exit climb. 3D metric (not Y-only) so
+    // lateral climbing on vine walls / curved-wall corners counts as
+    // progress and doesn't false-trigger the exit.
+    Vec3f           followerClimbStuckCheckPos    = { 0.0f, 0.0f, 0.0f };
 
     // Edge-prediction state (climb_surface_nav_grid_plan post-Stage-8
     // 2026-05-12; refactored to nearest-node-3D 2026-05-12 PM). When
