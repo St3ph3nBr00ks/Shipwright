@@ -2168,11 +2168,13 @@ void SohMenu::AddMenuEnhancements() {
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip(
-            "When on, scans for walkable-node pairs separated by a true "
+            "When on, scans for navmesh-edge pairs separated by a true "
             "air gap (no continuous floor along the segment between them). "
-            "Same-altitude jumps and upward jumps (up to broad-jump apex) "
-            "are pre-baked into NavEdges so BFS can route across without "
-            "falling back to runtime JumpResolver.\n\n"
+            "Both endpoints must be NODE_EDGE (walkable AND adjacent to "
+            "non-walkable) — actors physically jump from platform rims, "
+            "not interior tiles. Same-altitude and upward jumps (up to "
+            "broad-jump apex) are pre-baked into NavEdges so BFS can "
+            "route across without falling back to runtime JumpResolver.\n\n"
             "Downward gaps are EXCLUDED — those are DropAnchor's domain "
             "(directional, line-clear, passive fall). Walkable continuous "
             "floor is rejected via a per-segment 'is there floor at the "

@@ -910,7 +910,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // silently regenerate as v7 (matches every prior version bump). The
 // new ClimbAnchor fields default to zero / zero-vector — Stage 2 wires
 // the scan to populate them.
-static constexpr uint16_t kCurrentSchemaVersion = 9;
+static constexpr uint16_t kCurrentSchemaVersion = 10;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3050,6 +3050,16 @@ static void DetectJumpAnchors(
     for (uint16_t i = 0; i < out->nodes.size(); i++) {
         const NavNode& a = out->nodes[i];
         if (!(a.flags & NODE_WALKABLE)) continue;
+        // Endpoint must be a navmesh edge (NODE_EDGE = walkable AND
+        // adjacent to a non-walkable cell). Actors physically jump
+        // FROM the rim of a platform — interior nodes are surrounded
+        // by walkable terrain, no rim to launch from. Filtering here
+        // prevents the detector from emitting spurious anchors deep
+        // inside a navmesh, which add visual noise + unnecessary BFS
+        // adjacency entries with no behavioural benefit (the actor
+        // would just walk to the rim and use an edge-rooted anchor
+        // anyway).
+        if (!(a.flags & NODE_EDGE)) continue;
 
         CellKey aCell{ (int32_t)(int16_t)a.cellIdxX, (int32_t)(int16_t)a.cellIdxZ };
 
@@ -3062,6 +3072,9 @@ static void DetectJumpAnchors(
                     if (j <= i) continue;  // i < j ordering avoids dup pairs
                     const NavNode& b = out->nodes[j];
                     if (!(b.flags & NODE_WALKABLE)) continue;
+                    // Both endpoints must be navmesh edges — see comment
+                    // on the outer-loop NODE_EDGE check above.
+                    if (!(b.flags & NODE_EDGE)) continue;
 
                     const f32 dxf = b.pos.x - a.pos.x;
                     const f32 dzf = b.pos.z - a.pos.z;
