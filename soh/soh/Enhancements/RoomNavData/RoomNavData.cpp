@@ -1185,7 +1185,17 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // are pruned at altitude; their 4-connected neighbours become
 // edge-adjacent via the v16 post-emit scan, triggering 3× lateral
 // cost in A*. Bump invalidates v16 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 17;
+// v18 (2026-05-12 PM, log 82 followup): mid-wall floor↔climb
+// boundary edges. Pre-fix only top-row and bottom-row climb cells
+// looked for nearby floor nodes; walls passing by a mid-altitude
+// platform left the platform graph-disconnected from the wall.
+// Every climb cell now queries FindNearestFloorNodeXZRadius at its
+// own altitude. The existing 50u Y-delta gate filters out cells
+// with no platform near them. Net effect: leaders standing on
+// platforms mid-wall are now reachable via the climb-surface graph.
+// Bump invalidates v17 caches so they regenerate with the new
+// boundary edges.
+static constexpr uint16_t kCurrentSchemaVersion = 18;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -2312,17 +2322,29 @@ static void GenerateClimbSurfaceEdges(RoomNavData* out,
     // to that one floor node — for a wide grid, all bottom-row edges
     // converged on a single floor chokepoint (visible as diagonal
     // white lines in DebugDraw, all meeting at one floor square).
-    // Now each bottom/top cell finds its OWN nearest floor neighbor
-    // within kBoundaryFloorRadiusXZ. Cells too far from any floor
-    // (e.g. wall surfaces facing open air) emit no boundary edge —
-    // BFS reaches them only through adjacent in-grid cells.
+    //
+    // 2026-05-12 PM (log 82 fix): row gate removed. Pre-fix this loop
+    // only ran for bottom-row (v == 0) and top-row (v == cellsV-1)
+    // cells. Walls passing by a mid-altitude platform had no boundary
+    // edge from the cells facing the platform — the leader on such a
+    // platform was graph-disconnected from the wall even though Δy=0
+    // at the matching altitude. Now every cell calls
+    // FindNearestFloorNodeXZRadius at its own Y; the Y-delta gate
+    // (50u) naturally filters out cells with no floor at their
+    // altitude. Cells facing open air return -1 and emit no edge.
+    // Performance: O(cells × floor_nodes); for typical 450-cell
+    // anchors and 2000 floor nodes, ~900k iterations ≈ 10ms scan
+    // time. Well within the existing ~250ms scan budget.
+    //
+    // Edge cost: cells in the bottom row use kFloorToClimbCost (the
+    // floor→base climb-grab semantics), all other cells use
+    // kClimbToFloorCost (the dismount semantics). Mid-wall dismounts
+    // are dismounts, not initial grabs.
     size_t boundaryEdgeCount = 0;
     for (uint16_t i = 0; i < anchor.nodeCount; i++) {
         const NavNode& n = out->nodes[(size_t)anchor.firstNodeIdx + i];
         uint16_t climbIdx = (uint16_t)(anchor.firstNodeIdx + i);
         const bool isBottomRow = (n.cellIdxZ == 0);
-        const bool isTopRow    = (n.cellIdxZ == (uint16_t)(anchor.cellsV - 1));
-        if (!isBottomRow && !isTopRow) continue;
         int floorIdx = FindNearestFloorNodeXZRadius(out, n.pos,
                                                      kBoundaryFloorRadiusXZ,
                                                      kBoundaryFloorYDelta);
