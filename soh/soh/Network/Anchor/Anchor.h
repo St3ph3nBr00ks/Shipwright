@@ -690,6 +690,17 @@ class Anchor : public Network {
     Vec3f           followerClimbTopTarget        = { 0.0f, 0.0f, 0.0f };
     int             followerAutonomousClimbFrames = 0;
 
+    // Climb-state stuck detection (2026-05-12 PM, log 81 fix). The
+    // existing CheckStuckAndEscalate only runs in FOLLOW/ENGAGE/
+    // COLLECT_ITEM — CLIMBING state had no progress-based exit and the
+    // follower could loop in autonomous-climb indefinitely after
+    // falling off a wall. These fields drive a 2-second Y-progress
+    // check in HandleClimbStateAutonomous: snapshot Y on engagement,
+    // every kStuckCheckInterval (120 frames) compare current Y to
+    // snapshot. If |Δy| < kClimbStuckMinYProgress, exit climb (clears
+    // autonomous, returns to FOLLOW; G14 takes over from there).
+    f32             followerClimbStuckCheckY      = 0.0f;
+
     // Edge-prediction state (climb_surface_nav_grid_plan post-Stage-8
     // 2026-05-12; refactored to nearest-node-3D 2026-05-12 PM). When
     // the substrate engages CLIMBING, we capture which ClimbAnchor the

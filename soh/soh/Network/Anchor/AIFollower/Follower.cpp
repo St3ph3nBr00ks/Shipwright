@@ -1209,6 +1209,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                 followerClimbTopTarget        = anc.topPos;
                 followerAIState               = FollowerAIState::CLIMBING;
                 followerStateFrames           = 0;
+                followerClimbStuckCheckY      = player->actor.world.pos.y;
                 // Force facing INTO the wall (opposite the surface
                 // normal). OoT's ladder/vine collision needs Link's
                 // facing aligned with the wall surface to grab.
@@ -1738,10 +1739,24 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     static constexpr int kG14TimeoutFrames   = 600;      // ~10 s at 60 fps
     {
         bool actingToClose =
-            (followerAIState == FollowerAIState::FOLLOW  ||
-             followerAIState == FollowerAIState::STUCK   ||
-             followerAIState == FollowerAIState::ENGAGE  ||
-             followerAIState == FollowerAIState::ATTACK);
+            (followerAIState == FollowerAIState::FOLLOW   ||
+             followerAIState == FollowerAIState::STUCK    ||
+             followerAIState == FollowerAIState::ENGAGE   ||
+             followerAIState == FollowerAIState::ATTACK   ||
+             // CLIMBING added 2026-05-12 PM (log 81 fix). Pre-fix the
+             // follower could spend hundreds of frames stuck in
+             // autonomous CLIMBING (e.g. after falling off a wall with
+             // followerAutonomousClimb still set), and G14's
+             // distance-progress timer reset every entry because
+             // CLIMBING wasn't in the actingToClose set. Including
+             // CLIMBING means: if the follower is in CLIMBING and
+             // making genuine vertical progress toward an elevated
+             // leader, distance reduces and the timer keeps resetting
+             // (no false fire); if stuck in place with no progress,
+             // the 600-frame timer fires and teleports past the bad
+             // climb engagement. Complements the climb-state stuck
+             // detector inside HandleClimbStateAutonomous.
+             followerAIState == FollowerAIState::CLIMBING);
         if (!actingToClose) {
             // Non-closing state — reset so we don't inherit
             // stale counter on next movement state entry.
@@ -1871,6 +1886,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     followerAutonomousClimbFrames = 0;
                     followerAIState               = FollowerAIState::CLIMBING;
                     followerStateFrames           = 0;
+                    followerClimbStuckCheckY      = p2Pos.y;
 
                     // Force facing toward anchor base at engagement —
                     // OoT's ladder grab needs Link facing the wall.
@@ -3280,6 +3296,66 @@ void Anchor::PopulateClimbReachableNodes(
 void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) {
     (void)leaderPos;  // unused — autonomous branch tracks leader via clients map
 
+    // Recovery exit A — "fell out of climb" (2026-05-12 PM, log 81 fix).
+    // When the follower's Y drops well below the active anchor's
+    // basePos.y, it's no longer on the wall. Pre-fix the autonomous
+    // climb state persisted after a fall and the follower thrashed
+    // FOLLOW↔CLIMBING for hundreds of frames at floor level (none of
+    // the stuck-resolvers fire in CLIMBING state). Single Y-delta
+    // check; cheap and robust. Threshold = 100u below basePos covers
+    // the case where the follower fell to floor (which is typically
+    // 360-500u below the climb anchor base).
+    if (followerAutonomousClimb &&
+        followerClimbAnchorIdx != UINT16_MAX) {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        if (navData != nullptr &&
+            followerClimbAnchorIdx < navData->climbAnchors.size()) {
+            const f32 baseY =
+                navData->climbAnchors[followerClimbAnchorIdx].basePos.y;
+            constexpr f32 kFellOutBuffer = 100.0f;
+            if (player->actor.world.pos.y < baseY - kFellOutBuffer) {
+                SPDLOG_INFO("[Follower] CLIMBING→IDLE (fell out of climb; "
+                            "y={:.0f} anchor.baseY={:.0f})",
+                            player->actor.world.pos.y, baseY);
+                ExitFollowerClimbToIdle(ComputeFollowerDismountYaw(player),
+                                        /*clearAutonomous=*/true);
+                return;
+            }
+        }
+    }
+
+    // Recovery exit C — climb-state stuck progress check (2026-05-12
+    // PM, log 81 fix). Every kStuckCheckInterval frames (120, 2s) in
+    // autonomous climb, compare current Y to the last-checkpoint Y.
+    // If |Δy| < kClimbStuckMinYProgress (20u), the follower has been
+    // sitting in CLIMBING without making vertical progress (e.g.
+    // stuck in autonomous climb against an unreachable wall, or path
+    // cursor pointing at a climb cell the follower can't engage).
+    // Exit to IDLE; FOLLOW will re-evaluate, and G14 (added in this
+    // session) can escalate if still no progress.
+    {
+        constexpr int kClimbStuckInterval     = 120;   // 2s @ 60fps
+        constexpr f32 kClimbStuckMinYProgress = 20.0f; // matches FOLLOW threshold
+        if (followerAutonomousClimbFrames > 0 &&
+            (followerAutonomousClimbFrames % kClimbStuckInterval) == 0) {
+            const f32 dy =
+                player->actor.world.pos.y - followerClimbStuckCheckY;
+            if (std::fabs(dy) < kClimbStuckMinYProgress) {
+                SPDLOG_INFO("[Follower] CLIMBING→IDLE (no Y progress in 2s; "
+                            "y={:.0f} checkpoint y={:.0f} dy={:.1f})",
+                            player->actor.world.pos.y,
+                            followerClimbStuckCheckY, dy);
+                ExitFollowerClimbToIdle(ComputeFollowerDismountYaw(player),
+                                        /*clearAutonomous=*/true);
+                return;
+            }
+            followerClimbStuckCheckY = player->actor.world.pos.y;
+        }
+    }
+
     // P3.8 part 2 / P3.6: autonomous climb path. Entered from
     // HandleStateFollow when the follower is at a climb anchor and
     // the path goes up, OR from the leader-climbing trigger when the
@@ -3716,6 +3792,7 @@ Vec3f Anchor::ComputePursuitSubgoal(Player* player,
         followerAutonomousClimbFrames = 0;
         followerAIState               = FollowerAIState::CLIMBING;
         followerStateFrames           = 0;
+        followerClimbStuckCheckY      = player->actor.world.pos.y;
         // Force facing toward the climb subgoal — OoT's ladder/vine
         // collision needs Link facing the wall to grab.
         f32 fdx = resolvedTarget.x - player->actor.world.pos.x;
@@ -3856,6 +3933,7 @@ bool Anchor::TryEngageAutoClimb(Player* player,
     followerAutonomousClimbFrames = 0;
     followerAIState               = FollowerAIState::CLIMBING;
     followerStateFrames           = 0;
+    followerClimbStuckCheckY      = p2Pos.y;
     SPDLOG_INFO("[Follower] Pursuit→CLIMBING (legacy 2-point heuristic; "
                 "anchor base=({:.0f},{:.0f},{:.0f}) "
                 "top=({:.0f},{:.0f},{:.0f}) "
