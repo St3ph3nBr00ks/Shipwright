@@ -1140,7 +1140,16 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // hiding tall grass) was the actual culprit, separate from En_Kusa.
 // Bump invalidates v14 caches so they regenerate with Obj_Hana
 // floors rejected.
-static constexpr uint16_t kCurrentSchemaVersion = 15;
+// v16 (2026-05-12 PM): Option 3 wide-probe edge-avoidance inset
+// for Path B climb anchors (vines, generic walls, designated walls).
+// Climb-grid cells now require all 5 raycasts (center + ±15u in U/V)
+// to hit a climbable wall. Prunes cells adjacent to wall edges /
+// interior gaps that previously dropped the follower mid-climb (log
+// 77 Kokiri Forest triangular gap). Inter-anchor bridges updated to
+// use virtual perimeter positions (pre-inset wall edges) so the
+// existing 45u radius preserves bridge topology. Bump invalidates
+// v15 caches.
+static constexpr uint16_t kCurrentSchemaVersion = 16;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -1837,6 +1846,17 @@ static constexpr float    kClimbMinAnchorHeight  = 30.0f;  // skip degenerate-he
 static constexpr uint16_t kClimbMaxCellsU        = 40;     // width safety cap (~1200u)
 static constexpr uint16_t kClimbMaxCellsV        = 40;     // height safety cap (~1200u)
 static constexpr float    kClimbPathAActorWidth  = 30.0f;  // single-column ladder default
+// Edge-avoidance inset (2026-05-12 PM, log 77 fix). Path B anchors
+// (vines, generic walls, designated walls) probe the wall at ±this
+// offset along axisU AND axisV in addition to the cell center. Cell
+// is emitted only when all 5 probes hit a climbable wall — insetting
+// the climb grid 15u from any wall edge or interior gap (e.g., the
+// triangular top-corner gap in Kokiri Forest vine walls that
+// dropped the follower 3× in log 77). Link's body is ~25u wide; 15u
+// inset (slightly more than half-body) gives full-body clearance at
+// every emitted cell. Path A (ladder actors) bypass — single-column
+// actors don't have edge/gap exposure.
+static constexpr float    kClimbCellEdgeInset    = 15.0f;
 
 // Wall-plane bounding box of a poly cluster, with U/V coords measured
 // relative to a plane origin. Hybrid poly-driven grid generation
@@ -2520,6 +2540,38 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                 bool hit = RaycastClimbCell(play, cellCenter, normal,
                                             hitPos, wallFlags,
                                             /*requireClimbable=*/!useSingleShot);
+                // Option 3 wide-probe edge-avoidance (log 77 fix): for
+                // Path B anchors only, require the wall to also be
+                // present at ±kClimbCellEdgeInset offsets along axisU
+                // AND axisV. Cells adjacent to a wall edge or interior
+                // gap (e.g., triangular hole at top of Kokiri Forest
+                // vine wall) fail at least one probe and get pruned.
+                // Path A actors (anchor.actorId != 0) skip — single-
+                // column ladders don't have gap exposure.
+                if (hit && anchor.actorId == 0) {
+                    const Vec3f offsets[4] = {
+                        V3Scale(axisU,  kClimbCellEdgeInset),
+                        V3Scale(axisU, -kClimbCellEdgeInset),
+                        V3Scale(axisV,  kClimbCellEdgeInset),
+                        V3Scale(axisV, -kClimbCellEdgeInset),
+                    };
+                    for (int p = 0; p < 4; p++) {
+                        Vec3f probeCenter = V3Add(cellCenter, offsets[p]);
+                        Vec3f probeHit;
+                        s32   probeFlags = 0;
+                        // Path B probes require a climbable wall hit
+                        // (matches the main cell's pass-through mode).
+                        // Generic-wall anchors still use pass-through
+                        // here because the AABB-driven grid spans the
+                        // poly cluster — a missed probe = real gap.
+                        if (!RaycastClimbCell(play, probeCenter, normal,
+                                              probeHit, probeFlags,
+                                              /*requireClimbable=*/true)) {
+                            hit = false;
+                            break;
+                        }
+                    }
+                }
                 if (anchor.actorId != 0) {
                     // Path A — emit cell at GRID position whether or
                     // not raycast hit. Actor identity is truth.
@@ -2610,39 +2662,131 @@ static void DetectInterAnchorClimbBridges(RoomNavData* out) {
                                   kInterAnchorBridgeRadiusDefault));
     const float radiusSq = radius * radius;
 
-    // Predicate: cell on the perimeter of its anchor's grid. Covers
-    // both lateral edges and top/bottom rows. Corner cells (where both
-    // hold) are visited once because we iterate by node index, not by
-    // axis.
-    auto isPerimeter = [](const NavNode& n, const ClimbAnchor& a) -> bool {
-        const uint16_t u = n.cellIdxX;
-        const uint16_t v = n.cellIdxZ;
-        const uint16_t lastU = (a.cellsU > 0) ? (uint16_t)(a.cellsU - 1) : (uint16_t)0;
-        const uint16_t lastV = (a.cellsV > 0) ? (uint16_t)(a.cellsV - 1) : (uint16_t)0;
-        return (u == 0) || (u == lastU) || (v == 0) || (v == lastV);
+    // Bridge bookkeeping. Pre-Option-3, the bridge predicate compared
+    // ACTUAL emitted cell positions; cells at (u==0 / u==cellsU-1 /
+    // v==0 / v==cellsV-1) were the perimeter. With Option 3 inset
+    // (kClimbCellEdgeInset, 2026-05-12 PM), Path B anchors prune cells
+    // adjacent to wall edges/gaps — the actual perimeter cells of
+    // adjacent walls may now be 60u+ apart, exceeding the 45u bridge
+    // radius. To preserve bridge coverage without bumping radius, we
+    // build a "virtual perimeter" per anchor: positions at the
+    // ORIGINAL grid edges (u=0 / cellsU-1 / v=0 / cellsV-1), each
+    // linked to the NEAREST emitted cell in that row/column. Distance
+    // checks use the virtual positions; bridge edges link the actual
+    // emitted cells. Net effect: same bridge radius produces the same
+    // bridge topology as pre-inset, but the climb-grid coverage is
+    // properly inset for edge-avoidance.
+    //
+    // Holds (virtualPos, linkedNodeIdx) per virtual perimeter entry.
+    struct VirtPerimEntry {
+        Vec3f    virtualPos;
+        uint16_t linkedNodeIdx;
     };
 
-    // AABB inflated by bridge radius. Two anchors whose inflated
-    // bboxes don't overlap can't have cells within `radius` of each
-    // other; skip the inner O(perimeter²) loop entirely.
-    auto anchorAabb = [&](const ClimbAnchor& a, Vec3f& outMin, Vec3f& outMax) {
-        outMin = { std::numeric_limits<float>::infinity(),
-                   std::numeric_limits<float>::infinity(),
-                   std::numeric_limits<float>::infinity() };
-        outMax = { -std::numeric_limits<float>::infinity(),
-                   -std::numeric_limits<float>::infinity(),
-                   -std::numeric_limits<float>::infinity() };
-        const uint16_t end = (uint16_t)(a.firstNodeIdx + a.nodeCount);
-        for (uint16_t i = a.firstNodeIdx; i < end; i++) {
-            const Vec3f& p = out->nodes[i].pos;
-            if (p.x < outMin.x) outMin.x = p.x;
-            if (p.y < outMin.y) outMin.y = p.y;
-            if (p.z < outMin.z) outMin.z = p.z;
-            if (p.x > outMax.x) outMax.x = p.x;
-            if (p.y > outMax.y) outMax.y = p.y;
-            if (p.z > outMax.z) outMax.z = p.z;
-        }
+    const size_t nAnchors = out->climbAnchors.size();
+    std::vector<Vec3f>                        aabbMin(nAnchors);
+    std::vector<Vec3f>                        aabbMax(nAnchors);
+    std::vector<std::vector<VirtPerimEntry>>  virtPerim(nAnchors);
+
+    auto virtualCellPos = [&](const ClimbAnchor& a, uint16_t u, uint16_t v) -> Vec3f {
+        const float du = (float)u * kClimbGridCellSpacing;
+        const float dv = (float)v * kClimbGridCellSpacing;
+        return {
+            a.planeOrigin.x + a.planeAxisU.x * du + a.planeAxisV.x * dv,
+            a.planeOrigin.y + a.planeAxisU.y * du + a.planeAxisV.y * dv,
+            a.planeOrigin.z + a.planeAxisU.z * du + a.planeAxisV.z * dv,
+        };
     };
+
+    for (size_t i = 0; i < nAnchors; i++) {
+        const ClimbAnchor& a = out->climbAnchors[i];
+        if (a.cellsU == 0 || a.cellsV == 0 || a.nodeCount == 0) continue;
+
+        // Build a (cellsU × cellsV) lookup of emitted node indices for
+        // this anchor; -1 = no cell at that grid coord (pruned by the
+        // wide-probe gate or never raycast-hit).
+        std::vector<int> cellGrid((size_t)a.cellsU * (size_t)a.cellsV, -1);
+        const uint16_t end = (uint16_t)(a.firstNodeIdx + a.nodeCount);
+        for (uint16_t k = a.firstNodeIdx; k < end; k++) {
+            const NavNode& n = out->nodes[k];
+            if (n.cellIdxX < a.cellsU && n.cellIdxZ < a.cellsV) {
+                cellGrid[(size_t)n.cellIdxX + (size_t)n.cellIdxZ * a.cellsU] = (int)k;
+            }
+        }
+
+        auto pushIfFound = [&](uint16_t virtU, uint16_t virtV, int actualNodeIdx) {
+            if (actualNodeIdx < 0) return;
+            virtPerim[i].push_back({
+                virtualCellPos(a, virtU, virtV),
+                (uint16_t)actualNodeIdx
+            });
+        };
+
+        const uint16_t lastU = (uint16_t)(a.cellsU - 1);
+        const uint16_t lastV = (uint16_t)(a.cellsV - 1);
+
+        // Left edge (u=0): per row v, nearest emitted cell from left.
+        for (uint16_t v = 0; v < a.cellsV; v++) {
+            int found = -1;
+            for (uint16_t u = 0; u < a.cellsU; u++) {
+                int idx = cellGrid[(size_t)u + (size_t)v * a.cellsU];
+                if (idx >= 0) { found = idx; break; }
+            }
+            pushIfFound(0, v, found);
+        }
+        // Right edge (u=cellsU-1): per row v, nearest emitted from right.
+        if (a.cellsU > 1) {
+            for (uint16_t v = 0; v < a.cellsV; v++) {
+                int found = -1;
+                for (int u = (int)a.cellsU - 1; u >= 0; u--) {
+                    int idx = cellGrid[(size_t)u + (size_t)v * a.cellsU];
+                    if (idx >= 0) { found = idx; break; }
+                }
+                pushIfFound(lastU, v, found);
+            }
+        }
+        // Bottom edge (v=0): per column u, nearest emitted from bottom.
+        for (uint16_t u = 0; u < a.cellsU; u++) {
+            int found = -1;
+            for (uint16_t v = 0; v < a.cellsV; v++) {
+                int idx = cellGrid[(size_t)u + (size_t)v * a.cellsU];
+                if (idx >= 0) { found = idx; break; }
+            }
+            pushIfFound(u, 0, found);
+        }
+        // Top edge (v=cellsV-1): per column u, nearest emitted from top.
+        if (a.cellsV > 1) {
+            for (uint16_t u = 0; u < a.cellsU; u++) {
+                int found = -1;
+                for (int v = (int)a.cellsV - 1; v >= 0; v--) {
+                    int idx = cellGrid[(size_t)u + (size_t)v * a.cellsU];
+                    if (idx >= 0) { found = idx; break; }
+                }
+                pushIfFound(u, lastV, found);
+            }
+        }
+
+        // Anchor AABB from virtual perimeter positions (always >= the
+        // emitted-cell AABB; ensures the early-out below doesn't reject
+        // pairs that would bridge via virtual perimeters at the wall
+        // edges).
+        Vec3f mn = { std::numeric_limits<float>::infinity(),
+                     std::numeric_limits<float>::infinity(),
+                     std::numeric_limits<float>::infinity() };
+        Vec3f mx = { -std::numeric_limits<float>::infinity(),
+                     -std::numeric_limits<float>::infinity(),
+                     -std::numeric_limits<float>::infinity() };
+        for (const VirtPerimEntry& e : virtPerim[i]) {
+            if (e.virtualPos.x < mn.x) mn.x = e.virtualPos.x;
+            if (e.virtualPos.y < mn.y) mn.y = e.virtualPos.y;
+            if (e.virtualPos.z < mn.z) mn.z = e.virtualPos.z;
+            if (e.virtualPos.x > mx.x) mx.x = e.virtualPos.x;
+            if (e.virtualPos.y > mx.y) mx.y = e.virtualPos.y;
+            if (e.virtualPos.z > mx.z) mx.z = e.virtualPos.z;
+        }
+        aabbMin[i] = mn;
+        aabbMax[i] = mx;
+    }
 
     auto aabbOverlaps = [&](const Vec3f& aMin, const Vec3f& aMax,
                             const Vec3f& bMin, const Vec3f& bMax) -> bool {
@@ -2651,48 +2795,42 @@ static void DetectInterAnchorClimbBridges(RoomNavData* out) {
                  aMax.z + radius < bMin.z || bMax.z + radius < aMin.z);
     };
 
-    // Pre-compute each anchor's AABB + its list of perimeter node
-    // indices. Avoids repeating the cell-flag predicate inside the
-    // O(N²) anchor-pair loop.
-    const size_t nAnchors = out->climbAnchors.size();
-    std::vector<Vec3f>                       aabbMin(nAnchors);
-    std::vector<Vec3f>                       aabbMax(nAnchors);
-    std::vector<std::vector<uint16_t>>       perimeter(nAnchors);
-    for (size_t i = 0; i < nAnchors; i++) {
-        const ClimbAnchor& a = out->climbAnchors[i];
-        anchorAabb(a, aabbMin[i], aabbMax[i]);
-        const uint16_t end = (uint16_t)(a.firstNodeIdx + a.nodeCount);
-        for (uint16_t k = a.firstNodeIdx; k < end; k++) {
-            if (isPerimeter(out->nodes[k], a)) {
-                perimeter[i].push_back(k);
-            }
-        }
-    }
+    // Dedup: an anchor pair can produce many virtual-perimeter matches
+    // that resolve to the same (linkedA, linkedB) actual cells (corner
+    // overlap between row and column virtual entries). The pre-Option-3
+    // implementation didn't need dedup because cells WERE unique per
+    // perimeter; with virtual perimeters, multiple virtual rows/cols
+    // can collapse onto the same inset cell. Key = (small<<16 | large).
+    std::unordered_set<uint32_t> emittedEdges;
+    emittedEdges.reserve(64);
 
     size_t pairsConsidered = 0;
     size_t pairsBridged    = 0;
     size_t edgesEmitted    = 0;
 
     for (size_t i = 0; i < nAnchors; i++) {
+        if (virtPerim[i].empty()) continue;
         for (size_t j = i + 1; j < nAnchors; j++) {
+            if (virtPerim[j].empty()) continue;
             pairsConsidered++;
             if (!aabbOverlaps(aabbMin[i], aabbMax[i],
                               aabbMin[j], aabbMax[j])) continue;
 
             bool anyEmitted = false;
-            for (uint16_t ai : perimeter[i]) {
-                const Vec3f& aPos = out->nodes[ai].pos;
-                for (uint16_t bj : perimeter[j]) {
-                    const Vec3f& bPos = out->nodes[bj].pos;
-                    const float dx = aPos.x - bPos.x;
-                    const float dy = aPos.y - bPos.y;
-                    const float dz = aPos.z - bPos.z;
+            for (const VirtPerimEntry& ea : virtPerim[i]) {
+                for (const VirtPerimEntry& eb : virtPerim[j]) {
+                    const float dx = ea.virtualPos.x - eb.virtualPos.x;
+                    const float dy = ea.virtualPos.y - eb.virtualPos.y;
+                    const float dz = ea.virtualPos.z - eb.virtualPos.z;
                     if (dx*dx + dy*dy + dz*dz > radiusSq) continue;
-                    // Bidirectional. NavEdge is stored once but BuildAdjacencyList
-                    // pushes both directions, matching the existing edge convention.
+                    const uint16_t lo = std::min(ea.linkedNodeIdx, eb.linkedNodeIdx);
+                    const uint16_t hi = std::max(ea.linkedNodeIdx, eb.linkedNodeIdx);
+                    if (lo == hi) continue;  // virtual collision onto same cell
+                    const uint32_t key = ((uint32_t)lo << 16) | (uint32_t)hi;
+                    if (!emittedEdges.insert(key).second) continue;  // already emitted
                     NavEdge edge{};
-                    edge.fromIdx = (uint16_t)std::min<int>((int)ai, (int)bj);
-                    edge.toIdx   = (uint16_t)std::max<int>((int)ai, (int)bj);
+                    edge.fromIdx = lo;
+                    edge.toIdx   = hi;
                     edge.cost    = kInterAnchorBridgeCost;
                     out->edges.push_back(edge);
                     edgesEmitted++;
@@ -2705,7 +2843,7 @@ static void DetectInterAnchorClimbBridges(RoomNavData* out) {
 
     if (edgesEmitted > 0 || pairsBridged > 0) {
         SPDLOG_INFO("[RoomNav] Inter-anchor climb bridges: {} pairs bridged "
-                    "({}/{} considered), {} edges (radius={:.0f})",
+                    "({}/{} considered), {} edges (radius={:.0f}, virtual perimeter)",
                     pairsBridged, pairsBridged, pairsConsidered,
                     edgesEmitted, radius);
     }
