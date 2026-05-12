@@ -297,6 +297,28 @@ struct RoomNavData {
     // corrupt the spatial index if reconstructed alongside floor nodes.
     uint16_t firstClimbSurfaceNodeIdx = UINT16_MAX;
 
+    // Per-node "edge-adjacent" bit for Path B climb-surface nodes
+    // (schema v16+). Parallel to `nodes[]`. Index i has 1 iff `nodes[i]`
+    // is a climb-surface node whose 4-connected grid neighbour either
+    // doesn't exist (cell at the grid boundary) or wasn't emitted (the
+    // raycast at that neighbour cell's center missed — natural wall gap
+    // or interior notch). Floor nodes (i < firstClimbSurfaceNodeIdx)
+    // and Path A ladder cells always have 0 here.
+    //
+    // Consumed by:
+    //   - GenerateClimbSurfaceEdges: raises lateral edge cost by
+    //     kClimbEdgeAdjacentLateralMult when source OR target is edge-
+    //     adjacent. Pure vertical edges (du=0) keep base cost.
+    //   - DetectInterAnchorClimbBridges: raises bridge cost when either
+    //     endpoint cell is edge-adjacent.
+    //
+    // Bias: A* prefers paths that route laterally through full-width
+    // climb regions instead of along boundary cells next to a hole.
+    //
+    // Persisted (raw uint8_t vector). Empty vector treated by consumers
+    // as "no edge-adjacency info" → falls back to base costs.
+    std::vector<uint8_t> climbCellEdgeAdjacent;
+
     // Diagnostic: positions of floor candidates rejected by the per-actor
     // allowlist (FloorIsRejectedByAllowlist). Populated only when
     // gEnhancements.RoomNavData.LogRejectedFloors is on at scan time;
