@@ -910,7 +910,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // silently regenerate as v7 (matches every prior version bump). The
 // new ClimbAnchor fields default to zero / zero-vector — Stage 2 wires
 // the scan to populate them.
-static constexpr uint16_t kCurrentSchemaVersion = 10;
+static constexpr uint16_t kCurrentSchemaVersion = 11;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3047,19 +3047,57 @@ static void DetectJumpAnchors(
                                      &hitPos, &hitPoly, 0) != 0;
     };
 
+    // "Jump rim" predicate — at least one of the 8 neighbor cells
+    // either lacks walkable floor entirely OR has floor at a Y far
+    // enough from this node that walking across is implausible
+    // (gap, cliff, deep step). Captures the geometric meaning of
+    // "platform rim from which an actor would jump":
+    //   - Same-Y gap (chasm with empty cells) — rim qualifies
+    //   - Same-Y gap with deep-pit floor underneath (cells aren't
+    //     empty but their floor is far below) — rim still qualifies
+    //   - Cliff with step-down beyond step-up height — rim qualifies
+    //   - Interior node (every neighbor has walkable floor at this Y)
+    //     — does NOT qualify; not a rim
+    //
+    // Cannot reuse the existing NODE_EDGE flag — that's set only
+    // for "neighbor cell has zero scanned nodes" and misses chasms
+    // whose floor got scanned (deep pits, lava bottoms, etc.).
+    // Computing here keeps the NODE_EDGE flag's meaning unchanged
+    // for other consumers.
+    constexpr float kRimYTolerance = 25.0f;  // step-up height
+    auto isJumpRim = [&](const NavNode& n) -> bool {
+        const CellKey nc{ (int32_t)(int16_t)n.cellIdxX,
+                          (int32_t)(int16_t)n.cellIdxZ };
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                const CellKey nb{ nc.x + dx, nc.z + dz };
+                auto it = nodesByCell.find(nb);
+                if (it == nodesByCell.end()) return true;  // empty cell
+                bool walkableAtY = false;
+                for (uint16_t k : it->second) {
+                    const NavNode& m = out->nodes[k];
+                    if (m.flags & NODE_CLIMB_ANY) continue;  // not floor
+                    if (!(m.flags & NODE_WALKABLE)) continue;
+                    if (std::fabs(m.pos.y - n.pos.y) <= kRimYTolerance) {
+                        walkableAtY = true;
+                        break;
+                    }
+                }
+                if (!walkableAtY) return true;  // gap or step beyond walking
+            }
+        }
+        return false;  // surrounded by walkable floor at this Y → interior
+    };
+
     for (uint16_t i = 0; i < out->nodes.size(); i++) {
         const NavNode& a = out->nodes[i];
         if (!(a.flags & NODE_WALKABLE)) continue;
-        // Endpoint must be a navmesh edge (NODE_EDGE = walkable AND
-        // adjacent to a non-walkable cell). Actors physically jump
-        // FROM the rim of a platform — interior nodes are surrounded
-        // by walkable terrain, no rim to launch from. Filtering here
-        // prevents the detector from emitting spurious anchors deep
-        // inside a navmesh, which add visual noise + unnecessary BFS
-        // adjacency entries with no behavioural benefit (the actor
-        // would just walk to the rim and use an edge-rooted anchor
-        // anyway).
-        if (!(a.flags & NODE_EDGE)) continue;
+        // Endpoint must be a platform rim — see isJumpRim docstring.
+        // Filters out interior nodes that would emit spurious anchors
+        // (visual noise + redundant BFS edges with no behavioural
+        // benefit; actors walk to the rim and jump from there).
+        if (!isJumpRim(a)) continue;
 
         CellKey aCell{ (int32_t)(int16_t)a.cellIdxX, (int32_t)(int16_t)a.cellIdxZ };
 
@@ -3072,9 +3110,9 @@ static void DetectJumpAnchors(
                     if (j <= i) continue;  // i < j ordering avoids dup pairs
                     const NavNode& b = out->nodes[j];
                     if (!(b.flags & NODE_WALKABLE)) continue;
-                    // Both endpoints must be navmesh edges — see comment
-                    // on the outer-loop NODE_EDGE check above.
-                    if (!(b.flags & NODE_EDGE)) continue;
+                    // Both endpoints must be platform rims (gap/cliff
+                    // adjacent). See isJumpRim docstring above.
+                    if (!isJumpRim(b)) continue;
 
                     const f32 dxf = b.pos.x - a.pos.x;
                     const f32 dzf = b.pos.z - a.pos.z;
