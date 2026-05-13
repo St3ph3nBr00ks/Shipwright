@@ -3,6 +3,7 @@
 
 #include <libultraship/libultra.h>
 #include "global.h"
+#include "z64player.h"  // PLAYER_LIMB_BUF_COUNT, PLAYER_LIMB_MAX — Link skel sizing
 
 // SoH NPC Follower companion (Flotilla — see Plans/npc_follower_plan.md).
 //
@@ -29,32 +30,40 @@ struct EnFollower;
 typedef void (*EnFollowerActionFunc)(struct EnFollower*, PlayState*);
 
 typedef struct EnFollower {
-    /* 0x000 */ Actor actor;
+    Actor actor;
 
-    // Link skel runtime state. Link's skel has 21 limbs (child + adult share
-    // the same count); jointTable/morphTable sized accordingly. Phase 1.5
-    // will initialize the SkelAnime; Phase 1 scaffold leaves it zeroed.
-    /* 0x14C */ SkelAnime skelAnime;
-    /* 0x190 */ Vec3s     jointTable[21];
-    /* 0x202 */ Vec3s     morphTable[21];
+    // Link skel runtime state. Matches the Player struct's table sizing
+    // (PLAYER_LIMB_BUF_COUNT = align16(22 * sizeof(Vec3s)) / sizeof(Vec3s)
+    // ≈ 24 entries) so SkelAnime_InitLink can use them without
+    // resizing. Initialized in Init from gPlayerSkelHeaders.
+    SkelAnime skelAnime;
+    Vec3s     jointTable[PLAYER_LIMB_BUF_COUNT];
+    Vec3s     morphTable[PLAYER_LIMB_BUF_COUNT];
 
     // Owner-client bookkeeping. Set by Anchor at spawn time.
-    /* 0x274 */ u32 ownerClientId;
-    /* 0x278 */ u32 netId;
+    u32 ownerClientId;
+    u32 netId;
 
     // State machine.
-    /* 0x27C */ s32                  state;
-    /* 0x280 */ EnFollowerActionFunc actionFunc;
+    s32                  state;
+    EnFollowerActionFunc actionFunc;
 
     // Linkage age — matches gSaveContext.linkAge at spawn time. Drives skel
     // variant selection.
-    /* 0x288 */ s8 linkAge;
+    s8 linkAge;
+
+    // Cosmetic state to feed Player_DrawImpl. v1 reads the local player's
+    // values via GET_PLAYER(play) at draw time and stores them here for
+    // diagnostics; future phases may track them independently per NPC.
+    s8 currentTunic;
+    s8 currentBoots;
+    s8 currentFace;
 
     // v2 reserved (combat redesign): health, downed timer, etc. Sized to
     // ensure forward-compat with the FOLLOWER_NPC_STATE packet schema's
     // `health` + `deathFlag` fields without struct migration later.
-    /* 0x289 */ s8 reservedHealth;
-    /* 0x28A */ u8 reservedDeathFlag;
+    s8 reservedHealth;
+    u8 reservedDeathFlag;
 } EnFollower;
 
 #ifdef __cplusplus
