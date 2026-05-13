@@ -1427,6 +1427,48 @@ class Anchor : public Network {
     // touching the heartbeat mutex.
     std::atomic<uint64_t> gameFrameCounter{0};
 
+    // ----- Game-tick timing infrastructure (2026-05-15 log 118 followup) -----
+    //
+    // SoH game logic ticks at variable rates: 20 Hz vanilla (50ms/tick),
+    // up to display refresh when "Match refresh rate" is on, plus
+    // VirtualBox slowdowns that can drag it lower. Hard-coded
+    // "@60fps" frame counts (kStuckCheckInterval=120 etc.) ran 3-6×
+    // long on the 20 Hz default.
+    //
+    // Solution: measure the wall-clock interval between consecutive
+    // game ticks, EWMA-smooth it, and convert millisecond thresholds
+    // to tick counts at the consumer site via MsToGameTicks(ms).
+    //
+    // Frame counters in consumers stay as game-tick integers — they
+    // increment correctly per tick regardless of rate. Only the
+    // threshold comparison needs the helper:
+    //
+    //   if (counter >= MsToGameTicks(kThresholdMs)) { ... }
+    //
+    // Properties:
+    //   - 20 fps default → MsToGameTicks(2000) = 40 → 2 s actual.
+    //   - 60 fps unlocked → MsToGameTicks(2000) = 120 → 2 s actual.
+    //   - Game paused → no game tick fires → no counter increment →
+    //     timers freeze. Correct behaviour.
+    //   - Long hitches (>200ms / scene transitions) capped out of the
+    //     EWMA so the rolling average stays stable.
+    //
+    // Updated at the top of OnGameFrameUpdate (HookHandlers.cpp).
+    // Default 50ms (= 20 fps) so MsToGameTicks works correctly on the
+    // first tick before any sample arrives.
+    uint32_t mAvgGameTickMs      = 50;
+    uint64_t mLastGameTickWallMs = 0;
+
+    // Returns the number of game ticks (frame increments) that
+    // approximate the given wall-clock millisecond duration based on
+    // the current measured tick interval. Rounds UP so a 2000ms
+    // threshold never fires earlier than 2 seconds.
+    inline int MsToGameTicks(int ms) const {
+        if (ms <= 0) return 0;
+        const uint32_t tickMs = (mAvgGameTickMs == 0) ? 50 : mAvgGameTickMs;
+        return ((int)ms + (int)tickMs - 1) / (int)tickMs;
+    }
+
     // Network-thread-side bookkeeping. Written from the network thread
     // (TickHeartbeat sender; HandlePacket_Heartbeat receiver) and read
     // from the game thread via the IsClientLikely{Frozen,GameFrozen}
