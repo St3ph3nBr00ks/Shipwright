@@ -83,6 +83,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_AUTO_FULL_RESCAN      CVAR_ENHANCEMENT("RoomNavData.AutoFullRescanOnSceneFlag")
 #define CVAR_ROOM_NAV_CRAWLSPACE            CVAR_ENHANCEMENT("RoomNavData.CrawlspaceDetection")
 #define CVAR_ROOM_NAV_DROP_ANCHOR           CVAR_ENHANCEMENT("RoomNavData.DropAnchorDetection")
+#define CVAR_ROOM_NAV_DROP_ANCHOR_DEBUG     CVAR_ENHANCEMENT("RoomNavData.DropAnchorDebugLog")
 #define CVAR_ROOM_NAV_INITIAL_SCAN_DELAY    CVAR_ENHANCEMENT("RoomNavData.InitialScanDelayFrames")
 #define CVAR_ROOM_NAV_AUTO_EXPAND           CVAR_ENHANCEMENT("RoomNavData.AutoExpandOnExploration")
 #define CVAR_ROOM_NAV_INTER_ANCHOR_BRIDGE_R CVAR_ENHANCEMENT("RoomNavData.InterAnchorBridgeRadius")
@@ -3440,11 +3441,16 @@ static void DetectClimbCellDropAnchors(
 
     size_t added  = 0;
     size_t merged = 0;
+    // Diagnostic counters by rejection reason (CVar-gated logging
+    // emits these per-cell when DropAnchorDebugLog is on).
+    size_t rejYDelta = 0, rejXZ = 0, rejMovementClear = 0, rejNoNeighbors = 0;
+    const bool debug = CVarGetInteger(CVAR_ROOM_NAV_DROP_ANCHOR_DEBUG, 0) != 0;
 
     // Iterate per anchor so we can use anchor.planeNormal to offset
     // the line-test origin away from the wall. Anchor.firstNodeIdx
     // and nodeCount delimit each anchor's cells in out->nodes.
-    for (const ClimbAnchor& anchor : out->climbAnchors) {
+    for (size_t anchorIdx = 0; anchorIdx < out->climbAnchors.size(); anchorIdx++) {
+        const ClimbAnchor& anchor = out->climbAnchors[anchorIdx];
         if (anchor.nodeCount == 0) continue;
         // Some anchors (Path A actors with degenerate normal) may
         // have zero planeNormal. Skip — without a normal we can't
@@ -3478,29 +3484,61 @@ static void DetectClimbCellDropAnchors(
                 a.pos.z + anchor.planeNormal.z * kClimbDropTestNormalOffset,
             };
 
+            // Per-cell diagnostic header.
+            size_t cellCandidatesScanned = 0;
+            size_t cellCandidatesRejYDelta = 0;
+            size_t cellCandidatesRejXZ = 0;
+            size_t cellCandidatesRejMC = 0;
+            size_t cellCandidatesAccepted = 0;
+            bool   cellAnyCellsInNeighborhood = false;
+
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     CellKey nCell{ worldCellX + dx, worldCellZ + dz };
                     auto it = nodesByCell.find(nCell);
                     if (it == nodesByCell.end()) continue;
+                    cellAnyCellsInNeighborhood = true;
                     for (uint16_t j : it->second) {
                         const NavNode& b = out->nodes[j];
                         if (!(b.flags & NODE_WALKABLE)) continue;
+                        cellCandidatesScanned++;
 
                         // b must be LOWER than the climb cell.
                         f32 dy = a.pos.y - b.pos.y;
-                        if (dy < kDropMinDeltaY || dy > kDropMaxDeltaY) continue;
+                        if (dy < kDropMinDeltaY || dy > kDropMaxDeltaY) {
+                            cellCandidatesRejYDelta++;
+                            rejYDelta++;
+                            continue;
+                        }
 
                         f32 dxf = b.pos.x - a.pos.x;
                         f32 dzf = b.pos.z - a.pos.z;
-                        if (dxf*dxf + dzf*dzf > kDropMaxXZSq) continue;
+                        if (dxf*dxf + dzf*dzf > kDropMaxXZSq) {
+                            cellCandidatesRejXZ++;
+                            rejXZ++;
+                            continue;
+                        }
 
                         // MovementClear from the wall-offset origin to
                         // the floor candidate. The internal +20u Y bump
                         // applied to BOTH endpoints is harmless here
                         // because testFromBase is already in clear air
                         // (offset outward from wall by 30u).
-                        if (!MovementClear(testFromBase, b.pos, play)) continue;
+                        if (!MovementClear(testFromBase, b.pos, play)) {
+                            cellCandidatesRejMC++;
+                            rejMovementClear++;
+                            if (debug) {
+                                SPDLOG_INFO("[RoomNav][DropDbg]   cell=({:.0f},{:.0f},{:.0f}) "
+                                            "→ floor=({:.0f},{:.0f},{:.0f}) REJECT MovementClear "
+                                            "(testFrom=({:.0f},{:.0f},{:.0f}) dy={:.0f} xzDistSq={:.0f})",
+                                            a.pos.x, a.pos.y, a.pos.z,
+                                            b.pos.x, b.pos.y, b.pos.z,
+                                            testFromBase.x, testFromBase.y, testFromBase.z,
+                                            dy, dxf*dxf + dzf*dzf);
+                            }
+                            continue;
+                        }
+                        cellCandidatesAccepted++;
 
                         // Dedup against existing CLIMB-SOURCE drop anchors
                         // only. Floor-source anchors (highIsClimb=0)
@@ -3539,12 +3577,47 @@ static void DetectClimbCellDropAnchors(
                     }
                 }
             }
+            // Per-cell summary (debug-gated).
+            if (debug && cellCandidatesScanned > 0) {
+                SPDLOG_INFO("[RoomNav][DropDbg] anchor[{}] cell #{} pos=({:.0f},{:.0f},{:.0f}) "
+                            "neighborhood=({},{}) cellsFound={} scanned={} accepted={} "
+                            "rejY={} rejXZ={} rejMC={}",
+                            (int)anchorIdx, (int)(i - anchor.firstNodeIdx),
+                            a.pos.x, a.pos.y, a.pos.z,
+                            worldCellX, worldCellZ,
+                            cellAnyCellsInNeighborhood ? 1 : 0,
+                            (int)cellCandidatesScanned,
+                            (int)cellCandidatesAccepted,
+                            (int)cellCandidatesRejYDelta,
+                            (int)cellCandidatesRejXZ,
+                            (int)cellCandidatesRejMC);
+            } else if (debug && !cellAnyCellsInNeighborhood) {
+                rejNoNeighbors++;
+                SPDLOG_INFO("[RoomNav][DropDbg] anchor[{}] cell #{} pos=({:.0f},{:.0f},{:.0f}) "
+                            "neighborhood=({},{}) NO FLOOR CELLS IN 3x3 NEIGHBORHOOD",
+                            (int)anchorIdx, (int)(i - anchor.firstNodeIdx),
+                            a.pos.x, a.pos.y, a.pos.z,
+                            worldCellX, worldCellZ);
+            }
+        }
+        // Per-anchor summary (debug-gated).
+        if (debug) {
+            SPDLOG_INFO("[RoomNav][DropDbg] === anchor[{}] basePos=({:.0f},{:.0f},{:.0f}) "
+                        "topPos=({:.0f},{:.0f},{:.0f}) "
+                        "normal=({:.2f},{:.2f},{:.2f}) cells={} ===",
+                        (int)anchorIdx,
+                        anchor.basePos.x, anchor.basePos.y, anchor.basePos.z,
+                        anchor.topPos.x, anchor.topPos.y, anchor.topPos.z,
+                        anchor.planeNormal.x, anchor.planeNormal.y, anchor.planeNormal.z,
+                        (int)anchor.nodeCount);
         }
     }
 
     SPDLOG_INFO("[RoomNav] Climb-cell drop-anchor detection: {} anchors added, "
-                "{} duplicates merged ({} climb anchors scanned)",
-                added, merged, out->climbAnchors.size());
+                "{} duplicates merged ({} climb anchors scanned, "
+                "rejections: Y={} XZ={} MovementClear={} noNeighbors={})",
+                added, merged, out->climbAnchors.size(),
+                (int)rejYDelta, (int)rejXZ, (int)rejMovementClear, (int)rejNoNeighbors);
 }
 
 // ---------------------------------------------------------------------------
