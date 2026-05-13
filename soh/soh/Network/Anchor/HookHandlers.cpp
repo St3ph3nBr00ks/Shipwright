@@ -1029,6 +1029,27 @@ void Anchor::RegisterHooks() {
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
         ProcessIncomingPacketQueue();
 
+        // Game-tick interval measurement (2026-05-15 log 118 followup).
+        // Sample wall-clock delta since the previous tick and EWMA-smooth
+        // it into Anchor::mAvgGameTickMs. Consumers convert ms thresholds
+        // to game-tick counts via Anchor::MsToGameTicks(ms). Cap implausible
+        // deltas (load screens, scene transitions, hitches > 200ms) so
+        // the rolling average stays stable at the real game-loop rate.
+        {
+            const uint64_t nowMs = (uint64_t)
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (Anchor::Instance->mLastGameTickWallMs != 0) {
+                const uint64_t delta = nowMs - Anchor::Instance->mLastGameTickWallMs;
+                if (delta > 0 && delta < 200) {
+                    // EWMA with alpha = 1/8 → ~24-tick (1.2s @ 20fps) response.
+                    Anchor::Instance->mAvgGameTickMs =
+                        (uint32_t)((Anchor::Instance->mAvgGameTickMs * 7 + (uint32_t)delta) / 8);
+                }
+            }
+            Anchor::Instance->mLastGameTickWallMs = nowMs;
+        }
+
         // Heartbeat liveness counter (#194 follow-up) — read by the
         // network thread when building the heartbeat payload. If this
         // hook stops firing (game thread frozen), the counter stops

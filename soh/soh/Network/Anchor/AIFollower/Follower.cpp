@@ -278,8 +278,12 @@ static constexpr int kItemCollectTimeout = 300;
 //                              >50u/s). Lowered from initial 30u
 //                              draft per user concern about false
 //                              positives on bend-heavy paths.
-static constexpr int kStuckCheckInterval = 120;    // 2s @ 60fps
-static constexpr f32 kStuckMinProgress   = 20.0f;  // min units toward target per interval
+// 2s in real time. Game ticks at 20 Hz vanilla (50ms/tick), higher
+// when SoH's framerate is unlocked. The actual frame count is
+// resolved at the consumer site via Anchor::MsToGameTicks(ms) so
+// the threshold means the same 2 seconds regardless of tick rate.
+static constexpr int kStuckCheckIntervalMs = 2000;
+static constexpr f32 kStuckMinProgress     = 20.0f;  // min units toward target per interval
 // STUCK-FWD action (2026-05-12 PM): on stuck detection, project this
 // far toward followerMoveTarget, snap to the nearest walkable nav
 // node, and teleport. If |target - p2| < this, teleport directly to
@@ -287,7 +291,8 @@ static constexpr f32 kStuckMinProgress   = 20.0f;  // min units toward target pe
 // step without the noise of repeated JumpResolver / cycle-2 advance
 // firings the old 0.33s detector produced.
 static constexpr f32 kStuckForwardTeleportDist = 60.0f;
-static constexpr int kStuckCycleWindow   = 120;    // G12 cycle-count reset window (frames; 2s @ 60fps)
+// G12 cycle-count reset window (2s in real time; resolved at consumer site).
+static constexpr int kStuckCycleWindowMs = 2000;
 // Reduced 300→120 (log 66 follow-up). 5s was too forgiving — if the
 // follower can't make progress for 2 seconds, additional nudges aren't
 // going to help; escalate to teleport-to-subgoal sooner. The
@@ -738,7 +743,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     // (Phase 1 commit 9) — used by HandleStateCollectItem.
     // kMoveSpeed moved to file-scope anonymous namespace
     // (Phase 1 commit 8) — used by HandleStateStuck.
-    // kStuckCheckInterval / kStuckMinProgress moved to file-scope
+    // kStuckCheckIntervalMs / kStuckMinProgress moved to file-scope
     // anonymous namespace (Phase 1 commit 11) — used by HandleStateFollow.
     // kStuckRecovery moved to file-scope anonymous namespace
     // (Phase 1 commit 8) — used by HandleStateStuck.
@@ -746,10 +751,10 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     // (Phase 1 commit 6) so per-state handlers can reference it.
     // G10 — leash-timeout teleport thresholds.
     static constexpr f32 kTeleportThreshold   = 1200.0f; // sustained XZ overrun that triggers teleport
-    static constexpr int kTeleportDelayFrames = 120;     // ~2s at 60fps; debounces brief overshoots
+    static constexpr int kTeleportDelayMs = 2000;        // 2s in real time; debounces brief overshoots
     // G12 — STUCK escalation: N STUCK entries within window → teleport.
     static constexpr int kStuckCycleEscalation = 3;     // count threshold
-    // kStuckCycleWindow moved to file-scope anonymous namespace
+    // kStuckCycleWindowMs moved to file-scope anonymous namespace
     // (Phase 1 commit 11) — used by HandleStateFollow.
     // Phase B (Bug 7) — door handoff timeout. After leader crosses a
     // room boundary, the follower has this many frames to navigate
@@ -1588,7 +1593,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     }
 
     // G10 — leash-timeout teleport. If the follower has been more
-    // than kTeleportThreshold from the leader for kTeleportDelayFrames
+    // than kTeleportThreshold from the leader for kTeleportDelayMs in real time
     // continuous frames, teleport to the leader. Catches stuck-in-
     // geometry / fell-behind / can't-traverse scenarios that the
     // state machine couldn't recover from.
@@ -1605,7 +1610,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         f32 dzL = leaderPos.z - p2Pos.z;
         if (dxL * dxL + dyL * dyL + dzL * dzL > kTeleportThreshold * kTeleportThreshold) {
             followerOverrunFrames++;
-            if (followerOverrunFrames >= kTeleportDelayFrames) {
+            if (followerOverrunFrames >= MsToGameTicks(kTeleportDelayMs)) {
                 // Plan §implementation Step 4 — try TeleportToNextSubgoal
                 // first. The next eligible waypoint is closer to the
                 // follower than the leader is (path is the planned
@@ -1728,7 +1733,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     // close, but terrain/state-machine churn prevents progress.
     // G14 measures baseline distance and fires a teleport when
     // the follower hasn't reduced distance by `kG14ProgressDelta`
-    // in `kG14TimeoutFrames`.
+    // in `kG14TimeoutMs` of real time.
     //
     // Reset the baseline whenever the follower makes progress
     // (delta > kG14ProgressDelta) OR leaves a "trying to move"
@@ -1736,7 +1741,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     // / COLLECT_ITEM are excluded).
     static constexpr f32 kG14MinDistance     = 200.0f;   // below this, no teleport
     static constexpr f32 kG14ProgressDelta   = 30.0f;    // units of "progress"
-    static constexpr int kG14TimeoutFrames   = 600;      // ~10 s at 60 fps
+    static constexpr int kG14TimeoutMs       = 10000;    // 10 s in real time
     {
         bool actingToClose =
             (followerAIState == FollowerAIState::FOLLOW   ||
@@ -1775,7 +1780,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     followerCloseFailFrames   = 0;
                 } else {
                     followerCloseFailFrames++;
-                    if (followerCloseFailFrames >= kG14TimeoutFrames) {
+                    if (followerCloseFailFrames >= MsToGameTicks(kG14TimeoutMs)) {
                         SPDLOG_WARN("[Follower] G14 close-fail timeout "
                                     "(baseline={:.0f} now={:.0f} frames={})",
                                     followerCloseFailBaseline, distToLeader,
@@ -3575,10 +3580,12 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     // past the stuck section. If that fails (no useful path target),
     // fall through to the legacy IDLE exit so G14 can escalate.
     {
-        constexpr int kClimbStuckInterval    = 120;   // 2s @ 60fps
+        constexpr int kClimbStuckIntervalMs  = 2000;  // 2s in real time
         constexpr f32 kClimbStuckMinProgress = 20.0f; // 3D units, matches FOLLOW threshold
+        const int climbStuckIntervalTicks = MsToGameTicks(kClimbStuckIntervalMs);
         if (followerAutonomousClimbFrames > 0 &&
-            (followerAutonomousClimbFrames % kClimbStuckInterval) == 0) {
+            climbStuckIntervalTicks > 0 &&
+            (followerAutonomousClimbFrames % climbStuckIntervalTicks) == 0) {
             const Vec3f& p = player->actor.world.pos;
             const f32 dx = p.x - followerClimbStuckCheckPos.x;
             const f32 dy = p.y - followerClimbStuckCheckPos.y;
@@ -3711,9 +3718,10 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
             // for the seam-crossing duration, autonomous-climb timeout
             // fired.
             //
-            // Require the candidate to win for kReanchorLatchFrames
-            // consecutive checks before committing the switch.
-            constexpr uint16_t kReanchorLatchFrames = 30;  // ~0.5s @ 60fps
+            // Require the candidate to win for kReanchorLatchMs
+            // consecutive real-time before committing the switch.
+            constexpr int kReanchorLatchMs = 500;  // 0.5s in real time
+            const int reanchorLatchTicks = MsToGameTicks(kReanchorLatchMs);
             if (bestIdx != followerClimbAnchorIdx) {
                 if (bestIdx == followerReanchorCandidateIdx) {
                     followerReanchorCandidateFrames++;
@@ -3722,7 +3730,7 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
                     followerReanchorCandidateIdx    = bestIdx;
                     followerReanchorCandidateFrames = 1;
                 }
-                if (followerReanchorCandidateFrames >= kReanchorLatchFrames) {
+                if (followerReanchorCandidateFrames >= reanchorLatchTicks) {
                     SPDLOG_INFO("[Follower] Climb re-anchor: {} → {} "
                                 "(leader pos closer for {} frames; "
                                 "cur d²={:.0f} new d²={:.0f})",
@@ -3870,13 +3878,14 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
             // a brief hold, push followerClimbTopTarget Y above the
             // current cell, and let the CLIMBING-aware injection do
             // its job. After the hold expires, do the real exit.
-            constexpr int kMantleHoldFrames = 6;  // ~0.1s @ 60fps
-            constexpr f32 kMantleHoldYBoost  = 60.0f;
+            constexpr int kMantleHoldMs     = 100;   // 0.1s in real time
+            constexpr f32 kMantleHoldYBoost = 60.0f;
+            const int mantleHoldTicks = MsToGameTicks(kMantleHoldMs);
             if (followerMantleHoldFrames == 0) {
-                followerMantleHoldFrames = kMantleHoldFrames;
-                SPDLOG_INFO("[Follower] Mantle hold started ({} frames; "
+                followerMantleHoldFrames = mantleHoldTicks;
+                SPDLOG_INFO("[Follower] Mantle hold started ({} ticks; "
                             "boost target Y +{:.0f}u above current pos)",
-                            kMantleHoldFrames, kMantleHoldYBoost);
+                            mantleHoldTicks, kMantleHoldYBoost);
             } else {
                 followerMantleHoldFrames--;
             }
@@ -3907,7 +3916,7 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     }
 
     constexpr f32 kAutonomousClimbReachY = 16.0f;       // within 16u Y of top → done
-    constexpr int kAutonomousClimbMaxFrames = 600;      // ~10s safety
+    constexpr int kAutonomousClimbMaxMs  = 10000;       // 10s safety
     // Bug fix (user 2026-05-12 log 27): the substrate refresh
     // sets followerClimbTopTarget = currentSubgoal each frame.
     // For a follower at the BASE of a climb, the bottom-row cell
@@ -3935,7 +3944,7 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     }
     bool reachedTop =
         (player->actor.world.pos.y >= reachTopY - kAutonomousClimbReachY);
-    bool timedOut = (followerAutonomousClimbFrames >= kAutonomousClimbMaxFrames);
+    bool timedOut = (followerAutonomousClimbFrames >= MsToGameTicks(kAutonomousClimbMaxMs));
     // While leader is still climbing, suppress the reachedTop exit
     // — follower should stay on the ladder alongside the leader
     // (CLIMBING-aware injection naturally idles stick_y when at
@@ -4175,7 +4184,9 @@ Vec3f Anchor::ComputePursuitSubgoal(Player* player,
 // ─────────────────────────────────────────────────────────────────────
 bool Anchor::CheckStuckAndEscalate(const Vec3f& p2Pos,
                                     FollowerAIState resumeState) {
-    if (followerStateFrames % kStuckCheckInterval != 0) return false;
+    const int stuckCheckIntervalTicks = MsToGameTicks(kStuckCheckIntervalMs);
+    if (stuckCheckIntervalTicks <= 0 ||
+        followerStateFrames % stuckCheckIntervalTicks != 0) return false;
 
     // "Progress" is now measured as DISTANCE-TO-TARGET REDUCED, not raw
     // XZ displacement (user 2026-05-12 PM follow-up). Raw displacement
@@ -4223,7 +4234,7 @@ bool Anchor::CheckStuckAndEscalate(const Vec3f& p2Pos,
     followerStuckFrames   = 0;
     followerStateFrames   = 0;
     followerStuckCycleCount++;
-    followerStuckCycleResetFrames = kStuckCycleWindow;
+    followerStuckCycleResetFrames = MsToGameTicks(kStuckCycleWindowMs);
     SPDLOG_INFO("[Follower] {}→STUCK (stick input stalled, cycle={})",
                 stateStr, followerStuckCycleCount);
     return true;
@@ -4822,7 +4833,7 @@ void Anchor::HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sid
 
 void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Vec3f& p2Pos) {
     // FOLLOW: stick-driven movement toward leader's side. Periodically
-    // checks progress (every kStuckCheckInterval frames); enters STUCK
+    // checks progress (every kStuckCheckIntervalMs real time); enters STUCK
     // if no progress AND increments G12 stuck-cycle counter for the
     // teleport-escalation safety net. Scans for opportunistic item
     // drops every 10 frames. Transitions to IDLE when within
