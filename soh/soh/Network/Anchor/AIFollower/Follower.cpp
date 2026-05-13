@@ -4750,7 +4750,22 @@ void Anchor::HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sid
     f32    nearDistSq = kEngageRange * kEngageRange;
     Actor* eActor = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
     while (eActor != nullptr) {
+        // health > 0 filter (2026-05-15 log 118 fix). Pre-fix the only
+        // "alive" gate was `update != nullptr`, which is set to NULL
+        // by Actor_Kill. Enemies in their natural-death animation
+        // cycle (typical for Skulltula, Deku Baba etc.) keep update
+        // active for the duration of the dying anim — Actor_Kill
+        // doesn't fire until the anim completes. Without a health
+        // check, the follower re-engaged the same dying enemy every
+        // ~150ms (ATTACK→RETURN→FOLLOW→IDLE→ENGAGE cycle), seen in
+        // log 118 lines 1631-1645 as three IDLE→ENGAGE entries on
+        // the same id=55 (Skulltula) at different Y values as it
+        // fell. colChkInfo.health is set to 0 by the damage path
+        // BEFORE the natural death cycle starts, so this filter
+        // catches both locally-killed and network-killed dying
+        // enemies.
         if (eActor->update != nullptr &&
+            eActor->colChkInfo.health > 0 &&
             !IsScrubPuzzleActor(eActor->id) &&
             fabsf(eActor->world.pos.y - p2Pos.y) < kMaxYDelta) {
             f32 edx     = eActor->world.pos.x - p2Pos.x;
