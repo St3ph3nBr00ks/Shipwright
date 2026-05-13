@@ -236,68 +236,9 @@ size_t QueryNodesInRange(const RoomNavData* data,
     return outNodeIndices.size() - startCount;
 }
 
-int FindRandomReachableNode(const RoomNavData* data,
-                             int fromIdx,
-                             float maxDistance,
-                             const NavQueryOptions& opts,
-                             bool (*filter)(const NavNode&)) {
-    if (data == nullptr || fromIdx < 0 ||
-        (size_t)fromIdx >= data->nodes.size()) return -1;
-    if (maxDistance <= 0.0f) return -1;
-
-    // BFS-bounded reachable-node sweep from fromIdx, capped by 3D
-    // Euclidean distance. Reuses the same adjacency the path-finding
-    // BFS uses (climb mask, drop anchors, etc. via NavQueryOptions).
-    const AdjacencyCacheEntry& adjEntry =
-        GetOrBuildAdjacency(data, MakeAdjacencyKey(opts));
-    const auto& adjacency = adjEntry.adjacency;
-
-    const Vec3f& origin = data->nodes[(size_t)fromIdx].pos;
-    const float r2 = maxDistance * maxDistance;
-
-    std::vector<bool> visited(data->nodes.size(), false);
-    std::vector<int>  candidates;
-    candidates.reserve(64);
-
-    std::vector<uint16_t> frontier;
-    frontier.reserve(64);
-    frontier.push_back((uint16_t)fromIdx);
-    visited[(size_t)fromIdx] = true;
-
-    while (!frontier.empty()) {
-        uint16_t cur = frontier.back();
-        frontier.pop_back();
-        const NavNode& curNode = data->nodes[cur];
-
-        // Distance gate.
-        float dx = curNode.pos.x - origin.x;
-        float dy = curNode.pos.y - origin.y;
-        float dz = curNode.pos.z - origin.z;
-        if (dx*dx + dy*dy + dz*dz > r2) continue;
-
-        // Candidate test — walkable, not orphaned, passes user filter.
-        if ((curNode.flags & NODE_WALKABLE) &&
-            !(curNode.flags & (NODE_ORPHANED | NODE_HAZARD | NODE_UNDERWATER)) &&
-            (filter == nullptr || filter(curNode))) {
-            candidates.push_back((int)cur);
-        }
-
-        // Expand neighbours.
-        for (uint16_t nb : adjacency[cur]) {
-            if (nb >= visited.size()) continue;
-            if (visited[nb]) continue;
-            visited[nb] = true;
-            frontier.push_back(nb);
-        }
-    }
-
-    if (candidates.empty()) return -1;
-    // Uniform random pick. Use rand() — caller can seed externally if
-    // determinism matters; spawn-director-style use is fine with
-    // platform-default randomness.
-    const size_t pickIdx = (size_t)((unsigned)std::rand() % candidates.size());
-    return candidates[pickIdx];
-}
+// FindRandomReachableNode is defined LATER in this file (after
+// MakeAdjacencyKey and GetOrBuildAdjacency are visible — required for
+// the BFS adjacency lookup). Forward-declared in RoomNavData.h.
 
 // Threshold for hazard-traversal rejection — see plan §10 for the
 // derivation. A path that crosses 1-2 hazard cells before exiting is
@@ -648,6 +589,74 @@ static AdjacencyCacheKey MakeAdjacencyKey(const NavQueryOptions& opts) {
     k.maxJumpDistance  = opts.maxJumpDistance;
     k.maxJumpUpDelta   = opts.maxJumpUpDelta;
     return k;
+}
+
+// Public area-query API (2026-05-13). Definition placed here, AFTER
+// MakeAdjacencyKey / GetOrBuildAdjacency, because those helpers are
+// `static` in this TU (file-scope). C++ name lookup is single-pass for
+// non-member calls — the function body must see those helpers above it,
+// not just declared anywhere in the file.
+int FindRandomReachableNode(const RoomNavData* data,
+                             int fromIdx,
+                             float maxDistance,
+                             const NavQueryOptions& opts,
+                             bool (*filter)(const NavNode&)) {
+    if (data == nullptr || fromIdx < 0 ||
+        (size_t)fromIdx >= data->nodes.size()) return -1;
+    if (maxDistance <= 0.0f) return -1;
+
+    // BFS-bounded reachable-node sweep from fromIdx, capped by 3D
+    // Euclidean distance. Reuses the same adjacency the path-finding
+    // BFS uses (climb mask, drop anchors, etc. via NavQueryOptions).
+    const AdjacencyCacheEntry& adjEntry =
+        GetOrBuildAdjacency(data, MakeAdjacencyKey(opts));
+    const auto& adjacency = adjEntry.adjacency;
+
+    const Vec3f& origin = data->nodes[(size_t)fromIdx].pos;
+    const float r2 = maxDistance * maxDistance;
+
+    std::vector<bool> visited(data->nodes.size(), false);
+    std::vector<int>  candidates;
+    candidates.reserve(64);
+
+    std::vector<uint16_t> frontier;
+    frontier.reserve(64);
+    frontier.push_back((uint16_t)fromIdx);
+    visited[(size_t)fromIdx] = true;
+
+    while (!frontier.empty()) {
+        uint16_t cur = frontier.back();
+        frontier.pop_back();
+        const NavNode& curNode = data->nodes[cur];
+
+        // Distance gate.
+        float dx = curNode.pos.x - origin.x;
+        float dy = curNode.pos.y - origin.y;
+        float dz = curNode.pos.z - origin.z;
+        if (dx*dx + dy*dy + dz*dz > r2) continue;
+
+        // Candidate test — walkable, not orphaned, passes user filter.
+        if ((curNode.flags & NODE_WALKABLE) &&
+            !(curNode.flags & (NODE_ORPHANED | NODE_HAZARD | NODE_UNDERWATER)) &&
+            (filter == nullptr || filter(curNode))) {
+            candidates.push_back((int)cur);
+        }
+
+        // Expand neighbours.
+        for (uint16_t nb : adjacency[cur]) {
+            if (nb >= visited.size()) continue;
+            if (visited[nb]) continue;
+            visited[nb] = true;
+            frontier.push_back(nb);
+        }
+    }
+
+    if (candidates.empty()) return -1;
+    // Uniform random pick. Use rand() — caller can seed externally if
+    // determinism matters; spawn-director-style use is fine with
+    // platform-default randomness.
+    const size_t pickIdx = (size_t)((unsigned)std::rand() % candidates.size());
+    return candidates[pickIdx];
 }
 
 int FindBestReachableSubgoalNode(const RoomNavData* data,

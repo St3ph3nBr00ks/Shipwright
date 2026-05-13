@@ -363,43 +363,8 @@ const RoomNavData* GetForRoom(int16_t sceneNum, int8_t roomNum);
 int FindNearestNode(const RoomNavData* data, const Vec3f& pos,
                     bool includeClimb = false);
 
-// ---------------------------------------------------------------------------
-// NavMesh area queries (2026-05-13). Helpers for use cases beyond
-// pathfinding — primarily the AI Director's spawn-location selection.
-// ---------------------------------------------------------------------------
-
-// Collects all walkable floor nodes within `radius` (3D) of `center` that
-// pass the optional `filter` predicate. Appends to `outNodeIndices`. Caller
-// owns the vector. Skips climb-surface nodes by default. Returns the count
-// of nodes appended.
-//
-// Cost: O(N) walk over data->nodes. For Director spawn-candidate selection
-// at scan-frequency cadence (~once per minute), acceptable.
-size_t QueryNodesInRange(const RoomNavData* data,
-                          const Vec3f& center,
-                          float radius,
-                          std::vector<int>& outNodeIndices,
-                          bool (*filter)(const NavNode&) = nullptr);
-
-// Picks a random walkable floor node reachable from `fromIdx` within
-// `maxDistance` (3D Euclidean from fromIdx's position). Reachability is
-// checked via the static graph adjacency. Optional `filter` lets the
-// caller exclude unwanted nodes (e.g. NODE_EDGE, NODE_HAZARD_ADJACENT).
-//
-// Returns -1 if no candidate satisfies the constraints, or if `data` is
-// null / `fromIdx` invalid. Stochastic — returns different results
-// across calls. Useful for AI Director spawn-point selection ("random
-// reachable node within 500u of a player, not on hazard, not visible").
-//
-// Implementation note: v1 collects all candidates via a BFS-like sweep
-// then picks one uniformly. A future optimization could do a streaming
-// reservoir-sample to avoid the intermediate vector for very large
-// rooms; deferred until profiling shows need.
-int FindRandomReachableNode(const RoomNavData* data,
-                             int fromIdx,
-                             float maxDistance,
-                             const NavQueryOptions& opts,
-                             bool (*filter)(const NavNode&) = nullptr);
+// NavMesh area queries are declared below `NavQueryOptions` — they
+// reference it in their signatures, so the struct must come first.
 
 // ---------------------------------------------------------------------------
 // Multi-agent local avoidance placeholder (2026-05-13).
@@ -489,6 +454,45 @@ struct NavQueryOptions {
     float    maxJumpDistance     = 0.0f;  // XZ cap per actor; 0 means "no cap"
     float    maxJumpUpDelta      = 0.0f;  // upward Y reach cap per actor
 };
+
+// ---------------------------------------------------------------------------
+// NavMesh area queries (2026-05-13). Helpers for use cases beyond
+// pathfinding — primarily the AI Director's spawn-location selection.
+// Placed AFTER NavQueryOptions since their signatures reference it.
+// ---------------------------------------------------------------------------
+
+// Collects all walkable floor nodes within `radius` (3D) of `center` that
+// pass the optional `filter` predicate. Appends to `outNodeIndices`. Caller
+// owns the vector. Skips climb-surface nodes by default. Returns the count
+// of nodes appended.
+//
+// Cost: O(N) walk over data->nodes. For Director spawn-candidate selection
+// at scan-frequency cadence (~once per minute), acceptable.
+size_t QueryNodesInRange(const RoomNavData* data,
+                          const Vec3f& center,
+                          float radius,
+                          std::vector<int>& outNodeIndices,
+                          bool (*filter)(const NavNode&) = nullptr);
+
+// Picks a random walkable floor node reachable from `fromIdx` within
+// `maxDistance` (3D Euclidean from fromIdx's position). Reachability is
+// checked via the static graph adjacency. Optional `filter` lets the
+// caller exclude unwanted nodes (e.g. NODE_EDGE, NODE_HAZARD_ADJACENT).
+//
+// Returns -1 if no candidate satisfies the constraints, or if `data` is
+// null / `fromIdx` invalid. Stochastic — returns different results
+// across calls. Useful for AI Director spawn-point selection ("random
+// reachable node within 500u of a player, not on hazard, not visible").
+//
+// Implementation note: v1 collects all candidates via a BFS-like sweep
+// then picks one uniformly. A future optimization could do a streaming
+// reservoir-sample to avoid the intermediate vector for very large
+// rooms; deferred until profiling shows need.
+int FindRandomReachableNode(const RoomNavData* data,
+                             int fromIdx,
+                             float maxDistance,
+                             const NavQueryOptions& opts,
+                             bool (*filter)(const NavNode&) = nullptr);
 
 // Returns the index of the node closest to `targetPos` that's reachable
 // from `fromIdx` via graph edges, with hazard-aware filtering.

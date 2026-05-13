@@ -101,7 +101,9 @@ bool MovementClearAtPosition(const Vec3f& fromPos, const Vec3f& toPos, PlayState
 // Performance: O(N²) in waypoint count worst-case (M MovementClear calls
 // per smooth attempt). Typical paths have <50 waypoints; smoothing
 // adds ~5ms to scan-free path queries. Acceptable.
-static void SmoothNavPath(NavPath& path, PlayState* play) {
+// Note: NavPath is nested inside class ActorTrail (per ActorTrail.h),
+// so the file-scope function needs the qualified name.
+static void SmoothNavPath(ActorTrail::NavPath& path, PlayState* play) {
     if (play == nullptr) return;
     if (path.waypoints.size() < 3) return;
 
