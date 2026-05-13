@@ -2317,18 +2317,27 @@ void Anchor::TickFollowerInput(Actor* actor) {
             static constexpr f32 kClimbXzTolerance = 10.0f;
 
             // Option A — mid-climb anchor refresh (2026-05-14 log 113
-            // fix). On a curved/spiral wall, inter-anchor bridges let
-            // the follower's path cross from one anchor's grid onto a
+            // fix; latch added 2026-05-15 log 118 followup). On a
+            // curved/spiral wall, inter-anchor bridges let the
+            // follower's path cross from one anchor's grid onto a
             // bridged neighbour. Pre-fix, followerClimbAnchorIdx was
             // pinned at engagement and never updated; downstream
             // consumers (isLadderAnchor, reachTopY, prediction gate
             // plane axes) all kept reading the original anchor — wrong
             // surface orientation, wrong top altitude, wrong vs ladder
-            // classification. Now: every frame on ladder, find the
-            // anchor whose grid contains the climb-surface cell closest
-            // to the follower's current position; switch to it if
-            // different. Cost: O(climbSurfaceNodes) per frame; with
-            // ~500 nodes that's negligible.
+            // classification.
+            //
+            // Latch (log 118 followup). Log 118 showed the refresh
+            // firing 5 switches in 700ms at the seam between anchors
+            // 1 and 2 on the spiral wall — micro-motion alternated
+            // which anchor's nearest cell was closest, so every frame
+            // a new "best" was picked. Each switch re-ran
+            // PopulateClimbReachableNodes (edge enumeration + 150-node
+            // walk) and downstream consumers ping-ponged their
+            // isLadderAnchor / reachTopY decisions. Reuses the same
+            // kReanchorLatchFrames pattern as the leader-following
+            // re-anchor (line ~3716) — require N consecutive frames of
+            // "candidate ≠ active" before committing.
             if (followerClimbAnchorIdx != UINT16_MAX) {
                 const ::AnchorNavRoom::RoomNavData* navData =
                     ::AnchorNavRoom::GetForRoom(
@@ -2354,17 +2363,36 @@ void Anchor::TickFollowerInput(Actor* actor) {
                             }
                         }
                     }
+                    constexpr uint16_t kReanchorLatchFrames = 30;  // ~0.5s @ 60fps
                     if (bestIdx != followerClimbAnchorIdx) {
-                        SPDLOG_INFO("[Follower] CLIMBING anchor refresh: "
-                                    "{} -> {} (follower at "
-                                    "({:.0f},{:.0f},{:.0f}); nearest cell "
-                                    "{:.0f}u away)",
-                                    (int)followerClimbAnchorIdx,
-                                    (int)bestIdx,
-                                    p2w.x, p2w.y, p2w.z,
-                                    std::sqrt(bestDist2));
-                        followerClimbAnchorIdx = bestIdx;
-                        PopulateClimbReachableNodes(navData, bestIdx);
+                        if (bestIdx == followerReanchorCandidateIdx) {
+                            followerReanchorCandidateFrames++;
+                        } else {
+                            followerReanchorCandidateIdx    = bestIdx;
+                            followerReanchorCandidateFrames = 1;
+                        }
+                        if (followerReanchorCandidateFrames >=
+                            kReanchorLatchFrames) {
+                            SPDLOG_INFO("[Follower] CLIMBING anchor refresh: "
+                                        "{} -> {} (follower at "
+                                        "({:.0f},{:.0f},{:.0f}); nearest cell "
+                                        "{:.0f}u away; latched {} frames)",
+                                        (int)followerClimbAnchorIdx,
+                                        (int)bestIdx,
+                                        p2w.x, p2w.y, p2w.z,
+                                        std::sqrt(bestDist2),
+                                        (int)followerReanchorCandidateFrames);
+                            followerClimbAnchorIdx = bestIdx;
+                            PopulateClimbReachableNodes(navData, bestIdx);
+                            followerReanchorCandidateIdx    = UINT16_MAX;
+                            followerReanchorCandidateFrames = 0;
+                        }
+                    } else {
+                        // Current anchor still wins — clear latch so a
+                        // transient mid-seam flip doesn't accumulate
+                        // toward a stale candidate.
+                        followerReanchorCandidateIdx    = UINT16_MAX;
+                        followerReanchorCandidateFrames = 0;
                     }
                 }
             }
