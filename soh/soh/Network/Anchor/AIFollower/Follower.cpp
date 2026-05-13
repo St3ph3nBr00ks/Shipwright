@@ -4136,22 +4136,49 @@ bool Anchor::TryEngageAutoClimb(Player* player,
         ::AnchorNavRoom::GetForRoom((int16_t)gPlayState->sceneNum,
                                      (int8_t)gPlayState->roomCtx.curRoom.num);
     if (navData == nullptr) return false;
-    // Stage 7: skip the legacy 2-point heuristic when the room has v7
-    // climb-surface grid data — the substrate path's climb-flag check
-    // (in ComputePursuitSubgoal) handles engagement instead. Fallback
-    // to legacy heuristic for v6-cached rooms only.
-    const bool useV7Substrate =
-        navData->firstClimbSurfaceNodeIdx != UINT16_MAX;
-    if (useV7Substrate) return false;
 
-    Vec3f anchorBase, anchorTop;
-    if (!::AnchorNavRoom::FindClimbAnchorAbove(
-            navData, p2Pos,
-            kAutonomousClimbXZRadius,
-            kAutonomousClimbMinHeight,
-            anchorBase, anchorTop)) {
+    // Per-anchor v7 vs legacy gate (2026-05-13, log 104 fix). Pre-fix
+    // we bailed entirely when any v7 cell data existed in the room
+    // (firstClimbSurfaceNodeIdx != UINT16_MAX). That blocked legacy
+    // engagement for anchors with NO cells (Path B ladders after
+    // v28's skip-emit) even when other anchors in the room HAD cells.
+    //
+    // Now: find the nearest anchor above; check whether it has cells.
+    //   - With cells (vines, generic walls, designated walls, Path A
+    //     ladders): substrate path handles engagement via
+    //     ComputePursuitSubgoal's NODE_CLIMB_ANY check; bail here.
+    //   - Without cells (Path B ladders skip-emitted in v28, or any
+    //     other anchor with degenerate emission): use legacy 2-point
+    //     heuristic — that's exactly what these anchors need.
+    //
+    // FindClimbAnchorAbove iterates and returns base/top of the
+    // nearest qualifying anchor. We re-implement inline to track
+    // the anchor INDEX so we can read its surfaceType / nodeCount.
+    int bestIdx = -1;
+    float bestDistSq = std::numeric_limits<float>::infinity();
+    const float r2 = kAutonomousClimbXZRadius * kAutonomousClimbXZRadius;
+    for (size_t i = 0; i < navData->climbAnchors.size(); ++i) {
+        const auto& a = navData->climbAnchors[i];
+        if (a.topPos.y < p2Pos.y + kAutonomousClimbMinHeight) continue;
+        f32 dx = a.basePos.x - p2Pos.x;
+        f32 dz = a.basePos.z - p2Pos.z;
+        f32 d2 = dx * dx + dz * dz;
+        if (d2 > r2) continue;
+        if (d2 < bestDistSq) {
+            bestDistSq = d2;
+            bestIdx = (int)i;
+        }
+    }
+    if (bestIdx < 0) return false;
+
+    const auto& anc = navData->climbAnchors[(size_t)bestIdx];
+    if (anc.nodeCount > 0) {
+        // Anchor has cells — substrate handles it. Bail.
         return false;
     }
+
+    Vec3f anchorBase = anc.basePos;
+    Vec3f anchorTop  = anc.topPos;
     followerAutonomousClimb       = true;
     followerClimbTopTarget        = anchorTop;
     followerAutonomousClimbFrames = 0;
@@ -4159,9 +4186,10 @@ bool Anchor::TryEngageAutoClimb(Player* player,
     followerStateFrames           = 0;
     followerClimbStuckCheckPos    = p2Pos;
     SPDLOG_INFO("[Follower] Pursuit→CLIMBING (legacy 2-point heuristic; "
-                "anchor base=({:.0f},{:.0f},{:.0f}) "
+                "anchor[{}] type=0x{:04x} base=({:.0f},{:.0f},{:.0f}) "
                 "top=({:.0f},{:.0f},{:.0f}) "
                 "follower=({:.0f},{:.0f},{:.0f}))",
+                bestIdx, (unsigned)anc.surfaceType,
                 anchorBase.x, anchorBase.y, anchorBase.z,
                 anchorTop.x, anchorTop.y, anchorTop.z,
                 p2Pos.x, p2Pos.y, p2Pos.z);

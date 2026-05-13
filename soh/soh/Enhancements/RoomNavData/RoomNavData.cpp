@@ -1251,6 +1251,20 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // emitted. Loop also restructured to iterate per anchor (not per
 // node) so anchor.planeNormal is in scope for the offset. Bump
 // invalidates v21 caches so they regenerate with proper drops.
+// v29 (2026-05-13, log 104 fix): Path B ladders skip cell-emit and
+// fall back to legacy 2-point heuristic. Thin ladder geometry causes
+// per-cell raycasts to miss; anchors get zero or partial coverage.
+// User direction: revert ladders to the old "tall yellow line" model
+// where engagement happens via TryEngageAutoClimb / FindClimbAnchor
+// Above. The anchor stays in climbAnchors with basePos/topPos and
+// surfaceType=NODE_CLIMB_LADDER, but cellsU/cellsV/nodeCount=0.
+// Path A ladders (actor-based) unaffected — they emit cells
+// unconditionally because actor identity is the source of truth.
+// TryEngageAutoClimb now allows engagement for any anchor with
+// nodeCount=0 (ladders + degenerate emissions) regardless of v7
+// substrate state; cell-having anchors continue to be handled by
+// the substrate. Bump invalidates v28 caches.
+
 // v28 (2026-05-12 PM, log 100 fix): climb-source drop XZ tolerance
 // tightened 80u → 15u. OoT vine drops are pure-gravity; landing
 // floors more than 15u from cell XZ are unreachable. 15u accounts
@@ -1317,7 +1331,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 28;
+static constexpr uint16_t kCurrentSchemaVersion = 29;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -2707,6 +2721,38 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
             if (expectedType == 0) {
                 expectedType = NODE_CLIMB_DESIGNATED_WALL; // conservative fallback
             }
+        }
+
+        // Path B LADDER skip-emit (2026-05-13, log 104 fix). Ladders
+        // detected via Path B (scene-static geometry classified as
+        // ladder by wall flags) are too thin to reliably emit cells —
+        // per-cell raycasts miss the geometry, leaving the ladder with
+        // zero or partial coverage. The substrate path can't route
+        // through it. Per user direction, fall back to the legacy
+        // 2-point heuristic for these: keep the anchor in
+        // climbAnchors with basePos/topPos set, but don't emit any
+        // grid cells. TryEngageAutoClimb in Follower.cpp handles
+        // engagement via FindClimbAnchorAbove + autonomous-climb
+        // pipeline — same path that worked pre-v7-grid for all
+        // climbables.
+        //
+        // Path A ladders unaffected (anchor.actorId != 0 — those
+        // emit cells unconditionally because actor identity is the
+        // ground truth, not raycast hits).
+        //
+        // The anchor's surfaceType is set so consumers know it's a
+        // ladder. cellsU/cellsV/nodeCount stay at 0 → no contribution
+        // to nodesByCell, no participation in DetectInterAnchor
+        // ClimbBridges, no boundary edges. The legacy yellow-line
+        // visualization renders from basePos/topPos.
+        if (anchor.actorId == 0 && expectedType == NODE_CLIMB_LADDER) {
+            anchor.surfaceType = NODE_CLIMB_LADDER;
+            anchor.cellsU      = 0;
+            anchor.cellsV      = 0;
+            anchor.firstNodeIdx = 0;
+            anchor.nodeCount   = 0;
+            // Skip grid generation. continue to next anchor.
+            continue;
         }
 
         // Grid extent + origin. Hybrid 2026-05-11:
