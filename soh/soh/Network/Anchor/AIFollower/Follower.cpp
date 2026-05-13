@@ -3356,67 +3356,95 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     }
 
     // Climb-stuck teleport-forward helper (2026-05-12 PM, log 100
-    // fix). When the follower is genuinely stuck in CLIMBING and
-    // would normally exit to IDLE, attempt to advance the path
-    // cursor and teleport forward instead. Mirrors the STUCK-FWD
-    // behavior in FOLLOW state — moves the follower past the bad
-    // section so progress continues.
+    // fix; refined log 100 followup). When the follower is stuck in
+    // CLIMBING and would normally exit to IDLE, attempt to advance
+    // the path cursor and teleport forward.
     //
-    // Target selection: scan from the next waypoint forward. Pick
-    // the first NON-CLIMB waypoint encountered (a drop or floor
-    // edge, naturally the climb segment's exit point). If all
-    // remaining waypoints are climb cells, pick the furthest within
-    // a bounded scan window (assumed near top of climb).
+    // Two-pass priority order (per user preference: stay on the
+    // wall whenever possible):
     //
-    // Returns true if teleport happened and state was updated; false
-    // if no useful target found (caller should fall through to the
-    // legacy IDLE exit).
+    //   Pass 1: scan ahead for the next CLIMB cell. If found,
+    //           teleport there, STAY in CLIMBING — Link's collision
+    //           should re-attach to the wall (cell.pos is on the
+    //           wall surface). Reset the stuck-check baseline so
+    //           progress resumes from the new position. Cursor
+    //           advances each time, so repeated stucks naturally
+    //           walk the cursor up the climb segment.
+    //
+    //   Pass 2: no climb cells ahead within scan window — escalate
+    //           to next NON-CLIMB waypoint (drop or floor; natural
+    //           climb-segment exit). Teleport there, exit CLIMBING
+    //           → FOLLOW so the next tick picks up the drop/walk
+    //           transition immediately.
+    //
+    // If neither pass finds a target (path empty or cursor at end),
+    // returns false — caller falls back to legacy IDLE exit, and
+    // G14 escalates from there.
     auto teleportForwardOnClimbStuck = [&](const char* reason) -> bool {
         if (followerNavPath.Empty()) return false;
         const size_t cur = followerNavPath.cursorIdx;
         const size_t total = followerNavPath.waypoints.size();
         if (cur + 1 >= total) return false;
-        // Scan ahead looking for first non-climb (preferred target).
-        // Cap the scan at 20 waypoints to avoid teleporting unreason-
-        // ably far in degenerate paths.
         constexpr size_t kClimbStuckScanCap = 20;
-        size_t targetIdx = cur;  // sentinel
         const size_t scanEnd = std::min(total, cur + 1 + kClimbStuckScanCap);
+
+        // Pass 1: prefer next CLIMB cell (continue along climb segment).
+        for (size_t i = cur + 1; i < scanEnd; i++) {
+            const uint32_t f = (i < followerNavPath.waypointFlags.size())
+                                   ? followerNavPath.waypointFlags[i]
+                                   : (uint32_t)0;
+            if ((f & ::AnchorNavRoom::NODE_CLIMB_ANY) != 0) {
+                const Vec3f& target = followerNavPath.waypoints[i];
+                SPDLOG_INFO("[Follower] CLIMBING teleport-to-next-climb ({}) "
+                            "— cursor {} -> {}/{} pos=({:.0f},{:.0f},{:.0f})",
+                            reason, (int)cur, (int)i,
+                            (int)followerNavPath.waypoints.size() - 1,
+                            target.x, target.y, target.z);
+                player->actor.world.pos = target;
+                followerNavPath.cursorIdx = i;
+                followerPostTeleportFrames = kPostTeleportHoldFrames;
+                // Reset stuck baseline at new position — fresh 2s
+                // window before recovery C can fire again.
+                followerClimbStuckCheckPos = target;
+                followerAutonomousClimbFrames = 0;
+                // STAY in CLIMBING state. Link's body is at the
+                // wall surface (cell.pos was a raycast hit on the
+                // wall); OoT's vine/ladder collision should
+                // re-attach him on the next physics tick.
+                return true;
+            }
+        }
+
+        // Pass 2: no climb cells ahead — escalate to next non-climb
+        // (drop / floor exit). Same teleport-and-cleanup as the
+        // pre-refactor logic.
         for (size_t i = cur + 1; i < scanEnd; i++) {
             const uint32_t f = (i < followerNavPath.waypointFlags.size())
                                    ? followerNavPath.waypointFlags[i]
                                    : (uint32_t)0;
             if ((f & ::AnchorNavRoom::NODE_CLIMB_ANY) == 0) {
-                // Found a non-climb waypoint — preferred target
-                // (climb segment exit). Take it and stop.
-                targetIdx = i;
-                break;
+                const Vec3f& target = followerNavPath.waypoints[i];
+                SPDLOG_INFO("[Follower] CLIMBING→FOLLOW teleport-to-non-climb "
+                            "({}) — cursor {} -> {}/{} pos=({:.0f},{:.0f},{:.0f})",
+                            reason, (int)cur, (int)i,
+                            (int)followerNavPath.waypoints.size() - 1,
+                            target.x, target.y, target.z);
+                player->actor.world.pos = target;
+                followerNavPath.cursorIdx = i;
+                followerPostTeleportFrames = kPostTeleportHoldFrames;
+                followerAutonomousClimb       = false;
+                followerAutonomousClimbFrames = 0;
+                followerClimbAnchorIdx        = UINT16_MAX;
+                followerClimbReachableNodes.clear();
+                followerReanchorCandidateIdx    = UINT16_MAX;
+                followerReanchorCandidateFrames = 0;
+                followerAIState     = FollowerAIState::FOLLOW;
+                followerStateFrames = 0;
+                return true;
             }
-            // Still in climb segment — track the furthest as fallback.
-            targetIdx = i;
         }
-        if (targetIdx == cur) return false;
-        const Vec3f& target = followerNavPath.waypoints[targetIdx];
-        SPDLOG_INFO("[Follower] CLIMBING→FOLLOW teleport-forward ({}) — "
-                    "cursor {} -> {}/{} pos=({:.0f},{:.0f},{:.0f})",
-                    reason, (int)cur, (int)targetIdx,
-                    (int)followerNavPath.waypoints.size() - 1,
-                    target.x, target.y, target.z);
-        player->actor.world.pos = target;
-        followerNavPath.cursorIdx = targetIdx;
-        followerPostTeleportFrames = kPostTeleportHoldFrames;
-        // Climb-state cleanup (mirrors ExitFollowerClimbToIdle but
-        // exits to FOLLOW, not IDLE, so the next tick picks up
-        // pursuit immediately).
-        followerAutonomousClimb       = false;
-        followerAutonomousClimbFrames = 0;
-        followerClimbAnchorIdx        = UINT16_MAX;
-        followerClimbReachableNodes.clear();
-        followerReanchorCandidateIdx    = UINT16_MAX;
-        followerReanchorCandidateFrames = 0;
-        followerAIState     = FollowerAIState::FOLLOW;
-        followerStateFrames = 0;
-        return true;
+
+        return false;
     };
 
     // Recovery exit C — climb-state stuck progress check (2026-05-12
