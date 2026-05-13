@@ -63,8 +63,18 @@ bool IsRecognisedTransition(LifecyclePhase from, LifecyclePhase to) {
             // Karebaba respawn detector on non-host → Alive (same direct
             // transition as DyingByLocal — Regrowing is in the formal model
             // but the code consolidates it into the Alive transition).
+            //
+            // DyingByNetwork → Dead (2026-05-15 log 118 fix). The death
+            // animation eventually completes and OnActorKill fires
+            // (HookHandlers.cpp:2866/2875), which unconditionally calls
+            // TransitionTo(Dead). Pre-fix this surfaced as the warning
+            // "Unrecognised lifecycle transition DyingByNetwork -> Dead"
+            // on every network-killed enemy whose anim finished locally.
+            // Mirrors DyingByLocal → Dead (line 58) which has been
+            // allowed since the table was first written.
             return to == LifecyclePhase::Regrowing ||
-                   to == LifecyclePhase::Alive;
+                   to == LifecyclePhase::Alive ||
+                   to == LifecyclePhase::Dead;
         case LifecyclePhase::Dead:
             // Scene re-init produces a fresh actor → reset to Alive.
             return to == LifecyclePhase::Alive;
