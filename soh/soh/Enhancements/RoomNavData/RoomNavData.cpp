@@ -1270,6 +1270,26 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // emitted. Loop also restructured to iterate per anchor (not per
 // node) so anchor.planeNormal is in scope for the offset. Bump
 // invalidates v21 caches so they regenerate with proper drops.
+// v31 (2026-05-13, log 106 fix continued): Path B ladders use
+// PATH-A-STYLE single-column emission. Per user direction
+// "for consistency's sake for pathfinding, handle Path B ladders
+// like this: scan from the center of the mesh to the navmesh
+// markers are guaranteed to be in a usable position on the Path B
+// ladder." After the width-based reclassification, the LADDER
+// path now forces:
+//   - climbWidth = kClimbPathAActorWidth (30u, single column)
+//   - origin centered on basePos
+//   - single-shot raycast (any wall hit OK)
+//   - emit cell at GRID position whether or not raycast hits
+//     (matches Path A actor semantics)
+//   - skip wide-probe edge-avoidance gate (single column has no
+//     interior edges to avoid)
+// Substrate path now handles Path B ladders consistently with Path
+// A ladders — no special legacy-fallback path needed. The cell-less
+// bypass in BuildAdjacencyList + TryEngageAutoClimb (added in v30)
+// remain as defense-in-depth for any other degenerate emission
+// case. Bump invalidates v30 caches.
+
 // v30 (2026-05-13, log 106 fix): Two related fixes for Path B
 // ladders that v29 missed:
 //   (a) ClassifyClimbWallFlags can't distinguish ladder vs designed
@@ -1371,7 +1391,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 30;
+static constexpr uint16_t kCurrentSchemaVersion = 31;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -2822,13 +2842,13 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
         // surface narrower than kPathBLadderMaxWidth (45u ≈ 1.5 grid
         // cells) is almost certainly a ladder (standard OoT ladders
         // are ~30u wide; vines/designed walls are typically wider).
-        // Reclassify so the LADDER skip-emit fires for it. Wider
-        // walls keep their VINE/DESIGNATED classification.
         //
-        // Even if a narrow non-ladder slips through this heuristic
-        // (e.g. a thin vine tendril), routing it via legacy
-        // 2-point heuristic is acceptable — those geometries also
-        // suffer raycast miss with cell emission.
+        // Reclassified Path B ladders get FORCED into Path A-style
+        // single-column emission below (consistency over fallback —
+        // 2026-05-13 user direction): override climbWidth +
+        // recompute origin centered on basePos, then cell-emit
+        // unconditionally so the cells are guaranteed to be on the
+        // ladder regardless of raycast misses against thin geometry.
         constexpr float kPathBLadderMaxWidth = 45.0f;
         if (anchor.actorId == 0 &&
             (expectedType == NODE_CLIMB_DESIGNATED_WALL ||
@@ -2839,20 +2859,12 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                         climbWidth, kPathBLadderMaxWidth,
                         anchor.basePos.x, anchor.basePos.y, anchor.basePos.z);
             expectedType = NODE_CLIMB_LADDER;
-        }
-
-        // Path B LADDER skip-emit (v29). Either the wall-flag
-        // classifier said LADDER (rare for Path B static geometry —
-        // see ClassifyClimbWallFlags comment), or the width heuristic
-        // above just reclassified. Either way, skip cell emission and
-        // store as cell-less ladder for the legacy 2-point pipeline.
-        if (anchor.actorId == 0 && expectedType == NODE_CLIMB_LADDER) {
-            anchor.surfaceType  = NODE_CLIMB_LADDER;
-            anchor.cellsU       = 0;
-            anchor.cellsV       = 0;
-            anchor.firstNodeIdx = 0;
-            anchor.nodeCount    = 0;
-            continue;
+            // Force single-column at standard ladder width centered on
+            // basePos (mirrors the Path A actor branch).
+            climbWidth = kClimbPathAActorWidth;
+            origin = { anchor.basePos.x - axisU.x * (climbWidth * 0.5f),
+                       anchor.basePos.y,
+                       anchor.basePos.z - axisU.z * (climbWidth * 0.5f) };
         }
 
         uint16_t cellsU = (uint16_t)std::min<int>(
@@ -2881,13 +2893,17 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                 // single-shot semantics — the actor's collision IS the
                 // climbable surface, so first-wall-hit is the right cell
                 // position.
-                // Path A & generic-wall: single-shot raycast (any wall
-                // hit OK — actor identity / wall-cluster identity is
-                // the ground truth).
-                // Path B climbable: pass-through raycast (skip
-                // non-climbable hits like platforms in the way).
+                // Path A & generic-wall & Path B-ladder: single-shot
+                // raycast (any wall hit OK — actor identity /
+                // wall-cluster identity / narrow-width-ladder
+                // identity is the ground truth).
+                // Path B climbable (vine, designated): pass-through
+                // raycast (skip non-climbable hits like platforms in
+                // the way).
+                const bool isPathBLadder =
+                    (anchor.actorId == 0 && expectedType == NODE_CLIMB_LADDER);
                 const bool useSingleShot =
-                    (anchor.actorId != 0) || isGenericWallAnchor;
+                    (anchor.actorId != 0) || isGenericWallAnchor || isPathBLadder;
                 bool hit = RaycastClimbCell(play, cellCenter, normal,
                                             hitPos, wallFlags,
                                             /*requireClimbable=*/!useSingleShot);
@@ -2908,7 +2924,9 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                 // below, which then routes A* away from lateral
                 // movement through that region (3× cost via
                 // kClimbEdgeAdjacentLateralMult).
-                if (hit && anchor.actorId == 0 &&
+                // Wide-probe gate skips Path B ladders (single-column;
+                // ±U probes would go off the ladder's edge by design).
+                if (hit && anchor.actorId == 0 && !isPathBLadder &&
                     v > 0 && v < (uint16_t)(cellsV - 1)) {
                     const Vec3f offsets[4] = {
                         V3Scale(axisU,  kClimbCellEdgeInset),
@@ -2928,9 +2946,13 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                         }
                     }
                 }
-                if (anchor.actorId != 0) {
-                    // Path A — emit cell at GRID position whether or
-                    // not raycast hit. Actor identity is truth.
+                if (anchor.actorId != 0 || isPathBLadder) {
+                    // Path A actor OR Path B reclassified ladder —
+                    // emit cell at GRID position whether or not
+                    // raycast hit. The narrow-ladder geometry is
+                    // unreliable for raycast hits; the GRID position
+                    // (single-column centered on basePos) is the
+                    // ground truth.
                     if (!hit) hitPos = cellCenter;
                     typeBit = NODE_CLIMB_LADDER;
                 } else if (isGenericWallAnchor) {
