@@ -1515,7 +1515,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 31;
+static constexpr uint16_t kCurrentSchemaVersion = 32;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3032,11 +3032,26 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                                             hitPos, wallFlags,
                                             /*requireClimbable=*/!useSingleShot);
                 // Refined Option 3 wide-probe edge-avoidance gate (log 80
+                // followup; extended to 8 directions 2026-05-15 log 115
                 // followup). For Path B INTERIOR cells only (0 < v < cellsV-1
                 // AND anchor.actorId == 0), require the wall to also be
-                // present at ±kClimbCellEdgeInset offsets along axisU AND
-                // axisV. Cells near a wall edge / interior notch / diagonal
-                // top-corner clip fail at least one probe and get pruned.
+                // present at 8 surrounding offsets:
+                //   - ±kClimbCellEdgeInset (15u) along axisU and axisV
+                //     (4 axis-aligned probes — original 4-direction gate)
+                //   - ±kClimbCellDiagInset (≈11u) along (axisU±axisV)
+                //     diagonals (4 corner probes — Euclidean radius
+                //     ~15.5u so corners are checked at the same nominal
+                //     reach as the axis probes)
+                //
+                // Cells near a wall edge / interior notch / diagonal
+                // top-corner clip / diagonal-clipped notch fail at
+                // least one probe and get pruned. The diagonals
+                // matter for spiral/curved walls where the climbable
+                // polygon turns or tapers between cell centers — the
+                // 4-direction axis-only probes can miss those clipped
+                // corners and let phantom cells through, contributing
+                // to the log 115 fall (substrate said climbable, OoT
+                // disagreed mid-cell).
                 //
                 // Bottom row (v == 0) and top row (v == cellsV-1) are
                 // EXEMPT — pruning them breaks floor↔climb engagement
@@ -3052,13 +3067,22 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                 // ±U probes would go off the ladder's edge by design).
                 if (hit && anchor.actorId == 0 && !isPathBLadder &&
                     v > 0 && v < (uint16_t)(cellsV - 1)) {
-                    const Vec3f offsets[4] = {
+                    constexpr float kClimbCellDiagInset = 11.0f;
+                    const Vec3f offsets[8] = {
                         V3Scale(axisU,  kClimbCellEdgeInset),
                         V3Scale(axisU, -kClimbCellEdgeInset),
                         V3Scale(axisV,  kClimbCellEdgeInset),
                         V3Scale(axisV, -kClimbCellEdgeInset),
+                        V3Add(V3Scale(axisU,  kClimbCellDiagInset),
+                              V3Scale(axisV,  kClimbCellDiagInset)),
+                        V3Add(V3Scale(axisU,  kClimbCellDiagInset),
+                              V3Scale(axisV, -kClimbCellDiagInset)),
+                        V3Add(V3Scale(axisU, -kClimbCellDiagInset),
+                              V3Scale(axisV,  kClimbCellDiagInset)),
+                        V3Add(V3Scale(axisU, -kClimbCellDiagInset),
+                              V3Scale(axisV, -kClimbCellDiagInset)),
                     };
-                    for (int p = 0; p < 4; p++) {
+                    for (int p = 0; p < 8; p++) {
                         Vec3f probeCenter = V3Add(cellCenter, offsets[p]);
                         Vec3f probeHit;
                         s32   probeFlags = 0;
