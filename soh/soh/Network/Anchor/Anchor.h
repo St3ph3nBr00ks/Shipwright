@@ -507,6 +507,21 @@ class Anchor : public Network {
     // Deactivated by any controller input while active.
     bool followerActive = false;
 
+    // NPC Follower (Flotilla — Plans/npc_follower_plan.md). Separate from
+    // followerActive above. The player-rigged Follower is "AFK mode"
+    // (controls Link's body); the NPC Follower is a friendly Link-skel
+    // companion that walks beside the player using NPC primitives.
+    //
+    // mFollowerNpcLocalActor: when non-null, points to the ACTOR_EN_FOLLOWER
+    //   actor we spawned for THIS client. Cleared on Actor_Kill or on
+    //   scene transition. Validated at use site (update != NULL).
+    // mFollowerNpcCVarLast: last-tick value of the master CVar
+    //   gEnhancements.AI.FollowerNPC.Enabled; transition detection
+    //   compares against this to call SetFollowerNpcActive only on
+    //   0↔1 edges.
+    Actor* mFollowerNpcLocalActor = nullptr;
+    int    mFollowerNpcCVarLast   = 0;
+
     // AI follower state machine (runs each frame when followerActive is true).
     // IDLE     — at leader's side; scans for nearby enemies.
     // FOLLOW   — stick-driven movement toward leader's side. Used for ALL
@@ -1120,6 +1135,18 @@ class Anchor : public Network {
     uint32_t GetDummyPlayerClientId(const Actor* actor);
     bool IsFollowerActive() const { return followerActive; }
     void SetFollowerActive(bool active);
+
+    // NPC Follower (Flotilla — Plans/npc_follower_plan.md). Phase 2 wiring:
+    // spawn an ACTOR_EN_FOLLOWER at the local player's position on
+    // active=true; Actor_Kill the tracked instance on active=false.
+    // Idempotent: passing the same state twice is a no-op.
+    void SetFollowerNpcActive(bool active);
+    // CVar-transition polling helper, called from OnGameFrameUpdate.
+    // Compares the current CVar value against mFollowerNpcCVarLast and
+    // calls SetFollowerNpcActive on edges. Standalone so future spawn
+    // mechanisms (save-state recruit flag, per-scene anchors per plan
+    // §2.7) can swap out this driver without touching the spawn impl.
+    void TickFollowerNpcCVar();
     // G1/G2 — read local Player's stateFlags1 to detect ladder/vine/ledge climbing.
     // Returns false when there is no live PlayState or local Player. Used in
     // PrepClientState so remote clients see this client's climbing state.

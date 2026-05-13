@@ -1058,6 +1058,11 @@ void Anchor::RegisterHooks() {
         Anchor::Instance->gameFrameCounter.fetch_add(
             1, std::memory_order_relaxed);
 
+        // NPC Follower (Flotilla — Plans/npc_follower_plan.md) Phase 2.
+        // Poll the CVar each tick and spawn/despawn on 0↔1 edges.
+        // Cheap: one CVarGetInteger call + int compare in the no-op case.
+        Anchor::Instance->TickFollowerNpcCVar();
+
         // #191 — host countdown for cutscene-textbox vote-skip. No-op
         // when no active textbox vote is in progress; broadcasts
         // CUTSCENE_TEXT_ADVANCED on timer-0.
