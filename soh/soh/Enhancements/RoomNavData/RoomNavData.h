@@ -327,6 +327,25 @@ struct RoomNavData {
     // as "no edge-adjacency info" → falls back to base costs.
     std::vector<uint8_t> climbCellEdgeAdjacent;
 
+    // Schema v33+ near-edge ring (2026-05-15 log 116). Two-tier edge
+    // avoidance: NODE_EDGE marks cells adjacent to non-walkable
+    // (0-30u from boundary); nodeNearEdgeAdjacent[i] != 0 marks
+    // floor / climb cells adjacent to an EDGE cell but NOT themselves
+    // EDGE (30-60u from boundary). Together with NODE_EDGE, A* gets
+    // a graduated penalty:
+    //   - EDGE cells: heavy penalty (+kEdgeNodePenalty 120u)
+    //   - NEAR_EDGE cells: medium penalty (+kNearEdgeNodePenalty 60u)
+    //   - INTERIOR (neither): no penalty
+    // The result is a 60u buffer where A* strongly prefers paths
+    // through the deep interior; cells in the 0-60u boundary band
+    // get used only when no interior detour exists.
+    //
+    // Indexed by node index (parallel to nodes vector). Floor entries
+    // populated by the floor NODE_EDGE pass; climb entries populated
+    // by the climb edge-adjacency pass. Empty vector (pre-v33 cached
+    // scans) → no NEAR_EDGE bias.
+    std::vector<uint8_t> nodeNearEdgeAdjacent;
+
     // Diagnostic: positions of floor candidates rejected by the per-actor
     // allowlist (FloorIsRejectedByAllowlist). Populated only when
     // gEnhancements.RoomNavData.LogRejectedFloors is on at scan time;

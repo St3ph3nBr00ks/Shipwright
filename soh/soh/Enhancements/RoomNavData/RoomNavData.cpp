@@ -823,7 +823,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
             const uint16_t nbClimbBits = data->nodes[nb].flags & NODE_CLIMB_ANY;
             if (nbClimbBits != 0 && (nbClimbBits & climbSurfaceMask) == 0) continue;
             // Euclidean edge cost (2026-05-13). Step cost = actual
-            // 3D distance between nodes. + edge-cell penalty.
+            // 3D distance between nodes. + edge-cell penalty (two-tier).
             // See path-variant for full rationale.
             const Vec3f& curPos = data->nodes[entry.idx].pos;
             const Vec3f& nbPos  = data->nodes[nb].pos;
@@ -831,9 +831,13 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
             const float dy_e = nbPos.y - curPos.y;
             const float dz_e = nbPos.z - curPos.z;
             float stepCost = std::sqrt(dx_e*dx_e + dy_e*dy_e + dz_e*dz_e);
-            constexpr float kEdgeNodePenalty = 120.0f;
+            constexpr float kEdgeNodePenalty     = 120.0f;
+            constexpr float kNearEdgeNodePenalty =  60.0f;
             if (data->nodes[nb].flags & NODE_EDGE) {
                 stepCost += kEdgeNodePenalty;
+            } else if (nb < data->nodeNearEdgeAdjacent.size() &&
+                       data->nodeNearEdgeAdjacent[nb] != 0) {
+                stepCost += kNearEdgeNodePenalty;
             }
             const float tentativeG = gScore[entry.idx] + stepCost;
             if (tentativeG < gScore[nb]) {
@@ -1050,23 +1054,30 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
             const float dy_e = nbPos.y - curPos.y;
             const float dz_e = nbPos.z - curPos.z;
             float stepCost = std::sqrt(dx_e*dx_e + dy_e*dy_e + dz_e*dz_e);
-            // Edge-cell penalty (2026-05-13, user request). NODE_EDGE
-            // floor cells are walkable cells adjacent to non-walkable
-            // (i.e. within ~30u of a pit/wall). +120u step cost biases
-            // A* toward interior cells when alternatives exist — strong
-            // enough to detour up to 4 cells (~120u of extra path)
-            // around an edge step before the edge route becomes
-            // competitive. Narrow corridors or mandatory edges (drop /
-            // jump / climb-approach) still get used because no interior
-            // alternative exists. Tuning history:
-            //   - 30u (2026-05-13): break-even with one interior step,
-            //     too weak.
-            //   - 60u (2026-05-14 log 113): 2-cell detour preferred,
-            //     user still observed edge-walking in wide rooms.
+            // Two-tier edge penalty (2026-05-13 / extended 2026-05-15
+            // log 116). Floor cells form a graduated penalty band so
+            // A* prefers paths through the deep interior:
+            //   - NODE_EDGE (0-30u from non-walkable): +120u
+            //   - nodeNearEdgeAdjacent[i] (30-60u from non-walkable):
+            //     +60u. Set at scan time on cells adjacent to an
+            //     EDGE cell that themselves aren't EDGE.
+            //   - INTERIOR (60u+ from non-walkable): no penalty.
+            // Mutually exclusive by construction (NEAR_EDGE skips
+            // cells that are themselves EDGE).
+            //
+            // History:
+            //   - 30u (2026-05-13): break-even with one interior step.
+            //   - 60u (2026-05-14 log 113): 2-cell detour preferred.
             //   - 120u (2026-05-14 log 114): 4-cell detour preferred.
-            constexpr float kEdgeNodePenalty = 120.0f;
+            //   - 120u EDGE + 60u NEAR_EDGE (2026-05-15 log 116):
+            //     graduated band so paths land 60u from boundaries.
+            constexpr float kEdgeNodePenalty     = 120.0f;
+            constexpr float kNearEdgeNodePenalty =  60.0f;
             if (data->nodes[nb].flags & NODE_EDGE) {
                 stepCost += kEdgeNodePenalty;
+            } else if (nb < data->nodeNearEdgeAdjacent.size() &&
+                       data->nodeNearEdgeAdjacent[nb] != 0) {
+                stepCost += kNearEdgeNodePenalty;
             }
             const float tentativeG = gScore[entry.idx] + stepCost;
             if (tentativeG < gScore[nb]) {
@@ -1515,7 +1526,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 32;
+static constexpr uint16_t kCurrentSchemaVersion = 33;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -1609,6 +1620,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     uint32_t hazardCount     = (uint32_t)nav.hazardCentroids.size();
     uint32_t jumpCount       = (uint32_t)nav.jumpAnchors.size();       // schema v8+
     uint32_t climbEdgeAdjCount = (uint32_t)nav.climbCellEdgeAdjacent.size(); // schema v16+
+    uint32_t nearEdgeAdjCount  = (uint32_t)nav.nodeNearEdgeAdjacent.size();  // schema v33+
     WriteValue(f, nodeCount);
     WriteValue(f, edgeCount);
     WriteValue(f, climbCount);
@@ -1619,6 +1631,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     WriteValue(f, hazardCount);
     WriteValue(f, jumpCount);
     WriteValue(f, climbEdgeAdjCount);
+    WriteValue(f, nearEdgeAdjCount);
 
     WriteVector(f, nav.nodes);
     WriteVector(f, nav.edges);
@@ -1630,6 +1643,7 @@ static void SaveToDisk(const RoomNavData& nav) {
     WriteVector(f, nav.hazardCentroids);
     WriteVector(f, nav.jumpAnchors);
     WriteVector(f, nav.climbCellEdgeAdjacent);
+    WriteVector(f, nav.nodeNearEdgeAdjacent);
 
     if (!f.good()) {
         SPDLOG_WARN("[RoomNav] SaveToDisk: write error for {}", path.string());
@@ -1656,7 +1670,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     uint16_t gridRes = 0;
     uint32_t nodeCount = 0, edgeCount = 0, climbCount = 0, ledgeCount = 0,
              crawlspaceCount = 0, dropCount = 0, histSeedCount = 0, hazardCount = 0,
-             jumpCount = 0, climbEdgeAdjCount = 0;
+             jumpCount = 0, climbEdgeAdjCount = 0, nearEdgeAdjCount = 0;
 
     if (!ReadValue(f, magic) || magic != kMagic) {
         SPDLOG_WARN("[RoomNav] LoadFromDisk: magic mismatch for {} (got 0x{:08x}); regenerating",
@@ -1691,6 +1705,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadValue(f, hazardCount))     return;
     if (!ReadValue(f, jumpCount))       return; // schema v8+
     if (!ReadValue(f, climbEdgeAdjCount)) return; // schema v16+
+    if (!ReadValue(f, nearEdgeAdjCount))  return; // schema v33+
 
     if (!ReadVector(f, out->nodes,             nodeCount))       return;
     if (!ReadVector(f, out->edges,             edgeCount))       return;
@@ -1702,6 +1717,7 @@ static void TryLoadFromDisk(int16_t sceneNum, int8_t roomNum, RoomNavData* out) 
     if (!ReadVector(f, out->hazardCentroids,   hazardCount))     return;
     if (!ReadVector(f, out->jumpAnchors,       jumpCount))       return;
     if (!ReadVector(f, out->climbCellEdgeAdjacent, climbEdgeAdjCount)) return;
+    if (!ReadVector(f, out->nodeNearEdgeAdjacent,  nearEdgeAdjCount))  return;
 
     out->magic                      = magic;
     out->version                    = version;
@@ -2629,6 +2645,20 @@ static void GenerateClimbSurfaceEdges(RoomNavData* out,
                     out->climbCellEdgeAdjacent[toIdx] != 0;
                 if (fromEdgeAdj || toEdgeAdj) {
                     baseCost *= kClimbEdgeAdjacentLateralMult;
+                } else if (!out->nodeNearEdgeAdjacent.empty()) {
+                    // Schema v33 near-edge tier: cells one ring inland
+                    // from the boundary get a softer 1.5× multiplier
+                    // (vs 3× for edge cells). A* prefers paths through
+                    // the deep interior of wide vine walls.
+                    bool fromNearEdge =
+                        (fromIdx < out->nodeNearEdgeAdjacent.size()) &&
+                        out->nodeNearEdgeAdjacent[fromIdx] != 0;
+                    bool toNearEdge =
+                        (toIdx < out->nodeNearEdgeAdjacent.size()) &&
+                        out->nodeNearEdgeAdjacent[toIdx] != 0;
+                    if (fromNearEdge || toNearEdge) {
+                        baseCost *= 1.5f;
+                    }
                 }
             }
             edge.cost = baseCost;
@@ -3183,6 +3213,36 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
                     out->climbCellEdgeAdjacent[(size_t)firstNodeIdx + i] = 1;
                 }
             }
+            // Schema v33 near-edge ring (2026-05-15 log 116). Second
+            // pass: mark cells whose 4-neighbour is itself edge-
+            // adjacent but the cell itself ISN'T (one ring inland
+            // from the boundary). Together with climbCellEdgeAdjacent
+            // this gives a 60u-wide soft buffer; A* biases lateral
+            // climbing toward the deep interior of wide vine walls.
+            if (out->nodeNearEdgeAdjacent.size() < out->nodes.size()) {
+                out->nodeNearEdgeAdjacent.resize(out->nodes.size(), 0);
+            }
+            for (uint16_t i = 0; i < nodeCount; i++) {
+                const size_t myIdx = (size_t)firstNodeIdx + i;
+                if (out->climbCellEdgeAdjacent[myIdx]) continue;  // already heaviest tier
+                const NavNode& n = out->nodes[myIdx];
+                const int u = (int)n.cellIdxX;
+                const int v = (int)n.cellIdxZ;
+                bool nearEdge = false;
+                const int deltas[4][2] = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+                for (int d = 0; d < 4 && !nearEdge; d++) {
+                    int nu = u + deltas[d][0];
+                    int nv = v + deltas[d][1];
+                    if (nu < 0 || nu >= (int)cellsU ||
+                        nv < 0 || nv >= (int)cellsV) continue;
+                    int nbCellIdx = cellGrid[(size_t)nu + (size_t)nv * cellsU];
+                    if (nbCellIdx < 0) continue;  // hole — own cell IS edge-adj (handled above)
+                    if (out->climbCellEdgeAdjacent[(size_t)nbCellIdx]) {
+                        nearEdge = true;
+                    }
+                }
+                if (nearEdge) out->nodeNearEdgeAdjacent[myIdx] = 1;
+            }
         }
 
         // Stage 3: append this anchor's edges (surface 4-connected +
@@ -3323,6 +3383,9 @@ static void DetectInterAnchorClimbBridges(RoomNavData* out) {
                     // v16: bridges from notch-adjacent cells carry the
                     // same wall-edge hazard as intra-anchor lateral
                     // edges; apply the same multiplier.
+                    // v33: same two-tier scheme as intra-anchor lateral
+                    // edges — EDGE-adjacent endpoints → 3×; NEAR_EDGE
+                    // endpoints → 1.5×.
                     if (!out->climbCellEdgeAdjacent.empty()) {
                         bool aiEdgeAdj =
                             (ai < out->climbCellEdgeAdjacent.size()) &&
@@ -3332,6 +3395,16 @@ static void DetectInterAnchorClimbBridges(RoomNavData* out) {
                             out->climbCellEdgeAdjacent[bj] != 0;
                         if (aiEdgeAdj || bjEdgeAdj) {
                             bridgeCost *= kClimbEdgeAdjacentLateralMult;
+                        } else if (!out->nodeNearEdgeAdjacent.empty()) {
+                            bool aiNear =
+                                (ai < out->nodeNearEdgeAdjacent.size()) &&
+                                out->nodeNearEdgeAdjacent[ai] != 0;
+                            bool bjNear =
+                                (bj < out->nodeNearEdgeAdjacent.size()) &&
+                                out->nodeNearEdgeAdjacent[bj] != 0;
+                            if (aiNear || bjNear) {
+                                bridgeCost *= 1.5f;
+                            }
                         }
                     }
                     edge.cost    = bridgeCost;
@@ -4992,6 +5065,46 @@ static void ScanRoom(int16_t sceneNum, int8_t roomNum, PlayState* play, RoomNavD
                 }
             }
         }
+    }
+
+    // ----- Floor near-edge ring (schema v33, 2026-05-15 log 116). ----------
+    //
+    // Second pass over floor walkable nodes. For each non-EDGE walkable
+    // node, check its 8-cell XZ neighbours; if any contains a NODE_EDGE
+    // walkable node, mark this node as near-edge (one cell further
+    // inland from the boundary). Together with NODE_EDGE this gives a
+    // 60u-wide gradient that A* uses to bias paths toward the deep
+    // interior of wide rooms.
+    //
+    // Excludes NODE_EDGE cells themselves (they already carry the
+    // heavier penalty); also excludes non-walkable nodes (hazards /
+    // orphans / climb-surface nodes — those have their own bias).
+    //
+    // Allocates nodeNearEdgeAdjacent up to current size — climb pass
+    // below extends it to cover climb-surface nodes too.
+    out->nodeNearEdgeAdjacent.assign(out->nodes.size(), (uint8_t)0);
+    for (uint16_t i = 0; i < out->nodes.size(); i++) {
+        const NavNode& a = out->nodes[i];
+        if (!(a.flags & NODE_WALKABLE)) continue;
+        if (a.flags & NODE_EDGE)        continue;  // already heaviest tier
+
+        CellKey aCell{ (int32_t)(int16_t)a.cellIdxX, (int32_t)(int16_t)a.cellIdxZ };
+        bool nearEdge = false;
+        for (int dx = -1; dx <= 1 && !nearEdge; dx++) {
+            for (int dz = -1; dz <= 1 && !nearEdge; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                CellKey nCell{ aCell.x + dx, aCell.z + dz };
+                auto it = nodesByCell.find(nCell);
+                if (it == nodesByCell.end()) continue;
+                for (uint16_t j : it->second) {
+                    if (out->nodes[j].flags & NODE_EDGE) {
+                        nearEdge = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (nearEdge) out->nodeNearEdgeAdjacent[i] = 1;
     }
 
     // ----- (Orphan detection moved AFTER all anchor detection — schema v9.) -
