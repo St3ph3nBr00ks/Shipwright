@@ -5,6 +5,7 @@
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/Common/SkelAnimeWire.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
+#include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
 #include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"
@@ -841,7 +842,20 @@ actor_found:
         // update for an actor in a different scene/room, the host's view
         // legitimately won't have that netId yet. The non-host warn fires
         // on real netId mismatches that block sync.
-        if (!::SceneAuthority::IsEffectiveHost()) {
+        //
+        // Also suppress when we've already broadcast (or received-and-
+        // recorded) a defeat for this netId (2026-05-15 log 118 fix).
+        // After Actor_Kill removes the local actor, the host's in-flight
+        // ENEMY_UPDATE packets that crossed our DEFEATED in the wire
+        // produce a brief flurry of these "missing actor" lookups. Log
+        // 118 showed 2-4 warnings per kill across three actors — pure
+        // noise, the host stops sending within a few packets. The
+        // HostBookkeeping::HasDefeatBroadcast set is populated by both
+        // OnEnemyDefeat (local kill) and OnActorKill (network-driven
+        // kill that completed locally), so a single check covers both
+        // paths.
+        if (!::SceneAuthority::IsEffectiveHost() &&
+            !EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(netId)) {
             SPDLOG_WARN("[EnemyUpdate] No actor found for netId={} sceneNum={} — possible netId mismatch",
                         netId, sceneNum);
         }
