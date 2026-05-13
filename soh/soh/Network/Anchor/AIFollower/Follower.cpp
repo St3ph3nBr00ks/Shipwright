@@ -3739,10 +3739,24 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
             followerClimbTopTarget = followerNavPath.CurrentSubgoal();
         } else {
             // Path advanced past climb segment — climb done.
-            ExitFollowerClimbToIdle(ComputeFollowerDismountYaw(player),
+            //
+            // Mantle dismount yaw (2026-05-13, log 100 followup):
+            // use Link's CURRENT shape.rot.y (his facing while
+            // climbing — INTO the wall) rather than the geometric
+            // dismount yaw (from anchor.topPos toward nearest floor,
+            // which often points AWAY from the wall and produces
+            // sideways motion mid-mantle that disconnects Link from
+            // the vine). For vine mantling, OoT requires the player
+            // to keep pushing INTO the wall at the top to trigger
+            // the climb-up animation. Link's shape.rot.y was set at
+            // climb-engagement to face the wall and stays there
+            // throughout the climb — it's exactly the right
+            // direction for the mantle hold.
+            ExitFollowerClimbToIdle(player->actor.shape.rot.y,
                                     /*clearAutonomous=*/true);
             SPDLOG_INFO("[Follower] CLIMBING→IDLE (substrate path exited "
-                        "climb segment; next subgoal is floor)");
+                        "climb segment; mantle yaw={} from facing)",
+                        (int)player->actor.shape.rot.y);
             return;
         }
     }

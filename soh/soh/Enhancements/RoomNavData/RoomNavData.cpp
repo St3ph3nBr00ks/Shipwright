@@ -700,11 +700,17 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
             // climb-surface neighbours whose type isn't in the mask.
             const uint16_t nbClimbBits = data->nodes[nb].flags & NODE_CLIMB_ANY;
             if (nbClimbBits != 0 && (nbClimbBits & climbSurfaceMask) == 0) continue;
-            // Uniform edge cost (1 hop). Real Euclidean edge cost
-            // would be more accurate for Dijkstra, but A* with
-            // uniform-cost edges + admissible heuristic is optimal
-            // and matches the BFS's "hop count" semantics.
-            const float tentativeG = gScore[entry.idx] + 1.0f;
+            // Step cost: 1.0 base + edge-cell penalty. NODE_EDGE
+            // floor cells incur kEdgeNodePenalty so A* prefers
+            // interior cells; only uses edge cells when no
+            // interior alternative exists. See path-variant for
+            // full rationale.
+            constexpr float kEdgeNodePenalty = 2.0f;
+            float stepCost = 1.0f;
+            if (data->nodes[nb].flags & NODE_EDGE) {
+                stepCost += kEdgeNodePenalty;
+            }
+            const float tentativeG = gScore[entry.idx] + stepCost;
             if (tentativeG < gScore[nb]) {
                 gScore[nb] = tentativeG;
                 frontier.push({nb, curHazardHops, tentativeG + heuristic(nb)});
@@ -903,7 +909,23 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
             if (data->nodes[nb].flags & NODE_ORPHANED) continue;
             const uint16_t nbClimbBits = data->nodes[nb].flags & NODE_CLIMB_ANY;
             if (nbClimbBits != 0 && (nbClimbBits & climbSurfaceMask) == 0) continue;
-            const float tentativeG = gScore[entry.idx] + 1.0f;
+            // Edge-cell penalty (2026-05-13, user request). NODE_EDGE
+            // floor cells are walkable cells adjacent to non-walkable
+            // (cliff edge / pit border). A* prefers interior cells
+            // with no penalty over edge cells with +2.0u cost. Net
+            // effect: paths route through the middle of the nav mesh
+            // when possible, only using edge cells when no interior
+            // alternative exists (narrow corridors, mandatory edges
+            // for jump/drop/climb-approach). The runtime
+            // edge-avoidance gate (GroundFollowing.cpp) already
+            // suppresses stick toward unmarked edges; this pushes
+            // the planner-side preference further into the interior.
+            constexpr float kEdgeNodePenalty = 2.0f;
+            float stepCost = 1.0f;
+            if (data->nodes[nb].flags & NODE_EDGE) {
+                stepCost += kEdgeNodePenalty;
+            }
+            const float tentativeG = gScore[entry.idx] + stepCost;
             if (tentativeG < gScore[nb]) {
                 gScore[nb] = tentativeG;
                 parents[nb] = (int)entry.idx;
