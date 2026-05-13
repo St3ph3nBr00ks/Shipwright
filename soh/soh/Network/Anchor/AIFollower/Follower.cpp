@@ -2438,35 +2438,72 @@ void Anchor::TickFollowerInput(Actor* actor) {
             }
 
             // Option B — anchor-agnostic prediction gate (2026-05-14
-            // log 113 fix). The previous gate translated stick
-            // direction into world motion via the ACTIVE anchor's
-            // planeAxisU/V. On a curved/spiral wall the active
-            // anchor's plane axes don't match the local surface
-            // orientation along the path; predictions projected the
-            // wrong direction and `nearReachable` rejected legitimate
-            // motion, zeroing one or both stick axes. The follower
-            // either stalled (disp=0.0 in log 113) or climbed only
-            // laterally with zero vertical progress.
+            // log 113 fix; broadened 2026-05-14 log 114 follow-up).
+            // The previous gate translated stick direction into world
+            // motion via the ACTIVE anchor's planeAxisU/V. On a
+            // curved/spiral wall the active anchor's plane axes don't
+            // match the local surface orientation along the path;
+            // predictions projected the wrong direction and stick
+            // got zeroed.
             //
-            // New approach: predict in WORLD SPACE.
-            //   - Vertical stick predicts along world ±Y (Y is global;
-            //     no plane projection needed).
+            // World-space prediction:
+            //   - Vertical stick predicts along world ±Y.
             //   - Lateral stick predicts along the world XZ direction
-            //     toward followerMoveTarget (this is the direction the
-            //     stick was just computed FROM — see
-            //     worldYaw=Math_Atan2S(dzL,dxL) above — so it matches
-            //     what OoT will actually do when Link moves along the
-            //     surface).
-            // Then the same `nearReachable` check against
-            // followerClimbReachableNodes (which includes bridged
-            // neighbours) decides whether to zero or soft-bias each
-            // axis. No anchor lookup needed; gate works correctly
-            // wherever the follower is on any reachable climb surface.
-            if (!followerClimbReachableNodes.empty()) {
+            //     toward followerMoveTarget (the same direction the
+            //     stick was computed from).
+            //
+            // Reachability check (log 114 fix): the original gate used
+            // followerClimbReachableNodes — anchor's grid + 1-hop
+            // bridges only. On a curved wall represented by N flat-
+            // plane anchors, the path crosses 2+ bridge hops and the
+            // 1-hop set misses cells that ARE on the planned route.
+            // Symptom: disp=0.0 mid-climb at (405,613,231) because
+            // every predicted position fell outside the 30u radius of
+            // any node in followerClimbReachableNodes.
+            //
+            // Broadened set:
+            //   (a) Path waypoints (sparse but authoritative — A* on
+            //       the substrate already proved each cell is part
+            //       of the planned route).
+            //   (b) ALL climb-surface nodes in the room
+            //       [firstClimbSurfaceNodeIdx .. nodes.size()) —
+            //       dense fallback covering anchor grids the follower
+            //       might drift onto. ~500 nodes per room; 4 checks
+            //       per frame × 60fps = ~120k vec3 distances/sec,
+            //       negligible.
+            //   (c) followerClimbReachableNodes — kept as a last
+            //       fallback when no path is set (legacy snap-and-
+            //       climb engagements).
+            {
                 constexpr float kPredictDistance      = 30.0f;
                 constexpr float kSoftBiasDistance     = 60.0f;
                 constexpr float kReachableThresholdSq = 30.0f * 30.0f;
+                const ::AnchorNavRoom::RoomNavData* gateNavData =
+                    ::AnchorNavRoom::GetForRoom(
+                        gPlayState->sceneNum,
+                        (int8_t)gPlayState->roomCtx.curRoom.num);
                 auto nearReachable = [&](const Vec3f& pos) -> bool {
+                    // (a) Path waypoints first — fastest positive
+                    // when follower is tracking the route.
+                    for (const Vec3f& wp : followerNavPath.waypoints) {
+                        if (AnchorDist::Dist3DSq(wp, pos) < kReachableThresholdSq) {
+                            return true;
+                        }
+                    }
+                    // (b) Full climb-surface node sweep.
+                    if (gateNavData != nullptr &&
+                        gateNavData->firstClimbSurfaceNodeIdx != UINT16_MAX) {
+                        for (size_t i = gateNavData->firstClimbSurfaceNodeIdx;
+                             i < gateNavData->nodes.size(); i++) {
+                            if (AnchorDist::Dist3DSq(
+                                    gateNavData->nodes[i].pos, pos) <
+                                kReachableThresholdSq) {
+                                return true;
+                            }
+                        }
+                    }
+                    // (c) Legacy anchor-derived set (only fires when
+                    // path + full sweep both miss; rare).
                     for (const Vec3f& np : followerClimbReachableNodes) {
                         if (AnchorDist::Dist3DSq(np, pos) < kReachableThresholdSq) {
                             return true;

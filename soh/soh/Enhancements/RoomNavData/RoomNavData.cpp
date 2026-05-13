@@ -831,7 +831,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
             const float dy_e = nbPos.y - curPos.y;
             const float dz_e = nbPos.z - curPos.z;
             float stepCost = std::sqrt(dx_e*dx_e + dy_e*dy_e + dz_e*dz_e);
-            constexpr float kEdgeNodePenalty = 60.0f;
+            constexpr float kEdgeNodePenalty = 120.0f;
             if (data->nodes[nb].flags & NODE_EDGE) {
                 stepCost += kEdgeNodePenalty;
             }
@@ -1052,15 +1052,19 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
             float stepCost = std::sqrt(dx_e*dx_e + dy_e*dy_e + dz_e*dz_e);
             // Edge-cell penalty (2026-05-13, user request). NODE_EDGE
             // floor cells are walkable cells adjacent to non-walkable
-            // (i.e. within ~30u of a pit/wall). +60u step cost biases
+            // (i.e. within ~30u of a pit/wall). +120u step cost biases
             // A* toward interior cells when alternatives exist — strong
-            // enough to detour up to 2 cells (~60u of extra path length)
+            // enough to detour up to 4 cells (~120u of extra path)
             // around an edge step before the edge route becomes
             // competitive. Narrow corridors or mandatory edges (drop /
             // jump / climb-approach) still get used because no interior
-            // alternative exists. Bumped from 30u 2026-05-14 after
-            // log 113 showed follower walking edges in wide rooms.
-            constexpr float kEdgeNodePenalty = 60.0f;
+            // alternative exists. Tuning history:
+            //   - 30u (2026-05-13): break-even with one interior step,
+            //     too weak.
+            //   - 60u (2026-05-14 log 113): 2-cell detour preferred,
+            //     user still observed edge-walking in wide rooms.
+            //   - 120u (2026-05-14 log 114): 4-cell detour preferred.
+            constexpr float kEdgeNodePenalty = 120.0f;
             if (data->nodes[nb].flags & NODE_EDGE) {
                 stepCost += kEdgeNodePenalty;
             }
