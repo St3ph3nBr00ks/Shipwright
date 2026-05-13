@@ -823,7 +823,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
             const uint16_t nbClimbBits = data->nodes[nb].flags & NODE_CLIMB_ANY;
             if (nbClimbBits != 0 && (nbClimbBits & climbSurfaceMask) == 0) continue;
             // Euclidean edge cost (2026-05-13). Step cost = actual
-            // 3D distance between nodes. + 30u edge-cell penalty.
+            // 3D distance between nodes. + edge-cell penalty.
             // See path-variant for full rationale.
             const Vec3f& curPos = data->nodes[entry.idx].pos;
             const Vec3f& nbPos  = data->nodes[nb].pos;
@@ -831,7 +831,7 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
             const float dy_e = nbPos.y - curPos.y;
             const float dz_e = nbPos.z - curPos.z;
             float stepCost = std::sqrt(dx_e*dx_e + dy_e*dy_e + dz_e*dz_e);
-            constexpr float kEdgeNodePenalty = 30.0f;
+            constexpr float kEdgeNodePenalty = 60.0f;
             if (data->nodes[nb].flags & NODE_EDGE) {
                 stepCost += kEdgeNodePenalty;
             }
@@ -1051,12 +1051,16 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
             const float dz_e = nbPos.z - curPos.z;
             float stepCost = std::sqrt(dx_e*dx_e + dy_e*dy_e + dz_e*dz_e);
             // Edge-cell penalty (2026-05-13, user request). NODE_EDGE
-            // floor cells are walkable cells adjacent to non-walkable.
-            // +30u (one grid-cell-spacing) extra cost biases A* toward
-            // interior cells when alternatives exist. Narrow corridors
-            // or mandatory edges (drop/jump/climb-approach) still get
-            // used because no interior alternative exists.
-            constexpr float kEdgeNodePenalty = 30.0f;
+            // floor cells are walkable cells adjacent to non-walkable
+            // (i.e. within ~30u of a pit/wall). +60u step cost biases
+            // A* toward interior cells when alternatives exist — strong
+            // enough to detour up to 2 cells (~60u of extra path length)
+            // around an edge step before the edge route becomes
+            // competitive. Narrow corridors or mandatory edges (drop /
+            // jump / climb-approach) still get used because no interior
+            // alternative exists. Bumped from 30u 2026-05-14 after
+            // log 113 showed follower walking edges in wide rooms.
+            constexpr float kEdgeNodePenalty = 60.0f;
             if (data->nodes[nb].flags & NODE_EDGE) {
                 stepCost += kEdgeNodePenalty;
             }
