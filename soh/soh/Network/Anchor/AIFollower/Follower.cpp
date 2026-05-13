@@ -2309,27 +2309,13 @@ void Anchor::TickFollowerInput(Actor* actor) {
             // Vertical: compare leader Y to follower Y.
             f32 dyL = followerMoveTarget.y - p2w.y;
             static constexpr f32 kClimbYTolerance = 8.0f;
-            s8  ladderY = 0;
-            if (dyL >  kClimbYTolerance)      ladderY =  127;
-            else if (dyL < -kClimbYTolerance) ladderY = -127;
-            // Test 6 (log 74) — lateral tracking on vine
-            // walls. OoT's ladder climb code ignores
-            // stick_x (ladder is single-column), but vine
-            // climb uses stick_x for lateral movement along
-            // the wall face. Inject a camera-relative
-            // horizontal component from the XZ delta so the
-            // follower tracks the leader sideways; on
-            // ladders this is a no-op (OoT clamps it), on
-            // vines it slides Link along the vine face.
-            //
-            // Gate on Δxz > tolerance so idle stand-still
-            // climbs (follower holding at leader Y) don't
-            // emit phantom lateral input.
+
+            // Lateral: along the vine face (XZ delta to subgoal).
             f32 dxL = followerMoveTarget.x - p2w.x;
             f32 dzL = followerMoveTarget.z - p2w.z;
             f32 dxzSq = dxL * dxL + dzL * dzL;
-            s8  ladderX = 0;
             static constexpr f32 kClimbXzTolerance = 10.0f;
+
             // Bug B fix (user 2026-05-12 log 29): block lateral stick
             // injection on LADDER anchors. User: "horizontal/lateral
             // movement on ladders is not allowed; the only movement
@@ -2350,8 +2336,47 @@ void Anchor::TickFollowerInput(Actor* actor) {
                                        .surfaceType == ::AnchorNavRoom::NODE_CLIMB_LADDER);
                 }
             }
-            if (!isLadderAnchor &&
-                dxzSq > kClimbXzTolerance * kClimbXzTolerance) {
+
+            // Single-axis policy (2026-05-12 PM, log 98 fix). User:
+            // "diagonal climbing is not possible for the player in
+            // LoZOoT. All climbing must be either horizontal or
+            // vertical." Pre-fix the code injected stickY AND stickX
+            // simultaneously when both Y and XZ deltas exceeded
+            // their tolerances — this produced no motion at all in
+            // some cases (engine clamps to one axis or stalls
+            // ambiguously) and at best produced jerky single-axis
+            // motion as the engine decided which axis to honor.
+            //
+            // Now: pick the dominant axis (larger absolute delta).
+            // Only emit stick on that axis; zero the other. As the
+            // follower moves and the dominant axis's delta shrinks,
+            // the other axis takes over naturally — producing an
+            // L-shaped motion per subgoal. Matches OoT's vine
+            // mechanics where Link climbs purely vertical or purely
+            // lateral at any given moment.
+            //
+            // Ladders: vertical only (no lateral allowed at all).
+            // Vines: pick whichever axis has the larger delta.
+            //
+            // Tolerance gates still apply — small deltas in either
+            // axis idle that axis as before.
+            const f32 absDyL = std::fabs(dyL);
+            const f32 latDist = std::sqrt(dxzSq);
+            const bool yEligible  = absDyL > kClimbYTolerance;
+            const bool xzEligible = (!isLadderAnchor) &&
+                                    (latDist > kClimbXzTolerance);
+            // Dominance: if both eligible, pick the axis with the
+            // larger absolute delta. Ladder always gets vertical.
+            const bool doVertical = yEligible &&
+                                    (!xzEligible || absDyL >= latDist);
+            const bool doLateral  = xzEligible && !doVertical;
+
+            s8 ladderY = 0;
+            s8 ladderX = 0;
+            if (doVertical) {
+                ladderY = (dyL > 0.0f) ? (s8)127 : (s8)-127;
+            }
+            if (doLateral) {
                 Camera* cam = GET_ACTIVE_CAM(gPlayState);
                 s16 inputDirYaw = Camera_GetInputDirYaw(cam);
                 s16 worldYaw    = Math_Atan2S(dzL, dxL);
