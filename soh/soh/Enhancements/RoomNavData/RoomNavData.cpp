@@ -1229,6 +1229,14 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // emitted. Loop also restructured to iterate per anchor (not per
 // node) so anchor.planeNormal is in scope for the offset. Bump
 // invalidates v21 caches so they regenerate with proper drops.
+// v25 (2026-05-12 PM, log 95 fix): climb-source drops use a 500u
+// Max Y-delta (vs floor-floor's 200u). Suspended vines / walls in
+// OoT commonly hang 300-500u above floors below them; the 200u cap
+// was leaving the follower with no drop edges in those geometries.
+// 500u keeps drops in Link's "alive with fall damage" range
+// (survivable ~800-1000u). MovementClear still gates physical
+// feasibility per drop. Bump invalidates v24 caches.
+
 // v24 (2026-05-12 PM, log 92 fix): climb-cell drop dedup now
 // skips floor-source anchors. Pre-fix the dedup matched any
 // existing anchor (floor-src OR climb-src) within 40u XZ at both
@@ -1260,7 +1268,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 24;
+static constexpr uint16_t kCurrentSchemaVersion = 25;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3426,7 +3434,17 @@ static void DetectClimbCellDropAnchors(
     if (out->firstClimbSurfaceNodeIdx == UINT16_MAX) return;
 
     constexpr float kDropMinDeltaY   = 30.0f;
-    constexpr float kDropMaxDeltaY   = 200.0f;
+    // Climb-source drops use a larger Max Y-delta than the floor-floor
+    // pass (200u). Rationale: vines and other suspended climb walls
+    // commonly hang above floors by 300-500u in OoT geometry. The
+    // floor-floor 200u cap is calibrated for child Link's safe-fall
+    // threshold; climb-source falls can exceed that and let the
+    // follower take fall damage but survive (Link can survive falls
+    // ~800-1000u; 500u keeps us safely in the "alive with damage"
+    // range). MovementClear still gates whether the drop is
+    // physically feasible (no collision between cell and floor), so
+    // we won't connect unrelated geometries far apart.
+    constexpr float kDropMaxDeltaY   = 500.0f;
     constexpr float kDropMaxXZSq     = 80.0f * 80.0f;
     constexpr float kClusterRadiusSq = 40.0f * 40.0f;
     // Offset along the wall's outward normal for the MovementClear
