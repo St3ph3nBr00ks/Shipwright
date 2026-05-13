@@ -121,6 +121,15 @@ void Anchor::SetFollowerNpcActive(bool active) {
         SPDLOG_INFO("[FollowerNPC] Spawned ACTOR_EN_FOLLOWER(id={}) at "
                     "({:.0f},{:.0f},{:.0f}) yaw={} (CVar 0→1)",
                     (int)gEnFollowerId, p.x, p.y, p.z, (int)yaw);
+
+        // Phase 3: broadcast SPAWN so peers spawn read-only replicas.
+        // netId scheme: ownClientId (one NPC per client in v1, so the
+        // client id IS the natural unique key).
+        Vec3s rotVec3s{ 0, yaw, 0 };
+        SendPacket_FollowerNpcSpawn((uint32_t)ownClientId, p, rotVec3s,
+                                    (int16_t)gPlayState->sceneNum,
+                                    (int8_t)gPlayState->roomCtx.curRoom.num,
+                                    (uint8_t)(gSaveContext.linkAge & 0x1));
     } else {
         // Despawn: Actor_Kill the tracked instance if it's still alive.
         if (mFollowerNpcLocalActor == nullptr) {
@@ -130,6 +139,10 @@ void Anchor::SetFollowerNpcActive(bool active) {
             SPDLOG_INFO("[FollowerNPC] Despawning ACTOR_EN_FOLLOWER (CVar 1→0)");
             Actor_Kill(mFollowerNpcLocalActor);
         }
+        // Phase 3: broadcast DESPAWN so peers tear down replicas.
+        // reason=0 → cvar_off (the primary v1 trigger). Future phases
+        // may pass 1 (died) / 2 (scene_change) / 3 (owner_disconnect).
+        SendPacket_FollowerNpcDespawn((uint32_t)ownClientId, /*reason=*/0);
         // Clear our tracking pointer either way — even if update was
         // already NULL (the actor was destroyed by something else, e.g.
         // a scene transition wiping the actor list).

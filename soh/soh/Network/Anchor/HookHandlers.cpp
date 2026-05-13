@@ -1062,6 +1062,9 @@ void Anchor::RegisterHooks() {
         // Poll the CVar each tick and spawn/despawn on 0↔1 edges.
         // Cheap: one CVarGetInteger call + int compare in the no-op case.
         Anchor::Instance->TickFollowerNpcCVar();
+        // Phase 3: throttled STATE broadcast (10Hz) so peers see our
+        // local NPC's pos/rot. No-op when no local NPC is alive.
+        Anchor::Instance->TickFollowerNpcStateBroadcast();
 
         // #191 — host countdown for cutscene-textbox vote-skip. No-op
         // when no active textbox vote is in progress; broadcasts

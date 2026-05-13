@@ -522,6 +522,19 @@ class Anchor : public Network {
     Actor* mFollowerNpcLocalActor = nullptr;
     int    mFollowerNpcCVarLast   = 0;
 
+    // Phase 3 receive-side bookkeeping. Map from ownerClientId →
+    // local replica Actor* for NPCs owned by OTHER clients. We
+    // never put our own NPC here; mFollowerNpcLocalActor handles
+    // that. Cleared on Anchor::Disable / scene transitions.
+    std::unordered_map<uint32_t, Actor*> mPeerFollowerNpcs;
+
+    // STATE-broadcast throttle counter. The owner sends STATE
+    // every kFollowerNpcStateMs (100ms = 10Hz nominal). Tracked as
+    // game-tick counter via MsToGameTicks; mFollowerNpcStateLastTick
+    // records the last tick we sent so we don't double-send within
+    // one window.
+    uint64_t mFollowerNpcStateLastFrame = 0;
+
     // AI follower state machine (runs each frame when followerActive is true).
     // IDLE     — at leader's side; scans for nearby enemies.
     // FOLLOW   — stick-driven movement toward leader's side. Used for ALL
@@ -980,6 +993,14 @@ class Anchor : public Network {
     inline static const std::string MIDO_POST_DEKU_LEAVE = "MIDO_POST_DEKU_LEAVE";
     inline static const std::string CUTSCENE_TEXT_ADVANCE = "CUTSCENE_TEXT_ADVANCE";
     inline static const std::string CUTSCENE_TEXT_ADVANCED = "CUTSCENE_TEXT_ADVANCED";
+    // NPC Follower (Flotilla — Plans/npc_follower_plan.md §2.9).
+    // Single-owner authority: the client that toggled the CVar owns
+    // its local NPC; SPAWN announces, STATE periodically broadcasts
+    // pos/rot at ~10Hz, DESPAWN tears down. Peers spawn/apply/kill
+    // read-only replicas keyed by ownerClientId.
+    inline static const std::string FOLLOWER_NPC_SPAWN   = "FOLLOWER_NPC_SPAWN";
+    inline static const std::string FOLLOWER_NPC_STATE   = "FOLLOWER_NPC_STATE";
+    inline static const std::string FOLLOWER_NPC_DESPAWN = "FOLLOWER_NPC_DESPAWN";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
     inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
@@ -1420,6 +1441,23 @@ class Anchor : public Network {
     // Message_ShouldAdvance call returns true for. See #191.
     void SendPacket_CutsceneTextAdvanced(uint16_t textId, const char* reason);
     void HandlePacket_CutsceneTextAdvanced(nlohmann::json payload);
+
+    // FOLLOWER_NPC_* — Flotilla NPC Follower companion (Plans/
+    // npc_follower_plan.md §2.6 / §2.9). Single-owner authority:
+    // owner sends, peers apply read-only. Phase 3 wiring.
+    void SendPacket_FollowerNpcSpawn(uint32_t netId, const Vec3f& pos,
+                                      const Vec3s& rot, int16_t sceneNum,
+                                      int8_t roomNum, uint8_t linkAge);
+    void HandlePacket_FollowerNpcSpawn(nlohmann::json payload);
+    void SendPacket_FollowerNpcState();   // throttle + own-state-fetch internal
+    void HandlePacket_FollowerNpcState(nlohmann::json payload);
+    void SendPacket_FollowerNpcDespawn(uint32_t netId, uint8_t reason);
+    void HandlePacket_FollowerNpcDespawn(nlohmann::json payload);
+
+    // Per-tick driver for Phase 3 STATE broadcasts. Called from
+    // OnGameFrameUpdate after TickFollowerNpcCVar. Cheap no-op when
+    // no local NPC exists.
+    void TickFollowerNpcStateBroadcast();
 
     // #191 — per-active-textbox vote-skip state lives on the host.
     // Reset on each new textbox (detected by textId edge or no active
