@@ -299,20 +299,39 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
     // consumers (mask 0). Climb-aware consumers traverse the multi-
     // cell grid (Stages 2-3) for accurate per-cell waypoints — Stage 6
     // engages CLIMBING based on the climb-surface subgoal flags.
-    if (climbSurfaceMask == 0) {
-        for (const ClimbAnchor& anchor : data->climbAnchors) {
-            // Find base / top node indices the same way the scan
-            // populates NODE_CLIMB_BASE / NODE_CLIMB_TOP flags. Using
-            // FindNearestNode here matches that flagging convention.
-            int baseIdx = FindNearestNode(data, anchor.basePos);
-            int topIdx  = FindNearestNode(data, anchor.topPos);
-            if (baseIdx < 0 || topIdx < 0) continue;
-            if (baseIdx == topIdx) continue;
-            if ((size_t)baseIdx >= adjacency.size() ||
-                (size_t)topIdx  >= adjacency.size()) continue;
-            adjacency[(size_t)baseIdx].push_back((uint16_t)topIdx);
-            adjacency[(size_t)topIdx].push_back((uint16_t)baseIdx);
+    //
+    // EXCEPTION (2026-05-13, log 106 fix): cell-less anchors (Path B
+    // ladders skip-emitted in v29+, anything else with nodeCount=0)
+    // get the bypass for CLIMB-AWARE consumers too, gated on the
+    // anchor's surfaceType being in the consumer's mask. The cells
+    // don't exist to route through, so the BFS would otherwise treat
+    // the ladder as unreachable; the 1-hop bypass lets the BFS route
+    // floor↔floor across the ladder, and TryEngageAutoClimb handles
+    // the actual climb engagement at the floor↔climb transition.
+    for (const ClimbAnchor& anchor : data->climbAnchors) {
+        bool emitBypass = false;
+        if (climbSurfaceMask == 0) {
+            // Non-climb consumer — bypass all anchors.
+            emitBypass = true;
+        } else if (anchor.nodeCount == 0 &&
+                   (anchor.surfaceType & climbSurfaceMask) != 0) {
+            // Climb-aware consumer + cell-less anchor whose type is
+            // in this consumer's mask.
+            emitBypass = true;
         }
+        if (!emitBypass) continue;
+
+        // Find base / top node indices the same way the scan
+        // populates NODE_CLIMB_BASE / NODE_CLIMB_TOP flags. Using
+        // FindNearestNode here matches that flagging convention.
+        int baseIdx = FindNearestNode(data, anchor.basePos);
+        int topIdx  = FindNearestNode(data, anchor.topPos);
+        if (baseIdx < 0 || topIdx < 0) continue;
+        if (baseIdx == topIdx) continue;
+        if ((size_t)baseIdx >= adjacency.size() ||
+            (size_t)topIdx  >= adjacency.size()) continue;
+        adjacency[(size_t)baseIdx].push_back((uint16_t)topIdx);
+        adjacency[(size_t)topIdx].push_back((uint16_t)baseIdx);
     }
 
     // Ledge anchors (Plans/follower_ledge_consumer_plan.md). Each
@@ -1251,6 +1270,27 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // emitted. Loop also restructured to iterate per anchor (not per
 // node) so anchor.planeNormal is in scope for the offset. Bump
 // invalidates v21 caches so they regenerate with proper drops.
+// v30 (2026-05-13, log 106 fix): Two related fixes for Path B
+// ladders that v29 missed:
+//   (a) ClassifyClimbWallFlags can't distinguish ladder vs designed
+//       wall — both use bits 1-2. So v29's "if expectedType ==
+//       NODE_CLIMB_LADDER" gate never fired for Path B ladders;
+//       the Deku Tree entrance ladder was classified as
+//       DESIGNATED_WALL and emitted cells (badly, because thin
+//       geometry → raycast misses). Now after climbWidth is
+//       computed, if width < 45u AND the anchor is Path B AND
+//       initial classification was VINE/DESIGNATED, reclassify to
+//       LADDER. The v29 skip-emit then fires correctly.
+//   (b) BuildAdjacencyList's base↔top 1-hop bypass was gated to
+//       climbSurfaceMask == 0 (non-climb consumers only). The
+//       follower has climbSurfaceMask = LADDER|VINE|DESIGNATED, so
+//       it didn't get the bypass — and cell-less ladders had no
+//       cells either → BFS couldn't route through. Now: cell-less
+//       anchors get the bypass for any consumer whose mask matches
+//       the anchor's surfaceType. Cell-having anchors continue
+//       routing via the substrate cells.
+// Bump invalidates v29 caches.
+
 // v29 (2026-05-13, log 104 fix): Path B ladders skip cell-emit and
 // fall back to legacy 2-point heuristic. Thin ladder geometry causes
 // per-cell raycasts to miss; anchors get zero or partial coverage.
@@ -1331,7 +1371,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 29;
+static constexpr uint16_t kCurrentSchemaVersion = 30;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -2723,37 +2763,9 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
             }
         }
 
-        // Path B LADDER skip-emit (2026-05-13, log 104 fix). Ladders
-        // detected via Path B (scene-static geometry classified as
-        // ladder by wall flags) are too thin to reliably emit cells —
-        // per-cell raycasts miss the geometry, leaving the ladder with
-        // zero or partial coverage. The substrate path can't route
-        // through it. Per user direction, fall back to the legacy
-        // 2-point heuristic for these: keep the anchor in
-        // climbAnchors with basePos/topPos set, but don't emit any
-        // grid cells. TryEngageAutoClimb in Follower.cpp handles
-        // engagement via FindClimbAnchorAbove + autonomous-climb
-        // pipeline — same path that worked pre-v7-grid for all
-        // climbables.
-        //
-        // Path A ladders unaffected (anchor.actorId != 0 — those
-        // emit cells unconditionally because actor identity is the
-        // ground truth, not raycast hits).
-        //
-        // The anchor's surfaceType is set so consumers know it's a
-        // ladder. cellsU/cellsV/nodeCount stay at 0 → no contribution
-        // to nodesByCell, no participation in DetectInterAnchor
-        // ClimbBridges, no boundary edges. The legacy yellow-line
-        // visualization renders from basePos/topPos.
-        if (anchor.actorId == 0 && expectedType == NODE_CLIMB_LADDER) {
-            anchor.surfaceType = NODE_CLIMB_LADDER;
-            anchor.cellsU      = 0;
-            anchor.cellsV      = 0;
-            anchor.firstNodeIdx = 0;
-            anchor.nodeCount   = 0;
-            // Skip grid generation. continue to next anchor.
-            continue;
-        }
+        // (v29 LADDER-by-classifier skip-emit block moved below to
+        // after the width computation so the width-based ladder
+        // reclassification can fire first.)
 
         // Grid extent + origin. Hybrid 2026-05-11:
         //   - Path A (actor-based, no polys): single-column at fixed
@@ -2802,6 +2814,46 @@ static void GenerateClimbSurfaceGrids(RoomNavData* out, PlayState* play,
         }
         if (climbWidth  < kClimbGridCellSpacing) climbWidth  = kClimbGridCellSpacing;
         if (climbHeight < kClimbGridCellSpacing) climbHeight = kClimbGridCellSpacing;
+
+        // Path B narrow-wall ladder reclassification (2026-05-13, log
+        // 106 fix). ClassifyClimbWallFlags can't distinguish ladders
+        // from "designed climbable walls" — both use bits 1-2 of the
+        // wall-flag field. Width-based heuristic: a climbable Path B
+        // surface narrower than kPathBLadderMaxWidth (45u ≈ 1.5 grid
+        // cells) is almost certainly a ladder (standard OoT ladders
+        // are ~30u wide; vines/designed walls are typically wider).
+        // Reclassify so the LADDER skip-emit fires for it. Wider
+        // walls keep their VINE/DESIGNATED classification.
+        //
+        // Even if a narrow non-ladder slips through this heuristic
+        // (e.g. a thin vine tendril), routing it via legacy
+        // 2-point heuristic is acceptable — those geometries also
+        // suffer raycast miss with cell emission.
+        constexpr float kPathBLadderMaxWidth = 45.0f;
+        if (anchor.actorId == 0 &&
+            (expectedType == NODE_CLIMB_DESIGNATED_WALL ||
+             expectedType == NODE_CLIMB_VINE) &&
+            climbWidth < kPathBLadderMaxWidth) {
+            SPDLOG_INFO("[RoomNav] Path B narrow-wall reclassified as LADDER "
+                        "(width={:.0f}u < {:.0f}u; base=({:.0f},{:.0f},{:.0f}))",
+                        climbWidth, kPathBLadderMaxWidth,
+                        anchor.basePos.x, anchor.basePos.y, anchor.basePos.z);
+            expectedType = NODE_CLIMB_LADDER;
+        }
+
+        // Path B LADDER skip-emit (v29). Either the wall-flag
+        // classifier said LADDER (rare for Path B static geometry —
+        // see ClassifyClimbWallFlags comment), or the width heuristic
+        // above just reclassified. Either way, skip cell emission and
+        // store as cell-less ladder for the legacy 2-point pipeline.
+        if (anchor.actorId == 0 && expectedType == NODE_CLIMB_LADDER) {
+            anchor.surfaceType  = NODE_CLIMB_LADDER;
+            anchor.cellsU       = 0;
+            anchor.cellsV       = 0;
+            anchor.firstNodeIdx = 0;
+            anchor.nodeCount    = 0;
+            continue;
+        }
 
         uint16_t cellsU = (uint16_t)std::min<int>(
             (int)kClimbMaxCellsU,
