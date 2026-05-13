@@ -1229,6 +1229,16 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // emitted. Loop also restructured to iterate per anchor (not per
 // node) so anchor.planeNormal is in scope for the offset. Bump
 // invalidates v21 caches so they regenerate with proper drops.
+// v26 (2026-05-12 PM, log 96 fix): climb-source drop dedup is now
+// Y-aware. Same XZ column at different altitudes (>15u apart in Y)
+// no longer dedupes — each cell emits its own drop, scoping the
+// anchor to that cell's altitude. Pre-fix the entire vertical
+// column collapsed to one drop registered at the LOWEST cell that
+// passed all checks, making it unreachable from a follower
+// positioned high up the wall. Substantially raises emitted drop
+// count; A* picks the most useful drop per follower position.
+// Bump invalidates v25 caches.
+
 // v25 (2026-05-12 PM, log 95 fix): climb-source drops use a 500u
 // Max Y-delta (vs floor-floor's 200u). Suspended vines / walls in
 // OoT commonly hang 300-500u above floors below them; the 200u cap
@@ -1268,7 +1278,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 25;
+static constexpr uint16_t kCurrentSchemaVersion = 26;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3561,18 +3571,25 @@ static void DetectClimbCellDropAnchors(
                         // Dedup against existing CLIMB-SOURCE drop anchors
                         // only. Floor-source anchors (highIsClimb=0)
                         // skipped — they have different semantics (edge
-                        // from a FLOOR node vs from a CLIMB node), and
-                        // their XZ proximity to the climb cell shouldn't
-                        // suppress legitimate climb-source emissions.
-                        // Pre-fix the cross-source dedup was suppressing
-                        // ~all drops near floor-source-anchor regions
-                        // (log 92 — climb cells at the wall would
-                        // dedupe against floor nodes 30-50u away in XZ
-                        // even though the climb cell altitude is
-                        // 30-200u different).
+                        // from a FLOOR node vs from a CLIMB node).
+                        //
+                        // Y-aware dedup (2026-05-12 PM, log 96 fix):
+                        // include altitude in the highPos match so cells
+                        // at the same XZ column but different Y rows can
+                        // each emit their own drop. Pre-fix, XZ-only
+                        // match collapsed entire vertical columns to one
+                        // drop registered at the LOWEST cell altitude —
+                        // useless for a follower at high altitude (they'd
+                        // have to climb down the wall to use the drop).
+                        // Now each cell gets a drop at its own altitude;
+                        // A* picks the most useful one based on the
+                        // follower's current position.
+                        constexpr f32 kClusterYTolerance = 15.0f;  // ½ cell-spacing
                         bool isDuplicate = false;
                         for (const DropAnchor& existing : out->dropAnchors) {
                             if (existing.highIsClimb == 0) continue;
+                            f32 hy = existing.highPos.y - a.pos.y;
+                            if (std::fabs(hy) > kClusterYTolerance) continue;
                             f32 hx = existing.highPos.x    - a.pos.x;
                             f32 hz = existing.highPos.z    - a.pos.z;
                             f32 lx = existing.landingPos.x - b.pos.x;
