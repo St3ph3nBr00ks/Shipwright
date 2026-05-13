@@ -93,24 +93,56 @@ bool MovementClearAtPosition(const Vec3f& fromPos, const Vec3f& toPos, PlayState
 // from the wall. Combined with the existing "don't skip past climb
 // intermediates" rule, climbing segments pass through smoothing unchanged.
 //
-// Preserved flags (never skip past as intermediate, never start a skip from):
-//   - NODE_CLIMB_ANY — climb cells (vertical/lateral motion only)
-//   - NODE_DROP_FROM_ABOVE — planned off-edge motion (drop / jump intent)
-//   - NODE_REACHED_VIA_LEDGE_GRAB — ledge mantle teleport
+// Two flag sets govern smoothing:
+//   No-start-from (can't begin a skip here):
+//     - NODE_CLIMB_ANY — vertical/lateral motion only
+//     - NODE_DROP_FROM_ABOVE — straight-down drop
+//     - NODE_REACHED_VIA_LEDGE_GRAB — mantle teleport
+//   No-skip-past (can't skip over this as an intermediate):
+//     - the three above PLUS
+//     - NODE_EDGE — nav-mesh boundary; preserves edge avoidance through
+//       smoothing so a straight line can't cut a corner off the
+//       walkable area
+//
+// Air-gap gate: accepted smooth steps must also satisfy
+// FloorPresentAlongPath. MovementClear is a pelvis-height raycast — it
+// succeeds over open pits — so without the floor check the smoother
+// would cut a straight line across a chasm.
 //
 // Performance: O(N²) in waypoint count worst-case (M MovementClear calls
 // per smooth attempt). Typical paths have <50 waypoints; smoothing
 // adds ~5ms to scan-free path queries. Acceptable.
 // Note: NavPath is nested inside class ActorTrail (per ActorTrail.h),
 // so the file-scope function needs the qualified name.
+// FloorPresentAlongPath is defined below in the same TU; forward-declare
+// here so single-pass lookup resolves the call inside SmoothNavPath
+// (see CLAUDE.md pitfall 14).
+bool FloorPresentAlongPath(const Vec3f& from, const Vec3f& to, PlayState* play);
+
 static void SmoothNavPath(ActorTrail::NavPath& path, PlayState* play) {
     if (play == nullptr) return;
     if (path.waypoints.size() < 3) return;
 
-    constexpr uint32_t kPreserveFlags =
+    // Two flag sets:
+    //   kNoStartFromFlags — can't begin a smooth-skip from this waypoint.
+    //     CLIMB/DROP/LEDGE_GRAB have consumer choreography that requires
+    //     traversal of the next waypoint verbatim (vertical-only climb,
+    //     straight-down drop, mantle teleport).
+    //   kNoSkipPastFlags — can't skip OVER this waypoint as an
+    //     intermediate. Same three flags plus NODE_EDGE — edge waypoints
+    //     are intentionally placed at the boundary of walkable area;
+    //     a straight line that skips over an edge waypoint risks
+    //     cutting the corner off the navmesh (the pit-fall bug).
+    // Edge waypoints CAN start a smooth (NOT in kNoStartFromFlags); they
+    // just can't be skipped over. This keeps the follower from walking
+    // every edge cell verbatim along a wall path while still respecting
+    // the edge as a navigation anchor.
+    constexpr uint32_t kNoStartFromFlags =
         ::AnchorNavRoom::NODE_CLIMB_ANY |
         ::AnchorNavRoom::NODE_DROP_FROM_ABOVE |
         ::AnchorNavRoom::NODE_REACHED_VIA_LEDGE_GRAB;
+    constexpr uint32_t kNoSkipPastFlags =
+        kNoStartFromFlags | ::AnchorNavRoom::NODE_EDGE;
 
     auto getFlags = [&](size_t idx) -> uint32_t {
         return (idx < path.waypointFlags.size()) ? path.waypointFlags[idx] : 0u;
@@ -127,18 +159,19 @@ static void SmoothNavPath(ActorTrail::NavPath& path, PlayState* play) {
     size_t i = 0;
     while (i < path.waypoints.size() - 1) {
         size_t bestNext = i + 1;
-        // Don't smooth FROM a preserved-flag waypoint. Climbing is the
-        // critical case — a skip starting on a climb cell could direct
-        // the follower diagonally across the wall, disconnecting Link.
-        // Drop/ledge sources have specific consumer choreography that
-        // shouldn't be bypassed either.
-        const bool startsOnPreserved = (getFlags(i) & kPreserveFlags) != 0;
-        if (!startsOnPreserved) {
+        const bool startsOnNoStart = (getFlags(i) & kNoStartFromFlags) != 0;
+        if (!startsOnNoStart) {
             for (size_t j = i + 2; j < path.waypoints.size(); j++) {
-                // Don't skip past a preserved intermediate.
-                if (getFlags(j - 1) & kPreserveFlags) break;
+                if (getFlags(j - 1) & kNoSkipPastFlags) break;
                 if (!MovementClearAtPosition(path.waypoints[i],
                                               path.waypoints[j], play)) break;
+                // MovementClear is a pelvis-height raycast that succeeds
+                // across open pits — same air-gap blind spot Layer 1 LOS
+                // had before FloorPresentAlongPath was added. Without
+                // this check the smoother happily cut a straight line
+                // over a pit and the follower walked off the edge.
+                if (!FloorPresentAlongPath(path.waypoints[i],
+                                            path.waypoints[j], play)) break;
                 bestNext = j;
             }
         }
