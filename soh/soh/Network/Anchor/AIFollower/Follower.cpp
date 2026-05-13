@@ -3266,6 +3266,7 @@ void Anchor::ExitFollowerClimbToIdle(s16 dismountYaw, bool clearAutonomous) {
     followerStateFrames = 0;
     followerClimbAnchorIdx = UINT16_MAX;
     followerClimbReachableNodes.clear();
+    followerMantleHoldFrames = 0;  // clear any in-flight mantle hold
     // Reset re-anchor latch (Bug 2 fix) — next CLIMBING entry should
     // start with a clean candidate-tracking slate.
     followerReanchorCandidateIdx    = UINT16_MAX;
@@ -3737,25 +3738,57 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
         const uint32_t climbBits = sgFlags & ::AnchorNavRoom::NODE_CLIMB_ANY;
         if (climbBits != 0) {
             followerClimbTopTarget = followerNavPath.CurrentSubgoal();
+            // Reset mantle hold any time we go back to a regular
+            // climb cell (handoff was preempted).
+            followerMantleHoldFrames = 0;
         } else {
-            // Path advanced past climb segment — climb done.
+            // Path advanced past climb segment — mantle/dismount.
             //
-            // Mantle dismount yaw (2026-05-13, log 100 followup):
-            // use Link's CURRENT shape.rot.y (his facing while
-            // climbing — INTO the wall) rather than the geometric
-            // dismount yaw (from anchor.topPos toward nearest floor,
-            // which often points AWAY from the wall and produces
-            // sideways motion mid-mantle that disconnects Link from
-            // the vine). For vine mantling, OoT requires the player
-            // to keep pushing INTO the wall at the top to trigger
-            // the climb-up animation. Link's shape.rot.y was set at
-            // climb-engagement to face the wall and stays there
-            // throughout the climb — it's exactly the right
-            // direction for the mantle hold.
+            // Mantle hold (2026-05-13, log 103 fix). Pre-fix this
+            // exit immediately transitioned CLIMBING→IDLE and armed
+            // kClimbDismountHoldFrames which uses camera-relative
+            // stick — that doesn't trigger OoT's vine mantle; Link
+            // just walked sideways, released the wall, and fell.
+            //
+            // For mantling, OoT needs RAW stick_y=+127 sustained
+            // while Link is at the top of the vine — the input that
+            // the CLIMBING-aware injection (TickFollowerInput line
+            // ~2308) produces when followerMoveTarget.y is above
+            // player.world.pos.y. So we stay in CLIMBING state for
+            // a brief hold, push followerClimbTopTarget Y above the
+            // current cell, and let the CLIMBING-aware injection do
+            // its job. After the hold expires, do the real exit.
+            constexpr int kMantleHoldFrames = 6;  // ~0.1s @ 60fps
+            constexpr f32 kMantleHoldYBoost  = 60.0f;
+            if (followerMantleHoldFrames == 0) {
+                followerMantleHoldFrames = kMantleHoldFrames;
+                SPDLOG_INFO("[Follower] Mantle hold started ({} frames; "
+                            "boost target Y +{:.0f}u above current pos)",
+                            kMantleHoldFrames, kMantleHoldYBoost);
+            } else {
+                followerMantleHoldFrames--;
+            }
+            if (followerMantleHoldFrames > 0) {
+                // Hold target above current pos so CLIMBING-aware
+                // injection drives stick_y=+127 (climb up). Update
+                // each frame to track Link's rising Y as the mantle
+                // animation progresses.
+                followerClimbTopTarget.x = player->actor.world.pos.x;
+                followerClimbTopTarget.y = player->actor.world.pos.y +
+                                           kMantleHoldYBoost;
+                followerClimbTopTarget.z = player->actor.world.pos.z;
+                followerMoveTarget = followerClimbTopTarget;
+                return;  // stay in CLIMBING; injection runs in TickFollowerInput
+            }
+            // Hold complete — exit to IDLE. Use shape.rot.y as the
+            // post-mantle dismount yaw (Link is now on the platform;
+            // facing direction is "into the wall" but the dismount
+            // hold's role here is just to bridge to FOLLOW state
+            // smoothly).
             ExitFollowerClimbToIdle(player->actor.shape.rot.y,
                                     /*clearAutonomous=*/true);
-            SPDLOG_INFO("[Follower] CLIMBING→IDLE (substrate path exited "
-                        "climb segment; mantle yaw={} from facing)",
+            SPDLOG_INFO("[Follower] CLIMBING→IDLE (mantle hold complete; "
+                        "yaw={} from facing)",
                         (int)player->actor.shape.rot.y);
             return;
         }

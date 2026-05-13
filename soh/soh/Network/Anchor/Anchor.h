@@ -703,6 +703,24 @@ class Anchor : public Network {
     // progress and doesn't false-trigger the exit.
     Vec3f           followerClimbStuckCheckPos    = { 0.0f, 0.0f, 0.0f };
 
+    // Mantle hold (2026-05-13, log 103 fix). Counts down frames while
+    // the follower is at the top of a vine/ladder climb segment with
+    // a non-climb (drop or floor) waypoint next. During the hold, the
+    // follower stays in CLIMBING state with followerClimbTopTarget
+    // raised above the current position so the CLIMBING-aware input
+    // injection drives raw stick_y=+127 — OoT interprets this as
+    // "climb up" and triggers the mantle animation when the follower
+    // is at the top of a vine with a platform above. After the hold
+    // expires, ExitFollowerClimbToIdle fires and the follower
+    // transitions to IDLE → FOLLOW for the next path segment.
+    //
+    // Pre-fix the substrate-driven exit transitioned to IDLE
+    // immediately, then armed kClimbDismountHoldFrames which uses
+    // CAMERA-RELATIVE stick (not raw stick_y) — that doesn't
+    // trigger mantle; OoT just steered Link in some world direction
+    // and he released the wall.
+    int             followerMantleHoldFrames      = 0;
+
     // Edge-prediction state (climb_surface_nav_grid_plan post-Stage-8
     // 2026-05-12; refactored to nearest-node-3D 2026-05-12 PM). When
     // the substrate engages CLIMBING, we capture which ClimbAnchor the
