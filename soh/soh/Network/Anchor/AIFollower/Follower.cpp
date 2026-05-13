@@ -3553,6 +3553,47 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
             if (bestIdx > followerNavPath.cursorIdx) {
                 followerNavPath.cursorIdx = bestIdx;
             }
+            // Last-climb-cell handoff (2026-05-12 PM, log 98 fix).
+            // The advance loop above breaks at the first non-climb
+            // waypoint, leaving the cursor at the LAST climb cell of
+            // the segment. If the follower is within reach of that
+            // last cell AND the next waypoint is non-climb (drop
+            // edge or floor walk), advance the cursor PAST the climb
+            // cell so the climb-segment-exit block below fires and
+            // CLIMBING transitions out cleanly. Without this, the
+            // follower freezes at the top of the climb because:
+            //   - cursor stays on the climb cell
+            //   - CLIMBING-aware injection drives stick toward the
+            //     cell, but follower is already there → idle stick
+            //   - no progress → recovery exit C eventually fires
+            //     but only after a noticeable delay.
+            //
+            // The "within reach" check uses kClimbAdvanceReach3D
+            // (50u) which matches the in-segment cursor-advance
+            // tolerance — same proximity threshold for consistency.
+            const size_t curIdx = followerNavPath.cursorIdx;
+            const size_t nextIdx = curIdx + 1;
+            if (nextIdx < followerNavPath.waypoints.size()) {
+                const uint32_t nextFlags =
+                    (nextIdx < followerNavPath.waypointFlags.size())
+                        ? followerNavPath.waypointFlags[nextIdx]
+                        : (uint32_t)0;
+                const bool nextIsNonClimb =
+                    (nextFlags & ::AnchorNavRoom::NODE_CLIMB_ANY) == 0;
+                if (nextIsNonClimb) {
+                    f32 dSq = AnchorDist::Dist3DSq(
+                        followerNavPath.waypoints[curIdx], p2w);
+                    if (dSq <= kClimbAdvanceReachSq) {
+                        followerNavPath.cursorIdx = nextIdx;
+                        SPDLOG_INFO("[Follower] Climb-segment handoff: "
+                                    "advanced cursor {} → {} (next is "
+                                    "non-climb; follower at last climb "
+                                    "cell within {:.0f}u 3D)",
+                                    (int)curIdx, (int)nextIdx,
+                                    kClimbAdvanceReach3D);
+                    }
+                }
+            }
         }
     }
 
