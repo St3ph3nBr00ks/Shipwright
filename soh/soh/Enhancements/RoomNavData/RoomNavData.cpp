@@ -1229,6 +1229,14 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // emitted. Loop also restructured to iterate per anchor (not per
 // node) so anchor.planeNormal is in scope for the offset. Bump
 // invalidates v21 caches so they regenerate with proper drops.
+// v28 (2026-05-12 PM, log 100 fix): climb-source drop XZ tolerance
+// tightened 80u → 15u. OoT vine drops are pure-gravity; landing
+// floors more than 15u from cell XZ are unreachable. 15u accounts
+// for Link's body offset from wall surface during release.
+// Companion follower change: climb-stuck recovery now teleport-
+// forwards instead of just exiting to IDLE. Bump invalidates v27
+// caches.
+
 // v27 (2026-05-12 PM, user reverted): climb-source drop Y-delta
 // cap reverted from 500u → 200u (back to safe-fall threshold). XZ
 // tolerance kept at 80u. Effect: fewer drop anchors total, all
@@ -1287,7 +1295,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 27;
+static constexpr uint16_t kCurrentSchemaVersion = 28;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3470,7 +3478,17 @@ static void DetectClimbCellDropAnchors(
     // long fall + lateral offset). 200u keeps drops short enough
     // that any wrong-landing remains close to the cell.
     constexpr float kDropMaxDeltaY   = 200.0f;
-    constexpr float kDropMaxXZSq     = 80.0f * 80.0f;
+    // XZ tolerance tightened to 15u (2026-05-12 PM, log 100 fix).
+    // OoT vine drops are pure-gravity from Link's release XZ — he
+    // doesn't move laterally during the fall. A drop anchor whose
+    // landing floor is more than ~15u from the cell's XZ creates a
+    // phantom edge: the follower releases the wall, gravity pulls
+    // him straight down, and he lands on whatever floor is at the
+    // cell's XZ — NOT the anchor's stated landing. 15u accounts for
+    // Link's slight body offset from the wall surface during the
+    // release; tighter than that risks rejecting legitimate drops
+    // where the floor sits right in front of the wall.
+    constexpr float kDropMaxXZSq     = 15.0f * 15.0f;
     constexpr float kClusterRadiusSq = 40.0f * 40.0f;
     // Offset along the wall's outward normal for the MovementClear
     // test starting point (2026-05-12 PM, log 89 fix). The cell.pos
