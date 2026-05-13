@@ -46,6 +46,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>  // std::rand (FindRandomReachableNode)
 #include <ctime>
 #include <deque>
 #include <filesystem>
@@ -203,6 +204,99 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos,
         }
     }
     return bestIdx;
+}
+
+// ---------------------------------------------------------------------------
+// NavMesh area queries (2026-05-13). Basic helpers for use cases beyond
+// pathfinding — primarily the AI Director's spawn-location selection.
+// ---------------------------------------------------------------------------
+
+size_t QueryNodesInRange(const RoomNavData* data,
+                          const Vec3f& center,
+                          float radius,
+                          std::vector<int>& outNodeIndices,
+                          bool (*filter)(const NavNode&)) {
+    if (data == nullptr || data->nodes.empty() || radius <= 0.0f) return 0;
+    const float r2 = radius * radius;
+    size_t startCount = outNodeIndices.size();
+    for (size_t i = 0; i < data->nodes.size(); i++) {
+        const NavNode& n = data->nodes[i];
+        // Skip climb-surface cells; callers wanting climb nodes can
+        // walk data->nodes themselves with a custom filter.
+        if (n.flags & NODE_CLIMB_ANY) continue;
+        if (!(n.flags & NODE_WALKABLE)) continue;
+        if (n.flags & NODE_ORPHANED) continue;
+        float dx = n.pos.x - center.x;
+        float dy = n.pos.y - center.y;
+        float dz = n.pos.z - center.z;
+        if (dx*dx + dy*dy + dz*dz > r2) continue;
+        if (filter != nullptr && !filter(n)) continue;
+        outNodeIndices.push_back((int)i);
+    }
+    return outNodeIndices.size() - startCount;
+}
+
+int FindRandomReachableNode(const RoomNavData* data,
+                             int fromIdx,
+                             float maxDistance,
+                             const NavQueryOptions& opts,
+                             bool (*filter)(const NavNode&)) {
+    if (data == nullptr || fromIdx < 0 ||
+        (size_t)fromIdx >= data->nodes.size()) return -1;
+    if (maxDistance <= 0.0f) return -1;
+
+    // BFS-bounded reachable-node sweep from fromIdx, capped by 3D
+    // Euclidean distance. Reuses the same adjacency the path-finding
+    // BFS uses (climb mask, drop anchors, etc. via NavQueryOptions).
+    const AdjacencyCacheEntry& adjEntry =
+        GetOrBuildAdjacency(data, MakeAdjacencyKey(opts));
+    const auto& adjacency = adjEntry.adjacency;
+
+    const Vec3f& origin = data->nodes[(size_t)fromIdx].pos;
+    const float r2 = maxDistance * maxDistance;
+
+    std::vector<bool> visited(data->nodes.size(), false);
+    std::vector<int>  candidates;
+    candidates.reserve(64);
+
+    std::vector<uint16_t> frontier;
+    frontier.reserve(64);
+    frontier.push_back((uint16_t)fromIdx);
+    visited[(size_t)fromIdx] = true;
+
+    while (!frontier.empty()) {
+        uint16_t cur = frontier.back();
+        frontier.pop_back();
+        const NavNode& curNode = data->nodes[cur];
+
+        // Distance gate.
+        float dx = curNode.pos.x - origin.x;
+        float dy = curNode.pos.y - origin.y;
+        float dz = curNode.pos.z - origin.z;
+        if (dx*dx + dy*dy + dz*dz > r2) continue;
+
+        // Candidate test — walkable, not orphaned, passes user filter.
+        if ((curNode.flags & NODE_WALKABLE) &&
+            !(curNode.flags & (NODE_ORPHANED | NODE_HAZARD | NODE_UNDERWATER)) &&
+            (filter == nullptr || filter(curNode))) {
+            candidates.push_back((int)cur);
+        }
+
+        // Expand neighbours.
+        for (uint16_t nb : adjacency[cur]) {
+            if (nb >= visited.size()) continue;
+            if (visited[nb]) continue;
+            visited[nb] = true;
+            frontier.push_back(nb);
+        }
+    }
+
+    if (candidates.empty()) return -1;
+    // Uniform random pick. Use rand() — caller can seed externally if
+    // determinism matters; spawn-director-style use is fine with
+    // platform-default randomness.
+    const size_t pickIdx = (size_t)((unsigned)std::rand() % candidates.size());
+    return candidates[pickIdx];
 }
 
 // Threshold for hazard-traversal rejection — see plan §10 for the
@@ -719,13 +813,16 @@ int FindBestReachableSubgoalNode(const RoomNavData* data,
             // climb-surface neighbours whose type isn't in the mask.
             const uint16_t nbClimbBits = data->nodes[nb].flags & NODE_CLIMB_ANY;
             if (nbClimbBits != 0 && (nbClimbBits & climbSurfaceMask) == 0) continue;
-            // Step cost: 1.0 base + edge-cell penalty. NODE_EDGE
-            // floor cells incur kEdgeNodePenalty so A* prefers
-            // interior cells; only uses edge cells when no
-            // interior alternative exists. See path-variant for
-            // full rationale.
-            constexpr float kEdgeNodePenalty = 2.0f;
-            float stepCost = 1.0f;
+            // Euclidean edge cost (2026-05-13). Step cost = actual
+            // 3D distance between nodes. + 30u edge-cell penalty.
+            // See path-variant for full rationale.
+            const Vec3f& curPos = data->nodes[entry.idx].pos;
+            const Vec3f& nbPos  = data->nodes[nb].pos;
+            const float dx_e = nbPos.x - curPos.x;
+            const float dy_e = nbPos.y - curPos.y;
+            const float dz_e = nbPos.z - curPos.z;
+            float stepCost = std::sqrt(dx_e*dx_e + dy_e*dy_e + dz_e*dz_e);
+            constexpr float kEdgeNodePenalty = 30.0f;
             if (data->nodes[nb].flags & NODE_EDGE) {
                 stepCost += kEdgeNodePenalty;
             }
@@ -928,19 +1025,29 @@ bool FindBestReachableSubgoalPath(const RoomNavData* data,
             if (data->nodes[nb].flags & NODE_ORPHANED) continue;
             const uint16_t nbClimbBits = data->nodes[nb].flags & NODE_CLIMB_ANY;
             if (nbClimbBits != 0 && (nbClimbBits & climbSurfaceMask) == 0) continue;
+            // Euclidean edge cost (2026-05-13). A* step cost = actual
+            // 3D distance between nodes. Pre-fix this was uniform +1.0
+            // per hop; that ignored the edge.cost field set during
+            // scan (kSlopePenalty, kHazardPenalty, climb edge-adjacent
+            // multipliers) and made cost-shaping rely on integer hop
+            // counts. With Euclidean step cost, both g (Euclidean
+            // path length) and h (Euclidean to target) are in
+            // distance units — f = g + h is consistent. Cost-shaping
+            // penalties below are calibrated in distance units (e.g.
+            // +30u for an edge cell ≈ one grid-cell-spacing extra).
+            const Vec3f& curPos = data->nodes[entry.idx].pos;
+            const Vec3f& nbPos  = data->nodes[nb].pos;
+            const float dx_e = nbPos.x - curPos.x;
+            const float dy_e = nbPos.y - curPos.y;
+            const float dz_e = nbPos.z - curPos.z;
+            float stepCost = std::sqrt(dx_e*dx_e + dy_e*dy_e + dz_e*dz_e);
             // Edge-cell penalty (2026-05-13, user request). NODE_EDGE
-            // floor cells are walkable cells adjacent to non-walkable
-            // (cliff edge / pit border). A* prefers interior cells
-            // with no penalty over edge cells with +2.0u cost. Net
-            // effect: paths route through the middle of the nav mesh
-            // when possible, only using edge cells when no interior
-            // alternative exists (narrow corridors, mandatory edges
-            // for jump/drop/climb-approach). The runtime
-            // edge-avoidance gate (GroundFollowing.cpp) already
-            // suppresses stick toward unmarked edges; this pushes
-            // the planner-side preference further into the interior.
-            constexpr float kEdgeNodePenalty = 2.0f;
-            float stepCost = 1.0f;
+            // floor cells are walkable cells adjacent to non-walkable.
+            // +30u (one grid-cell-spacing) extra cost biases A* toward
+            // interior cells when alternatives exist. Narrow corridors
+            // or mandatory edges (drop/jump/climb-approach) still get
+            // used because no interior alternative exists.
+            constexpr float kEdgeNodePenalty = 30.0f;
             if (data->nodes[nb].flags & NODE_EDGE) {
                 stepCost += kEdgeNodePenalty;
             }

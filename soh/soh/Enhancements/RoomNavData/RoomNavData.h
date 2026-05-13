@@ -363,6 +363,113 @@ const RoomNavData* GetForRoom(int16_t sceneNum, int8_t roomNum);
 int FindNearestNode(const RoomNavData* data, const Vec3f& pos,
                     bool includeClimb = false);
 
+// ---------------------------------------------------------------------------
+// NavMesh area queries (2026-05-13). Helpers for use cases beyond
+// pathfinding — primarily the AI Director's spawn-location selection.
+// ---------------------------------------------------------------------------
+
+// Collects all walkable floor nodes within `radius` (3D) of `center` that
+// pass the optional `filter` predicate. Appends to `outNodeIndices`. Caller
+// owns the vector. Skips climb-surface nodes by default. Returns the count
+// of nodes appended.
+//
+// Cost: O(N) walk over data->nodes. For Director spawn-candidate selection
+// at scan-frequency cadence (~once per minute), acceptable.
+size_t QueryNodesInRange(const RoomNavData* data,
+                          const Vec3f& center,
+                          float radius,
+                          std::vector<int>& outNodeIndices,
+                          bool (*filter)(const NavNode&) = nullptr);
+
+// Picks a random walkable floor node reachable from `fromIdx` within
+// `maxDistance` (3D Euclidean from fromIdx's position). Reachability is
+// checked via the static graph adjacency. Optional `filter` lets the
+// caller exclude unwanted nodes (e.g. NODE_EDGE, NODE_HAZARD_ADJACENT).
+//
+// Returns -1 if no candidate satisfies the constraints, or if `data` is
+// null / `fromIdx` invalid. Stochastic — returns different results
+// across calls. Useful for AI Director spawn-point selection ("random
+// reachable node within 500u of a player, not on hazard, not visible").
+//
+// Implementation note: v1 collects all candidates via a BFS-like sweep
+// then picks one uniformly. A future optimization could do a streaming
+// reservoir-sample to avoid the intermediate vector for very large
+// rooms; deferred until profiling shows need.
+int FindRandomReachableNode(const RoomNavData* data,
+                             int fromIdx,
+                             float maxDistance,
+                             const NavQueryOptions& opts,
+                             bool (*filter)(const NavNode&) = nullptr);
+
+// ---------------------------------------------------------------------------
+// Multi-agent local avoidance placeholder (2026-05-13).
+//
+// PLACEHOLDER ONLY. The real implementation is deferred until there are
+// multiple AI agents in the same room (AI Invader landing alongside the
+// Follower). At that point this will be replaced with an RVO/ORCA-style
+// reciprocal-velocity-obstacle pass that adjusts each agent's velocity
+// to avoid colliding with neighbors while still pursuing their goal.
+//
+// For now, the function is inline and returns the desired velocity
+// unchanged. Callers can use it from any state-machine tick that wants
+// to be forward-compatible with future avoidance — when the real
+// implementation lands, all call sites pick up multi-agent behaviour
+// automatically.
+//
+// Reference reading for the future implementation:
+//   - "Reciprocal Velocity Obstacles for Real-Time Multi-Agent
+//     Navigation" (van den Berg, Lin, Manocha, 2008)
+//   - "Optimal Reciprocal Collision Avoidance for Multi-Agent
+//     Navigation" (van den Berg, Guy, Lin, Manocha, 2011 — the ORCA paper)
+//   - RVO2 library (open source reference C++ implementation)
+//
+// Signature is intentionally generic. The future version may take a
+// list of neighboring agents + their velocities; that data isn't
+// available right now and would have to be plumbed through the Anchor
+// session model.
+inline Vec3f ComputeAvoidanceVelocity(const Vec3f& desiredVelocity) {
+    // Placeholder: no avoidance, pass through unchanged.
+    return desiredVelocity;
+}
+
+// ---------------------------------------------------------------------------
+// Smart-object link unification (2026-05-13).
+//
+// Currently the substrate has 5 distinct anchor structs (ClimbAnchor,
+// LedgeAnchor, DropAnchor, JumpAnchor, CrawlspaceAnchor). Each has its
+// own emission path, BFS edge-injection logic, and consumer recognition.
+// Modern nav systems (Recast/Detour etc.) unify these into a single
+// "off-mesh link" / "traversal link" struct with a kind discriminator.
+//
+// We're not refactoring the existing types now — they work, and the
+// refactor is high-effort. This enum + ref struct names the abstraction
+// so future work can migrate the anchor types into a unified
+// TraversalLink incrementally without breaking the existing pipeline.
+//
+// When the refactor happens: replace per-type anchor vectors with a
+// single std::vector<TraversalLink> + per-kind index. BuildAdjacencyList
+// emits edges based on link.kind; consumers dispatch on link.kind.
+// ---------------------------------------------------------------------------
+
+enum class TraversalLinkKind : uint8_t {
+    None        = 0,
+    Climb       = 1,  // ClimbAnchor (Path A actor + Path B static + LADDER)
+    Ledge       = 2,  // LedgeAnchor (approachPos → topPos mantle)
+    Drop        = 3,  // DropAnchor (highPos → landingPos gravity drop)
+    Jump        = 4,  // JumpAnchor (fromPos → toPos bidirectional)
+    Crawlspace  = 5,  // CrawlspaceAnchor (entry/exit pair)
+};
+
+// Forward-compatibility reference. A consumer can hold a
+// TraversalLinkRef without knowing which underlying anchor vector it
+// belongs to. Pre-refactor, callers still index into the per-type vector
+// based on `kind`. Post-refactor, this struct will be the canonical
+// identity and the per-type vectors will become a single unified store.
+struct TraversalLinkRef {
+    TraversalLinkKind kind  = TraversalLinkKind::None;
+    uint16_t          index = 0;  // index into data->{climb,ledge,drop,jump,crawlspace}Anchors
+};
+
 // Bundle of per-query knobs for the hazard-aware BFS. Consolidates the
 // param explosion that grew across Tasks 3 + 4 (climb mask + drop anchors
 // + per-actor caps) so callers pass one struct instead of 5+ positional

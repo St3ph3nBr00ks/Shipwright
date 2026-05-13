@@ -73,6 +73,84 @@ bool MovementClearAtPosition(const Vec3f& fromPos, const Vec3f& toPos, PlayState
     return !hit;
 }
 
+// Path smoothing / string-pulling (2026-05-13). The substrate A* returns
+// a list of cell-center waypoints. Walking through cell centers produces
+// visibly grid-shaped motion. This pass collapses chains of waypoints
+// that have line-of-sight to a single endpoint — equivalent in spirit to
+// the funnel algorithm professional nav meshes apply to a triangulated
+// mesh, simplified for our cell grid.
+//
+// Algorithm: for each waypoint i, look ahead to the furthest waypoint j
+// such that MovementClearAtPosition(waypoints[i], waypoints[j]) holds AND
+// no intervening waypoint has a "special" flag (CLIMB, drop, ledge-mantle)
+// that must be preserved for consumer semantics. Replace waypoints
+// (i..j-1) with a single hop directly to j.
+//
+// Climb constraint (user direction 2026-05-13): smoothing must NOT touch
+// any segment that starts on a climb cell. OoT climbing is strictly
+// vertical OR lateral (no diagonal motion); a smoothed skip from a climb
+// cell would direct the follower diagonally and cause them to disconnect
+// from the wall. Combined with the existing "don't skip past climb
+// intermediates" rule, climbing segments pass through smoothing unchanged.
+//
+// Preserved flags (never skip past as intermediate, never start a skip from):
+//   - NODE_CLIMB_ANY — climb cells (vertical/lateral motion only)
+//   - NODE_DROP_FROM_ABOVE — planned off-edge motion (drop / jump intent)
+//   - NODE_REACHED_VIA_LEDGE_GRAB — ledge mantle teleport
+//
+// Performance: O(N²) in waypoint count worst-case (M MovementClear calls
+// per smooth attempt). Typical paths have <50 waypoints; smoothing
+// adds ~5ms to scan-free path queries. Acceptable.
+static void SmoothNavPath(NavPath& path, PlayState* play) {
+    if (play == nullptr) return;
+    if (path.waypoints.size() < 3) return;
+
+    constexpr uint32_t kPreserveFlags =
+        ::AnchorNavRoom::NODE_CLIMB_ANY |
+        ::AnchorNavRoom::NODE_DROP_FROM_ABOVE |
+        ::AnchorNavRoom::NODE_REACHED_VIA_LEDGE_GRAB;
+
+    auto getFlags = [&](size_t idx) -> uint32_t {
+        return (idx < path.waypointFlags.size()) ? path.waypointFlags[idx] : 0u;
+    };
+
+    std::vector<Vec3f>    smoothed;
+    std::vector<uint32_t> smoothedFlags;
+    smoothed.reserve(path.waypoints.size());
+    smoothedFlags.reserve(path.waypointFlags.size());
+
+    smoothed.push_back(path.waypoints[0]);
+    smoothedFlags.push_back(getFlags(0));
+
+    size_t i = 0;
+    while (i < path.waypoints.size() - 1) {
+        size_t bestNext = i + 1;
+        // Don't smooth FROM a preserved-flag waypoint. Climbing is the
+        // critical case — a skip starting on a climb cell could direct
+        // the follower diagonally across the wall, disconnecting Link.
+        // Drop/ledge sources have specific consumer choreography that
+        // shouldn't be bypassed either.
+        const bool startsOnPreserved = (getFlags(i) & kPreserveFlags) != 0;
+        if (!startsOnPreserved) {
+            for (size_t j = i + 2; j < path.waypoints.size(); j++) {
+                // Don't skip past a preserved intermediate.
+                if (getFlags(j - 1) & kPreserveFlags) break;
+                if (!MovementClearAtPosition(path.waypoints[i],
+                                              path.waypoints[j], play)) break;
+                bestNext = j;
+            }
+        }
+        smoothed.push_back(path.waypoints[bestNext]);
+        smoothedFlags.push_back(getFlags(bestNext));
+        i = bestNext;
+    }
+
+    if (smoothed.size() < path.waypoints.size()) {
+        path.waypoints     = std::move(smoothed);
+        path.waypointFlags = std::move(smoothedFlags);
+    }
+}
+
 // Returns true when continuous floor exists along the segment from→to at
 // approximately the linearly-interpolated Y. Used by Layer 1 LOS to
 // reject "clear at pelvis but no floor below" cases — without this gate,
@@ -560,6 +638,14 @@ bool ActorTrail::ComputePathTo(TrailKey key,
             out.waypoints.push_back(targetPos);
             out.waypointFlags.push_back(0); // target appended; not from any node
         }
+        // Path smoothing (2026-05-13). String-pull the cell-center
+        // waypoints to remove redundant grid-shaped jaggedness. Only
+        // applied to Layer 3 — Layer 1 is already a single-waypoint
+        // direct path, Layer 2 emits a single breadcrumb + optional
+        // target append (both LOS-verified at emit). Preserved-flag
+        // waypoints (climb cells, drops, ledge mantles) are never
+        // skipped past.
+        SmoothNavPath(out, play);
         return true;
     };
 
