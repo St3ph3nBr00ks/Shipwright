@@ -2316,6 +2316,59 @@ void Anchor::TickFollowerInput(Actor* actor) {
             f32 dxzSq = dxL * dxL + dzL * dzL;
             static constexpr f32 kClimbXzTolerance = 10.0f;
 
+            // Option A — mid-climb anchor refresh (2026-05-14 log 113
+            // fix). On a curved/spiral wall, inter-anchor bridges let
+            // the follower's path cross from one anchor's grid onto a
+            // bridged neighbour. Pre-fix, followerClimbAnchorIdx was
+            // pinned at engagement and never updated; downstream
+            // consumers (isLadderAnchor, reachTopY, prediction gate
+            // plane axes) all kept reading the original anchor — wrong
+            // surface orientation, wrong top altitude, wrong vs ladder
+            // classification. Now: every frame on ladder, find the
+            // anchor whose grid contains the climb-surface cell closest
+            // to the follower's current position; switch to it if
+            // different. Cost: O(climbSurfaceNodes) per frame; with
+            // ~500 nodes that's negligible.
+            if (followerClimbAnchorIdx != UINT16_MAX) {
+                const ::AnchorNavRoom::RoomNavData* navData =
+                    ::AnchorNavRoom::GetForRoom(
+                        gPlayState->sceneNum,
+                        (int8_t)gPlayState->roomCtx.curRoom.num);
+                if (navData != nullptr && !navData->climbAnchors.empty()) {
+                    uint16_t bestIdx  = followerClimbAnchorIdx;
+                    float    bestDist2 = std::numeric_limits<float>::max();
+                    for (size_t a = 0; a < navData->climbAnchors.size(); a++) {
+                        const auto& anc = navData->climbAnchors[a];
+                        const uint16_t end =
+                            (uint16_t)(anc.firstNodeIdx + anc.nodeCount);
+                        for (uint16_t i = anc.firstNodeIdx;
+                             i < end && i < navData->nodes.size(); i++) {
+                            const Vec3f& np = navData->nodes[i].pos;
+                            float dx = np.x - p2w.x;
+                            float dy = np.y - p2w.y;
+                            float dz = np.z - p2w.z;
+                            float d2 = dx*dx + dy*dy + dz*dz;
+                            if (d2 < bestDist2) {
+                                bestDist2 = d2;
+                                bestIdx   = (uint16_t)a;
+                            }
+                        }
+                    }
+                    if (bestIdx != followerClimbAnchorIdx) {
+                        SPDLOG_INFO("[Follower] CLIMBING anchor refresh: "
+                                    "{} -> {} (follower at "
+                                    "({:.0f},{:.0f},{:.0f}); nearest cell "
+                                    "{:.0f}u away)",
+                                    (int)followerClimbAnchorIdx,
+                                    (int)bestIdx,
+                                    p2w.x, p2w.y, p2w.z,
+                                    std::sqrt(bestDist2));
+                        followerClimbAnchorIdx = bestIdx;
+                        PopulateClimbReachableNodes(navData, bestIdx);
+                    }
+                }
+            }
+
             // Bug B fix (user 2026-05-12 log 29): block lateral stick
             // injection on LADDER anchors. User: "horizontal/lateral
             // movement on ladders is not allowed; the only movement
@@ -2384,92 +2437,77 @@ void Anchor::TickFollowerInput(Actor* actor) {
                 ladderX = (s8)(-Math_SinS(stickAngle) * 127.0f);
             }
 
-            // Edge-prediction safety gate (refactored 2026-05-12 PM,
-            // log 60 Bug 2 fix). Predict the follower's next-frame
-            // position along the active anchor's planeAxisU/V and
-            // suppress any stick axis whose prediction lands more than
-            // ~30u (one cell radius) from any reachable climb-surface
-            // node. The reachable set (followerClimbReachableNodes)
-            // includes the active anchor's grid AND any nodes on
-            // bridge-connected neighbour anchors — so when the
-            // follower is at the perimeter of the active anchor with
-            // a bridge edge to an adjacent climbable surface, the
-            // prediction lands near the bridged neighbour's node and
-            // the stick stays alive. Pre-fix the gate used per-anchor
-            // (u, v) projection that broke at curved-wall corners
-            // (predicted cell off the active anchor's grid → stick
-            // zeroed → bridge un-traversable).
+            // Option B — anchor-agnostic prediction gate (2026-05-14
+            // log 113 fix). The previous gate translated stick
+            // direction into world motion via the ACTIVE anchor's
+            // planeAxisU/V. On a curved/spiral wall the active
+            // anchor's plane axes don't match the local surface
+            // orientation along the path; predictions projected the
+            // wrong direction and `nearReachable` rejected legitimate
+            // motion, zeroing one or both stick axes. The follower
+            // either stalled (disp=0.0 in log 113) or climbed only
+            // laterally with zero vertical progress.
             //
-            // Soft inward bias: predict twice as far; if the deeper
-            // prediction is off-surface, halve the stick magnitude so
-            // the follower decelerates into surface edges instead of
-            // barrelling off them.
-            if (followerClimbAnchorIdx != UINT16_MAX &&
-                !followerClimbReachableNodes.empty()) {
-                const ::AnchorNavRoom::RoomNavData* navData =
-                    ::AnchorNavRoom::GetForRoom(
-                        gPlayState->sceneNum,
-                        (int8_t)gPlayState->roomCtx.curRoom.num);
-                if (navData != nullptr &&
-                    followerClimbAnchorIdx < navData->climbAnchors.size()) {
-                    const auto& anc = navData->climbAnchors[followerClimbAnchorIdx];
-                    constexpr float kPredictDistance      = 30.0f;
-                    constexpr float kSoftBiasDistance     = 60.0f;
-                    constexpr float kReachableThresholdSq = 30.0f * 30.0f;
-                    auto nearReachable = [&](const Vec3f& pos) -> bool {
-                        for (const Vec3f& np : followerClimbReachableNodes) {
-                            if (AnchorDist::Dist3DSq(np, pos) < kReachableThresholdSq) {
-                                return true;
-                            }
-                        }
-                        return false;
-                    };
-                    // Hard gate per axis. Use the active anchor's
-                    // planeAxisU/V to translate stick direction into
-                    // world-space motion vectors (ladderX = lateral
-                    // along planeAxisU; ladderY = vertical along
-                    // planeAxisV).
-                    if (ladderX != 0) {
-                        float sign = (ladderX > 0) ? 1.0f : -1.0f;
-                        Vec3f predX = {
-                            p2w.x + anc.planeAxisU.x * kPredictDistance * sign,
-                            p2w.y + anc.planeAxisU.y * kPredictDistance * sign,
-                            p2w.z + anc.planeAxisU.z * kPredictDistance * sign,
-                        };
-                        if (!nearReachable(predX)) {
-                            ladderX = 0; // would fall off lateral edge
+            // New approach: predict in WORLD SPACE.
+            //   - Vertical stick predicts along world ±Y (Y is global;
+            //     no plane projection needed).
+            //   - Lateral stick predicts along the world XZ direction
+            //     toward followerMoveTarget (this is the direction the
+            //     stick was just computed FROM — see
+            //     worldYaw=Math_Atan2S(dzL,dxL) above — so it matches
+            //     what OoT will actually do when Link moves along the
+            //     surface).
+            // Then the same `nearReachable` check against
+            // followerClimbReachableNodes (which includes bridged
+            // neighbours) decides whether to zero or soft-bias each
+            // axis. No anchor lookup needed; gate works correctly
+            // wherever the follower is on any reachable climb surface.
+            if (!followerClimbReachableNodes.empty()) {
+                constexpr float kPredictDistance      = 30.0f;
+                constexpr float kSoftBiasDistance     = 60.0f;
+                constexpr float kReachableThresholdSq = 30.0f * 30.0f;
+                auto nearReachable = [&](const Vec3f& pos) -> bool {
+                    for (const Vec3f& np : followerClimbReachableNodes) {
+                        if (AnchorDist::Dist3DSq(np, pos) < kReachableThresholdSq) {
+                            return true;
                         }
                     }
-                    if (ladderY != 0) {
-                        float sign = (ladderY > 0) ? 1.0f : -1.0f;
-                        Vec3f predY = {
-                            p2w.x + anc.planeAxisV.x * kPredictDistance * sign,
-                            p2w.y + anc.planeAxisV.y * kPredictDistance * sign,
-                            p2w.z + anc.planeAxisV.z * kPredictDistance * sign,
-                        };
-                        if (!nearReachable(predY)) {
-                            ladderY = 0; // would fall off top/bottom
-                        }
-                    }
-                    // Soft inward bias.
-                    if (ladderX != 0) {
-                        float sign = (ladderX > 0) ? 1.0f : -1.0f;
-                        Vec3f predX2 = {
-                            p2w.x + anc.planeAxisU.x * kSoftBiasDistance * sign,
-                            p2w.y + anc.planeAxisU.y * kSoftBiasDistance * sign,
-                            p2w.z + anc.planeAxisU.z * kSoftBiasDistance * sign,
-                        };
-                        if (!nearReachable(predX2)) ladderX = (s8)(ladderX / 2);
-                    }
-                    if (ladderY != 0) {
-                        float sign = (ladderY > 0) ? 1.0f : -1.0f;
-                        Vec3f predY2 = {
-                            p2w.x + anc.planeAxisV.x * kSoftBiasDistance * sign,
-                            p2w.y + anc.planeAxisV.y * kSoftBiasDistance * sign,
-                            p2w.z + anc.planeAxisV.z * kSoftBiasDistance * sign,
-                        };
-                        if (!nearReachable(predY2)) ladderY = (s8)(ladderY / 2);
-                    }
+                    return false;
+                };
+                // World-Y prediction for vertical axis.
+                auto predictVert = [&](float dist) -> Vec3f {
+                    float sign = (ladderY > 0) ? 1.0f : -1.0f;
+                    return { p2w.x, p2w.y + dist * sign, p2w.z };
+                };
+                // World-XZ prediction for lateral axis: extrapolate
+                // along the unit vector toward followerMoveTarget.
+                // ladderX magnitude is fine to ignore — we only need
+                // to know "does motion in this world direction land
+                // on a reachable cell?"
+                const float latMagXZ = std::sqrt(dxL*dxL + dzL*dzL);
+                auto predictLat = [&](float dist) -> Vec3f {
+                    if (latMagXZ < 0.001f) return p2w;
+                    const float ux = dxL / latMagXZ;
+                    const float uz = dzL / latMagXZ;
+                    return { p2w.x + ux * dist, p2w.y, p2w.z + uz * dist };
+                };
+                // Hard gate per axis.
+                if (ladderX != 0) {
+                    Vec3f predX = predictLat(kPredictDistance);
+                    if (!nearReachable(predX)) ladderX = 0;
+                }
+                if (ladderY != 0) {
+                    Vec3f predY = predictVert(kPredictDistance);
+                    if (!nearReachable(predY)) ladderY = 0;
+                }
+                // Soft inward bias.
+                if (ladderX != 0) {
+                    Vec3f predX2 = predictLat(kSoftBiasDistance);
+                    if (!nearReachable(predX2)) ladderX = (s8)(ladderX / 2);
+                }
+                if (ladderY != 0) {
+                    Vec3f predY2 = predictVert(kSoftBiasDistance);
+                    if (!nearReachable(predY2)) ladderY = (s8)(ladderY / 2);
                 }
             }
 
