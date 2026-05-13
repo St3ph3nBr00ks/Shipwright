@@ -40,6 +40,11 @@
 #include "z_en_follower.h"
 #include "objects/gameplay_keep/gameplay_keep.h"  // gPlayerAnim_link_normal_wait
 
+// Phase 4 — state-machine tick. Defined in
+// soh/soh/Network/Anchor/AIFollowerNPC/FollowerNPC.cpp (C++); exposed
+// to C via extern "C" wrapper. Forward-decl matches the .h there.
+extern void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play);
+
 // gPlayerSkelHeaders[], Player_DrawImpl, Player_OverrideLimbDrawGameplayDefault,
 // and Player_PostLimbDrawGameplay are all declared in standard headers
 // (variables.h + functions.h) pulled by global.h via z_en_follower.h.
@@ -98,8 +103,17 @@ void EnFollower_Destroy(Actor* thisx, PlayState* play) {
 void EnFollower_Update(Actor* thisx, PlayState* play) {
     EnFollower* this = (EnFollower*)thisx;
 
-    // Phase 1.5: advance the idle animation only. No AI tick yet —
-    // state machine + locomotion arrive in Phase 4.
+    // Phase 4: state-machine tick (locomotion + IDLE/FOLLOW transitions).
+    // C++ implementation in soh/soh/Network/Anchor/AIFollowerNPC/.
+    // For peer replicas (mPeerFollowerNpcs entries), this no-ops and
+    // returns — pos comes from FOLLOWER_NPC_STATE packets instead.
+    Anchor_TickFollowerNpcActor(thisx, play);
+
+    // Animation tick — runs for owner AND peer replicas alike so the
+    // replica plays the idle wait anim locally without needing
+    // animation data over the wire. Phase 4 still uses the default
+    // wait anim (Phase 1.5's SkelAnime_InitLink configured); Phase 5+
+    // will swap animations on state transitions.
     LinkAnimation_Update(play, &this->skelAnime);
 }
 

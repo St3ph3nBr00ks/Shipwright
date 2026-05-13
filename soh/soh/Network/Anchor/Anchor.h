@@ -1162,6 +1162,10 @@ class Anchor : public Network {
     // active=true; Actor_Kill the tracked instance on active=false.
     // Idempotent: passing the same state twice is a no-op.
     void SetFollowerNpcActive(bool active);
+    // Public accessor — returns the local NPC's actor pointer (or
+    // nullptr if no local NPC is alive). Used by the per-tick state-
+    // machine driver to distinguish owner-tick from peer-replica-tick.
+    Actor* GetFollowerNpcLocalActor() const { return mFollowerNpcLocalActor; }
     // CVar-transition polling helper, called from OnGameFrameUpdate.
     // Compares the current CVar value against mFollowerNpcCVarLast and
     // calls SetFollowerNpcActive on edges. Standalone so future spawn
