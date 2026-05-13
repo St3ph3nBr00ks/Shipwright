@@ -612,8 +612,27 @@ static ActorDBInit EnPartnerInit = {
 };
 extern "C" s16 gEnPartnerId;
 
+// SoH NPC Follower companion (Flotilla — see Plans/npc_follower_plan.md).
+// v1 Phase 1 scaffold: registers, can be spawned, no rendering, no AI.
+#include "src/overlays/actors/ovl_En_Follower/z_en_follower.h"
+static ActorDBInit EnFollowerInit = {
+    "En_Follower",
+    "AI Follower NPC (Flotilla)",
+    ACTORCAT_NPC,
+    (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
+    OBJECT_GAMEPLAY_KEEP,
+    sizeof(EnFollower),
+    (ActorFunc)EnFollower_Init,
+    (ActorFunc)EnFollower_Destroy,
+    (ActorFunc)EnFollower_Update,
+    (ActorFunc)EnFollower_Draw,
+    nullptr,
+};
+extern "C" s16 gEnFollowerId;
+
 void ActorDB::AddBuiltInCustomActors() {
-    gEnPartnerId = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
+    gEnPartnerId  = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
+    gEnFollowerId = ActorDB::Instance->AddEntry(EnFollowerInit).entry.id;
 }
 
 extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
