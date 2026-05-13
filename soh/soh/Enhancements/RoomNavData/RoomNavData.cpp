@@ -1228,6 +1228,17 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // emitted. Loop also restructured to iterate per anchor (not per
 // node) so anchor.planeNormal is in scope for the offset. Bump
 // invalidates v21 caches so they regenerate with proper drops.
+// v24 (2026-05-12 PM, log 92 fix): climb-cell drop dedup now
+// skips floor-source anchors. Pre-fix the dedup matched any
+// existing anchor (floor-src OR climb-src) within 40u XZ at both
+// endpoints. Climb cells at a wall would XZ-match nearby floor-
+// src drops (climb at wall surface, floor 30-50u away in XZ),
+// suppressing the legitimate climb-source emission. 759 cross-
+// source merges in log 92, including some that were the only
+// drop the user wanted at that location. Now climb-src dedup
+// only against other climb-src; floor-src ignored. Bump
+// invalidates v23 caches.
+
 // v23 (2026-05-12 PM, log 91 fix): worldCellX/Z computation in
 // DetectClimbCellDropAnchors was missing the bboxMin offset that
 // nodesByCell uses (CellKeyForXZ semantics: keys are
@@ -1248,7 +1259,7 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // extended with `highIsClimb` byte + 3 bytes padding. FindNearestNode
 // signature gained `bool includeClimb = false` opt-in (default keeps
 // existing floor-only semantics). Bump invalidates v20 caches.
-static constexpr uint16_t kCurrentSchemaVersion = 23;
+static constexpr uint16_t kCurrentSchemaVersion = 24;
 static constexpr uint32_t kMagic                = 0x52564E41; // 'RNAV' little-endian
 
 // Scan / sampling constants — declared early so persistence code can
@@ -3491,9 +3502,21 @@ static void DetectClimbCellDropAnchors(
                         // (offset outward from wall by 30u).
                         if (!MovementClear(testFromBase, b.pos, play)) continue;
 
-                        // Dedup against existing drop anchors.
+                        // Dedup against existing CLIMB-SOURCE drop anchors
+                        // only. Floor-source anchors (highIsClimb=0)
+                        // skipped — they have different semantics (edge
+                        // from a FLOOR node vs from a CLIMB node), and
+                        // their XZ proximity to the climb cell shouldn't
+                        // suppress legitimate climb-source emissions.
+                        // Pre-fix the cross-source dedup was suppressing
+                        // ~all drops near floor-source-anchor regions
+                        // (log 92 — climb cells at the wall would
+                        // dedupe against floor nodes 30-50u away in XZ
+                        // even though the climb cell altitude is
+                        // 30-200u different).
                         bool isDuplicate = false;
                         for (const DropAnchor& existing : out->dropAnchors) {
+                            if (existing.highIsClimb == 0) continue;
                             f32 hx = existing.highPos.x    - a.pos.x;
                             f32 hz = existing.highPos.z    - a.pos.z;
                             f32 lx = existing.landingPos.x - b.pos.x;
