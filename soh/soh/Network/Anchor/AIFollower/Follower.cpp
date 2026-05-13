@@ -278,11 +278,14 @@ static constexpr int kItemCollectTimeout = 300;
 //                              >50u/s). Lowered from initial 30u
 //                              draft per user concern about false
 //                              positives on bend-heavy paths.
-// 2s in real time. Game ticks at 20 Hz vanilla (50ms/tick), higher
-// when SoH's framerate is unlocked. The actual frame count is
-// resolved at the consumer site via Anchor::MsToGameTicks(ms) so
-// the threshold means the same 2 seconds regardless of tick rate.
-static constexpr int kStuckCheckIntervalMs = 2000;
+// 3s in real time (user 2026-05-15 log 119 — bumped 2s → 3s after
+// observing two spurious teleports on routes the follower had walked
+// cleanly in earlier tests; the 2s check fired before momentary
+// stalls resolved naturally). Game ticks at 20 Hz vanilla (50ms/tick),
+// higher when SoH's framerate is unlocked. The actual frame count is
+// resolved at the consumer site via Anchor::MsToGameTicks(ms) so the
+// threshold means the same 3 seconds regardless of tick rate.
+static constexpr int kStuckCheckIntervalMs = 3000;
 static constexpr f32 kStuckMinProgress     = 20.0f;  // min units toward target per interval
 // STUCK-FWD action (2026-05-12 PM): on stuck detection, project this
 // far toward followerMoveTarget, snap to the nearest walkable nav
@@ -291,11 +294,14 @@ static constexpr f32 kStuckMinProgress     = 20.0f;  // min units toward target 
 // step without the noise of repeated JumpResolver / cycle-2 advance
 // firings the old 0.33s detector produced.
 static constexpr f32 kStuckForwardTeleportDist = 60.0f;
-// G12 cycle-count reset window (2s in real time; resolved at consumer site).
-static constexpr int kStuckCycleWindowMs = 2000;
+// G12 cycle-count reset window (3s in real time; bumped from 2s
+// alongside kStuckCheckIntervalMs so the cycle window keeps pace
+// with the check interval).
+static constexpr int kStuckCycleWindowMs = 3000;
 // Reduced 300→120 (log 66 follow-up). 5s was too forgiving — if the
-// follower can't make progress for 2 seconds, additional nudges aren't
-// going to help; escalate to teleport-to-subgoal sooner. The
+// follower can't make progress within the stuck-check window,
+// additional nudges aren't going to help; escalate to
+// teleport-to-subgoal sooner. The
 // per-cycle dispatch (cursor-advance / teleport-to-subgoal /
 // teleport-to-leader fallback) is the actual recovery; window length
 // just controls how quickly cycles compound. After teleport, 2s
@@ -3580,7 +3586,7 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     // past the stuck section. If that fails (no useful path target),
     // fall through to the legacy IDLE exit so G14 can escalate.
     {
-        constexpr int kClimbStuckIntervalMs  = 2000;  // 2s in real time
+        constexpr int kClimbStuckIntervalMs  = 3000;  // 3s in real time (bumped 2s→3s, log 119)
         constexpr f32 kClimbStuckMinProgress = 20.0f; // 3D units, matches FOLLOW threshold
         const int climbStuckIntervalTicks = MsToGameTicks(kClimbStuckIntervalMs);
         if (followerAutonomousClimbFrames > 0 &&
