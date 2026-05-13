@@ -2346,7 +2346,7 @@ void Anchor::TickFollowerInput(Actor* actor) {
             // PopulateClimbReachableNodes (edge enumeration + 150-node
             // walk) and downstream consumers ping-ponged their
             // isLadderAnchor / reachTopY decisions. Reuses the same
-            // kReanchorLatchFrames pattern as the leader-following
+            // kReanchorLatchMs pattern as the leader-following
             // re-anchor (line ~3716) — require N consecutive frames of
             // "candidate ≠ active" before committing.
             if (followerClimbAnchorIdx != UINT16_MAX) {
@@ -2374,7 +2374,12 @@ void Anchor::TickFollowerInput(Actor* actor) {
                             }
                         }
                     }
-                    constexpr uint16_t kReanchorLatchFrames = 30;  // ~0.5s @ 60fps
+                    // 0.5s in real time, resolved via MsToGameTicks so
+                    // the latch holds 0.5s at any tick rate (was a
+                    // hardcoded 30 → 1.5s at 20fps default; fixed
+                    // 2026-05-15 log 120).
+                    constexpr int kReanchorLatchMs = 500;
+                    const int reanchorLatchTicks = MsToGameTicks(kReanchorLatchMs);
                     if (bestIdx != followerClimbAnchorIdx) {
                         if (bestIdx == followerReanchorCandidateIdx) {
                             followerReanchorCandidateFrames++;
@@ -2382,12 +2387,11 @@ void Anchor::TickFollowerInput(Actor* actor) {
                             followerReanchorCandidateIdx    = bestIdx;
                             followerReanchorCandidateFrames = 1;
                         }
-                        if (followerReanchorCandidateFrames >=
-                            kReanchorLatchFrames) {
+                        if (followerReanchorCandidateFrames >= reanchorLatchTicks) {
                             SPDLOG_INFO("[Follower] CLIMBING anchor refresh: "
                                         "{} -> {} (follower at "
                                         "({:.0f},{:.0f},{:.0f}); nearest cell "
-                                        "{:.0f}u away; latched {} frames)",
+                                        "{:.0f}u away; latched {} ticks)",
                                         (int)followerClimbAnchorIdx,
                                         (int)bestIdx,
                                         p2w.x, p2w.y, p2w.z,
@@ -3626,14 +3630,21 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
             const f32 dz = p.z - followerClimbStuckCheckPos.z;
             const f32 disp = sqrtf(dx*dx + dy*dy + dz*dz);
             if (disp < kClimbStuckMinProgress) {
-                SPDLOG_INFO("[Follower] climb-stuck (no 3D progress in 2s; "
+                // Format the elapsed-time substring from the constant so
+                // future timer adjustments don't desync the log message
+                // (log 120 caught a "2s" string left over from the 2s→3s
+                // bump in 77f649199).
+                const std::string reason =
+                    "no 3D progress in " +
+                    std::to_string(kClimbStuckIntervalMs / 1000) + "s";
+                SPDLOG_INFO("[Follower] climb-stuck ({}; "
                             "disp={:.1f} pos=({:.0f},{:.0f},{:.0f}) "
                             "checkpoint=({:.0f},{:.0f},{:.0f}))",
-                            disp, p.x, p.y, p.z,
+                            reason, disp, p.x, p.y, p.z,
                             followerClimbStuckCheckPos.x,
                             followerClimbStuckCheckPos.y,
                             followerClimbStuckCheckPos.z);
-                if (teleportForwardOnClimbStuck("no 3D progress in 2s")) {
+                if (teleportForwardOnClimbStuck(reason.c_str())) {
                     return;
                 }
                 SPDLOG_INFO("[Follower] CLIMBING→IDLE (teleport-forward failed; "
