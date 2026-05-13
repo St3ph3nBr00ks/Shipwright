@@ -1229,13 +1229,14 @@ bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toP
 // emitted. Loop also restructured to iterate per anchor (not per
 // node) so anchor.planeNormal is in scope for the offset. Bump
 // invalidates v21 caches so they regenerate with proper drops.
-// v27 (2026-05-12 PM, log 99 fix): climb-source drop XZ tolerance
-// tightened 80u → 30u. OoT vine drops fall straight down from
-// Link's release XZ; landing floors more than 30u from the cell's
-// XZ are physically unreachable via gravity. Pre-fix the loose
-// tolerance emitted "diagonal drop" anchors that the follower
-// followed and ended up landing in the wrong place. Bump
-// invalidates v26 caches.
+// v27 (2026-05-12 PM, user reverted): climb-source drop Y-delta
+// cap reverted from 500u → 200u (back to safe-fall threshold). XZ
+// tolerance kept at 80u. Effect: fewer drop anchors total, all
+// short (≤200u Y); any phantom-drop wrong-landings remain close
+// to the cell. Trade-off accepts that long suspended-vine drops
+// (200-500u) are not supported in the substrate. Follower trait
+// maxDropDistance also reverted 500 → 200. Bump invalidates v26
+// caches.
 
 // v26 (2026-05-12 PM, log 96 fix): climb-source drop dedup is now
 // Y-aware. Same XZ column at different altitudes (>15u apart in Y)
@@ -3462,20 +3463,14 @@ static void DetectClimbCellDropAnchors(
     // range). MovementClear still gates whether the drop is
     // physically feasible (no collision between cell and floor), so
     // we won't connect unrelated geometries far apart.
-    constexpr float kDropMaxDeltaY   = 500.0f;
-    // XZ tolerance tightened from 80u to 30u (2026-05-12 PM, log 99
-    // fix). OoT vine drops are pure-gravity from Link's current XZ
-    // position — he doesn't move laterally during the fall. A drop
-    // anchor whose landing floor is far from the cell's XZ creates
-    // a phantom edge the follower can't physically execute (Link
-    // releases at the wall's XZ, falls straight down, lands on
-    // whatever floor is at the wall's XZ — NOT the anchor's stated
-    // landing). 30u ≈ one grid cell, accounting for Link's body
-    // offset from the wall surface during the release. Floor
-    // candidates further in XZ from the cell are physically
-    // unreachable via simple gravity drop and should not emit drop
-    // anchors.
-    constexpr float kDropMaxXZSq     = 30.0f * 30.0f;
+    // Y-delta cap matches the floor-floor pass at 200u (child Link's
+    // safe-fall threshold). Pre-revert this was 500u to support
+    // long drops from suspended vines, but the larger range allowed
+    // drops to land in the wrong XZ location (phantom drops with
+    // long fall + lateral offset). 200u keeps drops short enough
+    // that any wrong-landing remains close to the cell.
+    constexpr float kDropMaxDeltaY   = 200.0f;
+    constexpr float kDropMaxXZSq     = 80.0f * 80.0f;
     constexpr float kClusterRadiusSq = 40.0f * 40.0f;
     // Offset along the wall's outward normal for the MovementClear
     // test starting point (2026-05-12 PM, log 89 fix). The cell.pos

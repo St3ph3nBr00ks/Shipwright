@@ -134,13 +134,10 @@ static NavTraits MakeFollowerTraits() {
                        | ::AnchorNavRoom::NODE_CLIMB_VINE
                        | ::AnchorNavRoom::NODE_CLIMB_DESIGNATED_WALL;
     // Drop anchors: follower can route through descents the same way
-    // the leader does. 500u matches the climb-source detector's
-    // kDropMaxDeltaY (RoomNavData v25). Floor-source drops can't
-    // exceed 200u (that pass keeps the safer cap), so only climb-
-    // source drops use the extended range. Drops 200-500u land Link
-    // with fall damage but survive (Link survives ~800-1000u).
+    // the leader does. 200u matches both detector passes
+    // (floor-floor and climb-cell) — child Link's safe-fall threshold.
     t.useDropAnchors          = true;
-    t.maxDropDistance         = 500;
+    t.maxDropDistance         = 200;
     // Jump anchors: follower routes through pre-baked jump pairs.
     // maxJumpDistance (140) already set above caps XZ; maxJumpUpDelta
     // 60 matches adult-Link broad-jump apex.
