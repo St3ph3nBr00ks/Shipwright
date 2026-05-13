@@ -750,6 +750,15 @@ class Anchor : public Network {
     uint16_t                       followerClimbAnchorIdx  = UINT16_MAX;
     std::vector<Vec3f>             followerClimbReachableNodes;
 
+    // Detachment detection — tracks the follower's Y last frame while
+    // CLIMBING. A sudden drop (>kClimbDetachDrop u per frame) indicates
+    // OoT released the ladder/vine grab (geometry mismatch — substrate
+    // says climbable, OoT's collision polys disagree). Resets to a
+    // sentinel on CLIMBING exit so the first frame after entry doesn't
+    // false-trigger. Initialized to a large negative number so the
+    // first-frame delta is positive.
+    f32                            followerClimbPrevY      = -1.0e9f;
+
     // Re-anchor latch state. Prevents per-frame flip-flopping between
     // touching climb anchors when the leader crosses a seam — without
     // the latch, alternating "closest anchor" decisions invert the

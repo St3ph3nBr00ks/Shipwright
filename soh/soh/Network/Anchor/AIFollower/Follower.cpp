@@ -3341,6 +3341,7 @@ void Anchor::ExitFollowerClimbToIdle(s16 dismountYaw, bool clearAutonomous) {
     followerStateFrames = 0;
     followerClimbAnchorIdx = UINT16_MAX;
     followerClimbReachableNodes.clear();
+    followerClimbPrevY = -1.0e9f;  // reset detach-detect baseline
     followerMantleHoldFrames = 0;  // clear any in-flight mantle hold
     // Reset re-anchor latch (Bug 2 fix) — next CLIMBING entry should
     // start with a clean candidate-tracking slate.
@@ -3396,6 +3397,42 @@ void Anchor::PopulateClimbReachableNodes(
 
 void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) {
     (void)leaderPos;  // unused — autonomous branch tracks leader via clients map
+
+    // Recovery exit A2 — "climb-detached" (2026-05-15 log 115 fix).
+    // The existing fell-out check below uses an absolute Y threshold
+    // (basePos.y - 100u). That misses falls that land on a platform
+    // at basePos.y altitude. Log 115: anchor 1 baseY=360 and the
+    // follower fell from Y=643 to Y=360 (a platform), staying in
+    // CLIMBING state because Y=360 is NOT below 260. They then
+    // thrashed laterally on the platform while still in CLIMBING.
+    //
+    // This early-detect compares the follower's Y to last frame's
+    // value; a rapid drop (>6u/frame) indicates OoT released the
+    // ladder/vine grab. We exit CLIMBING immediately so IDLE/FOLLOW
+    // engages and G10 leash teleport / other recovery paths take over.
+    //
+    // Threshold tuning: vanilla climb-down stick speed is ~3-5u/frame
+    // (sustained stick_y=-127 on a ladder); free-fall accelerates
+    // past 10u/frame within 2 frames of detach. 6u/frame catches
+    // detach within ~2 frames without false-triggering on legitimate
+    // climb-down. Suppressed during postTeleportHold (climb-stuck
+    // teleport-forward changes Y abruptly without being a fall).
+    if (followerAutonomousClimb &&
+        followerPostTeleportFrames == 0 &&
+        followerClimbPrevY > -1.0e8f) {
+        constexpr f32 kClimbDetachDropPerFrame = 6.0f;
+        const f32 yDrop = followerClimbPrevY - player->actor.world.pos.y;
+        if (yDrop > kClimbDetachDropPerFrame) {
+            SPDLOG_INFO("[Follower] climb-detached (Y dropped {:.1f}u "
+                        "from {:.0f} to {:.0f} — exiting CLIMBING)",
+                        yDrop, followerClimbPrevY,
+                        player->actor.world.pos.y);
+            ExitFollowerClimbToIdle(ComputeFollowerDismountYaw(player),
+                                    /*clearAutonomous=*/true);
+            return;
+        }
+    }
+    followerClimbPrevY = player->actor.world.pos.y;
 
     // Recovery exit A — "fell out of climb" (2026-05-12 PM, log 81 fix).
     // When the follower's Y drops well below the active anchor's
