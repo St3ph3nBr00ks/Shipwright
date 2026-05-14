@@ -2408,6 +2408,41 @@ void SohMenu::AddMenuEnhancements() {
             "Capture rate: gDeveloperTools.PlayerRecorder.CaptureHz (default 15). "
             "Auto-stop after MaxSeconds (default 300 = 5 min).\n\n"
             "Default: off. Zero overhead when disabled."));
+
+    // NPC Companion — Flotilla NPC Follower (Plans/npc_follower_plan.md).
+    // Friendly NPC that walks beside the player using player-like
+    // navigation (substrate path consumption + Actor_MoveXZGravity).
+    // Available in single-player AND multiplayer. Independent of the
+    // player-rigged AI Follower (which is the AFK-mode tool surfaced
+    // in the Network → Anchor menu, non-host only).
+    path.sidebarName = "NPC Companion";
+    AddSidebarEntry("Enhancements", path.sidebarName, 3);
+    path.column = SECTION_COLUMN_1;
+
+    AddWidget(path, "Friendly Link-skel NPC that walks beside you.", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "NPC Companion##FollowerNPC", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("AI.FollowerNPC.Enabled"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Spawn a Link-skel NPC that walks beside you using player-"
+            "like navigation. Pure pathfinding in v1 — no combat, "
+            "invulnerable. Substrate path-driven; routes around "
+            "obstacles instead of pressing into them.\n\n"
+            "Independent of the AI Follower in Network → Anchor "
+            "(which is the AFK-mode tool that hijacks Link's body and "
+            "is non-host-only). The NPC Companion works in single-"
+            "player AND as host.\n\n"
+            "Toggle ON spawns the NPC at your current position; "
+            "toggle OFF despawns. Auto-respawns on scene transitions.\n\n"
+            "v1 limitations:\n"
+            "  - No combat (invulnerable; doesn't attack).\n"
+            "  - No climbing yet (Phase 6 work — won't follow up "
+            "ladders/vines).\n"
+            "  - No door opening (same as the AI Follower).\n\n"
+            "Requires: Nav System (master) + Use Nav Pathfinding "
+            "+ Use Room Graph (Layer 3) ticked under AI Navigation "
+            "for substrate path consumption to work."));
 }
 
 } // namespace SohGui

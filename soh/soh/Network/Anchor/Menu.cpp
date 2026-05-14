@@ -173,25 +173,10 @@ void AnchorMainMenu(WidgetInfo& info) {
             anchor->SetFollowerActive(followerActive);
         }
 
-        // NPC Follower companion (Flotilla — Plans/npc_follower_plan.md).
-        // Independent of the player-rigged Follower above; spawns a
-        // friendly NPC actor (ACTOR_EN_FOLLOWER) that walks beside the
-        // player using NPC movement primitives (substrate path-driven;
-        // no stick injection). Phase 2 wires the CVar to spawn/despawn
-        // the actor; AI tick + network sync come in later phases.
-        bool npcFollowerEnabled =
-            CVarGetInteger(CVAR_ENHANCEMENT("AI.FollowerNPC.Enabled"), 0) != 0;
-        if (UIWidgets::Checkbox("NPC Follower Companion (experimental)", &npcFollowerEnabled,
-                                UIWidgets::CheckboxOptions()
-                                    .Color(THEME_COLOR)
-                                    .Tooltip("Spawn a Link-skel NPC companion that walks beside you using "
-                                             "player-like navigation. Independent of the AI Follower above. "
-                                             "v1: pure pathfinding, no combat, invulnerable. Toggle ON "
-                                             "spawns at your current position; toggle OFF despawns."))) {
-            CVarSetInteger(CVAR_ENHANCEMENT("AI.FollowerNPC.Enabled"),
-                           npcFollowerEnabled ? 1 : 0);
-            CVarSave();
-        }
+        // (NPC Follower checkbox moved to Enhancements → NPC Companion
+        // tab — the player-rigged AI Follower is non-host-only by
+        // design, but the NPC Follower works in single-player and as
+        // host too. See SohMenuEnhancements.cpp.)
 
         // Option B — allow the follower to temporarily override the player's
         // C-button items when it needs something (slingshot/bow for ranged

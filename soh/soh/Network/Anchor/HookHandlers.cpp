@@ -1058,12 +1058,11 @@ void Anchor::RegisterHooks() {
         Anchor::Instance->gameFrameCounter.fetch_add(
             1, std::memory_order_relaxed);
 
-        // NPC Follower (Flotilla — Plans/npc_follower_plan.md) Phase 2.
-        // Poll the CVar each tick and spawn/despawn on 0↔1 edges.
-        // Cheap: one CVarGetInteger call + int compare in the no-op case.
-        Anchor::Instance->TickFollowerNpcCVar();
-        // Phase 3: throttled STATE broadcast (10Hz) so peers see our
-        // local NPC's pos/rot. No-op when no local NPC is alive.
+        // NPC Follower STATE broadcast (Phase 3) — runs only when
+        // connected because there's nothing to broadcast otherwise.
+        // The CVar polling driver lives in NpcFollowerInit.cpp under
+        // an unconditional ShipInit hook so the NPC works in single-
+        // player AND multiplayer.
         Anchor::Instance->TickFollowerNpcStateBroadcast();
 
         // #191 — host countdown for cutscene-textbox vote-skip. No-op
