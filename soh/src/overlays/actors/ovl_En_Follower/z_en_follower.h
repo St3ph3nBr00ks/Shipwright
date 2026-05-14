@@ -70,8 +70,17 @@ typedef struct EnFollower {
     // v2 reserved (combat redesign): health, downed timer, etc. Sized to
     // ensure forward-compat with the FOLLOWER_NPC_STATE packet schema's
     // `health` + `deathFlag` fields without struct migration later.
-    s8 reservedHealth;
-    u8 reservedDeathFlag;
+    // Health (Stage 1 of npc_follower_health_and_respawn_plan).
+    // Range [0, kFollowerNpcMaxHealth] = 0..4. Starts at max on
+    // spawn. Damage application gated by
+    // `gEnhancements.AI.FollowerNPC.Invulnerable` CVar (default ON
+    // — preserves prior behavior). Death triggers and combat damage
+    // come in Stage 2+.
+    s8 health;
+    // Death-state flag — set to 1 when NPC has died (Stage 2). Sent
+    // in FOLLOWER_NPC_STATE so peers play matching anim. Reserved
+    // for now; Stage 1 only writes 0.
+    u8 deathFlag;
 
     // Last animation kind set on this actor (FollowerNpcAnim enum value
     // stored as int; matches the C++ enum class FollowerNpcAnim). Per-

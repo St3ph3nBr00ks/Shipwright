@@ -73,8 +73,8 @@ void Anchor::SendPacket_FollowerNpcState() {
     // kHoistGround vs kHoistSwim. Default 0 (ground) preserves
     // backward compat with pre-schema senders.
     payload["hoistContext"]  = (int)asFollower->hoistContext;
-    payload["health"]        = (int)100;  // RESERVED for v2
-    payload["deathFlag"]     = (int)0;    // RESERVED for v2
+    payload["health"]        = (int)asFollower->health;     // Stage 1 wired
+    payload["deathFlag"]     = (int)asFollower->deathFlag;  // Stage 1 wired (writes 0 until Stage 2)
     PacketTimeline::SetTimelineField(payload);
 
     SendJsonToRemote(payload);
@@ -190,6 +190,8 @@ void Anchor::HandlePacket_FollowerNpcState(nlohmann::json payload) {
     asFollower->syncedSpeedXZ = payload.value("speedXZ", 0.0f);
     asFollower->currentAnimType = (s8)payload.value("modelAnimType", 0);
     asFollower->hoistContext    = (s8)payload.value("hoistContext", 0);
+    asFollower->health          = (s8)payload.value("health", 4);
+    asFollower->deathFlag       = (u8)payload.value("deathFlag", 0);
 }
 
 void Anchor::TickFollowerNpcStateBroadcast() {

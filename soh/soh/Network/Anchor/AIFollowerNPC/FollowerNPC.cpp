@@ -42,6 +42,17 @@ extern s16        gEnFollowerId;
 }
 
 // ----------------------------------------------------------------------------
+// Stage 1 (npc_follower_health_and_respawn_plan): health constants
+// and helper. Stage 2+ will add ApplyDamage() that calls
+// FollowerNpcInvulnerable() before applying.
+// ----------------------------------------------------------------------------
+constexpr s8 kFollowerNpcMaxHealth = 4;
+
+bool FollowerNpcInvulnerable() {
+    return CVarGetInteger(CVAR_ENHANCEMENT("AI.FollowerNPC.Invulnerable"), 1) != 0;
+}
+
+// ----------------------------------------------------------------------------
 // File-scope Phase 5 nav state. Declared here (above SetFollowerNpcActive)
 // so the spawn helper can reset it. Single instance — v1 has one NPC per
 // client.
@@ -1919,6 +1930,21 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         if (ctx == HOIST_CONTEXT_SWIM) {
             constexpr float kSwimHoistRaise = 43.0f;  // tuned 60u → 50u → 45u → 43u over field tests
             npc->world.pos.y += kSwimHoistRaise;
+            npc->velocity.y = 0.0f;
+        } else if (ctx == HOIST_CONTEXT_GROUND) {
+            // Raise NPC near ledge so the climb-up anim is visible
+            // performing the mantle motion (body lifting up onto the
+            // ledge). Without this, NPC's pos stays at lower floor
+            // during the anim, body often hidden by terrain/camera —
+            // only the end-snap is visible to user, looking like a
+            // teleport. End-of-anim snap still moves NPC to exact
+            // topPos.
+            //
+            // Raise to topPos.y - 30 = NPC's body starts 30u below
+            // ledge top, anim shows the climb-up reach + pull motion
+            // ending at ledge level.
+            constexpr float kGroundHoistRaiseOffset = 30.0f;
+            npc->world.pos.y = topPos.y - kGroundHoistRaiseOffset;
             npc->velocity.y = 0.0f;
         }
         this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;

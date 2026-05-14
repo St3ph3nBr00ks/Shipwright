@@ -2443,6 +2443,23 @@ void SohMenu::AddMenuEnhancements() {
             "Requires: Nav System (master) + Use Nav Pathfinding "
             "+ Use Room Graph (Layer 3) ticked under AI Navigation "
             "for substrate path consumption to work."));
+
+    // Stage 1 of npc_follower_health_and_respawn_plan — gates damage
+    // application. Default ON preserves the prior "invulnerable v1"
+    // behavior. Stage 2+ adds environmental damage (drowning, void)
+    // that this CVar will gate.
+    AddWidget(path, "Invulnerable##FollowerNPC", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("AI.FollowerNPC.Invulnerable"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "When ON, the NPC Companion takes no damage from any "
+            "source (environmental hazards, future combat damage, "
+            "etc.). Defaults to ON until the death/respawn system "
+            "lands in Stage 2 of the health plan.\n\n"
+            "Health is tracked internally (4 HP max) regardless of "
+            "this setting; the CVar only gates damage application. "
+            "Future Stage 2+ work will use this CVar to let players "
+            "opt into the death/respawn loop."));
 }
 
 } // namespace SohGui

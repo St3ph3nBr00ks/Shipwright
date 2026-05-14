@@ -77,8 +77,8 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     this->currentTunic      = PLAYER_TUNIC_KOKIRI;
     this->currentBoots      = PLAYER_BOOTS_KOKIRI;
     this->currentFace       = 0;
-    this->reservedHealth    = 0;
-    this->reservedDeathFlag = 0;
+    this->health            = 4;     // kFollowerNpcMaxHealth (mirror in FollowerNPC.cpp)
+    this->deathFlag         = 0;
     this->currentAnim       = 0;     // kNone — first EnsureAnimation will fire
     this->currentAnimType   = 0;     // PLAYER_ANIMTYPE_0 (unarmed) baseline
     this->syncedSpeedXZ     = 0.0f;
