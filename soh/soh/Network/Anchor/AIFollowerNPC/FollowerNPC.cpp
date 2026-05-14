@@ -1817,7 +1817,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // the climb-out motion correctly. End-of-anim snap moves NPC
         // to the exact ledge top.
         if (ctx == HOIST_CONTEXT_SWIM) {
-            constexpr float kSwimHoistRaise = 50.0f;  // tuned -10u from initial 60u per field test
+            constexpr float kSwimHoistRaise = 45.0f;  // tuned 60u → 50u → 45u over field tests
             npc->world.pos.y += kSwimHoistRaise;
             npc->velocity.y = 0.0f;
         }
