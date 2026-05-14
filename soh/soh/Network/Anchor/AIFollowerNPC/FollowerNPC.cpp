@@ -53,13 +53,19 @@ namespace {
 // EnFollower as `currentAnim` (s32) so peer replicas track their own
 // animation independently.
 enum class FollowerNpcAnim {
-    kNone     = 0,  // initial state — first EnsureAnimation call always fires
-    kWait     = 1,  // wait_free (idle) — actually a waitL/waitR blend each frame
-    kWalk     = 2,  // walk_free
-    kRun      = 3,  // run_free
-    kClimbUp  = 4,  // climb-up (looping)
-    kStopL    = 5,  // walk_endL_free — one-shot stop anim, left foot forward
-    kStopR    = 6,  // walk_endR_free — one-shot stop anim, right foot forward
+    kNone        = 0,  // initial state — first EnsureAnimation call always fires
+    kWait        = 1,  // wait_free (idle) — actually a waitL/waitR blend each frame
+    kWalk        = 2,  // walk_free
+    kRun         = 3,  // run_free
+    kClimbUp     = 4,  // climb-up (looping)
+    kStopL       = 5,  // walk_endL_free — one-shot stop anim, left foot forward
+    kStopR       = 6,  // walk_endR_free — one-shot stop anim, right foot forward
+    // Fidgets — one-shot variants of the standing idle. Cycled by the
+    // dispatcher after kFidgetIntervalTicks in kWait. Source = Player's
+    // sFidgetAnimations at z_player.c:1014-1056.
+    kFidgetLookA = 7,  // gPlayerAnim_link_normal_wait_typeA_20f (look around)
+    kFidgetWarmB = 8,  // gPlayerAnim_link_normal_wait_typeB_20f (warm — wipe brow)
+    kFidgetStretchD = 9,  // gPlayerAnim_link_wait_typeD_20f (stretch arms)
 };
 
 struct LocalNpcNavState {
@@ -541,10 +547,11 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         const float dist = std::sqrt(distToLeaderSq);
         const float catchupBonus = std::max(0.0f, (dist - 100.0f) * 0.1f);
         speed = std::min(leaderSpeed + catchupBonus, kRunSpeed);
-        // Floor so an idle leader still produces a tiny drift toward
-        // them (NPC reaches IDLE re-entry threshold, then stops cleanly
-        // via the IDLE transition + walk_endL/R stop anim).
-        if (speed < 0.5f) speed = 0.5f;
+        // No min-speed floor: NPC matches leader's pace exactly when
+        // close, including pace-of-zero when leader is stopped. Prior
+        // 0.5 floor produced visible sliding (NPC drifting toward
+        // leader while idle anim played, since FOLLOW state never
+        // transitioned cleanly to IDLE in the hover band).
     }
     a->speedXZ = speed;
 
@@ -620,6 +627,18 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
             break;
         case FollowerNpcAnim::kStopR:
             anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR_free;
+            oneShot = true;
+            break;
+        case FollowerNpcAnim::kFidgetLookA:
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeA_20f;
+            oneShot = true;
+            break;
+        case FollowerNpcAnim::kFidgetWarmB:
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeB_20f;
+            oneShot = true;
+            break;
+        case FollowerNpcAnim::kFidgetStretchD:
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_wait_typeD_20f;
             oneShot = true;
             break;
         case FollowerNpcAnim::kNone:
@@ -719,13 +738,20 @@ void TickHeadLookAtLeader(EnFollower* this_, const Vec3f& leaderPos) {
                                    leaderPos.x - a->world.pos.x);
     const s16 yawRel = dirYaw - a->shape.rot.y;  // relative to body facing
 
-    // Distance for pitch — head tilts up when leader is above, down below.
-    const float dx = leaderPos.x - a->world.pos.x;
-    const float dz = leaderPos.z - a->world.pos.z;
-    const float dy = leaderPos.y - a->world.pos.y;
+    // Pitch via OoT's Math_Vec3f_Pitch formula at z_lib.c:292-294.
+    // Math_Atan2S(forward, side) takes forward axis first; passing
+    // (dy, distXZ) was treating dy as forward, producing 0x4000 (90°)
+    // for dy=0 → clamped to -0x2000 → head locked looking up.
+    //
+    // Correct: Math_Atan2S(distXZ, npc.y - leader.y). Returns small
+    // negative when leader is above (≈ "looking up" in Player's
+    // headLimbRot.x convention); positive when leader is below;
+    // 0 when at the same height.
+    const float dx     = leaderPos.x - a->world.pos.x;
+    const float dz     = leaderPos.z - a->world.pos.z;
     const float distXZ = std::sqrt(dx*dx + dz*dz);
     const s16 pitchRel = (distXZ > 1.0f)
-        ? -Math_Atan2S(dy, distXZ)   // negate: positive pitch = looking up
+        ? Math_Atan2S(distXZ, a->world.pos.y - leaderPos.y)
         : 0;
 
     // Apportion yaw: head takes up to ±0x4000, upper twists for the rest.
@@ -773,14 +799,13 @@ void TickIdleBlend(EnFollower* this_, PlayState* play) {
 FollowerNpcAnim AnimForState(s32 state, float speedXZ) {
     switch (state) {
         case EN_FOLLOWER_STATE_FOLLOW: {
-            // Near-zero speed → kWait. With pace-matching speed
-            // selection, NPC's speedXZ matches leader's; when leader
-            // stops, NPC stops too but stays in FOLLOW state (not
-            // IDLE) until distance drops below kEnterIdle. Without
-            // this case, NPC would play a walk anim at ~0 cadence,
-            // looking like a walking-in-place freeze.
-            if (speedXZ < 1.0f) return FollowerNpcAnim::kWait;
-            return (speedXZ >= 8.0f) ? FollowerNpcAnim::kRun : FollowerNpcAnim::kWalk;
+            // Truly-stopped speed (≈ 0) → kWait. Anything else plays
+            // walk or run based on Player's own walk↔run threshold of
+            // speedTarget > 4 (z_player.c:8165). NPC pace-matches the
+            // leader, so its speedXZ value range mirrors leader's:
+            // walk ~3, run ~7-9, sprint with catch-up bonus up to 12.
+            if (speedXZ < 0.1f) return FollowerNpcAnim::kWait;
+            return (speedXZ > 4.0f) ? FollowerNpcAnim::kRun : FollowerNpcAnim::kWalk;
         }
         case EN_FOLLOWER_STATE_STUCK:
             // STUCK runs for a single tick before transitioning to
@@ -1364,10 +1389,36 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             ? FollowerNpcAnim::kStopL
             : FollowerNpcAnim::kStopR;
     }
-    // Keep playing the stop anim until it finishes (LinkAnimation_Update
-    // returns true). EnsureAnimation guard on `stopAnimPlaying` prevents
-    // mid-anim overrides; once stopAnimPlaying clears, fall through to
-    // the normal anim choice.
+
+    // Idle fidget rotation. After sustained kWait, swap to a fidget
+    // anim (look-around / warm / stretch) cycling through three
+    // variants. Adds the look-around variety Link has in his idle.
+    // Counter only advances while actually playing kWait (not while
+    // stop-anim or another fidget is in progress).
+    static constexpr u32 kFidgetIntervalTicks = 120;  // ~6s at 20fps
+    if (localAnim == FollowerNpcAnim::kWait && !this_->stopAnimPlaying &&
+        (FollowerNpcAnim)this_->currentAnim == FollowerNpcAnim::kWait) {
+        this_->idleTicks++;
+        if (this_->idleTicks >= kFidgetIntervalTicks) {
+            this_->idleTicks = 0;
+            switch (this_->nextFidgetIdx % 3) {
+                case 0: localAnim = FollowerNpcAnim::kFidgetLookA;    break;
+                case 1: localAnim = FollowerNpcAnim::kFidgetWarmB;    break;
+                case 2: localAnim = FollowerNpcAnim::kFidgetStretchD; break;
+            }
+            this_->nextFidgetIdx++;
+        }
+    } else if (localAnim != FollowerNpcAnim::kWait) {
+        // Out of idle — reset counter so next idle session starts fresh.
+        this_->idleTicks = 0;
+    }
+
+    // Keep playing the stop anim / fidget until it finishes
+    // (LinkAnimation_Update returns true). EnsureAnimation guard on
+    // `stopAnimPlaying` prevents mid-anim overrides; once stopAnimPlaying
+    // clears, fall through to the normal anim choice (which is kWait
+    // for fidgets, so AnimForState swaps us back to the breathing
+    // idle automatically).
     if (this_->stopAnimPlaying) {
         localAnim = (FollowerNpcAnim)this_->currentAnim;  // hold current
     }

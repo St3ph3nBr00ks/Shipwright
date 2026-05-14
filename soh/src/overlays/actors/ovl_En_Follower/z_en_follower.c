@@ -85,6 +85,8 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     this->stopAnimPlaying   = 0;
     this->prevState         = EN_FOLLOWER_STATE_IDLE;
     this->idleBlendPhase    = 0.0f;
+    this->idleTicks         = 0;
+    this->nextFidgetIdx     = 0;
     this->headLimbRot.x     = 0; this->headLimbRot.y  = 0; this->headLimbRot.z  = 0;
     this->upperLimbRot.x    = 0; this->upperLimbRot.y = 0; this->upperLimbRot.z = 0;
 

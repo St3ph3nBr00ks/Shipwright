@@ -95,6 +95,14 @@ typedef struct EnFollower {
     // frame thereafter.
     s32 prevState;
 
+    // Idle fidget timing. Counts ticks while the NPC has been
+    // playing kWait. After kFidgetIntervalTicks, the dispatcher
+    // swaps to a one-shot fidget anim (look-around / warm / stretch),
+    // resets to 0, and cycles `nextFidgetIdx`. Adds the look-around
+    // / weight-shift variety Link himself has in long idle.
+    u32 idleTicks;
+    u8  nextFidgetIdx;
+
     // Idle blend phase. For waitL ↔ waitR blending in the idle anim.
     // Player's pattern: blend weight `unk_870` steps toward target
     // `unk_874` (0 or 1) at 0.3/frame (z_player.c:8058). NPC simplifies
