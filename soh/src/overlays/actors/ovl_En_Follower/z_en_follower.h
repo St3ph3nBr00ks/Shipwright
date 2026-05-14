@@ -18,13 +18,20 @@
 // State machine (5 states defined; v1 implements IDLE / FOLLOW / CLIMBING /
 // STUCK; DEAD is a reserved enum slot for v2 combat work).
 typedef enum {
-    EN_FOLLOWER_STATE_IDLE     = 0,
-    EN_FOLLOWER_STATE_FOLLOW   = 1,
-    EN_FOLLOWER_STATE_CLIMBING = 2,
-    EN_FOLLOWER_STATE_STUCK    = 3,
-    EN_FOLLOWER_STATE_DEAD     = 4,
-    EN_FOLLOWER_STATE_SWIMMING = 5,  // tread/swim while submerged
+    EN_FOLLOWER_STATE_IDLE        = 0,
+    EN_FOLLOWER_STATE_FOLLOW      = 1,
+    EN_FOLLOWER_STATE_CLIMBING    = 2,
+    EN_FOLLOWER_STATE_STUCK       = 3,
+    EN_FOLLOWER_STATE_DEAD        = 4,
+    EN_FOLLOWER_STATE_SWIMMING    = 5,  // tread/swim while submerged
+    EN_FOLLOWER_STATE_LEDGE_HOIST = 6,  // one-shot mantle (swim-out / ground-climb)
 } EnFollowerAIState;
+
+// LEDGE_HOIST entry context — drives anim selection.
+typedef enum {
+    HOIST_CONTEXT_GROUND = 0,  // ground-to-ledge mantle (gPlayerAnim_link_normal_climb_up)
+    HOIST_CONTEXT_SWIM   = 1,  // swim-out-of-water (gPlayerAnim_link_swimer_swim_15step_up)
+} HoistContext;
 
 struct EnFollower;
 
@@ -133,6 +140,15 @@ typedef struct EnFollower {
     // each tick toward leader's relative direction.
     Vec3s headLimbRot;
     Vec3s upperLimbRot;
+
+    // Ledge-hoist state. Captured at entry; consumed at anim
+    // completion. hoistContext picks the anim variant
+    // (ground-climb vs swim-step-up). hoistTargetPos is the ledge
+    // top — the snap target when the one-shot anim finishes.
+    // hoistEntryYaw locks NPC facing throughout the hoist.
+    s8    hoistContext;
+    Vec3f hoistTargetPos;
+    s16   hoistEntryYaw;
 } EnFollower;
 
 #ifdef __cplusplus

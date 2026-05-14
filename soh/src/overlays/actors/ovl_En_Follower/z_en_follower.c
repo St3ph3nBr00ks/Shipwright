@@ -90,6 +90,9 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     this->nextFidgetIdx     = 0;
     this->headLimbRot.x     = 0; this->headLimbRot.y  = 0; this->headLimbRot.z  = 0;
     this->upperLimbRot.x    = 0; this->upperLimbRot.y = 0; this->upperLimbRot.z = 0;
+    this->hoistContext      = HOIST_CONTEXT_GROUND;
+    this->hoistTargetPos.x  = 0.0f; this->hoistTargetPos.y = 0.0f; this->hoistTargetPos.z = 0.0f;
+    this->hoistEntryYaw     = 0;
 
     // Player-equivalent scale (matches Link). 0.01f. Same as the pause
     // menu preview and as Player_Init does for the real Link.

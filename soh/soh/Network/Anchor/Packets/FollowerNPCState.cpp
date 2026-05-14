@@ -68,6 +68,11 @@ void Anchor::SendPacket_FollowerNpcState() {
     // right armed/unarmed walk/run/idle variant. 0=unarmed, 1/2=
     // fighter (sword+shield), 3=long sword.
     payload["modelAnimType"] = (int)asFollower->currentAnimType;
+    // Ledge-hoist anim variant (only meaningful when state ==
+    // EN_FOLLOWER_STATE_LEDGE_HOIST). Receivers use this to pick
+    // kHoistGround vs kHoistSwim. Default 0 (ground) preserves
+    // backward compat with pre-schema senders.
+    payload["hoistContext"]  = (int)asFollower->hoistContext;
     payload["health"]        = (int)100;  // RESERVED for v2
     payload["deathFlag"]     = (int)0;    // RESERVED for v2
     PacketTimeline::SetTimelineField(payload);
@@ -184,6 +189,7 @@ void Anchor::HandlePacket_FollowerNpcState(nlohmann::json payload) {
     asFollower->state         = payload.value("state",   (int)EN_FOLLOWER_STATE_IDLE);
     asFollower->syncedSpeedXZ = payload.value("speedXZ", 0.0f);
     asFollower->currentAnimType = (s8)payload.value("modelAnimType", 0);
+    asFollower->hoistContext    = (s8)payload.value("hoistContext", 0);
 }
 
 void Anchor::TickFollowerNpcStateBroadcast() {

@@ -68,6 +68,13 @@ enum class FollowerNpcAnim {
     kFidgetStretchD = 9,  // gPlayerAnim_link_wait_typeD_20f (stretch arms)
     kSwim     = 10,  // gPlayerAnim_link_swimer_swim (moving)
     kSwimWait = 11,  // gPlayerAnim_link_swimer_swim_wait (treading water)
+    // Ledge-hoist one-shot anims. AnimForState returns one of these
+    // during EN_FOLLOWER_STATE_LEDGE_HOIST based on the
+    // EnFollower::hoistContext field. Both are ANIMMODE_ONCE; the
+    // existing stopAnimPlaying handshake holds the anim until
+    // LinkAnimation_Update reports completion.
+    kHoistGround = 12,  // gPlayerAnim_link_normal_climb_up (mantle from floor)
+    kHoistSwim   = 13,  // gPlayerAnim_link_swimer_swim_15step_up (climb out of water)
 };
 
 struct LocalNpcNavState {
@@ -654,6 +661,10 @@ LinkAnimationHeader* AnimHeaderFor(FollowerNpcAnim kind, s8 modelAnimType) {
             return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim;
         case FollowerNpcAnim::kSwimWait:
             return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim_wait;
+        case FollowerNpcAnim::kHoistGround:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_climb_up;
+        case FollowerNpcAnim::kHoistSwim:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim_15step_up;
         case FollowerNpcAnim::kNone:
         default:
             return nullptr;
@@ -680,7 +691,9 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
         want == FollowerNpcAnim::kStopR ||
         want == FollowerNpcAnim::kFidgetLookA ||
         want == FollowerNpcAnim::kFidgetWarmB ||
-        want == FollowerNpcAnim::kFidgetStretchD;
+        want == FollowerNpcAnim::kFidgetStretchD ||
+        want == FollowerNpcAnim::kHoistGround ||
+        want == FollowerNpcAnim::kHoistSwim;
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                           1.0f /* playSpeed — caller overrides per-frame */,
                           0.0f /* startFrame */,
@@ -855,6 +868,14 @@ FollowerNpcAnim AnimForState(s32 state, float speedXZ) {
             // Threshold matches Player's walk↔run handoff at 4.0.
             return (speedXZ > 0.5f) ? FollowerNpcAnim::kSwim
                                     : FollowerNpcAnim::kSwimWait;
+        case EN_FOLLOWER_STATE_LEDGE_HOIST:
+            // Picked from hoistContext by the dispatcher's anim
+            // resolution path (which has access to `this_`). This
+            // case shouldn't normally be hit because the dispatcher
+            // overrides localAnim during LEDGE_HOIST before calling
+            // EnsureAnimation; return a sensible default in case the
+            // dispatcher path is bypassed.
+            return FollowerNpcAnim::kHoistGround;
         case EN_FOLLOWER_STATE_DEAD:
             // v1 stub — wait pose. v2 combat will switch to a death anim.
             return FollowerNpcAnim::kWait;
@@ -1141,6 +1162,69 @@ void TickSWIMMING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 }
 
+// ── Ledge-hoist (bundled swim-out + ground-mantle) ───────────────────
+
+// Ledge-anchor lookup constants.
+static constexpr float kHoistApproachMatchXZSq   = 60.0f * 60.0f;
+static constexpr float kHoistSwimTriggerHeight   = 60.0f;   // leader >60u above water → search for swim-exit
+static constexpr float kHoistGroundMaxLift       = 90.0f;   // accept hoists up to this Y delta
+
+// Find the closest LedgeAnchor in this room where approachPos is
+// near `nearPos` (XZ) AND topPos is meaningfully above `nearPos.y`.
+// `wantHighEnoughForGround` filters out anchors where the lift is
+// already-walkable (i.e. step heights handled by gravity, not a
+// scripted hoist).
+const ::AnchorNavRoom::LedgeAnchor* FindClosestLedgeAnchor(
+    const ::AnchorNavRoom::RoomNavData* navData, const Vec3f& nearPos)
+{
+    if (navData == nullptr || navData->ledgeAnchors.empty()) return nullptr;
+    const ::AnchorNavRoom::LedgeAnchor* best = nullptr;
+    float bestDistSq = std::numeric_limits<float>::max();
+    for (const auto& anc : navData->ledgeAnchors) {
+        const float distSq = Dist2DSq(nearPos, anc.approachPos);
+        if (distSq > kHoistApproachMatchXZSq) continue;
+        const float lift = anc.topPos.y - nearPos.y;
+        if (lift < 20.0f) continue;  // too low; standard step / nothing to hoist
+        if (lift > kHoistGroundMaxLift) continue;  // too tall; not a v1 hoist
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            best = &anc;
+        }
+    }
+    return best;
+}
+
+// LEDGE_HOIST handler — one-shot mantle. The anim runs once
+// (ANIMMODE_ONCE via the kHoist* one-shot table in EnsureAnimation);
+// stopAnimPlaying clears when LinkAnimation_Update reports the anim
+// reached endFrame. At that point we snap to hoistTargetPos and
+// return to FOLLOW.
+void TickLEDGE_HOIST(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    Actor* a = &this_->actor;
+    a->speedXZ     = 0.0f;
+    a->shape.rot.y = this_->hoistEntryYaw;
+    a->world.rot.y = this_->hoistEntryYaw;
+
+    if (this_->stopAnimPlaying) {
+        // Anim still running — hold position. Y already set on entry;
+        // no further updates needed during the lock-pose phase.
+        return;
+    }
+
+    // Anim complete — snap to ledge top and exit.
+    a->world.pos = this_->hoistTargetPos;
+    sLocalNav.path.Reset();   // any pre-hoist path is now stale (NPC moved)
+    sLocalNav.lastPathRefreshFrame = 0;
+    sLocalNav.leashFrames     = 0;
+    sLocalNav.closeFailFrames = 0;
+    this_->state = EN_FOLLOWER_STATE_FOLLOW;
+    (void)leaderPos;
+    SPDLOG_INFO("[FollowerNPC] LEDGE_HOIST→FOLLOW (snapped to "
+                "({:.0f},{:.0f},{:.0f}), context={})",
+                this_->hoistTargetPos.x, this_->hoistTargetPos.y,
+                this_->hoistTargetPos.z, (int)this_->hoistContext);
+}
+
 // DEAD handler — Phase 7 stub. v1 NPC is invulnerable, so this state
 // is reserved-but-unentered; the handler exists to (a) lock the
 // declaration in the dispatcher (we'd otherwise rely on the
@@ -1344,6 +1428,14 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // around in the wait pose.
     if (!IsLocalOwnerNPC(npc)) {
         FollowerNpcAnim peerAnim = AnimForState(this_->state, this_->syncedSpeedXZ);
+        // Override for LEDGE_HOIST — mirror the dispatcher's
+        // local-owner path so peer picks kHoistSwim/kHoistGround
+        // from the synced hoistContext field.
+        if (this_->state == EN_FOLLOWER_STATE_LEDGE_HOIST) {
+            peerAnim = (this_->hoistContext == HOIST_CONTEXT_SWIM)
+                         ? FollowerNpcAnim::kHoistSwim
+                         : FollowerNpcAnim::kHoistGround;
+        }
         EnsureAnimation(this_, play, peerAnim);
         // Per-frame playSpeed for walk/run (mirrors local-owner path —
         // fixed 1.0 matching Player_AnimChangeLoopMorph). See local
@@ -1489,13 +1581,15 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // Phase 8 — G-guard safety nets. Run BEFORE state dispatch so a
     // teleport fully resets the state machine for the same tick (the
     // teleport drops us into FOLLOW with cleared path / baselines).
-    // CLIMBING and SWIMMING are exempt — vertical / water traversal
-    // is its own progression and shouldn't be aborted by a
+    // CLIMBING, SWIMMING, and LEDGE_HOIST are exempt — each is its
+    // own scripted traversal and shouldn't be aborted by a
     // distance-based leash. Without the swim exemption, G14 (10s,
     // 30u progress) could fire mid-swim and teleport NPC to leader's
-    // land position mid-pool.
+    // land position mid-pool. LEDGE_HOIST is short (~30 frames) so
+    // G-guards wouldn't fire anyway; exempt for safety.
     if (this_->state != EN_FOLLOWER_STATE_CLIMBING &&
-        this_->state != EN_FOLLOWER_STATE_SWIMMING) {
+        this_->state != EN_FOLLOWER_STATE_SWIMMING &&
+        this_->state != EN_FOLLOWER_STATE_LEDGE_HOIST) {
         if (TryFireG10(this_, play, leaderPos)) {
             // Teleport fired — skip rest of tick. NPC is now at leader
             // in fresh FOLLOW; next tick picks up normally.
@@ -1508,12 +1602,11 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
 
     // Water-entry detection — if NPC's submersion depth exceeds Link's
     // swim threshold (adult ageProperties.unk_24 = 36.0 at z_player.c:453),
-    // transition to SWIMMING. CLIMBING is exempt — climbing in water
-    // is OoT's own swim-up-ladder state which the substrate doesn't
-    // model. SWIMMING already running stays in SWIMMING (handler
-    // checks for water exit and reverts).
+    // transition to SWIMMING. CLIMBING / LEDGE_HOIST exempt — those
+    // are their own scripted traversals.
     if (this_->state != EN_FOLLOWER_STATE_CLIMBING &&
-        this_->state != EN_FOLLOWER_STATE_SWIMMING) {
+        this_->state != EN_FOLLOWER_STATE_SWIMMING &&
+        this_->state != EN_FOLLOWER_STATE_LEDGE_HOIST) {
         if (npc->yDistToWater > kSwimDepthThreshold) {
             this_->state = EN_FOLLOWER_STATE_SWIMMING;
             sLocalNav.path.Reset();  // discard land path; swim handler
@@ -1524,15 +1617,80 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         }
     }
 
+    // Ledge-hoist entry triggers. Two contexts:
+    //   SWIM_EXIT  — from SWIMMING when leader is meaningfully above
+    //                NPC's water surface AND a LedgeAnchor's approachPos
+    //                is near NPC's swim pos. NPC plays swim-step-up
+    //                anim then snaps to topPos.
+    //   GROUND     — from FOLLOW when a LedgeAnchor's approachPos is
+    //                near NPC's land pos AND topPos lifts in the
+    //                hoist range. NPC plays mantle anim then snaps.
+    //
+    // Both are autonomous (no need to mirror leader's exact hoist
+    // moment) — fire whenever geometry supports the lift and the
+    // NPC's current state would otherwise leave it stranded below
+    // the leader.
+    if (this_->state == EN_FOLLOWER_STATE_SWIMMING &&
+        leaderPos.y > npc->world.pos.y + kHoistSwimTriggerHeight) {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        const auto* ledge = FindClosestLedgeAnchor(navData, npc->world.pos);
+        if (ledge != nullptr) {
+            this_->hoistContext   = HOIST_CONTEXT_SWIM;
+            this_->hoistTargetPos = ledge->topPos;
+            this_->hoistEntryYaw  =
+                Math_Atan2S(ledge->topPos.z - npc->world.pos.z,
+                            ledge->topPos.x - npc->world.pos.x);
+            this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;
+            SPDLOG_INFO("[FollowerNPC] SWIMMING→LEDGE_HOIST(swim_exit) "
+                        "ledge.approach=({:.0f},{:.0f},{:.0f}) "
+                        "top=({:.0f},{:.0f},{:.0f}) NPC at "
+                        "({:.0f},{:.0f},{:.0f})",
+                        ledge->approachPos.x, ledge->approachPos.y, ledge->approachPos.z,
+                        ledge->topPos.x, ledge->topPos.y, ledge->topPos.z,
+                        npc->world.pos.x, npc->world.pos.y, npc->world.pos.z);
+        }
+    } else if (this_->state == EN_FOLLOWER_STATE_FOLLOW &&
+               leaderPos.y > npc->world.pos.y + 30.0f) {
+        // Ground hoist — leader is on a ledge above NPC. Search for a
+        // LedgeAnchor whose approachPos is near NPC's land pos. Lift
+        // must be in the hoist range (FindClosestLedgeAnchor enforces
+        // 20-90u). Fires only when state=FOLLOW because IDLE/STUCK
+        // shouldn't auto-hoist (NPC isn't actively pursuing).
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        const auto* ledge = FindClosestLedgeAnchor(navData, npc->world.pos);
+        if (ledge != nullptr) {
+            this_->hoistContext   = HOIST_CONTEXT_GROUND;
+            this_->hoistTargetPos = ledge->topPos;
+            this_->hoistEntryYaw  =
+                Math_Atan2S(ledge->topPos.z - npc->world.pos.z,
+                            ledge->topPos.x - npc->world.pos.x);
+            this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;
+            SPDLOG_INFO("[FollowerNPC] FOLLOW→LEDGE_HOIST(ground) "
+                        "ledge.approach=({:.0f},{:.0f},{:.0f}) "
+                        "top=({:.0f},{:.0f},{:.0f}) NPC at "
+                        "({:.0f},{:.0f},{:.0f})",
+                        ledge->approachPos.x, ledge->approachPos.y, ledge->approachPos.z,
+                        ledge->topPos.x, ledge->topPos.y, ledge->topPos.z,
+                        npc->world.pos.x, npc->world.pos.y, npc->world.pos.z);
+        }
+    }
+
     // Dispatch.
     switch (this_->state) {
         default:
-        case EN_FOLLOWER_STATE_IDLE:     TickIDLE(this_, play, leaderPos); break;
-        case EN_FOLLOWER_STATE_FOLLOW:   TickFOLLOW(this_, play, leaderPos); break;
-        case EN_FOLLOWER_STATE_STUCK:    TickSTUCK(this_, play, leaderPos); break;
-        case EN_FOLLOWER_STATE_CLIMBING: TickCLIMBING(this_, play, leaderPos); break;
-        case EN_FOLLOWER_STATE_SWIMMING: TickSWIMMING(this_, play, leaderPos); break;
-        case EN_FOLLOWER_STATE_DEAD:     TickDEAD(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_IDLE:        TickIDLE(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_FOLLOW:      TickFOLLOW(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_STUCK:       TickSTUCK(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_CLIMBING:    TickCLIMBING(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_SWIMMING:    TickSWIMMING(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_LEDGE_HOIST: TickLEDGE_HOIST(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_DEAD:        TickDEAD(this_, play, leaderPos); break;
     }
 
     // Clear stop-anim latch when the ONCE anim has reached endFrame.
@@ -1568,6 +1726,14 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     this_->currentAnimType = (s8)player->modelAnimType;
 
     FollowerNpcAnim localAnim = AnimForState(this_->state, npc->speedXZ);
+    // Ledge-hoist anim variant — AnimForState defaults to kHoistGround,
+    // override here based on hoistContext (the dispatcher has access
+    // to this_, AnimForState doesn't).
+    if (this_->state == EN_FOLLOWER_STATE_LEDGE_HOIST) {
+        localAnim = (this_->hoistContext == HOIST_CONTEXT_SWIM)
+                      ? FollowerNpcAnim::kHoistSwim
+                      : FollowerNpcAnim::kHoistGround;
+    }
     const bool justStoppedMoving =
         (this_->prevState == EN_FOLLOWER_STATE_FOLLOW &&
          this_->state    == EN_FOLLOWER_STATE_IDLE);
@@ -1673,8 +1839,12 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // gravity would yank NPC off the wall). SWIMMING also bypasses
     // (swim handler clamps Y to water surface; gravity would drag
     // NPC underwater each frame, fighting the surface clamp).
+    // LEDGE_HOIST bypasses too — handler locks pos during the anim
+    // and snaps to topPos on completion; gravity would drop NPC
+    // below the ledge during the lock-pose phase.
     if (this_->state != EN_FOLLOWER_STATE_CLIMBING &&
-        this_->state != EN_FOLLOWER_STATE_SWIMMING) {
+        this_->state != EN_FOLLOWER_STATE_SWIMMING &&
+        this_->state != EN_FOLLOWER_STATE_LEDGE_HOIST) {
         Actor_MoveXZGravity(npc);
 
         // Update collision-with-ground / floor altitude. Without this
