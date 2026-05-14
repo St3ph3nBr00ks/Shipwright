@@ -937,18 +937,23 @@ bool PopulateAnchorClimbPath(const ::AnchorNavRoom::RoomNavData* navData,
     // Column selection: project NPC and each node onto anchor.planeAxisU
     // (lateral wall axis). Keep nodes whose U-coordinate is within
     // 40u of NPC's U-coordinate (≈ 1 cell spacing of 30u + slack).
-    const float npcU = (npcPos.x - anchor.planeOrigin.x) * anchor.planeAxisU.x +
-                       (npcPos.z - anchor.planeOrigin.z) * anchor.planeAxisU.z;
+    // Use LEADER's U projection as the column-selection reference, NOT
+    // NPC's. Leader is on the wall, so leader's U reliably matches a
+    // cell column. NPC's pos in water (or on the floor near the wall)
+    // can be offset along the wall's lateral axis so NPC's U doesn't
+    // match any cell — log 142 showed "anchor found, distance OK
+    // (172u), but path population returned empty" because NPC's U
+    // missed all 8 cells of the anchor. Tracking leader's column
+    // guarantees the path follows where the leader actually climbed.
+    const float leaderU =
+        (leaderPos.x - anchor.planeOrigin.x) * anchor.planeAxisU.x +
+        (leaderPos.z - anchor.planeOrigin.z) * anchor.planeAxisU.z;
 
     struct Entry { float y; uint16_t idx; };
     std::vector<Entry> column;
-    // Tight column filter — only cells within ±15u of NPC's U (≈ half
-    // a 30u cell pitch). Earlier ±40u tolerance picked 2-3 adjacent
-    // columns; the path's cursor would advance through cells in
-    // different columns, snapping NPC's XZ laterally by ~30-100u per
-    // tick (visible "rapid position shifts" on curved walls like
-    // Inside Deku Tree's spiral vine wall). Single column produces
-    // a straight-up climb with no lateral hop.
+    // Tight column filter — only cells within ±15u of leader's U
+    // (≈ half a 30u cell pitch). Single column produces a straight-up
+    // climb with no lateral hop.
     for (uint16_t i = 0; i < anchor.nodeCount; i++) {
         const uint16_t idx = anchor.firstNodeIdx + i;
         if (idx >= navData->nodes.size()) break;
@@ -956,7 +961,7 @@ bool PopulateAnchorClimbPath(const ::AnchorNavRoom::RoomNavData* navData,
         const float nodeU =
             (n.pos.x - anchor.planeOrigin.x) * anchor.planeAxisU.x +
             (n.pos.z - anchor.planeOrigin.z) * anchor.planeAxisU.z;
-        if (std::fabs(nodeU - npcU) > 15.0f) continue;     // single column only
+        if (std::fabs(nodeU - leaderU) > 15.0f) continue;  // leader's column
         if (n.pos.y > leaderPos.y + 50.0f) continue;       // past leader
         column.push_back({n.pos.y, idx});
     }
@@ -1104,29 +1109,43 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 }
 
-// Swim constants. Matches Player's adult ageProperties.unk_24 = 36
-// (depth threshold to start swimming) and a slower XZ pace (Link
-// swims at ~3-4 u/frame, much slower than the 6-12 u/frame walk/run).
+// Swim constants. Match Player's ageProperties.unk_24 (z_player.c:453,505):
+// 36u for adult, 22u for child — that's the submersion depth at which
+// Player switches to swimming AND the depth Player maintains while
+// swimming (so head sits ~24u above surface for adult, ~28u for child).
 //
-// kSwimSurfaceDrop = how much to lift NPC pos when entering water so
-// body floats with head above surface (Link's pos is at feet; we
-// want pos.y = water surface - small offset so feet are submerged
-// but head is above).
-static constexpr float kSwimDepthThreshold = 36.0f;
-static constexpr float kSwimSpeedMax       = 4.0f;
-static constexpr float kSwimSurfaceDrop    = 10.0f;
-static constexpr float kSwimEnterArrive    = 60.0f;  // IDLE arrival in water (treading)
+// kSwimSpeedMax = Link's swim cap (~3-4 u/frame).
+// kSwimShoreExitDepth = if floor below NPC is within this much of
+//   the water surface, NPC can walk onto the floor → exit SWIMMING.
+//   Matches Link's step height (most actors can step up ~30u).
+static constexpr float kSwimDepthThresholdAdult = 36.0f;
+static constexpr float kSwimDepthThresholdChild = 22.0f;
+static constexpr float kSwimSpeedMax            = 4.0f;
+static constexpr float kSwimEnterArrive         = 60.0f;
+static constexpr float kSwimShoreExitDepth      = 30.0f;
 
-// SWIMMING handler — clamp Y to water surface, swim XZ toward leader
-// at swim pace. Exits to FOLLOW when no longer above water. Handles
-// its own XZ motion (dispatcher skips Actor_MoveXZGravity for
-// SWIMMING because gravity would fight the Y surface clamp).
+// Pick the per-age swim depth (used both for entry threshold and
+// surface-clamp drop — Player maintains depth = unk_24 while swimming).
+inline float SwimDepthFor(s8 linkAge) {
+    // gSaveContext.linkAge: 0 = adult, 1 = child (matches sAgeProperties
+    // indexing at z_player.c:442 / 498).
+    return (linkAge == 0) ? kSwimDepthThresholdAdult : kSwimDepthThresholdChild;
+}
+
+// SWIMMING handler — clamp Y to water surface at Link's swim depth,
+// swim XZ toward leader at swim pace. Exits to FOLLOW when:
+//   (a) no water at NPC's XZ (swimming straight off the edge of the
+//       waterbox extent), OR
+//   (b) shore is shallow enough below NPC to walk on (floor is
+//       within kSwimShoreExitDepth of the water surface).
+// Dispatcher skips Actor_MoveXZGravity for SWIMMING because gravity
+// would fight the Y surface clamp.
 void TickSWIMMING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
 
-    // Clamp Y to water surface so NPC floats at surface level.
-    // WaterBox_GetSurface1 fills surfaceY when there's water above the
-    // XZ position. If no water (somehow), exit swimming.
+    // Clamp Y to (surface - swim depth). For adult that's surface-36,
+    // for child surface-22. Maintains Link's swim pose where head
+    // sits above water and most of body submerged.
     f32 surfaceY = a->world.pos.y;
     WaterBox* wb = nullptr;
     if (!WaterBox_GetSurface1(play, &play->colCtx,
@@ -1138,7 +1157,27 @@ void TickSWIMMING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         this_->state = EN_FOLLOWER_STATE_FOLLOW;
         return;
     }
-    a->world.pos.y  = surfaceY - kSwimSurfaceDrop;
+
+    // Shore-shallow exit. Raycast floor down from a point slightly
+    // above NPC. If the floor is within kSwimShoreExitDepth of the
+    // surface, NPC can stand on it — exit swim. Without this, NPC
+    // never walks out onto sloped terrain (waterboxes extend right
+    // to the shore, so WaterBox_GetSurface1 keeps returning true).
+    Vec3f rayStart = { a->world.pos.x, surfaceY + 5.0f, a->world.pos.z };
+    CollisionPoly* floorPoly = nullptr;
+    const f32 floorY = BgCheck_EntityRaycastFloor1(&play->colCtx, &floorPoly, &rayStart);
+    if (floorPoly != nullptr && (surfaceY - floorY) < kSwimShoreExitDepth) {
+        a->world.pos.y = floorY;
+        a->velocity.y  = 0.0f;
+        this_->state   = EN_FOLLOWER_STATE_FOLLOW;
+        SPDLOG_INFO("[FollowerNPC] SWIMMING→FOLLOW (shore-shallow exit: "
+                    "surface={:.0f} floor={:.0f} depth={:.1f}u < {:.0f}u)",
+                    surfaceY, floorY, surfaceY - floorY, kSwimShoreExitDepth);
+        return;
+    }
+
+    const float swimDepth = SwimDepthFor(this_->linkAge);
+    a->world.pos.y  = surfaceY - swimDepth;
     a->velocity.y   = 0.0f;  // reset so a future FOLLOW transition starts fresh
 
     // Yaw toward leader, move at swim pace. Slower than land speeds —
@@ -1607,13 +1646,16 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     if (this_->state != EN_FOLLOWER_STATE_CLIMBING &&
         this_->state != EN_FOLLOWER_STATE_SWIMMING &&
         this_->state != EN_FOLLOWER_STATE_LEDGE_HOIST) {
-        if (npc->yDistToWater > kSwimDepthThreshold) {
+        const float swimEntryDepth = SwimDepthFor(this_->linkAge);
+        if (npc->yDistToWater > swimEntryDepth) {
             this_->state = EN_FOLLOWER_STATE_SWIMMING;
             sLocalNav.path.Reset();  // discard land path; swim handler
                                      // navigates direct-to-leader.
             SPDLOG_INFO("[FollowerNPC] FOLLOW/IDLE→SWIMMING "
-                        "(yDistToWater={:.1f}u > {:.0f}u threshold)",
-                        npc->yDistToWater, kSwimDepthThreshold);
+                        "(yDistToWater={:.1f}u > {:.0f}u threshold for "
+                        "linkAge={})",
+                        npc->yDistToWater, swimEntryDepth,
+                        (int)this_->linkAge);
         }
     }
 
