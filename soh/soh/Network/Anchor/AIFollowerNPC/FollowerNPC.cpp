@@ -946,12 +946,16 @@ bool PopulateAnchorClimbPath(const ::AnchorNavRoom::RoomNavData* navData,
     std::sort(column.begin(), column.end(),
               [](const Entry& a, const Entry& b){ return a.y < b.y; });
 
-    // Skip cells already below NPC's current Y (NPC is partway up
-    // the wall — don't backtrack). Includes a small downward slack
-    // so the first cell sits ~10u below NPC if needed for the climb
-    // anim to look right.
+    // Skip cells at or below NPC's current Y — strict filter, no
+    // downward slack. Without this, RE-ENTRY into CLIMBING (after
+    // the previous segment's path exhausted) would build a new path
+    // starting up to 30u BELOW NPC's current Y, forcing NPC to climb
+    // DOWN before resuming the climb up. User observed this as
+    // "oscillates up and down" during sustained leader-climbing.
+    // With strict filter, every re-engagement starts strictly ABOVE
+    // NPC's current Y → monotonic ascent.
     for (const auto& e : column) {
-        if (e.y < npcPos.y - 30.0f) continue;
+        if (e.y < npcPos.y) continue;
         const auto& n = navData->nodes[e.idx];
         path.waypoints.push_back(n.pos);
         path.waypointFlags.push_back(n.flags);
@@ -1411,6 +1415,15 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // partial-grid anchors).
     if (Anchor::Instance->IsLocalPlayerClimbing() &&
         this_->state != EN_FOLLOWER_STATE_CLIMBING) {
+        // Diagnostic throttle — log when force-engage WOULD-fire but
+        // doesn't, so we can see which gate is preventing the
+        // transition (e.g. swim→climb when leader grabs a vine wall
+        // reachable from water). One log per ~2s to avoid spam.
+        static uint64_t sLastDiagFrame = 0;
+        const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                      std::memory_order_relaxed);
+        const bool diagOK = (curFrame > sLastDiagFrame + 40);  // ~2s @ 20fps
+
         const ::AnchorNavRoom::RoomNavData* navData =
             ::AnchorNavRoom::GetForRoom(
                 gPlayState->sceneNum,
@@ -1428,19 +1441,48 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                     SPDLOG_INFO("[FollowerNPC] Leader-climbing force-engage — anchor "
                                 "base=({:.0f},{:.0f},{:.0f}) top=({:.0f},{:.0f},{:.0f}) "
                                 "NPC at ({:.0f},{:.0f},{:.0f}) distBase={:.0f}u — "
-                                "populated {} climb waypoints",
+                                "populated {} climb waypoints (from state={})",
                                 anchor->basePos.x, anchor->basePos.y, anchor->basePos.z,
                                 anchor->topPos.x, anchor->topPos.y, anchor->topPos.z,
                                 npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
                                 std::sqrt(distBaseSq),
-                                (int)sLocalNav.path.waypoints.size());
-                    // Fall through to dispatch — TickCLIMBING handles
-                    // the rest. Reset G-guard counters since we're
-                    // about to climb (not "stuck").
+                                (int)sLocalNav.path.waypoints.size(),
+                                (int)this_->prevState);
                     sLocalNav.leashFrames     = 0;
                     sLocalNav.closeFailFrames = 0;
+                } else if (diagOK) {
+                    SPDLOG_INFO("[FollowerNPC] Leader-climbing engage SKIPPED — anchor "
+                                "found, distance OK ({:.0f}u), but path population "
+                                "returned empty. NPC at ({:.0f},{:.0f},{:.0f}) state={} "
+                                "anchor U-axis=({:.2f},{:.2f},{:.2f}) cells={}",
+                                std::sqrt(distBaseSq),
+                                npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
+                                (int)this_->state,
+                                anchor->planeAxisU.x, anchor->planeAxisU.y, anchor->planeAxisU.z,
+                                (int)anchor->nodeCount);
+                    sLastDiagFrame = curFrame;
                 }
+            } else if (diagOK) {
+                SPDLOG_INFO("[FollowerNPC] Leader-climbing engage SKIPPED — anchor "
+                            "found but NPC too far from base ({:.0f}u > {:.0f}u "
+                            "threshold). NPC at ({:.0f},{:.0f},{:.0f}) "
+                            "anchor.base=({:.0f},{:.0f},{:.0f}) state={}",
+                            std::sqrt(distBaseSq),
+                            std::sqrt(kClimbForceEngageBaseDistSq),
+                            npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
+                            anchor->basePos.x, anchor->basePos.y, anchor->basePos.z,
+                            (int)this_->state);
+                sLastDiagFrame = curFrame;
             }
+        } else if (diagOK) {
+            SPDLOG_INFO("[FollowerNPC] Leader-climbing engage SKIPPED — no "
+                        "climb anchor in current room (sceneNum={} roomNum={}). "
+                        "NPC at ({:.0f},{:.0f},{:.0f}) state={}",
+                        gPlayState->sceneNum,
+                        (int)gPlayState->roomCtx.curRoom.num,
+                        npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
+                        (int)this_->state);
+            sLastDiagFrame = curFrame;
         }
     }
 
