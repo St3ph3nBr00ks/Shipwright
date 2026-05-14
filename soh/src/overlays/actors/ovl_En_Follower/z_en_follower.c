@@ -130,14 +130,33 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
     EnFollower* this = (EnFollower*)thisx;
 
     // Inherit the local player's equipment state for v1. The override
-    // callback (Player_OverrideLimbDrawGameplayDefault) and post-limb
-    // callback (Player_PostLimbDrawGameplay) cast `thisx` to Player*
-    // and access Player-specific fields (leftHandDLists, stateFlags1,
-    // leftHandType, etc.). Passing our EnFollower* would crash; passing
-    // the local player's Player* makes the NPC mirror Link's equipment
-    // visuals — sword, shield, boots, hand state — which is correct
-    // for v1. Phase 2+ may broadcast the NPC's own equipment via the
-    // FOLLOWER_NPC_STATE packet and track it independently.
+    // callback (Player_OverrideLimbDrawGameplayDefault) casts `thisx`
+    // to Player* and reads Player-specific fields (leftHandType,
+    // upperLimbRot, etc.) — passing our EnFollower* would crash;
+    // passing the local player's Player* makes the NPC mirror Link's
+    // equipment visuals (sword, shield, boots) for v1. Phase 2+ may
+    // broadcast the NPC's own equipment via FOLLOWER_NPC_STATE and
+    // track it independently.
+    //
+    // CRITICAL: post-limb callback is NULL (matching the pause-menu
+    // Link preview path at z_player_lib.c:2183). Player_PostLimbDrawGameplay
+    // WRITES BACK to the Player struct's leftHandPos / meleeWeaponInfo
+    // / hooked-actor positions — this is the data the engine reads
+    // next frame to position weapon swings, projectile spawns, and the
+    // first-person camera anchor. Passing it with localPlayer as thisx
+    // makes the NPC's hand positions overwrite the real Player's every
+    // frame, so swords swing from the NPC, slingshot/deku-nut shots
+    // spawn at the NPC, first-person camera anchors to the NPC. Field-
+    // tested 2026-05-16 (log 127): all four symptoms confirmed; fix
+    // is to pass NULL post-limb. NPC loses sword-swing trail and
+    // bottle rendering (post-limb side effects) but those don't apply
+    // to v1 (NPC is invulnerable / no combat).
+    //
+    // Override callback's writes (sLeftHandType / sRightHandType /
+    // D_80160000 file-statics) are transient — overwritten on the
+    // next real-Player draw — so leaving Override_Default in place
+    // is safe. Hand-attached display lists (sword/shield model) still
+    // render via the override path.
     Player* localPlayer = GET_PLAYER(play);
 
     // Sample localPlayer state for diagnostics (visible via
@@ -156,7 +175,7 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
                     this->currentBoots,
                     this->currentFace,
                     Player_OverrideLimbDrawGameplayDefault,
-                    Player_PostLimbDrawGameplay,
+                    NULL /* post-limb: see comment above — must be NULL */,
                     localPlayer /* thisx for callbacks */);
     Anchor_FollowerNpcDrawEnd();
 }
