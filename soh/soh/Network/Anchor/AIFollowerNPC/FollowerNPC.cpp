@@ -1316,11 +1316,14 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         this_->stopAnimPlaying = 0;
     }
 
-    // Head-look-at-leader. Steps NPC's headLimbRot/upperLimbRot toward
-    // leader's direction; EnFollower_Draw swaps these onto localPlayer
-    // for the override callback. Run before anim so the joint table
-    // built this frame includes the new rotations.
-    TickHeadLookAtLeader(this_, leaderPos);
+    // Head-look-at-leader. DISABLED 2026-05-16 (user reported a
+    // suspected animation bug; investigating). When re-enabling, set
+    // kHeadLookEnabled to true AND restore the save/swap/restore in
+    // EnFollower_Draw (z_en_follower.c — search for "Head-look swap").
+    constexpr bool kHeadLookEnabled = false;
+    if (kHeadLookEnabled) {
+        TickHeadLookAtLeader(this_, leaderPos);
+    }
 
     // Animation. Run AFTER dispatch so any state transitions made by
     // the handler are reflected this same tick (e.g. FOLLOW → STUCK
