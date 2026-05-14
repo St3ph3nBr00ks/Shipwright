@@ -103,6 +103,19 @@ struct LocalNpcNavState {
     // whenever progress > kNpcCloseFailProgressDelta is observed.
     uint32_t closeFailFrames   = 0;
     float    closeFailBaseline = 0.0f;
+
+    // Auto-jump-off-ledge diagnostics. Captured at jump trigger,
+    // emitted as periodic per-frame logs while airborne, summary
+    // log at landing. `jumpInProgress` flips false on landing.
+    bool     jumpInProgress         = false;
+    Vec3f    jumpStartPos           = { 0.0f, 0.0f, 0.0f };
+    Vec3f    jumpPeakPos            = { 0.0f, 0.0f, 0.0f };  // highest Y reached
+    s16      jumpStartYaw           = 0;
+    float    jumpStartSpeedXZ       = 0.0f;
+    float    jumpStartVelocityY     = 0.0f;
+    uint64_t jumpStartFrame         = 0;
+    uint64_t jumpLastDiagFrame      = 0;
+    bool     jumpWasOnFloorPrevTick = true;
 };
 }  // namespace
 static LocalNpcNavState sLocalNav;
@@ -1804,7 +1817,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // the climb-out motion correctly. End-of-anim snap moves NPC
         // to the exact ledge top.
         if (ctx == HOIST_CONTEXT_SWIM) {
-            constexpr float kSwimHoistRaise = 60.0f;
+            constexpr float kSwimHoistRaise = 50.0f;  // tuned -10u from initial 60u per field test
             npc->world.pos.y += kSwimHoistRaise;
             npc->velocity.y = 0.0f;
         }
@@ -1934,18 +1947,109 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // anim when fast, regular jump when slow (mirrors func_8083A4A8).
     // Set velocity.y = positive boost so NPC arcs up (gravity then
     // pulls down — natural jump arc).
-    if ((npc->bgCheckFlags & 4) && npc->speedXZ > 3.0f &&
-        this_->state == EN_FOLLOWER_STATE_FOLLOW) {
-        npc->velocity.y = 6.0f;   // Player uses ~6.0 for typical auto-jump
-        npc->bgCheckFlags &= ~4;  // consume the flag
-        // Pick anim based on speed — fast run uses kRunJump, slower
-        // walk-off uses kJump (matches z_player.c:5663-5666 split
-        // at linearVelocity > 4).
-        localAnim = (npc->speedXZ > 4.0f) ? FollowerNpcAnim::kRunJump
-                                          : FollowerNpcAnim::kJump;
-        SPDLOG_INFO("[FollowerNPC] Auto-jump-off-ledge fired (speedXZ={:.1f}, "
-                    "anim={})", npc->speedXZ,
-                    (localAnim == FollowerNpcAnim::kRunJump ? "run_jump" : "jump"));
+    {
+        const bool isOnFloor      = (npc->bgCheckFlags & 1) != 0;
+        const bool walkedOffEdge  = (npc->bgCheckFlags & 4) != 0;
+        const uint64_t curFrame   = Anchor::Instance->gameFrameCounter.load(
+                                        std::memory_order_relaxed);
+
+        // Diagnostic — log every gate evaluation at low rate so we can
+        // see WHY the jump didn't fire. Throttled to once every 30
+        // frames (~1.5s at 20fps) to limit spam, only when in FOLLOW
+        // and yDistToFloor is meaningful (suggesting the NPC is near
+        // an edge or in the air).
+        static uint64_t sLastGateDiag = 0;
+        if (this_->state == EN_FOLLOWER_STATE_FOLLOW &&
+            curFrame > sLastGateDiag + 30 &&
+            (walkedOffEdge || npc->yDistToWater > 1.0f ||
+             std::fabs(npc->velocity.y) > 1.0f)) {
+            SPDLOG_INFO("[FollowerNPC.jump] gate eval: state=FOLLOW "
+                        "bgCheckFlags=0x{:X} (onFloor={} walkedOffEdge={}) "
+                        "speedXZ={:.2f} velocity.y={:.2f} pos=({:.0f},{:.0f},{:.0f}) "
+                        "shape.rot.y=0x{:X} world.rot.y=0x{:X}",
+                        npc->bgCheckFlags, isOnFloor, walkedOffEdge,
+                        npc->speedXZ, npc->velocity.y,
+                        npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
+                        (uint16_t)npc->shape.rot.y, (uint16_t)npc->world.rot.y);
+            sLastGateDiag = curFrame;
+        }
+
+        // Trigger auto-jump.
+        if (walkedOffEdge && npc->speedXZ > 3.0f &&
+            this_->state == EN_FOLLOWER_STATE_FOLLOW) {
+            npc->velocity.y = 6.0f;   // Player uses ~6.0 for typical auto-jump
+            npc->bgCheckFlags &= ~4;  // consume the flag
+            localAnim = (npc->speedXZ > 4.0f) ? FollowerNpcAnim::kRunJump
+                                              : FollowerNpcAnim::kJump;
+            // Capture jump diagnostics
+            sLocalNav.jumpInProgress     = true;
+            sLocalNav.jumpStartPos       = npc->world.pos;
+            sLocalNav.jumpPeakPos        = npc->world.pos;
+            sLocalNav.jumpStartYaw       = npc->shape.rot.y;
+            sLocalNav.jumpStartSpeedXZ   = npc->speedXZ;
+            sLocalNav.jumpStartVelocityY = 6.0f;
+            sLocalNav.jumpStartFrame     = curFrame;
+            sLocalNav.jumpLastDiagFrame  = curFrame;
+            SPDLOG_INFO("[FollowerNPC.jump] FIRE — anim={} speedXZ={:.2f} "
+                        "yaw=0x{:X} startPos=({:.0f},{:.0f},{:.0f}) "
+                        "boostVel.y={:.2f} (gravity will pull from here)",
+                        (localAnim == FollowerNpcAnim::kRunJump ? "run_jump" : "jump"),
+                        npc->speedXZ, (uint16_t)npc->shape.rot.y,
+                        npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
+                        npc->velocity.y);
+        }
+
+        // Per-frame airborne tracking — log every ~6 frames (~0.3s)
+        // while jumpInProgress so we can see velocity / pos / peak
+        // evolving. Track peak Y for the summary.
+        if (sLocalNav.jumpInProgress) {
+            if (npc->world.pos.y > sLocalNav.jumpPeakPos.y) {
+                sLocalNav.jumpPeakPos = npc->world.pos;
+            }
+            if (curFrame > sLocalNav.jumpLastDiagFrame + 6) {
+                const float dxFromStart = npc->world.pos.x - sLocalNav.jumpStartPos.x;
+                const float dyFromStart = npc->world.pos.y - sLocalNav.jumpStartPos.y;
+                const float dzFromStart = npc->world.pos.z - sLocalNav.jumpStartPos.z;
+                const float distXZ = std::sqrt(dxFromStart*dxFromStart +
+                                                dzFromStart*dzFromStart);
+                SPDLOG_INFO("[FollowerNPC.jump] airborne tick {}: "
+                            "pos=({:.0f},{:.0f},{:.0f}) velocity.y={:.2f} "
+                            "speedXZ={:.2f} dY={:+.1f} distXZ={:.1f} "
+                            "peakY={:.0f} (peakΔY={:+.1f}) onFloor={}",
+                            (int)(curFrame - sLocalNav.jumpStartFrame),
+                            npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
+                            npc->velocity.y, npc->speedXZ,
+                            dyFromStart, distXZ,
+                            sLocalNav.jumpPeakPos.y,
+                            sLocalNav.jumpPeakPos.y - sLocalNav.jumpStartPos.y,
+                            isOnFloor);
+                sLocalNav.jumpLastDiagFrame = curFrame;
+            }
+            // Landing detection — bgCheckFlags & 1 set means NPC
+            // touched a floor. Emit summary log + close jump tracking.
+            if (isOnFloor && !sLocalNav.jumpWasOnFloorPrevTick) {
+                const float dxFromStart = npc->world.pos.x - sLocalNav.jumpStartPos.x;
+                const float dyFromStart = npc->world.pos.y - sLocalNav.jumpStartPos.y;
+                const float dzFromStart = npc->world.pos.z - sLocalNav.jumpStartPos.z;
+                const float distXZ = std::sqrt(dxFromStart*dxFromStart +
+                                                dzFromStart*dzFromStart);
+                const float peakRise = sLocalNav.jumpPeakPos.y -
+                                        sLocalNav.jumpStartPos.y;
+                SPDLOG_INFO("[FollowerNPC.jump] LAND — totalFrames={} "
+                            "startPos=({:.0f},{:.0f},{:.0f}) "
+                            "landPos=({:.0f},{:.0f},{:.0f}) "
+                            "peakY={:.0f} (rise={:+.1f}) drop={:+.1f}u "
+                            "horizontalDist={:.1f}u final velocity.y={:.2f}",
+                            (int)(curFrame - sLocalNav.jumpStartFrame),
+                            sLocalNav.jumpStartPos.x, sLocalNav.jumpStartPos.y,
+                            sLocalNav.jumpStartPos.z,
+                            npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
+                            sLocalNav.jumpPeakPos.y, peakRise,
+                            dyFromStart, distXZ, npc->velocity.y);
+                sLocalNav.jumpInProgress = false;
+            }
+        }
+        sLocalNav.jumpWasOnFloorPrevTick = isOnFloor;
     }
     const bool justStoppedMoving =
         (this_->prevState == EN_FOLLOWER_STATE_FOLLOW &&
