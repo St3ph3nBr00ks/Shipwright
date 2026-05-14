@@ -474,6 +474,22 @@ void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
 
+    // ---- Airborne momentum lock ------------------------------------
+    // While in a jump (sLocalNav.jumpInProgress), preserve speedXZ at
+    // the value captured when the jump fired. Player's airborne
+    // handler at z_player.c:7165 uses Math_AsymStepToF with very low
+    // rates (0.05/0.1) — effectively constant linearVelocity through
+    // the air. Without this, our TickFOLLOW recomputes speedXZ each
+    // tick from leader-distance, killing horizontal momentum mid-jump
+    // (log 147 jump 1 showed speedXZ decay 4.5 → 0 in ~20 frames).
+    // Skip the rest of FOLLOW so speedXZ + yaw stay locked.
+    if (sLocalNav.jumpInProgress) {
+        a->speedXZ = sLocalNav.jumpStartSpeedXZ;
+        a->shape.rot.y = sLocalNav.jumpStartYaw;
+        a->world.rot.y = sLocalNav.jumpStartYaw;
+        return;
+    }
+
     // ---- Effective target -------------------------------------------
     // When leader is climbing, redirect path target to the climb
     // anchor's topPos (a floor node above the climb). Pathfinder
@@ -1977,8 +1993,16 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // Trigger auto-jump.
         if (walkedOffEdge && npc->speedXZ > 3.0f &&
             this_->state == EN_FOLLOWER_STATE_FOLLOW) {
-            npc->velocity.y = 6.0f;   // Player uses ~6.0 for typical auto-jump
-            npc->bgCheckFlags &= ~4;  // consume the flag
+            // Boost matches Player's typical auto-jump value (run_jump
+            // peak ≈ 10 from func_8083A4A8 with default IREG(67)).
+            // Earlier value of 6.0 produced only +9u peak rise against
+            // our -2.0 gravity; bump to 10.0 + lower gravity to match
+            // Player's airborne behavior at z_player.c:9670.
+            constexpr float kJumpBoostVy = 10.0f;
+            constexpr float kJumpGravity = -1.2f;  // Player_Action_8084411C
+            npc->velocity.y = kJumpBoostVy;
+            npc->gravity    = kJumpGravity;        // restored on landing
+            npc->bgCheckFlags &= ~4;
             localAnim = (npc->speedXZ > 4.0f) ? FollowerNpcAnim::kRunJump
                                               : FollowerNpcAnim::kJump;
             // Capture jump diagnostics
@@ -1987,22 +2011,41 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             sLocalNav.jumpPeakPos        = npc->world.pos;
             sLocalNav.jumpStartYaw       = npc->shape.rot.y;
             sLocalNav.jumpStartSpeedXZ   = npc->speedXZ;
-            sLocalNav.jumpStartVelocityY = 6.0f;
+            sLocalNav.jumpStartVelocityY = kJumpBoostVy;
             sLocalNav.jumpStartFrame     = curFrame;
             sLocalNav.jumpLastDiagFrame  = curFrame;
             SPDLOG_INFO("[FollowerNPC.jump] FIRE — anim={} speedXZ={:.2f} "
                         "yaw=0x{:X} startPos=({:.0f},{:.0f},{:.0f}) "
-                        "boostVel.y={:.2f} (gravity will pull from here)",
+                        "boostVel.y={:.2f} gravity={:.2f}",
                         (localAnim == FollowerNpcAnim::kRunJump ? "run_jump" : "jump"),
                         npc->speedXZ, (uint16_t)npc->shape.rot.y,
                         npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
-                        npc->velocity.y);
+                        npc->velocity.y, npc->gravity);
         }
 
         // Per-frame airborne tracking — log every ~6 frames (~0.3s)
         // while jumpInProgress so we can see velocity / pos / peak
         // evolving. Track peak Y for the summary.
         if (sLocalNav.jumpInProgress) {
+            // Stuck-detection: if airborne >5s with near-zero
+            // velocity.y and not on floor, NPC is in geometry-state
+            // limbo (e.g. fell into water that doesn't register
+            // yDistToWater, or onto a void floor that doesn't set
+            // bgCheckFlags & 1). Force-teleport to leader to recover.
+            const uint64_t airborneFrames = curFrame - sLocalNav.jumpStartFrame;
+            if (airborneFrames > 100 &&  // ~5s @ 20fps
+                std::fabs(npc->velocity.y) < 1.0f && !isOnFloor) {
+                SPDLOG_WARN("[FollowerNPC.jump] STUCK in air for {} frames "
+                            "(velocity.y={:.2f}, pos=({:.0f},{:.0f},{:.0f})) "
+                            "— force-teleport to leader",
+                            (int)airborneFrames, npc->velocity.y,
+                            npc->world.pos.x, npc->world.pos.y, npc->world.pos.z);
+                TeleportNpcTo(this_, play, leaderPos);
+                npc->gravity              = -2.0f;  // restore default
+                sLocalNav.jumpInProgress  = false;
+                return;
+            }
+
             if (npc->world.pos.y > sLocalNav.jumpPeakPos.y) {
                 sLocalNav.jumpPeakPos = npc->world.pos;
             }
@@ -2046,6 +2089,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                             npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
                             sLocalNav.jumpPeakPos.y, peakRise,
                             dyFromStart, distXZ, npc->velocity.y);
+                npc->gravity = -2.0f;  // restore default ground gravity
                 sLocalNav.jumpInProgress = false;
             }
         }
