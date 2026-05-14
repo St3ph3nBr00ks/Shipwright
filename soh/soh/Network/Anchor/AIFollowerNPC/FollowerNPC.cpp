@@ -54,10 +54,12 @@ namespace {
 // animation independently.
 enum class FollowerNpcAnim {
     kNone     = 0,  // initial state — first EnsureAnimation call always fires
-    kWait     = 1,  // gPlayerAnim_link_normal_wait
-    kWalk     = 2,  // gPlayerAnim_link_normal_walk
-    kRun      = 3,  // gPlayerAnim_link_normal_run
-    kClimbUp  = 4,  // gPlayerAnim_link_normal_Fclimb_upL
+    kWait     = 1,  // wait_free (idle) — actually a waitL/waitR blend each frame
+    kWalk     = 2,  // walk_free
+    kRun      = 3,  // run_free
+    kClimbUp  = 4,  // climb-up (looping)
+    kStopL    = 5,  // walk_endL_free — one-shot stop anim, left foot forward
+    kStopR    = 6,  // walk_endR_free — one-shot stop anim, right foot forward
 };
 
 struct LocalNpcNavState {
@@ -572,8 +574,12 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
     if ((FollowerNpcAnim)this_->currentAnim == want) return;
     LinkAnimationHeader* anim = nullptr;
+    bool oneShot = false;
     switch (want) {
         case FollowerNpcAnim::kWait:
+            // wait_free is used as the "base" anim. Idle blends waitL/R
+            // each frame via LinkAnimation_BlendToJoint, so the wait_free
+            // here is only the initial joint state before the first blend.
             anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_free;
             break;
         case FollowerNpcAnim::kWalk:
@@ -585,6 +591,14 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
         case FollowerNpcAnim::kClimbUp:
             anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upL;
             break;
+        case FollowerNpcAnim::kStopL:
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endL_free;
+            oneShot = true;
+            break;
+        case FollowerNpcAnim::kStopR:
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR_free;
+            oneShot = true;
+            break;
         case FollowerNpcAnim::kNone:
             return;
     }
@@ -593,8 +607,65 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
                           1.0f /* playSpeed — caller overrides per-frame */,
                           0.0f /* startFrame */,
                           Animation_GetLastFrame((void*)anim),
-                          ANIMMODE_LOOP, -6.0f /* morphFrames */);
-    this_->currentAnim = (s32)want;
+                          oneShot ? ANIMMODE_ONCE : ANIMMODE_LOOP,
+                          -6.0f /* morphFrames */);
+    this_->currentAnim     = (s32)want;
+    this_->stopAnimPlaying = oneShot ? 1 : 0;
+}
+
+// ── Anim polish helpers (audit 2026-05-16, batch 1 / #4 / #5) ────────
+
+// Step phase cycle length — Player uses 29.0f (z_player.c:8109). The
+// walk/run anims are tuned to this cycle. Foot-down frames at ~10 and
+// ~24 within the 29-unit cycle (Player calls these with
+// func_8084021C(stepPhase, advance, 29.0, 10.0/24.0)).
+static constexpr float kStepPhaseCycle    = 29.0f;
+static constexpr float kStepPhaseFootDownL = 10.0f;
+static constexpr float kStepPhaseFootDownR = 24.0f;
+// Step phase threshold for stop-anim L vs R selection (Player at
+// z_player.c:6397 splits at sp30 < 14). sp30 = unk_868 - 3, so the
+// raw threshold is (3 + 14) = 17 in step-phase units; we ignore the
+// -3 phase shift and use 14 directly (close enough for visual L/R).
+static constexpr float kStopPhaseLRSplit  = 14.0f;
+
+// Detect step-phase crossing for footstep SFX. Returns true if the
+// phase advanced PAST `footDown` in this tick (handles the wrap-around
+// at kStepPhaseCycle so a tick that crosses the wrap still fires).
+bool StepPhaseCrossed(float prevPhase, float curPhase, float footDown) {
+    // No advance, no fire.
+    if (curPhase == prevPhase) return false;
+    // Wrap case: prev was near the end, cur wrapped to near the start.
+    if (curPhase < prevPhase) {
+        return (prevPhase < footDown && footDown <= kStepPhaseCycle) ||
+               (curPhase >= footDown && footDown >= 0.0f);
+    }
+    // Normal forward case.
+    return (prevPhase < footDown && footDown <= curPhase);
+}
+
+// Tick step phase, fire footstep SFX on cross. Returns the previous
+// phase (for diagnostics if needed).
+void TickStepPhaseAndSfx(EnFollower* this_, PlayState* play) {
+    const float playSpeed  = this_->skelAnime.playSpeed;
+    const float updateRate = R_UPDATE_RATE * 0.5f;
+    const float advance    = playSpeed * updateRate;
+    const float prevPhase  = this_->stepPhase;
+    float       newPhase   = prevPhase + advance;
+    while (newPhase >= kStepPhaseCycle) newPhase -= kStepPhaseCycle;
+    while (newPhase < 0.0f)             newPhase += kStepPhaseCycle;
+    this_->stepPhase = newPhase;
+
+    // Fire footstep SFX on foot-down frame cross. NA_SE_PL_WALK_GROUND
+    // is the base walk-on-ground SFX (Player_ApplyFloorAndAgeSfxOffsets
+    // selects the floor-variant version; we use the base for v1 — a
+    // future polish item is to honor floor type, but base sfx covers
+    // all surfaces audibly). Pitch shift scales with speed (Player
+    // passes linearVelocity at z_player.c:8099).
+    if (StepPhaseCrossed(prevPhase, newPhase, kStepPhaseFootDownL) ||
+        StepPhaseCrossed(prevPhase, newPhase, kStepPhaseFootDownR)) {
+        func_800F4010(&this_->actor.projectedPos, NA_SE_PL_WALK_GROUND,
+                      this_->actor.speedXZ);
+    }
 }
 
 // Pick the right animation for the current state. Used by both the
@@ -605,6 +676,77 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
 // comes from the synced field (`syncedSpeedXZ`) populated by the
 // state-packet handler; for local owners, it's the value the AI
 // just wrote.
+// ── Head-look-at-leader ──────────────────────────────────────────────
+// Step NPC's `headLimbRot` + `upperLimbRot` toward the relative yaw of
+// leader. Pattern mirrors Player's z_player.c:3735-3750 in shape but
+// uses simpler step-toward semantics: head turns within a comfortable
+// yaw range; if leader is behind, upper body twists too.
+//
+// Constraints:
+//   - Head yaw max ±0x4000 (90°). Beyond that, upper-body twist takes over.
+//   - Pitch: small angle (head tilts up/down slightly if leader is above/
+//     below). Capped at ±0x2000 (45°).
+//   - Step rate: ~0x600 per tick (slower than instant — feels alive).
+//
+// Drives the NPC's pose values written into Player's headLimbRot /
+// upperLimbRot via the EnFollower_Draw save/swap/restore.
+void TickHeadLookAtLeader(EnFollower* this_, const Vec3f& leaderPos) {
+    const Actor* a = &this_->actor;
+    const s16 dirYaw = Math_Atan2S(leaderPos.z - a->world.pos.z,
+                                   leaderPos.x - a->world.pos.x);
+    const s16 yawRel = dirYaw - a->shape.rot.y;  // relative to body facing
+
+    // Distance for pitch — head tilts up when leader is above, down below.
+    const float dx = leaderPos.x - a->world.pos.x;
+    const float dz = leaderPos.z - a->world.pos.z;
+    const float dy = leaderPos.y - a->world.pos.y;
+    const float distXZ = std::sqrt(dx*dx + dz*dz);
+    const s16 pitchRel = (distXZ > 1.0f)
+        ? -Math_Atan2S(dy, distXZ)   // negate: positive pitch = looking up
+        : 0;
+
+    // Apportion yaw: head takes up to ±0x4000, upper twists for the rest.
+    s16 headYawTarget  = yawRel;
+    s16 upperYawTarget = 0;
+    if (headYawTarget >  0x4000) { upperYawTarget = headYawTarget - 0x4000; headYawTarget =  0x4000; }
+    if (headYawTarget < -0x4000) { upperYawTarget = headYawTarget + 0x4000; headYawTarget = -0x4000; }
+    // If leader is mostly behind, cap upper twist at ±0x4000 (don't snap-spin).
+    if (upperYawTarget >  0x4000) upperYawTarget =  0x4000;
+    if (upperYawTarget < -0x4000) upperYawTarget = -0x4000;
+
+    // Head pitch cap at ±0x2000.
+    s16 headPitchTarget = pitchRel;
+    if (headPitchTarget >  0x2000) headPitchTarget =  0x2000;
+    if (headPitchTarget < -0x2000) headPitchTarget = -0x2000;
+
+    // Step toward targets. ~0x600 per tick = ~5° at 20fps.
+    Math_ScaledStepToS(&this_->headLimbRot.y,  headYawTarget,   0x600);
+    Math_ScaledStepToS(&this_->upperLimbRot.y, upperYawTarget,  0x600);
+    Math_ScaledStepToS(&this_->headLimbRot.x,  headPitchTarget, 0x600);
+}
+
+// ── Idle blend (waitL ↔ waitR) ───────────────────────────────────────
+// Continuously blend between waitL_free and waitR_free for a subtle
+// breathing-with-side-glance idle. Pattern from Player at z_player.c:8062.
+// Free-running phase (sine of frame counter) — no external target driver
+// needed for our v1; idle isn't long enough for the slow target-driven
+// pattern Player uses.
+void TickIdleBlend(EnFollower* this_, PlayState* play) {
+    // Phase advances ~1/40 cycle per tick → ~2s per full L↔R↔L cycle.
+    this_->idleBlendPhase += (1.0f / 40.0f);
+    if (this_->idleBlendPhase > 1.0f) this_->idleBlendPhase -= 1.0f;
+    // Blend weight: 0.5 + 0.5 * sin(2π * phase) — oscillates 0..1.
+    const float weight = 0.5f + 0.5f * Math_SinS((s16)(this_->idleBlendPhase * 0x10000));
+
+    LinkAnimation_BlendToJoint(
+        play, &this_->skelAnime,
+        (LinkAnimationHeader*)&gPlayerAnim_link_normal_waitR_free,
+        this_->skelAnime.curFrame,
+        (LinkAnimationHeader*)&gPlayerAnim_link_normal_waitL_free,
+        this_->skelAnime.curFrame,
+        weight, this_->blendTable);
+}
+
 FollowerNpcAnim AnimForState(s32 state, float speedXZ) {
     switch (state) {
         case EN_FOLLOWER_STATE_FOLLOW: {
@@ -1042,6 +1184,14 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         if (peerAnim == FollowerNpcAnim::kWalk || peerAnim == FollowerNpcAnim::kRun) {
             this_->skelAnime.playSpeed =
                 std::max(1.0f, this_->syncedSpeedXZ * 0.3f + 1.0f);
+            // Footstep SFX so peer NPC isn't silent. speedXZ is the
+            // synced value (broadcast by owner).
+            this_->actor.speedXZ = this_->syncedSpeedXZ;  // for SFX pitch
+            TickStepPhaseAndSfx(this_, play);
+        }
+        // Idle blend for peer too.
+        if (peerAnim == FollowerNpcAnim::kWait) {
+            TickIdleBlend(this_, play);
         }
         // Skip physics — STATE packet pos is authoritative and arrives
         // every ~100ms. If we ran Actor_MoveXZGravity here, gravity
@@ -1157,10 +1307,45 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         case EN_FOLLOWER_STATE_DEAD:     TickDEAD(this_, play, leaderPos); break;
     }
 
+    // Clear stop-anim latch when the ONCE anim has reached endFrame.
+    // LinkAnimation_Once clamps curFrame to endFrame on completion
+    // (z_skelanime.c:1237-1238), so once curFrame == endFrame the
+    // stop anim is done and we can swap back to wait.
+    if (this_->stopAnimPlaying &&
+        this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
+        this_->stopAnimPlaying = 0;
+    }
+
+    // Head-look-at-leader. Steps NPC's headLimbRot/upperLimbRot toward
+    // leader's direction; EnFollower_Draw swaps these onto localPlayer
+    // for the override callback. Run before anim so the joint table
+    // built this frame includes the new rotations.
+    TickHeadLookAtLeader(this_, leaderPos);
+
     // Animation. Run AFTER dispatch so any state transitions made by
     // the handler are reflected this same tick (e.g. FOLLOW → STUCK
     // immediately switches to wait anim, not next-tick).
+    //
+    // FOLLOW→IDLE transition gets a one-shot stop anim (walk_endL/R)
+    // chosen by current step phase — eliminates the "freeze mid-stride"
+    // pop when NPC arrives at leader. Mirrors Player's func_8083BF50
+    // (z_player.c:6388).
     FollowerNpcAnim localAnim = AnimForState(this_->state, npc->speedXZ);
+    const bool justStoppedMoving =
+        (this_->prevState == EN_FOLLOWER_STATE_FOLLOW &&
+         this_->state    == EN_FOLLOWER_STATE_IDLE);
+    if (justStoppedMoving) {
+        localAnim = (this_->stepPhase < kStopPhaseLRSplit)
+            ? FollowerNpcAnim::kStopL
+            : FollowerNpcAnim::kStopR;
+    }
+    // Keep playing the stop anim until it finishes (LinkAnimation_Update
+    // returns true). EnsureAnimation guard on `stopAnimPlaying` prevents
+    // mid-anim overrides; once stopAnimPlaying clears, fall through to
+    // the normal anim choice.
+    if (this_->stopAnimPlaying) {
+        localAnim = (FollowerNpcAnim)this_->currentAnim;  // hold current
+    }
     EnsureAnimation(this_, play, localAnim);
 
     // Per-frame playSpeed for walk/run. EnsureAnimation only sets
@@ -1171,7 +1356,18 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // Player's run-anim scaling: velocity * 0.3 + 1.0.
     if (localAnim == FollowerNpcAnim::kWalk || localAnim == FollowerNpcAnim::kRun) {
         this_->skelAnime.playSpeed = std::max(1.0f, npc->speedXZ * 0.3f + 1.0f);
+        // Tick step phase + emit footstep SFX on foot-down crossings.
+        TickStepPhaseAndSfx(this_, play);
     }
+
+    // Idle blend — overlay waitL↔waitR blend onto the joint table after
+    // LinkAnimation_Update has loaded the base wait_free frame. Only
+    // when we're actually playing the wait anim (not stop-anim mid-play).
+    if (localAnim == FollowerNpcAnim::kWait && !this_->stopAnimPlaying) {
+        TickIdleBlend(this_, play);
+    }
+
+    this_->prevState = this_->state;
 
     // Sync speed for peers — they read syncedSpeedXZ to choose walk
     // vs run anim. (For peers, this is overwritten by the STATE

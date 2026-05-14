@@ -77,6 +77,47 @@ typedef struct EnFollower {
     // FOLLOWER_NPC_STATE so it can pick walk vs run animation. Reset
     // to 0 on init.
     f32 syncedSpeedXZ;
+
+    // ── Animation polish (audit 2026-05-16) ──────────────────────────
+    // Step phase counter — Player calls this unk_868 (z_player.c:8105).
+    // Tracks position in the 29-unit walk/run step cycle so we know
+    // which foot is forward. Used by:
+    //   - walk_endL/R stop anim selection (phase < 14 → endL, else endR).
+    //   - Footstep SFX trigger (phase crosses 10 or 24 = foot-down frame).
+    // Ticked by `playSpeed * R_UPDATE_RATE * 0.5` per frame, wrapped at 29.
+    f32 stepPhase;
+    // Set true while a one-shot stop anim (walk_endL/R) is playing in
+    // IDLE state. Blocks EnsureAnimation from switching to kWait until
+    // the stop anim completes (LinkAnimation_Update returns true).
+    u8  stopAnimPlaying;
+    // Previous tick's state. Used to detect FOLLOW→IDLE transition so
+    // the stop anim fires only on the transition frame, not every
+    // frame thereafter.
+    s32 prevState;
+
+    // Idle blend phase. For waitL ↔ waitR blending in the idle anim.
+    // Player's pattern: blend weight `unk_870` steps toward target
+    // `unk_874` (0 or 1) at 0.3/frame (z_player.c:8058). NPC simplifies
+    // to a free-running sine so the breathing motion oscillates
+    // continuously without needing an external target driver.
+    f32 idleBlendPhase;
+    // 32-aligned blend table for LinkAnimation_BlendToJoint. Sized to
+    // PLAYER_LIMB_BUF_COUNT — same as jointTable. +1 to allow for the
+    // ALIGN16 manipulation inside LinkAnimation_BlendToJoint (which
+    // takes an unaligned pointer and rounds up).
+    Vec3s blendTable[PLAYER_LIMB_BUF_COUNT];
+
+    // Independent head-look-at-leader. We pass localPlayer as the
+    // override-callback thisx (so equipment-draw resolves), which
+    // means the NPC's head normally mirrors the local player's
+    // headLimbRot. To make the NPC's head turn independently toward
+    // its OWN leader, the NPC's draw path saves/swaps/restores
+    // localPlayer's headLimbRot/upperLimbRot around the Player_DrawImpl
+    // call (same save/swap/restore pattern as face textures and
+    // tunic color). These fields hold the NPC's own pose, computed
+    // each tick toward leader's relative direction.
+    Vec3s headLimbRot;
+    Vec3s upperLimbRot;
 } EnFollower;
 
 #ifdef __cplusplus

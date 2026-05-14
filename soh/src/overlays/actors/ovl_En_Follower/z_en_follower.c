@@ -81,6 +81,12 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     this->reservedDeathFlag = 0;
     this->currentAnim       = 0;     // kNone — first EnsureAnimation will fire
     this->syncedSpeedXZ     = 0.0f;
+    this->stepPhase         = 0.0f;
+    this->stopAnimPlaying   = 0;
+    this->prevState         = EN_FOLLOWER_STATE_IDLE;
+    this->idleBlendPhase    = 0.0f;
+    this->headLimbRot.x     = 0; this->headLimbRot.y  = 0; this->headLimbRot.z  = 0;
+    this->upperLimbRot.x    = 0; this->upperLimbRot.y = 0; this->upperLimbRot.z = 0;
 
     // Player-equivalent scale (matches Link). 0.01f. Same as the pause
     // menu preview and as Player_Init does for the real Link.
@@ -188,6 +194,18 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
     this->currentBoots = localPlayer->currentBoots;
     this->currentFace  = localPlayer->actor.shape.face;
 
+    // Head-look swap. Save/swap/restore localPlayer's head + upper
+    // rotation around our draw so the NPC's head turns independently
+    // toward ITS leader (the same Player, but via cached rotation
+    // values computed in our tick). Without this, the NPC's head
+    // mirrors whatever direction the local Link is currently looking
+    // — looks wrong because they often face different directions.
+    // Mirror of the face-texture save/swap/restore pattern.
+    Vec3s savedHead  = localPlayer->headLimbRot;
+    Vec3s savedUpper = localPlayer->upperLimbRot;
+    localPlayer->headLimbRot  = this->headLimbRot;
+    localPlayer->upperLimbRot = this->upperLimbRot;
+
     Anchor_FollowerNpcDrawBegin(thisx);
     Player_DrawImpl(play,
                     this->skelAnime.skeleton,
@@ -201,4 +219,9 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
                     NULL /* post-limb: see comment above — must be NULL */,
                     localPlayer /* thisx for callbacks */);
     Anchor_FollowerNpcDrawEnd();
+
+    // Restore. Scoped to this one draw call — same as the face-texture
+    // restore in DummyPlayer_Draw.
+    localPlayer->headLimbRot  = savedHead;
+    localPlayer->upperLimbRot = savedUpper;
 }
