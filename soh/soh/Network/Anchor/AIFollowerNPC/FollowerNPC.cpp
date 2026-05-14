@@ -1324,14 +1324,31 @@ void TickLEDGE_HOIST(EnFollower* this_, PlayState* play, const Vec3f& leaderPos)
     a->shape.rot.y = this_->hoistEntryYaw;
     a->world.rot.y = this_->hoistEntryYaw;
 
-    if (this_->stopAnimPlaying) {
-        // Anim still running — hold position. Y already set on entry;
-        // no further updates needed during the lock-pose phase.
+    // Wait until the hoist anim has been (a) set up by EnsureAnimation
+    // AND (b) played to completion. Without check (a), the entry tick
+    // would exit immediately because the dispatcher runs TickLEDGE_HOIST
+    // BEFORE EnsureAnimation in the per-tick order — stopAnimPlaying
+    // is still 0 (stale from prior state) on entry.
+    //
+    // Field-test log 144 showed LEDGE_HOIST entering and exiting on
+    // the same timestamp (no anim visible). The "teleport back to top
+    // when leader runs off ledge" was the same bug: NPC walked off
+    // snap target, GROUND-MANTLE trigger refired, the new LEDGE_HOIST
+    // exited instantly with a snap-back to topPos.
+    const bool hoistAnimSetUp =
+        (FollowerNpcAnim)this_->currentAnim == FollowerNpcAnim::kHoistGround ||
+        (FollowerNpcAnim)this_->currentAnim == FollowerNpcAnim::kHoistSwim;
+    if (!hoistAnimSetUp || this_->stopAnimPlaying) {
+        // Hold position. Anim isn't set up yet (entry tick) or is
+        // currently playing. EnsureAnimation will fire later in the
+        // dispatcher and transition the anim; subsequent ticks see
+        // hoistAnimSetUp=true.
         return;
     }
 
     // Anim complete — snap to ledge top and exit.
-    a->world.pos = this_->hoistTargetPos;
+    a->world.pos  = this_->hoistTargetPos;
+    a->velocity.y = 0.0f;   // reset so gravity starts fresh from the snap
     sLocalNav.path.Reset();   // any pre-hoist path is now stale (NPC moved)
     sLocalNav.lastPathRefreshFrame = 0;
     sLocalNav.leashFrames     = 0;
