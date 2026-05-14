@@ -511,18 +511,41 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
 
-    // Speed selection. Run when (a) NPC is far from leader (catch-up),
-    // or (b) leader is sprinting (pace-matching — without this, NPC
-    // oscillates walk↔run as it closes the gap → falls behind → closes
-    // again, producing the "walk anim while leader sprints" symptom).
-    // Leader speedXZ > 4 is the same threshold Player uses to decide
-    // run-vs-walk action handler at z_player.c:8165.
+    // Speed selection — match leader's pace, with a small catch-up
+    // bonus that only kicks in when significantly farther than the
+    // IDLE→FOLLOW threshold. Prevents the "sprint up → stop → sprint
+    // up" oscillation pattern caused by always-sprint catch-up: NPC
+    // would close to within kEnterIdle (50u), drop to IDLE, leader
+    // walks, NPC re-enters FOLLOW, sprint, repeat.
+    //
+    // Bands:
+    //   - dist > kRunDistance (250u): always sprint at kRunSpeed.
+    //     Big gap — catch up fast.
+    //   - dist 100-250u: match leader + (dist - 100) * 0.1 catch-up
+    //     bonus, capped at kRunSpeed. Slowly closes the gap.
+    //   - dist < 100u (down to kEnterIdle): match leader's speed
+    //     EXACTLY. Distance is stable; NPC trails at fixed offset.
+    //     No oscillation.
+    //
+    // When leader is stopped (speedXZ=0) and NPC reaches the close
+    // band, NPC effectively halts at the current distance. The
+    // IDLE re-entry check (distToTargetSq <= kEnterIdle²) handles
+    // the IDLE switch when NPC drifts in further.
     const float distToLeaderSq = Dist2DSq(a->world.pos, leaderPos);
-    Player* leader = GET_PLAYER(play);
-    const float leaderSpeed = (leader != nullptr) ? leader->actor.speedXZ : 0.0f;
-    const bool  shouldRun   = (distToLeaderSq > kRunDistance * kRunDistance) ||
-                              (leaderSpeed > 4.0f);
-    const float speed       = shouldRun ? kRunSpeed : kWalkSpeed;
+    Player*     leader         = GET_PLAYER(play);
+    const float leaderSpeed    = (leader != nullptr) ? leader->actor.speedXZ : 0.0f;
+    float       speed;
+    if (distToLeaderSq > kRunDistance * kRunDistance) {
+        speed = kRunSpeed;
+    } else {
+        const float dist = std::sqrt(distToLeaderSq);
+        const float catchupBonus = std::max(0.0f, (dist - 100.0f) * 0.1f);
+        speed = std::min(leaderSpeed + catchupBonus, kRunSpeed);
+        // Floor so an idle leader still produces a tiny drift toward
+        // them (NPC reaches IDLE re-entry threshold, then stops cleanly
+        // via the IDLE transition + walk_endL/R stop anim).
+        if (speed < 0.5f) speed = 0.5f;
+    }
     a->speedXZ = speed;
 
     // ---- Stuck check ------------------------------------------------
@@ -750,11 +773,13 @@ void TickIdleBlend(EnFollower* this_, PlayState* play) {
 FollowerNpcAnim AnimForState(s32 state, float speedXZ) {
     switch (state) {
         case EN_FOLLOWER_STATE_FOLLOW: {
-            // Threshold matches kRunDistance's intent: when the AI
-            // chose run speed (≥ kRunSpeed/2 ≈ 6.0), play run anim.
-            // Below that, play walk anim. At zero speed FOLLOW shouldn't
-            // be active but if it is, fall back to walk (so the NPC
-            // doesn't visually freeze).
+            // Near-zero speed → kWait. With pace-matching speed
+            // selection, NPC's speedXZ matches leader's; when leader
+            // stops, NPC stops too but stays in FOLLOW state (not
+            // IDLE) until distance drops below kEnterIdle. Without
+            // this case, NPC would play a walk anim at ~0 cadence,
+            // looking like a walking-in-place freeze.
+            if (speedXZ < 1.0f) return FollowerNpcAnim::kWait;
             return (speedXZ >= 8.0f) ? FollowerNpcAnim::kRun : FollowerNpcAnim::kWalk;
         }
         case EN_FOLLOWER_STATE_STUCK:
@@ -1317,14 +1342,10 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         this_->stopAnimPlaying = 0;
     }
 
-    // Head-look-at-leader. DISABLED 2026-05-16 (user reported a
-    // suspected animation bug; investigating). When re-enabling, set
-    // kHeadLookEnabled to true AND restore the save/swap/restore in
-    // EnFollower_Draw (z_en_follower.c — search for "Head-look swap").
-    constexpr bool kHeadLookEnabled = false;
-    if (kHeadLookEnabled) {
-        TickHeadLookAtLeader(this_, leaderPos);
-    }
+    // Head-look-at-leader. Re-enabled after isolating the idle-animation
+    // bug to TickIdleBlend (now disabled separately). Save/swap/restore
+    // of localPlayer's headLimbRot/upperLimbRot happens in EnFollower_Draw.
+    TickHeadLookAtLeader(this_, leaderPos);
 
     // Animation. Run AFTER dispatch so any state transitions made by
     // the handler are reflected this same tick (e.g. FOLLOW → STUCK

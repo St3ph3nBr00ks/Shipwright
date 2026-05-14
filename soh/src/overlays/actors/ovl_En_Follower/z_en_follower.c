@@ -194,12 +194,16 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
     this->currentBoots = localPlayer->currentBoots;
     this->currentFace  = localPlayer->actor.shape.face;
 
-    // Head-look swap — DISABLED 2026-05-16 (user reported a suspected
-    // animation bug; investigating). When re-enabling, restore the
-    // save/swap/restore around the Player_DrawImpl call below AND
-    // re-enable the TickHeadLookAtLeader call in
-    // soh/Network/Anchor/AIFollowerNPC/FollowerNPC.cpp (search for
-    // kHeadLookEnabled).
+    // Head-look swap. Save/swap/restore localPlayer's head + upper
+    // rotation around our draw so the NPC's head turns independently
+    // toward ITS leader. Mirror of the face-texture save/swap/restore
+    // pattern. Re-enabled after isolating the idle-anim bug to the
+    // idle blend (now disabled separately).
+    Vec3s savedHead  = localPlayer->headLimbRot;
+    Vec3s savedUpper = localPlayer->upperLimbRot;
+    localPlayer->headLimbRot  = this->headLimbRot;
+    localPlayer->upperLimbRot = this->upperLimbRot;
+
     Anchor_FollowerNpcDrawBegin(thisx);
     Player_DrawImpl(play,
                     this->skelAnime.skeleton,
@@ -213,4 +217,8 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
                     NULL /* post-limb: see comment above — must be NULL */,
                     localPlayer /* thisx for callbacks */);
     Anchor_FollowerNpcDrawEnd();
+
+    // Restore. Scoped to this one draw call.
+    localPlayer->headLimbRot  = savedHead;
+    localPlayer->upperLimbRot = savedUpper;
 }
