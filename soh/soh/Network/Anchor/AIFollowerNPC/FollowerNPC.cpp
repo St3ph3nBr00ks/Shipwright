@@ -99,6 +99,12 @@ enum class FollowerNpcAnim {
     kRunJump  = 14,  // gPlayerAnim_link_normal_run_jump
     kJump     = 15,  // gPlayerAnim_link_normal_jump
     kClimbUpR = 16,  // gPlayerAnim_link_normal_Fclimb_upR (alternates with kClimbUpL)
+    // Lateral climb anims — for sideways motion on a climbable surface
+    // (e.g. shimmying along a vine wall). Player uses these via
+    // ageProperties->unk_BC table at z_player.c:13415; alternates L/R
+    // similar to vertical climb. One-shot per step.
+    kClimbSideL = 17,  // gPlayerAnim_link_normal_Fclimb_sideL
+    kClimbSideR = 18,  // gPlayerAnim_link_normal_Fclimb_sideR
 };
 
 struct LocalNpcNavState {
@@ -142,7 +148,15 @@ struct LocalNpcNavState {
     // wall, no new step fires — anim holds at last frame
     // (Player's PLAYER_STATE2_STATIONARY_LADDER equivalent).
     bool     climbNextIsRight = false;  // toggles each step
-    float    climbPrevY       = 0.0f;   // for motion detection
+    float    climbPrevY       = 0.0f;   // for vertical motion detection
+    Vec3f    climbPrevXZ      = { 0.0f, 0.0f, 0.0f };  // for lateral motion (XZ delta on wall)
+
+    // Ledge-hoist position interpolation. Captured at LEDGE_HOIST
+    // entry; pos.y is lerp'd from startPos.y → hoistTargetPos.y over
+    // the anim duration so the body visibly moves up during the
+    // mantle motion (instead of staying at lower pos and snapping
+    // at end).
+    Vec3f    hoistStartPos   = { 0.0f, 0.0f, 0.0f };
 };
 }  // namespace
 static LocalNpcNavState sLocalNav;
@@ -712,6 +726,10 @@ LinkAnimationHeader* AnimHeaderFor(FollowerNpcAnim kind, s8 modelAnimType) {
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upL;
         case FollowerNpcAnim::kClimbUpR:
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upR;
+        case FollowerNpcAnim::kClimbSideL:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_sideL;
+        case FollowerNpcAnim::kClimbSideR:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_sideR;
         case FollowerNpcAnim::kFidgetLookA:
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeA_20f;
         case FollowerNpcAnim::kFidgetWarmB:
@@ -765,7 +783,9 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
         want == FollowerNpcAnim::kRunJump ||
         want == FollowerNpcAnim::kJump ||
         want == FollowerNpcAnim::kClimbUpL ||
-        want == FollowerNpcAnim::kClimbUpR;
+        want == FollowerNpcAnim::kClimbUpR ||
+        want == FollowerNpcAnim::kClimbSideL ||
+        want == FollowerNpcAnim::kClimbSideR;
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                           1.0f /* playSpeed — caller overrides per-frame */,
                           0.0f /* startFrame */,
@@ -1227,8 +1247,21 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         a->world.pos.y += (dy > 0.0f ? kClimbSpeedY : -kClimbSpeedY);
     }
 
-    // Face INTO the wall — opposite of planeNormal (which points OUT).
-    a->shape.rot.y = Math_Atan2S(-anc.planeNormal.z, -anc.planeNormal.x);
+    // Face direction. When leader is also climbing this anchor, mirror
+    // leader's facing — leader's rotation reflects the actual wall
+    // surface orientation including curvature (Player's collision
+    // updates rot.y as it moves between cells on a curved wall).
+    // Without this, NPC's rotation locks to the anchor's planeNormal
+    // (a single average direction) and doesn't update as NPC moves
+    // laterally along a curved vine wall.
+    if (Anchor::Instance->IsLocalPlayerClimbing()) {
+        Player* leaderPtr = GET_PLAYER(play);
+        if (leaderPtr != nullptr) {
+            a->shape.rot.y = leaderPtr->actor.shape.rot.y;
+        }
+    } else {
+        a->shape.rot.y = Math_Atan2S(-anc.planeNormal.z, -anc.planeNormal.x);
+    }
     a->world.rot.y = a->shape.rot.y;
     a->speedXZ     = 0.0f;  // we're scripting position, not using physics speed
 
@@ -1467,10 +1500,22 @@ void TickLEDGE_HOIST(EnFollower* this_, PlayState* play, const Vec3f& leaderPos)
         (FollowerNpcAnim)this_->currentAnim == FollowerNpcAnim::kHoistGround ||
         (FollowerNpcAnim)this_->currentAnim == FollowerNpcAnim::kHoistSwim;
     if (!hoistAnimSetUp || this_->stopAnimPlaying) {
-        // Hold position. Anim isn't set up yet (entry tick) or is
-        // currently playing. EnsureAnimation will fire later in the
-        // dispatcher and transition the anim; subsequent ticks see
-        // hoistAnimSetUp=true.
+        // Hold position — but if anim has been set up AND is playing,
+        // lerp pos over the anim's progress so body moves smoothly
+        // from start (lower floor / water surface) up to the ledge.
+        // Without this, body sits at start pos for the whole anim
+        // duration, then snaps to top — looks like teleport.
+        if (hoistAnimSetUp && this_->stopAnimPlaying &&
+            this_->skelAnime.endFrame > 0.0f) {
+            const float progress =
+                std::min(1.0f, this_->skelAnime.curFrame /
+                                this_->skelAnime.endFrame);
+            // Lerp Y only — XZ kept at the start pos (anim's body
+            // motion handles XZ visually). Smooth visual rise.
+            a->world.pos.y = sLocalNav.hoistStartPos.y +
+                              (this_->hoistTargetPos.y -
+                               sLocalNav.hoistStartPos.y) * progress;
+        }
         return;
     }
 
@@ -1927,26 +1972,19 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // raise puts NPC's feet near the ledge top, anim visualizes
         // the climb-out motion correctly. End-of-anim snap moves NPC
         // to the exact ledge top.
+        // Capture start position for the per-tick lerp during the anim.
+        // hoistTargetPos is the END pos; we lerp from start → target
+        // over the anim duration so body moves smoothly up.
+        sLocalNav.hoistStartPos = npc->world.pos;
         if (ctx == HOIST_CONTEXT_SWIM) {
             constexpr float kSwimHoistRaise = 43.0f;  // tuned 60u → 50u → 45u → 43u over field tests
             npc->world.pos.y += kSwimHoistRaise;
             npc->velocity.y = 0.0f;
-        } else if (ctx == HOIST_CONTEXT_GROUND) {
-            // Raise NPC near ledge so the climb-up anim is visible
-            // performing the mantle motion (body lifting up onto the
-            // ledge). Without this, NPC's pos stays at lower floor
-            // during the anim, body often hidden by terrain/camera —
-            // only the end-snap is visible to user, looking like a
-            // teleport. End-of-anim snap still moves NPC to exact
-            // topPos.
-            //
-            // Raise to topPos.y - 30 = NPC's body starts 30u below
-            // ledge top, anim shows the climb-up reach + pull motion
-            // ending at ledge level.
-            constexpr float kGroundHoistRaiseOffset = 30.0f;
-            npc->world.pos.y = topPos.y - kGroundHoistRaiseOffset;
-            npc->velocity.y = 0.0f;
+            sLocalNav.hoistStartPos = npc->world.pos;  // re-capture after raise
         }
+        // For GROUND context, no pre-raise — pos stays at lower
+        // floor and TickLEDGE_HOIST lerps Y up over the anim
+        // duration. Body visibly mantles from floor to ledge.
         this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;
         SPDLOG_INFO("[FollowerNPC] {}→LEDGE_HOIST({}) top=({:.0f},{:.0f},{:.0f}) "
                     "NPC at ({:.0f},{:.0f},{:.0f}) via {}",
@@ -2267,36 +2305,47 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     if (this_->state == EN_FOLLOWER_STATE_CLIMBING) {
         const float climbDy =
             std::fabs(npc->world.pos.y - sLocalNav.climbPrevY);
-        sLocalNav.climbPrevY = npc->world.pos.y;
-        const bool isMovingVertically = (climbDy > 0.5f);
-        const bool prevStepDone =
-            !this_->stopAnimPlaying ||
-            // First-tick of CLIMBING: currentAnim isn't a climb anim
-            // yet (still walk/run/wait from FOLLOW). Treat as
-            // "ready to fire first step."
-            (this_->currentAnim != (s32)FollowerNpcAnim::kClimbUpL &&
-             this_->currentAnim != (s32)FollowerNpcAnim::kClimbUpR);
-        if (isMovingVertically && prevStepDone) {
-            // Fire next step in the alternation. First step starts L
-            // (climbNextIsRight = false initially), then toggles each
-            // step.
+        const float climbDx =
+            npc->world.pos.x - sLocalNav.climbPrevXZ.x;
+        const float climbDz =
+            npc->world.pos.z - sLocalNav.climbPrevXZ.z;
+        const float climbDxz = std::sqrt(climbDx*climbDx + climbDz*climbDz);
+        sLocalNav.climbPrevY  = npc->world.pos.y;
+        sLocalNav.climbPrevXZ = npc->world.pos;
+
+        // Pick the dominant motion axis. Lateral motion > vertical
+        // → use side anims; otherwise vertical anims. Player toggles
+        // between up and side anims based on stick direction
+        // (z_player.c:13414 `sp80 != 0` lateral check).
+        const bool isMovingVertically  = (climbDy  > 0.5f);
+        const bool isMovingLaterally   = (climbDxz > 0.5f);
+        const bool useSideAnim         = isMovingLaterally && (climbDxz > climbDy);
+        const auto sideL = FollowerNpcAnim::kClimbSideL;
+        const auto sideR = FollowerNpcAnim::kClimbSideR;
+        const auto upL   = FollowerNpcAnim::kClimbUpL;
+        const auto upR   = FollowerNpcAnim::kClimbUpR;
+        const FollowerNpcAnim leftStep  = useSideAnim ? sideL : upL;
+        const FollowerNpcAnim rightStep = useSideAnim ? sideR : upR;
+
+        const bool currentIsAClimb =
+            this_->currentAnim == (s32)upL || this_->currentAnim == (s32)upR ||
+            this_->currentAnim == (s32)sideL || this_->currentAnim == (s32)sideR;
+        const bool prevStepDone = !this_->stopAnimPlaying || !currentIsAClimb;
+
+        if ((isMovingVertically || isMovingLaterally) && prevStepDone) {
             const bool fireRight = sLocalNav.climbNextIsRight;
-            localAnim = fireRight ? FollowerNpcAnim::kClimbUpR
-                                  : FollowerNpcAnim::kClimbUpL;
+            localAnim = fireRight ? rightStep : leftStep;
             sLocalNav.climbNextIsRight = !fireRight;
-        } else if (!isMovingVertically) {
-            // Stationary on wall — hold whatever anim is current
-            // (last frame of upL or upR persists). If we haven't
-            // started any climb anim yet, fire upL once so NPC
-            // shows the climb pose instead of a walk pose.
-            if (this_->currentAnim != (s32)FollowerNpcAnim::kClimbUpL &&
-                this_->currentAnim != (s32)FollowerNpcAnim::kClimbUpR) {
-                localAnim = FollowerNpcAnim::kClimbUpL;
+        } else if (!isMovingVertically && !isMovingLaterally) {
+            // Stationary — hold last-frame pose. First-tick fallback:
+            // fire an upL so NPC has a climb-pose visible immediately.
+            if (!currentIsAClimb) {
+                localAnim = upL;
             } else {
                 localAnim = (FollowerNpcAnim)this_->currentAnim;
             }
         } else {
-            // Moving but previous step not done — hold mid-anim.
+            // Moving but mid-anim — hold current.
             localAnim = (FollowerNpcAnim)this_->currentAnim;
         }
     }
@@ -2332,6 +2381,15 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         this_->skelAnime.playSpeed = 1.0f;
         // Tick step phase + emit footstep SFX on foot-down crossings.
         TickStepPhaseAndSfx(this_, play);
+    }
+    // Climb anims at 2.0× — field-test reported the natural 1.0
+    // cadence looked half-speed. The 2× scale matches the user's
+    // perceived "normal" speed for the L/R alternation pace.
+    else if (localAnim == FollowerNpcAnim::kClimbUpL ||
+             localAnim == FollowerNpcAnim::kClimbUpR ||
+             localAnim == FollowerNpcAnim::kClimbSideL ||
+             localAnim == FollowerNpcAnim::kClimbSideR) {
+        this_->skelAnime.playSpeed = 2.0f;
     }
 
     // Idle blend — DISABLED 2026-05-16 (user reported model collapse +
