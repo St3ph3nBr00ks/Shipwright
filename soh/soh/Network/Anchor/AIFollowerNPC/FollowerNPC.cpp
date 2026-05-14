@@ -19,6 +19,8 @@
 
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/AIFollowerNPC/FollowerNPC.h"
+#include "soh/Network/Anchor/Common/ActorTrail.h"     // Phase 5: substrate path consumption
+#include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
 #include "soh/cvar_prefixes.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
@@ -121,6 +123,14 @@ void Anchor::SetFollowerNpcActive(bool active) {
         }
 
         mFollowerNpcLocalActor = spawned;
+        // Reset Phase 5 nav state so a fresh path computes on the
+        // first FOLLOW tick. stuckCheckPos seeded to spawn pos so the
+        // first stuck check (3s in) compares to where we started.
+        sLocalNav.path.Reset();
+        sLocalNav.lastPathRefreshFrame = 0;
+        sLocalNav.lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
+        sLocalNav.stuckCheckPos        = p;
+        sLocalNav.lastStuckCheckFrame  = gameFrameCounter.load(std::memory_order_relaxed);
         SPDLOG_INFO("[FollowerNPC] Spawned ACTOR_EN_FOLLOWER(id={}) at "
                     "({:.0f},{:.0f},{:.0f}) yaw={} (CVar 0→1)",
                     (int)gEnFollowerId, p.x, p.y, p.z, (int)yaw);
@@ -175,6 +185,19 @@ static constexpr float kRunDistance = 250.0f;  // beyond this, run instead of wa
 static constexpr float kWalkSpeed   = 6.0f;
 static constexpr float kRunSpeed    = 12.0f;
 
+// Phase 5 — substrate path consumption + STUCK recovery.
+//
+// Path refresh policy: re-query ComputePathTo every kPathRefreshMs OR
+// when the captured target has moved beyond kPathRetargetDist (leader
+// walked far enough that the path is stale). 500ms = 2Hz refresh —
+// fast enough to track a moving leader without spamming the planner.
+static constexpr int   kPathRefreshMs       = 500;
+static constexpr float kPathRetargetDist    = 60.0f;
+static constexpr float kAdvanceSubgoalDist  = 30.0f;  // advance cursor when within this XZ
+static constexpr int   kStuckCheckMs        = 3000;   // matches player-Follower's tuned 3s
+static constexpr float kStuckMinProgress    = 20.0f;
+static constexpr float kStuckNudgeDist      = 30.0f;  // direct world.pos nudge in STUCK
+
 namespace {
 
 // True iff `npc` is THIS client's local NPC (not a peer replica). Peer
@@ -184,6 +207,17 @@ bool IsLocalOwnerNPC(Actor* npc) {
     return Anchor::Instance != nullptr &&
            npc == Anchor::Instance->GetFollowerNpcLocalActor();
 }
+
+// Per-NPC nav state. v1 = one local NPC per client, so a single static
+// instance suffices (no per-actor map). Reset on owner-side spawn.
+struct LocalNpcNavState {
+    AnchorNav::ActorTrail::NavPath path;
+    uint64_t lastPathRefreshFrame = 0;
+    Vec3f    lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
+    Vec3f    stuckCheckPos        = { 0.0f, 0.0f, 0.0f };
+    uint64_t lastStuckCheckFrame  = 0;
+};
+static LocalNpcNavState sLocalNav;
 
 // Compute XZ distance squared between two world positions.
 inline float Dist2DSq(const Vec3f& a, const Vec3f& b) {
@@ -213,29 +247,124 @@ void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 }
 
-// FOLLOW handler — walk/run toward leader, transition to IDLE on
-// proximity. v1: direct-vector locomotion (no substrate path
-// consumption; Phase 5 adds substrate-path-driven FOLLOW once stuck
-// recovery + path tracking land).
+// FOLLOW handler — walk/run toward the current substrate subgoal,
+// transition to IDLE on proximity to leader. Phase 5: substrate path
+// consumption replaces direct-vector pursuit so the NPC routes
+// around obstacles instead of pressing into walls.
 void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
 
-    // Face leader and set move direction.
-    const s16 yaw = YawTowardTarget(a->world.pos, leaderPos);
+    // ---- Path refresh ------------------------------------------------
+    const uint64_t curFrame   = Anchor::Instance->gameFrameCounter.load(
+                                    std::memory_order_relaxed);
+    const int      refreshTicks = Anchor::Instance->MsToGameTicks(kPathRefreshMs);
+    const bool needRefresh =
+        sLocalNav.path.Empty() ||
+        (refreshTicks > 0 &&
+         curFrame >= sLocalNav.lastPathRefreshFrame + (uint64_t)refreshTicks) ||
+        AnchorDist::DistXZSq(leaderPos, sLocalNav.lastPathTargetPos) >
+            kPathRetargetDist * kPathRetargetDist;
+    if (needRefresh) {
+        AnchorNav::TrailKey leaderKey =
+            AnchorNav::TrailKeyForPlayer((uint8_t)Anchor::Instance->ownClientId);
+        sLocalNav.path.Reset();
+        AnchorNav::ActorTrail::GetInstance().ComputePathTo(
+            leaderKey, a, leaderPos, play, sLocalNav.path,
+            /*skipLayer1LOS=*/false,
+            /*preferLeaderTrail=*/true);  // leader's breadcrumbs are the natural pursuit hint
+        sLocalNav.lastPathRefreshFrame = curFrame;
+        sLocalNav.lastPathTargetPos    = leaderPos;
+    }
+
+    // ---- Pick subgoal -----------------------------------------------
+    // Substrate path's CurrentSubgoal if available; else direct to leader.
+    Vec3f subgoal = sLocalNav.path.Empty() ? leaderPos : sLocalNav.path.CurrentSubgoal();
+
+    // Cursor advancement: if we're close to the current subgoal, step.
+    if (!sLocalNav.path.Empty() &&
+        AnchorDist::DistXZSq(a->world.pos, subgoal) <
+            kAdvanceSubgoalDist * kAdvanceSubgoalDist) {
+        sLocalNav.path.Advance();
+        // Refresh subgoal selection for this same tick — avoid wasting
+        // a frame standing in place after an advance.
+        subgoal = sLocalNav.path.Empty() ? leaderPos : sLocalNav.path.CurrentSubgoal();
+    }
+
+    // ---- Drive locomotion -------------------------------------------
+    const s16 yaw = YawTowardTarget(a->world.pos, subgoal);
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
 
-    // Pick walk vs run by distance. Far → run; near → walk.
-    const float distSq = Dist2DSq(a->world.pos, leaderPos);
-    const float speed  = (distSq > kRunDistance * kRunDistance)
-                             ? kRunSpeed : kWalkSpeed;
+    // Speed selection uses XZ distance to leader (not subgoal) so the
+    // NPC sustains run speed across multi-segment paths when leader is
+    // far, and slows to walk only when actually close.
+    const float distToLeaderSq = Dist2DSq(a->world.pos, leaderPos);
+    const float speed = (distToLeaderSq > kRunDistance * kRunDistance)
+                            ? kRunSpeed : kWalkSpeed;
     a->speedXZ = speed;
 
-    // Transition check: hysteresis lower bound.
-    if (distSq <= kEnterIdle * kEnterIdle) {
-        this_->state   = EN_FOLLOWER_STATE_IDLE;
-        a->speedXZ     = 0.0f;
+    // ---- Stuck check ------------------------------------------------
+    const int stuckCheckTicks = Anchor::Instance->MsToGameTicks(kStuckCheckMs);
+    if (stuckCheckTicks > 0 &&
+        curFrame >= sLocalNav.lastStuckCheckFrame + (uint64_t)stuckCheckTicks) {
+        const float progress = std::sqrt(Dist2DSq(a->world.pos, sLocalNav.stuckCheckPos));
+        if (progress < kStuckMinProgress) {
+            // No real progress in 3s — nudge in STUCK and force path
+            // refresh next tick.
+            this_->state                   = EN_FOLLOWER_STATE_STUCK;
+            sLocalNav.path.Reset();        // discard the broken path
+            sLocalNav.lastPathRefreshFrame = 0;
+            SPDLOG_INFO("[FollowerNPC] FOLLOW→STUCK (no progress {:.1f}u in 3s @ "
+                        "({:.0f},{:.0f},{:.0f}))",
+                        progress, a->world.pos.x, a->world.pos.y, a->world.pos.z);
+        }
+        sLocalNav.stuckCheckPos       = a->world.pos;
+        sLocalNav.lastStuckCheckFrame = curFrame;
     }
+
+    // ---- Transition: arrived at leader -----------------------------
+    if (distToLeaderSq <= kEnterIdle * kEnterIdle) {
+        this_->state = EN_FOLLOWER_STATE_IDLE;
+        a->speedXZ   = 0.0f;
+        sLocalNav.path.Reset();  // discard path; IDLE is local-frame
+    }
+}
+
+// STUCK handler — single-tick world.pos nudge toward leader, then
+// return to FOLLOW. The substrate path was just reset by the FOLLOW
+// caller; the next FOLLOW tick will recompute. Combined effect:
+// "stuck → nudge forward 30u → recompute path → continue."
+//
+// Equivalent in spirit to player-Follower's STUCK-FWD action but
+// simpler — no JumpResolver, no nav-snap. Phase 6+ may extend if
+// field-test surfaces stuck patterns the simple nudge can't escape.
+void TickSTUCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    Actor* a = &this_->actor;
+    const s16 yaw = YawTowardTarget(a->world.pos, leaderPos);
+    a->shape.rot.y = yaw;
+    a->world.rot.y = yaw;
+    a->speedXZ     = 0.0f;  // no momentum from STUCK; the nudge IS the motion
+
+    // Direct world.pos write — the AI Follower's STUCK-FWD action is
+    // also a direct write (player-rigged version uses
+    // player->actor.world.pos = snappedPos). Skipping floor snapping
+    // for v1; Actor_UpdateBgCheckInfo at the end of the tick will
+    // re-clamp Y.
+    const float dx = Math_SinS(yaw) * kStuckNudgeDist;
+    const float dz = Math_CosS(yaw) * kStuckNudgeDist;
+    a->world.pos.x += dx;
+    a->world.pos.z += dz;
+
+    // Reset stuck-check baseline so we don't immediately re-trigger.
+    sLocalNav.stuckCheckPos       = a->world.pos;
+    sLocalNav.lastStuckCheckFrame = Anchor::Instance->gameFrameCounter.load(
+                                        std::memory_order_relaxed);
+
+    // Resume FOLLOW. Path was reset by the FOLLOW caller; next tick
+    // will recompute.
+    this_->state = EN_FOLLOWER_STATE_FOLLOW;
+    SPDLOG_INFO("[FollowerNPC] STUCK→FOLLOW (nudged {:.0f}u toward yaw={})",
+                kStuckNudgeDist, (int)yaw);
 }
 
 }  // namespace
@@ -275,10 +404,12 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         case EN_FOLLOWER_STATE_FOLLOW:
             TickFOLLOW(this_, play, leaderPos);
             break;
-        // Phase 5+ handlers (CLIMBING / STUCK / DEAD) — fall through
-        // to IDLE behaviour as placeholders.
-        case EN_FOLLOWER_STATE_CLIMBING:
         case EN_FOLLOWER_STATE_STUCK:
+            TickSTUCK(this_, play, leaderPos);
+            break;
+        // Phase 6+ handlers (CLIMBING / DEAD) — fall through to IDLE
+        // behaviour as placeholders.
+        case EN_FOLLOWER_STATE_CLIMBING:
         case EN_FOLLOWER_STATE_DEAD:
             TickIDLE(this_, play, leaderPos);
             break;

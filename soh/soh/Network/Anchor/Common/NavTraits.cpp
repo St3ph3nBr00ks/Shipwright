@@ -249,6 +249,17 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
         return kBossDefaults;
     }
 
+    // NPC Follower (Flotilla — Plans/npc_follower_plan.md). Dynamic
+    // actor id assigned at runtime by ActorDB::AddBuiltInCustomActors,
+    // so it can't appear in the static `overrides` map. Resolve here:
+    // NPC Follower mirrors the player-rigged Follower's traits (Link
+    // skel, walks where Link walks, climbs where Link climbs).
+    extern s16 gEnFollowerId;
+    if (gEnFollowerId != 0 && actorId == gEnFollowerId) {
+        static const NavTraits sFollowerNpcTraits = MakeFollowerTraits();
+        return sFollowerNpcTraits;
+    }
+
     const auto& overrides = GetOverrides();
     auto it = overrides.find(actorId);
     if (it != overrides.end()) {
