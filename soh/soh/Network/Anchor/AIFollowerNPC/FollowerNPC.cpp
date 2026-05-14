@@ -907,6 +907,13 @@ bool PopulateAnchorClimbPath(const ::AnchorNavRoom::RoomNavData* navData,
 
     struct Entry { float y; uint16_t idx; };
     std::vector<Entry> column;
+    // Tight column filter — only cells within ±15u of NPC's U (≈ half
+    // a 30u cell pitch). Earlier ±40u tolerance picked 2-3 adjacent
+    // columns; the path's cursor would advance through cells in
+    // different columns, snapping NPC's XZ laterally by ~30-100u per
+    // tick (visible "rapid position shifts" on curved walls like
+    // Inside Deku Tree's spiral vine wall). Single column produces
+    // a straight-up climb with no lateral hop.
     for (uint16_t i = 0; i < anchor.nodeCount; i++) {
         const uint16_t idx = anchor.firstNodeIdx + i;
         if (idx >= navData->nodes.size()) break;
@@ -914,7 +921,7 @@ bool PopulateAnchorClimbPath(const ::AnchorNavRoom::RoomNavData* navData,
         const float nodeU =
             (n.pos.x - anchor.planeOrigin.x) * anchor.planeAxisU.x +
             (n.pos.z - anchor.planeOrigin.z) * anchor.planeAxisU.z;
-        if (std::fabs(nodeU - npcU) > 40.0f) continue;     // wrong column
+        if (std::fabs(nodeU - npcU) > 15.0f) continue;     // single column only
         if (n.pos.y > leaderPos.y + 50.0f) continue;       // past leader
         column.push_back({n.pos.y, idx});
     }
@@ -1040,15 +1047,20 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // EnsureAnimation's transition guard.
     EnsureAnimation(this_, play, FollowerNpcAnim::kClimbUp);
 
-    // Cursor advance — when within kClimbSubgoalReach3D 3D of subgoal,
-    // step to next waypoint. Y is the dominant axis here, so the
-    // 3D check matters (XZ-only would advance immediately on the
-    // first XZ snap).
-    const float dxAdv = a->world.pos.x - subgoal.x;
-    const float dyAdv = a->world.pos.y - subgoal.y;
-    const float dzAdv = a->world.pos.z - subgoal.z;
-    const float dSq = dxAdv*dxAdv + dyAdv*dyAdv + dzAdv*dzAdv;
-    if (dSq < kClimbSubgoalReach3D * kClimbSubgoalReach3D) {
+    // Cursor advance — Y-axis only. NPC's XZ is snapped to subgoal.xz +
+    // planeNormal * kClimbBodyOffset every frame (so body sits in front
+    // of the wall, not buried), which means XZ distance from subgoal is
+    // ~12u baseline regardless of climb progress. A 3D distance check
+    // (the earlier kClimbSubgoalReach3D=24u test) would fire on the
+    // very first frame after XZ snap because 12² < 24² — chaining
+    // multiple advances per tick and zipping through the path.
+    //
+    // Y is the meaningful progress axis for a vertical climb. Advance
+    // when within 12u of the subgoal's Y (≈ 3 frames of climb at
+    // kClimbSpeedY=4.0). Produces one cell of progress per ~7 frames
+    // at the configured climb speed — smooth and visibly paced.
+    const float dyAdv = std::fabs(a->world.pos.y - subgoal.y);
+    if (dyAdv < 12.0f) {
         sLocalNav.path.Advance();
     }
 }
