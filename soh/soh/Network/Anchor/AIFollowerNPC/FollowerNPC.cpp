@@ -65,6 +65,15 @@ struct LocalNpcNavState {
     // Phase 6 — anchor cached during a CLIMBING run so handler doesn't
     // re-resolve every frame. Cleared on CLIMBING exit.
     const ::AnchorNavRoom::ClimbAnchor* activeClimbAnchor = nullptr;
+    // Phase 8 — G10 leash. Counts consecutive ticks the NPC has been
+    // beyond kNpcLeashDistance from leader. Reset when within range.
+    uint32_t leashFrames = 0;
+    // Phase 8 — G14 close-fail. Counts consecutive ticks the NPC is
+    // in the close-fail distance band without progress.
+    // closeFailBaseline = distance-to-leader at window entry; reset
+    // whenever progress > kNpcCloseFailProgressDelta is observed.
+    uint32_t closeFailFrames   = 0;
+    float    closeFailBaseline = 0.0f;
 };
 }  // namespace
 static LocalNpcNavState sLocalNav;
@@ -308,6 +317,27 @@ static constexpr float kStuckNudgeDist      = 30.0f;  // direct world.pos nudge 
 static constexpr float kClimbSpeedY         = 4.0f;   // u/frame upward; vanilla Link is ~4-5
 static constexpr float kClimbSubgoalReach3D = 24.0f;  // advance cursor when within 3D
 static constexpr float kClimbXzSnap         = 1.0f;   // smooth XZ snap rate to subgoal (per frame fraction)
+
+// Phase 8 — G-guard recovery teleports. Mirror the player-rigged
+// Follower's G10 / G14 semantics but adapted for direct world.pos
+// writes (no stick injection).
+//
+// G10 leash: NPC distance to leader > kNpcLeashDistance for >
+// kNpcLeashTimeoutMs → teleport NPC to leader's pos. Catches "NPC
+// stuck behind a closed door / left in another scene / fell into
+// untracked geometry."
+static constexpr float kNpcLeashDistance      = 1200.0f;  // 3D units
+static constexpr int   kNpcLeashTimeoutMs     = 2000;     // 2s, framerate-aware
+//
+// G14 close-fail: NPC in the 200-1200u band (close enough that G10
+// won't fire) but making < kNpcCloseFailProgressDelta progress
+// across kNpcCloseFailTimeoutMs → teleport NPC to current substrate
+// subgoal. Catches "NPC stuck in tight geometry between rooms /
+// path-around-obstacle outside the substrate's understanding."
+static constexpr float kNpcCloseFailMinDistance   = 200.0f;
+static constexpr float kNpcCloseFailMaxDistance   = 1200.0f;
+static constexpr int   kNpcCloseFailTimeoutMs     = 10000;  // 10s
+static constexpr float kNpcCloseFailProgressDelta = 30.0f;
 
 namespace {
 
@@ -630,6 +660,128 @@ void TickDEAD(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // dispatch here.
 }
 
+// Phase 8 — G10/G14 recovery teleport. Direct world.pos write to
+// `dest`, reset path + stuck baselines + G-guard counters, force
+// FOLLOW state, snap floor altitude. Caller logs the trigger.
+void TeleportNpcTo(EnFollower* this_, PlayState* play, const Vec3f& dest) {
+    Actor* a = &this_->actor;
+    a->world.pos = dest;
+    a->speedXZ   = 0.0f;
+    // Reset all nav-state baselines so we don't immediately re-fire a
+    // G-guard or STUCK detection at the new position.
+    sLocalNav.path.Reset();
+    sLocalNav.lastPathRefreshFrame = 0;
+    sLocalNav.lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
+    sLocalNav.stuckCheckPos        = dest;
+    sLocalNav.lastStuckCheckFrame  = Anchor::Instance->gameFrameCounter.load(
+                                          std::memory_order_relaxed);
+    sLocalNav.leashFrames          = 0;
+    sLocalNav.closeFailFrames      = 0;
+    sLocalNav.closeFailBaseline    = 0.0f;
+    sLocalNav.activeClimbAnchor    = nullptr;
+    this_->state                   = EN_FOLLOWER_STATE_FOLLOW;
+    // Snap Y to floor at the new position so we don't sink / float.
+    Actor_UpdateBgCheckInfo(play, a, 26.0f, 10.0f, 50.0f, 4);
+}
+
+// Phase 8 — G10 leash safety net. NPC > kNpcLeashDistance from leader
+// for > kNpcLeashTimeoutMs of consecutive ticks → teleport to leader
+// pos. Catches "NPC stuck behind closed door / left in another room /
+// fell into untracked geometry where the substrate can't recover."
+//
+// 3D distance (not XZ) — vertical separation also counts; an NPC
+// stuck at the bottom of a pit beneath the leader should leash.
+//
+// Returns true if a teleport fired (caller should skip the rest of
+// the tick — the state machine is in fresh-FOLLOW with no baselines).
+bool TryFireG10(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    Actor* a = &this_->actor;
+    const float dx = a->world.pos.x - leaderPos.x;
+    const float dy = a->world.pos.y - leaderPos.y;
+    const float dz = a->world.pos.z - leaderPos.z;
+    const float dist3D = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+    if (dist3D <= kNpcLeashDistance) {
+        sLocalNav.leashFrames = 0;
+        return false;
+    }
+    sLocalNav.leashFrames++;
+    const int timeoutTicks = Anchor::Instance->MsToGameTicks(kNpcLeashTimeoutMs);
+    if (timeoutTicks <= 0 || (int)sLocalNav.leashFrames < timeoutTicks) {
+        return false;
+    }
+    SPDLOG_INFO("[FollowerNPC] G10 leash teleport — dist3D={:.0f}u for {} frames "
+                "(>{}u for >{}ms) → snap to leader",
+                dist3D, sLocalNav.leashFrames,
+                (int)kNpcLeashDistance, kNpcLeashTimeoutMs);
+    TeleportNpcTo(this_, play, leaderPos);
+    return true;
+}
+
+// Phase 8 — G14 close-fail safety net. NPC in the close-fail distance
+// band (200-1200u, i.e. close enough that G10 won't fire) but making
+// < kNpcCloseFailProgressDelta progress across kNpcCloseFailTimeoutMs
+// → teleport to current substrate subgoal (or leader if no path).
+// Catches "NPC stuck in tight geometry between rooms / pressed into
+// wall the substrate can't see past."
+//
+// Progress metric: baseline = distance-to-leader at window entry;
+// progress = baseline - current_distance. Reset counter whenever
+// progress > kNpcCloseFailProgressDelta (NPC made real headway).
+bool TryFireG14(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    Actor* a = &this_->actor;
+    const float dx = a->world.pos.x - leaderPos.x;
+    const float dy = a->world.pos.y - leaderPos.y;
+    const float dz = a->world.pos.z - leaderPos.z;
+    const float dist3D = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+    // Outside the band — reset counter, defer to G10 (or normal AI).
+    if (dist3D < kNpcCloseFailMinDistance || dist3D > kNpcCloseFailMaxDistance) {
+        sLocalNav.closeFailFrames   = 0;
+        sLocalNav.closeFailBaseline = 0.0f;
+        return false;
+    }
+
+    // First tick inside the band → seed baseline.
+    if (sLocalNav.closeFailFrames == 0) {
+        sLocalNav.closeFailBaseline = dist3D;
+        sLocalNav.closeFailFrames   = 1;
+        return false;
+    }
+
+    // Made meaningful headway → reset window (baseline is updated to
+    // current dist so we measure progress from here forward).
+    const float progress = sLocalNav.closeFailBaseline - dist3D;
+    if (progress > kNpcCloseFailProgressDelta) {
+        sLocalNav.closeFailBaseline = dist3D;
+        sLocalNav.closeFailFrames   = 1;
+        return false;
+    }
+
+    sLocalNav.closeFailFrames++;
+    const int timeoutTicks = Anchor::Instance->MsToGameTicks(kNpcCloseFailTimeoutMs);
+    if (timeoutTicks <= 0 || (int)sLocalNav.closeFailFrames < timeoutTicks) {
+        return false;
+    }
+
+    // Fire — teleport target is current substrate subgoal if we have
+    // one (preserves substrate intent), else leader pos (G10-style
+    // fallback).
+    Vec3f dest = leaderPos;
+    if (!sLocalNav.path.Empty()) {
+        dest = sLocalNav.path.CurrentSubgoal();
+    }
+    SPDLOG_INFO("[FollowerNPC] G14 close-fail teleport — dist3D={:.0f}u, "
+                "progress={:.1f}u over {} frames (<{}u in {}ms) → snap to "
+                "({:.0f},{:.0f},{:.0f}) [{}]",
+                dist3D, progress, sLocalNav.closeFailFrames,
+                (int)kNpcCloseFailProgressDelta, kNpcCloseFailTimeoutMs,
+                dest.x, dest.y, dest.z,
+                sLocalNav.path.Empty() ? "leader pos (no path)" : "substrate subgoal");
+    TeleportNpcTo(this_, play, dest);
+    return true;
+}
+
 // STUCK handler — single-tick world.pos nudge toward leader, then
 // return to FOLLOW. The substrate path was just reset by the FOLLOW
 // caller; the next FOLLOW tick will recompute. Combined effect:
@@ -710,6 +862,23 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // cutscene can drop the NPC into a void if the cutscene
         // teleported the world out from under us.
         return;
+    }
+
+    // Phase 8 — G-guard safety nets. Run BEFORE state dispatch so a
+    // teleport fully resets the state machine for the same tick (the
+    // teleport drops us into FOLLOW with cleared path / baselines).
+    // CLIMBING is exempt — a vertical-traversal-in-progress shouldn't
+    // be aborted by a far-from-leader leash; the climb might be the
+    // path to the leader (e.g. leader is on a ledge above).
+    if (this_->state != EN_FOLLOWER_STATE_CLIMBING) {
+        if (TryFireG10(this_, play, leaderPos)) {
+            // Teleport fired — skip rest of tick. NPC is now at leader
+            // in fresh FOLLOW; next tick picks up normally.
+            return;
+        }
+        if (TryFireG14(this_, play, leaderPos)) {
+            return;
+        }
     }
 
     // Dispatch.
