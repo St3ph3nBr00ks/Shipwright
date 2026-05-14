@@ -1189,10 +1189,11 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             this_->actor.speedXZ = this_->syncedSpeedXZ;  // for SFX pitch
             TickStepPhaseAndSfx(this_, play);
         }
-        // Idle blend for peer too.
-        if (peerAnim == FollowerNpcAnim::kWait) {
-            TickIdleBlend(this_, play);
-        }
+        // Idle blend DISABLED 2026-05-16 (see local-owner path below).
+        // constexpr bool kIdleBlendEnabled = false;
+        // if (kIdleBlendEnabled && peerAnim == FollowerNpcAnim::kWait) {
+        //     TickIdleBlend(this_, play);
+        // }
         // Skip physics — STATE packet pos is authoritative and arrives
         // every ~100ms. If we ran Actor_MoveXZGravity here, gravity
         // (-2.0/frame) would accumulate velocity.y between packets,
@@ -1363,10 +1364,33 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         TickStepPhaseAndSfx(this_, play);
     }
 
-    // Idle blend — overlay waitL↔waitR blend onto the joint table after
-    // LinkAnimation_Update has loaded the base wait_free frame. Only
-    // when we're actually playing the wait anim (not stop-anim mid-play).
-    if (localAnim == FollowerNpcAnim::kWait && !this_->stopAnimPlaying) {
+    // Idle blend — DISABLED 2026-05-16 (user reported model collapse +
+    // distortion + position jumping while in idle). Suspected causes
+    // (any combination):
+    //   - LinkAnimation_BlendToJoint queues entries that race with
+    //     LinkAnimation_Update's queue entries for the same jointTable,
+    //     producing torn / partial joint data when the queue processes.
+    //   - Blend table alignment overflow: LinkAnimation_BlendToJoint
+    //     ALIGN16's the buffer pointer (up to +15 bytes skew), and
+    //     PLAYER_LIMB_BUF_COUNT (24 entries = 144 bytes) provides only
+    //     12 bytes of headroom over the 132 bytes of data written —
+    //     a 2-byte short in worst-case alignment, stomping adjacent
+    //     struct members (headLimbRot / upperLimbRot follow blendTable
+    //     in EnFollower).
+    //   - waitL/waitR anim lengths may differ from wait_free; passing
+    //     skelAnime.curFrame (driven by wait_free's animLength) could
+    //     read beyond waitL/R bounds.
+    //
+    // Re-enabling: flip kIdleBlendEnabled to true AND fix the underlying
+    // issue. Likely path: skip LinkAnimation_Update for wait state and
+    // let BlendToJoint be the only joint-table writer (Player's
+    // pattern — Player doesn't call LinkAnimation_Update when using
+    // BlendToJoint for idle, see z_player.c:8061-8064). NPC will fall
+    // back to wait_free + LinkAnimation_Update (the prior working
+    // path) while this is disabled.
+    constexpr bool kIdleBlendEnabled = false;
+    if (kIdleBlendEnabled &&
+        localAnim == FollowerNpcAnim::kWait && !this_->stopAnimPlaying) {
         TickIdleBlend(this_, play);
     }
 
