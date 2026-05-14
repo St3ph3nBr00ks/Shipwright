@@ -57,7 +57,13 @@ enum class FollowerNpcAnim {
     kWait        = 1,  // wait_free (idle) — actually a waitL/waitR blend each frame
     kWalk        = 2,  // walk_free
     kRun         = 3,  // run_free
-    kClimbUp     = 4,  // climb-up (looping)
+    // Climb steps — one-shots, alternated by dispatcher driven by
+    // NPC's vertical motion. Mirrors Player's climb at z_player.c:13391-
+    // 13412 where each step is Player_AnimPlayOnce(upL/upR) toggled
+    // via actionVar2 ^= 1. Holds last frame when stationary (no new
+    // anim fired — equivalent to Player's PLAYER_STATE2_STATIONARY_LADDER).
+    kClimbUp     = 4,  // [legacy alias for kClimbUpL — same value to keep wire compat]
+    kClimbUpL    = 4,  // gPlayerAnim_link_normal_Fclimb_upL (one-shot)
     kStopL       = 5,  // walk_endL_free — one-shot stop anim, left foot forward
     kStopR       = 6,  // walk_endR_free — one-shot stop anim, right foot forward
     // Fidgets — one-shot variants of the standing idle. Cycled by the
@@ -81,6 +87,7 @@ enum class FollowerNpcAnim {
     // walk/run/wait when complete via the stopAnimPlaying handshake.
     kRunJump  = 14,  // gPlayerAnim_link_normal_run_jump
     kJump     = 15,  // gPlayerAnim_link_normal_jump
+    kClimbUpR = 16,  // gPlayerAnim_link_normal_Fclimb_upR (alternates with kClimbUpL)
 };
 
 struct LocalNpcNavState {
@@ -116,6 +123,15 @@ struct LocalNpcNavState {
     uint64_t jumpStartFrame         = 0;
     uint64_t jumpLastDiagFrame      = 0;
     bool     jumpWasOnFloorPrevTick = true;
+
+    // Climb step alternation. Mirrors Player's actionVar2 toggle at
+    // z_player.c:13412. Each climb step is a one-shot of upL/upR;
+    // we fire the next step when (1) the current one-shot is done
+    // AND (2) NPC is making vertical progress. When stationary on
+    // wall, no new step fires — anim holds at last frame
+    // (Player's PLAYER_STATE2_STATIONARY_LADDER equivalent).
+    bool     climbNextIsRight = false;  // toggles each step
+    float    climbPrevY       = 0.0f;   // for motion detection
 };
 }  // namespace
 static LocalNpcNavState sLocalNav;
@@ -681,8 +697,10 @@ LinkAnimationHeader* AnimHeaderFor(FollowerNpcAnim kind, s8 modelAnimType) {
             if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR;
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR_free;
         // Shared across stances:
-        case FollowerNpcAnim::kClimbUp:
+        case FollowerNpcAnim::kClimbUp:  // alias for kClimbUpL
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upL;
+        case FollowerNpcAnim::kClimbUpR:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upR;
         case FollowerNpcAnim::kFidgetLookA:
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeA_20f;
         case FollowerNpcAnim::kFidgetWarmB:
@@ -734,7 +752,9 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
         want == FollowerNpcAnim::kHoistGround ||
         want == FollowerNpcAnim::kHoistSwim ||
         want == FollowerNpcAnim::kRunJump ||
-        want == FollowerNpcAnim::kJump;
+        want == FollowerNpcAnim::kJump ||
+        want == FollowerNpcAnim::kClimbUpL ||
+        want == FollowerNpcAnim::kClimbUpR;
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                           1.0f /* playSpeed — caller overrides per-frame */,
                           0.0f /* startFrame */,
@@ -1201,9 +1221,10 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     a->world.rot.y = a->shape.rot.y;
     a->speedXZ     = 0.0f;  // we're scripting position, not using physics speed
 
-    // Climb-up animation. Plays looping; persists across frames via
-    // EnsureAnimation's transition guard.
-    EnsureAnimation(this_, play, FollowerNpcAnim::kClimbUp);
+    // Climb anim selection happens in the dispatcher's anim resolution
+    // (climb step alternation block). No EnsureAnimation call here —
+    // dispatcher fires kClimbUpL / kClimbUpR alternating one-shots
+    // driven by Y motion, mirroring Player's actionVar2 toggle.
 
     // Cursor advance — Y-axis only. NPC's XZ is snapped to subgoal.xz +
     // planeNormal * kClimbBodyOffset every frame (so body sits in front
@@ -2208,6 +2229,50 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // idle automatically).
     if (this_->stopAnimPlaying) {
         localAnim = (FollowerNpcAnim)this_->currentAnim;  // hold current
+    }
+
+    // Climb step alternation — when in CLIMBING state, drive
+    // L/R one-shot alternation from NPC's vertical motion.
+    // Mirrors Player at z_player.c:13391-13412 where each climb
+    // step is Player_AnimPlayOnce(upL/upR), toggled via
+    // actionVar2 ^= 1 when the prior one-shot completes. When
+    // NPC is stationary on the wall, no new step fires and the
+    // anim holds at last frame (Player's STATIONARY_LADDER).
+    if (this_->state == EN_FOLLOWER_STATE_CLIMBING) {
+        const float climbDy =
+            std::fabs(npc->world.pos.y - sLocalNav.climbPrevY);
+        sLocalNav.climbPrevY = npc->world.pos.y;
+        const bool isMovingVertically = (climbDy > 0.5f);
+        const bool prevStepDone =
+            !this_->stopAnimPlaying ||
+            // First-tick of CLIMBING: currentAnim isn't a climb anim
+            // yet (still walk/run/wait from FOLLOW). Treat as
+            // "ready to fire first step."
+            (this_->currentAnim != (s32)FollowerNpcAnim::kClimbUpL &&
+             this_->currentAnim != (s32)FollowerNpcAnim::kClimbUpR);
+        if (isMovingVertically && prevStepDone) {
+            // Fire next step in the alternation. First step starts L
+            // (climbNextIsRight = false initially), then toggles each
+            // step.
+            const bool fireRight = sLocalNav.climbNextIsRight;
+            localAnim = fireRight ? FollowerNpcAnim::kClimbUpR
+                                  : FollowerNpcAnim::kClimbUpL;
+            sLocalNav.climbNextIsRight = !fireRight;
+        } else if (!isMovingVertically) {
+            // Stationary on wall — hold whatever anim is current
+            // (last frame of upL or upR persists). If we haven't
+            // started any climb anim yet, fire upL once so NPC
+            // shows the climb pose instead of a walk pose.
+            if (this_->currentAnim != (s32)FollowerNpcAnim::kClimbUpL &&
+                this_->currentAnim != (s32)FollowerNpcAnim::kClimbUpR) {
+                localAnim = FollowerNpcAnim::kClimbUpL;
+            } else {
+                localAnim = (FollowerNpcAnim)this_->currentAnim;
+            }
+        } else {
+            // Moving but previous step not done — hold mid-anim.
+            localAnim = (FollowerNpcAnim)this_->currentAnim;
+        }
     }
 
     // Airborne anim hold — while jumpInProgress, keep the jump anim
