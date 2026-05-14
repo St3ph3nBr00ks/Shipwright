@@ -38,6 +38,22 @@ extern s16        gEnFollowerId;
 }
 
 // ----------------------------------------------------------------------------
+// File-scope Phase 5 nav state. Declared here (above SetFollowerNpcActive)
+// so the spawn helper can reset it. Single instance — v1 has one NPC per
+// client.
+// ----------------------------------------------------------------------------
+namespace {
+struct LocalNpcNavState {
+    AnchorNav::ActorTrail::NavPath path;
+    uint64_t lastPathRefreshFrame = 0;
+    Vec3f    lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
+    Vec3f    stuckCheckPos        = { 0.0f, 0.0f, 0.0f };
+    uint64_t lastStuckCheckFrame  = 0;
+};
+}  // namespace
+static LocalNpcNavState sLocalNav;
+
+// ----------------------------------------------------------------------------
 // CVar transition polling — called once per OnGameFrameUpdate tick.
 // ----------------------------------------------------------------------------
 void Anchor::TickFollowerNpcCVar() {
@@ -208,16 +224,8 @@ bool IsLocalOwnerNPC(Actor* npc) {
            npc == Anchor::Instance->GetFollowerNpcLocalActor();
 }
 
-// Per-NPC nav state. v1 = one local NPC per client, so a single static
-// instance suffices (no per-actor map). Reset on owner-side spawn.
-struct LocalNpcNavState {
-    AnchorNav::ActorTrail::NavPath path;
-    uint64_t lastPathRefreshFrame = 0;
-    Vec3f    lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
-    Vec3f    stuckCheckPos        = { 0.0f, 0.0f, 0.0f };
-    uint64_t lastStuckCheckFrame  = 0;
-};
-static LocalNpcNavState sLocalNav;
+// (LocalNpcNavState + sLocalNav defined at file scope above so the
+// spawn helper can reset them.)
 
 // Compute XZ distance squared between two world positions.
 inline float Dist2DSq(const Vec3f& a, const Vec3f& b) {
@@ -421,9 +429,9 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
 
     // Update collision-with-ground / floor altitude. Without this the
     // NPC's Y can drift away from the floor on slopes / steps.
+    // Flags=4 matches the standard NPC pattern (e.g. z_en_md.c:889).
     Actor_UpdateBgCheckInfo(play, npc, 26.0f /* wallCheckHeight */,
                             10.0f /* wallCheckRadius */,
                             50.0f /* ceilingCheckHeight */,
-                            UPDBGCHECKINFO_FLAG_0 | UPDBGCHECKINFO_FLAG_2 |
-                            UPDBGCHECKINFO_FLAG_3 | UPDBGCHECKINFO_FLAG_4);
+                            4 /* flags */);
 }
