@@ -79,12 +79,22 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     this->currentFace       = 0;
     this->reservedHealth    = 0;
     this->reservedDeathFlag = 0;
+    this->currentAnim       = 0;     // kNone — first EnsureAnimation will fire
+    this->syncedSpeedXZ     = 0.0f;
 
     // Player-equivalent scale (matches Link). 0.01f. Same as the pause
     // menu preview and as Player_Init does for the real Link.
     Actor_SetScale(thisx, 0.01f);
     ActorShape_Init(&thisx->shape, 0.0f, ActorShadow_DrawCircle, 24.0f);
     thisx->shape.shadowAlpha = 255;
+
+    // Gravity. Without this, Actor_MoveXZGravity adds 0.0 to velocity.y
+    // every frame — the NPC just hovers at spawn altitude. -2.0f matches
+    // Player_Init's value (most NPCs use -1.0f, but Link-skel actors
+    // should feel like Link). minVelocityY isn't set here — the default
+    // (0 → no floor) is fine because Actor_UpdateBgCheckInfo (called in
+    // FollowerNPC.cpp tick) clamps Y to floor.
+    thisx->gravity = -2.0f;
 
     // Load Link skel for the current age. gPlayerSkelHeaders is indexed
     // [0]=adult [1]=child to match LINK_AGE_ADULT/CHILD. Animation =
@@ -99,6 +109,25 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
                        9 /* flags */,
                        this->jointTable, this->morphTable,
                        PLAYER_LIMB_MAX);
+
+    // CRITICAL: SkelAnime_InitLink internally calls LinkAnimation_Change
+    // with endFrame=0 (z_skelanime.c:1146) — that sets the anim up but
+    // FREEZES it at frame 0 (no advance possible in LinkAnimation_Loop
+    // because curFrame >= animLength is always true when both are 0).
+    // Result: the NPC renders in the wait anim's frame-0 pose forever
+    // (a.k.a. "default pose for pause menu"). We need to override the
+    // endFrame with the anim's actual last frame to enable looping
+    // playback. LinkAnimation_PlayLoop does exactly that (sets startFrame=
+    // 0, endFrame=Animation_GetLastFrame(anim), mode=ANIMMODE_LOOP).
+    // After this call, LinkAnimation_Update in EnFollower_Update will
+    // advance curFrame each tick and write joint positions into
+    // jointTable, so the NPC visibly idles. Local-owner NPCs will then
+    // swap to walk/run/climb via EnsureAnimation in the AI tick; peer
+    // replicas will continue playing wait by default (state-driven
+    // anim sync is the v1 fallback — see TickFollowerNpcActor's anim
+    // resolution for peers).
+    LinkAnimation_PlayLoop(play, &this->skelAnime,
+                           (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait);
 }
 
 void EnFollower_Destroy(Actor* thisx, PlayState* play) {

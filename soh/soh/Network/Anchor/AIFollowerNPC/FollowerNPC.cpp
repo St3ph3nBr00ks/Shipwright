@@ -48,11 +48,15 @@ extern s16        gEnFollowerId;
 namespace {
 // Animation identity tag — tracked so the per-tick handler only calls
 // LinkAnimation_Change on actual transitions (calling it every frame
-// restarts the animation and freezes the playhead).
+// restarts the animation and freezes the playhead). Stored on the
+// EnFollower as `currentAnim` (s32) so peer replicas track their own
+// animation independently.
 enum class FollowerNpcAnim {
-    kNone,
-    kWait,        // gPlayerAnim_link_normal_wait
-    kClimbUp,     // gPlayerAnim_link_normal_Fclimb_upL
+    kNone     = 0,  // initial state — first EnsureAnimation call always fires
+    kWait     = 1,  // gPlayerAnim_link_normal_wait
+    kWalk     = 2,  // gPlayerAnim_link_normal_walk
+    kRun      = 3,  // gPlayerAnim_link_normal_run
+    kClimbUp  = 4,  // gPlayerAnim_link_normal_Fclimb_upL
 };
 
 struct LocalNpcNavState {
@@ -61,7 +65,8 @@ struct LocalNpcNavState {
     Vec3f    lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
     Vec3f    stuckCheckPos        = { 0.0f, 0.0f, 0.0f };
     uint64_t lastStuckCheckFrame  = 0;
-    FollowerNpcAnim currentAnim   = FollowerNpcAnim::kNone;
+    // (currentAnim moved to EnFollower::currentAnim — per-actor tracking
+    // so peer replicas don't share state with the local owner.)
     // Phase 6 — anchor cached during a CLIMBING run so handler doesn't
     // re-resolve every frame. Cleared on CLIMBING exit.
     const ::AnchorNavRoom::ClimbAnchor* activeClimbAnchor = nullptr;
@@ -243,8 +248,11 @@ void Anchor::SetFollowerNpcActive(bool active) {
         sLocalNav.lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
         sLocalNav.stuckCheckPos        = p;
         sLocalNav.lastStuckCheckFrame  = gameFrameCounter.load(std::memory_order_relaxed);
-        sLocalNav.currentAnim          = FollowerNpcAnim::kNone;  // force first-tick anim swap
         sLocalNav.activeClimbAnchor    = nullptr;
+        // (currentAnim init lives on EnFollower itself — set in
+        // EnFollower_Init. The first EnsureAnimation tick will swap
+        // from the kWait set up by LinkAnimation_PlayLoop in init to
+        // whatever AnimForState chooses based on first-tick state.)
         SPDLOG_INFO("[FollowerNPC] Spawned ACTOR_EN_FOLLOWER(id={}) at "
                     "({:.0f},{:.0f},{:.0f}) yaw={} (CVar 0→1)",
                     (int)gEnFollowerId, p.x, p.y, p.z, (int)yaw);
@@ -485,12 +493,20 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 
 // Animation switching helper — only call LinkAnimation_Change on
 // real transitions. Calling every frame restarts the playhead.
+// `currentAnim` is per-actor (on EnFollower) so peer replicas track
+// their own state independently.
 void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
-    if (sLocalNav.currentAnim == want) return;
+    if ((FollowerNpcAnim)this_->currentAnim == want) return;
     LinkAnimationHeader* anim = nullptr;
     switch (want) {
         case FollowerNpcAnim::kWait:
             anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait;
+            break;
+        case FollowerNpcAnim::kWalk:
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk;
+            break;
+        case FollowerNpcAnim::kRun:
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_run;
             break;
         case FollowerNpcAnim::kClimbUp:
             anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upL;
@@ -503,7 +519,41 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
                           1.0f /* playSpeed */, 0.0f /* startFrame */,
                           Animation_GetLastFrame((void*)anim),
                           ANIMMODE_LOOP, -6.0f /* morphFrames */);
-    sLocalNav.currentAnim = want;
+    this_->currentAnim = (s32)want;
+}
+
+// Pick the right animation for the current state. Used by both the
+// local-owner path (post-dispatch) and the peer-replica path (state
+// arrives via FOLLOWER_NPC_STATE).
+//
+// FOLLOW chooses walk vs run based on speedXZ. For peers, speedXZ
+// comes from the synced field (`syncedSpeedXZ`) populated by the
+// state-packet handler; for local owners, it's the value the AI
+// just wrote.
+FollowerNpcAnim AnimForState(s32 state, float speedXZ) {
+    switch (state) {
+        case EN_FOLLOWER_STATE_FOLLOW: {
+            // Threshold matches kRunDistance's intent: when the AI
+            // chose run speed (≥ kRunSpeed/2 ≈ 6.0), play run anim.
+            // Below that, play walk anim. At zero speed FOLLOW shouldn't
+            // be active but if it is, fall back to walk (so the NPC
+            // doesn't visually freeze).
+            return (speedXZ >= 8.0f) ? FollowerNpcAnim::kRun : FollowerNpcAnim::kWalk;
+        }
+        case EN_FOLLOWER_STATE_STUCK:
+            // STUCK runs for a single tick before transitioning to
+            // FOLLOW; play wait so the brief frame doesn't show the
+            // NPC mid-stride at zero motion.
+            return FollowerNpcAnim::kWait;
+        case EN_FOLLOWER_STATE_CLIMBING:
+            return FollowerNpcAnim::kClimbUp;
+        case EN_FOLLOWER_STATE_DEAD:
+            // v1 stub — wait pose. v2 combat will switch to a death anim.
+            return FollowerNpcAnim::kWait;
+        case EN_FOLLOWER_STATE_IDLE:
+        default:
+            return FollowerNpcAnim::kWait;
+    }
 }
 
 // Phase 6 — find the climb anchor whose grid is closest to `pos`.
@@ -830,11 +880,19 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
 
     // Peer replicas have their pos applied each frame from
     // FOLLOWER_NPC_STATE packets; they don't run AI. Skip the state
-    // machine entirely.
+    // machine entirely — but DO drive animation from the synced state
+    // field so peer NPCs visibly walk/run/climb instead of sliding
+    // around in the wait pose.
     if (!IsLocalOwnerNPC(npc)) {
-        // Still advance physics so gravity applies (the actor falls
-        // onto floor if STATE packets place it above ground).
-        Actor_MoveXZGravity(npc);
+        EnsureAnimation(this_, play,
+                        AnimForState(this_->state, this_->syncedSpeedXZ));
+        // Skip physics — STATE packet pos is authoritative and arrives
+        // every ~100ms. If we ran Actor_MoveXZGravity here, gravity
+        // (-2.0/frame) would accumulate velocity.y between packets,
+        // dropping the peer below packet pos before each snap (visible
+        // bobbing — worse at higher framerates where more frames pass
+        // between packets). Owner clamps Y to floor before broadcasting,
+        // so peer's pos is always on a valid floor.
         return;
     }
 
@@ -884,32 +942,22 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // Dispatch.
     switch (this_->state) {
         default:
-        case EN_FOLLOWER_STATE_IDLE:
-            TickIDLE(this_, play, leaderPos);
-            EnsureAnimation(this_, play, FollowerNpcAnim::kWait);
-            break;
-        case EN_FOLLOWER_STATE_FOLLOW:
-            TickFOLLOW(this_, play, leaderPos);
-            // FOLLOW uses the wait anim too in v1 (walk/run anims are
-            // a Phase 7 polish item). Movement looks slidey but
-            // mechanics are correct.
-            EnsureAnimation(this_, play, FollowerNpcAnim::kWait);
-            break;
-        case EN_FOLLOWER_STATE_STUCK:
-            TickSTUCK(this_, play, leaderPos);
-            EnsureAnimation(this_, play, FollowerNpcAnim::kWait);
-            break;
-        case EN_FOLLOWER_STATE_CLIMBING:
-            TickCLIMBING(this_, play, leaderPos);
-            // Anim swap happens inside TickCLIMBING (kClimbUp on
-            // entry; kWait on exit-to-FOLLOW path).
-            break;
-        case EN_FOLLOWER_STATE_DEAD:
-            TickDEAD(this_, play, leaderPos);
-            // No animation switch in v1 — invulnerable NPC never
-            // enters this state. v2 will set a death anim here.
-            break;
+        case EN_FOLLOWER_STATE_IDLE:     TickIDLE(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_FOLLOW:   TickFOLLOW(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_STUCK:    TickSTUCK(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_CLIMBING: TickCLIMBING(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_DEAD:     TickDEAD(this_, play, leaderPos); break;
     }
+
+    // Animation. Run AFTER dispatch so any state transitions made by
+    // the handler are reflected this same tick (e.g. FOLLOW → STUCK
+    // immediately switches to wait anim, not next-tick).
+    EnsureAnimation(this_, play, AnimForState(this_->state, npc->speedXZ));
+
+    // Sync speed for peers — they read syncedSpeedXZ to choose walk
+    // vs run anim. (For peers, this is overwritten by the STATE
+    // packet handler; for local owner, this is the source of truth.)
+    this_->syncedSpeedXZ = npc->speedXZ;
 
     // Apply locomotion. Standard OoT NPC pattern — speedXZ + world.rot.y
     // give a per-frame velocity vector; gravity pulls Y to floor.

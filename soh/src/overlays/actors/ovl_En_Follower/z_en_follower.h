@@ -64,6 +64,19 @@ typedef struct EnFollower {
     // `health` + `deathFlag` fields without struct migration later.
     s8 reservedHealth;
     u8 reservedDeathFlag;
+
+    // Last animation kind set on this actor (FollowerNpcAnim enum value
+    // stored as int; matches the C++ enum class FollowerNpcAnim). Per-
+    // actor (NOT a file-scope global) so peer replicas track their own
+    // animation independently of the local owner. Init = 0 = kNone =
+    // "not yet ensured" — first EnsureAnimation call will fire.
+    s32 currentAnim;
+
+    // Owner-broadcast speed signal (for peers). Local NPC writes its
+    // own speedXZ; peer NPC reads the value broadcast in
+    // FOLLOWER_NPC_STATE so it can pick walk vs run animation. Reset
+    // to 0 on init.
+    f32 syncedSpeedXZ;
 } EnFollower;
 
 #ifdef __cplusplus

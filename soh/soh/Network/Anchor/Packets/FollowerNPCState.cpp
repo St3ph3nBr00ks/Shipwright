@@ -24,6 +24,7 @@ extern "C" {
 #include "functions.h"
 #include "z64.h"
 #include "macros.h"
+#include "src/overlays/actors/ovl_En_Follower/z_en_follower.h"  // EnFollower struct + state field
 extern PlayState* gPlayState;
 extern s16        gEnFollowerId;
 }
@@ -42,6 +43,7 @@ void Anchor::SendPacket_FollowerNpcState() {
     // The throttle check is done by the caller (TickFollowerNpcStateBroadcast).
 
     Actor* npc = mFollowerNpcLocalActor;
+    EnFollower* asFollower = (EnFollower*)npc;
     const Vec3f& pos = npc->world.pos;
     const Vec3s& rot = npc->world.rot;
     const Vec3s& sr  = npc->shape.rot;
@@ -56,7 +58,12 @@ void Anchor::SendPacket_FollowerNpcState() {
     payload["rot"]           = { rot.x, rot.y, rot.z };
     payload["shapeRot"]      = { sr.x, sr.y, sr.z };
     payload["scale"]         = { sc.x, sc.y, sc.z };
-    payload["state"]         = 0;  // Phase 4 will populate from EnFollower's state
+    // State + speedXZ drive peer-side animation selection (wait / walk
+    // / run / climb-up). Both are tiny additions on the wire; receiver
+    // writes them onto the EnFollower struct so the next AnimForState
+    // call picks the right anim.
+    payload["state"]         = (int)asFollower->state;
+    payload["speedXZ"]       = npc->speedXZ;
     payload["health"]        = (int)100;  // RESERVED for v2
     payload["deathFlag"]     = (int)0;    // RESERVED for v2
     PacketTimeline::SetTimelineField(payload);
@@ -164,6 +171,14 @@ void Anchor::HandlePacket_FollowerNpcState(nlohmann::json payload) {
         replica->scale.y = scArr[1];
         replica->scale.z = scArr[2];
     }
+
+    // Apply state + speedXZ so the peer's next tick picks the right
+    // animation via AnimForState. Defaults match the local-owner
+    // initial values so v1 builds against pre-state-broadcast peers
+    // still get a valid (if static-wait) anim.
+    EnFollower* asFollower = (EnFollower*)replica;
+    asFollower->state         = payload.value("state",   (int)EN_FOLLOWER_STATE_IDLE);
+    asFollower->syncedSpeedXZ = payload.value("speedXZ", 0.0f);
 }
 
 void Anchor::TickFollowerNpcStateBroadcast() {
