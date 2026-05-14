@@ -1773,21 +1773,36 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                     source);
     };
 
-    if (this_->state == EN_FOLLOWER_STATE_SWIMMING &&
-        leaderPos.y > npc->world.pos.y + kHoistSwimTriggerHeight) {
-        const ::AnchorNavRoom::RoomNavData* navData =
-            ::AnchorNavRoom::GetForRoom(
-                gPlayState->sceneNum,
-                (int8_t)gPlayState->roomCtx.curRoom.num);
-        const auto* ledge = FindClosestLedgeAnchor(navData, npc->world.pos);
-        Vec3f targetTop;
-        if (ledge != nullptr) {
-            enterLedgeHoist(HOIST_CONTEXT_SWIM, ledge->topPos, "LedgeAnchor");
-        } else if (RaycastDetectLedge(play, npc->world.pos, leaderPos, targetTop)) {
-            // No LedgeAnchor in this room — fall back to runtime
-            // raycast probe. Catches shore edges and dock walls
-            // that aren't cataloged.
-            enterLedgeHoist(HOIST_CONTEXT_SWIM, targetTop, "raycast");
+    if (this_->state == EN_FOLLOWER_STATE_SWIMMING) {
+        // Autonomous swim-out detection — independent of leader's pos
+        // (per user feedback: "Do not rely on the position of the
+        // leader to determine if the NPC is in water"). Raycast from
+        // 5u above NPC's head straight down. If a floor poly is hit
+        // ABOVE NPC's current Y within hoist range, NPC is positioned
+        // under a walkable ledge / dock / shore — trigger hoist.
+        //
+        // BgCheck_EntityRaycastFloor1 only returns floor-normal polys
+        // (upward-facing), so cave ceilings / bridge undersides don't
+        // false-trigger. Low bridges where NPC's head fits underneath
+        // could trigger a premature hoist — edge case accepted in v1.
+        //
+        // NPC head is roughly at world.pos.y + 50 (Link body height).
+        // Probe start: head + 5 = pos.y + 55.
+        constexpr float kSwimHoistProbeStartY  = 55.0f;
+        constexpr float kSwimHoistMinLift      = 20.0f;
+        constexpr float kSwimHoistMaxLift      = 90.0f;
+        Vec3f probeStart = { npc->world.pos.x,
+                             npc->world.pos.y + kSwimHoistProbeStartY,
+                             npc->world.pos.z };
+        CollisionPoly* topPoly = nullptr;
+        const f32 topY = BgCheck_EntityRaycastFloor1(&play->colCtx,
+                                                      &topPoly, &probeStart);
+        if (topPoly != nullptr) {
+            const float lift = topY - npc->world.pos.y;
+            if (lift > kSwimHoistMinLift && lift < kSwimHoistMaxLift) {
+                Vec3f topPos = { probeStart.x, topY, probeStart.z };
+                enterLedgeHoist(HOIST_CONTEXT_SWIM, topPos, "head-up-probe");
+            }
         }
     } else if (this_->state == EN_FOLLOWER_STATE_FOLLOW &&
                leaderPos.y > npc->world.pos.y + 30.0f) {
