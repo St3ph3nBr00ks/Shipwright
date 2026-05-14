@@ -1230,10 +1230,12 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     if (!IsLocalOwnerNPC(npc)) {
         FollowerNpcAnim peerAnim = AnimForState(this_->state, this_->syncedSpeedXZ);
         EnsureAnimation(this_, play, peerAnim);
-        // Per-frame playSpeed for walk/run (mirrors local-owner path).
+        // Per-frame playSpeed for walk/run (mirrors local-owner path —
+        // fixed 1.0 matching Player_AnimChangeLoopMorph). See local
+        // path for explanation of why the earlier velocity-scaled
+        // formula was wrong.
         if (peerAnim == FollowerNpcAnim::kWalk || peerAnim == FollowerNpcAnim::kRun) {
-            this_->skelAnime.playSpeed =
-                std::max(1.0f, this_->syncedSpeedXZ * 0.3f + 1.0f);
+            this_->skelAnime.playSpeed = 1.0f;
             // Footstep SFX so peer NPC isn't silent. speedXZ is the
             // synced value (broadcast by owner).
             this_->actor.speedXZ = this_->syncedSpeedXZ;  // for SFX pitch
@@ -1424,14 +1426,21 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     }
     EnsureAnimation(this_, play, localAnim);
 
-    // Per-frame playSpeed for walk/run. EnsureAnimation only sets
-    // playSpeed at TRANSITION; if speedXZ changes mid-anim (e.g. NPC
-    // accelerates from walk to run pace while staying in kRun), the
-    // cadence falls out of sync. Player writes playSpeed directly each
-    // frame (z_player.c:8445); mirror that pattern. Formula matches
-    // Player's run-anim scaling: velocity * 0.3 + 1.0.
+    // Per-frame playSpeed for walk/run. Player's run anim is set via
+    // Player_AnimChangeLoopMorph at z_player.c:6634 with playSpeed=1.0
+    // — fixed cadence regardless of motion speed. Earlier iteration
+    // here used `speedXZ * 0.3 + 1.0` which is actually Player's
+    // STEP-COUNTER formula (z_player.c:8170, advances unk_868), NOT
+    // the anim playSpeed. That produced ~3× too-fast anim cadence
+    // (user observed "twice as fast" — close enough).
+    //
+    // Match Player: playSpeed = 1.0 for both walk and run. Anim
+    // cycle frames per game tick = 1.0 * R_UPDATE_RATE * 0.5 = 1.5,
+    // a natural cadence that doesn't drift with motion. Step counter
+    // still scales with velocity (handled by TickStepPhaseAndSfx
+    // using the actual step-counter formula).
     if (localAnim == FollowerNpcAnim::kWalk || localAnim == FollowerNpcAnim::kRun) {
-        this_->skelAnime.playSpeed = std::max(1.0f, npc->speedXZ * 0.3f + 1.0f);
+        this_->skelAnime.playSpeed = 1.0f;
         // Tick step phase + emit footstep SFX on foot-down crossings.
         TickStepPhaseAndSfx(this_, play);
     }
