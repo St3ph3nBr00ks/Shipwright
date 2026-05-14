@@ -64,6 +64,10 @@ void Anchor::SendPacket_FollowerNpcState() {
     // call picks the right anim.
     payload["state"]         = (int)asFollower->state;
     payload["speedXZ"]       = npc->speedXZ;
+    // Mirror local Player's modelAnimType so peer-side NPCs pick the
+    // right armed/unarmed walk/run/idle variant. 0=unarmed, 1/2=
+    // fighter (sword+shield), 3=long sword.
+    payload["modelAnimType"] = (int)asFollower->currentAnimType;
     payload["health"]        = (int)100;  // RESERVED for v2
     payload["deathFlag"]     = (int)0;    // RESERVED for v2
     PacketTimeline::SetTimelineField(payload);
@@ -179,6 +183,7 @@ void Anchor::HandlePacket_FollowerNpcState(nlohmann::json payload) {
     EnFollower* asFollower = (EnFollower*)replica;
     asFollower->state         = payload.value("state",   (int)EN_FOLLOWER_STATE_IDLE);
     asFollower->syncedSpeedXZ = payload.value("speedXZ", 0.0f);
+    asFollower->currentAnimType = (s8)payload.value("modelAnimType", 0);
 }
 
 void Anchor::TickFollowerNpcStateBroadcast() {

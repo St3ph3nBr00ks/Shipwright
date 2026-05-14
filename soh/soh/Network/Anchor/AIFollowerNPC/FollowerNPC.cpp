@@ -601,50 +601,77 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 // playSpeed defaults to 1.0; the dispatcher overrides skelAnime.playSpeed
 // per-frame for walk/run anims so motion-cadence stays in sync as
 // speedXZ varies within a single anim (z_player.c:8445 pattern).
-void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
-    if ((FollowerNpcAnim)this_->currentAnim == want) return;
-    LinkAnimationHeader* anim = nullptr;
-    bool oneShot = false;
-    switch (want) {
+// Pick anim header for a given anim kind + Player modelAnimType.
+// Mirrors Player's D_80853914 2D table (z_player.c:578) but only for
+// the kinds our NPC plays. modelAnimType maps:
+//   0 = unarmed / free (no shield, no sword in hand)
+//   1 = fighter (sword + shield drawn, ready stance)
+//   2 = fighter alt — same locomotion anims as 1 in Player's table
+//   3 = long sword (two-handed Biggoron Sword)
+//   4/5 = "free" variants — same as 0 in Player's table
+// CLIMBING anims and fidgets don't have modelAnimType variants in
+// Player's table (they're shared across stances).
+LinkAnimationHeader* AnimHeaderFor(FollowerNpcAnim kind, s8 modelAnimType) {
+    const bool isLong    = (modelAnimType == 3);
+    const bool isFighter = (modelAnimType == 1 || modelAnimType == 2);
+    switch (kind) {
         case FollowerNpcAnim::kWait:
-            // wait_free is used as the "base" anim. Idle blends waitL/R
-            // each frame via LinkAnimation_BlendToJoint, so the wait_free
-            // here is only the initial joint state before the first blend.
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_free;
-            break;
+            if (isLong)    return (LinkAnimationHeader*)&gPlayerAnim_link_fighter_wait_long;
+            if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_free;
         case FollowerNpcAnim::kWalk:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_free;
-            break;
+            if (isLong)    return (LinkAnimationHeader*)&gPlayerAnim_link_fighter_walk_long;
+            if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_free;
         case FollowerNpcAnim::kRun:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_run_free;
-            break;
-        case FollowerNpcAnim::kClimbUp:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upL;
-            break;
+            if (isLong)            return (LinkAnimationHeader*)&gPlayerAnim_link_fighter_run_long;
+            if (modelAnimType == 1) return (LinkAnimationHeader*)&gPlayerAnim_link_fighter_run;
+            if (modelAnimType == 2) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_run;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_run_free;
         case FollowerNpcAnim::kStopL:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endL_free;
-            oneShot = true;
-            break;
+            if (isLong)    return (LinkAnimationHeader*)&gPlayerAnim_link_fighter_walk_endL_long;
+            if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endL;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endL_free;
         case FollowerNpcAnim::kStopR:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR_free;
-            oneShot = true;
-            break;
+            if (isLong)    return (LinkAnimationHeader*)&gPlayerAnim_link_fighter_walk_endR_long;
+            if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR_free;
+        // Shared across stances:
+        case FollowerNpcAnim::kClimbUp:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upL;
         case FollowerNpcAnim::kFidgetLookA:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeA_20f;
-            oneShot = true;
-            break;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeA_20f;
         case FollowerNpcAnim::kFidgetWarmB:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeB_20f;
-            oneShot = true;
-            break;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeB_20f;
         case FollowerNpcAnim::kFidgetStretchD:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_wait_typeD_20f;
-            oneShot = true;
-            break;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_wait_typeD_20f;
         case FollowerNpcAnim::kNone:
-            return;
+        default:
+            return nullptr;
     }
+}
+
+void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
+    // Pick the right anim header for the (kind, modelAnimType) pair.
+    // currentAnimType is updated by the dispatcher BEFORE this call to
+    // reflect the local Player's current armed-stance state.
+    LinkAnimationHeader* anim = AnimHeaderFor(want, this_->currentAnimType);
     if (anim == nullptr) return;
+    // No-op only if BOTH the kind and the resolved anim header match.
+    // This way a modelAnimType change (e.g. unarmed → fighter when
+    // player draws sword+shield) correctly re-fires the anim with
+    // the armed variant, while same-kind+same-header transitions
+    // (e.g. type 4 ↔ type 0 — both pick _free) are no-ops.
+    if ((FollowerNpcAnim)this_->currentAnim == want &&
+        this_->skelAnime.animation == anim) {
+        return;
+    }
+    const bool oneShot =
+        want == FollowerNpcAnim::kStopL ||
+        want == FollowerNpcAnim::kStopR ||
+        want == FollowerNpcAnim::kFidgetLookA ||
+        want == FollowerNpcAnim::kFidgetWarmB ||
+        want == FollowerNpcAnim::kFidgetStretchD;
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                           1.0f /* playSpeed — caller overrides per-frame */,
                           0.0f /* startFrame */,
@@ -1382,6 +1409,16 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // chosen by current step phase — eliminates the "freeze mid-stride"
     // pop when NPC arrives at leader. Mirrors Player's func_8083BF50
     // (z_player.c:6388).
+    // Sync modelAnimType from local Player so EnsureAnimation picks
+    // armed (fighter) vs unarmed (_free) anim variants correctly.
+    // Player updates modelAnimType in Player_SetModelGroup
+    // (z_player_lib.c:655) whenever the held item / shield state
+    // changes (e.g. sword drawn/sheathed). Without this, the NPC
+    // always uses _free anims even while visually wielding sword+
+    // shield (because we inherit Player's equipment-draw via the
+    // override callback).
+    this_->currentAnimType = (s8)player->modelAnimType;
+
     FollowerNpcAnim localAnim = AnimForState(this_->state, npc->speedXZ);
     const bool justStoppedMoving =
         (this_->prevState == EN_FOLLOWER_STATE_FOLLOW &&

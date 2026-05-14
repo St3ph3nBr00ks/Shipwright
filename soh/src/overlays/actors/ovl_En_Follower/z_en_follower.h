@@ -71,6 +71,12 @@ typedef struct EnFollower {
     // animation independently of the local owner. Init = 0 = kNone =
     // "not yet ensured" — first EnsureAnimation call will fire.
     s32 currentAnim;
+    // Last modelAnimType used when picking the current anim. Mirrors
+    // Player.modelAnimType — 0=unarmed/free, 1/2=fighter (sword+
+    // shield), 3=long sword (two-handed). EnsureAnimation re-fires
+    // when this changes so swapping sword in/out re-picks the right
+    // variant (e.g. walk_free → walk when sword+shield drawn).
+    s8 currentAnimType;
 
     // Owner-broadcast speed signal (for peers). Local NPC writes its
     // own speedXZ; peer NPC reads the value broadcast in

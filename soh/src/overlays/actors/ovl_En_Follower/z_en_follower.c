@@ -80,6 +80,7 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     this->reservedHealth    = 0;
     this->reservedDeathFlag = 0;
     this->currentAnim       = 0;     // kNone — first EnsureAnimation will fire
+    this->currentAnimType   = 0;     // PLAYER_ANIMTYPE_0 (unarmed) baseline
     this->syncedSpeedXZ     = 0.0f;
     this->stepPhase         = 0.0f;
     this->stopAnimPlaying   = 0;
