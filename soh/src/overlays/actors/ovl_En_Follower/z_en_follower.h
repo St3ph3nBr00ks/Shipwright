@@ -23,6 +23,7 @@ typedef enum {
     EN_FOLLOWER_STATE_CLIMBING = 2,
     EN_FOLLOWER_STATE_STUCK    = 3,
     EN_FOLLOWER_STATE_DEAD     = 4,
+    EN_FOLLOWER_STATE_SWIMMING = 5,  // tread/swim while submerged
 } EnFollowerAIState;
 
 struct EnFollower;

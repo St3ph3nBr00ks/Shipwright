@@ -66,6 +66,8 @@ enum class FollowerNpcAnim {
     kFidgetLookA = 7,  // gPlayerAnim_link_normal_wait_typeA_20f (look around)
     kFidgetWarmB = 8,  // gPlayerAnim_link_normal_wait_typeB_20f (warm — wipe brow)
     kFidgetStretchD = 9,  // gPlayerAnim_link_wait_typeD_20f (stretch arms)
+    kSwim     = 10,  // gPlayerAnim_link_swimer_swim (moving)
+    kSwimWait = 11,  // gPlayerAnim_link_swimer_swim_wait (treading water)
 };
 
 struct LocalNpcNavState {
@@ -645,6 +647,13 @@ LinkAnimationHeader* AnimHeaderFor(FollowerNpcAnim kind, s8 modelAnimType) {
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeB_20f;
         case FollowerNpcAnim::kFidgetStretchD:
             return (LinkAnimationHeader*)&gPlayerAnim_link_wait_typeD_20f;
+        // Swimming — Player uses the same swim anims regardless of
+        // modelAnimType (sword stays sheathed in water). Anim cycle is
+        // looping for both.
+        case FollowerNpcAnim::kSwim:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim;
+        case FollowerNpcAnim::kSwimWait:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim_wait;
         case FollowerNpcAnim::kNone:
         default:
             return nullptr;
@@ -841,6 +850,11 @@ FollowerNpcAnim AnimForState(s32 state, float speedXZ) {
             return FollowerNpcAnim::kWait;
         case EN_FOLLOWER_STATE_CLIMBING:
             return FollowerNpcAnim::kClimbUp;
+        case EN_FOLLOWER_STATE_SWIMMING:
+            // Treading water at low speed; full swim anim when moving.
+            // Threshold matches Player's walk↔run handoff at 4.0.
+            return (speedXZ > 0.5f) ? FollowerNpcAnim::kSwim
+                                    : FollowerNpcAnim::kSwimWait;
         case EN_FOLLOWER_STATE_DEAD:
             // v1 stub — wait pose. v2 combat will switch to a death anim.
             return FollowerNpcAnim::kWait;
@@ -1062,6 +1076,64 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     const float dyAdv = std::fabs(a->world.pos.y - subgoal.y);
     if (dyAdv < 12.0f) {
         sLocalNav.path.Advance();
+    }
+}
+
+// Swim constants. Matches Player's adult ageProperties.unk_24 = 36
+// (depth threshold to start swimming) and a slower XZ pace (Link
+// swims at ~3-4 u/frame, much slower than the 6-12 u/frame walk/run).
+//
+// kSwimSurfaceDrop = how much to lift NPC pos when entering water so
+// body floats with head above surface (Link's pos is at feet; we
+// want pos.y = water surface - small offset so feet are submerged
+// but head is above).
+static constexpr float kSwimDepthThreshold = 36.0f;
+static constexpr float kSwimSpeedMax       = 4.0f;
+static constexpr float kSwimSurfaceDrop    = 10.0f;
+static constexpr float kSwimEnterArrive    = 60.0f;  // IDLE arrival in water (treading)
+
+// SWIMMING handler — clamp Y to water surface, swim XZ toward leader
+// at swim pace. Exits to FOLLOW when no longer above water. Handles
+// its own XZ motion (dispatcher skips Actor_MoveXZGravity for
+// SWIMMING because gravity would fight the Y surface clamp).
+void TickSWIMMING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    Actor* a = &this_->actor;
+
+    // Clamp Y to water surface so NPC floats at surface level.
+    // WaterBox_GetSurface1 fills surfaceY when there's water above the
+    // XZ position. If no water (somehow), exit swimming.
+    f32 surfaceY = a->world.pos.y;
+    WaterBox* wb = nullptr;
+    if (!WaterBox_GetSurface1(play, &play->colCtx,
+                              a->world.pos.x, a->world.pos.z,
+                              &surfaceY, &wb)) {
+        SPDLOG_INFO("[FollowerNPC] SWIMMING→FOLLOW (no water under NPC at "
+                    "({:.0f},{:.0f},{:.0f}))",
+                    a->world.pos.x, a->world.pos.y, a->world.pos.z);
+        this_->state = EN_FOLLOWER_STATE_FOLLOW;
+        return;
+    }
+    a->world.pos.y  = surfaceY - kSwimSurfaceDrop;
+    a->velocity.y   = 0.0f;  // reset so a future FOLLOW transition starts fresh
+
+    // Yaw toward leader, move at swim pace. Slower than land speeds —
+    // Link's swim caps around 3-4 u/frame. No IDLE substate for
+    // SWIMMING — just tread water when close.
+    const float dx = leaderPos.x - a->world.pos.x;
+    const float dz = leaderPos.z - a->world.pos.z;
+    const float distSq = dx*dx + dz*dz;
+    if (distSq > kSwimEnterArrive * kSwimEnterArrive) {
+        const s16 yaw = Math_Atan2S(dz, dx);
+        a->shape.rot.y = yaw;
+        a->world.rot.y = yaw;
+        a->speedXZ     = kSwimSpeedMax;
+        // Manual XZ motion. Math_SinS/CosS convert binary angle → unit
+        // vector. Direct write to world.pos.xz mirrors how TickCLIMBING
+        // handles XZ outside the standard physics pipeline.
+        a->world.pos.x += Math_SinS(yaw) * a->speedXZ;
+        a->world.pos.z += Math_CosS(yaw) * a->speedXZ;
+    } else {
+        a->speedXZ = 0.0f;  // tread water; swim_wait anim selected by AnimForState
     }
 }
 
@@ -1375,10 +1447,13 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // Phase 8 — G-guard safety nets. Run BEFORE state dispatch so a
     // teleport fully resets the state machine for the same tick (the
     // teleport drops us into FOLLOW with cleared path / baselines).
-    // CLIMBING is exempt — a vertical-traversal-in-progress shouldn't
-    // be aborted by a far-from-leader leash; the climb might be the
-    // path to the leader (e.g. leader is on a ledge above).
-    if (this_->state != EN_FOLLOWER_STATE_CLIMBING) {
+    // CLIMBING and SWIMMING are exempt — vertical / water traversal
+    // is its own progression and shouldn't be aborted by a
+    // distance-based leash. Without the swim exemption, G14 (10s,
+    // 30u progress) could fire mid-swim and teleport NPC to leader's
+    // land position mid-pool.
+    if (this_->state != EN_FOLLOWER_STATE_CLIMBING &&
+        this_->state != EN_FOLLOWER_STATE_SWIMMING) {
         if (TryFireG10(this_, play, leaderPos)) {
             // Teleport fired — skip rest of tick. NPC is now at leader
             // in fresh FOLLOW; next tick picks up normally.
@@ -1389,6 +1464,24 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         }
     }
 
+    // Water-entry detection — if NPC's submersion depth exceeds Link's
+    // swim threshold (adult ageProperties.unk_24 = 36.0 at z_player.c:453),
+    // transition to SWIMMING. CLIMBING is exempt — climbing in water
+    // is OoT's own swim-up-ladder state which the substrate doesn't
+    // model. SWIMMING already running stays in SWIMMING (handler
+    // checks for water exit and reverts).
+    if (this_->state != EN_FOLLOWER_STATE_CLIMBING &&
+        this_->state != EN_FOLLOWER_STATE_SWIMMING) {
+        if (npc->yDistToWater > kSwimDepthThreshold) {
+            this_->state = EN_FOLLOWER_STATE_SWIMMING;
+            sLocalNav.path.Reset();  // discard land path; swim handler
+                                     // navigates direct-to-leader.
+            SPDLOG_INFO("[FollowerNPC] FOLLOW/IDLE→SWIMMING "
+                        "(yDistToWater={:.1f}u > {:.0f}u threshold)",
+                        npc->yDistToWater, kSwimDepthThreshold);
+        }
+    }
+
     // Dispatch.
     switch (this_->state) {
         default:
@@ -1396,6 +1489,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         case EN_FOLLOWER_STATE_FOLLOW:   TickFOLLOW(this_, play, leaderPos); break;
         case EN_FOLLOWER_STATE_STUCK:    TickSTUCK(this_, play, leaderPos); break;
         case EN_FOLLOWER_STATE_CLIMBING: TickCLIMBING(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_SWIMMING: TickSWIMMING(this_, play, leaderPos); break;
         case EN_FOLLOWER_STATE_DEAD:     TickDEAD(this_, play, leaderPos); break;
     }
 
@@ -1533,9 +1627,12 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
 
     // Apply locomotion. Standard OoT NPC pattern — speedXZ + world.rot.y
     // give a per-frame velocity vector; gravity pulls Y to floor.
-    // CLIMBING bypasses this (we directly write world.pos and gravity
-    // would yank us off the wall).
-    if (this_->state != EN_FOLLOWER_STATE_CLIMBING) {
+    // CLIMBING bypasses this (climb handler writes world.pos directly,
+    // gravity would yank NPC off the wall). SWIMMING also bypasses
+    // (swim handler clamps Y to water surface; gravity would drag
+    // NPC underwater each frame, fighting the surface clamp).
+    if (this_->state != EN_FOLLOWER_STATE_CLIMBING &&
+        this_->state != EN_FOLLOWER_STATE_SWIMMING) {
         Actor_MoveXZGravity(npc);
 
         // Update collision-with-ground / floor altitude. Without this
