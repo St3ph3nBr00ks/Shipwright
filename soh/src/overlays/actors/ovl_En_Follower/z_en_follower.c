@@ -45,6 +45,15 @@
 // to C via extern "C" wrapper. Forward-decl matches the .h there.
 extern void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play);
 
+// Color-bug fix — set/clear a draw-context flag around our
+// Player_DrawImpl call so the VB_APPLY_TUNIC_COLOR hook in
+// HookHandlers.cpp can apply the OWNER's color instead of inheriting
+// the previous DummyPlayer draw's GPU env color. See
+// soh/soh/Network/Anchor/AIFollowerNPC/FollowerNPC.h for full
+// rationale; mirrors the pause-menu fix for the same root cause.
+extern void Anchor_FollowerNpcDrawBegin(Actor* npc);
+extern void Anchor_FollowerNpcDrawEnd(void);
+
 // gPlayerSkelHeaders[], Player_DrawImpl, Player_OverrideLimbDrawGameplayDefault,
 // and Player_PostLimbDrawGameplay are all declared in standard headers
 // (variables.h + functions.h) pulled by global.h via z_en_follower.h.
@@ -137,6 +146,7 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
     this->currentBoots = localPlayer->currentBoots;
     this->currentFace  = localPlayer->actor.shape.face;
 
+    Anchor_FollowerNpcDrawBegin(thisx);
     Player_DrawImpl(play,
                     this->skelAnime.skeleton,
                     this->skelAnime.jointTable,
@@ -148,4 +158,5 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
                     Player_OverrideLimbDrawGameplayDefault,
                     Player_PostLimbDrawGameplay,
                     localPlayer /* thisx for callbacks */);
+    Anchor_FollowerNpcDrawEnd();
 }

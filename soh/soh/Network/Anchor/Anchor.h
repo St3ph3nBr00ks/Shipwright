@@ -1166,6 +1166,19 @@ class Anchor : public Network {
     // nullptr if no local NPC is alive). Used by the per-tick state-
     // machine driver to distinguish owner-tick from peer-replica-tick.
     Actor* GetFollowerNpcLocalActor() const { return mFollowerNpcLocalActor; }
+    // Color-fix lookup: given an NPC Actor*, return the ownerClientId
+    // (== ownClientId for our local NPC; otherwise the peer
+    // ownerClientId from mPeerFollowerNpcs). Returns 0 if the actor
+    // isn't a tracked NPC. Used by the VB_APPLY_TUNIC_COLOR hook to
+    // pick the right color (own-color CVar for local; client.color
+    // for peer).
+    uint32_t FindFollowerNpcOwner(Actor* npc) const;
+    // Scene-transition pointer cleanup. OoT scene reload destroys the
+    // actor list; our cached Actor* pointers become dangling. This
+    // explicit clear (called from a OnSceneSpawnActors hook) is the
+    // safe alternative to checking actor->update on a possibly-freed
+    // pointer.
+    void ClearFollowerNpcSceneCache();
     // CVar-transition polling helper, called from OnGameFrameUpdate.
     // Compares the current CVar value against mFollowerNpcCVarLast and
     // calls SetFollowerNpcActive on edges. Standalone so future spawn

@@ -6,6 +6,7 @@
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
 #include "Common/ItemEligibility.h"   // CanPlayerCollectItem00 (#193 Phase 0)
 #include "Common/PauseLinkBuffer.h"   // Anchor_IsDrawingPauseLink (#182 follow-up)
+#include "AIFollowerNPC/FollowerNPC.h" // Anchor_GetCurrentlyDrawingFollowerNpc (NPC color fix)
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
@@ -3054,6 +3055,42 @@ void Anchor::RegisterHooks() {
             color->g = ownColor.g;
             color->b = ownColor.b;
             return;
+        }
+
+        // NPC Companion (Flotilla) — same color-leak class as the
+        // pause-Link bug above, same fix shape. EnFollower_Draw passes
+        // the local Player* as Player_DrawImpl's `data`, so without
+        // this check the hook would either:
+        //   (a) match `actor == myPlayer` and apply local color to ALL
+        //       NPCs (including peer replicas of remote players), OR
+        //   (b) inherit the previous DummyPlayer draw's GPU env color.
+        // The flag set by EnFollower_Draw lets us look up the OWNER
+        // of the NPC currently being drawn and apply that owner's
+        // color (own-color CVar for our local NPC; client.color for
+        // a peer's replica).
+        if (Actor* drawingNpc = Anchor_GetCurrentlyDrawingFollowerNpc()) {
+            uint32_t ownerCid = Anchor::Instance->FindFollowerNpcOwner(drawingNpc);
+            if (ownerCid == 0) {
+                // Unknown NPC — shouldn't happen, fall through.
+            } else if (ownerCid == Anchor::Instance->ownClientId) {
+                // Local NPC → use own-color CVar (same source as the
+                // pause-Link branch above).
+                Color_RGBA8 ownColor = CVarGetColor(CVAR_REMOTE_ANCHOR("Color.Value"), { 100, 255, 100 });
+                color->r = ownColor.r;
+                color->g = ownColor.g;
+                color->b = ownColor.b;
+                return;
+            } else {
+                // Peer replica → use the peer's color from clients map.
+                auto it = Anchor::Instance->clients.find(ownerCid);
+                if (it != Anchor::Instance->clients.end()) {
+                    color->r = it->second.color.r;
+                    color->g = it->second.color.g;
+                    color->b = it->second.color.b;
+                    return;
+                }
+                // Peer not in clients map (race? disconnect?) — fall through.
+            }
         }
 
         if (actor == myPlayer) {

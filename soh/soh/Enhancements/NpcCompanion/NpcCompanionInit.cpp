@@ -37,15 +37,38 @@ namespace {
 void OnGameFrameUpdateNpcCompanion() {
     if (Anchor::Instance == nullptr) return;
     // CVar transition polling — handles the OFF→ON spawn and the
-    // ON→OFF despawn. Stale-pointer cleanup + scene-transition
-    // auto-respawn also live in here. Cheap when steady-state
-    // (no edge → early-return after one CVarGetInteger).
+    // ON→OFF despawn. Cheap when steady-state (no edge → early-return
+    // after one CVarGetInteger).
     Anchor::Instance->TickFollowerNpcCVar();
+}
+
+// Scene transitions destroy the actor list. Our cached
+// mFollowerNpcLocalActor pointer becomes dangling — checking
+// pointer->update is undefined behaviour (the memory may be freed,
+// reused by another actor with non-null update, or contain stale
+// bytes). The earlier "stale-pointer cleanup" inside
+// TickFollowerNpcCVar relied on the dangling-read returning NULL,
+// which doesn't reliably happen — so the auto-respawn never fired
+// in field test.
+//
+// Fix: explicit clear on OnSceneSpawnActors (fires after the new
+// scene's actor list is initialised but before the first actor
+// tick). After the clear, the next TickFollowerNpcCVar sees CVar=on
+// AND pointer=null AND auto-respawns at the player's new-scene pos.
+//
+// Same clear empties mPeerFollowerNpcs — peers' next FOLLOWER_NPC_SPAWN
+// (auto-broadcast when their TickFollowerNpcCVar auto-respawns)
+// will repopulate the map.
+void OnSceneSpawnActorsNpcCompanion() {
+    if (Anchor::Instance == nullptr) return;
+    Anchor::Instance->ClearFollowerNpcSceneCache();
 }
 
 void RegisterNpcCompanion() {
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(
         OnGameFrameUpdateNpcCompanion);
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneSpawnActors>(
+        OnSceneSpawnActorsNpcCompanion);
 }
 
 }  // namespace

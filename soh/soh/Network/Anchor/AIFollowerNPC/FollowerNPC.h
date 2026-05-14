@@ -31,6 +31,26 @@ struct PlayState;
 //   - If peer replica: no-op (pos comes from STATE packet apply).
 void Anchor_TickFollowerNpcActor(struct Actor* npc, struct PlayState* play);
 
+// Draw-context flag (color-bug fix, mirrors Anchor_PauseLinkDrawBegin
+// / End). Set around EnFollower_Draw's Player_DrawImpl call so the
+// VB_APPLY_TUNIC_COLOR hook in HookHandlers.cpp can apply the OWNER's
+// color instead of inheriting whatever GPU env color the previous
+// DummyPlayer draw left behind.
+//
+// Same root cause as the pause-menu bug — Player_DrawImpl's `data`
+// param is the local player Player* (so equipment-draw resolves
+// correctly), which doesn't match the npc Actor* in the
+// VB_APPLY_TUNIC_COLOR check. Without this sentinel, the hook can't
+// distinguish "drawing the NPC" from "drawing the local player" and
+// applies the wrong color.
+//
+// `Anchor_GetCurrentlyDrawingFollowerNpc` returns the npc Actor*
+// pointer being drawn (NULL outside the begin/end pair). The hook
+// uses this to look up the owner via Anchor::FindFollowerNpcOwner.
+void   Anchor_FollowerNpcDrawBegin(struct Actor* npc);
+void   Anchor_FollowerNpcDrawEnd(void);
+struct Actor* Anchor_GetCurrentlyDrawingFollowerNpc(void);
+
 #ifdef __cplusplus
 }
 #endif

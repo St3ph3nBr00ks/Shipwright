@@ -54,28 +54,99 @@ struct LocalNpcNavState {
 static LocalNpcNavState sLocalNav;
 
 // ----------------------------------------------------------------------------
+// Color-bug fix — draw-context flag. Mirrors the pause-menu's
+// Anchor_PauseLinkDrawBegin/End / Anchor_IsDrawingPauseLink pattern
+// (see soh/Network/Anchor/Common/PauseLinkBuffer.{h,cpp}).
+//
+// Why needed: Player_DrawImpl receives the local player's Player* as
+// its `data` arg (so equipment-draw resolves correctly). The
+// VB_APPLY_TUNIC_COLOR hook receives that same `data` and matches
+// against `myPlayer == actor` — which TRUE-matches the local-player
+// branch and applies the local color to the NPC. But more
+// importantly: when the NPC is drawn AFTER a remote DummyPlayer
+// draw, the GPU env color from the previous draw leaks onto the
+// NPC unless the hook applies an override.
+//
+// The flag lets the hook know "this draw is an NPC; resolve color
+// from the NPC's owner, not from `actor` matching".
+// ----------------------------------------------------------------------------
+static Actor* sCurrentlyDrawingNpc = nullptr;
+
+extern "C" void Anchor_FollowerNpcDrawBegin(Actor* npc) {
+    sCurrentlyDrawingNpc = npc;
+}
+extern "C" void Anchor_FollowerNpcDrawEnd(void) {
+    sCurrentlyDrawingNpc = nullptr;
+}
+extern "C" Actor* Anchor_GetCurrentlyDrawingFollowerNpc(void) {
+    return sCurrentlyDrawingNpc;
+}
+
+// ----------------------------------------------------------------------------
+// Owner lookup — given an NPC Actor*, return the ownerClientId.
+// Local NPC → ownClientId; peer replica → ownerClientId from
+// mPeerFollowerNpcs; unknown → 0.
+// ----------------------------------------------------------------------------
+uint32_t Anchor::FindFollowerNpcOwner(Actor* npc) const {
+    if (npc == nullptr) return 0;
+    if (npc == mFollowerNpcLocalActor) {
+        return ownClientId;
+    }
+    for (const auto& [cid, replica] : mPeerFollowerNpcs) {
+        if (replica == npc) return cid;
+    }
+    return 0;
+}
+
+// ----------------------------------------------------------------------------
+// Scene-transition pointer cleanup. OoT clears the actor list on
+// scene reload; our cached Actor* pointers become dangling. Reading
+// dangling-pointer->update is undefined behaviour (the memory may
+// have been freed, reused by another actor with a non-null update,
+// or contain stale bytes). This explicit clear — called from the
+// OnSceneSpawnActors hook in NpcCompanionInit.cpp — is the safe
+// alternative.
+//
+// After the clear, TickFollowerNpcCVar's auto-respawn branch fires
+// on the next tick (CVar is on AND mFollowerNpcLocalActor is null
+// → SetFollowerNpcActive(true) re-spawns at the new scene's player
+// position). For peer replicas: their owners' next FOLLOWER_NPC_SPAWN
+// (auto-broadcast by the owner's auto-respawn) will repopulate
+// mPeerFollowerNpcs.
+// ----------------------------------------------------------------------------
+void Anchor::ClearFollowerNpcSceneCache() {
+    mFollowerNpcLocalActor = nullptr;
+    mPeerFollowerNpcs.clear();
+    // Reset the CVar transition baseline too — without this, the
+    // next TickFollowerNpcCVar sees CVar=1, last=1, no edge, no
+    // auto-respawn (the auto-respawn branch handles this case via
+    // the `cur != 0 && mFollowerNpcLocalActor == nullptr` check
+    // BEFORE the edge check, so this reset isn't strictly needed
+    // — but it's clearer to start the new scene with a clean slate).
+    // Don't touch mFollowerNpcCVarLast here; the auto-respawn branch
+    // is the one that handles "CVar on but pointer null" correctly.
+}
+
+// ----------------------------------------------------------------------------
 // CVar transition polling — called once per OnGameFrameUpdate tick.
 // ----------------------------------------------------------------------------
 void Anchor::TickFollowerNpcCVar() {
-    // Stale-pointer cleanup: scene transitions wipe the actor list
-    // (Actor_Kill chain by OoT scene-loader). Our tracking pointer
-    // survives but the actor is dead. Detect via update==NULL and
-    // clear the pointer so the next CVar poll respawns the NPC.
-    // (Or, if the user has the CVar off, no respawn — correct.)
-    if (mFollowerNpcLocalActor != nullptr &&
-        mFollowerNpcLocalActor->update == nullptr) {
-        mFollowerNpcLocalActor = nullptr;
-    }
+    // Stale-pointer cleanup is now handled by the OnSceneSpawnActors
+    // hook in NpcCompanionInit.cpp, which calls
+    // ClearFollowerNpcSceneCache(). Reading update on a dangling
+    // pointer is UB and was unreliable in field test (the dangling
+    // read returned non-null often enough that auto-respawn never
+    // fired). The explicit clear is the safe alternative.
 
     const int cur = CVarGetInteger(CVAR_ENHANCEMENT("AI.FollowerNPC.Enabled"), 0);
 
     // Auto-respawn after scene transition: if the CVar is on but the
-    // pointer is null (just cleared above), spawn now. This is NOT a
-    // CVar edge — handle it before the edge check.
+    // pointer is null (cleared by OnSceneSpawnActors), spawn now.
+    // This is NOT a CVar edge — handle it before the edge check.
     if (cur != 0 && mFollowerNpcLocalActor == nullptr) {
         SetFollowerNpcActive(true);
-        // Fall through to edge check; mFollowerNpcCVarLast may still
-        // need updating if this was also the first tick.
+        // Fall through to edge-check update; mFollowerNpcCVarLast
+        // tracking is independent of the auto-respawn.
     }
 
     if (cur == mFollowerNpcCVarLast) {
