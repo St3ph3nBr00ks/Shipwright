@@ -1026,11 +1026,34 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 
     // Resolve subgoal.
     if (sLocalNav.path.Empty()) {
-        // Path exhausted mid-climb — fall back to FOLLOW (which
-        // refreshes the path).
-        this_->state = EN_FOLLOWER_STATE_FOLLOW;
-        sLocalNav.activeClimbAnchor = nullptr;
-        return;
+        // Path exhausted — if leader is STILL climbing and we have an
+        // active anchor, refresh the path with new cells above NPC's
+        // current Y and stay in CLIMBING. Without this, NPC exits to
+        // FOLLOW between short climb segments, gravity pulls Y down
+        // (no floor at the wall side), force-engage refires at a
+        // lower Y, NPC climbs again — visible oscillation. Log 143
+        // showed NPC bouncing between Y=79 and Y=93 because the
+        // anchor had only 2 cells per column above NPC at any time.
+        if (Anchor::Instance->IsLocalPlayerClimbing() &&
+            sLocalNav.activeClimbAnchor != nullptr) {
+            const ::AnchorNavRoom::RoomNavData* navData =
+                ::AnchorNavRoom::GetForRoom(
+                    gPlayState->sceneNum,
+                    (int8_t)gPlayState->roomCtx.curRoom.num);
+            if (navData != nullptr &&
+                PopulateAnchorClimbPath(navData, *sLocalNav.activeClimbAnchor,
+                                        a->world.pos, leaderPos,
+                                        sLocalNav.path)) {
+                // Path refreshed in place; continue climbing this tick.
+                // Fall through to the subgoal-resolution code below.
+            }
+        }
+        // Re-check after refresh attempt.
+        if (sLocalNav.path.Empty()) {
+            this_->state = EN_FOLLOWER_STATE_FOLLOW;
+            sLocalNav.activeClimbAnchor = nullptr;
+            return;
+        }
     }
     const Vec3f& subgoal      = sLocalNav.path.CurrentSubgoal();
     const uint32_t subgoalFlags = sLocalNav.path.CurrentSubgoalFlags();
@@ -1231,6 +1254,63 @@ const ::AnchorNavRoom::LedgeAnchor* FindClosestLedgeAnchor(
         }
     }
     return best;
+}
+
+// Raycast fallback — detect a hoistable ledge ahead of NPC even when
+// the room doesn't have a LedgeAnchor catalogued for this geometry.
+// Probe:
+//   1. Cast forward from NPC chest height toward leader direction.
+//      A wall hit means there's geometry to hoist over.
+//   2. From slightly past the wall hit (along leader direction), cast
+//      down from kHoistGroundMaxLift above. The floor that intersects
+//      is the ledge top.
+//   3. Verify lift (top - NPC.y) is in the hoist range [20, 90].
+//
+// Returns true and writes outTopPos if a valid hoist target is found.
+// chkHeight = how high above NPC.y to start the forward cast (catches
+// short walls when small, tall walls when large; tunable).
+bool RaycastDetectLedge(PlayState* play, const Vec3f& npcPos,
+                        const Vec3f& leaderPos, Vec3f& outTopPos)
+{
+    const float dx = leaderPos.x - npcPos.x;
+    const float dz = leaderPos.z - npcPos.z;
+    const float distSq = dx*dx + dz*dz;
+    if (distSq < 1.0f) return false;
+    const float invDist = 1.0f / std::sqrt(distSq);
+    const float dirX = dx * invDist;
+    const float dirZ = dz * invDist;
+
+    constexpr float kForwardCastDist = 80.0f;
+    constexpr float kChestHeight     = 20.0f;
+    constexpr float kPastWallNudge   = 8.0f;
+    constexpr float kProbeMaxLift    = 90.0f;
+
+    Vec3f rayA = { npcPos.x, npcPos.y + kChestHeight, npcPos.z };
+    Vec3f rayB = { npcPos.x + dirX * kForwardCastDist, rayA.y,
+                   npcPos.z + dirZ * kForwardCastDist };
+    Vec3f wallHit;
+    CollisionPoly* wallPoly = nullptr;
+    if (!BgCheck_AnyLineTest1(&play->colCtx, &rayA, &rayB, &wallHit,
+                              &wallPoly, 1)) {
+        return false;
+    }
+
+    Vec3f downStart = {
+        wallHit.x + dirX * kPastWallNudge,
+        wallHit.y + kProbeMaxLift,
+        wallHit.z + dirZ * kPastWallNudge
+    };
+    CollisionPoly* topPoly = nullptr;
+    const f32 topY = BgCheck_EntityRaycastFloor1(&play->colCtx, &topPoly,
+                                                  &downStart);
+    if (topPoly == nullptr) return false;
+    const float lift = topY - npcPos.y;
+    if (lift < 20.0f || lift > kProbeMaxLift) return false;
+
+    outTopPos.x = downStart.x;
+    outTopPos.y = topY;
+    outTopPos.z = downStart.z;
+    return true;
 }
 
 // LEDGE_HOIST handler — one-shot mantle. The anim runs once
@@ -1622,13 +1702,16 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // teleport drops us into FOLLOW with cleared path / baselines).
     // CLIMBING, SWIMMING, and LEDGE_HOIST are exempt — each is its
     // own scripted traversal and shouldn't be aborted by a
-    // distance-based leash. Without the swim exemption, G14 (10s,
-    // 30u progress) could fire mid-swim and teleport NPC to leader's
-    // land position mid-pool. LEDGE_HOIST is short (~30 frames) so
-    // G-guards wouldn't fire anyway; exempt for safety.
+    // distance-based leash. Free-fall is also exempt — NPC walking
+    // off a ledge after leader needs to land before G14 decides "no
+    // progress" and teleports it back to the top. Detect free-fall
+    // via downward velocity + not-on-floor (bgCheckFlags bit 1).
+    const bool isFreeFalling = (npc->velocity.y < -5.0f) &&
+                                !(npc->bgCheckFlags & 1);
     if (this_->state != EN_FOLLOWER_STATE_CLIMBING &&
         this_->state != EN_FOLLOWER_STATE_SWIMMING &&
-        this_->state != EN_FOLLOWER_STATE_LEDGE_HOIST) {
+        this_->state != EN_FOLLOWER_STATE_LEDGE_HOIST &&
+        !isFreeFalling) {
         if (TryFireG10(this_, play, leaderPos)) {
             // Teleport fired — skip rest of tick. NPC is now at leader
             // in fresh FOLLOW; next tick picks up normally.
@@ -1672,6 +1755,24 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // moment) — fire whenever geometry supports the lift and the
     // NPC's current state would otherwise leave it stranded below
     // the leader.
+    // Helper to enter LEDGE_HOIST with a given target pos.
+    auto enterLedgeHoist = [&](HoistContext ctx, const Vec3f& topPos,
+                                const char* source) {
+        this_->hoistContext   = (s8)ctx;
+        this_->hoistTargetPos = topPos;
+        this_->hoistEntryYaw  =
+            Math_Atan2S(topPos.z - npc->world.pos.z,
+                        topPos.x - npc->world.pos.x);
+        this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;
+        SPDLOG_INFO("[FollowerNPC] {}→LEDGE_HOIST({}) top=({:.0f},{:.0f},{:.0f}) "
+                    "NPC at ({:.0f},{:.0f},{:.0f}) via {}",
+                    (ctx == HOIST_CONTEXT_SWIM ? "SWIMMING" : "FOLLOW"),
+                    (ctx == HOIST_CONTEXT_SWIM ? "swim_exit" : "ground"),
+                    topPos.x, topPos.y, topPos.z,
+                    npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
+                    source);
+    };
+
     if (this_->state == EN_FOLLOWER_STATE_SWIMMING &&
         leaderPos.y > npc->world.pos.y + kHoistSwimTriggerHeight) {
         const ::AnchorNavRoom::RoomNavData* navData =
@@ -1679,47 +1780,31 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                 gPlayState->sceneNum,
                 (int8_t)gPlayState->roomCtx.curRoom.num);
         const auto* ledge = FindClosestLedgeAnchor(navData, npc->world.pos);
+        Vec3f targetTop;
         if (ledge != nullptr) {
-            this_->hoistContext   = HOIST_CONTEXT_SWIM;
-            this_->hoistTargetPos = ledge->topPos;
-            this_->hoistEntryYaw  =
-                Math_Atan2S(ledge->topPos.z - npc->world.pos.z,
-                            ledge->topPos.x - npc->world.pos.x);
-            this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;
-            SPDLOG_INFO("[FollowerNPC] SWIMMING→LEDGE_HOIST(swim_exit) "
-                        "ledge.approach=({:.0f},{:.0f},{:.0f}) "
-                        "top=({:.0f},{:.0f},{:.0f}) NPC at "
-                        "({:.0f},{:.0f},{:.0f})",
-                        ledge->approachPos.x, ledge->approachPos.y, ledge->approachPos.z,
-                        ledge->topPos.x, ledge->topPos.y, ledge->topPos.z,
-                        npc->world.pos.x, npc->world.pos.y, npc->world.pos.z);
+            enterLedgeHoist(HOIST_CONTEXT_SWIM, ledge->topPos, "LedgeAnchor");
+        } else if (RaycastDetectLedge(play, npc->world.pos, leaderPos, targetTop)) {
+            // No LedgeAnchor in this room — fall back to runtime
+            // raycast probe. Catches shore edges and dock walls
+            // that aren't cataloged.
+            enterLedgeHoist(HOIST_CONTEXT_SWIM, targetTop, "raycast");
         }
     } else if (this_->state == EN_FOLLOWER_STATE_FOLLOW &&
                leaderPos.y > npc->world.pos.y + 30.0f) {
-        // Ground hoist — leader is on a ledge above NPC. Search for a
-        // LedgeAnchor whose approachPos is near NPC's land pos. Lift
-        // must be in the hoist range (FindClosestLedgeAnchor enforces
-        // 20-90u). Fires only when state=FOLLOW because IDLE/STUCK
-        // shouldn't auto-hoist (NPC isn't actively pursuing).
+        // Ground hoist — leader is on a ledge above NPC. LedgeAnchor
+        // first, raycast fallback second (covers walls not catalogued).
+        // Fires only when state=FOLLOW because IDLE/STUCK shouldn't
+        // auto-hoist (NPC isn't actively pursuing).
         const ::AnchorNavRoom::RoomNavData* navData =
             ::AnchorNavRoom::GetForRoom(
                 gPlayState->sceneNum,
                 (int8_t)gPlayState->roomCtx.curRoom.num);
         const auto* ledge = FindClosestLedgeAnchor(navData, npc->world.pos);
+        Vec3f targetTop;
         if (ledge != nullptr) {
-            this_->hoistContext   = HOIST_CONTEXT_GROUND;
-            this_->hoistTargetPos = ledge->topPos;
-            this_->hoistEntryYaw  =
-                Math_Atan2S(ledge->topPos.z - npc->world.pos.z,
-                            ledge->topPos.x - npc->world.pos.x);
-            this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;
-            SPDLOG_INFO("[FollowerNPC] FOLLOW→LEDGE_HOIST(ground) "
-                        "ledge.approach=({:.0f},{:.0f},{:.0f}) "
-                        "top=({:.0f},{:.0f},{:.0f}) NPC at "
-                        "({:.0f},{:.0f},{:.0f})",
-                        ledge->approachPos.x, ledge->approachPos.y, ledge->approachPos.z,
-                        ledge->topPos.x, ledge->topPos.y, ledge->topPos.z,
-                        npc->world.pos.x, npc->world.pos.y, npc->world.pos.z);
+            enterLedgeHoist(HOIST_CONTEXT_GROUND, ledge->topPos, "LedgeAnchor");
+        } else if (RaycastDetectLedge(play, npc->world.pos, leaderPos, targetTop)) {
+            enterLedgeHoist(HOIST_CONTEXT_GROUND, targetTop, "raycast");
         }
     }
 
