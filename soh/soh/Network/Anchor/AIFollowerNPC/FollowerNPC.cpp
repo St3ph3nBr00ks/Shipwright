@@ -997,19 +997,35 @@ bool PopulateAnchorClimbPath(const ::AnchorNavRoom::RoomNavData* navData,
 
     struct Entry { float y; uint16_t idx; };
     std::vector<Entry> column;
-    // Tight column filter — only cells within ±15u of leader's U
-    // (≈ half a 30u cell pitch). Single column produces a straight-up
-    // climb with no lateral hop.
-    for (uint16_t i = 0; i < anchor.nodeCount; i++) {
-        const uint16_t idx = anchor.firstNodeIdx + i;
-        if (idx >= navData->nodes.size()) break;
-        const auto& n = navData->nodes[idx];
-        const float nodeU =
-            (n.pos.x - anchor.planeOrigin.x) * anchor.planeAxisU.x +
-            (n.pos.z - anchor.planeOrigin.z) * anchor.planeAxisU.z;
-        if (std::fabs(nodeU - leaderU) > 15.0f) continue;  // leader's column
-        if (n.pos.y > leaderPos.y + 50.0f) continue;       // past leader
-        column.push_back({n.pos.y, idx});
+    // Column filter — cells within ±15u of leader's U (≈ half a 30u
+    // cell pitch). Y-axis cap at leader.y - 20 so NPC stays slightly
+    // BELOW leader during co-climb (was leader.y + 50 which let NPC
+    // outpace leader by 50-100u — Player's input-driven climb is
+    // slower than NPC's fixed 4 u/frame).
+    constexpr float kClimbColumnTolerance     = 15.0f;
+    constexpr float kClimbColumnFallbackTol   = 30.0f;
+    constexpr float kClimbStayBelowLeader     = 20.0f;
+    auto collectColumn = [&](float tolerance) {
+        column.clear();
+        for (uint16_t i = 0; i < anchor.nodeCount; i++) {
+            const uint16_t idx = anchor.firstNodeIdx + i;
+            if (idx >= navData->nodes.size()) break;
+            const auto& n = navData->nodes[idx];
+            const float nodeU =
+                (n.pos.x - anchor.planeOrigin.x) * anchor.planeAxisU.x +
+                (n.pos.z - anchor.planeOrigin.z) * anchor.planeAxisU.z;
+            if (std::fabs(nodeU - leaderU) > tolerance) continue;
+            if (n.pos.y > leaderPos.y - kClimbStayBelowLeader) continue;
+            column.push_back({n.pos.y, idx});
+        }
+    };
+    // Try strict (±15u) first. If empty (leader's U doesn't match any
+    // column — happens on curved walls / off-grid leader pos), fall
+    // back to wider tolerance (±30u, full cell pitch). Captures
+    // adjacent columns; minor lateral hop acceptable vs no climb.
+    collectColumn(kClimbColumnTolerance);
+    if (column.empty()) {
+        collectColumn(kClimbColumnFallbackTol);
     }
     if (column.empty()) return false;
 
@@ -1096,6 +1112,24 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         }
         // Re-check after refresh attempt.
         if (sLocalNav.path.Empty()) {
+            // Mantle-out: if NPC has reached near the top of the wall
+            // (within 60u of anchor.topPos.y), snap to topPos and
+            // exit. Without this, NPC at the top of climb falls when
+            // CLIMBING exits — leader hoisted to ledge, we lost
+            // refresh trigger, NPC mid-wall has no floor below →
+            // gravity drops NPC. Snap to topPos puts NPC on the
+            // ledge floor.
+            if (sLocalNav.activeClimbAnchor != nullptr) {
+                const float topY = sLocalNav.activeClimbAnchor->topPos.y;
+                if (a->world.pos.y >= topY - 60.0f) {
+                    a->world.pos  = sLocalNav.activeClimbAnchor->topPos;
+                    a->velocity.y = 0.0f;
+                    SPDLOG_INFO("[FollowerNPC] CLIMBING→FOLLOW (mantle-out: "
+                                "NPC at top, snapped to anchor.topPos "
+                                "({:.0f},{:.0f},{:.0f}))",
+                                a->world.pos.x, a->world.pos.y, a->world.pos.z);
+                }
+            }
             this_->state = EN_FOLLOWER_STATE_FOLLOW;
             sLocalNav.activeClimbAnchor = nullptr;
             return;
