@@ -21,17 +21,20 @@
 #include "soh/Network/Anchor/AIFollowerNPC/FollowerNPC.h"
 #include "soh/Network/Anchor/Common/ActorTrail.h"     // Phase 5: substrate path consumption
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
+#include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
 #include "soh/cvar_prefixes.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <libultraship/libultraship.h>
 #include <cmath>
+#include <limits>
 
 extern "C" {
 #include "variables.h"        // gPlayState, gEnFollowerId, gSaveContext
 #include "functions.h"
 #include "z64.h"
 #include "macros.h"
+#include "objects/gameplay_keep/gameplay_keep.h"  // gPlayerAnim_link_normal_*
 #include "src/overlays/actors/ovl_En_Follower/z_en_follower.h"  // EnFollower struct + state enum
 extern PlayState* gPlayState;
 extern s16        gEnFollowerId;
@@ -43,12 +46,25 @@ extern s16        gEnFollowerId;
 // client.
 // ----------------------------------------------------------------------------
 namespace {
+// Animation identity tag — tracked so the per-tick handler only calls
+// LinkAnimation_Change on actual transitions (calling it every frame
+// restarts the animation and freezes the playhead).
+enum class FollowerNpcAnim {
+    kNone,
+    kWait,        // gPlayerAnim_link_normal_wait
+    kClimbUp,     // gPlayerAnim_link_normal_Fclimb_upL
+};
+
 struct LocalNpcNavState {
     AnchorNav::ActorTrail::NavPath path;
     uint64_t lastPathRefreshFrame = 0;
     Vec3f    lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
     Vec3f    stuckCheckPos        = { 0.0f, 0.0f, 0.0f };
     uint64_t lastStuckCheckFrame  = 0;
+    FollowerNpcAnim currentAnim   = FollowerNpcAnim::kNone;
+    // Phase 6 — anchor cached during a CLIMBING run so handler doesn't
+    // re-resolve every frame. Cleared on CLIMBING exit.
+    const ::AnchorNavRoom::ClimbAnchor* activeClimbAnchor = nullptr;
 };
 }  // namespace
 static LocalNpcNavState sLocalNav;
@@ -218,6 +234,8 @@ void Anchor::SetFollowerNpcActive(bool active) {
         sLocalNav.lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
         sLocalNav.stuckCheckPos        = p;
         sLocalNav.lastStuckCheckFrame  = gameFrameCounter.load(std::memory_order_relaxed);
+        sLocalNav.currentAnim          = FollowerNpcAnim::kNone;  // force first-tick anim swap
+        sLocalNav.activeClimbAnchor    = nullptr;
         SPDLOG_INFO("[FollowerNPC] Spawned ACTOR_EN_FOLLOWER(id={}) at "
                     "({:.0f},{:.0f},{:.0f}) yaw={} (CVar 0→1)",
                     (int)gEnFollowerId, p.x, p.y, p.z, (int)yaw);
@@ -284,6 +302,12 @@ static constexpr float kAdvanceSubgoalDist  = 30.0f;  // advance cursor when wit
 static constexpr int   kStuckCheckMs        = 3000;   // matches player-Follower's tuned 3s
 static constexpr float kStuckMinProgress    = 20.0f;
 static constexpr float kStuckNudgeDist      = 30.0f;  // direct world.pos nudge in STUCK
+
+// Phase 6 — scripted-climb constants. Tuned to match Link's vanilla
+// climb feel; field-test in Inside Deku Tree may refine.
+static constexpr float kClimbSpeedY         = 4.0f;   // u/frame upward; vanilla Link is ~4-5
+static constexpr float kClimbSubgoalReach3D = 24.0f;  // advance cursor when within 3D
+static constexpr float kClimbXzSnap         = 1.0f;   // smooth XZ snap rate to subgoal (per frame fraction)
 
 namespace {
 
@@ -355,6 +379,26 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         sLocalNav.lastPathTargetPos    = leaderPos;
     }
 
+    // ---- Phase 6: climb-subgoal transition --------------------------
+    // If the current path subgoal is a climb cell, transition to
+    // CLIMBING. The CLIMBING handler takes over snapping XZ to the
+    // wall + driving Y. Same shape as the player-Follower's Stage 6
+    // substrate-driven CLIMBING engagement.
+    if (!sLocalNav.path.Empty()) {
+        const uint32_t flags = sLocalNav.path.CurrentSubgoalFlags();
+        if (flags & ::AnchorNavRoom::NODE_CLIMB_ANY) {
+            this_->state = EN_FOLLOWER_STATE_CLIMBING;
+            sLocalNav.activeClimbAnchor = nullptr;  // resolved fresh on entry
+            SPDLOG_INFO("[FollowerNPC] FOLLOW→CLIMBING (path entered climb cell at "
+                        "({:.0f},{:.0f},{:.0f}); flags=0x{:X})",
+                        sLocalNav.path.CurrentSubgoal().x,
+                        sLocalNav.path.CurrentSubgoal().y,
+                        sLocalNav.path.CurrentSubgoal().z,
+                        flags);
+            return;
+        }
+    }
+
     // ---- Pick subgoal -----------------------------------------------
     // Substrate path's CurrentSubgoal if available; else direct to leader.
     Vec3f subgoal = sLocalNav.path.Empty() ? leaderPos : sLocalNav.path.CurrentSubgoal();
@@ -406,6 +450,155 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         this_->state = EN_FOLLOWER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalNav.path.Reset();  // discard path; IDLE is local-frame
+    }
+}
+
+// Animation switching helper — only call LinkAnimation_Change on
+// real transitions. Calling every frame restarts the playhead.
+void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
+    if (sLocalNav.currentAnim == want) return;
+    LinkAnimationHeader* anim = nullptr;
+    switch (want) {
+        case FollowerNpcAnim::kWait:
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait;
+            break;
+        case FollowerNpcAnim::kClimbUp:
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upL;
+            break;
+        case FollowerNpcAnim::kNone:
+            return;
+    }
+    if (anim == nullptr) return;
+    LinkAnimation_Change(play, &this_->skelAnime, anim,
+                          1.0f /* playSpeed */, 0.0f /* startFrame */,
+                          Animation_GetLastFrame((void*)anim),
+                          ANIMMODE_LOOP, -6.0f /* morphFrames */);
+    sLocalNav.currentAnim = want;
+}
+
+// Phase 6 — find the climb anchor whose grid is closest to `pos`.
+// Used at CLIMBING entry to pick the anchor; cached in
+// sLocalNav.activeClimbAnchor for the duration of the climb run.
+//
+// "Closest" = min XZ distance to anchor.basePos (the anchor's
+// floor-level entry point). Suffices because anchors are well-spaced
+// in OoT scenes (Inside Deku Tree's 5 spiral-wall anchors are 100u+
+// apart in XZ).
+const ::AnchorNavRoom::ClimbAnchor* FindClosestClimbAnchor(
+    const ::AnchorNavRoom::RoomNavData* navData, const Vec3f& pos)
+{
+    if (navData == nullptr || navData->climbAnchors.empty()) return nullptr;
+    const ::AnchorNavRoom::ClimbAnchor* best = nullptr;
+    float bestDistSq = std::numeric_limits<float>::max();
+    for (const auto& anc : navData->climbAnchors) {
+        const float dx = pos.x - anc.basePos.x;
+        const float dz = pos.z - anc.basePos.z;
+        const float dSq = dx*dx + dz*dz;
+        if (dSq < bestDistSq) {
+            bestDistSq = dSq;
+            best = &anc;
+        }
+    }
+    return best;
+}
+
+// CLIMBING handler — Phase 6 scripted-climb driver. Runs while the
+// substrate path's current subgoal carries a NODE_CLIMB_* flag.
+//
+// Mechanics (per Plans/npc_follower_plan.md §3):
+//   - Snap NPC XZ each frame to the current climb subgoal's XZ.
+//   - Drive Y toward the subgoal at kClimbSpeedY.
+//   - Face into wall via the active anchor's planeNormal.
+//   - Play gPlayerAnim_link_normal_Fclimb_upL (looping).
+//   - Advance path cursor on 3D proximity to current subgoal.
+//   - Exit CLIMBING when the next subgoal is non-climb (mantle out
+//     to FOLLOW) OR when path is exhausted (FOLLOW handles fallback).
+//
+// v1 simplifications (deferred to later iterations):
+//   - No mantle-hold animation (snaps to top on exit).
+//   - No lateral-axis splitting (vines only support vertical motion
+//     in v1; lateral happens via XZ snap each frame).
+//   - No detach-detection (peer-Follower has it; v1 NPC trusts the
+//     scripted snap to keep us on the wall).
+//   - No climb-down anim (Y always positive in v1; if leader is below,
+//     the substrate path probably routes through a drop anchor not
+//     a climb-down).
+void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    Actor* a = &this_->actor;
+
+    // Resolve subgoal.
+    if (sLocalNav.path.Empty()) {
+        // Path exhausted mid-climb — fall back to FOLLOW (which
+        // refreshes the path).
+        this_->state = EN_FOLLOWER_STATE_FOLLOW;
+        sLocalNav.activeClimbAnchor = nullptr;
+        return;
+    }
+    const Vec3f& subgoal      = sLocalNav.path.CurrentSubgoal();
+    const uint32_t subgoalFlags = sLocalNav.path.CurrentSubgoalFlags();
+    const bool subgoalIsClimb = (subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY) != 0;
+
+    // Mantle-out: next subgoal is non-climb → snap to subgoal pos
+    // (effectively the top of the climb), exit to FOLLOW.
+    if (!subgoalIsClimb) {
+        a->world.pos.x = subgoal.x;
+        a->world.pos.y = subgoal.y;
+        a->world.pos.z = subgoal.z;
+        a->speedXZ     = 0.0f;
+        sLocalNav.activeClimbAnchor = nullptr;
+        this_->state = EN_FOLLOWER_STATE_FOLLOW;
+        return;
+    }
+
+    // Resolve the active anchor (cache on entry; refresh if the
+    // navData was rebuilt or cache is stale).
+    if (sLocalNav.activeClimbAnchor == nullptr) {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        sLocalNav.activeClimbAnchor = FindClosestClimbAnchor(navData, a->world.pos);
+        if (sLocalNav.activeClimbAnchor == nullptr) {
+            // No anchor data — fall back to FOLLOW.
+            this_->state = EN_FOLLOWER_STATE_FOLLOW;
+            return;
+        }
+    }
+    const auto& anc = *sLocalNav.activeClimbAnchor;
+
+    // Snap XZ to subgoal each frame (subgoal IS a climb-surface cell
+    // on the wall, so snapping there guarantees we're on the wall).
+    a->world.pos.x = subgoal.x;
+    a->world.pos.z = subgoal.z;
+
+    // Drive Y toward subgoal at kClimbSpeedY. Clamp to subgoal Y on
+    // approach so we don't overshoot.
+    const float dy = subgoal.y - a->world.pos.y;
+    if (std::fabs(dy) < kClimbSpeedY) {
+        a->world.pos.y = subgoal.y;
+    } else {
+        a->world.pos.y += (dy > 0.0f ? kClimbSpeedY : -kClimbSpeedY);
+    }
+
+    // Face INTO the wall — opposite of planeNormal (which points OUT).
+    a->shape.rot.y = Math_Atan2S(-anc.planeNormal.z, -anc.planeNormal.x);
+    a->world.rot.y = a->shape.rot.y;
+    a->speedXZ     = 0.0f;  // we're scripting position, not using physics speed
+
+    // Climb-up animation. Plays looping; persists across frames via
+    // EnsureAnimation's transition guard.
+    EnsureAnimation(this_, play, FollowerNpcAnim::kClimbUp);
+
+    // Cursor advance — when within kClimbSubgoalReach3D 3D of subgoal,
+    // step to next waypoint. Y is the dominant axis here, so the
+    // 3D check matters (XZ-only would advance immediately on the
+    // first XZ snap).
+    const float dxAdv = a->world.pos.x - subgoal.x;
+    const float dyAdv = a->world.pos.y - subgoal.y;
+    const float dzAdv = a->world.pos.z - subgoal.z;
+    const float dSq = dxAdv*dxAdv + dyAdv*dyAdv + dzAdv*dzAdv;
+    if (dSq < kClimbSubgoalReach3D * kClimbSubgoalReach3D) {
+        sLocalNav.path.Advance();
     }
 }
 
@@ -479,30 +672,43 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         default:
         case EN_FOLLOWER_STATE_IDLE:
             TickIDLE(this_, play, leaderPos);
+            EnsureAnimation(this_, play, FollowerNpcAnim::kWait);
             break;
         case EN_FOLLOWER_STATE_FOLLOW:
             TickFOLLOW(this_, play, leaderPos);
+            // FOLLOW uses the wait anim too in v1 (walk/run anims are
+            // a Phase 7 polish item). Movement looks slidey but
+            // mechanics are correct.
+            EnsureAnimation(this_, play, FollowerNpcAnim::kWait);
             break;
         case EN_FOLLOWER_STATE_STUCK:
             TickSTUCK(this_, play, leaderPos);
+            EnsureAnimation(this_, play, FollowerNpcAnim::kWait);
             break;
-        // Phase 6+ handlers (CLIMBING / DEAD) — fall through to IDLE
-        // behaviour as placeholders.
         case EN_FOLLOWER_STATE_CLIMBING:
+            TickCLIMBING(this_, play, leaderPos);
+            // Anim swap happens inside TickCLIMBING (kClimbUp on
+            // entry; kWait on exit-to-FOLLOW path).
+            break;
         case EN_FOLLOWER_STATE_DEAD:
             TickIDLE(this_, play, leaderPos);
+            EnsureAnimation(this_, play, FollowerNpcAnim::kWait);
             break;
     }
 
     // Apply locomotion. Standard OoT NPC pattern — speedXZ + world.rot.y
     // give a per-frame velocity vector; gravity pulls Y to floor.
-    Actor_MoveXZGravity(npc);
+    // CLIMBING bypasses this (we directly write world.pos and gravity
+    // would yank us off the wall).
+    if (this_->state != EN_FOLLOWER_STATE_CLIMBING) {
+        Actor_MoveXZGravity(npc);
 
-    // Update collision-with-ground / floor altitude. Without this the
-    // NPC's Y can drift away from the floor on slopes / steps.
-    // Flags=4 matches the standard NPC pattern (e.g. z_en_md.c:889).
-    Actor_UpdateBgCheckInfo(play, npc, 26.0f /* wallCheckHeight */,
-                            10.0f /* wallCheckRadius */,
-                            50.0f /* ceilingCheckHeight */,
-                            4 /* flags */);
+        // Update collision-with-ground / floor altitude. Without this
+        // the NPC's Y can drift away from the floor on slopes / steps.
+        // Flags=4 matches the standard NPC pattern (e.g. z_en_md.c:889).
+        Actor_UpdateBgCheckInfo(play, npc, 26.0f /* wallCheckHeight */,
+                                10.0f /* wallCheckRadius */,
+                                50.0f /* ceilingCheckHeight */,
+                                4 /* flags */);
+    }
 }
