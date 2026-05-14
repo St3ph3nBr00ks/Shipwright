@@ -75,6 +75,12 @@ enum class FollowerNpcAnim {
     // LinkAnimation_Update reports completion.
     kHoistGround = 12,  // gPlayerAnim_link_normal_climb_up (mantle from floor)
     kHoistSwim   = 13,  // gPlayerAnim_link_swimer_swim_15step_up (climb out of water)
+    // Auto-jump-off-ledge anims. Player picks between these at
+    // z_player.c:5663 based on speed (run-jump when fast + facing
+    // forward, regular jump otherwise). One-shot; falls back to
+    // walk/run/wait when complete via the stopAnimPlaying handshake.
+    kRunJump  = 14,  // gPlayerAnim_link_normal_run_jump
+    kJump     = 15,  // gPlayerAnim_link_normal_jump
 };
 
 struct LocalNpcNavState {
@@ -665,6 +671,10 @@ LinkAnimationHeader* AnimHeaderFor(FollowerNpcAnim kind, s8 modelAnimType) {
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_climb_up;
         case FollowerNpcAnim::kHoistSwim:
             return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim_15step_up;
+        case FollowerNpcAnim::kRunJump:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_run_jump;
+        case FollowerNpcAnim::kJump:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_jump;
         case FollowerNpcAnim::kNone:
         default:
             return nullptr;
@@ -693,7 +703,9 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
         want == FollowerNpcAnim::kFidgetWarmB ||
         want == FollowerNpcAnim::kFidgetStretchD ||
         want == FollowerNpcAnim::kHoistGround ||
-        want == FollowerNpcAnim::kHoistSwim;
+        want == FollowerNpcAnim::kHoistSwim ||
+        want == FollowerNpcAnim::kRunJump ||
+        want == FollowerNpcAnim::kJump;
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                           1.0f /* playSpeed — caller overrides per-frame */,
                           0.0f /* startFrame */,
@@ -1199,7 +1211,12 @@ void TickSWIMMING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         return;
     }
 
-    const float swimDepth = SwimDepthFor(this_->linkAge);
+    // Swim Y clamp. Field test reported NPC sitting 5u too high above
+    // water; add a small extra drop on top of the per-age threshold
+    // so head sits at a more natural level (slightly less of the body
+    // above surface, matching Player's actual swim pose).
+    constexpr float kSwimExtraDrop = 5.0f;
+    const float swimDepth = SwimDepthFor(this_->linkAge) + kSwimExtraDrop;
     a->world.pos.y  = surfaceY - swimDepth;
     a->velocity.y   = 0.0f;  // reset so a future FOLLOW transition starts fresh
 
@@ -1780,6 +1797,17 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         this_->hoistEntryYaw  =
             Math_Atan2S(topPos.z - npc->world.pos.z,
                         topPos.x - npc->world.pos.x);
+        // Swim-exit hoist: raise NPC ~60u so the swim-step-up anim
+        // plays at the ledge level instead of underwater. User
+        // reported NPC sinking below water during the anim. The
+        // raise puts NPC's feet near the ledge top, anim visualizes
+        // the climb-out motion correctly. End-of-anim snap moves NPC
+        // to the exact ledge top.
+        if (ctx == HOIST_CONTEXT_SWIM) {
+            constexpr float kSwimHoistRaise = 60.0f;
+            npc->world.pos.y += kSwimHoistRaise;
+            npc->velocity.y = 0.0f;
+        }
         this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;
         SPDLOG_INFO("[FollowerNPC] {}→LEDGE_HOIST({}) top=({:.0f},{:.0f},{:.0f}) "
                     "NPC at ({:.0f},{:.0f},{:.0f}) via {}",
@@ -1892,6 +1920,32 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         localAnim = (this_->hoistContext == HOIST_CONTEXT_SWIM)
                       ? FollowerNpcAnim::kHoistSwim
                       : FollowerNpcAnim::kHoistGround;
+    }
+
+    // Auto-jump-off-ledge — mimic Player's z_player.c:5818-5836.
+    // bgCheckFlags & 4 is set by Actor_UpdateBgCheckInfo's
+    // func_8002E234 (z_actor.c:1604) when actor was on floor last
+    // frame but the floor dropped >11u (walked off a ledge with
+    // a meaningful drop). Player triggers an auto-jump when this
+    // hits AND linearVelocity > 3 AND facing forward.
+    //
+    // For our NPC: same gate plus state must be FOLLOW (don't jump
+    // during CLIMBING / SWIMMING / LEDGE_HOIST etc.). Pick run_jump
+    // anim when fast, regular jump when slow (mirrors func_8083A4A8).
+    // Set velocity.y = positive boost so NPC arcs up (gravity then
+    // pulls down — natural jump arc).
+    if ((npc->bgCheckFlags & 4) && npc->speedXZ > 3.0f &&
+        this_->state == EN_FOLLOWER_STATE_FOLLOW) {
+        npc->velocity.y = 6.0f;   // Player uses ~6.0 for typical auto-jump
+        npc->bgCheckFlags &= ~4;  // consume the flag
+        // Pick anim based on speed — fast run uses kRunJump, slower
+        // walk-off uses kJump (matches z_player.c:5663-5666 split
+        // at linearVelocity > 4).
+        localAnim = (npc->speedXZ > 4.0f) ? FollowerNpcAnim::kRunJump
+                                          : FollowerNpcAnim::kJump;
+        SPDLOG_INFO("[FollowerNPC] Auto-jump-off-ledge fired (speedXZ={:.1f}, "
+                    "anim={})", npc->speedXZ,
+                    (localAnim == FollowerNpcAnim::kRunJump ? "run_jump" : "jump"));
     }
     const bool justStoppedMoving =
         (this_->prevState == EN_FOLLOWER_STATE_FOLLOW &&
