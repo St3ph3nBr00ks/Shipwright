@@ -26,6 +26,7 @@
 
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <libultraship/libultraship.h>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -325,6 +326,14 @@ static constexpr float kStuckNudgeDist      = 30.0f;  // direct world.pos nudge 
 static constexpr float kClimbSpeedY         = 4.0f;   // u/frame upward; vanilla Link is ~4-5
 static constexpr float kClimbSubgoalReach3D = 24.0f;  // advance cursor when within 3D
 static constexpr float kClimbXzSnap         = 1.0f;   // smooth XZ snap rate to subgoal (per frame fraction)
+//
+// Body offset from wall surface. Climb cells sit ON the climbable
+// polygon; the NPC's world.pos is at its body center, so snapping
+// directly to a cell embeds the body half-into the wall. Offset
+// along anchor.planeNormal (which points OUT from wall) by this
+// amount so the body sits in front of the wall, matching how OoT
+// renders Link on ladders/vines.
+static constexpr float kClimbBodyOffset     = 12.0f;
 
 // Phase 8 — G-guard recovery teleports. Mirror the player-rigged
 // Follower's G10 / G14 semantics but adapted for direct world.pos
@@ -372,6 +381,31 @@ inline s16 YawTowardTarget(const Vec3f& from, const Vec3f& to) {
     return Math_Atan2S(to.z - from.z, to.x - from.x);
 }
 
+// Forward-decl — defined further down (with TickCLIMBING since it's
+// the primary consumer). ComputeEffectiveTarget needs it for the
+// leader-climbing redirect. Pitfall 14: single-pass C++ name lookup
+// requires the declaration to appear before its first use.
+const ::AnchorNavRoom::ClimbAnchor* FindClosestClimbAnchor(
+    const ::AnchorNavRoom::RoomNavData* navData, const Vec3f& pos);
+
+// Compute the "effective target" the NPC should pursue. Normally
+// this is the leader's world pos, but when the leader is climbing,
+// it's the climb anchor's topPos (a floor pos above the climb) so
+// the substrate path is forced to route through climb cells.
+// Used by both IDLE (FOLLOW-entry threshold) and FOLLOW (path
+// target + IDLE re-entry threshold) so an NPC near a leader who
+// starts climbing reliably engages FOLLOW → CLIMBING.
+Vec3f ComputeEffectiveTarget(const Vec3f& leaderPos) {
+    if (!Anchor::Instance->IsLocalPlayerClimbing()) return leaderPos;
+    const ::AnchorNavRoom::RoomNavData* navData =
+        ::AnchorNavRoom::GetForRoom(
+            gPlayState->sceneNum,
+            (int8_t)gPlayState->roomCtx.curRoom.num);
+    const ::AnchorNavRoom::ClimbAnchor* leaderAnchor =
+        FindClosestClimbAnchor(navData, leaderPos);
+    return leaderAnchor ? leaderAnchor->topPos : leaderPos;
+}
+
 // IDLE handler — stand still, face leader, transition to FOLLOW on
 // distance exceed.
 void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
@@ -381,8 +415,12 @@ void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // Face leader so the NPC looks like it's tracking us even while idle.
     a->shape.rot.y = YawTowardTarget(a->world.pos, leaderPos);
 
-    // Transition check: hysteresis upper bound.
-    const float distSq = Dist2DSq(a->world.pos, leaderPos);
+    // Transition check: hysteresis upper bound. Measure against
+    // effectiveTarget so IDLE→FOLLOW fires when leader starts
+    // climbing — without this the NPC near a wall base sees small
+    // XZ distance to climbing-leader's XZ and stays IDLE forever.
+    const Vec3f effectiveTarget = ComputeEffectiveTarget(leaderPos);
+    const float distSq = Dist2DSq(a->world.pos, effectiveTarget);
     if (distSq > kEnterFollow * kEnterFollow) {
         this_->state = EN_FOLLOWER_STATE_FOLLOW;
     }
@@ -395,6 +433,16 @@ void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
 
+    // ---- Effective target -------------------------------------------
+    // When leader is climbing, redirect path target to the climb
+    // anchor's topPos (a floor node above the climb). Pathfinder
+    // routes through climb cells to reach it, and the climb-cell
+    // detection below engages FOLLOW→CLIMBING naturally. Without
+    // this, the pathfinder's FindNearestNode skips climb nodes and
+    // the path targets some random floor node — NPC reaches it and
+    // idles instead of climbing up.
+    const Vec3f effectiveTarget = ComputeEffectiveTarget(leaderPos);
+
     // ---- Path refresh ------------------------------------------------
     const uint64_t curFrame   = Anchor::Instance->gameFrameCounter.load(
                                     std::memory_order_relaxed);
@@ -403,18 +451,18 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         sLocalNav.path.Empty() ||
         (refreshTicks > 0 &&
          curFrame >= sLocalNav.lastPathRefreshFrame + (uint64_t)refreshTicks) ||
-        AnchorDist::DistXZSq(leaderPos, sLocalNav.lastPathTargetPos) >
+        AnchorDist::DistXZSq(effectiveTarget, sLocalNav.lastPathTargetPos) >
             kPathRetargetDist * kPathRetargetDist;
     if (needRefresh) {
         AnchorNav::TrailKey leaderKey =
             AnchorNav::TrailKeyForPlayer((uint8_t)Anchor::Instance->ownClientId);
         sLocalNav.path.Reset();
         AnchorNav::ActorTrail::GetInstance().ComputePathTo(
-            leaderKey, a, leaderPos, play, sLocalNav.path,
+            leaderKey, a, effectiveTarget, play, sLocalNav.path,
             /*skipLayer1LOS=*/false,
             /*preferLeaderTrail=*/true);  // leader's breadcrumbs are the natural pursuit hint
         sLocalNav.lastPathRefreshFrame = curFrame;
-        sLocalNav.lastPathTargetPos    = leaderPos;
+        sLocalNav.lastPathTargetPos    = effectiveTarget;
     }
 
     // ---- Phase 6: climb-subgoal transition --------------------------
@@ -484,7 +532,12 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 
     // ---- Transition: arrived at leader -----------------------------
-    if (distToLeaderSq <= kEnterIdle * kEnterIdle) {
+    // Measure against effectiveTarget (which redirects to anchor topPos
+    // while leader is climbing). Without this, NPC at the wall base
+    // sees small XZ distance to climbing-leader's XZ and enters IDLE
+    // before ever engaging CLIMBING.
+    const float distToTargetSq = Dist2DSq(a->world.pos, effectiveTarget);
+    if (distToTargetSq <= kEnterIdle * kEnterIdle) {
         this_->state = EN_FOLLOWER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalNav.path.Reset();  // discard path; IDLE is local-frame
@@ -495,18 +548,33 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 // real transitions. Calling every frame restarts the playhead.
 // `currentAnim` is per-actor (on EnFollower) so peer replicas track
 // their own state independently.
-void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
+//
+// Anim variants: use the _free variants (PLAYER_ANIMTYPE_UNARMED
+// equivalent — arms down, no shield). The non-_free anims are the
+// fighter / sword-and-shield poses, which would look wrong on an
+// NPC that has no combat in v1. Player's lookup table at
+// z_player.c:580-605 uses _free for unarmed.
+//
+// playSpeed: passed in by caller so walk/run scale with motion
+// speed. LinkAnimation_Loop advances curFrame by playSpeed *
+// R_UPDATE_RATE * 0.5 per game tick. Player uses
+// PLAYER_ANIM_ADJUSTED_SPEED (= 2/3 ≈ 0.667) which gives ~1
+// anim-frame per game-tick. We pass a value scaled by motion
+// speed in the FOLLOW caller (see TickFollowerNpcActor) so the
+// foot-roll cadence matches actual XZ motion.
+void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want,
+                     f32 playSpeed = 1.0f) {
     if ((FollowerNpcAnim)this_->currentAnim == want) return;
     LinkAnimationHeader* anim = nullptr;
     switch (want) {
         case FollowerNpcAnim::kWait:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait;
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_free;
             break;
         case FollowerNpcAnim::kWalk:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk;
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_free;
             break;
         case FollowerNpcAnim::kRun:
-            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_run;
+            anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_run_free;
             break;
         case FollowerNpcAnim::kClimbUp:
             anim = (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upL;
@@ -516,10 +584,33 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
     }
     if (anim == nullptr) return;
     LinkAnimation_Change(play, &this_->skelAnime, anim,
-                          1.0f /* playSpeed */, 0.0f /* startFrame */,
+                          playSpeed, 0.0f /* startFrame */,
                           Animation_GetLastFrame((void*)anim),
                           ANIMMODE_LOOP, -6.0f /* morphFrames */);
     this_->currentAnim = (s32)want;
+}
+
+// Compute a playSpeed for the given anim + motion speed.
+//   - kWait / kClimbUp: fixed 1.0 (no motion scaling).
+//   - kWalk / kRun: scale by motion speed against a reference. Walk
+//     anim is calibrated for ~6u/frame, run for ~12u/frame; scale
+//     proportionally so foot cadence matches motion. Floor of 0.4 so
+//     extremely slow motion still loops the anim visibly.
+f32 PlaySpeedForAnim(FollowerNpcAnim anim, f32 speedXZ) {
+    switch (anim) {
+        case FollowerNpcAnim::kWalk:
+            // walk anim looks natural at ~6 u/frame motion when
+            // playSpeed = 1.0 * R_UPDATE_RATE-scale. Scale linearly.
+            return std::max(0.4f, speedXZ / 6.0f);
+        case FollowerNpcAnim::kRun:
+            // run anim looks natural at ~12 u/frame motion. Scale linearly.
+            return std::max(0.6f, speedXZ / 12.0f);
+        case FollowerNpcAnim::kWait:
+        case FollowerNpcAnim::kClimbUp:
+        case FollowerNpcAnim::kNone:
+        default:
+            return 1.0f;
+    }
 }
 
 // Pick the right animation for the current state. Used by both the
@@ -646,13 +737,17 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
     const auto& anc = *sLocalNav.activeClimbAnchor;
 
-    // Snap XZ to subgoal each frame (subgoal IS a climb-surface cell
-    // on the wall, so snapping there guarantees we're on the wall).
-    a->world.pos.x = subgoal.x;
-    a->world.pos.z = subgoal.z;
+    // Snap XZ to subgoal + offset along planeNormal so body sits in
+    // FRONT of the wall (not buried). The subgoal IS on the wall
+    // surface; adding planeNormal * kClimbBodyOffset moves us out
+    // along the wall's outward-facing normal.
+    a->world.pos.x = subgoal.x + anc.planeNormal.x * kClimbBodyOffset;
+    a->world.pos.z = subgoal.z + anc.planeNormal.z * kClimbBodyOffset;
 
     // Drive Y toward subgoal at kClimbSpeedY. Clamp to subgoal Y on
-    // approach so we don't overshoot.
+    // approach so we don't overshoot. (planeNormal.y component
+    // intentionally ignored — climbable walls are near-vertical, and
+    // applying body-offset to Y would lift NPC above ladder rungs.)
     const float dy = subgoal.y - a->world.pos.y;
     if (std::fabs(dy) < kClimbSpeedY) {
         a->world.pos.y = subgoal.y;
@@ -884,8 +979,9 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // field so peer NPCs visibly walk/run/climb instead of sliding
     // around in the wait pose.
     if (!IsLocalOwnerNPC(npc)) {
-        EnsureAnimation(this_, play,
-                        AnimForState(this_->state, this_->syncedSpeedXZ));
+        FollowerNpcAnim peerAnim = AnimForState(this_->state, this_->syncedSpeedXZ);
+        EnsureAnimation(this_, play, peerAnim,
+                        PlaySpeedForAnim(peerAnim, this_->syncedSpeedXZ));
         // Skip physics — STATE packet pos is authoritative and arrives
         // every ~100ms. If we ran Actor_MoveXZGravity here, gravity
         // (-2.0/frame) would accumulate velocity.y between packets,
@@ -951,8 +1047,11 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
 
     // Animation. Run AFTER dispatch so any state transitions made by
     // the handler are reflected this same tick (e.g. FOLLOW → STUCK
-    // immediately switches to wait anim, not next-tick).
-    EnsureAnimation(this_, play, AnimForState(this_->state, npc->speedXZ));
+    // immediately switches to wait anim, not next-tick). playSpeed
+    // scaled by motion so walk/run cadence matches actual movement.
+    FollowerNpcAnim localAnim = AnimForState(this_->state, npc->speedXZ);
+    EnsureAnimation(this_, play, localAnim,
+                    PlaySpeedForAnim(localAnim, npc->speedXZ));
 
     // Sync speed for peers — they read syncedSpeedXZ to choose walk
     // vs run anim. (For peers, this is overwritten by the STATE

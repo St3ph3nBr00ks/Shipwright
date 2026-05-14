@@ -103,9 +103,14 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     //
     // Flags = 9 matches z_player_lib.c:1988's pattern (the only known-
     // good call site for player-skel init from a custom actor context).
+    // Init anim is wait_free (not wait). The non-_free wait anim is
+    // the "fighter" idle pose with shield raised — used by Link when
+    // sword+shield are drawn. Our NPC has no combat in v1, so the
+    // arms-down _free variant is correct. (Player's anim lookup table
+    // at z_player.c:580-587 uses _free for PLAYER_ANIMTYPE_UNARMED.)
     SkelAnime_InitLink(play, &this->skelAnime,
                        gPlayerSkelHeaders[this->linkAge],
-                       (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait,
+                       (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_free,
                        9 /* flags */,
                        this->jointTable, this->morphTable,
                        PLAYER_LIMB_MAX);
@@ -114,20 +119,9 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     // with endFrame=0 (z_skelanime.c:1146) — that sets the anim up but
     // FREEZES it at frame 0 (no advance possible in LinkAnimation_Loop
     // because curFrame >= animLength is always true when both are 0).
-    // Result: the NPC renders in the wait anim's frame-0 pose forever
-    // (a.k.a. "default pose for pause menu"). We need to override the
-    // endFrame with the anim's actual last frame to enable looping
-    // playback. LinkAnimation_PlayLoop does exactly that (sets startFrame=
-    // 0, endFrame=Animation_GetLastFrame(anim), mode=ANIMMODE_LOOP).
-    // After this call, LinkAnimation_Update in EnFollower_Update will
-    // advance curFrame each tick and write joint positions into
-    // jointTable, so the NPC visibly idles. Local-owner NPCs will then
-    // swap to walk/run/climb via EnsureAnimation in the AI tick; peer
-    // replicas will continue playing wait by default (state-driven
-    // anim sync is the v1 fallback — see TickFollowerNpcActor's anim
-    // resolution for peers).
+    // LinkAnimation_PlayLoop overrides with proper endFrame.
     LinkAnimation_PlayLoop(play, &this->skelAnime,
-                           (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait);
+                           (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_free);
 }
 
 void EnFollower_Destroy(Actor* thisx, PlayState* play) {
