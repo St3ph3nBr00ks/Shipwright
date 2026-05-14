@@ -2209,6 +2209,19 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     if (this_->stopAnimPlaying) {
         localAnim = (FollowerNpcAnim)this_->currentAnim;  // hold current
     }
+
+    // Airborne anim hold — while jumpInProgress, keep the jump anim
+    // as the active selection regardless of whether the one-shot has
+    // ended. Mirrors Player_Action_8084411C (z_player.c:9663) which
+    // doesn't transition anim during fall — Link stays in the jump
+    // pose until landing. Without this, our NPC's kRunJump one-shot
+    // ends mid-fall, AnimForState returns kWalk/kRun/kWait based on
+    // speedXZ, and NPC visibly switches to a walking pose while
+    // still in the air. Only released when jumpInProgress clears
+    // (on landing or stuck-teleport).
+    if (sLocalNav.jumpInProgress) {
+        localAnim = (FollowerNpcAnim)this_->currentAnim;
+    }
     EnsureAnimation(this_, play, localAnim);
 
     // Per-frame playSpeed for walk/run. Player's run anim is set via
