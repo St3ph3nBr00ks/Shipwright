@@ -25,6 +25,9 @@
 
 extern "C" {
 #include "z64.h"
+// Defined in src/code/z_play.c. C linkage; GetTraitsForActor below
+// references it via :: to escape the surrounding AnchorNav namespace.
+extern s16 gEnFollowerId;
 }
 
 // SoH's "climb any wall" cheat. Lives under gCheats. (NOT
@@ -254,8 +257,9 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
     // so it can't appear in the static `overrides` map. Resolve here:
     // NPC Follower mirrors the player-rigged Follower's traits (Link
     // skel, walks where Link walks, climbs where Link climbs).
-    extern s16 gEnFollowerId;
-    if (gEnFollowerId != 0 && actorId == gEnFollowerId) {
+    // ::gEnFollowerId — escape this file's AnchorNav namespace; the
+    // global is C-linkage from src/code/z_play.c.
+    if (::gEnFollowerId != 0 && actorId == ::gEnFollowerId) {
         static const NavTraits sFollowerNpcTraits = MakeFollowerTraits();
         return sFollowerNpcTraits;
     }
