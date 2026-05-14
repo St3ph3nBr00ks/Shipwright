@@ -602,6 +602,34 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 }
 
+// DEAD handler — Phase 7 stub. v1 NPC is invulnerable, so this state
+// is reserved-but-unentered; the handler exists to (a) lock the
+// declaration in the dispatcher (we'd otherwise rely on the
+// `default` branch) and (b) let the v2 combat redesign drop in
+// real death-anim playback + post-death-timer logic without
+// touching the dispatcher.
+//
+// v2 contract sketch (when combat lands):
+//   - On entry: switch animation to a death anim; arm a death-anim
+//     duration timer.
+//   - Each frame: hold pos (no Actor_MoveXZGravity), let anim play.
+//   - On timer expiry: SetFollowerNpcActive(false) — the
+//     SetFollowerNpcActive(false) path will Actor_Kill +
+//     broadcast DESPAWN(reason=died).
+//
+// v1 behaviour (here): just stop all movement and hold pose.
+// Functionally equivalent to TickIDLE without the FOLLOW transition
+// check (a dead NPC shouldn't aggro back to following on stand-up).
+void TickDEAD(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    (void)play;
+    (void)leaderPos;
+    Actor* a = &this_->actor;
+    a->speedXZ = 0.0f;
+    // No state transitions in v1 — invulnerable NPC never reaches DEAD.
+    // v2 will add the death-anim-complete → SetFollowerNpcActive(false)
+    // dispatch here.
+}
+
 // STUCK handler — single-tick world.pos nudge toward leader, then
 // return to FOLLOW. The substrate path was just reset by the FOLLOW
 // caller; the next FOLLOW tick will recompute. Combined effect:
@@ -667,6 +695,23 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     }
     const Vec3f& leaderPos = player->actor.world.pos;
 
+    // G18 — cutscene suspension. When a cutscene is running, freeze
+    // the NPC entirely (no AI tick, no animation update, no
+    // locomotion). Same shape as the player-rigged AI Follower's G18
+    // gate. Without this, the NPC can wander into cutscene framing
+    // or trigger collision with cutscene-locked actors.
+    //
+    // csCtx.state values: CS_STATE_IDLE = 0; anything non-zero means
+    // a cutscene is in some flavour of running / preparing / ending.
+    // The "all non-zero = freeze" rule matches G18 in HookHandlers.cpp.
+    if (gPlayState->csCtx.state != CS_STATE_IDLE) {
+        npc->speedXZ = 0.0f;
+        // Don't call Actor_MoveXZGravity either — gravity during a
+        // cutscene can drop the NPC into a void if the cutscene
+        // teleported the world out from under us.
+        return;
+    }
+
     // Dispatch.
     switch (this_->state) {
         default:
@@ -691,8 +736,9 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             // entry; kWait on exit-to-FOLLOW path).
             break;
         case EN_FOLLOWER_STATE_DEAD:
-            TickIDLE(this_, play, leaderPos);
-            EnsureAnimation(this_, play, FollowerNpcAnim::kWait);
+            TickDEAD(this_, play, leaderPos);
+            // No animation switch in v1 — invulnerable NPC never
+            // enters this state. v2 will set a death anim here.
             break;
     }
 
