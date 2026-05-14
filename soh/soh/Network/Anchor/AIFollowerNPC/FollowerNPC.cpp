@@ -844,11 +844,16 @@ void TickHeadLookAtLeader(EnFollower* this_, const Vec3f& leaderPos) {
         ? Math_Atan2S(distXZ, a->world.pos.y - leaderPos.y)
         : 0;
 
-    // Apportion yaw: head takes up to ±0x4000, upper twists for the rest.
+    // Apportion yaw: head takes up to ±kHeadYawMax (70° in OoT binary
+    // angle), upper body twists for the rest. Field test reported
+    // visually strange head angles when the limit was ±0x4000 (90°)
+    // — heads turn unnaturally far. Tightened to ±70° = 12743 binary
+    // (≈ 0x31C7), matching a natural neck rotation range.
+    constexpr s16 kHeadYawMax = 12743;
     s16 headYawTarget  = yawRel;
     s16 upperYawTarget = 0;
-    if (headYawTarget >  0x4000) { upperYawTarget = headYawTarget - 0x4000; headYawTarget =  0x4000; }
-    if (headYawTarget < -0x4000) { upperYawTarget = headYawTarget + 0x4000; headYawTarget = -0x4000; }
+    if (headYawTarget >  kHeadYawMax) { upperYawTarget = headYawTarget - kHeadYawMax; headYawTarget =  kHeadYawMax; }
+    if (headYawTarget < -kHeadYawMax) { upperYawTarget = headYawTarget + kHeadYawMax; headYawTarget = -kHeadYawMax; }
     // If leader is mostly behind, cap upper twist at ±0x4000 (don't snap-spin).
     if (upperYawTarget >  0x4000) upperYawTarget =  0x4000;
     if (upperYawTarget < -0x4000) upperYawTarget = -0x4000;
@@ -1833,7 +1838,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // the climb-out motion correctly. End-of-anim snap moves NPC
         // to the exact ledge top.
         if (ctx == HOIST_CONTEXT_SWIM) {
-            constexpr float kSwimHoistRaise = 45.0f;  // tuned 60u → 50u → 45u over field tests
+            constexpr float kSwimHoistRaise = 43.0f;  // tuned 60u → 50u → 45u → 43u over field tests
             npc->world.pos.y += kSwimHoistRaise;
             npc->velocity.y = 0.0f;
         }
@@ -1918,10 +1923,20 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         this_->stopAnimPlaying = 0;
     }
 
-    // Head-look-at-leader. Re-enabled after isolating the idle-animation
-    // bug to TickIdleBlend (now disabled separately). Save/swap/restore
-    // of localPlayer's headLimbRot/upperLimbRot happens in EnFollower_Draw.
-    TickHeadLookAtLeader(this_, leaderPos);
+    // Head-look-at-leader. Disabled during CLIMBING + LEDGE_HOIST —
+    // head rotation looks visually wrong in those poses (climb anim
+    // has Link facing the wall; head turning sideways to track leader
+    // produces unnatural angles). Also let head settle to neutral
+    // during these phases (Math_ScaledStepToS toward 0 instead of the
+    // leader-relative target). LEDGE_HOIST is similarly anim-locked.
+    if (this_->state == EN_FOLLOWER_STATE_CLIMBING ||
+        this_->state == EN_FOLLOWER_STATE_LEDGE_HOIST) {
+        Math_ScaledStepToS(&this_->headLimbRot.y,  0, 0x600);
+        Math_ScaledStepToS(&this_->headLimbRot.x,  0, 0x600);
+        Math_ScaledStepToS(&this_->upperLimbRot.y, 0, 0x600);
+    } else {
+        TickHeadLookAtLeader(this_, leaderPos);
+    }
 
     // Animation. Run AFTER dispatch so any state transitions made by
     // the handler are reflected this same tick (e.g. FOLLOW → STUCK
