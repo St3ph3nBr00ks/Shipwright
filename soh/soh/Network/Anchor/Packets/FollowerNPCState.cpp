@@ -76,11 +76,58 @@ void Anchor::HandlePacket_FollowerNpcState(nlohmann::json payload) {
 
     auto it = mPeerFollowerNpcs.find(ownerClientId);
     if (it == mPeerFollowerNpcs.end()) {
-        // No replica yet. Could happen if STATE arrived before SPAWN
-        // (race) or after our local DESPAWN. Silently skip — the next
-        // SPAWN will create the replica and subsequent STATE packets
-        // catch up.
-        return;
+        // No replica yet. Two cases:
+        //   (a) STATE arrived BEFORE the owner's SPAWN packet (network race).
+        //       Auto-recovers — when SPAWN arrives we'll spawn the replica
+        //       and subsequent STATE packets catch up.
+        //   (b) Late-join — we just connected to a session where the owner
+        //       already had its NPC live. The SPAWN was broadcast before
+        //       we existed, so we never saw it. Without recovery, we'd
+        //       silently drop every STATE forever and never see the NPC.
+        //
+        // Case (b) recovery: bootstrap the replica from the STATE packet.
+        // STATE carries pos/rot/scale; we can spawn the replica from
+        // those fields without needing a SPAWN replay round-trip from
+        // the owner. Same-scene gate (via clients[ownerClientId].sceneNum)
+        // because cross-scene replicas would just sit idle outside our
+        // visible world.
+        auto cit = clients.find(ownerClientId);
+        if (cit == clients.end() || cit->second.sceneNum != gPlayState->sceneNum) {
+            return;  // owner not in our scene; defer until they enter
+        }
+        if (gEnFollowerId == 0) {
+            return;  // actor not yet registered
+        }
+        auto posArr0 = payload.value("pos", std::vector<float>{ 0.0f, 0.0f, 0.0f });
+        auto rotArr0 = payload.value("rot", std::vector<int>{ 0, 0, 0 });
+        Vec3f bootPos{ 0, 0, 0 };
+        Vec3s bootRot{ 0, 0, 0 };
+        if (posArr0.size() >= 3) {
+            bootPos.x = posArr0[0]; bootPos.y = posArr0[1]; bootPos.z = posArr0[2];
+        }
+        if (rotArr0.size() >= 3) {
+            bootRot.x = (s16)rotArr0[0]; bootRot.y = (s16)rotArr0[1]; bootRot.z = (s16)rotArr0[2];
+        }
+        Actor* spawned = Actor_Spawn(
+            &gPlayState->actorCtx, gPlayState,
+            gEnFollowerId,
+            bootPos.x, bootPos.y, bootPos.z,
+            bootRot.x, bootRot.y, bootRot.z,
+            0 /* params */);
+        if (spawned == nullptr) {
+            SPDLOG_ERROR("[FollowerNpcState] Late-join bootstrap Actor_Spawn failed for "
+                         "owner={} at ({:.0f},{:.0f},{:.0f})",
+                         ownerClientId, bootPos.x, bootPos.y, bootPos.z);
+            return;
+        }
+        mPeerFollowerNpcs[ownerClientId] = spawned;
+        SPDLOG_INFO("[FollowerNpcState] Late-join bootstrap: spawned replica for "
+                    "owner={} at ({:.0f},{:.0f},{:.0f}) (no SPAWN seen — "
+                    "joined after owner)",
+                    ownerClientId, bootPos.x, bootPos.y, bootPos.z);
+        // Continue down to the standard apply path so this same packet's
+        // pos / rot / scale land on the freshly-spawned replica.
+        it = mPeerFollowerNpcs.find(ownerClientId);
     }
     Actor* replica = it->second;
     if (replica == nullptr || replica->update == nullptr) {
