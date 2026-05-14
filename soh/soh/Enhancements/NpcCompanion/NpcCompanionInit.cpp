@@ -32,6 +32,11 @@
 #include <libultraship/bridge.h>
 #include <libultraship/libultraship.h>
 
+extern "C" {
+#include "z64.h"
+extern PlayState* gPlayState;
+}
+
 namespace {
 
 void OnGameFrameUpdateNpcCompanion() {
@@ -42,26 +47,45 @@ void OnGameFrameUpdateNpcCompanion() {
     Anchor::Instance->TickFollowerNpcCVar();
 }
 
-// Scene transitions destroy the actor list. Our cached
-// mFollowerNpcLocalActor pointer becomes dangling — checking
-// pointer->update is undefined behaviour (the memory may be freed,
-// reused by another actor with non-null update, or contain stale
-// bytes). The earlier "stale-pointer cleanup" inside
-// TickFollowerNpcCVar relied on the dangling-read returning NULL,
-// which doesn't reliably happen — so the auto-respawn never fired
-// in field test.
+// SCENE transitions destroy the actor list (NPC dies); ROOM
+// transitions within the same scene do NOT — actors persist
+// across rooms. But OnSceneSpawnActors fires for BOTH (z_actor.c:2601
+// triggers it whenever play->numSetupActors != 0, which happens on
+// every room load too, not just scene loads).
 //
-// Fix: explicit clear on OnSceneSpawnActors (fires after the new
-// scene's actor list is initialised but before the first actor
-// tick). After the clear, the next TickFollowerNpcCVar sees CVar=on
-// AND pointer=null AND auto-respawns at the player's new-scene pos.
+// Naively clearing the cache on every fire caused duplicate NPCs
+// during door-open transitions: old NPC actor still alive in the
+// previous room, but our pointer was cleared so a NEW NPC spawned
+// in the current room → both visible.
 //
-// Same clear empties mPeerFollowerNpcs — peers' next FOLLOWER_NPC_SPAWN
-// (auto-broadcast when their TickFollowerNpcCVar auto-respawns)
-// will repopulate the map.
+// Fix: cache last-seen sceneNum. Only clear the pointer when the
+// scene actually changes (the actor is genuinely dead). For room
+// transitions within a scene, the actor persists; we instead
+// update its `actor->room` field each tick (in
+// Anchor_TickFollowerNpcActor) so the engine renders it in the
+// leader's current room. Single instance, follows leader through
+// doors, no duplication.
+//
+// This pattern (persistent actor + per-tick room sync) is the
+// reusable mechanism for AI Invader cross-room pursuit. Engine-
+// level scene transitions still kill all actors; system-level
+// state (CVar / Invader-active flag) drives respawn in the new
+// scene. Cross-room within a scene is handled entirely by the
+// actor.room field update — no respawn needed.
 void OnSceneSpawnActorsNpcCompanion() {
     if (Anchor::Instance == nullptr) return;
-    Anchor::Instance->ClearFollowerNpcSceneCache();
+    if (gPlayState == nullptr) return;
+    static int16_t sLastSceneNum = -1;
+    const int16_t curScene = gPlayState->sceneNum;
+    if (curScene != sLastSceneNum) {
+        // True scene transition — old actor list is dead, our pointer
+        // is dangling. Clear the cache; TickFollowerNpcCVar will
+        // auto-respawn next tick.
+        Anchor::Instance->ClearFollowerNpcSceneCache();
+        sLastSceneNum = curScene;
+    }
+    // Else: room transition within the same scene. Actor persists;
+    // don't clear the pointer (would duplicate-spawn).
 }
 
 void RegisterNpcCompanion() {

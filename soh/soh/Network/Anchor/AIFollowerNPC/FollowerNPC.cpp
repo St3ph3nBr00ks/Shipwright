@@ -1167,12 +1167,23 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
     const auto& anc = *sLocalNav.activeClimbAnchor;
 
-    // Snap XZ to subgoal + offset along planeNormal so body sits in
-    // FRONT of the wall (not buried). The subgoal IS on the wall
-    // surface; adding planeNormal * kClimbBodyOffset moves us out
-    // along the wall's outward-facing normal.
-    a->world.pos.x = subgoal.x + anc.planeNormal.x * kClimbBodyOffset;
-    a->world.pos.z = subgoal.z + anc.planeNormal.z * kClimbBodyOffset;
+    // XZ position: when leader is also climbing this anchor, MATCH
+    // leader's XZ exactly — leader's pos is on the actual climb
+    // surface (vine cell or ladder rung) at the right lateral
+    // position. Without this, NPC snaps to nearest CELL.xz which is
+    // grid-quantized (~30u pitch) and can be 15u off from leader's
+    // actual lateral position.
+    //
+    // When leader is NOT climbing (NPC alone on the wall), use the
+    // cell-based snap with body offset along planeNormal so NPC's
+    // body sits in front of the wall surface (not buried).
+    if (Anchor::Instance->IsLocalPlayerClimbing()) {
+        a->world.pos.x = leaderPos.x;
+        a->world.pos.z = leaderPos.z;
+    } else {
+        a->world.pos.x = subgoal.x + anc.planeNormal.x * kClimbBodyOffset;
+        a->world.pos.z = subgoal.z + anc.planeNormal.z * kClimbBodyOffset;
+    }
 
     // Drive Y toward subgoal at kClimbSpeedY. Clamp to subgoal Y on
     // approach so we don't overshoot. (planeNormal.y component
@@ -1692,6 +1703,19 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         return;
     }
     const Vec3f& leaderPos = player->actor.world.pos;
+
+    // Persistent room handoff — set NPC's room to leader's room each
+    // tick. Without this, after a within-scene room transition the
+    // NPC's actor.room field still points to the old room and the
+    // engine renders it there (or culls it). Tracking leader's room
+    // makes the actor "tag along" — same instance, no despawn/respawn,
+    // visible in whichever room the leader currently occupies.
+    //
+    // Reusable for AI Invader cross-room pursuit: same per-tick room
+    // sync. For cross-SCENE pursuit, the scene transition still kills
+    // the actor (engine-level), but the system-level state (CVar /
+    // Invader-active flag) drives respawn via OnSceneSpawnActors.
+    npc->room = player->actor.room;
 
     // G18 — cutscene suspension. When a cutscene is running, freeze
     // the NPC entirely (no AI tick, no animation update, no
