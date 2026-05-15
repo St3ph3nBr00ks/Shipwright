@@ -65,11 +65,23 @@ public:
     std::string GetDebugSnapshotLine() const override;
 
 private:
-    // Counters for the debug panel (step 12+ will increment these).
-    int      mTotalSpawned    = 0;
-    int      mTotalRemoved    = 0;
-    uint32_t mLastSpawnedNetId = 0;
+    // Default tunables. CVar overrides take precedence at read time;
+    // these are the fallback values per ai_invader_plan.md §3.
+    static constexpr int  kDefaultMaxAlive       = 1;        // per plan §3 (range 1..4)
+    static constexpr int  kDefaultCooldownMs     = 90 * 1000; // 90s per plan §3 (range 30..600)
+
+    // Counters surfaced via the debug panel. Like TestDescriptor, the
+    // descriptor doesn't get a "spawn executed" callback today — so we
+    // track proposalsOffered (non-empty ProposeSpawn results) rather
+    // than actual spawn count. Live count is queried from the Director.
+    int      mProposalsOffered = 0;
+    int      mTotalRemoved     = 0;
     uint32_t mLastRemovedNetId = 0;
+
+    // Step 12 diagnostic — throttles per-tick rejection-reason SPDLOGs
+    // to ~once per 5s at 20fps. Mirrors TestDescriptor's pattern;
+    // gated by gEnhancements.AI.Director.LogProposals.
+    int      mTicksSinceLog    = 0;
 };
 
 }  // namespace AnchorDirector

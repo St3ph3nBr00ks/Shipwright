@@ -2491,10 +2491,42 @@ void SohMenu::AddMenuEnhancements() {
             "Inspired by Dark Souls invader summons.\n\n"
             "Requires the AI Navigation master toggle to also be on (the "
             "Invader's spawn-position selection consumes the Nav substrate).\n\n"
-            "Step 11 scaffold: descriptor is registered but ProposeSpawn "
-            "returns empty — no spawns actually fire yet. Combat AI and "
-            "the ACTOR_EN_INVADER actor land in later steps. Default off; "
-            "stays off for vanilla play."));
+            "Step 12 scope: eligibility predicates wired (live-count cap, "
+            "cooldown, cutscene check, scene blacklist). Spawns a placeholder "
+            "ACTOR_EN_TEST (Stalfos) at the most-isolated player's position "
+            "until step 13 lands nav-aware placement and step 15 lands the "
+            "real Invader actor. Default off; stays off for vanilla play."));
+
+    AddWidget(path, "Max alive invaders: %d", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("AI.Invaders.MaxAlive"))
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("AI.Invaders.Enabled"), 0);
+        })
+        .RaceDisable(false)
+        .Options(IntSliderOptions()
+                     .Min(1)
+                     .Max(4)
+                     .DefaultValue(1)
+                     .Format("%d")
+                     .Tooltip(
+            "Maximum simultaneous live invaders. Director will not propose "
+            "another spawn until count drops below this. Plan default: 1."));
+
+    AddWidget(path, "Cooldown: %ds", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("AI.Invaders.CooldownSeconds"))
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("AI.Invaders.Enabled"), 0);
+        })
+        .RaceDisable(false)
+        .Options(IntSliderOptions()
+                     .Min(30)
+                     .Max(600)
+                     .DefaultValue(90)
+                     .Format("%ds")
+                     .Tooltip(
+            "Minimum seconds between spawn attempts per (scene, room). "
+            "Director's cooldown ledger is per-room, so moving to a fresh "
+            "room can re-arm immediately. Plan default: 90s."));
 
     AddWidget(path, "TestDescriptor (dev)", WIDGET_SEPARATOR_TEXT);
     AddWidget(path, "Enable TestDescriptor", WIDGET_CVAR_CHECKBOX)
