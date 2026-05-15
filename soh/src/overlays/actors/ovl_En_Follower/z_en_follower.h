@@ -25,6 +25,11 @@ typedef enum {
     EN_FOLLOWER_STATE_DEAD        = 4,
     EN_FOLLOWER_STATE_SWIMMING    = 5,  // tread/swim while submerged
     EN_FOLLOWER_STATE_LEDGE_HOIST = 6,  // one-shot mantle (swim-out / ground-climb)
+    EN_FOLLOWER_STATE_ATTACK      = 7,  // sword swing at nearest enemy (Stage 4)
+    EN_FOLLOWER_STATE_ENGAGE      = 8,  // pursue enemy into strike range (Stage 4)
+    EN_FOLLOWER_STATE_BLOCK       = 9,  // shield-up defensive stance (Stage 4)
+    EN_FOLLOWER_STATE_RANGED_ATTACK = 10, // bow shot at distant enemy (Stage 4)
+    EN_FOLLOWER_STATE_STANDBY     = 11, // alert pose with weapon drawn between combat exchanges (Stage 4)
 } EnFollowerAIState;
 
 // LEDGE_HOIST entry context — drives anim selection.
@@ -47,6 +52,18 @@ typedef struct EnFollower {
     SkelAnime skelAnime;
     Vec3s     jointTable[PLAYER_LIMB_BUF_COUNT];
     Vec3s     morphTable[PLAYER_LIMB_BUF_COUNT];
+
+    // Stage 3 — body collider. AC_TYPE_PLAYER bumper so enemy AT
+    // colliders register hits; OC for blocking. Initialized in
+    // EnFollower_Init via Collider_InitCylinder + Collider_SetCylinder
+    // and destroyed in EnFollower_Destroy. Per-tick update +
+    // CollisionCheck_SetAC handled by the C++ tick driver.
+    ColliderCylinder collider;
+    // Stage 4 — attack collider. Quad swept in front of NPC during
+    // the active frames of the sword-swing anim. AT_TYPE_PLAYER so
+    // enemy AC bumpers (which accept PLAYER-typed ATs) register
+    // hits. Init/destroy mirror the body collider.
+    ColliderQuad atCollider;
 
     // Owner-client bookkeeping. Set by Anchor at spawn time.
     u32 ownerClientId;
@@ -81,6 +98,12 @@ typedef struct EnFollower {
     // in FOLLOWER_NPC_STATE so peers play matching anim. Reserved
     // for now; Stage 1 only writes 0.
     u8 deathFlag;
+    // Stage 2 — death cause: drives which death animation plays in
+    // EN_FOLLOWER_STATE_DEAD. 0 = generic (back-down, used for
+    // fall / void / combat / unspecified); 1 = drowning (swim KO
+    // anim — gPlayerAnim_link_swimer_swim_dead). Broadcast in
+    // FOLLOWER_NPC_STATE so peers play the matching anim.
+    u8 deathCause;
 
     // Last animation kind set on this actor (FollowerNpcAnim enum value
     // stored as int; matches the C++ enum class FollowerNpcAnim). Per-

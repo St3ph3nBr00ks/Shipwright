@@ -62,6 +62,68 @@ extern void Anchor_FollowerNpcDrawEnd(void);
 #define FLAGS                                                                                                          \
     (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
+// Stage 3 — body collider definition. Mirrors Player's body cylinder
+// (z_player.c D_80854624 at line 10593) so enemy AT colliders see the
+// NPC the same way they see Link.
+//
+// Critical: AC_TYPE_ENEMY (not AC_TYPE_PLAYER). The TYPE field on an
+// AC bumper describes who the AC accepts hits FROM — enemy attacks
+// are typed AT_TYPE_ENEMY (e.g. En_Goma D_80A4B7A0:
+// `AT_ON | AT_TYPE_ENEMY`), so the matching AC must be AC_TYPE_ENEMY.
+// AC_TYPE_PLAYER would only accept hits from PLAYER-typed ATs (other
+// players in PvP) — the wrong direction for damage from enemies.
+//
+// COLTYPE_HIT5 + ELEMTYPE_UNK1 + dmgFlags 0xFFCFFFFF mirror Player.
+// Cylinder geometry: radius 12, height 60, yShift 0 (matches Link).
+static ColliderCylinderInit sColliderInit = {
+    {
+        COLTYPE_HIT5,
+        AT_NONE,
+        AC_ON | AC_TYPE_ENEMY,
+        OC1_ON | OC1_TYPE_ALL,
+        OC2_TYPE_PLAYER,
+        COLSHAPE_CYLINDER,
+    },
+    {
+        ELEMTYPE_UNK1,
+        { 0x00000000, 0x00, 0x00 },
+        { 0xFFCFFFFF, 0x00, 0x00 },
+        TOUCH_NONE,
+        BUMP_ON,
+        OCELEM_ON,
+    },
+    { 12, 60, 0, { 0, 0, 0 } },
+};
+
+// Stage 4 — sword swing AT collider (quad). Mirrors Player's sword AT
+// (z_player.c D_80854650 at line 10613): AT_ON | AT_TYPE_PLAYER so
+// enemy AC bumpers (configured AC_TYPE_PLAYER) register the hit. Quad
+// vertices are positioned per-frame by the C++ tick driver during
+// the active swing frames; resting position is zeroed.
+//
+// dmgFlags 0x00000100 = standard sword damage flag (matches Player's
+// kokiri-sword setup). Hookshot/megaton variants would use different
+// flags; for v1 the NPC always swings as if holding a basic sword.
+static ColliderQuadInit sAtColliderInit = {
+    {
+        COLTYPE_NONE,
+        AT_ON | AT_TYPE_PLAYER,
+        AC_NONE,
+        OC1_NONE,
+        OC2_TYPE_PLAYER,
+        COLSHAPE_QUAD,
+    },
+    {
+        ELEMTYPE_UNK2,
+        { 0x00000100, 0x00, 0x01 },
+        { 0xFFCFFFFF, 0x00, 0x00 },
+        TOUCH_ON | TOUCH_SFX_NORMAL,
+        BUMP_NONE,
+        OCELEM_NONE,
+    },
+    { { { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f } } },
+};
+
 void EnFollower_Init(Actor* thisx, PlayState* play) {
     EnFollower* this = (EnFollower*)thisx;
 
@@ -77,8 +139,19 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     this->currentTunic      = PLAYER_TUNIC_KOKIRI;
     this->currentBoots      = PLAYER_BOOTS_KOKIRI;
     this->currentFace       = 0;
-    this->health            = 4;     // kFollowerNpcMaxHealth (mirror in FollowerNPC.cpp)
+    // Stage 2: NPC HP mirrors Link's heart capacity (clamped). The
+    // C++ helper FollowerNpcMaxHealthFromLink() does the read +
+    // clamp, but it lives in FollowerNPC.cpp; replicate the formula
+    // here so EnFollower_Init doesn't depend on a C++ TU. Floor of
+    // 3 keeps an edge-case empty save above zero; cap of 20 fits s8.
+    {
+        int hearts = (int)gSaveContext.healthCapacity / 16;
+        if (hearts < 3)  hearts = 3;
+        if (hearts > 20) hearts = 20;
+        this->health = (s8)hearts;
+    }
     this->deathFlag         = 0;
+    this->deathCause        = 0;     // 0 = generic; 1 = drown
     this->currentAnim       = 0;     // kNone — first EnsureAnimation will fire
     this->currentAnimType   = 0;     // PLAYER_ANIMTYPE_0 (unarmed) baseline
     this->syncedSpeedXZ     = 0.0f;
@@ -134,14 +207,29 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     // LinkAnimation_PlayLoop overrides with proper endFrame.
     LinkAnimation_PlayLoop(play, &this->skelAnime,
                            (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_free);
+
+    // Stage 3 — body collider. Update + AC registration is per-tick in
+    // the C++ tick driver; here we just init the cylinder.
+    Collider_InitCylinder(play, &this->collider);
+    Collider_SetCylinder(play, &this->collider, &this->actor, &sColliderInit);
+    // Mirror NPC HP into the collider's colChkInfo so hit-reaction
+    // libraries that read it (Actor_ApplyDamage and friends) don't
+    // see a zero HP from the default-init colChkInfo. Damage values
+    // will be applied to colChkInfo by CollisionCheck_Damage; the C++
+    // tick driver mirrors the result back into `this->health`.
+    this->actor.colChkInfo.health = this->health;
+    this->actor.colChkInfo.damage = 0;
+
+    // Stage 4 — sword AT collider. Vertices positioned per-frame by
+    // the ATTACK state's tick handler; quad zeroed at init.
+    Collider_InitQuad(play, &this->atCollider);
+    Collider_SetQuad(play, &this->atCollider, &this->actor, &sAtColliderInit);
 }
 
 void EnFollower_Destroy(Actor* thisx, PlayState* play) {
-    // No dynamic resources to clean up; SkelAnime joint/morph tables
-    // live inline in the EnFollower struct so they free with the
-    // actor itself.
-    (void)thisx;
-    (void)play;
+    EnFollower* this = (EnFollower*)thisx;
+    Collider_DestroyCylinder(play, &this->collider);
+    Collider_DestroyQuad(play, &this->atCollider);
 }
 
 void EnFollower_Update(Actor* thisx, PlayState* play) {

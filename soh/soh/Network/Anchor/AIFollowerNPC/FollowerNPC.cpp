@@ -37,19 +37,99 @@ extern "C" {
 #include "macros.h"
 #include "objects/gameplay_keep/gameplay_keep.h"  // gPlayerAnim_link_normal_*
 #include "src/overlays/actors/ovl_En_Follower/z_en_follower.h"  // EnFollower struct + state enum
+#include "src/overlays/actors/ovl_En_Arrow/z_en_arrow.h"        // ARROW_NORMAL etc. for RANGED_ATTACK
 extern PlayState* gPlayState;
 extern s16        gEnFollowerId;
 }
 
 // ----------------------------------------------------------------------------
-// Stage 1 (npc_follower_health_and_respawn_plan): health constants
-// and helper. Stage 2+ will add ApplyDamage() that calls
+// Stage 1+2 (npc_follower_health_and_respawn_plan): health constants
+// and helpers. Stage 3+ will add ApplyDamage() that calls
 // FollowerNpcInvulnerable() before applying.
 // ----------------------------------------------------------------------------
-constexpr s8 kFollowerNpcMaxHealth = 4;
+// Floor for the per-spawn health cap. The leader-mirroring helper
+// returns max(this, gSaveContext.healthCapacity / 16) so the NPC
+// always has at least 3 hearts even before Link picks up his
+// starting heart container.
+constexpr s8 kFollowerNpcMinHealth = 3;
+// Hard cap so we never overflow the s8 EnFollower::health field
+// (max 127). 20 hearts is OoT's max anyway.
+constexpr s8 kFollowerNpcMaxHealth = 20;
 
 bool FollowerNpcInvulnerable() {
     return CVarGetInteger(CVAR_ENHANCEMENT("AI.FollowerNPC.Invulnerable"), 1) != 0;
+}
+
+// Stage 3 — public API: is the local NPC follower a valid target
+// for enemy AI? True only when the NPC exists, is alive, and the
+// invulnerable CVar is OFF. Same predicate also drives the per-tick
+// collider register, so targeting + damage application stay in sync.
+bool Anchor::IsFollowerNpcTargetable() const {
+    if (FollowerNpcInvulnerable()) return false;
+    if (mFollowerNpcLocalActor == nullptr) return false;
+    if (mFollowerNpcLocalActor->update == nullptr) return false;
+    EnFollower* asFollower = (EnFollower*)mFollowerNpcLocalActor;
+    if (asFollower->state == EN_FOLLOWER_STATE_DEAD) return false;
+    return true;
+}
+
+// Stage 2: NPC HP mirrors Link's heart capacity. healthCapacity is
+// in OoT's quarter-heart units (16 = 1 heart) so divide by 16 to get
+// the integer heart count. Clamped to [kFollowerNpcMinHealth,
+// kFollowerNpcMaxHealth] so an NPC spawned mid-game with a high-cap
+// Link still fits in s8 and a degenerate empty save still gives us
+// something reasonable.
+s8 FollowerNpcMaxHealthFromLink() {
+    int hearts = (int)gSaveContext.healthCapacity / 16;
+    if (hearts < kFollowerNpcMinHealth) hearts = kFollowerNpcMinHealth;
+    if (hearts > kFollowerNpcMaxHealth) hearts = kFollowerNpcMaxHealth;
+    return (s8)hearts;
+}
+
+// Stage 2 — death/respawn timings. All in milliseconds, converted to
+// game ticks via Anchor::MsToGameTicks at the comparison site so the
+// values stay correct at any framerate (20fps default vs unlocked).
+constexpr int kFollowerNpcDeathHoldMs       = 3000;   // anim hold + ground lay
+// User-spec is "10 seconds total from death to respawn". We achieve
+// that by setting this cooldown so deathHold + cooldown ≈ 10s.
+// Log 161 timing: death @ 02:20:58, respawn @ 02:21:12 = 13.9s with
+// the prior 10s cooldown — felt long. 7s cooldown gives 10s total.
+constexpr int kFollowerNpcRespawnCooldownMs = 7000;
+constexpr int kFollowerNpcDrowningMs        = 30000;  // user-spec (Player default)
+constexpr float kFollowerNpcVoidThresholdY  = -3000.0f;  // Y below this = void death
+
+// Stage 2 — find the door actor closest to `nearPos` (typically the
+// leader's position). Returns the door's world.pos + facing, or
+// nullopt-style failure via outFound. Walks ACTORCAT_DOOR; ignores
+// dead actors (update == nullptr). If no door is found the caller
+// falls back to a sensible default (leader pos).
+struct DoorRespawnResult {
+    Vec3f pos;
+    s16   yaw;
+    bool  found;
+};
+
+DoorRespawnResult FindClosestDoorToLeader(PlayState* play, const Vec3f& nearPos) {
+    DoorRespawnResult result{ nearPos, 0, false };
+    if (play == nullptr) return result;
+    Actor* it = play->actorCtx.actorLists[ACTORCAT_DOOR].head;
+    float bestDistSq = std::numeric_limits<float>::max();
+    while (it != nullptr) {
+        if (it->update != nullptr) {
+            const float dx = it->world.pos.x - nearPos.x;
+            const float dy = it->world.pos.y - nearPos.y;
+            const float dz = it->world.pos.z - nearPos.z;
+            const float distSq = dx*dx + dy*dy + dz*dz;
+            if (distSq < bestDistSq) {
+                bestDistSq    = distSq;
+                result.pos    = it->world.pos;
+                result.yaw    = it->shape.rot.y;
+                result.found  = true;
+            }
+        }
+        it = it->next;
+    }
+    return result;
 }
 
 // ----------------------------------------------------------------------------
@@ -105,6 +185,25 @@ enum class FollowerNpcAnim {
     // similar to vertical climb. One-shot per step.
     kClimbSideL = 17,  // gPlayerAnim_link_normal_Fclimb_sideL
     kClimbSideR = 18,  // gPlayerAnim_link_normal_Fclimb_sideR
+    // Stage 2 — death poses. Generic (back-down) for fall/void/combat;
+    // drowning-specific (swim KO) when the death cause is drowning.
+    // Both one-shot; hold at last frame after completion.
+    kDeath      = 19,  // gPlayerAnim_link_normal_back_downA  (generic)
+    kDeathDrown = 20,  // gPlayerAnim_link_swimer_swim_dead   (drowning)
+    // Stage 4 — basic vertical sword swing. One-shot; AT collider
+    // active during the apex frames. NPC inherits Player's
+    // modelAnimType so the grip matches whatever Link is holding.
+    kSwordSwing = 21,  // gPlayerAnim_link_fighter_normal_kiru
+    // Stage 4 — shield-up defensive stance. kBlockWait is the held
+    // pose (loop); kBlockHit is the one-shot reaction when an attack
+    // is successfully blocked (~10 frames). The dispatcher swaps
+    // between them based on a frame counter.
+    kBlockWait  = 22,  // gPlayerAnim_link_normal_defense_wait  (loop)
+    kBlockHit   = 23,  // gPlayerAnim_link_normal_defense_hit   (one-shot)
+    // Stage 4 — bow shoot one-shot. Full draw + release sequence
+    // in a single anim. EN_ARROW projectile spawns at the release
+    // frame (~5/15) inside TickRANGED_ATTACK.
+    kBowShoot   = 24,  // gPlayerAnim_link_bow_bow_shoot
 };
 
 struct LocalNpcNavState {
@@ -157,6 +256,25 @@ struct LocalNpcNavState {
     // mantle motion (instead of staying at lower pos and snapping
     // at end).
     Vec3f    hoistStartPos   = { 0.0f, 0.0f, 0.0f };
+
+    // Stage 3 — non-fatal fall hurt reaction. Counts down each frame
+    // after a hard (non-lethal) landing so the dispatcher's anim
+    // resolution holds the back-down anim briefly. Decremented in
+    // the dispatcher; reset to 0 (or a fresh value) on each hard
+    // landing.
+    uint32_t fallHurtFramesRemaining = 0;
+
+    // Edge-detect for leader's climbing state — used in the CLIMBING
+    // fast-path to handle the "leader hoisted over the rim while NPC
+    // was still mid-climb" case. Without this, the fast-path stops
+    // firing the moment leader exits CLIMBING, NPC's path is empty
+    // (fast-path bypasses path mgmt), the mantle-out check requires
+    // NPC within 60u of top (frequently outside the band when NPC
+    // was tracking ~30u below leader), and gravity drops NPC all the
+    // way back to the wall base. We detect the true→false edge of
+    // leaderClimbing while NPC is still in CLIMBING and inject a
+    // LEDGE_HOIST to the active anchor's topPos.
+    bool     leaderWasClimbingPrevTick = false;
 };
 }  // namespace
 static LocalNpcNavState sLocalNav;
@@ -180,12 +298,207 @@ static LocalNpcNavState sLocalNav;
 // ----------------------------------------------------------------------------
 static Actor* sCurrentlyDrawingNpc = nullptr;
 
+// Stage 4 Phase B — equipment-visibility swap. While the NPC is being
+// drawn, Player's `leftHandType / rightHandType / sheathType / *DLists`
+// fields are temporarily replaced with values matching the NPC's own
+// combat intent (sword+shield in combat states; bow in RANGED_ATTACK;
+// empty hands otherwise). Restored at draw end so the local Player's
+// next draw uses the user's actual equipment.
+//
+// Mechanism: we call Player_SetModels(localPlayer, intendedGroup) to
+// overwrite the fields (it knows how to pick the right DLists from
+// sPlayerDListGroups internally). On End, we call Player_SetModels
+// again with the saved group to restore.
+//
+// File-scope save slot — single instance because actor draws don't
+// nest (each actor's full draw sequence completes before the next
+// actor begins). If nesting ever becomes possible, switch to a stack.
+static bool      sEquipmentSwapActive       = false;
+static s32       sSavedPlayerModelGroup     = 0;
+static u8        sSavedPlayerLeftHandType   = 0;
+static u8        sSavedPlayerRightHandType  = 0;
+static u8        sSavedPlayerSheathType     = 0;
+static Gfx**     sSavedPlayerLeftHandDLists  = nullptr;
+static Gfx**     sSavedPlayerRightHandDLists = nullptr;
+static Gfx**     sSavedPlayerSheathDLists    = nullptr;
+static Gfx**     sSavedPlayerWaistDLists     = nullptr;
+static s8        sSavedPlayerHeldItemAction  = 0;
+static bool      sSavedHeldItemActionActive  = false;
+
+// Last combat type used. 0 = melee (sword+shield); 1 = ranged (bow).
+// Set by combat state ENTRY in TryEngageCombat. Used by the
+// time-based equipment-retention logic below.
+static s32 sLastCombatWeapon = 0;
+
+// Time-based equipment retention. Tracks when the NPC last exited a
+// combat state. While the post-combat sheathe delay is active,
+// equipment stays visible regardless of current state — mirrors
+// Player's vanilla sheathe behavior where Link keeps his sword/bow
+// drawn for several seconds after combat actions before
+// auto-sheathing.
+//
+// Without time-based retention, the NPC visibly flickered weapon
+// → empty hands → weapon → empty hands every shot (log 162 —
+// STANDBY's tight 80u leader-leash dropped NPC to FOLLOW immediately
+// after each RANGED_ATTACK exit, FOLLOW's modelGroup is DEFAULT
+// (empty hands), then next combat tick re-drew the weapon).
+//
+// 4000ms picked empirically — long enough to bridge most STANDBY ↔
+// FOLLOW ↔ combat cycles without visible flicker, short enough to
+// feel responsive (NPC sheathes within a few seconds of true combat
+// end). Player's vanilla sheathe is similar order of magnitude.
+static constexpr int kSheatheDelayMs = 4000;
+static uint64_t sLastCombatExitFrame = 0;
+
+// Helper — model group for the most-recent combat weapon. Used both
+// by STANDBY's direct mapping AND the time-based sheathe-delay
+// retention for non-combat states.
+static s32 ModelGroupForLastWeapon() {
+    return (sLastCombatWeapon == 1) ? PLAYER_MODELGROUP_BOW_SLINGSHOT
+                                    : PLAYER_MODELGROUP_SWORD_AND_SHIELD;
+}
+
+// Map NPC state → intended Player model group.
+//
+// Combat states return their direct weapon. STANDBY mirrors the
+// last-combat weapon. Non-combat states (IDLE / FOLLOW / etc.) return
+// DEFAULT (empty hands) UNLESS the post-combat sheathe-delay is still
+// active — in which case the last-combat weapon stays visible. This
+// time-based retention mirrors Player's vanilla sheathe behavior
+// (Link keeps weapon drawn for several seconds after last combat
+// action before auto-sheathing) and prevents the
+// weapon→empty→weapon→empty visible flicker the user reported in
+// log 162.
+static s32 NpcStateToModelGroup(s32 state) {
+    switch (state) {
+        case EN_FOLLOWER_STATE_RANGED_ATTACK:
+            return PLAYER_MODELGROUP_BOW_SLINGSHOT;
+        case EN_FOLLOWER_STATE_ATTACK:
+        case EN_FOLLOWER_STATE_BLOCK:
+        case EN_FOLLOWER_STATE_ENGAGE:
+            return PLAYER_MODELGROUP_SWORD_AND_SHIELD;
+        case EN_FOLLOWER_STATE_STANDBY:
+            return ModelGroupForLastWeapon();
+        default:
+            // IDLE / FOLLOW / SWIMMING / LEDGE_HOIST / CLIMBING /
+            // STUCK / DEAD — sheathe-delay window?
+            if (Anchor::Instance != nullptr && sLastCombatExitFrame > 0) {
+                const uint64_t curFrame =
+                    Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+                const uint64_t sheatheTicks =
+                    (uint64_t)Anchor::Instance->MsToGameTicks(kSheatheDelayMs);
+                if (curFrame < sLastCombatExitFrame + sheatheTicks) {
+                    // Still within sheathe-delay — keep weapon visible.
+                    return ModelGroupForLastWeapon();
+                }
+            }
+            // Sheathed — default empty-hands model.
+            return PLAYER_MODELGROUP_DEFAULT;
+    }
+}
+
 extern "C" void Anchor_FollowerNpcDrawBegin(Actor* npc) {
     sCurrentlyDrawingNpc = npc;
+
+    // Phase B equipment swap. Save Player's current model state +
+    // apply NPC's intended model. End() restores.
+    if (gPlayState == nullptr) return;
+    Player* localPlayer = GET_PLAYER(gPlayState);
+    if (localPlayer == nullptr) return;
+
+    EnFollower* asFollower = (EnFollower*)npc;
+    const s32 intendedGroup = NpcStateToModelGroup(asFollower->state);
+
+    // No-op if we're already at the intended group (saves a redundant
+    // SetModels call when NPC is in IDLE and Player has nothing
+    // special equipped — the most common case).
+    if (intendedGroup == localPlayer->modelGroup) {
+        sEquipmentSwapActive = false;
+        return;
+    }
+
+    // Save state. We save BOTH the model group (for the canonical
+    // restore via Player_SetModels) AND the raw DList/type fields
+    // (defensive — in case something between save and restore
+    // mutates them, the raw restore brings them back exactly).
+    sSavedPlayerModelGroup       = localPlayer->modelGroup;
+    sSavedPlayerLeftHandType     = localPlayer->leftHandType;
+    sSavedPlayerRightHandType    = localPlayer->rightHandType;
+    sSavedPlayerSheathType       = localPlayer->sheathType;
+    sSavedPlayerLeftHandDLists   = localPlayer->leftHandDLists;
+    sSavedPlayerRightHandDLists  = localPlayer->rightHandDLists;
+    sSavedPlayerSheathDLists     = localPlayer->sheathDLists;
+    sSavedPlayerWaistDLists      = localPlayer->waistDLists;
+
+    // Bow vs slingshot inventory check. Player_SetModels picks the
+    // bow vs slingshot DList variant via Player_HoldsSlingshot(this),
+    // which checks Player's heldItemAction (NOT inventory ownership).
+    // When NPC is the shooter, Player isn't actively holding either —
+    // so the default selection is bow. That makes child Link's NPC
+    // visually wield a bow even when only the slingshot is owned
+    // (log 163 user complaint). Fix: if intended group is
+    // BOW_SLINGSHOT and Player has slingshot but not bow,
+    // temporarily set heldItemAction to PLAYER_IA_SLINGSHOT so the
+    // SetModels DList pick resolves correctly. Restore at End.
+    sSavedHeldItemActionActive = false;
+    if (intendedGroup == PLAYER_MODELGROUP_BOW_SLINGSHOT) {
+        const u8 bowSlot   = INV_CONTENT(ITEM_BOW);
+        const u8 slingSlot = INV_CONTENT(ITEM_SLINGSHOT);
+        const bool hasBow       = (bowSlot   != ITEM_NONE);
+        const bool hasSlingshot = (slingSlot != ITEM_NONE);
+        s8 desired = -1;
+        if (hasSlingshot && !hasBow) {
+            desired = PLAYER_IA_SLINGSHOT;
+        } else if (hasBow && !hasSlingshot) {
+            desired = PLAYER_IA_BOW;
+        }  // both / neither → no override (let Player's natural state pick)
+        if (desired >= 0 && localPlayer->heldItemAction != desired) {
+            sSavedPlayerHeldItemAction = localPlayer->heldItemAction;
+            sSavedHeldItemActionActive = true;
+            localPlayer->heldItemAction = desired;
+        }
+    }
+
+    // Apply NPC's intended model. Player_SetModels writes
+    // leftHandType/DLists, rightHandType/DLists, sheathType/DLists,
+    // waistDLists from sPlayerDListGroups[type][linkAge]. Does NOT
+    // write modelAnimType (we control that separately via
+    // currentAnimType).
+    Player_SetModels(localPlayer, intendedGroup);
+    localPlayer->modelGroup = intendedGroup;  // SetModels doesn't touch this; SetModelGroup does
+    sEquipmentSwapActive = true;
 }
+
 extern "C" void Anchor_FollowerNpcDrawEnd(void) {
     sCurrentlyDrawingNpc = nullptr;
+
+    if (!sEquipmentSwapActive) return;
+    sEquipmentSwapActive = false;
+
+    if (gPlayState == nullptr) return;
+    Player* localPlayer = GET_PLAYER(gPlayState);
+    if (localPlayer == nullptr) return;
+
+    // Restore. Both the canonical SetModels call (so any internal
+    // bookkeeping is consistent) AND the raw fields (defensive,
+    // since the EquipmentAlwaysVisible CVar branches inside
+    // Player_SetModels may pick slightly different DLists than the
+    // user originally had).
+    Player_SetModels(localPlayer, sSavedPlayerModelGroup);
+    localPlayer->modelGroup      = sSavedPlayerModelGroup;
+    localPlayer->leftHandType    = sSavedPlayerLeftHandType;
+    localPlayer->rightHandType   = sSavedPlayerRightHandType;
+    localPlayer->sheathType      = sSavedPlayerSheathType;
+    localPlayer->leftHandDLists  = sSavedPlayerLeftHandDLists;
+    localPlayer->rightHandDLists = sSavedPlayerRightHandDLists;
+    localPlayer->sheathDLists    = sSavedPlayerSheathDLists;
+    localPlayer->waistDLists     = sSavedPlayerWaistDLists;
+    if (sSavedHeldItemActionActive) {
+        localPlayer->heldItemAction = sSavedPlayerHeldItemAction;
+        sSavedHeldItemActionActive  = false;
+    }
 }
+
 extern "C" Actor* Anchor_GetCurrentlyDrawingFollowerNpc(void) {
     return sCurrentlyDrawingNpc;
 }
@@ -252,6 +565,47 @@ void Anchor::TickFollowerNpcCVar() {
     // pointer is null (cleared by OnSceneSpawnActors), spawn now.
     // This is NOT a CVar edge — handle it before the edge check.
     if (cur != 0 && mFollowerNpcLocalActor == nullptr) {
+        // Stage 2 — death respawn cooldown. If a death just occurred,
+        // suppress the spawn until the cooldown elapses; then resolve
+        // the respawn position (door closest to leader, or leader
+        // itself as fallback) and arm the SetFollowerNpcActive
+        // override so the spawn lands at the chosen door.
+        const uint64_t curFrame =
+            gameFrameCounter.load(std::memory_order_relaxed);
+        if (mFollowerNpcRespawnAtFrame != 0) {
+            if (curFrame < mFollowerNpcRespawnAtFrame) {
+                // Cooldown still active. Skip respawn; CVar edge
+                // bookkeeping still proceeds below.
+                if (cur != mFollowerNpcCVarLast) {
+                    mFollowerNpcCVarLast = cur;
+                }
+                return;
+            }
+            // Cooldown elapsed — pick a respawn pos (door near leader)
+            // and arm the spawn override. Cleared by the spawn helper.
+            if (gPlayState != nullptr) {
+                Player* leader = GET_PLAYER(gPlayState);
+                if (leader != nullptr) {
+                    DoorRespawnResult dr =
+                        FindClosestDoorToLeader(gPlayState,
+                                                 leader->actor.world.pos);
+                    if (dr.found) {
+                        mFollowerNpcSpawnPosOverride    = true;
+                        mFollowerNpcSpawnPosOverridePos = dr.pos;
+                        mFollowerNpcSpawnPosOverrideYaw = dr.yaw;
+                        SPDLOG_INFO("[FollowerNPC] respawn at door "
+                                    "({:.0f},{:.0f},{:.0f}) yaw=0x{:X} "
+                                    "(distFromLeader squared visible in scan)",
+                                    dr.pos.x, dr.pos.y, dr.pos.z,
+                                    (uint16_t)dr.yaw);
+                    } else {
+                        SPDLOG_INFO("[FollowerNPC] respawn — no door found, "
+                                    "falling back to leader pos");
+                    }
+                }
+            }
+            mFollowerNpcRespawnAtFrame = 0;  // consumed
+        }
         SetFollowerNpcActive(true);
         // Fall through to edge-check update; mFollowerNpcCVarLast
         // tracking is independent of the auto-respawn.
@@ -264,6 +618,10 @@ void Anchor::TickFollowerNpcCVar() {
     // Edge detected. The spawn case above already handled it; the
     // despawn case (1→0) still needs to fire here.
     if (cur == 0) {
+        // Manual disable cancels any pending death cooldown — the
+        // user explicitly turned the feature off.
+        mFollowerNpcRespawnAtFrame  = 0;
+        mFollowerNpcSpawnPosOverride = false;
         SetFollowerNpcActive(false);
     }
     mFollowerNpcCVarLast = cur;
@@ -301,8 +659,18 @@ void Anchor::SetFollowerNpcActive(bool active) {
         // matches Link's so the NPC stands on the same floor; rotation
         // matches so the NPC initially faces the same way (the AI in
         // Phase 4 will reorient toward leader/path).
-        const Vec3f& p = player->actor.world.pos;
-        const s16 yaw  = player->actor.shape.rot.y;
+        //
+        // Stage 2 override: when the death-respawn cooldown elapsed
+        // and TickFollowerNpcCVar resolved a door near the leader,
+        // it set mFollowerNpcSpawnPosOverride. Consume it here so
+        // the NPC respawns at the door instead of on top of leader.
+        Vec3f p   = player->actor.world.pos;
+        s16   yaw = player->actor.shape.rot.y;
+        if (mFollowerNpcSpawnPosOverride) {
+            p   = mFollowerNpcSpawnPosOverridePos;
+            yaw = mFollowerNpcSpawnPosOverrideYaw;
+            mFollowerNpcSpawnPosOverride = false;  // single-shot
+        }
 
         Actor* spawned = Actor_Spawn(
             &gPlayState->actorCtx, gPlayState,
@@ -327,6 +695,31 @@ void Anchor::SetFollowerNpcActive(bool active) {
         sLocalNav.stuckCheckPos        = p;
         sLocalNav.lastStuckCheckFrame  = gameFrameCounter.load(std::memory_order_relaxed);
         sLocalNav.activeClimbAnchor    = nullptr;
+        // Reset jump-tracking state — log 161 showed a respawn at
+        // 02:30:56 followed immediately at 02:30:57 by an "airborne
+        // for 4432 frames" warning. The previous NPC instance had
+        // jumpInProgress=true at the time of disappearance; the new
+        // NPC inherited that file-static state and its first tick
+        // tripped the airborne-stuck safety net. Reset all fields
+        // here so each respawn starts fresh.
+        sLocalNav.jumpInProgress         = false;
+        sLocalNav.jumpStartFrame         = 0;
+        sLocalNav.jumpLastDiagFrame      = 0;
+        sLocalNav.jumpStartPos           = p;
+        sLocalNav.jumpPeakPos            = p;
+        sLocalNav.jumpWasOnFloorPrevTick = true;
+        // (Combat-state cleanup intentionally NOT done here.
+        // sAttackState and sCombatCooldownEndFrame are defined later
+        // in the file; forward-referencing them from this early
+        // function is a compile error. They're not load-bearing for
+        // the disappearance bug — combat states validate
+        // sAttackState.target->update on entry and exit harmlessly
+        // when stale. The killer leftover is sLocalNav.jumpInProgress
+        // which IS reset above. sLastCombatWeapon (used by Phase B
+        // STANDBY equipment) is also defined later — same deferral
+        // applies; default 0 is fine for first STANDBY entry on a
+        // fresh NPC because it'll be set by the next combat
+        // engagement before STANDBY's draw fires.)
         // (currentAnim init lives on EnFollower itself — set in
         // EnFollower_Init. The first EnsureAnimation tick will swap
         // from the kWait set up by LinkAnimation_PlayLoop in init to
@@ -488,14 +881,19 @@ Vec3f ComputeEffectiveTarget(const Vec3f& leaderPos) {
     return leaderAnchor ? leaderAnchor->basePos : leaderPos;
 }
 
-// IDLE handler — stand still, face leader, transition to FOLLOW on
-// distance exceed.
+// IDLE handler — stand still, transition to FOLLOW on distance
+// exceed. Body yaw is intentionally NOT auto-rotated to face leader
+// — that produced an unnatural "always staring at you" look. The NPC
+// preserves whatever facing direction it had when it stopped moving
+// (e.g., when it transitioned FOLLOW→IDLE on arriving at the leader).
+// This mirrors AI Follower (player-rigged), where Link's body keeps
+// its last facing while idle. The independent head-look-at-leader
+// (TickHeadLookAtLeader, dispatched separately) still tracks the
+// player so the NPC visually acknowledges us with eye/head movement
+// without rotating the whole body.
 void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
     a->speedXZ = 0.0f;
-
-    // Face leader so the NPC looks like it's tracking us even while idle.
-    a->shape.rot.y = YawTowardTarget(a->world.pos, leaderPos);
 
     // Transition check: hysteresis upper bound. Measure against
     // effectiveTarget so IDLE→FOLLOW fires when leader starts
@@ -767,6 +1165,18 @@ LinkAnimationHeader* AnimHeaderFor(FollowerNpcAnim kind, s8 modelAnimType) {
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_run_jump;
         case FollowerNpcAnim::kJump:
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_jump;
+        case FollowerNpcAnim::kDeath:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_back_downA;
+        case FollowerNpcAnim::kDeathDrown:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim_dead;
+        case FollowerNpcAnim::kSwordSwing:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_fighter_normal_kiru;
+        case FollowerNpcAnim::kBlockWait:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_defense_wait;
+        case FollowerNpcAnim::kBlockHit:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_defense_hit;
+        case FollowerNpcAnim::kBowShoot:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_bow_bow_shoot;
         case FollowerNpcAnim::kNone:
         default:
             return nullptr;
@@ -801,7 +1211,12 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
         want == FollowerNpcAnim::kClimbUpL ||
         want == FollowerNpcAnim::kClimbUpR ||
         want == FollowerNpcAnim::kClimbSideL ||
-        want == FollowerNpcAnim::kClimbSideR;
+        want == FollowerNpcAnim::kClimbSideR ||
+        want == FollowerNpcAnim::kDeath ||
+        want == FollowerNpcAnim::kDeathDrown ||
+        want == FollowerNpcAnim::kSwordSwing ||
+        want == FollowerNpcAnim::kBlockHit ||
+        want == FollowerNpcAnim::kBowShoot;
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                           1.0f /* playSpeed — caller overrides per-frame */,
                           0.0f /* startFrame */,
@@ -990,7 +1405,33 @@ FollowerNpcAnim AnimForState(s32 state, float speedXZ) {
             // dispatcher path is bypassed.
             return FollowerNpcAnim::kHoistGround;
         case EN_FOLLOWER_STATE_DEAD:
-            // v1 stub — wait pose. v2 combat will switch to a death anim.
+            // Stage 2: Player's Game-Over death anim
+            // (gPlayerAnim_link_normal_back_downA — fall onto back).
+            return FollowerNpcAnim::kDeath;
+        case EN_FOLLOWER_STATE_ATTACK:
+            // Stage 4 — vertical sword swing.
+            return FollowerNpcAnim::kSwordSwing;
+        case EN_FOLLOWER_STATE_ENGAGE:
+            // Stage 4 — pursuit locomotion (same anims as FOLLOW).
+            // Speed threshold matches FOLLOW so handoff IDLE→FOLLOW
+            // ↔ ENGAGE looks consistent.
+            if (speedXZ > 8.0f) return FollowerNpcAnim::kRun;
+            if (speedXZ > 0.5f) return FollowerNpcAnim::kWalk;
+            return FollowerNpcAnim::kWait;
+        case EN_FOLLOWER_STATE_BLOCK:
+            // Stage 4 — shield-up wait. The dispatcher overrides to
+            // kBlockHit during the brief window after a successful
+            // block; otherwise the looping wait pose holds.
+            return FollowerNpcAnim::kBlockWait;
+        case EN_FOLLOWER_STATE_RANGED_ATTACK:
+            // Stage 4 — bow shoot one-shot. Spans draw + release.
+            return FollowerNpcAnim::kBowShoot;
+        case EN_FOLLOWER_STATE_STANDBY:
+            // Stage 4 — alert idle between combat exchanges. Same kWait
+            // anim as IDLE; the visual difference comes from the
+            // dispatcher setting currentAnimType=1 (fighter) here, so
+            // EnsureAnimation picks gPlayerAnim_link_normal_wait
+            // (sword+shield ready stance) instead of the _free variant.
             return FollowerNpcAnim::kWait;
         case EN_FOLLOWER_STATE_IDLE:
         default:
@@ -1173,10 +1614,34 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         const float pdy = leaderPos.y - a->world.pos.y;
         const float pdz = leaderPos.z - a->world.pos.z;
         const float dist3DSq = pdx*pdx + pdy*pdy + pdz*pdz;
-        constexpr float kCoClimbProxLimit = 30.0f;
+        // Loosened from 30 → 60: the prior 30u limit was a 3D
+        // distance, but co-climbing has the NPC ~30u BELOW leader
+        // by design — so the |dy| component alone is at the limit
+        // and any lateral wall-curvature offset puts the NPC over.
+        // Result: fast-path fires only briefly at engagement, then
+        // the regular path-based code takes over and produces the
+        // ~10u-above-leader visual the user reported. 60u gives the
+        // fast-path room to track once the offset settles.
+        constexpr float kCoClimbProxLimit = 60.0f;
         const bool nearLeader = dist3DSq <= (kCoClimbProxLimit * kCoClimbProxLimit);
-        if (Anchor::Instance->IsLocalPlayerClimbing() && nearLeader) {
-            constexpr float kCoClimbYOffset = 10.0f;  // sit just below leader
+        const bool leaderClimbing = Anchor::Instance->IsLocalPlayerClimbing();
+
+        // Diagnostic — log fast-path eligibility every ~1.5s so we can
+        // see if/when it fires and what the resulting Δy is.
+        static uint64_t sLastCoClimbDiag = 0;
+        const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                      std::memory_order_relaxed);
+        if (curFrame > sLastCoClimbDiag + 30) {
+            SPDLOG_INFO("[FollowerNPC.coClimb] eligibility: leaderClimbing={} "
+                        "nearLeader={} dist3D={:.1f} (limit {:.0f}) "
+                        "NPC.y={:.0f} leader.y={:.0f} (Δy={:+.1f})",
+                        leaderClimbing, nearLeader, std::sqrt(dist3DSq),
+                        kCoClimbProxLimit, a->world.pos.y, leaderPos.y, pdy);
+            sLastCoClimbDiag = curFrame;
+        }
+
+        if (leaderClimbing && nearLeader) {
+            constexpr float kCoClimbYOffset = 30.0f;  // sit ~30u below leader (tuned 10 → 30 per field test)
             a->world.pos.x = leaderPos.x;
             a->world.pos.z = leaderPos.z;
             const float targetY = leaderPos.y - kCoClimbYOffset;
@@ -1194,8 +1659,51 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
                 a->world.rot.y = a->shape.rot.y;
             }
             a->speedXZ = 0.0f;
+            sLocalNav.leaderWasClimbingPrevTick = true;
             return;  // skip path-based subgoal navigation
         }
+
+        // Leader-just-hoisted-over edge: leader was climbing last tick
+        // (fast-path was firing), now isn't. NPC is still in CLIMBING.
+        // Without intervention, the regular path-based code below
+        // requires NPC within 60u of anchor.topPos.y to mantle out;
+        // when fast-path was tracking the user as they climbed past
+        // the rim, NPC is typically 30-101u below the rim — outside
+        // the mantle band — and falls through to FOLLOW where gravity
+        // pulls it back down to the wall base (log 158 line 814+
+        // showed NPC dropping from -101 → -721 in 6s).
+        //
+        // Fix: trigger LEDGE_HOIST to the active anchor's topPos so
+        // NPC mantles up to the same ledge leader landed on. Same
+        // anim path the GROUND-context hoist uses for ground-to-ledge.
+        if (!leaderClimbing && sLocalNav.leaderWasClimbingPrevTick &&
+            sLocalNav.activeClimbAnchor != nullptr) {
+            const Vec3f topPos = sLocalNav.activeClimbAnchor->topPos;
+            SPDLOG_INFO("[FollowerNPC] CLIMBING→LEDGE_HOIST(ground) "
+                        "(leader hoisted over rim) anchor.topPos=({:.0f},{:.0f},{:.0f}) "
+                        "NPC at ({:.0f},{:.0f},{:.0f})",
+                        topPos.x, topPos.y, topPos.z,
+                        a->world.pos.x, a->world.pos.y, a->world.pos.z);
+            this_->hoistContext   = (s8)HOIST_CONTEXT_GROUND;
+            this_->hoistTargetPos = topPos;
+            this_->hoistEntryYaw  =
+                Math_Atan2S(topPos.z - a->world.pos.z,
+                            topPos.x - a->world.pos.x);
+            // Snap XZ to ledge top so anim plays in place (matches
+            // the FOLLOW→LEDGE_HOIST entry pattern).
+            a->world.pos.x = topPos.x;
+            a->world.pos.z = topPos.z;
+            sLocalNav.hoistStartPos = a->world.pos;
+            sLocalNav.path.Reset();
+            sLocalNav.activeClimbAnchor = nullptr;
+            sLocalNav.leaderWasClimbingPrevTick = false;
+            this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;
+            this_->stopAnimPlaying = 0;  // let dispatcher's LEDGE_HOIST anim override flow through
+            a->speedXZ = 0.0f;
+            return;
+        }
+
+        sLocalNav.leaderWasClimbingPrevTick = leaderClimbing;
     }
 
     // Resolve subgoal.
@@ -1601,32 +2109,887 @@ void TickLEDGE_HOIST(EnFollower* this_, PlayState* play, const Vec3f& leaderPos)
                 this_->hoistTargetPos.z, (int)this_->hoistContext);
 }
 
-// DEAD handler — Phase 7 stub. v1 NPC is invulnerable, so this state
-// is reserved-but-unentered; the handler exists to (a) lock the
-// declaration in the dispatcher (we'd otherwise rely on the
-// `default` branch) and (b) let the v2 combat redesign drop in
-// real death-anim playback + post-death-timer logic without
-// touching the dispatcher.
+// ----------------------------------------------------------------------------
+// Stage 4 — ATTACK state.
 //
-// v2 contract sketch (when combat lands):
-//   - On entry: switch animation to a death anim; arm a death-anim
-//     duration timer.
-//   - Each frame: hold pos (no Actor_MoveXZGravity), let anim play.
-//   - On timer expiry: SetFollowerNpcActive(false) — the
-//     SetFollowerNpcActive(false) path will Actor_Kill +
-//     broadcast DESPAWN(reason=died).
+// Engagement: when an enemy comes within kAttackEngageDist of the NPC
+// AND the NPC is in IDLE or FOLLOW, transition to ATTACK and play the
+// vertical sword-swing one-shot. AT collider activates during the apex
+// frames (when the sword is mid-arc) and is positioned in front of NPC
+// at chest height. On anim completion, transition back to FOLLOW; the
+// FOLLOW handler may immediately re-engage if the enemy is still near.
 //
-// v1 behaviour (here): just stop all movement and hold pose.
-// Functionally equivalent to TickIDLE without the FOLLOW transition
-// check (a dead NPC shouldn't aggro back to following on stand-up).
-void TickDEAD(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
-    (void)play;
+// Damage values follow Player's basic-sword convention (1 unit = 1/2
+// heart per swing). Enemies' HP / death paths are vanilla — when the
+// AT lands on an enemy bumper, OoT's CollisionCheck_Damage decrements
+// the enemy's colChkInfo.health like any other player swing.
+// ----------------------------------------------------------------------------
+static constexpr float kAttackEngageDist     = 80.0f;   // melee acquisition range (XZ)
+static constexpr float kAttackBreakDist      = 200.0f;  // bail if enemy fled past this
+static constexpr float kAttackQuadForward    = 60.0f;   // sword reach in front of NPC
+static constexpr float kAttackQuadHalfWidth  = 25.0f;   // sword arc half-width
+static constexpr float kAttackQuadBaseY      = 5.0f;    // bottom of quad above feet
+static constexpr float kAttackQuadTopY       = 65.0f;   // top of quad (chest height)
+
+// Forward decl — defined in the STANDBY section below. Used by every
+// combat state's exit transition (TickATTACK / TickENGAGE / TickBLOCK
+// / TickRANGED_ATTACK) to pick STANDBY (enemy still in detect range,
+// keep weapon drawn) vs FOLLOW (no enemies, sheathe and follow leader).
+// Must appear before any combat state's TickXxx since C++ name lookup
+// for free functions is single-pass top-to-bottom.
+s32 ChooseCombatExitState(EnFollower* this_, PlayState* play);
+
+// Combat cooldown — set when any combat state exits. While the
+// cooldown is active, TryEngageCombat suppresses re-engagement so the
+// NPC has a beat in STANDBY before the next swing/shot. Without this,
+// the kBowShoot anim (~6 frames / ~100ms) cycles RANGED_ATTACK ↔
+// STANDBY every tick (log 160 wave at 02:03:44-02:03:53), producing
+// rapid weapon flicker (Phase B equipment swap toggles each cycle)
+// AND blocking FOLLOW since combat states lock speedXZ=0.
+//
+// 1500ms is long enough to see the result of the swing/shot, short
+// enough to feel responsive when an enemy is genuinely in range.
+static constexpr int kPostCombatCooldownMs = 1500;
+static uint64_t sCombatCooldownEndFrame = 0;
+
+// Friendly state-name lookup for log messages. Replaces hardcoded
+// "IDLE" / "FOLLOW" string-literals that predated STANDBY/combat
+// states (log 160 showed "FOLLOW→RANGED_ATTACK" when actual source
+// was STANDBY — misleading triage).
+const char* StateName(s32 s) {
+    switch (s) {
+        case EN_FOLLOWER_STATE_IDLE:          return "IDLE";
+        case EN_FOLLOWER_STATE_FOLLOW:        return "FOLLOW";
+        case EN_FOLLOWER_STATE_CLIMBING:      return "CLIMBING";
+        case EN_FOLLOWER_STATE_STUCK:         return "STUCK";
+        case EN_FOLLOWER_STATE_DEAD:          return "DEAD";
+        case EN_FOLLOWER_STATE_SWIMMING:      return "SWIMMING";
+        case EN_FOLLOWER_STATE_LEDGE_HOIST:   return "LEDGE_HOIST";
+        case EN_FOLLOWER_STATE_ATTACK:        return "ATTACK";
+        case EN_FOLLOWER_STATE_ENGAGE:        return "ENGAGE";
+        case EN_FOLLOWER_STATE_BLOCK:         return "BLOCK";
+        case EN_FOLLOWER_STATE_RANGED_ATTACK: return "RANGED_ATTACK";
+        case EN_FOLLOWER_STATE_STANDBY:       return "STANDBY";
+        default:                              return "UNKNOWN";
+    }
+}
+
+// Bow / slingshot ownership — RANGED_ATTACK gates on this. Without
+// the gate, NPC fires arrows from thin air even in early-game saves
+// where Player hasn't picked up a ranged weapon yet (log 160 — NPC
+// firing in Kokiri Forest before the slingshot was earned).
+//
+// gSaveContext.inventory.items[SLOT_BOW] is the inventory slot value
+// — ITEM_NONE (0xFF) when not owned, ITEM_BOW (0x03) when owned.
+// Slingshot is the child equivalent at SLOT_SLINGSHOT.
+bool FollowerNpcHasRangedWeapon() {
+    const u8 bowSlot   = INV_CONTENT(ITEM_BOW);
+    const u8 slingSlot = INV_CONTENT(ITEM_SLINGSHOT);
+    return (bowSlot != ITEM_NONE) || (slingSlot != ITEM_NONE);
+}
+// Anim active-window — kiru anim is ~22 frames at speed 1.0; the
+// blade actually contacts the target around the middle. Activate
+// AT collider for frames [kAttackActiveStart .. kAttackActiveEnd]
+// of the anim's curFrame.
+static constexpr float kAttackActiveStartFrame = 4.0f;
+static constexpr float kAttackActiveEndFrame   = 12.0f;
+
+// File-scope ATTACK state — tracks the current target so it stays
+// consistent across the swing's duration even if a closer enemy
+// appears mid-swing. Reset on every entry.
+struct AttackState {
+    Actor*  target = nullptr;
+    bool    swingFiredAT = false;  // single-shot AT register per swing
+};
+static AttackState sAttackState;
+
+// Find the nearest live enemy to the NPC within `maxRange` XZ. Returns
+// nullptr if no enemy in range. Walks ACTORCAT_ENEMY only (bosses are
+// excluded per the project-wide bosses-opt-in rule). Cross-timeline
+// not a concern here — enemies are always in the local scene.
+Actor* FindNearestEnemyForAttack(EnFollower* this_, PlayState* play, float maxRange,
+                                   float maxYDelta = 60.0f) {
+    Actor* a = &this_->actor;
+    Actor* nearest = nullptr;
+    float bestDistSq = maxRange * maxRange;
+    Actor* it = play->actorCtx.actorLists[ACTORCAT_ENEMY].head;
+    while (it != nullptr) {
+        if (it->update != nullptr && it->colChkInfo.health > 0) {
+            const float dx = it->world.pos.x - a->world.pos.x;
+            const float dz = it->world.pos.z - a->world.pos.z;
+            const float dy = it->world.pos.y - a->world.pos.y;
+            // Y filter — caller-controlled. Melee scans use the
+            // tight default (±60u — Link's body height); ranged scans
+            // pass a wider value (~250u) so Skullwalltulas on
+            // ceilings, Keese in the air, etc. become valid targets
+            // for arrow shots (log 161 — NPC ignored Skullwalltula
+            // because it was above the 60u Y threshold).
+            if (std::fabs(dy) > maxYDelta) {
+                it = it->next;
+                continue;
+            }
+            const float distSq = dx*dx + dz*dz;
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                nearest = it;
+            }
+        }
+        it = it->next;
+    }
+    return nearest;
+}
+
+// Position the AT quad as a flat plane in front of the NPC at chest
+// height. Vertices: bottom-left, bottom-right, top-right, top-left
+// (counter-clockwise from below). Quad faces forward along the NPC's
+// rotation. Player's sword AT is more anatomical (sword tip → grip)
+// but for v1 a simple forward plane is sufficient.
+void PositionAttackQuad(EnFollower* this_) {
+    Actor* a = &this_->actor;
+    const float yawRad = (float)a->shape.rot.y * (3.14159265f / 32768.0f);
+    const float fx = sinf(yawRad);  // forward unit vector
+    const float fz = cosf(yawRad);
+    const float rx = cosf(yawRad);  // right (perpendicular to forward)
+    const float rz = -sinf(yawRad);
+    const Vec3f& p = a->world.pos;
+    Vec3f bottomLeft  = { p.x + fx * kAttackQuadForward - rx * kAttackQuadHalfWidth,
+                          p.y + kAttackQuadBaseY,
+                          p.z + fz * kAttackQuadForward - rz * kAttackQuadHalfWidth };
+    Vec3f bottomRight = { p.x + fx * kAttackQuadForward + rx * kAttackQuadHalfWidth,
+                          p.y + kAttackQuadBaseY,
+                          p.z + fz * kAttackQuadForward + rz * kAttackQuadHalfWidth };
+    Vec3f topRight    = { bottomRight.x, p.y + kAttackQuadTopY, bottomRight.z };
+    Vec3f topLeft     = { bottomLeft.x,  p.y + kAttackQuadTopY, bottomLeft.z };
+    Collider_SetQuadVertices(&this_->atCollider, &bottomLeft, &bottomRight,
+                              &topLeft, &topRight);
+}
+
+// ATTACK handler — locks NPC in place, faces target, plays swing
+// anim (set up by dispatcher's AnimForState), activates AT during
+// apex frames, and transitions back to FOLLOW when the anim ends.
+void TickATTACK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     (void)leaderPos;
     Actor* a = &this_->actor;
     a->speedXZ = 0.0f;
-    // No state transitions in v1 — invulnerable NPC never reaches DEAD.
-    // v2 will add the death-anim-complete → SetFollowerNpcActive(false)
-    // dispatch here.
+
+    // Validate target — if it died or scene-changed (update went null)
+    // mid-swing, just complete the swing harmlessly and return to FOLLOW.
+    if (sAttackState.target != nullptr &&
+        (sAttackState.target->update == nullptr ||
+         sAttackState.target->colChkInfo.health <= 0)) {
+        sAttackState.target = nullptr;
+    }
+
+    // Face the target each frame so the swing tracks a moving enemy.
+    if (sAttackState.target != nullptr) {
+        a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
+        a->world.rot.y = a->shape.rot.y;
+    }
+
+    // Active-frame AT registration. Single-shot per swing — once the
+    // AT has been registered and a hit landed (or the active window
+    // ended), don't re-register on the same swing. swingFiredAT
+    // resets on each ATTACK entry.
+    const float curFrame = this_->skelAnime.curFrame;
+    const bool inActiveWindow = (curFrame >= kAttackActiveStartFrame &&
+                                  curFrame <= kAttackActiveEndFrame);
+    if (inActiveWindow && !sAttackState.swingFiredAT) {
+        PositionAttackQuad(this_);
+        CollisionCheck_SetAT(play, &play->colChkCtx, &this_->atCollider.base);
+        // Don't set swingFiredAT here — keep registering the AT for
+        // every frame in the active window so a passing enemy gets
+        // hit. Set after the window closes so the "single-swing"
+        // semantics hold even if the swing didn't connect.
+    } else if (!inActiveWindow && curFrame > kAttackActiveEndFrame) {
+        sAttackState.swingFiredAT = true;
+    }
+
+    // Anim complete — exit to STANDBY (if enemy still in detect range,
+    // weapon stays drawn for next swing) or FOLLOW (no enemy left,
+    // sheathe and resume leader-following).
+    if (this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
+        const s32 nextState = ChooseCombatExitState(this_, play);
+        SPDLOG_INFO("[FollowerNPC] ATTACK→{} (swing complete)",
+                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
+        this_->state = (s32)nextState;
+        // Don't null sAttackState.target — STANDBY uses it to decide
+        // facing direction. ATTACK will re-acquire on next entry
+        // anyway via TryEngageCombat.
+        sAttackState.swingFiredAT = false;
+        // Reset path so FOLLOW recomputes a path that may now route
+        // around the (potentially defeated) enemy.
+        sLocalNav.path.Reset();
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Stage 4 — ENGAGE state.
+//
+// Bridges the gap between "wandered into melee range" (ATTACK direct
+// from FOLLOW) and "leave NPC alone unless an enemy comes close". An
+// enemy spotted within kEngageAcquireDist (wider than the melee
+// kAttackEngageDist) triggers ENGAGE: NPC walks/runs toward the enemy
+// until close enough to strike, then transitions to ATTACK.
+//
+// Bail conditions:
+//   - target died or scene-changed → FOLLOW
+//   - target fled past kEngageBreakDist → FOLLOW
+//   - leader got too distant (kEngageLeaderLeash) → FOLLOW (don't
+//     stray far from leader chasing one enemy forever)
+// ----------------------------------------------------------------------------
+static constexpr float kEngageAcquireDist  = 250.0f;  // pursuit acquisition radius
+static constexpr float kEngageBreakDist    = 400.0f;  // bail if target fled past this
+static constexpr float kEngageLeaderLeash  = 600.0f;  // bail if leader >this far away
+static constexpr float kEngageStrikeDist   = 70.0f;   // close enough to ATTACK (slight hysteresis vs kAttackEngageDist=80)
+// BLOCK entry threshold — defined here (above TryEngageCombat) so the
+// engagement helper can reference it. The remaining BLOCK constants
+// stay grouped with the BLOCK section below.
+static constexpr float kBlockHpThresholdRatio = 0.5f;  // enter BLOCK when HP <= 50% max
+// RANGED_ATTACK acquisition range — defined here (above TryEngageCombat)
+// for the same reason. Min dist slightly above kAttackEngageDist gives
+// a clean handoff: melee → ATTACK, just-out-of-melee → RANGED.
+static constexpr float kRangedMinDist     = 90.0f;   // > kAttackEngageDist (80) for handoff
+static constexpr float kRangedAcquireDist = 500.0f;  // max range to enter RANGED_ATTACK
+
+// (forward decl of ChooseCombatExitState moved above TickATTACK so
+// every combat state's exit transition can call it.)
+
+void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    Actor* a = &this_->actor;
+
+    // Validate target.
+    if (sAttackState.target == nullptr ||
+        sAttackState.target->update == nullptr ||
+        sAttackState.target->colChkInfo.health <= 0) {
+        const s32 nextState = ChooseCombatExitState(this_, play);
+        SPDLOG_INFO("[FollowerNPC] ENGAGE→{} (target lost/dead)",
+                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
+        this_->state = nextState;
+        sAttackState.target = nullptr;
+        a->speedXZ = 0.0f;
+        return;
+    }
+
+    const Vec3f& targetPos = sAttackState.target->world.pos;
+    const float dx = targetPos.x - a->world.pos.x;
+    const float dz = targetPos.z - a->world.pos.z;
+    const float distXZ = std::sqrt(dx*dx + dz*dz);
+
+    // Leader-leash bail — don't chase enemies forever away from leader.
+    // Always FOLLOW (not STANDBY) — yielding to leader is the explicit
+    // intent of this exit.
+    const float ldx = leaderPos.x - a->world.pos.x;
+    const float ldz = leaderPos.z - a->world.pos.z;
+    const float leaderDistXZ = std::sqrt(ldx*ldx + ldz*ldz);
+    if (leaderDistXZ > kEngageLeaderLeash) {
+        SPDLOG_INFO("[FollowerNPC] ENGAGE→FOLLOW (leader too far: {:.0f}u > {:.0f}u)",
+                    leaderDistXZ, kEngageLeaderLeash);
+        this_->state = EN_FOLLOWER_STATE_FOLLOW;
+        sAttackState.target = nullptr;
+        a->speedXZ = 0.0f;
+        return;
+    }
+
+    // Enemy fled past pursuit range — exit; STANDBY if any other
+    // enemy is in detect range, else FOLLOW.
+    if (distXZ > kEngageBreakDist) {
+        const s32 nextState = ChooseCombatExitState(this_, play);
+        SPDLOG_INFO("[FollowerNPC] ENGAGE→{} (target fled: {:.0f}u > {:.0f}u)",
+                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"),
+                    distXZ, kEngageBreakDist);
+        this_->state = nextState;
+        sAttackState.target = nullptr;
+        a->speedXZ = 0.0f;
+        return;
+    }
+
+    // In strike range — transition to ATTACK. Target carries over
+    // (sAttackState.target stays valid; ATTACK uses it directly).
+    if (distXZ <= kEngageStrikeDist) {
+        SPDLOG_INFO("[FollowerNPC] ENGAGE→ATTACK (strike range, dist={:.0f}u)",
+                    distXZ);
+        this_->state = EN_FOLLOWER_STATE_ATTACK;
+        this_->stopAnimPlaying = 0;  // let kSwordSwing override flow through
+        sAttackState.swingFiredAT = false;
+        a->speedXZ = 0.0f;
+        return;
+    }
+
+    // Pursuit — walk toward target if close, run if far. Use the same
+    // walk/run thresholds as FOLLOW so locomotion feels consistent.
+    a->shape.rot.y = YawTowardTarget(a->world.pos, targetPos);
+    a->world.rot.y = a->shape.rot.y;
+    a->speedXZ = (distXZ > kRunDistance) ? kRunSpeed : kWalkSpeed;
+}
+
+// Combined engagement check — replaces the old TryEngageAttack with
+// a two-tier scan:
+//   1. Enemy within kAttackEngageDist (close, in melee range) → ATTACK
+//      directly, skipping ENGAGE pursuit.
+//   2. Enemy within kEngageAcquireDist (wider radius) → ENGAGE pursuit
+//      first, transitioning to ATTACK once close enough.
+//
+// Called from the dispatcher pre-state-handler block. Only fires from
+// IDLE / FOLLOW (engagement doesn't preempt CLIMBING / SWIMMING / etc.).
+// Returns true if engaged.
+bool TryEngageCombat(EnFollower* this_, PlayState* play) {
+    if (FollowerNpcInvulnerable()) return false;  // gated on same toggle as damage
+    if (this_->state != EN_FOLLOWER_STATE_IDLE   &&
+        this_->state != EN_FOLLOWER_STATE_FOLLOW &&
+        this_->state != EN_FOLLOWER_STATE_STANDBY) {
+        return false;
+    }
+
+    // Post-combat cooldown — after any combat state exits, suppress
+    // re-engagement for kPostCombatCooldownMs. Without this, the
+    // kBowShoot anim (~6 frames at 60fps) immediately re-fires
+    // RANGED_ATTACK from STANDBY, producing visible weapon flicker
+    // (Phase B equipment swap toggles each cycle) AND blocking
+    // FOLLOW since combat states lock speedXZ=0 (log 160 wave —
+    // RANGED_ATTACK ↔ STANDBY every ~133ms for 9 seconds).
+    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                  std::memory_order_relaxed);
+    if (curFrame < sCombatCooldownEndFrame) {
+        return false;
+    }
+
+    const char* fromName = StateName(this_->state);
+
+    // Tier 1 — enemy already in melee range. Pick BLOCK over ATTACK
+    // when HP is low (defensive cycle); otherwise ATTACK.
+    Actor* meleeEnemy = FindNearestEnemyForAttack(this_, play, kAttackEngageDist);
+    if (meleeEnemy != nullptr) {
+        const s8 maxHp = FollowerNpcMaxHealthFromLink();
+        const bool lowHp =
+            (maxHp > 0) &&
+            ((float)this_->health / (float)maxHp <= kBlockHpThresholdRatio);
+        if (lowHp) {
+            SPDLOG_INFO("[FollowerNPC] {}→BLOCK (low HP {}/{}, target "
+                        "enemyId=0x{:X})",
+                        fromName, (int)this_->health, (int)maxHp,
+                        (uint16_t)meleeEnemy->id);
+            this_->state = EN_FOLLOWER_STATE_BLOCK;
+            this_->stopAnimPlaying = 0;  // let kBlockWait flow through
+            sAttackState.target = meleeEnemy;
+            sAttackState.swingFiredAT = false;
+            sLastCombatWeapon = 0;  // melee — STANDBY shows sword+shield
+            return true;
+        }
+        SPDLOG_INFO("[FollowerNPC] {}→ATTACK (target enemyId=0x{:X} at "
+                    "({:.0f},{:.0f},{:.0f}))",
+                    fromName, (uint16_t)meleeEnemy->id,
+                    meleeEnemy->world.pos.x, meleeEnemy->world.pos.y,
+                    meleeEnemy->world.pos.z);
+        this_->state = EN_FOLLOWER_STATE_ATTACK;
+        this_->stopAnimPlaying = 0;
+        sAttackState.target = meleeEnemy;
+        sAttackState.swingFiredAT = false;
+        sLastCombatWeapon = 0;  // melee — STANDBY keeps sword+shield
+        return true;
+    }
+
+    // Tier 2 — ENGAGE pursuit if a GROUND-level enemy is in pursuit
+    // range. Tight Y filter (default 60u) so ceiling-perched enemies
+    // are skipped here; they fall through to Tier 3 (ranged). This
+    // makes the NPC prefer melee for ground enemies — log 163 showed
+    // NPC firing arrows at Deku Babas at 499u when it could have just
+    // walked up and swung. User feedback: "Why is the NPC Follower
+    // not using the sword and shield and engaging dekubaba in melee
+    // combat?"
+    Actor* pursueEnemy = FindNearestEnemyForAttack(this_, play, kEngageAcquireDist);
+    if (pursueEnemy != nullptr) {
+        SPDLOG_INFO("[FollowerNPC] {}→ENGAGE (target enemyId=0x{:X} at "
+                    "({:.0f},{:.0f},{:.0f}))",
+                    fromName, (uint16_t)pursueEnemy->id,
+                    pursueEnemy->world.pos.x, pursueEnemy->world.pos.y,
+                    pursueEnemy->world.pos.z);
+        this_->state = EN_FOLLOWER_STATE_ENGAGE;
+        sAttackState.target = pursueEnemy;
+        sAttackState.swingFiredAT = false;
+        sLastCombatWeapon = 0;  // melee pursuit — STANDBY shows sword+shield
+        return true;
+    }
+
+    // Tier 3 — RANGED_ATTACK as last resort. Fires only when:
+    //   (a) Player owns a ranged weapon (bow / slingshot), AND
+    //   (b) No ground-level enemy in pursuit range (Tier 2 fell
+    //       through — only elevated/flying enemies remain).
+    //
+    // Wide Y filter (250u vs the 60u default) catches Skullwalltulas
+    // on cave ceilings, Keese in flight, etc. — enemies that NPC
+    // cannot reach by walking. Ground-level enemies in [pursuit,
+    // ranged] range get pursued via FOLLOW (which re-enters
+    // TryEngageCombat once close enough for ENGAGE/ATTACK).
+    static constexpr float kRangedYFilter = 250.0f;
+    if (FollowerNpcHasRangedWeapon()) {
+        Actor* rangedEnemy = FindNearestEnemyForAttack(this_, play,
+                                                        kRangedAcquireDist,
+                                                        kRangedYFilter);
+        if (rangedEnemy != nullptr) {
+            const float dx = rangedEnemy->world.pos.x - this_->actor.world.pos.x;
+            const float dz = rangedEnemy->world.pos.z - this_->actor.world.pos.z;
+            const float dy = rangedEnemy->world.pos.y - this_->actor.world.pos.y;
+            const float distXZ = std::sqrt(dx*dx + dz*dz);
+            // Additional gate: only ranged-attack when the enemy is
+            // genuinely out of melee reach. Ground enemies (|dy|<60)
+            // were already handled by Tier 2's pursuit; if they
+            // somehow got here (e.g., Tier 2 returned null due to a
+            // race), we'd rather pursue than shoot them.
+            const bool isElevated = std::fabs(dy) > 60.0f;
+            if (isElevated && distXZ >= kRangedMinDist) {
+                SPDLOG_INFO("[FollowerNPC] {}→RANGED_ATTACK (elevated target "
+                            "enemyId=0x{:X} at ({:.0f},{:.0f},{:.0f}) "
+                            "dist={:.0f} dy={:+.0f})",
+                            fromName, (uint16_t)rangedEnemy->id,
+                            rangedEnemy->world.pos.x, rangedEnemy->world.pos.y,
+                            rangedEnemy->world.pos.z, distXZ, dy);
+                this_->state = EN_FOLLOWER_STATE_RANGED_ATTACK;
+                this_->stopAnimPlaying = 0;  // let kBowShoot flow through
+                sAttackState.target = rangedEnemy;
+                sAttackState.swingFiredAT = false;  // reused as "shot fired" flag
+                sLastCombatWeapon = 1;  // ranged — STANDBY keeps bow drawn
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// Stage 4 — BLOCK state.
+//
+// Defensive stance — NPC raises shield, faces target, absorbs frontal
+// damage. Triggered as an alternative to ATTACK when HP is low and an
+// enemy is in melee range. Blocks frontal hits (|yaw_to_attacker| <
+// 90° from NPC's facing) at zero HP cost; back/side hits take full
+// damage. After kBlockDurationMs, NPC re-evaluates: ATTACK if enemy
+// still close, FOLLOW otherwise.
+//
+// Block anim: kBlockWait loops while held. When a hit lands and is
+// successfully blocked, kBlockHit one-shot plays for ~10 frames then
+// returns to kBlockWait via the dispatcher's frame counter.
+// ----------------------------------------------------------------------------
+static constexpr int   kBlockDurationMs        = 2000;  // hold block ~2s
+// kBlockHpThresholdRatio moved up earlier in the file (above
+// TryEngageCombat) to satisfy C++ top-down name lookup. See its
+// definition near the engagement-radius constants.
+static constexpr u32   kBlockHitAnimFrames     = 12;    // block-hit reaction duration
+static constexpr int   kBlockFrontalAngle      = 0x4000; // ±90° = ±0x4000 in s16 yaw units
+
+// File-scope BLOCK state. Reset on every entry.
+struct BlockState {
+    uint64_t entryFrame      = 0;
+    uint32_t hitAnimFrames   = 0;  // > 0 = play kBlockHit instead of kBlockWait
+};
+static BlockState sBlockState;
+
+// Returns true if the attacker is within ±kBlockFrontalAngle of the
+// NPC's facing direction (i.e., NPC has the attacker in its frontal
+// cone). Used to decide if a hit is blocked or takes full damage.
+bool IsFrontalAttacker(EnFollower* this_, Actor* attacker) {
+    if (attacker == nullptr) return false;
+    Actor* a = &this_->actor;
+    const s16 yawToAttacker = YawTowardTarget(a->world.pos, attacker->world.pos);
+    // s16 angle subtraction wraps naturally — the resulting delta is
+    // the signed shortest angular distance. Take abs and compare.
+    const s16 delta = (s16)(yawToAttacker - a->shape.rot.y);
+    const int absDelta = (delta < 0) ? -(int)delta : (int)delta;
+    return absDelta < kBlockFrontalAngle;
+}
+
+void TickBLOCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    (void)leaderPos;
+    Actor* a = &this_->actor;
+    a->speedXZ = 0.0f;
+
+    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                  std::memory_order_relaxed);
+
+    // Entry-frame detection.
+    if (this_->prevState != EN_FOLLOWER_STATE_BLOCK) {
+        sBlockState.entryFrame    = curFrame;
+        sBlockState.hitAnimFrames = 0;
+        SPDLOG_INFO("[FollowerNPC] BLOCK entry — HP={} target=0x{:X}",
+                    (int)this_->health,
+                    (sAttackState.target ? (uint16_t)sAttackState.target->id : 0));
+    }
+
+    // Validate target (may have died or scene-changed).
+    if (sAttackState.target != nullptr &&
+        (sAttackState.target->update == nullptr ||
+         sAttackState.target->colChkInfo.health <= 0)) {
+        const s32 nextState = ChooseCombatExitState(this_, play);
+        SPDLOG_INFO("[FollowerNPC] BLOCK→{} (target lost mid-block)",
+                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
+        this_->state = nextState;
+        sAttackState.target = nullptr;
+        return;
+    }
+
+    // Face target each frame so the shield always faces the threat.
+    if (sAttackState.target != nullptr) {
+        a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
+        a->world.rot.y = a->shape.rot.y;
+    }
+
+    // Decrement block-hit anim counter (decremented in TickBLOCK so
+    // the count advances even when no new hit lands; the override
+    // anim plays out then returns to kBlockWait).
+    if (sBlockState.hitAnimFrames > 0) {
+        sBlockState.hitAnimFrames--;
+    }
+
+    // Exit after kBlockDurationMs — re-evaluate.
+    const uint64_t durationTicks =
+        (uint64_t)Anchor::Instance->MsToGameTicks(kBlockDurationMs);
+    if (curFrame >= sBlockState.entryFrame + durationTicks) {
+        // If target still alive and in melee range, swap to ATTACK.
+        if (sAttackState.target != nullptr) {
+            const float dx = sAttackState.target->world.pos.x - a->world.pos.x;
+            const float dz = sAttackState.target->world.pos.z - a->world.pos.z;
+            const float distXZ = std::sqrt(dx*dx + dz*dz);
+            if (distXZ <= kAttackEngageDist) {
+                SPDLOG_INFO("[FollowerNPC] BLOCK→ATTACK (block timer expired, "
+                            "target still in range dist={:.0f})", distXZ);
+                this_->state = EN_FOLLOWER_STATE_ATTACK;
+                this_->stopAnimPlaying = 0;
+                sAttackState.swingFiredAT = false;
+                return;
+            }
+        }
+        // Otherwise drop back to STANDBY (target out of melee but
+        // still maybe nearby) or FOLLOW (no enemy detected).
+        const s32 nextState = ChooseCombatExitState(this_, play);
+        SPDLOG_INFO("[FollowerNPC] BLOCK→{} (block timer expired)",
+                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
+        this_->state = nextState;
+        if (nextState == EN_FOLLOWER_STATE_FOLLOW) {
+            sAttackState.target = nullptr;
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Stage 4 — RANGED_ATTACK state.
+//
+// NPC plays a one-shot bow-shoot anim and spawns an EN_ARROW projectile
+// at the release frame, aimed at the current target with both yaw and
+// pitch compensation (so arrows fly upward at elevated targets and
+// downward at lower ones). Anim completes → exit to FOLLOW; if target
+// is still in range, the next dispatcher tick re-engages.
+//
+// EN_ARROW is the same actor Player spawns when shooting the bow
+// (z_player.c references at lines 14396 and 2703). Params=ARROW_NORMAL
+// (regular wooden arrow). The arrow handles its own physics + AT
+// collider; we just spawn it pointed in the right direction.
+// ----------------------------------------------------------------------------
+static constexpr float kRangedSpawnFrame   = 5.0f;   // anim frame at which arrow spawns
+static constexpr float kRangedBreakDist    = 800.0f; // bail if target fled past this
+static constexpr float kRangedSpawnHeightY = 50.0f;  // chest height (arrow leaves the bow)
+
+void TickRANGED_ATTACK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    (void)leaderPos;
+    Actor* a = &this_->actor;
+    a->speedXZ = 0.0f;
+
+    // Validate target.
+    if (sAttackState.target == nullptr ||
+        sAttackState.target->update == nullptr ||
+        sAttackState.target->colChkInfo.health <= 0) {
+        const s32 nextState = ChooseCombatExitState(this_, play);
+        SPDLOG_INFO("[FollowerNPC] RANGED_ATTACK→{} (target lost mid-shoot)",
+                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
+        this_->state = nextState;
+        sAttackState.target = nullptr;
+        sAttackState.swingFiredAT = false;
+        return;
+    }
+
+    // Range bail — target fled past max range while we were drawing.
+    const Vec3f& tp = sAttackState.target->world.pos;
+    const float dx = tp.x - a->world.pos.x;
+    const float dz = tp.z - a->world.pos.z;
+    const float distXZ = std::sqrt(dx*dx + dz*dz);
+    if (distXZ > kRangedBreakDist) {
+        const s32 nextState = ChooseCombatExitState(this_, play);
+        SPDLOG_INFO("[FollowerNPC] RANGED_ATTACK→{} (target fled: {:.0f}u > {:.0f}u)",
+                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"),
+                    distXZ, kRangedBreakDist);
+        this_->state = nextState;
+        sAttackState.target = nullptr;
+        sAttackState.swingFiredAT = false;
+        return;
+    }
+
+    // Face target (yaw only — body alignment for the shoot anim).
+    a->shape.rot.y = YawTowardTarget(a->world.pos, tp);
+    a->world.rot.y = a->shape.rot.y;
+
+    // Spawn arrow at release frame. swingFiredAT field is reused
+    // across combat states as a "single-shot per state entry" flag —
+    // here it gates the arrow spawn so we fire one arrow per shoot
+    // anim, even though the dispatcher may briefly hold curFrame at
+    // the spawn frame across multiple ticks.
+    if (!sAttackState.swingFiredAT &&
+        this_->skelAnime.curFrame >= kRangedSpawnFrame) {
+        // Compute pitch from XZ distance + Y delta. Math_Vec3f_Pitch
+        // pattern (z_lib.c:292) uses Math_Atan2S(distXZ, deltaY) for
+        // pitch; the arrow's flight code interprets shape.rot.x as
+        // elevation, so positive = up. Negate to match the arrow's
+        // velocity-vs-ground convention (verified empirically against
+        // Player's spawn at z_player.c:14397 which uses 4000 ≈ slight
+        // upward for a level shot at ~mid-range).
+        const float dy = tp.y - a->world.pos.y;
+        const s16 pitch = (s16)(-Math_Atan2S(distXZ, -dy));
+
+        Vec3f spawnPos = {
+            a->world.pos.x,
+            a->world.pos.y + kRangedSpawnHeightY,
+            a->world.pos.z,
+        };
+
+        Actor* arrow = Actor_Spawn(
+            &play->actorCtx, play, ACTOR_EN_ARROW,
+            spawnPos.x, spawnPos.y, spawnPos.z,
+            pitch, a->shape.rot.y, 0,
+            ARROW_NORMAL);
+        sAttackState.swingFiredAT = true;  // single-shot
+        if (arrow != nullptr) {
+            SPDLOG_INFO("[FollowerNPC] RANGED_ATTACK fire — arrow→target dist={:.0f} "
+                        "pitch=0x{:X} yaw=0x{:X}",
+                        distXZ, (uint16_t)pitch, (uint16_t)a->shape.rot.y);
+        } else {
+            SPDLOG_WARN("[FollowerNPC] RANGED_ATTACK fire — Actor_Spawn(EN_ARROW) returned null");
+        }
+    }
+
+    // Anim complete → exit to STANDBY (target still in detect range,
+    // bow stays visible) or FOLLOW (no enemies — sheathe and resume
+    // leader-following). STANDBY → RANGED_ATTACK happens automatically
+    // via TryEngageCombat next tick.
+    if (this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
+        const s32 nextState = ChooseCombatExitState(this_, play);
+        SPDLOG_INFO("[FollowerNPC] RANGED_ATTACK→{} (shoot complete)",
+                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
+        this_->state = nextState;
+        if (nextState == EN_FOLLOWER_STATE_FOLLOW) {
+            sAttackState.target = nullptr;
+        }
+        sAttackState.swingFiredAT = false;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Stage 4 — STANDBY state.
+//
+// Alert idle between combat exchanges. NPC keeps the fighter wait pose
+// (sword+shield raised) and faces the nearest enemy, ready for the
+// next swing. Combat state exits transition here (instead of FOLLOW)
+// when an enemy is still in detect range — this is what keeps the
+// weapon "drawn" between swings instead of sheathing every time.
+//
+// Bail conditions:
+//   - No enemy in scan range → IDLE (sheathes weapon via animType
+//     dropping back to free in the dispatcher's per-tick assign)
+//   - Leader > kEnterFollow → FOLLOW (yields to leader-following;
+//     re-engages from FOLLOW if enemy still detected via TryEngageCombat)
+// ----------------------------------------------------------------------------
+static constexpr float kStandbyDetectDist = 600.0f;  // >= max(kRangedAcquireDist=500, kEngageAcquireDist=250)
+
+void TickSTANDBY(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    Actor* a = &this_->actor;
+    a->speedXZ = 0.0f;
+
+    // Face nearest enemy if known. Falls back to facing leader so the
+    // alert pose has a sensible orientation when target is null.
+    Actor* faceTarget = sAttackState.target;
+    if (faceTarget == nullptr || faceTarget->update == nullptr ||
+        faceTarget->colChkInfo.health <= 0) {
+        faceTarget = FindNearestEnemyForAttack(this_, play, kStandbyDetectDist);
+        if (faceTarget != nullptr) {
+            sAttackState.target = faceTarget;  // refresh target tracking
+        }
+    }
+    a->shape.rot.y = (faceTarget != nullptr)
+                       ? YawTowardTarget(a->world.pos, faceTarget->world.pos)
+                       : YawTowardTarget(a->world.pos, leaderPos);
+    a->world.rot.y = a->shape.rot.y;
+
+    // No enemy in detect range — drop back to IDLE / FOLLOW so the
+    // dispatcher's animType=0 logic fires next tick (weapon sheathes
+    // visually via the free-variant idle anim).
+    if (faceTarget == nullptr) {
+        sAttackState.target = nullptr;
+        const float distToLeaderSq = Dist2DSq(a->world.pos, leaderPos);
+        if (distToLeaderSq > kEnterFollow * kEnterFollow) {
+            SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (no enemies, leader far)");
+            this_->state = EN_FOLLOWER_STATE_FOLLOW;
+        } else {
+            SPDLOG_INFO("[FollowerNPC] STANDBY→IDLE (no enemies, near leader)");
+            this_->state = EN_FOLLOWER_STATE_IDLE;
+        }
+        return;
+    }
+
+    // Leader yields combat — STANDBY won't chase the leader (combat
+    // states lock speedXZ=0), but FOLLOW will. Hand off to FOLLOW once
+    // leader is moderately far — kEnterFollow=80u was the threshold
+    // for IDLE→FOLLOW, and using the same value here gives consistent
+    // "follow leader" behaviour. Without this fix (log 160 — leash
+    // was 600u), the NPC stayed locked in STANDBY/RANGED_ATTACK
+    // cycle even as the leader walked across Hyrule Field. The
+    // combat cooldown gives FOLLOW a beat to make progress before
+    // TryEngageCombat re-engages.
+    const float distToLeaderSq = Dist2DSq(a->world.pos, leaderPos);
+    const float kStandbyLeaderLeash = kEnterFollow;  // 80u — same as IDLE→FOLLOW
+    if (distToLeaderSq > (kStandbyLeaderLeash * kStandbyLeaderLeash)) {
+        SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (leader >{:.0f}u away)",
+                    kStandbyLeaderLeash);
+        this_->state = EN_FOLLOWER_STATE_FOLLOW;
+    }
+
+    // Otherwise stay in STANDBY. TryEngageCombat (called pre-dispatch)
+    // will swap to ATTACK / BLOCK / ENGAGE / RANGED_ATTACK whenever
+    // the enemy is in any combat tier.
+}
+
+// Helper used by combat state EXIT transitions — pick STANDBY if any
+// enemy is still in detect range (keeps weapon drawn for the next
+// engagement), otherwise FOLLOW (sheathe and resume leader-following).
+//
+// Side effect: arms the post-combat cooldown so TryEngageCombat
+// suppresses re-engagement for kPostCombatCooldownMs. Without this,
+// short-anim combat states (kBowShoot ~6 frames) re-fire instantly
+// from STANDBY, producing weapon flicker + blocking FOLLOW.
+s32 ChooseCombatExitState(EnFollower* this_, PlayState* play) {
+    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                  std::memory_order_relaxed);
+    sCombatCooldownEndFrame = curFrame +
+        (uint64_t)Anchor::Instance->MsToGameTicks(kPostCombatCooldownMs);
+    // Time-based equipment retention — mark this combat exit so the
+    // sheathe-delay window starts now. NpcStateToModelGroup uses
+    // this to keep the weapon visible across STANDBY ↔ FOLLOW ↔
+    // combat re-entry cycles, mirroring Player's vanilla "stay armed
+    // for N seconds after combat" behavior.
+    sLastCombatExitFrame = curFrame;
+    Actor* nearby = FindNearestEnemyForAttack(this_, play, kStandbyDetectDist);
+    return (nearby != nullptr) ? EN_FOLLOWER_STATE_STANDBY
+                               : EN_FOLLOWER_STATE_FOLLOW;
+}
+
+// DEAD handler — Stage 2.
+// Locks XZ motion, lets gravity settle the body, holds the death anim
+// (kDeath = gPlayerAnim_link_normal_back_downA) until kFollowerNpcDeathHoldMs
+// elapses, then despawns the local actor + arms the respawn cooldown.
+// Per user spec: NPC death is purely cosmetic — no system-wide effects,
+// no notifications. Respawn happens via TickFollowerNpcCVar's auto-
+// respawn branch once the cooldown elapses.
+//
+// File-scope sDeathEntryFrame tracks when the current DEAD state was
+// entered. Reset on any non-DEAD state via dispatcher prevState edge
+// (handled inline below).
+static uint64_t sDeathEntryFrame = 0;
+
+void TickDEAD(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    (void)leaderPos;
+    (void)play;
+    Actor* a = &this_->actor;
+    a->speedXZ = 0.0f;
+
+    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                  std::memory_order_relaxed);
+
+    // Entry-frame detection via prevState edge. The dispatcher updates
+    // prevState AFTER state handlers run, so on the entry frame
+    // prevState != DEAD while state == DEAD.
+    if (this_->prevState != EN_FOLLOWER_STATE_DEAD) {
+        sDeathEntryFrame = curFrame;
+        SPDLOG_INFO("[FollowerNPC] DEAD entry — anim=kDeath at "
+                    "({:.0f},{:.0f},{:.0f}) deathHoldMs={}",
+                    a->world.pos.x, a->world.pos.y, a->world.pos.z,
+                    kFollowerNpcDeathHoldMs);
+    }
+
+    // Let gravity / floor collision settle the body so it lies on the
+    // ground naturally instead of floating. No XZ motion (speedXZ=0
+    // above; Actor_MoveXZGravity is called by the dispatcher's outer
+    // tick after state dispatch).
+
+    // Despawn after the hold elapses.
+    const uint64_t holdTicks = (uint64_t)Anchor::Instance->MsToGameTicks(
+                                   kFollowerNpcDeathHoldMs);
+    if (curFrame >= sDeathEntryFrame + holdTicks) {
+        SPDLOG_INFO("[FollowerNPC] DEAD hold complete — despawning + arming "
+                    "respawn cooldown ({} ms)", kFollowerNpcRespawnCooldownMs);
+        Anchor::Instance->mFollowerNpcRespawnAtFrame =
+            curFrame + (uint64_t)Anchor::Instance->MsToGameTicks(
+                            kFollowerNpcRespawnCooldownMs);
+        Anchor::Instance->SetFollowerNpcActive(false);
+    }
+}
+
+// Stage 2 — death triggers (drowning, void). Called from the dispatcher
+// each tick BEFORE state-handler dispatch. If a hazard is detected
+// AND health > 0 AND not invulnerable, sets state=DEAD + health=0 +
+// deathFlag=1 so the next tick TickDEAD takes over. Returns true if
+// death was just triggered (caller may choose to skip remaining work
+// this tick).
+bool CheckEnvironmentalDeath(EnFollower* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+
+    // Already dead? Nothing to do.
+    if (this_->state == EN_FOLLOWER_STATE_DEAD) return false;
+    if (FollowerNpcInvulnerable())            return false;
+
+    // Void death — Y below kFollowerNpcVoidThresholdY. Instant kill;
+    // no anim hold needed because the body is past the camera anyway.
+    if (a->world.pos.y < kFollowerNpcVoidThresholdY) {
+        SPDLOG_INFO("[FollowerNPC] death trigger: void (y={:.0f} < {:.0f})",
+                    a->world.pos.y, kFollowerNpcVoidThresholdY);
+        this_->state           = EN_FOLLOWER_STATE_DEAD;
+        this_->health          = 0;
+        this_->deathFlag       = 1;
+        this_->stopAnimPlaying = 0;  // let kDeath flow through dispatcher hold
+        return true;
+    }
+
+    // Drowning — NPC has been in SWIMMING state for kFollowerNpcDrowningMs.
+    // Tracked on the actor via `idleTicks` which is repurposed here as
+    // a swim-entry-frame counter. Reset on any non-SWIMMING state, set
+    // on first SWIMMING tick. We only count actual SWIMMING (not
+    // shallow/treading-water FOLLOW) — yDistToWater gating already
+    // handled the entry transition.
+    static uint64_t sSwimStartFrame = 0;
+    static bool     sWasSwimming    = false;
+    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                  std::memory_order_relaxed);
+    if (this_->state == EN_FOLLOWER_STATE_SWIMMING) {
+        if (!sWasSwimming) {
+            sSwimStartFrame = curFrame;
+            sWasSwimming    = true;
+        } else {
+            const uint64_t drownTicks =
+                (uint64_t)Anchor::Instance->MsToGameTicks(kFollowerNpcDrowningMs);
+            if (curFrame >= sSwimStartFrame + drownTicks) {
+                SPDLOG_INFO("[FollowerNPC] death trigger: drowning "
+                            "(swim duration {}ms exceeded)",
+                            kFollowerNpcDrowningMs);
+                this_->state           = EN_FOLLOWER_STATE_DEAD;
+                this_->health          = 0;
+                this_->deathFlag       = 1;
+                this_->deathCause      = 1;  // drowning → kDeathDrown
+                this_->stopAnimPlaying = 0;  // let kDeath flow through dispatcher hold
+                sWasSwimming           = false;  // consumed
+                (void)play;
+                return true;
+            }
+        }
+    } else {
+        sWasSwimming = false;
+    }
+
+    return false;
 }
 
 // Phase 8 — G10/G14 recovery teleport. Direct world.pos write to
@@ -1811,6 +3174,12 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             peerAnim = (this_->hoistContext == HOIST_CONTEXT_SWIM)
                          ? FollowerNpcAnim::kHoistSwim
                          : FollowerNpcAnim::kHoistGround;
+        }
+        // Same override for drowning death — peer plays the swim KO
+        // anim instead of the back-down generic.
+        if (this_->state == EN_FOLLOWER_STATE_DEAD &&
+            this_->deathCause == 1) {
+            peerAnim = FollowerNpcAnim::kDeathDrown;
         }
         EnsureAnimation(this_, play, peerAnim);
         // Per-frame playSpeed for walk/run (mirrors local-owner path —
@@ -2049,6 +3418,16 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // raise puts NPC's feet near the ledge top, anim visualizes
         // the climb-out motion correctly. End-of-anim snap moves NPC
         // to the exact ledge top.
+        // Snap XZ to ledge top XZ at entry so the anim plays in
+        // place (only Y will lerp over the anim duration). Without
+        // this, an 80u XZ lerp during a 1-second mantle anim looks
+        // like the body is "walking sideways while hunched" — the
+        // climb_up anim assumes a stationary body pulling up. With
+        // the snap, body translates straight up, matching the anim's
+        // vertical-only mantle motion. Y stays at NPC's current
+        // floor for the moment; TickLEDGE_HOIST lerps Y up.
+        npc->world.pos.x = topPos.x;
+        npc->world.pos.z = topPos.z;
         // Capture start position for the per-tick lerp during the anim.
         // hoistTargetPos is the END pos; we lerp from start → target
         // over the anim duration so body moves smoothly up.
@@ -2063,6 +3442,11 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // floor and TickLEDGE_HOIST lerps Y up over the anim
         // duration. Body visibly mantles from floor to ledge.
         this_->state = EN_FOLLOWER_STATE_LEDGE_HOIST;
+        // Clear any in-flight stop/fidget anim hold so the dispatcher's
+        // LEDGE_HOIST anim override survives the stopAnimPlaying check
+        // (otherwise that hold reverts localAnim to currentAnim — kWalk —
+        // and EnsureAnimation never transitions to kHoistGround/kHoistSwim).
+        this_->stopAnimPlaying = 0;
         SPDLOG_INFO("[FollowerNPC] {}→LEDGE_HOIST({}) top=({:.0f},{:.0f},{:.0f}) "
                     "NPC at ({:.0f},{:.0f},{:.0f}) via {}",
                     (ctx == HOIST_CONTEXT_SWIM ? "SWIMMING" : "FOLLOW"),
@@ -2141,6 +3525,19 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         }
     }
 
+    // Stage 2 — environmental death triggers (drowning, void). Runs
+    // BEFORE state dispatch so a death detected this tick gets the
+    // first TickDEAD call (anim entry + start-frame capture) instead
+    // of waiting a frame.
+    CheckEnvironmentalDeath(this_, play);
+
+    // Stage 4 — combat engagement check. Tier 1 (close): direct ATTACK.
+    // Tier 2 (medium): ENGAGE pursuit. Fires from IDLE / FOLLOW only.
+    // Runs BEFORE state dispatch so the new state's handler gets the
+    // first tick (start-frame capture for the active-window check, or
+    // initial pursuit yaw computation).
+    TryEngageCombat(this_, play);
+
     // Dispatch.
     switch (this_->state) {
         default:
@@ -2151,6 +3548,11 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         case EN_FOLLOWER_STATE_SWIMMING:    TickSWIMMING(this_, play, leaderPos); break;
         case EN_FOLLOWER_STATE_LEDGE_HOIST: TickLEDGE_HOIST(this_, play, leaderPos); break;
         case EN_FOLLOWER_STATE_DEAD:        TickDEAD(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_ATTACK:      TickATTACK(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_ENGAGE:      TickENGAGE(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_BLOCK:       TickBLOCK(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_RANGED_ATTACK: TickRANGED_ATTACK(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_STANDBY:     TickSTANDBY(this_, play, leaderPos); break;
     }
 
     // Clear stop-anim latch when the ONCE anim has reached endFrame.
@@ -2185,15 +3587,27 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // chosen by current step phase — eliminates the "freeze mid-stride"
     // pop when NPC arrives at leader. Mirrors Player's func_8083BF50
     // (z_player.c:6388).
-    // Sync modelAnimType from local Player so EnsureAnimation picks
-    // armed (fighter) vs unarmed (_free) anim variants correctly.
-    // Player updates modelAnimType in Player_SetModelGroup
-    // (z_player_lib.c:655) whenever the held item / shield state
-    // changes (e.g. sword drawn/sheathed). Without this, the NPC
-    // always uses _free anims even while visually wielding sword+
-    // shield (because we inherit Player's equipment-draw via the
-    // override callback).
-    this_->currentAnimType = (s8)player->modelAnimType;
+    // currentAnimType — drives armed (fighter) vs unarmed (_free)
+    // anim variants. Per the user-spec design (2026-05-15): NPC
+    // body language reflects its OWN combat intent, NOT Player's
+    // weapon state. The NPC has the fighter pose only when in a
+    // combat state (STANDBY / ATTACK / BLOCK / ENGAGE / RANGED_ATTACK);
+    // otherwise it uses the relaxed unarmed pose regardless of what
+    // Player has drawn.
+    //
+    // Equipment visibility (sword/shield/bow models) is still
+    // inherited from Player via the Player_DrawImpl override
+    // callback — that's a future Phase B follow-up requiring
+    // hand-type swap in the draw path.
+    auto isCombatState = [](s32 s) {
+        return s == EN_FOLLOWER_STATE_STANDBY ||
+               s == EN_FOLLOWER_STATE_ATTACK  ||
+               s == EN_FOLLOWER_STATE_BLOCK   ||
+               s == EN_FOLLOWER_STATE_ENGAGE  ||
+               s == EN_FOLLOWER_STATE_RANGED_ATTACK;
+    };
+    this_->currentAnimType = isCombatState(this_->state) ? 1 /*fighter*/ : 0 /*free*/;
+    (void)player;  // no longer used for animType inheritance
 
     FollowerNpcAnim localAnim = AnimForState(this_->state, npc->speedXZ);
     // Ledge-hoist anim variant — AnimForState defaults to kHoistGround,
@@ -2203,6 +3617,33 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         localAnim = (this_->hoistContext == HOIST_CONTEXT_SWIM)
                       ? FollowerNpcAnim::kHoistSwim
                       : FollowerNpcAnim::kHoistGround;
+    }
+    // Death-pose variant — AnimForState returns kDeath (back-down)
+    // for any DEAD state; override to kDeathDrown when the cause
+    // was drowning (NPC is in water; back-down anim would look
+    // strange floating).
+    if (this_->state == EN_FOLLOWER_STATE_DEAD &&
+        this_->deathCause == 1) {
+        localAnim = FollowerNpcAnim::kDeathDrown;
+    }
+    // Stage 3 — non-fatal fall hurt reaction. Plays the back-down anim
+    // briefly without entering DEAD state (NPC sits up automatically
+    // once the counter hits zero and AnimForState resumes normal
+    // selection). Same anim asset as kDeath; the difference is
+    // duration + lack of DEAD state transition.
+    if (sLocalNav.fallHurtFramesRemaining > 0 &&
+        this_->state != EN_FOLLOWER_STATE_DEAD) {
+        localAnim = FollowerNpcAnim::kDeath;
+        sLocalNav.fallHurtFramesRemaining--;
+    }
+    // Stage 4 — BLOCK hit-reaction override. While the block-hit
+    // counter is non-zero AND state is still BLOCK, override
+    // kBlockWait with the one-shot kBlockHit. Counter decrements
+    // in TickBLOCK so this fires for kBlockHitAnimFrames ticks
+    // after a successful block.
+    if (this_->state == EN_FOLLOWER_STATE_BLOCK &&
+        sBlockState.hitAnimFrames > 0) {
+        localAnim = FollowerNpcAnim::kBlockHit;
     }
 
     // Auto-jump-off-ledge — mimic Player's z_player.c:5818-5836.
@@ -2257,6 +3698,11 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             npc->velocity.y = kJumpBoostVy;
             npc->gravity    = kJumpGravity;        // restored on landing
             npc->bgCheckFlags &= ~4;
+            // Same hazard as LEDGE_HOIST: clear any in-flight stop/fidget
+            // hold so the localAnim assignment below isn't reverted by the
+            // stopAnimPlaying check — otherwise EnsureAnimation never
+            // transitions to kRunJump/kJump and the run anim plays airborne.
+            this_->stopAnimPlaying = 0;
             localAnim = (npc->speedXZ > 4.0f) ? FollowerNpcAnim::kRunJump
                                               : FollowerNpcAnim::kJump;
             // Capture jump diagnostics
@@ -2281,19 +3727,41 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // while jumpInProgress so we can see velocity / pos / peak
         // evolving. Track peak Y for the summary.
         if (sLocalNav.jumpInProgress) {
-            // Stuck-detection: if airborne >5s with near-zero
-            // velocity.y and not on floor, NPC is in geometry-state
-            // limbo (e.g. fell into water that doesn't register
-            // yDistToWater, or onto a void floor that doesn't set
-            // bgCheckFlags & 1). Force-teleport to leader to recover.
+            // Stuck-detection — two paths:
+            //   (a) airborne >5s with near-zero velocity.y AND not on
+            //       floor (original — zero-velocity hover scenario).
+            //   (b) airborne >5s with NO position change (log 161:
+            //       NPC frozen at (-49,361,405) for 73 seconds with
+            //       velocity.y clamped at -10. The (a) check missed
+            //       it because |-10| > 1.0; pos was actually static
+            //       though — gravity wasn't translating into motion).
+            // Track previous tick's pos to detect (b).
+            static Vec3f sJumpPrevPos = { 0.0f, 0.0f, 0.0f };
+            static uint64_t sJumpPrevPosFrame = 0;
             const uint64_t airborneFrames = curFrame - sLocalNav.jumpStartFrame;
-            if (airborneFrames > 100 &&  // ~5s @ 20fps
-                std::fabs(npc->velocity.y) < 1.0f && !isOnFloor) {
+
+            const bool zeroVel  = std::fabs(npc->velocity.y) < 1.0f;
+            const float posDelta = std::sqrt(
+                (npc->world.pos.x - sJumpPrevPos.x) * (npc->world.pos.x - sJumpPrevPos.x) +
+                (npc->world.pos.y - sJumpPrevPos.y) * (npc->world.pos.y - sJumpPrevPos.y) +
+                (npc->world.pos.z - sJumpPrevPos.z) * (npc->world.pos.z - sJumpPrevPos.z));
+            // If pos hasn't moved more than 0.5u in the last 5s while
+            // airborne, the NPC is frozen mid-fall regardless of what
+            // velocity says. Re-baseline every 5s of motion.
+            const bool posStuck = (curFrame > sJumpPrevPosFrame + 100) &&
+                                  (posDelta < 0.5f);
+            if (posDelta >= 0.5f) {
+                sJumpPrevPos       = npc->world.pos;
+                sJumpPrevPosFrame  = curFrame;
+            }
+
+            if (airborneFrames > 100 && !isOnFloor && (zeroVel || posStuck)) {
                 SPDLOG_WARN("[FollowerNPC.jump] STUCK in air for {} frames "
-                            "(velocity.y={:.2f}, pos=({:.0f},{:.0f},{:.0f})) "
-                            "— force-teleport to leader",
+                            "(velocity.y={:.2f}, pos=({:.0f},{:.0f},{:.0f}), "
+                            "posStuck={} zeroVel={}) — force-teleport to leader",
                             (int)airborneFrames, npc->velocity.y,
-                            npc->world.pos.x, npc->world.pos.y, npc->world.pos.z);
+                            npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
+                            posStuck, zeroVel);
                 TeleportNpcTo(this_, play, leaderPos);
                 npc->gravity              = -2.0f;  // restore default
                 sLocalNav.jumpInProgress  = false;
@@ -2332,19 +3800,74 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                                                 dzFromStart*dzFromStart);
                 const float peakRise = sLocalNav.jumpPeakPos.y -
                                         sLocalNav.jumpStartPos.y;
+                // Fall distance for damage = peak Y minus landing Y.
+                // Using peak (not start) handles "jumped up then fell
+                // into a deep pit" — the actual descent measures from
+                // the high point of the trajectory, not the takeoff.
+                const float fallDistance = sLocalNav.jumpPeakPos.y -
+                                            npc->world.pos.y;
                 SPDLOG_INFO("[FollowerNPC.jump] LAND — totalFrames={} "
                             "startPos=({:.0f},{:.0f},{:.0f}) "
                             "landPos=({:.0f},{:.0f},{:.0f}) "
                             "peakY={:.0f} (rise={:+.1f}) drop={:+.1f}u "
-                            "horizontalDist={:.1f}u final velocity.y={:.2f}",
+                            "fallDistance={:.0f} horizontalDist={:.1f}u "
+                            "final velocity.y={:.2f}",
                             (int)(curFrame - sLocalNav.jumpStartFrame),
                             sLocalNav.jumpStartPos.x, sLocalNav.jumpStartPos.y,
                             sLocalNav.jumpStartPos.z,
                             npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
                             sLocalNav.jumpPeakPos.y, peakRise,
-                            dyFromStart, distXZ, npc->velocity.y);
+                            dyFromStart, fallDistance, distXZ, npc->velocity.y);
                 npc->gravity = -2.0f;  // restore default ground gravity
                 sLocalNav.jumpInProgress = false;
+
+                // Stage 3 — fall damage. Gated on Invulnerable CVar
+                // and IsLocalOwnerNPC (peers don't own damage state).
+                // Thresholds chosen to roughly match Player's 320u
+                // soft-landing threshold + scale up with fall depth.
+                //   < 400u : safe
+                //   400-799 : 1 HP
+                //   800-1199: 2 HP
+                //   1200+  : 3 HP (or more, scaled per 400u increment)
+                if (!FollowerNpcInvulnerable() &&
+                    IsLocalOwnerNPC(npc) &&
+                    this_->state != EN_FOLLOWER_STATE_DEAD) {
+                    constexpr float kFallSafeThreshold = 400.0f;
+                    constexpr float kFallHpStepUnits   = 400.0f;
+                    if (fallDistance >= kFallSafeThreshold) {
+                        const int hpLoss =
+                            (int)((fallDistance - kFallSafeThreshold) /
+                                  kFallHpStepUnits) + 1;
+                        const int newHealth =
+                            std::max<int>(0, (int)this_->health - hpLoss);
+                        SPDLOG_INFO("[FollowerNPC] fall damage: "
+                                    "fallDistance={:.0f} → {} HP loss "
+                                    "(health {}→{})",
+                                    fallDistance, hpLoss,
+                                    (int)this_->health, newHealth);
+                        this_->health = (s8)newHealth;
+                        if (newHealth <= 0) {
+                            this_->state           = EN_FOLLOWER_STATE_DEAD;
+                            this_->deathFlag       = 1;
+                            this_->deathCause      = 0;  // generic (back-down)
+                            this_->stopAnimPlaying = 0;
+                            SPDLOG_INFO("[FollowerNPC] death by fall");
+                        } else {
+                            // Non-fatal hard landing — fire the back-
+                            // down anim as a brief hurt reaction.
+                            // Same one-shot anim as kDeath; flips
+                            // back to kWait/kWalk via the
+                            // stopAnimPlaying handshake when finished.
+                            this_->stopAnimPlaying = 0;
+                            // We don't enter DEAD state — only the
+                            // anim is overridden via a transient
+                            // localAnim assignment further down. Set
+                            // a flag so the per-tick anim resolution
+                            // picks kDeath (back-down) for this hit.
+                            sLocalNav.fallHurtFramesRemaining = 30;  // ~1.5s @ 20fps
+                        }
+                    }
+                }
             }
         }
         sLocalNav.jumpWasOnFloorPrevTick = isOnFloor;
@@ -2379,6 +3902,17 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     } else if (localAnim != FollowerNpcAnim::kWait) {
         // Out of idle — reset counter so next idle session starts fresh.
         this_->idleTicks = 0;
+    }
+
+    // If NPC has started moving while a fidget/stop-anim was holding,
+    // cancel the hold so walk/run takes over immediately. Without this
+    // the body slides along the ground while the idle/fidget plays
+    // out (user-reported). Movement signal: in FOLLOW state with
+    // non-trivial XZ speed.
+    if (this_->stopAnimPlaying &&
+        this_->state == EN_FOLLOWER_STATE_FOLLOW &&
+        npc->speedXZ > 0.5f) {
+        this_->stopAnimPlaying = 0;
     }
 
     // Keep playing the stop anim / fidget until it finishes
@@ -2446,16 +3980,27 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         }
     }
 
-    // Airborne anim hold — while jumpInProgress, keep the jump anim
-    // as the active selection regardless of whether the one-shot has
-    // ended. Mirrors Player_Action_8084411C (z_player.c:9663) which
-    // doesn't transition anim during fall — Link stays in the jump
-    // pose until landing. Without this, our NPC's kRunJump one-shot
-    // ends mid-fall, AnimForState returns kWalk/kRun/kWait based on
-    // speedXZ, and NPC visibly switches to a walking pose while
-    // still in the air. Only released when jumpInProgress clears
-    // (on landing or stuck-teleport).
-    if (sLocalNav.jumpInProgress) {
+    // Airborne anim hold — while jumpInProgress AND a jump anim is
+    // already running, keep the jump anim as the active selection
+    // regardless of whether the one-shot has ended. Mirrors
+    // Player_Action_8084411C (z_player.c:9663): Link stays in the
+    // jump pose until landing. Without this, our NPC's kRunJump
+    // one-shot ends mid-fall, AnimForState returns kWalk/kRun/kWait
+    // based on speedXZ, and NPC visibly switches to a walking pose
+    // while still in the air.
+    //
+    // The `currentAnim is a jump` gate is critical: on the trigger
+    // frame, `localAnim` was just set to kRunJump/kJump but
+    // `currentAnim` is still the prior anim (kRun/kWalk) because
+    // EnsureAnimation hasn't run yet. Without the gate, the hold
+    // would revert localAnim to kRun and EnsureAnimation would
+    // never transition to the jump anim. With the gate, the hold
+    // only fires from frame N+1 onward (after currentAnim is
+    // updated to kRunJump/kJump), letting the trigger-frame choice
+    // through unmolested.
+    if (sLocalNav.jumpInProgress &&
+        ((FollowerNpcAnim)this_->currentAnim == FollowerNpcAnim::kRunJump ||
+         (FollowerNpcAnim)this_->currentAnim == FollowerNpcAnim::kJump)) {
         localAnim = (FollowerNpcAnim)this_->currentAnim;
     }
     EnsureAnimation(this_, play, localAnim);
@@ -2546,5 +4091,78 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                                 10.0f /* wallCheckRadius */,
                                 50.0f /* ceilingCheckHeight */,
                                 4 /* flags */);
+    }
+
+    // Stage 3 — body collider tick. Update cylinder pos from actor
+    // pos + rotation, drain any AC hit landed this frame, register
+    // AC for next frame. Skipped while DEAD (the body is despawning
+    // and we don't want late hits to re-decrement health). Skipped
+    // when Invulnerable (the user-facing kill-switch for the entire
+    // damage flow — both detection and application).
+    if (this_->state != EN_FOLLOWER_STATE_DEAD &&
+        !FollowerNpcInvulnerable() &&
+        IsLocalOwnerNPC(npc)) {
+        Collider_UpdateCylinder(npc, &this_->collider);
+
+        // Drain AC hit, if any. CollisionCheck_Damage (engine
+        // pre-update pass) has already written damage value to
+        // npc->colChkInfo.damage and set acFlags & AC_HIT on the
+        // collider; clear both, decrement health.
+        if ((this_->collider.base.acFlags & AC_HIT) != 0) {
+            this_->collider.base.acFlags &= ~AC_HIT;
+            const int dmgUnits = (int)npc->colChkInfo.damage;
+
+            // Stage 4 — BLOCK absorption. While in BLOCK state, frontal
+            // hits (attacker within ±90° of NPC's facing) are absorbed
+            // entirely — kBlockHit reaction plays, no HP loss. Back/
+            // side hits take full damage. Approximated attacker = the
+            // NPC's current target (sAttackState.target). If no target
+            // is tracked, treat all blocked hits as frontal so the
+            // BLOCK state has a meaningful effect even when target
+            // tracking is fuzzy.
+            bool blocked = false;
+            if (this_->state == EN_FOLLOWER_STATE_BLOCK && dmgUnits > 0) {
+                if (sAttackState.target == nullptr ||
+                    IsFrontalAttacker(this_, sAttackState.target)) {
+                    blocked = true;
+                    sBlockState.hitAnimFrames = kBlockHitAnimFrames;
+                    this_->stopAnimPlaying = 0;  // let kBlockHit override flow through
+                    SPDLOG_INFO("[FollowerNPC] BLOCK absorbed dmgUnits={} (frontal)",
+                                dmgUnits);
+                }
+            }
+
+            // OoT damage values are in 1/16-heart units (16 = 1 heart).
+            // NPC HP is in full hearts; convert via /16 (ceil so a
+            // 1u hit still deals 1 HP). A 4-damage enemy attack
+            // (1 full heart) → 1 NPC HP; an 8-damage attack (2 hearts)
+            // → 1 NPC HP (clamps to 1); etc. Could refine to track
+            // partial hearts later.
+            const int hpLoss = (!blocked && dmgUnits > 0) ? 1 : 0;
+            if (hpLoss > 0) {
+                this_->health = (s8)std::max<int>(0, (int)this_->health - hpLoss);
+                SPDLOG_INFO("[FollowerNPC] AC_HIT dmgUnits={} → health {}→{}",
+                            dmgUnits, (int)this_->health + hpLoss,
+                            (int)this_->health);
+                if (this_->health <= 0) {
+                    this_->state           = EN_FOLLOWER_STATE_DEAD;
+                    this_->deathFlag       = 1;
+                    this_->deathCause      = 0;  // generic
+                    this_->stopAnimPlaying = 0;
+                    SPDLOG_INFO("[FollowerNPC] death by combat damage");
+                }
+            }
+            npc->colChkInfo.damage = 0;
+        }
+        // Mirror local health to colChkInfo so future damage-routing
+        // code that reads it (Player_InflictDamage-style helpers)
+        // sees a non-zero value.
+        npc->colChkInfo.health = this_->health;
+
+        // Register AC for the next collision frame.
+        CollisionCheck_SetAC(play, &play->colChkCtx, &this_->collider.base);
+        // Register OC (blocking) so the NPC's body has physical
+        // presence — enemies can't walk through it.
+        CollisionCheck_SetOC(play, &play->colChkCtx, &this_->collider.base);
     }
 }

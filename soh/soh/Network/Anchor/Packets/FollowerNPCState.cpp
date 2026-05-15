@@ -75,6 +75,7 @@ void Anchor::SendPacket_FollowerNpcState() {
     payload["hoistContext"]  = (int)asFollower->hoistContext;
     payload["health"]        = (int)asFollower->health;     // Stage 1 wired
     payload["deathFlag"]     = (int)asFollower->deathFlag;  // Stage 1 wired (writes 0 until Stage 2)
+    payload["deathCause"]    = (int)asFollower->deathCause; // Stage 2: 0=generic 1=drown
     PacketTimeline::SetTimelineField(payload);
 
     SendJsonToRemote(payload);
@@ -192,6 +193,7 @@ void Anchor::HandlePacket_FollowerNpcState(nlohmann::json payload) {
     asFollower->hoistContext    = (s8)payload.value("hoistContext", 0);
     asFollower->health          = (s8)payload.value("health", 4);
     asFollower->deathFlag       = (u8)payload.value("deathFlag", 0);
+    asFollower->deathCause      = (u8)payload.value("deathCause", 0);
 }
 
 void Anchor::TickFollowerNpcStateBroadcast() {

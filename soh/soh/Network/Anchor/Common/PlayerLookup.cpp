@@ -69,6 +69,27 @@ Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
         npc = npc->next;
     }
 
+    // Stage 3 — NPC Follower as alternate target. When the local NPC
+    // follower exists, is alive, and is not invulnerable, treat it as
+    // an additional target candidate alongside DummyPlayers. Enemy AI
+    // that reads the patched cached fields (xzDistToPlayer etc.) will
+    // pursue the NPC if it's the closest target. Same shape as the
+    // DummyPlayer iteration above; gated through the public Anchor
+    // helper so the CVar read is centralized.
+    if (Anchor::Instance != nullptr && Anchor::Instance->IsFollowerNpcTargetable()) {
+        Actor* npcFollower = Anchor::Instance->GetFollowerNpcLocalActor();
+        if (npcFollower != nullptr && npcFollower->update != nullptr) {
+            float dx = enemy->world.pos.x - npcFollower->world.pos.x;
+            float dy = enemy->world.pos.y - npcFollower->world.pos.y;
+            float dz = enemy->world.pos.z - npcFollower->world.pos.z;
+            float distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq < nearestDistSq) {
+                nearestDistSq = distSq;
+                nearest = npcFollower;
+            }
+        }
+    }
+
     return nearest;
 }
 

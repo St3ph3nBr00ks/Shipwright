@@ -1166,6 +1166,13 @@ class Anchor : public Network {
     // nullptr if no local NPC is alive). Used by the per-tick state-
     // machine driver to distinguish owner-tick from peer-replica-tick.
     Actor* GetFollowerNpcLocalActor() const { return mFollowerNpcLocalActor; }
+    // Stage 3 — true when the local NPC follower exists, is alive,
+    // and is not flagged invulnerable. Used by FindNearestPlayerActor
+    // to include the NPC as a target candidate for enemy AI. When
+    // false (no NPC, dead, or invulnerable) the NPC is invisible to
+    // targeting and enemies behave as before. Implementation in
+    // AIFollowerNPC/FollowerNPC.cpp (needs the CVar read helper).
+    bool IsFollowerNpcTargetable() const;
     // Color-fix lookup: given an NPC Actor*, return the ownerClientId
     // (== ownClientId for our local NPC; otherwise the peer
     // ownerClientId from mPeerFollowerNpcs). Returns 0 if the actor
@@ -1508,6 +1515,17 @@ class Anchor : public Network {
     // payload. atomic so the cross-thread read is well-defined without
     // touching the heartbeat mutex.
     std::atomic<uint64_t> gameFrameCounter{0};
+
+    // Stage 2 (npc_follower_health_and_respawn_plan) — respawn cooldown.
+    // Public because the file-scope TickDEAD/TickFollowerNpcCVar helpers
+    // in FollowerNPC.cpp need to write these. 0 = no pending respawn.
+    uint64_t mFollowerNpcRespawnAtFrame = 0;
+    // Optional override for the next NPC spawn position. When set,
+    // SetFollowerNpcActive(true) spawns at this pose instead of the
+    // local player's. Single-shot — the spawn helper clears the flag.
+    bool  mFollowerNpcSpawnPosOverride = false;
+    Vec3f mFollowerNpcSpawnPosOverridePos = { 0.0f, 0.0f, 0.0f };
+    s16   mFollowerNpcSpawnPosOverrideYaw = 0;
 
     // ----- Game-tick timing infrastructure (2026-05-15 log 118 followup) -----
     //

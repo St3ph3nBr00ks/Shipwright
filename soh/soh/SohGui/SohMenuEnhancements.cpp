@@ -2444,22 +2444,24 @@ void SohMenu::AddMenuEnhancements() {
             "+ Use Room Graph (Layer 3) ticked under AI Navigation "
             "for substrate path consumption to work."));
 
-    // Stage 1 of npc_follower_health_and_respawn_plan — gates damage
-    // application. Default ON preserves the prior "invulnerable v1"
-    // behavior. Stage 2+ adds environmental damage (drowning, void)
-    // that this CVar will gate.
+    // Stage 1+2 of npc_follower_health_and_respawn_plan — gates damage
+    // application. Default ON keeps prior "invulnerable v1" behavior;
+    // turning OFF enables environmental death (drowning after 30s in
+    // deep water, void below Y=-3000) and the 10-second respawn
+    // cooldown at the door closest to the leader.
     AddWidget(path, "Invulnerable##FollowerNPC", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("AI.FollowerNPC.Invulnerable"))
         .RaceDisable(false)
         .Options(CheckboxOptions().DefaultValue(true).Tooltip(
             "When ON, the NPC Companion takes no damage from any "
             "source (environmental hazards, future combat damage, "
-            "etc.). Defaults to ON until the death/respawn system "
-            "lands in Stage 2 of the health plan.\n\n"
-            "Health is tracked internally (4 HP max) regardless of "
-            "this setting; the CVar only gates damage application. "
-            "Future Stage 2+ work will use this CVar to let players "
-            "opt into the death/respawn loop."));
+            "etc.). Default ON.\n\n"
+            "Turn OFF to enable Stage 2 death/respawn:\n"
+            "- Drowns after 30s in deep water\n"
+            "- Dies on void fall (Y < -3000)\n"
+            "- Respawns 10s later at the door closest to the leader\n"
+            "  (or at the leader if no door is in range).\n\n"
+            "Max HP mirrors Link's heart capacity (clamped to 3..20)."));
 }
 
 } // namespace SohGui
