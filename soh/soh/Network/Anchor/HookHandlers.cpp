@@ -1515,7 +1515,8 @@ void Anchor::RegisterHooks() {
         // corrupted segment table). isSpawningNetworkActor is set by
         // HandlePacket_EnemySpawn around the Actor_Spawn call, exactly
         // for this guard.
-        if (isDynamicSpawn && ::SceneAuthority::IsMyCurrentRoomHost() && !isSpawningNetworkActor) {
+        if (isDynamicSpawn && ::SceneAuthority::IsMyCurrentRoomHost() &&
+            !isSpawningNetworkActor && !isSpawningDirectorActor) {
             SendPacket_EnemySpawn(actor);
         }
     });
@@ -2947,6 +2948,20 @@ void Anchor::RegisterHooks() {
             bookkeeping.RecordSceneDeath(gPlayState->sceneNum, ext->netId);
         }
         SendPacket_EnemyDefeated(ext->netId);
+
+        // AI Director: notify removal for director-spawned enemies via the
+        // OnActorKill path too. Many enemies (Stalfos, Skullkid, Skb, etc.)
+        // die through this hook rather than OnEnemyDefeat — and when both
+        // hooks fire for the same kill, OnActorKill runs first and the
+        // ClaimDefeatBroadcast dedup makes the OnEnemyDefeat sibling
+        // early-return BEFORE its Director::OnEnemyRemoved call.
+        // OnEnemyRemoved itself is idempotent: erases the netId from
+        // mNetIdToDescriptor on first call, so a duplicate fire from
+        // OnEnemyDefeat (in cases where it wins the race) is a no-op.
+        if (::SceneAuthority::IsEffectiveHost()) {
+            AnchorDirector::Director::Instance().OnEnemyRemoved(
+                ext->netId, AnchorDirector::DefeatCause::Kill);
+        }
     });
 
     // Issue #171 fix B — clean up all ObjectExtension entries before

@@ -51,7 +51,12 @@ private:
     // field-testing exposes a need).
     static constexpr int  kMaxAlive       = 1;        // one stalfos at a time
     static constexpr int  kCooldownMs     = 30 * 1000;  // 30s between spawns
-    static constexpr float kSpawnOffsetXZ = 200.0f;   // distance from target player
+    static constexpr float kSpawnOffsetXZ = 0.0f;     // spawn at player.pos exactly so it's
+                                                      // visible regardless of room geometry
+                                                      // (any +X offset risks clipping through
+                                                      // walls in tight indoor scenes like
+                                                      // Bottom of the Well). Step 13's nav-
+                                                      // aware PickSpawnPosition replaces this.
 
     // Counters surfaced via the debug panel (step 8) + GetDebugSnapshotLine.
     // Note: no per-descriptor "spawn executed" hook exists yet on the
@@ -62,6 +67,11 @@ private:
     int      mProposalsOffered = 0;
     int      mTotalRemoved     = 0;
     uint32_t mLastRemovedNetId = 0;
+
+    // Step 9 field-test 1 diagnostic — counter throttles the per-tick
+    // reject-reason SPDLOG to ~once every 5 seconds at default 20fps so
+    // the log doesn't flood. Remove once Director is field-validated.
+    int      mTicksSinceLog    = 0;
 };
 
 }  // namespace AnchorDirector

@@ -51,18 +51,38 @@
 #include <cmath>
 #include <limits>
 
+#include <libultraship/bridge/consolevariablebridge.h>  // CVarGetInteger
 #include <libultraship/libultraship.h>  // SPDLOG_*
 
 #include "../Anchor.h"
 #include "../Common/SceneAuthority.h"
+#include "soh/ActorDB.h"  // ActorDB::Instance->RetrieveEntry — pre-spawn object lookup
 #include "soh/ObjectExtension/ObjectExtension.h"
+#include "soh/cvar_prefixes.h"  // CVAR_ENHANCEMENT
 
 extern "C" {
-#include "variables.h"  // gPlayState
+#include "variables.h"
 #include "functions.h"  // Actor_Spawn
+#include "macros.h"     // GET_PLAYER macro (lives in macros.h, NOT functions.h/z64.h)
 #include "z64.h"
 #include "z64cutscene.h"  // CS_STATE_IDLE
+
+// Object_Spawn has no public header — defined only in src/code/z_scene.c.
+// Forward-decl here for the pre-spawn object preload in ExecuteSpawn.
+// Returns the object slot index; we ignore the return value, only need
+// the side-effect of queuing the object load.
+s32 Object_Spawn(ObjectContext* objectCtx, s16 objectId);
 }
+
+// gPlayState lives in z_play.c with C linkage. Use the unambiguous
+// `extern "C"` form so the symbol resolves without depending on
+// transitive C-linkage declarations from other headers (the bare
+// `extern PlayState* gPlayState;` form used elsewhere in Anchor/
+// only works because z64.h or similar transitively provides it
+// inside an extern "C" block — fragile under different include
+// orders). See SohModals.cpp:12 / ResourceManagerHelpers.cpp:18
+// for the same robust pattern.
+extern "C" PlayState* gPlayState;
 
 namespace AnchorDirector {
 
@@ -113,6 +133,19 @@ void Director::Tick() {
     // the debug panel, but Tick early-exits here.
     if (!::SceneAuthority::IsEffectiveHost()) {
         return;
+    }
+
+    // One-shot proof the host-gated Tick is firing. Gated behind
+    // gEnhancements.AI.Director.LogProposals so production logs stay
+    // quiet; flip the CVar on when investigating "why isn't the
+    // Director doing anything?" — sees this line confirms the hook
+    // chain is alive.
+    static bool sLoggedFirstHostTick = false;
+    if (!sLoggedFirstHostTick &&
+        CVarGetInteger(CVAR_ENHANCEMENT("AI.Director.LogProposals"), 0) != 0) {
+        SPDLOG_INFO("[Director] First host Tick — descriptors={} (will arbitrate proposals)",
+                    mDescriptors.size());
+        sLoggedFirstHostTick = true;
     }
 
     // Host-side tick counter. Incremented unconditionally after the
@@ -191,8 +224,35 @@ bool Director::ExecuteSpawn(const SpawnProposal& proposal) {
         return false;
     }
 
+    // Pre-spawn object preload. OoT actors defer their init() until
+    // their required object is loaded; if the object isn't in the
+    // scene's object list when Actor_Spawn fires, init() never runs
+    // and the actor exists as an invisible-but-physically-present
+    // ghost (its collider works, hit effects fire, but it has no
+    // model). Field-test signature 2026-05-15: spawned EN_TEST in
+    // Bottom of the Well room 0 (no native object_st), Stalfos
+    // killed Link with invisible body and visible sword-hit
+    // sparkles.
+    //
+    // Object_Spawn is idempotent for already-loaded objects (returns
+    // the existing slot index). For new objects, it queues an async
+    // DMA load; the actor's deferred-init loop picks the object up
+    // a few frames later, then init() runs and the model appears.
+    // Net visual: actor pops in a frame or two late instead of never.
+    const auto& dbEntry = ActorDB::Instance->RetrieveEntry(proposal.actorId);
+    if (dbEntry.entry.valid && dbEntry.entry.objectId > 0) {
+        Object_Spawn(&gPlayState->objectCtx, (s16)dbEntry.entry.objectId);
+    }
+
     // Spawn the actor locally on host. The OnActorSpawn hook will assign
     // a deterministic netId via the existing EnemyNetId extension path.
+    //
+    // isSpawningDirectorActor flag suppresses the OnActorSpawn auto-
+    // broadcast of ENEMY_SPAWN — we send our own below with descriptor
+    // identity in the schema-5 fields. Without this guard every Director
+    // spawn produced two packets (auto director=0/0 + explicit
+    // director=descId/variantId).
+    Anchor::Instance->isSpawningDirectorActor = true;
     Actor* spawned = Actor_Spawn(&gPlayState->actorCtx, gPlayState,
                                  proposal.actorId,
                                  proposal.worldPos.x,
@@ -202,6 +262,7 @@ bool Director::ExecuteSpawn(const SpawnProposal& proposal) {
                                  proposal.yawTowards,
                                  /*rotZ=*/0,
                                  proposal.actorParams);
+    Anchor::Instance->isSpawningDirectorActor = false;
     if (spawned == nullptr) {
         SPDLOG_WARN("[Director] ExecuteSpawn: Actor_Spawn failed for actorId={} descriptor='{}' "
                     "(actor limit, invalid id, or object not loaded)",
@@ -362,18 +423,42 @@ SessionView Director::BuildSessionView() const {
     for (const auto& [clientId, client] : Anchor::Instance->clients) {
         if (!client.online) continue;
 
+        const bool isLocal = (clientId == Anchor::Instance->ownClientId);
+
         PlayerSnapshot snap{};
         snap.clientId        = clientId;
         snap.teamId          = client.teamId;
-        snap.sceneNum        = client.sceneNum;
-        snap.roomNum         = client.curRoomNum;
-        snap.worldPos        = client.posRot.pos;
-        snap.isLocal         = (clientId == Anchor::Instance->ownClientId);
-        snap.isSaveLoaded    = client.isSaveLoaded;
-        snap.isInCutscene    = (client.csCtxState != CS_STATE_IDLE);
-        snap.isInvulnerable  = (client.invincibilityTimer != 0);
+        snap.isLocal         = isLocal;
         snap.followerActive  = client.followerActive;
         snap.isClimbing      = client.isClimbing;
+
+        if (isLocal) {
+            // The local client's entry in Anchor::Instance->clients is only
+            // touched by RecomputeEffectiveHost / handshake bookkeeping — it
+            // never receives the per-frame "live state" fields a peer gets
+            // via PLAYER_UPDATE / UPDATE_CLIENT_STATE. So fields like
+            // isSaveLoaded / sceneNum / worldPos stay at their struct
+            // defaults (false / 0 / origin) on the local entry forever.
+            // Read directly from the live game state instead.
+            snap.isSaveLoaded   = Anchor::Instance->IsSaveLoaded();
+            if (gPlayState != nullptr) {
+                snap.sceneNum     = (int16_t)gPlayState->sceneNum;
+                snap.roomNum      = (int8_t)gPlayState->roomCtx.curRoom.num;
+                snap.isInCutscene = (gPlayState->csCtx.state != CS_STATE_IDLE);
+                Player* localPlayer = GET_PLAYER(gPlayState);
+                if (localPlayer != nullptr) {
+                    snap.worldPos       = localPlayer->actor.world.pos;
+                    snap.isInvulnerable = (localPlayer->invincibilityTimer != 0);
+                }
+            }
+        } else {
+            snap.sceneNum       = client.sceneNum;
+            snap.roomNum        = client.curRoomNum;
+            snap.worldPos       = client.posRot.pos;
+            snap.isSaveLoaded   = client.isSaveLoaded;
+            snap.isInCutscene   = (client.csCtxState != CS_STATE_IDLE);
+            snap.isInvulnerable = (client.invincibilityTimer != 0);
+        }
 
         // step 12+ fields left at struct-default values until the
         // boss-room / scene-residency plumbing lands. Documented in

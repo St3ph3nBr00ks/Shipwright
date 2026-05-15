@@ -2462,6 +2462,52 @@ void SohMenu::AddMenuEnhancements() {
             "- Respawns 10s later at the door closest to the leader\n"
             "  (or at the leader if no door is in range).\n\n"
             "Max HP mirrors Link's heart capacity (clamped to 3..20)."));
+
+    // AI Director — host-authoritative spawn-decision substrate.
+    // Plans/ai_director_plan.md.
+    path.sidebarName = "AI Director";
+    AddSidebarEntry("Enhancements", path.sidebarName, 1);
+    path.column = SECTION_COLUMN_1;
+
+    AddWidget(path, "Director debug panel", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Open AI Director Debug Window", WIDGET_WINDOW_BUTTON)
+        .CVar(CVAR_WINDOW("AIDirectorDebug"))
+        .RaceDisable(false)
+        .WindowName("AI Director Debug")
+        .Options(WindowButtonOptions().Tooltip(
+            "Floating window showing Director state: global-host status, "
+            "registered descriptors with live counts and cooldown info, "
+            "session-view player snapshots, and a TestDescriptor toggle.\n\n"
+            "Read-only on non-host clients (state shown is the most recent "
+            "DIRECTOR_STATE_SYNC received from the host)."));
+
+    AddWidget(path, "TestDescriptor (dev)", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Enable TestDescriptor", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("AI.Director.TestDescriptorEnabled"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Dev-only descriptor that spawns ACTOR_EN_TEST (Stalfos) at "
+            "the most-isolated player every 30s, max 1 alive. Validates "
+            "the full Director pipeline (proposal -> spawn -> ledger -> "
+            "ENEMY_SPAWN broadcast -> ENEMY_DEFEATED -> cleanup) without "
+            "an Invader actor existing.\n\n"
+            "Pre-loads the actor's required object via Object_Spawn so "
+            "the Stalfos appears even in scenes that don't natively load "
+            "object_st (works in Bottom of the Well, Hyrule Field, etc.)."));
+
+    AddWidget(path, "Diagnostic logging", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Log Proposals", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("AI.Director.LogProposals"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Emits SPDLOG_INFO lines for per-tick descriptor proposal "
+            "decisions: which gate blocked a spawn (live-count cap / "
+            "no target / target invalid / cooldown), or when a proposal "
+            "was offered. Throttled to once per ~5s per descriptor so "
+            "the log doesn't flood.\n\n"
+            "Useful for debugging 'why isn't my descriptor spawning?' "
+            "Default off. Lifecycle logs (ExecuteSpawn ok, OnSpawn-"
+            "Removed) are always on — those are rare events."));
 }
 
 } // namespace SohGui

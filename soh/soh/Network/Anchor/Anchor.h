@@ -927,10 +927,11 @@ class Anchor : public Network {
     void HandlePacket_UpdateTeamState(nlohmann::json payload);
     void HandlePacket_SceneTransitionHandoff(nlohmann::json payload);
 
-    // AI Director migration-snapshot send/receive. Body lives in
-    // Packets/DirectorStateSync.cpp; called from
-    // AnchorDirector::Director after every ledger mutation on host.
-    void SendPacket_DirectorStateSync();
+    // AI Director migration-snapshot receive (private — called from
+    // OnIncomingJson dispatch only). The corresponding Send is public,
+    // declared further down alongside other externally-callable
+    // SendPacket_* methods, since AnchorDirector::Director invokes it
+    // directly after ledger mutations.
     void HandlePacket_DirectorStateSync(nlohmann::json payload);
     // Pillar C v1
     void HandlePacket_WorldFlagSet(nlohmann::json payload);
@@ -958,6 +959,17 @@ class Anchor : public Network {
 
   public:
     uint32_t ownClientId;
+
+    // Set to true for the duration of AnchorDirector::Director::ExecuteSpawn's
+    // Actor_Spawn call so the OnActorSpawn auto-broadcast does NOT fire
+    // (Director sends ENEMY_SPAWN itself with descriptor identity in
+    // schema-5 fields). Without this, every Director spawn produced two
+    // ENEMY_SPAWN packets — one with director=0/0 from the auto-hook, one
+    // with director=desc/variant from Director::ExecuteSpawn. Public so
+    // the external Director module can set/clear it directly (sibling
+    // isSpawningNetworkActor stays private since it's only touched from
+    // Anchor::HandlePacket_EnemySpawn).
+    bool isSpawningDirectorActor = false;
 
     // Pillar A Phase 1 — global effective-host migration (pure-(a)).
     //
@@ -1387,6 +1399,13 @@ class Anchor : public Network {
     void SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect);
     void SendPacket_EnemyHitPlayer(uint32_t netId);
     void HandlePacket_EnemyHitPlayer(nlohmann::json payload);
+
+    // AI Director migration-snapshot send. Body lives in
+    // Packets/DirectorStateSync.cpp. Called from
+    // AnchorDirector::Director after every ledger mutation on host.
+    // Receive (HandlePacket_DirectorStateSync) is private — only
+    // OnIncomingJson dispatches it.
+    void SendPacket_DirectorStateSync();
 
     // PROJECTILE_HIT_ENEMY — peer → room host. Sent when a peer's local
     // projectile (currently En_Nutsball only) lands on a peer's local
