@@ -1556,11 +1556,17 @@ void TickLEDGE_HOIST(EnFollower* this_, PlayState* play, const Vec3f& leaderPos)
             const float progress =
                 std::min(1.0f, this_->skelAnime.curFrame /
                                 this_->skelAnime.endFrame);
-            // Lerp Y only — XZ kept at the start pos (anim's body
-            // motion handles XZ visually). Smooth visual rise.
-            a->world.pos.y = sLocalNav.hoistStartPos.y +
-                              (this_->hoistTargetPos.y -
-                               sLocalNav.hoistStartPos.y) * progress;
+            // Lerp ALL THREE axes (X, Y, Z) so body translates
+            // smoothly from start pos to ledge top during the anim.
+            // Without XZ lerp, NPC stays at its start XZ (which may
+            // be a few units away from the ledge edge) and only Y
+            // moves up — looks like body floating up to the wrong
+            // XZ then snapping to ledge top XZ at completion.
+            const Vec3f& s = sLocalNav.hoistStartPos;
+            const Vec3f& t = this_->hoistTargetPos;
+            a->world.pos.x = s.x + (t.x - s.x) * progress;
+            a->world.pos.y = s.y + (t.y - s.y) * progress;
+            a->world.pos.z = s.z + (t.z - s.z) * progress;
         }
         return;
     }
@@ -1983,6 +1989,16 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             this_->state = EN_FOLLOWER_STATE_SWIMMING;
             sLocalNav.path.Reset();  // discard land path; swim handler
                                      // navigates direct-to-leader.
+            // Clear jumpInProgress when entering water from a jump.
+            // Without this, the airborne anim hold logic keeps the
+            // jump anim active because jumpInProgress only clears on
+            // bgCheckFlags & 1 (floor landing) — which doesn't fire
+            // for water entry. NPC plays kRunJump for several seconds
+            // until eventually touching the underwater floor.
+            if (sLocalNav.jumpInProgress) {
+                npc->gravity              = -2.0f;  // restore default
+                sLocalNav.jumpInProgress  = false;
+            }
             SPDLOG_INFO("[FollowerNPC] FOLLOW/IDLE→SWIMMING "
                         "(yDistToWater={:.1f}u > {:.0f}u threshold for "
                         "linkAge={})",
@@ -2088,6 +2104,25 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             enterLedgeHoist(HOIST_CONTEXT_GROUND, ledge->topPos, "LedgeAnchor");
         } else if (RaycastDetectLedge(play, npc->world.pos, leaderPos, targetTop)) {
             enterLedgeHoist(HOIST_CONTEXT_GROUND, targetTop, "raycast");
+        } else {
+            // Diagnostic — leader is high enough to warrant hoist but
+            // neither LedgeAnchor nor raycast found a ledge geometry.
+            // NPC will fall through to auto-jump or just walk into the
+            // wall. Log throttled to ~2s to track field-test cases
+            // where hoist should fire but doesn't.
+            static uint64_t sLastHoistMissDiag = 0;
+            const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                          std::memory_order_relaxed);
+            if (curFrame > sLastHoistMissDiag + 40) {
+                SPDLOG_INFO("[FollowerNPC.hoist] GROUND trigger conditions met "
+                            "but no ledge found — leader.y={:.0f}, NPC.y={:.0f} "
+                            "(diff={:.0f}), navData={}, ledgeAnchorCount={}",
+                            leaderPos.y, npc->world.pos.y,
+                            leaderPos.y - npc->world.pos.y,
+                            (navData ? "OK" : "NULL"),
+                            (navData ? (int)navData->ledgeAnchors.size() : 0));
+                sLastHoistMissDiag = curFrame;
+            }
         }
     }
 
@@ -2202,7 +2237,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             // Earlier value of 6.0 produced only +9u peak rise against
             // our -2.0 gravity; bump to 10.0 + lower gravity to match
             // Player's airborne behavior at z_player.c:9670.
-            constexpr float kJumpBoostVy = 10.0f;
+            constexpr float kJumpBoostVy = 8.0f;   // tuned 6 → 10 → 8 over field tests
             constexpr float kJumpGravity = -1.2f;  // Player_Action_8084411C
             npc->velocity.y = kJumpBoostVy;
             npc->gravity    = kJumpGravity;        // restored on landing
