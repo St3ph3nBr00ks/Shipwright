@@ -1137,6 +1137,52 @@ static constexpr float kClimbForceEngageBaseDistSq = 200.0f * 200.0f;
 void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
 
+    // FAST PATH: leader is actively climbing — track leader's pos
+    // directly (no cell-grid pathfinding). Eliminates two field-test
+    // bugs:
+    //
+    //   * 10u Y oscillation during co-climb. Was caused by the cell-
+    //     based path's Y-axis filter (cells <= leader.y - 20) being
+    //     too tight when NPC and leader are at near-equal Y (lateral
+    //     climb). Path went empty repeatedly, NPC exited CLIMBING
+    //     briefly, gravity pulled Y down ~10u, force-engage refired
+    //     with lower NPC.y, repeat.
+    //
+    //   * NPC drops to bottom of wall when leader reaches lateral
+    //     edge. Was caused by exit-to-FOLLOW when path empty → fall
+    //     to bottom → re-engage CLIMBING from bottom (cells above
+    //     bottom-NPC.y + below leader.y produce a path that climbs
+    //     up from the bottom).
+    //
+    // Direct tracking: NPC.xz = leader.xz, NPC.y lerps toward
+    // (leader.y - kClimbStayBelowLeader). Smooth, no oscillation,
+    // no need for cell-by-cell path.
+    //
+    // Path-based logic still handles the "leader stopped climbing"
+    // case (mantle-out, NPC alone climbing, etc.) — that's the
+    // original code below this fast-path branch.
+    if (Anchor::Instance->IsLocalPlayerClimbing()) {
+        constexpr float kCoClimbYOffset = 10.0f;  // sit just below leader
+        a->world.pos.x = leaderPos.x;
+        a->world.pos.z = leaderPos.z;
+        const float targetY = leaderPos.y - kCoClimbYOffset;
+        const float dy = targetY - a->world.pos.y;
+        if (std::fabs(dy) < kClimbSpeedY) {
+            a->world.pos.y = targetY;
+        } else {
+            a->world.pos.y += (dy > 0.0f ? kClimbSpeedY : -kClimbSpeedY);
+        }
+        // Mirror leader's facing — handles wall curvature
+        // automatically since Player's rotation tracks the surface.
+        Player* leaderPtr = GET_PLAYER(play);
+        if (leaderPtr != nullptr) {
+            a->shape.rot.y = leaderPtr->actor.shape.rot.y;
+            a->world.rot.y = a->shape.rot.y;
+        }
+        a->speedXZ = 0.0f;
+        return;  // skip path-based subgoal navigation
+    }
+
     // Resolve subgoal.
     if (sLocalNav.path.Empty()) {
         // Path exhausted — if leader is STILL climbing and we have an
