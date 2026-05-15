@@ -1,4 +1,5 @@
 #include "Anchor.h"
+#include "AIDirector/Director.h"      // AnchorDirector::Director::Instance() (Director scaffold step 1)
 #include "AIFollower/Follower.h"      // FollowerFrameContext for the OnGameFrameUpdate wrapper (Phase 1 commit 4)
 #include "soh/cvar_prefixes.h"        // CVAR_REMOTE_ANCHOR / CVAR_ENHANCEMENT (Nav system commit 6c)
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
@@ -1186,6 +1187,12 @@ void Anchor::RegisterHooks() {
     // ShouldActorUpdate input injection) are re-registered there on every
     // enable/disable of Anchor.
     RegisterFollowerHooks(isConnected);
+
+    // AI Director hook registration. Drives AnchorDirector::Director::Tick()
+    // each frame on the global-effective-host. Step 1 scaffold: Tick body
+    // is a no-op until descriptors are registered (step 7+). See
+    // Plans/ai_director_plan.md §9.
+    RegisterDirectorHooks(isConnected);
 
     // #region Enemy sync hooks (Phase 1 — visibility)
 
@@ -2823,6 +2830,17 @@ void Anchor::RegisterHooks() {
             }
         }
         SendPacket_EnemyDefeated(ext->netId);
+
+        // AI Director: notify removal for director-spawned enemies. Early-
+        // exits inside OnEnemyRemoved if this netId isn't in the Director's
+        // registry, so the cost for non-director-spawned kills is one hash
+        // lookup. Cause is always Kill from this path; descriptors that
+        // need other DefeatCauses (Leash, SceneExit, etc.) trigger those
+        // via their own paths before calling Actor_Kill.
+        if (::SceneAuthority::IsEffectiveHost()) {
+            AnchorDirector::Director::Instance().OnEnemyRemoved(
+                ext->netId, AnchorDirector::DefeatCause::Kill);
+        }
     });
 
     // Fix 12 — Actor_Kill death path: ENEMY_DEFEATED for enemies that skip OnEnemyDefeat.
@@ -3762,4 +3780,32 @@ void Anchor::RegisterHooks() {
     });
 
     // #endregion
+}
+
+// ---------------------------------------------------------------------------
+// Anchor::RegisterDirectorHooks — (re-)register the AI Director's per-frame
+// tick. Step 1 scaffold per Plans/ai_director_plan.md §9 step 1.
+//
+// The Director itself lives at AIDirector/Director.cpp as the singleton
+// AnchorDirector::Director::Instance(). Tick() body is host-gated and
+// no-ops when no descriptors are registered, so this hook is safe to fire
+// every frame.
+//
+// Re-registration on enable/disable mirrors RegisterFollowerHooks: the
+// hook ID is a function-scope static, unregistered on entry and re-
+// registered only when isConnected. Disconnect path is responsible for
+// also clearing any descriptor-private state — currently the registry
+// is set up once at construction and persists across connect cycles,
+// which is intentional (cooldown ledgers / live counts persist across
+// transient disconnects).
+// ---------------------------------------------------------------------------
+void Anchor::RegisterDirectorHooks(bool isConnected) {
+    static HOOK_ID directorHookId = 0;
+    GameInteractor::Instance->UnregisterGameHook<GameInteractor::OnGameFrameUpdate>(directorHookId);
+    directorHookId = 0;
+    if (isConnected) {
+        directorHookId = GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>([]() {
+            AnchorDirector::Director::Instance().Tick();
+        });
+    }
 }

@@ -865,6 +865,14 @@ class Anchor : public Network {
     // for the state machine, ShouldActorUpdate for input injection) are both
     // re-registered on every Anchor enable/disable to track isConnected.
     void RegisterFollowerHooks(bool isConnected);
+
+    // AI Director hook (re-)registration. Tick body is small enough to live
+    // inline in HookHandlers.cpp's RegisterHooks rather than a sibling
+    // .cpp; Director itself lives at AIDirector/Director.cpp as the
+    // singleton AnchorDirector::Director::Instance(). Re-registered on
+    // every Anchor enable/disable so Tick fires only when connected.
+    // See Plans/ai_director_plan.md §9 step 1.
+    void RegisterDirectorHooks(bool isConnected);
     void RefreshClientActors();
     // Backfill EnemyNetId extensions on actors that are already loaded but
     // missing the extension. Recovery path for the case where a scene init

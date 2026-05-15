@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/AIDirector/Director.h"  // Director::OnEnemyRemoved (step 3 hook)
 #include "soh/Network/Anchor/Common/ActorSyncScope.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
@@ -1406,6 +1407,15 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     SPDLOG_INFO("[EnemyDefeated] Received defeat for netId={} killerClientId={} killerTeamId={}",
                 netId, killerClientId,
                 killerTeamId.empty() ? "(unattributed)" : killerTeamId);
+
+    // AI Director: notify removal for director-spawned enemies. Host-only —
+    // mNetIdToDescriptor only has entries on the authority that spawned them.
+    // Early-exits inside OnEnemyRemoved when the netId isn't director-spawned,
+    // so the cost on vanilla-enemy defeats is one hash lookup.
+    if (::SceneAuthority::IsEffectiveHost() && netId != 0) {
+        AnchorDirector::Director::Instance().OnEnemyRemoved(
+            netId, AnchorDirector::DefeatCause::Kill);
+    }
 
     // Host-routed attribution: when host receives unattributed kill, fill
     // in attribution from the relay-enriched sender field and re-broadcast.
