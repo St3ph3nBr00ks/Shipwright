@@ -204,6 +204,13 @@ enum class FollowerNpcAnim {
     // in a single anim. EN_ARROW projectile spawns at the release
     // frame (~5/15) inside TickRANGED_ATTACK.
     kBowShoot   = 24,  // gPlayerAnim_link_bow_bow_shoot
+    // Stage 5 — child-Link crawlspace anims. Player uses
+    // gPlayerAnim_link_child_tunnel_start as both entry AND the
+    // continuous crawl-loop (z_player.c:7695); we follow the same
+    // shape and play it as a loop while moving through the tunnel.
+    // The end anim plays when exiting forward.
+    kCrawlMove  = 25,  // gPlayerAnim_link_child_tunnel_start (loop)
+    kCrawlExit  = 26,  // gPlayerAnim_link_child_tunnel_end   (one-shot)
 };
 
 struct LocalNpcNavState {
@@ -371,6 +378,13 @@ static s32 ModelGroupForLastWeapon() {
 // log 162.
 static s32 NpcStateToModelGroup(s32 state) {
     switch (state) {
+        case EN_FOLLOWER_STATE_CRAWLING:
+            // Crawlspaces force weapons sheathed regardless of
+            // sheathe-delay. Player vanilla also clears all combat
+            // state on crawlspace entry. Returning DEFAULT here
+            // bypasses the time-based retention in the default
+            // branch — NPC visually puts everything away to crawl.
+            return PLAYER_MODELGROUP_DEFAULT;
         case EN_FOLLOWER_STATE_RANGED_ATTACK:
             return PLAYER_MODELGROUP_BOW_SLINGSHOT;
         case EN_FOLLOWER_STATE_ATTACK:
@@ -1177,6 +1191,10 @@ LinkAnimationHeader* AnimHeaderFor(FollowerNpcAnim kind, s8 modelAnimType) {
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_defense_hit;
         case FollowerNpcAnim::kBowShoot:
             return (LinkAnimationHeader*)&gPlayerAnim_link_bow_bow_shoot;
+        case FollowerNpcAnim::kCrawlMove:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_child_tunnel_start;
+        case FollowerNpcAnim::kCrawlExit:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_child_tunnel_end;
         case FollowerNpcAnim::kNone:
         default:
             return nullptr;
@@ -1216,7 +1234,8 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
         want == FollowerNpcAnim::kDeathDrown ||
         want == FollowerNpcAnim::kSwordSwing ||
         want == FollowerNpcAnim::kBlockHit ||
-        want == FollowerNpcAnim::kBowShoot;
+        want == FollowerNpcAnim::kBowShoot ||
+        want == FollowerNpcAnim::kCrawlExit;
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                           1.0f /* playSpeed — caller overrides per-frame */,
                           0.0f /* startFrame */,
@@ -1433,6 +1452,11 @@ FollowerNpcAnim AnimForState(s32 state, float speedXZ) {
             // EnsureAnimation picks gPlayerAnim_link_normal_wait
             // (sword+shield ready stance) instead of the _free variant.
             return FollowerNpcAnim::kWait;
+        case EN_FOLLOWER_STATE_CRAWLING:
+            // Stage 5 — child crawlspace traversal. Loop the entry
+            // anim during traversal; dispatcher overrides to kCrawlExit
+            // when the exit transition fires.
+            return FollowerNpcAnim::kCrawlMove;
         case EN_FOLLOWER_STATE_IDLE:
         default:
             return FollowerNpcAnim::kWait;
@@ -2170,6 +2194,7 @@ const char* StateName(s32 s) {
         case EN_FOLLOWER_STATE_BLOCK:         return "BLOCK";
         case EN_FOLLOWER_STATE_RANGED_ATTACK: return "RANGED_ATTACK";
         case EN_FOLLOWER_STATE_STANDBY:       return "STANDBY";
+        case EN_FOLLOWER_STATE_CRAWLING:      return "CRAWLING";
         default:                              return "UNKNOWN";
     }
 }
@@ -2878,6 +2903,191 @@ s32 ChooseCombatExitState(EnFollower* this_, PlayState* play) {
                                : EN_FOLLOWER_STATE_FOLLOW;
 }
 
+// ----------------------------------------------------------------------------
+// Stage 5 — CRAWLING state.
+//
+// Child-Link-only traversal of crawlspaces (the Player_TryEnteringCrawlspace
+// equivalent at z_player.c:7630). RoomNavData catalogues crawlspaces as
+// CrawlspaceAnchor entries — entryPos + entryNormal (wall normal pointing
+// OUT of the crawlspace toward the entry side). A typical crawlspace
+// has TWO anchors, one at each end with opposite normals.
+//
+// Traversal:
+//   1. Detection — if leader is on the far side of an anchor's wall
+//      plane AND NPC is on the entry-facing side within entry range,
+//      enter CRAWLING.
+//   2. Snap NPC to entryPos + face into the wall (-entryNormal).
+//   3. Move forward at slow constant speed (matches Player's
+//      sControlInput->rel.stick_y * 0.03f scale; ~3.81 max).
+//   4. Loop kCrawlMove (gPlayerAnim_link_child_tunnel_start) the
+//      whole time.
+//   5. Exit when NPC crosses past the wall plane to the leader's side
+//      OR after kCrawlMaxDistance traveled (safety cap).
+//   6. Play kCrawlExit one-shot, transition to FOLLOW.
+//
+// AI Follower (player-rigged) handles this trivially — Player's
+// vanilla code detects crawlspace entry on BTN_A, sets
+// PLAYER_STATE2_CRAWLING, runs the camera-locked traversal. AI
+// Follower just injects stick_y=127 (Follower.cpp:2273). NPC has
+// no Player code path; we replicate the traversal here.
+//
+// linkAge gate — only child Link can crawl (z_player.c:7639's
+// !LINK_IS_ADULT). NPC's linkAge field is set at spawn from
+// gSaveContext.linkAge; gate on linkAge == LINK_AGE_CHILD (1).
+// ----------------------------------------------------------------------------
+static constexpr float kCrawlSpeed         = 3.5f;   // matches Player's stick_y*0.03 max ≈ 3.81
+static constexpr float kCrawlEntryRadius   = 150.0f; // NPC must be within this XZ of entryPos to enter
+static constexpr float kCrawlMinCrossDist  = 20.0f;  // both NPC + leader must be this far from wall plane
+static constexpr float kCrawlExitMargin    = 30.0f;  // NPC has crossed past wall plane by this much → exit
+static constexpr float kCrawlMaxDistance   = 400.0f; // safety cap on traversal length
+
+struct CrawlState {
+    const ::AnchorNavRoom::CrawlspaceAnchor* anchor = nullptr;
+    Vec3f forwardDir = { 0, 0, 0 };  // -entryNormal direction (into the wall)
+    Vec3f entryPos   = { 0, 0, 0 };  // captured at entry for max-distance bail
+    bool  exitAnimPlaying = false;   // true once we've switched to kCrawlExit
+};
+static CrawlState sCrawlState;
+
+// Find the crawlspace anchor that separates NPC from leader. Returns
+// nullptr if no eligible anchor exists.
+const ::AnchorNavRoom::CrawlspaceAnchor* FindCrawlspaceForCrossing(
+    const ::AnchorNavRoom::RoomNavData* navData,
+    const Vec3f& npcPos,
+    const Vec3f& leaderPos)
+{
+    if (navData == nullptr || navData->crawlspaceAnchors.empty()) return nullptr;
+    const ::AnchorNavRoom::CrawlspaceAnchor* best = nullptr;
+    float bestDistSq = std::numeric_limits<float>::max();
+    for (const auto& a : navData->crawlspaceAnchors) {
+        // Signed distance to wall plane (positive = entry side, OUT of wall).
+        const float npcSide =
+            (npcPos.x - a.entryPos.x) * a.entryNormal.x +
+            (npcPos.z - a.entryPos.z) * a.entryNormal.z;
+        const float leaderSide =
+            (leaderPos.x - a.entryPos.x) * a.entryNormal.x +
+            (leaderPos.z - a.entryPos.z) * a.entryNormal.z;
+        // NPC must be on entry-facing side (positive); leader on far side (negative).
+        if (npcSide < kCrawlMinCrossDist || leaderSide > -kCrawlMinCrossDist) {
+            continue;
+        }
+        // Y filter — crawlspaces are roughly at NPC's altitude.
+        if (std::fabs(a.entryPos.y - npcPos.y) > 60.0f) continue;
+        // NPC must be within entry radius of entryPos XZ.
+        const float dx = npcPos.x - a.entryPos.x;
+        const float dz = npcPos.z - a.entryPos.z;
+        const float distSq = dx*dx + dz*dz;
+        if (distSq > kCrawlEntryRadius * kCrawlEntryRadius) continue;
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            best = &a;
+        }
+    }
+    return best;
+}
+
+void TickCRAWLING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    (void)leaderPos;
+    Actor* a = &this_->actor;
+    a->speedXZ = 0.0f;  // we drive position directly, not via Actor_MoveXZGravity
+
+    if (sCrawlState.anchor == nullptr) {
+        // Defensive — anchor pointer lost (scene change?). Bail.
+        SPDLOG_WARN("[FollowerNPC] CRAWLING tick with null anchor — exiting to FOLLOW");
+        this_->state = EN_FOLLOWER_STATE_FOLLOW;
+        return;
+    }
+
+    // Once exit anim is playing, hold position and wait for anim
+    // completion — then transition to FOLLOW.
+    if (sCrawlState.exitAnimPlaying) {
+        if (this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
+            SPDLOG_INFO("[FollowerNPC] CRAWLING→FOLLOW (exit anim complete at "
+                        "({:.0f},{:.0f},{:.0f}))",
+                        a->world.pos.x, a->world.pos.y, a->world.pos.z);
+            this_->state = EN_FOLLOWER_STATE_FOLLOW;
+            sCrawlState.anchor = nullptr;
+            sCrawlState.exitAnimPlaying = false;
+        }
+        return;
+    }
+
+    // Traversal — move forward at constant speed.
+    a->world.pos.x += sCrawlState.forwardDir.x * kCrawlSpeed;
+    a->world.pos.z += sCrawlState.forwardDir.z * kCrawlSpeed;
+    // Y stays at entryPos.y (crawlspaces are flat tunnels — vanilla
+    // Player's crawlspace code doesn't apply gravity either).
+    a->world.pos.y = sCrawlState.entryPos.y;
+
+    // Exit detection — has NPC crossed past the wall plane to the
+    // leader's side by margin?
+    const float currentSide =
+        (a->world.pos.x - sCrawlState.anchor->entryPos.x) * sCrawlState.anchor->entryNormal.x +
+        (a->world.pos.z - sCrawlState.anchor->entryPos.z) * sCrawlState.anchor->entryNormal.z;
+    // Safety cap — distance traveled from entry.
+    const float dx = a->world.pos.x - sCrawlState.entryPos.x;
+    const float dz = a->world.pos.z - sCrawlState.entryPos.z;
+    const float traveled = std::sqrt(dx*dx + dz*dz);
+
+    const bool crossedPlane = currentSide < -kCrawlExitMargin;
+    const bool tooFar       = traveled > kCrawlMaxDistance;
+    if (crossedPlane || tooFar) {
+        SPDLOG_INFO("[FollowerNPC] CRAWLING — exit triggered ({}), traveled {:.0f}u "
+                    "from entry; switching to kCrawlExit anim",
+                    crossedPlane ? "crossed plane" : "max distance",
+                    traveled);
+        sCrawlState.exitAnimPlaying = true;
+        this_->stopAnimPlaying = 0;  // let kCrawlExit override flow through
+    }
+}
+
+// Try to enter CRAWLING from IDLE / FOLLOW. Returns true if entered.
+// Called from the dispatcher pre-state-handler block.
+bool TryEnterCrawling(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
+    if (this_->state != EN_FOLLOWER_STATE_IDLE &&
+        this_->state != EN_FOLLOWER_STATE_FOLLOW) {
+        return false;
+    }
+    // Child-Link only — Player's Player_TryEnteringCrawlspace gates
+    // on !LINK_IS_ADULT (z_player.c:7639). Adult Link is too tall.
+    if (this_->linkAge != LINK_AGE_CHILD) return false;
+
+    const ::AnchorNavRoom::RoomNavData* navData =
+        ::AnchorNavRoom::GetForRoom(
+            play->sceneNum,
+            (int8_t)play->roomCtx.curRoom.num);
+    const auto* anchor = FindCrawlspaceForCrossing(navData,
+                                                     this_->actor.world.pos,
+                                                     leaderPos);
+    if (anchor == nullptr) return false;
+
+    // Enter — snap to entryPos + face -entryNormal (into the wall).
+    Actor* a = &this_->actor;
+    a->world.pos.x = anchor->entryPos.x;
+    a->world.pos.z = anchor->entryPos.z;
+    a->world.pos.y = anchor->entryPos.y;
+    a->shape.rot.y = Math_Atan2S(-anchor->entryNormal.z, -anchor->entryNormal.x);
+    a->world.rot.y = a->shape.rot.y;
+    a->speedXZ     = 0.0f;
+    a->velocity.y  = 0.0f;
+
+    sCrawlState.anchor    = anchor;
+    sCrawlState.entryPos  = a->world.pos;
+    sCrawlState.forwardDir = {
+        -anchor->entryNormal.x, 0.0f, -anchor->entryNormal.z
+    };
+    sCrawlState.exitAnimPlaying = false;
+    this_->state = EN_FOLLOWER_STATE_CRAWLING;
+    this_->stopAnimPlaying = 0;  // let kCrawlMove flow through dispatcher hold
+
+    SPDLOG_INFO("[FollowerNPC] {}→CRAWLING (entry=({:.0f},{:.0f},{:.0f}) "
+                "normal=({:.2f},{:.2f}))",
+                StateName(this_->prevState),
+                anchor->entryPos.x, anchor->entryPos.y, anchor->entryPos.z,
+                anchor->entryNormal.x, anchor->entryNormal.z);
+    return true;
+}
+
 // DEAD handler — Stage 2.
 // Locks XZ motion, lets gravity settle the body, holds the death anim
 // (kDeath = gPlayerAnim_link_normal_back_downA) until kFollowerNpcDeathHoldMs
@@ -3538,6 +3748,11 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // initial pursuit yaw computation).
     TryEngageCombat(this_, play);
 
+    // Stage 5 — crawlspace entry check. Fires when leader is on the
+    // far side of a CrawlspaceAnchor wall plane and NPC is on the
+    // entry side within range. Child Link only.
+    TryEnterCrawling(this_, play, leaderPos);
+
     // Dispatch.
     switch (this_->state) {
         default:
@@ -3553,6 +3768,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         case EN_FOLLOWER_STATE_BLOCK:       TickBLOCK(this_, play, leaderPos); break;
         case EN_FOLLOWER_STATE_RANGED_ATTACK: TickRANGED_ATTACK(this_, play, leaderPos); break;
         case EN_FOLLOWER_STATE_STANDBY:     TickSTANDBY(this_, play, leaderPos); break;
+        case EN_FOLLOWER_STATE_CRAWLING:    TickCRAWLING(this_, play, leaderPos); break;
     }
 
     // Clear stop-anim latch when the ONCE anim has reached endFrame.
@@ -3625,6 +3841,14 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     if (this_->state == EN_FOLLOWER_STATE_DEAD &&
         this_->deathCause == 1) {
         localAnim = FollowerNpcAnim::kDeathDrown;
+    }
+    // Crawlspace exit anim — AnimForState returns kCrawlMove for
+    // EN_FOLLOWER_STATE_CRAWLING; override to kCrawlExit when the
+    // exit transition has been triggered (TickCRAWLING set the
+    // exitAnimPlaying flag).
+    if (this_->state == EN_FOLLOWER_STATE_CRAWLING &&
+        sCrawlState.exitAnimPlaying) {
+        localAnim = FollowerNpcAnim::kCrawlExit;
     }
     // Stage 3 — non-fatal fall hurt reaction. Plays the back-down anim
     // briefly without entering DEAD state (NPC sits up automatically
@@ -4081,7 +4305,8 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // below the ledge during the lock-pose phase.
     if (this_->state != EN_FOLLOWER_STATE_CLIMBING &&
         this_->state != EN_FOLLOWER_STATE_SWIMMING &&
-        this_->state != EN_FOLLOWER_STATE_LEDGE_HOIST) {
+        this_->state != EN_FOLLOWER_STATE_LEDGE_HOIST &&
+        this_->state != EN_FOLLOWER_STATE_CRAWLING) {
         Actor_MoveXZGravity(npc);
 
         // Update collision-with-ground / floor altitude. Without this

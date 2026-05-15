@@ -30,6 +30,7 @@ typedef enum {
     EN_FOLLOWER_STATE_BLOCK       = 9,  // shield-up defensive stance (Stage 4)
     EN_FOLLOWER_STATE_RANGED_ATTACK = 10, // bow shot at distant enemy (Stage 4)
     EN_FOLLOWER_STATE_STANDBY     = 11, // alert pose with weapon drawn between combat exchanges (Stage 4)
+    EN_FOLLOWER_STATE_CRAWLING    = 12, // child-Link crawlspace traversal (Stage 5)
 } EnFollowerAIState;
 
 // LEDGE_HOIST entry context — drives anim selection.
