@@ -677,8 +677,17 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
 
 // Phase=Alive, phaseChanged=true — dynamic spawn replication.
 // Sent by the host when a runtime spawn occurs after the initial scene
-// actor batch has loaded (En_Encount1, Peahat larvae, Floormaster split).
-void Anchor::SendPacket_EnemySpawn(Actor* actor) {
+// actor batch has loaded (En_Encount1, Peahat larvae, Floormaster split),
+// OR by AI Director's ExecuteSpawn for director-spawned actors.
+//
+// Schema-5 director fields (AI Director hard Pillar F bump, 2026-05) are
+// always emitted — `directorDescriptorId == 0` means "not director-spawned"
+// (vanilla dynamic spawn). Peers deserialize with the same default so
+// older clients silently lose the marker rather than failing the receive.
+void Anchor::SendPacket_EnemySpawn(Actor* actor,
+                                   uint8_t directorDescriptorId,
+                                   uint8_t directorVariantId,
+                                   int     directorGroupId) {
     if (!IsSaveLoaded()) {
         return;
     }
@@ -712,10 +721,16 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor) {
         payload["netId"] = ext->netId;
     }
 
-    SPDLOG_INFO("[EnemySpawn] Sending spawn actorId={} netId={} pos=({:.1f},{:.1f},{:.1f}) params={}",
+    // AI Director identity (schema 5 — mandatory fields, always emitted).
+    payload["directorDescriptorId"] = directorDescriptorId;
+    payload["directorVariantId"]    = directorVariantId;
+    payload["directorGroupId"]      = directorGroupId;
+
+    SPDLOG_INFO("[EnemySpawn] Sending spawn actorId={} netId={} pos=({:.1f},{:.1f},{:.1f}) params={} director={}/{}",
                 actor->id,
                 payload.value("netId", (uint32_t)0),
-                actor->home.pos.x, actor->home.pos.y, actor->home.pos.z, actor->params);
+                actor->home.pos.x, actor->home.pos.y, actor->home.pos.z, actor->params,
+                directorDescriptorId, directorVariantId);
 
     SendJsonToRemote(payload);
 }
@@ -1320,8 +1335,21 @@ void Anchor::HandlePacket_EnemySpawn(nlohmann::json payload) {
     Vec3s  rot     = payload["rot"].get<Vec3s>();
     s16    params  = payload.value("params", (s16)0);
 
-    SPDLOG_INFO("[EnemySpawn] Received spawn actorId={} pos=({:.1f},{:.1f},{:.1f}) params={}",
-                actorId, pos.x, pos.y, pos.z, params);
+    // AI Director identity (schema 5). Defaults of 0 mean "not director-
+    // spawned" — equivalent to a pre-bump packet from an unlikely-stale
+    // peer, or any vanilla dynamic spawn. Pulled out here so the SPDLOG
+    // line below carries the marker for visual log inspection. Future
+    // steps may stash these on the spawned actor's EnemyNetId for debug-
+    // panel rendering on peers (the host already tracks via Director's
+    // mNetIdToDescriptor at RecordSpawn time).
+    uint8_t directorDescriptorId = payload.value("directorDescriptorId", (uint8_t)0);
+    uint8_t directorVariantId    = payload.value("directorVariantId",    (uint8_t)0);
+    int     directorGroupId      = payload.value("directorGroupId",      0);
+    (void)directorGroupId;  // step 4: deserialized but not yet stashed (step 7+ consumer)
+
+    SPDLOG_INFO("[EnemySpawn] Received spawn actorId={} pos=({:.1f},{:.1f},{:.1f}) params={} director={}/{}",
+                actorId, pos.x, pos.y, pos.z, params,
+                directorDescriptorId, directorVariantId);
 
     // Idempotency guard for #186 — drop the spawn if an actor with this
     // netId already exists in any synced category. Without this, a

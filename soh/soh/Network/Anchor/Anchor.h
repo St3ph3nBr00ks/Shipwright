@@ -1359,7 +1359,16 @@ class Anchor : public Network {
     // matching phase tag; bodies live in EnemyStateSync/Packets/EnemyState.cpp.
     void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);   // phase=Alive       phaseChanged=false
     void SendPacket_EnemyDefeated(uint32_t netId);               // phase=DyingByLocal phaseChanged=true
-    void SendPacket_EnemySpawn(Actor* actor);                    // phase=Alive       phaseChanged=true
+    // ENEMY_STATE phase=Alive phaseChanged=true (dynamic spawn).
+    // Optional descId / variantId / groupId carry AI Director identity
+    // for director-spawned actors. Defaults to (0, 0, 0) for vanilla
+    // dynamic spawns and current hook-site callers. Director's
+    // ExecuteSpawn passes the descriptor's values explicitly.
+    // Wire-format schema 5 (Pillar F hard bump 2026-05; see PacketSchemas.h).
+    void SendPacket_EnemySpawn(Actor* actor,
+                               uint8_t directorDescriptorId = 0,
+                               uint8_t directorVariantId    = 0,
+                               int     directorGroupId      = 0);
     void SendPacket_EnemyRespawn(uint32_t netId);                // phase=Regrowing   phaseChanged=true
     void SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect);
     void SendPacket_EnemyHitPlayer(uint32_t netId);
