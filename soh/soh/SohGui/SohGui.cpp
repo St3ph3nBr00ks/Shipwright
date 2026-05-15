@@ -26,6 +26,7 @@
 #include "soh/Enhancements/TimeDisplay/TimeDisplay.h"
 #include "soh/Enhancements/mod_menu.h"
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/AIDirector/DirectorDebugWindow.h"
 
 namespace SohGui {
 
@@ -91,6 +92,7 @@ std::shared_ptr<SohModalWindow> mModalWindow;
 std::shared_ptr<Notification::Window> mNotificationWindow;
 std::shared_ptr<TimeDisplayWindow> mTimeDisplayWindow;
 std::shared_ptr<AnchorRoomWindow> mAnchorRoomWindow;
+std::shared_ptr<AnchorDirector::DirectorDebugWindow> mAIDirectorDebugWindow;
 
 UIWidgets::Colors GetMenuThemeColor() {
     return mSohMenu->GetMenuThemeColor();
@@ -197,6 +199,9 @@ void SetupGuiElements() {
     gui->AddGuiWindow(mTimeDisplayWindow);
     mAnchorRoomWindow = std::make_shared<AnchorRoomWindow>(CVAR_WINDOW("AnchorRoom"), "Anchor Room");
     gui->AddGuiWindow(mAnchorRoomWindow);
+    mAIDirectorDebugWindow = std::make_shared<AnchorDirector::DirectorDebugWindow>(
+        CVAR_WINDOW("AIDirectorDebug"), "AI Director Debug");
+    gui->AddGuiWindow(mAIDirectorDebugWindow);
 }
 
 void Destroy() {
@@ -231,6 +236,7 @@ void Destroy() {
     mPlandomizerWindow = nullptr;
     mTimeDisplayWindow = nullptr;
     mAnchorRoomWindow = nullptr;
+    mAIDirectorDebugWindow = nullptr;
 }
 
 void RegisterPopup(std::string title, std::string message, std::string button1, std::string button2,
