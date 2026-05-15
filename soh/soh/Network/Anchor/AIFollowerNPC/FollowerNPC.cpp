@@ -541,16 +541,32 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // idles instead of climbing up.
     const Vec3f effectiveTarget = ComputeEffectiveTarget(leaderPos);
 
+    // ---- Proximity check: skip pathfinding when leader is close ---
+    // When leader is within 30u 3D, NPC just walks straight at leader
+    // — no need for substrate path computation. Avoids spurious
+    // re-paths around small obstacles when leader is right there.
+    const float pdx0 = leaderPos.x - a->world.pos.x;
+    const float pdy0 = leaderPos.y - a->world.pos.y;
+    const float pdz0 = leaderPos.z - a->world.pos.z;
+    const float dist3DSq = pdx0*pdx0 + pdy0*pdy0 + pdz0*pdz0;
+    constexpr float kFollowProxLimit = 30.0f;
+    const bool nearLeader = dist3DSq <= (kFollowProxLimit * kFollowProxLimit);
+    if (nearLeader) {
+        // Reset path so subsequent far-leader paths start fresh.
+        sLocalNav.path.Reset();
+    }
+
     // ---- Path refresh ------------------------------------------------
     const uint64_t curFrame   = Anchor::Instance->gameFrameCounter.load(
                                     std::memory_order_relaxed);
     const int      refreshTicks = Anchor::Instance->MsToGameTicks(kPathRefreshMs);
     const bool needRefresh =
-        sLocalNav.path.Empty() ||
-        (refreshTicks > 0 &&
-         curFrame >= sLocalNav.lastPathRefreshFrame + (uint64_t)refreshTicks) ||
-        AnchorDist::DistXZSq(effectiveTarget, sLocalNav.lastPathTargetPos) >
-            kPathRetargetDist * kPathRetargetDist;
+        !nearLeader && (
+            sLocalNav.path.Empty() ||
+            (refreshTicks > 0 &&
+             curFrame >= sLocalNav.lastPathRefreshFrame + (uint64_t)refreshTicks) ||
+            AnchorDist::DistXZSq(effectiveTarget, sLocalNav.lastPathTargetPos) >
+                kPathRetargetDist * kPathRetargetDist);
     if (needRefresh) {
         AnchorNav::TrailKey leaderKey =
             AnchorNav::TrailKeyForPlayer((uint8_t)Anchor::Instance->ownClientId);
@@ -1137,50 +1153,49 @@ static constexpr float kClimbForceEngageBaseDistSq = 200.0f * 200.0f;
 void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
 
-    // FAST PATH: leader is actively climbing — track leader's pos
-    // directly (no cell-grid pathfinding). Eliminates two field-test
-    // bugs:
+    // FAST PATH: leader is actively climbing AND NPC is within 30u 3D
+    // of leader. Track leader's pos directly (no cell-grid pathfinding).
+    // Beyond 30u, fall through to the cell-grid path so NPC can
+    // navigate to leader properly (e.g. NPC at bottom of wall, leader
+    // at top — needs path to know which cells to climb through).
     //
-    //   * 10u Y oscillation during co-climb. Was caused by the cell-
-    //     based path's Y-axis filter (cells <= leader.y - 20) being
-    //     too tight when NPC and leader are at near-equal Y (lateral
-    //     climb). Path went empty repeatedly, NPC exited CLIMBING
-    //     briefly, gravity pulled Y down ~10u, force-engage refired
-    //     with lower NPC.y, repeat.
-    //
-    //   * NPC drops to bottom of wall when leader reaches lateral
-    //     edge. Was caused by exit-to-FOLLOW when path empty → fall
-    //     to bottom → re-engage CLIMBING from bottom (cells above
-    //     bottom-NPC.y + below leader.y produce a path that climbs
-    //     up from the bottom).
+    // Solves two field-test bugs caused by cell-grid pathfinding when
+    // NPC and leader are at near-equal Y:
+    //   * 10u Y oscillation during co-climb (path filter empty →
+    //     exit → gravity → refire with lower Y → repeat).
+    //   * NPC drops to bottom when leader reaches lateral edge (same
+    //     empty-path → exit → fall sequence).
     //
     // Direct tracking: NPC.xz = leader.xz, NPC.y lerps toward
-    // (leader.y - kClimbStayBelowLeader). Smooth, no oscillation,
-    // no need for cell-by-cell path.
-    //
-    // Path-based logic still handles the "leader stopped climbing"
-    // case (mantle-out, NPC alone climbing, etc.) — that's the
-    // original code below this fast-path branch.
-    if (Anchor::Instance->IsLocalPlayerClimbing()) {
-        constexpr float kCoClimbYOffset = 10.0f;  // sit just below leader
-        a->world.pos.x = leaderPos.x;
-        a->world.pos.z = leaderPos.z;
-        const float targetY = leaderPos.y - kCoClimbYOffset;
-        const float dy = targetY - a->world.pos.y;
-        if (std::fabs(dy) < kClimbSpeedY) {
-            a->world.pos.y = targetY;
-        } else {
-            a->world.pos.y += (dy > 0.0f ? kClimbSpeedY : -kClimbSpeedY);
+    // (leader.y - 10). Smooth, no oscillation.
+    {
+        const float pdx = leaderPos.x - a->world.pos.x;
+        const float pdy = leaderPos.y - a->world.pos.y;
+        const float pdz = leaderPos.z - a->world.pos.z;
+        const float dist3DSq = pdx*pdx + pdy*pdy + pdz*pdz;
+        constexpr float kCoClimbProxLimit = 30.0f;
+        const bool nearLeader = dist3DSq <= (kCoClimbProxLimit * kCoClimbProxLimit);
+        if (Anchor::Instance->IsLocalPlayerClimbing() && nearLeader) {
+            constexpr float kCoClimbYOffset = 10.0f;  // sit just below leader
+            a->world.pos.x = leaderPos.x;
+            a->world.pos.z = leaderPos.z;
+            const float targetY = leaderPos.y - kCoClimbYOffset;
+            const float dy = targetY - a->world.pos.y;
+            if (std::fabs(dy) < kClimbSpeedY) {
+                a->world.pos.y = targetY;
+            } else {
+                a->world.pos.y += (dy > 0.0f ? kClimbSpeedY : -kClimbSpeedY);
+            }
+            // Mirror leader's facing — handles wall curvature
+            // automatically since Player's rotation tracks the surface.
+            Player* leaderPtr = GET_PLAYER(play);
+            if (leaderPtr != nullptr) {
+                a->shape.rot.y = leaderPtr->actor.shape.rot.y;
+                a->world.rot.y = a->shape.rot.y;
+            }
+            a->speedXZ = 0.0f;
+            return;  // skip path-based subgoal navigation
         }
-        // Mirror leader's facing — handles wall curvature
-        // automatically since Player's rotation tracks the surface.
-        Player* leaderPtr = GET_PLAYER(play);
-        if (leaderPtr != nullptr) {
-            a->shape.rot.y = leaderPtr->actor.shape.rot.y;
-            a->world.rot.y = a->shape.rot.y;
-        }
-        a->speedXZ = 0.0f;
-        return;  // skip path-based subgoal navigation
     }
 
     // Resolve subgoal.
