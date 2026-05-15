@@ -1,4 +1,5 @@
 #include "Anchor.h"
+#include "AIDirector/Director.h"
 #include "Common/PacketSchemas.h"
 #include "WorldStateSync/WorldStateSync.h"
 #include <nlohmann/json.hpp>
@@ -476,6 +477,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_WorldStateSnapshot(payload);
             else if (packetType == SCENE_DEATHS_CLEARED)
                 HandlePacket_SceneDeathsCleared(payload);
+            else if (packetType == DIRECTOR_STATE_SYNC)
+                HandlePacket_DirectorStateSync(payload);
         } catch (const std::exception& e) {
             SPDLOG_ERROR("[Anchor] Exception while processing incoming packet {}", e.what());
             SPDLOG_ERROR("[Anchor] Packet: {}", payload.dump());
@@ -595,6 +598,13 @@ void Anchor::OnBecameEffectiveHost() {
     // joiners are affected — they'll see corpses for post-migration kills
     // only. Acceptable for First Dungeon Demo scope.
     EnemyStateSync::HostBookkeeping::Instance().ClearAllDefeatBroadcasts();
+
+    // AI Director migration handoff (step 5). The local Director already
+    // has the latest cached ledger state from a prior DIRECTOR_STATE_SYNC
+    // (peers always apply on receive). Notify descriptors that this
+    // client is now the authority so they can rebuild host-perspective
+    // caches, log "I am authority", etc.
+    AnchorDirector::Director::Instance().OnHostMigrated(/*isNewHost=*/true);
 
     // Vacancy reconciliation across migration boundary.
     //

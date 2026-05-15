@@ -14,7 +14,13 @@
  * DEFEATED routes to Director::OnEnemyRemoved on host from both the local
  * OnEnemyDefeat hook (HookHandlers.cpp) and the HandlePacket_EnemyDefeated
  * receive path (EnemyState.cpp).
- * Step 4+: proposal arbitration + ExecuteSpawn body.
+ * Step 4 (landed): ENEMY_STATE schema 5 — director identity fields on
+ * dynamic-spawn packets (Common/PacketSchemas.h + EnemyState.cpp).
+ * Step 5 (landed): DIRECTOR_STATE_SYNC packet plus SerializeMigrationSnapshot
+ * / ApplyMigrationSnapshot. Host broadcasts on every RecordSpawn / OnEnemy-
+ * Removed; peers cache; OnBecameEffectiveHost fires Director::OnHostMigrated
+ * so descriptors run their migration hook.
+ * Step 6+: event-forwarding plumbing + proposal arbitration body.
  *
  * Hook registration lives in Anchor::RegisterDirectorHooks (HookHandlers.cpp
  * — sibling to the existing RegisterFollowerHooks call). The OnGameFrameUpdate
@@ -161,6 +167,13 @@ void Director::RecordSpawn(int16_t sceneNum, int8_t roomNum, uint8_t descId, uin
     if (netId != 0) {
         mNetIdToDescriptor[netId] = descId;
     }
+
+    // Step 5: broadcast updated state to peers so any migration target
+    // has a fresh snapshot. Host-side only; non-host shouldn't be calling
+    // RecordSpawn at all, but the SendPacket itself gates on host.
+    if (Anchor::Instance != nullptr) {
+        Anchor::Instance->SendPacket_DirectorStateSync();
+    }
 }
 
 void Director::OnEnemyRemoved(uint32_t netId, DefeatCause cause) {
@@ -181,6 +194,12 @@ void Director::OnEnemyRemoved(uint32_t netId, DefeatCause cause) {
     count = std::max(0, count - 1);
 
     mNetIdToDescriptor.erase(it);
+
+    // Step 5: broadcast updated state to peers so any migration target
+    // has a fresh snapshot. Host-side only.
+    if (Anchor::Instance != nullptr) {
+        Anchor::Instance->SendPacket_DirectorStateSync();
+    }
 }
 
 void Director::NotifyEvent(const DirectorEventPayload& evt) {
@@ -302,6 +321,107 @@ const PlayerSnapshot* SessionView::PlayerByClientId(uint32_t clientId) const {
         if (p.clientId == clientId) return &p;
     }
     return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Host-migration snapshot (step 5).
+// ---------------------------------------------------------------------------
+//
+// Wire format (compact arrays-of-pairs keep the JSON small):
+//
+//   {
+//     "globalFrame":  <uint64>,
+//     "lastSpawnFrames": [[<uint32 key>, <int frame>], ...],
+//     "liveCounts":     [[<uint8 descId>, <int count>], ...],
+//     "netIdToDesc":    [[<uint32 netId>, <uint8 descId>], ...],
+//     "descState":      {"<descId>": <opaque blob>, ...}
+//   }
+//
+// The packet envelope (type, schema, etc.) is added by
+// SendPacket_DirectorStateSync; this method returns just the data payload.
+
+nlohmann::json Director::SerializeMigrationSnapshot() const {
+    nlohmann::json snapshot;
+    snapshot["globalFrame"] = mGlobalFrameCounter;
+
+    nlohmann::json lastSpawnFrames = nlohmann::json::array();
+    for (const auto& [key, frame] : mLastSpawnFrameByKey) {
+        lastSpawnFrames.push_back(nlohmann::json::array({key, frame}));
+    }
+    snapshot["lastSpawnFrames"] = lastSpawnFrames;
+
+    nlohmann::json liveCounts = nlohmann::json::array();
+    for (const auto& [descId, count] : mLiveCountByDescriptor) {
+        liveCounts.push_back(nlohmann::json::array({descId, count}));
+    }
+    snapshot["liveCounts"] = liveCounts;
+
+    nlohmann::json netIdToDesc = nlohmann::json::array();
+    for (const auto& [netId, descId] : mNetIdToDescriptor) {
+        netIdToDesc.push_back(nlohmann::json::array({netId, descId}));
+    }
+    snapshot["netIdToDesc"] = netIdToDesc;
+
+    // Per-descriptor opaque state. Key as string for stable JSON-object
+    // representation; descriptor ids are small uint8 → string conversion
+    // is unambiguous.
+    nlohmann::json descState = nlohmann::json::object();
+    for (const auto& d : mDescriptors) {
+        nlohmann::json blob = d->SerializeMigrationState();
+        if (!blob.is_null() && !blob.empty()) {
+            descState[std::to_string(d->GetDescriptorId())] = std::move(blob);
+        }
+    }
+    snapshot["descState"] = descState;
+
+    return snapshot;
+}
+
+void Director::ApplyMigrationSnapshot(const nlohmann::json& snapshot) {
+    if (!snapshot.is_object()) {
+        return;
+    }
+
+    // Replace, don't merge. The host is authoritative; whatever local
+    // ledger entries existed are stale by definition.
+    mLastSpawnFrameByKey.clear();
+    mLiveCountByDescriptor.clear();
+    mNetIdToDescriptor.clear();
+
+    if (snapshot.contains("globalFrame")) {
+        mGlobalFrameCounter = snapshot["globalFrame"].get<uint64_t>();
+    }
+
+    if (snapshot.contains("lastSpawnFrames") && snapshot["lastSpawnFrames"].is_array()) {
+        for (const auto& pair : snapshot["lastSpawnFrames"]) {
+            if (!pair.is_array() || pair.size() != 2) continue;
+            mLastSpawnFrameByKey[pair[0].get<uint32_t>()] = pair[1].get<int>();
+        }
+    }
+
+    if (snapshot.contains("liveCounts") && snapshot["liveCounts"].is_array()) {
+        for (const auto& pair : snapshot["liveCounts"]) {
+            if (!pair.is_array() || pair.size() != 2) continue;
+            mLiveCountByDescriptor[pair[0].get<uint8_t>()] = pair[1].get<int>();
+        }
+    }
+
+    if (snapshot.contains("netIdToDesc") && snapshot["netIdToDesc"].is_array()) {
+        for (const auto& pair : snapshot["netIdToDesc"]) {
+            if (!pair.is_array() || pair.size() != 2) continue;
+            mNetIdToDescriptor[pair[0].get<uint32_t>()] = pair[1].get<uint8_t>();
+        }
+    }
+
+    if (snapshot.contains("descState") && snapshot["descState"].is_object()) {
+        const auto& descState = snapshot["descState"];
+        for (auto& d : mDescriptors) {
+            const std::string key = std::to_string(d->GetDescriptorId());
+            if (descState.contains(key)) {
+                d->RestoreMigrationState(descState[key]);
+            }
+        }
+    }
 }
 
 }  // namespace AnchorDirector

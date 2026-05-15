@@ -28,6 +28,8 @@
 
 #include "SpawnableEnemyDescriptor.h"
 
+#include <nlohmann/json.hpp>
+
 extern "C" {
 #include "z64.h"  // Vec3f
 }
@@ -148,7 +150,25 @@ public:
     // - Bumps mLiveCountByDescriptor.
     // - Adds the netId → descriptorId mapping so OnEnemyRemoved routes
     //   the removal back to the right descriptor.
+    //
+    // Triggers a DIRECTOR_STATE_SYNC broadcast at the end (host only)
+    // so peers' cached Director state stays current for migration.
     void RecordSpawn(int16_t sceneNum, int8_t roomNum, uint8_t descId, uint32_t netId);
+
+    // --- Host migration snapshot (step 5) -------------------------------
+
+    // Build a full snapshot of Director state for DIRECTOR_STATE_SYNC.
+    // Includes ledgers + per-descriptor SerializeMigrationState() blobs.
+    // Called by SendPacket_DirectorStateSync on host; safe to call at any
+    // time (returns whatever state is currently present).
+    nlohmann::json SerializeMigrationSnapshot() const;
+
+    // Apply a received DIRECTOR_STATE_SYNC snapshot. Overwrites local
+    // ledgers, mGlobalFrameCounter, and calls each known descriptor's
+    // RestoreMigrationState with that descriptor's slice. Always safe
+    // to call on a peer; the migration-hook OnDirectorHostMigrated fires
+    // separately via OnHostMigrated when the host role transfers.
+    void ApplyMigrationSnapshot(const nlohmann::json& snapshot);
 
     // --- Lifecycle hooks called by Anchor / packet handlers -----------
 

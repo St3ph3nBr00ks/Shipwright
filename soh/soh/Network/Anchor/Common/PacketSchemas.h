@@ -42,6 +42,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"REQUEST_TELEPORT", 1},
     {"SCENE_ACTOR_NETIDS", 1},  // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     {"SCENE_TRANSITION_HANDOFF", 2},  // bumped 2026-04-26 (Pillar B): timeline field.
+    {"DIRECTOR_STATE_SYNC", 1},        // AI Director migration snapshot — full ledger replay on every mutation.
     {"BOSS_EXIT_TEAM_WARP", 1},        // Team co-warp on synced boss-room exit.
     {"BOSS_GOMA_LOOKED_AT", 1},        // Peer→host bridge for Boss_Goma intro state-3 trigger.
     {"MIDO_POST_DEKU_LEAVE", 1},       // Dialog→peers broadcast for Mido's post-Deku-Tree confrontation walk-away.

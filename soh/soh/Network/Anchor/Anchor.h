@@ -926,6 +926,12 @@ class Anchor : public Network {
     void HandlePacket_UpdateRoomState(nlohmann::json payload);
     void HandlePacket_UpdateTeamState(nlohmann::json payload);
     void HandlePacket_SceneTransitionHandoff(nlohmann::json payload);
+
+    // AI Director migration-snapshot send/receive. Body lives in
+    // Packets/DirectorStateSync.cpp; called from
+    // AnchorDirector::Director after every ledger mutation on host.
+    void SendPacket_DirectorStateSync();
+    void HandlePacket_DirectorStateSync(nlohmann::json payload);
     // Pillar C v1
     void HandlePacket_WorldFlagSet(nlohmann::json payload);
     void HandlePacket_WorldFlagUnset(nlohmann::json payload);
@@ -1037,6 +1043,14 @@ class Anchor : public Network {
     // boss-room deactivate path and unblocks cross-scene doors / grotto /
     // crawlspace entry. See #169.
     inline static const std::string SCENE_TRANSITION_HANDOFF = "SCENE_TRANSITION_HANDOFF";
+
+    // AI Director migration snapshot. Broadcast from the global-effective-
+    // host on every ledger mutation (RecordSpawn, OnEnemyRemoved). Carries
+    // mLastSpawnFrameByKey + mLiveCountByDescriptor + mNetIdToDescriptor +
+    // per-descriptor SerializeMigrationState(). Peers cache into their own
+    // Director instance so a future host-migration target has fresh state.
+    // See Plans/ai_director_plan.md §2.8.
+    inline static const std::string DIRECTOR_STATE_SYNC = "DIRECTOR_STATE_SYNC";
 
     // BOSS_EXIT_TEAM_WARP — team-routed scene transition for synced boss
     // exits. When a team member enters the dungeon-clear blue warp, all
