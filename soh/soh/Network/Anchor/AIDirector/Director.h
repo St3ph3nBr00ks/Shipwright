@@ -194,13 +194,21 @@ public:
     }
 
 private:
-    Director() = default;
+    Director();  // step 7: constructs default descriptor registry
     Director(const Director&) = delete;
     Director& operator=(const Director&) = delete;
 
     // Build a SessionView snapshot for this tick. Step 1 returns an
     // always-invalid view; step 2 walks players + DummyPlayers.
     SessionView BuildSessionView() const;
+
+    // Execute a winning spawn proposal on the host:
+    //   - Actor_Spawn locally; read assigned netId via EnemyNetId extension.
+    //   - RecordSpawn (ledgers + DIRECTOR_STATE_SYNC broadcast).
+    //   - SendPacket_EnemySpawn with descriptor identity.
+    // Returns true on success; false if Actor_Spawn failed or netId
+    // couldn't be read (rare — actor limit reached, non-EnemyNetId actor).
+    bool ExecuteSpawn(const SpawnProposal& proposal);
 
     // Ledgers --------------------------------------------------------
     //

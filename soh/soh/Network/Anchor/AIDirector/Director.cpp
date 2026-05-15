@@ -29,7 +29,14 @@
  * PlayerOpenedChest, CutsceneStarted/Ended, SceneTransitionBegin) wire
  * when a descriptor first needs them — same pattern: build
  * DirectorEventPayload, call NotifyEvent.
- * Step 7+: TestDescriptor + proposal arbitration body.
+ * Step 7 (landed): proposal-arbitration loop in Tick — collects proposals
+ * from enabled descriptors, picks highest-priority (ties → oldest last-
+ * spawn-frame), runs ExecuteSpawn. ExecuteSpawn calls Actor_Spawn,
+ * reads assigned netId from EnemyNetId, RecordSpawn (broadcasts
+ * DIRECTOR_STATE_SYNC), SendPacket_EnemySpawn with descriptor identity.
+ * TestDescriptor registered in the Director constructor — gated by
+ * gEnhancements.AI.Director.TestDescriptorEnabled CVar.
+ * Step 8+: ImGui debug panel.
  *
  * Hook registration lives in Anchor::RegisterDirectorHooks (HookHandlers.cpp
  * — sibling to the existing RegisterFollowerHooks call). The OnGameFrameUpdate
@@ -37,16 +44,22 @@
  */
 
 #include "Director.h"
+#include "Descriptors/TestDescriptor.h"
 
 #include <algorithm>
 #include <climits>
 #include <cmath>
 #include <limits>
 
+#include <libultraship/libultraship.h>  // SPDLOG_*
+
 #include "../Anchor.h"
 #include "../Common/SceneAuthority.h"
+#include "soh/ObjectExtension/ObjectExtension.h"
 
 extern "C" {
+#include "variables.h"  // gPlayState
+#include "functions.h"  // Actor_Spawn
 #include "z64.h"
 #include "z64cutscene.h"  // CS_STATE_IDLE
 }
@@ -67,6 +80,17 @@ namespace {
 Director& Director::Instance() {
     static Director sInstance;
     return sInstance;
+}
+
+Director::Director() {
+    // Step 7: register the dev-only TestDescriptor. Permanently present
+    // so the debug panel can show its state; gated to no-op by its own
+    // IsEnabled() reading the gEnhancements.AI.Director.TestDescriptor-
+    // Enabled CVar. Production builds carry the registration cost (one
+    // virtual table entry + one per-tick IsEnabled hash-map miss) — well
+    // under measurable.
+    Register(std::make_unique<TestDescriptor>());
+    // Future: Register(std::make_unique<InvaderDescriptor>()) lands in step 11.
 }
 
 SpawnableEnemyDescriptor* Director::Register(std::unique_ptr<SpawnableEnemyDescriptor> descriptor) {
@@ -118,12 +142,107 @@ void Director::Tick() {
         return;
     }
 
-    // Step 3+: collect proposals from view-eligible descriptors,
-    // arbitrate by priority + cooldown, ExecuteSpawn. Body lives here.
-    // Step 2: view is built but no proposals collected because no
-    // descriptors are registered yet (the empty-registry gate above
-    // would have returned). The proposal loop is wired in step 3.
-    (void)view;
+    // Step 7: collect proposals from enabled descriptors, arbitrate,
+    // ExecuteSpawn on the winner. Single group per tick max (plan §3).
+    // Multi-actor group support is in the wire — step 7 still single-
+    // actor since TestDescriptor returns one proposal at a time.
+    std::vector<SpawnProposal> proposals;
+    for (auto& d : mDescriptors) {
+        if (!d->IsEnabled()) continue;
+        auto descProposals = d->ProposeSpawn(*this, view);
+        for (auto& p : descProposals) {
+            // Defensive: ensure source is set so post-arbitration code
+            // can read descriptor identity off the proposal.
+            if (p.source == nullptr) p.source = d.get();
+            proposals.push_back(std::move(p));
+        }
+    }
+    if (proposals.empty()) return;
+
+    // Arbitrate: highest priority wins; ties broken by oldest last-
+    // spawn-frame for the proposal's (scene, room, descId) tuple
+    // (most overdue gets to spawn).
+    size_t winnerIdx = 0;
+    for (size_t i = 1; i < proposals.size(); ++i) {
+        const SpawnProposal& w = proposals[winnerIdx];
+        const SpawnProposal& c = proposals[i];
+        if (c.priority > w.priority) {
+            winnerIdx = i;
+            continue;
+        }
+        if (c.priority < w.priority) continue;
+        // Tiebreak by oldest last-spawn-frame.
+        int wFrames = GetFramesSinceLastSpawn(w.sceneNum, w.roomNum,
+                                              w.source->GetDescriptorId());
+        int cFrames = GetFramesSinceLastSpawn(c.sceneNum, c.roomNum,
+                                              c.source->GetDescriptorId());
+        if (cFrames > wFrames) winnerIdx = i;
+    }
+    ExecuteSpawn(proposals[winnerIdx]);
+}
+
+bool Director::ExecuteSpawn(const SpawnProposal& proposal) {
+    if (gPlayState == nullptr || proposal.source == nullptr) {
+        return false;
+    }
+    if (proposal.actorId == 0) {
+        SPDLOG_WARN("[Director] ExecuteSpawn rejected: actorId=0 from descriptor '{}'",
+                    proposal.source->GetDebugName());
+        return false;
+    }
+
+    // Spawn the actor locally on host. The OnActorSpawn hook will assign
+    // a deterministic netId via the existing EnemyNetId extension path.
+    Actor* spawned = Actor_Spawn(&gPlayState->actorCtx, gPlayState,
+                                 proposal.actorId,
+                                 proposal.worldPos.x,
+                                 proposal.worldPos.y,
+                                 proposal.worldPos.z,
+                                 /*rotX=*/0,
+                                 proposal.yawTowards,
+                                 /*rotZ=*/0,
+                                 proposal.actorParams);
+    if (spawned == nullptr) {
+        SPDLOG_WARN("[Director] ExecuteSpawn: Actor_Spawn failed for actorId={} descriptor='{}' "
+                    "(actor limit, invalid id, or object not loaded)",
+                    proposal.actorId, proposal.source->GetDebugName());
+        return false;
+    }
+
+    // Read the netId assigned by OnActorSpawn. Synced actors get an
+    // EnemyNetId extension; non-synced ones won't and we abort the
+    // bookkeeping (the actor is still in the world — it just won't be
+    // tracked by the Director). Tests should pick synced actor ids.
+    const EnemyNetId* extConst = ObjectExtension::GetInstance().Get<EnemyNetId>(spawned);
+    if (extConst == nullptr || extConst->netId == 0) {
+        SPDLOG_WARN("[Director] ExecuteSpawn: spawned actorId={} has no EnemyNetId — "
+                    "Director will not track this spawn (descriptor='{}')",
+                    proposal.actorId, proposal.source->GetDebugName());
+        return true;  // actor exists; bookkeeping skipped
+    }
+    const uint32_t netId = extConst->netId;
+
+    // Ledger update + DIRECTOR_STATE_SYNC broadcast (handled internally).
+    RecordSpawn(proposal.sceneNum, proposal.roomNum,
+                proposal.source->GetDescriptorId(), netId);
+
+    // Wire-format broadcast: peers spawn the suppressed-local-AI replica
+    // via standard ENEMY_SPAWN pipeline. Carries director identity in
+    // the schema-5 mandatory fields (step 4).
+    if (Anchor::Instance != nullptr) {
+        Anchor::Instance->SendPacket_EnemySpawn(
+            spawned,
+            proposal.source->GetDescriptorId(),
+            proposal.variantId,
+            proposal.groupId);
+    }
+
+    SPDLOG_INFO("[Director] ExecuteSpawn ok: descriptor='{}' actorId={} netId={} "
+                "pos=({:.1f},{:.1f},{:.1f}) variant={} group={}",
+                proposal.source->GetDebugName(), proposal.actorId, netId,
+                proposal.worldPos.x, proposal.worldPos.y, proposal.worldPos.z,
+                proposal.variantId, proposal.groupId);
+    return true;
 }
 
 int Director::GetFramesSinceLastSpawn(int16_t sceneNum, int8_t roomNum, uint8_t descId) const {
