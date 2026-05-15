@@ -44,6 +44,7 @@
  */
 
 #include "Director.h"
+#include "Descriptors/InvaderDescriptor.h"
 #include "Descriptors/TestDescriptor.h"
 
 #include <algorithm>
@@ -110,7 +111,14 @@ Director::Director() {
     // virtual table entry + one per-tick IsEnabled hash-map miss) — well
     // under measurable.
     Register(std::make_unique<TestDescriptor>());
-    // Future: Register(std::make_unique<InvaderDescriptor>()) lands in step 11.
+
+    // Step 11: register the InvaderDescriptor scaffold. ProposeSpawn
+    // returns empty unconditionally — no spawn logic until step 12
+    // (eligibility predicates) + step 13 (PickSpawnPosition) +
+    // step 15 (real ACTOR_EN_INVADER actor). Permanently present so
+    // the debug panel surfaces the descriptor row even when the
+    // master Invaders.Enabled CVar is off.
+    Register(std::make_unique<InvaderDescriptor>());
 }
 
 SpawnableEnemyDescriptor* Director::Register(std::unique_ptr<SpawnableEnemyDescriptor> descriptor) {

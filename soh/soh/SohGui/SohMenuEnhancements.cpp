@@ -2481,6 +2481,21 @@ void SohMenu::AddMenuEnhancements() {
             "Read-only on non-host clients (state shown is the most recent "
             "DIRECTOR_STATE_SYNC received from the host)."));
 
+    AddWidget(path, "Invader (hostile NPC)", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Enable Invader spawns", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("AI.Invaders.Enabled"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Master gate for the Invader descriptor — a host-authoritative "
+            "spawner of hostile Link-look-alike NPCs that hunt your team. "
+            "Inspired by Dark Souls invader summons.\n\n"
+            "Requires the AI Navigation master toggle to also be on (the "
+            "Invader's spawn-position selection consumes the Nav substrate).\n\n"
+            "Step 11 scaffold: descriptor is registered but ProposeSpawn "
+            "returns empty — no spawns actually fire yet. Combat AI and "
+            "the ACTOR_EN_INVADER actor land in later steps. Default off; "
+            "stays off for vanilla play."));
+
     AddWidget(path, "TestDescriptor (dev)", WIDGET_SEPARATOR_TEXT);
     AddWidget(path, "Enable TestDescriptor", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("AI.Director.TestDescriptorEnabled"))
