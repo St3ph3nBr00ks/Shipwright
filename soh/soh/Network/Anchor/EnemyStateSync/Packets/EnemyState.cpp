@@ -1440,9 +1440,22 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     // mNetIdToDescriptor only has entries on the authority that spawned them.
     // Early-exits inside OnEnemyRemoved when the netId isn't director-spawned,
     // so the cost on vanilla-enemy defeats is one hash lookup.
+    //
+    // Step 6: also fire reactive PlayerKilledEnemy event with the killer
+    // attribution from the wire. BossDefeated is fired later (where the
+    // actor walk has resolved actor->id and IsSyncedBossActor check is
+    // available); see the per-category walk below.
     if (::SceneAuthority::IsEffectiveHost() && netId != 0) {
-        AnchorDirector::Director::Instance().OnEnemyRemoved(
-            netId, AnchorDirector::DefeatCause::Kill);
+        auto& director = AnchorDirector::Director::Instance();
+        director.OnEnemyRemoved(netId, AnchorDirector::DefeatCause::Kill);
+
+        AnchorDirector::DirectorEventPayload evt{};
+        evt.type     = AnchorDirector::DirectorEvent::PlayerKilledEnemy;
+        evt.clientId = killerClientId;  // 0 if unattributed
+        evt.sceneNum = (gPlayState != nullptr) ? (s16)gPlayState->sceneNum : 0;
+        evt.roomNum  = (gPlayState != nullptr) ? (s8)gPlayState->roomCtx.curRoom.num : 0;
+        evt.data["netId"] = netId;
+        director.NotifyEvent(evt);
     }
 
     // Host-routed attribution: when host receives unattributed kill, fill

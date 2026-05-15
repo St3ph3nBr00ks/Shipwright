@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/AIDirector/Director.h"  // step 6: forward reactive events
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/PacketSchemas.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
@@ -179,6 +180,42 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         // back to the current scene all leave sceneNum and isSaveLoaded unchanged,
         // but the non-host's OnSceneSpawnActors still fires and bumps its epoch.
         bool     sceneSpawned        = (prevSceneSpawnEpoch != newSceneSpawnEpoch);
+
+        // Step 6: AI Director reactive events. Fires host-only since
+        // descriptors are host-authoritative. PlayerEnteredRoom /
+        // PlayerLeftRoom / SaveLoaded all derive from the transition
+        // booleans computed above; further events (PlayerTookDamage,
+        // PlayerOpenedChest, CutsceneStarted/Ended, SceneTransitionBegin)
+        // are wired when a descriptor first needs them — pattern is
+        // the same: build DirectorEventPayload, call NotifyEvent.
+        if (::SceneAuthority::IsEffectiveHost()) {
+            const int8_t newCurRoom = clients[clientId].curRoomNum;
+            auto fireEvent = [&](AnchorDirector::DirectorEvent type,
+                                 int16_t scene, int8_t room) {
+                AnchorDirector::DirectorEventPayload evt{};
+                evt.type     = type;
+                evt.clientId = clientId;
+                evt.sceneNum = scene;
+                evt.roomNum  = room;
+                AnchorDirector::Director::Instance().NotifyEvent(evt);
+            };
+
+            if (justLoaded) {
+                fireEvent(AnchorDirector::DirectorEvent::SaveLoaded, newScene, newCurRoom);
+            }
+
+            const bool roomChanged = (prevCurRoomNum != newCurRoom);
+            if (sceneChanged || roomChanged) {
+                if (prevSceneNum >= 0) {
+                    fireEvent(AnchorDirector::DirectorEvent::PlayerLeftRoom,
+                              prevSceneNum, prevCurRoomNum);
+                }
+                if (newScene >= 0) {
+                    fireEvent(AnchorDirector::DirectorEvent::PlayerEnteredRoom,
+                              newScene, newCurRoom);
+                }
+            }
+        }
 
         // Exit-gated vacancy detection (Test 1.5 fix follow-up).
         // PRIMARY trigger: when this client transitions OUT of a scene

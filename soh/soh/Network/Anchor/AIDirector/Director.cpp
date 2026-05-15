@@ -20,7 +20,16 @@
  * / ApplyMigrationSnapshot. Host broadcasts on every RecordSpawn / OnEnemy-
  * Removed; peers cache; OnBecameEffectiveHost fires Director::OnHostMigrated
  * so descriptors run their migration hook.
- * Step 6+: event-forwarding plumbing + proposal arbitration body.
+ * Step 6 (landed): event-forwarding plumbing — DirectorEvent::Player-
+ * EnteredRoom / PlayerLeftRoom / SaveLoaded fire from UCS receive
+ * (UpdateClientState.cpp) on peer transitions; PlayerKilledEnemy +
+ * BossDefeated fire from OnEnemyDefeat (HookHandlers.cpp) and Player-
+ * KilledEnemy also fires from HandlePacket_EnemyDefeated (EnemyState.cpp)
+ * with killerClientId attribution. Other events (PlayerTookDamage,
+ * PlayerOpenedChest, CutsceneStarted/Ended, SceneTransitionBegin) wire
+ * when a descriptor first needs them — same pattern: build
+ * DirectorEventPayload, call NotifyEvent.
+ * Step 7+: TestDescriptor + proposal arbitration body.
  *
  * Hook registration lives in Anchor::RegisterDirectorHooks (HookHandlers.cpp
  * — sibling to the existing RegisterFollowerHooks call). The OnGameFrameUpdate

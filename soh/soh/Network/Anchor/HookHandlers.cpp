@@ -2837,9 +2837,30 @@ void Anchor::RegisterHooks() {
         // lookup. Cause is always Kill from this path; descriptors that
         // need other DefeatCauses (Leash, SceneExit, etc.) trigger those
         // via their own paths before calling Actor_Kill.
+        //
+        // Step 6: also fire reactive PlayerKilledEnemy event (and Boss-
+        // Defeated for synced-boss kills) for ANY kill — descriptor
+        // hooks like "ambush after N kills" / "revenge after boss
+        // death" can consume these regardless of whether the killed
+        // actor was director-spawned.
         if (::SceneAuthority::IsEffectiveHost()) {
-            AnchorDirector::Director::Instance().OnEnemyRemoved(
-                ext->netId, AnchorDirector::DefeatCause::Kill);
+            auto& director = AnchorDirector::Director::Instance();
+            director.OnEnemyRemoved(ext->netId, AnchorDirector::DefeatCause::Kill);
+
+            AnchorDirector::DirectorEventPayload evt{};
+            evt.clientId = ownClientId;  // local kill on host
+            evt.sceneNum = (gPlayState != nullptr) ? (s16)gPlayState->sceneNum : 0;
+            evt.roomNum  = (gPlayState != nullptr) ? (s8)gPlayState->roomCtx.curRoom.num : 0;
+            evt.data["netId"]   = ext->netId;
+            evt.data["actorId"] = actor->id;
+
+            evt.type = AnchorDirector::DirectorEvent::PlayerKilledEnemy;
+            director.NotifyEvent(evt);
+
+            if (IsSyncedBossActor(actor->id)) {
+                evt.type = AnchorDirector::DirectorEvent::BossDefeated;
+                director.NotifyEvent(evt);
+            }
         }
     });
 
