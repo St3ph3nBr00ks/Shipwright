@@ -1,11 +1,17 @@
 /**
  * Invader — AI Invader Director-side tick driver and rendering hooks.
  *
- * v1 (step 15a) — scaffold only. Anchor_TickInvaderActor is a no-op;
- * the file-scope draw-context flag (Anchor_InvaderDrawBegin/End +
- * Anchor_GetCurrentlyDrawingInvader) supports the
- * VB_APPLY_TUNIC_COLOR hook's black-tint override for the
- * hostile-Link visual.
+ * v1 (steps 15a + 15b) — Anchor_TickInvaderActor is a no-op; the
+ * Begin/End pair around EnInvader_Draw's Player_DrawImpl call does
+ * two things:
+ *   (1) sets/clears the file-scope draw-context flag for the
+ *       VB_APPLY_TUNIC_COLOR hook's hostile-black tint override
+ *       (Anchor_GetCurrentlyDrawingInvader);
+ *   (2) Phase B equipment swap — temporarily overrides the local
+ *       Player's modelGroup + hand/sheath DLists to
+ *       PLAYER_MODELGROUP_SWORD_AND_SHIELD so the Invader appears
+ *       permanently armed, independent of Link's actual equipment.
+ *       End() restores Player's saved state.
  *
  * Combat AI lands here post-#208 (follower state-machine formal
  * design pass); see Plans/ai_invader_plan.md §2.2.
@@ -31,15 +37,19 @@ extern "C" {
 // v1 is a no-op; combat AI fills this in post-#208.
 void Anchor_TickInvaderActor(Actor* invader, PlayState* play);
 
-// Draw-context flag — set/cleared by EnInvader_Draw around its
-// Player_DrawImpl call. The VB_APPLY_TUNIC_COLOR hook in
-// HookHandlers.cpp reads Anchor_GetCurrentlyDrawingInvader() to
-// detect Invader draws and override the tunic color with the
-// hostile-black tint.
+// Draw-context flag + Phase B equipment swap. Begin/End bracket the
+// Player_DrawImpl call inside EnInvader_Draw. Begin() sets the flag
+// (so VB_APPLY_TUNIC_COLOR can apply the hostile-black tint via
+// Anchor_GetCurrentlyDrawingInvader) and saves the local Player's
+// model state, then forces PLAYER_MODELGROUP_SWORD_AND_SHIELD so the
+// Invader appears armed regardless of Link's equipment. End() clears
+// the flag and restores Player's saved state.
 //
-// Same draw-context flag shape as the NPC Follower's
-// Anchor_FollowerNpcDrawBegin/End. See FollowerNPC.cpp:422 for the
-// canonical pattern.
+// Same draw-context-flag + equipment-swap shape as the NPC Follower's
+// Anchor_FollowerNpcDrawBegin/End. See FollowerNPC.cpp:422-526 for
+// the canonical pattern. The NPC Follower's bow/slingshot quirk-fix
+// (Player_HoldsSlingshot heldItemAction override) is intentionally
+// omitted here — v1 Invader has no ranged state.
 void   Anchor_InvaderDrawBegin(Actor* invader);
 void   Anchor_InvaderDrawEnd(void);
 Actor* Anchor_GetCurrentlyDrawingInvader(void);
