@@ -204,12 +204,20 @@ enum class FollowerNpcAnim {
     // in a single anim. EN_ARROW projectile spawns at the release
     // frame (~5/15) inside TickRANGED_ATTACK.
     kBowShoot   = 24,  // gPlayerAnim_link_bow_bow_shoot
-    // Stage 5 — child-Link crawlspace anims. Player uses
-    // gPlayerAnim_link_child_tunnel_start as both entry AND the
-    // continuous crawl-loop (z_player.c:7695); we follow the same
-    // shape and play it as a loop while moving through the tunnel.
-    // The end anim plays when exiting forward.
-    kCrawlMove  = 25,  // gPlayerAnim_link_child_tunnel_start (loop)
+    // Stage 5 — child-Link crawlspace anims. Both one-shots:
+    // - kCrawlMove plays once on entry (the get-down-and-crouch
+    //   motion); after completion the SkelAnime holds at the end
+    //   frame (low crouch pose) while TickCRAWLING translates the
+    //   body forward. This mirrors Player exactly — Player calls
+    //   Player_AnimPlayOnce at z_player.c:7695 then translates via
+    //   linearVelocity each frame without a continuous crawl loop.
+    //   OoT does not have a true crawl-stride loop animation.
+    // - kCrawlExit plays once on the way out.
+    // (Earlier this enum had kCrawlMove as a loop. Looping the
+    // entry anim cycled back to frame 0 = upright stand pose,
+    // producing a visible stand→crouch→stand→crouch flicker the
+    // user perceived as walking.)
+    kCrawlMove  = 25,  // gPlayerAnim_link_child_tunnel_start (one-shot, holds end frame)
     kCrawlExit  = 26,  // gPlayerAnim_link_child_tunnel_end   (one-shot)
 };
 
@@ -1235,6 +1243,7 @@ void EnsureAnimation(EnFollower* this_, PlayState* play, FollowerNpcAnim want) {
         want == FollowerNpcAnim::kSwordSwing ||
         want == FollowerNpcAnim::kBlockHit ||
         want == FollowerNpcAnim::kBowShoot ||
+        want == FollowerNpcAnim::kCrawlMove ||  // matches Player (Player_AnimPlayOnce at z_player.c:7695)
         want == FollowerNpcAnim::kCrawlExit;
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                           1.0f /* playSpeed — caller overrides per-frame */,
@@ -1453,9 +1462,14 @@ FollowerNpcAnim AnimForState(s32 state, float speedXZ) {
             // (sword+shield ready stance) instead of the _free variant.
             return FollowerNpcAnim::kWait;
         case EN_FOLLOWER_STATE_CRAWLING:
-            // Stage 5 — child crawlspace traversal. Loop the entry
-            // anim during traversal; dispatcher overrides to kCrawlExit
-            // when the exit transition fires.
+            // Stage 5 — child crawlspace traversal. Returns kCrawlMove
+            // on entry; once it plays through, the dispatcher's
+            // stopAnimPlaying hold check keeps localAnim pinned to
+            // currentAnim (still kCrawlMove) so EnsureAnimation
+            // no-ops and the SkelAnime sits at the end frame (low
+            // crouch pose) — body translates via TickCRAWLING.
+            // Dispatcher overrides localAnim to kCrawlExit when the
+            // exit transition fires.
             return FollowerNpcAnim::kCrawlMove;
         case EN_FOLLOWER_STATE_IDLE:
         default:
@@ -3079,6 +3093,16 @@ bool TryEnterCrawling(EnFollower* this_, PlayState* play, const Vec3f& leaderPos
     sCrawlState.exitAnimPlaying = false;
     this_->state = EN_FOLLOWER_STATE_CRAWLING;
     this_->stopAnimPlaying = 0;  // let kCrawlMove flow through dispatcher hold
+
+    // Diagnostic — confirms the anim setup will fire on the next
+    // dispatcher anim-resolution pass. If the user reports walk
+    // anim during CRAWLING, this log establishes whether the
+    // transition was attempted (vs. some earlier override blocking
+    // it).
+    SPDLOG_INFO("[FollowerNPC.crawl] anim setup — currentAnim={} → "
+                "want=kCrawlMove (one-shot); currentAnimType={} stopAnimPlaying={}",
+                (int)this_->currentAnim, (int)this_->currentAnimType,
+                (int)this_->stopAnimPlaying);
 
     SPDLOG_INFO("[FollowerNPC] {}→CRAWLING (entry=({:.0f},{:.0f},{:.0f}) "
                 "normal=({:.2f},{:.2f}))",
