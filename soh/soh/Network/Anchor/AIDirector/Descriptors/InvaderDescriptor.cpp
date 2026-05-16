@@ -4,12 +4,9 @@
  * Eligibility-predicate chain from ai_invader_plan.md §7.1. ProposeSpawn
  * walks the gates; if any blocks, returns empty (with a throttled
  * diagnostic SPDLOG explaining which gate). If all pass, returns a
- * proposal with a placeholder spawn position (target's worldPos) and
- * placeholder actor (ACTOR_EN_TEST + STALFOS_TYPE_1).
- *
- * Step 13 will replace the placeholder position with PickSpawnPosition
- * consuming RoomNavData. Step 15 will replace ACTOR_EN_TEST with the
- * real ACTOR_EN_INVADER.
+ * proposal targeting the real ACTOR_EN_INVADER (step 15a landed,
+ * commit follows). PickSpawnPosition (step 13, landed) supplies the
+ * nav-aware spawn position.
  *
  * Predicates implemented this step:
  *   - Live-count cap (CVar AI.Invaders.MaxAlive, default 1).
@@ -53,7 +50,13 @@
 
 extern "C" {
 #include "z64.h"
-#include "z64actor.h"  // ACTOR_EN_TEST placeholder until step 15's ACTOR_EN_INVADER
+#include "z64actor.h"
+// gEnInvaderId — runtime-allocated actor id for ACTOR_EN_INVADER.
+// Assigned by ActorDB::AddBuiltInCustomActors at boot; defined in
+// soh/src/code/z_play.c. Use this instead of a compile-time ACTOR_*
+// enum since the Invader is a SoH custom actor (not a vanilla
+// decomp actor).
+extern s16 gEnInvaderId;
 }
 
 // gPlayState — Phase 1 §7.5 OnTick reads sceneNum / roomCtx for the
@@ -382,20 +385,30 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
 
     // All gates passed. Build proposal.
     //
-    // Step 12-13 placeholders:
-    //   - actorId = ACTOR_EN_TEST (Stalfos). Real ACTOR_EN_INVADER lands
-    //     in step 15 once #208 unblocks combat AI.
-    //   - actorParams = 1 (STALFOS_TYPE_1, visible variant — type 0 is
-    //     Lens-of-Truth-invisible).
-    //   - worldPos: step-13 nav-aware placement via PickSpawnPosition.
+    // Step 15a: actorId = gEnInvaderId (ACTOR_EN_INVADER, dynamic id
+    // allocated by ActorDB at boot). actorParams=0 (Invader uses no
+    // params today; combat-AI variants may overload it post-#208).
+    // Defensive: skip the proposal if gEnInvaderId is 0 (Boot order:
+    // ActorDB::AddBuiltInCustomActors fires from OTRGlobals.cpp:1569
+    // during initial OTR load. If the Director's first Tick somehow
+    // fires before that, gEnInvaderId is still 0 and Actor_Spawn
+    // would reject it.
+    if (gEnInvaderId == 0) {
+        if (shouldLog) {
+            SPDLOG_WARN("[InvaderDescriptor] no proposal: gEnInvaderId not yet "
+                        "allocated (ActorDB::AddBuiltInCustomActors hasn't run?)");
+            markLog();
+        }
+        return {};
+    }
     SpawnProposal p;
     p.source       = this;
     p.sceneNum     = target->sceneNum;
     p.roomNum      = target->roomNum;
     p.worldPos     = *pickedPos;
     p.yawTowards   = 0;
-    p.actorId      = ACTOR_EN_TEST;
-    p.actorParams  = 1;
+    p.actorId      = gEnInvaderId;
+    p.actorParams  = 0;
     p.variantId    = 0;
     p.priority     = DescriptorPriority::Standard;
     p.groupId      = 0;
@@ -447,14 +460,19 @@ std::vector<SpawnProposal> InvaderDescriptor::BuildForcedProposal(const Director
                     "falling back to player.worldPos");
     }
 
+    if (gEnInvaderId == 0) {
+        SPDLOG_WARN("[InvaderDescriptor] BuildForcedProposal: gEnInvaderId not yet "
+                    "allocated");
+        return {};
+    }
     SpawnProposal p;
     p.source       = this;
     p.sceneNum     = target->sceneNum;
     p.roomNum      = target->roomNum;
     p.worldPos     = spawnPos;
     p.yawTowards   = 0;
-    p.actorId      = ACTOR_EN_TEST;
-    p.actorParams  = 1;
+    p.actorId      = gEnInvaderId;
+    p.actorParams  = 0;
     p.variantId    = 0;
     p.priority     = DescriptorPriority::Standard;
     p.groupId      = 0;
@@ -793,14 +811,19 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
 
         director.ExecuteDespawn(oldNetId, DefeatCause::SceneExit);
 
+        if (gEnInvaderId == 0) {
+            SPDLOG_WARN("[InvaderDescriptor] follow-spawn: gEnInvaderId not yet "
+                        "allocated — skipping continuation");
+            continue;
+        }
         SpawnProposal p;
         p.source         = this;
         p.sceneNum       = (gPlayState != nullptr) ? (int16_t)gPlayState->sceneNum : 0;
         p.roomNum        = (gPlayState != nullptr) ? (int8_t)gPlayState->roomCtx.curRoom.num : 0;
         p.worldPos       = entrancePos;
         p.yawTowards     = 0;
-        p.actorId        = ACTOR_EN_TEST;
-        p.actorParams    = 1;
+        p.actorId        = gEnInvaderId;
+        p.actorParams    = 0;
         p.variantId      = 0;
         p.priority       = DescriptorPriority::Standard;
         p.groupId        = 0;
