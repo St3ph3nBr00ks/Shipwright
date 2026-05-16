@@ -92,44 +92,6 @@ inline int ReadCooldownMs() {
     return sec * 1000;
 }
 
-// Scenes where Invader spawns should never fire regardless of other
-// gates. Narrative-climax / end-game scenes where an invader breaks
-// immersion or interferes with scripted sequences.
-//
-// Step 12 list — minimal. Extends as field-testing surfaces more
-// scenes that need exclusion. The boss-room check (currently stubbed)
-// will catch dungeon-boss rooms generically; this list is for the
-// non-boss-room exclusions.
-//
-// Values match SCENE_* enum from soh/include/tables/scene_table.h.
-bool IsSceneFlaggedNoInvaders(int16_t sceneNum) {
-    switch (sceneNum) {
-        case  0x0A:  // SCENE_GANONS_TOWER
-        case  0x0D:  // SCENE_INSIDE_GANONS_CASTLE
-        case  0x0E:  // SCENE_GANONS_TOWER_COLLAPSE_INTERIOR
-        case  0x0F:  // SCENE_INSIDE_GANONS_CASTLE_COLLAPSE
-        case  0x19:  // SCENE_GANONDORF_BOSS
-        case  0x1A:  // SCENE_GANONS_TOWER_COLLAPSE_EXTERIOR
-        case  0x44:  // SCENE_CHAMBER_OF_THE_SAGES (sage-awakening cutscene
-                     // chamber; narrative-only, no gameplay)
-        case  0x45:  // SCENE_CASTLE_COURTYARD_GUARDS_DAY (young-Link stealth
-                     // section — Invader would break the guard mechanic)
-        case  0x46:  // SCENE_CASTLE_COURTYARD_GUARDS_NIGHT (same)
-        case  0x4A:  // SCENE_CASTLE_COURTYARD_ZELDA (first Zelda meeting,
-                     // scripted cutscene area)
-        case  0x4F:  // SCENE_GANON_BOSS
-        case  0x5F:  // SCENE_HYRULE_CASTLE
-        case  0x64:  // SCENE_OUTSIDE_GANONS_CASTLE (rainbow-bridge approach;
-                     // log 204 — Invader followed across the bridge to the
-                     // castle entrance, breaking endgame atmosphere)
-        case  0x6B:  // SCENE_HAIRAL_NIWA2 (unused castle-courtyard variant;
-                     // included for completeness with the courtyard set)
-            return true;
-        default:
-            return false;
-    }
-}
-
 // Step 13 will implement this against a boss-room registry +
 // HostBookkeeping defeat tracking. Stub returns false (= never a
 // live-boss room) so it doesn't block step 12 testing. Documented
@@ -257,6 +219,50 @@ std::optional<Vec3f> PickSpawnPosition(int16_t sceneNum, int8_t roomNum,
 }
 
 }  // namespace
+
+// Scenes where Invader spawns should never fire regardless of other
+// gates. Narrative-climax / end-game scenes where an invader breaks
+// immersion or interferes with scripted sequences.
+//
+// Step 12 list — minimal. Extends as field-testing surfaces more
+// scenes that need exclusion. The boss-room check (currently stubbed)
+// will catch dungeon-boss rooms generically; this list is for the
+// non-boss-room exclusions.
+//
+// Values match SCENE_* enum from soh/include/tables/scene_table.h.
+//
+// Lifted out of the anonymous namespace 2026-05-16 so the actor-side
+// target picker in PlayerLookup.cpp can share the same exclusion
+// list as the Director's spawn-decision path. Declared in
+// InvaderDescriptor.h; defined here at namespace AnchorDirector
+// (external linkage) instead of file-scope.
+bool IsSceneFlaggedNoInvaders(int16_t sceneNum) {
+    switch (sceneNum) {
+        case  0x0A:  // SCENE_GANONS_TOWER
+        case  0x0D:  // SCENE_INSIDE_GANONS_CASTLE
+        case  0x0E:  // SCENE_GANONS_TOWER_COLLAPSE_INTERIOR
+        case  0x0F:  // SCENE_INSIDE_GANONS_CASTLE_COLLAPSE
+        case  0x19:  // SCENE_GANONDORF_BOSS
+        case  0x1A:  // SCENE_GANONS_TOWER_COLLAPSE_EXTERIOR
+        case  0x44:  // SCENE_CHAMBER_OF_THE_SAGES (sage-awakening cutscene
+                     // chamber; narrative-only, no gameplay)
+        case  0x45:  // SCENE_CASTLE_COURTYARD_GUARDS_DAY (young-Link stealth
+                     // section — Invader would break the guard mechanic)
+        case  0x46:  // SCENE_CASTLE_COURTYARD_GUARDS_NIGHT (same)
+        case  0x4A:  // SCENE_CASTLE_COURTYARD_ZELDA (first Zelda meeting,
+                     // scripted cutscene area)
+        case  0x4F:  // SCENE_GANON_BOSS
+        case  0x5F:  // SCENE_HYRULE_CASTLE
+        case  0x64:  // SCENE_OUTSIDE_GANONS_CASTLE (rainbow-bridge approach;
+                     // log 204 — Invader followed across the bridge to the
+                     // castle entrance, breaking endgame atmosphere)
+        case  0x6B:  // SCENE_HAIRAL_NIWA2 (unused castle-courtyard variant;
+                     // included for completeness with the courtyard set)
+            return true;
+        default:
+            return false;
+    }
+}
 
 bool InvaderDescriptor::IsEnabled() const {
     // Chained gate — both must be on. See header for rationale.
