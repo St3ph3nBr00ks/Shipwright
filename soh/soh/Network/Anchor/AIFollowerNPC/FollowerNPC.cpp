@@ -3016,8 +3016,14 @@ void TickCRAWLING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 
     // Once exit anim is playing, hold position and wait for anim
-    // completion — then transition to FOLLOW.
+    // completion — then transition to FOLLOW. Drop Y by kCrawlExitYDrop
+    // for the duration of the exit anim: gPlayerAnim_link_child_tunnel_end
+    // is authored so the body's pivot starts at standing height while the
+    // model renders crouched — without the drop, the NPC visually floats
+    // 20u above the crawlspace floor for the length of the exit anim.
     if (sCrawlState.exitAnimPlaying) {
+        constexpr float kCrawlExitYDrop = 20.0f;
+        a->world.pos.y = sCrawlState.entryPos.y - kCrawlExitYDrop;
         if (this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
             SPDLOG_INFO("[FollowerNPC] CRAWLING→FOLLOW (exit anim complete at "
                         "({:.0f},{:.0f},{:.0f}))",
