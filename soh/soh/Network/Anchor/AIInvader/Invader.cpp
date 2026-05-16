@@ -40,6 +40,7 @@
 #include "Invader.h"
 
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PlayerLookup.h"  // PickHostileTargetForInvader (Agent 4)
 #include "soh/cvar_prefixes.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
@@ -49,26 +50,13 @@
 #include <limits>
 
 extern "C" {
-#include "variables.h"
-#include "functions.h"
-#include "z64.h"
-#include "macros.h"
-#include "objects/gameplay_keep/gameplay_keep.h"
+#include "variables.h"   // gPlayState, gSaveContext
+#include "functions.h"   // Player_SetModels, Actor_Spawn, Math_*
+#include "z64.h"         // Player, Gfx, PlayState, Actor, Vec3f
+#include "macros.h"      // GET_PLAYER, INV_CONTENT, CS_STATE_IDLE
+#include "objects/gameplay_keep/gameplay_keep.h"  // gPlayerAnim_*
 #include "src/overlays/actors/ovl_En_Invader/z_en_invader.h"
 #include "src/overlays/actors/ovl_En_Arrow/z_en_arrow.h"
-extern PlayState* gPlayState;
-
-// Target-picking placeholder. Agent 4 replaces this with a multi-
-// player picker. Defined in HookHandlers.cpp as a thin wrapper
-// around FindNearestPlayerActor.
-Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
-}
-
-extern "C" {
-#include "variables.h"   // gPlayState
-#include "functions.h"   // Player_SetModels
-#include "macros.h"      // GET_PLAYER
-#include "z64.h"         // Player, Gfx, PLAYER_MODELGROUP_SWORD_AND_SHIELD (via z64player.h)
 extern PlayState* gPlayState;
 }
 
@@ -170,9 +158,11 @@ struct BlockState {
 static BlockState sBlockState;
 
 // ---------------------------------------------------------------------
-// Small math helpers (private clones — same shape as
-// FollowerNPC's free functions but kept inside this TU so we don't
-// reach into FollowerNPC.cpp's anonymous namespace).
+// Small math helpers — defined here so Phase 2 Tick handlers below
+// can call them without forward declarations (C++ single-pass name
+// lookup, CLAUDE.md Pitfall 14). Cloned from FollowerNPC's free
+// functions; kept inside this TU rather than reaching into
+// FollowerNPC's anonymous namespace.
 // ---------------------------------------------------------------------
 inline float Dist2DSq(const Vec3f& a, const Vec3f& b) {
     const float dx = a.x - b.x;
@@ -182,6 +172,330 @@ inline float Dist2DSq(const Vec3f& a, const Vec3f& b) {
 
 inline s16 YawTowardTarget(const Vec3f& from, const Vec3f& to) {
     return Math_Atan2S(to.z - from.z, to.x - from.x);
+}
+
+// Forward declaration — PickHostileTarget is defined further down
+// (after Phase 2 handlers) because it's an Agent 3 helper that lives
+// near the combat constants. The Phase 2 Tick handlers call it for
+// target acquisition. C++ single-pass name lookup needs the decl
+// here (CLAUDE.md Pitfall 14).
+Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
+                         float maxYDelta = 60.0f);
+
+// ---------------------------------------------------------------------
+// Phase 2 — locomotion tuning constants. Cloned from FollowerNPC
+// with the leader-friendly thresholds inverted into target-hostile
+// pursuit thresholds. NOTE post-#208: revisit state shape against
+// canonical follower design pass.
+// ---------------------------------------------------------------------
+
+// Hysteresis: IDLE→FOLLOW fires when target XZ-distance exceeds this.
+// Larger than kEnterIdle so the NPC doesn't oscillate at the boundary.
+// We pick 250u as the "lose interest" threshold — outside this range
+// the Invader returns to IDLE and the target picker may select a
+// different hostile.
+constexpr float kInvFollowEngageDist = 250.0f;
+// FOLLOW→IDLE fires when target XZ-distance falls inside this. Slightly
+// smaller than kEngageStrikeDist so FOLLOW hands off to combat
+// (TryEngageCombat picks ATTACK / ENGAGE) BEFORE the IDLE re-entry
+// snaps the chase. Field test will likely retune; this is a starting
+// point that mirrors FollowerNPC's 50u kEnterIdle scaled to pursuit.
+constexpr float kInvFollowIdleDist = 60.0f;
+// FOLLOW pursuit speeds. Same numerics as FollowerNPC's kRunSpeed /
+// kRunDistance.
+constexpr float kInvWalkSpeed   = 6.0f;
+constexpr float kInvRunSpeed    = 12.0f;
+constexpr float kInvRunDistance = 200.0f;
+// STUCK detection — no progress over this window triggers a one-tick
+// nudge. Same shape as FollowerNPC's kStuckCheckMs / kStuckMinProgress
+// but Invader's nudge distance is smaller (chase enemies don't have
+// the "find route around stairs" goal that the friendly follower does).
+constexpr int   kInvStuckCheckMs    = 3000;
+constexpr float kInvStuckMinProgress = 20.0f;
+constexpr float kInvStuckNudgeDist   = 30.0f;
+// G10 leash — 3D distance threshold + timeout. The Invader can be
+// far from the target; we use a longer leash than FollowerNPC's
+// (1200u/2000ms) so the Invader doesn't teleport away from a hostile
+// it's actively pursuing. Fires only when in IDLE/FOLLOW/STUCK
+// (combat / engage states stay put). Snaps to target on fire.
+constexpr float kInvLeashDistance  = 2000.0f;
+constexpr int   kInvLeashTimeoutMs = 5000;
+
+// Local nav baseline. Same shape as FollowerNPC's sLocalNav (subset —
+// no jump / climb / hoist machinery for v1 Invader). File-scope is
+// safe because actor states are non-reentrant per actor.
+struct LocalInvNavState {
+    Vec3f    stuckCheckPos        = { 0.0f, 0.0f, 0.0f };
+    uint64_t lastStuckCheckFrame  = 0;
+    uint32_t leashFrames          = 0;
+    // Cached target for FOLLOW's anim / speed calc. PickHostileTarget
+    // re-queried each tick, but we keep a one-tick cache so STUCK can
+    // nudge toward the same target without re-running the picker.
+    Actor*   lastTarget           = nullptr;
+};
+static LocalInvNavState sLocalInvNav;
+
+// ---------------------------------------------------------------------
+// Phase 2 — animation kind enum + header / picker / ensurer.
+// Smaller surface than FollowerNPC's (12 kinds → 5 kinds) since v1
+// Invader has no swim / climb / hoist / fidgets. Combat states drive
+// their anims directly via LinkAnimation_Change inside their Tick
+// handlers (matching FollowerNPC's pattern) — this enum covers only
+// the locomotion + alert anims.
+// ---------------------------------------------------------------------
+enum class InvaderAnim {
+    kNone,     // sentinel (no anim selected yet)
+    kWait,     // idle wait (free or fighter depending on modelAnimType)
+    kWalk,     // pursuit walk
+    kRun,      // pursuit run
+    kStopL,    // one-shot stop on left foot (FOLLOW→IDLE)
+    kStopR,    // one-shot stop on right foot (FOLLOW→IDLE)
+};
+
+LinkAnimationHeader* InvAnimHeaderFor(InvaderAnim kind, s8 modelAnimType) {
+    const bool isFighter = (modelAnimType == 1 || modelAnimType == 2);
+    switch (kind) {
+        case InvaderAnim::kWait:
+            if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_free;
+        case InvaderAnim::kWalk:
+            if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_free;
+        case InvaderAnim::kRun:
+            if (modelAnimType == 1) return (LinkAnimationHeader*)&gPlayerAnim_link_fighter_run;
+            if (modelAnimType == 2) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_run;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_run_free;
+        case InvaderAnim::kStopL:
+            if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endL;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endL_free;
+        case InvaderAnim::kStopR:
+            if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR;
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR_free;
+        case InvaderAnim::kNone:
+        default:
+            return nullptr;
+    }
+}
+
+void InvEnsureAnimation(EnInvader* this_, PlayState* play, InvaderAnim want,
+                        s8 modelAnimType) {
+    LinkAnimationHeader* anim = InvAnimHeaderFor(want, modelAnimType);
+    if (anim == nullptr) return;
+    // No-op only if BOTH the kind and the resolved anim header match.
+    // A modelAnimType change must re-fire the anim with the new
+    // variant even when kind is unchanged.
+    if ((InvaderAnim)this_->currentAnim == want &&
+        this_->skelAnime.animation == anim) {
+        return;
+    }
+    const bool oneShot = (want == InvaderAnim::kStopL ||
+                          want == InvaderAnim::kStopR);
+    LinkAnimation_Change(play, &this_->skelAnime, anim,
+                         1.0f /* playSpeed */,
+                         0.0f /* startFrame */,
+                         Animation_GetLastFrame((void*)anim),
+                         oneShot ? ANIMMODE_ONCE : ANIMMODE_LOOP,
+                         -6.0f /* morphFrames */);
+    this_->currentAnim     = (s32)want;
+    this_->currentAnimType = modelAnimType;
+    this_->stopAnimPlaying = oneShot ? 1 : 0;
+}
+
+InvaderAnim InvAnimForState(s32 state, float speedXZ, s32 prevState) {
+    switch (state) {
+        case EN_INVADER_STATE_FOLLOW: {
+            if (speedXZ < 0.1f) return InvaderAnim::kWait;
+            return (speedXZ > 4.0f) ? InvaderAnim::kRun : InvaderAnim::kWalk;
+        }
+        case EN_INVADER_STATE_STUCK:
+            return InvaderAnim::kWait;
+        case EN_INVADER_STATE_IDLE: {
+            // Fire stop-anim ONCE on the FOLLOW→IDLE transition. Caller
+            // (dispatcher) is responsible for not re-firing every tick;
+            // the stopAnimPlaying flag on this_ guards LinkAnimation_Change
+            // from restarting. After the one-shot completes, falls back
+            // to kWait.
+            if (prevState == EN_INVADER_STATE_FOLLOW) {
+                // Pick L/R based on step phase. Same split as FollowerNPC
+                // — phase < 14 = stop-on-left, phase >= 14 = stop-on-right.
+                // Without a real step phase calculation we approximate
+                // via prevState's odd/even quirk; this is "good enough"
+                // visual variety for v1. Field-test may want the full
+                // step-phase machinery.
+                return InvaderAnim::kStopL;
+            }
+            return InvaderAnim::kWait;
+        }
+        default:
+            return InvaderAnim::kWait;
+    }
+}
+
+// ---------------------------------------------------------------------
+// Phase 2 — TickIDLE / TickFOLLOW / TickSTUCK + G10 leash.
+// Cloned from FollowerNPC's same-named handlers, with "leader" swapped
+// to "hostile target via PickHostileTarget" and no substrate path
+// consumption. Direct yaw + speedXZ.
+// ---------------------------------------------------------------------
+
+void TickIDLE(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+    a->speedXZ = 0.0f;
+
+    // Look for a hostile target in the FOLLOW-engage range. TryEngageCombat
+    // has already run by the time this fires; it picks combat states
+    // when in melee/pursuit/ranged range. Anything farther falls to
+    // IDLE-vs-FOLLOW arbitration here.
+    Actor* target = PickHostileTarget(a, play, kInvFollowEngageDist,
+                                       /*maxYDelta=*/kRangedYFilter);
+    if (target != nullptr) {
+        sLocalInvNav.lastTarget = target;
+        this_->state = EN_INVADER_STATE_FOLLOW;
+        // Reset stuck baseline on transition so the FOLLOW handler
+        // measures progress from the engagement point.
+        sLocalInvNav.stuckCheckPos = a->world.pos;
+        sLocalInvNav.lastStuckCheckFrame =
+            Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+        return;
+    }
+    sLocalInvNav.lastTarget = nullptr;
+}
+
+void TickFOLLOW(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+
+    // Re-acquire target each tick. Sticky-target behaviour is the
+    // responsibility of Agent 4's picker (which can return a non-closest
+    // target if it's tracking session-level aggro state); our wrapper
+    // adds the range / Y-delta filter.
+    Actor* target = PickHostileTarget(a, play, kInvFollowEngageDist,
+                                       /*maxYDelta=*/kRangedYFilter);
+    if (target == nullptr) {
+        // Lost target. Hand off to IDLE — the dispatcher's next tick
+        // re-runs TryEngageCombat / TickIDLE which will re-scan.
+        this_->state = EN_INVADER_STATE_IDLE;
+        a->speedXZ   = 0.0f;
+        sLocalInvNav.lastTarget = nullptr;
+        return;
+    }
+    sLocalInvNav.lastTarget = target;
+
+    // Drive yaw + speed toward the target.
+    const s16 yaw = YawTowardTarget(a->world.pos, target->world.pos);
+    a->shape.rot.y = yaw;
+    a->world.rot.y = yaw;
+
+    const float distSq = Dist2DSq(a->world.pos, target->world.pos);
+    const float dist   = std::sqrt(distSq);
+    a->speedXZ = (dist > kInvRunDistance) ? kInvRunSpeed : kInvWalkSpeed;
+
+    // Stuck check — STUCK fires when no real progress happens over
+    // the check window.
+    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                  std::memory_order_relaxed);
+    const int stuckCheckTicks = Anchor::Instance->MsToGameTicks(kInvStuckCheckMs);
+    if (stuckCheckTicks > 0 &&
+        curFrame >= sLocalInvNav.lastStuckCheckFrame + (uint64_t)stuckCheckTicks) {
+        const float progress = std::sqrt(
+            Dist2DSq(a->world.pos, sLocalInvNav.stuckCheckPos));
+        if (progress < kInvStuckMinProgress) {
+            this_->state = EN_INVADER_STATE_STUCK;
+            SPDLOG_INFO("[Invader] FOLLOW→STUCK (no progress {:.1f}u in {}ms @ "
+                        "({:.0f},{:.0f},{:.0f}))",
+                        progress, kInvStuckCheckMs,
+                        a->world.pos.x, a->world.pos.y, a->world.pos.z);
+        }
+        sLocalInvNav.stuckCheckPos       = a->world.pos;
+        sLocalInvNav.lastStuckCheckFrame = curFrame;
+    }
+
+    // Transition: arrived at target (IDLE re-entry). Combat states
+    // pick up before this fires when target is in melee/strike range.
+    if (distSq <= kInvFollowIdleDist * kInvFollowIdleDist) {
+        this_->state = EN_INVADER_STATE_IDLE;
+        a->speedXZ   = 0.0f;
+    }
+}
+
+void TickSTUCK(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+    Actor* target = sLocalInvNav.lastTarget;
+    if (target == nullptr || target->update == nullptr) {
+        // No target — drop to IDLE; the dispatcher's next pass picks
+        // up FROM IDLE cleanly.
+        this_->state = EN_INVADER_STATE_IDLE;
+        a->speedXZ   = 0.0f;
+        return;
+    }
+    const s16 yaw = YawTowardTarget(a->world.pos, target->world.pos);
+    a->shape.rot.y = yaw;
+    a->world.rot.y = yaw;
+    a->speedXZ     = 0.0f;  // nudge IS the motion, not momentum
+    // Direct world.pos write — same shape as FollowerNPC's TickSTUCK.
+    // Actor_UpdateBgCheckInfo at the end of EnInvader_Update re-clamps Y.
+    const float dx = Math_SinS(yaw) * kInvStuckNudgeDist;
+    const float dz = Math_CosS(yaw) * kInvStuckNudgeDist;
+    a->world.pos.x += dx;
+    a->world.pos.z += dz;
+    // Reset baseline so we don't immediately re-trigger STUCK after
+    // the nudge.
+    sLocalInvNav.stuckCheckPos       = a->world.pos;
+    sLocalInvNav.lastStuckCheckFrame =
+        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+    this_->state = EN_INVADER_STATE_FOLLOW;
+    SPDLOG_INFO("[Invader] STUCK→FOLLOW (nudged {:.0f}u toward yaw=0x{:X})",
+                kInvStuckNudgeDist, (uint16_t)yaw);
+}
+
+// G10 leash — Invader too far from its target for > kInvLeashTimeoutMs
+// of consecutive ticks → teleport to the target. Catches Invader stuck
+// behind closed door / left in another room / fell into untracked
+// geometry. Returns true if teleport fired (caller skips rest of tick).
+//
+// CLIMBING / SWIMMING / LEDGE_HOIST don't apply to v1 Invader — only
+// active states are IDLE/FOLLOW/STUCK + combat — so this fires
+// whenever target distance exceeds the leash, regardless of state
+// EXCEPT when the Invader is currently swinging (ATTACK /
+// RANGED_ATTACK / BLOCK / ENGAGE state in active combat) — those are
+// scripted moves and shouldn't be cut short by a leash teleport.
+bool TryFireG10Invader(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+    // Find target — for leash purposes we use the picker's full-range
+    // version (no Y/range filter) so a target far away or elevated
+    // still counts as "should leash to it". If no target at all, no
+    // leash applies.
+    Actor* target = PickHostileTargetForInvader(a, play);
+    if (target == nullptr || target->update == nullptr) {
+        sLocalInvNav.leashFrames = 0;
+        return false;
+    }
+    const float dx = a->world.pos.x - target->world.pos.x;
+    const float dy = a->world.pos.y - target->world.pos.y;
+    const float dz = a->world.pos.z - target->world.pos.z;
+    const float dist3D = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist3D <= kInvLeashDistance) {
+        sLocalInvNav.leashFrames = 0;
+        return false;
+    }
+    sLocalInvNav.leashFrames++;
+    const int timeoutTicks = Anchor::Instance->MsToGameTicks(kInvLeashTimeoutMs);
+    if (timeoutTicks <= 0 || (int)sLocalInvNav.leashFrames < timeoutTicks) {
+        return false;
+    }
+    SPDLOG_INFO("[Invader] G10 leash teleport — dist3D={:.0f}u for {} frames "
+                "(>{}u for >{}ms) → snap to target",
+                dist3D, sLocalInvNav.leashFrames,
+                (int)kInvLeashDistance, kInvLeashTimeoutMs);
+    a->world.pos = target->world.pos;
+    a->speedXZ   = 0.0f;
+    sLocalInvNav.leashFrames        = 0;
+    sLocalInvNav.stuckCheckPos      = a->world.pos;
+    sLocalInvNav.lastStuckCheckFrame =
+        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+    this_->state = EN_INVADER_STATE_FOLLOW;
+    // Snap Y to floor at new pos to avoid sink/float on landing.
+    Actor_UpdateBgCheckInfo(play, a, 26.0f, 10.0f, 50.0f, 4);
+    return true;
 }
 
 const char* StateName(s32 s) {
@@ -200,18 +514,20 @@ const char* StateName(s32 s) {
 }
 
 // ---------------------------------------------------------------------
-// Target picking — placeholder hook for Agent 4. The Invader's
-// hostile-target source is the local-player actor (or the nearest
-// DummyPlayer) discovered by Anchor_GetNearestPlayerActor.
+// Target picking — thin range/Y-delta filter on top of Agent 4's
+// PickHostileTargetForInvader. The Agent 4 picker walks the FULL
+// session (local Player + every in-timeline DummyPlayer + the NPC
+// Follower when targetable), applies session-level validity gates
+// (cutscene / save-loaded / scene-blacklist), and returns the closest
+// valid candidate. Our wrapper layers the combat-tier range + Y-delta
+// filters on top so each tier (melee 80u, pursue 250u, ranged 500u)
+// can independently decide whether the picker's result is in scope.
 //
-// Agent 4 integration point: replace this body with a multi-player
-// picker that consults director-side state (e.g. which players are
-// in scope for this invader, which are out-of-timeline, etc.).
-// Caller validates result is non-null + alive before use.
+// Caller validates non-null + alive before use.
 // ---------------------------------------------------------------------
 Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
                          float maxYDelta = 60.0f) {
-    Actor* candidate = Anchor_GetNearestPlayerActor(self, play);
+    Actor* candidate = PickHostileTargetForInvader(self, play);
     if (candidate == nullptr || candidate->update == nullptr) return nullptr;
     const float dx = candidate->world.pos.x - self->world.pos.x;
     const float dz = candidate->world.pos.z - self->world.pos.z;
@@ -678,10 +994,31 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // G18 — freeze during cutscenes (same shape as FollowerNPC's G18
     // gate). Without this, the Invader could swing or shoot during
     // a cutscene; combat AT/AC during cutscenes is a common source
-    // of "what just hit me?" bugs.
+    // of "what just hit me?" bugs. NOTE: this does NOT cancel an
+    // active AT collider — see Race-Audit caveat in commit message.
     if (gPlayState->csCtx.state != CS_STATE_IDLE) {
         invader->speedXZ = 0.0f;
         return;
+    }
+
+    // Phase 2 G10 leash — Invader too far from any hostile target for
+    // > kInvLeashTimeoutMs → snap to target. Fires only when in
+    // non-combat states; combat handlers run scripted moves that
+    // shouldn't be cut short. Skipping G10 during combat means a
+    // pathologically out-of-range combat actor would stay out of
+    // range, but the combat handlers themselves return to STANDBY
+    // when target is lost.
+    const bool combatState =
+        (this_->state == EN_INVADER_STATE_ATTACK) ||
+        (this_->state == EN_INVADER_STATE_ENGAGE) ||
+        (this_->state == EN_INVADER_STATE_BLOCK) ||
+        (this_->state == EN_INVADER_STATE_RANGED_ATTACK) ||
+        (this_->state == EN_INVADER_STATE_STANDBY);
+    if (!combatState) {
+        if (TryFireG10Invader(this_, play)) {
+            this_->prevState = this_->state;
+            return;
+        }
     }
 
     // Hostile-target acquisition + tier-based engagement check. Fires
@@ -701,6 +1038,7 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
                              : invader->world.pos;
 
     switch (this_->state) {
+        // Combat states (Agent 3).
         case EN_INVADER_STATE_ATTACK:
             TickATTACK(this_, play, hintPos);
             break;
@@ -716,15 +1054,44 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         case EN_INVADER_STATE_STANDBY:
             TickSTANDBY(this_, play, hintPos);
             break;
+        // Locomotion / non-combat (Phase 2 reconstruction).
         case EN_INVADER_STATE_IDLE:
+            TickIDLE(this_, play);
+            break;
         case EN_INVADER_STATE_FOLLOW:
+            TickFOLLOW(this_, play);
+            break;
         case EN_INVADER_STATE_STUCK:
+            TickSTUCK(this_, play);
+            break;
         case EN_INVADER_STATE_DEAD:
         default:
-            // Locomotion / non-combat states are owned by Agent 2.
-            // No-op until that layer lands; the actor still ticks
-            // animation + collision via EnInvader_Update.
+            // DEAD / unknown: hold pose, no motion.
+            invader->speedXZ = 0.0f;
             break;
+    }
+
+    // Phase 2 — drive animation for non-combat states. Combat states
+    // own their anims via direct LinkAnimation_Change calls inside
+    // their Tick handlers (matching FollowerNPC's pattern). We only
+    // pick + ensure for IDLE/FOLLOW/STUCK here. Anim type tracks
+    // combat: STANDBY-ish states use fighter (1); locomotion uses
+    // _free (0).
+    const bool isLocomotion =
+        (this_->state == EN_INVADER_STATE_IDLE) ||
+        (this_->state == EN_INVADER_STATE_FOLLOW) ||
+        (this_->state == EN_INVADER_STATE_STUCK);
+    if (isLocomotion) {
+        // Animation type: fighter (1) right after combat exit (so the
+        // Invader holds the sword+shield stance briefly), _free (0)
+        // otherwise. Combat-cooldown overlap drives this — same window
+        // as the Agent 3 cooldown so transition timing matches.
+        const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                      std::memory_order_relaxed);
+        const s8 animType = (curFrame < sCombatCooldownEndFrame) ? 1 : 0;
+        const InvaderAnim want = InvAnimForState(this_->state, invader->speedXZ,
+                                                  this_->prevState);
+        InvEnsureAnimation(this_, play, want, animType);
     }
 
     // Update prevState tail (after dispatch so combat handlers can
