@@ -3105,20 +3105,38 @@ void TickCRAWLING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 
     // Run BG check at crawl-body height: small wall-radius (NPC is in
     // a narrow tunnel), low wallCheckHeight (~20u — NPC is crouched).
-    // The Actor_UpdateBgCheckInfo call writes to bgCheckFlags + wallPoly
-    // + wallBgId; we don't care about gravity / floor here, just the
-    // wall touch state.
+    //
+    // CRITICAL: Actor_UpdateBgCheckInfo flag bits (z_actor.c:1692-1723):
+    //   bit 0 (1) = wall check          ← WE NEED THIS
+    //   bit 1 (2) = ceiling check
+    //   bit 2 (4) = floor + water check
+    // The standard NPC dispatcher uses flags=4 (floor only). For
+    // crawlspace exit detection we need bit 0 — without it, wall_check
+    // never runs and bgCheckFlags & 8 stays clear forever (log 194 —
+    // 11s of CRAWLING ended via the 400u safety cap, never via a
+    // wall hit). Pass flags=1 here for wall-only check.
+    //
+    // Side effect: when wall check detects a wall, line 1700 copies
+    // the wall-slide-corrected pos into world.pos. That would push
+    // our NPC back from the wall and prevent forward progress. We
+    // snapshot pos before the call and restore after — we own
+    // position via direct write, BG check is read-only for us.
+    const Vec3f preBgPos = a->world.pos;
     Actor_UpdateBgCheckInfo(play, a, 20.0f /* wallCheckHeight */,
                             15.0f /* wallCheckRadius */,
                             30.0f /* ceilingCheckHeight */,
-                            4 /* flags */);
+                            1 /* flags = wall check only */);
+    const bool wallTouched = (a->bgCheckFlags & 8) != 0 && a->wallPoly != nullptr;
+    CollisionPoly* touchedPoly = a->wallPoly;
+    s32 touchedBgId = a->wallBgId;
+    a->world.pos = preBgPos;  // restore — keep our forward motion uncorrupted
 
-    if ((a->bgCheckFlags & 8) != 0 && a->wallPoly != nullptr) {
+    if (wallTouched) {
         // func_80041DB8 returns the surface-type wall-flags bitmask
         // for the touched polygon. 0x30 = crawlspace bits (matches
         // Player's interactWallFlags & 0x30 check at z_player.c:7639
         // for entry and z_player.c:7766 for exit).
-        const s32 wallFlags = func_80041DB8(&play->colCtx, a->wallPoly, a->wallBgId);
+        const s32 wallFlags = func_80041DB8(&play->colCtx, touchedPoly, touchedBgId);
         if ((wallFlags & 0x30) != 0) {
             SPDLOG_INFO("[FollowerNPC] CRAWLING — exit wall hit "
                         "(flags=0x{:X}, traveled {:.0f}u) — switching to "
