@@ -160,10 +160,28 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
     // Register AC for the next collision frame.
     CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
 
-    // Death check. Actor_Kill triggers OnActorKill (HookHandlers.cpp)
-    // → Director::OnEnemyRemoved (live count + cooldown bookkeeping).
-    // OnEnemyDefeat fires earlier in the kill pipeline and broadcasts
-    // ENEMY_DEFEATED for peers.
+    // Death check. Actor_Kill triggers OnActorKill (HookHandlers.cpp:2887)
+    // which: (a) broadcasts ENEMY_DEFEATED to peers so they kill their
+    // local replica, and (b) calls Director::OnEnemyRemoved on host
+    // (live count + cooldown bookkeeping). The Invader does NOT fire
+    // OnEnemyDefeat — that hook is fired by enemies' own death-state
+    // actionFuncs (e.g. SetupDying), which v1 doesn't have. OnActorKill
+    // is the sole death-broadcast path.
+    //
+    // Race-B host-authoritative path (peer kills Invader on its screen):
+    //   1. Peer's ShouldActorUpdate clamps colChkInfo.damage so peer's
+    //      Invader stays at 1 HP and the local AC_HIT block here doesn't
+    //      decrement past 0 (the clamp zeros damage; the `damage > 0`
+    //      guard short-circuits the health write).
+    //   2. Peer's OnActorUpdate forwarder sends DAMAGE_ENEMY with the
+    //      stashed un-clamped damage.
+    //   3. Host's HandlePacket_DamageEnemy queues pendingSyncDamage.
+    //   4. Host's ShouldActorUpdate calls DrainPendingSyncDamage which
+    //      writes colChkInfo.damage AND calls ApplySyncAcHitToActor —
+    //      that helper has a runtime gEnInvaderId branch that sets
+    //      AC_HIT on this->collider so the drain block below fires.
+    //   5. Host's EnInvader_Update (this function) reads AC_HIT, drains,
+    //      hits 0, Actor_Kill → OnActorKill → ENEMY_DEFEATED to peers.
     if (this->actor.colChkInfo.health <= 0) {
         Actor_Kill(&this->actor);
         return;

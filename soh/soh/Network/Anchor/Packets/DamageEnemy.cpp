@@ -33,6 +33,10 @@ extern "C" {
 // because BossGoma_UpdateHit (z_boss_goma.c:1823) gates on bumperFlags &
 // BUMP_HIT (not AC_HIT) and dereferences acHitInfo->toucher.dmgFlags.
 #include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
+// AI Invader — runtime-allocated actor id (gEnInvaderId). EnInvader_Update
+// gates its damage drain on AC_HIT, so synthetic damage from
+// DAMAGE_ENEMY needs to set the AC_HIT bit on its body collider too.
+#include "src/overlays/actors/ovl_En_Invader/z_en_invader.h"
 extern PlayState* gPlayState;
 }
 
@@ -234,6 +238,17 @@ damage_target_found:
 // + synthesise a static ColliderInfo with sword dmgFlags so Goma's stun /
 // patience / sword-damage paths register the synthetic hit.
 static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
+    // AI Invader (gEnInvaderId is runtime-allocated, not a compile-time
+    // constant — can't go in a case label). EnInvader_Update's damage
+    // drain (z_en_invader.c:152) gates on `(acFlags & AC_HIT) && damage>0`,
+    // so peer→host DAMAGE_ENEMY traffic needs the AC_HIT bit synthesised
+    // on the body collider for host to consume the queued damage.
+    // No acHitInfo deref in EnInvader_Update — bit-set is safe without a
+    // fake AT collider (same shape as ACTOR_EN_SKB).
+    if (actor->id == gEnInvaderId) {
+        ((EnInvader*)actor)->collider.base.acFlags |= AC_HIT;
+        return;
+    }
     switch (actor->id) {
         case ACTOR_EN_DEKUBABA:
             ((EnDekubaba*)actor)->collider.base.acFlags |= AC_HIT;
