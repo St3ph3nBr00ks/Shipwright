@@ -150,9 +150,18 @@ bool AllPlayersSettledInScene(const SessionView& view, int16_t sceneNum) {
 // "abort proposal for this tick".
 std::optional<Vec3f> PickSpawnPosition(int16_t sceneNum, int8_t roomNum,
                                        const SessionView& view) {
-    constexpr int   kMaxSampledNodes = 64;
-    constexpr float kMinPlayerDistU  = 200.0f;
-    constexpr float kMinPlayerDistSq = kMinPlayerDistU * kMinPlayerDistU;
+    constexpr int   kMaxSampledNodes      = 64;
+    constexpr float kMinPlayerDistU       = 200.0f;
+    constexpr float kMinPlayerDistSq      = kMinPlayerDistU * kMinPlayerDistU;
+    // Y-delta gate — added 2026-05-15 post-field-test log 186. Inside
+    // Deku Tree's room 0 nav graph spans the main chamber + the basement
+    // pit (Gohma area, Y ≈ -940). Without this gate, PickSpawnPosition
+    // sampled a basement node when the player was on the upper floor at
+    // Y ≈ 0; the resulting Invader was unreachable, the player thought
+    // they killed it but only killed a force-spawned duplicate, and the
+    // live-count cap blocked all subsequent respawns. Capped to roughly
+    // one OoT dungeon-floor of vertical separation.
+    constexpr float kMaxYDeltaFromTarget  = 300.0f;
 
     const AnchorNavRoom::RoomNavData* data =
         AnchorNavRoom::GetForRoom(sceneNum, roomNum);
@@ -178,7 +187,7 @@ std::optional<Vec3f> PickSpawnPosition(int16_t sceneNum, int8_t roomNum,
                        AnchorNavRoom::NODE_HAZARD   |
                        AnchorNavRoom::NODE_UNDERWATER)) continue;
 
-        // Distance gate against every team-member in this scene.
+        // XZ distance gate against every team-member in this scene.
         bool tooClose = false;
         for (const PlayerSnapshot& p : view.players) {
             if (p.sceneNum != sceneNum) continue;
@@ -190,6 +199,23 @@ std::optional<Vec3f> PickSpawnPosition(int16_t sceneNum, int8_t roomNum,
             }
         }
         if (tooClose) continue;
+
+        // Y-delta gate. Reject candidates more than kMaxYDeltaFromTarget
+        // from EVERY team member in the same scene — keeps the spawn on
+        // an architecturally-reachable floor instead of dropping into a
+        // disconnected vertical area (basement pits, mid-air platforms
+        // accessible only via teleport, etc.). Must be reachable from
+        // AT LEAST one player to count as "valid floor" — multi-player
+        // sessions tolerate one player being on a different floor.
+        bool sameFloorAsAnyPlayer = false;
+        for (const PlayerSnapshot& p : view.players) {
+            if (p.sceneNum != sceneNum) continue;
+            if (std::abs(n.pos.y - p.worldPos.y) <= kMaxYDeltaFromTarget) {
+                sameFloorAsAnyPlayer = true;
+                break;
+            }
+        }
+        if (!sameFloorAsAnyPlayer) continue;
 
         return n.pos;
     }
