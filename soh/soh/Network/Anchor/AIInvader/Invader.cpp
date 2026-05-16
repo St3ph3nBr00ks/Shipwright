@@ -236,20 +236,45 @@ struct LocalInvNavState {
 static LocalInvNavState sLocalInvNav;
 
 // ---------------------------------------------------------------------
-// Phase 2 — animation kind enum + header / picker / ensurer.
-// Smaller surface than FollowerNPC's (12 kinds → 5 kinds) since v1
-// Invader has no swim / climb / hoist / fidgets. Combat states drive
-// their anims directly via LinkAnimation_Change inside their Tick
-// handlers (matching FollowerNPC's pattern) — this enum covers only
-// the locomotion + alert anims.
+// Phase 2 + Phase 4 — animation kind enum + header / picker / ensurer.
+// Cloned from FollowerNPC's larger enum but with combat-anim direct
+// LinkAnimation_Change calls in the combat handlers (matching the
+// FollowerNPC pattern). Locomotion + idle + swim + hoist + jump +
+// fidget anims live in this enum.
+//
+// Phase 4 additions: kSwim / kSwimWait (SWIMMING state),
+// kHoistGround / kHoistSwim (LEDGE_HOIST state one-shots),
+// kJump / kRunJump (airborne FOLLOW), kFidgetLookA / kFidgetWarmB /
+// kFidgetStretchD (IDLE rotation).
+//
+// NOTE: OoT does NOT expose a standalone "draw sword" / "sheathe
+// sword" anim. Player_SetModels handles equipment-DList swap
+// instantaneously and Player vanilla uses brief transitional anims
+// (`waitL2defense`) tied to combat-state transitions. For the
+// Invader's draw/sheathe smoothing, the equipment-swap path (Phase B,
+// Anchor_InvaderDrawBegin/End forcing PLAYER_MODELGROUP_SWORD_AND_SHIELD)
+// is already instant; documenting the gap rather than inventing a fake
+// transition. Field-test will tell us whether this needs a visible
+// transition pass.
 // ---------------------------------------------------------------------
 enum class InvaderAnim {
-    kNone,     // sentinel (no anim selected yet)
-    kWait,     // idle wait (free or fighter depending on modelAnimType)
-    kWalk,     // pursuit walk
-    kRun,      // pursuit run
-    kStopL,    // one-shot stop on left foot (FOLLOW→IDLE)
-    kStopR,    // one-shot stop on right foot (FOLLOW→IDLE)
+    kNone,            // sentinel (no anim selected yet)
+    kWait,            // idle wait (free or fighter depending on modelAnimType)
+    kWalk,            // pursuit walk
+    kRun,             // pursuit run
+    kStopL,           // one-shot stop on left foot (FOLLOW→IDLE)
+    kStopR,           // one-shot stop on right foot (FOLLOW→IDLE)
+
+    // Phase 4 additions.
+    kSwim,            // swimming pursuit (gPlayerAnim_link_swimer_swim)
+    kSwimWait,        // treading water idle (gPlayerAnim_link_swimer_swim_wait)
+    kHoistGround,     // mantle from floor (gPlayerAnim_link_normal_climb_up; one-shot)
+    kHoistSwim,       // climb out of water (gPlayerAnim_link_swimer_swim_15step_up; one-shot)
+    kJump,            // standing jump (gPlayerAnim_link_normal_jump; one-shot)
+    kRunJump,         // running jump (gPlayerAnim_link_normal_run_jump; one-shot)
+    kFidgetLookA,     // idle look-around (gPlayerAnim_link_normal_wait_typeA_20f; one-shot)
+    kFidgetWarmB,     // idle warm-up (gPlayerAnim_link_normal_wait_typeB_20f; one-shot)
+    kFidgetStretchD,  // idle stretch (gPlayerAnim_link_wait_typeD_20f; one-shot)
 };
 
 LinkAnimationHeader* InvAnimHeaderFor(InvaderAnim kind, s8 modelAnimType) {
@@ -271,6 +296,26 @@ LinkAnimationHeader* InvAnimHeaderFor(InvaderAnim kind, s8 modelAnimType) {
         case InvaderAnim::kStopR:
             if (isFighter) return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR;
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_walk_endR_free;
+        // Phase 4 — modelAnimType-independent (swim anims keep sword
+        // sheathed regardless; mantle/jump/fidget are agnostic).
+        case InvaderAnim::kSwim:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim;
+        case InvaderAnim::kSwimWait:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim_wait;
+        case InvaderAnim::kHoistGround:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_climb_up;
+        case InvaderAnim::kHoistSwim:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim_15step_up;
+        case InvaderAnim::kJump:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_jump;
+        case InvaderAnim::kRunJump:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_run_jump;
+        case InvaderAnim::kFidgetLookA:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeA_20f;
+        case InvaderAnim::kFidgetWarmB:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeB_20f;
+        case InvaderAnim::kFidgetStretchD:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_wait_typeD_20f;
         case InvaderAnim::kNone:
         default:
             return nullptr;
@@ -289,7 +334,14 @@ void InvEnsureAnimation(EnInvader* this_, PlayState* play, InvaderAnim want,
         return;
     }
     const bool oneShot = (want == InvaderAnim::kStopL ||
-                          want == InvaderAnim::kStopR);
+                          want == InvaderAnim::kStopR ||
+                          want == InvaderAnim::kHoistGround ||
+                          want == InvaderAnim::kHoistSwim ||
+                          want == InvaderAnim::kJump ||
+                          want == InvaderAnim::kRunJump ||
+                          want == InvaderAnim::kFidgetLookA ||
+                          want == InvaderAnim::kFidgetWarmB ||
+                          want == InvaderAnim::kFidgetStretchD);
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                          1.0f /* playSpeed */,
                          0.0f /* startFrame */,
@@ -326,10 +378,61 @@ InvaderAnim InvAnimForState(s32 state, float speedXZ, s32 prevState) {
             }
             return InvaderAnim::kWait;
         }
+        case EN_INVADER_STATE_SWIMMING:
+            // Tread water at low speed; full swim anim when moving.
+            // Threshold matches FollowerNPC's 0.5f handoff.
+            return (speedXZ > 0.5f) ? InvaderAnim::kSwim
+                                    : InvaderAnim::kSwimWait;
+        case EN_INVADER_STATE_LEDGE_HOIST:
+            // Dispatcher overrides this with the correct kHoistGround
+            // vs kHoistSwim pick based on EnInvader::hoistContext (which
+            // this function doesn't have access to). Return a sensible
+            // default so a code path that bypasses the dispatcher
+            // override still gets a valid hoist anim.
+            return InvaderAnim::kHoistGround;
         default:
             return InvaderAnim::kWait;
     }
 }
+
+// ---------------------------------------------------------------------
+// Phase 4 — swim constants. Match FollowerNPC's swim constants
+// (FollowerNPC.cpp:1907-1911) so the Invader's swim behaviour visually
+// mirrors the NPC Follower (and Player). Per-age depth picked from
+// Player's ageProperties.unk_24 (z_player.c:453,505): adult 36u,
+// child 22u.
+// ---------------------------------------------------------------------
+static constexpr float kInvSwimDepthAdult     = 36.0f;
+static constexpr float kInvSwimDepthChild     = 22.0f;
+static constexpr float kInvSwimExtraDrop      = 5.0f;
+static constexpr float kInvSwimSpeedMax       = 4.0f;
+static constexpr float kInvSwimArrive         = 60.0f;
+static constexpr float kInvSwimShoreExitDepth = 30.0f;
+
+inline float InvSwimDepthFor(s8 linkAge) {
+    return (linkAge == 0) ? kInvSwimDepthAdult : kInvSwimDepthChild;
+}
+
+// Phase 4 — hoist constants. Match FollowerNPC's hoist constants
+// (FollowerNPC.cpp:1998-2000) so geometry detection matches.
+static constexpr float kInvHoistGroundLiftMin  = 20.0f;
+static constexpr float kInvHoistGroundLiftMax  = 90.0f;
+static constexpr float kInvHoistSwimProbeStartY = 55.0f;
+static constexpr float kInvHoistSwimLiftMin    = 20.0f;
+static constexpr float kInvHoistSwimLiftMax    = 90.0f;
+// Forward-cast for ground-hoist raycast fallback.
+static constexpr float kInvHoistForwardCastDist = 80.0f;
+static constexpr float kInvHoistChestHeight     = 20.0f;
+static constexpr float kInvHoistPastWallNudge   = 8.0f;
+// Swim-exit Y raise during the swim-step-up anim — matches FollowerNPC's
+// kSwimHoistRaise (FollowerNPC.cpp:3670) so feet sit at ledge-top level
+// while the swim_15step_up anim plays.
+static constexpr float kInvSwimHoistRaise       = 43.0f;
+
+// Captured at LEDGE_HOIST entry for the per-tick interpolation lerp
+// in TickLEDGE_HOIST. File-scope is safe because a per-Invader hoist
+// is non-reentrant (only one Invader's hoist runs per dispatch tick).
+static Vec3f sLocalInvHoistStartPos = { 0.0f, 0.0f, 0.0f };
 
 // ---------------------------------------------------------------------
 // Phase 2 — TickIDLE / TickFOLLOW / TickSTUCK + G10 leash.
@@ -447,6 +550,239 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
                 kInvStuckNudgeDist, (uint16_t)yaw);
 }
 
+// ---------------------------------------------------------------------
+// Phase 4 — TickSWIMMING / TickLEDGE_HOIST.
+//
+// Cloned from FollowerNPC's same-named handlers (FollowerNPC.cpp:1929 +
+// :2089). Key deltas:
+//   - SWIMMING swims toward the nearest hostile target (PickHostileTarget),
+//     not toward a leader. Falls through to FOLLOW when target lost.
+//   - LEDGE_HOIST does the same one-shot mantle pattern but the entry
+//     trigger comes from the dispatcher's geometry probe, NOT a synced
+//     hoistContext from peers (Invader v1 doesn't sync hoist state —
+//     each side runs its own probe). The probe is fired only on the
+//     local host's tick so peer replicas don't double-hoist.
+//   - No drown timeout. Invader is hostile and can swim indefinitely.
+//     FollowerNPC has a 30s drown timer for friendly-NPC death; an
+//     Invader drown would just kill it prematurely. Documented in
+//     plan §1.2 deferred.
+// ---------------------------------------------------------------------
+
+void TickSWIMMING(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+
+    // Sample water surface at NPC's XZ. If no waterbox, exit to FOLLOW
+    // (we swam off the edge of the box and are now overland).
+    f32 surfaceY = a->world.pos.y;
+    WaterBox* wb = nullptr;
+    if (!WaterBox_GetSurface1(play, &play->colCtx,
+                              a->world.pos.x, a->world.pos.z,
+                              &surfaceY, &wb)) {
+        SPDLOG_INFO("[Invader] SWIMMING→FOLLOW (no water under NPC at "
+                    "({:.0f},{:.0f},{:.0f}))",
+                    a->world.pos.x, a->world.pos.y, a->world.pos.z);
+        this_->state = EN_INVADER_STATE_FOLLOW;
+        return;
+    }
+
+    // Shore-shallow exit. Probe floor below NPC. If floor is within
+    // kInvSwimShoreExitDepth of surface, NPC can stand — exit swim.
+    Vec3f rayStart = { a->world.pos.x, surfaceY + 5.0f, a->world.pos.z };
+    CollisionPoly* floorPoly = nullptr;
+    const f32 floorY = BgCheck_EntityRaycastFloor1(&play->colCtx,
+                                                    &floorPoly, &rayStart);
+    if (floorPoly != nullptr &&
+        (surfaceY - floorY) < kInvSwimShoreExitDepth) {
+        a->world.pos.y = floorY;
+        a->velocity.y  = 0.0f;
+        this_->state   = EN_INVADER_STATE_FOLLOW;
+        SPDLOG_INFO("[Invader] SWIMMING→FOLLOW (shore-shallow exit: "
+                    "surface={:.0f} floor={:.0f} depth={:.1f}u < {:.0f}u)",
+                    surfaceY, floorY, surfaceY - floorY,
+                    kInvSwimShoreExitDepth);
+        return;
+    }
+
+    // Clamp Y to (surface - depth). Slightly extra drop matches
+    // FollowerNPC's tuning (NPC was 5u too high above water).
+    const float swimDepth = InvSwimDepthFor(this_->linkAge) + kInvSwimExtraDrop;
+    a->world.pos.y = surfaceY - swimDepth;
+    a->velocity.y  = 0.0f;
+
+    // Swim toward nearest hostile target.
+    Actor* target = PickHostileTarget(a, play, kInvFollowEngageDist,
+                                       /*maxYDelta=*/kRangedYFilter);
+    if (target == nullptr) {
+        sLocalInvNav.lastTarget = nullptr;
+        a->speedXZ = 0.0f;
+        // No hostile in range — keep treading water; SWIMMING handler
+        // will pick up a target on a later tick if one approaches.
+        // Falling back to FOLLOW from here would oscillate against the
+        // water-entry trigger in the dispatcher.
+        return;
+    }
+    sLocalInvNav.lastTarget = target;
+
+    const float dx = target->world.pos.x - a->world.pos.x;
+    const float dz = target->world.pos.z - a->world.pos.z;
+    const float distSq = dx * dx + dz * dz;
+    if (distSq > kInvSwimArrive * kInvSwimArrive) {
+        const s16 yaw = Math_Atan2S(dz, dx);
+        a->shape.rot.y = yaw;
+        a->world.rot.y = yaw;
+        a->speedXZ     = kInvSwimSpeedMax;
+        // Manual XZ motion — Actor_MoveXZGravity is skipped for
+        // SWIMMING in EnInvader_Update so we drive position directly.
+        a->world.pos.x += Math_SinS(yaw) * a->speedXZ;
+        a->world.pos.z += Math_CosS(yaw) * a->speedXZ;
+    } else {
+        a->speedXZ = 0.0f;  // tread water; kSwimWait picked by AnimForState
+    }
+}
+
+// Helper — probe straight up from NPC's head for an overhead ledge.
+// Matches FollowerNPC's autonomous swim-exit probe pattern
+// (FollowerNPC.cpp:3708-3723). Returns true + writes outTopPos when a
+// hoistable ledge is detected.
+bool InvDetectSwimHoist(PlayState* play, const Vec3f& npcPos, Vec3f& outTopPos) {
+    Vec3f probeStart = { npcPos.x, npcPos.y + kInvHoistSwimProbeStartY, npcPos.z };
+    CollisionPoly* topPoly = nullptr;
+    const f32 topY = BgCheck_EntityRaycastFloor1(&play->colCtx,
+                                                  &topPoly, &probeStart);
+    if (topPoly == nullptr) return false;
+    const float lift = topY - npcPos.y;
+    if (lift <= kInvHoistSwimLiftMin || lift >= kInvHoistSwimLiftMax) {
+        return false;
+    }
+    outTopPos.x = probeStart.x;
+    outTopPos.y = topY;
+    outTopPos.z = probeStart.z;
+    return true;
+}
+
+// Helper — probe forward then down to detect a hoistable wall ledge
+// in the NPC's facing direction. Matches FollowerNPC's
+// RaycastDetectLedge (FollowerNPC.cpp:2040). Used for ground-hoist
+// (FOLLOW→LEDGE_HOIST) when target is at higher altitude.
+bool InvRaycastDetectLedge(PlayState* play, const Vec3f& npcPos,
+                            s16 facingYaw, Vec3f& outTopPos) {
+    const float dirX = Math_SinS(facingYaw);
+    const float dirZ = Math_CosS(facingYaw);
+
+    Vec3f rayA = { npcPos.x, npcPos.y + kInvHoistChestHeight, npcPos.z };
+    Vec3f rayB = { npcPos.x + dirX * kInvHoistForwardCastDist, rayA.y,
+                   npcPos.z + dirZ * kInvHoistForwardCastDist };
+    Vec3f wallHit;
+    CollisionPoly* wallPoly = nullptr;
+    if (!BgCheck_AnyLineTest1(&play->colCtx, &rayA, &rayB, &wallHit,
+                              &wallPoly, 1)) {
+        return false;
+    }
+
+    Vec3f downStart = {
+        wallHit.x + dirX * kInvHoistPastWallNudge,
+        wallHit.y + kInvHoistGroundLiftMax,
+        wallHit.z + dirZ * kInvHoistPastWallNudge,
+    };
+    CollisionPoly* topPoly = nullptr;
+    const f32 topY = BgCheck_EntityRaycastFloor1(&play->colCtx, &topPoly,
+                                                  &downStart);
+    if (topPoly == nullptr) return false;
+    const float lift = topY - npcPos.y;
+    if (lift < kInvHoistGroundLiftMin || lift > kInvHoistGroundLiftMax) {
+        return false;
+    }
+    outTopPos.x = downStart.x;
+    outTopPos.y = topY;
+    outTopPos.z = downStart.z;
+    return true;
+}
+
+// Helper — fire LEDGE_HOIST with a given context + target pos. Cloned
+// from FollowerNPC's enterLedgeHoist lambda (FollowerNPC.cpp:3642).
+// Captures the start position for the per-tick lerp in TickLEDGE_HOIST.
+void InvEnterLedgeHoist(EnInvader* this_, InvHoistContext ctx,
+                         const Vec3f& topPos, const char* source) {
+    Actor* a = &this_->actor;
+    this_->hoistContext   = (s8)ctx;
+    this_->hoistTargetPos = topPos;
+    this_->hoistEntryYaw  =
+        Math_Atan2S(topPos.z - a->world.pos.z, topPos.x - a->world.pos.x);
+
+    // Snap XZ to ledge top XZ at entry so the anim plays in place
+    // (only Y will lerp over the anim duration). Without this, an
+    // XZ lerp during a 1-second mantle anim looks like "walking
+    // sideways while hunched" — the climb_up anim assumes a
+    // stationary body pulling up.
+    a->world.pos.x = topPos.x;
+    a->world.pos.z = topPos.z;
+    sLocalInvHoistStartPos = a->world.pos;
+
+    // For swim-exit, raise NPC ~43u so the swim_15step_up anim plays
+    // at ledge level rather than underwater. End-of-anim snap moves
+    // NPC to the exact ledge top.
+    if (ctx == INV_HOIST_CONTEXT_SWIM) {
+        a->world.pos.y += kInvSwimHoistRaise;
+        a->velocity.y = 0.0f;
+        sLocalInvHoistStartPos = a->world.pos;
+    }
+
+    this_->state = EN_INVADER_STATE_LEDGE_HOIST;
+    // Clear any in-flight stop/fidget hold so the dispatcher's
+    // LEDGE_HOIST anim override survives the stopAnimPlaying check.
+    this_->stopAnimPlaying = 0;
+    SPDLOG_INFO("[Invader] →LEDGE_HOIST({}) top=({:.0f},{:.0f},{:.0f}) "
+                "via {}",
+                (ctx == INV_HOIST_CONTEXT_SWIM ? "swim_exit" : "ground"),
+                topPos.x, topPos.y, topPos.z, source);
+}
+
+void TickLEDGE_HOIST(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+    a->speedXZ     = 0.0f;
+    a->shape.rot.y = this_->hoistEntryYaw;
+    a->world.rot.y = this_->hoistEntryYaw;
+
+    // Wait for the hoist anim to be (a) set up by InvEnsureAnimation
+    // AND (b) played to completion. Without check (a), the entry tick
+    // would exit immediately because the dispatcher runs TickLEDGE_HOIST
+    // BEFORE InvEnsureAnimation in the per-tick order — stopAnimPlaying
+    // is still 0 (stale from prior state) on entry. See FollowerNPC's
+    // analogous fix at FollowerNPC.cpp:2106.
+    const bool hoistAnimSetUp =
+        (InvaderAnim)this_->currentAnim == InvaderAnim::kHoistGround ||
+        (InvaderAnim)this_->currentAnim == InvaderAnim::kHoistSwim;
+    if (!hoistAnimSetUp || this_->stopAnimPlaying) {
+        if (hoistAnimSetUp && this_->stopAnimPlaying &&
+            this_->skelAnime.endFrame > 0.0f) {
+            // Lerp pos from start → target over anim progress so body
+            // visibly translates up during the mantle motion.
+            const float progress =
+                std::min(1.0f, this_->skelAnime.curFrame /
+                                this_->skelAnime.endFrame);
+            const Vec3f& s = sLocalInvHoistStartPos;
+            const Vec3f& t = this_->hoistTargetPos;
+            a->world.pos.x = s.x + (t.x - s.x) * progress;
+            a->world.pos.y = s.y + (t.y - s.y) * progress;
+            a->world.pos.z = s.z + (t.z - s.z) * progress;
+        }
+        return;
+    }
+
+    // Anim complete — snap to ledge top and exit to FOLLOW.
+    a->world.pos  = this_->hoistTargetPos;
+    a->velocity.y = 0.0f;
+    sLocalInvNav.stuckCheckPos = a->world.pos;
+    sLocalInvNav.lastStuckCheckFrame =
+        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+    sLocalInvNav.leashFrames = 0;
+    this_->state = EN_INVADER_STATE_FOLLOW;
+    SPDLOG_INFO("[Invader] LEDGE_HOIST→FOLLOW (snapped to "
+                "({:.0f},{:.0f},{:.0f}), context={})",
+                this_->hoistTargetPos.x, this_->hoistTargetPos.y,
+                this_->hoistTargetPos.z, (int)this_->hoistContext);
+}
+
 // G10 leash — Invader too far from its target for > kInvLeashTimeoutMs
 // of consecutive ticks → teleport to the target. Catches Invader stuck
 // behind closed door / left in another room / fell into untracked
@@ -504,6 +840,8 @@ const char* StateName(s32 s) {
         case EN_INVADER_STATE_FOLLOW:        return "FOLLOW";
         case EN_INVADER_STATE_STUCK:         return "STUCK";
         case EN_INVADER_STATE_DEAD:          return "DEAD";
+        case EN_INVADER_STATE_SWIMMING:      return "SWIMMING";
+        case EN_INVADER_STATE_LEDGE_HOIST:   return "LEDGE_HOIST";
         case EN_INVADER_STATE_ATTACK:        return "ATTACK";
         case EN_INVADER_STATE_ENGAGE:        return "ENGAGE";
         case EN_INVADER_STATE_BLOCK:         return "BLOCK";
@@ -1008,16 +1346,75 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // pathologically out-of-range combat actor would stay out of
     // range, but the combat handlers themselves return to STANDBY
     // when target is lost.
+    //
+    // Phase 4 — also exempt SWIMMING / LEDGE_HOIST. Each is its own
+    // scripted traversal (one-shot mantle, surface-clamped swim) and
+    // shouldn't be aborted by a distance-based leash. Matches
+    // FollowerNPC's same exempt list at FollowerNPC.cpp:3584-3586.
     const bool combatState =
         (this_->state == EN_INVADER_STATE_ATTACK) ||
         (this_->state == EN_INVADER_STATE_ENGAGE) ||
         (this_->state == EN_INVADER_STATE_BLOCK) ||
         (this_->state == EN_INVADER_STATE_RANGED_ATTACK) ||
         (this_->state == EN_INVADER_STATE_STANDBY);
-    if (!combatState) {
+    const bool scriptedTraversal =
+        (this_->state == EN_INVADER_STATE_SWIMMING) ||
+        (this_->state == EN_INVADER_STATE_LEDGE_HOIST);
+    if (!combatState && !scriptedTraversal) {
         if (TryFireG10Invader(this_, play)) {
             this_->prevState = this_->state;
             return;
+        }
+    }
+
+    // Phase 4 — water-entry detection. Mirrors FollowerNPC's
+    // water-entry trigger at FollowerNPC.cpp:3598-3625. yDistToWater
+    // is computed by Actor_UpdateBgCheckInfo (called from
+    // EnInvader_Update with flags=4). When NPC submerges past Link's
+    // per-age swim threshold, transition to SWIMMING. SWIMMING /
+    // LEDGE_HOIST / combat exempt — combat in-water is a v2 concern.
+    if (!combatState && !scriptedTraversal) {
+        const float swimEntryDepth = InvSwimDepthFor(this_->linkAge);
+        if (invader->yDistToWater > swimEntryDepth) {
+            this_->state = EN_INVADER_STATE_SWIMMING;
+            // Clear airborne tracking — entering water from a jump
+            // should drop the jump anim hold.
+            if (this_->jumpInProgress) {
+                invader->gravity      = -2.0f;
+                this_->jumpInProgress = 0;
+            }
+            SPDLOG_INFO("[Invader] →SWIMMING (yDistToWater={:.1f}u > "
+                        "{:.0f}u threshold for linkAge={})",
+                        invader->yDistToWater, swimEntryDepth,
+                        (int)this_->linkAge);
+        }
+    }
+
+    // Phase 4 — autonomous ledge-hoist detection. Matches FollowerNPC's
+    // FollowerNPC.cpp:3693-3760 split:
+    //   SWIMMING:  head-up probe finds an overhead floor 20-90u above
+    //              NPC → swim-step-up hoist.
+    //   FOLLOW:    target is meaningfully above NPC → raycast probe for
+    //              a wall ledge ahead → ground mantle.
+    if (this_->state == EN_INVADER_STATE_SWIMMING) {
+        Vec3f topPos;
+        if (InvDetectSwimHoist(play, invader->world.pos, topPos)) {
+            InvEnterLedgeHoist(this_, INV_HOIST_CONTEXT_SWIM, topPos,
+                                "swim head-up-probe");
+        }
+    } else if (this_->state == EN_INVADER_STATE_FOLLOW) {
+        // Ground hoist gates on target above. Probe forward in NPC's
+        // current facing direction. Quiet — most FOLLOW frames don't
+        // trigger, no logging.
+        if (sLocalInvNav.lastTarget != nullptr &&
+            sLocalInvNav.lastTarget->update != nullptr &&
+            sLocalInvNav.lastTarget->world.pos.y > invader->world.pos.y + 30.0f) {
+            Vec3f topPos;
+            if (InvRaycastDetectLedge(play, invader->world.pos,
+                                       invader->shape.rot.y, topPos)) {
+                InvEnterLedgeHoist(this_, INV_HOIST_CONTEXT_GROUND, topPos,
+                                    "ground raycast");
+            }
         }
     }
 
@@ -1027,7 +1424,14 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // intentional combat-state pre-empt, the dispatcher below picks
     // the new state's handler — locomotion is not preempted unless
     // a tier matches.
-    TryEngageCombat(this_, play);
+    //
+    // Phase 4 — TryEngageCombat is eligibility-gated to non-combat,
+    // non-scripted states. SWIMMING / LEDGE_HOIST → no preempt; let
+    // the scripted traversal complete first.
+    if (this_->state != EN_INVADER_STATE_SWIMMING &&
+        this_->state != EN_INVADER_STATE_LEDGE_HOIST) {
+        TryEngageCombat(this_, play);
+    }
 
     // Hint pos for handlers that want a "where to face when nothing
     // else applies" — use the target's pos when known, else the
@@ -1064,6 +1468,17 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         case EN_INVADER_STATE_STUCK:
             TickSTUCK(this_, play);
             break;
+        // Phase 4 — scripted traversal.
+        case EN_INVADER_STATE_SWIMMING:
+            TickSWIMMING(this_, play);
+            break;
+        case EN_INVADER_STATE_LEDGE_HOIST:
+            TickLEDGE_HOIST(this_, play);
+            break;
+        // TODO: full CLIMBING state — not implemented; Invader doesn't
+        // pursue into vertical spaces in v1. Slot 2 reserved for parity
+        // with NPC Follower. If/when added, mirror FollowerNPC's
+        // TickCLIMBING (FollowerNPC.cpp:1500+).
         case EN_INVADER_STATE_DEAD:
         default:
             // DEAD / unknown: hold pose, no motion.
@@ -1071,16 +1486,56 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
             break;
     }
 
-    // Phase 2 — drive animation for non-combat states. Combat states
-    // own their anims via direct LinkAnimation_Change calls inside
-    // their Tick handlers (matching FollowerNPC's pattern). We only
-    // pick + ensure for IDLE/FOLLOW/STUCK here. Anim type tracks
-    // combat: STANDBY-ish states use fighter (1); locomotion uses
-    // _free (0).
+    // Phase 4 — airborne auto-jump anim selection for FOLLOW. Tracks
+    // walked-off-edge transitions so kJump / kRunJump play as the
+    // body falls. Matches FollowerNPC's logic at FollowerNPC.cpp:3909
+    // but simpler (no jump-arc boost — Invader uses default gravity
+    // and just rides the natural arc; no field-test instrumentation;
+    // no STUCK-in-air position-stuck detection — gravity will land it
+    // eventually). Triggered only in FOLLOW; CLIMBING/SWIMMING/
+    // LEDGE_HOIST handle their own anims.
+    InvaderAnim airborneAnimOverride = InvaderAnim::kNone;
+    {
+        const bool isOnFloor     = (invader->bgCheckFlags & 1) != 0;
+        const bool walkedOffEdge = (invader->bgCheckFlags & 4) != 0;
+        if (walkedOffEdge && invader->speedXZ > 3.0f &&
+            this_->state == EN_INVADER_STATE_FOLLOW) {
+            invader->bgCheckFlags &= ~4;
+            // Clear any in-flight stop hold so the jump anim override
+            // below survives the stopAnimPlaying check.
+            this_->stopAnimPlaying = 0;
+            this_->jumpInProgress  = 1;
+            airborneAnimOverride =
+                (invader->speedXZ > 4.0f) ? InvaderAnim::kRunJump
+                                          : InvaderAnim::kJump;
+            SPDLOG_INFO("[Invader.jump] FIRE anim={} speedXZ={:.2f} "
+                        "pos=({:.0f},{:.0f},{:.0f})",
+                        (airborneAnimOverride == InvaderAnim::kRunJump
+                            ? "run_jump" : "jump"),
+                        invader->speedXZ,
+                        invader->world.pos.x, invader->world.pos.y,
+                        invader->world.pos.z);
+        }
+        // Landing detection — clears jumpInProgress when bgCheckFlags & 1
+        // returns. Matches FollowerNPC's landing branch at
+        // FollowerNPC.cpp:4043 (simplified — no fall-damage logic).
+        if (this_->jumpInProgress && isOnFloor) {
+            this_->jumpInProgress = 0;
+        }
+    }
+
+    // Phase 2 + 4 — drive animation for non-combat states. Combat
+    // states own their anims via direct LinkAnimation_Change calls
+    // inside their Tick handlers (matching FollowerNPC's pattern).
+    // We only pick + ensure for IDLE/FOLLOW/STUCK/SWIMMING/LEDGE_HOIST
+    // here. Anim type tracks combat: STANDBY-ish states use fighter
+    // (1); locomotion uses _free (0).
     const bool isLocomotion =
         (this_->state == EN_INVADER_STATE_IDLE) ||
         (this_->state == EN_INVADER_STATE_FOLLOW) ||
-        (this_->state == EN_INVADER_STATE_STUCK);
+        (this_->state == EN_INVADER_STATE_STUCK) ||
+        (this_->state == EN_INVADER_STATE_SWIMMING) ||
+        (this_->state == EN_INVADER_STATE_LEDGE_HOIST);
     if (isLocomotion) {
         // Animation type: fighter (1) right after combat exit (so the
         // Invader holds the sword+shield stance briefly), _free (0)
@@ -1089,9 +1544,77 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
                                       std::memory_order_relaxed);
         const s8 animType = (curFrame < sCombatCooldownEndFrame) ? 1 : 0;
-        const InvaderAnim want = InvAnimForState(this_->state, invader->speedXZ,
-                                                  this_->prevState);
+        InvaderAnim want = InvAnimForState(this_->state, invader->speedXZ,
+                                            this_->prevState);
+
+        // Phase 4 — LEDGE_HOIST anim override. AnimForState returns a
+        // default (kHoistGround); resolve the real pick from
+        // hoistContext here where we have access to `this_`.
+        if (this_->state == EN_INVADER_STATE_LEDGE_HOIST) {
+            want = (this_->hoistContext == (s8)INV_HOIST_CONTEXT_SWIM)
+                       ? InvaderAnim::kHoistSwim
+                       : InvaderAnim::kHoistGround;
+        }
+
+        // Phase 4 — airborne anim override. If jump fired this tick OR
+        // we're still mid-jump and the current anim is a jump anim,
+        // hold the jump anim until landing. Mirrors FollowerNPC's
+        // airborne anim hold at FollowerNPC.cpp:4249.
+        if (airborneAnimOverride != InvaderAnim::kNone) {
+            want = airborneAnimOverride;
+        } else if (this_->jumpInProgress &&
+                   ((InvaderAnim)this_->currentAnim == InvaderAnim::kRunJump ||
+                    (InvaderAnim)this_->currentAnim == InvaderAnim::kJump)) {
+            want = (InvaderAnim)this_->currentAnim;
+        }
+
+        // Phase 4 — idle fidget rotation. After sustained kWait,
+        // rotate through {kFidgetLookA, kFidgetWarmB, kFidgetStretchD}.
+        // Matches FollowerNPC's pattern at FollowerNPC.cpp:4132-4153.
+        static constexpr u32 kInvFidgetIntervalTicks = 120;  // ~6s @ 20fps
+        if (want == InvaderAnim::kWait && !this_->stopAnimPlaying &&
+            (InvaderAnim)this_->currentAnim == InvaderAnim::kWait) {
+            this_->idleTicks++;
+            if (this_->idleTicks >= kInvFidgetIntervalTicks) {
+                this_->idleTicks = 0;
+                switch (this_->nextFidgetIdx % 3) {
+                    case 0: want = InvaderAnim::kFidgetLookA;    break;
+                    case 1: want = InvaderAnim::kFidgetWarmB;    break;
+                    case 2: want = InvaderAnim::kFidgetStretchD; break;
+                }
+                this_->nextFidgetIdx++;
+            }
+        } else if (want != InvaderAnim::kWait) {
+            this_->idleTicks = 0;
+        }
+
+        // If a one-shot is in flight (stop / fidget / hoist / jump) and
+        // we haven't otherwise overridden `want`, hold the current
+        // anim until LinkAnimation_Update reports completion. Matches
+        // FollowerNPC's hold-during-stop pattern at FollowerNPC.cpp:4172.
+        if (this_->stopAnimPlaying &&
+            airborneAnimOverride == InvaderAnim::kNone &&
+            this_->state != EN_INVADER_STATE_LEDGE_HOIST) {
+            want = (InvaderAnim)this_->currentAnim;
+        }
+
+        // Cancel stop-anim hold if NPC has resumed locomotion. Without
+        // this, body slides along ground while idle/fidget anim plays
+        // out. Matches FollowerNPC's cancel at FollowerNPC.cpp:4160.
+        if (this_->stopAnimPlaying &&
+            this_->state == EN_INVADER_STATE_FOLLOW &&
+            invader->speedXZ > 0.5f) {
+            this_->stopAnimPlaying = 0;
+        }
+
         InvEnsureAnimation(this_, play, want, animType);
+
+        // Clear stop-anim latch when the ONCE anim reaches endFrame.
+        // LinkAnimation_Once clamps curFrame to endFrame on completion.
+        if (this_->stopAnimPlaying &&
+            this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
+            this_->stopAnimPlaying = 0;
+        }
     }
 
     // Update prevState tail (after dispatch so combat handlers can

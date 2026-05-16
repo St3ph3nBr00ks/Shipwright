@@ -18,6 +18,17 @@
  *   once #208 documents the design contract. Combat target
  *   selection delegates to PickHostileTargetForInvader (Agent 4).
  *   (Agent 3)
+ * Step 15e — Phase 4 animation parity: adds SWIMMING + LEDGE_HOIST
+ *   states (cloned from NPC Follower's same-named handlers), kJump /
+ *   kRunJump airborne anim selection in FOLLOW (auto-fires on
+ *   walked-off-edge), and a 3-anim fidget rotation in IDLE
+ *   (kFidgetLookA / kFidgetWarmB / kFidgetStretchD cycle modulo 3
+ *   after ~6s of sustained kWait). Full CLIMBING state intentionally
+ *   left out — v1 Invader does not pursue into vertical spaces;
+ *   slot 2 reserved for future. Draw/sheathe transitions documented
+ *   as a gap: OoT has no standalone "draw sword" anim, equipment
+ *   swap is instant via Phase B (Anchor_InvaderDrawBegin/End). See
+ *   Invader.cpp comment near InvaderAnim enum.
  *
  * Draw-context flag pattern: same shape as the NPC Follower's
  * Anchor_FollowerNpcDrawBegin/End. See FollowerNPC.cpp:422-526 for

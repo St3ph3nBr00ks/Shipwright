@@ -28,17 +28,36 @@
 // (Agent 3). Slot numbering matches NPC Follower to avoid future
 // renumbering when the two state machines are consolidated
 // post-#208. Note: STUCK is slot 3 (not 2), DEAD is slot 4.
+// Step 15e (Phase 4 — animation parity): SWIMMING / LEDGE_HOIST
+// non-combat traversal states cloned from NPC Follower (slot 5/6).
+// CLIMBING (slot 2) intentionally LEFT UNUSED for v1 — Invader does
+// not pursue into vertical spaces; full CLIMBING state is OUT OF
+// SCOPE. Only LEDGE_HOIST one-shot mantle is implemented (covers
+// the "follow target up a low ledge" + "climb out of water onto
+// shore" cases). Slot numbering matches NPC Follower so a future
+// CLIMBING add doesn't shift other slots.
 typedef enum {
     EN_INVADER_STATE_IDLE          = 0,
     EN_INVADER_STATE_FOLLOW        = 1,   // chase target (Agent 2)
+    // EN_INVADER_STATE_CLIMBING   = 2,   // reserved slot — NOT implemented in v1
     EN_INVADER_STATE_STUCK         = 3,   // single-tick nudge recovery (Agent 2)
     EN_INVADER_STATE_DEAD          = 4,   // reserved for future death sequence
+    EN_INVADER_STATE_SWIMMING      = 5,   // tread/swim while submerged (Phase 4)
+    EN_INVADER_STATE_LEDGE_HOIST   = 6,   // one-shot ledge mantle (Phase 4)
     EN_INVADER_STATE_ATTACK        = 7,   // sword swing (Stage 4)
     EN_INVADER_STATE_ENGAGE        = 8,   // pursue into strike range (Stage 4)
     EN_INVADER_STATE_BLOCK         = 9,   // shield-up defensive stance (Stage 4)
     EN_INVADER_STATE_RANGED_ATTACK = 10,  // bow shot (Stage 4)
     EN_INVADER_STATE_STANDBY       = 11,  // alert pose between combat (Stage 4)
 } EnInvaderAIState;
+
+// LEDGE_HOIST entry context — drives anim selection. Cloned from
+// NPC Follower's HoistContext enum (z_en_follower.h:37-40). Slot
+// numbering matches so peers / future merges share semantics.
+typedef enum {
+    INV_HOIST_CONTEXT_GROUND = 0,  // ground-to-ledge mantle (gPlayerAnim_link_normal_climb_up)
+    INV_HOIST_CONTEXT_SWIM   = 1,  // swim-out-of-water (gPlayerAnim_link_swimer_swim_15step_up)
+} InvHoistContext;
 
 struct EnInvader;
 
@@ -127,6 +146,33 @@ typedef struct EnInvader {
     // resyncs colChkInfo.health → this->health.
     s8 health;
     s8 maxHealth;
+
+    // ── Phase 4 — animation parity additions ─────────────────────────
+
+    // Ledge-hoist state. Captured at entry; consumed at anim
+    // completion. hoistContext picks the anim variant
+    // (kHoistGround vs kHoistSwim). hoistTargetPos is the ledge top —
+    // the snap target when the one-shot anim finishes. hoistEntryYaw
+    // locks NPC facing throughout the hoist. Cloned from
+    // EnFollower::hoistContext / hoistTargetPos / hoistEntryYaw
+    // (z_en_follower.h:182-184).
+    s8    hoistContext;
+    Vec3f hoistTargetPos;
+    s16   hoistEntryYaw;
+
+    // Idle fidget rotation index. Counts which fidget anim to play
+    // next when idleTicks crosses the fidget interval. Cycles modulo 3
+    // through {kFidgetLookA, kFidgetWarmB, kFidgetStretchD}. Mirrors
+    // EnFollower::nextFidgetIdx (z_en_follower.h:151).
+    u8  nextFidgetIdx;
+
+    // Jump tracking. Set true at jump-trigger frame; cleared on
+    // landing. Cloned from LocalNpcNavState::jumpInProgress but moved
+    // onto the actor so per-Invader state doesn't share a file-scope
+    // global. v1 simplification: only jumpInProgress + the airborne
+    // detection in TickFOLLOW. Field-test instrumentation (jumpStartPos
+    // etc.) deferred until needed.
+    u8 jumpInProgress;
 } EnInvader;
 
 #ifdef __cplusplus

@@ -125,6 +125,17 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     this->health          = 1;
     this->maxHealth       = 1;
 
+    // Phase 4 — animation parity. LEDGE_HOIST state + fidget rotation
+    // + jump tracking. All zero-init so the first transition into
+    // these states picks fresh values.
+    this->hoistContext    = 0;  // INV_HOIST_CONTEXT_GROUND
+    this->hoistTargetPos.x = 0.0f;
+    this->hoistTargetPos.y = 0.0f;
+    this->hoistTargetPos.z = 0.0f;
+    this->hoistEntryYaw   = 0;
+    this->nextFidgetIdx   = 0;
+    this->jumpInProgress  = 0;
+
     // Player-equivalent scale + shadow. Matches Link's footprint so
     // the Invader visually reads as a hostile Link, not a giant.
     Actor_SetScale(thisx, 0.01f);
@@ -196,7 +207,22 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
     // to the floor. The C++ tick has already written shape.rot.y
     // (visual) and world.rot.y (locomotion) for FOLLOW/STUCK, or
     // zeroed speedXZ for IDLE / G-guards.
-    Actor_MoveXZGravity(&this->actor);
+    //
+    // Phase 4 — skip Actor_MoveXZGravity for SWIMMING / LEDGE_HOIST.
+    //   SWIMMING:    the handler clamps Y to (surface - swimDepth) each
+    //                tick; gravity would fight that clamp and produce
+    //                vertical jitter / sink-and-rise oscillation.
+    //   LEDGE_HOIST: the handler lerps pos from hoistStartPos to
+    //                hoistTargetPos over the anim's curFrame/endFrame
+    //                ratio; gravity would drag Y down each tick, undoing
+    //                the lerp's upward motion and causing the mantle to
+    //                visually fail.
+    // Matches NPC Follower's same skip (FollowerNPC.cpp pre-MoveXZGravity
+    // gate excludes these two states).
+    if (this->state != EN_INVADER_STATE_SWIMMING &&
+        this->state != EN_INVADER_STATE_LEDGE_HOIST) {
+        Actor_MoveXZGravity(&this->actor);
+    }
     // Update collision-with-ground / floor altitude. Without this
     // the actor's Y can drift away from the floor on slopes / steps.
     // Flags=4 matches the standard NPC pattern (z_en_md.c:889,
