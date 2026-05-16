@@ -139,6 +139,26 @@ public:
     // respects current measured tick rate.
     bool MsCooldownElapsed(int16_t sceneNum, int8_t roomNum, uint8_t descId, int ms) const;
 
+    // --- Dev-only force spawn -------------------------------------------
+
+    // Bypass all eligibility gates and immediately execute a spawn for
+    // the named descriptor. Returns true on success. Used by the AI
+    // Director Debug panel's per-descriptor "Force Spawn" button.
+    //
+    // Process:
+    //   1. Look up descriptor by id.
+    //   2. Build a SessionView (still requires gPlayState + at least
+    //      one online player — force-spawn can't conjure a session).
+    //   3. Call descriptor->BuildForcedProposal — descriptor controls
+    //      what bypassing its gates means (target selection, position
+    //      fallback, etc.).
+    //   4. Execute the resulting proposal via ExecuteSpawn (same path
+    //      as the normal arbitration loop — RecordSpawn fires,
+    //      DIRECTOR_STATE_SYNC broadcasts, ENEMY_SPAWN goes out).
+    //
+    // Host-only (mirrors the rest of the Director's spawn path).
+    bool ForceSpawn(uint8_t descriptorId);
+
     // --- Ledger update --------------------------------------------------
 
     // Record a successful spawn in all three ledgers atomically. Called by

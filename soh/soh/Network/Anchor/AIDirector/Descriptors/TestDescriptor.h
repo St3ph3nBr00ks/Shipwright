@@ -40,11 +40,16 @@ public:
     std::vector<SpawnProposal> ProposeSpawn(const Director& director,
                                             const SessionView& view) override;
 
+    // --- Dev-only force spawn (panel button) ---
+    std::vector<SpawnProposal> BuildForcedProposal(const Director& director,
+                                                   const SessionView& view) override;
+
     // --- Spawn-removed cleanup ---
     void OnSpawnRemoved(uint32_t netId, DefeatCause cause) override;
 
     // --- Debug surface ---
     std::string GetDebugSnapshotLine() const override;
+    void RenderDebugUI(const Director& director) override;
 
 private:
     // Tunables (compiled-in; not CVar'd in step 7 — adjust here if

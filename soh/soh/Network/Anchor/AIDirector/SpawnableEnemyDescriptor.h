@@ -121,6 +121,22 @@ public:
     virtual std::vector<SpawnProposal> ProposeSpawn(const Director& director,
                                                     const SessionView& view) = 0;
 
+    // Dev-only "force spawn" — return a proposal bypassing the
+    // descriptor's normal eligibility gates (cooldown, cap, cutscene,
+    // scene blacklist, etc.). Called from Director::ForceSpawn via the
+    // debug panel's per-descriptor "Force Spawn" button.
+    //
+    // Descriptors that don't want to support force-spawn return empty
+    // (default). Descriptors that do should still gracefully handle
+    // edge cases (no target, no nav graph) — they may use a more
+    // permissive fallback (e.g. spawn at the local player's position)
+    // since the user explicitly asked for a spawn.
+    virtual std::vector<SpawnProposal> BuildForcedProposal(const Director& director,
+                                                          const SessionView& view) {
+        (void)director; (void)view;
+        return {};
+    }
+
     // --- Spawn-removed cleanup ---------------------------------------
 
     // Fires when a spawned actor of this descriptor is removed (defeated,

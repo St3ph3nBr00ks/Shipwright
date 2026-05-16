@@ -35,6 +35,7 @@
 #include "soh/cvar_prefixes.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // step 13: PickSpawnPosition
 
+#include <imgui.h>  // ImGui::Button for RenderDebugUI
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <libultraship/libultraship.h>
 
@@ -360,6 +361,50 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
     return { p };
 }
 
+std::vector<SpawnProposal> InvaderDescriptor::BuildForcedProposal(const Director& director,
+                                                                 const SessionView& view) {
+    // Bypasses cooldown / cap / cutscene / scene-blacklist gates — the
+    // user explicitly asked for a spawn via the dev button.
+    //
+    // Position selection: still tries PickSpawnPosition first (so the
+    // spawn lands on a real walkable node), but if no candidate passes
+    // we fall back to the target player's worldPos. Force-spawn must
+    // produce a visible spawn for testing; "force button did nothing"
+    // would defeat the purpose.
+    (void)director;
+    const PlayerSnapshot* target = view.MostIsolatedPlayer();
+    if (target == nullptr) {
+        SPDLOG_INFO("[InvaderDescriptor] BuildForcedProposal: no target");
+        return {};
+    }
+
+    Vec3f spawnPos = target->worldPos;
+    auto pickedPos = PickSpawnPosition(target->sceneNum, target->roomNum, view);
+    if (pickedPos.has_value()) {
+        spawnPos = *pickedPos;
+        SPDLOG_INFO("[InvaderDescriptor] ForceSpawn: PickSpawnPosition succeeded "
+                    "at ({:.0f},{:.0f},{:.0f})",
+                    spawnPos.x, spawnPos.y, spawnPos.z);
+    } else {
+        SPDLOG_INFO("[InvaderDescriptor] ForceSpawn: PickSpawnPosition failed; "
+                    "falling back to player.worldPos");
+    }
+
+    SpawnProposal p;
+    p.source       = this;
+    p.sceneNum     = target->sceneNum;
+    p.roomNum      = target->roomNum;
+    p.worldPos     = spawnPos;
+    p.yawTowards   = 0;
+    p.actorId      = ACTOR_EN_TEST;
+    p.actorParams  = 1;
+    p.variantId    = 0;
+    p.priority     = DescriptorPriority::Standard;
+    p.groupId      = 0;
+    ++mProposalsOffered;
+    return { p };
+}
+
 void InvaderDescriptor::OnSpawnRemoved(uint32_t netId, DefeatCause cause) {
     ++mTotalRemoved;
     mLastRemovedNetId = netId;
@@ -372,6 +417,16 @@ std::string InvaderDescriptor::GetDebugSnapshotLine() const {
     return "proposals=" + std::to_string(mProposalsOffered) +
            " removed=" + std::to_string(mTotalRemoved) +
            " lastRemove=" + std::to_string(mLastRemovedNetId);
+}
+
+void InvaderDescriptor::RenderDebugUI(const Director& director) {
+    (void)director;
+    if (ImGui::Button("Force Spawn Invader")) {
+        // Bypasses cooldown / cap / cutscene / scene-blacklist gates.
+        // RecordSpawn still increments the live count + broadcasts
+        // state. Use sparingly during step 14 testing.
+        Director::Instance().ForceSpawn(GetDescriptorId());
+    }
 }
 
 }  // namespace AnchorDirector

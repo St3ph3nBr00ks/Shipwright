@@ -7,6 +7,7 @@
 
 #include "soh/cvar_prefixes.h"
 
+#include <imgui.h>  // ImGui::Button for RenderDebugUI
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <libultraship/libultraship.h>
 
@@ -126,6 +127,33 @@ std::vector<SpawnProposal> TestDescriptor::ProposeSpawn(const Director& director
     return { p };
 }
 
+std::vector<SpawnProposal> TestDescriptor::BuildForcedProposal(const Director& director,
+                                                               const SessionView& view) {
+    // Bypasses live-count cap, cooldown, target-invalid checks — the
+    // user explicitly asked for a spawn via the dev button.
+    (void)director;
+    const PlayerSnapshot* target = view.MostIsolatedPlayer();
+    if (target == nullptr) {
+        return {};  // No players → can't spawn meaningfully.
+    }
+
+    SpawnProposal p;
+    p.source       = this;
+    p.sceneNum     = target->sceneNum;
+    p.roomNum      = target->roomNum;
+    p.worldPos.x   = target->worldPos.x + kSpawnOffsetXZ;
+    p.worldPos.y   = target->worldPos.y;
+    p.worldPos.z   = target->worldPos.z;
+    p.yawTowards   = 0x8000;
+    p.actorId      = ACTOR_EN_TEST;
+    p.actorParams  = 1;  // STALFOS_TYPE_1 visible variant
+    p.variantId    = 0;
+    p.priority     = DescriptorPriority::Ambient;
+    p.groupId      = 0;
+    ++mProposalsOffered;
+    return { p };
+}
+
 void TestDescriptor::OnSpawnRemoved(uint32_t netId, DefeatCause cause) {
     ++mTotalRemoved;
     mLastRemovedNetId = netId;
@@ -137,6 +165,16 @@ std::string TestDescriptor::GetDebugSnapshotLine() const {
     return "proposals=" + std::to_string(mProposalsOffered) +
            " removed=" + std::to_string(mTotalRemoved) +
            " lastRemove=" + std::to_string(mLastRemovedNetId);
+}
+
+void TestDescriptor::RenderDebugUI(const Director& director) {
+    (void)director;
+    if (ImGui::Button("Force Spawn TestDescriptor")) {
+        // Bypasses cooldown/cap/gates. RecordSpawn still increments the
+        // live count + broadcasts state, so DIRECTOR_STATE_SYNC remains
+        // consistent. Use sparingly during step 14 testing.
+        Director::Instance().ForceSpawn(GetDescriptorId());
+    }
 }
 
 }  // namespace AnchorDirector

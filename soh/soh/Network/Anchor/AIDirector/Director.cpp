@@ -352,6 +352,56 @@ bool Director::MsCooldownElapsed(int16_t sceneNum, int8_t roomNum, uint8_t descI
     return framesSince >= requiredTicks;
 }
 
+bool Director::ForceSpawn(uint8_t descriptorId) {
+    // Host-only — non-hosts shouldn't be spawning anything; even with
+    // the dev button pressed on a peer client, propagating a spawn from
+    // a non-authority would conflict with the migration model.
+    if (!::SceneAuthority::IsEffectiveHost()) {
+        SPDLOG_WARN("[Director] ForceSpawn rejected: not effective host");
+        return false;
+    }
+
+    SpawnableEnemyDescriptor* desc = nullptr;
+    for (auto& d : mDescriptors) {
+        if (d->GetDescriptorId() == descriptorId) {
+            desc = d.get();
+            break;
+        }
+    }
+    if (desc == nullptr) {
+        SPDLOG_WARN("[Director] ForceSpawn: no descriptor with id={}", descriptorId);
+        return false;
+    }
+
+    SessionView view = BuildSessionView();
+    if (!view.IsValid()) {
+        SPDLOG_WARN("[Director] ForceSpawn: invalid session view "
+                    "(save not loaded?) — descriptor='{}'",
+                    desc->GetDebugName());
+        return false;
+    }
+
+    auto proposals = desc->BuildForcedProposal(*this, view);
+    if (proposals.empty()) {
+        SPDLOG_WARN("[Director] ForceSpawn: descriptor='{}' returned no "
+                    "forced proposal — descriptor may not support force "
+                    "spawn or has no target",
+                    desc->GetDebugName());
+        return false;
+    }
+
+    SPDLOG_INFO("[Director] ForceSpawn: descriptor='{}' executing {} proposal(s) "
+                "(bypasses cooldown/cap/cutscene/blacklist gates)",
+                desc->GetDebugName(), proposals.size());
+
+    bool anyExecuted = false;
+    for (auto& p : proposals) {
+        if (p.source == nullptr) p.source = desc;
+        if (ExecuteSpawn(p)) anyExecuted = true;
+    }
+    return anyExecuted;
+}
+
 void Director::RecordSpawn(int16_t sceneNum, int8_t roomNum, uint8_t descId, uint32_t netId) {
     const uint32_t key = MakeCooldownKey(sceneNum, roomNum, descId);
     // mGlobalFrameCounter is uint64_t but the ledger holds int. The counter
