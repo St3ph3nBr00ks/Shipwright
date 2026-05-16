@@ -159,6 +159,26 @@ public:
     // Host-only (mirrors the rest of the Director's spawn path).
     bool ForceSpawn(uint8_t descriptorId);
 
+    // Phase 1 §7.5 lifecycle — descriptor-initiated despawn. Mirror of
+    // ExecuteSpawn for the "I want this actor gone now" direction
+    // (orphan timeout, all-unavailable cleanup, scene-following
+    // continuation despawn). Walks the actor lists looking for the
+    // EnemyNetId match, calls Actor_Kill on it. The standard
+    // ENEMY_DEFEATED / OnEnemyRemoved pipeline then fires, routes
+    // through descriptor->OnSpawnRemoved with the provided cause.
+    //
+    // Returns true if the actor was found and killed; false if not
+    // present (e.g. already destroyed by scene transition).
+    bool ExecuteDespawn(uint32_t netId, DefeatCause cause);
+
+    // Phase 1 §7.5 — public ExecuteSpawn for descriptor-initiated
+    // continuations (scene-follow follow-spawn). Bypasses arbitration
+    // by design: the caller knows it wants this proposal executed,
+    // no competition needed. The proposal's bypassCooldown flag
+    // distinguishes "fresh natural spawn" from "scene-follow
+    // continuation"; see SpawnableEnemyDescriptor.h.
+    bool ExecuteSpawn(const SpawnProposal& proposal);
+
     // --- Ledger update --------------------------------------------------
 
     // Record a successful spawn in all three ledgers atomically. Called by
@@ -222,13 +242,10 @@ private:
     // always-invalid view; step 2 walks players + DummyPlayers.
     SessionView BuildSessionView() const;
 
-    // Execute a winning spawn proposal on the host:
-    //   - Actor_Spawn locally; read assigned netId via EnemyNetId extension.
-    //   - RecordSpawn (ledgers + DIRECTOR_STATE_SYNC broadcast).
-    //   - SendPacket_EnemySpawn with descriptor identity.
-    // Returns true on success; false if Actor_Spawn failed or netId
-    // couldn't be read (rare — actor limit reached, non-EnemyNetId actor).
-    bool ExecuteSpawn(const SpawnProposal& proposal);
+    // ExecuteSpawn — declared public above for descriptor access
+    // (Phase 1 §7.5 scene-follow continuations call it directly,
+    // bypassing arbitration). Body still in this TU; semantics
+    // documented at the public declaration site.
 
     // Ledgers --------------------------------------------------------
     //

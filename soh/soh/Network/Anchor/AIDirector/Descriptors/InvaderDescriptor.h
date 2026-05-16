@@ -43,7 +43,31 @@
 
 #include "../SpawnableEnemyDescriptor.h"
 
+#include <unordered_map>
+
 namespace AnchorDirector {
+
+// Per-Invader runtime state. Keyed on netId in mActiveInvaders.
+// Replaces the earlier scalar mLastSpawnPos / mLastSpawnNetId
+// approach now that MaxAlive can be > 1 and each invader carries
+// its own sticky target / orphan timer / pending-follow state.
+//
+// Phase 1 scope: targetClientId (sticky), lastKnownScene/Room (for
+// orphan-detection), orphanFrames (60s timeout). Phase 2 adds
+// outOfSightFrames + cantReachFrames once the real ACTOR_EN_INVADER
+// has the signals (#208-blocked).
+struct InvaderRuntimeState {
+    Vec3f    lastSpawnPos      = { 0.0f, 0.0f, 0.0f };
+    uint32_t targetClientId    = 0;     // sticky — 0 means "needs initial target"
+    int16_t  lastKnownSceneNum = 0;
+    int8_t   lastKnownRoomNum  = 0;
+    int      orphanFrames      = 0;     // ticks since any team-player was in (scene, room)
+    bool     pendingFollowSpawn = false; // Phase 2 lifecycle: true between PlayerEnteredRoom event and respawn
+    int      followGraceFrames = 0;     // countdown for follow-spawn grace period
+    Vec3f    pendingFollowPos  = { 0.0f, 0.0f, 0.0f };  // captured entrance pos
+    int16_t  pendingFollowScene = 0;
+    int8_t   pendingFollowRoom  = 0;
+};
 
 class InvaderDescriptor : public SpawnableEnemyDescriptor {
 public:
@@ -67,6 +91,12 @@ public:
 
     // --- Spawn-removed cleanup ---
     void OnSpawnRemoved(uint32_t netId, DefeatCause cause) override;
+
+    // --- Reactive events (Phase 1 §7.5 scene-following) ---
+    void OnEvent(const DirectorEventPayload& evt) override;
+
+    // --- Per-tick lifecycle scan (Phase 1 §7.5) ---
+    void OnTick(Director& director, const SessionView& view) override;
 
     // --- Debug surface ---
     std::string GetDebugSnapshotLine() const override;
@@ -96,9 +126,17 @@ private:
     int      mTotalRemoved      = 0;
     uint32_t mLastRemovedNetId  = 0;
 
-    // Last-spawn world position from the most recent successful
-    // ExecuteSpawn. Surfaced by the debug panel + the in-world
-    // overlay so the user can locate orphan invaders.
+    // Per-Invader runtime state. Keyed on netId. Populated by
+    // OnSpawnExecuted, erased by OnSpawnRemoved, tracked per-tick by
+    // ProposeSpawn (sticky target re-evaluation, orphan timer).
+    std::unordered_map<uint32_t, InvaderRuntimeState> mActiveInvaders;
+
+    // Scalar mirror of the most-recently-spawned invader's position
+    // for the in-world red-marker overlay. Updated on every
+    // OnSpawnExecuted; never cleared so the marker persists across
+    // kills (intentional — useful for finding orphan locations).
+    // With MaxAlive>1 this just tracks whichever spawn fired last;
+    // future enhancement could render markers for ALL active invaders.
     Vec3f    mLastSpawnPos      = { 0.0f, 0.0f, 0.0f };
     uint32_t mLastSpawnNetId    = 0;
     bool     mHasLastSpawn      = false;  // false until first OnSpawnExecuted
@@ -107,6 +145,25 @@ private:
     // to ~once per 5s at 20fps. Mirrors TestDescriptor's pattern;
     // gated by gEnhancements.AI.Director.LogProposals.
     int      mTicksSinceLog    = 0;
+
+    // --- Phase 1 helpers ---
+
+    // Phase 1 §7.5 valid-target predicate. A player is a valid target
+    // when: online + save loaded + not in cutscene + not in boss room
+    // with live boss + not in blacklisted scene + alive (proxy: save
+    // loaded). The first three are read from PlayerSnapshot directly;
+    // boss-room is stubbed false (step 12 deferral); blacklist consults
+    // IsSceneFlaggedNoInvaders. Used by ProposeSpawn (initial target
+    // pick) + the per-tick lifecycle scan (sticky-target re-evaluate).
+    bool IsValidTarget(const PlayerSnapshot& p) const;
+
+    // Returns the best valid target from the view, or nullptr if none
+    // exists. "Best" today is most-isolated (same as MostIsolatedPlayer)
+    // filtered through IsValidTarget. When all players are invalid
+    // (everyone in boss room / cutscene / blacklisted scene / dead),
+    // returns nullptr — the InvaderDescriptor's all-unavailable
+    // immediate-despawn logic uses this as the trigger.
+    const PlayerSnapshot* PickValidTarget(const SessionView& view) const;
 };
 
 }  // namespace AnchorDirector

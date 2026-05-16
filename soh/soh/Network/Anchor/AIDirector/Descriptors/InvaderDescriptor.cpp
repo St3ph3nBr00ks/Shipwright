@@ -30,6 +30,7 @@
  */
 
 #include "InvaderDescriptor.h"
+#include "../Anchor.h"  // Phase 1 §7.5 — Anchor::Instance->MsToGameTicks for orphan / grace timers
 #include "../Director.h"
 
 #include "soh/cvar_prefixes.h"
@@ -42,12 +43,20 @@
 #include <cmath>    // std::sqrt for OFFERED log distance metric
 #include <cstdio>   // std::snprintf for GetDebugSnapshotLine pos formatting
 #include <cstdlib>  // std::rand for candidate-node sampling
+#include <limits>   // std::numeric_limits<float>::infinity in PickValidTarget
 #include <optional>
+#include <utility>  // std::pair for OnTick's toFollowSpawn vector
+#include <vector>   // OnTick's toDespawn / toFollowSpawn vectors
 
 extern "C" {
 #include "z64.h"
 #include "z64actor.h"  // ACTOR_EN_TEST placeholder until step 15's ACTOR_EN_INVADER
 }
+
+// gPlayState — Phase 1 §7.5 OnTick reads sceneNum / roomCtx for the
+// orphan-timer's lastKnownScene/Room population. Same trap-avoidance
+// pattern as Director.cpp (Pitfall 15 territory).
+extern "C" PlayState* gPlayState;
 
 namespace AnchorDirector {
 
@@ -439,23 +448,47 @@ std::vector<SpawnProposal> InvaderDescriptor::BuildForcedProposal(const Director
 }
 
 void InvaderDescriptor::OnSpawnExecuted(uint32_t netId, const Vec3f& worldPos) {
+    // Scalar mirror for the in-world red-marker (legacy step-8 API).
     mLastSpawnPos   = worldPos;
     mLastSpawnNetId = netId;
     mHasLastSpawn   = true;
-    SPDLOG_INFO("[InvaderDescriptor] OnSpawnExecuted netId={} pos=({:.0f},{:.0f},{:.0f})",
-                netId, worldPos.x, worldPos.y, worldPos.z);
+
+    // Phase 1 §7.5: populate runtime state for this Invader. Most
+    // fields filled lazily by OnTick / OnEvent — here we just record
+    // the spawn position + clear any pending-follow state from a prior
+    // scene-following continuation that just landed.
+    InvaderRuntimeState& state = mActiveInvaders[netId];
+    state.lastSpawnPos        = worldPos;
+    state.pendingFollowSpawn  = false;
+    state.followGraceFrames   = 0;
+    state.orphanFrames        = 0;
+    // sceneNum / roomNum populated by the first OnTick after spawn
+    // (reads gPlayState at that point); targetClientId by the first
+    // sticky-target assignment in ProposeSpawn / OnTick.
+
+    SPDLOG_INFO("[InvaderDescriptor] OnSpawnExecuted netId={} pos=({:.0f},{:.0f},{:.0f}) "
+                "activeInvaders={}",
+                netId, worldPos.x, worldPos.y, worldPos.z, mActiveInvaders.size());
 }
 
 void InvaderDescriptor::OnSpawnRemoved(uint32_t netId, DefeatCause cause) {
     ++mTotalRemoved;
     mLastRemovedNetId = netId;
-    // Note: do NOT clear mLastSpawnPos here. The "where did my last
+
+    // Phase 1 §7.5: drop runtime state for this Invader. Sticky target,
+    // orphan timer, pending-follow are all gone. If another Invader
+    // is still alive (MaxAlive > 1), its state in mActiveInvaders
+    // continues independently.
+    mActiveInvaders.erase(netId);
+
+    // Note: do NOT clear mLastSpawnPos (scalar) here. The "where did my last
     // spawn appear" diagnostic stays useful even after kill — the
     // user might still want to know where to look for orphans on
     // subsequent rounds.
     SPDLOG_INFO("[InvaderDescriptor] OnSpawnRemoved netId={} cause={} "
-                "(proposals={} removed={})",
-                netId, (int)cause, mProposalsOffered, mTotalRemoved);
+                "(proposals={} removed={} remainingActive={})",
+                netId, (int)cause, mProposalsOffered, mTotalRemoved,
+                mActiveInvaders.size());
 }
 
 std::string InvaderDescriptor::GetDebugSnapshotLine() const {
@@ -480,6 +513,246 @@ void InvaderDescriptor::RenderDebugUI(const Director& director) {
         // RecordSpawn still increments the live count + broadcasts
         // state. Use sparingly during step 14 testing.
         Director::Instance().ForceSpawn(GetDescriptorId());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 §7.5 — lifecycle persistence.
+// ---------------------------------------------------------------------------
+
+bool InvaderDescriptor::IsValidTarget(const PlayerSnapshot& p) const {
+    // Per plan §7.5, a player is invalid when ANY of:
+    //   - offline / save not loaded
+    //   - in cutscene (csCtxState != CS_STATE_IDLE)
+    //   - in boss room with live boss
+    //   - in blacklisted scene
+    //   - dead / mid-respawn (proxied by !isSaveLoaded today; a future
+    //     PlayerSnapshot.isDead field would be more precise)
+    //
+    // online filter is implicit: SessionView::BuildSessionView only
+    // includes online clients. So we only need to check the rest.
+    if (!p.isSaveLoaded) return false;
+    if (p.isInCutscene)  return false;
+    if (IsSceneFlaggedNoInvaders(p.sceneNum)) return false;
+    if (IsBossRoomWithLiveBoss(p.sceneNum, p.roomNum)) return false;
+    return true;
+}
+
+const PlayerSnapshot* InvaderDescriptor::PickValidTarget(const SessionView& view) const {
+    // "Best" valid target = most-isolated player passing IsValidTarget.
+    // Iterates the view's players manually since SessionView's
+    // MostIsolatedPlayer helper doesn't take a filter today; if a
+    // second descriptor wants this pattern, refactor to a generic
+    // filter-aware helper on SessionView.
+    const PlayerSnapshot* best = nullptr;
+    float bestMinDistSq = -1.0f;
+    for (size_t i = 0; i < view.players.size(); ++i) {
+        const PlayerSnapshot& candidate = view.players[i];
+        if (!IsValidTarget(candidate)) continue;
+
+        // Compute min-distance to any OTHER valid candidate. Isolated
+        // = far from peers (Dark-Souls-flavor; lone players get hunted).
+        float minDistSq = std::numeric_limits<float>::infinity();
+        for (size_t j = 0; j < view.players.size(); ++j) {
+            if (i == j) continue;
+            const PlayerSnapshot& other = view.players[j];
+            if (!IsValidTarget(other)) continue;
+            if (other.sceneNum != candidate.sceneNum) continue;
+            const float dx = candidate.worldPos.x - other.worldPos.x;
+            const float dy = candidate.worldPos.y - other.worldPos.y;
+            const float dz = candidate.worldPos.z - other.worldPos.z;
+            const float d  = dx*dx + dy*dy + dz*dz;
+            if (d < minDistSq) minDistSq = d;
+        }
+        if (minDistSq > bestMinDistSq) {
+            bestMinDistSq = minDistSq;
+            best          = &candidate;
+        }
+    }
+    return best;
+}
+
+void InvaderDescriptor::OnEvent(const DirectorEventPayload& evt) {
+    // Phase 1 §7.5 scene-following — only PlayerEnteredRoom matters for
+    // the v1 lifecycle. Other DirectorEvents are ignored.
+    if (evt.type != DirectorEvent::PlayerEnteredRoom) return;
+
+    // Find any active Invader currently tracking the transitioning
+    // player as its sticky target. If found, arm the follow-spawn:
+    // captures the player's entrance position (= their worldPos right
+    // now, since OnSceneSpawnActors just placed them there) + grace
+    // counter. OnTick despawns the old actor + schedules the new
+    // spawn at the entrance.
+    for (auto& [netId, state] : mActiveInvaders) {
+        if (state.targetClientId != evt.clientId) continue;
+        // Look up the transitioning player's current pos (= entrance
+        // position) from SessionView. We don't have view here, so
+        // capture sceneNum/roomNum + flag — OnTick reads the live
+        // worldPos at follow-spawn time.
+        state.pendingFollowSpawn   = true;
+        state.pendingFollowScene   = evt.sceneNum;
+        state.pendingFollowRoom    = evt.roomNum;
+        state.followGraceFrames    = 0;  // OnTick initializes from MsToGameTicks
+        // entrance position captured at OnTick time when grace is set.
+        SPDLOG_INFO("[InvaderDescriptor] OnEvent PlayerEnteredRoom: client={} "
+                    "scene={} room={} -> arming follow-spawn for netId={}",
+                    evt.clientId, (int)evt.sceneNum, (int)evt.roomNum, netId);
+    }
+}
+
+void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
+    // No active Invaders → nothing to manage.
+    if (mActiveInvaders.empty()) return;
+
+    // Collect netIds to mutate-after-iteration so we don't invalidate
+    // the map during the loop.
+    std::vector<uint32_t> toDespawn;
+    std::vector<std::pair<uint32_t, Vec3f>> toFollowSpawn;  // (netId, entrancePos)
+
+    // Phase 1 §7.5 "all-unavailable" precheck — if NO valid target
+    // exists for ANY active Invader, despawn them all immediately
+    // (BossRoom or Leash cause; using Leash as catch-all for now).
+    const PlayerSnapshot* anyValid = PickValidTarget(view);
+    const bool allUnavailable      = (anyValid == nullptr);
+
+    for (auto& [netId, state] : mActiveInvaders) {
+        // Sticky-target validity check. If the current target is no
+        // longer valid, try to switch to another. If no valid target
+        // exists at all, queue this Invader for despawn.
+        const PlayerSnapshot* currentTarget = view.PlayerByClientId(state.targetClientId);
+        const bool targetInvalid =
+            (currentTarget == nullptr) || !IsValidTarget(*currentTarget);
+
+        if (allUnavailable) {
+            // No valid target anywhere — immediate despawn.
+            toDespawn.push_back(netId);
+            continue;
+        }
+
+        if (targetInvalid) {
+            // Switch sticky target to whoever is best valid right now.
+            if (anyValid != nullptr) {
+                if (state.targetClientId != anyValid->clientId) {
+                    SPDLOG_INFO("[InvaderDescriptor] OnTick: sticky target "
+                                "for netId={} switched ({} -> {})",
+                                netId, state.targetClientId, anyValid->clientId);
+                    state.targetClientId = anyValid->clientId;
+                }
+            }
+        } else if (state.targetClientId == 0) {
+            // Initial target assignment (first OnTick after OnSpawnExecuted).
+            state.targetClientId = anyValid->clientId;
+            SPDLOG_INFO("[InvaderDescriptor] OnTick: initial sticky target "
+                        "for netId={} -> client {}",
+                        netId, state.targetClientId);
+        }
+
+        // Update last-known scene/room — used by the orphan-timer
+        // check below. Use the spawn-time data from OnSpawnExecuted
+        // (we don't continuously chase the actor's wandering position
+        // — the orphan check is about "is anyone in the room I spawned
+        // into"). Lazily populated on first OnTick when scene/room is 0.
+        if (state.lastKnownSceneNum == 0 && gPlayState != nullptr) {
+            state.lastKnownSceneNum = (int16_t)gPlayState->sceneNum;
+            state.lastKnownRoomNum  = (int8_t)gPlayState->roomCtx.curRoom.num;
+        }
+
+        // Orphan-in-scene timer: increment if no team player is in
+        // (lastKnownScene, lastKnownRoom). Reset to 0 if any is.
+        bool playerInScene = false;
+        for (const PlayerSnapshot& p : view.players) {
+            if (p.sceneNum == state.lastKnownSceneNum &&
+                p.roomNum  == state.lastKnownRoomNum) {
+                playerInScene = true;
+                break;
+            }
+        }
+        if (playerInScene) {
+            state.orphanFrames = 0;
+        } else {
+            ++state.orphanFrames;
+            const int kOrphanMs = 60 * 1000;
+            if (state.orphanFrames >= Anchor::Instance->MsToGameTicks(kOrphanMs)) {
+                SPDLOG_INFO("[InvaderDescriptor] OnTick: netId={} orphan-in-scene "
+                            "timeout ({}s, scene={} room={}) — despawning",
+                            netId, kOrphanMs / 1000,
+                            (int)state.lastKnownSceneNum,
+                            (int)state.lastKnownRoomNum);
+                toDespawn.push_back(netId);
+                continue;
+            }
+        }
+
+        // Scene-follow grace counter. OnEvent set pendingFollowSpawn=true
+        // when the target player transitioned; we initialize the grace
+        // counter here on the first OnTick after the event so MsToGameTicks
+        // applies the right tick rate.
+        if (state.pendingFollowSpawn) {
+            if (state.followGraceFrames == 0) {
+                // First tick after OnEvent — initialize grace counter +
+                // capture the target's CURRENT worldPos (= entrance pos
+                // since they JUST spawned in via OnSceneSpawnActors).
+                const PlayerSnapshot* tgt = view.PlayerByClientId(state.targetClientId);
+                if (tgt != nullptr) {
+                    state.pendingFollowPos = tgt->worldPos;
+                    const int kGraceMs = 1500;
+                    state.followGraceFrames = Anchor::Instance->MsToGameTicks(kGraceMs);
+                    SPDLOG_INFO("[InvaderDescriptor] OnTick: follow-spawn armed "
+                                "netId={} entrancePos=({:.0f},{:.0f},{:.0f}) grace={}ms",
+                                netId,
+                                state.pendingFollowPos.x,
+                                state.pendingFollowPos.y,
+                                state.pendingFollowPos.z,
+                                kGraceMs);
+                }
+            } else {
+                // Tick down grace counter; fire follow-spawn when it
+                // hits 0. Captures the entrancePos at arm-time, not now
+                // (player may have walked away during the 1.5s grace).
+                --state.followGraceFrames;
+                if (state.followGraceFrames <= 0) {
+                    toFollowSpawn.push_back({netId, state.pendingFollowPos});
+                    state.pendingFollowSpawn = false;
+                }
+            }
+        }
+    }
+
+    // Execute despawns. ExecuteDespawn handles missing-actor case
+    // (e.g. scene-unload already destroyed it) by cleaning up
+    // bookkeeping without calling Actor_Kill.
+    for (uint32_t netId : toDespawn) {
+        director.ExecuteDespawn(netId, DefeatCause::Leash);
+    }
+
+    // Execute scene-following follow-spawns. Despawn the old Invader,
+    // then spawn a fresh one at the captured entrance position with
+    // bypassCooldown=true so the new scene's cooldown ledger doesn't
+    // stamp this as a "fresh natural spawn".
+    for (const auto& [oldNetId, entrancePos] : toFollowSpawn) {
+        SPDLOG_INFO("[InvaderDescriptor] OnTick: executing follow-spawn "
+                    "(old netId={} -> entrancePos=({:.0f},{:.0f},{:.0f}))",
+                    oldNetId, entrancePos.x, entrancePos.y, entrancePos.z);
+
+        director.ExecuteDespawn(oldNetId, DefeatCause::SceneExit);
+
+        SpawnProposal p;
+        p.source         = this;
+        p.sceneNum       = (gPlayState != nullptr) ? (int16_t)gPlayState->sceneNum : 0;
+        p.roomNum        = (gPlayState != nullptr) ? (int8_t)gPlayState->roomCtx.curRoom.num : 0;
+        p.worldPos       = entrancePos;
+        p.yawTowards     = 0;
+        p.actorId        = ACTOR_EN_TEST;
+        p.actorParams    = 1;
+        p.variantId      = 0;
+        p.priority       = DescriptorPriority::Standard;
+        p.groupId        = 0;
+        p.bypassCooldown = true;  // CRITICAL — continuation, not a new encounter
+        ++mProposalsOffered;
+        // ExecuteSpawn directly — bypass arbitration. The new spawn
+        // doesn't compete with other descriptors; it's a continuation
+        // of an already-decided spawn.
+        director.ExecuteSpawn(p);
     }
 }
 
