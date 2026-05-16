@@ -2952,7 +2952,10 @@ s32 ChooseCombatExitState(EnFollower* this_, PlayState* play) {
 static constexpr float kCrawlSpeed         = 3.5f;   // matches Player's stick_y*0.03 max ≈ 3.81
 static constexpr float kCrawlEntryRadius   = 150.0f; // NPC must be within this XZ of entryPos to enter
 static constexpr float kCrawlMinCrossDist  = 20.0f;  // both NPC + leader must be this far from wall plane
-static constexpr float kCrawlExitMargin    = 30.0f;  // NPC has crossed past wall plane by this much → exit
+// kCrawlExitMargin removed — Approach A's signed-distance exit test
+// was replaced by Approach B (wall-collision-based) in TickCRAWLING.
+// If switching back to Approach A, restore this constant and use it
+// in the per-tick currentSide check.
 static constexpr float kCrawlMaxDistance   = 400.0f; // safety cap on traversal length
 
 struct CrawlState {
@@ -3033,25 +3036,97 @@ void TickCRAWLING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // Player's crawlspace code doesn't apply gravity either).
     a->world.pos.y = sCrawlState.entryPos.y;
 
-    // Exit detection — has NPC crossed past the wall plane to the
-    // leader's side by margin?
-    const float currentSide =
-        (a->world.pos.x - sCrawlState.anchor->entryPos.x) * sCrawlState.anchor->entryNormal.x +
-        (a->world.pos.z - sCrawlState.anchor->entryPos.z) * sCrawlState.anchor->entryNormal.z;
-    // Safety cap — distance traveled from entry.
     const float dx = a->world.pos.x - sCrawlState.entryPos.x;
     const float dz = a->world.pos.z - sCrawlState.entryPos.z;
     const float traveled = std::sqrt(dx*dx + dz*dz);
 
-    const bool crossedPlane = currentSide < -kCrawlExitMargin;
-    const bool tooFar       = traveled > kCrawlMaxDistance;
-    if (crossedPlane || tooFar) {
-        SPDLOG_INFO("[FollowerNPC] CRAWLING — exit triggered ({}), traveled {:.0f}u "
-                    "from entry; switching to kCrawlExit anim",
-                    crossedPlane ? "crossed plane" : "max distance",
-                    traveled);
+    // ------------------------------------------------------------------
+    // Approach B — wall-collision-based exit detection.
+    //
+    // Mirrors Player's Player_TryLeavingCrawlspace at z_player.c:7763.
+    // OoT crawlspaces have FOUR walls with the special flag: two
+    // ENTRANCE walls (outside-facing, one at each end) and two EXIT
+    // walls (inside-facing, deeper into the tunnel than the entrance
+    // walls). Player exits when its forward motion bumps it into one
+    // of the interior exit walls (z_player.c:7766 — bgCheckFlags & 8
+    // AND touched-wall-flags & 0x30). We replicate the same check.
+    //
+    // We DO need to wait before arming the exit check, because we
+    // snap to entryPos at CRAWLING entry — entryPos sits AT or near
+    // the entry wall, so the first BG check would touch the entry
+    // wall (which also has flag 0x30) and trigger exit immediately.
+    // Player avoids this implicitly because Player_TryEnteringCrawlspace
+    // (z_player.c:7690-7691) snaps Player past the wall and the entry
+    // anim moves them away before their own crawl action func starts
+    // testing for exit. Our snap is simpler — manual buffer is needed.
+    //
+    // ------------------------------------------------------------------
+    // Alternative — Approach A (paired-anchor detection, deferred):
+    //
+    // An OoT crawlspace has TWO CrawlspaceAnchor entries (one at each
+    // end with opposite-facing entryNormals). At CRAWLING entry, scan
+    // all crawlspaceAnchors for the pair: dot product of normals < -0.7
+    // (roughly antiparallel) AND the candidate lies along this
+    // anchor's -entryNormal direction. Cache the paired anchor's
+    // entryPos as sCrawlState.exitPos. In TickCRAWLING, exit when
+    // NPC's XZ distance to exitPos < 30u.
+    //
+    // Pros: pure math, no collision queries, no entry-wall confusion.
+    // Cons: relies on substrate detection cataloguing BOTH ends of
+    // every crawlspace; for crawlspaces with only one detected
+    // anchor, only the safety cap below would fire.
+    //
+    // To switch from B → A: (1) at TryEnterCrawling, scan
+    // navData->crawlspaceAnchors for the pair and cache
+    // sCrawlState.exitPos. (2) Replace the BG-check block below
+    // with a distance-to-exitPos check. (3) Remove the
+    // Actor_UpdateBgCheckInfo call.
+    // ------------------------------------------------------------------
+
+    // Distance buffer — don't run the wall-flag check until we've
+    // moved past the entry wall (else we'd trigger exit on the entry
+    // wall, which also has the 0x30 flag). 70u ≈ enough clearance
+    // for typical crawlspace wall thicknesses + safety margin.
+    constexpr float kCrawlExitArmDistance = 70.0f;
+
+    // Safety cap always fires regardless of BG check.
+    if (traveled > kCrawlMaxDistance) {
+        SPDLOG_INFO("[FollowerNPC] CRAWLING — exit triggered (safety cap, "
+                    "traveled {:.0f}u > {:.0f}u)",
+                    traveled, kCrawlMaxDistance);
         sCrawlState.exitAnimPlaying = true;
-        this_->stopAnimPlaying = 0;  // let kCrawlExit override flow through
+        this_->stopAnimPlaying = 0;
+        return;
+    }
+
+    if (traveled < kCrawlExitArmDistance) {
+        return;  // too close to entry wall — skip exit detection
+    }
+
+    // Run BG check at crawl-body height: small wall-radius (NPC is in
+    // a narrow tunnel), low wallCheckHeight (~20u — NPC is crouched).
+    // The Actor_UpdateBgCheckInfo call writes to bgCheckFlags + wallPoly
+    // + wallBgId; we don't care about gravity / floor here, just the
+    // wall touch state.
+    Actor_UpdateBgCheckInfo(play, a, 20.0f /* wallCheckHeight */,
+                            15.0f /* wallCheckRadius */,
+                            30.0f /* ceilingCheckHeight */,
+                            4 /* flags */);
+
+    if ((a->bgCheckFlags & 8) != 0 && a->wallPoly != nullptr) {
+        // func_80041DB8 returns the surface-type wall-flags bitmask
+        // for the touched polygon. 0x30 = crawlspace bits (matches
+        // Player's interactWallFlags & 0x30 check at z_player.c:7639
+        // for entry and z_player.c:7766 for exit).
+        const s32 wallFlags = func_80041DB8(&play->colCtx, a->wallPoly, a->wallBgId);
+        if ((wallFlags & 0x30) != 0) {
+            SPDLOG_INFO("[FollowerNPC] CRAWLING — exit wall hit "
+                        "(flags=0x{:X}, traveled {:.0f}u) — switching to "
+                        "kCrawlExit anim",
+                        (unsigned)wallFlags, traveled);
+            sCrawlState.exitAnimPlaying = true;
+            this_->stopAnimPlaying = 0;  // let kCrawlExit override flow through
+        }
     }
 }
 
