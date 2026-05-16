@@ -1,18 +1,22 @@
 /**
  * Invader — AI Invader Director-side tick driver and rendering hooks.
  *
- * v1 (step 15a) — scaffold only. Anchor_TickInvaderActor is a no-op;
- * the file-scope draw-context flag (Anchor_InvaderDrawBegin/End +
+ * Step 15c (Phase 2) — locomotion + anim infrastructure + G-guards.
+ * Anchor_TickInvaderActor implements IDLE / FOLLOW / STUCK state
+ * machine cloned from NPC Follower's same-named states. NO combat
+ * states (ATTACK/BLOCK/ENGAGE/RANGED_ATTACK/STANDBY) — those are
+ * Agent 3's scope. NO substrate path consumption — direct yaw +
+ * speedXZ only (Phase 3+ will add substrate path consumption).
+ *
+ * The file-scope draw-context flag (Anchor_InvaderDrawBegin/End +
  * Anchor_GetCurrentlyDrawingInvader) supports the
  * VB_APPLY_TUNIC_COLOR hook's black-tint override for the
- * hostile-Link visual.
+ * hostile-Link visual (owned by Agent 1; we don't touch it here).
  *
  * Combat AI lands here post-#208 (follower state-machine formal
  * design pass); see Plans/ai_invader_plan.md §2.2.
  *
- * Parallels soh/soh/Network/Anchor/AIFollowerNPC/FollowerNPC.h —
- * the Invader will grow into a similarly-shaped state machine once
- * #208 lands and the cloning contract is documented.
+ * Parallels soh/soh/Network/Anchor/AIFollowerNPC/FollowerNPC.h.
  */
 
 #pragma once

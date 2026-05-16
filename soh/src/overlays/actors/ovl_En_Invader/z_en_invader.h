@@ -22,8 +22,15 @@
 //
 // Combat AI (state machine, target selection, attack, retreat) is
 // blocked on #208 — see plan §2.2.
+//
+// Step 15c (Phase 2): added FOLLOW + STUCK states for locomotion +
+// G-guard safety harness. Cloned from EnFollower's IDLE/FOLLOW/STUCK
+// shape. NO combat states (ATTACK/BLOCK/ENGAGE/RANGED_ATTACK/STANDBY)
+// — those are Agent 3's scope.
 typedef enum {
-    EN_INVADER_STATE_IDLE = 0,
+    EN_INVADER_STATE_IDLE   = 0,
+    EN_INVADER_STATE_FOLLOW = 1,  // chase nearest player (target-acquired)
+    EN_INVADER_STATE_STUCK  = 2,  // single-tick nudge recovery
 } EnInvaderAIState;
 
 struct EnInvader;
@@ -56,9 +63,43 @@ typedef struct EnInvader {
     s8 currentBoots;
     s8 currentFace;
 
-    // State machine — currently IDLE only. Combat AI (post-#208)
-    // expands this to SPAWN / TRACK / ENGAGE / ATTACK / etc.
+    // State machine — IDLE / FOLLOW / STUCK (Phase 2). Combat AI
+    // (post-#208) expands this to ENGAGE / ATTACK / BLOCK / etc.
     s32 state;
+
+    // ── Animation tracking (Phase 2 — cloned from EnFollower) ────────
+    // Last animation kind set on this actor (InvaderAnim enum value
+    // stored as int; matches the C++ enum class InvaderAnim in
+    // Invader.cpp). Init = 0 = kNone — first EnsureAnimation call
+    // will fire and swap from the kWait set up by SkelAnime_InitLink.
+    s32 currentAnim;
+    // Last modelAnimType used when picking the current anim. Mirrors
+    // Player.modelAnimType — 0=unarmed/free, 1/2=fighter. For v1 the
+    // Invader has no combat → always 0 (free). Agent 3 may set 1
+    // (fighter) when adding combat states.
+    s8  currentAnimType;
+    // Set true while a one-shot stop anim is playing in IDLE state.
+    // Blocks EnsureAnimation from switching to kWait until the stop
+    // anim completes.
+    u8  stopAnimPlaying;
+    // Previous tick's state. Used to detect FOLLOW→IDLE transition so
+    // the stop anim fires only on the transition frame.
+    s32 prevState;
+    // Step phase counter for foot-down detection (Player's unk_868
+    // equivalent at z_player.c:8105). Used for stop-anim L/R selection.
+    f32 stepPhase;
+    // Idle tick counter — counts ticks while NPC has been playing
+    // kWait. Reserved for future fidget-anim rotation (cloned from
+    // EnFollower; v1 doesn't rotate fidgets but kept for API parity).
+    u32 idleTicks;
+
+    // Independent head-look-at-target. Same pattern as EnFollower:
+    // computed each tick toward target's relative direction, written
+    // into Player's headLimbRot/upperLimbRot via the draw save/swap.
+    // For v1 the Invader doesn't swap these into the draw (Agent 1
+    // owns draw); reserved field kept so future polish can engage.
+    Vec3s headLimbRot;
+    Vec3s upperLimbRot;
 } EnInvader;
 
 #ifdef __cplusplus
