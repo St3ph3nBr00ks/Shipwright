@@ -180,9 +180,17 @@ private:
     // exists. "Best" today is most-isolated (same as MostIsolatedPlayer)
     // filtered through IsValidTarget. When all players are invalid
     // (everyone in boss room / cutscene / blacklisted scene / dead),
-    // returns nullptr — the InvaderDescriptor's all-unavailable
-    // immediate-despawn logic uses this as the trigger.
+    // returns nullptr.
     const PlayerSnapshot* PickValidTarget(const SessionView& view) const;
+
+    // Phase 1 §7.5 PERSISTENT-target predicate — same as IsValidTarget
+    // but excludes the CUTSCENE invalidator. Used by the all-unavailable
+    // despawn check so transient cutscenes (Kakariko entry, Lon Lon
+    // Ranch entry, etc.) don't kill in-flight follow-spawns or freshly-
+    // spawned Invaders sitting through an entry sequence. Cutscene is
+    // a transient state; only permanent unavailability (blacklist
+    // scene, boss room, save not loaded) should immediately despawn.
+    bool IsPersistentTarget(const PlayerSnapshot& p) const;
 };
 
 }  // namespace AnchorDirector

@@ -535,8 +535,36 @@ bool InvaderDescriptor::IsValidTarget(const PlayerSnapshot& p) const {
     //
     // online filter is implicit: SessionView::BuildSessionView only
     // includes online clients. So we only need to check the rest.
+    //
+    // Used for SPAWN DECISIONS (sticky-target re-eval, PickValidTarget,
+    // ProposeSpawn). Cutscene exclusion is correct here — Invaders
+    // should not aggro during scripted sequences. For the "should the
+    // Invader STAY ALIVE through transient unavailability" check, see
+    // IsPersistentTarget below.
     if (!p.isSaveLoaded) return false;
     if (p.isInCutscene)  return false;
+    if (IsSceneFlaggedNoInvaders(p.sceneNum)) return false;
+    if (IsBossRoomWithLiveBoss(p.sceneNum, p.roomNum)) return false;
+    return true;
+}
+
+bool InvaderDescriptor::IsPersistentTarget(const PlayerSnapshot& p) const {
+    // "Persistent" = the player would be a valid target if not for
+    // TRANSIENT conditions (cutscene). Used by the all-unavailable
+    // despawn check so Invaders aren't killed off by a brief entry
+    // cutscene (Kakariko gate, Lon Lon Ranch entry, etc. — log 199
+    // symptom).
+    //
+    // Permanent conditions still despawn:
+    //   - offline (handled implicitly by empty view)
+    //   - save not loaded
+    //   - blacklisted scene (Ganon endgame, Hyrule Castle)
+    //   - boss room with live boss (currently stubbed)
+    //
+    // Cutscenes are temporary; let the 60s orphan-in-scene timer
+    // handle "player has been in cutscene with no resolution forever"
+    // if it ever matters in practice.
+    if (!p.isSaveLoaded) return false;
     if (IsSceneFlaggedNoInvaders(p.sceneNum)) return false;
     if (IsBossRoomWithLiveBoss(p.sceneNum, p.roomNum)) return false;
     return true;
@@ -613,11 +641,21 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
     std::vector<uint32_t> toDespawn;
     std::vector<std::pair<uint32_t, Vec3f>> toFollowSpawn;  // (netId, entrancePos)
 
-    // Phase 1 §7.5 "all-unavailable" precheck — if NO valid target
-    // exists for ANY active Invader, despawn them all immediately
-    // (BossRoom or Leash cause; using Leash as catch-all for now).
+    // Phase 1 §7.5 "all-unavailable" precheck — if NO PERSISTENT target
+    // exists (everyone in blacklist / boss-room / not-save-loaded),
+    // despawn all active Invaders. Transient unavailability (cutscene)
+    // does NOT trigger this — the orphan-in-scene 60s timer handles
+    // pathological "player in cutscene forever" cases.
+    //
+    // anyValid (for sticky-target re-eval) still uses IsValidTarget
+    // which includes cutscene exclusion — we don't want to switch
+    // sticky to a cutscene player or have ProposeSpawn target them.
     const PlayerSnapshot* anyValid = PickValidTarget(view);
-    const bool allUnavailable      = (anyValid == nullptr);
+    bool anyPersistent = false;
+    for (const auto& p : view.players) {
+        if (IsPersistentTarget(p)) { anyPersistent = true; break; }
+    }
+    const bool allUnavailable = !anyPersistent;
 
     for (auto& [netId, state] : mActiveInvaders) {
         // Sticky-target validity check. If the current target is no
@@ -628,7 +666,10 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
             (currentTarget == nullptr) || !IsValidTarget(*currentTarget);
 
         if (allUnavailable) {
-            // No valid target anywhere — immediate despawn.
+            // No persistent target anywhere — terminal condition.
+            // Cutscene is excluded from this branch (see IsPersistent-
+            // Target) so the Kakariko entry-cutscene window doesn't
+            // kill the follow-spawn (log 199 symptom).
             toDespawn.push_back(netId);
             continue;
         }
