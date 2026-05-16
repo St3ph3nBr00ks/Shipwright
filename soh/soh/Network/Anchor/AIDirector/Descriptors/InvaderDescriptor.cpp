@@ -40,6 +40,7 @@
 #include <libultraship/libultraship.h>
 
 #include <cmath>    // std::sqrt for OFFERED log distance metric
+#include <cstdio>   // std::snprintf for GetDebugSnapshotLine pos formatting
 #include <cstdlib>  // std::rand for candidate-node sampling
 #include <optional>
 
@@ -159,9 +160,15 @@ std::optional<Vec3f> PickSpawnPosition(int16_t sceneNum, int8_t roomNum,
     // sampled a basement node when the player was on the upper floor at
     // Y ≈ 0; the resulting Invader was unreachable, the player thought
     // they killed it but only killed a force-spawned duplicate, and the
-    // live-count cap blocked all subsequent respawns. Capped to roughly
-    // one OoT dungeon-floor of vertical separation.
-    constexpr float kMaxYDeltaFromTarget  = 300.0f;
+    // live-count cap blocked all subsequent respawns.
+    //
+    // Tightened 100u (down from 300u) 2026-05-15 post-log-190. Inside
+    // Deku Tree's main chamber has multiple stacked walkable platforms
+    // within 300u — 300u was permissive enough that "same floor" still
+    // accepted candidates two visible levels above the player. 100u
+    // restricts to roughly "same elevation" — single-platform spawns
+    // only. Tune up if a multi-level scene legitimately needs broader.
+    constexpr float kMaxYDeltaFromTarget  = 100.0f;
 
     const AnchorNavRoom::RoomNavData* data =
         AnchorNavRoom::GetForRoom(sceneNum, roomNum);
@@ -431,18 +438,39 @@ std::vector<SpawnProposal> InvaderDescriptor::BuildForcedProposal(const Director
     return { p };
 }
 
+void InvaderDescriptor::OnSpawnExecuted(uint32_t netId, const Vec3f& worldPos) {
+    mLastSpawnPos   = worldPos;
+    mLastSpawnNetId = netId;
+    mHasLastSpawn   = true;
+    SPDLOG_INFO("[InvaderDescriptor] OnSpawnExecuted netId={} pos=({:.0f},{:.0f},{:.0f})",
+                netId, worldPos.x, worldPos.y, worldPos.z);
+}
+
 void InvaderDescriptor::OnSpawnRemoved(uint32_t netId, DefeatCause cause) {
     ++mTotalRemoved;
     mLastRemovedNetId = netId;
+    // Note: do NOT clear mLastSpawnPos here. The "where did my last
+    // spawn appear" diagnostic stays useful even after kill — the
+    // user might still want to know where to look for orphans on
+    // subsequent rounds.
     SPDLOG_INFO("[InvaderDescriptor] OnSpawnRemoved netId={} cause={} "
                 "(proposals={} removed={})",
                 netId, (int)cause, mProposalsOffered, mTotalRemoved);
 }
 
 std::string InvaderDescriptor::GetDebugSnapshotLine() const {
-    return "proposals=" + std::to_string(mProposalsOffered) +
-           " removed=" + std::to_string(mTotalRemoved) +
-           " lastRemove=" + std::to_string(mLastRemovedNetId);
+    std::string out = "proposals=" + std::to_string(mProposalsOffered) +
+                      " removed=" + std::to_string(mTotalRemoved);
+    if (mHasLastSpawn) {
+        // Use snprintf for stable integer-precision world coords.
+        char buf[96];
+        std::snprintf(buf, sizeof(buf),
+                      " lastSpawnPos=(%.0f,%.0f,%.0f) netId=%u",
+                      mLastSpawnPos.x, mLastSpawnPos.y, mLastSpawnPos.z,
+                      mLastSpawnNetId);
+        out += buf;
+    }
+    return out;
 }
 
 void InvaderDescriptor::RenderDebugUI(const Director& director) {

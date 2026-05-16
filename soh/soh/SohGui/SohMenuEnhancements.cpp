@@ -2543,6 +2543,18 @@ void SohMenu::AddMenuEnhancements() {
             "object_st (works in Bottom of the Well, Hyrule Field, etc.)."));
 
     AddWidget(path, "Diagnostic logging", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "In-world DebugDraw (red post at last spawn)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("AI.Director.DebugDraw"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Renders a red vertical post 60u tall in the world at each "
+            "descriptor's most recent successfully-spawned actor position. "
+            "Useful for locating 'orphan invader' situations where the live "
+            "count says 1 but you can't see the Stalfos — walk toward the "
+            "red marker.\n\n"
+            "Marker persists across kills (shows the LAST spawn, not the "
+            "currently alive one). Disappears only when the descriptor "
+            "hasn't spawned anything this session. Default off."));
     AddWidget(path, "Log Proposals", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("AI.Director.LogProposals"))
         .RaceDisable(false)

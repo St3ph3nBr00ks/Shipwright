@@ -62,12 +62,22 @@ public:
     std::vector<SpawnProposal> BuildForcedProposal(const Director& director,
                                                    const SessionView& view) override;
 
+    // --- Spawn-executed callback ---
+    void OnSpawnExecuted(uint32_t netId, const Vec3f& worldPos) override;
+
     // --- Spawn-removed cleanup ---
     void OnSpawnRemoved(uint32_t netId, DefeatCause cause) override;
 
     // --- Debug surface ---
     std::string GetDebugSnapshotLine() const override;
     void RenderDebugUI(const Director& director) override;
+
+    // --- In-world debug-draw accessor ---
+    // Returns the last successfully-executed spawn's world position, or
+    // nullopt if no spawn has happened this session. Used by the
+    // DirectorDebugDraw render hook to render an in-world marker.
+    bool HasLastSpawn() const { return mHasLastSpawn; }
+    const Vec3f& LastSpawnPos() const { return mLastSpawnPos; }
 
     // Default tunables. CVar overrides take precedence at read time;
     // these are the fallback values per ai_invader_plan.md §3. Public
@@ -82,9 +92,16 @@ private:
     // descriptor doesn't get a "spawn executed" callback today — so we
     // track proposalsOffered (non-empty ProposeSpawn results) rather
     // than actual spawn count. Live count is queried from the Director.
-    int      mProposalsOffered = 0;
-    int      mTotalRemoved     = 0;
-    uint32_t mLastRemovedNetId = 0;
+    int      mProposalsOffered  = 0;
+    int      mTotalRemoved      = 0;
+    uint32_t mLastRemovedNetId  = 0;
+
+    // Last-spawn world position from the most recent successful
+    // ExecuteSpawn. Surfaced by the debug panel + the in-world
+    // overlay so the user can locate orphan invaders.
+    Vec3f    mLastSpawnPos      = { 0.0f, 0.0f, 0.0f };
+    uint32_t mLastSpawnNetId    = 0;
+    bool     mHasLastSpawn      = false;  // false until first OnSpawnExecuted
 
     // Step 12 diagnostic — throttles per-tick rejection-reason SPDLOGs
     // to ~once per 5s at 20fps. Mirrors TestDescriptor's pattern;

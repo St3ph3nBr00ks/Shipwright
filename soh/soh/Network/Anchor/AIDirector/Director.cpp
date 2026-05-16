@@ -295,6 +295,11 @@ bool Director::ExecuteSpawn(const SpawnProposal& proposal) {
     RecordSpawn(proposal.sceneNum, proposal.roomNum,
                 proposal.source->GetDescriptorId(), netId);
 
+    // Notify the descriptor that its proposal landed. Lets it record
+    // final-position state without coupling to RecordSpawn internals.
+    // Optional hook — default no-op for descriptors that don't care.
+    proposal.source->OnSpawnExecuted(netId, spawned->world.pos);
+
     // Wire-format broadcast: peers spawn the suppressed-local-AI replica
     // via standard ENEMY_SPAWN pipeline. Carries director identity in
     // the schema-5 mandatory fields (step 4).

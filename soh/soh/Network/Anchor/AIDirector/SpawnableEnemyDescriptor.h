@@ -137,6 +137,17 @@ public:
         return {};
     }
 
+    // --- Spawn-executed callback -------------------------------------
+
+    // Fires when a proposal from this descriptor was successfully
+    // executed (Actor_Spawn returned non-null, RecordSpawn updated the
+    // ledgers, ENEMY_SPAWN broadcast). Lets the descriptor record
+    // landed-spawn state (netId, final position) without needing
+    // RecordSpawn coupling. Default: no-op.
+    virtual void OnSpawnExecuted(uint32_t netId, const Vec3f& worldPos) {
+        (void)netId; (void)worldPos;
+    }
+
     // --- Spawn-removed cleanup ---------------------------------------
 
     // Fires when a spawned actor of this descriptor is removed (defeated,
