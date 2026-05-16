@@ -71,11 +71,28 @@ static ColliderCylinderInit sColliderInit = {
 void EnInvader_Init(Actor* thisx, PlayState* play) {
     EnInvader* this = (EnInvader*)thisx;
 
-    this->state        = EN_INVADER_STATE_IDLE;
-    this->linkAge      = (s8)gSaveContext.linkAge;
-    this->currentTunic = PLAYER_TUNIC_KOKIRI;
-    this->currentBoots = PLAYER_BOOTS_KOKIRI;
-    this->currentFace  = 0;
+    this->state           = EN_INVADER_STATE_IDLE;
+    this->linkAge         = (s8)gSaveContext.linkAge;
+    this->currentTunic    = PLAYER_TUNIC_KOKIRI;
+    this->currentBoots    = PLAYER_BOOTS_KOKIRI;
+    this->currentFace     = 0;
+
+    // Phase 2 — animation + state-machine bookkeeping (cloned from
+    // EnFollower_Init). Zero-initialize so first EnsureAnimation tick
+    // fires (currentAnim==0==kNone) and IDLE→FOLLOW edge detection
+    // has a defined prevState baseline.
+    this->currentAnim     = 0;  // kNone
+    this->currentAnimType = 0;  // _free (unarmed; v1 has no combat)
+    this->stopAnimPlaying = 0;
+    this->prevState       = EN_INVADER_STATE_IDLE;
+    this->stepPhase       = 0.0f;
+    this->idleTicks       = 0;
+    this->headLimbRot.x   = 0;
+    this->headLimbRot.y   = 0;
+    this->headLimbRot.z   = 0;
+    this->upperLimbRot.x  = 0;
+    this->upperLimbRot.y  = 0;
+    this->upperLimbRot.z  = 0;
 
     // Player-equivalent scale + shadow. Matches Link's footprint so
     // the Invader visually reads as a hostile Link, not a giant.
@@ -128,11 +145,28 @@ void EnInvader_Destroy(Actor* thisx, PlayState* play) {
 void EnInvader_Update(Actor* thisx, PlayState* play) {
     EnInvader* this = (EnInvader*)thisx;
 
-    // Combat-AI tick (C++). Empty for v1; combat AI lands post-#208.
+    // State machine + locomotion tick (C++). Phase 2: writes
+    // speedXZ + shape.rot.y based on chase-nearest-player; also runs
+    // G-guards (cutscene freeze, leash teleport, stuck nudge) and
+    // selects + ensures the appropriate animation.
     Anchor_TickInvaderActor(thisx, play);
 
-    // Animation tick — runs every frame so the idle anim cycles.
+    // Animation tick — runs every frame so the current anim cycles.
     LinkAnimation_Update(play, &this->skelAnime);
+
+    // Phase 2 — apply locomotion. Standard OoT NPC pattern: speedXZ +
+    // world.rot.y give a per-frame velocity vector; gravity pulls Y
+    // to the floor. The C++ tick has already written shape.rot.y
+    // (visual) and world.rot.y (locomotion) for FOLLOW/STUCK, or
+    // zeroed speedXZ for IDLE / G-guards.
+    Actor_MoveXZGravity(&this->actor);
+    // Update collision-with-ground / floor altitude. Without this
+    // the actor's Y can drift away from the floor on slopes / steps.
+    // Flags=4 matches the standard NPC pattern (z_en_md.c:889,
+    // z_en_follower.c-via-FollowerNPC.cpp:4339).
+    Actor_UpdateBgCheckInfo(play, &this->actor, 26.0f /* wallCheckHeight */,
+                            10.0f /* wallCheckRadius */,
+                            50.0f /* ceilingCheckHeight */, 4 /* flags */);
 
     // Body collider — update cylinder pos from world.pos, then drain
     // AC_HIT and register for the next collision frame.
