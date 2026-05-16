@@ -107,8 +107,18 @@ bool IsSceneFlaggedNoInvaders(int16_t sceneNum) {
         case  0x0F:  // SCENE_INSIDE_GANONS_CASTLE_COLLAPSE
         case  0x19:  // SCENE_GANONDORF_BOSS
         case  0x1A:  // SCENE_GANONS_TOWER_COLLAPSE_EXTERIOR
+        case  0x44:  // SCENE_CHAMBER_OF_THE_SAGES (sage-awakening cutscene
+                     // chamber; narrative-only, no gameplay)
+        case  0x45:  // SCENE_CASTLE_COURTYARD_GUARDS_DAY (young-Link stealth
+                     // section — Invader would break the guard mechanic)
+        case  0x46:  // SCENE_CASTLE_COURTYARD_GUARDS_NIGHT (same)
+        case  0x4A:  // SCENE_CASTLE_COURTYARD_ZELDA (first Zelda meeting,
+                     // scripted cutscene area)
         case  0x4F:  // SCENE_GANON_BOSS
         case  0x5F:  // SCENE_HYRULE_CASTLE
+        case  0x64:  // SCENE_OUTSIDE_GANONS_CASTLE (rainbow-bridge approach;
+                     // log 204 — Invader followed across the bridge to the
+                     // castle entrance, breaking endgame atmosphere)
             return true;
         default:
             return false;
