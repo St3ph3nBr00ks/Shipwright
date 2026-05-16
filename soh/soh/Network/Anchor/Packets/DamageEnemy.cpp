@@ -38,7 +38,10 @@ extern "C" {
 // reads `collider.base.acFlags & AC_HIT` then decrements health when
 // `colChkInfo.damage > 0` (z_en_invader.c). Without setting AC_HIT here, host's
 // queued DAMAGE_ENEMY damage gets added to colChkInfo.damage but never
-// consumed — host's Invader is unkillable from peer hits.
+// consumed — host's Invader is unkillable from peer hits. (Race B fix:
+// peer's local damage on a synced enemy is force-routed through host so
+// the kill-attribution and drop pipeline are driven by the same code
+// path as host-local hits.)
 #include "src/overlays/actors/ovl_En_Invader/z_en_invader.h"
 extern PlayState* gPlayState;
 }
@@ -243,9 +246,12 @@ damage_target_found:
 static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
     // AI Invader uses a runtime-allocated actor id (gEnInvaderId), so we
     // can't put it in the switch's case labels. Check up-front. EnInvader's
-    // body collider gates its health drain on AC_HIT; setting the bit here
-    // is sufficient (the invader's UpdateDamage equivalent is inline in
-    // EnInvader_Update and consumes both AC_HIT and colChkInfo.damage).
+    // body collider gates its health drain on AC_HIT (z_en_invader.c:152
+    // tests `(acFlags & AC_HIT) && colChkInfo.damage > 0`); setting the
+    // bit here is sufficient. No acHitInfo deref in EnInvader_Update —
+    // bit-set is safe without a fake AT collider (same shape as
+    // ACTOR_EN_SKB). The gEnInvaderId != 0 guard is defensive in case the
+    // dynamic-actor registration hasn't completed yet.
     if (gEnInvaderId != 0 && actor->id == gEnInvaderId) {
         ((EnInvader*)actor)->collider.base.acFlags |= AC_HIT;
         return;
