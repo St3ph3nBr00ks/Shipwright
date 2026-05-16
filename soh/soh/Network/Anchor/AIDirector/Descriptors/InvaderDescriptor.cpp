@@ -119,6 +119,8 @@ bool IsSceneFlaggedNoInvaders(int16_t sceneNum) {
         case  0x64:  // SCENE_OUTSIDE_GANONS_CASTLE (rainbow-bridge approach;
                      // log 204 — Invader followed across the bridge to the
                      // castle entrance, breaking endgame atmosphere)
+        case  0x6B:  // SCENE_HAIRAL_NIWA2 (unused castle-courtyard variant;
+                     // included for completeness with the courtyard set)
             return true;
         default:
             return false;
