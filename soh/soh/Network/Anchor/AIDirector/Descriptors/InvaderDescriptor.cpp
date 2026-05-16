@@ -531,6 +531,86 @@ void InvaderDescriptor::OnSpawnRemoved(uint32_t netId, DefeatCause cause) {
                 mActiveInvaders.size());
 }
 
+// ---------------------------------------------------------------------------
+// Host-migration serialization for per-Invader runtime state. The Director's
+// ledger (live counts, netId→descriptor) round-trips via the parent snapshot;
+// this round-trips mActiveInvaders so the new host inherits in-flight
+// lifecycle state (sticky target, orphan timer, pending follow-spawn).
+//
+// Wire format (compact JSON array):
+//   [
+//     [<netId>, <targetClientId>, <lastKnownSceneNum>, <lastKnownRoomNum>,
+//      <orphanFrames>, <pendingFollowSpawn>, <followGraceFrames>,
+//      <pendingFollowPosX>, <pendingFollowPosY>, <pendingFollowPosZ>,
+//      <pendingFollowScene>, <pendingFollowRoom>,
+//      <lastSpawnPosX>, <lastSpawnPosY>, <lastSpawnPosZ>],
+//     ...
+//   ]
+//
+// Defensive value() reads on the restore side tolerate future schema bumps:
+// if a peer sends a shorter tuple (older schema), the missing trailing fields
+// default per InvaderRuntimeState's initializers.
+// ---------------------------------------------------------------------------
+
+nlohmann::json InvaderDescriptor::SerializeMigrationState() const {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& [netId, state] : mActiveInvaders) {
+        nlohmann::json tup = nlohmann::json::array();
+        tup.push_back(netId);
+        tup.push_back(state.targetClientId);
+        tup.push_back((int)state.lastKnownSceneNum);
+        tup.push_back((int)state.lastKnownRoomNum);
+        tup.push_back(state.orphanFrames);
+        tup.push_back(state.pendingFollowSpawn);
+        tup.push_back(state.followGraceFrames);
+        tup.push_back(state.pendingFollowPos.x);
+        tup.push_back(state.pendingFollowPos.y);
+        tup.push_back(state.pendingFollowPos.z);
+        tup.push_back((int)state.pendingFollowScene);
+        tup.push_back((int)state.pendingFollowRoom);
+        tup.push_back(state.lastSpawnPos.x);
+        tup.push_back(state.lastSpawnPos.y);
+        tup.push_back(state.lastSpawnPos.z);
+        arr.push_back(std::move(tup));
+    }
+    return arr;
+}
+
+void InvaderDescriptor::RestoreMigrationState(const nlohmann::json& j) {
+    if (!j.is_array()) {
+        return;
+    }
+    // Replace the map outright — the host's snapshot is authoritative.
+    // Any local stale entries would be wrong by definition (we're a peer
+    // being promoted to host, our pre-migration view of this descriptor
+    // was a cached mirror).
+    mActiveInvaders.clear();
+    for (const auto& tup : j) {
+        if (!tup.is_array() || tup.size() < 1) continue;
+        const uint32_t netId = tup[0].get<uint32_t>();
+        InvaderRuntimeState s;
+        // Defensive: only read indexes that exist. Schema-stable today but
+        // value() pattern guards against future tuple-length changes.
+        if (tup.size() >  1) s.targetClientId    = tup[1].get<uint32_t>();
+        if (tup.size() >  2) s.lastKnownSceneNum = (int16_t)tup[2].get<int>();
+        if (tup.size() >  3) s.lastKnownRoomNum  = (int8_t)tup[3].get<int>();
+        if (tup.size() >  4) s.orphanFrames      = tup[4].get<int>();
+        if (tup.size() >  5) s.pendingFollowSpawn = tup[5].get<bool>();
+        if (tup.size() >  6) s.followGraceFrames = tup[6].get<int>();
+        if (tup.size() >  7) s.pendingFollowPos.x = tup[7].get<float>();
+        if (tup.size() >  8) s.pendingFollowPos.y = tup[8].get<float>();
+        if (tup.size() >  9) s.pendingFollowPos.z = tup[9].get<float>();
+        if (tup.size() > 10) s.pendingFollowScene = (int16_t)tup[10].get<int>();
+        if (tup.size() > 11) s.pendingFollowRoom  = (int8_t)tup[11].get<int>();
+        if (tup.size() > 12) s.lastSpawnPos.x = tup[12].get<float>();
+        if (tup.size() > 13) s.lastSpawnPos.y = tup[13].get<float>();
+        if (tup.size() > 14) s.lastSpawnPos.z = tup[14].get<float>();
+        mActiveInvaders[netId] = std::move(s);
+    }
+    SPDLOG_INFO("[InvaderDescriptor] RestoreMigrationState: restored {} active invader(s) "
+                "from host migration snapshot", mActiveInvaders.size());
+}
+
 std::string InvaderDescriptor::GetDebugSnapshotLine() const {
     std::string out = "proposals=" + std::to_string(mProposalsOffered) +
                       " removed=" + std::to_string(mTotalRemoved);

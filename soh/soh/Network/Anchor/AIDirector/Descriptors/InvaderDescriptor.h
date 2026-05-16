@@ -123,6 +123,30 @@ public:
     // --- Per-tick lifecycle scan (Phase 1 §7.5) ---
     void OnTick(Director& director, const SessionView& view) override;
 
+    // --- Host migration ---
+    // Round-trips mActiveInvaders (per-Invader sticky target, orphan timer,
+    // pending follow-spawn) so the new host inherits in-flight Invader
+    // lifecycle state instead of restarting every timer from zero.
+    //
+    // Director's own ledger (live count, netId→descriptor) is already
+    // migrated by SerializeMigrationSnapshot at the parent level. This
+    // descriptor-side state is the per-Invader bookkeeping the
+    // ProposeSpawn / OnTick scan needs to continue managing existing
+    // Invaders after migration. Without it, post-migration:
+    //   - sticky target re-acquires on first OnTick (≈1 tick delay,
+    //     visible if Invader is mid-engagement);
+    //   - orphan-in-scene timer resets to 0 (delays Leash despawn by
+    //     up to 60s);
+    //   - any pending follow-spawn (PlayerEnteredRoom event seen but
+    //     grace counter not yet elapsed) silently drops, leaving the
+    //     Invader stranded in the old scene until the orphan timer
+    //     fires.
+    // Schema: a JSON array of [netId, fields...] tuples. Defensive
+    // value() reads on each field so a future field add doesn't break
+    // backward compat with peers that haven't yet bumped.
+    nlohmann::json SerializeMigrationState() const override;
+    void RestoreMigrationState(const nlohmann::json& j) override;
+
     // --- Debug surface ---
     std::string GetDebugSnapshotLine() const override;
     void RenderDebugUI(const Director& director) override;
