@@ -1,5 +1,6 @@
 #include "PlayerLookup.h"
 #include "soh/Network/Anchor/Anchor.h"  // DummyPlayer_Update forward decl, AnchorClient
+#include "soh/Network/Anchor/AIDirector/Descriptors/InvaderDescriptor.h"  // AnchorDirector::IsSceneFlaggedNoInvaders
 
 extern "C" {
 #include "macros.h"  // GET_PLAYER, SQ
@@ -128,4 +129,122 @@ int GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount) {
     }
 
     return count;
+}
+
+// ---------------------------------------------------------------------------
+// PickHostileTargetForInvader — multi-player target picker for AI Invader.
+// ---------------------------------------------------------------------------
+//
+// Walks the local actor list (local Player + ACTORCAT_NPC DummyPlayers +
+// optional local NPC Follower) and returns the closest valid candidate by
+// XZ distance from the invader. Every in-world candidate is guaranteed to
+// be in the local scene (it's in the local actor list), but the per-peer
+// AnchorClient state is still queried to filter on remote save/cutscene
+// status — a peer whose DummyPlayer happens to be in our actor list but
+// whose remote save is mid-load, or who is currently in a cutscene, is
+// not a valid aggro target.
+//
+// Returns nullptr when no valid candidate exists. Caller behaviour on
+// nullptr is "hold IDLE" / suspend pursuit.
+//
+// Single-player session collapses to "closest = local Player" with the
+// same gating; in that case the function returns the local Player when
+// it passes the gates, otherwise nullptr.
+Actor* PickHostileTargetForInvader(Actor* invader, PlayState* play) {
+    if (invader == nullptr || play == nullptr) return nullptr;
+
+    // --- Scene-level gates ---------------------------------------------
+    // Apply the blacklist once up front against the local scene. Every
+    // in-world candidate lives in the local scene by definition, so a
+    // blacklisted scene means "no Invader target on this client this tick"
+    // regardless of which candidate we'd otherwise pick. Mirrors the
+    // Director-side IsValidTarget which applies the same gate per-player.
+    if (AnchorDirector::IsSceneFlaggedNoInvaders(play->sceneNum)) {
+        return nullptr;
+    }
+
+    Actor* best = nullptr;
+    float  bestDistSq = 0.0f;
+
+    auto considerCandidate = [&](Actor* cand) {
+        if (cand == nullptr) return;
+        const float dx = invader->world.pos.x - cand->world.pos.x;
+        const float dz = invader->world.pos.z - cand->world.pos.z;
+        const float dSq = dx * dx + dz * dz;
+        if (best == nullptr || dSq < bestDistSq) {
+            best = cand;
+            bestDistSq = dSq;
+        }
+    };
+
+    // --- Local Player gate ---------------------------------------------
+    // Read straight off gPlayState / gSaveContext for local state.
+    // Cutscene gate uses csCtx.state (per InvaderDescriptor §7.5 plan).
+    // Save-loaded gate proxied by Anchor::Instance->IsSaveLoaded() when
+    // Anchor is available (gives the same answer as IsValidTarget — see
+    // Anchor.cpp:727); falls back to gSaveContext.fileNum >= 0 when
+    // Anchor isn't around (test harness / standalone).
+    {
+        Player* localPlayer = GET_PLAYER(play);
+        if (localPlayer != nullptr) {
+            const bool saveLoaded =
+                (Anchor::Instance != nullptr)
+                    ? Anchor::Instance->IsSaveLoaded()
+                    : (gSaveContext.fileNum >= 0);
+            const bool inCutscene = (play->csCtx.state != CS_STATE_IDLE);
+            if (saveLoaded && !inCutscene) {
+                considerCandidate(&localPlayer->actor);
+            }
+        }
+    }
+
+    // --- DummyPlayer iteration -----------------------------------------
+    // Mirror FindNearestPlayerActor's iteration shape (NPC category, id
+    // == ACTOR_EN_OE2, update == DummyPlayer_Update) plus the Pillar B
+    // Phase 3 cross-timeline filter. Additionally apply the
+    // online / save-loaded / non-cutscene / same-scene filters via the
+    // peer's AnchorClient row.
+    Actor* npc = play->actorCtx.actorLists[ACTORCAT_NPC].head;
+    while (npc != nullptr) {
+        if (npc->id == ACTOR_EN_OE2 && npc->update == DummyPlayer_Update) {
+            bool valid = true;
+            if (Anchor::Instance != nullptr) {
+                const uint32_t clientId =
+                    Anchor::Instance->GetDummyPlayerClientId(npc);
+                auto it = Anchor::Instance->clients.find(clientId);
+                if (it == Anchor::Instance->clients.end()) {
+                    valid = false;
+                } else {
+                    const AnchorClient& c = it->second;
+                    // Cross-timeline (Pillar B Phase 3).
+                    if (c.linkAge != gSaveContext.linkAge)        valid = false;
+                    // Online + save-loaded.
+                    else if (!c.online || !c.isSaveLoaded)        valid = false;
+                    // Peer in cutscene (csCtxState != CS_STATE_IDLE).
+                    else if (c.csCtxState != CS_STATE_IDLE)       valid = false;
+                    // Peer in a different scene. The DummyPlayer's world.pos
+                    // is parked at -9999 for out-of-scene peers by
+                    // DummyPlayer_Update, but this is belt-and-braces — a
+                    // same-coord coincidence shouldn't attract a target.
+                    else if (c.sceneNum != play->sceneNum)        valid = false;
+                }
+            }
+            if (valid) considerCandidate(npc);
+        }
+        npc = npc->next;
+    }
+
+    // --- NPC Follower (local) ------------------------------------------
+    // Same shape as FindNearestPlayerActor's NPC Follower branch. The
+    // local NPC Follower is owned by the local client and lives in the
+    // local scene by definition, so we only gate on the same liveness
+    // predicate the existing path uses.
+    if (Anchor::Instance != nullptr && Anchor::Instance->IsFollowerNpcTargetable()) {
+        Actor* npcFollower = Anchor::Instance->GetFollowerNpcLocalActor();
+        if (npcFollower != nullptr && npcFollower->update != nullptr) {
+            considerCandidate(npcFollower);
+        }
+    }
+
+    return best;
 }
