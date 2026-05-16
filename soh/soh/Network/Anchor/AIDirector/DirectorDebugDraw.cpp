@@ -42,8 +42,10 @@
 #include <vector>
 
 extern "C" {
-#include "variables.h"
 #include "z64.h"
+#include "macros.h"     // OPEN_DISPS / CLOSE_DISPS / POLY_XLU_DISP — NOT in z64.h. Same trap family as Pitfall 15 (GET_PLAYER).
+#include "functions.h"  // gSPDisplayList macro — defined here, NOT in z64.h or macros.h despite appearance. Matches RoomNavData.cpp:60 chain.
+#include "variables.h"
 }
 
 extern "C" PlayState* gPlayState;
