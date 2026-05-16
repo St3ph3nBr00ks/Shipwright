@@ -68,10 +68,37 @@ static ColliderCylinderInit sColliderInit = {
     { 12, 60, 0, { 0, 0, 0 } },
 };
 
+// Step 15d — sword swing AT collider (quad). Same shape as
+// EnFollower's sAtColliderInit but flipped to enemy alignment:
+// AT_TYPE_ENEMY so Player AC bumpers (AC_TYPE_PLAYER) accept hits
+// from this Invader. dmgFlags 0x00000100 = standard sword damage.
+// Quad vertices are positioned per-frame by the C++ tick driver
+// (PositionAttackQuad) during the active frames of the swing anim.
+static ColliderQuadInit sAtColliderInit = {
+    {
+        COLTYPE_NONE,
+        AT_ON | AT_TYPE_ENEMY,
+        AC_NONE,
+        OC1_NONE,
+        OC2_TYPE_1,
+        COLSHAPE_QUAD,
+    },
+    {
+        ELEMTYPE_UNK2,
+        { 0x00000100, 0x00, 0x01 },
+        { 0xFFCFFFFF, 0x00, 0x00 },
+        TOUCH_ON | TOUCH_SFX_NORMAL,
+        BUMP_NONE,
+        OCELEM_NONE,
+    },
+    { { { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f } } },
+};
+
 void EnInvader_Init(Actor* thisx, PlayState* play) {
     EnInvader* this = (EnInvader*)thisx;
 
     this->state           = EN_INVADER_STATE_IDLE;
+    this->prevState       = EN_INVADER_STATE_IDLE;
     this->linkAge         = (s8)gSaveContext.linkAge;
     this->currentTunic    = PLAYER_TUNIC_KOKIRI;
     this->currentBoots    = PLAYER_BOOTS_KOKIRI;
@@ -82,9 +109,8 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     // fires (currentAnim==0==kNone) and IDLE→FOLLOW edge detection
     // has a defined prevState baseline.
     this->currentAnim     = 0;  // kNone
-    this->currentAnimType = 0;  // _free (unarmed; v1 has no combat)
+    this->currentAnimType = 0;  // _free (unarmed by default; combat states set 1)
     this->stopAnimPlaying = 0;
-    this->prevState       = EN_INVADER_STATE_IDLE;
     this->stepPhase       = 0.0f;
     this->idleTicks       = 0;
     this->headLimbRot.x   = 0;
@@ -93,6 +119,11 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     this->upperLimbRot.x  = 0;
     this->upperLimbRot.y  = 0;
     this->upperLimbRot.z  = 0;
+
+    // Step 15d — 1 HP for v1 (per plan §2.5). Mirrored into
+    // actor.colChkInfo.health below for CollisionCheck_Damage.
+    this->health          = 1;
+    this->maxHealth       = 1;
 
     // Player-equivalent scale + shadow. Matches Link's footprint so
     // the Invader visually reads as a hostile Link, not a giant.
@@ -124,22 +155,28 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
                            (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_free);
 
     // Body collider. AC registration is per-tick (CollisionCheck_SetAC
-    // in Update); init here. v1 has no AT collider — combat AI
-    // (post-#208) will add the sword AT and its setup.
+    // in Update); init here.
     Collider_InitCylinder(play, &this->collider);
     Collider_SetCylinder(play, &this->collider, &this->actor, &sColliderInit);
+
+    // Step 15d — sword AT collider. Vertices positioned per-frame by
+    // the ATTACK state's tick handler; quad zeroed at init.
+    Collider_InitQuad(play, &this->atCollider);
+    Collider_SetQuad(play, &this->atCollider, &this->actor, &sAtColliderInit);
 
     // 1 HP for v1 — one-shot kill confirms end-to-end spawn/sync/
     // defeat pipeline. Combat-AI variants will raise this per
     // plan §4. colChkInfo.health is what CollisionCheck_Damage
-    // decrements; Actor_Kill fires when it hits 0.
-    this->actor.colChkInfo.health = 1;
+    // decrements; Actor_Kill fires when it hits 0. Mirrored into
+    // this->health for C++ combat code (e.g. BLOCK threshold).
+    this->actor.colChkInfo.health = this->health;
     this->actor.colChkInfo.damage = 0;
 }
 
 void EnInvader_Destroy(Actor* thisx, PlayState* play) {
     EnInvader* this = (EnInvader*)thisx;
     Collider_DestroyCylinder(play, &this->collider);
+    Collider_DestroyQuad(play, &this->atCollider);
 }
 
 void EnInvader_Update(Actor* thisx, PlayState* play) {
@@ -193,6 +230,11 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
 
     // Register AC for the next collision frame.
     CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
+
+    // Step 15d — mirror colChkInfo.health back into this->health so
+    // C++ combat code reading EnInvader::health sees the
+    // post-collision value (e.g. BLOCK threshold check).
+    this->health = this->actor.colChkInfo.health;
 
     // Death check. Actor_Kill triggers OnActorKill (HookHandlers.cpp:2887)
     // which: (a) broadcasts ENEMY_DEFEATED to peers so they kill their

@@ -15,7 +15,9 @@
  * Step 15d — Phase 3 combat: ATTACK / BLOCK / ENGAGE /
  *   RANGED_ATTACK / STANDBY states cloned from NPC Follower Stage 4
  *   ahead of #208 — the canonical combat shape will be revisited
- *   once #208 documents the design contract. (Agent 3)
+ *   once #208 documents the design contract. Combat target
+ *   selection delegates to PickHostileTargetForInvader (Agent 4).
+ *   (Agent 3)
  *
  * Draw-context flag pattern: same shape as the NPC Follower's
  * Anchor_FollowerNpcDrawBegin/End. See FollowerNPC.cpp:422-526 for
@@ -40,7 +42,11 @@ namespace AnchorInvader {
 extern "C" {
 
 // Per-frame tick called from EnInvader_Update via extern wrapper.
-// v1 is a no-op; combat AI fills this in post-#208.
+// Implements the full state machine: IDLE/FOLLOW/STUCK locomotion
+// (Agent 2) + ATTACK/BLOCK/ENGAGE/RANGED_ATTACK/STANDBY combat
+// (Agent 3) + G18/G10 safety guards. Skipped on peer replicas.
+// TODO post-#208: revisit state shape against canonical follower
+// design pass.
 void Anchor_TickInvaderActor(Actor* invader, PlayState* play);
 
 // Draw-context flag + Phase B equipment swap. Begin/End bracket the
