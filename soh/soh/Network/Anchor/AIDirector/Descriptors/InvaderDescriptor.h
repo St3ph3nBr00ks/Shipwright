@@ -64,12 +64,15 @@ public:
     // --- Debug surface ---
     std::string GetDebugSnapshotLine() const override;
 
-private:
     // Default tunables. CVar overrides take precedence at read time;
-    // these are the fallback values per ai_invader_plan.md §3.
+    // these are the fallback values per ai_invader_plan.md §3. Public
+    // so the .cpp's anonymous-namespace ReadMaxAlive / ReadCooldownMs
+    // helpers can reference them without private-access trouble
+    // (Pitfall 16 — anon-namespace functions are not class members).
     static constexpr int  kDefaultMaxAlive       = 1;        // per plan §3 (range 1..4)
     static constexpr int  kDefaultCooldownMs     = 90 * 1000; // 90s per plan §3 (range 30..600)
 
+private:
     // Counters surfaced via the debug panel. Like TestDescriptor, the
     // descriptor doesn't get a "spawn executed" callback today — so we
     // track proposalsOffered (non-empty ProposeSpawn results) rather

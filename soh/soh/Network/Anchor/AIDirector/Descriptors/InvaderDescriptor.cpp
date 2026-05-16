@@ -33,9 +33,14 @@
 #include "../Director.h"
 
 #include "soh/cvar_prefixes.h"
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // step 13: PickSpawnPosition
 
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <libultraship/libultraship.h>
+
+#include <cmath>    // std::sqrt for OFFERED log distance metric
+#include <cstdlib>  // std::rand for candidate-node sampling
+#include <optional>
 
 extern "C" {
 #include "z64.h"
@@ -117,6 +122,77 @@ bool AllPlayersSettledInScene(const SessionView& view, int16_t sceneNum) {
     // TODO step 13: walk view.players, require framesInCurrentScene >=
     // MsToGameTicks(5000) for the team-leader's scene.
     return true;
+}
+
+// Step 13: nav-aware spawn placement. Picks a walkable NavNode from
+// RoomNavData filtered by:
+//   - flags: NODE_WALKABLE set AND NODE_ORPHANED / NODE_HAZARD /
+//     NODE_UNDERWATER all clear.
+//   - distance: ≥ kMinPlayerDistU from any team member in the same
+//     scene (plan §7.2 predicate 4 — "avoid in-face spawn").
+//
+// Sampling strategy: random offset into the node vector + linear scan
+// up to kMaxSampledNodes. Avoids iterating the entire graph each call
+// (Hyrule Field has thousands of nodes) while still touching enough
+// candidates to find one passing the filters most ticks.
+//
+// Deferred to a follow-up if field-testing surfaces the need:
+//   - Line-of-sight gate (plan §7.2 #5). Requires BgCheck raycast
+//     against gPlayState; cheap to add later.
+//   - Reachability gate. Candidate node already exists in the graph,
+//     which implies it's reachable from at least the floodfill seeds.
+//     Real reachability-from-player would need FindBestReachable-
+//     SubgoalPath; add when an unreachable spawn surfaces.
+//
+// Returns nullopt when no candidate passes the filters or RoomNavData
+// isn't loaded for the (scene, room). Caller treats nullopt as
+// "abort proposal for this tick".
+std::optional<Vec3f> PickSpawnPosition(int16_t sceneNum, int8_t roomNum,
+                                       const SessionView& view) {
+    constexpr int   kMaxSampledNodes = 64;
+    constexpr float kMinPlayerDistU  = 200.0f;
+    constexpr float kMinPlayerDistSq = kMinPlayerDistU * kMinPlayerDistU;
+
+    const AnchorNavRoom::RoomNavData* data =
+        AnchorNavRoom::GetForRoom(sceneNum, roomNum);
+    if (data == nullptr || data->nodes.empty()) {
+        // No nav graph for this room — RoomNavData CVar may be off,
+        // scene may not yet be scanned, or it's a custom map without
+        // a baked graph. Return nullopt; caller logs + aborts.
+        return std::nullopt;
+    }
+
+    const size_t nodeCount = data->nodes.size();
+    const size_t startIdx  = static_cast<size_t>(std::rand()) % nodeCount;
+    const size_t sampled   = std::min<size_t>(kMaxSampledNodes, nodeCount);
+
+    for (size_t i = 0; i < sampled; ++i) {
+        const size_t idx = (startIdx + i) % nodeCount;
+        const AnchorNavRoom::NavNode& n = data->nodes[idx];
+
+        // Flag filters per the candidate-loop sketch in
+        // ai_follower_reference_for_director_and_invader.md §3.
+        if ((n.flags & AnchorNavRoom::NODE_WALKABLE) == 0) continue;
+        if (n.flags & (AnchorNavRoom::NODE_ORPHANED |
+                       AnchorNavRoom::NODE_HAZARD   |
+                       AnchorNavRoom::NODE_UNDERWATER)) continue;
+
+        // Distance gate against every team-member in this scene.
+        bool tooClose = false;
+        for (const PlayerSnapshot& p : view.players) {
+            if (p.sceneNum != sceneNum) continue;
+            const float dx = n.pos.x - p.worldPos.x;
+            const float dz = n.pos.z - p.worldPos.z;
+            if (dx * dx + dz * dz < kMinPlayerDistSq) {
+                tooClose = true;
+                break;
+            }
+        }
+        if (tooClose) continue;
+
+        return n.pos;
+    }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -230,22 +306,35 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
         return {};
     }
 
+    // Step 13: nav-aware spawn placement. Picks a walkable graph
+    // node ≥200u from any team member. Returns nullopt if RoomNav-
+    // Data isn't loaded for this room, or if no candidate passed the
+    // filters after sampling.
+    auto pickedPos = PickSpawnPosition(target->sceneNum, target->roomNum, view);
+    if (!pickedPos.has_value()) {
+        if (shouldLog) {
+            SPDLOG_INFO("[InvaderDescriptor] no proposal: PickSpawnPosition "
+                        "found no candidate (scene={} room={}) — nav graph "
+                        "absent or all sampled nodes failed filters",
+                        (int)target->sceneNum, (int)target->roomNum);
+            markLog();
+        }
+        return {};
+    }
+
     // All gates passed. Build proposal.
     //
-    // Step 12 placeholders:
+    // Step 12-13 placeholders:
     //   - actorId = ACTOR_EN_TEST (Stalfos). Real ACTOR_EN_INVADER lands
     //     in step 15 once #208 unblocks combat AI.
     //   - actorParams = 1 (STALFOS_TYPE_1, visible variant — type 0 is
     //     Lens-of-Truth-invisible).
-    //   - worldPos = target's worldPos. PickSpawnPosition (step 13)
-    //     replaces this with nav-aware placement per plan §7.2 (behind
-    //     target's recent-trail cone, occluded LOS, ≥200u from any
-    //     player).
+    //   - worldPos: step-13 nav-aware placement via PickSpawnPosition.
     SpawnProposal p;
     p.source       = this;
     p.sceneNum     = target->sceneNum;
     p.roomNum      = target->roomNum;
-    p.worldPos     = target->worldPos;
+    p.worldPos     = *pickedPos;
     p.yawTowards   = 0;
     p.actorId      = ACTOR_EN_TEST;
     p.actorParams  = 1;
@@ -254,11 +343,17 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
     p.groupId      = 0;
     ++mProposalsOffered;
     if (IsLoggingProposals()) {
+        const float dx = p.worldPos.x - target->worldPos.x;
+        const float dz = p.worldPos.z - target->worldPos.z;
+        const float distFromTarget = std::sqrt(dx * dx + dz * dz);
         SPDLOG_INFO("[InvaderDescriptor] OFFERED proposal: target=client{} "
-                    "scene={} room={} pos=({:.0f},{:.0f},{:.0f}) liveCount={}/{} "
-                    "cooldown={}ms",
+                    "scene={} room={} playerPos=({:.0f},{:.0f},{:.0f}) "
+                    "spawnPos=({:.0f},{:.0f},{:.0f}) distFromTarget={:.0f}u "
+                    "liveCount={}/{} cooldown={}ms",
                     target->clientId, (int)target->sceneNum, (int)target->roomNum,
+                    target->worldPos.x, target->worldPos.y, target->worldPos.z,
                     p.worldPos.x, p.worldPos.y, p.worldPos.z,
+                    distFromTarget,
                     liveCount, maxAlive, cooldownMs);
     }
     markLog();
