@@ -263,6 +263,19 @@ private:
     // Initialize'd next tick.
     bool mInitializedDescriptors = false;
 
+    // Local-player scene/room transition observer. Phase 1 §7.5 needs
+    // DirectorEvent::PlayerEnteredRoom to fire for the HOST's own
+    // transitions (scene-following hunts the local player when they
+    // warp). step-6's UCS-receive wiring only fires events for remote
+    // peers — local transitions don't route through that path. So
+    // Director polls gPlayState each Tick and fires the event itself
+    // when it detects a change. Sentinel = -1 to suppress the
+    // "first observation" firing (no real transition has happened
+    // yet at session start; the initial value is just the first
+    // scene the host loads into).
+    int16_t mPrevLocalSceneNum = -1;
+    int8_t  mPrevLocalRoomNum  = -1;
+
     // Host-side tick counter. Increments at the top of Tick (after the
     // IsEffectiveHost gate) so it tracks "ticks while host" rather than
     // "ticks since boot". Cooldown ledger compares against this counter

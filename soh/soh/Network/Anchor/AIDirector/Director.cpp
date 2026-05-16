@@ -184,6 +184,37 @@ void Director::Tick() {
         return;
     }
 
+    // Phase 1 §7.5 local-player scene/room transition observer.
+    //
+    // DirectorEvent::PlayerEnteredRoom needs to fire for the HOST's own
+    // transitions too — scene-following hunts the local player when they
+    // warp. step-6's UCS-receive wiring (UpdateClientState.cpp) only
+    // fires events for REMOTE peers; local transitions don't route
+    // through that path because the host doesn't UCS-broadcast back to
+    // itself. Rather than add a new GameInteractor hook (more coupling),
+    // poll gPlayState here and fire the event ourselves on change.
+    //
+    // The first observation is consumed silently (no prior baseline) —
+    // we don't want to emit a fake "entered" event on the very first
+    // Tick after save-load when mPrevLocalSceneNum is -1. Subsequent
+    // transitions fire normally.
+    if (gPlayState != nullptr && Anchor::Instance != nullptr) {
+        const int16_t curScene = (int16_t)gPlayState->sceneNum;
+        const int8_t  curRoom  = (int8_t)gPlayState->roomCtx.curRoom.num;
+        const bool changed = (curScene != mPrevLocalSceneNum) ||
+                             (curRoom  != mPrevLocalRoomNum);
+        if (changed && mPrevLocalSceneNum >= 0) {
+            DirectorEventPayload evt{};
+            evt.type     = DirectorEvent::PlayerEnteredRoom;
+            evt.clientId = Anchor::Instance->ownClientId;
+            evt.sceneNum = curScene;
+            evt.roomNum  = curRoom;
+            NotifyEvent(evt);
+        }
+        mPrevLocalSceneNum = curScene;
+        mPrevLocalRoomNum  = curRoom;
+    }
+
     // Phase 1 §7.5 lifecycle scan — descriptors manage their active
     // spawns BEFORE the proposal loop (sticky-target re-eval, orphan
     // timer, all-unavailable despawn, scene-follow timers).

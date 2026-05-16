@@ -30,7 +30,10 @@
  */
 
 #include "InvaderDescriptor.h"
-#include "../Anchor.h"  // Phase 1 §7.5 — Anchor::Instance->MsToGameTicks for orphan / grace timers
+#include "../../Anchor.h"  // Phase 1 §7.5 — Anchor::Instance->MsToGameTicks for orphan / grace timers
+                           // (TWO levels up — Descriptors/ is nested under AIDirector/ which is
+                           // under Anchor/; relative path Director.h is one level up but Anchor.h
+                           // is two)
 #include "../Director.h"
 
 #include "soh/cvar_prefixes.h"
@@ -449,9 +452,10 @@ std::vector<SpawnProposal> InvaderDescriptor::BuildForcedProposal(const Director
 
 void InvaderDescriptor::OnSpawnExecuted(uint32_t netId, const Vec3f& worldPos) {
     // Scalar mirror for the in-world red-marker (legacy step-8 API).
-    mLastSpawnPos   = worldPos;
-    mLastSpawnNetId = netId;
-    mHasLastSpawn   = true;
+    mLastSpawnPos      = worldPos;
+    mLastSpawnNetId    = netId;
+    mHasLastSpawn      = true;
+    mLastSpawnSceneNum = (gPlayState != nullptr) ? (int16_t)gPlayState->sceneNum : -1;
 
     // Phase 1 §7.5: populate runtime state for this Invader. Most
     // fields filled lazily by OnTick / OnEvent — here we just record

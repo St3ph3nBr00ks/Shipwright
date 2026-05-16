@@ -47,6 +47,15 @@
 
 namespace AnchorDirector {
 
+// Forward-decls for types referenced in method signatures below.
+// SessionView is already forward-declared in SpawnableEnemyDescriptor.h
+// (used by ProposeSpawn); PlayerSnapshot is added here because
+// IsValidTarget / PickValidTarget reference it but the parent header
+// doesn't. Both are defined in Director.h — including Director.h here
+// would create a circular include (Director.h → InvaderDescriptor.h
+// via the Director's registry construction).
+struct PlayerSnapshot;
+
 // Per-Invader runtime state. Keyed on netId in mActiveInvaders.
 // Replaces the earlier scalar mLastSpawnPos / mLastSpawnNetId
 // approach now that MaxAlive can be > 1 and each invader carries
@@ -106,8 +115,17 @@ public:
     // Returns the last successfully-executed spawn's world position, or
     // nullopt if no spawn has happened this session. Used by the
     // DirectorDebugDraw render hook to render an in-world marker.
+    //
+    // LastSpawnSceneNum returns the scene the spawn happened in (-1 = no
+    // spawn yet). DirectorDebugDraw gates the marker render on this
+    // matching gPlayState->sceneNum so the post doesn't ghost-render in
+    // a different scene at the same world coords (log 197 symptom —
+    // Inside Deku Tree spawn at (17,-4,327), then user teleported to
+    // Castle Town where (17,-4,327) maps to a visible spot, causing
+    // the marker to appear in town with no actual Invader).
     bool HasLastSpawn() const { return mHasLastSpawn; }
     const Vec3f& LastSpawnPos() const { return mLastSpawnPos; }
+    int16_t LastSpawnSceneNum() const { return mLastSpawnSceneNum; }
 
     // Default tunables. CVar overrides take precedence at read time;
     // these are the fallback values per ai_invader_plan.md §3. Public
@@ -140,6 +158,7 @@ private:
     Vec3f    mLastSpawnPos      = { 0.0f, 0.0f, 0.0f };
     uint32_t mLastSpawnNetId    = 0;
     bool     mHasLastSpawn      = false;  // false until first OnSpawnExecuted
+    int16_t  mLastSpawnSceneNum = -1;     // scene of last spawn; gates DebugDraw render
 
     // Step 12 diagnostic — throttles per-tick rejection-reason SPDLOGs
     // to ~once per 5s at 20fps. Mirrors TestDescriptor's pattern;
