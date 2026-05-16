@@ -41,7 +41,7 @@ typedef enum {
     EN_INVADER_STATE_FOLLOW        = 1,   // chase target (Agent 2)
     // EN_INVADER_STATE_CLIMBING   = 2,   // reserved slot — NOT implemented in v1
     EN_INVADER_STATE_STUCK         = 3,   // single-tick nudge recovery (Agent 2)
-    EN_INVADER_STATE_DEAD          = 4,   // reserved for future death sequence
+    EN_INVADER_STATE_DEAD          = 4,   // anim hold + Actor_Kill (parity gap 3)
     EN_INVADER_STATE_SWIMMING      = 5,   // tread/swim while submerged (Phase 4)
     EN_INVADER_STATE_LEDGE_HOIST   = 6,   // one-shot ledge mantle (Phase 4)
     EN_INVADER_STATE_ATTACK        = 7,   // sword swing (Stage 4)
@@ -49,6 +49,7 @@ typedef enum {
     EN_INVADER_STATE_BLOCK         = 9,   // shield-up defensive stance (Stage 4)
     EN_INVADER_STATE_RANGED_ATTACK = 10,  // bow shot (Stage 4)
     EN_INVADER_STATE_STANDBY       = 11,  // alert pose between combat (Stage 4)
+    EN_INVADER_STATE_CRAWLING      = 12,  // child-only crawlspace traversal (parity gap 5)
 } EnInvaderAIState;
 
 // LEDGE_HOIST entry context — drives anim selection. Cloned from
@@ -173,6 +174,15 @@ typedef struct EnInvader {
     // detection in TickFOLLOW. Field-test instrumentation (jumpStartPos
     // etc.) deferred until needed.
     u8 jumpInProgress;
+
+    // Death cause — closes parity gap 4. Drives anim selection in DEAD:
+    //   0 = generic (kDeath  — gPlayerAnim_link_normal_back_downA)
+    //   1 = drowning (kDeathDrown — gPlayerAnim_link_swimer_swim_dead)
+    // NOT broadcast over the wire — Invader peer replicas play the
+    // host's joint table directly via ENEMY_UPDATE, so they see the
+    // correct anim without needing a separate deathCause field.
+    // Mirrors EnFollower::deathCause (z_en_follower.h:107).
+    u8 deathCause;
 } EnInvader;
 
 #ifdef __cplusplus

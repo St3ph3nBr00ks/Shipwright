@@ -41,6 +41,7 @@
 
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/PlayerLookup.h"  // PickHostileTargetForInvader (Agent 4)
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
 #include "soh/cvar_prefixes.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
@@ -157,6 +158,34 @@ struct BlockState {
 };
 static BlockState sBlockState;
 
+// Parity gap 3 — DEAD state hold timer. Captures the gameFrameCounter
+// at DEAD entry; TickDEAD waits for kInvaderDeathHoldMs to elapse, then
+// calls Actor_Kill which fires the OnActorKill broadcast path
+// (ENEMY_DEFEATED + Director::OnEnemyRemoved). File-scope is safe
+// because actor states are non-reentrant per actor.
+constexpr int kInvaderDeathHoldMs = 3000;  // 3s — matches FollowerNPC's kFollowerNpcDeathHoldMs
+static uint64_t sDeathEntryInvFrame = 0;
+
+// Parity gap 5 — crawlspace traversal state. Same shape as FollowerNPC's
+// sCrawlState (FollowerNPC.cpp:2958-2964). anchor pointer is borrowed
+// from the room's RoomNavData::crawlspaceAnchors vector; it's invalidated
+// on scene transition, but TickCRAWLING bails to FOLLOW + clears the
+// pointer if it ever sees a null mid-crawl (defensive).
+constexpr float kInvCrawlSpeed         = 3.5f;
+constexpr float kInvCrawlEntryRadius   = 150.0f;
+constexpr float kInvCrawlMinCrossDist  = 20.0f;
+constexpr float kInvCrawlExitMargin    = 30.0f;
+constexpr float kInvCrawlMaxDistance   = 400.0f;
+constexpr float kInvCrawlExitYDrop     = 20.0f;  // matches FollowerNPC bddc0b598
+
+struct CrawlInvState {
+    const ::AnchorNavRoom::CrawlspaceAnchor* anchor = nullptr;
+    Vec3f forwardDir = { 0, 0, 0 };  // -entryNormal direction (into the wall)
+    Vec3f entryPos   = { 0, 0, 0 };  // captured at entry for max-distance bail
+    bool  exitAnimPlaying = false;
+};
+static CrawlInvState sCrawlInvState;
+
 // ---------------------------------------------------------------------
 // Small math helpers — defined here so Phase 2 Tick handlers below
 // can call them without forward declarations (C++ single-pass name
@@ -232,6 +261,13 @@ struct LocalInvNavState {
     // re-queried each tick, but we keep a one-tick cache so STUCK can
     // nudge toward the same target without re-running the picker.
     Actor*   lastTarget           = nullptr;
+    // Parity gap 6 — G14 close-fail tracking. closeFailFrames counts
+    // consecutive ticks inside the close-fail distance band without
+    // progress; closeFailBaseline is the dist3D-to-target captured at
+    // window entry. Reset when progress > kInvCloseFailProgressDelta
+    // is observed.
+    uint32_t closeFailFrames      = 0;
+    float    closeFailBaseline    = 0.0f;
 };
 static LocalInvNavState sLocalInvNav;
 
@@ -275,6 +311,30 @@ enum class InvaderAnim {
     kFidgetLookA,     // idle look-around (gPlayerAnim_link_normal_wait_typeA_20f; one-shot)
     kFidgetWarmB,     // idle warm-up (gPlayerAnim_link_normal_wait_typeB_20f; one-shot)
     kFidgetStretchD,  // idle stretch (gPlayerAnim_link_wait_typeD_20f; one-shot)
+
+    // Parity gap 1 — combat anims. Cloned from FollowerNPC's enum
+    // values 21-24 (FollowerNPC.cpp:196-206). kSwordSwing / kBlockHit /
+    // kBowShoot are one-shots; kBlockWait loops while the shield is up.
+    kSwordSwing,      // vertical sword swing (gPlayerAnim_link_fighter_normal_kiru; one-shot)
+    kBlockWait,       // shield-up held pose (gPlayerAnim_link_normal_defense_wait; LOOP)
+    kBlockHit,        // shield-deflect reaction (gPlayerAnim_link_normal_defense_hit; one-shot)
+    kBowShoot,        // bow draw+release (gPlayerAnim_link_bow_bow_shoot; one-shot)
+
+    // Parity gap 4 — death poses. Generic (back-down) for combat/void;
+    // drowning-specific (swim KO) when death cause is drowning. Both
+    // one-shot; SkelAnime holds at last frame after completion so
+    // TickDEAD's 3s hold timer drives the eventual Actor_Kill.
+    kDeath,           // generic death (gPlayerAnim_link_normal_back_downA; one-shot)
+    kDeathDrown,      // drowning death (gPlayerAnim_link_swimer_swim_dead; one-shot)
+
+    // Parity gap 5 — child-Link crawlspace anims. kCrawlMove plays
+    // once on entry (the get-down-and-crouch motion); after
+    // completion the SkelAnime holds at the end frame (low crouch
+    // pose) while TickCRAWLING translates the body forward. kCrawlExit
+    // plays once on the way out. Mirrors FollowerNPC's kCrawlMove /
+    // kCrawlExit (FollowerNPC.cpp:220-221).
+    kCrawlMove,       // crouch-enter (gPlayerAnim_link_child_tunnel_start; one-shot, holds end frame)
+    kCrawlExit,       // crouch-exit (gPlayerAnim_link_child_tunnel_end; one-shot)
 };
 
 LinkAnimationHeader* InvAnimHeaderFor(InvaderAnim kind, s8 modelAnimType) {
@@ -316,6 +376,26 @@ LinkAnimationHeader* InvAnimHeaderFor(InvaderAnim kind, s8 modelAnimType) {
             return (LinkAnimationHeader*)&gPlayerAnim_link_normal_wait_typeB_20f;
         case InvaderAnim::kFidgetStretchD:
             return (LinkAnimationHeader*)&gPlayerAnim_link_wait_typeD_20f;
+        // Parity gap 1 — combat anim headers (modelAnimType-independent;
+        // these are always armed/fighter regardless of caller's hint).
+        case InvaderAnim::kSwordSwing:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_fighter_normal_kiru;
+        case InvaderAnim::kBlockWait:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_defense_wait;
+        case InvaderAnim::kBlockHit:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_defense_hit;
+        case InvaderAnim::kBowShoot:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_bow_bow_shoot;
+        // Parity gap 4 — death anim headers.
+        case InvaderAnim::kDeath:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_back_downA;
+        case InvaderAnim::kDeathDrown:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_swimer_swim_dead;
+        // Parity gap 5 — crawlspace anim headers.
+        case InvaderAnim::kCrawlMove:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_child_tunnel_start;
+        case InvaderAnim::kCrawlExit:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_child_tunnel_end;
         case InvaderAnim::kNone:
         default:
             return nullptr;
@@ -341,7 +421,19 @@ void InvEnsureAnimation(EnInvader* this_, PlayState* play, InvaderAnim want,
                           want == InvaderAnim::kRunJump ||
                           want == InvaderAnim::kFidgetLookA ||
                           want == InvaderAnim::kFidgetWarmB ||
-                          want == InvaderAnim::kFidgetStretchD);
+                          want == InvaderAnim::kFidgetStretchD ||
+                          // Parity gap 1 — combat one-shots.
+                          // kBlockWait stays LOOP (not in this list).
+                          want == InvaderAnim::kSwordSwing ||
+                          want == InvaderAnim::kBlockHit ||
+                          want == InvaderAnim::kBowShoot ||
+                          // Parity gap 4 — death anims (one-shot; hold at last frame).
+                          want == InvaderAnim::kDeath ||
+                          want == InvaderAnim::kDeathDrown ||
+                          // Parity gap 5 — crawlspace anims (one-shot;
+                          // kCrawlMove holds end-frame crouch pose).
+                          want == InvaderAnim::kCrawlMove ||
+                          want == InvaderAnim::kCrawlExit);
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                          1.0f /* playSpeed */,
                          0.0f /* startFrame */,
@@ -390,6 +482,41 @@ InvaderAnim InvAnimForState(s32 state, float speedXZ, s32 prevState) {
             // default so a code path that bypasses the dispatcher
             // override still gets a valid hoist anim.
             return InvaderAnim::kHoistGround;
+        // Parity gap 1 — combat state anims. Dispatcher hoists
+        // currentAnimType to 1 (fighter) for combat states so kWait /
+        // kWalk / kRun would pick fighter variants if used; the
+        // combat states pick their dedicated anim values here instead.
+        case EN_INVADER_STATE_ATTACK:
+            return InvaderAnim::kSwordSwing;
+        case EN_INVADER_STATE_BLOCK:
+            // Loop kBlockWait by default; the dispatcher overrides to
+            // kBlockHit during the brief frame window after a
+            // successful frontal deflect (sBlockState.hitAnimFrames > 0).
+            return InvaderAnim::kBlockWait;
+        case EN_INVADER_STATE_RANGED_ATTACK:
+            return InvaderAnim::kBowShoot;
+        case EN_INVADER_STATE_ENGAGE:
+            // Pursuit locomotion — same anims as FOLLOW. Speed threshold
+            // matches FOLLOW so handoff IDLE→FOLLOW ↔ ENGAGE looks
+            // consistent. Returns kWait when stationary so a brief
+            // tick at speedXZ=0 doesn't show the NPC mid-stride.
+            if (speedXZ > 4.0f) return InvaderAnim::kRun;
+            if (speedXZ > 0.5f) return InvaderAnim::kWalk;
+            return InvaderAnim::kWait;
+        case EN_INVADER_STATE_STANDBY:
+            // Alert idle between exchanges. Same kWait anim as IDLE;
+            // the visual difference comes from the dispatcher setting
+            // currentAnimType=1 (fighter) here.
+            return InvaderAnim::kWait;
+        // Parity gap 4 — DEAD state default. Dispatcher overrides to
+        // kDeathDrown when this_->deathCause == 1 (drowning).
+        case EN_INVADER_STATE_DEAD:
+            return InvaderAnim::kDeath;
+        // Parity gap 5 — CRAWLING. Returns kCrawlMove on entry; the
+        // dispatcher overrides to kCrawlExit when sCrawlInvState's
+        // exitAnimPlaying flag is set.
+        case EN_INVADER_STATE_CRAWLING:
+            return InvaderAnim::kCrawlMove;
         default:
             return InvaderAnim::kWait;
     }
@@ -847,6 +974,7 @@ const char* StateName(s32 s) {
         case EN_INVADER_STATE_BLOCK:         return "BLOCK";
         case EN_INVADER_STATE_RANGED_ATTACK: return "RANGED_ATTACK";
         case EN_INVADER_STATE_STANDBY:       return "STANDBY";
+        case EN_INVADER_STATE_CRAWLING:      return "CRAWLING";
         default:                             return "UNKNOWN";
     }
 }
@@ -936,6 +1064,12 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
     if (this_->prevState != EN_INVADER_STATE_ATTACK) {
         sAttackState.entryFrame = Anchor::Instance->gameFrameCounter.load(
                                        std::memory_order_relaxed);
+        // Parity gap 1 — fire kSwordSwing on entry. stopAnimPlaying=0
+        // ensures EnsureAnimation can pick a new anim even if an older
+        // one-shot was in flight. Combat anims are always armed/fighter
+        // (modelAnimType=1) regardless of dispatcher hint.
+        this_->stopAnimPlaying = 0;
+        InvEnsureAnimation(this_, play, InvaderAnim::kSwordSwing, 1);
     }
 
     if (sAttackState.target != nullptr &&
@@ -1033,7 +1167,28 @@ void TickBLOCK(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     if (this_->prevState != EN_INVADER_STATE_BLOCK) {
         sBlockState.entryFrame    = curFrame;
         sBlockState.hitAnimFrames = 0;
+        // Parity gap 1 — fire kBlockWait on entry. Loop anim so the
+        // pose holds for the full block duration. Dispatcher overrides
+        // to kBlockHit during the hit-reaction window.
+        this_->stopAnimPlaying = 0;
+        InvEnsureAnimation(this_, play, InvaderAnim::kBlockWait, 1);
         SPDLOG_INFO("[Invader] BLOCK entry — HP={}", (int)this_->health);
+    }
+
+    // Parity gap 1 — kBlockHit override while the hit-reaction counter
+    // is non-zero. One-shot anim plays out then dispatcher returns to
+    // kBlockWait via the standard hold-then-resume pattern.
+    if (sBlockState.hitAnimFrames > 0 &&
+        (InvaderAnim)this_->currentAnim != InvaderAnim::kBlockHit) {
+        this_->stopAnimPlaying = 0;
+        InvEnsureAnimation(this_, play, InvaderAnim::kBlockHit, 1);
+    } else if (sBlockState.hitAnimFrames == 0 &&
+               (InvaderAnim)this_->currentAnim == InvaderAnim::kBlockHit &&
+               this_->skelAnime.endFrame > 0.0f &&
+               this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
+        // Hit anim complete — return to held block pose.
+        this_->stopAnimPlaying = 0;
+        InvEnsureAnimation(this_, play, InvaderAnim::kBlockWait, 1);
     }
 
     if (sAttackState.target != nullptr &&
@@ -1098,6 +1253,10 @@ void TickRANGED_ATTACK(EnInvader* this_, PlayState* play, const Vec3f& leaderHin
     if (this_->prevState != EN_INVADER_STATE_RANGED_ATTACK) {
         sAttackState.entryFrame = Anchor::Instance->gameFrameCounter.load(
                                        std::memory_order_relaxed);
+        // Parity gap 1 — fire kBowShoot on entry. One-shot draw + release.
+        // Arrow spawns at curFrame >= kRangedSpawnFrame (~frame 5).
+        this_->stopAnimPlaying = 0;
+        InvEnsureAnimation(this_, play, InvaderAnim::kBowShoot, 1);
     }
 
     if (sAttackState.target == nullptr ||
@@ -1323,11 +1482,346 @@ s32 ChooseCombatExitState(EnInvader* this_, PlayState* play) {
                                : EN_INVADER_STATE_IDLE;
 }
 
+// ---------------------------------------------------------------------
+// Parity gap 2 — head-look-at-target.
+//
+// Cloned from FollowerNPC's TickHeadLookAtLeader (FollowerNPC.cpp:1335).
+// Computes desired head + upper-body yaw relative to body facing,
+// apportions between the two via ±70° head cap, then steps toward via
+// Math_ScaledStepToS. EnInvader_Draw swaps these onto the local Player's
+// headLimbRot/upperLimbRot so the override callback renders the
+// Invader's head turned toward its target without affecting Player's
+// actual rotation.
+// ---------------------------------------------------------------------
+void TickHeadLookAtTarget(EnInvader* this_, const Vec3f& targetPos) {
+    const Actor* a = &this_->actor;
+    const s16 dirYaw = Math_Atan2S(targetPos.z - a->world.pos.z,
+                                    targetPos.x - a->world.pos.x);
+    const s16 yawRel = dirYaw - a->shape.rot.y;
+
+    const float dx     = targetPos.x - a->world.pos.x;
+    const float dz     = targetPos.z - a->world.pos.z;
+    const float distXZ = std::sqrt(dx*dx + dz*dz);
+    const s16 pitchRel = (distXZ > 1.0f)
+        ? Math_Atan2S(distXZ, a->world.pos.y - targetPos.y)
+        : 0;
+
+    constexpr s16 kHeadYawMax = 12743;  // ±70° binary; matches FollowerNPC
+    s16 headYawTarget  = yawRel;
+    s16 upperYawTarget = 0;
+    if (headYawTarget >  kHeadYawMax) { upperYawTarget = headYawTarget - kHeadYawMax; headYawTarget =  kHeadYawMax; }
+    if (headYawTarget < -kHeadYawMax) { upperYawTarget = headYawTarget + kHeadYawMax; headYawTarget = -kHeadYawMax; }
+    if (upperYawTarget >  0x4000) upperYawTarget =  0x4000;
+    if (upperYawTarget < -0x4000) upperYawTarget = -0x4000;
+
+    s16 headPitchTarget = pitchRel;
+    if (headPitchTarget >  0x2000) headPitchTarget =  0x2000;
+    if (headPitchTarget < -0x2000) headPitchTarget = -0x2000;
+
+    Math_ScaledStepToS(&this_->headLimbRot.y,  headYawTarget,   0x600);
+    Math_ScaledStepToS(&this_->upperLimbRot.y, upperYawTarget,  0x600);
+    Math_ScaledStepToS(&this_->headLimbRot.x,  headPitchTarget, 0x600);
+}
+
+// ---------------------------------------------------------------------
+// Parity gap 3 — TickDEAD.
+//
+// Cloned from FollowerNPC's TickDEAD (FollowerNPC.cpp:3128). Captures
+// the entry frame on the first tick after state transition, plays the
+// death anim (kDeath generic or kDeathDrown when prevState was
+// SWIMMING), holds for kInvaderDeathHoldMs, then calls Actor_Kill. The
+// terminal Actor_Kill fires OnActorKill which broadcasts ENEMY_DEFEATED
+// to peers + invokes Director::OnEnemyRemoved on the host.
+//
+// Skips combat preempt + G10/G14 + state dispatch — see dispatcher
+// guard inserted by parity gap 3.
+// ---------------------------------------------------------------------
+void TickDEAD(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+    a->speedXZ = 0.0f;
+
+    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                  std::memory_order_relaxed);
+
+    // Entry tick — pick death cause (drowning if we were swimming),
+    // snap shape.rot to last facing, fire death anim. Anim type 0
+    // (free) — both death anims are modelAnimType-agnostic.
+    if (this_->prevState != EN_INVADER_STATE_DEAD) {
+        sDeathEntryInvFrame = curFrame;
+        // Parity gap 4 — death-cause selection. If prevState was
+        // SWIMMING, classify as drowning. Otherwise generic. Note we
+        // do NOT need to broadcast this to peers — Invader peers see
+        // the host's joint table directly via ENEMY_UPDATE, so they
+        // play whichever anim the host runs.
+        this_->deathCause = (this_->prevState == EN_INVADER_STATE_SWIMMING)
+                                ? 1 : 0;
+        this_->stopAnimPlaying = 0;
+        InvEnsureAnimation(this_, play,
+                            (this_->deathCause == 1) ? InvaderAnim::kDeathDrown
+                                                      : InvaderAnim::kDeath,
+                            0);
+        SPDLOG_INFO("[Invader] DEAD entry — anim={} pos=({:.0f},{:.0f},{:.0f}) "
+                    "holdMs={}",
+                    (this_->deathCause == 1 ? "kDeathDrown" : "kDeath"),
+                    a->world.pos.x, a->world.pos.y, a->world.pos.z,
+                    kInvaderDeathHoldMs);
+    }
+
+    // Hold for the configured duration so the death anim has time to
+    // play visibly. After the hold elapses, fire Actor_Kill which
+    // triggers OnActorKill → ENEMY_DEFEATED broadcast +
+    // Director::OnEnemyRemoved bookkeeping.
+    const uint64_t holdTicks = (uint64_t)Anchor::Instance->MsToGameTicks(
+                                   kInvaderDeathHoldMs);
+    if (curFrame >= sDeathEntryInvFrame + holdTicks) {
+        SPDLOG_INFO("[Invader] DEAD hold complete — firing Actor_Kill");
+        Actor_Kill(a);
+        // Don't touch state past this point — actor is being torn down.
+    }
+}
+
+// ---------------------------------------------------------------------
+// Parity gap 5 — CRAWLING state + helpers.
+//
+// Cloned from FollowerNPC's FindCrawlspaceForCrossing /
+// TryEnterCrawling / TickCRAWLING (FollowerNPC.cpp:2968 / 3060 / 3003).
+// Child-Link-only gate: adult Invader can't fit into crawlspaces (same
+// as Player's Player_TryEnteringCrawlspace at z_player.c:7639).
+//
+// Detection: find a CrawlspaceAnchor whose entryNormal separates the
+// Invader (entry-facing side) from its target (far side). When found,
+// snap to entryPos + face into the wall + transition to CRAWLING.
+// TickCRAWLING moves forward at constant speed until the body crosses
+// past the wall plane by margin, then plays the kCrawlExit one-shot
+// and returns to FOLLOW.
+// ---------------------------------------------------------------------
+const ::AnchorNavRoom::CrawlspaceAnchor* FindCrawlspaceForCrossingInv(
+    const ::AnchorNavRoom::RoomNavData* navData,
+    const Vec3f& selfPos,
+    const Vec3f& targetPos)
+{
+    if (navData == nullptr || navData->crawlspaceAnchors.empty()) return nullptr;
+    const ::AnchorNavRoom::CrawlspaceAnchor* best = nullptr;
+    float bestDistSq = std::numeric_limits<float>::max();
+    for (const auto& a : navData->crawlspaceAnchors) {
+        const float selfSide =
+            (selfPos.x - a.entryPos.x) * a.entryNormal.x +
+            (selfPos.z - a.entryPos.z) * a.entryNormal.z;
+        const float targetSide =
+            (targetPos.x - a.entryPos.x) * a.entryNormal.x +
+            (targetPos.z - a.entryPos.z) * a.entryNormal.z;
+        if (selfSide < kInvCrawlMinCrossDist ||
+            targetSide > -kInvCrawlMinCrossDist) {
+            continue;
+        }
+        if (std::fabs(a.entryPos.y - selfPos.y) > 60.0f) continue;
+        const float dx = selfPos.x - a.entryPos.x;
+        const float dz = selfPos.z - a.entryPos.z;
+        const float distSq = dx*dx + dz*dz;
+        if (distSq > kInvCrawlEntryRadius * kInvCrawlEntryRadius) continue;
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            best = &a;
+        }
+    }
+    return best;
+}
+
+void TickCRAWLING(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+    a->speedXZ = 0.0f;  // direct world.pos drive; Actor_MoveXZGravity skipped
+
+    if (sCrawlInvState.anchor == nullptr) {
+        SPDLOG_WARN("[Invader] CRAWLING tick with null anchor — exiting to FOLLOW");
+        this_->state = EN_INVADER_STATE_FOLLOW;
+        return;
+    }
+
+    if (sCrawlInvState.exitAnimPlaying) {
+        // Apply Y-drop for crawl-exit anim — closes parity gap 5
+        // sub-fix (matches FollowerNPC commit bddc0b598). The
+        // child_tunnel_end anim has the body pivot at standing height
+        // while rendering crouched; without the drop, the Invader
+        // visually floats 20u above the crawlspace floor for the
+        // length of the exit anim.
+        a->world.pos.y = sCrawlInvState.entryPos.y - kInvCrawlExitYDrop;
+        if (this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
+            SPDLOG_INFO("[Invader] CRAWLING→FOLLOW (exit anim complete at "
+                        "({:.0f},{:.0f},{:.0f}))",
+                        a->world.pos.x, a->world.pos.y, a->world.pos.z);
+            this_->state = EN_INVADER_STATE_FOLLOW;
+            sCrawlInvState.anchor = nullptr;
+            sCrawlInvState.exitAnimPlaying = false;
+        }
+        return;
+    }
+
+    a->world.pos.x += sCrawlInvState.forwardDir.x * kInvCrawlSpeed;
+    a->world.pos.z += sCrawlInvState.forwardDir.z * kInvCrawlSpeed;
+    a->world.pos.y = sCrawlInvState.entryPos.y;
+
+    const float currentSide =
+        (a->world.pos.x - sCrawlInvState.anchor->entryPos.x) *
+            sCrawlInvState.anchor->entryNormal.x +
+        (a->world.pos.z - sCrawlInvState.anchor->entryPos.z) *
+            sCrawlInvState.anchor->entryNormal.z;
+    const float dx = a->world.pos.x - sCrawlInvState.entryPos.x;
+    const float dz = a->world.pos.z - sCrawlInvState.entryPos.z;
+    const float traveled = std::sqrt(dx*dx + dz*dz);
+
+    const bool crossedPlane = currentSide < -kInvCrawlExitMargin;
+    const bool tooFar       = traveled > kInvCrawlMaxDistance;
+    if (crossedPlane || tooFar) {
+        SPDLOG_INFO("[Invader] CRAWLING — exit triggered ({}), traveled {:.0f}u "
+                    "from entry; switching to kCrawlExit anim",
+                    crossedPlane ? "crossed plane" : "max distance", traveled);
+        sCrawlInvState.exitAnimPlaying = true;
+        this_->stopAnimPlaying = 0;
+        InvEnsureAnimation(this_, play, InvaderAnim::kCrawlExit, 0);
+    }
+}
+
+// Try to enter CRAWLING from IDLE / FOLLOW. Returns true if entered.
+bool TryEnterCrawling(EnInvader* this_, PlayState* play, const Vec3f& targetPos) {
+    if (this_->state != EN_INVADER_STATE_IDLE &&
+        this_->state != EN_INVADER_STATE_FOLLOW) {
+        return false;
+    }
+    // Child-Link only — same gate as Player's
+    // Player_TryEnteringCrawlspace at z_player.c:7639.
+    if (this_->linkAge != LINK_AGE_CHILD) return false;
+
+    const ::AnchorNavRoom::RoomNavData* navData =
+        ::AnchorNavRoom::GetForRoom(
+            play->sceneNum,
+            (int8_t)play->roomCtx.curRoom.num);
+    const auto* anchor = FindCrawlspaceForCrossingInv(navData,
+                                                       this_->actor.world.pos,
+                                                       targetPos);
+    if (anchor == nullptr) return false;
+
+    Actor* a = &this_->actor;
+    a->world.pos.x = anchor->entryPos.x;
+    a->world.pos.z = anchor->entryPos.z;
+    a->world.pos.y = anchor->entryPos.y;
+    a->shape.rot.y = Math_Atan2S(-anchor->entryNormal.z, -anchor->entryNormal.x);
+    a->world.rot.y = a->shape.rot.y;
+    a->speedXZ     = 0.0f;
+    a->velocity.y  = 0.0f;
+
+    sCrawlInvState.anchor    = anchor;
+    sCrawlInvState.entryPos  = a->world.pos;
+    sCrawlInvState.forwardDir = {
+        -anchor->entryNormal.x, 0.0f, -anchor->entryNormal.z
+    };
+    sCrawlInvState.exitAnimPlaying = false;
+    this_->state = EN_INVADER_STATE_CRAWLING;
+    this_->stopAnimPlaying = 0;
+    InvEnsureAnimation(this_, play, InvaderAnim::kCrawlMove, 0);
+
+    SPDLOG_INFO("[Invader] {}→CRAWLING (entry=({:.0f},{:.0f},{:.0f}) "
+                "normal=({:.2f},{:.2f}))",
+                StateName(this_->prevState),
+                anchor->entryPos.x, anchor->entryPos.y, anchor->entryPos.z,
+                anchor->entryNormal.x, anchor->entryNormal.z);
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// Parity gap 6 — G14 close-fail safety net.
+//
+// Cloned from FollowerNPC's TryFireG14 (FollowerNPC.cpp:3297). Invader
+// is "close to target but not closing" — distance unchanged for >
+// kInvCloseFailTimeoutMs → snap to target's pos. Catches pathological
+// orbits where G10 (long leash) doesn't fire because the Invader is
+// inside the leash band, but the Invader can't actually make progress
+// because of geometry.
+//
+// Uses sLocalInvNav.closeFailFrames / closeFailBaseline (added below).
+// Skips combat states + scripted-traversal states (SWIMMING /
+// LEDGE_HOIST / CRAWLING / DEAD) — those are their own scripted
+// motion.
+// ---------------------------------------------------------------------
+constexpr float kInvCloseFailMinDistance   = 200.0f;
+constexpr float kInvCloseFailMaxDistance   = 1200.0f;
+constexpr int   kInvCloseFailTimeoutMs     = 10000;
+constexpr float kInvCloseFailProgressDelta = 30.0f;
+
+bool TryFireG14Invader(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+    Actor* target = PickHostileTargetForInvader(a, play);
+    if (target == nullptr || target->update == nullptr) {
+        sLocalInvNav.closeFailFrames   = 0;
+        sLocalInvNav.closeFailBaseline = 0.0f;
+        return false;
+    }
+
+    const float dx = a->world.pos.x - target->world.pos.x;
+    const float dy = a->world.pos.y - target->world.pos.y;
+    const float dz = a->world.pos.z - target->world.pos.z;
+    const float dist3D = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+    if (dist3D < kInvCloseFailMinDistance ||
+        dist3D > kInvCloseFailMaxDistance) {
+        sLocalInvNav.closeFailFrames   = 0;
+        sLocalInvNav.closeFailBaseline = 0.0f;
+        return false;
+    }
+
+    if (sLocalInvNav.closeFailFrames == 0) {
+        sLocalInvNav.closeFailBaseline = dist3D;
+        sLocalInvNav.closeFailFrames   = 1;
+        return false;
+    }
+
+    const float progress = sLocalInvNav.closeFailBaseline - dist3D;
+    if (progress > kInvCloseFailProgressDelta) {
+        sLocalInvNav.closeFailBaseline = dist3D;
+        sLocalInvNav.closeFailFrames   = 1;
+        return false;
+    }
+
+    sLocalInvNav.closeFailFrames++;
+    const int timeoutTicks =
+        Anchor::Instance->MsToGameTicks(kInvCloseFailTimeoutMs);
+    if (timeoutTicks <= 0 ||
+        (int)sLocalInvNav.closeFailFrames < timeoutTicks) {
+        return false;
+    }
+
+    SPDLOG_INFO("[Invader] G14 close-fail teleport — dist3D={:.0f}u, "
+                "progress={:.1f}u over {} frames (<{}u in {}ms) → snap to target",
+                dist3D, progress, sLocalInvNav.closeFailFrames,
+                (int)kInvCloseFailProgressDelta, kInvCloseFailTimeoutMs);
+    a->world.pos = target->world.pos;
+    a->speedXZ   = 0.0f;
+    sLocalInvNav.closeFailFrames   = 0;
+    sLocalInvNav.closeFailBaseline = 0.0f;
+    sLocalInvNav.leashFrames       = 0;
+    sLocalInvNav.stuckCheckPos     = a->world.pos;
+    sLocalInvNav.lastStuckCheckFrame =
+        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+    this_->state = EN_INVADER_STATE_FOLLOW;
+    Actor_UpdateBgCheckInfo(play, a, 26.0f, 10.0f, 50.0f, 4);
+    return true;
+}
+
 }  // namespace
 
 extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     if (invader == nullptr || play == nullptr) return;
     EnInvader* this_ = (EnInvader*)invader;
+
+    // Parity gap 3 — DEAD state short-circuit. When dead, skip combat
+    // preempt + G10/G14 + state dispatch — only TickDEAD runs (anim
+    // hold + terminal Actor_Kill). Hint pos doesn't matter; pass the
+    // actor's own pos as a no-op. Update prevState at the end so the
+    // entry-edge detect inside TickDEAD fires on the first DEAD tick.
+    if (this_->state == EN_INVADER_STATE_DEAD) {
+        TickDEAD(this_, play);
+        this_->prevState = this_->state;
+        return;
+    }
 
     // G18 — freeze during cutscenes (same shape as FollowerNPC's G18
     // gate). Without this, the Invader could swing or shoot during
@@ -1357,11 +1851,22 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         (this_->state == EN_INVADER_STATE_BLOCK) ||
         (this_->state == EN_INVADER_STATE_RANGED_ATTACK) ||
         (this_->state == EN_INVADER_STATE_STANDBY);
+    // Parity gap 5 — CRAWLING joins SWIMMING / LEDGE_HOIST in the
+    // "scripted traversal" exempt list. CRAWLING moves the actor at
+    // its own constant speed; G10/G14 mid-crawl would yank the body
+    // out of the tunnel.
     const bool scriptedTraversal =
         (this_->state == EN_INVADER_STATE_SWIMMING) ||
-        (this_->state == EN_INVADER_STATE_LEDGE_HOIST);
+        (this_->state == EN_INVADER_STATE_LEDGE_HOIST) ||
+        (this_->state == EN_INVADER_STATE_CRAWLING);
     if (!combatState && !scriptedTraversal) {
         if (TryFireG10Invader(this_, play)) {
+            this_->prevState = this_->state;
+            return;
+        }
+        // Parity gap 6 — G14 close-fail. Fires only when G10 didn't.
+        // Same eligibility (non-combat, non-scripted).
+        if (TryFireG14Invader(this_, play)) {
             this_->prevState = this_->state;
             return;
         }
@@ -1426,11 +1931,21 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // a tier matches.
     //
     // Phase 4 — TryEngageCombat is eligibility-gated to non-combat,
-    // non-scripted states. SWIMMING / LEDGE_HOIST → no preempt; let
-    // the scripted traversal complete first.
+    // non-scripted states. SWIMMING / LEDGE_HOIST / CRAWLING → no
+    // preempt; let the scripted traversal complete first.
     if (this_->state != EN_INVADER_STATE_SWIMMING &&
-        this_->state != EN_INVADER_STATE_LEDGE_HOIST) {
+        this_->state != EN_INVADER_STATE_LEDGE_HOIST &&
+        this_->state != EN_INVADER_STATE_CRAWLING) {
         TryEngageCombat(this_, play);
+    }
+
+    // Parity gap 5 — try-enter CRAWLING. Fires only when in IDLE /
+    // FOLLOW (gated inside TryEnterCrawling) AND child Link AND a
+    // crawlspace anchor separates Invader from its current target.
+    // If we enter CRAWLING, the dispatch below picks TickCRAWLING.
+    if (sLocalInvNav.lastTarget != nullptr &&
+        sLocalInvNav.lastTarget->update != nullptr) {
+        TryEnterCrawling(this_, play, sLocalInvNav.lastTarget->world.pos);
     }
 
     // Hint pos for handlers that want a "where to face when nothing
@@ -1475,13 +1990,19 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         case EN_INVADER_STATE_LEDGE_HOIST:
             TickLEDGE_HOIST(this_, play);
             break;
+        // Parity gap 5 — CRAWLING child-only crawlspace traversal.
+        case EN_INVADER_STATE_CRAWLING:
+            TickCRAWLING(this_, play);
+            break;
         // TODO: full CLIMBING state — not implemented; Invader doesn't
         // pursue into vertical spaces in v1. Slot 2 reserved for parity
         // with NPC Follower. If/when added, mirror FollowerNPC's
         // TickCLIMBING (FollowerNPC.cpp:1500+).
+        // Parity gap 3 — DEAD is handled at top of function (early
+        // short-circuit); this case is unreachable but kept defensive.
         case EN_INVADER_STATE_DEAD:
         default:
-            // DEAD / unknown: hold pose, no motion.
+            // DEAD short-circuited above; unknown states hold pose.
             invader->speedXZ = 0.0f;
             break;
     }
@@ -1525,17 +2046,27 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     }
 
     // Phase 2 + 4 — drive animation for non-combat states. Combat
-    // states own their anims via direct LinkAnimation_Change calls
-    // inside their Tick handlers (matching FollowerNPC's pattern).
-    // We only pick + ensure for IDLE/FOLLOW/STUCK/SWIMMING/LEDGE_HOIST
-    // here. Anim type tracks combat: STANDBY-ish states use fighter
-    // (1); locomotion uses _free (0).
+    // states fire their own anim via InvEnsureAnimation calls at state
+    // entry inside the Tick handlers; the dispatcher anim block
+    // intentionally skips them so a re-fire doesn't truncate the
+    // one-shot anim. We pick + ensure for IDLE / FOLLOW / STUCK /
+    // SWIMMING / LEDGE_HOIST / CRAWLING here. Anim type tracks
+    // combat: STANDBY-ish states use fighter (1); locomotion uses
+    // _free (0).
+    //
+    // Parity gap 5 — CRAWLING joins this list so kCrawlMove / kCrawlExit
+    // get resolved via the standard pipeline (TryEnterCrawling fires
+    // kCrawlMove on entry, TickCRAWLING fires kCrawlExit when the
+    // body crosses the wall plane). The dispatcher's stopAnimPlaying
+    // hold keeps the SkelAnime at end-frame (crouch pose) during
+    // mid-tunnel translation.
     const bool isLocomotion =
         (this_->state == EN_INVADER_STATE_IDLE) ||
         (this_->state == EN_INVADER_STATE_FOLLOW) ||
         (this_->state == EN_INVADER_STATE_STUCK) ||
         (this_->state == EN_INVADER_STATE_SWIMMING) ||
-        (this_->state == EN_INVADER_STATE_LEDGE_HOIST);
+        (this_->state == EN_INVADER_STATE_LEDGE_HOIST) ||
+        (this_->state == EN_INVADER_STATE_CRAWLING);
     if (isLocomotion) {
         // Animation type: fighter (1) right after combat exit (so the
         // Invader holds the sword+shield stance briefly), _free (0)
@@ -1554,6 +2085,14 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
             want = (this_->hoistContext == (s8)INV_HOIST_CONTEXT_SWIM)
                        ? InvaderAnim::kHoistSwim
                        : InvaderAnim::kHoistGround;
+        }
+
+        // Parity gap 5 — CRAWLING exit-anim override. AnimForState
+        // returns kCrawlMove for CRAWLING; switch to kCrawlExit when
+        // TickCRAWLING set the exitAnimPlaying flag.
+        if (this_->state == EN_INVADER_STATE_CRAWLING &&
+            sCrawlInvState.exitAnimPlaying) {
+            want = InvaderAnim::kCrawlExit;
         }
 
         // Phase 4 — airborne anim override. If jump fired this tick OR
@@ -1592,9 +2131,18 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         // we haven't otherwise overridden `want`, hold the current
         // anim until LinkAnimation_Update reports completion. Matches
         // FollowerNPC's hold-during-stop pattern at FollowerNPC.cpp:4172.
+        //
+        // Parity gap 5 — exempt CRAWLING: kCrawlMove is intentionally a
+        // one-shot that holds at end-frame (crouch pose); we WANT the
+        // dispatcher to keep returning kCrawlMove / kCrawlExit (the
+        // computed `want`) instead of re-asserting whatever currentAnim
+        // happens to be. Without this exemption, the exit-anim override
+        // above would never take effect because stopAnimPlaying is
+        // still set from kCrawlMove's entry.
         if (this_->stopAnimPlaying &&
             airborneAnimOverride == InvaderAnim::kNone &&
-            this_->state != EN_INVADER_STATE_LEDGE_HOIST) {
+            this_->state != EN_INVADER_STATE_LEDGE_HOIST &&
+            this_->state != EN_INVADER_STATE_CRAWLING) {
             want = (InvaderAnim)this_->currentAnim;
         }
 
@@ -1614,6 +2162,35 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         if (this_->stopAnimPlaying &&
             this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
             this_->stopAnimPlaying = 0;
+        }
+    }
+
+    // Parity gap 2 — head-look-at-target. Compute desired
+    // headLimbRot/upperLimbRot toward the current target each tick
+    // (or settle to neutral when no target / scripted-anim states).
+    // EnInvader_Draw's save/swap/restore makes the local Player's
+    // limb rotation reflect THIS computation during the Player_DrawImpl
+    // call. Disabled during LEDGE_HOIST / CRAWLING — anim is body-locked
+    // (climb up + crouch); head turning sideways looks wrong.
+    if (this_->state == EN_INVADER_STATE_LEDGE_HOIST ||
+        this_->state == EN_INVADER_STATE_CRAWLING) {
+        Math_ScaledStepToS(&this_->headLimbRot.y,  0, 0x600);
+        Math_ScaledStepToS(&this_->headLimbRot.x,  0, 0x600);
+        Math_ScaledStepToS(&this_->upperLimbRot.y, 0, 0x600);
+    } else {
+        // Prefer the current combat target; fall back to the cached
+        // locomotion target; otherwise settle to neutral. Same as
+        // FollowerNPC's TickHeadLookAtLeader call site.
+        Actor* lookTarget = sAttackState.target;
+        if (lookTarget == nullptr || lookTarget->update == nullptr) {
+            lookTarget = sLocalInvNav.lastTarget;
+        }
+        if (lookTarget != nullptr && lookTarget->update != nullptr) {
+            TickHeadLookAtTarget(this_, lookTarget->world.pos);
+        } else {
+            Math_ScaledStepToS(&this_->headLimbRot.y,  0, 0x600);
+            Math_ScaledStepToS(&this_->headLimbRot.x,  0, 0x600);
+            Math_ScaledStepToS(&this_->upperLimbRot.y, 0, 0x600);
         }
     }
 

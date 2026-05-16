@@ -136,6 +136,10 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     this->nextFidgetIdx   = 0;
     this->jumpInProgress  = 0;
 
+    // Parity gap 4 — death cause. 0 = generic; TickDEAD sets to 1
+    // when the death triggered from SWIMMING.
+    this->deathCause      = 0;
+
     // Player-equivalent scale + shadow. Matches Link's footprint so
     // the Invader visually reads as a hostile Link, not a giant.
     Actor_SetScale(thisx, 0.01f);
@@ -262,31 +266,21 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
     // post-collision value (e.g. BLOCK threshold check).
     this->health = this->actor.colChkInfo.health;
 
-    // Death check. Actor_Kill triggers OnActorKill (HookHandlers.cpp:2887)
-    // which: (a) broadcasts ENEMY_DEFEATED to peers so they kill their
-    // local replica, and (b) calls Director::OnEnemyRemoved on host
-    // (live count + cooldown bookkeeping). The Invader does NOT fire
-    // OnEnemyDefeat — that hook is fired by enemies' own death-state
-    // actionFuncs (e.g. SetupDying), which v1 doesn't have. OnActorKill
-    // is the sole death-broadcast path.
+    // Death check — closes parity gap 3. Previously this called
+    // Actor_Kill immediately when health <= 0; the Invader popped out
+    // of existence with no death anim. Now we transition to the DEAD
+    // state and let TickDEAD play the death anim hold (~3s) before
+    // the actual Actor_Kill fires. The OnActorKill broadcast pipeline
+    // (ENEMY_DEFEATED to peers + Director::OnEnemyRemoved bookkeeping)
+    // runs from TickDEAD's terminal Actor_Kill call.
     //
-    // Race-B host-authoritative path (peer kills Invader on its screen):
-    //   1. Peer's ShouldActorUpdate clamps colChkInfo.damage so peer's
-    //      Invader stays at 1 HP and the local AC_HIT block here doesn't
-    //      decrement past 0 (the clamp zeros damage; the `damage > 0`
-    //      guard short-circuits the health write).
-    //   2. Peer's OnActorUpdate forwarder sends DAMAGE_ENEMY with the
-    //      stashed un-clamped damage.
-    //   3. Host's HandlePacket_DamageEnemy queues pendingSyncDamage.
-    //   4. Host's ShouldActorUpdate calls DrainPendingSyncDamage which
-    //      writes colChkInfo.damage AND calls ApplySyncAcHitToActor —
-    //      that helper has a runtime gEnInvaderId branch that sets
-    //      AC_HIT on this->collider so the drain block below fires.
-    //   5. Host's EnInvader_Update (this function) reads AC_HIT, drains,
-    //      hits 0, Actor_Kill → OnActorKill → ENEMY_DEFEATED to peers.
-    if (this->actor.colChkInfo.health <= 0) {
-        Actor_Kill(&this->actor);
-        return;
+    // Race-B host-authoritative path is unchanged — the C-side drain
+    // above still decrements colChkInfo.health, and we still trip the
+    // transition here. Only the timing of the Actor_Kill shifts (now
+    // deferred ~3s instead of immediate).
+    if (this->actor.colChkInfo.health <= 0 &&
+        this->state != EN_INVADER_STATE_DEAD) {
+        this->state = EN_INVADER_STATE_DEAD;
     }
 }
 
@@ -305,6 +299,17 @@ void EnInvader_Draw(Actor* thisx, PlayState* play) {
     this->currentBoots = localPlayer->currentBoots;
     this->currentFace  = localPlayer->actor.shape.face;
 
+    // Parity gap 2 — head-look swap. Save/swap/restore localPlayer's
+    // head + upper rotation around our draw so the Invader's head
+    // turns independently toward ITS target. Same shape as
+    // EnFollower_Draw lines 291-317. The per-tick computation that
+    // writes this->headLimbRot/upperLimbRot happens in
+    // Anchor_TickInvaderActor (TickHeadLookAtTarget helper).
+    Vec3s savedHead  = localPlayer->headLimbRot;
+    Vec3s savedUpper = localPlayer->upperLimbRot;
+    localPlayer->headLimbRot  = this->headLimbRot;
+    localPlayer->upperLimbRot = this->upperLimbRot;
+
     // Set draw-context flag so VB_APPLY_TUNIC_COLOR knows this draw
     // is an Invader and applies the hostile-black tint instead of
     // inheriting the previous draw's env color.
@@ -321,4 +326,9 @@ void EnInvader_Draw(Actor* thisx, PlayState* play) {
                     NULL /* post-limb: MUST be NULL — see comment above */,
                     localPlayer);
     Anchor_InvaderDrawEnd();
+
+    // Restore. Scoped to this one draw call so Player's own next draw
+    // uses the user's actual head/upper rotation.
+    localPlayer->headLimbRot  = savedHead;
+    localPlayer->upperLimbRot = savedUpper;
 }
