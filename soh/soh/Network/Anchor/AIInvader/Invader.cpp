@@ -121,10 +121,23 @@ constexpr float kRangedYFilter     = 250.0f;
 constexpr float kRangedElevatedYDelta = 60.0f;
 
 constexpr float kStandbyDetectDist = 600.0f;
-// Idle leader-leash radius — STANDBY drops back to IDLE inside this.
-constexpr float kStandbyIdleRadius = 80.0f;
+// Idle leader-leash radius — STANDBY drops to FOLLOW outside this.
+// Was 80u; widened to 150u 2026-05-17 after log 230 showed an
+// ATTACK→STANDBY→FOLLOW→ATTACK cycle every ~1s. With 80u the
+// hysteresis between STANDBY-exit (80u) and combat-entry
+// (kAttackEngageDist=80u) was zero — any player motion in/out of the
+// 80u ring triggered a chase-then-immediate-swing pattern. 150u
+// creates a "wait at attention" band of 80-150u where the Invader
+// holds in STANDBY while the player drifts away, only chasing when
+// the player meaningfully retreats.
+constexpr float kStandbyIdleRadius = 150.0f;
 
-constexpr int   kPostCombatCooldownMs = 1500;
+// Post-combat re-engagement cooldown. Was 1500ms; bumped to 2500ms
+// 2026-05-17 alongside kStandbyIdleRadius widening — together they
+// space the Invader's swings out into a more "deliberate hunter"
+// rhythm. TryEngageCombat checks `curFrame < sCombatCooldownEndFrame`
+// before re-firing combat tiers.
+constexpr int   kPostCombatCooldownMs = 2500;
 static uint64_t sCombatCooldownEndFrame = 0;
 // Last combat weapon. 0 = melee (sword); 1 = ranged. Set at every
 // combat entry by TryEngageCombat; consumed by STANDBY anim/facing

@@ -639,7 +639,15 @@ static ActorDBInit EnInvaderInit = {
     "En_Invader",
     "AI Invader (Flotilla)",
     ACTORCAT_ENEMY,
-    (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
+    // ATTENTION_ENABLED + HOSTILE — required for Z-targeting (lock-on).
+    // Stalfos uses the same combo at z_en_test.c:12. Without these
+    // bits, the OoT attention system skips the actor when scanning
+    // for lock-on candidates and the targeting reticle never appears
+    // over the Invader. CULLING_DISABLED flags keep the Invader
+    // active even when off-screen (Director-spawned actors must not
+    // self-cull or the host's actor list gets wonky).
+    (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE |
+     ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
     OBJECT_GAMEPLAY_KEEP,
     sizeof(EnInvader),
     (ActorFunc)EnInvader_Init,
