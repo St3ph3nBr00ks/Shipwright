@@ -8,6 +8,7 @@
 #include "Common/ItemEligibility.h"   // CanPlayerCollectItem00 (#193 Phase 0)
 #include "Common/PauseLinkBuffer.h"   // Anchor_IsDrawingPauseLink (#182 follow-up)
 #include "AIFollowerNPC/FollowerNPC.h" // Anchor_GetCurrentlyDrawingFollowerNpc (NPC color fix)
+#include "AIInvader/Invader.h"          // Anchor_GetCurrentlyDrawingInvader (black-tint color fix)
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
@@ -3145,6 +3146,21 @@ void Anchor::RegisterHooks() {
                 }
                 // Peer not in clients map (race? disconnect?) — fall through.
             }
+        }
+
+        // AI Invader — same draw-context flag class as the NPC
+        // Follower above. EnInvader_Draw passes the local Player* as
+        // Player_DrawImpl's `data`, so without this check the hook
+        // would either match `actor == myPlayer` and paint the
+        // Invader with local color, or inherit the previous draw's
+        // GPU env color. Hostile-black is the design tint per the
+        // user's spec (plan §2.1 said "phantom red"; user requested
+        // black during step 15a implementation).
+        if (Anchor_GetCurrentlyDrawingInvader() != nullptr) {
+            color->r = 0;
+            color->g = 0;
+            color->b = 0;
+            return;
         }
 
         if (actor == myPlayer) {

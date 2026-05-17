@@ -43,6 +43,7 @@
 
 #include "../SpawnableEnemyDescriptor.h"
 
+#include <cstdint>
 #include <unordered_map>
 
 namespace AnchorDirector {
@@ -55,6 +56,21 @@ namespace AnchorDirector {
 // would create a circular include (Director.h → InvaderDescriptor.h
 // via the Director's registry construction).
 struct PlayerSnapshot;
+
+// Public accessor for the scene-blacklist gate used by the Invader
+// spawn pipeline. Free function (not a class member) so consumers
+// outside the Director — like the actor-side target picker in
+// PlayerLookup.cpp — can apply the same exclusion without taking
+// a dependency on the descriptor class. Defined in
+// InvaderDescriptor.cpp at namespace AnchorDirector (external
+// linkage); shares the single switch statement with the Director's
+// own IsValidTarget / IsPersistentTarget consumers.
+//
+// Returns true when the scene is one where Invader gameplay should
+// be suppressed entirely (Ganon endgame, Hyrule Castle stealth, sage
+// chamber, etc.). Callers should treat any player in such a scene
+// as a non-target.
+bool IsSceneFlaggedNoInvaders(int16_t sceneNum);
 
 // Per-Invader runtime state. Keyed on netId in mActiveInvaders.
 // Replaces the earlier scalar mLastSpawnPos / mLastSpawnNetId
@@ -106,6 +122,30 @@ public:
 
     // --- Per-tick lifecycle scan (Phase 1 §7.5) ---
     void OnTick(Director& director, const SessionView& view) override;
+
+    // --- Host migration ---
+    // Round-trips mActiveInvaders (per-Invader sticky target, orphan timer,
+    // pending follow-spawn) so the new host inherits in-flight Invader
+    // lifecycle state instead of restarting every timer from zero.
+    //
+    // Director's own ledger (live count, netId→descriptor) is already
+    // migrated by SerializeMigrationSnapshot at the parent level. This
+    // descriptor-side state is the per-Invader bookkeeping the
+    // ProposeSpawn / OnTick scan needs to continue managing existing
+    // Invaders after migration. Without it, post-migration:
+    //   - sticky target re-acquires on first OnTick (≈1 tick delay,
+    //     visible if Invader is mid-engagement);
+    //   - orphan-in-scene timer resets to 0 (delays Leash despawn by
+    //     up to 60s);
+    //   - any pending follow-spawn (PlayerEnteredRoom event seen but
+    //     grace counter not yet elapsed) silently drops, leaving the
+    //     Invader stranded in the old scene until the orphan timer
+    //     fires.
+    // Schema: a JSON array of [netId, fields...] tuples. Defensive
+    // value() reads on each field so a future field add doesn't break
+    // backward compat with peers that haven't yet bumped.
+    nlohmann::json SerializeMigrationState() const override;
+    void RestoreMigrationState(const nlohmann::json& j) override;
 
     // --- Debug surface ---
     std::string GetDebugSnapshotLine() const override;

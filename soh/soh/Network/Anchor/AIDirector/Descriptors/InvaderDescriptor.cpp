@@ -4,12 +4,9 @@
  * Eligibility-predicate chain from ai_invader_plan.md §7.1. ProposeSpawn
  * walks the gates; if any blocks, returns empty (with a throttled
  * diagnostic SPDLOG explaining which gate). If all pass, returns a
- * proposal with a placeholder spawn position (target's worldPos) and
- * placeholder actor (ACTOR_EN_TEST + STALFOS_TYPE_1).
- *
- * Step 13 will replace the placeholder position with PickSpawnPosition
- * consuming RoomNavData. Step 15 will replace ACTOR_EN_TEST with the
- * real ACTOR_EN_INVADER.
+ * proposal targeting the real ACTOR_EN_INVADER (step 15a landed,
+ * commit follows). PickSpawnPosition (step 13, landed) supplies the
+ * nav-aware spawn position.
  *
  * Predicates implemented this step:
  *   - Live-count cap (CVar AI.Invaders.MaxAlive, default 1).
@@ -53,7 +50,13 @@
 
 extern "C" {
 #include "z64.h"
-#include "z64actor.h"  // ACTOR_EN_TEST placeholder until step 15's ACTOR_EN_INVADER
+#include "z64actor.h"
+// gEnInvaderId — runtime-allocated actor id for ACTOR_EN_INVADER.
+// Assigned by ActorDB::AddBuiltInCustomActors at boot; defined in
+// soh/src/code/z_play.c. Use this instead of a compile-time ACTOR_*
+// enum since the Invader is a SoH custom actor (not a vanilla
+// decomp actor).
+extern s16 gEnInvaderId;
 }
 
 // gPlayState — Phase 1 §7.5 OnTick reads sceneNum / roomCtx for the
@@ -87,44 +90,6 @@ inline int ReadCooldownMs() {
     if (sec < 30)  sec = 30;
     if (sec > 600) sec = 600;  // plan §3 range
     return sec * 1000;
-}
-
-// Scenes where Invader spawns should never fire regardless of other
-// gates. Narrative-climax / end-game scenes where an invader breaks
-// immersion or interferes with scripted sequences.
-//
-// Step 12 list — minimal. Extends as field-testing surfaces more
-// scenes that need exclusion. The boss-room check (currently stubbed)
-// will catch dungeon-boss rooms generically; this list is for the
-// non-boss-room exclusions.
-//
-// Values match SCENE_* enum from soh/include/tables/scene_table.h.
-bool IsSceneFlaggedNoInvaders(int16_t sceneNum) {
-    switch (sceneNum) {
-        case  0x0A:  // SCENE_GANONS_TOWER
-        case  0x0D:  // SCENE_INSIDE_GANONS_CASTLE
-        case  0x0E:  // SCENE_GANONS_TOWER_COLLAPSE_INTERIOR
-        case  0x0F:  // SCENE_INSIDE_GANONS_CASTLE_COLLAPSE
-        case  0x19:  // SCENE_GANONDORF_BOSS
-        case  0x1A:  // SCENE_GANONS_TOWER_COLLAPSE_EXTERIOR
-        case  0x44:  // SCENE_CHAMBER_OF_THE_SAGES (sage-awakening cutscene
-                     // chamber; narrative-only, no gameplay)
-        case  0x45:  // SCENE_CASTLE_COURTYARD_GUARDS_DAY (young-Link stealth
-                     // section — Invader would break the guard mechanic)
-        case  0x46:  // SCENE_CASTLE_COURTYARD_GUARDS_NIGHT (same)
-        case  0x4A:  // SCENE_CASTLE_COURTYARD_ZELDA (first Zelda meeting,
-                     // scripted cutscene area)
-        case  0x4F:  // SCENE_GANON_BOSS
-        case  0x5F:  // SCENE_HYRULE_CASTLE
-        case  0x64:  // SCENE_OUTSIDE_GANONS_CASTLE (rainbow-bridge approach;
-                     // log 204 — Invader followed across the bridge to the
-                     // castle entrance, breaking endgame atmosphere)
-        case  0x6B:  // SCENE_HAIRAL_NIWA2 (unused castle-courtyard variant;
-                     // included for completeness with the courtyard set)
-            return true;
-        default:
-            return false;
-    }
 }
 
 // Step 13 will implement this against a boss-room registry +
@@ -255,6 +220,50 @@ std::optional<Vec3f> PickSpawnPosition(int16_t sceneNum, int8_t roomNum,
 
 }  // namespace
 
+// Scenes where Invader spawns should never fire regardless of other
+// gates. Narrative-climax / end-game scenes where an invader breaks
+// immersion or interferes with scripted sequences.
+//
+// Step 12 list — minimal. Extends as field-testing surfaces more
+// scenes that need exclusion. The boss-room check (currently stubbed)
+// will catch dungeon-boss rooms generically; this list is for the
+// non-boss-room exclusions.
+//
+// Values match SCENE_* enum from soh/include/tables/scene_table.h.
+//
+// Lifted out of the anonymous namespace 2026-05-16 so the actor-side
+// target picker in PlayerLookup.cpp can share the same exclusion
+// list as the Director's spawn-decision path. Declared in
+// InvaderDescriptor.h; defined here at namespace AnchorDirector
+// (external linkage) instead of file-scope.
+bool IsSceneFlaggedNoInvaders(int16_t sceneNum) {
+    switch (sceneNum) {
+        case  0x0A:  // SCENE_GANONS_TOWER
+        case  0x0D:  // SCENE_INSIDE_GANONS_CASTLE
+        case  0x0E:  // SCENE_GANONS_TOWER_COLLAPSE_INTERIOR
+        case  0x0F:  // SCENE_INSIDE_GANONS_CASTLE_COLLAPSE
+        case  0x19:  // SCENE_GANONDORF_BOSS
+        case  0x1A:  // SCENE_GANONS_TOWER_COLLAPSE_EXTERIOR
+        case  0x44:  // SCENE_CHAMBER_OF_THE_SAGES (sage-awakening cutscene
+                     // chamber; narrative-only, no gameplay)
+        case  0x45:  // SCENE_CASTLE_COURTYARD_GUARDS_DAY (young-Link stealth
+                     // section — Invader would break the guard mechanic)
+        case  0x46:  // SCENE_CASTLE_COURTYARD_GUARDS_NIGHT (same)
+        case  0x4A:  // SCENE_CASTLE_COURTYARD_ZELDA (first Zelda meeting,
+                     // scripted cutscene area)
+        case  0x4F:  // SCENE_GANON_BOSS
+        case  0x5F:  // SCENE_HYRULE_CASTLE
+        case  0x64:  // SCENE_OUTSIDE_GANONS_CASTLE (rainbow-bridge approach;
+                     // log 204 — Invader followed across the bridge to the
+                     // castle entrance, breaking endgame atmosphere)
+        case  0x6B:  // SCENE_HAIRAL_NIWA2 (unused castle-courtyard variant;
+                     // included for completeness with the courtyard set)
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool InvaderDescriptor::IsEnabled() const {
     // Chained gate — both must be on. See header for rationale.
     return CVarGetInteger(CVAR_ENHANCEMENT("AI.Invaders.Enabled"), 0) != 0
@@ -382,20 +391,30 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
 
     // All gates passed. Build proposal.
     //
-    // Step 12-13 placeholders:
-    //   - actorId = ACTOR_EN_TEST (Stalfos). Real ACTOR_EN_INVADER lands
-    //     in step 15 once #208 unblocks combat AI.
-    //   - actorParams = 1 (STALFOS_TYPE_1, visible variant — type 0 is
-    //     Lens-of-Truth-invisible).
-    //   - worldPos: step-13 nav-aware placement via PickSpawnPosition.
+    // Step 15a: actorId = gEnInvaderId (ACTOR_EN_INVADER, dynamic id
+    // allocated by ActorDB at boot). actorParams=0 (Invader uses no
+    // params today; combat-AI variants may overload it post-#208).
+    // Defensive: skip the proposal if gEnInvaderId is 0 (Boot order:
+    // ActorDB::AddBuiltInCustomActors fires from OTRGlobals.cpp:1569
+    // during initial OTR load. If the Director's first Tick somehow
+    // fires before that, gEnInvaderId is still 0 and Actor_Spawn
+    // would reject it.
+    if (gEnInvaderId == 0) {
+        if (shouldLog) {
+            SPDLOG_WARN("[InvaderDescriptor] no proposal: gEnInvaderId not yet "
+                        "allocated (ActorDB::AddBuiltInCustomActors hasn't run?)");
+            markLog();
+        }
+        return {};
+    }
     SpawnProposal p;
     p.source       = this;
     p.sceneNum     = target->sceneNum;
     p.roomNum      = target->roomNum;
     p.worldPos     = *pickedPos;
     p.yawTowards   = 0;
-    p.actorId      = ACTOR_EN_TEST;
-    p.actorParams  = 1;
+    p.actorId      = gEnInvaderId;
+    p.actorParams  = 0;
     p.variantId    = 0;
     p.priority     = DescriptorPriority::Standard;
     p.groupId      = 0;
@@ -447,14 +466,19 @@ std::vector<SpawnProposal> InvaderDescriptor::BuildForcedProposal(const Director
                     "falling back to player.worldPos");
     }
 
+    if (gEnInvaderId == 0) {
+        SPDLOG_WARN("[InvaderDescriptor] BuildForcedProposal: gEnInvaderId not yet "
+                    "allocated");
+        return {};
+    }
     SpawnProposal p;
     p.source       = this;
     p.sceneNum     = target->sceneNum;
     p.roomNum      = target->roomNum;
     p.worldPos     = spawnPos;
     p.yawTowards   = 0;
-    p.actorId      = ACTOR_EN_TEST;
-    p.actorParams  = 1;
+    p.actorId      = gEnInvaderId;
+    p.actorParams  = 0;
     p.variantId    = 0;
     p.priority     = DescriptorPriority::Standard;
     p.groupId      = 0;
@@ -505,6 +529,86 @@ void InvaderDescriptor::OnSpawnRemoved(uint32_t netId, DefeatCause cause) {
                 "(proposals={} removed={} remainingActive={})",
                 netId, (int)cause, mProposalsOffered, mTotalRemoved,
                 mActiveInvaders.size());
+}
+
+// ---------------------------------------------------------------------------
+// Host-migration serialization for per-Invader runtime state. The Director's
+// ledger (live counts, netId→descriptor) round-trips via the parent snapshot;
+// this round-trips mActiveInvaders so the new host inherits in-flight
+// lifecycle state (sticky target, orphan timer, pending follow-spawn).
+//
+// Wire format (compact JSON array):
+//   [
+//     [<netId>, <targetClientId>, <lastKnownSceneNum>, <lastKnownRoomNum>,
+//      <orphanFrames>, <pendingFollowSpawn>, <followGraceFrames>,
+//      <pendingFollowPosX>, <pendingFollowPosY>, <pendingFollowPosZ>,
+//      <pendingFollowScene>, <pendingFollowRoom>,
+//      <lastSpawnPosX>, <lastSpawnPosY>, <lastSpawnPosZ>],
+//     ...
+//   ]
+//
+// Defensive value() reads on the restore side tolerate future schema bumps:
+// if a peer sends a shorter tuple (older schema), the missing trailing fields
+// default per InvaderRuntimeState's initializers.
+// ---------------------------------------------------------------------------
+
+nlohmann::json InvaderDescriptor::SerializeMigrationState() const {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& [netId, state] : mActiveInvaders) {
+        nlohmann::json tup = nlohmann::json::array();
+        tup.push_back(netId);
+        tup.push_back(state.targetClientId);
+        tup.push_back((int)state.lastKnownSceneNum);
+        tup.push_back((int)state.lastKnownRoomNum);
+        tup.push_back(state.orphanFrames);
+        tup.push_back(state.pendingFollowSpawn);
+        tup.push_back(state.followGraceFrames);
+        tup.push_back(state.pendingFollowPos.x);
+        tup.push_back(state.pendingFollowPos.y);
+        tup.push_back(state.pendingFollowPos.z);
+        tup.push_back((int)state.pendingFollowScene);
+        tup.push_back((int)state.pendingFollowRoom);
+        tup.push_back(state.lastSpawnPos.x);
+        tup.push_back(state.lastSpawnPos.y);
+        tup.push_back(state.lastSpawnPos.z);
+        arr.push_back(std::move(tup));
+    }
+    return arr;
+}
+
+void InvaderDescriptor::RestoreMigrationState(const nlohmann::json& j) {
+    if (!j.is_array()) {
+        return;
+    }
+    // Replace the map outright — the host's snapshot is authoritative.
+    // Any local stale entries would be wrong by definition (we're a peer
+    // being promoted to host, our pre-migration view of this descriptor
+    // was a cached mirror).
+    mActiveInvaders.clear();
+    for (const auto& tup : j) {
+        if (!tup.is_array() || tup.size() < 1) continue;
+        const uint32_t netId = tup[0].get<uint32_t>();
+        InvaderRuntimeState s;
+        // Defensive: only read indexes that exist. Schema-stable today but
+        // value() pattern guards against future tuple-length changes.
+        if (tup.size() >  1) s.targetClientId    = tup[1].get<uint32_t>();
+        if (tup.size() >  2) s.lastKnownSceneNum = (int16_t)tup[2].get<int>();
+        if (tup.size() >  3) s.lastKnownRoomNum  = (int8_t)tup[3].get<int>();
+        if (tup.size() >  4) s.orphanFrames      = tup[4].get<int>();
+        if (tup.size() >  5) s.pendingFollowSpawn = tup[5].get<bool>();
+        if (tup.size() >  6) s.followGraceFrames = tup[6].get<int>();
+        if (tup.size() >  7) s.pendingFollowPos.x = tup[7].get<float>();
+        if (tup.size() >  8) s.pendingFollowPos.y = tup[8].get<float>();
+        if (tup.size() >  9) s.pendingFollowPos.z = tup[9].get<float>();
+        if (tup.size() > 10) s.pendingFollowScene = (int16_t)tup[10].get<int>();
+        if (tup.size() > 11) s.pendingFollowRoom  = (int8_t)tup[11].get<int>();
+        if (tup.size() > 12) s.lastSpawnPos.x = tup[12].get<float>();
+        if (tup.size() > 13) s.lastSpawnPos.y = tup[13].get<float>();
+        if (tup.size() > 14) s.lastSpawnPos.z = tup[14].get<float>();
+        mActiveInvaders[netId] = std::move(s);
+    }
+    SPDLOG_INFO("[InvaderDescriptor] RestoreMigrationState: restored {} active invader(s) "
+                "from host migration snapshot", mActiveInvaders.size());
 }
 
 std::string InvaderDescriptor::GetDebugSnapshotLine() const {
@@ -793,14 +897,19 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
 
         director.ExecuteDespawn(oldNetId, DefeatCause::SceneExit);
 
+        if (gEnInvaderId == 0) {
+            SPDLOG_WARN("[InvaderDescriptor] follow-spawn: gEnInvaderId not yet "
+                        "allocated — skipping continuation");
+            continue;
+        }
         SpawnProposal p;
         p.source         = this;
         p.sceneNum       = (gPlayState != nullptr) ? (int16_t)gPlayState->sceneNum : 0;
         p.roomNum        = (gPlayState != nullptr) ? (int8_t)gPlayState->roomCtx.curRoom.num : 0;
         p.worldPos       = entrancePos;
         p.yawTowards     = 0;
-        p.actorId        = ACTOR_EN_TEST;
-        p.actorParams    = 1;
+        p.actorId        = gEnInvaderId;
+        p.actorParams    = 0;
         p.variantId      = 0;
         p.priority       = DescriptorPriority::Standard;
         p.groupId        = 0;
