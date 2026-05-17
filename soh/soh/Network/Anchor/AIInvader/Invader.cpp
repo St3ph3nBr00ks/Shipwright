@@ -2837,7 +2837,17 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // skips climb cells; cross-room nav not supported). Gated to non-
     // combat / non-scripted states to avoid interrupting a swing or
     // mantle. Returns silently when conditions aren't met.
-    if (!combatState && !scriptedTraversal &&
+    // Item 7 (2026-05-17) — also permit SWIMMING → CLIMBING force-
+    // engage (the swim-to-climb transition: target grabs a vine wall
+    // reachable from water). Mirrors NPC Follower's force-engage at
+    // FollowerNPC.cpp:3600 which fires from any non-CLIMBING state
+    // when leader is climbing. LEDGE_HOIST / CRAWLING stay exempt
+    // (they're committed scripted motions), as do combat states.
+    const bool autoClimbExempt =
+        combatState ||
+        (this_->state == EN_INVADER_STATE_LEDGE_HOIST) ||
+        (this_->state == EN_INVADER_STATE_CRAWLING);
+    if (!autoClimbExempt &&
         sLocalInvNav.lastTarget != nullptr &&
         sLocalInvNav.lastTarget->update != nullptr) {
         TryEngageAutoClimbInv(this_, play, sLocalInvNav.lastTarget);
