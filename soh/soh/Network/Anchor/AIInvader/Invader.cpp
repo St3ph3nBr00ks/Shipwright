@@ -101,8 +101,20 @@ constexpr float kAttackQuadTopY       = 65.0f;
 constexpr float kAttackActiveStartFrame = 4.0f;
 constexpr float kAttackActiveEndFrame   = 12.0f;
 
-constexpr float kEngageAcquireDist  = 250.0f;
-constexpr float kEngageBreakDist    = 400.0f;
+// Detection range bumped 250→1000 on 2026-05-17 (log 233 testing).
+// User observation: "AI Invader only started pathfinding to player
+// when the player got close, within ~300 units. AI Invader had line
+// of sight on the player from much further away and should have begun
+// pathfinding."
+//
+// Invader's PickHostileTargetForInvader (Common/PlayerLookup.cpp)
+// only ever returns player-aligned actors (local Player + DummyPlayers
+// + NPC Follower when targetable) — vanilla enemies are NEVER
+// candidates here, so widening the range does not cause the Invader
+// to attack scene enemies. Defensive retaliation against non-player
+// enemies remains a deferred feature (post-#208).
+constexpr float kEngageAcquireDist  = 1000.0f;
+constexpr float kEngageBreakDist    = 1500.0f;
 constexpr float kEngageStrikeDist   = 70.0f;
 constexpr float kEngageWalkSpeed    = 6.0f;
 constexpr float kEngageRunDistance  = 150.0f;
@@ -232,11 +244,13 @@ Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
 // ---------------------------------------------------------------------
 
 // Hysteresis: IDLE→FOLLOW fires when target XZ-distance exceeds this.
-// Larger than kEnterIdle so the NPC doesn't oscillate at the boundary.
-// We pick 250u as the "lose interest" threshold — outside this range
-// the Invader returns to IDLE and the target picker may select a
-// different hostile.
-constexpr float kInvFollowEngageDist = 250.0f;
+// Larger than kInvFollowIdleDist so the NPC doesn't oscillate at the
+// boundary. Bumped 250→1000 on 2026-05-17 (log 233) to match the
+// kEngageAcquireDist range — outside 1000u the Invader returns to
+// IDLE and the target picker may select a different hostile. Inside
+// 1000u, IDLE→FOLLOW engages and TryEngageCombat Tier 2 immediately
+// promotes to ENGAGE pursuit.
+constexpr float kInvFollowEngageDist = 1000.0f;
 // FOLLOW→IDLE fires when target XZ-distance falls inside this. Slightly
 // smaller than kEngageStrikeDist so FOLLOW hands off to combat
 // (TryEngageCombat picks ATTACK / ENGAGE) BEFORE the IDLE re-entry
