@@ -6784,11 +6784,11 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         }
     }
 
-    // Computed-path overlay (CVAR_ROOM_NAV_DEBUG_DRAW_PATHS). Red
+    // Computed-path overlay (CVAR_ROOM_NAV_DEBUG_DRAW_PATHS). Teal
     // vertical posts at every waypoint in the most-recent computed
     // path for each navigator. Same height/style as the breadcrumb
     // markers above so the visualization is consistent — different
-    // colour (red vs hot pink) distinguishes "planned route" from
+    // colour (teal vs hot pink) distinguishes "planned route" from
     // "actual walked history". ActorTrail's ComputePathTo populates
     // the snapshot map on every successful path compute; entries are
     // erased on path-fail or scene change.
@@ -6797,7 +6797,7 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
         AnchorNav::ActorTrail::GetInstance().SnapshotComputedPaths(
             gPlayState->sceneNum, sPathSnapshot);
         if (!sPathSnapshot.empty()) {
-            sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0x00, 0x00, 0xFF));  // red
+            sXluDl.push_back(gsDPSetPrimColor(0, 0, 0x00, 0x80, 0x80, 0xFF));  // teal (R=0, G=128, B=128)
             for (const auto& path : sPathSnapshot) {
                 for (size_t i = path.cursorIdx; i < path.waypoints.size(); ++i) {
                     const Vec3f& pos = path.waypoints[i];

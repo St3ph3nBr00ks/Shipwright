@@ -2358,9 +2358,9 @@ void SohMenu::AddMenuEnhancements() {
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip(
             "When on (in addition to Debug Draw), every navigator's most-recent "
-            "ComputePathTo result is rendered as red vertical posts at each path "
+            "ComputePathTo result is rendered as teal vertical posts at each path "
             "waypoint. Same height/style as the magenta breadcrumb overlay — the "
-            "red colour distinguishes 'planned route' from 'walked history'. "
+            "teal colour distinguishes 'planned route' from 'walked history'. "
             "Path is captured at ComputePathTo time and erased on path-failure "
             "or scene change."));
 
