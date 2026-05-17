@@ -992,7 +992,7 @@ const char* StateName(s32 s) {
 // Caller validates non-null + alive before use.
 // ---------------------------------------------------------------------
 Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
-                         float maxYDelta = 60.0f) {
+                         float maxYDelta) {  // default in forward-decl at line 212
     Actor* candidate = PickHostileTargetForInvader(self, play);
     if (candidate == nullptr || candidate->update == nullptr) return nullptr;
     const float dx = candidate->world.pos.x - self->world.pos.x;
