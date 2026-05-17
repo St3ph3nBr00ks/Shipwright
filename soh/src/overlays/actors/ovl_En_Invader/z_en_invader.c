@@ -85,7 +85,13 @@ static ColliderQuadInit sAtColliderInit = {
     },
     {
         ELEMTYPE_UNK2,
-        { 0x00000100, 0x00, 0x01 },
+        // dmgFlags=0x100 (standard sword flag); effect=0; damage=0x08.
+        // Damage units are 16-per-heart, so 0x08 = 1/2 heart per swing.
+        // Was 0x01 (1/16 heart, ~6%) — user reported "less than 1/4
+        // heart" 2026-05-17. Vanilla Stalfos's sword AT is 4 damage
+        // (1/4 heart); Invader is intentionally a touch deadlier to
+        // sell the "hunter" identity.
+        { 0x00000100, 0x00, 0x08 },
         { 0xFFCFFFFF, 0x00, 0x00 },
         TOUCH_ON | TOUCH_SFX_NORMAL,
         BUMP_NONE,

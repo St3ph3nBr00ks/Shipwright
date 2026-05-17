@@ -1561,6 +1561,22 @@ void TickDEAD(EnInvader* this_, PlayState* play) {
     // (free) — both death anims are modelAnimType-agnostic.
     if (this_->prevState != EN_INVADER_STATE_DEAD) {
         sDeathEntryInvFrame = curFrame;
+
+        // Bug fix 2026-05-17 (death anim hovering above ground): reset
+        // velocity.y and force-snap Y to floor on death entry. Without
+        // these, the Invader can die mid-swing while the actor's
+        // velocity.y still has the prior-tick's accumulated value (e.g.
+        // from a brief attack-anim hop or a swing that left the actor
+        // off-floor). The C update's Actor_MoveXZGravity + UpdateBgCheckInfo
+        // chain settles Y eventually but takes several frames — long
+        // enough for the user to see the body hovering during the 3s
+        // death-anim hold. Snap explicitly on entry so the body lies
+        // flat from frame 0 of the anim.
+        a->velocity.y = 0.0f;
+        Actor_UpdateBgCheckInfo(play, a, 26.0f /* wallCheckHeight */,
+                                10.0f /* wallCheckRadius */,
+                                50.0f /* ceilingCheckHeight */, 4 /* flags */);
+
         // Parity gap 4 — death-cause selection. If prevState was
         // SWIMMING, classify as drowning. Otherwise generic. Note we
         // do NOT need to broadcast this to peers — Invader peers see
@@ -1872,18 +1888,29 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         (this_->state == EN_INVADER_STATE_SWIMMING) ||
         (this_->state == EN_INVADER_STATE_LEDGE_HOIST) ||
         (this_->state == EN_INVADER_STATE_CRAWLING);
-    if (!combatState && !scriptedTraversal) {
-        if (TryFireG10Invader(this_, play)) {
-            this_->prevState = this_->state;
-            return;
-        }
-        // Parity gap 6 — G14 close-fail. Fires only when G10 didn't.
-        // Same eligibility (non-combat, non-scripted).
-        if (TryFireG14Invader(this_, play)) {
-            this_->prevState = this_->state;
-            return;
-        }
-    }
+    // Bug fix 2026-05-17 (Invader teleporting to player): G10 + G14 are
+    // direct-to-target teleports. User clarified that the Invader
+    // should NOT teleport directly to its target — only stuck-resolution
+    // along a calculated pathfinding path should be permitted (like NPC
+    // Follower's substrate-path-aware recovery). Invader doesn't yet
+    // have substrate pathfinding wired in, so for now we simply DISABLE
+    // both teleport calls.
+    //
+    // Consequence: if the Invader is genuinely stuck (geometry it can't
+    // traverse, target far behind a wall, etc.), it will sit there
+    // until the target re-enters the engage radius. The cooldown-aware
+    // sticky-target re-evaluation in InvaderDescriptor.cpp handles the
+    // long-term despawn case.
+    //
+    // Future re-enablement: once Invader consumes RoomNavData substrate
+    // and computes a path to the target, replace these calls with a
+    // path-aware "advance one subgoal" teleport (path-based, not
+    // direct-to-target). See GH #207 / general nav-system plan.
+    //
+    // The helper functions are kept (defined further below) for future
+    // reference but unused for now.
+    (void)combatState;
+    (void)scriptedTraversal;
 
     // Phase 4 — water-entry detection. Mirrors FollowerNPC's
     // water-entry trigger at FollowerNPC.cpp:3598-3625. yDistToWater
@@ -2073,14 +2100,21 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // body crosses the wall plane). The dispatcher's stopAnimPlaying
     // hold keeps the SkelAnime at end-frame (crouch pose) during
     // mid-tunnel translation.
-    const bool isLocomotion =
-        (this_->state == EN_INVADER_STATE_IDLE) ||
-        (this_->state == EN_INVADER_STATE_FOLLOW) ||
-        (this_->state == EN_INVADER_STATE_STUCK) ||
-        (this_->state == EN_INVADER_STATE_SWIMMING) ||
-        (this_->state == EN_INVADER_STATE_LEDGE_HOIST) ||
-        (this_->state == EN_INVADER_STATE_CRAWLING);
-    if (isLocomotion) {
+    // Bug fix 2026-05-17 (attack-anim freeze): the previous gate
+    // `if (isLocomotion)` skipped the per-tick EnsureAnimation block
+    // for combat states. After kSwordSwing ran once, currentAnim
+    // stayed at kSwordSwing forever (no state in the gate could reset
+    // it), so re-entering ATTACK from STANDBY found
+    // currentAnim==kSwordSwing already → EnsureAnimation no-oped and
+    // the anim never restarted. Visual: Invader frozen in
+    // post-swing pose with sword extended.
+    //
+    // Drop the gate so the per-tick EnsureAnimation runs for ALL
+    // states. Matches NPC Follower's pattern at FollowerNPC.cpp:4354
+    // (unconditional). Combat states' Tick handlers still fire their
+    // own EnsureAnimation on entry-edge — those become idempotent
+    // no-ops once the dispatcher's call also fires the same anim.
+    if (true) {
         // Animation type: fighter (1) right after combat exit (so the
         // Invader holds the sword+shield stance briefly), _free (0)
         // otherwise. Combat-cooldown overlap drives this — same window
