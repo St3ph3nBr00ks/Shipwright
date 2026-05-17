@@ -126,10 +126,19 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     this->upperLimbRot.y  = 0;
     this->upperLimbRot.z  = 0;
 
-    // Step 15d — 1 HP for v1 (per plan §2.5). Mirrored into
-    // actor.colChkInfo.health below for CollisionCheck_Damage.
-    this->health          = 1;
-    this->maxHealth       = 1;
+    // Item 5 (2026-05-17) — health scales with Link's heart capacity.
+    // Clones FollowerNpcMaxHealthFromLink (FollowerNPC.cpp:82): hearts =
+    // gSaveContext.healthCapacity / 16, clamped to [3, 20]. Previously
+    // hardcoded to 1 HP (v1 one-shot kill); now matches Link so the
+    // BLOCK state (HP ≤ 50% threshold) is reachable and the Invader
+    // feels appropriately tough at high heart counts.
+    {
+        int hearts = (int)gSaveContext.healthCapacity / 16;
+        if (hearts < 3)  hearts = 3;
+        if (hearts > 20) hearts = 20;
+        this->health    = (s8)hearts;
+        this->maxHealth = (s8)hearts;
+    }
 
     // Phase 4 — animation parity. LEDGE_HOIST state + fidget rotation
     // + jump tracking. All zero-init so the first transition into
@@ -185,11 +194,11 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     Collider_InitQuad(play, &this->atCollider);
     Collider_SetQuad(play, &this->atCollider, &this->actor, &sAtColliderInit);
 
-    // 1 HP for v1 — one-shot kill confirms end-to-end spawn/sync/
-    // defeat pipeline. Combat-AI variants will raise this per
-    // plan §4. colChkInfo.health is what CollisionCheck_Damage
-    // decrements; Actor_Kill fires when it hits 0. Mirrored into
-    // this->health for C++ combat code (e.g. BLOCK threshold).
+    // Health init (Item 5 — heart-scaling block above sets this->health
+    // and this->maxHealth based on gSaveContext.healthCapacity).
+    // colChkInfo.health is what CollisionCheck_Damage decrements;
+    // Actor_Kill fires when it hits 0. Mirrored into this->health for
+    // C++ combat code (e.g. BLOCK threshold-check at HP ≤ 50%).
     this->actor.colChkInfo.health = this->health;
     this->actor.colChkInfo.damage = 0;
 }

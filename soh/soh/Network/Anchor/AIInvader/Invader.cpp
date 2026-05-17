@@ -193,6 +193,21 @@ static BlockState sBlockState;
 constexpr int kInvaderDeathHoldMs = 3000;  // 3s — matches FollowerNPC's kFollowerNpcDeathHoldMs
 static uint64_t sDeathEntryInvFrame = 0;
 
+// Item 1 — environmental death thresholds (clones of
+// kFollowerNpcVoidThresholdY / kFollowerNpcDrowningMs from
+// FollowerNPC.cpp:98-99). Void: actor's Y dipped below the world's
+// out-of-bounds threshold. Drown: spent N ms continuously in SWIMMING.
+// Both transition the actor to DEAD with the corresponding
+// deathCause (0 = void/generic kDeath, 1 = drown kDeathDrown).
+constexpr float kInvaderVoidThresholdY = -3000.0f;
+constexpr int   kInvaderDrowningMs     = 30000;  // Player default; matches Follower
+
+// Item 6 — swim-start tracking for drown timer. Static is safe because
+// only one Invader's tick runs at a time. Reset on SWIMMING exit (when
+// the dispatcher transitions away from EN_INVADER_STATE_SWIMMING).
+static uint64_t sInvSwimStartFrame = 0;
+static bool     sInvWasSwimming    = false;
+
 // Parity gap 5 — crawlspace traversal state. Same shape as FollowerNPC's
 // sCrawlState (FollowerNPC.cpp:2958-2964). anchor pointer is borrowed
 // from the room's RoomNavData::crawlspaceAnchors vector; it's invalidated
@@ -1387,10 +1402,13 @@ bool TryEngageAutoClimbInv(EnInvader* this_, PlayState* play, Actor* target) {
 //     hoistContext from peers (Invader v1 doesn't sync hoist state —
 //     each side runs its own probe). The probe is fired only on the
 //     local host's tick so peer replicas don't double-hoist.
-//   - No drown timeout. Invader is hostile and can swim indefinitely.
-//     FollowerNPC has a 30s drown timer for friendly-NPC death; an
-//     Invader drown would just kill it prematurely. Documented in
-//     plan §1.2 deferred.
+//   - Drown timeout — Invader drowns after kInvaderDrowningMs (30s)
+//     continuously in SWIMMING (Item 6 added 2026-05-17, reversing the
+//     earlier "no drown" decision). The trigger lives in
+//     Anchor_TickInvaderActor's environmental-death pre-state block;
+//     when fired, prevState is forced to SWIMMING so TickDEAD's
+//     deathCause picker selects kDeathDrown. Static counter pattern
+//     matches FollowerNPC.cpp:3300-3310.
 // ---------------------------------------------------------------------
 
 void TickSWIMMING(EnInvader* this_, PlayState* play) {
@@ -2536,6 +2554,70 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         TickDEAD(this_, play);
         this_->prevState = this_->state;
         return;
+    }
+
+    // Item 1 + Item 6 — environmental death detection. Clones the
+    // void + drown branches from FollowerNPC.cpp:CheckEnvironmentalDeath
+    // (FollowerNPC.cpp:3272-3315). Two triggers:
+    //
+    //   (a) VOID — Y below kInvaderVoidThresholdY (e.g. fell into
+    //       out-of-bounds geometry). Instant DEAD transition with
+    //       generic kDeath anim.
+    //   (b) DROWN — has been in EN_INVADER_STATE_SWIMMING continuously
+    //       for kInvaderDrowningMs (30s). DEAD transition with
+    //       kDeathDrown anim (TickDEAD selects based on deathCause).
+    //
+    // Both fire BEFORE state dispatch so a single death trigger doesn't
+    // get masked by combat tier preempt or other state-machine logic.
+    {
+        Actor* a = &this_->actor;
+        const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                      std::memory_order_relaxed);
+
+        // (a) Void check. Transition to DEAD; next tick will run
+        // TickDEAD via the short-circuit at the top, which fires
+        // entry-edge because prevState != DEAD. We DON'T overwrite
+        // prevState here — TickDEAD's deathCause picker reads
+        // `prevState == SWIMMING ? drown : generic`, so leaving
+        // prevState as whatever it actually was (FOLLOW/IDLE/etc.)
+        // gives the correct generic kDeath classification.
+        if (a->world.pos.y < kInvaderVoidThresholdY) {
+            SPDLOG_INFO("[Invader] death trigger: void (y={:.0f} < {:.0f})",
+                        a->world.pos.y, kInvaderVoidThresholdY);
+            this_->state         = EN_INVADER_STATE_DEAD;
+            this_->stopAnimPlaying = 0;
+            return;
+        }
+
+        // (b) Drown tracker. Static counter pattern matches
+        // FollowerNPC.cpp:3300-3310 (sSwimStartFrame / sWasSwimming).
+        if (this_->state == EN_INVADER_STATE_SWIMMING) {
+            if (!sInvWasSwimming) {
+                sInvSwimStartFrame = curFrame;
+                sInvWasSwimming    = true;
+            } else {
+                const uint64_t drownTicks =
+                    (uint64_t)Anchor::Instance->MsToGameTicks(kInvaderDrowningMs);
+                if (curFrame >= sInvSwimStartFrame + drownTicks) {
+                    SPDLOG_INFO("[Invader] death trigger: drowning "
+                                "(swim duration {}ms exceeded)",
+                                kInvaderDrowningMs);
+                    this_->state          = EN_INVADER_STATE_DEAD;
+                    // CRITICAL: force prevState = SWIMMING so TickDEAD's
+                    // entry-edge picker (`prevState==SWIMMING ?
+                    // kDeathDrown : kDeath`) classifies this as a drown.
+                    // Without this, prevState would reflect whatever was
+                    // before SWIMMING (FOLLOW typically) and the wrong
+                    // anim would play.
+                    this_->prevState      = EN_INVADER_STATE_SWIMMING;
+                    this_->stopAnimPlaying = 0;
+                    sInvWasSwimming        = false;  // reset for next swim
+                    return;
+                }
+            }
+        } else {
+            sInvWasSwimming = false;
+        }
     }
 
     // G18 — freeze during cutscenes (same shape as FollowerNPC's G18
