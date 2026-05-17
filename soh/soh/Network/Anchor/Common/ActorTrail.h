@@ -258,6 +258,21 @@ public:
     void SnapshotActiveWaypoints(int16_t sceneFilter,
                                   std::vector<WaypointSnapshot>& out) const;
 
+    // Diagnostic: snapshot every computed path (one per TrailKey) whose
+    // sceneNum matches `sceneFilter` into `out`. Populated by
+    // ComputePathTo on every successful path compute — the most recent
+    // path per key replaces any prior. Used by the RoomNavData
+    // DebugDrawPaths overlay so the overlay doesn't need access to
+    // per-actor consumer state. Output is cleared before append.
+    struct ComputedPathSnapshot {
+        TrailKey            key;
+        std::vector<Vec3f>  waypoints;   // waypoints[cursorIdx..end] = remaining path
+        size_t              cursorIdx;
+        int16_t             sceneNum;
+    };
+    void SnapshotComputedPaths(int16_t sceneFilter,
+                                std::vector<ComputedPathSnapshot>& out) const;
+
     // Lifecycle.
     void ClearForKey(TrailKey key);
     void ClearForScene(int16_t sceneNum);
