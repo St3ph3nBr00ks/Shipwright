@@ -126,6 +126,12 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     this->upperLimbRot.y  = 0;
     this->upperLimbRot.z  = 0;
 
+    // Item 3 — idle breathing blend. Phase advances each tick via
+    // TickIdleBlend; blendTable used by LinkAnimation_BlendToJoint.
+    this->idleBlendPhase  = 0.0f;
+    // blendTable members default to 0 via struct-zero on actor alloc;
+    // no explicit clear needed.
+
     // Item 5 (2026-05-17) — health scales with Link's heart capacity.
     // Clones FollowerNpcMaxHealthFromLink (FollowerNPC.cpp:82): hearts =
     // gSaveContext.healthCapacity / 16, clamped to [3, 20]. Previously

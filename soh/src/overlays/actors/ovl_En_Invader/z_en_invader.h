@@ -139,6 +139,16 @@ typedef struct EnInvader {
     // kWait. Reserved for future fidget-anim rotation (cloned from
     // EnFollower; v1 doesn't rotate fidgets but kept for API parity).
     u32 idleTicks;
+    // Item 3 (2026-05-17) — idle breathing blend phase. Free-running
+    // 0..1 advanced 1/40 per tick (~2s full cycle). Used by
+    // TickIdleBlend to oscillate waitL ↔ waitR via
+    // LinkAnimation_BlendToJoint. Adds visible chest-rise breathing
+    // motion to the idle pose. Clone of EnFollower::idleBlendPhase.
+    f32 idleBlendPhase;
+    // Item 3 — blend table for LinkAnimation_BlendToJoint. Same size
+    // as jointTable (PLAYER_LIMB_BUF_COUNT). Clone of
+    // EnFollower::blendTable.
+    Vec3s blendTable[PLAYER_LIMB_BUF_COUNT];
 
     // Independent head-look-at-target. Same pattern as EnFollower:
     // computed each tick toward target's relative direction, written

@@ -595,6 +595,27 @@ inline bool InvStepPhaseCrossed(float prevPhase, float curPhase, float footDown)
     return (prevPhase < footDown && footDown <= curPhase);
 }
 
+// Item 3 — idle waitL ↔ waitR breathing blend. Cloned from
+// FollowerNPC.cpp:TickIdleBlend (1388). Free-running sine on
+// idleBlendPhase produces a 0..1 blend weight; LinkAnimation_BlendToJoint
+// interpolates between gPlayerAnim_link_normal_waitL_free and waitR_free
+// at the same curFrame for both — visually a continuous chest-rise.
+// Phase advances 1/40 per tick → ~2s for a full L↔R↔L cycle.
+inline void InvTickIdleBlend(EnInvader* this_, PlayState* play) {
+    this_->idleBlendPhase += (1.0f / 40.0f);
+    if (this_->idleBlendPhase > 1.0f) this_->idleBlendPhase -= 1.0f;
+    const float weight = 0.5f + 0.5f * Math_SinS(
+                                     (s16)(this_->idleBlendPhase * 0x10000));
+
+    LinkAnimation_BlendToJoint(
+        play, &this_->skelAnime,
+        (LinkAnimationHeader*)&gPlayerAnim_link_normal_waitR_free,
+        this_->skelAnime.curFrame,
+        (LinkAnimationHeader*)&gPlayerAnim_link_normal_waitL_free,
+        this_->skelAnime.curFrame,
+        weight, this_->blendTable);
+}
+
 // Item 2 — tick step-phase + fire footstep SFX on foot-down crosses.
 // Called from the dispatcher every tick while in a state that moves
 // the body (FOLLOW / STUCK / ENGAGE). Fires NA_SE_PL_WALK_GROUND at
@@ -3080,6 +3101,18 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
             // next FOLLOW entry starts from a clean phase. Matches
             // FollowerNPC's stationary-decay pattern.
             this_->stepPhase = 0.0f;
+        }
+
+        // Item 3 (2026-05-17) — idle waitL ↔ waitR breathing blend.
+        // Runs only when the actor is in IDLE state AND the active anim
+        // is kWait (not a fidget one-shot, not a stop-anim hold).
+        // Without these gates, blending would fight other anims (e.g.
+        // overwrite kFidgetLookA's frames with a wait blend). Clone of
+        // FollowerNPC.cpp idle-blend dispatcher gate.
+        if (this_->state == EN_INVADER_STATE_IDLE &&
+            (InvaderAnim)this_->currentAnim == InvaderAnim::kWait &&
+            !this_->stopAnimPlaying) {
+            InvTickIdleBlend(this_, play);
         }
     }
 
