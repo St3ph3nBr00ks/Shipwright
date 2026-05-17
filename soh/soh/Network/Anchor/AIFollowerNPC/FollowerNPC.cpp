@@ -3021,9 +3021,9 @@ void TickCRAWLING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // is authored so the body's pivot starts at standing height while the
     // model renders crouched — without the drop, the NPC visually floats
     // above the crawlspace floor for the length of the exit anim.
-    // (Tuned 20u → 5u per field test — 20u was too aggressive.)
+    // (Tuned 20u → 25u per field test — slightly more drop needed.)
     if (sCrawlState.exitAnimPlaying) {
-        constexpr float kCrawlExitYDrop = 5.0f;
+        constexpr float kCrawlExitYDrop = 25.0f;
         a->world.pos.y = sCrawlState.entryPos.y - kCrawlExitYDrop;
         if (this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
             SPDLOG_INFO("[FollowerNPC] CRAWLING→FOLLOW (exit anim complete at "
