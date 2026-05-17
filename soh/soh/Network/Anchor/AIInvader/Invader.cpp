@@ -721,8 +721,15 @@ void TickIDLE(EnInvader* this_, PlayState* play) {
 //     climbing IS the Invader's target; the Invader pursues to the
 //     climb-anchor base via the substrate path's regular climb-cell
 //     emission and then engages CLIMBING via the climb-cell transition.
-//   - `preferLeaderTrail` is false (we're not chasing a friendly
-//     leader's exact route; we want the BFS to find a fresh path).
+//   - `preferLeaderTrail` is TRUE 2026-05-17. Initial impl had it
+//     false (reasoning: "Invader isn't following a friendly leader;
+//     give it a fresh BFS path"), but user observed the BFS produced
+//     suboptimal routes through difficult geometry. The player's
+//     breadcrumb trail is a proven-passable path; preferring it
+//     means the Invader walks where the player walked, which is by
+//     definition reachable. The trail also captures climb-anchor /
+//     drop-anchor sequencing decisions the player made, which BFS
+//     can re-derive but the trail is cheaper.
 //   - Trail key is computed from the target. For player targets, use
 //     TrailKeyForPlayer(client.id) so the BFS can use the target's
 //     own breadcrumb history.
@@ -798,7 +805,7 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
         AnchorNav::ActorTrail::GetInstance().ComputePathTo(
             trailKey, a, targetPos, play, sLocalInvNav.path,
             /*skipLayer1LOS=*/false,
-            /*preferLeaderTrail=*/false);
+            /*preferLeaderTrail=*/true);  // see doc-comment above
         sLocalInvNav.lastPathRefreshFrame = curFrame;
         sLocalInvNav.lastPathTargetPos    = targetPos;
     }
