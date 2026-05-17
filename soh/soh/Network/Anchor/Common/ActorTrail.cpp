@@ -252,7 +252,10 @@ struct ComputedPathEntry {
     size_t              cursorIdx = 0;
     int16_t             sceneNum  = -1;
 };
-std::unordered_map<ActorTrail::TrailKey, ComputedPathEntry> sDebugPaths;
+// TrailKey is a namespace-level typedef at AnchorNav::TrailKey (ActorTrail.h:58),
+// NOT a nested type. Use the bare name — we're inside `namespace AnchorNav`
+// so it resolves correctly. Bug fix 2026-05-17: was `ActorTrail::TrailKey`.
+std::unordered_map<TrailKey, ComputedPathEntry> sDebugPaths;
 }
 
 void ActorTrail::ClearForKey(TrailKey key) {
