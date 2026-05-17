@@ -340,6 +340,14 @@ struct LocalInvNavState {
     // transition, but Phase B exits CLIMBING on scene change via the
     // anchor-null check in the handler.
     const ::AnchorNavRoom::ClimbAnchor* activeClimbAnchor = nullptr;
+
+    // Was the target climbing on the previous CLIMBING tick? Used by
+    // the "target hoisted over edge" branch — if target was climbing
+    // last tick (fast-path was firing) but isn't this tick, target has
+    // mantled over the rim and the Invader should mantle out via
+    // LEDGE_HOIST to reach the same ledge. Same shape as NPC Follower's
+    // `leaderWasClimbingPrevTick` (FollowerNPC.cpp:1700).
+    bool targetWasClimbingPrevTick = false;
 };
 static LocalInvNavState sLocalInvNav;
 
@@ -1082,26 +1090,120 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
         this_->state = EN_INVADER_STATE_FOLLOW;
         sLocalInvNav.activeClimbAnchor = nullptr;
         sLocalInvNav.path.Reset();
+        sLocalInvNav.targetWasClimbingPrevTick = false;
         return;
+    }
+
+    // ── Co-climb fast-path (bug fix 2026-05-17: ladder-bottom oscillation) ──
+    // Cloned from FollowerNPC.cpp:1650-1745. Solves the documented
+    // "10u Y oscillation during co-climb" bug: cell-grid path filter
+    // empties when target Y ≈ NPC Y, NPC exits CLIMBING to FOLLOW,
+    // gravity pulls NPC back down (no floor mid-wall), force-engage
+    // refires at a lower Y, NPC climbs again. Same root cause as
+    // NPC Follower's identical bug — same fix shape.
+    //
+    // Gate: target is the LOCAL Player (ACTOR_PLAYER) AND
+    // IsLocalPlayerClimbing() AND within 60u 3D. For DummyPlayer
+    // targets (remote peers), fast-path doesn't fire — would need a
+    // sync field for the remote's climb state. Single-player covers
+    // the common case.
+    //
+    // Mechanics: snap XZ to target.xz, Y lerps toward target.y - 30
+    // (Invader stalks 30u below the player — adds "looming below"
+    // tension; mirrors NPC Follower's `kCoClimbYOffset=30`).
+    const bool targetIsLocalPlayer = (target->id == ACTOR_PLAYER);
+    const bool targetIsClimbing =
+        targetIsLocalPlayer &&
+        Anchor::Instance != nullptr &&
+        Anchor::Instance->IsLocalPlayerClimbing();
+    {
+        const float pdx0 = target->world.pos.x - a->world.pos.x;
+        const float pdy0 = target->world.pos.y - a->world.pos.y;
+        const float pdz0 = target->world.pos.z - a->world.pos.z;
+        const float dist3DSq = pdx0*pdx0 + pdy0*pdy0 + pdz0*pdz0;
+        constexpr float kInvCoClimbProxLimit = 60.0f;
+        const bool nearTarget = dist3DSq <=
+            (kInvCoClimbProxLimit * kInvCoClimbProxLimit);
+
+        if (targetIsClimbing && nearTarget) {
+            constexpr float kInvCoClimbYOffset = 30.0f;
+            a->world.pos.x = target->world.pos.x;
+            a->world.pos.z = target->world.pos.z;
+            const float targetY = target->world.pos.y - kInvCoClimbYOffset;
+            const float dy = targetY - a->world.pos.y;
+            if (std::fabs(dy) < kInvClimbSpeedY) {
+                a->world.pos.y = targetY;
+            } else {
+                a->world.pos.y += (dy > 0.0f ? kInvClimbSpeedY : -kInvClimbSpeedY);
+            }
+            // Mirror target's facing — handles wall curvature.
+            Player* targetAsPlayer = (Player*)target;
+            a->shape.rot.y = targetAsPlayer->actor.shape.rot.y;
+            a->world.rot.y = a->shape.rot.y;
+            a->speedXZ     = 0.0f;
+            sLocalInvNav.targetWasClimbingPrevTick = true;
+            return;  // skip path-based subgoal navigation
+        }
+
+        // Target-just-hoisted-over-edge: target was climbing last tick
+        // (fast-path was firing), now isn't. NPC is still in CLIMBING.
+        // Trigger LEDGE_HOIST to the active anchor's topPos so NPC
+        // mantles up. Same shape as FollowerNPC.cpp:1717-1742.
+        if (!targetIsClimbing &&
+            sLocalInvNav.targetWasClimbingPrevTick &&
+            sLocalInvNav.activeClimbAnchor != nullptr) {
+            const Vec3f topPos = sLocalInvNav.activeClimbAnchor->topPos;
+            SPDLOG_INFO("[Invader] CLIMBING→LEDGE_HOIST(ground) "
+                        "(target hoisted over rim) anchor.topPos="
+                        "({:.0f},{:.0f},{:.0f}) NPC at ({:.0f},{:.0f},{:.0f})",
+                        topPos.x, topPos.y, topPos.z,
+                        a->world.pos.x, a->world.pos.y, a->world.pos.z);
+            this_->hoistContext   = (s8)INV_HOIST_CONTEXT_GROUND;
+            this_->hoistTargetPos = topPos;
+            this_->hoistEntryYaw  = Math_Atan2S(topPos.z - a->world.pos.z,
+                                                 topPos.x - a->world.pos.x);
+            a->world.pos.x = topPos.x;
+            a->world.pos.z = topPos.z;
+            sLocalInvHoistStartPos = a->world.pos;
+            sLocalInvNav.path.Reset();
+            sLocalInvNav.activeClimbAnchor = nullptr;
+            sLocalInvNav.targetWasClimbingPrevTick = false;
+            this_->state = EN_INVADER_STATE_LEDGE_HOIST;
+            this_->stopAnimPlaying = 0;
+            a->speedXZ = 0.0f;
+            return;
+        }
+
+        sLocalInvNav.targetWasClimbingPrevTick = targetIsClimbing;
     }
 
     // ── Resolve subgoal ────────────────────────────────────────────
     if (sLocalInvNav.path.Empty()) {
-        // Path exhausted. If we have an active anchor, try to refresh
-        // toward the target's lateral column — keeps the Invader on
-        // the wall when target is still above us. Otherwise mantle out.
-        if (sLocalInvNav.activeClimbAnchor != nullptr) {
+        // Path exhausted. Refresh aggressively — relaxed from the
+        // initial `target.y > npc.y + 30` gate (bug fix 2026-05-17):
+        // the strict gate prevented refresh when target was only a few
+        // units above NPC (common during co-climb at near-equal Y),
+        // causing exit-to-FOLLOW → gravity-fall → re-engage oscillation.
+        // Now: refresh whenever target is climbing OR target is above NPC
+        // at all (>= 5u). Mirrors FollowerNPC.cpp:1757's check shape.
+        const bool shouldRefresh =
+            sLocalInvNav.activeClimbAnchor != nullptr &&
+            (targetIsClimbing ||
+             target->world.pos.y > a->world.pos.y + 5.0f);
+        if (shouldRefresh) {
             const ::AnchorNavRoom::RoomNavData* navData =
                 ::AnchorNavRoom::GetForRoom(
                     gPlayState->sceneNum,
                     (int8_t)gPlayState->roomCtx.curRoom.num);
             if (navData != nullptr &&
-                target->world.pos.y > a->world.pos.y + 30.0f &&
                 PopulateAnchorClimbPathInv(navData,
                                             *sLocalInvNav.activeClimbAnchor,
                                             a->world.pos, target->world.pos,
                                             sLocalInvNav.path)) {
-                // Path refreshed; fall through to subgoal resolution.
+                SPDLOG_INFO("[Invader] CLIMBING path refreshed "
+                            "(NPC.y={:.0f} target.y={:.0f}) waypoints={}",
+                            a->world.pos.y, target->world.pos.y,
+                            (int)sLocalInvNav.path.waypoints.size());
             }
         }
         if (sLocalInvNav.path.Empty()) {
@@ -1119,8 +1221,12 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
                                 a->world.pos.x, a->world.pos.y, a->world.pos.z);
                 }
             }
+            SPDLOG_INFO("[Invader] CLIMBING→FOLLOW (path empty, no refresh; "
+                        "NPC.y={:.0f} target.y={:.0f} targetClimbing={})",
+                        a->world.pos.y, target->world.pos.y, targetIsClimbing);
             this_->state = EN_INVADER_STATE_FOLLOW;
             sLocalInvNav.activeClimbAnchor = nullptr;
+            sLocalInvNav.targetWasClimbingPrevTick = false;
             return;
         }
     }
