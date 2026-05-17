@@ -28,6 +28,7 @@ extern "C" {
 // Defined in src/code/z_play.c. C linkage; GetTraitsForActor below
 // references it via :: to escape the surrounding AnchorNav namespace.
 extern s16 gEnFollowerId;
+extern s16 gEnInvaderId;
 }
 
 // SoH's "climb any wall" cheat. Lives under gCheats. (NOT
@@ -105,6 +106,36 @@ static NavTraits MakeFreezardTraits() {
     NavTraits t = {};
     t.useStickyTargeting = true;
     t.targetStickyFrames = 240;
+    return t;
+}
+
+// AI Invader (Plans/ai_invader_plan.md). Link-skel hostile NPC.
+// Inherits the same nav capabilities as the player-rigged Follower:
+// climbs ladders/vines/designated-walls, swims, broad-jumps, and uses
+// drop/jump anchors. The Invader is intentionally as athletic as Link
+// so it can keep pace with the player it's pursuing.
+//
+// Distinct identity (vs MakeFollowerTraits) — even though the rows are
+// numerically identical at this writing, future tuning may diverge:
+// e.g. Invader could get a wider jump cap as a difficulty knob, or
+// could be promoted to NODE_CLIMB_GENERIC_WALL unconditionally
+// (vanilla Link's ClimbAnywhere cheat applied to the Invader's nav
+// regardless of the local player's cheat state).
+static NavTraits MakeInvaderTraits() {
+    NavTraits t = {};
+    t.eligibleForLeashRespawn = false;
+    t.useStickyTargeting      = true;
+    t.targetStickyFrames      = 180;
+    t.eligibleForSwimming     = true;
+    t.leavesTrail             = true;
+    t.maxJumpDistance         = 140;
+    t.climbSurfaceMask = ::AnchorNavRoom::NODE_CLIMB_LADDER
+                       | ::AnchorNavRoom::NODE_CLIMB_VINE
+                       | ::AnchorNavRoom::NODE_CLIMB_DESIGNATED_WALL;
+    t.useDropAnchors          = true;
+    t.maxDropDistance         = 200;
+    t.useJumpAnchors          = true;
+    t.maxJumpUpDelta          = 60;
     return t;
 }
 
@@ -264,6 +295,17 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
         return sFollowerNpcTraits;
     }
 
+    // AI Invader (Plans/ai_invader_plan.md). Same dynamic-id-resolution
+    // pattern as the NPC Follower above: gEnInvaderId is allocated at
+    // runtime so it can't live in the static overrides map. Inherits
+    // Link-skel nav capabilities (climb / swim / drop / jump anchors)
+    // so it can pursue the player into all the spaces the player can
+    // reach.
+    if (::gEnInvaderId != 0 && actorId == ::gEnInvaderId) {
+        static const NavTraits sInvaderTraits = MakeInvaderTraits();
+        return sInvaderTraits;
+    }
+
     const auto& overrides = GetOverrides();
     auto it = overrides.find(actorId);
     if (it != overrides.end()) {
@@ -300,6 +342,17 @@ uint16_t ResolveDynamicClimbMask(s16 actorId, uint16_t baseMask) {
     // Other consumers (none yet wired; future Skullwalltula traits will
     // include GENERIC_WALL in their static base) get baseMask unchanged.
     if (actorId == ACTOR_EN_OE2 || actorId == ACTOR_PLAYER) {
+        if (CVarGetInteger(CVAR_CLIMB_EVERYTHING, 0) != 0) {
+            return (uint16_t)(baseMask | ::AnchorNavRoom::NODE_CLIMB_GENERIC_WALL);
+        }
+    }
+    // AI Invader: also inherits the local player's ClimbAnywhere cheat
+    // so the Invader can't be "out-cheated" by a player who enabled
+    // the climb-anywhere cheat for themselves but the Invader is still
+    // restricted to vanilla climb surfaces. Symmetry keeps the pursuit
+    // feeling fair (or unfair — depending on how the player feels about
+    // an enemy that climbs as well as they do).
+    if (::gEnInvaderId != 0 && actorId == ::gEnInvaderId) {
         if (CVarGetInteger(CVAR_CLIMB_EVERYTHING, 0) != 0) {
             return (uint16_t)(baseMask | ::AnchorNavRoom::NODE_CLIMB_GENERIC_WALL);
         }

@@ -41,6 +41,8 @@
 
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/PlayerLookup.h"  // PickHostileTargetForInvader (Agent 4)
+#include "soh/Network/Anchor/Common/ActorTrail.h"    // Nav-parity Phase A: substrate path consumption
+#include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
 #include "soh/cvar_prefixes.h"
 
@@ -277,9 +279,39 @@ constexpr float kInvStuckNudgeDist   = 30.0f;
 constexpr float kInvLeashDistance  = 2000.0f;
 constexpr int   kInvLeashTimeoutMs = 5000;
 
-// Local nav baseline. Same shape as FollowerNPC's sLocalNav (subset —
-// no jump / climb / hoist machinery for v1 Invader). File-scope is
-// safe because actor states are non-reentrant per actor.
+// ── Nav-parity Phase A — substrate path tuning ────────────────────
+// Same numerics as FollowerNPC's kPathRefresh*/kAdvanceSubgoalDist.
+// Re-querying every 500ms hits the trail-decay sweet spot — long
+// enough to amortise the BFS cost, short enough that a target who
+// just stepped around a corner doesn't run dry on the current path.
+constexpr int   kInvPathRefreshMs       = 500;
+constexpr float kInvPathRetargetDist    = 60.0f;
+constexpr float kInvAdvanceSubgoalDist  = 30.0f;
+// Proximity inside which TickFOLLOW skips substrate-path computation
+// and walks straight at the target. Matches FollowerNPC's
+// kFollowProxLimit — avoids spurious re-paths around small obstacles
+// when the target is right there.
+constexpr float kInvFollowProxLimit     = 30.0f;
+
+// ── Nav-parity Phase B — CLIMBING tuning ───────────────────────────
+// Same numerics as FollowerNPC's kClimbSpeedY / kClimbBodyOffset.
+// Vanilla Link climbs at ~4-5u/frame; we use 4 to keep the Invader
+// from out-pacing the player vertically.
+constexpr float kInvClimbSpeedY     = 4.0f;
+constexpr float kInvClimbBodyOffset = 12.0f;
+// Engagement gate when leader-climb force-engage fires. Same shape as
+// FollowerNPC's kClimbForceEngageBaseDistSq (200u). Squared form to
+// avoid the sqrt at gate-check time.
+constexpr float kInvClimbForceEngageBaseDistSq = 200.0f * 200.0f;
+
+// Local nav baseline. Same shape as FollowerNPC's sLocalNav (subset).
+// Nav-parity Phase A added substrate path consumption + the cached
+// climb anchor used by Phase B (CLIMBING state).
+//
+// File-scope is safe because actor states are non-reentrant per actor.
+// If a future revision spawns multiple Invaders sharing one dispatcher,
+// this state moves onto EnInvader (same evolution path as
+// FollowerNPC's sLocalNav).
 struct LocalInvNavState {
     Vec3f    stuckCheckPos        = { 0.0f, 0.0f, 0.0f };
     uint64_t lastStuckCheckFrame  = 0;
@@ -295,6 +327,19 @@ struct LocalInvNavState {
     // is observed.
     uint32_t closeFailFrames      = 0;
     float    closeFailBaseline    = 0.0f;
+
+    // ── Nav-parity Phase A — substrate path consumption ─────────────
+    AnchorNav::ActorTrail::NavPath path;
+    uint64_t lastPathRefreshFrame = 0;
+    Vec3f    lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
+
+    // ── Nav-parity Phase B — CLIMBING anchor cache ──────────────────
+    // Active anchor during a CLIMBING run so the handler doesn't
+    // re-resolve every frame. Cleared on CLIMBING exit. Pointer is
+    // borrowed from the room's RoomNavData; invalidated on scene
+    // transition, but Phase B exits CLIMBING on scene change via the
+    // anchor-null check in the handler.
+    const ::AnchorNavRoom::ClimbAnchor* activeClimbAnchor = nullptr;
 };
 static LocalInvNavState sLocalInvNav;
 
@@ -618,6 +663,30 @@ void TickIDLE(EnInvader* this_, PlayState* play) {
     sLocalInvNav.lastTarget = nullptr;
 }
 
+// Nav-parity Phase A — substrate path consumption. TickFOLLOW now
+// computes a path from invader→target using
+// AnchorNav::ActorTrail::ComputePathTo, advances the cursor on
+// 30u XZ proximity, and yaws toward the current subgoal instead of
+// directly toward the target. If the path is empty or invalid, falls
+// back to direct yaw (the prior v1 behaviour).
+//
+// Phase B — CLIMBING transition: if the current path's subgoal flag
+// bitmap carries NODE_CLIMB_ANY, transition to EN_INVADER_STATE_CLIMBING
+// and let the climb handler take over the snap-to-wall + vertical drive.
+//
+// Reference: FollowerNPC.cpp:TickFOLLOW (FollowerNPC.cpp:935). Key
+// divergences from the Follower:
+//   - Target is a hostile actor (PickHostileTarget) instead of a
+//     friendly leader (GET_PLAYER).
+//   - No `effectiveTarget` leader-climb redirect — the player who is
+//     climbing IS the Invader's target; the Invader pursues to the
+//     climb-anchor base via the substrate path's regular climb-cell
+//     emission and then engages CLIMBING via the climb-cell transition.
+//   - `preferLeaderTrail` is false (we're not chasing a friendly
+//     leader's exact route; we want the BFS to find a fresh path).
+//   - Trail key is computed from the target. For player targets, use
+//     TrailKeyForPlayer(client.id) so the BFS can use the target's
+//     own breadcrumb history.
 void TickFOLLOW(EnInvader* this_, PlayState* play) {
     Actor* a = &this_->actor;
 
@@ -633,23 +702,120 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
         this_->state = EN_INVADER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalInvNav.lastTarget = nullptr;
+        sLocalInvNav.path.Reset();
         return;
     }
     sLocalInvNav.lastTarget = target;
 
-    // Drive yaw + speed toward the target.
-    const s16 yaw = YawTowardTarget(a->world.pos, target->world.pos);
+    const Vec3f& targetPos = target->world.pos;
+
+    // ── Proximity check: skip pathfinding when target is close ──────
+    // Inside kInvFollowProxLimit (30u 3D), walk straight — substrate
+    // pathfinding is overhead when the target is in melee distance.
+    // Matches FollowerNPC.cpp:968-977.
+    const float pdx0 = targetPos.x - a->world.pos.x;
+    const float pdy0 = targetPos.y - a->world.pos.y;
+    const float pdz0 = targetPos.z - a->world.pos.z;
+    const float dist3DSq = pdx0*pdx0 + pdy0*pdy0 + pdz0*pdz0;
+    const bool nearTarget = dist3DSq <= (kInvFollowProxLimit * kInvFollowProxLimit);
+    if (nearTarget) {
+        sLocalInvNav.path.Reset();
+    }
+
+    // ── Path refresh ────────────────────────────────────────────────
+    const uint64_t curFrame   = Anchor::Instance->gameFrameCounter.load(
+                                    std::memory_order_relaxed);
+    const int      refreshTicks = Anchor::Instance->MsToGameTicks(kInvPathRefreshMs);
+    const bool needRefresh =
+        !nearTarget && (
+            sLocalInvNav.path.Empty() ||
+            (refreshTicks > 0 &&
+             curFrame >= sLocalInvNav.lastPathRefreshFrame + (uint64_t)refreshTicks) ||
+            AnchorDist::DistXZSq(targetPos, sLocalInvNav.lastPathTargetPos) >
+                kInvPathRetargetDist * kInvPathRetargetDist);
+    if (needRefresh) {
+        // Trail key — pick the right entity to read breadcrumbs from.
+        //   ACTOR_PLAYER (local Link)         → local client's TrailKey.
+        //   ACTOR_EN_OE2 (remote DummyPlayer) → owning client's TrailKey
+        //                                       (Anchor exposes the cid
+        //                                       via GetDummyPlayerClientId).
+        //   anything else                     → key=0 (no trail). BFS
+        //                                       still works without
+        //                                       breadcrumbs — Layer 3
+        //                                       (RoomNavData) is the
+        //                                       primary reliable layer
+        //                                       anyway.
+        AnchorNav::TrailKey trailKey = 0;
+        if (target->id == ACTOR_PLAYER) {
+            trailKey = AnchorNav::TrailKeyForPlayer(
+                (uint8_t)Anchor::Instance->ownClientId);
+        } else if (target->id == ACTOR_EN_OE2) {
+            const uint32_t cid = Anchor::Instance->GetDummyPlayerClientId(target);
+            if (cid != 0) {
+                trailKey = AnchorNav::TrailKeyForPlayer((uint8_t)cid);
+            }
+        }
+        sLocalInvNav.path.Reset();
+        AnchorNav::ActorTrail::GetInstance().ComputePathTo(
+            trailKey, a, targetPos, play, sLocalInvNav.path,
+            /*skipLayer1LOS=*/false,
+            /*preferLeaderTrail=*/false);
+        sLocalInvNav.lastPathRefreshFrame = curFrame;
+        sLocalInvNav.lastPathTargetPos    = targetPos;
+    }
+
+    // ── Phase B: climb-cell transition ───────────────────────────────
+    // If the current path subgoal is a climb cell, transition to
+    // CLIMBING. The CLIMBING handler takes over snapping XZ to the
+    // wall + driving Y. Same shape as FollowerNPC.cpp:1007-1020.
+    if (!sLocalInvNav.path.Empty()) {
+        const uint32_t flags = sLocalInvNav.path.CurrentSubgoalFlags();
+        if (flags & ::AnchorNavRoom::NODE_CLIMB_ANY) {
+            this_->state = EN_INVADER_STATE_CLIMBING;
+            sLocalInvNav.activeClimbAnchor = nullptr;  // resolved fresh on entry
+            SPDLOG_INFO("[Invader] FOLLOW→CLIMBING (path entered climb cell at "
+                        "({:.0f},{:.0f},{:.0f}); flags=0x{:X})",
+                        sLocalInvNav.path.CurrentSubgoal().x,
+                        sLocalInvNav.path.CurrentSubgoal().y,
+                        sLocalInvNav.path.CurrentSubgoal().z,
+                        flags);
+            return;
+        }
+    }
+
+    // ── Pick subgoal ────────────────────────────────────────────────
+    // Substrate path's CurrentSubgoal if available; else direct to target.
+    Vec3f subgoal = sLocalInvNav.path.Empty() ? targetPos
+                                              : sLocalInvNav.path.CurrentSubgoal();
+
+    // Cursor advancement: if we're close to the current subgoal, step.
+    if (!sLocalInvNav.path.Empty() &&
+        AnchorDist::DistXZSq(a->world.pos, subgoal) <
+            kInvAdvanceSubgoalDist * kInvAdvanceSubgoalDist) {
+        sLocalInvNav.path.Advance();
+        // Refresh subgoal selection for this same tick — avoid wasting
+        // a frame standing in place after an advance.
+        subgoal = sLocalInvNav.path.Empty() ? targetPos
+                                            : sLocalInvNav.path.CurrentSubgoal();
+    }
+
+    // Drive yaw + speed toward the current subgoal.
+    const s16 yaw = YawTowardTarget(a->world.pos, subgoal);
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
 
-    const float distSq = Dist2DSq(a->world.pos, target->world.pos);
+    // Speed selection — distance is measured to the target (not the
+    // subgoal) so pursuit pace stays correlated with how far the chase
+    // ultimately is. Mirrors the Invader's prior direct-yaw speed
+    // band; substrate routing doesn't change the runtime-energy band.
+    const float distSq = Dist2DSq(a->world.pos, targetPos);
     const float dist   = std::sqrt(distSq);
     a->speedXZ = (dist > kInvRunDistance) ? kInvRunSpeed : kInvWalkSpeed;
 
     // Stuck check — STUCK fires when no real progress happens over
-    // the check window.
-    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
-                                  std::memory_order_relaxed);
+    // the check window. This is the time-based fallback; the path
+    // refresh above already short-circuits "stuck because the path
+    // was wrong" cases at most every kInvPathRefreshMs.
     const int stuckCheckTicks = Anchor::Instance->MsToGameTicks(kInvStuckCheckMs);
     if (stuckCheckTicks > 0 &&
         curFrame >= sLocalInvNav.lastStuckCheckFrame + (uint64_t)stuckCheckTicks) {
@@ -657,6 +823,8 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
             Dist2DSq(a->world.pos, sLocalInvNav.stuckCheckPos));
         if (progress < kInvStuckMinProgress) {
             this_->state = EN_INVADER_STATE_STUCK;
+            sLocalInvNav.path.Reset();   // discard the broken path
+            sLocalInvNav.lastPathRefreshFrame = 0;
             SPDLOG_INFO("[Invader] FOLLOW→STUCK (no progress {:.1f}u in {}ms @ "
                         "({:.0f},{:.0f},{:.0f}))",
                         progress, kInvStuckCheckMs,
@@ -668,9 +836,12 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
 
     // Transition: arrived at target (IDLE re-entry). Combat states
     // pick up before this fires when target is in melee/strike range.
+    // Measure against the actual target (not the subgoal) so the
+    // re-entry only fires when we're truly close to the hostile.
     if (distSq <= kInvFollowIdleDist * kInvFollowIdleDist) {
         this_->state = EN_INVADER_STATE_IDLE;
         a->speedXZ   = 0.0f;
+        sLocalInvNav.path.Reset();
     }
 }
 

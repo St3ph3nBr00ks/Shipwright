@@ -8,6 +8,14 @@
 // SoH AI Invader — hostile Link-skel NPC spawned by the AI Director.
 // See Plans/ai_invader_plan.md.
 //
+// Nav-parity addition (post-#208): CLIMBING state slot reactivated as
+// EN_INVADER_STATE_CLIMBING for full substrate-driven vertical pursuit
+// (ladders / vines / designated climb walls). Path consumption + drop
+// + jump anchors handled in TickFOLLOW via the AnchorNav::ActorTrail
+// substrate path (stored on the C++-side LocalInvNavState; the actor
+// struct only gains a climb-step-phase tracker since the C++ tick
+// owns the path lifecycle).
+//
 // v1 (step 15a) scope: actor scaffold only.
 //   - Registers as a custom actor via ActorDB (dynamic ID at runtime).
 //   - Spawned by the AI Director's InvaderDescriptor on host-only.
@@ -39,7 +47,7 @@
 typedef enum {
     EN_INVADER_STATE_IDLE          = 0,
     EN_INVADER_STATE_FOLLOW        = 1,   // chase target (Agent 2)
-    // EN_INVADER_STATE_CLIMBING   = 2,   // reserved slot — NOT implemented in v1
+    EN_INVADER_STATE_CLIMBING      = 2,   // scripted ladder/vine ascent (nav-parity Phase B)
     EN_INVADER_STATE_STUCK         = 3,   // single-tick nudge recovery (Agent 2)
     EN_INVADER_STATE_DEAD          = 4,   // anim hold + Actor_Kill (parity gap 3)
     EN_INVADER_STATE_SWIMMING      = 5,   // tread/swim while submerged (Phase 4)
@@ -183,6 +191,14 @@ typedef struct EnInvader {
     // correct anim without needing a separate deathCause field.
     // Mirrors EnFollower::deathCause (z_en_follower.h:107).
     u8 deathCause;
+
+    // Nav-parity Phase B — climb step phase tracker. CLIMBING alternates
+    // kClimbUpL / kClimbUpR one-shots each climb step (mirrors Player's
+    // actionVar2 toggle at z_player.c:13412). Stored on the actor so
+    // the per-actor C++ tick can read/write across frames without
+    // sharing file-scope state across multiple Invaders (if a future
+    // revision spawns more than one). 0 = next step uses L, 1 = R.
+    u8 climbNextIsRight;
 } EnInvader;
 
 #ifdef __cplusplus
