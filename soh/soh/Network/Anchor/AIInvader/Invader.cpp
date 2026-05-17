@@ -407,6 +407,19 @@ enum class InvaderAnim {
     // kCrawlExit (FollowerNPC.cpp:220-221).
     kCrawlMove,       // crouch-enter (gPlayerAnim_link_child_tunnel_start; one-shot, holds end frame)
     kCrawlExit,       // crouch-exit (gPlayerAnim_link_child_tunnel_end; one-shot)
+
+    // Nav-parity Phase B — CLIMBING anims. Vertical alternation
+    // (kClimbUpL / kClimbUpR) and lateral alternation (kClimbSideL /
+    // kClimbSideR) — each one-shot, the dispatcher fires the next
+    // step when the previous completes AND vertical/lateral motion
+    // is happening. Mirrors Player's actionVar2 toggle at
+    // z_player.c:13412. Headers from gPlayerAnim_link_normal_Fclimb_*.
+    // Shared across modelAnimType (climb anims are stance-agnostic in
+    // Player's table).
+    kClimbUpL,        // gPlayerAnim_link_normal_Fclimb_upL (one-shot)
+    kClimbUpR,        // gPlayerAnim_link_normal_Fclimb_upR (one-shot)
+    kClimbSideL,      // gPlayerAnim_link_normal_Fclimb_sideL (one-shot)
+    kClimbSideR,      // gPlayerAnim_link_normal_Fclimb_sideR (one-shot)
 };
 
 LinkAnimationHeader* InvAnimHeaderFor(InvaderAnim kind, s8 modelAnimType) {
@@ -468,6 +481,16 @@ LinkAnimationHeader* InvAnimHeaderFor(InvaderAnim kind, s8 modelAnimType) {
             return (LinkAnimationHeader*)&gPlayerAnim_link_child_tunnel_start;
         case InvaderAnim::kCrawlExit:
             return (LinkAnimationHeader*)&gPlayerAnim_link_child_tunnel_end;
+        // Nav-parity Phase B — climbing anim headers. Shared across
+        // modelAnimType (climb stance is identity, not weapon-typed).
+        case InvaderAnim::kClimbUpL:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upL;
+        case InvaderAnim::kClimbUpR:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_upR;
+        case InvaderAnim::kClimbSideL:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_sideL;
+        case InvaderAnim::kClimbSideR:
+            return (LinkAnimationHeader*)&gPlayerAnim_link_normal_Fclimb_sideR;
         case InvaderAnim::kNone:
         default:
             return nullptr;
@@ -505,7 +528,18 @@ void InvEnsureAnimation(EnInvader* this_, PlayState* play, InvaderAnim want,
                           // Parity gap 5 — crawlspace anims (one-shot;
                           // kCrawlMove holds end-frame crouch pose).
                           want == InvaderAnim::kCrawlMove ||
-                          want == InvaderAnim::kCrawlExit);
+                          want == InvaderAnim::kCrawlExit ||
+                          // Nav-parity Phase B — climb step anims. Each
+                          // climb step is a one-shot of kClimbUp{L,R} or
+                          // kClimbSide{L,R}; the TickCLIMBING handler
+                          // fires the next step when the previous
+                          // completes AND vertical/lateral motion is
+                          // progressing. Mirrors Player's L/R alternation
+                          // at z_player.c:13412.
+                          want == InvaderAnim::kClimbUpL ||
+                          want == InvaderAnim::kClimbUpR ||
+                          want == InvaderAnim::kClimbSideL ||
+                          want == InvaderAnim::kClimbSideR);
     LinkAnimation_Change(play, &this_->skelAnime, anim,
                          1.0f /* playSpeed */,
                          0.0f /* startFrame */,
@@ -589,6 +623,11 @@ InvaderAnim InvAnimForState(s32 state, float speedXZ, s32 prevState) {
         // exitAnimPlaying flag is set.
         case EN_INVADER_STATE_CRAWLING:
             return InvaderAnim::kCrawlMove;
+        // Nav-parity Phase B — CLIMBING. Returns kClimbUpL as a sane
+        // default; the dispatcher overrides to kClimbUpR / kClimbSideL/R
+        // based on this_->climbNextIsRight + the current motion axis.
+        case EN_INVADER_STATE_CLIMBING:
+            return InvaderAnim::kClimbUpL;
         default:
             return InvaderAnim::kWait;
     }
@@ -873,6 +912,301 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
     this_->state = EN_INVADER_STATE_FOLLOW;
     SPDLOG_INFO("[Invader] STUCK→FOLLOW (nudged {:.0f}u toward yaw=0x{:X})",
                 kInvStuckNudgeDist, (uint16_t)yaw);
+}
+
+// ---------------------------------------------------------------------
+// Nav-parity Phase B — CLIMBING state.
+//
+// Reference: FollowerNPC.cpp:TickCLIMBING (FollowerNPC.cpp:1632) +
+// FindClosestClimbAnchor (FollowerNPC.cpp:1488) + PopulateAnchorClimbPath
+// (FollowerNPC.cpp:1517). Mechanics simplified for v1:
+//   - No fast-path co-climb (FollowerNPC's "leader is also climbing"
+//     direct-track behavior). The Invader chases a hostile, not a
+//     friendly leader, so it doesn't get the leader's exact pos as
+//     "we're on the wall together"; instead it uses the cell-grid
+//     subgoals from the path.
+//   - No "leader hoisted over rim" LEDGE_HOIST injection — the target
+//     is a hostile, not a follower-leader, so the mantle-out semantics
+//     differ. v1 exits to FOLLOW when the path advances to a non-climb
+//     subgoal OR the path exhausts.
+//   - Mantle-out: snap to topPos when path is exhausted AND NPC is
+//     near the anchor's top.
+// ---------------------------------------------------------------------
+
+// Walk the room's climb anchors and pick the one whose basePos is
+// closest to `pos` in XZ. Cloned from FollowerNPC.cpp:1488.
+const ::AnchorNavRoom::ClimbAnchor* FindClosestClimbAnchorInv(
+    const ::AnchorNavRoom::RoomNavData* navData, const Vec3f& pos)
+{
+    if (navData == nullptr || navData->climbAnchors.empty()) return nullptr;
+    const ::AnchorNavRoom::ClimbAnchor* best = nullptr;
+    float bestDistSq = std::numeric_limits<float>::max();
+    for (const auto& anc : navData->climbAnchors) {
+        const float dx = pos.x - anc.basePos.x;
+        const float dz = pos.z - anc.basePos.z;
+        const float dSq = dx*dx + dz*dz;
+        if (dSq < bestDistSq) {
+            bestDistSq = dSq;
+            best = &anc;
+        }
+    }
+    return best;
+}
+
+// Manually populate `path` with this anchor's cells, bottom-to-top,
+// strictly above `npcPos.y`. Column-selection projects `referencePos`
+// onto the anchor's lateral plane axis and picks cells within ±15u
+// (≈ half a 30u cell pitch). The reference is the TARGET position
+// (where we want to end up). Falls back to ±30u if the strict
+// tolerance yields no cells. Cloned + adapted from
+// FollowerNPC.cpp:1517 (PopulateAnchorClimbPath).
+//
+// Difference from FollowerNPC: the Invader chases a hostile, so the
+// reference for column selection is `targetPos`, not the
+// follower-leader's pos. The "stay below leader" filter from the
+// Follower doesn't apply — we want to keep climbing past the
+// hostile's altitude if the path goes higher.
+bool PopulateAnchorClimbPathInv(const ::AnchorNavRoom::RoomNavData* navData,
+                                 const ::AnchorNavRoom::ClimbAnchor& anchor,
+                                 const Vec3f& npcPos, const Vec3f& referencePos,
+                                 AnchorNav::ActorTrail::NavPath& path)
+{
+    if (navData == nullptr || anchor.nodeCount == 0) return false;
+    path.Reset();
+
+    const float refU =
+        (referencePos.x - anchor.planeOrigin.x) * anchor.planeAxisU.x +
+        (referencePos.z - anchor.planeOrigin.z) * anchor.planeAxisU.z;
+
+    struct Entry { float y; uint16_t idx; };
+    std::vector<Entry> column;
+    constexpr float kInvClimbColTolerance     = 15.0f;
+    constexpr float kInvClimbColFallbackTol   = 30.0f;
+    auto collectColumn = [&](float tolerance) {
+        column.clear();
+        for (uint16_t i = 0; i < anchor.nodeCount; i++) {
+            const uint16_t idx = anchor.firstNodeIdx + i;
+            if (idx >= navData->nodes.size()) break;
+            const auto& n = navData->nodes[idx];
+            const float nodeU =
+                (n.pos.x - anchor.planeOrigin.x) * anchor.planeAxisU.x +
+                (n.pos.z - anchor.planeOrigin.z) * anchor.planeAxisU.z;
+            if (std::fabs(nodeU - refU) > tolerance) continue;
+            column.push_back({n.pos.y, idx});
+        }
+    };
+    collectColumn(kInvClimbColTolerance);
+    if (column.empty()) {
+        collectColumn(kInvClimbColFallbackTol);
+    }
+    if (column.empty()) return false;
+
+    std::sort(column.begin(), column.end(),
+              [](const Entry& a, const Entry& b){ return a.y < b.y; });
+
+    // Strict ABOVE-NPC filter — no downward slack. Prevents re-entry
+    // oscillation (NPC climbs up, re-engages CLIMBING with cells
+    // starting BELOW current Y, descends, repeats). Same shape as
+    // FollowerNPC.cpp:1591-1602.
+    for (const auto& e : column) {
+        if (e.y < npcPos.y) continue;
+        const auto& n = navData->nodes[e.idx];
+        path.waypoints.push_back(n.pos);
+        path.waypointFlags.push_back(n.flags);
+    }
+    if (path.waypoints.empty()) {
+        // NPC is already at or above the entire column — push the top
+        // cell so CLIMBING has something to track.
+        const auto& n = navData->nodes[column.back().idx];
+        path.waypoints.push_back(n.pos);
+        path.waypointFlags.push_back(n.flags);
+    }
+    path.sceneNum = gPlayState->sceneNum;
+    return true;
+}
+
+void TickCLIMBING(EnInvader* this_, PlayState* play) {
+    Actor* a = &this_->actor;
+
+    // Re-acquire target so we know whether to keep climbing. If the
+    // target is gone, exit to FOLLOW (next tick will re-IDLE).
+    Actor* target = sLocalInvNav.lastTarget;
+    if (target == nullptr || target->update == nullptr) {
+        this_->state = EN_INVADER_STATE_FOLLOW;
+        sLocalInvNav.activeClimbAnchor = nullptr;
+        sLocalInvNav.path.Reset();
+        return;
+    }
+
+    // ── Resolve subgoal ────────────────────────────────────────────
+    if (sLocalInvNav.path.Empty()) {
+        // Path exhausted. If we have an active anchor, try to refresh
+        // toward the target's lateral column — keeps the Invader on
+        // the wall when target is still above us. Otherwise mantle out.
+        if (sLocalInvNav.activeClimbAnchor != nullptr) {
+            const ::AnchorNavRoom::RoomNavData* navData =
+                ::AnchorNavRoom::GetForRoom(
+                    gPlayState->sceneNum,
+                    (int8_t)gPlayState->roomCtx.curRoom.num);
+            if (navData != nullptr &&
+                target->world.pos.y > a->world.pos.y + 30.0f &&
+                PopulateAnchorClimbPathInv(navData,
+                                            *sLocalInvNav.activeClimbAnchor,
+                                            a->world.pos, target->world.pos,
+                                            sLocalInvNav.path)) {
+                // Path refreshed; fall through to subgoal resolution.
+            }
+        }
+        if (sLocalInvNav.path.Empty()) {
+            // Mantle-out: if NPC is near the top of the wall, snap to
+            // topPos so we don't drop. Same shape as
+            // FollowerNPC.cpp:1772-1794.
+            if (sLocalInvNav.activeClimbAnchor != nullptr) {
+                const float topY = sLocalInvNav.activeClimbAnchor->topPos.y;
+                if (a->world.pos.y >= topY - 60.0f) {
+                    a->world.pos  = sLocalInvNav.activeClimbAnchor->topPos;
+                    a->velocity.y = 0.0f;
+                    SPDLOG_INFO("[Invader] CLIMBING→FOLLOW (mantle-out: "
+                                "snapped to anchor.topPos "
+                                "({:.0f},{:.0f},{:.0f}))",
+                                a->world.pos.x, a->world.pos.y, a->world.pos.z);
+                }
+            }
+            this_->state = EN_INVADER_STATE_FOLLOW;
+            sLocalInvNav.activeClimbAnchor = nullptr;
+            return;
+        }
+    }
+
+    const Vec3f& subgoal        = sLocalInvNav.path.CurrentSubgoal();
+    const uint32_t subgoalFlags = sLocalInvNav.path.CurrentSubgoalFlags();
+    const bool subgoalIsClimb   = (subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY) != 0;
+
+    // Mantle-out: next subgoal is non-climb → snap to subgoal pos
+    // (top of the climb), exit to FOLLOW. Same shape as
+    // FollowerNPC.cpp:1800-1810.
+    if (!subgoalIsClimb) {
+        a->world.pos.x = subgoal.x;
+        a->world.pos.y = subgoal.y;
+        a->world.pos.z = subgoal.z;
+        a->speedXZ     = 0.0f;
+        sLocalInvNav.activeClimbAnchor = nullptr;
+        this_->state = EN_INVADER_STATE_FOLLOW;
+        SPDLOG_INFO("[Invader] CLIMBING→FOLLOW (mantle-out to non-climb "
+                    "subgoal ({:.0f},{:.0f},{:.0f}))",
+                    subgoal.x, subgoal.y, subgoal.z);
+        return;
+    }
+
+    // ── Resolve / cache the active anchor ──────────────────────────
+    if (sLocalInvNav.activeClimbAnchor == nullptr) {
+        const ::AnchorNavRoom::RoomNavData* navData =
+            ::AnchorNavRoom::GetForRoom(
+                gPlayState->sceneNum,
+                (int8_t)gPlayState->roomCtx.curRoom.num);
+        sLocalInvNav.activeClimbAnchor = FindClosestClimbAnchorInv(
+            navData, a->world.pos);
+        if (sLocalInvNav.activeClimbAnchor == nullptr) {
+            // No anchor data — fall back to FOLLOW.
+            this_->state = EN_INVADER_STATE_FOLLOW;
+            return;
+        }
+    }
+    const auto& anc = *sLocalInvNav.activeClimbAnchor;
+
+    // ── Snap XZ + drive Y ──────────────────────────────────────────
+    // Snap XZ to subgoal + planeNormal * bodyOffset so the Invader's
+    // body sits in front of the wall surface (not buried). Identical
+    // to FollowerNPC's non-leader-climbing branch (FollowerNPC.cpp:1841).
+    a->world.pos.x = subgoal.x + anc.planeNormal.x * kInvClimbBodyOffset;
+    a->world.pos.z = subgoal.z + anc.planeNormal.z * kInvClimbBodyOffset;
+
+    // Drive Y toward subgoal. Clamp on approach.
+    const float dy = subgoal.y - a->world.pos.y;
+    if (std::fabs(dy) < kInvClimbSpeedY) {
+        a->world.pos.y = subgoal.y;
+    } else {
+        a->world.pos.y += (dy > 0.0f ? kInvClimbSpeedY : -kInvClimbSpeedY);
+    }
+
+    // Face into the wall. Yaw = direction OPPOSITE to planeNormal.
+    a->shape.rot.y = Math_Atan2S(-anc.planeNormal.z, -anc.planeNormal.x);
+    a->world.rot.y = a->shape.rot.y;
+    a->speedXZ     = 0.0f;
+
+    // Anim selection — alternate kClimbUpL ↔ kClimbUpR as climb steps
+    // complete. Mirrors Player's actionVar2 toggle. The InvEnsureAnimation
+    // call lives in the dispatcher post-state-handler block; we just
+    // toggle `climbNextIsRight` here when a step finishes (curFrame
+    // crosses anim endFrame).
+    if (this_->skelAnime.curFrame >=
+        Animation_GetLastFrame((void*)this_->skelAnime.animation)) {
+        // Step completed — flip phase for the next one-shot.
+        this_->climbNextIsRight = !this_->climbNextIsRight;
+    }
+
+    // ── Advance cursor on Y-proximity ──────────────────────────────
+    // Y-axis only (XZ is snap-clamped to subgoal+offset; full 3D
+    // distance would chain advances on the first frame). Same logic
+    // as FollowerNPC.cpp:1880-1894.
+    const float dyAdv = std::fabs(a->world.pos.y - subgoal.y);
+    if (dyAdv < 12.0f) {
+        sLocalInvNav.path.Advance();
+    }
+}
+
+// Try to force-engage CLIMBING based on the target being above the
+// Invader AND a climb anchor being reachable. This complements the
+// natural FOLLOW→CLIMBING transition (via the path's climb-cell flag)
+// for cases where the BFS pathfinder fails to route to a target
+// who's mid-wall (the pathfinder's FindNearestNode skips climb cells;
+// cross-room nav not supported). Cloned + adapted from
+// FollowerNPC.cpp:3584-3671 (leader-climbing force-engage). The
+// Invader's gate is "target is meaningfully above us" instead of
+// "leader is climbing".
+//
+// Fires only when in non-CLIMBING states (caller-checked). Returns
+// true if engagement succeeded (state set to CLIMBING + path populated).
+bool TryEngageAutoClimbInv(EnInvader* this_, PlayState* play, Actor* target) {
+    if (this_ == nullptr || play == nullptr || target == nullptr) return false;
+    if (this_->state == EN_INVADER_STATE_CLIMBING) return false;
+    // Only engage when target is meaningfully above us — climbing
+    // downward is rare and the substrate path's drop-anchor route is
+    // the right answer when target is below.
+    if (target->world.pos.y <= this_->actor.world.pos.y + 40.0f) return false;
+
+    const ::AnchorNavRoom::RoomNavData* navData =
+        ::AnchorNavRoom::GetForRoom(
+            gPlayState->sceneNum,
+            (int8_t)gPlayState->roomCtx.curRoom.num);
+    const ::AnchorNavRoom::ClimbAnchor* anchor =
+        FindClosestClimbAnchorInv(navData, target->world.pos);
+    if (anchor == nullptr) return false;
+
+    const float distBaseSq = Dist2DSq(this_->actor.world.pos, anchor->basePos);
+    if (distBaseSq >= kInvClimbForceEngageBaseDistSq) return false;
+
+    if (!PopulateAnchorClimbPathInv(navData, *anchor,
+                                     this_->actor.world.pos,
+                                     target->world.pos,
+                                     sLocalInvNav.path)) {
+        return false;
+    }
+    sLocalInvNav.activeClimbAnchor = anchor;
+    this_->state                    = EN_INVADER_STATE_CLIMBING;
+    sLocalInvNav.leashFrames        = 0;
+    sLocalInvNav.closeFailFrames    = 0;
+    SPDLOG_INFO("[Invader] Auto-climb force-engage — anchor "
+                "base=({:.0f},{:.0f},{:.0f}) top=({:.0f},{:.0f},{:.0f}) "
+                "Inv at ({:.0f},{:.0f},{:.0f}) distBase={:.0f}u — "
+                "populated {} climb waypoints",
+                anchor->basePos.x, anchor->basePos.y, anchor->basePos.z,
+                anchor->topPos.x, anchor->topPos.y, anchor->topPos.z,
+                this_->actor.world.pos.x, this_->actor.world.pos.y,
+                this_->actor.world.pos.z,
+                std::sqrt(distBaseSq),
+                (int)sLocalInvNav.path.waypoints.size());
+    return true;
 }
 
 // ---------------------------------------------------------------------
@@ -1163,6 +1497,7 @@ const char* StateName(s32 s) {
     switch (s) {
         case EN_INVADER_STATE_IDLE:          return "IDLE";
         case EN_INVADER_STATE_FOLLOW:        return "FOLLOW";
+        case EN_INVADER_STATE_CLIMBING:      return "CLIMBING";
         case EN_INVADER_STATE_STUCK:         return "STUCK";
         case EN_INVADER_STATE_DEAD:          return "DEAD";
         case EN_INVADER_STATE_SWIMMING:      return "SWIMMING";
@@ -2069,10 +2404,16 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // "scripted traversal" exempt list. CRAWLING moves the actor at
     // its own constant speed; G10/G14 mid-crawl would yank the body
     // out of the tunnel.
+    //
+    // Nav-parity Phase B — CLIMBING joins the exempt list. The
+    // CLIMBING handler scripts position (snap XZ to subgoal+offset,
+    // drive Y at fixed rate); a distance-based teleport mid-climb
+    // would dislodge the body from the wall.
     const bool scriptedTraversal =
         (this_->state == EN_INVADER_STATE_SWIMMING) ||
         (this_->state == EN_INVADER_STATE_LEDGE_HOIST) ||
-        (this_->state == EN_INVADER_STATE_CRAWLING);
+        (this_->state == EN_INVADER_STATE_CRAWLING) ||
+        (this_->state == EN_INVADER_STATE_CLIMBING);
     // Bug fix 2026-05-17 (Invader teleporting to player): G10 + G14 are
     // direct-to-target teleports. User clarified that the Invader
     // should NOT teleport directly to its target — only stuck-resolution
@@ -2156,11 +2497,14 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // a tier matches.
     //
     // Phase 4 — TryEngageCombat is eligibility-gated to non-combat,
-    // non-scripted states. SWIMMING / LEDGE_HOIST / CRAWLING → no
-    // preempt; let the scripted traversal complete first.
+    // non-scripted states. SWIMMING / LEDGE_HOIST / CRAWLING / CLIMBING
+    // → no preempt; let the scripted traversal complete first. (Phase B
+    // adds CLIMBING to the exempt list — swinging a sword mid-climb
+    // would dislodge the body from the wall.)
     if (this_->state != EN_INVADER_STATE_SWIMMING &&
         this_->state != EN_INVADER_STATE_LEDGE_HOIST &&
-        this_->state != EN_INVADER_STATE_CRAWLING) {
+        this_->state != EN_INVADER_STATE_CRAWLING &&
+        this_->state != EN_INVADER_STATE_CLIMBING) {
         TryEngageCombat(this_, play);
     }
 
@@ -2171,6 +2515,20 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     if (sLocalInvNav.lastTarget != nullptr &&
         sLocalInvNav.lastTarget->update != nullptr) {
         TryEnterCrawling(this_, play, sLocalInvNav.lastTarget->world.pos);
+    }
+
+    // Nav-parity Phase B — force-engage CLIMBING when the target is
+    // meaningfully above the Invader AND a climb anchor is reachable.
+    // Complements the natural FOLLOW→CLIMBING transition (via a path
+    // subgoal carrying NODE_CLIMB_ANY) for cases where the BFS
+    // pathfinder fails to route to a mid-wall target (FindNearestNode
+    // skips climb cells; cross-room nav not supported). Gated to non-
+    // combat / non-scripted states to avoid interrupting a swing or
+    // mantle. Returns silently when conditions aren't met.
+    if (!combatState && !scriptedTraversal &&
+        sLocalInvNav.lastTarget != nullptr &&
+        sLocalInvNav.lastTarget->update != nullptr) {
+        TryEngageAutoClimbInv(this_, play, sLocalInvNav.lastTarget);
     }
 
     // Hint pos for handlers that want a "where to face when nothing
@@ -2219,10 +2577,13 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         case EN_INVADER_STATE_CRAWLING:
             TickCRAWLING(this_, play);
             break;
-        // TODO: full CLIMBING state — not implemented; Invader doesn't
-        // pursue into vertical spaces in v1. Slot 2 reserved for parity
-        // with NPC Follower. If/when added, mirror FollowerNPC's
-        // TickCLIMBING (FollowerNPC.cpp:1500+).
+        // Nav-parity Phase B — full CLIMBING state. Scripts XZ-snap +
+        // Y-drive on the active anchor's cell column. Cloned from
+        // FollowerNPC's TickCLIMBING (FollowerNPC.cpp:1632) minus the
+        // friendly-leader fast-path co-climb branches.
+        case EN_INVADER_STATE_CLIMBING:
+            TickCLIMBING(this_, play);
+            break;
         // Parity gap 3 — DEAD is handled at top of function (early
         // short-circuit); this case is unreachable but kept defensive.
         case EN_INVADER_STATE_DEAD:
@@ -2327,6 +2688,17 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
             want = InvaderAnim::kCrawlExit;
         }
 
+        // Nav-parity Phase B — CLIMBING anim override. AnimForState
+        // returns kClimbUpL as a default; pick L/R based on the
+        // alternation tracker the TickCLIMBING handler maintains. This
+        // mirrors Player's L/R step alternation. Side variants
+        // (kClimbSideL/R) are reserved for future lateral-motion
+        // detection — v1 climbs purely vertically.
+        if (this_->state == EN_INVADER_STATE_CLIMBING) {
+            want = this_->climbNextIsRight ? InvaderAnim::kClimbUpR
+                                           : InvaderAnim::kClimbUpL;
+        }
+
         // Phase 4 — airborne anim override. If jump fired this tick OR
         // we're still mid-jump and the current anim is a jump anim,
         // hold the jump anim until landing. Mirrors FollowerNPC's
@@ -2374,7 +2746,8 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         if (this_->stopAnimPlaying &&
             airborneAnimOverride == InvaderAnim::kNone &&
             this_->state != EN_INVADER_STATE_LEDGE_HOIST &&
-            this_->state != EN_INVADER_STATE_CRAWLING) {
+            this_->state != EN_INVADER_STATE_CRAWLING &&
+            this_->state != EN_INVADER_STATE_CLIMBING) {
             want = (InvaderAnim)this_->currentAnim;
         }
 
