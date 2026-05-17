@@ -884,6 +884,25 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     }
 }
 
+// Nav-parity Phase C — path-aware STUCK recovery. The nudge direction
+// is taken from the substrate path's current subgoal when available
+// (so the Invader nudges around an obstacle in the same direction the
+// BFS planned the path), and falls back to a direct nudge toward the
+// hostile target only when the path is empty. Mirrors FollowerNPC's
+// substrate-aware STUCK in spirit — FollowerNPC's TickSTUCK is
+// technically a "nudge toward leader" because its FOLLOW caller
+// always resets the path before transitioning to STUCK (the broken
+// path is the reason it bailed). We do the same path-reset on the
+// FOLLOW→STUCK transition (set in TickFOLLOW above), so the path here
+// is empty in the common case — but if FOLLOW didn't get a chance to
+// reset (e.g. STUCK reached via some future path that DIDN'T trigger
+// the FOLLOW path-reset), we'd still want path-aware steering.
+//
+// The path Empty() check below is therefore a forward-compat hook: in
+// v1 (and matching FollowerNPC's current shape) STUCK practically
+// always sees an empty path and nudges straight at the target. As
+// future state transitions land STUCK with a populated path, the
+// path-aware nudge takes over without code change.
 void TickSTUCK(EnInvader* this_, PlayState* play) {
     Actor* a = &this_->actor;
     Actor* target = sLocalInvNav.lastTarget;
@@ -892,9 +911,21 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
         // up FROM IDLE cleanly.
         this_->state = EN_INVADER_STATE_IDLE;
         a->speedXZ   = 0.0f;
+        sLocalInvNav.path.Reset();
         return;
     }
-    const s16 yaw = YawTowardTarget(a->world.pos, target->world.pos);
+
+    // Pick the nudge target. Path subgoal when available (path-aware
+    // recovery — nudge in the BFS-planned direction, not blindly toward
+    // the hostile). Otherwise fall back to the target's pos.
+    Vec3f nudgeTarget = target->world.pos;
+    bool  pathAware   = false;
+    if (!sLocalInvNav.path.Empty()) {
+        nudgeTarget = sLocalInvNav.path.CurrentSubgoal();
+        pathAware   = true;
+    }
+
+    const s16 yaw = YawTowardTarget(a->world.pos, nudgeTarget);
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
     a->speedXZ     = 0.0f;  // nudge IS the motion, not momentum
@@ -909,9 +940,18 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
     sLocalInvNav.stuckCheckPos       = a->world.pos;
     sLocalInvNav.lastStuckCheckFrame =
         Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+    // Discard the path — TickFOLLOW will rebuild it next tick with
+    // the new position as the starting point. Without this, the next
+    // FOLLOW tick would observe distance > kInvFollowProxLimit AND
+    // not yet need a refresh (path is still recent) and steer toward
+    // the now-stale subgoal that just caused the stuck condition.
+    sLocalInvNav.path.Reset();
+    sLocalInvNav.lastPathRefreshFrame = 0;
     this_->state = EN_INVADER_STATE_FOLLOW;
-    SPDLOG_INFO("[Invader] STUCK→FOLLOW (nudged {:.0f}u toward yaw=0x{:X})",
-                kInvStuckNudgeDist, (uint16_t)yaw);
+    SPDLOG_INFO("[Invader] STUCK→FOLLOW (nudged {:.0f}u toward yaw=0x{:X}, "
+                "{} target)",
+                kInvStuckNudgeDist, (uint16_t)yaw,
+                pathAware ? "path-aware" : "direct-to");
 }
 
 // ---------------------------------------------------------------------
