@@ -1102,20 +1102,33 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
     // refires at a lower Y, NPC climbs again. Same root cause as
     // NPC Follower's identical bug — same fix shape.
     //
-    // Gate: target is the LOCAL Player (ACTOR_PLAYER) AND
-    // IsLocalPlayerClimbing() AND within 60u 3D. For DummyPlayer
-    // targets (remote peers), fast-path doesn't fire — would need a
-    // sync field for the remote's climb state. Single-player covers
-    // the common case.
+    // Gate: target is climbing (local Player via IsLocalPlayerClimbing,
+    // or remote DummyPlayer via the synced AnchorClient::isClimbing
+    // field) AND within 60u 3D. Works for both single-player and
+    // multiplayer — the isClimbing sync infra already exists for AI
+    // Follower's leader-climbing detection (Anchor.h:1237
+    // GetClientIsClimbing).
     //
     // Mechanics: snap XZ to target.xz, Y lerps toward target.y - 30
     // (Invader stalks 30u below the player — adds "looming below"
     // tension; mirrors NPC Follower's `kCoClimbYOffset=30`).
     const bool targetIsLocalPlayer = (target->id == ACTOR_PLAYER);
-    const bool targetIsClimbing =
-        targetIsLocalPlayer &&
-        Anchor::Instance != nullptr &&
-        Anchor::Instance->IsLocalPlayerClimbing();
+    bool targetIsClimbing = false;
+    if (Anchor::Instance != nullptr) {
+        if (targetIsLocalPlayer) {
+            targetIsClimbing = Anchor::Instance->IsLocalPlayerClimbing();
+        } else if (target->id == ACTOR_EN_OE2) {
+            // Remote DummyPlayer — look up owning client by pointer
+            // (the same GetDummyPlayerClientId helper TickFOLLOW uses
+            // for trail-key resolution).
+            const uint32_t cid =
+                Anchor::Instance->GetDummyPlayerClientId(target);
+            if (cid != 0) {
+                targetIsClimbing =
+                    Anchor::Instance->GetClientIsClimbing(cid);
+            }
+        }
+    }
     {
         const float pdx0 = target->world.pos.x - a->world.pos.x;
         const float pdy0 = target->world.pos.y - a->world.pos.y;
