@@ -574,7 +574,55 @@ void InvEnsureAnimation(EnInvader* this_, PlayState* play, InvaderAnim want,
     this_->stopAnimPlaying = oneShot ? 1 : 0;
 }
 
-InvaderAnim InvAnimForState(s32 state, float speedXZ, s32 prevState) {
+// Item 2/4 — step-phase constants. Clone of FollowerNPC.cpp:1264-1271.
+// 29-unit walk cycle, foot-down at 10 (left) / 24 (right), L/R stop
+// split at 14 (Player's z_player.c:6397 uses 14 with -3 offset; we
+// drop the offset for simplicity, visually identical).
+static constexpr float kInvStepPhaseCycle    = 29.0f;
+static constexpr float kInvStepPhaseFootDownL = 10.0f;
+static constexpr float kInvStepPhaseFootDownR = 24.0f;
+static constexpr float kInvStopPhaseLRSplit  = 14.0f;
+
+// Item 2 — step-phase crossing detector for footstep SFX. Returns true
+// if the phase advanced past `footDown` this tick. Handles wrap-around
+// at kInvStepPhaseCycle. Clone of FollowerNPC.cpp:StepPhaseCrossed.
+inline bool InvStepPhaseCrossed(float prevPhase, float curPhase, float footDown) {
+    if (curPhase == prevPhase) return false;
+    if (curPhase < prevPhase) {
+        return (prevPhase < footDown && footDown <= kInvStepPhaseCycle) ||
+               (curPhase  >= footDown && footDown >= 0.0f);
+    }
+    return (prevPhase < footDown && footDown <= curPhase);
+}
+
+// Item 2 — tick step-phase + fire footstep SFX on foot-down crosses.
+// Called from the dispatcher every tick while in a state that moves
+// the body (FOLLOW / STUCK / ENGAGE). Fires NA_SE_PL_WALK_GROUND at
+// foot-down frames 10 and 24 of the 29-unit cycle. Same shape as
+// FollowerNPC.cpp:TickStepPhaseAndSfx.
+inline void InvTickStepPhaseAndSfx(EnInvader* this_, PlayState* play) {
+    (void)play;
+    const float playSpeed  = this_->skelAnime.playSpeed;
+    const float updateRate = R_UPDATE_RATE * 0.5f;
+    const float advance    = playSpeed * updateRate;
+    const float prevPhase  = this_->stepPhase;
+    float       newPhase   = prevPhase + advance;
+    while (newPhase >= kInvStepPhaseCycle) newPhase -= kInvStepPhaseCycle;
+    while (newPhase < 0.0f)                newPhase += kInvStepPhaseCycle;
+    this_->stepPhase = newPhase;
+
+    if (InvStepPhaseCrossed(prevPhase, newPhase, kInvStepPhaseFootDownL) ||
+        InvStepPhaseCrossed(prevPhase, newPhase, kInvStepPhaseFootDownR)) {
+        // NA_SE_PL_WALK_GROUND is the base walk-on-ground SFX.
+        // func_800F4010 is the engine's spatial SFX dispatcher used by
+        // Player and other actors for footsteps.
+        func_800F4010(&this_->actor.projectedPos, NA_SE_PL_WALK_GROUND,
+                      this_->actor.speedXZ);
+    }
+}
+
+InvaderAnim InvAnimForState(s32 state, float speedXZ, s32 prevState,
+                             float stepPhase) {
     switch (state) {
         case EN_INVADER_STATE_FOLLOW: {
             if (speedXZ < 0.1f) return InvaderAnim::kWait;
@@ -583,19 +631,14 @@ InvaderAnim InvAnimForState(s32 state, float speedXZ, s32 prevState) {
         case EN_INVADER_STATE_STUCK:
             return InvaderAnim::kWait;
         case EN_INVADER_STATE_IDLE: {
-            // Fire stop-anim ONCE on the FOLLOW→IDLE transition. Caller
-            // (dispatcher) is responsible for not re-firing every tick;
-            // the stopAnimPlaying flag on this_ guards LinkAnimation_Change
-            // from restarting. After the one-shot completes, falls back
-            // to kWait.
+            // Item 4 (2026-05-17) — pick kStopL vs kStopR based on live
+            // stepPhase (Player's z_player.c:6397 pattern). Was hardcoded
+            // to kStopL. Adds L/R foot-forward variety to FOLLOW→IDLE
+            // transitions.
             if (prevState == EN_INVADER_STATE_FOLLOW) {
-                // Pick L/R based on step phase. Same split as FollowerNPC
-                // — phase < 14 = stop-on-left, phase >= 14 = stop-on-right.
-                // Without a real step phase calculation we approximate
-                // via prevState's odd/even quirk; this is "good enough"
-                // visual variety for v1. Field-test may want the full
-                // step-phase machinery.
-                return InvaderAnim::kStopL;
+                return (stepPhase < kInvStopPhaseLRSplit)
+                           ? InvaderAnim::kStopL
+                           : InvaderAnim::kStopR;
             }
             return InvaderAnim::kWait;
         }
@@ -2917,7 +2960,8 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
                                       std::memory_order_relaxed);
         const s8 animType = (curFrame < sCombatCooldownEndFrame) ? 1 : 0;
         InvaderAnim want = InvAnimForState(this_->state, invader->speedXZ,
-                                            this_->prevState);
+                                            this_->prevState,
+                                            this_->stepPhase);
 
         // Phase 4 — LEDGE_HOIST anim override. AnimForState returns a
         // default (kHoistGround); resolve the real pick from
@@ -3015,6 +3059,27 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         if (this_->stopAnimPlaying &&
             this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
             this_->stopAnimPlaying = 0;
+        }
+
+        // Item 2 (2026-05-17) — tick step phase + fire footstep SFX
+        // when the phase crosses a foot-down frame (10 left, 24 right
+        // of 29-unit walk cycle). Only fires when the body is actually
+        // moving (speedXZ > 0.5) and is in a locomotion state — combat
+        // states have their own anims that don't cycle through walk
+        // frames, and idle states stay near phase 0. Clone of
+        // FollowerNPC.cpp:TickStepPhaseAndSfx.
+        const bool stepPhaseEligible =
+            invader->speedXZ > 0.5f &&
+            (this_->state == EN_INVADER_STATE_FOLLOW ||
+             this_->state == EN_INVADER_STATE_STUCK  ||
+             this_->state == EN_INVADER_STATE_ENGAGE);
+        if (stepPhaseEligible) {
+            InvTickStepPhaseAndSfx(this_, play);
+        } else {
+            // Decay step phase toward 0 during non-moving states so the
+            // next FOLLOW entry starts from a clean phase. Matches
+            // FollowerNPC's stationary-decay pattern.
+            this_->stepPhase = 0.0f;
         }
     }
 
