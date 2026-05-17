@@ -235,6 +235,26 @@ bool ActorTrail::IsEnabled() {
     return AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kActorTrail);
 }
 
+// Computed-path debug snapshot — per-key storage of the most recent
+// successful ComputePathTo result. Populated by ComputePathTo, read
+// by the RoomNavData DebugDrawPaths overlay via SnapshotComputedPaths.
+//
+// File-scope static (not a class member) so it stays writable from
+// ComputePathTo's `const` method without needing a `mutable` annotation
+// on ActorTrail. The map is the only state; not exposed in headers.
+//
+// Defined here (above ClearForKey/Scene/All) so the lifecycle clears
+// below can reference it. C++ name lookup needs the file-scope
+// variable's definition to precede its uses.
+namespace {
+struct ComputedPathEntry {
+    std::vector<Vec3f>  waypoints;
+    size_t              cursorIdx = 0;
+    int16_t             sceneNum  = -1;
+};
+std::unordered_map<ActorTrail::TrailKey, ComputedPathEntry> sDebugPaths;
+}
+
 void ActorTrail::ClearForKey(TrailKey key) {
     mTrails.erase(key);
 }
@@ -251,12 +271,30 @@ void ActorTrail::ClearForScene(int16_t sceneNum) {
         }
         ++it;
     }
+    // Also drop debug-path snapshots for this scene.
+    for (auto it = sDebugPaths.begin(); it != sDebugPaths.end();) {
+        if (it->second.sceneNum == sceneNum) it = sDebugPaths.erase(it);
+        else ++it;
+    }
 }
 
 void ActorTrail::ClearAll() {
     mTrails.clear();
     mNowMs = 0;
     mLastCaptureMs = 0;
+    sDebugPaths.clear();
+}
+
+// (sDebugPaths + ComputedPathEntry defined above ClearForKey)
+
+void ActorTrail::SnapshotComputedPaths(int16_t sceneFilter,
+                                         std::vector<ComputedPathSnapshot>& out) const {
+    out.clear();
+    for (const auto& [key, entry] : sDebugPaths) {
+        if (entry.sceneNum != sceneFilter) continue;
+        if (entry.waypoints.empty()) continue;
+        out.push_back({ key, entry.waypoints, entry.cursorIdx, entry.sceneNum });
+    }
 }
 
 uint64_t ActorTrail::NowMs() {
@@ -613,6 +651,17 @@ bool ActorTrail::ComputePathTo(TrailKey key,
     // the chasm. The floor gate forces fall-through to Layer 3 BFS so
     // jump-anchor / climb-bridge / drop-anchor edges actually get
     // consulted on cross-gap pursuits.
+    // DebugDraw — capture every computed path keyed by TrailKey so
+    // the RoomNavData DebugDrawPaths overlay can render them as red
+    // vertical posts (mirrors the magenta breadcrumb overlay). Done
+    // at every success path below; reset on failure so the overlay
+    // doesn't show stale data when a re-query produced no path.
+    auto captureForDebug = [&]() {
+        sDebugPaths[key] = ComputedPathEntry{
+            out.waypoints, out.cursorIdx, out.sceneNum,
+        };
+    };
+
     constexpr float kLayer1YGate = 50.0f;
     float dyToTarget = std::fabs(targetPos.y - navigator->world.pos.y);
     if (!skipLayer1LOS &&
@@ -621,6 +670,7 @@ bool ActorTrail::ComputePathTo(TrailKey key,
         FloorPresentAlongPath(navigator->world.pos, targetPos, play)) {
         out.waypoints.push_back(targetPos);
         out.waypointFlags.push_back(0); // Layer 1: target itself, no source node
+        captureForDebug();
         return true;
     }
 
@@ -714,14 +764,17 @@ bool ActorTrail::ComputePathTo(TrailKey key,
     };
 
     if (preferLeaderTrail) {
-        if (tryLayer2()) return true;
-        if (tryLayer3()) return true;
+        if (tryLayer2()) { captureForDebug(); return true; }
+        if (tryLayer3()) { captureForDebug(); return true; }
     } else {
-        if (tryLayer3()) return true;
-        if (tryLayer2()) return true;
+        if (tryLayer3()) { captureForDebug(); return true; }
+        if (tryLayer2()) { captureForDebug(); return true; }
     }
 
     // Nothing reachable — caller falls through to direct yaw / recovery.
+    // Also clear the debug snapshot for this key so the overlay doesn't
+    // keep showing a stale path that the consumer has abandoned.
+    sDebugPaths.erase(key);
     return false;
 }
 

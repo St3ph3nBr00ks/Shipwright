@@ -73,6 +73,7 @@ extern PlayState* gPlayState;
 #define CVAR_ROOM_NAV_DEBUG_DRAW            CVAR_ENHANCEMENT("RoomNavData.DebugDraw")
 #define CVAR_ROOM_NAV_LOG_STUCK_ON_SLOPE    CVAR_ENHANCEMENT("RoomNavData.LogStuckOnSlope")
 #define CVAR_ROOM_NAV_DEBUG_DRAW_COMPONENTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawComponents")
+#define CVAR_ROOM_NAV_DEBUG_DRAW_PATHS      CVAR_ENHANCEMENT("RoomNavData.DebugDrawPaths")
 #define CVAR_ROOM_NAV_DEBUG_DRAW_CLIMB_GHOSTS CVAR_ENHANCEMENT("RoomNavData.DebugDrawClimbGhosts")
 #define CVAR_ROOM_NAV_GEN_GENERIC_WALL_GRIDS  CVAR_ENHANCEMENT("RoomNavData.GenerateGenericWallGrids")
 #define CVAR_ROOM_NAV_LOG_REJECTED_FLOORS   CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors")
@@ -6782,6 +6783,30 @@ static void BuildOverlayDrawData(const RoomNavData* data) {
             AddVerticalPost(sXluDl, sVtxDl, wp.pos, topPos);
         }
     }
+
+    // Computed-path overlay (CVAR_ROOM_NAV_DEBUG_DRAW_PATHS). Red
+    // vertical posts at every waypoint in the most-recent computed
+    // path for each navigator. Same height/style as the breadcrumb
+    // markers above so the visualization is consistent — different
+    // colour (red vs hot pink) distinguishes "planned route" from
+    // "actual walked history". ActorTrail's ComputePathTo populates
+    // the snapshot map on every successful path compute; entries are
+    // erased on path-fail or scene change.
+    if (CVarGetInteger(CVAR_ROOM_NAV_DEBUG_DRAW_PATHS, 0) != 0) {
+        static thread_local std::vector<AnchorNav::ActorTrail::ComputedPathSnapshot> sPathSnapshot;
+        AnchorNav::ActorTrail::GetInstance().SnapshotComputedPaths(
+            gPlayState->sceneNum, sPathSnapshot);
+        if (!sPathSnapshot.empty()) {
+            sXluDl.push_back(gsDPSetPrimColor(0, 0, 0xFF, 0x00, 0x00, 0xFF));  // red
+            for (const auto& path : sPathSnapshot) {
+                for (size_t i = path.cursorIdx; i < path.waypoints.size(); ++i) {
+                    const Vec3f& pos = path.waypoints[i];
+                    Vec3f topPos = { pos.x, pos.y + kTrailMarkerHeight, pos.z };
+                    AddVerticalPost(sXluDl, sVtxDl, pos, topPos);
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6880,6 +6905,10 @@ static void OnDebugDrawRender() {
     // vertical post → 8 verts + 2 Gfx commands. Reserve slop is fine; the
     // capacity-overshoot is a one-time scene-change allocation.
     constexpr size_t kMaxTrailWaypointsForReserve = 30 * 8;
+    // Computed-path overlay bound — same shape as breadcrumbs but
+    // separate buffer slot (path waypoints are typically shorter:
+    // ~10-20 per path × ~8 navigators with active paths).
+    constexpr size_t kMaxPathWaypointsForReserve = 20 * 8;
     sVtxDl.reserve(data->nodes.size() * 4
                    + data->nodes.size() * 4 // orphan group
                    + data->edges.size() * 4
@@ -6891,7 +6920,8 @@ static void OnDebugDrawRender() {
                    + data->jumpAnchors.size() * 16    // jump: same shape as drop
                    + data->hazardCentroids.size() * 4
                    + data->rejectedFloorPositions.size() * 8
-                   + kMaxTrailWaypointsForReserve * 8);
+                   + kMaxTrailWaypointsForReserve * 8
+                   + kMaxPathWaypointsForReserve * 8);
     // Gfx commands: 2 per node-quad / edge-quad / hazard-centroid quad; 8
     // per climb anchor (2 ground quads + 4 vertical-post quad pairs); 4 per
     // rejected-floor cross (2 quads); 64 for setup + fixed per-color-group

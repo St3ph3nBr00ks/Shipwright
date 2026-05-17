@@ -2352,6 +2352,18 @@ void SohMenu::AddMenuEnhancements() {
             "distinct hue from a golden-angle HSV distribution. Cached per-room; "
             "invalidated on Force Rescan and on game exit."));
 
+    AddWidget(path, "Debug Draw — Computed Paths", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RoomNavData.DebugDrawPaths"))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When on (in addition to Debug Draw), every navigator's most-recent "
+            "ComputePathTo result is rendered as red vertical posts at each path "
+            "waypoint. Same height/style as the magenta breadcrumb overlay — the "
+            "red colour distinguishes 'planned route' from 'walked history'. "
+            "Path is captured at ComputePathTo time and erased on path-failure "
+            "or scene change."));
+
     AddWidget(path, "Debug Draw — Log Rejected Floors", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("RoomNavData.LogRejectedFloors"))
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 0); })
