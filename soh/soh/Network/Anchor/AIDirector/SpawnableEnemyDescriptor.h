@@ -87,6 +87,14 @@ struct SpawnProposal {
     uint8_t  variantId    = 0;
     int      priority     = DescriptorPriority::Standard;
     int      groupId      = 0;  // multi-actor proposals share a groupId; 0 = solo
+
+    // Phase 1 §7.5 scene-following: scene-follow continuations skip the
+    // cooldown-ledger update (mLastSpawnFrameByKey). Otherwise the new
+    // scene would start "freshly spawned" and block subsequent natural
+    // spawns there for the next 90s. The follow-spawn is the SAME Invader
+    // continuing, not a new encounter. Live-count + netId mapping still
+    // update normally. Default false for natural / force / new spawns.
+    bool     bypassCooldown = false;
 };
 
 class SpawnableEnemyDescriptor {
@@ -135,6 +143,14 @@ public:
                                                           const SessionView& view) {
         (void)director; (void)view;
         return {};
+    }
+
+    // Phase 1 §7.5 lifecycle scan — called once per Director tick
+    // BEFORE ProposeSpawn. Lets descriptors manage their active spawns
+    // (sticky-target re-evaluate, orphan-timer increment / despawn,
+    // all-unavailable immediate despawn). Default no-op.
+    virtual void OnTick(Director& director, const SessionView& view) {
+        (void)director; (void)view;
     }
 
     // --- Spawn-executed callback -------------------------------------

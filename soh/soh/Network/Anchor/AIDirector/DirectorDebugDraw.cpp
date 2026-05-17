@@ -42,8 +42,10 @@
 #include <vector>
 
 extern "C" {
-#include "variables.h"
 #include "z64.h"
+#include "macros.h"     // OPEN_DISPS / CLOSE_DISPS / POLY_XLU_DISP — NOT in z64.h. Same trap family as Pitfall 15 (GET_PLAYER).
+#include "functions.h"  // gSPDisplayList macro — defined here, NOT in z64.h or macros.h despite appearance. Matches RoomNavData.cpp:60 chain.
+#include "variables.h"
 }
 
 extern "C" PlayState* gPlayState;
@@ -163,9 +165,15 @@ static void OnDirectorDebugDrawRender() {
     bool anyDrawn = false;
 
     // InvaderDescriptor — render red post at last-spawn position.
+    // Scene-gated: only render in the scene the spawn happened in. World
+    // coordinates aren't scene-tagged, so the same (x,y,z) maps to a
+    // different physical location in every scene. Without this gate, a
+    // spawn in Inside Deku Tree at (17,-4,327) renders a ghost marker
+    // at (17,-4,327) in Castle Town too (log 197 symptom).
+    const int16_t curScene = (int16_t)play->sceneNum;
     for (const auto& desc : director.GetDescriptors()) {
         if (auto* inv = dynamic_cast<InvaderDescriptor*>(desc.get())) {
-            if (inv->HasLastSpawn()) {
+            if (inv->HasLastSpawn() && inv->LastSpawnSceneNum() == curScene) {
                 AddRedVerticalPost(inv->LastSpawnPos());
                 anyDrawn = true;
             }

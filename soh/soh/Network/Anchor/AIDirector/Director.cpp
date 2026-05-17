@@ -56,6 +56,7 @@
 #include <libultraship/libultraship.h>  // SPDLOG_*
 
 #include "../Anchor.h"
+#include "../Common/ActorSyncHelpers.h"  // kSyncableActorCategories (ExecuteDespawn actor walk)
 #include "../Common/SceneAuthority.h"
 #include "soh/ActorDB.h"  // ActorDB::Instance->RetrieveEntry — pre-spawn object lookup
 #include "soh/ObjectExtension/ObjectExtension.h"
@@ -183,6 +184,46 @@ void Director::Tick() {
         return;
     }
 
+    // Phase 1 §7.5 local-player scene/room transition observer.
+    //
+    // DirectorEvent::PlayerEnteredRoom needs to fire for the HOST's own
+    // transitions too — scene-following hunts the local player when they
+    // warp. step-6's UCS-receive wiring (UpdateClientState.cpp) only
+    // fires events for REMOTE peers; local transitions don't route
+    // through that path because the host doesn't UCS-broadcast back to
+    // itself. Rather than add a new GameInteractor hook (more coupling),
+    // poll gPlayState here and fire the event ourselves on change.
+    //
+    // The first observation is consumed silently (no prior baseline) —
+    // we don't want to emit a fake "entered" event on the very first
+    // Tick after save-load when mPrevLocalSceneNum is -1. Subsequent
+    // transitions fire normally.
+    if (gPlayState != nullptr && Anchor::Instance != nullptr) {
+        const int16_t curScene = (int16_t)gPlayState->sceneNum;
+        const int8_t  curRoom  = (int8_t)gPlayState->roomCtx.curRoom.num;
+        const bool changed = (curScene != mPrevLocalSceneNum) ||
+                             (curRoom  != mPrevLocalRoomNum);
+        if (changed && mPrevLocalSceneNum >= 0) {
+            DirectorEventPayload evt{};
+            evt.type     = DirectorEvent::PlayerEnteredRoom;
+            evt.clientId = Anchor::Instance->ownClientId;
+            evt.sceneNum = curScene;
+            evt.roomNum  = curRoom;
+            NotifyEvent(evt);
+        }
+        mPrevLocalSceneNum = curScene;
+        mPrevLocalRoomNum  = curRoom;
+    }
+
+    // Phase 1 §7.5 lifecycle scan — descriptors manage their active
+    // spawns BEFORE the proposal loop (sticky-target re-eval, orphan
+    // timer, all-unavailable despawn, scene-follow timers).
+    // Default OnTick is a no-op for descriptors that don't care.
+    for (auto& d : mDescriptors) {
+        if (!d->IsEnabled()) continue;
+        d->OnTick(*this, view);
+    }
+
     // Step 7: collect proposals from enabled descriptors, arbitrate,
     // ExecuteSpawn on the winner. Single group per tick max (plan §3).
     // Multi-actor group support is in the wire — step 7 still single-
@@ -291,9 +332,23 @@ bool Director::ExecuteSpawn(const SpawnProposal& proposal) {
     }
     const uint32_t netId = extConst->netId;
 
-    // Ledger update + DIRECTOR_STATE_SYNC broadcast (handled internally).
-    RecordSpawn(proposal.sceneNum, proposal.roomNum,
-                proposal.source->GetDescriptorId(), netId);
+    // Ledger update + DIRECTOR_STATE_SYNC broadcast.
+    //
+    // Phase 1 §7.5: scene-follow continuations set proposal.bypassCooldown
+    // = true. In that case we update live-count + netId map ONLY
+    // (the spawn is a continuation of the SAME logical Invader, not a
+    // new encounter — stamping mLastSpawnFrameByKey would lock the new
+    // scene's cooldown unnecessarily).
+    if (proposal.bypassCooldown) {
+        ++mLiveCountByDescriptor[proposal.source->GetDescriptorId()];
+        mNetIdToDescriptor[netId] = proposal.source->GetDescriptorId();
+        if (Anchor::Instance != nullptr) {
+            Anchor::Instance->SendPacket_DirectorStateSync();
+        }
+    } else {
+        RecordSpawn(proposal.sceneNum, proposal.roomNum,
+                    proposal.source->GetDescriptorId(), netId);
+    }
 
     // Notify the descriptor that its proposal landed. Lets it record
     // final-position state without coupling to RecordSpawn internals.
@@ -405,6 +460,61 @@ bool Director::ForceSpawn(uint8_t descriptorId) {
         if (ExecuteSpawn(p)) anyExecuted = true;
     }
     return anyExecuted;
+}
+
+bool Director::ExecuteDespawn(uint32_t netId, DefeatCause cause) {
+    // Host-only. Mirrors ExecuteSpawn's host gate — descriptor lifecycle
+    // logic should never run on peer clients (their Director ticks are
+    // gated at the top of Tick).
+    if (!::SceneAuthority::IsEffectiveHost()) {
+        return false;
+    }
+    if (gPlayState == nullptr || netId == 0) {
+        return false;
+    }
+
+    // Walk every syncable actor category looking for the netId match.
+    // Same iteration pattern as HandlePacket_EnemyDefeated. Most spawns
+    // are ACTORCAT_ENEMY but Karebaba etc. can change category mid-life
+    // so we walk the full set.
+    Actor* foundActor = nullptr;
+    for (size_t catIdx = 0; catIdx < kSyncableActorCategoriesCount; ++catIdx) {
+        Actor* actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[catIdx]].head;
+        while (actor != nullptr) {
+            const EnemyNetId* ext =
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+            if (ext != nullptr && ext->netId == netId) {
+                foundActor = actor;
+                break;
+            }
+            actor = actor->next;
+        }
+        if (foundActor != nullptr) break;
+    }
+
+    if (foundActor == nullptr) {
+        // Actor not in host's current actor lists. Could be: already
+        // destroyed by scene unload, never existed on host, or peer-only.
+        // Still proceed with the bookkeeping cleanup so the live count
+        // doesn't stay phantom-locked. OnEnemyRemoved is idempotent.
+        SPDLOG_INFO("[Director] ExecuteDespawn: netId={} not found in host's "
+                    "actor lists — cleaning up bookkeeping only", netId);
+        OnEnemyRemoved(netId, cause);
+        return false;
+    }
+
+    SPDLOG_INFO("[Director] ExecuteDespawn ok: netId={} actorId={} cause={}",
+                netId, foundActor->id, (int)cause);
+
+    // Actor_Kill triggers the OnEnemyDefeat / OnActorKill hooks which
+    // route through Director::OnEnemyRemoved (with DefeatCause::Kill
+    // from those paths). Pre-emptively call OnEnemyRemoved here with
+    // the requested cause so the descriptor sees the RIGHT cause; the
+    // subsequent hook-driven call is idempotent (early-returns on
+    // map miss after mNetIdToDescriptor.erase).
+    OnEnemyRemoved(netId, cause);
+    Actor_Kill(foundActor);
+    return true;
 }
 
 void Director::RecordSpawn(int16_t sceneNum, int8_t roomNum, uint8_t descId, uint32_t netId) {
