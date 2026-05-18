@@ -107,10 +107,14 @@ void Anchor::HandlePacket_NavTestDirective(nlohmann::json payload) {
         player->actor.velocity.y = 0.0f;
         player->actor.velocity.z = 0.0f;
 
-        // Enable AI Follower mode + combat-disabled.
+        // Enable harness flags + combat-disabled. AI Follower mode is
+        // NOT a CVar — it's runtime state on the Anchor instance
+        // (Menu.cpp toggles it via SetFollowerActive). Call directly
+        // (log 244 fix 2026-05-18: previously this packet set a CVar
+        // that didn't exist and AI Follower mode never engaged).
         CVarSetInteger(CVAR_ENHANCEMENT("AI.NavTest.Enabled"), 1);
         CVarSetInteger(CVAR_ENHANCEMENT("AI.NavTest.CombatDisabled"), 1);
-        CVarSetInteger(CVAR_REMOTE_ANCHOR("FollowerMode"), 1);
+        Anchor::Instance->SetFollowerActive(true);
 
         // Latch the P2 test-mode flag so the Player AI Follower's reach
         // detector fires when this client closes within 60u of the

@@ -200,6 +200,12 @@ void RunTest() {
     const int8_t spawnRoomNum =
         (int8_t)CV(CVAR_ENHANCEMENT("AI.NavTest.SpawnPoint.RoomNum"), 0);
 
+    // Enable the NPC Follower CVar so its C++ tick runs. Without this
+    // the actor spawns but its tick is a no-op gated on this CVar —
+    // log 244 symptom where NPC Follower spawned at the spawn point
+    // and just stood there with no [FollowerNPC] state logs.
+    CVSet(CVAR_ENHANCEMENT("AI.FollowerNPC.Enabled"), 1);
+
     // ── 1. NPC Follower: spawn or relocate ────────────────────────
     Actor* npcFollower = Anchor::Instance != nullptr
         ? Anchor::Instance->GetFollowerNpcLocalActor()

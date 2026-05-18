@@ -1912,6 +1912,23 @@ const char* StateName(s32 s) {
 // ---------------------------------------------------------------------
 Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
                          float maxYDelta) {  // default in forward-decl at line 212
+    // Navigation Test Harness override (log 244 fix 2026-05-18): in
+    // test mode the Invader must target the local Link (= test
+    // conductor on the host client) regardless of distance, NOT the
+    // nearest player-aligned actor. Without this, on P1's host the
+    // picker selects P2's DummyPlayer (closer than P1 who climbed)
+    // and the Invader follows P2 around the spawn point instead of
+    // navigating to P1. Range / Y filters are bypassed — for a nav
+    // test the Invader should pursue P1 even if P1 is hundreds of
+    // units above. Test harness handles damage suppression via the
+    // combat-disable gate; the actor never actually swings.
+    if (AINavTest::IsRunActive() && play != nullptr) {
+        Player* localPlayer = GET_PLAYER(play);
+        if (localPlayer != nullptr && localPlayer->actor.update != nullptr) {
+            return &localPlayer->actor;
+        }
+    }
+
     Actor* candidate = PickHostileTargetForInvader(self, play);
     if (candidate == nullptr || candidate->update == nullptr) return nullptr;
     const float dx = candidate->world.pos.x - self->world.pos.x;
