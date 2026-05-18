@@ -120,9 +120,14 @@ constexpr float kAttackActiveEndFrame   = 12.0f;
 constexpr float kEngageAcquireDist  = 1000.0f;
 constexpr float kEngageBreakDist    = 1500.0f;
 constexpr float kEngageStrikeDist   = 70.0f;
+// Speed band matched to vanilla Link's max. R_RUN_SPEED_LIMIT in OoT
+// caps Link at ~9 units/tick at full sprint; pre-fix Invader had 12,
+// which made it visibly outrun Link in tests (user report 2026-05-18).
+// Walk and engage speeds use the same band as the locomotion FOLLOW
+// state (kInvWalkSpeed/kInvRunSpeed below).
 constexpr float kEngageWalkSpeed    = 6.0f;
 constexpr float kEngageRunDistance  = 150.0f;
-constexpr float kEngageRunSpeed     = 12.0f;
+constexpr float kEngageRunSpeed     = 9.0f;
 
 constexpr int   kBlockDurationMs        = 2000;
 constexpr float kBlockHpThresholdRatio  = 0.5f;
@@ -284,7 +289,7 @@ constexpr float kInvFollowIdleDist = 60.0f;
 // FOLLOW pursuit speeds. Same numerics as FollowerNPC's kRunSpeed /
 // kRunDistance.
 constexpr float kInvWalkSpeed   = 6.0f;
-constexpr float kInvRunSpeed    = 12.0f;
+constexpr float kInvRunSpeed    = 9.0f;  // tuned 2026-05-18 to match vanilla Link's R_RUN_SPEED_LIMIT
 constexpr float kInvRunDistance = 200.0f;
 // STUCK detection — no progress over this window triggers a one-tick
 // nudge. Same shape as FollowerNPC's kStuckCheckMs / kStuckMinProgress

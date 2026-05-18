@@ -200,32 +200,47 @@ void RunTest() {
     const int8_t spawnRoomNum =
         (int8_t)CV(CVAR_ENHANCEMENT("AI.NavTest.SpawnPoint.RoomNum"), 0);
 
-    // Enable the NPC Follower CVar so its C++ tick runs. Without this
-    // the actor spawns but its tick is a no-op gated on this CVar —
-    // log 244 symptom where NPC Follower spawned at the spawn point
-    // and just stood there with no [FollowerNPC] state logs.
-    CVSet(CVAR_ENHANCEMENT("AI.FollowerNPC.Enabled"), 1);
-
     // ── 1. NPC Follower: spawn or relocate ────────────────────────
-    Actor* npcFollower = Anchor::Instance != nullptr
-        ? Anchor::Instance->GetFollowerNpcLocalActor()
-        : nullptr;
-    if (npcFollower != nullptr && npcFollower->update != nullptr) {
-        // Relocate.
-        npcFollower->world.pos = spawnPos;
-        npcFollower->velocity.x = npcFollower->velocity.y = npcFollower->velocity.z = 0.0f;
-        SPDLOG_INFO("[NavTest] NPC Follower relocated to spawn point");
-    } else if (gEnFollowerId != 0) {
-        Actor* spawned = Actor_Spawn(
-            &gPlayState->actorCtx, gPlayState, gEnFollowerId,
-            spawnPos.x, spawnPos.y, spawnPos.z,
-            0, 0, 0, 0);
-        if (spawned == nullptr) {
-            SPDLOG_WARN("[NavTest] Actor_Spawn(gEnFollowerId) returned null");
-        } else {
-            SPDLOG_INFO("[NavTest] NPC Follower spawned at spawn point");
+    // Two cases:
+    //   (a) NPC Follower already alive (CVar was on from a prior test)
+    //       → teleport it back to the spawn point.
+    //   (b) NPC Follower not alive
+    //       → use the existing SetFollowerNpcActive + spawn-pos override
+    //         mechanism in Anchor.h so mFollowerNpcLocalActor tracking
+    //         + lifecycle hooks fire correctly. We CANNOT call
+    //         Actor_Spawn directly: the polling driver in
+    //         TickFollowerNpcCVar would see mFollowerNpcLocalActor==null
+    //         on the next frame (since our manual spawn doesn't populate
+    //         that field) and would auto-respawn a SECOND NPC at the
+    //         player's position. Log 245 symptom: NPC Follower appeared
+    //         at P1 instead of the spawn point.
+    //
+    // After spawn/relocate, set the CVar so the tick runs each frame.
+    // Setting CVar AFTER spawn is important: the polling driver's
+    // edge-detection then sees CVarLast=0, CVar=1 → spawn branch fires
+    // → SetFollowerNpcActive(true) is idempotent (returns immediately
+    // because actor is already alive). No double-spawn.
+    if (Anchor::Instance != nullptr) {
+        Actor* npcFollower = Anchor::Instance->GetFollowerNpcLocalActor();
+        if (npcFollower != nullptr && npcFollower->update != nullptr) {
+            // Relocate alive NPC.
+            npcFollower->world.pos  = spawnPos;
+            npcFollower->velocity.x = 0.0f;
+            npcFollower->velocity.y = 0.0f;
+            npcFollower->velocity.z = 0.0f;
+            SPDLOG_INFO("[NavTest] NPC Follower relocated to spawn point");
+        } else if (gEnFollowerId != 0) {
+            // Arm the spawn-pos override so SetFollowerNpcActive lands
+            // the actor at the spawn point instead of player pos.
+            Anchor::Instance->mFollowerNpcSpawnPosOverride    = true;
+            Anchor::Instance->mFollowerNpcSpawnPosOverridePos = spawnPos;
+            Anchor::Instance->mFollowerNpcSpawnPosOverrideYaw = 0;
+            Anchor::Instance->SetFollowerNpcActive(true);
+            SPDLOG_INFO("[NavTest] NPC Follower spawned at spawn point "
+                        "via SetFollowerNpcActive override");
         }
     }
+    CVSet(CVAR_ENHANCEMENT("AI.FollowerNPC.Enabled"), 1);
 
     // ── 2. AI Invader: spawn or relocate ──────────────────────────
     // Find an existing Invader in the scene (we don't track a pointer

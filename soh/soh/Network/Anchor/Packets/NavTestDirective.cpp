@@ -35,7 +35,12 @@ void Anchor::SendPacket_NavTestDirective(const std::string& directive,
                                           int8_t  spawnRoomNum,
                                           int     runIndex,
                                           int     reachedMs) {
-    if (!isConnected) return;
+    if (!isConnected) {
+        SPDLOG_WARN("[NavTestDirective] send skipped: not connected — P2 "
+                    "will NOT receive the RUN directive (single-client "
+                    "test). If running multi-client, check Anchor connection.");
+        return;
+    }
 
     nlohmann::json payload;
     payload["type"]            = NAV_TEST_DIRECTIVE;
@@ -60,8 +65,20 @@ void Anchor::SendPacket_NavTestDirective(const std::string& directive,
 void Anchor::HandlePacket_NavTestDirective(nlohmann::json payload) {
     const uint32_t senderClientId = payload.value("senderClientId", (uint32_t)0);
 
+    // Diagnostic — every packet received logs entry so we can confirm
+    // P2 received the RUN directive (log 245 user report: P2's AI
+    // Follower mode didn't engage; without this log it was impossible
+    // to tell whether the packet arrived).
+    SPDLOG_INFO("[NavTestDirective] RECEIVED packet from senderClientId={} "
+                "(my ownClientId={}); directive={}",
+                senderClientId, ownClientId,
+                payload.value("directive", std::string("(missing)")));
+
     // Ignore self-echoes.
-    if (senderClientId == ownClientId) return;
+    if (senderClientId == ownClientId) {
+        SPDLOG_INFO("[NavTestDirective] self-echo ignored");
+        return;
+    }
 
     const std::string directive = payload.value("directive", std::string("RUN"));
 
