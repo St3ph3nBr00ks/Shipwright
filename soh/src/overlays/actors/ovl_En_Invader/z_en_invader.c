@@ -144,6 +144,16 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
         if (hearts > 20) hearts = 20;
         this->health    = (s8)hearts;
         this->maxHealth = (s8)hearts;
+        // Diagnostic (log 241 follow-up): confirm at spawn time that
+        // the Invader actually got HP > 1. If `healthCapacity` is
+        // somehow 0 at spawn time, the clamp would still give 3 HP —
+        // a "dies in 1 hit" report means either this log shows HP=1
+        // (some other code path overwriting), or each AC_HIT decrements
+        // more than 1 (see drain block in EnInvader_Update).
+        LUSLOG_INFO("[Invader.health] init HP=%d maxHP=%d hearts=%d "
+                    "healthCapacity=%d", (int)this->health,
+                    (int)this->maxHealth, hearts,
+                    (int)gSaveContext.healthCapacity);
     }
 
     // Phase 4 — animation parity. LEDGE_HOIST state + fidget rotation
@@ -279,10 +289,20 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
     // Combat-AI variants will tune per-weapon damage values later.
     if (this->collider.base.acFlags & AC_HIT) {
         this->collider.base.acFlags &= ~AC_HIT;
+        const s8 hpBefore = this->actor.colChkInfo.health;
+        const u8 dmg      = this->actor.colChkInfo.damage;
         if (this->actor.colChkInfo.damage > 0) {
             this->actor.colChkInfo.health -= 1;
         }
         this->actor.colChkInfo.damage = 0;
+        // Diagnostic (log 241 follow-up): one-line damage trace so a
+        // "dies in 1 hit" report can be classified: is hpBefore < 3
+        // (HP regression), or are multiple hits landing in one tick
+        // (extremely unlikely), or is the drain working correctly and
+        // the player just hit 3+ times in the perceived "1 hit"?
+        LUSLOG_INFO("[Invader.damage] hit dmg=%d HP=%d -> %d",
+                    (int)dmg, (int)hpBefore,
+                    (int)this->actor.colChkInfo.health);
     }
 
     // Register AC for the next collision frame.
