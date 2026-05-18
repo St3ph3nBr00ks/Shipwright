@@ -7,6 +7,8 @@
 #include <atomic>
 #include <cmath>
 
+#include <spdlog/spdlog.h>       // SPDLOG_INFO — synthetic-flag diagnostic (Phase 2.5)
+
 #include "../../Anchor.h"        // Anchor::Instance->gameFrameCounter, MsToGameTicks
 #include "../ActorTrail.h"       // ActorTrail::GetInstance().ComputePathTo
 #include "../DistanceMath.h"     // AnchorDist::DistXZSq / Dist3DSq
@@ -169,6 +171,40 @@ NavOrDirectResult ChooseSubgoal(const Actor*         navigator,
     result.fallbackEngaged       = PathEmptyFallback::DirectYaw;  // sentinel; unused
     result.fallbackJustEngaged   = false;
     result.subgoalFlags          = navState.path.CurrentSubgoalFlags();
+
+    // ── Phase 2.5 diagnostic — synthetic flag visibility ──────────────
+    // Most path waypoints have flags=0 (plain walkable node from Layer 1
+    // direct LOS or Layer 3 BFS without synthetic edges). Non-zero flags
+    // indicate that BFS routed through a special edge:
+    //   0x0400 NODE_CLIMB_LADDER       0x4000 NODE_CLIMB_BOUNDARY
+    //   0x0800 NODE_CLIMB_VINE         0x8000 NODE_DROP_FROM_ABOVE
+    //   0x1000 NODE_CLIMB_DESIGNATED   0x00010000 NODE_REACHED_VIA_LEDGE_GRAB
+    //   0x2000 NODE_CLIMB_GENERIC      (plus possible future jump-anchor flag)
+    //
+    // Log emits ONLY on rising-edge into a non-zero flag. With AI Invader
+    // as the only consumer today, a single static suffices; later phases
+    // will key by navigator pointer or trail key.
+    //
+    // Purpose: determine whether jump-anchor edges actually appear in
+    // Invader paths (log 240 question). If no flag log includes a
+    // jump-anchor bit during a session where the Invader had to cross
+    // a gap, the BFS is not emitting them — root-cause is at the
+    // path-planner layer, not the consumer.
+    static uint32_t s_lastLoggedFlags = 0;
+    if (result.subgoalFlags != 0 && result.subgoalFlags != s_lastLoggedFlags) {
+        SPDLOG_INFO("[NavOrDirect] subgoalFlags=0x{:X} subgoal=({:.0f},{:.0f},{:.0f}) "
+                    "navigator.id={} (path waypoint carrying synthetic flag — "
+                    "BFS routed through a special edge)",
+                    result.subgoalFlags,
+                    result.subgoal.x, result.subgoal.y, result.subgoal.z,
+                    (int)navigator->id);
+        s_lastLoggedFlags = result.subgoalFlags;
+    } else if (result.subgoalFlags == 0 && s_lastLoggedFlags != 0) {
+        // Path transitioned BACK to plain walkable. Reset edge tracking
+        // so the next synthetic flag re-logs.
+        s_lastLoggedFlags = 0;
+    }
+
     return result;
 }
 
