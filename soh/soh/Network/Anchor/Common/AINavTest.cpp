@@ -13,6 +13,7 @@
 
 #include "../Anchor.h"
 #include "../../../cvar_prefixes.h"
+#include "../Common/NavCVars.h"   // AnchorNavCVars::k* — Nav Data Usage toggles
 
 extern "C" {
 #include "variables.h"
@@ -96,6 +97,29 @@ int CurrentRunElapsedMs() {
 }  // namespace
 
 // ── Public predicates ──────────────────────────────────────────────
+
+// Enable every toggle in the Anchor → "Nav Data Usage" section.
+// Called from RunTest (P1) AND the NAV_TEST_DIRECTIVE RUN handler
+// (P2). Without this, a fresh save / first-time test with default-off
+// nav CVars falls back to direct-yaw pursuit on all consumers —
+// defeats the harness's purpose.
+//
+// Mirrors the array in Menu.cpp:230-280 (kFollowerNavToggles). When
+// new toggles are added to that section, add them here too.
+void EnableAllNavDataUsageFeatures() {
+    CVSet(AnchorNavCVars::kEnabled, 1);
+    CVSet(AnchorNavCVars::kAiFollowerConsumer, 1);
+    CVSet(AnchorNavCVars::kActorTrail, 1);
+    CVSet(AnchorNavCVars::kRoomNavConsumer, 1);
+    CVSet(CVAR_ENHANCEMENT("RoomNavData.Enabled"), 1);
+    CVSet(CVAR_ENHANCEMENT("RoomNavData.PathBClimbDetection"), 1);
+    CVSet(AnchorNavCVars::kVerticalTeleport, 1);
+    CVSet(AnchorNavCVars::kEdgeAvoidance, 1);
+    SPDLOG_INFO("[NavTest] All 'Nav Data Usage' features enabled: "
+                "master/AiFollowerConsumer/ActorTrail/RoomNavConsumer/"
+                "RoomNavData.Enabled/PathBClimbDetection/VerticalTeleport/"
+                "EdgeAvoidance");
+}
 
 bool IsEnabled() {
     return CV(CVAR_ENHANCEMENT("AI.NavTest.Enabled"), 0) != 0;
@@ -199,6 +223,13 @@ void RunTest() {
     };
     const int8_t spawnRoomNum =
         (int8_t)CV(CVAR_ENHANCEMENT("AI.NavTest.SpawnPoint.RoomNum"), 0);
+
+    // Ensure every "Nav Data Usage" feature is on locally. Without this,
+    // a fresh save / first-time test with default-off CVars falls back
+    // to direct-yaw pursuit on P1's nav consumers (NPC Follower + AI
+    // Invader), defeating the harness's purpose. P2's RUN handler does
+    // the same enable for the Player AI Follower's nav consumer.
+    EnableAllNavDataUsageFeatures();
 
     // ── 1. NPC Follower: spawn or relocate ────────────────────────
     // Two cases:

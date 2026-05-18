@@ -140,6 +140,13 @@ void Anchor::HandlePacket_NavTestDirective(nlohmann::json payload) {
         // that didn't exist and AI Follower mode never engaged).
         CVarSetInteger(CVAR_ENHANCEMENT("AI.NavTest.Enabled"), 1);
         CVarSetInteger(CVAR_ENHANCEMENT("AI.NavTest.CombatDisabled"), 1);
+
+        // Enable every "Nav Data Usage" feature locally so the Player
+        // AI Follower's nav substrate consumer runs. Without this,
+        // default-off CVars on P2 mean the AI Follower falls back to
+        // legacy direct-yaw pursuit even after SetFollowerActive(true).
+        AINavTest::EnableAllNavDataUsageFeatures();
+
         Anchor::Instance->SetFollowerActive(true);
 
         // Latch the P2 test-mode flag so the Player AI Follower's reach

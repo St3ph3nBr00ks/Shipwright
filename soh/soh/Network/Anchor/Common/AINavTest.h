@@ -76,6 +76,14 @@ bool IsP2InTestMode();
 // Latches the test-mode flag with a wall-clock expiry of 120s.
 void NotifyP2TestStarted();
 
+// Enable every toggle in the Anchor → "Nav Data Usage" menu section
+// (master + AiFollowerConsumer + ActorTrail + RoomNavConsumer +
+// RoomNavData.Enabled + RoomNavData.PathBClimbDetection +
+// VerticalTeleport + EdgeAvoidance). Called from RunTest on P1's
+// local AND from the NAV_TEST_DIRECTIVE RUN handler on P2, so both
+// clients have the nav substrate live before navigation begins.
+void EnableAllNavDataUsageFeatures();
+
 // 3D 60u completion criterion. Returns true if `actorPos` is within
 // the configured threshold of `targetPos`. Used by all three actors'
 // completion checks for consistent semantics.
