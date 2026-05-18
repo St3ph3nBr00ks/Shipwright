@@ -51,9 +51,18 @@ void Anchor::SendPacket_NavTestDirective(const std::string& directive,
     payload["spawnRoomNum"]    = (int)spawnRoomNum;
     payload["runIndex"]        = runIndex;
     payload["reachedMs"]       = reachedMs;
-    payload["targetClientId"]  = ownClientId;  // RUN: I am the target P2 follows
-                                                // REACHED: I am the reporter; P1 looks
-                                                // up reachedMs
+
+    // NOTE: deliberately NOT setting "targetClientId" — the Anchor relay
+    // treats that field as a unicast destination, so any value (including
+    // ownClientId) would route ONLY to that client, not broadcast. RUN
+    // needs to reach all peers (P2 + any future N-th client) so they
+    // can teleport + enable AI Follower mode. REACHED needs to reach
+    // P1 (the test conductor), which works fine because P1 is just a
+    // peer in the room and gets the broadcast.
+    // Log 246 bug: previously set targetClientId = ownClientId thinking
+    // it identified the sender. Result: P1 unicast the packet to itself,
+    // P2 never received it. User had to manually toggle the AI Follower
+    // menu checkbox.
 
     SPDLOG_INFO("[NavTestDirective] Sending directive='{}' runIndex={} "
                 "spawnPos=({:.0f},{:.0f},{:.0f}) reachedMs={}",
