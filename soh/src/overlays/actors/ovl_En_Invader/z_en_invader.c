@@ -272,6 +272,20 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
                             10.0f /* wallCheckRadius */,
                             50.0f /* ceilingCheckHeight */, 4 /* flags */);
 
+    // Anchor lock-on focus point to the Invader's actual torso position
+    // each frame. Without this, actor->focus.pos stays at its init-time
+    // value (0,0,0 or stale spawn coords) and the Z-target cursor sticks
+    // to the spawn point as the Invader walks/climbs/runs away.
+    //
+    // Y offset = 40u puts the focus on the Invader's torso (Link skel
+    // at scale 0.01 is ~40-50u tall). Vanilla Player computes its own
+    // focus.pos via Player_Update; the Invader bypasses Player_Update
+    // so we set it manually here.
+    //
+    // Fixes GitHub issue #224. Mirror this in NPC Follower /
+    // DummyPlayer flows when their lock-on flags get enabled (see #225).
+    Actor_SetFocus(&this->actor, 40.0f);
+
     // Body collider — update cylinder pos from world.pos, then drain
     // AC_HIT and register for the next collision frame.
     Collider_UpdateCylinder(&this->actor, &this->collider);
