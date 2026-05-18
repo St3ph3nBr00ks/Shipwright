@@ -799,7 +799,11 @@ static constexpr float kEnterIdle   = 50.0f;
 // always sprint.
 static constexpr float kRunDistance = 250.0f;  // beyond this, run instead of walk
 static constexpr float kWalkSpeed   = 6.0f;
-static constexpr float kRunSpeed    = 12.0f;
+// Tuned 2026-05-18 (was 12.0): matches vanilla Link's R_RUN_SPEED_LIMIT
+// (800 → 8.0 units/tick). 12.0 made the NPC Follower visibly outrun
+// Link in test, which felt wrong — companion shouldn't sprint faster
+// than the leader. User report from harness log 250.
+static constexpr float kRunSpeed    = 8.0f;
 
 // Phase 5 — substrate path consumption + STUCK recovery.
 //
