@@ -200,10 +200,18 @@ private:
     bool     mHasLastSpawn      = false;  // false until first OnSpawnExecuted
     int16_t  mLastSpawnSceneNum = -1;     // scene of last spawn; gates DebugDraw render
 
-    // Step 12 diagnostic — throttles per-tick rejection-reason SPDLOGs
-    // to ~once per 5s at 20fps. Mirrors TestDescriptor's pattern;
-    // gated by gEnhancements.AI.Director.LogProposals.
+    // Step 12 diagnostic — throttles per-tick rejection-reason SPDLOGs.
+    // Two layers:
+    //   1. Edge-trigger: log only when the BAIL GATE changes. Saves ~99%
+    //      of log volume when a descriptor is parked on the same gate
+    //      (e.g. "target save not loaded" for the entire startup window).
+    //   2. Heartbeat throttle: even on a stable gate, re-log once per
+    //      ~30s as a "still here" diagnostic.
+    // mLastBailGateId values: -1 = no bail / OFFERED last call; 1..10 =
+    // one of the gates in ProposeSpawn (see implementation for table).
+    // Gated by gEnhancements.AI.Director.LogProposals.
     int      mTicksSinceLog    = 0;
+    int      mLastBailGateId   = -1;
 
     // --- Phase 1 helpers ---
 

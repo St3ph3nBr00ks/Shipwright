@@ -272,21 +272,39 @@ bool InvaderDescriptor::IsEnabled() const {
 
 std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& director,
                                                           const SessionView& view) {
-    // Throttled diagnostic logging — gated by LogProposals CVar AND
-    // throttle counter so a stuck descriptor logs once per ~5s.
+    // Diagnostic logging — edge-triggered + heartbeat-throttled. A bail
+    // gate logs ONCE when the descriptor enters it, then stays silent
+    // until either (a) the gate changes (different bail reason this
+    // tick) or (b) the heartbeat throttle elapses (~30s as a "still
+    // here" reassurance). On a successful OFFERED proposal, the gate
+    // tracker resets so the next bail re-logs.
+    //
+    // Gate IDs (kept stable across versions for log greppability):
+    //   1 = live-count cap            6 = boss room with live boss
+    //   2 = no target player          7 = team not yet settled in scene
+    //   3 = target save not loaded    8 = cooldown
+    //   4 = player in cutscene        9 = PickSpawnPosition failed
+    //   5 = scene blacklist          10 = gEnInvaderId not allocated
     ++mTicksSinceLog;
-    const bool shouldLog = (mTicksSinceLog >= 100) && IsLoggingProposals();
+    const bool heartbeat = (mTicksSinceLog >= 1800);  // ~30s @ 60fps unlocked, ~90s @ 20fps
+    int currentGate = -1;
+    auto shouldLogGate = [&](int gate) -> bool {
+        currentGate = gate;
+        if (!IsLoggingProposals()) return false;
+        return (gate != mLastBailGateId) || heartbeat;
+    };
     auto markLog = [&]() { mTicksSinceLog = 0; };
 
-    // Predicate 1: live-count cap (plan §7.1 #2).
+    // Predicate 1: live-count cap (plan §7.1 #2). Gate ID = 1.
     const int liveCount = director.GetLiveCount(GetDescriptorId());
     const int maxAlive = ReadMaxAlive();
     if (liveCount >= maxAlive) {
-        if (shouldLog) {
+        if (shouldLogGate(1)) {
             SPDLOG_INFO("[InvaderDescriptor] no proposal: liveCount={} cap={}",
                         liveCount, maxAlive);
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
 
@@ -296,63 +314,69 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
     // the same role for proposal-position purposes).
     const PlayerSnapshot* target = view.MostIsolatedPlayer();
     if (target == nullptr) {
-        if (shouldLog) {
+        if (shouldLogGate(2)) {
             SPDLOG_INFO("[InvaderDescriptor] no proposal: no target player "
                         "(view.players={})", view.players.size());
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
 
     if (!target->isSaveLoaded) {
-        if (shouldLog) {
+        if (shouldLogGate(3)) {
             SPDLOG_INFO("[InvaderDescriptor] no proposal: target save not loaded "
                         "(clientId={})", target->clientId);
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
 
     // Predicate 6: no team member in a cutscene (plan §7.1 #7).
     // Invaders should not aggro during scripted sequences.
     if (view.AnyPlayerInCutscene()) {
-        if (shouldLog) {
+        if (shouldLogGate(4)) {
             SPDLOG_INFO("[InvaderDescriptor] no proposal: a player is in cutscene");
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
 
-    // Predicate 4: scene blacklist (plan §7.1 #4).
+    // Predicate 4: scene blacklist (plan §7.1 #4). Gate ID = 5.
     if (IsSceneFlaggedNoInvaders(target->sceneNum)) {
-        if (shouldLog) {
+        if (shouldLogGate(5)) {
             SPDLOG_INFO("[InvaderDescriptor] no proposal: scene={} flagged noInvaders",
                         (int)target->sceneNum);
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
 
-    // Predicate 5: boss-room-with-live-boss (plan §7.1 #5).
+    // Predicate 5: boss-room-with-live-boss (plan §7.1 #5). Gate ID = 6.
     // Stub returns false at step 12 — never blocks. Step 13 wires it.
     if (IsBossRoomWithLiveBoss(target->sceneNum, target->roomNum)) {
-        if (shouldLog) {
+        if (shouldLogGate(6)) {
             SPDLOG_INFO("[InvaderDescriptor] no proposal: boss room with live boss "
                         "(scene={} room={})",
                         (int)target->sceneNum, (int)target->roomNum);
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
 
-    // Predicate 8: team has been in scene long enough (plan §7.1 #8).
+    // Predicate 8: team has been in scene long enough (plan §7.1 #8). Gate ID = 7.
     // Stub returns true at step 12 — never blocks. Step 13 wires it.
     if (!AllPlayersSettledInScene(view, target->sceneNum)) {
-        if (shouldLog) {
+        if (shouldLogGate(7)) {
             SPDLOG_INFO("[InvaderDescriptor] no proposal: not yet 5s in scene "
                         "(scene={})", (int)target->sceneNum);
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
 
@@ -361,7 +385,7 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
     const int cooldownMs = ReadCooldownMs();
     if (!director.MsCooldownElapsed(target->sceneNum, target->roomNum,
                                     GetDescriptorId(), cooldownMs)) {
-        if (shouldLog) {
+        if (shouldLogGate(8)) {
             const int framesSince = director.GetFramesSinceLastSpawn(
                 target->sceneNum, target->roomNum, GetDescriptorId());
             SPDLOG_INFO("[InvaderDescriptor] no proposal: cooldown "
@@ -370,22 +394,24 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
                         framesSince, cooldownMs);
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
 
     // Step 13: nav-aware spawn placement. Picks a walkable graph
     // node ≥200u from any team member. Returns nullopt if RoomNav-
     // Data isn't loaded for this room, or if no candidate passed the
-    // filters after sampling.
+    // filters after sampling. Gate ID = 9.
     auto pickedPos = PickSpawnPosition(target->sceneNum, target->roomNum, view);
     if (!pickedPos.has_value()) {
-        if (shouldLog) {
+        if (shouldLogGate(9)) {
             SPDLOG_INFO("[InvaderDescriptor] no proposal: PickSpawnPosition "
                         "found no candidate (scene={} room={}) — nav graph "
                         "absent or all sampled nodes failed filters",
                         (int)target->sceneNum, (int)target->roomNum);
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
 
@@ -400,11 +426,12 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
     // fires before that, gEnInvaderId is still 0 and Actor_Spawn
     // would reject it.
     if (gEnInvaderId == 0) {
-        if (shouldLog) {
+        if (shouldLogGate(10)) {
             SPDLOG_WARN("[InvaderDescriptor] no proposal: gEnInvaderId not yet "
                         "allocated (ActorDB::AddBuiltInCustomActors hasn't run?)");
             markLog();
         }
+        mLastBailGateId = currentGate;
         return {};
     }
     SpawnProposal p;
@@ -434,6 +461,7 @@ std::vector<SpawnProposal> InvaderDescriptor::ProposeSpawn(const Director& direc
                     liveCount, maxAlive, cooldownMs);
     }
     markLog();
+    mLastBailGateId = -1;  // proposal offered — next bail (whatever gate) re-logs
     return { p };
 }
 
