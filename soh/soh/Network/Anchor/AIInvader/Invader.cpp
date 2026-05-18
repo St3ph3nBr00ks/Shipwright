@@ -1284,29 +1284,58 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
         // (fast-path was firing), now isn't. NPC is still in CLIMBING.
         // Trigger LEDGE_HOIST to the active anchor's topPos so NPC
         // mantles up. Same shape as FollowerNPC.cpp:1717-1742.
+        //
+        // MAX-Y-DELTA GATE (log 241 fix 2026-05-18): the original branch
+        // unconditionally snapped to anchor.topPos. On tall vine walls
+        // (e.g. log 241's 600u-tall vine wall in Deku Tree room 0 with
+        // anchor.topPos.y=1000), this teleported the Invader hundreds
+        // of units up the moment the player hopped off the wall —
+        // visible as the Invader "disappearing" mid-climb.
+        //
+        // The branch is intended for "player mantled the rim just above
+        // me" cases — typical Y delta under 50u. Skip when topPos is
+        // farther overhead; the normal climb-cell path consumer will
+        // continue carrying the Invader up the anchor at kInvClimbSpeedY,
+        // and the subgoal-driven mantle-out at the rim will fire normally
+        // when the Invader actually reaches it.
+        constexpr float kHoistOverRimMaxYDelta = 50.0f;
         if (!targetIsClimbing &&
             sLocalInvNav.targetWasClimbingPrevTick &&
             sLocalInvNav.activeClimbAnchor != nullptr) {
             const Vec3f topPos = sLocalInvNav.activeClimbAnchor->topPos;
-            SPDLOG_INFO("[Invader] CLIMBING→LEDGE_HOIST(ground) "
-                        "(target hoisted over rim) anchor.topPos="
-                        "({:.0f},{:.0f},{:.0f}) NPC at ({:.0f},{:.0f},{:.0f})",
-                        topPos.x, topPos.y, topPos.z,
-                        a->world.pos.x, a->world.pos.y, a->world.pos.z);
-            this_->hoistContext   = (s8)INV_HOIST_CONTEXT_GROUND;
-            this_->hoistTargetPos = topPos;
-            this_->hoistEntryYaw  = Math_Atan2S(topPos.z - a->world.pos.z,
-                                                 topPos.x - a->world.pos.x);
-            a->world.pos.x = topPos.x;
-            a->world.pos.z = topPos.z;
-            sLocalInvHoistStartPos = a->world.pos;
-            sLocalInvNav.navState.path.Reset();
-            sLocalInvNav.activeClimbAnchor = nullptr;
-            sLocalInvNav.targetWasClimbingPrevTick = false;
-            this_->state = EN_INVADER_STATE_LEDGE_HOIST;
-            this_->stopAnimPlaying = 0;
-            a->speedXZ = 0.0f;
-            return;
+            const float dy     = topPos.y - a->world.pos.y;
+            if (dy > kHoistOverRimMaxYDelta) {
+                // Anchor's rim is too far above to be a "just hoisted
+                // over" scenario. Clear the prev-tick latch and fall
+                // through to subgoal-driven pursuit.
+                SPDLOG_INFO("[Invader] CLIMBING: skip target-hoisted snap "
+                            "(rim too far: Δy={:.0f}u > {:.0f}u; "
+                            "anchor.topPos.y={:.0f} NPC.y={:.0f})",
+                            dy, kHoistOverRimMaxYDelta,
+                            topPos.y, a->world.pos.y);
+                sLocalInvNav.targetWasClimbingPrevTick = false;
+            } else {
+                SPDLOG_INFO("[Invader] CLIMBING→LEDGE_HOIST(ground) "
+                            "(target hoisted over rim) anchor.topPos="
+                            "({:.0f},{:.0f},{:.0f}) NPC at ({:.0f},{:.0f},{:.0f}) Δy={:.0f}u",
+                            topPos.x, topPos.y, topPos.z,
+                            a->world.pos.x, a->world.pos.y, a->world.pos.z,
+                            dy);
+                this_->hoistContext   = (s8)INV_HOIST_CONTEXT_GROUND;
+                this_->hoistTargetPos = topPos;
+                this_->hoistEntryYaw  = Math_Atan2S(topPos.z - a->world.pos.z,
+                                                     topPos.x - a->world.pos.x);
+                a->world.pos.x = topPos.x;
+                a->world.pos.z = topPos.z;
+                sLocalInvHoistStartPos = a->world.pos;
+                sLocalInvNav.navState.path.Reset();
+                sLocalInvNav.activeClimbAnchor = nullptr;
+                sLocalInvNav.targetWasClimbingPrevTick = false;
+                this_->state = EN_INVADER_STATE_LEDGE_HOIST;
+                this_->stopAnimPlaying = 0;
+                a->speedXZ = 0.0f;
+                return;
+            }
         }
 
         sLocalInvNav.targetWasClimbingPrevTick = targetIsClimbing;
