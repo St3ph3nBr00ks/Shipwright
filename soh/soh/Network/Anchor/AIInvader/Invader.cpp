@@ -291,6 +291,12 @@ constexpr float kInvRunDistance = 200.0f;
 // the "find route around stairs" goal that the friendly follower does).
 constexpr int   kInvStuckCheckMs    = 3000;
 constexpr float kInvStuckMinProgress = 20.0f;
+
+// Log 242 diagnostic — throttle for the FOLLOW progress snapshot.
+// 5s is long enough that a healthy FOLLOW tick doesn't spam the log
+// but short enough that a "stuck for 34s" symptom produces 6-7 data
+// points to diagnose against.
+constexpr int   kInvFollowProgressLogMs = 5000;
 constexpr float kInvStuckNudgeDist   = 30.0f;
 // G10 leash — 3D distance threshold + timeout. The Invader can be
 // far from the target; we use a longer leash than FollowerNPC's
@@ -355,6 +361,14 @@ struct LocalInvNavState {
     // lastPathRefreshFrame / lastPathTargetPos fields with a NavState
     // struct so AnchorAI::ChooseSubgoal can consume it directly.
     AnchorAI::NavState navState;
+
+    // Log 242 diagnostic — throttled FOLLOW progress snapshot. Logs a
+    // one-line state report every kInvFollowProgressLogMs while the
+    // Invader is in FOLLOW. Tells us the Invader's pos, target pos,
+    // path size + cursor, distance-to-subgoal, distance-to-target, and
+    // speedXZ — enough to classify "stuck" symptoms (path stale vs
+    // empty vs cursor-not-advancing vs target-out-of-tier).
+    uint64_t lastFollowProgressLogFrame = 0;
 
     // ── Nav-parity Phase B — CLIMBING anchor cache ──────────────────
     // Active anchor during a CLIMBING run so the handler doesn't
@@ -840,6 +854,13 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     if (target == nullptr) {
         // Lost target. Hand off to IDLE — the dispatcher's next tick
         // re-runs TryEngageCombat / TickIDLE which will re-scan.
+        // Log 242 diagnostic: previously silent; surface so we can tell
+        // when a "stuck in FOLLOW" symptom is actually "fell into IDLE
+        // because the picker rejected the target this tick" (e.g. dy
+        // exceeded kRangedYFilter, target out of kInvFollowEngageDist).
+        SPDLOG_INFO("[Invader] FOLLOW→IDLE (target lost — picker returned "
+                    "nullptr; range={:.0f}u y-filter={:.0f}u)",
+                    kInvFollowEngageDist, kRangedYFilter);
         this_->state = EN_INVADER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalInvNav.lastTarget = nullptr;
@@ -995,9 +1016,45 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     // Measure against the actual target (not the subgoal) so the
     // re-entry only fires when we're truly close to the hostile.
     if (distSq <= kInvFollowIdleDist * kInvFollowIdleDist) {
+        // Log 242 diagnostic: this transition was previously silent.
+        // Distance is XZ-only — if the target is directly below/above
+        // the Invader (huge Y delta but small XZ), this fires even
+        // though the Invader can't actually engage. Surfaces "stuck"
+        // symptoms where Invader is in IDLE next to/above/below the
+        // player but no combat tier matches.
+        SPDLOG_INFO("[Invader] FOLLOW→IDLE (arrived: XZ dist={:.0f}u, "
+                    "Δy={:+.0f}u target.y={:.0f} NPC.y={:.0f})",
+                    std::sqrt(distSq),
+                    targetPos.y - a->world.pos.y,
+                    targetPos.y, a->world.pos.y);
         this_->state = EN_INVADER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalInvNav.navState.path.Reset();
+        return;
+    }
+
+    // Log 242 diagnostic — throttled FOLLOW progress snapshot. Fires
+    // every kInvFollowProgressLogMs ms. Gives enough state to classify
+    // a "stuck for N seconds" symptom: path size + cursor say whether
+    // BFS is returning anything, distToSubgoal says whether the cursor
+    // would advance, distToTarget says whether the Invader is closing.
+    const int progressLogTicks = Anchor::Instance->MsToGameTicks(kInvFollowProgressLogMs);
+    if (progressLogTicks > 0 &&
+        curFrame >= sLocalInvNav.lastFollowProgressLogFrame + (uint64_t)progressLogTicks) {
+        const float distToSubgoal = std::sqrt(
+            Dist2DSq(a->world.pos, nav.subgoal));
+        SPDLOG_INFO("[Invader.follow] pos=({:.0f},{:.0f},{:.0f}) "
+                    "target=({:.0f},{:.0f},{:.0f}) path.size={} path.idx={} "
+                    "distToSubgoal={:.0f}u distToTarget={:.0f}u speedXZ={:.1f} "
+                    "usingNavMesh={} fallback={}",
+                    a->world.pos.x, a->world.pos.y, a->world.pos.z,
+                    targetPos.x, targetPos.y, targetPos.z,
+                    (int)sLocalInvNav.navState.path.waypoints.size(),
+                    (int)sLocalInvNav.navState.path.cursorIdx,
+                    distToSubgoal, dist, a->speedXZ,
+                    nav.usingNavMesh ? "yes" : "no",
+                    (int)nav.fallbackEngaged);
+        sLocalInvNav.lastFollowProgressLogFrame = curFrame;
     }
 }
 
