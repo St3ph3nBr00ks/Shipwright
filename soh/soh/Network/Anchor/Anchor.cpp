@@ -425,6 +425,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_FollowerNpcState(payload);
             else if (packetType == FOLLOWER_NPC_DESPAWN)
                 HandlePacket_FollowerNpcDespawn(payload);
+            else if (packetType == NAV_TEST_DIRECTIVE)
+                HandlePacket_NavTestDirective(payload);
             else if (packetType == DISABLE_ANCHOR)
                 HandlePacket_DisableAnchor(payload);
             else if (packetType == ENTRANCE_DISCOVERED)

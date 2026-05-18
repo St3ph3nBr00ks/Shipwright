@@ -1027,6 +1027,7 @@ class Anchor : public Network {
     inline static const std::string FOLLOWER_NPC_SPAWN   = "FOLLOWER_NPC_SPAWN";
     inline static const std::string FOLLOWER_NPC_STATE   = "FOLLOWER_NPC_STATE";
     inline static const std::string FOLLOWER_NPC_DESPAWN = "FOLLOWER_NPC_DESPAWN";
+    inline static const std::string NAV_TEST_DIRECTIVE   = "NAV_TEST_DIRECTIVE";
     inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
     inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
     inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
@@ -1527,6 +1528,18 @@ class Anchor : public Network {
     void HandlePacket_FollowerNpcState(nlohmann::json payload);
     void SendPacket_FollowerNpcDespawn(uint32_t netId, uint8_t reason);
     void HandlePacket_FollowerNpcDespawn(nlohmann::json payload);
+
+    // NAV_TEST_DIRECTIVE — Navigation Test Harness coordination packet.
+    // Plan: Claude/Plans/ai_nav_test_harness_plan.md §4.2.
+    // Single send method handles both "RUN" (P1→P2) and "REACHED"
+    // (P2→P1) directives via the `directive` field.
+    void SendPacket_NavTestDirective(const std::string& directive,
+                                      const Vec3f& spawnPos,
+                                      int16_t spawnSceneNum,
+                                      int8_t  spawnRoomNum,
+                                      int     runIndex,
+                                      int     reachedMs);
+    void HandlePacket_NavTestDirective(nlohmann::json payload);
 
     // Per-tick driver for Phase 3 STATE broadcasts. Called from
     // OnGameFrameUpdate after TickFollowerNpcCVar. Cheap no-op when

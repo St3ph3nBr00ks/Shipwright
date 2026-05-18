@@ -43,6 +43,7 @@
 #include "soh/Network/Anchor/Common/PlayerLookup.h"  // PickHostileTargetForInvader (Agent 4)
 #include "soh/Network/Anchor/Common/ActorTrail.h"    // Nav-parity Phase A: substrate path consumption
 #include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 2: shared substrate-path helper
+#include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
 #include "soh/cvar_prefixes.h"
@@ -1009,6 +1010,14 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
         }
         sLocalInvNav.stuckCheckPos       = a->world.pos;
         sLocalInvNav.lastStuckCheckFrame = curFrame;
+    }
+
+    // Navigation Test Harness reach reporter. Uses the harness's 3D 60u
+    // criterion (NOT the XZ-only IDLE distance below — XZ-only false-
+    // positives when target is above/below). One-shot per run.
+    if (AINavTest::IsRunActive() &&
+        AINavTest::ReachedTarget(a->world.pos, targetPos)) {
+        AINavTest::ReportAIInvaderReach();
     }
 
     // Transition: arrived at target (IDLE re-entry). Combat states
@@ -2364,6 +2373,11 @@ void TickSTANDBY(EnInvader* this_, PlayState* play, const Vec3f& targetHintPos) 
 // Tier-ordered engagement check. Mirrors FollowerNPC's TryEngageCombat
 // but targets are Players (hostile) instead of enemies (friendly).
 bool TryEngageCombat(EnInvader* this_, PlayState* play) {
+    // Navigation Test Harness combat-disable gate. When the harness is
+    // running with combat disabled, all engagement tiers short-circuit
+    // so the locomotion trace stays clean.
+    if (AINavTest::IsCombatDisabled()) return false;
+
     // Eligible from non-combat states only. Combat states stay in
     // their own handlers; STANDBY is eligible (combat-to-combat
     // re-engage) so a STANDBY→ATTACK chain can happen the moment

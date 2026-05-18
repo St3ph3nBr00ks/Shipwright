@@ -1,11 +1,50 @@
 #include "SohMenu.h"
 #include "SohGui.hpp"
 
+#include "soh/Network/Anchor/Common/AINavTest.h"
+
+#include <imgui.h>
+
 extern "C" {
 extern PlayState* gPlayState;
 }
 
 void WarpPointsWidget(WidgetInfo& info);
+
+// AI Diagnostics — Navigation Test Harness statistics widget. Custom
+// renderer displays per-actor stats (count, min, max, mean, median).
+static void NavTestStatsWidget(WidgetInfo& info) {
+    using AINavTest::Stats;
+    const auto& history = AINavTest::GetRunHistory();
+    ImGui::TextUnformatted("Run history:");
+    ImGui::Text("  Total runs: %d", (int)history.size());
+
+    auto renderRow = [](const char* name, Stats s) {
+        if (s.count == 0) {
+            ImGui::Text("  %s: no completions", name);
+        } else {
+            ImGui::Text("  %s: count=%d  min=%dms  max=%dms  mean=%dms  median=%dms",
+                        name, s.count, s.min, s.max, s.mean, s.median);
+        }
+    };
+    renderRow("NPC Follower", AINavTest::ComputeNpcFollowerStats());
+    renderRow("AI Invader  ", AINavTest::ComputeAIInvaderStats());
+    renderRow("AI Follower ", AINavTest::ComputeAIFollowerStats());
+
+    if (!history.empty()) {
+        const auto& last = history.back();
+        ImGui::Separator();
+        ImGui::TextUnformatted("Last run:");
+        auto fmtMs = [](int ms) {
+            return ms >= 0 ? std::to_string(ms) + "ms" : std::string("(not reached)");
+        };
+        ImGui::Text("  NPC Follower: %s", fmtMs(last.npcFollowerMs).c_str());
+        ImGui::Text("  AI Invader:   %s", fmtMs(last.aiInvaderMs).c_str());
+        ImGui::Text("  AI Follower:  %s", fmtMs(last.aiFollowerMs).c_str());
+        ImGui::Text("  Status:       %s",
+                    last.completedOrDNF ? "Completed / DNF" : "In progress");
+    }
+}
 
 namespace SohGui {
 
@@ -326,6 +365,78 @@ void SohMenu::AddMenuDevTools() {
         .WindowName("GfxDebugger##SoH")
         .HideInSearch(true)
         .Options(WindowButtonOptions().Tooltip("Enables the separate Gfx Debugger Window."));
+
+    // AI Diagnostics — Navigation Test Harness.
+    // Plan: Claude/Plans/ai_nav_test_harness_plan.md
+    path.sidebarName = "AI Diagnostics";
+    AddSidebarEntry("Dev Tools", path.sidebarName, 1);
+
+    AddWidget(path, "Navigation Test Harness", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Enable Navigation Test Harness", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("AI.NavTest.Enabled"))
+        .Options(CheckboxOptions().Tooltip(
+            "Master gate for the Navigation Test Harness. When enabled, "
+            "AI Invader / NPC Follower / Player AI Follower honor the "
+            "harness's combat-disable + reach-detection logic. "
+            "Disable when not testing — vanilla AI resumes."));
+
+    AddWidget(path, "Disable Combat for AI Actors", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("AI.NavTest.CombatDisabled"))
+        .Options(CheckboxOptions()
+                     .Tooltip("When the harness is enabled, gate the engagement "
+                              "tier dispatchers on all three AI actors so "
+                              "ATTACK / RANGED_ATTACK / BLOCK never fire. "
+                              "Keeps the locomotion trace clean.")
+                     .DefaultValue(true));
+
+    AddWidget(path, "Include AI Follower (P2)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("AI.NavTest.IncludeAIFollower"))
+        .Options(CheckboxOptions()
+                     .Tooltip("Broadcast NAV_TEST_DIRECTIVE to P2 on Run Test "
+                              "(P2 teleports to spawn + enables AI Follower mode). "
+                              "Disable for single-client tests.")
+                     .DefaultValue(true));
+
+    AddWidget(path, "Set Spawn Point at Player Position", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip(
+            "Captures the player's current position + scene + room as "
+            "the spawn point for AI test runs."))
+        .Callback([](WidgetInfo& info) {
+            AINavTest::SetSpawnPointAtPlayer(gPlayState);
+        });
+
+    AddWidget(path, "Run Test", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip(
+            "Spawn or relocate NPC Follower + AI Invader at the spawn "
+            "point, broadcast RUN to P2 (if Include AI Follower is on), "
+            "and start the run timer. Press again to start a new run "
+            "(actors are relocated, not respawned)."))
+        .Callback([](WidgetInfo& info) {
+            AINavTest::RunTest();
+        });
+
+    AddWidget(path, "Kill All Enemies in Current Room", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip(
+            "Calls Actor_Kill on every ACTORCAT_ENEMY actor in the "
+            "current room EXCEPT AI Invader instances (which are kept "
+            "alive as test agents)."))
+        .Callback([](WidgetInfo& info) {
+            AINavTest::KillAllEnemiesInRoom(gPlayState);
+        });
+
+    AddWidget(path, "Statistics", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "NavTest Stats", WIDGET_CUSTOM)
+        .CustomFunction(NavTestStatsWidget)
+        .HideInSearch(true);
+
+    AddWidget(path, "Clear Run History", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip(
+            "Resets the run history vector. Statistics display shows "
+            "fresh data after the next Run Test."))
+        .Callback([](WidgetInfo& info) {
+            AINavTest::ClearRunHistory();
+        });
 }
 
 } // namespace SohGui

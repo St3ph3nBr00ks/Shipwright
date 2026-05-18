@@ -20,6 +20,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/AIFollowerNPC/FollowerNPC.h"
 #include "soh/Network/Anchor/Common/ActorTrail.h"     // Phase 5: substrate path consumption
+#include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
 #include "soh/cvar_prefixes.h"
@@ -1096,6 +1097,13 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 
     // ---- Transition: arrived at leader -----------------------------
+    // Navigation Test Harness reach reporter — fires when NPC reaches
+    // leader within the harness's 3D 60u criterion. One-shot per run.
+    if (AINavTest::IsRunActive() &&
+        AINavTest::ReachedTarget(a->world.pos, leaderPos)) {
+        AINavTest::ReportNpcFollowerReach();
+    }
+
     // Measure against effectiveTarget (which redirects to anchor topPos
     // while leader is climbing). Without this, NPC at the wall base
     // sees small XZ distance to climbing-leader's XZ and enters IDLE
@@ -2473,6 +2481,7 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 // Returns true if engaged.
 bool TryEngageCombat(EnFollower* this_, PlayState* play) {
     if (FollowerNpcInvulnerable()) return false;  // gated on same toggle as damage
+    if (AINavTest::IsCombatDisabled()) return false;  // Navigation Test Harness
     if (this_->state != EN_FOLLOWER_STATE_IDLE   &&
         this_->state != EN_FOLLOWER_STATE_FOLLOW &&
         this_->state != EN_FOLLOWER_STATE_STANDBY) {

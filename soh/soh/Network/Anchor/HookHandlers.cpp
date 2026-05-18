@@ -8,6 +8,7 @@
 #include "Common/ItemEligibility.h"   // CanPlayerCollectItem00 (#193 Phase 0)
 #include "Common/PauseLinkBuffer.h"   // Anchor_IsDrawingPauseLink (#182 follow-up)
 #include "AIFollowerNPC/FollowerNPC.h" // Anchor_GetCurrentlyDrawingFollowerNpc (NPC color fix)
+#include "Common/AINavTest.h"          // Navigation Test Harness — Tick() driver
 #include "AIInvader/Invader.h"          // Anchor_GetCurrentlyDrawingInvader (black-tint color fix)
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
@@ -1067,6 +1068,10 @@ void Anchor::RegisterHooks() {
         // an unconditional ShipInit hook so the NPC works in single-
         // player AND multiplayer.
         Anchor::Instance->TickFollowerNpcStateBroadcast();
+
+        // Navigation Test Harness — DNF timeout + run-complete bookkeeping.
+        // Tick is cheap (no-op when harness disabled or no run active).
+        AINavTest::Tick();
 
         // #191 — host countdown for cutscene-textbox vote-skip. No-op
         // when no active textbox vote is in progress; broadcasts

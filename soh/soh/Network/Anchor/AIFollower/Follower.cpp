@@ -20,6 +20,7 @@
 #include "soh/cvar_prefixes.h"
 #include "../Common/ActorSyncHelpers.h"
 #include "../Common/DistanceMath.h"
+#include "../Common/AINavTest.h"  // Navigation Test Harness — combat-disable + reach
 #include "../Common/PlayerLookup.h"
 #include "../Common/SceneAuthority.h"
 #include "../Common/ItemEligibility.h"
@@ -4793,6 +4794,13 @@ void Anchor::HandleStateIdle(Player* player, Actor* dummyActor, const Vec3f& sid
                     sqrtf(dx * dx + dz * dz), dy);
         return;
     }
+    // Navigation Test Harness combat-disable gate. Skip the enemy
+    // scan entirely so the follower stays in FOLLOW/IDLE locomotion
+    // states only.
+    if (AINavTest::IsCombatDisabled()) {
+        return;
+    }
+
     // Scan for the nearest live enemy within ENGAGE range. Reject
     // enemies on a different vertical level (XZ-only follower can't
     // reach them). Target blacklist: scrub-puzzle actors that can only
@@ -5000,6 +5008,33 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // trying to find a route up (slope / stairs / ladder via Layer 2
     // breadcrumbs). G10/G14 leash teleport eventually fires if no
     // route is found — safer than locking-in on the wrong altitude.
+    // Navigation Test Harness reach reporter. On P2 (the AI Follower
+    // mode driver): when this client reaches sideTarget within the
+    // harness's 3D 60u criterion AND we received a RUN directive
+    // recently (IsP2InTestMode), broadcast REACHED so P1 records the
+    // time. One-shot per test cycle — once IsP2InTestMode flips back
+    // off (120s timeout or new RUN received) the rising-edge fires
+    // again. Use a static rising-edge latch so we don't spam REACHED
+    // every tick we stay inside 60u.
+    static bool sP2ReachReportedThisCycle = false;
+    if (AINavTest::IsP2InTestMode()) {
+        if (!sP2ReachReportedThisCycle &&
+            AINavTest::ReachedTarget(p2Pos, sideTarget)) {
+            Vec3f zero = {0, 0, 0};
+            SendPacket_NavTestDirective(
+                "REACHED", zero,
+                gPlayState ? gPlayState->sceneNum : (int16_t)-1,
+                gPlayState ? (int8_t)gPlayState->roomCtx.curRoom.num : (int8_t)-1,
+                /*runIndex=*/-1,    // P1 ignores runIndex on REACHED
+                /*reachedMs=*/0);    // P1 fills in its own elapsed time
+            sP2ReachReportedThisCycle = true;
+            SPDLOG_INFO("[Follower] NavTest: P2 reached test target — REACHED packet sent");
+        }
+    } else {
+        // Out of test mode → reset latch so the next RUN re-fires.
+        sP2ReachReportedThisCycle = false;
+    }
+
     f32 distToFinalGoal = AnchorDist::DistXZ(sideTarget, p2Pos);
     f32 dyToFinalGoal = fabsf(sideTarget.y - p2Pos.y);
     if (distToFinalGoal < kFollowThreshold &&
