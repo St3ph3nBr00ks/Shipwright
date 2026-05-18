@@ -1173,6 +1173,26 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
         return;
     }
 
+    // Target-dropped-below exit. If the hostile target moved meaningfully
+    // below the Invader (jumped off the rim, fell down, dropped from a
+    // ledge) we should abandon the climb so FOLLOW can re-plan a path to
+    // the new position. Without this branch the Invader stays in CLIMBING
+    // and chews through stale waypoints aimed at the target's old upper
+    // position — log 235 ladder-stuck-on-jump-down symptom. Co-climb
+    // case is handled below (fast-path covers downward target motion when
+    // target is also on a ladder).
+    if (target->world.pos.y < a->world.pos.y - 30.0f) {
+        SPDLOG_INFO("[Invader] CLIMBING→FOLLOW (target dropped below: "
+                    "NPC.y={:.0f} target.y={:.0f} Δ={:+.0f}u)",
+                    a->world.pos.y, target->world.pos.y,
+                    target->world.pos.y - a->world.pos.y);
+        this_->state = EN_INVADER_STATE_FOLLOW;
+        sLocalInvNav.activeClimbAnchor = nullptr;
+        sLocalInvNav.path.Reset();
+        sLocalInvNav.targetWasClimbingPrevTick = false;
+        return;
+    }
+
     // ── Co-climb fast-path (bug fix 2026-05-17: ladder-bottom oscillation) ──
     // Cloned from FollowerNPC.cpp:1650-1745. Solves the documented
     // "10u Y oscillation during co-climb" bug: cell-grid path filter
@@ -2843,8 +2863,19 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // FollowerNPC.cpp:3600 which fires from any non-CLIMBING state
     // when leader is climbing. LEDGE_HOIST / CRAWLING stay exempt
     // (they're committed scripted motions), as do combat states.
+    // Auto-climb is exempt from ACTIVE combat motions (ATTACK swing,
+    // ENGAGE pursuit gait, BLOCK shield-up, RANGED_ATTACK shoot) and
+    // scripted traversals. STANDBY is intentionally EXCLUDED from the
+    // exempt set so a between-arrows STANDBY tick can elect to switch
+    // to CLIMBING when an elevated target has a reachable climb anchor —
+    // mirrors the user's preference "climb to engage, ranged is fallback"
+    // (log 235 "didn't climb until player out of FoV" symptom).
     const bool autoClimbExempt =
-        combatState ||
+        (this_->state == EN_INVADER_STATE_ATTACK) ||
+        (this_->state == EN_INVADER_STATE_ENGAGE) ||
+        (this_->state == EN_INVADER_STATE_BLOCK) ||
+        (this_->state == EN_INVADER_STATE_RANGED_ATTACK) ||
+        (this_->state == EN_INVADER_STATE_SWIMMING) ||
         (this_->state == EN_INVADER_STATE_LEDGE_HOIST) ||
         (this_->state == EN_INVADER_STATE_CRAWLING);
     if (!autoClimbExempt &&

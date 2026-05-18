@@ -233,19 +233,25 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
     // (visual) and world.rot.y (locomotion) for FOLLOW/STUCK, or
     // zeroed speedXZ for IDLE / G-guards.
     //
-    // Phase 4 — skip Actor_MoveXZGravity for SWIMMING / LEDGE_HOIST.
-    //   SWIMMING:    the handler clamps Y to (surface - swimDepth) each
-    //                tick; gravity would fight that clamp and produce
-    //                vertical jitter / sink-and-rise oscillation.
-    //   LEDGE_HOIST: the handler lerps pos from hoistStartPos to
-    //                hoistTargetPos over the anim's curFrame/endFrame
-    //                ratio; gravity would drag Y down each tick, undoing
-    //                the lerp's upward motion and causing the mantle to
-    //                visually fail.
-    // Matches NPC Follower's same skip (FollowerNPC.cpp pre-MoveXZGravity
-    // gate excludes these two states).
+    // Skip Actor_MoveXZGravity for scripted-position states where the
+    // C++ tick writes world.pos directly:
+    //   CLIMBING:    handler snaps XZ to subgoal+offset and drives Y at
+    //                +4u/frame; gravity (-2/frame accumulating into
+    //                velocity.y) overpowers the climb within ~3 frames
+    //                and pins NPC to the floor — path Y never advances,
+    //                handler runs silently. (Log 235 ladder-bottom-stuck
+    //                bug. Match NPC Follower's gate at FollowerNPC.cpp:4430.)
+    //   SWIMMING:    handler clamps Y to (surface - swimDepth) each tick;
+    //                gravity would produce vertical jitter / sink-and-rise.
+    //   LEDGE_HOIST: handler lerps pos hoistStartPos → hoistTargetPos
+    //                over anim curFrame/endFrame; gravity drags Y down
+    //                each tick, undoing the lerp's upward motion.
+    //   CRAWLING:    handler moves at constant speed along the crawl
+    //                tunnel; gravity would yank body off the tunnel floor.
     if (this->state != EN_INVADER_STATE_SWIMMING &&
-        this->state != EN_INVADER_STATE_LEDGE_HOIST) {
+        this->state != EN_INVADER_STATE_LEDGE_HOIST &&
+        this->state != EN_INVADER_STATE_CLIMBING &&
+        this->state != EN_INVADER_STATE_CRAWLING) {
         Actor_MoveXZGravity(&this->actor);
     }
     // Update collision-with-ground / floor altitude. Without this
