@@ -42,6 +42,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/PlayerLookup.h"  // PickHostileTargetForInvader (Agent 4)
 #include "soh/Network/Anchor/Common/ActorTrail.h"    // Nav-parity Phase A: substrate path consumption
+#include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 2: shared substrate-path helper
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
 #include "soh/cvar_prefixes.h"
@@ -253,6 +254,11 @@ inline s16 YawTowardTarget(const Vec3f& from, const Vec3f& to) {
 Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
                          float maxYDelta = 60.0f);
 
+// Same forward-decl reason as PickHostileTarget — InvaderHasRangedWeapon
+// is defined ~1800 lines below near other combat helpers. Phase 2 Tick
+// handlers call it to build the FallbackPolicy for NavOrDirect.
+bool InvaderHasRangedWeapon();
+
 // ---------------------------------------------------------------------
 // Phase 2 — locomotion tuning constants. Cloned from FollowerNPC
 // with the leader-friendly thresholds inverted into target-hostile
@@ -344,9 +350,11 @@ struct LocalInvNavState {
     float    closeFailBaseline    = 0.0f;
 
     // ── Nav-parity Phase A — substrate path consumption ─────────────
-    AnchorNav::ActorTrail::NavPath path;
-    uint64_t lastPathRefreshFrame = 0;
-    Vec3f    lastPathTargetPos    = { 0.0f, 0.0f, 0.0f };
+    // navState carries the substrate path + refresh-rate bookkeeping +
+    // trail key. Phase 2 (2026-05-18) replaced the inline path /
+    // lastPathRefreshFrame / lastPathTargetPos fields with a NavState
+    // struct so AnchorAI::ChooseSubgoal can consume it directly.
+    AnchorAI::NavState navState;
 
     // ── Nav-parity Phase B — CLIMBING anchor cache ──────────────────
     // Active anchor during a CLIMBING run so the handler doesn't
@@ -835,115 +843,130 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
         this_->state = EN_INVADER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalInvNav.lastTarget = nullptr;
-        sLocalInvNav.path.Reset();
+        sLocalInvNav.navState.path.Reset();
         return;
     }
     sLocalInvNav.lastTarget = target;
 
     const Vec3f& targetPos = target->world.pos;
 
-    // ── Proximity check: skip pathfinding when target is close ──────
-    // Inside kInvFollowProxLimit (30u 3D), walk straight — substrate
-    // pathfinding is overhead when the target is in melee distance.
-    // Matches FollowerNPC.cpp:968-977.
-    const float pdx0 = targetPos.x - a->world.pos.x;
-    const float pdy0 = targetPos.y - a->world.pos.y;
-    const float pdz0 = targetPos.z - a->world.pos.z;
-    const float dist3DSq = pdx0*pdx0 + pdy0*pdy0 + pdz0*pdz0;
-    const bool nearTarget = dist3DSq <= (kInvFollowProxLimit * kInvFollowProxLimit);
-    if (nearTarget) {
-        sLocalInvNav.path.Reset();
+    // ── Trail key resolution ────────────────────────────────────────
+    // Pick the right entity to read breadcrumbs from. Updated each
+    // tick (cheap; just an enum branch) so target swaps are reflected
+    // in the next path refresh.
+    //   ACTOR_PLAYER  (local Link)        → local client's TrailKey.
+    //   ACTOR_EN_OE2  (remote DummyPlayer) → owning client's TrailKey.
+    //   anything else                      → key=0 (no trail). BFS
+    //                                        still works without
+    //                                        breadcrumbs.
+    sLocalInvNav.navState.trailKey = 0;
+    if (target->id == ACTOR_PLAYER) {
+        sLocalInvNav.navState.trailKey = AnchorNav::TrailKeyForPlayer(
+            (uint8_t)Anchor::Instance->ownClientId);
+    } else if (target->id == ACTOR_EN_OE2) {
+        const uint32_t cid = Anchor::Instance->GetDummyPlayerClientId(target);
+        if (cid != 0) {
+            sLocalInvNav.navState.trailKey = AnchorNav::TrailKeyForPlayer((uint8_t)cid);
+        }
     }
 
-    // ── Path refresh ────────────────────────────────────────────────
-    const uint64_t curFrame   = Anchor::Instance->gameFrameCounter.load(
-                                    std::memory_order_relaxed);
-    const int      refreshTicks = Anchor::Instance->MsToGameTicks(kInvPathRefreshMs);
-    const bool needRefresh =
-        !nearTarget && (
-            sLocalInvNav.path.Empty() ||
-            (refreshTicks > 0 &&
-             curFrame >= sLocalInvNav.lastPathRefreshFrame + (uint64_t)refreshTicks) ||
-            AnchorDist::DistXZSq(targetPos, sLocalInvNav.lastPathTargetPos) >
-                kInvPathRetargetDist * kInvPathRetargetDist);
-    if (needRefresh) {
-        // Trail key — pick the right entity to read breadcrumbs from.
-        //   ACTOR_PLAYER (local Link)         → local client's TrailKey.
-        //   ACTOR_EN_OE2 (remote DummyPlayer) → owning client's TrailKey
-        //                                       (Anchor exposes the cid
-        //                                       via GetDummyPlayerClientId).
-        //   anything else                     → key=0 (no trail). BFS
-        //                                       still works without
-        //                                       breadcrumbs — Layer 3
-        //                                       (RoomNavData) is the
-        //                                       primary reliable layer
-        //                                       anyway.
-        AnchorNav::TrailKey trailKey = 0;
-        if (target->id == ACTOR_PLAYER) {
-            trailKey = AnchorNav::TrailKeyForPlayer(
-                (uint8_t)Anchor::Instance->ownClientId);
-        } else if (target->id == ACTOR_EN_OE2) {
-            const uint32_t cid = Anchor::Instance->GetDummyPlayerClientId(target);
-            if (cid != 0) {
-                trailKey = AnchorNav::TrailKeyForPlayer((uint8_t)cid);
-            }
-        }
-        sLocalInvNav.path.Reset();
-        AnchorNav::ActorTrail::GetInstance().ComputePathTo(
-            trailKey, a, targetPos, play, sLocalInvNav.path,
-            /*skipLayer1LOS=*/false,
-            /*preferLeaderTrail=*/true);  // see doc-comment above
-        sLocalInvNav.lastPathRefreshFrame = curFrame;
-        sLocalInvNav.lastPathTargetPos    = targetPos;
-    }
+    // ── Substrate-driven subgoal selection (Phase 2 — via helper) ──
+    // ChooseSubgoal handles the 60u direct-yaw gate, water gate,
+    // rate-limited path refresh (kPathRefreshMs), target-drift refresh
+    // (kTargetDriftRefresh), and cursor advance. AI Invader's fallback
+    // policy when path is empty + outside 60u: RangedInPlace if a bow
+    // is owned + ammo present, otherwise RetreatHostile, with
+    // HoldDefensive as the last-resort selection. The actual fallback
+    // engagement (switching state to RANGED_ATTACK / etc.) is handled
+    // below after we see what the helper chose.
+    AnchorAI::FallbackPolicy policy;
+    policy.isHostileActor   = true;
+    policy.hasRangedReady   = InvaderHasRangedWeapon();
+    const AnchorAI::NavOrDirectResult nav =
+        AnchorAI::ChooseSubgoal(a, targetPos, sLocalInvNav.navState, policy, play);
 
     // ── Phase B: climb-cell transition ───────────────────────────────
-    // If the current path subgoal is a climb cell, transition to
-    // CLIMBING. The CLIMBING handler takes over snapping XZ to the
-    // wall + driving Y. Same shape as FollowerNPC.cpp:1007-1020.
-    if (!sLocalInvNav.path.Empty()) {
-        const uint32_t flags = sLocalInvNav.path.CurrentSubgoalFlags();
-        if (flags & ::AnchorNavRoom::NODE_CLIMB_ANY) {
-            this_->state = EN_INVADER_STATE_CLIMBING;
-            sLocalInvNav.activeClimbAnchor = nullptr;  // resolved fresh on entry
-            SPDLOG_INFO("[Invader] FOLLOW→CLIMBING (path entered climb cell at "
-                        "({:.0f},{:.0f},{:.0f}); flags=0x{:X})",
-                        sLocalInvNav.path.CurrentSubgoal().x,
-                        sLocalInvNav.path.CurrentSubgoal().y,
-                        sLocalInvNav.path.CurrentSubgoal().z,
-                        flags);
+    // If the current path subgoal carries the climb-cell flag, transition
+    // to CLIMBING. The CLIMBING handler takes over snapping XZ to the
+    // wall + driving Y. Only fires when the helper returned a substrate
+    // subgoal — direct-yaw fallback never carries climb flags.
+    if (nav.usingNavMesh && (nav.subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY)) {
+        this_->state = EN_INVADER_STATE_CLIMBING;
+        sLocalInvNav.activeClimbAnchor = nullptr;  // resolved fresh on entry
+        SPDLOG_INFO("[Invader] FOLLOW→CLIMBING (path entered climb cell at "
+                    "({:.0f},{:.0f},{:.0f}); flags=0x{:X})",
+                    nav.subgoal.x, nav.subgoal.y, nav.subgoal.z,
+                    nav.subgoalFlags);
+        return;
+    }
+
+    // ── Path-empty fallback engagement ──────────────────────────────
+    // The helper picked a non-DirectYaw fallback because the path was
+    // empty AND the target is outside the 60u direct-yaw threshold.
+    // Translate the policy selection into a state transition.
+    //
+    // Rising-edge-only — without this the AI would re-trigger the
+    // RANGED_ATTACK transition every tick while the path stays empty.
+    if (nav.fallbackJustEngaged) {
+        switch (nav.fallbackEngaged) {
+        case AnchorAI::PathEmptyFallback::RangedInPlace:
+            // We have a bow + the target is too far / unreachable via nav.
+            // Switch to RANGED_ATTACK from FOLLOW. The combat-AI cooldown
+            // and tier-eligibility checks still apply — but they fire on
+            // the next dispatcher tick when state == RANGED_ATTACK.
+            SPDLOG_INFO("[Invader] FOLLOW→RANGED_ATTACK (path empty, ranged "
+                        "fallback, target dist={:.0f}u)",
+                        std::sqrt(AnchorDist::Dist3DSq(a->world.pos, targetPos)));
+            this_->state = EN_INVADER_STATE_RANGED_ATTACK;
+            a->speedXZ = 0.0f;
             return;
+        case AnchorAI::PathEmptyFallback::RetreatHostile:
+            // No ranged weapon AND path unreachable. Drop to STANDBY for
+            // now — the RetreatPath helper (Phase 5) will compute a
+            // substrate path AWAY from the target so the Invader actively
+            // disengages. Until then, holding ground in STANDBY is better
+            // than thrashing toward an unreachable target.
+            SPDLOG_INFO("[Invader] FOLLOW→STANDBY (path empty, no ranged, "
+                        "retreat-hostile fallback engaged — RetreatPath "
+                        "not yet implemented, holding ground)");
+            this_->state = EN_INVADER_STATE_STANDBY;
+            a->speedXZ = 0.0f;
+            return;
+        case AnchorAI::PathEmptyFallback::HoldDefensive:
+            SPDLOG_INFO("[Invader] FOLLOW→STANDBY (path empty, no fallback "
+                        "applicable, holding defensive)");
+            this_->state = EN_INVADER_STATE_STANDBY;
+            a->speedXZ = 0.0f;
+            return;
+        case AnchorAI::PathEmptyFallback::ReturnToLeader:
+        case AnchorAI::PathEmptyFallback::DirectYaw:
+            // Either inapplicable for hostile actors (ReturnToLeader) or
+            // not actually a fallback engagement (DirectYaw inside 60u).
+            // Fall through to direct-yaw locomotion below.
+            break;
         }
     }
 
-    // ── Pick subgoal ────────────────────────────────────────────────
-    // Substrate path's CurrentSubgoal if available; else direct to target.
-    Vec3f subgoal = sLocalInvNav.path.Empty() ? targetPos
-                                              : sLocalInvNav.path.CurrentSubgoal();
-
-    // Cursor advancement: if we're close to the current subgoal, step.
-    if (!sLocalInvNav.path.Empty() &&
-        AnchorDist::DistXZSq(a->world.pos, subgoal) <
-            kInvAdvanceSubgoalDist * kInvAdvanceSubgoalDist) {
-        sLocalInvNav.path.Advance();
-        // Refresh subgoal selection for this same tick — avoid wasting
-        // a frame standing in place after an advance.
-        subgoal = sLocalInvNav.path.Empty() ? targetPos
-                                            : sLocalInvNav.path.CurrentSubgoal();
-    }
-
-    // Drive yaw + speed toward the current subgoal.
-    const s16 yaw = YawTowardTarget(a->world.pos, subgoal);
+    // ── Drive locomotion toward chosen subgoal ──────────────────────
+    // When usingNavMesh = true, subgoal is the current path waypoint.
+    // When usingNavMesh = false (DirectYaw fallback, target inside 60u
+    // or water-gated), subgoal is the target position itself.
+    const s16 yaw = YawTowardTarget(a->world.pos, nav.subgoal);
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
 
-    // Speed selection — distance is measured to the target (not the
-    // subgoal) so pursuit pace stays correlated with how far the chase
-    // ultimately is. Mirrors the Invader's prior direct-yaw speed
-    // band; substrate routing doesn't change the runtime-energy band.
+    // Speed selection — distance is measured to the actual target (not
+    // the subgoal) so pursuit pace stays correlated with how far the
+    // chase ultimately is. Substrate routing doesn't change the
+    // runtime-energy band.
     const float distSq = Dist2DSq(a->world.pos, targetPos);
     const float dist   = std::sqrt(distSq);
     a->speedXZ = (dist > kInvRunDistance) ? kInvRunSpeed : kInvWalkSpeed;
+
+    // Refresh stale state mirror — STUCK + IDLE checks below want the
+    // current curFrame too.
+    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                  std::memory_order_relaxed);
 
     // Stuck check — STUCK fires when no real progress happens over
     // the check window. This is the time-based fallback; the path
@@ -956,8 +979,8 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
             Dist2DSq(a->world.pos, sLocalInvNav.stuckCheckPos));
         if (progress < kInvStuckMinProgress) {
             this_->state = EN_INVADER_STATE_STUCK;
-            sLocalInvNav.path.Reset();   // discard the broken path
-            sLocalInvNav.lastPathRefreshFrame = 0;
+            sLocalInvNav.navState.path.Reset();   // discard the broken path
+            sLocalInvNav.navState.lastPathRefreshFrame = 0;
             SPDLOG_INFO("[Invader] FOLLOW→STUCK (no progress {:.1f}u in {}ms @ "
                         "({:.0f},{:.0f},{:.0f}))",
                         progress, kInvStuckCheckMs,
@@ -974,7 +997,7 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     if (distSq <= kInvFollowIdleDist * kInvFollowIdleDist) {
         this_->state = EN_INVADER_STATE_IDLE;
         a->speedXZ   = 0.0f;
-        sLocalInvNav.path.Reset();
+        sLocalInvNav.navState.path.Reset();
     }
 }
 
@@ -1005,7 +1028,7 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
         // up FROM IDLE cleanly.
         this_->state = EN_INVADER_STATE_IDLE;
         a->speedXZ   = 0.0f;
-        sLocalInvNav.path.Reset();
+        sLocalInvNav.navState.path.Reset();
         return;
     }
 
@@ -1014,8 +1037,8 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
     // the hostile). Otherwise fall back to the target's pos.
     Vec3f nudgeTarget = target->world.pos;
     bool  pathAware   = false;
-    if (!sLocalInvNav.path.Empty()) {
-        nudgeTarget = sLocalInvNav.path.CurrentSubgoal();
+    if (!sLocalInvNav.navState.path.Empty()) {
+        nudgeTarget = sLocalInvNav.navState.path.CurrentSubgoal();
         pathAware   = true;
     }
 
@@ -1039,8 +1062,8 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
     // FOLLOW tick would observe distance > kInvFollowProxLimit AND
     // not yet need a refresh (path is still recent) and steer toward
     // the now-stale subgoal that just caused the stuck condition.
-    sLocalInvNav.path.Reset();
-    sLocalInvNav.lastPathRefreshFrame = 0;
+    sLocalInvNav.navState.path.Reset();
+    sLocalInvNav.navState.lastPathRefreshFrame = 0;
     this_->state = EN_INVADER_STATE_FOLLOW;
     SPDLOG_INFO("[Invader] STUCK→FOLLOW (nudged {:.0f}u toward yaw=0x{:X}, "
                 "{} target)",
@@ -1168,7 +1191,7 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
     if (target == nullptr || target->update == nullptr) {
         this_->state = EN_INVADER_STATE_FOLLOW;
         sLocalInvNav.activeClimbAnchor = nullptr;
-        sLocalInvNav.path.Reset();
+        sLocalInvNav.navState.path.Reset();
         sLocalInvNav.targetWasClimbingPrevTick = false;
         return;
     }
@@ -1188,7 +1211,7 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
                     target->world.pos.y - a->world.pos.y);
         this_->state = EN_INVADER_STATE_FOLLOW;
         sLocalInvNav.activeClimbAnchor = nullptr;
-        sLocalInvNav.path.Reset();
+        sLocalInvNav.navState.path.Reset();
         sLocalInvNav.targetWasClimbingPrevTick = false;
         return;
     }
@@ -1277,7 +1300,7 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
             a->world.pos.x = topPos.x;
             a->world.pos.z = topPos.z;
             sLocalInvHoistStartPos = a->world.pos;
-            sLocalInvNav.path.Reset();
+            sLocalInvNav.navState.path.Reset();
             sLocalInvNav.activeClimbAnchor = nullptr;
             sLocalInvNav.targetWasClimbingPrevTick = false;
             this_->state = EN_INVADER_STATE_LEDGE_HOIST;
@@ -1290,7 +1313,7 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
     }
 
     // ── Resolve subgoal ────────────────────────────────────────────
-    if (sLocalInvNav.path.Empty()) {
+    if (sLocalInvNav.navState.path.Empty()) {
         // Path exhausted. Refresh aggressively — relaxed from the
         // initial `target.y > npc.y + 30` gate (bug fix 2026-05-17):
         // the strict gate prevented refresh when target was only a few
@@ -1311,14 +1334,14 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
                 PopulateAnchorClimbPathInv(navData,
                                             *sLocalInvNav.activeClimbAnchor,
                                             a->world.pos, target->world.pos,
-                                            sLocalInvNav.path)) {
+                                            sLocalInvNav.navState.path)) {
                 SPDLOG_INFO("[Invader] CLIMBING path refreshed "
                             "(NPC.y={:.0f} target.y={:.0f}) waypoints={}",
                             a->world.pos.y, target->world.pos.y,
-                            (int)sLocalInvNav.path.waypoints.size());
+                            (int)sLocalInvNav.navState.path.waypoints.size());
             }
         }
-        if (sLocalInvNav.path.Empty()) {
+        if (sLocalInvNav.navState.path.Empty()) {
             // Mantle-out: if NPC is near the top of the wall, snap to
             // topPos so we don't drop. Same shape as
             // FollowerNPC.cpp:1772-1794.
@@ -1343,8 +1366,8 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
         }
     }
 
-    const Vec3f& subgoal        = sLocalInvNav.path.CurrentSubgoal();
-    const uint32_t subgoalFlags = sLocalInvNav.path.CurrentSubgoalFlags();
+    const Vec3f& subgoal        = sLocalInvNav.navState.path.CurrentSubgoal();
+    const uint32_t subgoalFlags = sLocalInvNav.navState.path.CurrentSubgoalFlags();
     const bool subgoalIsClimb   = (subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY) != 0;
 
     // Mantle-out: next subgoal is non-climb → snap to subgoal pos
@@ -1416,7 +1439,7 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
     // as FollowerNPC.cpp:1880-1894.
     const float dyAdv = std::fabs(a->world.pos.y - subgoal.y);
     if (dyAdv < 12.0f) {
-        sLocalInvNav.path.Advance();
+        sLocalInvNav.navState.path.Advance();
     }
 }
 
@@ -1454,7 +1477,7 @@ bool TryEngageAutoClimbInv(EnInvader* this_, PlayState* play, Actor* target) {
     if (!PopulateAnchorClimbPathInv(navData, *anchor,
                                      this_->actor.world.pos,
                                      target->world.pos,
-                                     sLocalInvNav.path)) {
+                                     sLocalInvNav.navState.path)) {
         return false;
     }
     sLocalInvNav.activeClimbAnchor = anchor;
@@ -1470,7 +1493,7 @@ bool TryEngageAutoClimbInv(EnInvader* this_, PlayState* play, Actor* target) {
                 this_->actor.world.pos.x, this_->actor.world.pos.y,
                 this_->actor.world.pos.z,
                 std::sqrt(distBaseSq),
-                (int)sLocalInvNav.path.waypoints.size());
+                (int)sLocalInvNav.navState.path.waypoints.size());
     return true;
 }
 
@@ -1951,8 +1974,84 @@ void TickENGAGE(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
         return;
     }
 
-    // Pursuit — walk close, run far.
-    a->shape.rot.y = YawTowardTarget(a->world.pos, targetPos);
+    // ── Pursuit — substrate-aware (Phase 2, log-237 fix) ───────────
+    // Pre-Phase-2 this state used direct-yaw, ignoring nav mesh entirely.
+    // Symptom: Invader spawned at (227,0,-273) with target at
+    // (-11,0,372) — 720u away — ran in a straight line and fell into
+    // a pit (log 237). Routing through NavOrDirect uses the substrate
+    // path for distances > 60u and direct-yaw only inside that radius
+    // (where strike-range is anyway).
+    //
+    // Trail key reuses what TickFOLLOW set. ENGAGE doesn't re-acquire
+    // target (sAttackState.target is owned by the combat-AI tier), so
+    // the trail key may be stale if the target type changed between
+    // FOLLOW and ENGAGE. Refresh defensively.
+    sLocalInvNav.navState.trailKey = 0;
+    if (sAttackState.target->id == ACTOR_PLAYER) {
+        sLocalInvNav.navState.trailKey = AnchorNav::TrailKeyForPlayer(
+            (uint8_t)Anchor::Instance->ownClientId);
+    } else if (sAttackState.target->id == ACTOR_EN_OE2) {
+        const uint32_t cid = Anchor::Instance->GetDummyPlayerClientId(sAttackState.target);
+        if (cid != 0) {
+            sLocalInvNav.navState.trailKey = AnchorNav::TrailKeyForPlayer((uint8_t)cid);
+        }
+    }
+
+    AnchorAI::FallbackPolicy policy;
+    policy.isHostileActor   = true;
+    policy.hasRangedReady   = InvaderHasRangedWeapon();
+    const AnchorAI::NavOrDirectResult nav =
+        AnchorAI::ChooseSubgoal(&this_->actor, targetPos,
+                                 sLocalInvNav.navState, policy, play);
+
+    // Climb-cell transition — same shape as TickFOLLOW. If the substrate
+    // routes us through a climb cell, exit ENGAGE so CLIMBING can take
+    // over. Combat resumes from STANDBY after the climb-out.
+    if (nav.usingNavMesh && (nav.subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY)) {
+        this_->state = EN_INVADER_STATE_CLIMBING;
+        sLocalInvNav.activeClimbAnchor = nullptr;
+        SPDLOG_INFO("[Invader] ENGAGE→CLIMBING (path entered climb cell at "
+                    "({:.0f},{:.0f},{:.0f}); flags=0x{:X})",
+                    nav.subgoal.x, nav.subgoal.y, nav.subgoal.z,
+                    nav.subgoalFlags);
+        a->speedXZ = 0.0f;
+        return;
+    }
+
+    // Path-empty fallback. ENGAGE is a combat state — the right
+    // response when the path is empty and we're outside 60u is to
+    // switch to RANGED_ATTACK (if bow owned) or fall back to STANDBY
+    // and let TickSTANDBY's tier scan decide what to do next.
+    if (nav.fallbackJustEngaged) {
+        switch (nav.fallbackEngaged) {
+        case AnchorAI::PathEmptyFallback::RangedInPlace:
+            SPDLOG_INFO("[Invader] ENGAGE→RANGED_ATTACK (path empty, ranged "
+                        "fallback, dist={:.0f}u)", distXZ);
+            this_->state = EN_INVADER_STATE_RANGED_ATTACK;
+            a->speedXZ = 0.0f;
+            return;
+        case AnchorAI::PathEmptyFallback::RetreatHostile:
+        case AnchorAI::PathEmptyFallback::HoldDefensive:
+            SPDLOG_INFO("[Invader] ENGAGE→STANDBY (path empty, no ranged, "
+                        "fallback={})",
+                        nav.fallbackEngaged == AnchorAI::PathEmptyFallback::RetreatHostile
+                            ? "retreat-hostile" : "hold-defensive");
+            this_->state = EN_INVADER_STATE_STANDBY;
+            sAttackState.target = nullptr;
+            a->speedXZ = 0.0f;
+            return;
+        case AnchorAI::PathEmptyFallback::ReturnToLeader:
+        case AnchorAI::PathEmptyFallback::DirectYaw:
+            // ReturnToLeader inapplicable for hostile; DirectYaw inside
+            // 60u is handled below by yawing directly at target.
+            break;
+        }
+    }
+
+    // Drive locomotion toward chosen subgoal. Speed band stays target-
+    // relative (not subgoal-relative) so pursuit pace matches actual
+    // distance-to-target.
+    a->shape.rot.y = YawTowardTarget(a->world.pos, nav.subgoal);
     a->world.rot.y = a->shape.rot.y;
     a->speedXZ = (distXZ > kEngageRunDistance) ? kEngageRunSpeed : kEngageWalkSpeed;
 }
