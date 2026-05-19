@@ -4,7 +4,7 @@
 
 #include "ScriptedFollow.h"
 
-#include "../../../Enhancements/RoomNavData/RoomNavData.h"  // NODE_CLIMB_ANY
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // NODE_CLIMB_ANY
 
 namespace AnchorAI {
 
