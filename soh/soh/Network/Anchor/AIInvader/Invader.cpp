@@ -925,6 +925,11 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     if (step.shouldEngageClimb) {
         this_->state = EN_INVADER_STATE_CLIMBING;
         sLocalInvNav.activeClimbAnchor = nullptr;  // resolved fresh on entry
+        // Seed climbPrev* with current pos so the first CLIMBING tick's
+        // motion-axis comparison reads (0, 0) instead of huge spurious
+        // deltas vs zeroed init values.
+        this_->climbPrevY  = this_->actor.world.pos.y;
+        this_->climbPrevXZ = this_->actor.world.pos;
         SPDLOG_INFO("[Invader] FOLLOW→CLIMBING (path entered climb cell at "
                     "({:.0f},{:.0f},{:.0f}); flags=0x{:X})",
                     nav.subgoal.x, nav.subgoal.y, nav.subgoal.z,
@@ -2169,6 +2174,9 @@ void TickENGAGE(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     if (step.shouldEngageClimb) {
         this_->state = EN_INVADER_STATE_CLIMBING;
         sLocalInvNav.activeClimbAnchor = nullptr;
+        // Seed climbPrev* (see TickFOLLOW for rationale).
+        this_->climbPrevY  = this_->actor.world.pos.y;
+        this_->climbPrevXZ = this_->actor.world.pos;
         SPDLOG_INFO("[Invader] ENGAGE→CLIMBING (path entered climb cell at "
                     "({:.0f},{:.0f},{:.0f}); flags=0x{:X})",
                     nav.subgoal.x, nav.subgoal.y, nav.subgoal.z,
@@ -3326,15 +3334,67 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
             want = InvaderAnim::kCrawlExit;
         }
 
-        // Nav-parity Phase B — CLIMBING anim override. AnimForState
-        // returns kClimbUpL as a default; pick L/R based on the
-        // alternation tracker the TickCLIMBING handler maintains. This
-        // mirrors Player's L/R step alternation. Side variants
-        // (kClimbSideL/R) are reserved for future lateral-motion
-        // detection — v1 climbs purely vertically.
+        // CLIMBING anim override — motion-axis aware (2026-05-19 port
+        // from FollowerNPC.cpp:4395-4435). Each tick, compare current
+        // pos to previous tick's pos to detect dominant motion axis:
+        //   lateral > vertical → kClimbSideL/R (side scoot)
+        //   vertical dominant  → kClimbUpL/R (vertical step)
+        //   stationary         → hold the current pose (matches
+        //                        PLAYER_STATE2_STATIONARY_LADDER —
+        //                        vanilla Link freezes mid-rung when
+        //                        stick is neutral)
+        // L/R alternates each STEP (one anim cycle), not each tick,
+        // via climbNextIsRight toggle (existing). Side and Up variants
+        // share the same toggle state.
+        //
+        // Pre-fix: always picked UP variant. AI Invader visibly climbed
+        // upward even when moving laterally across the vine wall —
+        // animation completely disconnected from actual motion. User
+        // report log 254. NPC Follower (which already has this logic)
+        // climbed identical paths with correct anims.
         if (this_->state == EN_INVADER_STATE_CLIMBING) {
-            want = this_->climbNextIsRight ? InvaderAnim::kClimbUpR
-                                           : InvaderAnim::kClimbUpL;
+            Actor* invActor = &this_->actor;
+            const float climbDx  = invActor->world.pos.x - this_->climbPrevXZ.x;
+            const float climbDz  = invActor->world.pos.z - this_->climbPrevXZ.z;
+            const float climbDy  = invActor->world.pos.y - this_->climbPrevY;
+            const float climbDxz = std::sqrt(climbDx*climbDx + climbDz*climbDz);
+            this_->climbPrevY    = invActor->world.pos.y;
+            this_->climbPrevXZ   = invActor->world.pos;
+
+            const bool isMovingVertically = (climbDy  > 0.5f);
+            const bool isMovingLaterally  = (climbDxz > 0.5f);
+            const bool useSideAnim        = isMovingLaterally && (climbDxz > climbDy);
+
+            const InvaderAnim upL   = InvaderAnim::kClimbUpL;
+            const InvaderAnim upR   = InvaderAnim::kClimbUpR;
+            const InvaderAnim sideL = InvaderAnim::kClimbSideL;
+            const InvaderAnim sideR = InvaderAnim::kClimbSideR;
+            const InvaderAnim leftStep  = useSideAnim ? sideL : upL;
+            const InvaderAnim rightStep = useSideAnim ? sideR : upR;
+
+            const bool currentIsAClimb =
+                (InvaderAnim)this_->currentAnim == upL ||
+                (InvaderAnim)this_->currentAnim == upR ||
+                (InvaderAnim)this_->currentAnim == sideL ||
+                (InvaderAnim)this_->currentAnim == sideR;
+            const bool prevStepDone = !this_->stopAnimPlaying || !currentIsAClimb;
+
+            if ((isMovingVertically || isMovingLaterally) && prevStepDone) {
+                want = this_->climbNextIsRight ? rightStep : leftStep;
+                this_->climbNextIsRight = !this_->climbNextIsRight;
+            } else if (!isMovingVertically && !isMovingLaterally) {
+                // Stationary — hold the last-frame climb pose. First-
+                // tick fallback: fire an upL so the Invader at least
+                // has a recognisable climb pose visible immediately.
+                if (!currentIsAClimb) {
+                    want = upL;
+                } else {
+                    want = (InvaderAnim)this_->currentAnim;
+                }
+            } else {
+                // Mid-step (anim still playing). Hold current.
+                want = (InvaderAnim)this_->currentAnim;
+            }
         }
 
         // Phase 4 — airborne anim override. If jump fired this tick OR

@@ -209,6 +209,14 @@ typedef struct EnInvader {
     // sharing file-scope state across multiple Invaders (if a future
     // revision spawns more than one). 0 = next step uses L, 1 = R.
     u8 climbNextIsRight;
+
+    // Climb-anim motion-axis tracker (2026-05-19 port from NPC Follower).
+    // Each CLIMBING tick compares world.pos to the previous tick's pos
+    // to decide whether to play UP (kClimbUpL/R) or SIDE (kClimbSideL/R)
+    // variants. Lateral motion dominates → SIDE; vertical dominates → UP.
+    // Stationary → hold current pose (matches PLAYER_STATE2_STATIONARY_LADDER).
+    f32 climbPrevY;
+    Vec3f climbPrevXZ;
 } EnInvader;
 
 #ifdef __cplusplus

@@ -167,6 +167,13 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     this->nextFidgetIdx   = 0;
     this->jumpInProgress  = 0;
 
+    // Climb-anim motion-axis tracker init (2026-05-19 port).
+    // climbNextIsRight stays as struct-zero (false = next step uses L).
+    this->climbPrevY        = 0.0f;
+    this->climbPrevXZ.x     = 0.0f;
+    this->climbPrevXZ.y     = 0.0f;
+    this->climbPrevXZ.z     = 0.0f;
+
     // Parity gap 4 — death cause. 0 = generic; TickDEAD sets to 1
     // when the death triggered from SWIMMING.
     this->deathCause      = 0;
