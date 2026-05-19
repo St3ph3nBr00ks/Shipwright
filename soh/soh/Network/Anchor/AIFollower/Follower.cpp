@@ -1200,19 +1200,19 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
 
         if (isClimbDest && navData != nullptr) {
             // Climb-attach choreography (plan §climb-attach steps 2-7).
-            // Identify the anchor whose grid contains chosenPos.
-            constexpr float kClimbCellSpacing = 30.0f;
-            uint16_t resolvedAnchor = UINT16_MAX;
-            for (size_t a = 0; a < navData->climbAnchors.size(); a++) {
-                const auto& anc = navData->climbAnchors[a];
-                int u = 0, v = 0;
-                if (::AnchorNavRoom::ProjectPositionToAnchorCell(
-                        anc, chosenPos, kClimbCellSpacing, u, v) &&
-                    ::AnchorNavRoom::AnchorCellExists(navData, anc, u, v)) {
-                    resolvedAnchor = (uint16_t)a;
-                    break;
-                }
-            }
+            // Identify the anchor whose emitted node set contains chosenPos.
+            //
+            // Was: ProjectPositionToAnchorCell + AnchorCellExists, which
+            // had floating-point drift in the reverse projection and
+            // failed when the drifted (u, v) landed on a grid hole.
+            // Symptom: anchorIdx=UINT16_MAX, "orphan climb cell" in log,
+            // climb engagement immediately released by OoT collision.
+            // Replaced with position-match (RoomNavData.h
+            // FindAnchorByClimbNodePosition) which compares Vec3f
+            // distance directly — robust against FP drift.
+            uint16_t resolvedAnchor =
+                ::AnchorNavRoom::FindAnchorByClimbNodePosition(
+                    navData, chosenPos);
             if (resolvedAnchor != UINT16_MAX) {
                 const auto& anc = navData->climbAnchors[resolvedAnchor];
                 followerClimbAnchorIdx        = resolvedAnchor;
@@ -4193,6 +4193,14 @@ Vec3f Anchor::ComputePursuitSubgoal(Player* player,
         }
         // Edge-prediction setup — identify which ClimbAnchor the
         // subgoal belongs to and seed followerClimbReachableNodes.
+        //
+        // Replaced ProjectPositionToAnchorCell + AnchorCellExists with
+        // position-match FindAnchorByClimbNodePosition (see RoomNavData.h).
+        // The old lookup had FP drift that caused anchorIdx=UINT16_MAX
+        // for valid path waypoints whenever the projection rounded onto
+        // a grid hole. Position-match against the emitted nodes is
+        // robust — a waypoint's pos was copied verbatim from a real
+        // climb node's pos.
         followerClimbAnchorIdx = UINT16_MAX;
         followerClimbReachableNodes.clear();
         const ::AnchorNavRoom::RoomNavData* navData =
@@ -4200,17 +4208,11 @@ Vec3f Anchor::ComputePursuitSubgoal(Player* player,
                 gPlayState->sceneNum,
                 (int8_t)gPlayState->roomCtx.curRoom.num);
         if (navData != nullptr) {
-            constexpr float kClimbCellSpacing = 30.0f;
-            for (size_t a = 0; a < navData->climbAnchors.size(); a++) {
-                const auto& anc = navData->climbAnchors[a];
-                int u = 0, v = 0;
-                if (::AnchorNavRoom::ProjectPositionToAnchorCell(
-                        anc, resolvedTarget, kClimbCellSpacing, u, v) &&
-                    ::AnchorNavRoom::AnchorCellExists(navData, anc, u, v)) {
-                    followerClimbAnchorIdx = (uint16_t)a;
-                    PopulateClimbReachableNodes(navData, (uint16_t)a);
-                    break;
-                }
+            followerClimbAnchorIdx =
+                ::AnchorNavRoom::FindAnchorByClimbNodePosition(
+                    navData, resolvedTarget);
+            if (followerClimbAnchorIdx != UINT16_MAX) {
+                PopulateClimbReachableNodes(navData, followerClimbAnchorIdx);
             }
         }
         SPDLOG_INFO("[Follower] Pursuit→CLIMBING (substrate path entered "

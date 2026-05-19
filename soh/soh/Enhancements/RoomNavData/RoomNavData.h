@@ -677,6 +677,33 @@ bool ProjectPositionToAnchorCell(const ClimbAnchor& anchor,
 bool AnchorCellExists(const RoomNavData* data, const ClimbAnchor& anchor,
                       int u, int v);
 
+// Find the climb anchor whose emitted node set contains `pos` within
+// `tolerance` units of any climb node's position. Returns the anchor
+// index, or UINT16_MAX if no anchor contains the position.
+//
+// Existed because the previous lookup pattern (ProjectPositionToAnchorCell
+// + AnchorCellExists) has floating-point precision drift in the reverse
+// projection — for a climb node whose `pos = raycastHit`, projecting
+// `pos` back to (u, v) via `floor((pos - origin) · axisU / cellSpacing)`
+// can land on (u-1, v) due to FP precision. If the drifted (u, v) is a
+// grid hole (raycast missed at scan time), `AnchorCellExists` returns
+// false and the consumer reports `anchorIdx=UINT16_MAX` — the "orphan
+// climb cell" symptom in P2's logs 244 + 248 + 250.
+//
+// Position-match doesn't suffer this: a path waypoint's `pos` is copied
+// verbatim from `data->nodes[i].pos`, so direct equality (or near-
+// equality within `tolerance`) is robust. Used by Player AI Follower's
+// substrate-path climb engagement.
+//
+// Cost: O(total climb nodes). Typical scene has ~500 climb nodes total,
+// so ~500 distance-squared compares per call. Cheap.
+//
+// `tolerance` defaults to 1.0f world units — well within the precision
+// of a Vec3f position copied from a node's raycast hit.
+uint16_t FindAnchorByClimbNodePosition(const RoomNavData* data,
+                                        const Vec3f& pos,
+                                        float tolerance = 1.0f);
+
 // Find the nearest floor node to `pos` within `maxRadiusXZ` AND |Δy|
 // < `maxYDelta`. Floor here means "any node without NODE_CLIMB_ANY".
 // Returns -1 if no floor matches. XZ proximity for the "near the

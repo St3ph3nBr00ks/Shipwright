@@ -1234,6 +1234,30 @@ bool AnchorCellExists(const RoomNavData* data, const ClimbAnchor& anchor,
     return false;
 }
 
+uint16_t FindAnchorByClimbNodePosition(const RoomNavData* data,
+                                        const Vec3f& pos,
+                                        float tolerance) {
+    if (data == nullptr) return UINT16_MAX;
+    const float toleranceSq = tolerance * tolerance;
+    for (size_t a = 0; a < data->climbAnchors.size(); a++) {
+        const ClimbAnchor& anchor = data->climbAnchors[a];
+        if (anchor.nodeCount == 0) continue;
+        const size_t nodeEnd =
+            (size_t)anchor.firstNodeIdx + (size_t)anchor.nodeCount;
+        if (nodeEnd > data->nodes.size()) continue;  // defensive
+        for (size_t i = anchor.firstNodeIdx; i < nodeEnd; i++) {
+            const Vec3f& np = data->nodes[i].pos;
+            const float dx = pos.x - np.x;
+            const float dy = pos.y - np.y;
+            const float dz = pos.z - np.z;
+            if ((dx*dx + dy*dy + dz*dz) <= toleranceSq) {
+                return (uint16_t)a;
+            }
+        }
+    }
+    return UINT16_MAX;
+}
+
 bool IsReachable(const RoomNavData* data, const Vec3f& fromPos, const Vec3f& toPos) {
     if (data == nullptr || data->nodes.empty() || data->edges.empty()) return false;
 
