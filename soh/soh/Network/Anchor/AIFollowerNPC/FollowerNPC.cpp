@@ -297,6 +297,12 @@ struct LocalNpcNavState {
     // leaderClimbing while NPC is still in CLIMBING and inject a
     // LEDGE_HOIST to the active anchor's topPos.
     bool     leaderWasClimbingPrevTick = false;
+
+    // Throttled FOLLOW progress diagnostic. One snapshot every
+    // kFollowProgressLogMs while NPC is in FOLLOW — pos/target/path
+    // state/distToSubgoal/distToTarget. Tells us what NPC is doing
+    // during otherwise-silent windows (e.g. stuck-on-platform symptoms).
+    uint64_t lastFollowProgressLogFrame = 0;
 };
 }  // namespace
 static LocalNpcNavState sLocalNav;
@@ -821,6 +827,7 @@ static constexpr int   kPathRefreshMs       = 500;
 static constexpr float kPathRetargetDist    = 60.0f;
 static constexpr float kAdvanceSubgoalDist  = 30.0f;  // advance cursor when within this XZ
 static constexpr int   kStuckCheckMs        = 3000;   // matches player-Follower's tuned 3s
+static constexpr int   kFollowProgressLogMs = 5000;   // throttled FOLLOW diagnostic period
 static constexpr float kStuckMinProgress    = 20.0f;
 static constexpr float kStuckNudgeDist      = 30.0f;  // direct world.pos nudge in STUCK
 
@@ -1099,6 +1106,40 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         this_->state = EN_FOLLOWER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalNav.navState.path.Reset();  // discard path; IDLE is local-frame
+        return;
+    }
+
+    // Throttled FOLLOW progress snapshot (log 252 diagnostic). Captures
+    // what NPC is doing during otherwise-silent stretches — particularly
+    // the "stuck on flat ground at base of next vine wall" symptom
+    // where the substrate path isn't engaging CLIMBING and there are
+    // no state-transition logs to trace from.
+    //
+    // Fires every kFollowProgressLogMs (5s). Reports the active path
+    // state (size + cursor + flags) so we can see whether NPC is
+    // following a path or fell to direct-yaw fallback.
+    const int progressLogTicks =
+        Anchor::Instance->MsToGameTicks(kFollowProgressLogMs);
+    if (progressLogTicks > 0 &&
+        curFrame >= sLocalNav.lastFollowProgressLogFrame + (uint64_t)progressLogTicks) {
+        const float distToSubgoal = std::sqrt(
+            Dist2DSq(a->world.pos, nav.subgoal));
+        const float distToLeader = std::sqrt(distToLeaderSq);
+        SPDLOG_INFO("[FollowerNPC.follow] pos=({:.0f},{:.0f},{:.0f}) "
+                    "target=({:.0f},{:.0f},{:.0f}) path.size={} path.idx={} "
+                    "subgoal=({:.0f},{:.0f},{:.0f}) flags=0x{:X} "
+                    "distToSubgoal={:.0f}u distToTarget={:.0f}u speedXZ={:.1f} "
+                    "usingNavMesh={} fallback={}",
+                    a->world.pos.x, a->world.pos.y, a->world.pos.z,
+                    effectiveTarget.x, effectiveTarget.y, effectiveTarget.z,
+                    (int)sLocalNav.navState.path.waypoints.size(),
+                    (int)sLocalNav.navState.path.cursorIdx,
+                    nav.subgoal.x, nav.subgoal.y, nav.subgoal.z,
+                    nav.subgoalFlags,
+                    distToSubgoal, distToLeader, a->speedXZ,
+                    nav.usingNavMesh ? "yes" : "no",
+                    (int)nav.fallbackEngaged);
+        sLocalNav.lastFollowProgressLogFrame = curFrame;
     }
 }
 
