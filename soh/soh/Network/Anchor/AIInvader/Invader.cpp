@@ -45,6 +45,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 2: shared substrate-path helper
 #include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5: shared scripted-FOLLOW step
 #include "soh/Network/Anchor/Common/AILocomotion/LocomotionAnim.h"  // Phase 6: shared climb-anim decision
+#include "soh/Network/Anchor/Common/AILocomotion/AirborneRecovery.h"  // shared airborne-stuck recovery
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
@@ -397,6 +398,17 @@ struct LocalInvNavState {
     // LEDGE_HOIST to reach the same ledge. Same shape as NPC Follower's
     // `leaderWasClimbingPrevTick` (FollowerNPC.cpp:1700).
     bool targetWasClimbingPrevTick = false;
+
+    // Shared airborne-stuck recovery state (Common/AILocomotion/
+    // AirborneRecovery). Ported from NPC Follower 2026-05-19. NPC's
+    // jumpInProgress lived on its sLocalNav; Invader had only a bare
+    // `jumpInProgress` flag on the actor struct (z_en_invader.h) and
+    // no peak / start-frame / prev-pos tracking, so the airborne-
+    // freeze safety net (NPC log 161: 73s frozen mid-fall) was
+    // missing. State lives here on the file-scope nav struct so it
+    // mirrors NPC's layout. EnInvader.jumpInProgress still kept on
+    // the actor struct because the C-side actor file may read it.
+    AnchorAI::AirborneState airborneState;
 };
 static LocalInvNavState sLocalInvNav;
 
@@ -3240,16 +3252,18 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
 
     // Phase 4 — airborne auto-jump anim selection for FOLLOW. Tracks
     // walked-off-edge transitions so kJump / kRunJump play as the
-    // body falls. Matches FollowerNPC's logic at FollowerNPC.cpp:3909
-    // but simpler (no jump-arc boost — Invader uses default gravity
-    // and just rides the natural arc; no field-test instrumentation;
-    // no STUCK-in-air position-stuck detection — gravity will land it
-    // eventually). Triggered only in FOLLOW; CLIMBING/SWIMMING/
+    // body falls. Matches FollowerNPC's logic at FollowerNPC.cpp:3909.
+    // Now wired to the shared AirborneRecovery helper (2026-05-19) so
+    // the airborne-stuck safety net (NPC log-161 class bug — actor
+    // frozen mid-fall with velocity.y clamped at terminal) covers
+    // Invader too. Triggered only in FOLLOW; CLIMBING/SWIMMING/
     // LEDGE_HOIST handle their own anims.
     InvaderAnim airborneAnimOverride = InvaderAnim::kNone;
     {
         const bool isOnFloor     = (invader->bgCheckFlags & 1) != 0;
         const bool walkedOffEdge = (invader->bgCheckFlags & 4) != 0;
+        const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
+                                       std::memory_order_relaxed);
         if (walkedOffEdge && invader->speedXZ > 3.0f &&
             this_->state == EN_INVADER_STATE_FOLLOW) {
             invader->bgCheckFlags &= ~4;
@@ -3260,6 +3274,8 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
             airborneAnimOverride =
                 (invader->speedXZ > 4.0f) ? InvaderAnim::kRunJump
                                           : InvaderAnim::kJump;
+            AnchorAI::StartAirborne(sLocalInvNav.airborneState,
+                                    invader->world.pos, curFrame);
             SPDLOG_INFO("[Invader.jump] FIRE anim={} speedXZ={:.2f} "
                         "pos=({:.0f},{:.0f},{:.0f})",
                         (airborneAnimOverride == InvaderAnim::kRunJump
@@ -3268,11 +3284,43 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
                         invader->world.pos.x, invader->world.pos.y,
                         invader->world.pos.z);
         }
-        // Landing detection — clears jumpInProgress when bgCheckFlags & 1
-        // returns. Matches FollowerNPC's landing branch at
-        // FollowerNPC.cpp:4043 (simplified — no fall-damage logic).
+        // Per-tick airborne-stuck recovery while jumpInProgress.
+        // shouldForceTeleport fires when actor is airborne ≥5s AND
+        // (|velocity.y| < 1.0 OR no XYZ pos delta ≥0.5u in last 5s).
+        if (sLocalInvNav.airborneState.jumpInProgress) {
+            AnchorAI::AirborneRecoveryInput in;
+            in.currentPos = invader->world.pos;
+            in.velocityY  = invader->velocity.y;
+            in.isOnFloor  = isOnFloor;
+            in.curFrame   = curFrame;
+            const AnchorAI::AirborneRecoveryResult rec =
+                AnchorAI::UpdateAirborneRecovery(sLocalInvNav.airborneState, in);
+            if (rec.shouldForceTeleport) {
+                // Snap to current target (or to home pos if no target).
+                Actor* target = PickHostileTargetForInvader(invader, play);
+                const Vec3f to = (target != nullptr && target->update != nullptr)
+                                   ? target->world.pos
+                                   : invader->home.pos;
+                SPDLOG_WARN("[Invader.jump] STUCK in air for {} frames "
+                            "(velocity.y={:.2f}, pos=({:.0f},{:.0f},{:.0f}), "
+                            "posStuck={} zeroVel={}) — force-teleport",
+                            (int)rec.airborneFrames, invader->velocity.y,
+                            invader->world.pos.x, invader->world.pos.y,
+                            invader->world.pos.z, rec.posStuck, rec.zeroVel);
+                invader->world.pos = to;
+                invader->speedXZ   = 0.0f;
+                Actor_UpdateBgCheckInfo(play, invader, 26.0f, 10.0f, 50.0f, 4);
+                this_->jumpInProgress = 0;
+                AnchorAI::EndAirborne(sLocalInvNav.airborneState);
+                this_->state = EN_INVADER_STATE_FOLLOW;
+            }
+        }
+        // Landing detection — bgCheckFlags & 1 set means actor touched
+        // floor. Clear both the actor's jumpInProgress flag and the
+        // helper's airborne state.
         if (this_->jumpInProgress && isOnFloor) {
             this_->jumpInProgress = 0;
+            AnchorAI::EndAirborne(sLocalInvNav.airborneState);
         }
     }
 

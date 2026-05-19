@@ -23,6 +23,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 3 (2026-05-18): shared substrate-path helper
 #include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5 (2026-05-19): shared scripted-FOLLOW step
 #include "soh/Network/Anchor/Common/AILocomotion/LocomotionAnim.h"  // Phase 6 (2026-05-19): shared climb-anim decision
+#include "soh/Network/Anchor/Common/AILocomotion/AirborneRecovery.h"  // shared airborne-stuck detection
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
@@ -253,14 +254,16 @@ struct LocalNpcNavState {
 
     // Auto-jump-off-ledge diagnostics. Captured at jump trigger,
     // emitted as periodic per-frame logs while airborne, summary
-    // log at landing. `jumpInProgress` flips false on landing.
-    bool     jumpInProgress         = false;
-    Vec3f    jumpStartPos           = { 0.0f, 0.0f, 0.0f };
-    Vec3f    jumpPeakPos            = { 0.0f, 0.0f, 0.0f };  // highest Y reached
+    // log at landing. `airborneState.jumpInProgress` flips false on
+    // landing. The persistent jump-fire / peak-tracking / pos-resnap
+    // fields live in AnchorAI::AirborneState (shared with AI Invader
+    // via Common/AILocomotion/AirborneRecovery); NPC-specific
+    // diagnostic captures (yaw, speed, velocityY, log throttle,
+    // floor-edge tracking) stay actor-side.
+    AnchorAI::AirborneState airborneState;
     s16      jumpStartYaw           = 0;
     float    jumpStartSpeedXZ       = 0.0f;
     float    jumpStartVelocityY     = 0.0f;
-    uint64_t jumpStartFrame         = 0;
     uint64_t jumpLastDiagFrame      = 0;
     bool     jumpWasOnFloorPrevTick = true;
 
@@ -739,19 +742,21 @@ void Anchor::SetFollowerNpcActive(bool active) {
         // NPC inherited that file-static state and its first tick
         // tripped the airborne-stuck safety net. Reset all fields
         // here so each respawn starts fresh.
-        sLocalNav.jumpInProgress         = false;
-        sLocalNav.jumpStartFrame         = 0;
-        sLocalNav.jumpLastDiagFrame      = 0;
-        sLocalNav.jumpStartPos           = p;
-        sLocalNav.jumpPeakPos            = p;
-        sLocalNav.jumpWasOnFloorPrevTick = true;
+        sLocalNav.airborneState = {};  // value-reset (jumpInProgress = false,
+                                       // frame = 0, start/peak/prev all zero)
+        // Seed start/peak to current pos so first airborne tick after
+        // respawn doesn't compute huge deltas from origin.
+        sLocalNav.airborneState.jumpStartPos = p;
+        sLocalNav.airborneState.jumpPeakPos  = p;
+        sLocalNav.jumpLastDiagFrame          = 0;
+        sLocalNav.jumpWasOnFloorPrevTick     = true;
         // (Combat-state cleanup intentionally NOT done here.
         // sAttackState and sCombatCooldownEndFrame are defined later
         // in the file; forward-referencing them from this early
         // function is a compile error. They're not load-bearing for
         // the disappearance bug — combat states validate
         // sAttackState.target->update on entry and exit harmlessly
-        // when stale. The killer leftover is sLocalNav.jumpInProgress
+        // when stale. The killer leftover is sLocalNav.airborneState.jumpInProgress
         // which IS reset above. sLastCombatWeapon (used by Phase B
         // STANDBY equipment) is also defined later — same deferral
         // applies; default 0 is fine for first STANDBY entry on a
@@ -961,7 +966,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
 
     // ---- Airborne momentum lock ------------------------------------
-    // While in a jump (sLocalNav.jumpInProgress), preserve speedXZ at
+    // While in a jump (sLocalNav.airborneState.jumpInProgress), preserve speedXZ at
     // the value captured when the jump fired. Player's airborne
     // handler at z_player.c:7165 uses Math_AsymStepToF with very low
     // rates (0.05/0.1) — effectively constant linearVelocity through
@@ -969,7 +974,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // tick from leader-distance, killing horizontal momentum mid-jump
     // (log 147 jump 1 showed speedXZ decay 4.5 → 0 in ~20 frames).
     // Skip the rest of FOLLOW so speedXZ + yaw stay locked.
-    if (sLocalNav.jumpInProgress) {
+    if (sLocalNav.airborneState.jumpInProgress) {
         a->speedXZ = sLocalNav.jumpStartSpeedXZ;
         a->shape.rot.y = sLocalNav.jumpStartYaw;
         a->world.rot.y = sLocalNav.jumpStartYaw;
@@ -3823,9 +3828,9 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             // bgCheckFlags & 1 (floor landing) — which doesn't fire
             // for water entry. NPC plays kRunJump for several seconds
             // until eventually touching the underwater floor.
-            if (sLocalNav.jumpInProgress) {
-                npc->gravity              = -2.0f;  // restore default
-                sLocalNav.jumpInProgress  = false;
+            if (sLocalNav.airborneState.jumpInProgress) {
+                npc->gravity = -2.0f;  // restore default
+                AnchorAI::EndAirborne(sLocalNav.airborneState);
             }
             SPDLOG_INFO("[FollowerNPC] FOLLOW/IDLE→SWIMMING "
                         "(yDistToWater={:.1f}u > {:.0f}u threshold for "
@@ -4165,13 +4170,11 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             localAnim = (npc->speedXZ > 4.0f) ? FollowerNpcAnim::kRunJump
                                               : FollowerNpcAnim::kJump;
             // Capture jump diagnostics
-            sLocalNav.jumpInProgress     = true;
-            sLocalNav.jumpStartPos       = npc->world.pos;
-            sLocalNav.jumpPeakPos        = npc->world.pos;
+            AnchorAI::StartAirborne(sLocalNav.airborneState,
+                                    npc->world.pos, curFrame);
             sLocalNav.jumpStartYaw       = npc->shape.rot.y;
             sLocalNav.jumpStartSpeedXZ   = npc->speedXZ;
             sLocalNav.jumpStartVelocityY = kJumpBoostVy;
-            sLocalNav.jumpStartFrame     = curFrame;
             sLocalNav.jumpLastDiagFrame  = curFrame;
             SPDLOG_INFO("[FollowerNPC.jump] FIRE — anim={} speedXZ={:.2f} "
                         "yaw=0x{:X} startPos=({:.0f},{:.0f},{:.0f}) "
@@ -4185,85 +4188,69 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // Per-frame airborne tracking — log every ~6 frames (~0.3s)
         // while jumpInProgress so we can see velocity / pos / peak
         // evolving. Track peak Y for the summary.
-        if (sLocalNav.jumpInProgress) {
-            // Stuck-detection — two paths:
-            //   (a) airborne >5s with near-zero velocity.y AND not on
-            //       floor (original — zero-velocity hover scenario).
-            //   (b) airborne >5s with NO position change (log 161:
-            //       NPC frozen at (-49,361,405) for 73 seconds with
-            //       velocity.y clamped at -10. The (a) check missed
-            //       it because |-10| > 1.0; pos was actually static
-            //       though — gravity wasn't translating into motion).
-            // Track previous tick's pos to detect (b).
-            static Vec3f sJumpPrevPos = { 0.0f, 0.0f, 0.0f };
-            static uint64_t sJumpPrevPosFrame = 0;
-            const uint64_t airborneFrames = curFrame - sLocalNav.jumpStartFrame;
+        if (sLocalNav.airborneState.jumpInProgress) {
+            // Stuck-detection via shared helper (Common/AILocomotion/
+            // AirborneRecovery). Two branches OR'd:
+            //   (a) zeroVel: airborne ≥5s with |velocity.y| < 1.0
+            //   (b) posStuck: airborne ≥5s with NO position change
+            //       in the last 5s (log 161 — frozen at terminal
+            //       velocity but pos static).
+            AnchorAI::AirborneRecoveryInput in;
+            in.currentPos = npc->world.pos;
+            in.velocityY  = npc->velocity.y;
+            in.isOnFloor  = isOnFloor;
+            in.curFrame   = curFrame;
+            const AnchorAI::AirborneRecoveryResult rec =
+                AnchorAI::UpdateAirborneRecovery(sLocalNav.airborneState, in);
 
-            const bool zeroVel  = std::fabs(npc->velocity.y) < 1.0f;
-            const float posDelta = std::sqrt(
-                (npc->world.pos.x - sJumpPrevPos.x) * (npc->world.pos.x - sJumpPrevPos.x) +
-                (npc->world.pos.y - sJumpPrevPos.y) * (npc->world.pos.y - sJumpPrevPos.y) +
-                (npc->world.pos.z - sJumpPrevPos.z) * (npc->world.pos.z - sJumpPrevPos.z));
-            // If pos hasn't moved more than 0.5u in the last 5s while
-            // airborne, the NPC is frozen mid-fall regardless of what
-            // velocity says. Re-baseline every 5s of motion.
-            const bool posStuck = (curFrame > sJumpPrevPosFrame + 100) &&
-                                  (posDelta < 0.5f);
-            if (posDelta >= 0.5f) {
-                sJumpPrevPos       = npc->world.pos;
-                sJumpPrevPosFrame  = curFrame;
-            }
-
-            if (airborneFrames > 100 && !isOnFloor && (zeroVel || posStuck)) {
+            if (rec.shouldForceTeleport) {
                 SPDLOG_WARN("[FollowerNPC.jump] STUCK in air for {} frames "
                             "(velocity.y={:.2f}, pos=({:.0f},{:.0f},{:.0f}), "
                             "posStuck={} zeroVel={}) — force-teleport to leader",
-                            (int)airborneFrames, npc->velocity.y,
+                            (int)rec.airborneFrames, npc->velocity.y,
                             npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
-                            posStuck, zeroVel);
+                            rec.posStuck, rec.zeroVel);
                 TeleportNpcTo(this_, play, leaderPos);
-                npc->gravity              = -2.0f;  // restore default
-                sLocalNav.jumpInProgress  = false;
+                npc->gravity = -2.0f;  // restore default
+                AnchorAI::EndAirborne(sLocalNav.airborneState);
                 return;
             }
-
-            if (npc->world.pos.y > sLocalNav.jumpPeakPos.y) {
-                sLocalNav.jumpPeakPos = npc->world.pos;
-            }
+            // Helper already wrote jumpPeakPos via in.peakUpdated path —
+            // no need to maintain a separate peak check.
             if (curFrame > sLocalNav.jumpLastDiagFrame + 6) {
-                const float dxFromStart = npc->world.pos.x - sLocalNav.jumpStartPos.x;
-                const float dyFromStart = npc->world.pos.y - sLocalNav.jumpStartPos.y;
-                const float dzFromStart = npc->world.pos.z - sLocalNav.jumpStartPos.z;
+                const float dxFromStart = npc->world.pos.x - sLocalNav.airborneState.jumpStartPos.x;
+                const float dyFromStart = npc->world.pos.y - sLocalNav.airborneState.jumpStartPos.y;
+                const float dzFromStart = npc->world.pos.z - sLocalNav.airborneState.jumpStartPos.z;
                 const float distXZ = std::sqrt(dxFromStart*dxFromStart +
                                                 dzFromStart*dzFromStart);
                 SPDLOG_INFO("[FollowerNPC.jump] airborne tick {}: "
                             "pos=({:.0f},{:.0f},{:.0f}) velocity.y={:.2f} "
                             "speedXZ={:.2f} dY={:+.1f} distXZ={:.1f} "
                             "peakY={:.0f} (peakΔY={:+.1f}) onFloor={}",
-                            (int)(curFrame - sLocalNav.jumpStartFrame),
+                            (int)(curFrame - sLocalNav.airborneState.jumpStartFrame),
                             npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
                             npc->velocity.y, npc->speedXZ,
                             dyFromStart, distXZ,
-                            sLocalNav.jumpPeakPos.y,
-                            sLocalNav.jumpPeakPos.y - sLocalNav.jumpStartPos.y,
+                            sLocalNav.airborneState.jumpPeakPos.y,
+                            sLocalNav.airborneState.jumpPeakPos.y - sLocalNav.airborneState.jumpStartPos.y,
                             isOnFloor);
                 sLocalNav.jumpLastDiagFrame = curFrame;
             }
             // Landing detection — bgCheckFlags & 1 set means NPC
             // touched a floor. Emit summary log + close jump tracking.
             if (isOnFloor && !sLocalNav.jumpWasOnFloorPrevTick) {
-                const float dxFromStart = npc->world.pos.x - sLocalNav.jumpStartPos.x;
-                const float dyFromStart = npc->world.pos.y - sLocalNav.jumpStartPos.y;
-                const float dzFromStart = npc->world.pos.z - sLocalNav.jumpStartPos.z;
+                const float dxFromStart = npc->world.pos.x - sLocalNav.airborneState.jumpStartPos.x;
+                const float dyFromStart = npc->world.pos.y - sLocalNav.airborneState.jumpStartPos.y;
+                const float dzFromStart = npc->world.pos.z - sLocalNav.airborneState.jumpStartPos.z;
                 const float distXZ = std::sqrt(dxFromStart*dxFromStart +
                                                 dzFromStart*dzFromStart);
-                const float peakRise = sLocalNav.jumpPeakPos.y -
-                                        sLocalNav.jumpStartPos.y;
+                const float peakRise = sLocalNav.airborneState.jumpPeakPos.y -
+                                        sLocalNav.airborneState.jumpStartPos.y;
                 // Fall distance for damage = peak Y minus landing Y.
                 // Using peak (not start) handles "jumped up then fell
                 // into a deep pit" — the actual descent measures from
                 // the high point of the trajectory, not the takeoff.
-                const float fallDistance = sLocalNav.jumpPeakPos.y -
+                const float fallDistance = sLocalNav.airborneState.jumpPeakPos.y -
                                             npc->world.pos.y;
                 SPDLOG_INFO("[FollowerNPC.jump] LAND — totalFrames={} "
                             "startPos=({:.0f},{:.0f},{:.0f}) "
@@ -4271,14 +4258,14 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                             "peakY={:.0f} (rise={:+.1f}) drop={:+.1f}u "
                             "fallDistance={:.0f} horizontalDist={:.1f}u "
                             "final velocity.y={:.2f}",
-                            (int)(curFrame - sLocalNav.jumpStartFrame),
-                            sLocalNav.jumpStartPos.x, sLocalNav.jumpStartPos.y,
-                            sLocalNav.jumpStartPos.z,
+                            (int)(curFrame - sLocalNav.airborneState.jumpStartFrame),
+                            sLocalNav.airborneState.jumpStartPos.x, sLocalNav.airborneState.jumpStartPos.y,
+                            sLocalNav.airborneState.jumpStartPos.z,
                             npc->world.pos.x, npc->world.pos.y, npc->world.pos.z,
-                            sLocalNav.jumpPeakPos.y, peakRise,
+                            sLocalNav.airborneState.jumpPeakPos.y, peakRise,
                             dyFromStart, fallDistance, distXZ, npc->velocity.y);
                 npc->gravity = -2.0f;  // restore default ground gravity
-                sLocalNav.jumpInProgress = false;
+                AnchorAI::EndAirborne(sLocalNav.airborneState);
 
                 // Stage 3 — fall damage. Gated on Invulnerable CVar
                 // and IsLocalOwnerNPC (peers don't own damage state).
@@ -4450,7 +4437,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // only fires from frame N+1 onward (after currentAnim is
     // updated to kRunJump/kJump), letting the trigger-frame choice
     // through unmolested.
-    if (sLocalNav.jumpInProgress &&
+    if (sLocalNav.airborneState.jumpInProgress &&
         ((FollowerNpcAnim)this_->currentAnim == FollowerNpcAnim::kRunJump ||
          (FollowerNpcAnim)this_->currentAnim == FollowerNpcAnim::kJump)) {
         localAnim = (FollowerNpcAnim)this_->currentAnim;
