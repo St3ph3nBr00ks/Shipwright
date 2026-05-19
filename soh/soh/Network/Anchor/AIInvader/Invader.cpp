@@ -3317,10 +3317,45 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         }
         // Landing detection — bgCheckFlags & 1 set means actor touched
         // floor. Clear both the actor's jumpInProgress flag and the
-        // helper's airborne state.
+        // helper's airborne state. Apply fall damage if descent exceeded
+        // the safe threshold (mirrors FollowerNPC.cpp:4278-4314).
         if (this_->jumpInProgress && isOnFloor) {
+            const float fallDistance =
+                sLocalInvNav.airborneState.jumpPeakPos.y - invader->world.pos.y;
             this_->jumpInProgress = 0;
             AnchorAI::EndAirborne(sLocalInvNav.airborneState);
+
+            // Fall damage. Thresholds match NPC Follower:
+            //   < 400u  : safe
+            //   400-799 : 1 HP
+            //   800-1199: 2 HP
+            //   1200+   : 3+ HP (scaled per 400u increment)
+            // No Invulnerable CVar on Invader (no toggle exists); gate
+            // only on already-dead. Health writes route through
+            // colChkInfo.health so the C-side drain logic (z_en_invader.c
+            // :311-335) sees the post-fall value; the DEAD transition
+            // there will catch HP ≤ 0 on the next actor update.
+            constexpr float kFallSafeThreshold = 400.0f;
+            constexpr float kFallHpStepUnits   = 400.0f;
+            if (fallDistance >= kFallSafeThreshold &&
+                this_->state != EN_INVADER_STATE_DEAD &&
+                invader->colChkInfo.health > 0) {
+                const int hpLoss =
+                    (int)((fallDistance - kFallSafeThreshold) /
+                          kFallHpStepUnits) + 1;
+                const int newHealth =
+                    std::max<int>(0, (int)invader->colChkInfo.health - hpLoss);
+                SPDLOG_INFO("[Invader] fall damage: fallDistance={:.0f} → "
+                            "{} HP loss (health {}→{})",
+                            fallDistance, hpLoss,
+                            (int)invader->colChkInfo.health, newHealth);
+                invader->colChkInfo.health = (s8)newHealth;
+                this_->health = (s8)newHealth;
+                if (newHealth <= 0) {
+                    this_->state = EN_INVADER_STATE_DEAD;
+                    SPDLOG_INFO("[Invader] death by fall");
+                }
+            }
         }
     }
 
