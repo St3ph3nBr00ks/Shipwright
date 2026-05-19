@@ -1487,11 +1487,38 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
     }
 
     // ── Resolve / cache the active anchor ──────────────────────────
+    //
+    // Phase 3 follow-up (2026-05-18): per-tick position-match refresh
+    // so cross-anchor climb-cell traversals (spiral wall bridges,
+    // L-shape vine walls) re-target the active anchor correctly. Same
+    // shape as Player AI Follower's Option A refresh and NPC Follower's
+    // equivalent. Without this, Invader commits to the closest-basePos
+    // anchor at engagement and never switches even when the substrate
+    // path's subgoal cell belongs to a neighbouring anchor.
+    const ::AnchorNavRoom::RoomNavData* navData =
+        ::AnchorNavRoom::GetForRoom(
+            gPlayState->sceneNum,
+            (int8_t)gPlayState->roomCtx.curRoom.num);
+    if (navData != nullptr) {
+        uint16_t refreshedIdx =
+            ::AnchorNavRoom::FindAnchorByClimbNodePosition(navData, subgoal);
+        if (refreshedIdx == UINT16_MAX) {
+            refreshedIdx = ::AnchorNavRoom::FindAnchorByClimbNodePosition(
+                navData, a->world.pos);
+        }
+        if (refreshedIdx != UINT16_MAX) {
+            const auto* refreshed = &navData->climbAnchors[refreshedIdx];
+            if (refreshed != sLocalInvNav.activeClimbAnchor) {
+                SPDLOG_INFO("[Invader] CLIMBING anchor refresh: → {} "
+                            "(subgoal=({:.0f},{:.0f},{:.0f}))",
+                            refreshedIdx, subgoal.x, subgoal.y, subgoal.z);
+                sLocalInvNav.activeClimbAnchor = refreshed;
+            }
+        }
+    }
+
     if (sLocalInvNav.activeClimbAnchor == nullptr) {
-        const ::AnchorNavRoom::RoomNavData* navData =
-            ::AnchorNavRoom::GetForRoom(
-                gPlayState->sceneNum,
-                (int8_t)gPlayState->roomCtx.curRoom.num);
+        // Position-match found nothing — fall back to closest-by-basePos.
         sLocalInvNav.activeClimbAnchor = FindClosestClimbAnchorInv(
             navData, a->world.pos);
         if (sLocalInvNav.activeClimbAnchor == nullptr) {
