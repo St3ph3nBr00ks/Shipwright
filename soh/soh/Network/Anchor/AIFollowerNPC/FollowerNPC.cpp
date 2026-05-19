@@ -21,6 +21,7 @@
 #include "soh/Network/Anchor/AIFollowerNPC/FollowerNPC.h"
 #include "soh/Network/Anchor/Common/ActorTrail.h"     // Phase 5: substrate path consumption
 #include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 3 (2026-05-18): shared substrate-path helper
+#include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5 (2026-05-19): shared scripted-FOLLOW step
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
@@ -989,34 +990,30 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     sLocalNav.navState.trailKey = AnchorNav::TrailKeyForPlayer(
         (uint8_t)Anchor::Instance->ownClientId);
 
-    // ---- Substrate-driven subgoal selection (Phase 3 — via helper) --
-    // Phase 3 (2026-05-18): ChooseSubgoal handles the 60u direct-yaw
-    // gate, water gate, rate-limited path refresh (kPathRefreshMs),
-    // target-drift refresh, and cursor advance. NPC Follower is a
-    // friendly actor — fallback policy when path is empty + outside
-    // 60u is "ReturnToLeader" (already covered by G10 leash teleport
-    // for catastrophic stuck cases, so the fallback enum mostly just
-    // marks intent for state-machine consumers).
-    //
-    // Mirrors AI Invader Phase 2 TickFOLLOW (Invader.cpp:838-).
+    // ---- Substrate-driven subgoal selection (via shared helper) ----
+    // Phase 5 (2026-05-19): consolidated through RunScriptedFollowStep
+    // so NPC Follower and AI Invader share one entry point for the
+    // FOLLOW path-decision + climb-cell-flag detection. Each caller
+    // does its own state transitions + locomotion drive based on the
+    // returned ScriptedFollowResult.
     AnchorAI::FallbackPolicy policy;
     policy.isFriendlyActor = true;
     policy.hasRangedReady  = false;  // ranged engagement is a combat-AI
                                      // concern; locomotion fallback
                                      // doesn't fire RANGED_ATTACK here.
-    const AnchorAI::NavOrDirectResult nav =
-        AnchorAI::ChooseSubgoal(a, effectiveTarget, sLocalNav.navState,
-                                 policy, play);
+    const AnchorAI::ScriptedFollowResult step =
+        AnchorAI::RunScriptedFollowStep(a, effectiveTarget,
+                                         sLocalNav.navState, policy, play);
+    const AnchorAI::NavOrDirectResult& nav = step.nav;
 
     const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
                                   std::memory_order_relaxed);
 
     // ---- Phase 6: climb-subgoal transition --------------------------
-    // If the current path subgoal carries the climb-cell flag, transition
-    // to CLIMBING. The CLIMBING handler takes over snapping XZ to the
-    // wall + driving Y. Only fires when the helper returned a substrate
-    // subgoal — direct-yaw fallback never carries climb flags.
-    if (nav.usingNavMesh && (nav.subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY)) {
+    // The shared helper sets step.shouldEngageClimb when the current
+    // path subgoal carries NODE_CLIMB_ANY. Transition to CLIMBING so
+    // its handler can snap XZ + drive Y on the climb anchor's grid.
+    if (step.shouldEngageClimb) {
         this_->state = EN_FOLLOWER_STATE_CLIMBING;
         sLocalNav.activeClimbAnchor = nullptr;  // resolved fresh on entry
         SPDLOG_INFO("[FollowerNPC] FOLLOW→CLIMBING (path entered climb cell at "
@@ -2543,14 +2540,15 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     AnchorAI::FallbackPolicy policy;
     policy.isFriendlyActor = true;
     policy.hasRangedReady  = false;
-    const AnchorAI::NavOrDirectResult nav =
-        AnchorAI::ChooseSubgoal(a, targetPos, sLocalNav.navState,
-                                 policy, play);
+    const AnchorAI::ScriptedFollowResult step =
+        AnchorAI::RunScriptedFollowStep(a, targetPos, sLocalNav.navState,
+                                         policy, play);
+    const AnchorAI::NavOrDirectResult& nav = step.nav;
 
     // Climb-cell transition — same shape as TickFOLLOW. If the substrate
     // routes us through a climb cell mid-pursuit, exit ENGAGE so
     // CLIMBING can take over.
-    if (nav.usingNavMesh && (nav.subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY)) {
+    if (step.shouldEngageClimb) {
         this_->state = EN_FOLLOWER_STATE_CLIMBING;
         sLocalNav.activeClimbAnchor = nullptr;
         SPDLOG_INFO("[FollowerNPC] ENGAGE→CLIMBING (path entered climb cell at "

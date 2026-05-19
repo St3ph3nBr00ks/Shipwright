@@ -43,6 +43,7 @@
 #include "soh/Network/Anchor/Common/PlayerLookup.h"  // PickHostileTargetForInvader (Agent 4)
 #include "soh/Network/Anchor/Common/ActorTrail.h"    // Nav-parity Phase A: substrate path consumption
 #include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 2: shared substrate-path helper
+#include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5: shared scripted-FOLLOW step
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
@@ -912,15 +913,16 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     AnchorAI::FallbackPolicy policy;
     policy.isHostileActor   = true;
     policy.hasRangedReady   = InvaderHasRangedWeapon();
-    const AnchorAI::NavOrDirectResult nav =
-        AnchorAI::ChooseSubgoal(a, targetPos, sLocalInvNav.navState, policy, play);
+    const AnchorAI::ScriptedFollowResult step =
+        AnchorAI::RunScriptedFollowStep(a, targetPos, sLocalInvNav.navState,
+                                         policy, play);
+    const AnchorAI::NavOrDirectResult& nav = step.nav;
 
     // ── Phase B: climb-cell transition ───────────────────────────────
-    // If the current path subgoal carries the climb-cell flag, transition
-    // to CLIMBING. The CLIMBING handler takes over snapping XZ to the
-    // wall + driving Y. Only fires when the helper returned a substrate
-    // subgoal — direct-yaw fallback never carries climb flags.
-    if (nav.usingNavMesh && (nav.subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY)) {
+    // Phase 5 (2026-05-19): step.shouldEngageClimb is the shared
+    // helper's signal that the current substrate subgoal is a climb
+    // cell. Same shape as NPC Follower's TickFOLLOW.
+    if (step.shouldEngageClimb) {
         this_->state = EN_INVADER_STATE_CLIMBING;
         sLocalInvNav.activeClimbAnchor = nullptr;  // resolved fresh on entry
         SPDLOG_INFO("[Invader] FOLLOW→CLIMBING (path entered climb cell at "
@@ -1604,6 +1606,15 @@ bool TryEngageAutoClimbInv(EnInvader* this_, PlayState* play, Actor* target) {
     const float distBaseSq = Dist2DSq(this_->actor.world.pos, anchor->basePos);
     if (distBaseSq >= kInvClimbForceEngageBaseDistSq) return false;
 
+    // Anchor-overhead sanity gate (2026-05-19, log 253 fix). If the
+    // anchor's top extends meaningfully above the target's Y, the cell
+    // column passes THROUGH (or above) the platform where the target is
+    // standing. Riding the column to the top causes the Invader to climb
+    // PAST the target — visible as "climbed through the platform P1 was
+    // on" in log 253. Reject anchors whose top is >50u above target.
+    constexpr float kAnchorOverheadMax = 50.0f;
+    if (anchor->topPos.y > target->world.pos.y + kAnchorOverheadMax) return false;
+
     if (!PopulateAnchorClimbPathInv(navData, *anchor,
                                      this_->actor.world.pos,
                                      target->world.pos,
@@ -2147,14 +2158,15 @@ void TickENGAGE(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     AnchorAI::FallbackPolicy policy;
     policy.isHostileActor   = true;
     policy.hasRangedReady   = InvaderHasRangedWeapon();
-    const AnchorAI::NavOrDirectResult nav =
-        AnchorAI::ChooseSubgoal(&this_->actor, targetPos,
-                                 sLocalInvNav.navState, policy, play);
+    const AnchorAI::ScriptedFollowResult step =
+        AnchorAI::RunScriptedFollowStep(&this_->actor, targetPos,
+                                         sLocalInvNav.navState, policy, play);
+    const AnchorAI::NavOrDirectResult& nav = step.nav;
 
     // Climb-cell transition — same shape as TickFOLLOW. If the substrate
     // routes us through a climb cell, exit ENGAGE so CLIMBING can take
     // over. Combat resumes from STANDBY after the climb-out.
-    if (nav.usingNavMesh && (nav.subgoalFlags & ::AnchorNavRoom::NODE_CLIMB_ANY)) {
+    if (step.shouldEngageClimb) {
         this_->state = EN_INVADER_STATE_CLIMBING;
         sLocalInvNav.activeClimbAnchor = nullptr;
         SPDLOG_INFO("[Invader] ENGAGE→CLIMBING (path entered climb cell at "
@@ -3129,7 +3141,28 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         (this_->state == EN_INVADER_STATE_SWIMMING) ||
         (this_->state == EN_INVADER_STATE_LEDGE_HOIST) ||
         (this_->state == EN_INVADER_STATE_CRAWLING);
+
+    // STRICT GATE (2026-05-19, log 253 fix): only force-engage CLIMBING
+    // when the substrate path is EMPTY. If BFS returned a path (even
+    // a 1-waypoint direct-yaw fallback), trust the path — the BFS
+    // already considered every climb anchor and chose the best route.
+    //
+    // Pre-fix symptom: NPC Follower successfully climbed two vine walls
+    // in Deku Tree via substrate-path-driven CLIMBING (anchor 4 → 2 →
+    // mid-climb-refresh → 1 → 2). AI Invader got the SAME 45-waypoint
+    // path but TryEngageAutoClimbInv hijacked it after the first
+    // mantle, force-engaged a different anchor (base=(450,360,111)
+    // top=(450,1000,111)), and rode the column 640u up to Y=832 —
+    // climbing THROUGH the platform P1 was standing on at Y=800.
+    //
+    // NPC Follower has no equivalent force-climb hijack — that's why
+    // it climbs correctly. With this gate, AI Invader inherits the
+    // same substrate-path-only behaviour.
+    const bool substratePathHasContent =
+        !sLocalInvNav.navState.path.Empty();
+
     if (!autoClimbExempt &&
+        !substratePathHasContent &&
         sLocalInvNav.lastTarget != nullptr &&
         sLocalInvNav.lastTarget->update != nullptr) {
         TryEngageAutoClimbInv(this_, play, sLocalInvNav.lastTarget);
