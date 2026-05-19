@@ -812,7 +812,7 @@ static constexpr float kEnterIdle   = 50.0f;
 // when leader is far — gives a natural feel without making the NPC
 // always sprint.
 static constexpr float kRunDistance = 250.0f;  // beyond this, run instead of walk
-static constexpr float kWalkSpeed   = 6.0f;
+static constexpr float kWalkSpeed   = 4.8f;
 // Speed history:
 //   v1: 12.0    (50% faster than Link — visibly outran Link in tests)
 //   v2: 8.0     (matches Link R_RUN_SPEED_LIMIT — still felt fast in
@@ -820,7 +820,9 @@ static constexpr float kWalkSpeed   = 6.0f;
 //                anim-blending which makes vanilla movement read
 //                smoother at the same nominal speed)
 //   v3: 6.4     (20% reduction from v2 per user report 2026-05-19)
-static constexpr float kRunSpeed    = 6.4f;
+//   v4: 5.12    (further 20% reduction per user report 2026-05-19 PM —
+//                NPC + Invader still visibly outpaced Link in field test)
+static constexpr float kRunSpeed    = 5.12f;
 
 // Phase 5 — substrate path consumption + STUCK recovery.
 //
@@ -838,7 +840,7 @@ static constexpr float kStuckNudgeDist      = 30.0f;  // direct world.pos nudge 
 
 // Phase 6 — scripted-climb constants. Tuned to match Link's vanilla
 // climb feel; field-test in Inside Deku Tree may refine.
-static constexpr float kClimbSpeedY         = 4.0f;   // u/frame upward; vanilla Link is ~4-5
+static constexpr float kClimbSpeedY         = 2.0f;   // u/frame upward; halved 2026-05-19 PM per user report (was 4.0 — too fast)
 static constexpr float kClimbSubgoalReach3D = 24.0f;  // advance cursor when within 3D
 static constexpr float kClimbXzSnap         = 1.0f;   // smooth XZ snap rate to subgoal (per frame fraction)
 //
@@ -4012,17 +4014,18 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         this_->stopAnimPlaying = 0;
     }
 
-    // Head-look-at-leader. Disabled during CLIMBING + LEDGE_HOIST —
-    // head rotation looks visually wrong in those poses (climb anim
-    // has Link facing the wall; head turning sideways to track leader
-    // produces unnatural angles). Also let head settle to neutral
-    // during these phases (Math_ScaledStepToS toward 0 instead of the
-    // leader-relative target). LEDGE_HOIST is similarly anim-locked.
+    // Head-look-at-leader. Hard-disabled (zeroed, not settled) during
+    // CLIMBING + LEDGE_HOIST. The earlier gradual settle (0x600/tick
+    // → ~0.65s to neutralize a fully-deflected head turn) left the
+    // first ~0.65s of climb entry showing the prior leader-tracking
+    // pose on top of the climb anim — user-reported as "torso and
+    // head bending at unnatural angles" 2026-05-19 PM. Snapping to
+    // zero gives the climb anim a clean default-pose base.
     if (this_->state == EN_FOLLOWER_STATE_CLIMBING ||
         this_->state == EN_FOLLOWER_STATE_LEDGE_HOIST) {
-        Math_ScaledStepToS(&this_->headLimbRot.y,  0, 0x600);
-        Math_ScaledStepToS(&this_->headLimbRot.x,  0, 0x600);
-        Math_ScaledStepToS(&this_->upperLimbRot.y, 0, 0x600);
+        this_->headLimbRot.y  = 0;
+        this_->headLimbRot.x  = 0;
+        this_->upperLimbRot.y = 0;
     } else {
         TickHeadLookAtLeader(this_, leaderPos);
     }

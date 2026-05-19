@@ -130,9 +130,10 @@ constexpr float kEngageStrikeDist   = 70.0f;
 //                 scripted-position locomotion lacks Link's anim
 //                 blending which makes vanilla movement read smoother
 //                 at the same nominal speed)
-constexpr float kEngageWalkSpeed    = 6.0f;
+//   v5: 5.12     (further 20% reduction per user report 2026-05-19 PM)
+constexpr float kEngageWalkSpeed    = 4.8f;
 constexpr float kEngageRunDistance  = 150.0f;
-constexpr float kEngageRunSpeed     = 6.4f;
+constexpr float kEngageRunSpeed     = 5.12f;
 
 constexpr int   kBlockDurationMs        = 2000;
 constexpr float kBlockHpThresholdRatio  = 0.5f;
@@ -293,8 +294,8 @@ constexpr float kInvFollowEngageDist = 1000.0f;
 constexpr float kInvFollowIdleDist = 60.0f;
 // FOLLOW pursuit speeds. Same numerics as FollowerNPC's kRunSpeed /
 // kRunDistance.
-constexpr float kInvWalkSpeed   = 6.0f;
-constexpr float kInvRunSpeed    = 6.4f;  // 20% below Link's R_RUN_SPEED_LIMIT (2026-05-19 user report)
+constexpr float kInvWalkSpeed   = 4.8f;  // further 20% reduction 2026-05-19 PM (was 6.0)
+constexpr float kInvRunSpeed    = 5.12f; // further 20% reduction 2026-05-19 PM (was 6.4 = 20% below Link)
 constexpr float kInvRunDistance = 200.0f;
 // STUCK detection — no progress over this window triggers a one-tick
 // nudge. Same shape as FollowerNPC's kStuckCheckMs / kStuckMinProgress
@@ -333,9 +334,9 @@ constexpr float kInvFollowProxLimit     = 30.0f;
 
 // ── Nav-parity Phase B — CLIMBING tuning ───────────────────────────
 // Same numerics as FollowerNPC's kClimbSpeedY / kClimbBodyOffset.
-// Vanilla Link climbs at ~4-5u/frame; we use 4 to keep the Invader
-// from out-pacing the player vertically.
-constexpr float kInvClimbSpeedY     = 4.0f;
+// Vanilla Link climbs at ~4-5u/frame; halved to 2.0 on 2026-05-19 PM
+// per user report — 4.0 still felt too fast on the vine wall.
+constexpr float kInvClimbSpeedY     = 2.0f;
 constexpr float kInvClimbBodyOffset = 12.0f;
 // Engagement gate when leader-climb force-engage fires. Same shape as
 // FollowerNPC's kClimbForceEngageBaseDistSq (200u). Squared form to
@@ -3505,13 +3506,17 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // (or settle to neutral when no target / scripted-anim states).
     // EnInvader_Draw's save/swap/restore makes the local Player's
     // limb rotation reflect THIS computation during the Player_DrawImpl
-    // call. Disabled during LEDGE_HOIST / CRAWLING — anim is body-locked
-    // (climb up + crouch); head turning sideways looks wrong.
-    if (this_->state == EN_INVADER_STATE_LEDGE_HOIST ||
+    // call. Hard-disabled (zeroed, not settled) during CLIMBING /
+    // LEDGE_HOIST / CRAWLING — anim is body-locked (climb up /
+    // ledge mantle / crouch); head turning sideways produces
+    // unnatural angles. CLIMBING gate added 2026-05-19 PM per user
+    // report (was visibly tracking target during vine-wall climb).
+    if (this_->state == EN_INVADER_STATE_CLIMBING ||
+        this_->state == EN_INVADER_STATE_LEDGE_HOIST ||
         this_->state == EN_INVADER_STATE_CRAWLING) {
-        Math_ScaledStepToS(&this_->headLimbRot.y,  0, 0x600);
-        Math_ScaledStepToS(&this_->headLimbRot.x,  0, 0x600);
-        Math_ScaledStepToS(&this_->upperLimbRot.y, 0, 0x600);
+        this_->headLimbRot.y  = 0;
+        this_->headLimbRot.x  = 0;
+        this_->upperLimbRot.y = 0;
     } else {
         // Prefer the current combat target; fall back to the cached
         // locomotion target; otherwise settle to neutral. Same as
