@@ -1043,6 +1043,14 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     if (step.shouldEngageClimb) {
         this_->state = EN_FOLLOWER_STATE_CLIMBING;
         sLocalNav.activeClimbAnchor = nullptr;  // resolved fresh on entry
+        // Seed climbPrev* with current pos so the first CLIMBING tick's
+        // motion-axis decision (LocomotionAnim) compares against the
+        // correct baseline. Without seeding, |dy| and |dxz| compute
+        // against zeroed init values (or stale post-prior-climb values)
+        // and the first tick mis-picks SideL/R vs UpL/R based on
+        // world-coordinate magnitude. Matches AI Invader entry pattern.
+        sLocalNav.climbPrevY  = a->world.pos.y;
+        sLocalNav.climbPrevXZ = a->world.pos;
         SPDLOG_INFO("[FollowerNPC] FOLLOW→CLIMBING (path entered climb cell at "
                     "({:.0f},{:.0f},{:.0f}); flags=0x{:X})",
                     nav.subgoal.x, nav.subgoal.y, nav.subgoal.z,
@@ -2582,6 +2590,9 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     if (step.shouldEngageClimb) {
         this_->state = EN_FOLLOWER_STATE_CLIMBING;
         sLocalNav.activeClimbAnchor = nullptr;
+        // Seed climbPrev* (see TickFOLLOW for rationale).
+        sLocalNav.climbPrevY  = a->world.pos.y;
+        sLocalNav.climbPrevXZ = a->world.pos;
         SPDLOG_INFO("[FollowerNPC] ENGAGE→CLIMBING (path entered climb cell at "
                     "({:.0f},{:.0f},{:.0f}); flags=0x{:X})",
                     nav.subgoal.x, nav.subgoal.y, nav.subgoal.z,
@@ -3820,6 +3831,18 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                 (int8_t)gPlayState->roomCtx.curRoom.num);
         const ::AnchorNavRoom::ClimbAnchor* anchor =
             FindClosestClimbAnchor(navData, leaderPos);
+        // Anchor-overhead sanity gate (ported from AI Invader, 2026-05-19,
+        // log 253 fix). If the anchor's top extends meaningfully above
+        // the leader's Y, the cell column passes THROUGH or above the
+        // platform the leader is standing on. Riding the column to the
+        // top would climb PAST the leader — visible as "climbed through
+        // the platform" in Invader's log 253. Reject and fall through
+        // to substrate path (which routes around if possible).
+        constexpr float kAnchorOverheadMax = 50.0f;
+        if (anchor != nullptr &&
+            anchor->topPos.y > leaderPos.y + kAnchorOverheadMax) {
+            anchor = nullptr;
+        }
         if (anchor != nullptr) {
             const float distBaseSq = Dist2DSq(npc->world.pos, anchor->basePos);
             if (distBaseSq < kClimbForceEngageBaseDistSq) {
@@ -3828,6 +3851,9 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                                             sLocalNav.navState.path)) {
                     sLocalNav.activeClimbAnchor = anchor;
                     this_->state                = EN_FOLLOWER_STATE_CLIMBING;
+                    // Seed climbPrev* (see TickFOLLOW for rationale).
+                    sLocalNav.climbPrevY  = npc->world.pos.y;
+                    sLocalNav.climbPrevXZ = npc->world.pos;
                     SPDLOG_INFO("[FollowerNPC] Leader-climbing force-engage — anchor "
                                 "base=({:.0f},{:.0f},{:.0f}) top=({:.0f},{:.0f},{:.0f}) "
                                 "NPC at ({:.0f},{:.0f},{:.0f}) distBase={:.0f}u — "

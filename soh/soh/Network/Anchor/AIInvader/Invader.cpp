@@ -1780,6 +1780,11 @@ bool TryEngageAutoClimbInv(EnInvader* this_, PlayState* play, Actor* target) {
     this_->state                    = EN_INVADER_STATE_CLIMBING;
     sLocalInvNav.leashFrames        = 0;
     sLocalInvNav.closeFailFrames    = 0;
+    // Seed climbPrev* so the first CLIMBING tick's motion-axis decision
+    // (LocomotionAnim) reads a meaningful baseline. Matches TickFOLLOW /
+    // TickENGAGE entry pattern.
+    this_->climbPrevY  = this_->actor.world.pos.y;
+    this_->climbPrevXZ = this_->actor.world.pos;
     SPDLOG_INFO("[Invader] Auto-climb force-engage — anchor "
                 "base=({:.0f},{:.0f},{:.0f}) top=({:.0f},{:.0f},{:.0f}) "
                 "Inv at ({:.0f},{:.0f},{:.0f}) distBase={:.0f}u — "
