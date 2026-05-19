@@ -24,6 +24,9 @@
 #include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5 (2026-05-19): shared scripted-FOLLOW step
 #include "soh/Network/Anchor/Common/AILocomotion/LocomotionAnim.h"  // Phase 6 (2026-05-19): shared climb-anim decision
 #include "soh/Network/Anchor/Common/AILocomotion/AirborneRecovery.h"  // shared airborne-stuck detection
+#include "soh/Network/Anchor/Common/AILocomotion/HeadLook.h"          // shared head-look math
+#include "soh/Network/Anchor/Common/AILocomotion/StepPhase.h"         // shared step-phase + footstep SFX
+#include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
@@ -252,16 +255,11 @@ struct LocalNpcNavState {
     uint32_t closeFailFrames   = 0;
     float    closeFailBaseline = 0.0f;
 
-    // STUCK escalation (ported from Player AI Follower's G12). Counts
-    // consecutive FOLLOW→STUCK transitions within kStuckCycleWindowMs;
-    // TickSTUCK reads the count to escalate (nudge → cursor advance →
-    // teleport). `stuckCycleResetFrames` decays the counter; reset to
-    // window-length on each new STUCK entry. `stuckCycleAdvancedAt`
-    // is an edge-trigger latch so cycle-2's cursor-advance fires once
-    // per cycle (not every tick while STUCK).
-    uint32_t stuckCycleCount       = 0;
-    uint32_t stuckCycleResetFrames = 0;
-    uint32_t stuckCycleAdvancedAt  = 0;
+    // STUCK escalation state (Common/AILocomotion/StuckEscalation).
+    // Counts consecutive FOLLOW→STUCK transitions within the decay
+    // window; TickSTUCK reads via GetStuckAction to choose between
+    // nudge / cursor advance / teleport.
+    AnchorAI::StuckCycleState stuckCycle;
 
     // Auto-jump-off-ledge diagnostics. Captured at jump trigger,
     // emitted as periodic per-frame logs while airborne, summary
@@ -1116,13 +1114,12 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
             // cycle-2 advance has a path to operate on); TickSTUCK's
             // cycle-1 branch resets the path after nudging.
             this_->state = EN_FOLLOWER_STATE_STUCK;
-            sLocalNav.stuckCycleCount++;
-            sLocalNav.stuckCycleResetFrames =
-                (uint32_t)Anchor::Instance->MsToGameTicks(kStuckCycleWindowMs);
+            AnchorAI::NoteStuckEntered(sLocalNav.stuckCycle,
+                Anchor::Instance->MsToGameTicks(kStuckCycleWindowMs));
             SPDLOG_INFO("[FollowerNPC] FOLLOW→STUCK (no progress {:.1f}u in 3s @ "
                         "({:.0f},{:.0f},{:.0f}); cycle={})",
                         progress, a->world.pos.x, a->world.pos.y, a->world.pos.z,
-                        sLocalNav.stuckCycleCount);
+                        sLocalNav.stuckCycle.count);
         }
         sLocalNav.stuckCheckPos       = a->world.pos;
         sLocalNav.lastStuckCheckFrame = curFrame;
@@ -1344,44 +1341,15 @@ static constexpr float kStepPhaseFootDownR = 24.0f;
 // -3 phase shift and use 14 directly (close enough for visual L/R).
 static constexpr float kStopPhaseLRSplit  = 14.0f;
 
-// Detect step-phase crossing for footstep SFX. Returns true if the
-// phase advanced PAST `footDown` in this tick (handles the wrap-around
-// at kStepPhaseCycle so a tick that crosses the wrap still fires).
-bool StepPhaseCrossed(float prevPhase, float curPhase, float footDown) {
-    // No advance, no fire.
-    if (curPhase == prevPhase) return false;
-    // Wrap case: prev was near the end, cur wrapped to near the start.
-    if (curPhase < prevPhase) {
-        return (prevPhase < footDown && footDown <= kStepPhaseCycle) ||
-               (curPhase >= footDown && footDown >= 0.0f);
-    }
-    // Normal forward case.
-    return (prevPhase < footDown && footDown <= curPhase);
-}
-
-// Tick step phase, fire footstep SFX on cross. Returns the previous
-// phase (for diagnostics if needed).
+// Step-phase + footstep SFX. Thin wrapper over the shared
+// AnchorAI::TickStepPhase helper that supplies NPC's stepPhase
+// counter + Link-walk-cycle constants.
 void TickStepPhaseAndSfx(EnFollower* this_, PlayState* play) {
-    const float playSpeed  = this_->skelAnime.playSpeed;
-    const float updateRate = R_UPDATE_RATE * 0.5f;
-    const float advance    = playSpeed * updateRate;
-    const float prevPhase  = this_->stepPhase;
-    float       newPhase   = prevPhase + advance;
-    while (newPhase >= kStepPhaseCycle) newPhase -= kStepPhaseCycle;
-    while (newPhase < 0.0f)             newPhase += kStepPhaseCycle;
-    this_->stepPhase = newPhase;
-
-    // Fire footstep SFX on foot-down frame cross. NA_SE_PL_WALK_GROUND
-    // is the base walk-on-ground SFX (Player_ApplyFloorAndAgeSfxOffsets
-    // selects the floor-variant version; we use the base for v1 — a
-    // future polish item is to honor floor type, but base sfx covers
-    // all surfaces audibly). Pitch shift scales with speed (Player
-    // passes linearVelocity at z_player.c:8099).
-    if (StepPhaseCrossed(prevPhase, newPhase, kStepPhaseFootDownL) ||
-        StepPhaseCrossed(prevPhase, newPhase, kStepPhaseFootDownR)) {
-        func_800F4010(&this_->actor.projectedPos, NA_SE_PL_WALK_GROUND,
-                      this_->actor.speedXZ);
-    }
+    AnchorAI::TickStepPhase(this_->stepPhase, &this_->actor,
+                            this_->skelAnime.playSpeed,
+                            kStepPhaseCycle,
+                            kStepPhaseFootDownL,
+                            kStepPhaseFootDownR);
 }
 
 // Pick the right animation for the current state. Used by both the
@@ -1407,50 +1375,11 @@ void TickStepPhaseAndSfx(EnFollower* this_, PlayState* play) {
 // Drives the NPC's pose values written into Player's headLimbRot /
 // upperLimbRot via the EnFollower_Draw save/swap/restore.
 void TickHeadLookAtLeader(EnFollower* this_, const Vec3f& leaderPos) {
-    const Actor* a = &this_->actor;
-    const s16 dirYaw = Math_Atan2S(leaderPos.z - a->world.pos.z,
-                                   leaderPos.x - a->world.pos.x);
-    const s16 yawRel = dirYaw - a->shape.rot.y;  // relative to body facing
-
-    // Pitch via OoT's Math_Vec3f_Pitch formula at z_lib.c:292-294.
-    // Math_Atan2S(forward, side) takes forward axis first; passing
-    // (dy, distXZ) was treating dy as forward, producing 0x4000 (90°)
-    // for dy=0 → clamped to -0x2000 → head locked looking up.
-    //
-    // Correct: Math_Atan2S(distXZ, npc.y - leader.y). Returns small
-    // negative when leader is above (≈ "looking up" in Player's
-    // headLimbRot.x convention); positive when leader is below;
-    // 0 when at the same height.
-    const float dx     = leaderPos.x - a->world.pos.x;
-    const float dz     = leaderPos.z - a->world.pos.z;
-    const float distXZ = std::sqrt(dx*dx + dz*dz);
-    const s16 pitchRel = (distXZ > 1.0f)
-        ? Math_Atan2S(distXZ, a->world.pos.y - leaderPos.y)
-        : 0;
-
-    // Apportion yaw: head takes up to ±kHeadYawMax (70° in OoT binary
-    // angle), upper body twists for the rest. Field test reported
-    // visually strange head angles when the limit was ±0x4000 (90°)
-    // — heads turn unnaturally far. Tightened to ±70° = 12743 binary
-    // (≈ 0x31C7), matching a natural neck rotation range.
-    constexpr s16 kHeadYawMax = 12743;
-    s16 headYawTarget  = yawRel;
-    s16 upperYawTarget = 0;
-    if (headYawTarget >  kHeadYawMax) { upperYawTarget = headYawTarget - kHeadYawMax; headYawTarget =  kHeadYawMax; }
-    if (headYawTarget < -kHeadYawMax) { upperYawTarget = headYawTarget + kHeadYawMax; headYawTarget = -kHeadYawMax; }
-    // If leader is mostly behind, cap upper twist at ±0x4000 (don't snap-spin).
-    if (upperYawTarget >  0x4000) upperYawTarget =  0x4000;
-    if (upperYawTarget < -0x4000) upperYawTarget = -0x4000;
-
-    // Head pitch cap at ±0x2000.
-    s16 headPitchTarget = pitchRel;
-    if (headPitchTarget >  0x2000) headPitchTarget =  0x2000;
-    if (headPitchTarget < -0x2000) headPitchTarget = -0x2000;
-
-    // Step toward targets. ~0x600 per tick = ~5° at 20fps.
-    Math_ScaledStepToS(&this_->headLimbRot.y,  headYawTarget,   0x600);
-    Math_ScaledStepToS(&this_->upperLimbRot.y, upperYawTarget,  0x600);
-    Math_ScaledStepToS(&this_->headLimbRot.x,  headPitchTarget, 0x600);
+    AnchorAI::HeadLookInputs in;
+    in.actorPos  = this_->actor.world.pos;
+    in.actorYaw  = this_->actor.shape.rot.y;
+    in.targetPos = leaderPos;
+    AnchorAI::StepHeadLookToward(in, &this_->headLimbRot, &this_->upperLimbRot);
 }
 
 // ── Idle blend (waitL ↔ waitR) ───────────────────────────────────────
@@ -3609,17 +3538,19 @@ bool TryFireG14(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 //   Cycle 3+: teleport to next subgoal (TeleportNpcTo to
 //            navState.path.CurrentSubgoal()) OR leader as fallback.
 //
-// The cycle counter lives on sLocalNav.stuckCycleCount; the FOLLOW
-// stuck-detect increments + arms the reset window. The dispatcher's
-// per-tick decrement (decays the counter after kStuckCycleWindowMs)
-// gives the cycle a clean restart between unrelated stuck episodes.
+// State lives on sLocalNav.stuckCycle (AnchorAI::StuckCycleState).
+// FOLLOW's stuck-detect calls NoteStuckEntered to increment + arm
+// the reset window. The dispatcher's TickStuckCycleWindow decays it
+// so unrelated stuck episodes don't accumulate into escalation.
 void TickSTUCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
-    const uint32_t cycle = sLocalNav.stuckCycleCount;
+    const AnchorAI::StuckCycleAction action =
+        AnchorAI::GetStuckAction(sLocalNav.stuckCycle, kStuckCycleEscalation);
+    const uint32_t cycle = sLocalNav.stuckCycle.count;
 
     // Cycle 3+: teleport. Try next subgoal first; fall back to leader
     // if the path is empty.
-    if (cycle >= (uint32_t)kStuckCycleEscalation) {
+    if (action == AnchorAI::StuckCycleAction::Teleport) {
         const bool havePath = !sLocalNav.navState.path.waypoints.empty() &&
                               sLocalNav.navState.path.cursorIdx <
                                   sLocalNav.navState.path.waypoints.size();
@@ -3636,24 +3567,19 @@ void TickSTUCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
                     "({:.0f},{:.0f},{:.0f})",
                     (int)cycle, reason, dest.x, dest.y, dest.z);
         TeleportNpcTo(this_, play, dest);
-        // Reset cycle state so the next true-stuck episode starts fresh.
-        sLocalNav.stuckCycleCount       = 0;
-        sLocalNav.stuckCycleResetFrames = 0;
-        sLocalNav.stuckCycleAdvancedAt  = 0;
+        AnchorAI::OnStuckTeleportFired(sLocalNav.stuckCycle);
         return;
     }
 
     // Cycle 2: edge-triggered cursor advance. Skip whichever subgoal
-    // the path currently points at — the one we couldn't reach. Latch
-    // on stuckCycleAdvancedAt so the advance fires once per cycle
-    // (not every tick we re-enter STUCK at the same count).
-    if (cycle == 2 && sLocalNav.stuckCycleAdvancedAt != 2 &&
+    // the path currently points at — the one we couldn't reach.
+    if (action == AnchorAI::StuckCycleAction::CursorAdvance &&
         !sLocalNav.navState.path.waypoints.empty() &&
         sLocalNav.navState.path.cursorIdx <
             sLocalNav.navState.path.waypoints.size() - 1) {
         const size_t before = sLocalNav.navState.path.cursorIdx;
         sLocalNav.navState.path.Advance();
-        sLocalNav.stuckCycleAdvancedAt = 2;
+        AnchorAI::MarkCursorAdvanced(sLocalNav.stuckCycle);
         SPDLOG_INFO("[FollowerNPC] STUCK cycle 2: advance cursor (skip subgoal "
                     "{} → {}/{})",
                     (int)before, (int)sLocalNav.navState.path.cursorIdx,
@@ -3784,19 +3710,10 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         return;
     }
 
-    // STUCK-cycle reset-frame decrement (ported from Player AI Follower's
-    // G12). Decays the stuckCycleCount counter after kStuckCycleWindowMs
-    // of no new STUCK transition; resets the edge-trigger latch too so
-    // the next cycle-2 advance can fire fresh. Without this decay, the
-    // counter would accumulate forever across unrelated stuck episodes
-    // and escalate to teleport on what should be a fresh cycle-1.
-    if (sLocalNav.stuckCycleResetFrames > 0) {
-        sLocalNav.stuckCycleResetFrames--;
-        if (sLocalNav.stuckCycleResetFrames == 0) {
-            sLocalNav.stuckCycleCount      = 0;
-            sLocalNav.stuckCycleAdvancedAt = 0;
-        }
-    }
+    // STUCK-cycle reset-frame decay (Common/AILocomotion/StuckEscalation).
+    // When the window expires, the cycle counter + advance latch reset
+    // so unrelated stuck episodes don't accumulate into escalation.
+    AnchorAI::TickStuckCycleWindow(sLocalNav.stuckCycle);
 
     // Leader-climbing force-engage. Fires BEFORE the G-guards and
     // dispatch so a successful engagement skips both. The substrate
@@ -4145,9 +4062,8 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // zero gives the climb anim a clean default-pose base.
     if (this_->state == EN_FOLLOWER_STATE_CLIMBING ||
         this_->state == EN_FOLLOWER_STATE_LEDGE_HOIST) {
-        this_->headLimbRot.y  = 0;
-        this_->headLimbRot.x  = 0;
-        this_->upperLimbRot.y = 0;
+        AnchorAI::ResetHeadLookToNeutral(&this_->headLimbRot,
+                                          &this_->upperLimbRot);
     } else {
         TickHeadLookAtLeader(this_, leaderPos);
     }

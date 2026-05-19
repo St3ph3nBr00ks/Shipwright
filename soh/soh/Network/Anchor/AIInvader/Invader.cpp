@@ -46,6 +46,9 @@
 #include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5: shared scripted-FOLLOW step
 #include "soh/Network/Anchor/Common/AILocomotion/LocomotionAnim.h"  // Phase 6: shared climb-anim decision
 #include "soh/Network/Anchor/Common/AILocomotion/AirborneRecovery.h"  // shared airborne-stuck recovery
+#include "soh/Network/Anchor/Common/AILocomotion/HeadLook.h"          // shared head-look math
+#include "soh/Network/Anchor/Common/AILocomotion/StepPhase.h"         // shared step-phase + footstep SFX
+#include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
@@ -483,11 +486,8 @@ struct LocalInvNavState {
     // the actor struct because the C-side actor file may read it.
     AnchorAI::AirborneState airborneState;
 
-    // STUCK escalation (ported from Player AI Follower's G12 — see
-    // FollowerNPC.cpp comments for the routing semantics).
-    uint32_t stuckCycleCount       = 0;
-    uint32_t stuckCycleResetFrames = 0;
-    uint32_t stuckCycleAdvancedAt  = 0;
+    // STUCK escalation state (Common/AILocomotion/StuckEscalation).
+    AnchorAI::StuckCycleState stuckCycle;
 
     // Non-fatal hard-landing wince (mirrors NPC's
     // fallHurtFramesRemaining). When a fall is hard enough to cause
@@ -715,18 +715,6 @@ static constexpr float kInvStepPhaseFootDownL = 10.0f;
 static constexpr float kInvStepPhaseFootDownR = 24.0f;
 static constexpr float kInvStopPhaseLRSplit  = 14.0f;
 
-// Item 2 — step-phase crossing detector for footstep SFX. Returns true
-// if the phase advanced past `footDown` this tick. Handles wrap-around
-// at kInvStepPhaseCycle. Clone of FollowerNPC.cpp:StepPhaseCrossed.
-inline bool InvStepPhaseCrossed(float prevPhase, float curPhase, float footDown) {
-    if (curPhase == prevPhase) return false;
-    if (curPhase < prevPhase) {
-        return (prevPhase < footDown && footDown <= kInvStepPhaseCycle) ||
-               (curPhase  >= footDown && footDown >= 0.0f);
-    }
-    return (prevPhase < footDown && footDown <= curPhase);
-}
-
 // Item 3 — idle waitL ↔ waitR breathing blend. Cloned from
 // FollowerNPC.cpp:TickIdleBlend (1388). Free-running sine on
 // idleBlendPhase produces a 0..1 blend weight; LinkAnimation_BlendToJoint
@@ -748,30 +736,15 @@ inline void InvTickIdleBlend(EnInvader* this_, PlayState* play) {
         weight, this_->blendTable);
 }
 
-// Item 2 — tick step-phase + fire footstep SFX on foot-down crosses.
-// Called from the dispatcher every tick while in a state that moves
-// the body (FOLLOW / STUCK / ENGAGE). Fires NA_SE_PL_WALK_GROUND at
-// foot-down frames 10 and 24 of the 29-unit cycle. Same shape as
-// FollowerNPC.cpp:TickStepPhaseAndSfx.
+// Thin wrapper over the shared AnchorAI::TickStepPhase helper that
+// supplies Invader's stepPhase counter + Link-walk-cycle constants.
 inline void InvTickStepPhaseAndSfx(EnInvader* this_, PlayState* play) {
     (void)play;
-    const float playSpeed  = this_->skelAnime.playSpeed;
-    const float updateRate = R_UPDATE_RATE * 0.5f;
-    const float advance    = playSpeed * updateRate;
-    const float prevPhase  = this_->stepPhase;
-    float       newPhase   = prevPhase + advance;
-    while (newPhase >= kInvStepPhaseCycle) newPhase -= kInvStepPhaseCycle;
-    while (newPhase < 0.0f)                newPhase += kInvStepPhaseCycle;
-    this_->stepPhase = newPhase;
-
-    if (InvStepPhaseCrossed(prevPhase, newPhase, kInvStepPhaseFootDownL) ||
-        InvStepPhaseCrossed(prevPhase, newPhase, kInvStepPhaseFootDownR)) {
-        // NA_SE_PL_WALK_GROUND is the base walk-on-ground SFX.
-        // func_800F4010 is the engine's spatial SFX dispatcher used by
-        // Player and other actors for footsteps.
-        func_800F4010(&this_->actor.projectedPos, NA_SE_PL_WALK_GROUND,
-                      this_->actor.speedXZ);
-    }
+    AnchorAI::TickStepPhase(this_->stepPhase, &this_->actor,
+                            this_->skelAnime.playSpeed,
+                            kInvStepPhaseCycle,
+                            kInvStepPhaseFootDownL,
+                            kInvStepPhaseFootDownR);
 }
 
 InvaderAnim InvAnimForState(s32 state, float speedXZ, s32 prevState,
@@ -1120,14 +1093,13 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
             // NOT reset here — cycle 2 needs it to advance the cursor.
             // TickSTUCK's cycle-1 branch resets the path after nudging.
             this_->state = EN_INVADER_STATE_STUCK;
-            sLocalInvNav.stuckCycleCount++;
-            sLocalInvNav.stuckCycleResetFrames =
-                (uint32_t)Anchor::Instance->MsToGameTicks(kInvStuckCycleWindowMs);
+            AnchorAI::NoteStuckEntered(sLocalInvNav.stuckCycle,
+                Anchor::Instance->MsToGameTicks(kInvStuckCycleWindowMs));
             SPDLOG_INFO("[Invader] FOLLOW→STUCK (no progress {:.1f}u in {}ms @ "
                         "({:.0f},{:.0f},{:.0f}); cycle={})",
                         progress, kInvStuckCheckMs,
                         a->world.pos.x, a->world.pos.y, a->world.pos.z,
-                        sLocalInvNav.stuckCycleCount);
+                        sLocalInvNav.stuckCycle.count);
         }
         sLocalInvNav.stuckCheckPos       = a->world.pos;
         sLocalInvNav.lastStuckCheckFrame = curFrame;
@@ -1219,12 +1191,13 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
         return;
     }
 
-    const uint32_t cycle = sLocalInvNav.stuckCycleCount;
+    const AnchorAI::StuckCycleAction action =
+        AnchorAI::GetStuckAction(sLocalInvNav.stuckCycle, kInvStuckCycleEscalation);
+    const uint32_t cycle = sLocalInvNav.stuckCycle.count;
 
     // Cycle 3+: teleport to next subgoal (or target as fallback).
-    // Same shape as FollowerNPC TickSTUCK; Invader's teleport target
-    // is its current hostile, not the leader.
-    if (cycle >= (uint32_t)kInvStuckCycleEscalation) {
+    // Invader's teleport target is its current hostile, not a leader.
+    if (action == AnchorAI::StuckCycleAction::Teleport) {
         const bool havePath = !sLocalInvNav.navState.path.Empty();
         Vec3f dest;
         const char* reason;
@@ -1246,21 +1219,19 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
         sLocalInvNav.stuckCheckPos      = a->world.pos;
         sLocalInvNav.lastStuckCheckFrame =
             Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
-        sLocalInvNav.stuckCycleCount       = 0;
-        sLocalInvNav.stuckCycleResetFrames = 0;
-        sLocalInvNav.stuckCycleAdvancedAt  = 0;
+        AnchorAI::OnStuckTeleportFired(sLocalInvNav.stuckCycle);
         this_->state = EN_INVADER_STATE_FOLLOW;
         return;
     }
 
     // Cycle 2: edge-triggered cursor advance — skip the stuck subgoal.
-    if (cycle == 2 && sLocalInvNav.stuckCycleAdvancedAt != 2 &&
+    if (action == AnchorAI::StuckCycleAction::CursorAdvance &&
         !sLocalInvNav.navState.path.Empty() &&
         sLocalInvNav.navState.path.cursorIdx <
             sLocalInvNav.navState.path.waypoints.size() - 1) {
         const size_t before = sLocalInvNav.navState.path.cursorIdx;
         sLocalInvNav.navState.path.Advance();
-        sLocalInvNav.stuckCycleAdvancedAt = 2;
+        AnchorAI::MarkCursorAdvanced(sLocalInvNav.stuckCycle);
         SPDLOG_INFO("[Invader] STUCK cycle 2: advance cursor (skip subgoal "
                     "{} → {}/{})",
                     (int)before, (int)sLocalInvNav.navState.path.cursorIdx,
@@ -2725,33 +2696,11 @@ s32 ChooseCombatExitState(EnInvader* this_, PlayState* play) {
 // actual rotation.
 // ---------------------------------------------------------------------
 void TickHeadLookAtTarget(EnInvader* this_, const Vec3f& targetPos) {
-    const Actor* a = &this_->actor;
-    const s16 dirYaw = Math_Atan2S(targetPos.z - a->world.pos.z,
-                                    targetPos.x - a->world.pos.x);
-    const s16 yawRel = dirYaw - a->shape.rot.y;
-
-    const float dx     = targetPos.x - a->world.pos.x;
-    const float dz     = targetPos.z - a->world.pos.z;
-    const float distXZ = std::sqrt(dx*dx + dz*dz);
-    const s16 pitchRel = (distXZ > 1.0f)
-        ? Math_Atan2S(distXZ, a->world.pos.y - targetPos.y)
-        : 0;
-
-    constexpr s16 kHeadYawMax = 12743;  // ±70° binary; matches FollowerNPC
-    s16 headYawTarget  = yawRel;
-    s16 upperYawTarget = 0;
-    if (headYawTarget >  kHeadYawMax) { upperYawTarget = headYawTarget - kHeadYawMax; headYawTarget =  kHeadYawMax; }
-    if (headYawTarget < -kHeadYawMax) { upperYawTarget = headYawTarget + kHeadYawMax; headYawTarget = -kHeadYawMax; }
-    if (upperYawTarget >  0x4000) upperYawTarget =  0x4000;
-    if (upperYawTarget < -0x4000) upperYawTarget = -0x4000;
-
-    s16 headPitchTarget = pitchRel;
-    if (headPitchTarget >  0x2000) headPitchTarget =  0x2000;
-    if (headPitchTarget < -0x2000) headPitchTarget = -0x2000;
-
-    Math_ScaledStepToS(&this_->headLimbRot.y,  headYawTarget,   0x600);
-    Math_ScaledStepToS(&this_->upperLimbRot.y, upperYawTarget,  0x600);
-    Math_ScaledStepToS(&this_->headLimbRot.x,  headPitchTarget, 0x600);
+    AnchorAI::HeadLookInputs in;
+    in.actorPos  = this_->actor.world.pos;
+    in.actorYaw  = this_->actor.shape.rot.y;
+    in.targetPos = targetPos;
+    AnchorAI::StepHeadLookToward(in, &this_->headLimbRot, &this_->upperLimbRot);
 }
 
 // ---------------------------------------------------------------------
@@ -3070,16 +3019,8 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         return;
     }
 
-    // STUCK-cycle reset-frame decrement (ported from Player AI Follower's
-    // G12). Decays stuckCycleCount after kInvStuckCycleWindowMs of no
-    // new STUCK transition; resets the edge-trigger latch too.
-    if (sLocalInvNav.stuckCycleResetFrames > 0) {
-        sLocalInvNav.stuckCycleResetFrames--;
-        if (sLocalInvNav.stuckCycleResetFrames == 0) {
-            sLocalInvNav.stuckCycleCount      = 0;
-            sLocalInvNav.stuckCycleAdvancedAt = 0;
-        }
-    }
+    // STUCK-cycle reset-frame decay (Common/AILocomotion/StuckEscalation).
+    AnchorAI::TickStuckCycleWindow(sLocalInvNav.stuckCycle);
 
     // Item 1 + Item 6 — environmental death detection. Clones the
     // void + drown branches from FollowerNPC.cpp:CheckEnvironmentalDeath
@@ -3790,13 +3731,15 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     if (this_->state == EN_INVADER_STATE_CLIMBING ||
         this_->state == EN_INVADER_STATE_LEDGE_HOIST ||
         this_->state == EN_INVADER_STATE_CRAWLING) {
-        this_->headLimbRot.y  = 0;
-        this_->headLimbRot.x  = 0;
-        this_->upperLimbRot.y = 0;
+        AnchorAI::ResetHeadLookToNeutral(&this_->headLimbRot,
+                                          &this_->upperLimbRot);
     } else {
         // Prefer the current combat target; fall back to the cached
-        // locomotion target; otherwise settle to neutral. Same as
-        // FollowerNPC's TickHeadLookAtLeader call site.
+        // locomotion target; otherwise gently settle to neutral
+        // (separate from the hard-zero scripted-anim states above —
+        // here the head just decays to forward when no target is in
+        // view; gradual is fine because no body-locked anim is
+        // running, the head settle is visually consistent).
         Actor* lookTarget = sAttackState.target;
         if (lookTarget == nullptr || lookTarget->update == nullptr) {
             lookTarget = sLocalInvNav.lastTarget;
