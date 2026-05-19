@@ -4465,7 +4465,22 @@ void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3
             } else {
                 const f32 scale = kStuckForwardTeleportDist / fwdDist;
                 projected.x = p2Pos.x + fwdDx * scale;
-                projected.y = followerMoveTarget.y;  // approximate Y of subgoal
+                // Clamp Y to a small window around the actor's current
+                // altitude (2026-05-19, log 64 fix). Previously this used
+                // followerMoveTarget.y directly, but when the subgoal is
+                // a climb-related waypoint (e.g. top of a vine wall at
+                // Y=800 while the actor is on the floor at Y=0), the
+                // projection landed at Y=800 and FindNearestNode picked
+                // a climb-surface node up there. With NODE_CLIMB_* not
+                // in the reject mask, STUCK-FWD then teleported the
+                // actor up the wall instead of letting CLIMBING engage.
+                // Clamping to ±60u keeps stairs/ramps working (small Y
+                // deltas) while preventing the wall-top jump.
+                constexpr f32 kMaxStuckFwdYDelta = 60.0f;
+                f32 wantY = followerMoveTarget.y;
+                if (wantY > p2Pos.y + kMaxStuckFwdYDelta) wantY = p2Pos.y + kMaxStuckFwdYDelta;
+                if (wantY < p2Pos.y - kMaxStuckFwdYDelta) wantY = p2Pos.y - kMaxStuckFwdYDelta;
+                projected.y = wantY;
                 projected.z = p2Pos.z + fwdDz * scale;
             }
             const ::AnchorNavRoom::RoomNavData* navData =
@@ -4479,12 +4494,20 @@ void Anchor::HandleStateStuck(Player* player, const Vec3f& leaderPos, const Vec3
             if (nodeIdx >= 0) {
                 const auto& node = navData->nodes[(size_t)nodeIdx];
                 // Reject orphaned / steep / hazard / underwater nodes —
-                // those aren't safe teleport destinations.
+                // those aren't safe teleport destinations. Also reject
+                // climb-surface nodes + boundary nodes + drop-from-above:
+                // teleporting onto a climb cell bypasses the legitimate
+                // CLIMBING engagement (log 64). The actor should instead
+                // fall through to the legacy nudge and let the next
+                // FOLLOW tick route through Pursuit→CLIMBING.
                 constexpr uint32_t kRejectFlags =
-                    ::AnchorNavRoom::NODE_ORPHANED     |
-                    ::AnchorNavRoom::NODE_STEEP_SLOPE  |
-                    ::AnchorNavRoom::NODE_HAZARD       |
-                    ::AnchorNavRoom::NODE_UNDERWATER;
+                    ::AnchorNavRoom::NODE_ORPHANED         |
+                    ::AnchorNavRoom::NODE_STEEP_SLOPE      |
+                    ::AnchorNavRoom::NODE_HAZARD           |
+                    ::AnchorNavRoom::NODE_UNDERWATER       |
+                    ::AnchorNavRoom::NODE_CLIMB_ANY        |
+                    ::AnchorNavRoom::NODE_CLIMB_BOUNDARY   |
+                    ::AnchorNavRoom::NODE_DROP_FROM_ABOVE;
                 if ((node.flags & kRejectFlags) == 0) {
                     const FollowerAIState resume = followerPreStuckState;
                     SPDLOG_INFO("[Follower] STUCK-FWD: {} ({:.0f}u to subgoal) → "
