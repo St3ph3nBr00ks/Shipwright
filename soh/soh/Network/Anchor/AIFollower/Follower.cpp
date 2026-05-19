@@ -2300,6 +2300,8 @@ void Anchor::TickFollowerInput(Actor* actor) {
             SPDLOG_INFO("[Follower] Dismount forward-hold complete");
         }
     } else if (followerAIState == FollowerAIState::CLIMBING) {
+        SPDLOG_INFO("[ClimbDiag] TFI-1 CLIMBING block entry nowOnLadder={} anchorIdx={}",
+                    nowOnLadder, (int)followerClimbAnchorIdx);
         // Bug 2 (2026-04-22): natural ladder grab + climb.
         // Two phases:
         //   (a) Not on ladder yet (nowOnLadder == false):
@@ -2318,6 +2320,7 @@ void Anchor::TickFollowerInput(Actor* actor) {
         //       Stick_x is irrelevant during climb.
         Vec3f p2w = actor->world.pos;
         if (nowOnLadder) {
+            SPDLOG_INFO("[ClimbDiag] TFI-2 nowOnLadder branch entry");
             // Vertical: compare leader Y to follower Y.
             f32 dyL = followerMoveTarget.y - p2w.y;
             static constexpr f32 kClimbYTolerance = 8.0f;
@@ -2350,6 +2353,7 @@ void Anchor::TickFollowerInput(Actor* actor) {
             // kReanchorLatchMs pattern as the leader-following
             // re-anchor (line ~3716) — require N consecutive frames of
             // "candidate ≠ active" before committing.
+            SPDLOG_INFO("[ClimbDiag] TFI-3 before anchor-refresh loop");
             if (followerClimbAnchorIdx != UINT16_MAX) {
                 const ::AnchorNavRoom::RoomNavData* navData =
                     ::AnchorNavRoom::GetForRoom(
@@ -2421,6 +2425,7 @@ void Anchor::TickFollowerInput(Actor* actor) {
             // Link's facing — observable as Link sliding/rotating
             // and eventually falling off. Vines correctly use lateral
             // tracking; only ladders block.
+            SPDLOG_INFO("[ClimbDiag] TFI-4 before isLadderAnchor check");
             bool isLadderAnchor = false;
             if (followerClimbAnchorIdx != UINT16_MAX) {
                 const ::AnchorNavRoom::RoomNavData* navData =
@@ -2433,6 +2438,7 @@ void Anchor::TickFollowerInput(Actor* actor) {
                                        .surfaceType == ::AnchorNavRoom::NODE_CLIMB_LADDER);
                 }
             }
+            SPDLOG_INFO("[ClimbDiag] TFI-5 isLadderAnchor={}", isLadderAnchor);
 
             // Single-axis policy (2026-05-12 PM, log 98 fix). User:
             // "diagonal climbing is not possible for the player in
@@ -2468,6 +2474,8 @@ void Anchor::TickFollowerInput(Actor* actor) {
                                     (!xzEligible || absDyL >= latDist);
             const bool doLateral  = xzEligible && !doVertical;
 
+            SPDLOG_INFO("[ClimbDiag] TFI-6 axis pick doVertical={} doLateral={}",
+                        doVertical, doLateral);
             s8 ladderY = 0;
             s8 ladderX = 0;
             if (doVertical) {
@@ -2475,6 +2483,8 @@ void Anchor::TickFollowerInput(Actor* actor) {
             }
             if (doLateral) {
                 Camera* cam = GET_ACTIVE_CAM(gPlayState);
+                SPDLOG_INFO("[ClimbDiag] TFI-6a lateral cam={}",
+                            (cam == nullptr ? "NULL" : "ok"));
                 s16 inputDirYaw = Camera_GetInputDirYaw(cam);
                 s16 worldYaw    = Math_Atan2S(dzL, dxL);
                 s16 stickAngle  = worldYaw - inputDirYaw;
@@ -2518,6 +2528,7 @@ void Anchor::TickFollowerInput(Actor* actor) {
             //   (c) followerClimbReachableNodes — kept as a last
             //       fallback when no path is set (legacy snap-and-
             //       climb engagements).
+            SPDLOG_INFO("[ClimbDiag] TFI-7 before cell-prediction gate");
             {
                 constexpr float kPredictDistance      = 30.0f;
                 constexpr float kSoftBiasDistance     = 60.0f;
@@ -2592,10 +2603,13 @@ void Anchor::TickFollowerInput(Actor* actor) {
                 }
             }
 
+            SPDLOG_INFO("[ClimbDiag] TFI-8 after prediction gate ladderX={} ladderY={}",
+                        ladderX, ladderY);
             input.cur.stick_x = ladderX;
             input.cur.stick_y = ladderY;
             input.rel.stick_x = ladderX;
             input.rel.stick_y = ladderY;
+            SPDLOG_INFO("[ClimbDiag] TFI-9 nowOnLadder branch EXIT");
         } else {
             // Item 2 fix (user 2026-05-12): snap to climb anchor's
             // basePos when very close. Climb-surface grids are
@@ -3442,6 +3456,19 @@ void Anchor::PopulateClimbReachableNodes(
 void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) {
     (void)leaderPos;  // unused — autonomous branch tracks leader via clients map
 
+    // Crash-diagnostic (2026-05-19, log 257). Each climb frame logs a
+    // checkpoint marker; the last marker that fires before the crash
+    // identifies which block is the culprit. Remove after the bug is
+    // pinpointed.
+    SPDLOG_INFO("[ClimbDiag] HandleClimbStateAutonomous ENTRY "
+                "anchorIdx={} reachableNodes={} autonomousFrames={} pos=({:.0f},{:.0f},{:.0f})",
+                (int)followerClimbAnchorIdx,
+                (int)followerClimbReachableNodes.size(),
+                (int)followerAutonomousClimbFrames,
+                player->actor.world.pos.x,
+                player->actor.world.pos.y,
+                player->actor.world.pos.z);
+
     // Recovery exit A2 — "climb-detached" (2026-05-15 log 115 fix).
     // The existing fell-out check below uses an absolute Y threshold
     // (basePos.y - 100u). That misses falls that land on a platform
@@ -3461,6 +3488,7 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     // detach within ~2 frames without false-triggering on legitimate
     // climb-down. Suppressed during postTeleportHold (climb-stuck
     // teleport-forward changes Y abruptly without being a fall).
+    SPDLOG_INFO("[ClimbDiag] HCSA-1 before detach-check");
     if (followerAutonomousClimb &&
         followerPostTeleportFrames == 0 &&
         followerClimbPrevY > -1.0e8f) {
@@ -3487,6 +3515,7 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     // check; cheap and robust. Threshold = 100u below basePos covers
     // the case where the follower fell to floor (which is typically
     // 360-500u below the climb anchor base).
+    SPDLOG_INFO("[ClimbDiag] HCSA-2 before fell-out check");
     if (followerAutonomousClimb &&
         followerClimbAnchorIdx != UINT16_MAX) {
         const ::AnchorNavRoom::RoomNavData* navData =
@@ -3495,6 +3524,9 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
                 (int8_t)gPlayState->roomCtx.curRoom.num);
         if (navData != nullptr &&
             followerClimbAnchorIdx < navData->climbAnchors.size()) {
+            SPDLOG_INFO("[ClimbDiag] HCSA-2a deref climbAnchors[{}] (size={})",
+                        (int)followerClimbAnchorIdx,
+                        (int)navData->climbAnchors.size());
             const f32 baseY =
                 navData->climbAnchors[followerClimbAnchorIdx].basePos.y;
             constexpr f32 kFellOutBuffer = 100.0f;
@@ -3897,6 +3929,8 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     // active). Re-points followerClimbTopTarget at the current
     // climb-flagged subgoal each frame, OR exits CLIMBING when the
     // path has advanced past the climb-surface segment.
+    SPDLOG_INFO("[ClimbDiag] HCSA-3 before substrate-refresh leaderStillClimbing={} pathEmpty={}",
+                leaderStillClimbing, followerNavPath.Empty());
     if (!leaderStillClimbing &&
         AnchorFollower::IsAiFollowerNavSubstrateEnabled() &&
         !followerNavPath.Empty()) {
@@ -3977,6 +4011,8 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     // followerClimbTopTarget.y when no active anchor (legacy
     // snap-and-climb path; followerClimbTopTarget set to
     // anchor.topPos at engagement, never refreshed mid-climb).
+    SPDLOG_INFO("[ClimbDiag] HCSA-4 before reachTopY anchorIdx={}",
+                (int)followerClimbAnchorIdx);
     f32 reachTopY = followerClimbTopTarget.y;
     if (followerClimbAnchorIdx != UINT16_MAX) {
         const ::AnchorNavRoom::RoomNavData* navData =
@@ -3988,6 +4024,8 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
             reachTopY = navData->climbAnchors[followerClimbAnchorIdx].topPos.y;
         }
     }
+    SPDLOG_INFO("[ClimbDiag] HCSA-5 reachTopY={:.0f} pos.y={:.0f}",
+                reachTopY, player->actor.world.pos.y);
     bool reachedTop =
         (player->actor.world.pos.y >= reachTopY - kAutonomousClimbReachY);
     bool timedOut = (followerAutonomousClimbFrames >= MsToGameTicks(kAutonomousClimbMaxMs));
@@ -4017,6 +4055,7 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     // stick_y direction and for walk-to-ladder approach when not
     // yet on the climb collider.
     followerMoveTarget = followerClimbTopTarget;
+    SPDLOG_INFO("[ClimbDiag] HCSA-6 EXIT");
 }
 
 void Anchor::HandleClimbStateLeaderFollowing(Player* player, const Vec3f& leaderPos, Actor* leaderActor) {
