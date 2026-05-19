@@ -44,6 +44,7 @@
 #include "soh/Network/Anchor/Common/ActorTrail.h"    // Nav-parity Phase A: substrate path consumption
 #include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 2: shared substrate-path helper
 #include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5: shared scripted-FOLLOW step
+#include "soh/Network/Anchor/Common/AILocomotion/LocomotionAnim.h"  // Phase 6: shared climb-anim decision
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
@@ -1559,16 +1560,14 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
     a->world.rot.y = a->shape.rot.y;
     a->speedXZ     = 0.0f;
 
-    // Anim selection — alternate kClimbUpL ↔ kClimbUpR as climb steps
-    // complete. Mirrors Player's actionVar2 toggle. The InvEnsureAnimation
-    // call lives in the dispatcher post-state-handler block; we just
-    // toggle `climbNextIsRight` here when a step finishes (curFrame
-    // crosses anim endFrame).
-    if (this_->skelAnime.curFrame >=
-        Animation_GetLastFrame((void*)this_->skelAnime.animation)) {
-        // Step completed — flip phase for the next one-shot.
-        this_->climbNextIsRight = !this_->climbNextIsRight;
-    }
+    // Anim selection / L-R alternation is owned by the climb-anim
+    // decision block in the dispatcher (see Common/AILocomotion/
+    // LocomotionAnim.h and the CLIMBING anim-override block). Do
+    // NOT toggle `climbNextIsRight` here — the decision block uses
+    // the toggle to PICK each step. Double-toggling would flip back
+    // before the next step fires and the alternation breaks.
+    // Mirrors NPC Follower (FollowerNPC.cpp:4421-4423 is the only
+    // toggle site in that consumer).
 
     // ── Advance cursor on Y-proximity ──────────────────────────────
     // Y-axis only (XZ is snap-clamped to subgoal+offset; full 3D
@@ -3354,46 +3353,46 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         // climbed identical paths with correct anims.
         if (this_->state == EN_INVADER_STATE_CLIMBING) {
             Actor* invActor = &this_->actor;
-            const float climbDx  = invActor->world.pos.x - this_->climbPrevXZ.x;
-            const float climbDz  = invActor->world.pos.z - this_->climbPrevXZ.z;
-            const float climbDy  = invActor->world.pos.y - this_->climbPrevY;
-            const float climbDxz = std::sqrt(climbDx*climbDx + climbDz*climbDz);
-            this_->climbPrevY    = invActor->world.pos.y;
-            this_->climbPrevXZ   = invActor->world.pos;
 
-            const bool isMovingVertically = (climbDy  > 0.5f);
-            const bool isMovingLaterally  = (climbDxz > 0.5f);
-            const bool useSideAnim        = isMovingLaterally && (climbDxz > climbDy);
-
+            // Build the abstract decision context; the shared helper
+            // maps motion-axis → ClimbAnimStep and we map back to
+            // InvaderAnim below. See Common/AILocomotion/LocomotionAnim.h.
             const InvaderAnim upL   = InvaderAnim::kClimbUpL;
             const InvaderAnim upR   = InvaderAnim::kClimbUpR;
             const InvaderAnim sideL = InvaderAnim::kClimbSideL;
             const InvaderAnim sideR = InvaderAnim::kClimbSideR;
-            const InvaderAnim leftStep  = useSideAnim ? sideL : upL;
-            const InvaderAnim rightStep = useSideAnim ? sideR : upR;
-
             const bool currentIsAClimb =
                 (InvaderAnim)this_->currentAnim == upL ||
                 (InvaderAnim)this_->currentAnim == upR ||
                 (InvaderAnim)this_->currentAnim == sideL ||
                 (InvaderAnim)this_->currentAnim == sideR;
-            const bool prevStepDone = !this_->stopAnimPlaying || !currentIsAClimb;
 
-            if ((isMovingVertically || isMovingLaterally) && prevStepDone) {
-                want = this_->climbNextIsRight ? rightStep : leftStep;
-                this_->climbNextIsRight = !this_->climbNextIsRight;
-            } else if (!isMovingVertically && !isMovingLaterally) {
-                // Stationary — hold the last-frame climb pose. First-
-                // tick fallback: fire an upL so the Invader at least
-                // has a recognisable climb pose visible immediately.
-                if (!currentIsAClimb) {
-                    want = upL;
-                } else {
+            AnchorAI::ClimbAnimContext animCtx;
+            animCtx.currentPos          = invActor->world.pos;
+            animCtx.prevPos             = { this_->climbPrevXZ.x,
+                                            this_->climbPrevY,
+                                            this_->climbPrevXZ.z };
+            animCtx.climbNextIsRight    = this_->climbNextIsRight;
+            animCtx.currentAnimIsClimb  = currentIsAClimb;
+            animCtx.prevStepDone        = !this_->stopAnimPlaying ||
+                                          !currentIsAClimb;
+            this_->climbPrevY  = invActor->world.pos.y;
+            this_->climbPrevXZ = invActor->world.pos;
+
+            const AnchorAI::ClimbAnimResult anim =
+                AnchorAI::PickClimbAnimStep(animCtx);
+
+            switch (anim.step) {
+                case AnchorAI::ClimbAnimStep::kFireUpL:   want = upL;   break;
+                case AnchorAI::ClimbAnimStep::kFireUpR:   want = upR;   break;
+                case AnchorAI::ClimbAnimStep::kFireSideL: want = sideL; break;
+                case AnchorAI::ClimbAnimStep::kFireSideR: want = sideR; break;
+                case AnchorAI::ClimbAnimStep::kHoldCurrent:
                     want = (InvaderAnim)this_->currentAnim;
-                }
-            } else {
-                // Mid-step (anim still playing). Hold current.
-                want = (InvaderAnim)this_->currentAnim;
+                    break;
+            }
+            if (anim.advanceLR) {
+                this_->climbNextIsRight = !this_->climbNextIsRight;
             }
         }
 

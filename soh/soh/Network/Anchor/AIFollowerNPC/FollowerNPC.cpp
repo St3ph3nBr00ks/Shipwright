@@ -22,6 +22,7 @@
 #include "soh/Network/Anchor/Common/ActorTrail.h"     // Phase 5: substrate path consumption
 #include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 3 (2026-05-18): shared substrate-path helper
 #include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5 (2026-05-19): shared scripted-FOLLOW step
+#include "soh/Network/Anchor/Common/AILocomotion/LocomotionAnim.h"  // Phase 6 (2026-05-19): shared climb-anim decision
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
 #include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
@@ -4388,50 +4389,43 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // NPC is stationary on the wall, no new step fires and the
     // anim holds at last frame (Player's STATIONARY_LADDER).
     if (this_->state == EN_FOLLOWER_STATE_CLIMBING) {
-        const float climbDy =
-            std::fabs(npc->world.pos.y - sLocalNav.climbPrevY);
-        const float climbDx =
-            npc->world.pos.x - sLocalNav.climbPrevXZ.x;
-        const float climbDz =
-            npc->world.pos.z - sLocalNav.climbPrevXZ.z;
-        const float climbDxz = std::sqrt(climbDx*climbDx + climbDz*climbDz);
-        sLocalNav.climbPrevY  = npc->world.pos.y;
-        sLocalNav.climbPrevXZ = npc->world.pos;
-
-        // Pick the dominant motion axis. Lateral motion > vertical
-        // → use side anims; otherwise vertical anims. Player toggles
-        // between up and side anims based on stick direction
-        // (z_player.c:13414 `sp80 != 0` lateral check).
-        const bool isMovingVertically  = (climbDy  > 0.5f);
-        const bool isMovingLaterally   = (climbDxz > 0.5f);
-        const bool useSideAnim         = isMovingLaterally && (climbDxz > climbDy);
-        const auto sideL = FollowerNpcAnim::kClimbSideL;
-        const auto sideR = FollowerNpcAnim::kClimbSideR;
+        // Build the abstract decision context; the shared helper maps
+        // motion-axis → ClimbAnimStep and we map back to FollowerNpcAnim
+        // below. See Common/AILocomotion/LocomotionAnim.h. Mirror of the
+        // identical AI Invader call site (Phase 6, 2026-05-19).
         const auto upL   = FollowerNpcAnim::kClimbUpL;
         const auto upR   = FollowerNpcAnim::kClimbUpR;
-        const FollowerNpcAnim leftStep  = useSideAnim ? sideL : upL;
-        const FollowerNpcAnim rightStep = useSideAnim ? sideR : upR;
-
+        const auto sideL = FollowerNpcAnim::kClimbSideL;
+        const auto sideR = FollowerNpcAnim::kClimbSideR;
         const bool currentIsAClimb =
             this_->currentAnim == (s32)upL || this_->currentAnim == (s32)upR ||
             this_->currentAnim == (s32)sideL || this_->currentAnim == (s32)sideR;
-        const bool prevStepDone = !this_->stopAnimPlaying || !currentIsAClimb;
 
-        if ((isMovingVertically || isMovingLaterally) && prevStepDone) {
-            const bool fireRight = sLocalNav.climbNextIsRight;
-            localAnim = fireRight ? rightStep : leftStep;
-            sLocalNav.climbNextIsRight = !fireRight;
-        } else if (!isMovingVertically && !isMovingLaterally) {
-            // Stationary — hold last-frame pose. First-tick fallback:
-            // fire an upL so NPC has a climb-pose visible immediately.
-            if (!currentIsAClimb) {
-                localAnim = upL;
-            } else {
+        AnchorAI::ClimbAnimContext animCtx;
+        animCtx.currentPos          = npc->world.pos;
+        animCtx.prevPos             = { sLocalNav.climbPrevXZ.x,
+                                        sLocalNav.climbPrevY,
+                                        sLocalNav.climbPrevXZ.z };
+        animCtx.climbNextIsRight    = sLocalNav.climbNextIsRight;
+        animCtx.currentAnimIsClimb  = currentIsAClimb;
+        animCtx.prevStepDone        = !this_->stopAnimPlaying || !currentIsAClimb;
+        sLocalNav.climbPrevY  = npc->world.pos.y;
+        sLocalNav.climbPrevXZ = npc->world.pos;
+
+        const AnchorAI::ClimbAnimResult anim =
+            AnchorAI::PickClimbAnimStep(animCtx);
+
+        switch (anim.step) {
+            case AnchorAI::ClimbAnimStep::kFireUpL:   localAnim = upL;   break;
+            case AnchorAI::ClimbAnimStep::kFireUpR:   localAnim = upR;   break;
+            case AnchorAI::ClimbAnimStep::kFireSideL: localAnim = sideL; break;
+            case AnchorAI::ClimbAnimStep::kFireSideR: localAnim = sideR; break;
+            case AnchorAI::ClimbAnimStep::kHoldCurrent:
                 localAnim = (FollowerNpcAnim)this_->currentAnim;
-            }
-        } else {
-            // Moving but mid-anim — hold current.
-            localAnim = (FollowerNpcAnim)this_->currentAnim;
+                break;
+        }
+        if (anim.advanceLR) {
+            sLocalNav.climbNextIsRight = !sLocalNav.climbNextIsRight;
         }
     }
 
