@@ -372,6 +372,11 @@ constexpr float kInvRunDistance = 200.0f;
 // the "find route around stairs" goal that the friendly follower does).
 constexpr int   kInvStuckCheckMs    = 3000;
 constexpr float kInvStuckMinProgress = 20.0f;
+// STUCK escalation (ported from Player AI Follower's G12). Matches
+// NPC Follower's kStuckCycleWindowMs / kStuckCycleEscalation. See
+// FollowerNPC.cpp:TickSTUCK for the routing semantics.
+constexpr int kInvStuckCycleWindowMs  = 3000;
+constexpr int kInvStuckCycleEscalation = 3;
 
 // Log 242 diagnostic — throttle for the FOLLOW progress snapshot.
 // 5s is long enough that a healthy FOLLOW tick doesn't spam the log
@@ -477,6 +482,12 @@ struct LocalInvNavState {
     // mirrors NPC's layout. EnInvader.jumpInProgress still kept on
     // the actor struct because the C-side actor file may read it.
     AnchorAI::AirborneState airborneState;
+
+    // STUCK escalation (ported from Player AI Follower's G12 — see
+    // FollowerNPC.cpp comments for the routing semantics).
+    uint32_t stuckCycleCount       = 0;
+    uint32_t stuckCycleResetFrames = 0;
+    uint32_t stuckCycleAdvancedAt  = 0;
 };
 static LocalInvNavState sLocalInvNav;
 
@@ -1097,13 +1108,19 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
         const float progress = std::sqrt(
             Dist2DSq(a->world.pos, sLocalInvNav.stuckCheckPos));
         if (progress < kInvStuckMinProgress) {
+            // Enter STUCK; TickSTUCK reads the cycle counter to
+            // escalate (nudge → cursor advance → teleport). Path is
+            // NOT reset here — cycle 2 needs it to advance the cursor.
+            // TickSTUCK's cycle-1 branch resets the path after nudging.
             this_->state = EN_INVADER_STATE_STUCK;
-            sLocalInvNav.navState.path.Reset();   // discard the broken path
-            sLocalInvNav.navState.lastPathRefreshFrame = 0;
+            sLocalInvNav.stuckCycleCount++;
+            sLocalInvNav.stuckCycleResetFrames =
+                (uint32_t)Anchor::Instance->MsToGameTicks(kInvStuckCycleWindowMs);
             SPDLOG_INFO("[Invader] FOLLOW→STUCK (no progress {:.1f}u in {}ms @ "
-                        "({:.0f},{:.0f},{:.0f}))",
+                        "({:.0f},{:.0f},{:.0f}); cycle={})",
                         progress, kInvStuckCheckMs,
-                        a->world.pos.x, a->world.pos.y, a->world.pos.z);
+                        a->world.pos.x, a->world.pos.y, a->world.pos.z,
+                        sLocalInvNav.stuckCycleCount);
         }
         sLocalInvNav.stuckCheckPos       = a->world.pos;
         sLocalInvNav.lastStuckCheckFrame = curFrame;
@@ -1195,9 +1212,56 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
         return;
     }
 
-    // Pick the nudge target. Path subgoal when available (path-aware
-    // recovery — nudge in the BFS-planned direction, not blindly toward
-    // the hostile). Otherwise fall back to the target's pos.
+    const uint32_t cycle = sLocalInvNav.stuckCycleCount;
+
+    // Cycle 3+: teleport to next subgoal (or target as fallback).
+    // Same shape as FollowerNPC TickSTUCK; Invader's teleport target
+    // is its current hostile, not the leader.
+    if (cycle >= (uint32_t)kInvStuckCycleEscalation) {
+        const bool havePath = !sLocalInvNav.navState.path.Empty();
+        Vec3f dest;
+        const char* reason;
+        if (havePath) {
+            dest   = sLocalInvNav.navState.path.CurrentSubgoal();
+            reason = "next subgoal";
+        } else {
+            dest   = target->world.pos;
+            reason = "target (path empty)";
+        }
+        SPDLOG_INFO("[Invader] STUCK cycle {} escalation: teleport to {} "
+                    "({:.0f},{:.0f},{:.0f})",
+                    (int)cycle, reason, dest.x, dest.y, dest.z);
+        a->world.pos = dest;
+        a->speedXZ   = 0.0f;
+        Actor_UpdateBgCheckInfo(play, a, 26.0f, 10.0f, 50.0f, 4);
+        sLocalInvNav.navState.path.Reset();
+        sLocalInvNav.navState.lastPathRefreshFrame = 0;
+        sLocalInvNav.stuckCheckPos      = a->world.pos;
+        sLocalInvNav.lastStuckCheckFrame =
+            Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+        sLocalInvNav.stuckCycleCount       = 0;
+        sLocalInvNav.stuckCycleResetFrames = 0;
+        sLocalInvNav.stuckCycleAdvancedAt  = 0;
+        this_->state = EN_INVADER_STATE_FOLLOW;
+        return;
+    }
+
+    // Cycle 2: edge-triggered cursor advance — skip the stuck subgoal.
+    if (cycle == 2 && sLocalInvNav.stuckCycleAdvancedAt != 2 &&
+        !sLocalInvNav.navState.path.Empty() &&
+        sLocalInvNav.navState.path.cursorIdx <
+            sLocalInvNav.navState.path.waypoints.size() - 1) {
+        const size_t before = sLocalInvNav.navState.path.cursorIdx;
+        sLocalInvNav.navState.path.Advance();
+        sLocalInvNav.stuckCycleAdvancedAt = 2;
+        SPDLOG_INFO("[Invader] STUCK cycle 2: advance cursor (skip subgoal "
+                    "{} → {}/{})",
+                    (int)before, (int)sLocalInvNav.navState.path.cursorIdx,
+                    (int)sLocalInvNav.navState.path.waypoints.size() - 1);
+    }
+
+    // Cycles 1 + 2: legacy nudge. Path subgoal when available
+    // (path-aware recovery), otherwise straight at the target.
     Vec3f nudgeTarget = target->world.pos;
     bool  pathAware   = false;
     if (!sLocalInvNav.navState.path.Empty()) {
@@ -1208,29 +1272,28 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
     const s16 yaw = YawTowardTarget(a->world.pos, nudgeTarget);
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
-    a->speedXZ     = 0.0f;  // nudge IS the motion, not momentum
-    // Direct world.pos write — same shape as FollowerNPC's TickSTUCK.
-    // Actor_UpdateBgCheckInfo at the end of EnInvader_Update re-clamps Y.
+    a->speedXZ     = 0.0f;
     const float dx = Math_SinS(yaw) * kInvStuckNudgeDist;
     const float dz = Math_CosS(yaw) * kInvStuckNudgeDist;
     a->world.pos.x += dx;
     a->world.pos.z += dz;
-    // Reset baseline so we don't immediately re-trigger STUCK after
-    // the nudge.
+
     sLocalInvNav.stuckCheckPos       = a->world.pos;
     sLocalInvNav.lastStuckCheckFrame =
         Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
-    // Discard the path — TickFOLLOW will rebuild it next tick with
-    // the new position as the starting point. Without this, the next
-    // FOLLOW tick would observe distance > kInvFollowProxLimit AND
-    // not yet need a refresh (path is still recent) and steer toward
-    // the now-stale subgoal that just caused the stuck condition.
-    sLocalInvNav.navState.path.Reset();
-    sLocalInvNav.navState.lastPathRefreshFrame = 0;
+
+    // Cycle 1 only: reset path so TickFOLLOW replans from new pos.
+    // Cycle 2 keeps the cursor-advanced path so the next FOLLOW tick
+    // steers toward the new subgoal.
+    if (cycle <= 1) {
+        sLocalInvNav.navState.path.Reset();
+        sLocalInvNav.navState.lastPathRefreshFrame = 0;
+    }
+
     this_->state = EN_INVADER_STATE_FOLLOW;
-    SPDLOG_INFO("[Invader] STUCK→FOLLOW (nudged {:.0f}u toward yaw=0x{:X}, "
+    SPDLOG_INFO("[Invader] STUCK→FOLLOW (cycle {} nudged {:.0f}u toward yaw=0x{:X}, "
                 "{} target)",
-                kInvStuckNudgeDist, (uint16_t)yaw,
+                (int)cycle, kInvStuckNudgeDist, (uint16_t)yaw,
                 pathAware ? "path-aware" : "direct-to");
 }
 
@@ -2993,6 +3056,17 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         TickDEAD(this_, play);
         this_->prevState = this_->state;
         return;
+    }
+
+    // STUCK-cycle reset-frame decrement (ported from Player AI Follower's
+    // G12). Decays stuckCycleCount after kInvStuckCycleWindowMs of no
+    // new STUCK transition; resets the edge-trigger latch too.
+    if (sLocalInvNav.stuckCycleResetFrames > 0) {
+        sLocalInvNav.stuckCycleResetFrames--;
+        if (sLocalInvNav.stuckCycleResetFrames == 0) {
+            sLocalInvNav.stuckCycleCount      = 0;
+            sLocalInvNav.stuckCycleAdvancedAt = 0;
+        }
     }
 
     // Item 1 + Item 6 — environmental death detection. Clones the

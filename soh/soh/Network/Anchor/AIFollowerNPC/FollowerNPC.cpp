@@ -252,6 +252,17 @@ struct LocalNpcNavState {
     uint32_t closeFailFrames   = 0;
     float    closeFailBaseline = 0.0f;
 
+    // STUCK escalation (ported from Player AI Follower's G12). Counts
+    // consecutive FOLLOW→STUCK transitions within kStuckCycleWindowMs;
+    // TickSTUCK reads the count to escalate (nudge → cursor advance →
+    // teleport). `stuckCycleResetFrames` decays the counter; reset to
+    // window-length on each new STUCK entry. `stuckCycleAdvancedAt`
+    // is an edge-trigger latch so cycle-2's cursor-advance fires once
+    // per cycle (not every tick while STUCK).
+    uint32_t stuckCycleCount       = 0;
+    uint32_t stuckCycleResetFrames = 0;
+    uint32_t stuckCycleAdvancedAt  = 0;
+
     // Auto-jump-off-ledge diagnostics. Captured at jump trigger,
     // emitted as periodic per-frame logs while airborne, summary
     // log at landing. `airborneState.jumpInProgress` flips false on
@@ -842,6 +853,14 @@ static constexpr int   kStuckCheckMs        = 3000;   // matches player-Follower
 static constexpr int   kFollowProgressLogMs = 5000;   // throttled FOLLOW diagnostic period
 static constexpr float kStuckMinProgress    = 20.0f;
 static constexpr float kStuckNudgeDist      = 30.0f;  // direct world.pos nudge in STUCK
+// STUCK escalation (ported from Player AI Follower's G12 — Follower.cpp:1680).
+// Counts consecutive FOLLOW→STUCK transitions within a sliding window:
+//   Cycle 1: legacy nudge (toward leader)
+//   Cycle 2: edge-triggered navPath cursor advance (skip stuck subgoal)
+//   Cycle 3+: teleport to next subgoal OR leader as fallback
+// Cycle counter decays after kStuckCycleWindowMs of no new STUCK.
+static constexpr int kStuckCycleWindowMs  = 3000;
+static constexpr int kStuckCycleEscalation = 3;
 
 // Phase 6 — scripted-climb constants. Tuned to match Link's vanilla
 // climb feel; field-test in Inside Deku Tree may refine.
@@ -1084,14 +1103,18 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         curFrame >= sLocalNav.lastStuckCheckFrame + (uint64_t)stuckCheckTicks) {
         const float progress = std::sqrt(Dist2DSq(a->world.pos, sLocalNav.stuckCheckPos));
         if (progress < kStuckMinProgress) {
-            // No real progress in 3s — nudge in STUCK and force path
-            // refresh next tick.
-            this_->state                   = EN_FOLLOWER_STATE_STUCK;
-            sLocalNav.navState.path.Reset();        // discard the broken path
-            sLocalNav.navState.lastPathRefreshFrame = 0;
+            // No real progress in 3s. Enter STUCK; TickSTUCK reads the
+            // cycle counter to escalate. Path is NOT reset here (so the
+            // cycle-2 advance has a path to operate on); TickSTUCK's
+            // cycle-1 branch resets the path after nudging.
+            this_->state = EN_FOLLOWER_STATE_STUCK;
+            sLocalNav.stuckCycleCount++;
+            sLocalNav.stuckCycleResetFrames =
+                (uint32_t)Anchor::Instance->MsToGameTicks(kStuckCycleWindowMs);
             SPDLOG_INFO("[FollowerNPC] FOLLOW→STUCK (no progress {:.1f}u in 3s @ "
-                        "({:.0f},{:.0f},{:.0f}))",
-                        progress, a->world.pos.x, a->world.pos.y, a->world.pos.z);
+                        "({:.0f},{:.0f},{:.0f}); cycle={})",
+                        progress, a->world.pos.x, a->world.pos.y, a->world.pos.z,
+                        sLocalNav.stuckCycleCount);
         }
         sLocalNav.stuckCheckPos       = a->world.pos;
         sLocalNav.lastStuckCheckFrame = curFrame;
@@ -3568,36 +3591,90 @@ bool TryFireG14(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 // caller; the next FOLLOW tick will recompute. Combined effect:
 // "stuck → nudge forward 30u → recompute path → continue."
 //
-// Equivalent in spirit to player-Follower's STUCK-FWD action but
-// simpler — no JumpResolver, no nav-snap. Phase 6+ may extend if
-// field-test surfaces stuck patterns the simple nudge can't escape.
+// STUCK escalation tiers (ported from Player AI Follower's G12):
+//   Cycle 1: legacy nudge toward leader + path reset
+//   Cycle 2: edge-triggered cursor advance (skip stuck subgoal) +
+//            legacy nudge; path NOT reset so cursor advance persists.
+//   Cycle 3+: teleport to next subgoal (TeleportNpcTo to
+//            navState.path.CurrentSubgoal()) OR leader as fallback.
+//
+// The cycle counter lives on sLocalNav.stuckCycleCount; the FOLLOW
+// stuck-detect increments + arms the reset window. The dispatcher's
+// per-tick decrement (decays the counter after kStuckCycleWindowMs)
+// gives the cycle a clean restart between unrelated stuck episodes.
 void TickSTUCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
+    const uint32_t cycle = sLocalNav.stuckCycleCount;
+
+    // Cycle 3+: teleport. Try next subgoal first; fall back to leader
+    // if the path is empty.
+    if (cycle >= (uint32_t)kStuckCycleEscalation) {
+        const bool havePath = !sLocalNav.navState.path.waypoints.empty() &&
+                              sLocalNav.navState.path.cursorIdx <
+                                  sLocalNav.navState.path.waypoints.size();
+        Vec3f dest;
+        const char* reason;
+        if (havePath) {
+            dest   = sLocalNav.navState.path.CurrentSubgoal();
+            reason = "next subgoal";
+        } else {
+            dest   = leaderPos;
+            reason = "leader (path empty)";
+        }
+        SPDLOG_INFO("[FollowerNPC] STUCK cycle {} escalation: teleport to {} "
+                    "({:.0f},{:.0f},{:.0f})",
+                    (int)cycle, reason, dest.x, dest.y, dest.z);
+        TeleportNpcTo(this_, play, dest);
+        // Reset cycle state so the next true-stuck episode starts fresh.
+        sLocalNav.stuckCycleCount       = 0;
+        sLocalNav.stuckCycleResetFrames = 0;
+        sLocalNav.stuckCycleAdvancedAt  = 0;
+        return;
+    }
+
+    // Cycle 2: edge-triggered cursor advance. Skip whichever subgoal
+    // the path currently points at — the one we couldn't reach. Latch
+    // on stuckCycleAdvancedAt so the advance fires once per cycle
+    // (not every tick we re-enter STUCK at the same count).
+    if (cycle == 2 && sLocalNav.stuckCycleAdvancedAt != 2 &&
+        !sLocalNav.navState.path.waypoints.empty() &&
+        sLocalNav.navState.path.cursorIdx <
+            sLocalNav.navState.path.waypoints.size() - 1) {
+        const size_t before = sLocalNav.navState.path.cursorIdx;
+        sLocalNav.navState.path.Advance();
+        sLocalNav.stuckCycleAdvancedAt = 2;
+        SPDLOG_INFO("[FollowerNPC] STUCK cycle 2: advance cursor (skip subgoal "
+                    "{} → {}/{})",
+                    (int)before, (int)sLocalNav.navState.path.cursorIdx,
+                    (int)sLocalNav.navState.path.waypoints.size() - 1);
+    }
+
+    // Cycles 1 + 2: legacy nudge toward leader. Direct world.pos write —
+    // matches AI Follower's STUCK-FWD action.
     const s16 yaw = YawTowardTarget(a->world.pos, leaderPos);
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
-    a->speedXZ     = 0.0f;  // no momentum from STUCK; the nudge IS the motion
-
-    // Direct world.pos write — the AI Follower's STUCK-FWD action is
-    // also a direct write (player-rigged version uses
-    // player->actor.world.pos = snappedPos). Skipping floor snapping
-    // for v1; Actor_UpdateBgCheckInfo at the end of the tick will
-    // re-clamp Y.
+    a->speedXZ     = 0.0f;
     const float dx = Math_SinS(yaw) * kStuckNudgeDist;
     const float dz = Math_CosS(yaw) * kStuckNudgeDist;
     a->world.pos.x += dx;
     a->world.pos.z += dz;
 
-    // Reset stuck-check baseline so we don't immediately re-trigger.
+    // Cycle 1 only: reset path so the next FOLLOW tick replans from
+    // the new position. Cycle 2 keeps the (cursor-advanced) path so
+    // the next FOLLOW tick steers toward the new subgoal.
+    if (cycle <= 1) {
+        sLocalNav.navState.path.Reset();
+        sLocalNav.navState.lastPathRefreshFrame = 0;
+    }
+
     sLocalNav.stuckCheckPos       = a->world.pos;
     sLocalNav.lastStuckCheckFrame = Anchor::Instance->gameFrameCounter.load(
                                         std::memory_order_relaxed);
 
-    // Resume FOLLOW. Path was reset by the FOLLOW caller; next tick
-    // will recompute.
     this_->state = EN_FOLLOWER_STATE_FOLLOW;
-    SPDLOG_INFO("[FollowerNPC] STUCK→FOLLOW (nudged {:.0f}u toward yaw={})",
-                kStuckNudgeDist, (int)yaw);
+    SPDLOG_INFO("[FollowerNPC] STUCK→FOLLOW (cycle {} nudged {:.0f}u toward yaw={})",
+                (int)cycle, kStuckNudgeDist, (int)yaw);
 }
 
 }  // namespace
@@ -3694,6 +3771,20 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // cutscene can drop the NPC into a void if the cutscene
         // teleported the world out from under us.
         return;
+    }
+
+    // STUCK-cycle reset-frame decrement (ported from Player AI Follower's
+    // G12). Decays the stuckCycleCount counter after kStuckCycleWindowMs
+    // of no new STUCK transition; resets the edge-trigger latch too so
+    // the next cycle-2 advance can fire fresh. Without this decay, the
+    // counter would accumulate forever across unrelated stuck episodes
+    // and escalate to teleport on what should be a fresh cycle-1.
+    if (sLocalNav.stuckCycleResetFrames > 0) {
+        sLocalNav.stuckCycleResetFrames--;
+        if (sLocalNav.stuckCycleResetFrames == 0) {
+            sLocalNav.stuckCycleCount      = 0;
+            sLocalNav.stuckCycleAdvancedAt = 0;
+        }
     }
 
     // Leader-climbing force-engage. Fires BEFORE the G-guards and
