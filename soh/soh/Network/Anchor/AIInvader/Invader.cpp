@@ -488,6 +488,13 @@ struct LocalInvNavState {
     uint32_t stuckCycleCount       = 0;
     uint32_t stuckCycleResetFrames = 0;
     uint32_t stuckCycleAdvancedAt  = 0;
+
+    // Non-fatal hard-landing wince (mirrors NPC's
+    // fallHurtFramesRemaining). When a fall is hard enough to cause
+    // damage but not lethal, fire the kDeath (back-down) anim
+    // briefly without entering DEAD state. Decremented in the
+    // dispatcher's anim block.
+    uint32_t fallHurtFramesRemaining = 0;
 };
 static LocalInvNavState sLocalInvNav;
 
@@ -3210,10 +3217,13 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         if (invader->yDistToWater > swimEntryDepth) {
             this_->state = EN_INVADER_STATE_SWIMMING;
             // Clear airborne tracking — entering water from a jump
-            // should drop the jump anim hold.
+            // should drop the jump anim hold. Also restore default
+            // gravity (jump-arc boost lowered it to -1.2) and clear
+            // the helper's airborne state.
             if (this_->jumpInProgress) {
                 invader->gravity      = -2.0f;
                 this_->jumpInProgress = 0;
+                AnchorAI::EndAirborne(sLocalInvNav.airborneState);
             }
             SPDLOG_INFO("[Invader] →SWIMMING (yDistToWater={:.1f}u > "
                         "{:.0f}u threshold for linkAge={})",
@@ -3420,15 +3430,27 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
             airborneAnimOverride =
                 (invader->speedXZ > 4.0f) ? InvaderAnim::kRunJump
                                           : InvaderAnim::kJump;
+            // Apply velocity boost + lowered gravity so the Invader
+            // arcs forward off the ledge instead of falling straight
+            // down. Ports NPC Follower's auto-jump arc behaviour
+            // (FollowerNPC.cpp:4251-4254). Gravity restored to default
+            // -2.0 on landing OR force-teleport. Matches Player's
+            // Player_Action_8084411C airborne behaviour.
+            constexpr float kInvJumpBoostVy = 8.0f;
+            constexpr float kInvJumpGravity = -1.2f;
+            invader->velocity.y = kInvJumpBoostVy;
+            invader->gravity    = kInvJumpGravity;
             AnchorAI::StartAirborne(sLocalInvNav.airborneState,
                                     invader->world.pos, curFrame);
             SPDLOG_INFO("[Invader.jump] FIRE anim={} speedXZ={:.2f} "
-                        "pos=({:.0f},{:.0f},{:.0f})",
+                        "pos=({:.0f},{:.0f},{:.0f}) "
+                        "boostVel.y={:.2f} gravity={:.2f}",
                         (airborneAnimOverride == InvaderAnim::kRunJump
                             ? "run_jump" : "jump"),
                         invader->speedXZ,
                         invader->world.pos.x, invader->world.pos.y,
-                        invader->world.pos.z);
+                        invader->world.pos.z,
+                        invader->velocity.y, invader->gravity);
         }
         // Per-tick airborne-stuck recovery while jumpInProgress.
         // shouldForceTeleport fires when actor is airborne ≥5s AND
@@ -3455,6 +3477,7 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
                             invader->world.pos.z, rec.posStuck, rec.zeroVel);
                 invader->world.pos = to;
                 invader->speedXZ   = 0.0f;
+                invader->gravity   = -2.0f;  // restore default after jump-arc boost
                 Actor_UpdateBgCheckInfo(play, invader, 26.0f, 10.0f, 50.0f, 4);
                 this_->jumpInProgress = 0;
                 AnchorAI::EndAirborne(sLocalInvNav.airborneState);
@@ -3469,6 +3492,7 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
             const float fallDistance =
                 sLocalInvNav.airborneState.jumpPeakPos.y - invader->world.pos.y;
             this_->jumpInProgress = 0;
+            invader->gravity      = -2.0f;  // restore default after jump-arc boost
             AnchorAI::EndAirborne(sLocalInvNav.airborneState);
 
             // Fall damage. Thresholds match NPC Follower:
@@ -3500,6 +3524,13 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
                 if (newHealth <= 0) {
                     this_->state = EN_INVADER_STATE_DEAD;
                     SPDLOG_INFO("[Invader] death by fall");
+                } else {
+                    // Non-fatal hard landing — fire the kDeath (back-
+                    // down) anim briefly as a hurt reaction. Mirrors
+                    // NPC Follower's fallHurtFramesRemaining behaviour
+                    // (FollowerNPC.cpp:4393-4404).
+                    this_->stopAnimPlaying = 0;
+                    sLocalInvNav.fallHurtFramesRemaining = 30;  // ~1.5s @ 20fps
                 }
             }
         }
@@ -3636,6 +3667,17 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
                    ((InvaderAnim)this_->currentAnim == InvaderAnim::kRunJump ||
                     (InvaderAnim)this_->currentAnim == InvaderAnim::kJump)) {
             want = (InvaderAnim)this_->currentAnim;
+        }
+
+        // Non-fatal hard-landing wince. Override the anim picker to
+        // play kDeath (back-down) for a brief window after a hard but
+        // non-lethal fall. Same anim asset as the death anim; difference
+        // is duration + no DEAD state transition. Mirrors NPC Follower's
+        // fallHurtFramesRemaining override (FollowerNPC.cpp:4189-4193).
+        if (sLocalInvNav.fallHurtFramesRemaining > 0 &&
+            this_->state != EN_INVADER_STATE_DEAD) {
+            want = InvaderAnim::kDeath;
+            sLocalInvNav.fallHurtFramesRemaining--;
         }
 
         // Phase 4 — idle fidget rotation. After sustained kWait,
