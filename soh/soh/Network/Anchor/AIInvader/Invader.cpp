@@ -96,6 +96,14 @@ static Gfx** sSavedPlayerLeftHandDLists  = nullptr;
 static Gfx** sSavedPlayerRightHandDLists = nullptr;
 static Gfx** sSavedPlayerSheathDLists    = nullptr;
 static Gfx** sSavedPlayerWaistDLists     = nullptr;
+// Bow / slingshot DList-pick override. Player_HoldsSlingshot reads
+// heldItemAction (NOT inventory) to pick bow vs slingshot DLists when
+// model is BOW_SLINGSHOT. When the Invader is the shooter the Player
+// isn't actually holding either — so Begin temporarily writes
+// PLAYER_IA_BOW or PLAYER_IA_SLINGSHOT based on inventory ownership,
+// and End restores. Same trick as FollowerNPC.cpp:495-499.
+static s8    sSavedPlayerHeldItemAction  = 0;
+static bool  sSavedHeldItemActionActive  = false;
 
 // ---------------------------------------------------------------------
 // Combat tuning constants (cloned from FollowerNPC).
@@ -169,8 +177,68 @@ constexpr int   kPostCombatCooldownMs = 2500;
 static uint64_t sCombatCooldownEndFrame = 0;
 // Last combat weapon. 0 = melee (sword); 1 = ranged. Set at every
 // combat entry by TryEngageCombat; consumed by STANDBY anim/facing
-// preference (no equipment swap here — Agent 1).
+// preference AND by the equipment-swap path for sheathe-delay retention.
 static s32 sLastCombatWeapon = 0;
+
+// Sheathe-delay: keep last-combat weapon visible for kInvSheatheDelayMs
+// after combat exit. Without this, the visible weapon flashes
+// armed→default→armed every combat cycle as the Invader transitions
+// FOLLOW (default modelGroup) → ENGAGE/ATTACK (armed) → STANDBY/IDLE.
+// 4000ms matches NPC Follower's kSheatheDelayMs — same vanilla-Link
+// "Link keeps weapon drawn for a few seconds after combat" feel.
+// Set by ChooseCombatExitState; consumed by InvStateToModelGroup.
+constexpr int   kInvSheatheDelayMs   = 4000;
+static uint64_t sLastCombatExitFrame = 0;
+
+// Helper — model group for the most-recent combat weapon. Used both
+// by combat states' direct mapping AND the time-based sheathe-delay
+// retention for non-combat states.
+static s32 InvModelGroupForLastWeapon() {
+    return (sLastCombatWeapon == 1) ? PLAYER_MODELGROUP_BOW_SLINGSHOT
+                                    : PLAYER_MODELGROUP_SWORD_AND_SHIELD;
+}
+
+// Map Invader state → intended Player model group. Mirrors
+// FollowerNPC.cpp:405 NpcStateToModelGroup.
+//
+// Combat states return their direct weapon. STANDBY mirrors the
+// last-combat weapon. Non-combat states (IDLE / FOLLOW / etc.) return
+// DEFAULT (empty hands) UNLESS the post-combat sheathe-delay is still
+// active — in which case the last-combat weapon stays visible. This
+// time-based retention mirrors Player's vanilla sheathe behavior
+// (Link keeps weapon drawn for a few seconds after last combat action
+// before auto-sheathing) and prevents armed→empty→armed flicker
+// between combat exchanges.
+static s32 InvStateToModelGroup(s32 state) {
+    switch (state) {
+        case EN_INVADER_STATE_CRAWLING:
+            // Crawlspaces force weapons sheathed regardless of
+            // sheathe-delay. Matches Player's vanilla "clear all
+            // combat state on crawl entry".
+            return PLAYER_MODELGROUP_DEFAULT;
+        case EN_INVADER_STATE_RANGED_ATTACK:
+            return PLAYER_MODELGROUP_BOW_SLINGSHOT;
+        case EN_INVADER_STATE_ATTACK:
+        case EN_INVADER_STATE_BLOCK:
+        case EN_INVADER_STATE_ENGAGE:
+            return PLAYER_MODELGROUP_SWORD_AND_SHIELD;
+        case EN_INVADER_STATE_STANDBY:
+            return InvModelGroupForLastWeapon();
+        default:
+            // IDLE / FOLLOW / SWIMMING / LEDGE_HOIST / CLIMBING /
+            // STUCK / DEAD — sheathe-delay window?
+            if (Anchor::Instance != nullptr && sLastCombatExitFrame > 0) {
+                const uint64_t curFrame =
+                    Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+                const uint64_t sheatheTicks =
+                    (uint64_t)Anchor::Instance->MsToGameTicks(kInvSheatheDelayMs);
+                if (curFrame < sLastCombatExitFrame + sheatheTicks) {
+                    return InvModelGroupForLastWeapon();
+                }
+            }
+            return PLAYER_MODELGROUP_DEFAULT;
+    }
+}
 
 // Per-swing / per-shot state. File-scope is safe because actor combat
 // states are non-reentrant per actor (the dispatcher runs at most one
@@ -2560,6 +2628,10 @@ s32 ChooseCombatExitState(EnInvader* this_, PlayState* play) {
                                   std::memory_order_relaxed);
     sCombatCooldownEndFrame = curFrame +
         (uint64_t)Anchor::Instance->MsToGameTicks(kPostCombatCooldownMs);
+    // Open the sheathe-delay window. InvStateToModelGroup will keep
+    // the last-combat weapon visible for kInvSheatheDelayMs in
+    // non-combat states.
+    sLastCombatExitFrame = curFrame;
     Actor* nearby = PickHostileTarget(&this_->actor, play, kStandbyDetectDist,
                                        /*maxYDelta=*/kRangedYFilter);
     return (nearby != nullptr) ? EN_INVADER_STATE_STANDBY
@@ -3626,30 +3698,32 @@ extern "C" void Anchor_InvaderDrawBegin(Actor* invader) {
     sCurrentlyDrawingInvader = invader;
 
     // Phase B equipment swap. Save Player's current model state and
-    // force the Invader's intended model (SWORD_AND_SHIELD for v1).
-    // End() restores.
+    // apply the Invader's state-mapped model. End() restores.
+    //
+    // State→model mapping with sheathe-delay (2026-05-19): combat
+    // states show their weapon, non-combat states are unarmed unless
+    // within the post-combat sheathe-delay window. Mirrors NPC
+    // Follower's polish so the Invader visually draws/sheathes its
+    // weapon during the engagement cycle (FOLLOW unarmed → ENGAGE
+    // arming → ATTACK swinging → STANDBY armed → IDLE/FOLLOW
+    // sheathed after ~4s).
     sEquipmentSwapActive = false;
-    if (gPlayState == nullptr) return;
+    if (gPlayState == nullptr || invader == nullptr) return;
     Player* localPlayer = GET_PLAYER(gPlayState);
     if (localPlayer == nullptr) return;
 
-    // v1: Invader is always armed. Future combat AI may swap based on
-    // an Invader state-machine — mirror NpcStateToModelGroup at that
-    // point.
-    const s32 intendedGroup = PLAYER_MODELGROUP_SWORD_AND_SHIELD;
+    EnInvader* asInvader = (EnInvader*)invader;
+    const s32 intendedGroup = InvStateToModelGroup(asInvader->state);
 
-    // No-op if we're already at the intended group (saves a redundant
-    // SetModels call when Player is in fighter stance — common in
-    // combat scenarios where the Invader is most likely to appear).
-    if (intendedGroup == localPlayer->modelGroup) {
+    // No-op if we're already at the intended group.
+    if (intendedGroup == (s32)localPlayer->modelGroup) {
         return;
     }
 
-    // Save. We save BOTH the modelGroup (for the canonical
-    // Player_SetModels restore) AND the raw DList/type fields
-    // (defensive — in case Player_SetModels's EquipmentAlwaysVisible
-    // CVar branches resolve slightly different DLists on restore than
-    // the user originally had).
+    // Save. Both the modelGroup (for the canonical Player_SetModels
+    // restore) AND the raw DList/type fields (defensive — in case
+    // Player_SetModels's EquipmentAlwaysVisible CVar branches resolve
+    // slightly different DLists on restore than the user originally had).
     sSavedPlayerModelGroup       = localPlayer->modelGroup;
     sSavedPlayerLeftHandType     = localPlayer->leftHandType;
     sSavedPlayerRightHandType    = localPlayer->rightHandType;
@@ -3659,11 +3733,35 @@ extern "C" void Anchor_InvaderDrawBegin(Actor* invader) {
     sSavedPlayerSheathDLists     = localPlayer->sheathDLists;
     sSavedPlayerWaistDLists      = localPlayer->waistDLists;
 
+    // Bow vs slingshot DList pick — Player_SetModels reads
+    // heldItemAction (NOT inventory) so the default for BOW_SLINGSHOT
+    // resolves to bow. When the Invader is the shooter and child Link
+    // owns only slingshot, force the held-item to slingshot so the
+    // DList picker sees the right weapon. Restore at End. Same shape
+    // as FollowerNPC.cpp:483-500.
+    sSavedHeldItemActionActive = false;
+    if (intendedGroup == PLAYER_MODELGROUP_BOW_SLINGSHOT) {
+        const u8 bowSlot   = INV_CONTENT(ITEM_BOW);
+        const u8 slingSlot = INV_CONTENT(ITEM_SLINGSHOT);
+        const bool hasBow       = (bowSlot   != ITEM_NONE);
+        const bool hasSlingshot = (slingSlot != ITEM_NONE);
+        s8 desired = -1;
+        if (hasSlingshot && !hasBow) {
+            desired = PLAYER_IA_SLINGSHOT;
+        } else if (hasBow && !hasSlingshot) {
+            desired = PLAYER_IA_BOW;
+        }  // both / neither → no override
+        if (desired >= 0 && localPlayer->heldItemAction != desired) {
+            sSavedPlayerHeldItemAction = localPlayer->heldItemAction;
+            sSavedHeldItemActionActive = true;
+            localPlayer->heldItemAction = desired;
+        }
+    }
+
     // Apply Invader's intended model. Player_SetModels writes
     // leftHandType/DLists, rightHandType/DLists, sheathType/DLists,
     // waistDLists from sPlayerDListGroups[type][linkAge]. Does NOT
-    // write modelGroup itself — the trailing assignment handles that
-    // (matches FollowerNPC.cpp:489-490).
+    // write modelGroup itself — trailing assignment handles that.
     Player_SetModels(localPlayer, intendedGroup);
     localPlayer->modelGroup = (u8)intendedGroup;
     sEquipmentSwapActive = true;
@@ -3693,6 +3791,10 @@ extern "C" void Anchor_InvaderDrawEnd(void) {
     localPlayer->rightHandDLists = sSavedPlayerRightHandDLists;
     localPlayer->sheathDLists    = sSavedPlayerSheathDLists;
     localPlayer->waistDLists     = sSavedPlayerWaistDLists;
+    if (sSavedHeldItemActionActive) {
+        localPlayer->heldItemAction = sSavedPlayerHeldItemAction;
+        sSavedHeldItemActionActive  = false;
+    }
 }
 
 extern "C" Actor* Anchor_GetCurrentlyDrawingInvader(void) {
