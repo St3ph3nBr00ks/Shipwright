@@ -3708,12 +3708,26 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         }
 
         // Item 3 (2026-05-17) — idle waitL ↔ waitR breathing blend.
-        // Runs only when the actor is in IDLE state AND the active anim
-        // is kWait (not a fidget one-shot, not a stop-anim hold).
-        // Without these gates, blending would fight other anims (e.g.
-        // overwrite kFidgetLookA's frames with a wait blend). Clone of
-        // FollowerNPC.cpp idle-blend dispatcher gate.
-        if (this_->state == EN_INVADER_STATE_IDLE &&
+        // DISABLED 2026-05-20 (log 67, user reported "model flops
+        // around environment when playing idle fidget animations").
+        // Mirrors NPC Follower's same disable in commit 29cf7b37f
+        // (rationale: model collapse + distortion + position jumping
+        // while in idle). The blend's LinkAnimation_BlendToJoint races
+        // against the per-frame LinkAnimation_Update load of wait_free
+        // — Update's joint-table writes partially overwrite the
+        // blended output, AND the blendTable buffer's ALIGN16 inside
+        // BlendToJoint can spill into adjacent EnInvader fields
+        // (headLimbRot / upperLimbRot follow blendTable in the struct
+        // layout) producing the position-flop visual.
+        //
+        // Re-enabling path: skip LinkAnimation_Update for kWait and
+        // make BlendToJoint the only joint-table writer (Player's
+        // pattern at z_player.c:8061-8064). For now, fall back to
+        // wait_free + LinkAnimation_Update (no breathing blend; idle
+        // pose is static between fidget anims).
+        constexpr bool kIdleBlendEnabled = false;
+        if (kIdleBlendEnabled &&
+            this_->state == EN_INVADER_STATE_IDLE &&
             (InvaderAnim)this_->currentAnim == InvaderAnim::kWait &&
             !this_->stopAnimPlaying) {
             InvTickIdleBlend(this_, play);
