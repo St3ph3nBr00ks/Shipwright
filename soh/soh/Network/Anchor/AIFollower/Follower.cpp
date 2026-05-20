@@ -4201,11 +4201,29 @@ Vec3f Anchor::ComputePursuitSubgoal(Player* player,
     }
 
     // Advance cursor when within reach of current subgoal.
+    //
+    // 3D proximity check (2026-05-19, log 65 root-cause fix). The
+    // previous XZ-only check produced a "cursor burn" through stacked
+    // vertical climb segments: when the actor stands at the base of a
+    // vine wall (e.g., Deku Tree at ~(150, 0, -295)), the substrate
+    // path's CLIMB waypoints share the same XZ as the actor but rise
+    // through Y=30, Y=60, ..., Y=800. Every one of them passed the
+    // XZ test, and the cursor advanced through the entire climb
+    // segment in a single FOLLOW tick — landing on the top-floor
+    // walkable waypoint at Y=800 while the actor was still at Y=0.
+    // G14 close-fail then teleported the actor up.
+    //
+    // 3D check requires the actor to physically reach each waypoint's
+    // 3D position before the cursor advances. CLIMB cells stacked
+    // 30u apart at the same XZ get advanced one-at-a-time as the
+    // CLIMBING state machine drives the actor up. Floor walking is
+    // unaffected (dy ≈ 0 in normal locomotion, so 3D ≈ XZ).
     {
         Vec3f sg = followerNavPath.CurrentSubgoal();
         f32 sgDx = sg.x - p2Pos.x;
+        f32 sgDy = sg.y - p2Pos.y;
         f32 sgDz = sg.z - p2Pos.z;
-        if (sgDx * sgDx + sgDz * sgDz <
+        if (sgDx * sgDx + sgDy * sgDy + sgDz * sgDz <
             kNavPathSubgoalReach * kNavPathSubgoalReach) {
             followerNavPath.Advance();
         }
