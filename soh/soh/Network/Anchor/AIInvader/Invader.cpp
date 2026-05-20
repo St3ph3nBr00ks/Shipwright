@@ -3866,3 +3866,13 @@ extern "C" void Anchor_InvaderDrawEnd(void) {
 extern "C" Actor* Anchor_GetCurrentlyDrawingInvader(void) {
     return sCurrentlyDrawingInvader;
 }
+
+// Defensive scene-transition reset. Mirrors NPC Follower's same-named
+// function. Called from the OnSceneInit hook in HookHandlers.cpp.
+// See FollowerNPC.cpp's Anchor_FollowerNpcDrawStateResetOnSceneTransition
+// for full rationale — same pattern, separate per-actor swap state.
+extern "C" void Anchor_InvaderDrawStateResetOnSceneTransition(void) {
+    sEquipmentSwapActive       = false;
+    sSavedHeldItemActionActive = false;
+    sCurrentlyDrawingInvader   = nullptr;
+}

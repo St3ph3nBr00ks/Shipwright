@@ -2291,4 +2291,21 @@ extern "C" {
         sLocalFaceSwapActive = false;
         sLocalSavedFaceAge = -1;
     }
+
+    // Defensive scene-transition reset. Called from the OnSceneInit hook
+    // in HookHandlers.cpp. Clears `sLocalFaceSwapActive` WITHOUT calling
+    // the normal End path — the saved-pointer slots (sLocalSavedEye /
+    // Mouth) point into BakedPlayerModel string buffers from the
+    // pre-transition scene, which may have been retired. Restoring them
+    // post-transition would write stale c_str() pointers back into
+    // sEyeTextures / sMouthTextures. Player_Init in the new scene
+    // re-binds these textures naturally; we just need to make sure the
+    // next FaceSwapBegin doesn't short-circuit on a stale-active flag.
+    void Anchor_LocalPlayerFaceSwapResetOnSceneTransition(void) {
+        sLocalFaceSwapActive = false;
+        sLocalSavedFaceAge   = -1;
+        // Don't touch sLocalSavedEye / sLocalSavedMouth — they hold
+        // dangling pointers; the next active Begin will overwrite them
+        // before any code reads them.
+    }
 }

@@ -552,6 +552,24 @@ extern "C" Actor* Anchor_GetCurrentlyDrawingFollowerNpc(void) {
     return sCurrentlyDrawingNpc;
 }
 
+// Defensive scene-transition reset. Called from the OnSceneInit hook in
+// HookHandlers.cpp. Clears the equipment-swap active flag without
+// running the End-path restore — the saved Player DList pointers
+// (sSavedPlayer{LeftHand,RightHand,Sheath,Waist}DLists) reference the
+// old scene's allocated resources, which may have been freed during
+// the transition. Restoring them would write dangling pointers into
+// Link's draw state and crash on the first Player_Draw of the new
+// scene. Player_Init re-binds these naturally for the new scene; we
+// just need to prevent the next DrawBegin from short-circuiting on a
+// stale-active flag, and prevent the matching End-call (if any) from
+// writing stale data on top of the new scene's freshly-initialized
+// Player state.
+extern "C" void Anchor_FollowerNpcDrawStateResetOnSceneTransition(void) {
+    sEquipmentSwapActive       = false;
+    sSavedHeldItemActionActive = false;
+    sCurrentlyDrawingNpc       = nullptr;
+}
+
 // ----------------------------------------------------------------------------
 // Owner lookup — given an NPC Actor*, return the ownerClientId.
 // Local NPC → ownClientId; peer replica → ownerClientId from

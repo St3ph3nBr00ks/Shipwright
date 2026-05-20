@@ -838,9 +838,45 @@ bool Anchor::IsLocalPlayerCrawling() const {
 // — moved to AIFollower/Follower.cpp per Phase 1 commit 2 of the SRP
 // refactor. Declarations remain in Anchor.h.
 
+// Forward decls for the per-module draw-state reset functions invoked
+// from the OnSceneInit defensive guard below. Each lives in its own .cpp
+// (Skeleton.cpp / FollowerNPC.cpp / Invader.cpp) and clears the
+// associated equipment/face swap active-flag WITHOUT running its normal
+// End-path restore — the saved-pointer slots may reference resources
+// freed during the scene transition.
+extern "C" {
+    void Anchor_LocalPlayerFaceSwapResetOnSceneTransition(void);
+    void Anchor_FollowerNpcDrawStateResetOnSceneTransition(void);
+    void Anchor_InvaderDrawStateResetOnSceneTransition(void);
+}
+
 void Anchor::RegisterHooks() {
 
     // #region Hooks that are required for basic Anchor functionality
+
+    // Defensive scene-transition draw-state reset (2026-05-20, log 66
+    // crash class). OnSceneInit fires after the old scene's actors
+    // are destroyed but BEFORE the first Player_Draw of the new scene.
+    // Clear any equipment/face-texture swap active-flags that may
+    // have been left set by a swap whose Begin/End wasn't paired (e.g.,
+    // mid-draw scene transition tear-down). Without this guard, the
+    // first Player_Draw of the new scene could read sEyeTextures /
+    // modelGroup / DList pointers that the previous swap "saved" from
+    // a now-freed BakedPlayerModel — crashing in the skel/limb draw
+    // chain.
+    //
+    // Unconditional registration (no isConnected gate): cosmetic packs
+    // work in single-player too, so the local face-swap can be active
+    // without a live connection. NPC/Invader swaps require connection
+    // for the actors to exist; their reset functions are safe no-ops
+    // when no swap was active.
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneInit>(
+        [](int16_t sceneNum) {
+            (void)sceneNum;
+            Anchor_LocalPlayerFaceSwapResetOnSceneTransition();
+            Anchor_FollowerNpcDrawStateResetOnSceneTransition();
+            Anchor_InvaderDrawStateResetOnSceneTransition();
+        });
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {
         // Bump before sending so the host's HandlePacket_UpdateClientState sees the
