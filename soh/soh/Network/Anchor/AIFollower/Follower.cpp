@@ -1071,6 +1071,34 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         followerNavPath.Reset();
         AnchorFollower::QueueRecorderEvent(std::string("teleport:") + reason);
         if (!roomsDiffer) {
+            // Same-room Y-delta gate (2026-05-19, log 65 fix). If the
+            // leader is significantly higher than the follower (e.g.,
+            // standing on top of a vine wall the follower is supposed
+            // to climb), do NOT raw-write world.pos = leaderPos —
+            // that would teleport the follower straight up the wall
+            // bypassing the legitimate CLIMBING engagement. Leave the
+            // follower where it is; the next FOLLOW tick recomputes
+            // the path and the substrate's climb waypoints take over.
+            //
+            // The threshold (100u) is permissive enough to cover any
+            // single-step stair / ramp segment in OoT — those range
+            // 10-30u between floor levels. Anything over 100u is
+            // effectively a climbable surface (vine/ladder, ~100-800u
+            // tall).
+            //
+            // Cross-room case (above) is unaffected — it uses
+            // RESPAWN_MODE_TOP / scene-reload, not a raw world.pos
+            // write, so vertical placement is handled by the scene
+            // load itself.
+            constexpr f32 kSameRoomMaxYAboveActor = 100.0f;
+            const f32 actorY = player->actor.world.pos.y;
+            if (destPos.y > actorY + kSameRoomMaxYAboveActor) {
+                SPDLOG_INFO("[Follower] Teleport SUPPRESSED ({}) — same-room "
+                            "Y gate (leader Y={:.0f} actor Y={:.0f} delta={:.0f} > {:.0f})",
+                            reason, destPos.y, actorY, destPos.y - actorY,
+                            kSameRoomMaxYAboveActor);
+                return false;
+            }
             player->actor.world.pos = destPos;
             player->actor.prevPos   = destPos;
             SPDLOG_INFO("[Follower] Teleport world.pos ({}) — same room {} pos={:.0f},{:.0f},{:.0f} "
@@ -1148,6 +1176,17 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         const size_t endIdx   = std::min(
             startIdx + (size_t)kSubgoalScanHops,
             followerNavPath.waypoints.size());
+        const Vec3f actorPos = player->actor.world.pos;
+        // Plain walkable destinations whose Y exceeds the actor's by
+        // more than this are rejected (2026-05-19, log 65 fix). The
+        // path can carry a "top of vine wall" walkable waypoint at
+        // Y=800 while the actor is on the floor at Y=0; without this
+        // gate, G14 close-fail would teleport the actor straight up
+        // the wall — bypassing the legitimate CLIMBING engagement.
+        // Climb-destination waypoints are NOT subject to this gate
+        // because the CLIMB branch (below) runs the proper climb-
+        // attach choreography rather than a plain world.pos write.
+        constexpr f32 kMaxWalkableYAbove = 60.0f;
         size_t chosenIdx = SIZE_MAX;
         for (size_t i = startIdx; i < endIdx; i++) {
             const uint32_t f = (i < followerNavPath.waypointFlags.size())
@@ -1166,6 +1205,20 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
             const bool climb    = (f & ::AnchorNavRoom::NODE_CLIMB_ANY) != 0;
             const bool walkable = (f & ::AnchorNavRoom::NODE_WALKABLE)  != 0;
             if (!climb && !walkable) continue;
+            // Y-delta gate for plain walkable destinations.
+            if (!climb && walkable) {
+                const Vec3f& wpPos = followerNavPath.waypoints[i];
+                if (wpPos.y > actorPos.y + kMaxWalkableYAbove) {
+                    SPDLOG_INFO("[Follower] TeleportToNextSubgoal skip idx={} "
+                                "pos=({:.0f},{:.0f},{:.0f}) — walkable but "
+                                "Y={:.0f}u above actor Y={:.0f}",
+                                (int)i, followerNavPath.waypoints[i].x,
+                                followerNavPath.waypoints[i].y,
+                                followerNavPath.waypoints[i].z,
+                                wpPos.y - actorPos.y, actorPos.y);
+                    continue;
+                }
+            }
             chosenIdx = i;
             break;
         }
