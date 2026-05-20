@@ -217,6 +217,25 @@ typedef struct EnInvader {
     // Stationary → hold current pose (matches PLAYER_STATE2_STATIONARY_LADDER).
     f32 climbPrevY;
     Vec3f climbPrevXZ;
+
+    // Peer-replica anim sync (2026-05-20, bug 2 log 67). Owner-side
+    // broadcasts via ENEMY_STATE; peer-side stores synced values here
+    // and the dispatcher's peer-replica branch (Anchor_TickInvaderActor)
+    // picks the anim from `syncedState` + speedXZ instead of running
+    // the local state machine. Without this, peer-replicas always
+    // see the Invader in its locally-derived IDLE state (no visible
+    // target to chase from peer's perspective) and play the wait anim
+    // while the owner's Invader is climbing / attacking / etc.
+    //
+    // syncedHasState is the "have I received a sync packet" gate;
+    // false means peer-replica's tick keeps running the local state
+    // machine (better than playing kWait forever before the first
+    // packet arrives during late-join).
+    u8  syncedHasState;
+    s32 syncedState;
+    f32 syncedSpeedXZ;
+    s8  syncedHoistContext;
+    u8  syncedDeathCause;
 } EnInvader;
 
 #ifdef __cplusplus

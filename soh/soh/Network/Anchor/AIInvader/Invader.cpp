@@ -51,6 +51,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
+#include "soh/Network/Anchor/Common/SceneAuthority.h"  // IsEffectiveHost — peer-replica gate
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
 #include "soh/cvar_prefixes.h"
 
@@ -3009,6 +3010,83 @@ bool TryFireG14Invader(EnInvader* this_, PlayState* play) {
 extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     if (invader == nullptr || play == nullptr) return;
     EnInvader* this_ = (EnInvader*)invader;
+
+    // Peer-replica branch (2026-05-20, bug 2 log 67). On non-host
+    // clients, the Invader's state machine should NOT run — the
+    // owner broadcasts authoritative pos + state via ENEMY_STATE,
+    // peer applies + picks anim from the synced fields. Without this
+    // gate, peer ran the full state machine locally, immediately
+    // derived IDLE (no visible target from peer's perspective), and
+    // played wait anim while the owner's Invader was climbing /
+    // attacking elsewhere.
+    //
+    // Parallel to NPC Follower's IsLocalOwnerNPC peer-replica branch
+    // at FollowerNPC.cpp:3651. Future scripted-position actors that
+    // share ENEMY_STATE should adopt the same shape. The shared bits
+    // (skip Actor_MoveXZGravity, drive playSpeed + step-phase SFX when
+    // walking) are candidate for helper extraction once a third
+    // consumer surfaces.
+    if (!::SceneAuthority::IsEffectiveHost() && this_->syncedHasState) {
+        // Apply synced state to the actor so anim picking + state-
+        // dependent renders (modelGroup swap in DrawBegin, head-look
+        // gate, etc.) see the owner's truth.
+        this_->state    = this_->syncedState;
+        invader->speedXZ = this_->syncedSpeedXZ;
+        this_->hoistContext = this_->syncedHoistContext;
+        this_->deathCause   = this_->syncedDeathCause;
+        // Pick anim via the same picker the owner-side dispatcher
+        // uses. InvAnimForState reads state + speedXZ; we've already
+        // populated those from the synced packet. Special-case
+        // overrides (LEDGE_HOIST swim-vs-ground, DEAD drown-vs-generic,
+        // CLIMBING motion-axis) are downstream of anim picking in the
+        // owner pipeline; peers fall back to the picker's default for
+        // climb (kClimbUpL) — pose driven by the synced jointTable
+        // means the visual is correct even if the L/R variant differs.
+        InvaderAnim peerAnim = InvAnimForState(this_->state,
+                                                invader->speedXZ,
+                                                this_->prevState,
+                                                this_->stepPhase);
+        if (this_->state == EN_INVADER_STATE_LEDGE_HOIST) {
+            peerAnim = (this_->hoistContext == (s8)INV_HOIST_CONTEXT_SWIM)
+                         ? InvaderAnim::kHoistSwim
+                         : InvaderAnim::kHoistGround;
+        }
+        if (this_->state == EN_INVADER_STATE_DEAD &&
+            this_->deathCause == 1) {
+            peerAnim = InvaderAnim::kDeathDrown;
+        }
+        // Animation type: fighter (1) for combat / standby states,
+        // free (0) for locomotion. Same logic the owner dispatcher
+        // uses at the bottom of TickInvaderActor.
+        s8 peerAnimType = 0;
+        switch (this_->state) {
+            case EN_INVADER_STATE_ATTACK:
+            case EN_INVADER_STATE_BLOCK:
+            case EN_INVADER_STATE_ENGAGE:
+            case EN_INVADER_STATE_STANDBY:
+            case EN_INVADER_STATE_RANGED_ATTACK:
+                peerAnimType = 1;
+                break;
+            default:
+                peerAnimType = 0;
+                break;
+        }
+        InvEnsureAnimation(this_, play, peerAnim, peerAnimType);
+        // Walk/run footstep SFX so peer Invader isn't silent.
+        if (peerAnim == InvaderAnim::kWalk || peerAnim == InvaderAnim::kRun) {
+            AnchorAI::TickStepPhase(this_->stepPhase, &this_->actor,
+                                    this_->skelAnime.playSpeed,
+                                    kInvStepPhaseCycle,
+                                    kInvStepPhaseFootDownL,
+                                    kInvStepPhaseFootDownR);
+        }
+        // Update prevState tail so the next tick's edge-detect works.
+        this_->prevState = this_->state;
+        // Skip the host-side state machine, G-guards, etc. Pos comes
+        // from ENEMY_STATE applied earlier in the receive pipeline;
+        // running Actor_MoveXZGravity here would fight the snapshot.
+        return;
+    }
 
     // Parity gap 3 — DEAD state short-circuit. When dead, skip combat
     // preempt + G10/G14 + state dispatch — only TickDEAD runs (anim

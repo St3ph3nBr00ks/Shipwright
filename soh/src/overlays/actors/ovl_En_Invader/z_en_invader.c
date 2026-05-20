@@ -105,6 +105,11 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
 
     this->state           = EN_INVADER_STATE_IDLE;
     this->prevState       = EN_INVADER_STATE_IDLE;
+    this->syncedHasState  = 0;
+    this->syncedState     = EN_INVADER_STATE_IDLE;
+    this->syncedSpeedXZ   = 0.0f;
+    this->syncedHoistContext = 0;
+    this->syncedDeathCause = 0;
     this->linkAge         = (s8)gSaveContext.linkAge;
     this->currentTunic    = PLAYER_TUNIC_KOKIRI;
     this->currentBoots    = PLAYER_BOOTS_KOKIRI;

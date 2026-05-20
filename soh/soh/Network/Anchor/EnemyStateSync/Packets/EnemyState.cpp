@@ -51,6 +51,9 @@ extern "C" {
 // Per-torch lit-state sync — host-authoritative `litTimer` so partial
 // multi-torch puzzle progress is visible across clients.
 #include "overlays/actors/ovl_Obj_Syokudai/z_obj_syokudai.h"
+// AI Invader state-machine sync (2026-05-20, bug 2 log 67) —
+// peer-replica anim sync via ENEMY_STATE extras.
+#include "src/overlays/actors/ovl_En_Invader/z_en_invader.h"
 extern PlayState* gPlayState;
 }
 
@@ -159,6 +162,19 @@ struct EnemyUpdateExtras {
     // "puzzle complete" but not "torch #2 of 4 lit").
     bool hasSyokudai     = false;
     s16  syokudaiLitTimer = 0;
+
+    // AI Invader state-machine sync (2026-05-20, bug 2 log 67). Peer
+    // replicas need the owner's state + walk speed to pick the right
+    // anim (CLIMBING / FOLLOW / fidget / DEAD) instead of running the
+    // local state machine which always derives IDLE from peer's
+    // own (target-less) perspective. Pattern parallels NPC Follower's
+    // FOLLOWER_NPC_STATE; Invader uses the shared ENEMY_STATE pipeline
+    // because EnInvader is ACTORCAT_ENEMY.
+    bool hasInvader              = false;
+    s16  invaderState            = 0;
+    f32  invaderSpeedXZ          = 0.0f;
+    s16  invaderHoistContext     = 0;
+    s16  invaderDeathCause       = 0;
 };
 
 // Snapshot of the last steady-state packet that actually went out (not
@@ -277,6 +293,19 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         ObjSyokudai* torch  = (ObjSyokudai*)actor;
         e.hasSyokudai       = true;
         e.syokudaiLitTimer  = torch->litTimer;
+    } else if (gEnInvaderId != 0 && actor->id == gEnInvaderId) {
+        // AI Invader is a runtime-allocated custom actor (not a vanilla
+        // ACTOR_ENUM), so the dispatch keys on the gEnInvaderId global
+        // rather than a compile-time constant. State/speed/etc. drive
+        // peer-replica anim selection (Anchor_TickInvaderActor's peer
+        // branch picks anim from these fields instead of running the
+        // local state machine).
+        EnInvader* inv               = (EnInvader*)actor;
+        e.hasInvader                 = true;
+        e.invaderState               = (s16)inv->state;
+        e.invaderSpeedXZ             = actor->speedXZ;
+        e.invaderHoistContext        = (s16)inv->hoistContext;
+        e.invaderDeathCause          = (s16)inv->deathCause;
     }
     return e;
 }
@@ -606,6 +635,14 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     if (extras.hasDekunuts) {
         payload["actionState"]              = extras.dekunutsActionState;
         payload["dekunutsAnimFlagAndTimer"] = (int)extras.dekunutsAnimFlagAndTimer;
+    }
+
+    // AI Invader state-machine sync (2026-05-20, bug 2 log 67).
+    if (extras.hasInvader) {
+        payload["invaderState"]         = extras.invaderState;
+        payload["invaderSpeedXZ"]       = extras.invaderSpeedXZ;
+        payload["invaderHoistContext"]  = extras.invaderHoistContext;
+        payload["invaderDeathCause"]    = extras.invaderDeathCause;
     }
 
     // En_Hintnuts state-machine sync (Inside Deku Tree Compound Room).
@@ -1305,6 +1342,27 @@ actor_found:
                                 switchFlag, (int)litRoom, litInGroup, maxTorchCount, torchCount);
                 }
             }
+        }
+    }
+
+    // AI Invader peer-replica anim sync (2026-05-20, bug 2 log 67).
+    // Owner-side broadcasts state / speed / hoistContext / deathCause;
+    // peer-side stores them on the EnInvader for the dispatcher's
+    // peer-replica branch to consume. Write only when our local
+    // EnInvader is NOT the owner — owner-side keeps authoritative
+    // state via the local state machine.
+    if (gEnInvaderId != 0 && actor->id == gEnInvaderId &&
+        payload.contains("invaderState")) {
+        EnInvader* inv = (EnInvader*)actor;
+        // Skip if WE are the host/owner — our local state machine is
+        // already authoritative. (The owner echo is filtered earlier in
+        // the receive pipeline for most enemies, but defensive here.)
+        if (!::SceneAuthority::IsEffectiveHost()) {
+            inv->syncedHasState    = 1;
+            inv->syncedState       = payload["invaderState"].get<int>();
+            inv->syncedSpeedXZ     = payload.value("invaderSpeedXZ", 0.0f);
+            inv->syncedHoistContext = (s8)payload.value("invaderHoistContext", 0);
+            inv->syncedDeathCause  = (u8)payload.value("invaderDeathCause", 0);
         }
     }
 
