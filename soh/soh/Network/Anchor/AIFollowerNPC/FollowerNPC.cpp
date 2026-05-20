@@ -3535,6 +3535,37 @@ bool TryFireG14(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     if (!sLocalNav.navState.path.Empty()) {
         dest = sLocalNav.navState.path.CurrentSubgoal();
     }
+
+    // Y-delta gate (2026-05-20, log 69 fix). If the destination is the
+    // leader-pos fallback (no path) AND the leader is significantly
+    // higher than the NPC, suppress the teleport. NPC at Y=360 on a
+    // mid-wall platform with leader at Y=800 atop the next wall above
+    // would otherwise jump straight up the wall, bypassing the
+    // legitimate CLIMBING engagement. Reset the close-fail window
+    // so the next FOLLOW tick re-plans via substrate (which should
+    // include climb waypoints from NPC's current floor up to leader's).
+    //
+    // Mirrors the Player AI Follower TeleportToLeader same-room Y gate
+    // (Follower.cpp:1099). Threshold 100u matches.
+    //
+    // Substrate-subgoal case is NOT gated because the path planner
+    // already routed through whatever waypoints are needed; if the
+    // current subgoal is a CLIMB cell at higher Y, teleport-to-cell +
+    // CLIMBING engagement is the intended outcome (same as Player AI
+    // Follower TeleportToNextSubgoal's CLIMB branch).
+    constexpr f32 kG14LeaderYAbove = 100.0f;
+    const bool destIsLeaderPos = sLocalNav.navState.path.Empty();
+    const f32  actorY          = a->world.pos.y;
+    if (destIsLeaderPos && dest.y > actorY + kG14LeaderYAbove) {
+        SPDLOG_INFO("[FollowerNPC] G14 close-fail SUPPRESSED — dest is leader pos "
+                    "at Y={:.0f} but actor Y={:.0f} (delta={:.0f} > {:.0f}); "
+                    "next FOLLOW tick re-plans via substrate",
+                    dest.y, actorY, dest.y - actorY, kG14LeaderYAbove);
+        sLocalNav.closeFailBaseline = 0.0f;
+        sLocalNav.closeFailFrames   = 0;
+        return false;
+    }
+
     SPDLOG_INFO("[FollowerNPC] G14 close-fail teleport — dist3D={:.0f}u, "
                 "progress={:.1f}u over {} frames (<{}u in {}ms) → snap to "
                 "({:.0f},{:.0f},{:.0f}) [{}]",
