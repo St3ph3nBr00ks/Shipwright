@@ -472,6 +472,17 @@ void Anchor::SetFollowerActive(bool active) {
         followerAutonomousClimbFrames = 0;
         followerClimbAnchorIdx = UINT16_MAX;
         followerClimbReachableNodes.clear();
+        // Reset substrate path (2026-05-20, log 67 test-2-stuck fix).
+        // Activation doesn't necessarily mean a fresh test from a
+        // fresh spawn point, but it always means the previous follower
+        // session's path is no longer authoritative. Without this
+        // reset, nav test 2 inherits test 1's path with the cursor
+        // parked at the final waypoint; the first FOLLOW tick steers
+        // toward that stale waypoint instead of re-planning from the
+        // newly-teleported spawn. Symptom: actor walks slowly on the
+        // floor via STUCK-FWD nudges for ~30s before a refresh
+        // eventually replans through the climb cells.
+        followerNavPath.Reset();
         SPDLOG_INFO("[Follower] Activated (menu)");
     } else {
         hasPendingTransition = false;
