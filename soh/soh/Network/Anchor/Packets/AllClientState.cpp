@@ -5,6 +5,10 @@
 #include "soh/OTRGlobals.h"
 #include "soh/Notification/Notification.h"
 
+extern "C" {
+#include "functions.h"  // Actor_Kill — used by peer-NPC despawn on disconnect
+}
+
 /**
  * ALL_CLIENT_STATE
  *
@@ -68,6 +72,27 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
     }
     // (separate loop to avoid iterator invalidation)
     for (auto& clientId : clientsToRemove) {
+        // Despawn the peer's NPC Follower replica (Bug 5, log 67
+        // 2026-05-20). Without this, when P1 disconnects (crash /
+        // quit / connection drop), P2 retains P1's NPC follower
+        // forever — the replica was spawned via SPAWN packet on P2's
+        // side but only the matching DESPAWN packet would clean it
+        // up. Disconnect doesn't send DESPAWN. Mirror of the
+        // HandlePacket_FollowerNpcDespawn cleanup body.
+        //
+        // Future: if NPCs are ever meant to PERSIST after the owner
+        // leaves, gate this on a per-NPC-class policy. v1 follower
+        // NPCs are owner-anchored; disconnect = despawn.
+        auto npcIt = mPeerFollowerNpcs.find(clientId);
+        if (npcIt != mPeerFollowerNpcs.end()) {
+            Actor* replica = npcIt->second;
+            if (replica != nullptr && replica->update != nullptr) {
+                Actor_Kill(replica);
+            }
+            mPeerFollowerNpcs.erase(npcIt);
+            SPDLOG_INFO("[AllClientState] Despawned NPC replica for "
+                        "disconnected client {}", clientId);
+        }
         clients.erase(clientId);
     }
 
