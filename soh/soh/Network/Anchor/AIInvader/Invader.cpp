@@ -143,9 +143,11 @@ constexpr float kEngageStrikeDist   = 70.0f;
 //                 blending which makes vanilla movement read smoother
 //                 at the same nominal speed)
 //   v5: 5.12     (further 20% reduction per user report 2026-05-19 PM)
-constexpr float kEngageWalkSpeed    = 4.8f;
+//   v6: 5.376    (+5% per user report 2026-05-20 — pursuit slightly
+//                 slower than Player AI Follower; bump to match)
+constexpr float kEngageWalkSpeed    = 5.04f;
 constexpr float kEngageRunDistance  = 150.0f;
-constexpr float kEngageRunSpeed     = 5.12f;
+constexpr float kEngageRunSpeed     = 5.376f;
 
 constexpr int   kBlockDurationMs        = 2000;
 constexpr float kBlockHpThresholdRatio  = 0.5f;
@@ -366,8 +368,8 @@ constexpr float kInvFollowEngageDist = 1000.0f;
 constexpr float kInvFollowIdleDist = 60.0f;
 // FOLLOW pursuit speeds. Same numerics as FollowerNPC's kRunSpeed /
 // kRunDistance.
-constexpr float kInvWalkSpeed   = 4.8f;  // further 20% reduction 2026-05-19 PM (was 6.0)
-constexpr float kInvRunSpeed    = 5.12f; // further 20% reduction 2026-05-19 PM (was 6.4 = 20% below Link)
+constexpr float kInvWalkSpeed   = 5.04f;  // +5% 2026-05-20 (was 4.8 — slightly behind Player AI Follower)
+constexpr float kInvRunSpeed    = 5.376f; // +5% 2026-05-20 (was 5.12 — slightly behind Player AI Follower)
 constexpr float kInvRunDistance = 200.0f;
 // STUCK detection — no progress over this window triggers a one-tick
 // nudge. Same shape as FollowerNPC's kStuckCheckMs / kStuckMinProgress

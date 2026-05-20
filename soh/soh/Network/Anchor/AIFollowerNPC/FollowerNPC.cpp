@@ -826,7 +826,7 @@ static constexpr float kEnterIdle   = 50.0f;
 // when leader is far — gives a natural feel without making the NPC
 // always sprint.
 static constexpr float kRunDistance = 250.0f;  // beyond this, run instead of walk
-static constexpr float kWalkSpeed   = 4.8f;
+static constexpr float kWalkSpeed   = 5.04f;
 // Speed history:
 //   v1: 12.0    (50% faster than Link — visibly outran Link in tests)
 //   v2: 8.0     (matches Link R_RUN_SPEED_LIMIT — still felt fast in
@@ -836,7 +836,9 @@ static constexpr float kWalkSpeed   = 4.8f;
 //   v3: 6.4     (20% reduction from v2 per user report 2026-05-19)
 //   v4: 5.12    (further 20% reduction per user report 2026-05-19 PM —
 //                NPC + Invader still visibly outpaced Link in field test)
-static constexpr float kRunSpeed    = 5.12f;
+//   v5: 5.376   (+5% per user report 2026-05-20 — NPC + Invader now
+//                slightly slower than Player AI Follower; bump back up)
+static constexpr float kRunSpeed    = 5.376f;
 
 // Phase 5 — substrate path consumption + STUCK recovery.
 //
