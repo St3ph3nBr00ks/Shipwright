@@ -63,14 +63,22 @@ StuckCycleAction GetStuckAction(const StuckCycleState& state,
 
 // Vertical-dominant overload (Phase 4). When the separation to the
 // target is vertical-dominant (|dy| >> distXZ — caller checks via
-// NavStateTransitions::IsVerticalDominantSeparation), horizontal
-// nudge cycles can't help. This overload short-circuits the cycle 1
-// nudge to cycle 2's cursor advance (lets the substrate path skip
-// to a climb/drop/hoist subgoal) and promotes cycle 2 to teleport.
+// AnchorAI::IsVerticalDominantSeparation in NavStateTransitions.h),
+// horizontal nudge cycles are still applied by the caller's TickSTUCK
+// body — but this overload upgrades the RETURNED action so the
+// caller also fires a cursor advance in cycle 1 (instead of nudge
+// alone) and escalates to a hard Teleport in cycle 2+.
 //
 //   verticalDominant=false → identical to the non-overloaded form.
-//   verticalDominant=true  → cycle 1 acts as CursorAdvance,
-//                            cycle 2+ acts as Teleport.
+//   verticalDominant=true  → cycle 1 returns CursorAdvance (the
+//                            caller advances the path AND still
+//                            does its legacy nudge — the legacy
+//                            nudge code is unconditional after the
+//                            action dispatch, so this is a net
+//                            "advance + nudge" upgrade vs default
+//                            cycle 1's "nudge only").
+//                            cycle 2+ returns Teleport (caller
+//                            short-circuits before the nudge).
 //
 // Caller still owns the world.pos write + path Reset/Advance — the
 // helper just decides which tier the caller should execute.

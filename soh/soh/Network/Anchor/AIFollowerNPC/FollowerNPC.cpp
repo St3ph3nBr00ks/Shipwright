@@ -3045,9 +3045,12 @@ void TickSTANDBY(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // STANDBY→FOLLOW handoff.
     if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
                                  kEnterFollow, kEnterFollowY)) {
+        const float leaderDistXZ = AnchorDist::DistXZ(a->world.pos, leaderPos);
+        const float leaderDy     = std::fabs(leaderPos.y - a->world.pos.y);
         SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (leader beyond hysteresis "
-                    "XZ={:.0f}u/{:.0f}u or Y={:.0f}u)",
-                    kEnterFollow, kEnterFollow, kEnterFollowY);
+                    "XZ={:.0f}u/{:.0f}u, |dy|={:.0f}u/{:.0f}u)",
+                    leaderDistXZ, kEnterFollow,
+                    leaderDy, kEnterFollowY);
         this_->state = EN_FOLLOWER_STATE_FOLLOW;
     }
 
