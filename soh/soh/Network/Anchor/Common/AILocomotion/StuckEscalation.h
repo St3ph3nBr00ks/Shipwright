@@ -61,6 +61,23 @@ void NoteStuckEntered(StuckCycleState& state, int windowTicks);
 StuckCycleAction GetStuckAction(const StuckCycleState& state,
                                 int escalationThreshold = 3);
 
+// Vertical-dominant overload (Phase 4). When the separation to the
+// target is vertical-dominant (|dy| >> distXZ — caller checks via
+// NavStateTransitions::IsVerticalDominantSeparation), horizontal
+// nudge cycles can't help. This overload short-circuits the cycle 1
+// nudge to cycle 2's cursor advance (lets the substrate path skip
+// to a climb/drop/hoist subgoal) and promotes cycle 2 to teleport.
+//
+//   verticalDominant=false → identical to the non-overloaded form.
+//   verticalDominant=true  → cycle 1 acts as CursorAdvance,
+//                            cycle 2+ acts as Teleport.
+//
+// Caller still owns the world.pos write + path Reset/Advance — the
+// helper just decides which tier the caller should execute.
+StuckCycleAction GetStuckAction(const StuckCycleState& state,
+                                int escalationThreshold,
+                                bool verticalDominant);
+
 // Caller fired the cycle-2 cursor advance. Latches state.advancedAt
 // so the next GetStuckAction call won't re-fire the advance.
 void MarkCursorAdvanced(StuckCycleState& state);

@@ -1213,8 +1213,17 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
         return;
     }
 
+    // Phase 4: vertical-dominant escalation. When the hostile target is
+    // mostly above/below in Y (e.g. perched on a ledge), the horizontal
+    // nudge tier can't close the gap. The overload promotes cycle 1 to
+    // CursorAdvance (substrate path walks to a climb/drop subgoal) and
+    // cycle 2 to Teleport.
+    const bool verticalDominant =
+        AnchorAI::IsVerticalDominantSeparation(a->world.pos, target->world.pos);
     const AnchorAI::StuckCycleAction action =
-        AnchorAI::GetStuckAction(sLocalInvNav.stuckCycle, kInvStuckCycleEscalation);
+        AnchorAI::GetStuckAction(sLocalInvNav.stuckCycle,
+                                  kInvStuckCycleEscalation,
+                                  verticalDominant);
     const uint32_t cycle = sLocalInvNav.stuckCycle.count;
 
     // Cycle 3+: teleport to next subgoal (or target as fallback).

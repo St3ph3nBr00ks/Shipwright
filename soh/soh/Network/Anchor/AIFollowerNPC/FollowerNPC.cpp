@@ -3652,8 +3652,18 @@ bool TryFireG14(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 // so unrelated stuck episodes don't accumulate into escalation.
 void TickSTUCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
+    // Phase 4: vertical-dominant escalation. When the leader is mostly
+    // above/below in Y rather than horizontally away (e.g. on a ledge
+    // directly overhead), the cycle-1 horizontal nudge can't close the
+    // gap. The overload promotes cycle 1 to CursorAdvance (so the
+    // substrate path walks to a climb/drop subgoal) and cycle 2 to
+    // Teleport, skipping the doomed nudge tier.
+    const bool verticalDominant =
+        AnchorAI::IsVerticalDominantSeparation(a->world.pos, leaderPos);
     const AnchorAI::StuckCycleAction action =
-        AnchorAI::GetStuckAction(sLocalNav.stuckCycle, kStuckCycleEscalation);
+        AnchorAI::GetStuckAction(sLocalNav.stuckCycle,
+                                  kStuckCycleEscalation,
+                                  verticalDominant);
     const uint32_t cycle = sLocalNav.stuckCycle.count;
 
     // Cycle 3+: teleport. Try next subgoal first; fall back to leader
