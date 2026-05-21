@@ -135,7 +135,9 @@ constexpr float kAttackActiveEndFrame   = 12.0f;
 // enemies remains a deferred feature (post-#208).
 constexpr float kEngageAcquireDist  = 1000.0f;
 constexpr float kEngageBreakDist    = 1500.0f;
+constexpr float kEngageBreakDistY   = 400.0f;  // Y "fled" gate — wider than Follower's 250u; Invader pursues across larger maps
 constexpr float kEngageStrikeDist   = 70.0f;
+constexpr float kEngageStrikeY      = 60.0f;   // Link body height — ATTACK only when target body in vertical reach
 // Speed history:
 //   v1: 12.0     (50% faster than Link — visibly outran in tests)
 //   v2: 9.0      (still too fast)
@@ -174,6 +176,7 @@ constexpr float kStandbyDetectDist = 600.0f;
 // holds in STANDBY while the player drifts away, only chasing when
 // the player meaningfully retreats.
 constexpr float kStandbyIdleRadius = 150.0f;
+constexpr float kStandbyIdleY      = 100.0f;  // Y handoff to FOLLOW (Phase 3 P1-E) — narrower than break-Y to keep close-range vertical hostiles in STANDBY
 
 // Post-combat re-engagement cooldown. Was 1500ms; bumped to 2500ms
 // 2026-05-17 alongside kStandbyIdleRadius widening — together they
@@ -2259,23 +2262,33 @@ void TickENGAGE(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     }
 
     const Vec3f& targetPos = sAttackState.target->world.pos;
-    const float dx = targetPos.x - a->world.pos.x;
-    const float dz = targetPos.z - a->world.pos.z;
-    const float distXZ = std::sqrt(dx * dx + dz * dz);
+    const float distXZ = AnchorDist::DistXZ(a->world.pos, targetPos);
+    const float dyToTarget = std::fabs(targetPos.y - a->world.pos.y);
 
-    if (distXZ > kEngageBreakDist) {
+    // Phase 3 P1-G: 3D-aware "fled" — target jumping to a ledge above
+    // or dropping to a pit below also yields combat (the XZ-only check
+    // would keep ENGAGE going against a target Invader can't reach).
+    if (AnchorAI::ShouldPursue3D(a->world.pos, targetPos,
+                                 kEngageBreakDist, kEngageBreakDistY)) {
         const s32 next = ChooseCombatExitState(this_, play);
-        SPDLOG_INFO("[Invader] ENGAGE→{} (target fled {:.0f}u > {:.0f}u)",
+        SPDLOG_INFO("[Invader] ENGAGE→{} (target fled: XZ={:.0f}u/{:.0f}u, "
+                    "|dy|={:.0f}u/{:.0f}u)",
                     (next == EN_INVADER_STATE_STANDBY ? "STANDBY" : "IDLE/FOLLOW"),
-                    distXZ, kEngageBreakDist);
+                    distXZ, kEngageBreakDist,
+                    dyToTarget, kEngageBreakDistY);
         this_->state = next;
         sAttackState.target = nullptr;
         a->speedXZ = 0.0f;
         return;
     }
 
-    if (distXZ <= kEngageStrikeDist) {
-        SPDLOG_INFO("[Invader] ENGAGE→ATTACK (strike range, dist={:.0f}u)", distXZ);
+    // Phase 3 P1-G: 3D-aware strike — require Y reach in addition to
+    // XZ. Prior XZ-only check fired ATTACK when target stood on a
+    // ledge directly above, whiffing the swing every cycle.
+    if (AnchorAI::IsArrived3D(a->world.pos, targetPos,
+                              kEngageStrikeDist, kEngageStrikeY)) {
+        SPDLOG_INFO("[Invader] ENGAGE→ATTACK (strike range, "
+                    "XZ={:.0f}u, |dy|={:.0f}u)", distXZ, dyToTarget);
         this_->state = EN_INVADER_STATE_ATTACK;
         sAttackState.swingFiredAT = false;
         a->speedXZ = 0.0f;
@@ -2575,12 +2588,19 @@ void TickSTANDBY(EnInvader* this_, PlayState* play, const Vec3f& targetHintPos) 
     // pursuit toward sAttackState.target via the target hint; for
     // now FOLLOW may default to IDLE if Agent 2's locomotion isn't
     // landed yet — that's acceptable, TryEngageCombat will re-fire
-    // once a tier matches).
-    const float distSq = Dist2DSq(a->world.pos, faceTarget->world.pos);
-    if (distSq > kStandbyIdleRadius * kStandbyIdleRadius) {
-        SPDLOG_INFO("[Invader] STANDBY→FOLLOW (target {:.0f}u away — handoff to "
-                    "locomotion)",
-                    std::sqrt(distSq));
+    // once a tier matches). Phase 3 P1-E: 3D-aware so a target who
+    // jumped to a ledge above (small XZ, huge Y) also triggers FOLLOW
+    // — letting the substrate path engage CLIMBING/hoist subgoals
+    // instead of staring at the wall in STANDBY forever.
+    if (AnchorAI::ShouldPursue3D(a->world.pos, faceTarget->world.pos,
+                                 kStandbyIdleRadius, kStandbyIdleY)) {
+        const float distXZ =
+            AnchorDist::DistXZ(a->world.pos, faceTarget->world.pos);
+        const float dy =
+            std::fabs(faceTarget->world.pos.y - a->world.pos.y);
+        SPDLOG_INFO("[Invader] STANDBY→FOLLOW (target XZ={:.0f}u, "
+                    "|dy|={:.0f}u — handoff to locomotion)",
+                    distXZ, dy);
         this_->state = EN_INVADER_STATE_FOLLOW;
     }
     // Otherwise stay in STANDBY; TryEngageCombat will re-engage once

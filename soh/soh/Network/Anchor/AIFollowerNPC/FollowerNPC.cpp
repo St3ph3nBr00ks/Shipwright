@@ -2471,8 +2471,11 @@ void TickATTACK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 // ----------------------------------------------------------------------------
 static constexpr float kEngageAcquireDist  = 250.0f;  // pursuit acquisition radius
 static constexpr float kEngageBreakDist    = 400.0f;  // bail if target fled past this
+static constexpr float kEngageBreakDistY   = 250.0f;  // bail if target Y-fled past this (jumped to ledge)
 static constexpr float kEngageLeaderLeash  = 600.0f;  // bail if leader >this far away
+static constexpr float kEngageLeaderLeashY = 300.0f;  // bail if leader >this far away vertically (climbed ledge)
 static constexpr float kEngageStrikeDist   = 70.0f;   // close enough to ATTACK (slight hysteresis vs kAttackEngageDist=80)
+static constexpr float kEngageStrikeY      = 60.0f;   // Link body height — ATTACK only when target body in vertical reach
 // BLOCK entry threshold — defined here (above TryEngageCombat) so the
 // engagement helper can reference it. The remaining BLOCK constants
 // stay grouped with the BLOCK section below.
@@ -2503,19 +2506,24 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 
     const Vec3f& targetPos = sAttackState.target->world.pos;
-    const float dx = targetPos.x - a->world.pos.x;
-    const float dz = targetPos.z - a->world.pos.z;
-    const float distXZ = std::sqrt(dx*dx + dz*dz);
+    const float distXZ = AnchorDist::DistXZ(a->world.pos, targetPos);
+    const float dyToTarget = std::fabs(targetPos.y - a->world.pos.y);
 
     // Leader-leash bail — don't chase enemies forever away from leader.
     // Always FOLLOW (not STANDBY) — yielding to leader is the explicit
-    // intent of this exit.
-    const float ldx = leaderPos.x - a->world.pos.x;
-    const float ldz = leaderPos.z - a->world.pos.z;
-    const float leaderDistXZ = std::sqrt(ldx*ldx + ldz*ldz);
-    if (leaderDistXZ > kEngageLeaderLeash) {
-        SPDLOG_INFO("[FollowerNPC] ENGAGE→FOLLOW (leader too far: {:.0f}u > {:.0f}u)",
-                    leaderDistXZ, kEngageLeaderLeash);
+    // intent of this exit. Phase 3 P1-F: 3D-aware via ShouldPursue3D so
+    // a leader climbing to a ledge above (huge Y, small XZ) also yields
+    // combat — the prior XZ-only check kept NPC fighting indefinitely
+    // when leader topped a wall during a pursuit.
+    if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
+                                 kEngageLeaderLeash, kEngageLeaderLeashY)) {
+        const float leaderDistXZ =
+            AnchorDist::DistXZ(a->world.pos, leaderPos);
+        const float leaderDy = std::fabs(leaderPos.y - a->world.pos.y);
+        SPDLOG_INFO("[FollowerNPC] ENGAGE→FOLLOW (leader too far: "
+                    "XZ={:.0f}u/{:.0f}u, |dy|={:.0f}u/{:.0f}u)",
+                    leaderDistXZ, kEngageLeaderLeash,
+                    leaderDy, kEngageLeaderLeashY);
         this_->state = EN_FOLLOWER_STATE_FOLLOW;
         sAttackState.target = nullptr;
         a->speedXZ = 0.0f;
@@ -2523,12 +2531,18 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 
     // Enemy fled past pursuit range — exit; STANDBY if any other
-    // enemy is in detect range, else FOLLOW.
-    if (distXZ > kEngageBreakDist) {
+    // enemy is in detect range, else FOLLOW. Phase 3 P1-G: 3D-aware
+    // so a target that jumped/flew to a ledge above (small XZ, huge
+    // Y) also counts as "fled" — the XZ-only check kept NPC stuck
+    // in ENGAGE chasing a target it could no longer reach.
+    if (AnchorAI::ShouldPursue3D(a->world.pos, targetPos,
+                                 kEngageBreakDist, kEngageBreakDistY)) {
         const s32 nextState = ChooseCombatExitState(this_, play);
-        SPDLOG_INFO("[FollowerNPC] ENGAGE→{} (target fled: {:.0f}u > {:.0f}u)",
+        SPDLOG_INFO("[FollowerNPC] ENGAGE→{} (target fled: XZ={:.0f}u/{:.0f}u, "
+                    "|dy|={:.0f}u/{:.0f}u)",
                     (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"),
-                    distXZ, kEngageBreakDist);
+                    distXZ, kEngageBreakDist,
+                    dyToTarget, kEngageBreakDistY);
         this_->state = nextState;
         sAttackState.target = nullptr;
         a->speedXZ = 0.0f;
@@ -2537,9 +2551,15 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 
     // In strike range — transition to ATTACK. Target carries over
     // (sAttackState.target stays valid; ATTACK uses it directly).
-    if (distXZ <= kEngageStrikeDist) {
-        SPDLOG_INFO("[FollowerNPC] ENGAGE→ATTACK (strike range, dist={:.0f}u)",
-                    distXZ);
+    // Phase 3 P1-G: require BOTH XZ close AND vertical reach (Link's
+    // sword swing covers ~60u of vertical body height). Prior
+    // XZ-only check fired ATTACK when target was directly above on
+    // a ledge — the swing whiffed into empty air every cycle.
+    if (AnchorAI::IsArrived3D(a->world.pos, targetPos,
+                              kEngageStrikeDist, kEngageStrikeY)) {
+        SPDLOG_INFO("[FollowerNPC] ENGAGE→ATTACK (strike range, "
+                    "XZ={:.0f}u, |dy|={:.0f}u)",
+                    distXZ, dyToTarget);
         this_->state = EN_FOLLOWER_STATE_ATTACK;
         this_->stopAnimPlaying = 0;  // let kSwordSwing override flow through
         sAttackState.swingFiredAT = false;
@@ -2987,11 +3007,14 @@ void TickSTANDBY(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 
     // No enemy in detect range — drop back to IDLE / FOLLOW so the
     // dispatcher's animType=0 logic fires next tick (weapon sheathes
-    // visually via the free-variant idle anim).
+    // visually via the free-variant idle anim). Phase 3 P1-E: 3D-aware
+    // — if leader is meaningfully above/below (ledge), → FOLLOW so the
+    // navigator can engage CLIMBING / hoist / drop subgoals instead of
+    // dropping to IDLE under the leader's feet.
     if (faceTarget == nullptr) {
         sAttackState.target = nullptr;
-        const float distToLeaderSq = Dist2DSq(a->world.pos, leaderPos);
-        if (distToLeaderSq > kEnterFollow * kEnterFollow) {
+        if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
+                                     kEnterFollow, kEnterFollowY)) {
             SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (no enemies, leader far)");
             this_->state = EN_FOLLOWER_STATE_FOLLOW;
         } else {
@@ -3009,12 +3032,14 @@ void TickSTANDBY(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // was 600u), the NPC stayed locked in STANDBY/RANGED_ATTACK
     // cycle even as the leader walked across Hyrule Field. The
     // combat cooldown gives FOLLOW a beat to make progress before
-    // TryEngageCombat re-engages.
-    const float distToLeaderSq = Dist2DSq(a->world.pos, leaderPos);
-    const float kStandbyLeaderLeash = kEnterFollow;  // 80u — same as IDLE→FOLLOW
-    if (distToLeaderSq > (kStandbyLeaderLeash * kStandbyLeaderLeash)) {
-        SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (leader >{:.0f}u away)",
-                    kStandbyLeaderLeash);
+    // TryEngageCombat re-engages. Phase 3 P1-E: 3D-aware so a leader
+    // climbing to a ledge above (small XZ, huge Y) also triggers
+    // STANDBY→FOLLOW handoff.
+    if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
+                                 kEnterFollow, kEnterFollowY)) {
+        SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (leader beyond hysteresis "
+                    "XZ={:.0f}u/{:.0f}u or Y={:.0f}u)",
+                    kEnterFollow, kEnterFollow, kEnterFollowY);
         this_->state = EN_FOLLOWER_STATE_FOLLOW;
     }
 

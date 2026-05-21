@@ -252,6 +252,13 @@ static constexpr f32 kMaxYDelta = 120.0f;
 // Leader leash — abandon COLLECT_ITEM when the leader strays beyond
 // this distance. Promoted for HandleStateCollectItem.
 static constexpr f32 kMaxLeash = 800.0f;
+// Y companion to kMaxLeash (Phase 3 P1-F). When the leader climbs to a
+// ledge well above (or drops far below) the follower mid-ENGAGE, yield
+// combat — the XZ-only check kept follower fighting the floor-bound
+// enemy while leader was already several screens of vertical away.
+// 300u is well above kMaxYDelta (120) so single-step Y delta during
+// normal combat doesn't trip; only multi-storey separation triggers.
+static constexpr f32 kMaxLeashY = 300.0f;
 
 // Enemy detection radius (XZ) for IDLE→ENGAGE transitions. Promoted for
 // HandleStateIdle.
@@ -4789,16 +4796,14 @@ void Anchor::HandleStateCollectItem(Player* player, const Vec3f& leaderPos, cons
         return;
     }
     // Leader leash — don't stray too far from the leader just for a rupee.
-    {
-        f32 lx = leaderPos.x - p2Pos.x;
-        f32 lz = leaderPos.z - p2Pos.z;
-        if (lx * lx + lz * lz > kMaxLeash * kMaxLeash) {
-            SPDLOG_INFO("[Follower] COLLECT_ITEM→FOLLOW (leader beyond leash)");
-            followerTargetItem  = nullptr;
-            followerAIState     = FollowerAIState::FOLLOW;
-            followerStateFrames = 0;
-            return;
-        }
+    // Phase 3 P1-F: 3D-aware so leader climbing/dropping to a different
+    // floor also abandons the pickup attempt.
+    if (AnchorAI::ShouldPursue3D(p2Pos, leaderPos, kMaxLeash, kMaxLeashY)) {
+        SPDLOG_INFO("[Follower] COLLECT_ITEM→FOLLOW (leader beyond leash)");
+        followerTargetItem  = nullptr;
+        followerAIState     = FollowerAIState::FOLLOW;
+        followerStateFrames = 0;
+        return;
     }
     // Y-gate — item ended up on a different floor (bounce off a ledge
     // between grace expiry and pickup start).
@@ -5203,16 +5208,15 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
     // (unless ranged-required, then RANGED_ATTACK). When in attackRange,
     // routes to ATTACK or BLOCK depending on enemy class.
     //
-    // Abandon if leader is too far.
-    {
-        f32 ldx = leaderPos.x - p2Pos.x;
-        f32 ldz = leaderPos.z - p2Pos.z;
-        if (ldx * ldx + ldz * ldz > kMaxLeash * kMaxLeash) {
-            followerAIState     = FollowerAIState::FOLLOW;
-            followerStateFrames = 0;
-            SPDLOG_INFO("[Follower] ENGAGE\u2192FOLLOW (leader too far)");
-            return;
-        }
+    // Abandon if leader is too far. Phase 3 P1-F: 3D-aware so a leader
+    // who climbed several storeys above (small XZ, huge Y) also yields
+    // combat — prior XZ-only check kept follower fighting indefinitely
+    // when leader went up a ladder mid-pursuit.
+    if (AnchorAI::ShouldPursue3D(p2Pos, leaderPos, kMaxLeash, kMaxLeashY)) {
+        followerAIState     = FollowerAIState::FOLLOW;
+        followerStateFrames = 0;
+        SPDLOG_INFO("[Follower] ENGAGE\u2192FOLLOW (leader too far)");
+        return;
     }
     if (followerTargetEnemy == nullptr ||
         followerTargetEnemy->update == nullptr) {
