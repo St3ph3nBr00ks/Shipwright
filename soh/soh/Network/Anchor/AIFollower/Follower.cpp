@@ -4370,12 +4370,17 @@ bool Anchor::CheckStuckAndEscalate(const Vec3f& p2Pos,
     // Lateral sliding along a wall: 0. Walking AWAY from target:
     // negative progress. Only forward motion TOWARD the immediate
     // move target counts.
-    f32 toTarget = AnchorDist::DistXZ(followerMoveTarget, p2Pos);
-    f32 prevToTarget = AnchorDist::DistXZ(followerMoveTarget, followerLastPos);
+    // P0 audit: 3D progress, not XZ. Climbing actors make progress
+    // mostly in Y; XZ-only registers them as "stuck" mid-climb and
+    // fires false-positive escalation. (NPC Follower / Invader have
+    // the same fix on this branch — keeps the three actors in sync.)
+    f32 toTarget = AnchorDist::Dist3D(followerMoveTarget, p2Pos);
+    f32 prevToTarget = AnchorDist::Dist3D(followerMoveTarget, followerLastPos);
     f32 progress = prevToTarget - toTarget;  // positive = approached
     f32 progDx   = p2Pos.x - followerLastPos.x;
+    f32 progDy   = p2Pos.y - followerLastPos.y;
     f32 progDz   = p2Pos.z - followerLastPos.z;
-    f32 rawDisp  = sqrtf(progDx * progDx + progDz * progDz);
+    f32 rawDisp  = sqrtf(progDx * progDx + progDy * progDy + progDz * progDz);
     (void)rawDisp;  // retained for the log line below
     // Per-state log prefix so traces stay diagnosable across the three
     // pursuing states. Compact switch keeps the log site cheap.
