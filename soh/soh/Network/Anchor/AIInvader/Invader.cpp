@@ -2454,20 +2454,27 @@ void TickBLOCK(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
         sBlockState.hitAnimFrames--;
     }
 
+    // Phase 5 P2-H: 3D-aware BLOCK timer recheck. If the target moved
+    // vertically out of reach during the block window (jumped to a
+    // ledge above, fell to a pit below), the XZ-only "in range" check
+    // would trigger ATTACK into empty air. Reuse kEngageStrikeY
+    // (Link body height) added in Phase 3.
     const uint64_t durationTicks =
         (uint64_t)Anchor::Instance->MsToGameTicks(kBlockDurationMs);
     if (curFrame >= sBlockState.entryFrame + durationTicks) {
-        if (sAttackState.target != nullptr) {
-            const float dx = sAttackState.target->world.pos.x - a->world.pos.x;
-            const float dz = sAttackState.target->world.pos.z - a->world.pos.z;
-            const float distXZ = std::sqrt(dx * dx + dz * dz);
-            if (distXZ <= kAttackEngageDist) {
-                SPDLOG_INFO("[Invader] BLOCK→ATTACK (timer expired, target in range "
-                            "dist={:.0f})", distXZ);
-                this_->state = EN_INVADER_STATE_ATTACK;
-                sAttackState.swingFiredAT = false;
-                return;
-            }
+        if (sAttackState.target != nullptr &&
+            AnchorAI::IsArrived3D(a->world.pos,
+                                   sAttackState.target->world.pos,
+                                   kAttackEngageDist, kEngageStrikeY)) {
+            const float distXZ = AnchorDist::DistXZ(a->world.pos,
+                                                     sAttackState.target->world.pos);
+            const float dy = std::fabs(sAttackState.target->world.pos.y -
+                                        a->world.pos.y);
+            SPDLOG_INFO("[Invader] BLOCK→ATTACK (timer expired, target in range "
+                        "XZ={:.0f}u |dy|={:.0f}u)", distXZ, dy);
+            this_->state = EN_INVADER_STATE_ATTACK;
+            sAttackState.swingFiredAT = false;
+            return;
         }
         const s32 next = ChooseCombatExitState(this_, play);
         SPDLOG_INFO("[Invader] BLOCK→{} (timer expired)",

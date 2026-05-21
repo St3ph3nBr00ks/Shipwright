@@ -2829,23 +2829,31 @@ void TickBLOCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         sBlockState.hitAnimFrames--;
     }
 
-    // Exit after kBlockDurationMs — re-evaluate.
+    // Exit after kBlockDurationMs — re-evaluate. Phase 5 P2-H: 3D-aware
+    // recheck via IsArrived3D. Without the Y gate, a target that
+    // jumped/climbed to a ledge directly above during the block window
+    // would still satisfy the XZ distance and trigger ATTACK — the
+    // swing then whiffed into empty air. Reuse kEngageStrikeY (Link
+    // body-height reach) added in Phase 3.
     const uint64_t durationTicks =
         (uint64_t)Anchor::Instance->MsToGameTicks(kBlockDurationMs);
     if (curFrame >= sBlockState.entryFrame + durationTicks) {
-        // If target still alive and in melee range, swap to ATTACK.
-        if (sAttackState.target != nullptr) {
-            const float dx = sAttackState.target->world.pos.x - a->world.pos.x;
-            const float dz = sAttackState.target->world.pos.z - a->world.pos.z;
-            const float distXZ = std::sqrt(dx*dx + dz*dz);
-            if (distXZ <= kAttackEngageDist) {
-                SPDLOG_INFO("[FollowerNPC] BLOCK→ATTACK (block timer expired, "
-                            "target still in range dist={:.0f})", distXZ);
-                this_->state = EN_FOLLOWER_STATE_ATTACK;
-                this_->stopAnimPlaying = 0;
-                sAttackState.swingFiredAT = false;
-                return;
-            }
+        // If target still alive and in melee + vertical reach, swap to ATTACK.
+        if (sAttackState.target != nullptr &&
+            AnchorAI::IsArrived3D(a->world.pos,
+                                   sAttackState.target->world.pos,
+                                   kAttackEngageDist, kEngageStrikeY)) {
+            const float distXZ = AnchorDist::DistXZ(a->world.pos,
+                                                     sAttackState.target->world.pos);
+            const float dy = std::fabs(sAttackState.target->world.pos.y -
+                                        a->world.pos.y);
+            SPDLOG_INFO("[FollowerNPC] BLOCK→ATTACK (block timer expired, "
+                        "target still in range XZ={:.0f}u |dy|={:.0f}u)",
+                        distXZ, dy);
+            this_->state = EN_FOLLOWER_STATE_ATTACK;
+            this_->stopAnimPlaying = 0;
+            sAttackState.swingFiredAT = false;
+            return;
         }
         // Otherwise drop back to STANDBY (target out of melee but
         // still maybe nearby) or FOLLOW (no enemy detected).
