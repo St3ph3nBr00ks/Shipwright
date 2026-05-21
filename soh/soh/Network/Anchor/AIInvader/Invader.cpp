@@ -2233,8 +2233,8 @@ void TickENGAGE(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     // Phase 3 P1-G: 3D-aware strike — require Y reach in addition to
     // XZ. Prior XZ-only check fired ATTACK when target stood on a
     // ledge directly above, whiffing the swing every cycle.
-    if (AnchorAI::IsArrived3D(a->world.pos, targetPos,
-                              kEngageStrikeDist, kEngageStrikeY)) {
+    if (AnchorAI::IsInStrikeRange(a->world.pos, targetPos,
+                                   kEngageStrikeDist, kEngageStrikeY)) {
         SPDLOG_INFO("[Invader] ENGAGE→ATTACK (strike range, "
                     "XZ={:.0f}u, |dy|={:.0f}u)", distXZ, dyToTarget);
         this_->state = EN_INVADER_STATE_ATTACK;
@@ -2402,9 +2402,9 @@ void TickBLOCK(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
         (uint64_t)Anchor::Instance->MsToGameTicks(kBlockDurationMs);
     if (curFrame >= sBlockState.entryFrame + durationTicks) {
         if (sAttackState.target != nullptr &&
-            AnchorAI::IsArrived3D(a->world.pos,
-                                   sAttackState.target->world.pos,
-                                   kAttackEngageDist, kEngageStrikeY)) {
+            AnchorAI::IsInStrikeRange(a->world.pos,
+                                       sAttackState.target->world.pos,
+                                       kAttackEngageDist, kEngageStrikeY)) {
             const float distXZ = AnchorDist::DistXZ(a->world.pos,
                                                      sAttackState.target->world.pos);
             const float dy = std::fabs(sAttackState.target->world.pos.y -

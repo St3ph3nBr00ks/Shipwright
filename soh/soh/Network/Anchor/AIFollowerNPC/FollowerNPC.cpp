@@ -2556,8 +2556,8 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // sword swing covers ~60u of vertical body height). Prior
     // XZ-only check fired ATTACK when target was directly above on
     // a ledge — the swing whiffed into empty air every cycle.
-    if (AnchorAI::IsArrived3D(a->world.pos, targetPos,
-                              kEngageStrikeDist, kEngageStrikeY)) {
+    if (AnchorAI::IsInStrikeRange(a->world.pos, targetPos,
+                                   kEngageStrikeDist, kEngageStrikeY)) {
         SPDLOG_INFO("[FollowerNPC] ENGAGE→ATTACK (strike range, "
                     "XZ={:.0f}u, |dy|={:.0f}u)",
                     distXZ, dyToTarget);
@@ -2841,9 +2841,9 @@ void TickBLOCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     if (curFrame >= sBlockState.entryFrame + durationTicks) {
         // If target still alive and in melee + vertical reach, swap to ATTACK.
         if (sAttackState.target != nullptr &&
-            AnchorAI::IsArrived3D(a->world.pos,
-                                   sAttackState.target->world.pos,
-                                   kAttackEngageDist, kEngageStrikeY)) {
+            AnchorAI::IsInStrikeRange(a->world.pos,
+                                       sAttackState.target->world.pos,
+                                       kAttackEngageDist, kEngageStrikeY)) {
             const float distXZ = AnchorDist::DistXZ(a->world.pos,
                                                      sAttackState.target->world.pos);
             const float dy = std::fabs(sAttackState.target->world.pos.y -

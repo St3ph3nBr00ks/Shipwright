@@ -108,6 +108,20 @@ inline float RawDisplacement3D(const Vec3f& prevPos, const Vec3f& curPos) {
 }
 
 // -----------------------------------------------------------------------------
+// IsInStrikeRange — alias for IsArrived3D with combat-tier intent
+//
+// Used by BLOCK / ENGAGE timer rechecks where the consumer needs to
+// know "is the target STILL within my sword's effective melee reach?"
+// — same math as the FOLLOW→IDLE arrival predicate, but the name
+// documents the combat-state intent at the call site. Thin wrapper;
+// no behavior difference vs IsArrived3D.
+// -----------------------------------------------------------------------------
+inline bool IsInStrikeRange(const Vec3f& attackerPos, const Vec3f& targetPos,
+                             float strikeRadius, float strikeYReach) {
+    return IsArrived3D(attackerPos, targetPos, strikeRadius, strikeYReach);
+}
+
+// -----------------------------------------------------------------------------
 // IsVerticalDominantSeparation — "the gap to target is mostly vertical"
 //
 // Returns true when |dy| > kRatio × distXZ. Used by stuck-recovery
