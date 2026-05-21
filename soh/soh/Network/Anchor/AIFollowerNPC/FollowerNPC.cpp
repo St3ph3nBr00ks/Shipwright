@@ -27,6 +27,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/HeadLook.h"          // shared head-look math
 #include "soh/Network/Anchor/Common/AILocomotion/StepPhase.h"         // shared step-phase + footstep SFX
 #include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
+#include "soh/Network/Anchor/Common/AILocomotion/StuckRecovery.h"     // shared TickSTUCK dispatch
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
 #include "soh/Network/Anchor/Common/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
@@ -3661,86 +3662,35 @@ bool TryFireG14(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 // FOLLOW's stuck-detect calls NoteStuckEntered to increment + arm
 // the reset window. The dispatcher's TickStuckCycleWindow decays it
 // so unrelated stuck episodes don't accumulate into escalation.
+// Teleport callback for the shared StuckRecovery dispatch — invoked
+// for cycle 3+ (or vertical-dominant cycle 2+) escalation. Wraps
+// TeleportNpcTo which handles cross-scene work.
+static void StuckTeleportCallback(void* user, Actor* actor, PlayState* play,
+                                   const Vec3f& dest, const char* reason) {
+    (void)reason;
+    (void)actor;
+    EnFollower* this_ = static_cast<EnFollower*>(user);
+    TeleportNpcTo(this_, play, dest);
+}
+
 void TickSTUCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
-    // Phase 4: vertical-dominant escalation. When the leader is mostly
-    // above/below in Y rather than horizontally away (e.g. on a ledge
-    // directly overhead), the cycle-1 horizontal nudge can't close the
-    // gap. The overload promotes cycle 1 to CursorAdvance (so the
-    // substrate path walks to a climb/drop subgoal) and cycle 2 to
-    // Teleport, skipping the doomed nudge tier.
-    const bool verticalDominant =
-        AnchorAI::IsVerticalDominantSeparation(a->world.pos, leaderPos);
-    const AnchorAI::StuckCycleAction action =
-        AnchorAI::GetStuckAction(sLocalNav.stuckCycle,
-                                  kStuckCycleEscalation,
-                                  verticalDominant);
-    const uint32_t cycle = sLocalNav.stuckCycle.count;
-
-    // Cycle 3+: teleport. Try next subgoal first; fall back to leader
-    // if the path is empty.
-    if (action == AnchorAI::StuckCycleAction::Teleport) {
-        const bool havePath = !sLocalNav.navState.path.waypoints.empty() &&
-                              sLocalNav.navState.path.cursorIdx <
-                                  sLocalNav.navState.path.waypoints.size();
-        Vec3f dest;
-        const char* reason;
-        if (havePath) {
-            dest   = sLocalNav.navState.path.CurrentSubgoal();
-            reason = "next subgoal";
-        } else {
-            dest   = leaderPos;
-            reason = "leader (path empty)";
-        }
-        SPDLOG_INFO("[FollowerNPC] STUCK cycle {} escalation: teleport to {} "
-                    "({:.0f},{:.0f},{:.0f})",
-                    (int)cycle, reason, dest.x, dest.y, dest.z);
-        TeleportNpcTo(this_, play, dest);
-        AnchorAI::OnStuckTeleportFired(sLocalNav.stuckCycle);
-        return;
-    }
-
-    // Cycle 2: edge-triggered cursor advance. Skip whichever subgoal
-    // the path currently points at — the one we couldn't reach.
-    if (action == AnchorAI::StuckCycleAction::CursorAdvance &&
-        !sLocalNav.navState.path.waypoints.empty() &&
-        sLocalNav.navState.path.cursorIdx <
-            sLocalNav.navState.path.waypoints.size() - 1) {
-        const size_t before = sLocalNav.navState.path.cursorIdx;
-        sLocalNav.navState.path.Advance();
-        AnchorAI::MarkCursorAdvanced(sLocalNav.stuckCycle);
-        SPDLOG_INFO("[FollowerNPC] STUCK cycle 2: advance cursor (skip subgoal "
-                    "{} → {}/{})",
-                    (int)before, (int)sLocalNav.navState.path.cursorIdx,
-                    (int)sLocalNav.navState.path.waypoints.size() - 1);
-    }
-
-    // Cycles 1 + 2: legacy nudge toward leader. Direct world.pos write —
-    // matches AI Follower's STUCK-FWD action.
-    const s16 yaw = YawTowardTarget(a->world.pos, leaderPos);
-    a->shape.rot.y = yaw;
-    a->world.rot.y = yaw;
-    a->speedXZ     = 0.0f;
-    const float dx = Math_SinS(yaw) * kStuckNudgeDist;
-    const float dz = Math_CosS(yaw) * kStuckNudgeDist;
-    a->world.pos.x += dx;
-    a->world.pos.z += dz;
-
-    // Cycle 1 only: reset path so the next FOLLOW tick replans from
-    // the new position. Cycle 2 keeps the (cursor-advanced) path so
-    // the next FOLLOW tick steers toward the new subgoal.
-    if (cycle <= 1) {
-        sLocalNav.navState.path.Reset();
-        sLocalNav.navState.lastPathRefreshFrame = 0;
-    }
-
-    sLocalNav.stuckCheckPos       = a->world.pos;
-    sLocalNav.lastStuckCheckFrame = Anchor::Instance->gameFrameCounter.load(
-                                        std::memory_order_relaxed);
-
+    AnchorAI::StuckRecoveryConfig cfg = {
+        sLocalNav.stuckCycle,
+        sLocalNav.navState,
+        sLocalNav.stuckCheckPos,
+        sLocalNav.lastStuckCheckFrame,
+        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed),
+        kStuckCycleEscalation,
+        kStuckNudgeDist,
+        "FollowerNPC",
+        &StuckTeleportCallback,
+        static_cast<void*>(this_),
+    };
+    const bool teleported =
+        AnchorAI::RunStuckRecoveryStep(a, leaderPos, play, cfg);
+    if (teleported) return;
     this_->state = EN_FOLLOWER_STATE_FOLLOW;
-    SPDLOG_INFO("[FollowerNPC] STUCK→FOLLOW (cycle {} nudged {:.0f}u toward yaw={})",
-                (int)cycle, kStuckNudgeDist, (int)yaw);
 }
 
 }  // namespace

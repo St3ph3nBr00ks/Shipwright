@@ -49,6 +49,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/HeadLook.h"          // shared head-look math
 #include "soh/Network/Anchor/Common/AILocomotion/StepPhase.h"         // shared step-phase + footstep SFX
 #include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
+#include "soh/Network/Anchor/Common/AILocomotion/StuckRecovery.h"     // shared TickSTUCK dispatch
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Network/Anchor/Common/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
@@ -1201,6 +1202,21 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
 // always sees an empty path and nudges straight at the target. As
 // future state transitions land STUCK with a populated path, the
 // path-aware nudge takes over without code change.
+// Teleport callback for the shared StuckRecovery dispatch — invoked
+// for cycle 3+ (or vertical-dominant cycle 2+) escalation. Inline
+// pos write + BG check + path reset (Invader has no cross-scene
+// teleport wrapper analogous to FollowerNPC's TeleportNpcTo).
+static void StuckTeleportCallback(void* user, Actor* actor, PlayState* play,
+                                   const Vec3f& dest, const char* reason) {
+    (void)user;
+    (void)reason;
+    actor->world.pos = dest;
+    actor->speedXZ   = 0.0f;
+    Actor_UpdateBgCheckInfo(play, actor, 26.0f, 10.0f, 50.0f, 4);
+    sLocalInvNav.navState.path.Reset();
+    sLocalInvNav.navState.lastPathRefreshFrame = 0;
+}
+
 void TickSTUCK(EnInvader* this_, PlayState* play) {
     Actor* a = &this_->actor;
     Actor* target = sLocalInvNav.lastTarget;
@@ -1213,97 +1229,20 @@ void TickSTUCK(EnInvader* this_, PlayState* play) {
         return;
     }
 
-    // Phase 4: vertical-dominant escalation. When the hostile target is
-    // mostly above/below in Y (e.g. perched on a ledge), the horizontal
-    // nudge tier can't close the gap. The overload promotes cycle 1 to
-    // CursorAdvance (substrate path walks to a climb/drop subgoal) and
-    // cycle 2 to Teleport.
-    const bool verticalDominant =
-        AnchorAI::IsVerticalDominantSeparation(a->world.pos, target->world.pos);
-    const AnchorAI::StuckCycleAction action =
-        AnchorAI::GetStuckAction(sLocalInvNav.stuckCycle,
-                                  kInvStuckCycleEscalation,
-                                  verticalDominant);
-    const uint32_t cycle = sLocalInvNav.stuckCycle.count;
-
-    // Cycle 3+: teleport to next subgoal (or target as fallback).
-    // Invader's teleport target is its current hostile, not a leader.
-    if (action == AnchorAI::StuckCycleAction::Teleport) {
-        const bool havePath = !sLocalInvNav.navState.path.Empty();
-        Vec3f dest;
-        const char* reason;
-        if (havePath) {
-            dest   = sLocalInvNav.navState.path.CurrentSubgoal();
-            reason = "next subgoal";
-        } else {
-            dest   = target->world.pos;
-            reason = "target (path empty)";
-        }
-        SPDLOG_INFO("[Invader] STUCK cycle {} escalation: teleport to {} "
-                    "({:.0f},{:.0f},{:.0f})",
-                    (int)cycle, reason, dest.x, dest.y, dest.z);
-        a->world.pos = dest;
-        a->speedXZ   = 0.0f;
-        Actor_UpdateBgCheckInfo(play, a, 26.0f, 10.0f, 50.0f, 4);
-        sLocalInvNav.navState.path.Reset();
-        sLocalInvNav.navState.lastPathRefreshFrame = 0;
-        sLocalInvNav.stuckCheckPos      = a->world.pos;
-        sLocalInvNav.lastStuckCheckFrame =
-            Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
-        AnchorAI::OnStuckTeleportFired(sLocalInvNav.stuckCycle);
-        this_->state = EN_INVADER_STATE_FOLLOW;
-        return;
-    }
-
-    // Cycle 2: edge-triggered cursor advance — skip the stuck subgoal.
-    if (action == AnchorAI::StuckCycleAction::CursorAdvance &&
-        !sLocalInvNav.navState.path.Empty() &&
-        sLocalInvNav.navState.path.cursorIdx <
-            sLocalInvNav.navState.path.waypoints.size() - 1) {
-        const size_t before = sLocalInvNav.navState.path.cursorIdx;
-        sLocalInvNav.navState.path.Advance();
-        AnchorAI::MarkCursorAdvanced(sLocalInvNav.stuckCycle);
-        SPDLOG_INFO("[Invader] STUCK cycle 2: advance cursor (skip subgoal "
-                    "{} → {}/{})",
-                    (int)before, (int)sLocalInvNav.navState.path.cursorIdx,
-                    (int)sLocalInvNav.navState.path.waypoints.size() - 1);
-    }
-
-    // Cycles 1 + 2: legacy nudge. Path subgoal when available
-    // (path-aware recovery), otherwise straight at the target.
-    Vec3f nudgeTarget = target->world.pos;
-    bool  pathAware   = false;
-    if (!sLocalInvNav.navState.path.Empty()) {
-        nudgeTarget = sLocalInvNav.navState.path.CurrentSubgoal();
-        pathAware   = true;
-    }
-
-    const s16 yaw = YawTowardTarget(a->world.pos, nudgeTarget);
-    a->shape.rot.y = yaw;
-    a->world.rot.y = yaw;
-    a->speedXZ     = 0.0f;
-    const float dx = Math_SinS(yaw) * kInvStuckNudgeDist;
-    const float dz = Math_CosS(yaw) * kInvStuckNudgeDist;
-    a->world.pos.x += dx;
-    a->world.pos.z += dz;
-
-    sLocalInvNav.stuckCheckPos       = a->world.pos;
-    sLocalInvNav.lastStuckCheckFrame =
-        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
-
-    // Cycle 1 only: reset path so TickFOLLOW replans from new pos.
-    // Cycle 2 keeps the cursor-advanced path so the next FOLLOW tick
-    // steers toward the new subgoal.
-    if (cycle <= 1) {
-        sLocalInvNav.navState.path.Reset();
-        sLocalInvNav.navState.lastPathRefreshFrame = 0;
-    }
-
+    AnchorAI::StuckRecoveryConfig cfg = {
+        sLocalInvNav.stuckCycle,
+        sLocalInvNav.navState,
+        sLocalInvNav.stuckCheckPos,
+        sLocalInvNav.lastStuckCheckFrame,
+        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed),
+        kInvStuckCycleEscalation,
+        kInvStuckNudgeDist,
+        "Invader",
+        &StuckTeleportCallback,
+        nullptr,
+    };
+    AnchorAI::RunStuckRecoveryStep(a, target->world.pos, play, cfg);
     this_->state = EN_INVADER_STATE_FOLLOW;
-    SPDLOG_INFO("[Invader] STUCK→FOLLOW (cycle {} nudged {:.0f}u toward yaw=0x{:X}, "
-                "{} target)",
-                (int)cycle, kInvStuckNudgeDist, (uint16_t)yaw,
-                pathAware ? "path-aware" : "direct-to");
 }
 
 // ---------------------------------------------------------------------
