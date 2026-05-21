@@ -367,6 +367,13 @@ constexpr float kInvFollowEngageDist = 1000.0f;
 // snaps the chase. Field test will likely retune; this is a starting
 // point that mirrors FollowerNPC's 50u kEnterIdle scaled to pursuit.
 constexpr float kInvFollowIdleDist = 60.0f;
+// P0 audit / log 263 fix — Y-axis gate on the FOLLOW→IDLE "arrived"
+// check. Without this the Invader declares itself arrived when the
+// target is directly above on a ledge (small XZ, huge Y delta), then
+// oscillates FOLLOW↔IDLE without ever engaging the next climb segment.
+// Same shape as FollowerNPC's kEnterIdleY and Player AI Follower's
+// kFollowYThreshold (already in place since log 32).
+constexpr float kInvFollowIdleY    = 40.0f;
 // FOLLOW pursuit speeds. Same numerics as FollowerNPC's kRunSpeed /
 // kRunDistance.
 constexpr float kInvWalkSpeed   = 5.04f;  // +5% 2026-05-20 (was 4.8 — slightly behind Player AI Follower)
@@ -1088,8 +1095,13 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     const int stuckCheckTicks = Anchor::Instance->MsToGameTicks(kInvStuckCheckMs);
     if (stuckCheckTicks > 0 &&
         curFrame >= sLocalInvNav.lastStuckCheckFrame + (uint64_t)stuckCheckTicks) {
-        const float progress = std::sqrt(
-            Dist2DSq(a->world.pos, sLocalInvNav.stuckCheckPos));
+        // P0 audit: 3D progress, not XZ. Climbing actors make progress
+        // mostly in Y; XZ-only registers them as "stuck" mid-climb and
+        // fires false-positive stuck escalation.
+        const float dx = a->world.pos.x - sLocalInvNav.stuckCheckPos.x;
+        const float dy = a->world.pos.y - sLocalInvNav.stuckCheckPos.y;
+        const float dz = a->world.pos.z - sLocalInvNav.stuckCheckPos.z;
+        const float progress = std::sqrt(dx*dx + dy*dy + dz*dz);
         if (progress < kInvStuckMinProgress) {
             // Enter STUCK; TickSTUCK reads the cycle counter to
             // escalate (nudge → cursor advance → teleport). Path is
@@ -1120,13 +1132,17 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     // pick up before this fires when target is in melee/strike range.
     // Measure against the actual target (not the subgoal) so the
     // re-entry only fires when we're truly close to the hostile.
-    if (distSq <= kInvFollowIdleDist * kInvFollowIdleDist) {
-        // Log 242 diagnostic: this transition was previously silent.
-        // Distance is XZ-only — if the target is directly below/above
-        // the Invader (huge Y delta but small XZ), this fires even
-        // though the Invader can't actually engage. Surfaces "stuck"
-        // symptoms where Invader is in IDLE next to/above/below the
-        // player but no combat tier matches.
+    //
+    // P0 audit (log 263 root-cause fix): require BOTH XZ AND |dy|
+    // within threshold. The prior diagnostic log called out the bug
+    // — XZ-only would fire when the target was directly above/below
+    // (huge Y delta, small XZ), declaring "arrived" while the
+    // Invader was on a different floor than the target. Now the
+    // Invader stays in FOLLOW until vertically aligned too — letting
+    // the substrate path consume climb / hoist / drop subgoals.
+    const float dyToTarget = std::fabs(targetPos.y - a->world.pos.y);
+    if (distSq <= kInvFollowIdleDist * kInvFollowIdleDist &&
+        dyToTarget <= kInvFollowIdleY) {
         SPDLOG_INFO("[Invader] FOLLOW→IDLE (arrived: XZ dist={:.0f}u, "
                     "Δy={:+.0f}u target.y={:.0f} NPC.y={:.0f})",
                     std::sqrt(distSq),
