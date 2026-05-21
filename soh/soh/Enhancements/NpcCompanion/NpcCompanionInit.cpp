@@ -20,7 +20,7 @@
  *     both edges + the auto-respawn after scene transitions.
  *
  * The actual spawn/despawn helpers live in
- * soh/soh/Network/Anchor/AIFollowerNPC/FollowerNPC.cpp; this file is
+ * soh/soh/Network/Anchor/NPCFollower/FollowerNPC.cpp; this file is
  * just the registration shim.
  */
 

@@ -17,7 +17,7 @@
  *
  * Step 15d — Phase 3 combat. ATTACK / BLOCK / ENGAGE / RANGED_ATTACK /
  * STANDBY cloned from NPC Follower Stage 4
- * (AIFollowerNPC/FollowerNPC.cpp) with these intentional deltas:
+ * (NPCFollower/FollowerNPC.cpp) with these intentional deltas:
  *   - Target is the nearest PLAYER actor (not nearest enemy). Uses
  *     PickHostileTargetForInvader (Agent 4) — multi-player picker
  *     respecting director-side state.
@@ -32,7 +32,7 @@
  * TODO post-#208: revisit state shape against canonical follower
  * design pass (currently a verbatim clone of NPC Follower Stage 4).
  *
- * Canonical patterns referenced from AIFollowerNPC/FollowerNPC.cpp
+ * Canonical patterns referenced from NPCFollower/FollowerNPC.cpp
  * lines 422-526 (equipment swap), 916-1109 (IDLE/FOLLOW), 3359-3386
  * (STUCK), 3263-3286 (G10 leash), 3393-3482 (dispatcher G18).
  */

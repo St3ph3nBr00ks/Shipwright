@@ -37,7 +37,7 @@
  * override) is intentionally omitted here — v1 Invader has no
  * ranged state needing the slingshot variant.
  *
- * Parallels soh/soh/Network/Anchor/AIFollowerNPC/FollowerNPC.h.
+ * Parallels soh/soh/Network/Anchor/NPCFollower/FollowerNPC.h.
  */
 
 #pragma once

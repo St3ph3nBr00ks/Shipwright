@@ -7,7 +7,7 @@
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
 #include "Common/ItemEligibility.h"   // CanPlayerCollectItem00 (#193 Phase 0)
 #include "Common/PauseLinkBuffer.h"   // Anchor_IsDrawingPauseLink (#182 follow-up)
-#include "AIFollowerNPC/FollowerNPC.h" // Anchor_GetCurrentlyDrawingFollowerNpc (NPC color fix)
+#include "NPCFollower/FollowerNPC.h" // Anchor_GetCurrentlyDrawingFollowerNpc (NPC color fix)
 #include "Common/AINavTest.h"          // Navigation Test Harness — Tick() driver
 #include "NPCInvader/Invader.h"          // Anchor_GetCurrentlyDrawingInvader (black-tint color fix)
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)

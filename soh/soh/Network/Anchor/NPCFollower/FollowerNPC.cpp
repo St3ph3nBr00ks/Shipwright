@@ -18,7 +18,7 @@
  */
 
 #include "soh/Network/Anchor/Anchor.h"
-#include "soh/Network/Anchor/AIFollowerNPC/FollowerNPC.h"
+#include "soh/Network/Anchor/NPCFollower/FollowerNPC.h"
 #include "soh/Network/Anchor/Common/ActorTrail.h"     // Phase 5: substrate path consumption
 #include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 3 (2026-05-18): shared substrate-path helper
 #include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5 (2026-05-19): shared scripted-FOLLOW step

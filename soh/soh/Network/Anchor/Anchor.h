@@ -1206,7 +1206,7 @@ class Anchor : public Network {
     // to include the NPC as a target candidate for enemy AI. When
     // false (no NPC, dead, or invulnerable) the NPC is invisible to
     // targeting and enemies behave as before. Implementation in
-    // AIFollowerNPC/FollowerNPC.cpp (needs the CVar read helper).
+    // NPCFollower/FollowerNPC.cpp (needs the CVar read helper).
     bool IsFollowerNpcTargetable() const;
     // Color-fix lookup: given an NPC Actor*, return the ownerClientId
     // (== ownClientId for our local NPC; otherwise the peer
