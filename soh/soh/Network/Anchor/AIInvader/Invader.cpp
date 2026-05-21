@@ -51,6 +51,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
+#include "soh/Network/Anchor/Common/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
 #include "soh/Network/Anchor/Common/SceneAuthority.h"  // IsEffectiveHost — peer-replica gate
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
 #include "soh/cvar_prefixes.h"
@@ -1097,11 +1098,10 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
         curFrame >= sLocalInvNav.lastStuckCheckFrame + (uint64_t)stuckCheckTicks) {
         // P0 audit: 3D progress, not XZ. Climbing actors make progress
         // mostly in Y; XZ-only registers them as "stuck" mid-climb and
-        // fires false-positive stuck escalation.
-        const float dx = a->world.pos.x - sLocalInvNav.stuckCheckPos.x;
-        const float dy = a->world.pos.y - sLocalInvNav.stuckCheckPos.y;
-        const float dz = a->world.pos.z - sLocalInvNav.stuckCheckPos.z;
-        const float progress = std::sqrt(dx*dx + dy*dy + dz*dz);
+        // fires false-positive stuck escalation. Phase 2 extracted to
+        // RawDisplacement3D.
+        const float progress = AnchorAI::RawDisplacement3D(
+            sLocalInvNav.stuckCheckPos, a->world.pos);
         if (progress < kInvStuckMinProgress) {
             // Enter STUCK; TickSTUCK reads the cycle counter to
             // escalate (nudge → cursor advance → teleport). Path is
@@ -1140,9 +1140,9 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     // Invader was on a different floor than the target. Now the
     // Invader stays in FOLLOW until vertically aligned too — letting
     // the substrate path consume climb / hoist / drop subgoals.
-    const float dyToTarget = std::fabs(targetPos.y - a->world.pos.y);
-    if (distSq <= kInvFollowIdleDist * kInvFollowIdleDist &&
-        dyToTarget <= kInvFollowIdleY) {
+    // Phase 2 extracted to IsArrived3D.
+    if (AnchorAI::IsArrived3D(a->world.pos, targetPos,
+                              kInvFollowIdleDist, kInvFollowIdleY)) {
         SPDLOG_INFO("[Invader] FOLLOW→IDLE (arrived: XZ dist={:.0f}u, "
                     "Δy={:+.0f}u target.y={:.0f} NPC.y={:.0f})",
                     std::sqrt(distSq),

@@ -29,6 +29,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
+#include "soh/Network/Anchor/Common/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
 #include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
 #include "soh/cvar_prefixes.h"
 
@@ -1006,13 +1007,10 @@ void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // when the leader was directly above on a ledge (small XZ but
     // 440u Y delta). Mirrors Player AI Follower's xzExceeds ||
     // yExceeds pattern (Follower.cpp:4931 — fixed for the same
-    // bug class on log 32).
+    // bug class on log 32). Phase 2 extracted to ShouldPursue3D.
     const Vec3f effectiveTarget = ComputeEffectiveTarget(leaderPos);
-    const float distSq = Dist2DSq(a->world.pos, effectiveTarget);
-    const float dy     = std::fabs(effectiveTarget.y - a->world.pos.y);
-    const bool xzExceeds = distSq > kEnterFollow * kEnterFollow;
-    const bool yExceeds  = dy > kEnterFollowY;
-    if (xzExceeds || yExceeds) {
+    if (AnchorAI::ShouldPursue3D(a->world.pos, effectiveTarget,
+                                 kEnterFollow, kEnterFollowY)) {
         this_->state = EN_FOLLOWER_STATE_FOLLOW;
     }
 }
@@ -1151,11 +1149,10 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         curFrame >= sLocalNav.lastStuckCheckFrame + (uint64_t)stuckCheckTicks) {
         // P0 audit: 3D progress, not XZ. Climbing actors make progress
         // mostly in Y; XZ-only measurement registered them as "stuck"
-        // mid-climb (false-positive stuck escalation).
-        const float dx = a->world.pos.x - sLocalNav.stuckCheckPos.x;
-        const float dy = a->world.pos.y - sLocalNav.stuckCheckPos.y;
-        const float dz = a->world.pos.z - sLocalNav.stuckCheckPos.z;
-        const float progress = std::sqrt(dx*dx + dy*dy + dz*dz);
+        // mid-climb (false-positive stuck escalation). Phase 2
+        // extracted to RawDisplacement3D.
+        const float progress =
+            AnchorAI::RawDisplacement3D(sLocalNav.stuckCheckPos, a->world.pos);
         if (progress < kStuckMinProgress) {
             // No real progress in 3s. Enter STUCK; TickSTUCK reads the
             // cycle counter to escalate. Path is NOT reset here (so the
@@ -1191,11 +1188,9 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // directly above on a ledge (XZ=57u, Y=440u). NPC declared
     // itself "arrived" while standing on a lower floor below the
     // leader, then oscillated FOLLOW↔IDLE without ever engaging
-    // the next climb segment.
-    const float distToTargetSq = Dist2DSq(a->world.pos, effectiveTarget);
-    const float dyToTarget     = std::fabs(effectiveTarget.y - a->world.pos.y);
-    if (distToTargetSq <= kEnterIdle * kEnterIdle &&
-        dyToTarget    <= kEnterIdleY) {
+    // the next climb segment. Phase 2 extracted to IsArrived3D.
+    if (AnchorAI::IsArrived3D(a->world.pos, effectiveTarget,
+                              kEnterIdle, kEnterIdleY)) {
         this_->state = EN_FOLLOWER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalNav.navState.path.Reset();  // discard path; IDLE is local-frame

@@ -20,6 +20,7 @@
 #include "soh/cvar_prefixes.h"
 #include "../Common/ActorSyncHelpers.h"
 #include "../Common/DistanceMath.h"
+#include "../Common/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
 #include "../Common/AINavTest.h"  // Navigation Test Harness — combat-disable + reach
 #include "../Common/PlayerLookup.h"
 #include "../Common/SceneAuthority.h"
@@ -4374,13 +4375,11 @@ bool Anchor::CheckStuckAndEscalate(const Vec3f& p2Pos,
     // mostly in Y; XZ-only registers them as "stuck" mid-climb and
     // fires false-positive escalation. (NPC Follower / Invader have
     // the same fix on this branch — keeps the three actors in sync.)
+    // Phase 2 extracted to ProgressTowardTarget3D + RawDisplacement3D.
     f32 toTarget = AnchorDist::Dist3D(followerMoveTarget, p2Pos);
-    f32 prevToTarget = AnchorDist::Dist3D(followerMoveTarget, followerLastPos);
-    f32 progress = prevToTarget - toTarget;  // positive = approached
-    f32 progDx   = p2Pos.x - followerLastPos.x;
-    f32 progDy   = p2Pos.y - followerLastPos.y;
-    f32 progDz   = p2Pos.z - followerLastPos.z;
-    f32 rawDisp  = sqrtf(progDx * progDx + progDy * progDy + progDz * progDz);
+    f32 progress = AnchorAI::ProgressTowardTarget3D(
+        followerLastPos, p2Pos, followerMoveTarget);  // positive = approached
+    f32 rawDisp  = AnchorAI::RawDisplacement3D(followerLastPos, p2Pos);
     (void)rawDisp;  // retained for the log line below
     // Per-state log prefix so traces stay diagnosable across the three
     // pursuing states. Compact switch keeps the log site cheap.
