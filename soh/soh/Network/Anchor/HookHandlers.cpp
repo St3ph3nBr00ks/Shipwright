@@ -1,6 +1,6 @@
 #include "Anchor.h"
 #include "AIDirector/Director.h"      // AnchorDirector::Director::Instance() (Director scaffold step 1)
-#include "AIFollower/Follower.h"      // FollowerFrameContext for the OnGameFrameUpdate wrapper (Phase 1 commit 4)
+#include "AIPlayerFollower/Follower.h"      // FollowerFrameContext for the OnGameFrameUpdate wrapper (Phase 1 commit 4)
 #include "soh/cvar_prefixes.h"        // CVAR_REMOTE_ANCHOR / CVAR_ENHANCEMENT (Nav system commit 6c)
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
@@ -835,7 +835,7 @@ bool Anchor::IsLocalPlayerCrawling() const {
 }
 
 // FollowerTryEquipRangedWeapon, FollowerRestoreItems, SetFollowerActive
-// — moved to AIFollower/Follower.cpp per Phase 1 commit 2 of the SRP
+// — moved to AIPlayerFollower/Follower.cpp per Phase 1 commit 2 of the SRP
 // refactor. Declarations remain in Anchor.h.
 
 // Forward decls for the per-module draw-state reset functions invoked
@@ -1223,7 +1223,7 @@ void Anchor::RegisterHooks() {
 
     });
 
-    // Follower hook registration. Body moved to AIFollower/Follower.cpp's
+    // Follower hook registration. Body moved to AIPlayerFollower/Follower.cpp's
     // Anchor::RegisterFollowerHooks per Phase 1 commit 13 of the SRP refactor
     // (#173 / #169). Both hooks (OnGameFrameUpdate state-machine driver +
     // ShouldActorUpdate input injection) are re-registered there on every

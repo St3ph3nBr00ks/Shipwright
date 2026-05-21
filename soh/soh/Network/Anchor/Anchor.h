@@ -446,7 +446,7 @@ typedef struct {
 } RoomState;
 
 // Forward-decl for the Anchor::TickFollower parameter — defined in
-// AIFollower/Follower.h (Phase 1 commit 3 of the SRP refactor).
+// AIPlayerFollower/Follower.h (Phase 1 commit 3 of the SRP refactor).
 namespace AnchorFollower {
     struct FollowerFrameContext;
     // Diagnostic recorder needs read access to private follower state.
@@ -858,7 +858,7 @@ class Anchor : public Network {
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();
     void RegisterHooks();
-    // Follower hook (re-)registration. Body lives in AIFollower/Follower.cpp
+    // Follower hook (re-)registration. Body lives in AIPlayerFollower/Follower.cpp
     // (Phase 1 commit 13 of the SRP refactor — moved from RegisterHooks
     // body in HookHandlers.cpp). Called from RegisterHooks at the same
     // point in the enable/disable cycle. The two registrations (OnGameFrameUpdate
@@ -1255,7 +1255,7 @@ class Anchor : public Network {
     void FollowerRestoreItems();
 
     // Per-frame follower state-machine entry point. Body lives in
-    // AIFollower/Follower.cpp (Phase 1 commit 4 of the SRP refactor —
+    // AIPlayerFollower/Follower.cpp (Phase 1 commit 4 of the SRP refactor —
     // moved verbatim from the OnGameFrameUpdate lambda body in
     // HookHandlers.cpp). Method on Anchor:: rather than a free function
     // so the body's accesses to private members (followerActive, clients,
@@ -1269,7 +1269,7 @@ class Anchor : public Network {
     void TickFollower(AnchorFollower::FollowerFrameContext& ctx);
 
     // Per-frame follower input-injection entry point. Body lives in
-    // AIFollower/Follower.cpp (Phase 1 commit 5 of the SRP refactor —
+    // AIPlayerFollower/Follower.cpp (Phase 1 commit 5 of the SRP refactor —
     // moved verbatim from the ShouldActorUpdate lambda body in
     // HookHandlers.cpp). Caller (HookHandlers.cpp's ShouldActorUpdate
     // hook) does the early-outs (followerActive, gPlayState non-null,
