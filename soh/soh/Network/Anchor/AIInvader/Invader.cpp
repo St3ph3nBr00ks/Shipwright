@@ -139,6 +139,10 @@ constexpr float kEngageBreakDist    = 1500.0f;
 constexpr float kEngageBreakDistY   = 400.0f;  // Y "fled" gate — wider than Follower's 250u; Invader pursues across larger maps
 constexpr float kEngageStrikeDist   = 70.0f;
 constexpr float kEngageStrikeY      = 60.0f;   // Link body height — ATTACK only when target body in vertical reach
+// Fix C: grouped form. Float constants stay accessible for log strings.
+constexpr AnchorAI::ThresholdPair kEngageBreakBand        = { kEngageBreakDist,  kEngageBreakDistY };
+constexpr AnchorAI::ThresholdPair kEngageStrikeBand       = { kEngageStrikeDist, kEngageStrikeY };
+constexpr AnchorAI::ThresholdPair kAttackEngageStrikeBand = { kAttackEngageDist, kEngageStrikeY };  // BLOCK timer recheck
 // Speed history:
 //   v1: 12.0     (50% faster than Link — visibly outran in tests)
 //   v2: 9.0      (still too fast)
@@ -178,6 +182,7 @@ constexpr float kStandbyDetectDist = 600.0f;
 // the player meaningfully retreats.
 constexpr float kStandbyIdleRadius = 150.0f;
 constexpr float kStandbyIdleY      = 100.0f;  // Y handoff to FOLLOW (Phase 3 P1-E) — narrower than break-Y to keep close-range vertical hostiles in STANDBY
+constexpr AnchorAI::ThresholdPair kStandbyIdleBand = { kStandbyIdleRadius, kStandbyIdleY };  // Fix C
 
 // Post-combat re-engagement cooldown. Was 1500ms; bumped to 2500ms
 // 2026-05-17 alongside kStandbyIdleRadius widening — together they
@@ -379,6 +384,7 @@ constexpr float kInvFollowIdleDist = 60.0f;
 // Same shape as FollowerNPC's kEnterIdleY and Player AI Follower's
 // kFollowYThreshold (already in place since log 32).
 constexpr float kInvFollowIdleY    = 40.0f;
+constexpr AnchorAI::ThresholdPair kInvFollowIdleBand = { kInvFollowIdleDist, kInvFollowIdleY };  // Fix C
 // FOLLOW pursuit speeds. Same numerics as FollowerNPC's kRunSpeed /
 // kRunDistance.
 constexpr float kInvWalkSpeed   = 5.04f;  // +5% 2026-05-20 (was 4.8 — slightly behind Player AI Follower)
@@ -1146,7 +1152,7 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     // the substrate path consume climb / hoist / drop subgoals.
     // Phase 2 extracted to IsArrived3D.
     if (AnchorAI::IsArrived3D(a->world.pos, targetPos,
-                              kInvFollowIdleDist, kInvFollowIdleY)) {
+                              kInvFollowIdleBand)) {
         SPDLOG_INFO("[Invader] FOLLOW→IDLE (arrived: XZ dist={:.0f}u, "
                     "Δy={:+.0f}u target.y={:.0f} NPC.y={:.0f})",
                     std::sqrt(distSq),
@@ -2217,7 +2223,7 @@ void TickENGAGE(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     // or dropping to a pit below also yields combat (the XZ-only check
     // would keep ENGAGE going against a target Invader can't reach).
     if (AnchorAI::ShouldPursue3D(a->world.pos, targetPos,
-                                 kEngageBreakDist, kEngageBreakDistY)) {
+                                 kEngageBreakBand)) {
         const s32 next = ChooseCombatExitState(this_, play);
         SPDLOG_INFO("[Invader] ENGAGE→{} (target fled: XZ={:.0f}u/{:.0f}u, "
                     "|dy|={:.0f}u/{:.0f}u)",
@@ -2234,7 +2240,7 @@ void TickENGAGE(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     // XZ. Prior XZ-only check fired ATTACK when target stood on a
     // ledge directly above, whiffing the swing every cycle.
     if (AnchorAI::IsInStrikeRange(a->world.pos, targetPos,
-                                   kEngageStrikeDist, kEngageStrikeY)) {
+                                   kEngageStrikeBand)) {
         SPDLOG_INFO("[Invader] ENGAGE→ATTACK (strike range, "
                     "XZ={:.0f}u, |dy|={:.0f}u)", distXZ, dyToTarget);
         this_->state = EN_INVADER_STATE_ATTACK;
@@ -2404,7 +2410,7 @@ void TickBLOCK(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
         if (sAttackState.target != nullptr &&
             AnchorAI::IsInStrikeRange(a->world.pos,
                                        sAttackState.target->world.pos,
-                                       kAttackEngageDist, kEngageStrikeY)) {
+                                       kAttackEngageStrikeBand)) {
             const float distXZ = AnchorDist::DistXZ(a->world.pos,
                                                      sAttackState.target->world.pos);
             const float dy = std::fabs(sAttackState.target->world.pos.y -
@@ -2548,7 +2554,7 @@ void TickSTANDBY(EnInvader* this_, PlayState* play, const Vec3f& targetHintPos) 
     // — letting the substrate path engage CLIMBING/hoist subgoals
     // instead of staring at the wall in STANDBY forever.
     if (AnchorAI::ShouldPursue3D(a->world.pos, faceTarget->world.pos,
-                                 kStandbyIdleRadius, kStandbyIdleY)) {
+                                 kStandbyIdleBand)) {
         const float distXZ =
             AnchorDist::DistXZ(a->world.pos, faceTarget->world.pos);
         const float dy =

@@ -41,6 +41,32 @@ extern "C" {
 namespace AnchorAI {
 
 // -----------------------------------------------------------------------------
+// ThresholdPair — XZ + Y threshold pair for state-transition predicates.
+//
+// The Y-companion constant pattern (kFooXZ + kFooY) was scattered
+// across the three actor files post-Phase-3:
+//   FollowerNPC:   kEnterIdle/Y, kEnterFollow/Y, kEngageBreakDist/Y,
+//                   kEngageLeaderLeash/Y, kEngageStrikeDist/Y...
+//   AI Invader:    kInvFollowIdleDist/Y, kInvEngageBreakDist/Y,
+//                   kInvEngageStrikeDist/Y, kStandbyIdleRadius/Y...
+//   Player AI Follower: kMaxLeash/Y, ...
+//
+// Each pair is logically a single concept ("arrival band", "leash
+// radius") but spelled as two unrelated float constants. ThresholdPair
+// groups them so a single named constant names the concept, and the
+// predicate overloads taking a ThresholdPair read more naturally at
+// call sites.
+//
+// Legacy two-float overloads of IsArrived3D / ShouldPursue3D /
+// IsInStrikeRange remain — both pass-by-pair and pass-by-floats are
+// supported, so consumers can adopt incrementally.
+// -----------------------------------------------------------------------------
+struct ThresholdPair {
+    float xz;
+    float y;
+};
+
+// -----------------------------------------------------------------------------
 // IsArrived3D — "close in BOTH XZ and Y"
 //
 // Used by FOLLOW→IDLE arrival checks. Caller passes XZ radius (typical
@@ -56,6 +82,10 @@ inline bool IsArrived3D(const Vec3f& pos, const Vec3f& target,
     const float distXZSq = AnchorDist::DistXZSq(pos, target);
     const float dy       = std::fabs(target.y - pos.y);
     return distXZSq <= (xzRadius * xzRadius) && dy <= yTolerance;
+}
+inline bool IsArrived3D(const Vec3f& pos, const Vec3f& target,
+                         const ThresholdPair& band) {
+    return IsArrived3D(pos, target, band.xz, band.y);
 }
 
 // -----------------------------------------------------------------------------
@@ -75,6 +105,10 @@ inline bool ShouldPursue3D(const Vec3f& pos, const Vec3f& target,
     const float distXZSq = AnchorDist::DistXZSq(pos, target);
     const float dy       = std::fabs(target.y - pos.y);
     return distXZSq > (xzThreshold * xzThreshold) || dy > yThreshold;
+}
+inline bool ShouldPursue3D(const Vec3f& pos, const Vec3f& target,
+                            const ThresholdPair& band) {
+    return ShouldPursue3D(pos, target, band.xz, band.y);
 }
 
 // -----------------------------------------------------------------------------
@@ -119,6 +153,10 @@ inline float RawDisplacement3D(const Vec3f& prevPos, const Vec3f& curPos) {
 inline bool IsInStrikeRange(const Vec3f& attackerPos, const Vec3f& targetPos,
                              float strikeRadius, float strikeYReach) {
     return IsArrived3D(attackerPos, targetPos, strikeRadius, strikeYReach);
+}
+inline bool IsInStrikeRange(const Vec3f& attackerPos, const Vec3f& targetPos,
+                             const ThresholdPair& reach) {
+    return IsArrived3D(attackerPos, targetPos, reach.xz, reach.y);
 }
 
 // -----------------------------------------------------------------------------

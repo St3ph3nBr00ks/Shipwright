@@ -259,6 +259,8 @@ static constexpr f32 kMaxLeash = 800.0f;
 // 300u is well above kMaxYDelta (120) so single-step Y delta during
 // normal combat doesn't trip; only multi-storey separation triggers.
 static constexpr f32 kMaxLeashY = 300.0f;
+// Fix C: grouped form. Float constants stay accessible for log strings.
+static constexpr AnchorAI::ThresholdPair kMaxLeashBand = { kMaxLeash, kMaxLeashY };
 
 // Enemy detection radius (XZ) for IDLE→ENGAGE transitions. Promoted for
 // HandleStateIdle.
@@ -4798,7 +4800,7 @@ void Anchor::HandleStateCollectItem(Player* player, const Vec3f& leaderPos, cons
     // Leader leash — don't stray too far from the leader just for a rupee.
     // Phase 3 P1-F: 3D-aware so leader climbing/dropping to a different
     // floor also abandons the pickup attempt.
-    if (AnchorAI::ShouldPursue3D(p2Pos, leaderPos, kMaxLeash, kMaxLeashY)) {
+    if (AnchorAI::ShouldPursue3D(p2Pos, leaderPos, kMaxLeashBand)) {
         SPDLOG_INFO("[Follower] COLLECT_ITEM→FOLLOW (leader beyond leash)");
         followerTargetItem  = nullptr;
         followerAIState     = FollowerAIState::FOLLOW;
@@ -5212,7 +5214,7 @@ void Anchor::HandleStateEngage(Player* player, const Vec3f& leaderPos, const Vec
     // who climbed several storeys above (small XZ, huge Y) also yields
     // combat — prior XZ-only check kept follower fighting indefinitely
     // when leader went up a ladder mid-pursuit.
-    if (AnchorAI::ShouldPursue3D(p2Pos, leaderPos, kMaxLeash, kMaxLeashY)) {
+    if (AnchorAI::ShouldPursue3D(p2Pos, leaderPos, kMaxLeashBand)) {
         followerAIState     = FollowerAIState::FOLLOW;
         followerStateFrames = 0;
         SPDLOG_INFO("[Follower] ENGAGE\u2192FOLLOW (leader too far)");

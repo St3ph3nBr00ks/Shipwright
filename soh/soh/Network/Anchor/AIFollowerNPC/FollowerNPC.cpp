@@ -852,6 +852,12 @@ static constexpr float kEnterIdle   = 50.0f;
 //     kEnterFollowY (hysteresis upper bound).
 static constexpr float kEnterIdleY   = 40.0f;
 static constexpr float kEnterFollowY = 60.0f;
+// Fix C: grouped form — preferred at predicate call sites; the
+// individual float constants stay accessible for log strings + speed
+// scaling. Float and band forms are interchangeable via predicate
+// overloads (NavStateTransitions.h).
+static constexpr AnchorAI::ThresholdPair kEnterIdleBand   = { kEnterIdle,   kEnterIdleY };
+static constexpr AnchorAI::ThresholdPair kEnterFollowBand = { kEnterFollow, kEnterFollowY };
 
 // Walk and run speeds in OoT units/frame. Matches Link's vanilla walk
 // (~6.0) and run (~12.0). The NPC walks when close to leader and runs
@@ -1011,7 +1017,7 @@ void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // bug class on log 32). Phase 2 extracted to ShouldPursue3D.
     const Vec3f effectiveTarget = ComputeEffectiveTarget(leaderPos);
     if (AnchorAI::ShouldPursue3D(a->world.pos, effectiveTarget,
-                                 kEnterFollow, kEnterFollowY)) {
+                                 kEnterFollowBand)) {
         this_->state = EN_FOLLOWER_STATE_FOLLOW;
     }
 }
@@ -1191,7 +1197,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // leader, then oscillated FOLLOW↔IDLE without ever engaging
     // the next climb segment. Phase 2 extracted to IsArrived3D.
     if (AnchorAI::IsArrived3D(a->world.pos, effectiveTarget,
-                              kEnterIdle, kEnterIdleY)) {
+                              kEnterIdleBand)) {
         this_->state = EN_FOLLOWER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalNav.navState.path.Reset();  // discard path; IDLE is local-frame
@@ -2477,6 +2483,12 @@ static constexpr float kEngageLeaderLeash  = 600.0f;  // bail if leader >this fa
 static constexpr float kEngageLeaderLeashY = 300.0f;  // bail if leader >this far away vertically (climbed ledge)
 static constexpr float kEngageStrikeDist   = 70.0f;   // close enough to ATTACK (slight hysteresis vs kAttackEngageDist=80)
 static constexpr float kEngageStrikeY      = 60.0f;   // Link body height — ATTACK only when target body in vertical reach
+// Fix C: grouped form. Float constants above stay accessible for log
+// strings; predicate call sites use the band form.
+static constexpr AnchorAI::ThresholdPair kEngageBreakBand        = { kEngageBreakDist,    kEngageBreakDistY };
+static constexpr AnchorAI::ThresholdPair kEngageLeaderLeashBand  = { kEngageLeaderLeash,  kEngageLeaderLeashY };
+static constexpr AnchorAI::ThresholdPair kEngageStrikeBand       = { kEngageStrikeDist,   kEngageStrikeY };
+static constexpr AnchorAI::ThresholdPair kAttackEngageStrikeBand = { kAttackEngageDist,   kEngageStrikeY };  // BLOCK timer recheck
 // BLOCK entry threshold — defined here (above TryEngageCombat) so the
 // engagement helper can reference it. The remaining BLOCK constants
 // stay grouped with the BLOCK section below.
@@ -2517,7 +2529,7 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // combat — the prior XZ-only check kept NPC fighting indefinitely
     // when leader topped a wall during a pursuit.
     if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
-                                 kEngageLeaderLeash, kEngageLeaderLeashY)) {
+                                 kEngageLeaderLeashBand)) {
         const float leaderDistXZ =
             AnchorDist::DistXZ(a->world.pos, leaderPos);
         const float leaderDy = std::fabs(leaderPos.y - a->world.pos.y);
@@ -2537,7 +2549,7 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // Y) also counts as "fled" — the XZ-only check kept NPC stuck
     // in ENGAGE chasing a target it could no longer reach.
     if (AnchorAI::ShouldPursue3D(a->world.pos, targetPos,
-                                 kEngageBreakDist, kEngageBreakDistY)) {
+                                 kEngageBreakBand)) {
         const s32 nextState = ChooseCombatExitState(this_, play);
         SPDLOG_INFO("[FollowerNPC] ENGAGE→{} (target fled: XZ={:.0f}u/{:.0f}u, "
                     "|dy|={:.0f}u/{:.0f}u)",
@@ -2557,7 +2569,7 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // XZ-only check fired ATTACK when target was directly above on
     // a ledge — the swing whiffed into empty air every cycle.
     if (AnchorAI::IsInStrikeRange(a->world.pos, targetPos,
-                                   kEngageStrikeDist, kEngageStrikeY)) {
+                                   kEngageStrikeBand)) {
         SPDLOG_INFO("[FollowerNPC] ENGAGE→ATTACK (strike range, "
                     "XZ={:.0f}u, |dy|={:.0f}u)",
                     distXZ, dyToTarget);
@@ -2843,7 +2855,7 @@ void TickBLOCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         if (sAttackState.target != nullptr &&
             AnchorAI::IsInStrikeRange(a->world.pos,
                                        sAttackState.target->world.pos,
-                                       kAttackEngageDist, kEngageStrikeY)) {
+                                       kAttackEngageStrikeBand)) {
             const float distXZ = AnchorDist::DistXZ(a->world.pos,
                                                      sAttackState.target->world.pos);
             const float dy = std::fabs(sAttackState.target->world.pos.y -
@@ -3023,7 +3035,7 @@ void TickSTANDBY(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     if (faceTarget == nullptr) {
         sAttackState.target = nullptr;
         if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
-                                     kEnterFollow, kEnterFollowY)) {
+                                     kEnterFollowBand)) {
             SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (no enemies, leader far)");
             this_->state = EN_FOLLOWER_STATE_FOLLOW;
         } else {
@@ -3045,7 +3057,7 @@ void TickSTANDBY(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // climbing to a ledge above (small XZ, huge Y) also triggers
     // STANDBY→FOLLOW handoff.
     if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
-                                 kEnterFollow, kEnterFollowY)) {
+                                 kEnterFollowBand)) {
         const float leaderDistXZ = AnchorDist::DistXZ(a->world.pos, leaderPos);
         const float leaderDy     = std::fabs(leaderPos.y - a->world.pos.y);
         SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (leader beyond hysteresis "
