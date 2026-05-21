@@ -20,7 +20,7 @@
 #include "soh/cvar_prefixes.h"
 #include "../Common/ActorSyncHelpers.h"
 #include "../Common/DistanceMath.h"
-#include "../Common/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
+#include "../Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
 #include "../Common/AINavTest.h"  // Navigation Test Harness — combat-disable + reach
 #include "../Common/PlayerLookup.h"
 #include "../Common/SceneAuthority.h"

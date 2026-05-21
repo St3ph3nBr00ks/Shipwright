@@ -18,11 +18,16 @@
  * caller-supplied so each actor can tune its own pursuit/arrival
  * radii.
  *
- * Sibling helpers in Common/:
- *   - DistanceMath.h — raw distance math (`Dist3D`, `DistXZ`, etc.)
- *   - JumpResolver.h — jump-feasibility checks
- *   - LeashRespawn.h — enemy rehydration on scene re-entry
- *   - TargetSelection.h — actor-agnostic target candidate scoring
+ * Sibling helpers in Common/AILocomotion/:
+ *   - StuckEscalation.{h,cpp} — cycle-based STUCK escalation tiers.
+ *   - StuckRecovery.{h,cpp}   — TickSTUCK dispatch (consumes this header).
+ *   - NavOrDirect, ScriptedFollow, LocomotionAnim, AirborneRecovery,
+ *     HeadLook, StepPhase — shared locomotion mechanics.
+ * Parent Common/:
+ *   - DistanceMath.h — raw distance math (`Dist3D`, `DistXZ`, etc.).
+ *   - JumpResolver.h — jump-feasibility checks.
+ *   - LeashRespawn.h — enemy rehydration on scene re-entry.
+ *   - TargetSelection.h — actor-agnostic target candidate scoring.
  *
  * See:
  *   - Plans/nav_system_implementation_plan.md
@@ -32,7 +37,7 @@
 
 #include <cmath>
 
-#include "DistanceMath.h"
+#include "../DistanceMath.h"
 
 extern "C" {
 #include "z64math.h"  // Vec3f

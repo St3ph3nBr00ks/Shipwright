@@ -10,7 +10,7 @@
 
 #include <cmath>
 
-#include "../NavStateTransitions.h"
+#include "NavStateTransitions.h"
 
 #include <spdlog/spdlog.h>
 
