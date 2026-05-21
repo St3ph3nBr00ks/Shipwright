@@ -44,7 +44,6 @@ private:
     void DrawHeader();
     void DrawDescriptors();
     void DrawSessionView();
-    void DrawTestDescriptorControls();
 };
 
 }  // namespace AnchorDirector

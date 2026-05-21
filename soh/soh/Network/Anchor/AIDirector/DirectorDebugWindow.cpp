@@ -20,8 +20,7 @@ void DirectorDebugWindow::DrawElement() {
     DrawDescriptors();
     ImGui::Separator();
     DrawSessionView();
-    ImGui::Separator();
-    DrawTestDescriptorControls();
+    // TestDescriptor toggle moved to Flotilla -> Game Director menu tab.
 }
 
 void DirectorDebugWindow::DrawHeader() {
@@ -127,21 +126,6 @@ void DirectorDebugWindow::DrawSessionView() {
     if (onlineCount == 0) {
         ImGui::TextDisabled("(no online players)");
     }
-
-    ImGui::Unindent();
-}
-
-void DirectorDebugWindow::DrawTestDescriptorControls() {
-    ImGui::Text("TestDescriptor controls (dev-only)");
-    ImGui::Indent();
-
-    bool enabled = CVarGetInteger(CVAR_ENHANCEMENT("AI.Director.TestDescriptorEnabled"), 0) != 0;
-    if (ImGui::Checkbox("Enable TestDescriptor", &enabled)) {
-        CVarSetInteger(CVAR_ENHANCEMENT("AI.Director.TestDescriptorEnabled"), enabled ? 1 : 0);
-        CVarSave();
-    }
-    ImGui::TextDisabled("Spawns ACTOR_EN_TEST near the most-isolated player every 30s. "
-                        "Use scenes where Stalfos's object is loaded (e.g. Forest Temple).");
 
     ImGui::Unindent();
 }

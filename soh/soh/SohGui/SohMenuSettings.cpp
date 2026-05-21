@@ -131,23 +131,6 @@ void SohMenu::UpdateLanguageMap(std::map<int32_t, const char*>& languageMap) {
     }
 }
 
-// Returns {"", <FolderA>, <FolderB>, ...} where "" represents Default Link / Default Voices.
-// Each entry is the name of a subdirectory of coopplayercharacters/ (a sibling of mods/).
-static std::vector<std::string> GetInstalledCoopModelMods() {
-    std::vector<std::string> mods;
-    mods.push_back(""); // Default (empty = vanilla)
-    std::string coopPath = Ship::Context::LocateFileAcrossAppDirs("coopplayercharacters", appShortName);
-    std::filesystem::path coopDir(coopPath);
-    if (std::filesystem::exists(coopDir) && std::filesystem::is_directory(coopDir)) {
-        for (const auto& entry : std::filesystem::directory_iterator(coopDir)) {
-            if (entry.is_directory()) {
-                mods.push_back(entry.path().filename().string());
-            }
-        }
-    }
-    return mods;
-}
-
 void SohMenu::AddMenuSettings() {
     // Add Settings Menu
     AddMenuEntry("Settings", CVAR_SETTING("Menu.SettingsSidebarSection"));
@@ -560,106 +543,8 @@ void SohMenu::AddMenuSettings() {
         .HideInSearch(true)
         .Options(WindowButtonOptions().Tooltip("Enables the separate Mod Menu Window."));
 
-    // Characters Settings
-    path.sidebarName = "Characters";
-    path.column = SECTION_COLUMN_1;
-    AddSidebarEntry("Settings", "Characters", 2);
-
-    AddWidget(path, "Character Customization", WIDGET_SEPARATOR_TEXT);
-
-    // Character Model — picked from coopplayercharacters/ (sibling of mods/).
-    // Works while connected: applies locally via UpdateCustomSkeletons() and
-    // broadcasts to remote clients via UPDATE_CLIENT_STATE.
-    AddWidget(path, "Character Model", WIDGET_CUSTOM)
-        .HideInSearch(true)
-        .CustomFunction([](WidgetInfo& info) {
-            auto anchor = Anchor::Instance;
-            static std::vector<std::string> mods;
-            if (mods.empty()) {
-                mods = GetInstalledCoopModelMods();
-            }
-            std::string currentModel = CVarGetString(CVAR_REMOTE_ANCHOR("CharacterModel"), "");
-
-            // Auto-populate once: if no CVar is saved and packs exist, pick the first one.
-            // Static flag prevents "Default Link" from being immediately overridden on the next frame.
-            static bool autoPopulateDone = false;
-            if (!autoPopulateDone && currentModel.empty() && mods.size() > 1) {
-                autoPopulateDone = true;
-                currentModel = mods[1];
-                CVarSetString(CVAR_REMOTE_ANCHOR("CharacterModel"), currentModel.c_str());
-                Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-            }
-            if (!currentModel.empty()) {
-                autoPopulateDone = true; // also mark done if a mod was already saved from a prior session
-            }
-
-            std::vector<const char*> displayNames;
-            int currentIdx = 0;
-            for (int i = 0; i < (int)mods.size(); i++) {
-                displayNames.push_back(mods[i].empty() ? "Default Link" : mods[i].c_str());
-                if (mods[i] == currentModel) currentIdx = i;
-            }
-
-            ImGui::Text("Character Model");
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-            if (ImGui::Combo("##CharacterModel", &currentIdx,
-                             (const char* const*)displayNames.data(), (int)displayNames.size())) {
-                CVarSetString(CVAR_REMOTE_ANCHOR("CharacterModel"), mods[currentIdx].c_str());
-                Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-                SOH::SkeletonPatcher::UpdateCustomSkeletons();
-                if (anchor && anchor->isConnected) {
-                    anchor->SendPacket_UpdateClientState();
-                }
-            }
-        });
-
-#if 0
-    // Voice Pack and Player Pronouns UI hidden until both systems are proven viable.
-    // Voice Pack backend (Pillar B2) is not yet implemented — selection saved but no audio swap.
-    // Pronoun system replacer works but verb agreement is not handled and feasibility for full
-    // dialogue coverage is unproven. Re-enable when the backend / linguistic coverage lands.
-    AddWidget(path, "Voice Pack", WIDGET_CUSTOM)
-        .HideInSearch(true)
-        .CustomFunction([](WidgetInfo& info) {
-            auto anchor = Anchor::Instance;
-            static std::vector<std::string> mods;
-            if (mods.empty()) {
-                mods = GetInstalledCoopModelMods();
-            }
-            std::string currentAudio = CVarGetString(CVAR_REMOTE_ANCHOR("AudioMod"), "");
-
-            std::vector<const char*> displayNames;
-            int currentIdx = 0;
-            for (int i = 0; i < (int)mods.size(); i++) {
-                displayNames.push_back(mods[i].empty() ? "Default Voices" : mods[i].c_str());
-                if (mods[i] == currentAudio) currentIdx = i;
-            }
-
-            ImGui::Text("Voice Pack");
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-            if (ImGui::Combo("##VoicePack", &currentIdx,
-                             (const char* const*)displayNames.data(), (int)displayNames.size())) {
-                CVarSetString(CVAR_REMOTE_ANCHOR("AudioMod"), mods[currentIdx].c_str());
-                Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-                if (anchor && anchor->isConnected) {
-                    anchor->SendPacket_UpdateClientState();
-                }
-            }
-        });
-
-    AddWidget(path, "Player Identity", WIDGET_SEPARATOR_TEXT);
-    AddWidget(path, "Player Pronouns in Dialogue", WIDGET_CVAR_COMBOBOX)
-        .CVar(CVAR_ENHANCEMENT("PronounMode"))
-        .RaceDisable(false)
-        .Options(ComboboxOptions()
-                     .ComboMap(pronounModeOptions)
-                     .DefaultIndex(0)
-                     .ComponentAlignment(ComponentAlignments::Right)
-                     .LabelPosition(LabelPositions::Far)
-                     .Tooltip("Replaces gendered pronouns referring to the player character in all in-game dialogue.\n"
-                              "Works at message display time — takes effect immediately without reloading.\n"
-                              "Note: verb agreement (e.g. 'they are' vs 'he is') is not automatically adjusted."));
-#endif
+    // Characters sidebar (Character Model, Voice Pack, Player Pronouns) moved to
+    // Flotilla -> Player tab. See SohMenuFlotilla.cpp.
 }
 
 } // namespace SohGui

@@ -1933,9 +1933,9 @@ void SohMenu::AddMenuEnhancements() {
             .Callback([](WidgetInfo& info) { TimeDisplayUpdateDisplayOptions(); });
     }
 
-    // AI Navigation — multiplayer navigation system. All features default-off
-    // permanently per Flotilla policy for vanilla-altering features.
-    // See Plans/nav_system_implementation_plan.md and Plans/room_nav_data_plan.md.
+    // AI Navigation / NPC Companion / AI Director sidebars moved to Flotilla tab.
+    // See SohMenuFlotilla.cpp.
+#if 0
     path.sidebarName = "AI Navigation";
     AddSidebarEntry("Enhancements", path.sidebarName, 3);
     path.column = SECTION_COLUMN_1;
@@ -2579,6 +2579,7 @@ void SohMenu::AddMenuEnhancements() {
             "Useful for debugging 'why isn't my descriptor spawning?' "
             "Default off. Lifecycle logs (ExecuteSpawn ok, OnSpawn-"
             "Removed) are always on — those are rare events."));
+#endif // moved to Flotilla tab
 }
 
 } // namespace SohGui
