@@ -838,6 +838,18 @@ void Anchor::SetFollowerNpcActive(bool active) {
 // direct-vector, not stick-injection (smoother but no built-in dead-zone).
 static constexpr float kEnterFollow = 80.0f;
 static constexpr float kEnterIdle   = 50.0f;
+// Y-axis hysteresis pair (P0 audit / log 263 fix). Without these gates,
+// when the leader is directly above on a ledge (e.g., y=800 above NPC's
+// y=360), small XZ distance makes the actor declare itself "arrived"
+// and stop trying to climb. Mirrors Player AI Follower's
+// kFollowYThreshold pattern (Follower.cpp:223) added 2026-05-12 for
+// the same bug class.
+//   - Arrival (FOLLOW→IDLE): require |dy| ≤ kEnterIdleY in addition
+//     to XZ.
+//   - Re-engage (IDLE→FOLLOW): trigger on XZ exceeds OR |dy| exceeds
+//     kEnterFollowY (hysteresis upper bound).
+static constexpr float kEnterIdleY   = 40.0f;
+static constexpr float kEnterFollowY = 60.0f;
 
 // Walk and run speeds in OoT units/frame. Matches Link's vanilla walk
 // (~6.0) and run (~12.0). The NPC walks when close to leader and runs
@@ -988,9 +1000,19 @@ void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // effectiveTarget so IDLE→FOLLOW fires when leader starts
     // climbing — without this the NPC near a wall base sees small
     // XZ distance to climbing-leader's XZ and stays IDLE forever.
+    //
+    // P0 audit (log 263): re-engage when target moves away in
+    // EITHER XZ or Y. Without the Y gate, the NPC stayed in IDLE
+    // when the leader was directly above on a ledge (small XZ but
+    // 440u Y delta). Mirrors Player AI Follower's xzExceeds ||
+    // yExceeds pattern (Follower.cpp:4931 — fixed for the same
+    // bug class on log 32).
     const Vec3f effectiveTarget = ComputeEffectiveTarget(leaderPos);
     const float distSq = Dist2DSq(a->world.pos, effectiveTarget);
-    if (distSq > kEnterFollow * kEnterFollow) {
+    const float dy     = std::fabs(effectiveTarget.y - a->world.pos.y);
+    const bool xzExceeds = distSq > kEnterFollow * kEnterFollow;
+    const bool yExceeds  = dy > kEnterFollowY;
+    if (xzExceeds || yExceeds) {
         this_->state = EN_FOLLOWER_STATE_FOLLOW;
     }
 }
@@ -1127,7 +1149,13 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     const int stuckCheckTicks = Anchor::Instance->MsToGameTicks(kStuckCheckMs);
     if (stuckCheckTicks > 0 &&
         curFrame >= sLocalNav.lastStuckCheckFrame + (uint64_t)stuckCheckTicks) {
-        const float progress = std::sqrt(Dist2DSq(a->world.pos, sLocalNav.stuckCheckPos));
+        // P0 audit: 3D progress, not XZ. Climbing actors make progress
+        // mostly in Y; XZ-only measurement registered them as "stuck"
+        // mid-climb (false-positive stuck escalation).
+        const float dx = a->world.pos.x - sLocalNav.stuckCheckPos.x;
+        const float dy = a->world.pos.y - sLocalNav.stuckCheckPos.y;
+        const float dz = a->world.pos.z - sLocalNav.stuckCheckPos.z;
+        const float progress = std::sqrt(dx*dx + dy*dy + dz*dz);
         if (progress < kStuckMinProgress) {
             // No real progress in 3s. Enter STUCK; TickSTUCK reads the
             // cycle counter to escalate. Path is NOT reset here (so the
@@ -1157,8 +1185,17 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // while leader is climbing). Without this, NPC at the wall base
     // sees small XZ distance to climbing-leader's XZ and enters IDLE
     // before ever engaging CLIMBING.
+    //
+    // P0 audit (log 263): require BOTH XZ close AND |dy| close. Prior
+    // XZ-only check fired false-positive arrival when the leader was
+    // directly above on a ledge (XZ=57u, Y=440u). NPC declared
+    // itself "arrived" while standing on a lower floor below the
+    // leader, then oscillated FOLLOW↔IDLE without ever engaging
+    // the next climb segment.
     const float distToTargetSq = Dist2DSq(a->world.pos, effectiveTarget);
-    if (distToTargetSq <= kEnterIdle * kEnterIdle) {
+    const float dyToTarget     = std::fabs(effectiveTarget.y - a->world.pos.y);
+    if (distToTargetSq <= kEnterIdle * kEnterIdle &&
+        dyToTarget    <= kEnterIdleY) {
         this_->state = EN_FOLLOWER_STATE_IDLE;
         a->speedXZ   = 0.0f;
         sLocalNav.navState.path.Reset();  // discard path; IDLE is local-frame
