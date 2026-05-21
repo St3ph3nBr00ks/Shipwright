@@ -1,9 +1,9 @@
 /**
  * StuckEscalation — shared STUCK recovery escalation tiers for
- * scripted-position AI actors (NPC Follower, AI Invader; future
+ * scripted-position AI actors (NPC Follower, NPC Invader; future
  * follower / hostile actors with substrate paths).
  *
- * Ports Player AI Follower's G12 cycle tracking (Follower.cpp:1680).
+ * Ports AI Player Follower's G12 cycle tracking (Follower.cpp:1680).
  * Without escalation, a STUCK→nudge→STUCK loop can persist indefinitely
  * if the simple nudge keeps failing against the same geometry.
  *

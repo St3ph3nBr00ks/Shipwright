@@ -363,7 +363,7 @@ void ActorTrail::Tick(PlayState* play) {
     // to ACTORCAT_NPC with id=ACTOR_EN_OE2 and update=DummyPlayer_Update
     // (per session_state.md "DummyPlayer Actor Facts"). Each maps to a
     // remote clientId via Anchor::GetDummyPlayerClientId; capture under
-    // TrailKeyForPlayer(clientId) so the AI Follower's substrate path
+    // TrailKeyForPlayer(clientId) so the AI Player Follower's substrate path
     // consumer (HandleStateFollow / RETURN) finds the leader's
     // breadcrumb trail when it queries TrailKeyForPlayer(leaderClientId).
     //
@@ -530,7 +530,7 @@ bool ActorTrail::GetBestReachableSubgoal(TrailKey key,
     // breadcrumbs the follower couldn't actually reach (short walls
     // / voids the line passes over), and the trail walk would
     // short-circuit before this graph layer ran. User 2026-05-09
-    // follow-up reported "AI Follower stuck running into a wall
+    // follow-up reported "AI Player Follower stuck running into a wall
     // trying to reach the leader instead of using nav data to walk
     // around" — exactly that failure mode.
     if (AnchorNavCVars::IsFeatureEnabled(AnchorNavCVars::kRoomNavConsumer)) {

@@ -53,7 +53,7 @@ struct PlayerSnapshot {
     bool         isSaveLoaded;
     bool         isInCutscene;          // csCtxState != CS_STATE_IDLE
     bool         isInvulnerable;        // invincibilityTimer != 0
-    bool         followerActive;        // AI Follower mode is on for this client
+    bool         followerActive;        // AI Player Follower mode is on for this client
     bool         isClimbing;            // peer's local Player is climbing (G1/G2)
 
     // step 12+ fields — populated lazily when a descriptor needs them.

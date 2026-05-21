@@ -3,10 +3,10 @@
  *
  * Two directives:
  *   "RUN"      P1 → P2. P2 teleports its Link to the spawn point and
- *              enables AI Follower mode targeting P1. P2 also enters
+ *              enables AI Player Follower mode targeting P1. P2 also enters
  *              combat-disabled mode (via local NavTest.CombatDisabled
- *              CVar) so AI Follower's combat tier doesn't fire.
- *   "REACHED"  P2 → P1. Sent when P2's AI Follower mode reaches the
+ *              CVar) so AI Player Follower's combat tier doesn't fire.
+ *   "REACHED"  P2 → P1. Sent when P2's AI Player Follower mode reaches the
  *              test target (P1's position) within 3D 60u. Carries the
  *              elapsed ms so P1 records it in the run results.
  *
@@ -56,12 +56,12 @@ void Anchor::SendPacket_NavTestDirective(const std::string& directive,
     // treats that field as a unicast destination, so any value (including
     // ownClientId) would route ONLY to that client, not broadcast. RUN
     // needs to reach all peers (P2 + any future N-th client) so they
-    // can teleport + enable AI Follower mode. REACHED needs to reach
+    // can teleport + enable AI Player Follower mode. REACHED needs to reach
     // P1 (the test conductor), which works fine because P1 is just a
     // peer in the room and gets the broadcast.
     // Log 246 bug: previously set targetClientId = ownClientId thinking
     // it identified the sender. Result: P1 unicast the packet to itself,
-    // P2 never received it. User had to manually toggle the AI Follower
+    // P2 never received it. User had to manually toggle the AI Player Follower
     // menu checkbox.
 
     SPDLOG_INFO("[NavTestDirective] Sending directive='{}' runIndex={} "
@@ -93,7 +93,7 @@ void Anchor::HandlePacket_NavTestDirective(nlohmann::json payload) {
 
     if (directive == "RUN") {
         // P2 (or any peer) receives: teleport our Link to the spawn
-        // point + enable AI Follower mode targeting the sender + flip
+        // point + enable AI Player Follower mode targeting the sender + flip
         // combat-disabled CVar.
         if (gPlayState == nullptr) {
             SPDLOG_WARN("[NavTestDirective] RUN ignored: gPlayState null");
@@ -133,36 +133,36 @@ void Anchor::HandlePacket_NavTestDirective(nlohmann::json payload) {
         player->actor.velocity.y = 0.0f;
         player->actor.velocity.z = 0.0f;
 
-        // Enable harness flags + combat-disabled. AI Follower mode is
+        // Enable harness flags + combat-disabled. AI Player Follower mode is
         // NOT a CVar — it's runtime state on the Anchor instance
         // (Menu.cpp toggles it via SetFollowerActive). Call directly
         // (log 244 fix 2026-05-18: previously this packet set a CVar
-        // that didn't exist and AI Follower mode never engaged).
+        // that didn't exist and AI Player Follower mode never engaged).
         CVarSetInteger(CVAR_ENHANCEMENT("AI.NavTest.Enabled"), 1);
         CVarSetInteger(CVAR_ENHANCEMENT("AI.NavTest.CombatDisabled"), 1);
 
         // Enable every "Nav Data Usage" feature locally so the Player
-        // AI Follower's nav substrate consumer runs. Without this,
-        // default-off CVars on P2 mean the AI Follower falls back to
+        // AI Player Follower's nav substrate consumer runs. Without this,
+        // default-off CVars on P2 mean the AI Player Follower falls back to
         // legacy direct-yaw pursuit even after SetFollowerActive(true).
         AINavTest::EnableAllNavDataUsageFeatures();
 
         Anchor::Instance->SetFollowerActive(true);
 
-        // Latch the P2 test-mode flag so the Player AI Follower's reach
+        // Latch the P2 test-mode flag so the AI Player Follower's reach
         // detector fires when this client closes within 60u of the
         // sender (P1). Auto-clears after 120s.
         AINavTest::NotifyP2TestStarted();
 
         SPDLOG_INFO("[NavTestDirective] RUN received from client {} — "
                     "teleported to spawn point ({:.0f},{:.0f},{:.0f}) + "
-                    "enabled AI Follower mode + combat-disabled",
+                    "enabled AI Player Follower mode + combat-disabled",
                     senderClientId, spawnPos.x, spawnPos.y, spawnPos.z);
         return;
     }
 
     if (directive == "REACHED") {
-        // P1 receives this from P2 when P2's AI Follower mode reaches
+        // P1 receives this from P2 when P2's AI Player Follower mode reaches
         // the test target. P2's packet payload's reachedMs is a
         // sentinel (0) — P1 computes its own elapsed time relative to
         // the current active run's start frame. Network latency adds

@@ -3189,7 +3189,7 @@ void Anchor::RegisterHooks() {
             }
         }
 
-        // AI Invader — same draw-context flag class as the NPC
+        // NPC Invader — same draw-context flag class as the NPC
         // Follower above. EnInvader_Draw passes the local Player* as
         // Player_DrawImpl's `data`, so without this check the hook
         // would either match `actor == myPlayer` and paint the

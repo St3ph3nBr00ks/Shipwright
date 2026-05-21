@@ -1,7 +1,7 @@
 /**
  * StepPhase — shared step-phase counter + footstep SFX trigger for
  * scripted-position AI actors that use Link's walk/run skel (NPC
- * Follower, AI Invader; future actors that share the rig).
+ * Follower, NPC Invader; future actors that share the rig).
  *
  * Pattern mirrors Player's z_player.c:8083-8113 step-phase counter,
  * which advances on every tick based on the active animation's

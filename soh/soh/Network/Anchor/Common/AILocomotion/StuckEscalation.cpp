@@ -2,7 +2,7 @@
  * StuckEscalation — see StuckEscalation.h for purpose.
  *
  * Logic source: FollowerNPC.cpp + Invader.cpp STUCK cycle handling
- * (both ported from Player AI Follower's G12 — Follower.cpp:1680).
+ * (both ported from AI Player Follower's G12 — Follower.cpp:1680).
  */
 
 #include "StuckEscalation.h"

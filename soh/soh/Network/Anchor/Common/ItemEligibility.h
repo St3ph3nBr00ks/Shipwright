@@ -4,7 +4,7 @@
 //
 // Extracted from HookHandlers.cpp's `FollowerWantsItem` lambda
 // (#173 / #193 Phase 0). Used by:
-//   - AI Follower opportunistic item pickup scan (#172)
+//   - AI Player Follower opportunistic item pickup scan (#172)
 //   - MP item-drop sync per-player pickup gate (#193)
 //
 // Both callers want the same predicate shape: "given the local
@@ -34,15 +34,15 @@ namespace ItemEligibility {
 //     (full HP for hearts, full quiver for arrows, etc.).
 //   - Unrecognised discriminants (defensive default).
 //
-// Today's behaviour matches the pre-#193 AI Follower whitelist exactly,
-// EXCEPT for rupees: the AI Follower allowed rupees unconditionally
+// Today's behaviour matches the pre-#193 AI Player Follower whitelist exactly,
+// EXCEPT for rupees: the AI Player Follower allowed rupees unconditionally
 // (silently truncated by vanilla); #193's per-player share semantics
 // gate them on `gSaveContext.rupees < CUR_CAPACITY(UPG_WALLET)`.
 //
 // `walletCapAware = true` enables the wallet-cap rupee gate (used by
 // #193 pickup gate so an over-capped teammate can defer to others).
 // `walletCapAware = false` keeps the legacy "always allowed" rupee
-// behaviour (used by AI Follower).
+// behaviour (used by AI Player Follower).
 bool CanPlayerCollectItem00(s16 item00Type, bool walletCapAware);
 
 }  // namespace ItemEligibility

@@ -181,7 +181,7 @@ NavOrDirectResult ChooseSubgoal(const Actor*         navigator,
     //   0x1000 NODE_CLIMB_DESIGNATED   0x00010000 NODE_REACHED_VIA_LEDGE_GRAB
     //   0x2000 NODE_CLIMB_GENERIC      (plus possible future jump-anchor flag)
     //
-    // Log emits ONLY on rising-edge into a non-zero flag. With AI Invader
+    // Log emits ONLY on rising-edge into a non-zero flag. With NPC Invader
     // as the only consumer today, a single static suffices; later phases
     // will key by navigator pointer or trail key.
     //

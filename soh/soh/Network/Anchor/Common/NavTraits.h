@@ -2,7 +2,7 @@
  * NavTraits — per-actor navigation feature flags + master CVar wiring.
  *
  * The navigation system's policy layer. Each navigator (synced enemy,
- * AI Follower, future ally NPC) reads its NavTraits row to decide which
+ * AI Player Follower, future ally NPC) reads its NavTraits row to decide which
  * nav features apply.
  *
  * Two axes per actor:
@@ -53,7 +53,7 @@ struct NavTraits {
     //     waypoint-driven actors / bosses (the ground graph doesn't
     //     model their navigable space).
     //   - eligibleForSwimming: Underwater nodes are valid pass-through
-    //     and destination. On for Link-rigged navigators (AI Follower,
+    //     and destination. On for Link-rigged navigators (AI Player Follower,
     //     NPC Invader); future per-actor opt-in for canonically aquatic
     //     enemies.
     //   - avoidHazardNodes: hazard nodes are limited to kHazardEscapeHops

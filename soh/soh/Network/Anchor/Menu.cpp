@@ -155,7 +155,7 @@ void AnchorMainMenu(WidgetInfo& info) {
                          : "Cannot show other players because the room's Show Locations mode is set to None."));
     ImGui::EndDisabled();
 
-    // AI Follower / Allow Choose Items / Nav Data Usage moved to Flotilla -> Player
+    // AI Player Follower / Allow Choose Items / Nav Data Usage moved to Flotilla -> Player
     // and Flotilla -> Nav System tabs. See SohMenuFlotilla.cpp.
 
     ImGui::Spacing();

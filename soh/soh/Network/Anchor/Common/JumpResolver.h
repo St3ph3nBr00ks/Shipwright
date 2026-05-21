@@ -23,7 +23,7 @@
  * Per user-supplied design intent. See user request 2026-05-08.
  *
  * No consumer wired in this commit — the predicate exists for future
- * AI navigators (AI Follower port, AI Invader, synced enemies that
+ * AI navigators (AI Player Follower port, NPC Invader, synced enemies that
  * pursue across fragmented terrain) to call before each step.
  */
 

@@ -1,7 +1,7 @@
 /**
  * NavStateTransitions — shared state-transition predicates for AI actors.
  *
- * Three actor systems (NPC Follower, AI Invader, Player AI Follower)
+ * Three actor systems (NPC Follower, NPC Invader, AI Player Follower)
  * each had their own copy of the same three checks: "did I arrive?",
  * "should I pursue?", "did I make progress?". Each copy was XZ-only
  * until log 263 surfaced the same bug class in all three — when the
@@ -52,9 +52,9 @@ namespace AnchorAI {
 // across the three actor files post-Phase-3:
 //   FollowerNPC:   kEnterIdle/Y, kEnterFollow/Y, kEngageBreakDist/Y,
 //                   kEngageLeaderLeash/Y, kEngageStrikeDist/Y...
-//   AI Invader:    kInvFollowIdleDist/Y, kInvEngageBreakDist/Y,
+//   NPC Invader:    kInvFollowIdleDist/Y, kInvEngageBreakDist/Y,
 //                   kInvEngageStrikeDist/Y, kStandbyIdleRadius/Y...
-//   Player AI Follower: kMaxLeash/Y, ...
+//   AI Player Follower: kMaxLeash/Y, ...
 //
 // Each pair is logically a single concept ("arrival band", "leash
 // radius") but spelled as two unrelated float constants. ThresholdPair

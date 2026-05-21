@@ -123,8 +123,8 @@ constexpr float kAttackActiveStartFrame = 4.0f;
 constexpr float kAttackActiveEndFrame   = 12.0f;
 
 // Detection range bumped 250→1000 on 2026-05-17 (log 233 testing).
-// User observation: "AI Invader only started pathfinding to player
-// when the player got close, within ~300 units. AI Invader had line
+// User observation: "NPC Invader only started pathfinding to player
+// when the player got close, within ~300 units. NPC Invader had line
 // of sight on the player from much further away and should have begun
 // pathfinding."
 //
@@ -153,7 +153,7 @@ constexpr AnchorAI::ThresholdPair kAttackEngageStrikeBand = { kAttackEngageDist,
 //                 at the same nominal speed)
 //   v5: 5.12     (further 20% reduction per user report 2026-05-19 PM)
 //   v6: 5.376    (+5% per user report 2026-05-20 — pursuit slightly
-//                 slower than Player AI Follower; bump to match)
+//                 slower than AI Player Follower; bump to match)
 constexpr float kEngageWalkSpeed    = 5.04f;
 constexpr float kEngageRunDistance  = 150.0f;
 constexpr float kEngageRunSpeed     = 5.376f;
@@ -381,14 +381,14 @@ constexpr float kInvFollowIdleDist = 60.0f;
 // check. Without this the Invader declares itself arrived when the
 // target is directly above on a ledge (small XZ, huge Y delta), then
 // oscillates FOLLOW↔IDLE without ever engaging the next climb segment.
-// Same shape as FollowerNPC's kEnterIdleY and Player AI Follower's
+// Same shape as FollowerNPC's kEnterIdleY and AI Player Follower's
 // kFollowYThreshold (already in place since log 32).
 constexpr float kInvFollowIdleY    = 40.0f;
 constexpr AnchorAI::ThresholdPair kInvFollowIdleBand = { kInvFollowIdleDist, kInvFollowIdleY };  // Fix C
 // FOLLOW pursuit speeds. Same numerics as FollowerNPC's kRunSpeed /
 // kRunDistance.
-constexpr float kInvWalkSpeed   = 5.04f;  // +5% 2026-05-20 (was 4.8 — slightly behind Player AI Follower)
-constexpr float kInvRunSpeed    = 5.376f; // +5% 2026-05-20 (was 5.12 — slightly behind Player AI Follower)
+constexpr float kInvWalkSpeed   = 5.04f;  // +5% 2026-05-20 (was 4.8 — slightly behind AI Player Follower)
+constexpr float kInvRunSpeed    = 5.376f; // +5% 2026-05-20 (was 5.12 — slightly behind AI Player Follower)
 constexpr float kInvRunDistance = 200.0f;
 // STUCK detection — no progress over this window triggers a one-tick
 // nudge. Same shape as FollowerNPC's kStuckCheckMs / kStuckMinProgress
@@ -396,7 +396,7 @@ constexpr float kInvRunDistance = 200.0f;
 // the "find route around stairs" goal that the friendly follower does).
 constexpr int   kInvStuckCheckMs    = 3000;
 constexpr float kInvStuckMinProgress = 20.0f;
-// STUCK escalation (ported from Player AI Follower's G12). Matches
+// STUCK escalation (ported from AI Player Follower's G12). Matches
 // NPC Follower's kStuckCycleWindowMs / kStuckCycleEscalation. See
 // FollowerNPC.cpp:TickSTUCK for the routing semantics.
 constexpr int kInvStuckCycleWindowMs  = 3000;
@@ -998,7 +998,7 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     // ── Substrate-driven subgoal selection (Phase 2 — via helper) ──
     // ChooseSubgoal handles the 60u direct-yaw gate, water gate,
     // rate-limited path refresh (kPathRefreshMs), target-drift refresh
-    // (kTargetDriftRefresh), and cursor advance. AI Invader's fallback
+    // (kTargetDriftRefresh), and cursor advance. NPC Invader's fallback
     // policy when path is empty + outside 60u: RangedInPlace if a bow
     // is owned + ammo present, otherwise RetreatHostile, with
     // HoldDefensive as the last-resort selection. The actual fallback
@@ -1600,7 +1600,7 @@ void TickCLIMBING(EnInvader* this_, PlayState* play) {
     // Phase 3 follow-up (2026-05-18): per-tick position-match refresh
     // so cross-anchor climb-cell traversals (spiral wall bridges,
     // L-shape vine walls) re-target the active anchor correctly. Same
-    // shape as Player AI Follower's Option A refresh and NPC Follower's
+    // shape as AI Player Follower's Option A refresh and NPC Follower's
     // equivalent. Without this, Invader commits to the closest-basePos
     // anchor at engagement and never switches even when the substrate
     // path's subgoal cell belongs to a neighbouring anchor.
@@ -3348,14 +3348,14 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     //
     // Pre-fix symptom: NPC Follower successfully climbed two vine walls
     // in Deku Tree via substrate-path-driven CLIMBING (anchor 4 → 2 →
-    // mid-climb-refresh → 1 → 2). AI Invader got the SAME 45-waypoint
+    // mid-climb-refresh → 1 → 2). NPC Invader got the SAME 45-waypoint
     // path but TryEngageAutoClimbInv hijacked it after the first
     // mantle, force-engaged a different anchor (base=(450,360,111)
     // top=(450,1000,111)), and rode the column 640u up to Y=832 —
     // climbing THROUGH the platform P1 was standing on at Y=800.
     //
     // NPC Follower has no equivalent force-climb hijack — that's why
-    // it climbs correctly. With this gate, AI Invader inherits the
+    // it climbs correctly. With this gate, NPC Invader inherits the
     // same substrate-path-only behaviour.
     const bool substratePathHasContent =
         !sLocalInvNav.navState.path.Empty();
@@ -3630,7 +3630,7 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
         // via climbNextIsRight toggle (existing). Side and Up variants
         // share the same toggle state.
         //
-        // Pre-fix: always picked UP variant. AI Invader visibly climbed
+        // Pre-fix: always picked UP variant. NPC Invader visibly climbed
         // upward even when moving laterally across the vine wall —
         // animation completely disconnected from actual motion. User
         // report log 254. NPC Follower (which already has this logic)

@@ -45,7 +45,7 @@
  * Future consumers (not implemented here, just on-the-record):
  *   - #191 voting-skip quorum exclusion: skip frozen peers in the
  *     all-pressed quorum so the timer doesn't have to elapse.
- *   - AI Follower (#169): surface "leader frozen" state instead of
+ *   - AI Player Follower (#169): surface "leader frozen" state instead of
  *     escalating through stuck-cycle / leash-timeout safety nets.
  *   - UI banner: "P3 may be frozen".
  *

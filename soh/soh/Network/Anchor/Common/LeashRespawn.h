@@ -15,7 +15,7 @@
  *
  * Default-off: gated by gEnhancements.Nav.Enabled AND
  * gEnhancements.Nav.LeashRespawn. NavTraits.eligibleForLeashRespawn
- * gates per-actor (AI Follower opts out by default; bosses opt out
+ * gates per-actor (AI Player Follower opts out by default; bosses opt out
  * via kBossDefaults).
  *
  * Host-only: a non-host has no authority to override actor positions.

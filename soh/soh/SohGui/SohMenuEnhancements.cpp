@@ -1959,7 +1959,7 @@ void SohMenu::AddMenuEnhancements() {
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip(
-            "Captures recent positions for players, AI Followers, and synced enemies that "
+            "Captures recent positions for players, AI Player Followers, and synced enemies that "
             "opt in via NavTraits. Other navigators consult the trail when direct line-of-"
             "sight pursuit is blocked, picking the furthest reachable breadcrumb that's "
             "progress toward the target.\n\n"
@@ -1998,7 +1998,7 @@ void SohMenu::AddMenuEnhancements() {
         .PreFunc([](WidgetInfo& info) { info.isHidden = !CVarGetInteger(CVAR_ENHANCEMENT("Nav.Enabled"), 0); })
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip(
-            "Two-shape vertical reach. Shape A wraps the existing AI Follower climb "
+            "Two-shape vertical reach. Shape A wraps the existing AI Player Follower climb "
             "pipeline (real ladder/vine animation, hang-state resolution). Shape B "
             "teleports synced enemies upward when their target is on a higher Y level "
             "and a climb path exists."));
@@ -2070,7 +2070,7 @@ void SohMenu::AddMenuEnhancements() {
             "he grabs the rim.\n\n"
             "Visualized in the debug overlay as light-purple ground quads (approach + "
             "top) with a thin connecting post. Phase 1 implements detection + viz "
-            "only; Phase 2 wires AI Follower to USE the anchors via jump injection.\n\n"
+            "only; Phase 2 wires AI Player Follower to USE the anchors via jump injection.\n\n"
             "Schema bumps to v3 when first scan runs with this on; existing v2 .bin "
             "files regenerate on next room entry. Apply via Force Rescan. Default: off."));
 
@@ -2233,7 +2233,7 @@ void SohMenu::AddMenuEnhancements() {
             "(high + landing) with a thin connecting post showing the "
             "fall direction.\n\n"
             "Phase 1 implements detection + viz only. Phase 2 wires "
-            "consumers (autonomous nav for AI Invader) to use drops as "
+            "consumers (autonomous nav for NPC Invader) to use drops as "
             "descent edges in pathfinding.\n\n"
             "Schema bumps to v5 when first scan runs with this on; "
             "existing v4 .bin files regenerate. Apply via Force Rescan. "
@@ -2254,7 +2254,7 @@ void SohMenu::AddMenuEnhancements() {
             "short direction line showing the wall normal (which way "
             "the navigator faces to enter).\n\n"
             "Phase 1 implements detection + viz only. Phase 2 wires "
-            "consumers (AI Follower, AI Invader child variant) to "
+            "consumers (AI Player Follower, NPC Invader child variant) to "
             "actually USE the anchors via crawl-input injection. Adult "
             "Link / non-child-rigged enemies cannot use crawlspaces — "
             "that gating happens consumer-side in Phase 2.\n\n"
@@ -2384,7 +2384,7 @@ void SohMenu::AddMenuEnhancements() {
             "that LACK the vanilla climbable wall-flag bits. The resulting anchors "
             "are tagged NODE_CLIMB_GENERIC_WALL — accessible only to consumers "
             "whose NavTraits.climbSurfaceMask includes GENERIC_WALL (planned: "
-            "Skullwalltula sync; AI Follower with gCheats.ClimbEverything on).\n\n"
+            "Skullwalltula sync; AI Player Follower with gCheats.ClimbEverything on).\n\n"
             "Tradeoff: scan time + memory grow proportionally — every interior "
             "wall in the room generates a grid. Best left off unless an actor that "
             "needs generic-wall climbing is in scope for the current room.\n\n"
@@ -2415,7 +2415,7 @@ void SohMenu::AddMenuEnhancements() {
             "incl. on-ladder / hang-ledge / climb-ledge / crawling, and "
             "actionFunc pointer) to logs/Ship of Harkinian <N> player.log. "
             "Use to record your own movement through a difficult area, "
-            "then compare to the AI Follower's path (Follower Recorder "
+            "then compare to the AI Player Follower's path (Follower Recorder "
             "log) to identify where the follower's logic falls short.\n\n"
             "Capture rate: gDeveloperTools.PlayerRecorder.CaptureHz (default 15). "
             "Auto-stop after MaxSeconds (default 300 = 5 min).\n\n"
@@ -2425,7 +2425,7 @@ void SohMenu::AddMenuEnhancements() {
     // Friendly NPC that walks beside the player using player-like
     // navigation (substrate path consumption + Actor_MoveXZGravity).
     // Available in single-player AND multiplayer. Independent of the
-    // player-rigged AI Follower (which is the AFK-mode tool surfaced
+    // AI Player Follower (which is the AFK-mode tool surfaced
     // in the Network → Anchor menu, non-host only).
     path.sidebarName = "NPC Companion";
     AddSidebarEntry("Enhancements", path.sidebarName, 3);
@@ -2441,7 +2441,7 @@ void SohMenu::AddMenuEnhancements() {
             "like navigation. Pure pathfinding in v1 — no combat, "
             "invulnerable. Substrate path-driven; routes around "
             "obstacles instead of pressing into them.\n\n"
-            "Independent of the AI Follower in Network → Anchor "
+            "Independent of the AI Player Follower in Network → Anchor "
             "(which is the AFK-mode tool that hijacks Link's body and "
             "is non-host-only). The NPC Companion works in single-"
             "player AND as host.\n\n"
@@ -2451,7 +2451,7 @@ void SohMenu::AddMenuEnhancements() {
             "  - No combat (invulnerable; doesn't attack).\n"
             "  - No climbing yet (Phase 6 work — won't follow up "
             "ladders/vines).\n"
-            "  - No door opening (same as the AI Follower).\n\n"
+            "  - No door opening (same as the AI Player Follower).\n\n"
             "Requires: Nav System (master) + Use Nav Pathfinding "
             "+ Use Room Graph (Layer 3) ticked under AI Navigation "
             "for substrate path consumption to work."));

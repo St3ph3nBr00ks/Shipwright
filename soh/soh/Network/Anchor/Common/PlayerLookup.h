@@ -30,7 +30,7 @@ Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play);
 // distance-filter on the returned actors.
 int GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount);
 
-// Multi-player hostile-target picker for AI Invader.
+// Multi-player hostile-target picker for NPC Invader.
 //
 // Walks the FULL session — local Player + every in-timeline DummyPlayer
 // in the actor list + the local NPC Follower (when targetable) — and
@@ -64,7 +64,7 @@ int GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount);
 // the local Player when it passes the gates, otherwise nullptr.
 //
 // This is the multi-player replacement for Anchor_GetNearestPlayerActor
-// when the consumer is the AI Invader — that legacy helper is used by
+// when the consumer is the NPC Invader — that legacy helper is used by
 // vanilla-enemy targeting and does NOT apply session-level validity
 // gates (cutscene / save-loaded / scene blacklist). Other consumers
 // of Anchor_GetNearestPlayerActor remain unchanged; this helper is

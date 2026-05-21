@@ -81,7 +81,7 @@ bool RunStuckRecoveryStep(Actor* actor,
     }
 
     // Cycles 1 + 2 (and vertical-dominant cycle 1 fall-through): legacy
-    // nudge. Direct world.pos write — matches Player AI Follower's
+    // nudge. Direct world.pos write — matches AI Player Follower's
     // STUCK-FWD action.
     //
     // Path-aware nudge target (was Invader-only pre-extraction): when

@@ -1,7 +1,7 @@
 /**
  * AiFollower / Follower — implementation. Phase 1 commit 1: scaffolding.
  *
- * Empty stub. Subsequent commits move the AI Follower state machine,
+ * Empty stub. Subsequent commits move the AI Player Follower state machine,
  * helper methods, hook bodies, and tunable constants out of
  * HookHandlers.cpp into this file.
  *
@@ -213,7 +213,7 @@ static constexpr f32 kFollowThreshold = 100.0f;
 static constexpr int kPostTeleportHoldFrames = 30;
 
 // P3.10 (user 2026-05-09 — "if the leader is standing on a platform,
-// the AI Follower will stand under the leader instead of walking up a
+// the AI Player Follower will stand under the leader instead of walking up a
 // sloped surface to get onto the platform"): vertical gate for the
 // FOLLOW→IDLE transitions. When |dy| to the final goal
 // exceeds this threshold, the follower hasn't really arrived even if
@@ -632,8 +632,8 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         // matching mask condition. Counter armed on injection,
         // decremented below in the post-check tick.
         //
-        // P3.7 (user 2026-05-09 — "When the AI Follower starts to
-        // climb onto a ledge, the AI Follower system appears to
+        // P3.7 (user 2026-05-09 — "When the AI Player Follower starts to
+        // climb onto a ledge, the AI Player Follower system appears to
         // disable"): also mask during the three Player_State1 climb
         // flags. The hoist transition fires this race:
         //   Frame N    : DO_ACTION_CLIMB set; we inject BTN_A; mask
@@ -668,7 +668,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
         // here was left gated — so when the gate is off and BTN_B
         // injection fires, the deactivate-check sees BTN_B unmasked
         // and turns the follower off (user 2026-05-09 follow-up
-        // report: "AI Follower is still turning off when the
+        // report: "AI Player Follower is still turning off when the
         // follower climbs onto a ledge"). Mirror the ungating here.
         //
         // Also extend the mask to cover the entire climb-state
@@ -1912,7 +1912,7 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
     // ladder rim; subsequent stick_y forward injection causes the
     // ladder collider to attach Link.
     //
-    // P3.5 (user 2026-05-09 — "AI Follower does not need to snap to
+    // P3.5 (user 2026-05-09 — "AI Player Follower does not need to snap to
     // the position of the player to enter doors, crawlspaces, and
     // ladders anymore. NPCs should snap the correct position when
     // they are already within ~30 units of the climbable surface
@@ -2893,9 +2893,9 @@ void Anchor::TickFollowerInput(Actor* actor) {
     // target"): originally gated behind gEnhancements.Nav.Enabled +
     // Nav.VerticalTeleport. That made this basic NPC capability
     // dependent on enabling experimental nav CVars. Now always-on
-    // for the AI Follower — hang-state resolution is core to "follow
+    // for the AI Player Follower — hang-state resolution is core to "follow
     // the leader through vertical terrain". Future per-NPC opt-out
-    // can route through NavTraits when AI Invader / ally NPCs join.
+    // can route through NavTraits when NPC Invader / ally NPCs join.
     {
         const bool hangFlag = (sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) != 0;
         static bool sWasHanging = false;
@@ -3385,7 +3385,7 @@ void Anchor::HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* 
     // mechanism in VerticalTeleport.cpp; rewriting would risk
     // regressing those behaviours. Instead, AnchorNav::IsShapeAEligible
     // exposes a discoverable predicate so OTHER navigators (synced
-    // enemies, AI Invader) can decide whether to use this style of
+    // enemies, NPC Invader) can decide whether to use this style of
     // climb (Shape A, for Link-rigged actors) or a direct world.pos
     // teleport (Shape B, for non-Link actors).
     //
@@ -5165,7 +5165,7 @@ void Anchor::HandleStateFollow(Player* player, const Vec3f& sideTarget, const Ve
     // trying to find a route up (slope / stairs / ladder via Layer 2
     // breadcrumbs). G10/G14 leash teleport eventually fires if no
     // route is found — safer than locking-in on the wrong altitude.
-    // Navigation Test Harness reach reporter. On P2 (the AI Follower
+    // Navigation Test Harness reach reporter. On P2 (the AI Player Follower
     // mode driver): when this client reaches sideTarget within the
     // harness's 3D 60u criterion AND we received a RUN directive
     // recently (IsP2InTestMode), broadcast REACHED so P1 records the
@@ -5461,7 +5461,7 @@ void Anchor::HandleStateAttack(Player* player, const Vec3f& p2Pos) {
 // id=ACTOR_EN_OE2, update=DummyPlayer_Update, clientId==roomState.ownerClientId).
 // Its world.pos is updated every frame by DummyPlayer_Update to the host's
 // authoritative position. Activation: toggled via the Anchor settings menu
-// (AI Follower checkbox). Any controller input while active immediately cancels
+// (AI Player Follower checkbox). Any controller input while active immediately cancels
 // it and returns manual control.
 //
 // Note: COND_HOOK cannot be used here — the registered lambdas (or the bodies

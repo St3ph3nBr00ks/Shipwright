@@ -617,7 +617,7 @@ extern "C" s16 gEnPartnerId;
 #include "src/overlays/actors/ovl_En_Follower/z_en_follower.h"
 static ActorDBInit EnFollowerInit = {
     "En_Follower",
-    "AI Follower NPC (Flotilla)",
+    "NPC Follower (Flotilla)",
     ACTORCAT_NPC,
     (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
     OBJECT_GAMEPLAY_KEEP,
@@ -630,14 +630,14 @@ static ActorDBInit EnFollowerInit = {
 };
 extern "C" s16 gEnFollowerId;
 
-// SoH AI Invader — hostile Link-skel NPC spawned by the AI Director.
+// SoH NPC Invader — hostile Link-skel NPC spawned by the AI Director.
 // See Plans/ai_invader_plan.md. v1 step 15a scaffold: registers,
 // renders as black-tinted Link, takes damage and dies cleanly.
 // Combat AI deferred behind #208.
 #include "src/overlays/actors/ovl_En_Invader/z_en_invader.h"
 static ActorDBInit EnInvaderInit = {
     "En_Invader",
-    "AI Invader (Flotilla)",
+    "NPC Invader (Flotilla)",
     ACTORCAT_ENEMY,
     // ATTENTION_ENABLED + HOSTILE — required for Z-targeting (lock-on).
     // Stalfos uses the same combo at z_en_test.c:12. Without these

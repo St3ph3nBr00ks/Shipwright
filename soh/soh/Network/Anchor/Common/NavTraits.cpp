@@ -109,8 +109,8 @@ static NavTraits MakeFreezardTraits() {
     return t;
 }
 
-// AI Invader (Plans/ai_invader_plan.md). Link-skel hostile NPC.
-// Inherits the same nav capabilities as the player-rigged Follower:
+// NPC Invader (Plans/ai_invader_plan.md). Link-skel hostile NPC.
+// Inherits the same nav capabilities as the AI Player Follower:
 // climbs ladders/vines/designated-walls, swims, broad-jumps, and uses
 // drop/jump anchors. The Invader is intentionally as athletic as Link
 // so it can keep pace with the player it's pursuing.
@@ -140,7 +140,7 @@ static NavTraits MakeInvaderTraits() {
 }
 
 static NavTraits MakeFollowerTraits() {
-    // AI Follower (ACTOR_EN_OE2 = DummyPlayer-derived):
+    // AI Player Follower (ACTOR_EN_OE2 = DummyPlayer-derived):
     //   - Follower owns its own leash + state machine; LeashRespawn is
     //     enemy-only by design.
     //   - Sticky targeting helps follower commit to a leader / enemy
@@ -232,11 +232,11 @@ static const std::unordered_map<s16, NavTraits>& GetOverrides() {
         // Freezard — slow turn rate; longer commit.
         { ACTOR_EN_FZ,       MakeFreezardTraits() },
 
-        // AI Follower. Two actor IDs map to the same traits:
+        // AI Player Follower. Two actor IDs map to the same traits:
         //   ACTOR_EN_OE2 — DummyPlayer (a REMOTE peer's Link, rendered
         //                  on this client; rare consumer of pathfinding
         //                  but harmless to include).
-        //   ACTOR_PLAYER — the LOCAL Link, when AI Follower mode is
+        //   ACTOR_PLAYER — the LOCAL Link, when AI Player Follower mode is
         //                  active. HandleStateFollow / RETURN /
         //                  COLLECT_ITEM call ComputePathTo with
         //                  `&player->actor`, whose id is ACTOR_PLAYER
@@ -286,7 +286,7 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
     // NPC Follower (Flotilla — Plans/npc_follower_plan.md). Dynamic
     // actor id assigned at runtime by ActorDB::AddBuiltInCustomActors,
     // so it can't appear in the static `overrides` map. Resolve here:
-    // NPC Follower mirrors the player-rigged Follower's traits (Link
+    // NPC Follower mirrors the AI Player Follower's traits (Link
     // skel, walks where Link walks, climbs where Link climbs).
     // ::gEnFollowerId — escape this file's AnchorNav namespace; the
     // global is C-linkage from src/code/z_play.c.
@@ -295,7 +295,7 @@ const NavTraits& GetTraitsForActor(s16 actorId) {
         return sFollowerNpcTraits;
     }
 
-    // AI Invader (Plans/ai_invader_plan.md). Same dynamic-id-resolution
+    // NPC Invader (Plans/ai_invader_plan.md). Same dynamic-id-resolution
     // pattern as the NPC Follower above: gEnInvaderId is allocated at
     // runtime so it can't live in the static overrides map. Inherits
     // Link-skel nav capabilities (climb / swim / drop / jump anchors)
@@ -346,7 +346,7 @@ uint16_t ResolveDynamicClimbMask(s16 actorId, uint16_t baseMask) {
             return (uint16_t)(baseMask | ::AnchorNavRoom::NODE_CLIMB_GENERIC_WALL);
         }
     }
-    // AI Invader: also inherits the local player's ClimbAnywhere cheat
+    // NPC Invader: also inherits the local player's ClimbAnywhere cheat
     // so the Invader can't be "out-cheated" by a player who enabled
     // the climb-anywhere cheat for themselves but the Invader is still
     // restricted to vanilla climb surfaces. Symmetry keeps the pursuit

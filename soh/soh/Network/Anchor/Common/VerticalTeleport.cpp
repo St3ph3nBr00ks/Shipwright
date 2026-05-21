@@ -13,7 +13,7 @@
  * follower-teleport reactivity. Per-frame re-fire while the climbing
  * flag holds.
  *
- * Shape A wiring (player-derived navigators / AI Follower) lands in
+ * Shape A wiring (player-derived navigators / AI Player Follower) lands in
  * commit 6b. Hang-state resolution lands in commit 6c. This commit
  * exposes the public predicates `IsTargetClimbing` and
  * `IsPlayerDerivedNavigator` so the Shape A wiring can dispatch
@@ -92,7 +92,7 @@ bool IsVerticalTeleportEnabled() {
 bool IsPlayerDerivedNavigator(const Actor* actor) {
     if (actor == nullptr) return false;
     // ACTOR_PLAYER is always Link-rigged. ACTOR_EN_OE2 is the
-    // DummyPlayer / AI Follower actor — same Player_Update path,
+    // DummyPlayer / AI Player Follower actor — same Player_Update path,
     // same input rig.
     return actor->id == ACTOR_PLAYER || actor->id == ACTOR_EN_OE2;
 }

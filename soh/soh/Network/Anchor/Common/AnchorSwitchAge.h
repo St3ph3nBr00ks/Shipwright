@@ -19,7 +19,7 @@
 //   Q 4.B.8 — confirm dialog skipped in v1; CVar
 //             CVAR_REMOTE_ANCHOR("SkipCrossTimelineConfirm") is reserved
 //             for the future polish pass when the dialog lands.
-//   Q 4.B.9 — AI Follower follows automatically because the local follower
+//   Q 4.B.9 — AI Player Follower follows automatically because the local follower
 //             shares gSaveContext.linkAge with the leader (see Pillar D
 //             "shared inventory with leader" decision in design doc).
 //             No explicit hook needed.

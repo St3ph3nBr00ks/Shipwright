@@ -210,7 +210,7 @@ struct EnemyNetId {
     //
     // Despite the struct's historical name (EnemyNetId), this extension is
     // the canonical "per-actor nav state" — attached to any navigator that
-    // participates, not only enemies. AI Follower (ACTOR_EN_OE2) and any
+    // participates, not only enemies. AI Player Follower (ACTOR_EN_OE2) and any
     // future Link-rigged navigator share it.
     //
     // navHeldKind discriminates the held-target representation:
@@ -503,12 +503,12 @@ class Anchor : public Network {
     bool isKillingNetworkActor = false;
 
     // Follower mode: non-host player's position is overridden to trail the host.
-    // Toggled via the Anchor settings menu (AI Follower checkbox).
+    // Toggled via the Anchor settings menu (AI Player Follower checkbox).
     // Deactivated by any controller input while active.
     bool followerActive = false;
 
     // NPC Follower (Flotilla — Plans/npc_follower_plan.md). Separate from
-    // followerActive above. The player-rigged Follower is "AFK mode"
+    // followerActive above. The AI Player Follower is "AFK mode"
     // (controls Link's body); the NPC Follower is a friendly Link-skel
     // companion that walks beside the player using NPC primitives.
     //
@@ -690,7 +690,7 @@ class Anchor : public Network {
     // breaks the deadlock. Resets to 0 on any non-hang frame.
     int             followerHangFrames            = 0;
 
-    // Bug 1 (user 2026-05-10 — "When P2 AI Follower attempts to climb onto
+    // Bug 1 (user 2026-05-10 — "When P2 AI Player Follower attempts to climb onto
     // a ledge, it lets go/drops down immediately, and disables the AI
     // Follower system"): post-climb-exit BTN_A mask hold counter. The
     // climb-state-flags mask at Follower.cpp:560-571 exempts BTN_A while

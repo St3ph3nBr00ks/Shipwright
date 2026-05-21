@@ -1,6 +1,6 @@
 /**
  * LocomotionAnim — shared animation-selection helpers for scripted-
- * position AI actors (NPC Follower, AI Invader).
+ * position AI actors (NPC Follower, NPC Invader).
  *
  * Phase 6 of the AI Actor Parity Plan (Plans/ai_actor_parity_plan.md).
  *

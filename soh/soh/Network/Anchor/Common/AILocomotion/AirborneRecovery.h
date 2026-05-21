@@ -1,6 +1,6 @@
 /**
  * AirborneRecovery — shared airborne-stuck detection for scripted-
- * position AI actors (NPC Follower, AI Invader).
+ * position AI actors (NPC Follower, NPC Invader).
  *
  * Mirrors NPC Follower's airborne-tracking block at
  * FollowerNPC.cpp:4188-4232. Two recovery triggers, OR'd:

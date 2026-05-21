@@ -1,13 +1,13 @@
 /**
- * AINavTest — Navigation Test Harness for AI Invader, NPC Follower,
- * and Player AI Follower.
+ * AINavTest — Navigation Test Harness for NPC Invader, NPC Follower,
+ * and AI Player Follower.
  *
  * Diagnostic infrastructure. Lets the user set a fixed spawn point at
  * their current location, then trigger a test run that:
  *   - Spawns or relocates NPC Follower at the spawn point.
- *   - Spawns or relocates AI Invader at the spawn point.
+ *   - Spawns or relocates NPC Invader at the spawn point.
  *   - Broadcasts a NAV_TEST_DIRECTIVE packet to P2 instructing P2 to
- *     teleport to the spawn point and enable AI Follower mode.
+ *     teleport to the spawn point and enable AI Player Follower mode.
  *   - Disables combat across all three actors (so the trace is pure
  *     locomotion, no ATTACK/RANGED_ATTACK/etc. cycles).
  *   - Starts a per-run timer.
@@ -68,7 +68,7 @@ bool IsRunActive();
 
 // P2-side counterpart of IsRunActive. True for kP2TestActiveTimeoutMs
 // after this client receives a NAV_TEST_DIRECTIVE RUN packet. Used by
-// the Player AI Follower's reach detector — P2 doesn't have a run
+// the AI Player Follower's reach detector — P2 doesn't have a run
 // record in sRunHistory; this flag tells it "yes, I'm participating".
 bool IsP2InTestMode();
 

@@ -3,7 +3,7 @@
  *
  * Plan §9. Two integration shapes share a CVar:
  *
- *   Shape A (player-derived) — AI Follower / DummyPlayer / future Link-
+ *   Shape A (player-derived) — AI Player Follower / DummyPlayer / future Link-
  *   rigged ally NPCs ride OoT's climb state machine via injected input.
  *   The existing follower CLIMBING pipeline at HookHandlers.cpp produces
  *   the real climb animation, real physics, vine lateral tracking.
@@ -83,7 +83,7 @@ bool IsTargetClimbing(const Actor* target);
 
 // True when `actor` is a Link-rigged navigator (Shape A applies);
 // false otherwise (Shape B applies). v1 list: ACTOR_PLAYER and
-// ACTOR_EN_OE2 (DummyPlayer / AI Follower). Future Link-rigged ally
+// ACTOR_EN_OE2 (DummyPlayer / AI Player Follower). Future Link-rigged ally
 // NPCs join via additional entries.
 bool IsPlayerDerivedNavigator(const Actor* actor);
 

@@ -1,5 +1,5 @@
 /**
- * AI Follower Diagnostic Recorder — per-frame JSONL capture of follower
+ * AI Player Follower Diagnostic Recorder — per-frame JSONL capture of follower
  * decision state for post-hoc debug analysis.
  *
  * Spec: Claude/Plans/follower_recorder_plan.md.

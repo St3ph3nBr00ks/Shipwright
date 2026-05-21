@@ -5,7 +5,7 @@
  * Plan: Plans/npc_follower_plan.md.
  *
  * Why this lives outside the Anchor's COND_HOOK:
- *   - The player-rigged AI Follower (Anchor::SetFollowerActive +
+ *   - The AI Player Follower (Anchor::SetFollowerActive +
  *     friends in HookHandlers.cpp) is non-host-only by design and
  *     gates all its ticks on isConnected. The NPC Companion is a
  *     general enhancement that should work in single-player too.
@@ -67,7 +67,7 @@ void OnGameFrameUpdateNpcCompanion() {
 // doors, no duplication.
 //
 // This pattern (persistent actor + per-tick room sync) is the
-// reusable mechanism for AI Invader cross-room pursuit. Engine-
+// reusable mechanism for NPC Invader cross-room pursuit. Engine-
 // level scene transitions still kill all actors; system-level
 // state (CVar / Invader-active flag) drives respawn in the new
 // scene. Cross-room within a scene is handled entirely by the

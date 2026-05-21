@@ -1,5 +1,5 @@
 /**
- * AI Follower Diagnostic Recorder — implementation.
+ * AI Player Follower Diagnostic Recorder — implementation.
  *
  * Spec: Claude/Plans/follower_recorder_plan.md.
  */

@@ -47,7 +47,7 @@ enum NodeFlags : uint16_t {
     NODE_CRAWLSPACE      = 0x200, // walkable but accessible only via crawlspace traversal (low-clearance
                                   // tunnel; navigator must be in PLAYER_STATE2_CRAWLING). Tagged by
                                   // proximity to a CrawlspaceAnchor. Only child-Link-rigged navigators
-                                  // (AI Follower, AI Invader child variant) can use these — adult Link
+                                  // (AI Player Follower, NPC Invader child variant) can use these — adult Link
                                   // and most enemies cannot crawl. Consumer-side gating per NavTraits.
 
     // Climb-surface nodes (schema v7+). Each climb-surface node lies ON a
@@ -140,7 +140,7 @@ struct ClimbAnchor {
 // where the navigator ends up after the climb-up. A wall exists between
 // the two (the ledge edge that gets grabbed).
 //
-// Consumer pattern (Phase 2): only Link-rigged navigators (AI Follower,
+// Consumer pattern (Phase 2): only Link-rigged navigators (AI Player Follower,
 // future allied NPCs) can use ledge grab — it's an engine-level Link
 // state, not generally available to enemies. NavTraits.eligibleForLedgeGrab
 // gates per-navigator opt-in.
@@ -159,8 +159,8 @@ struct LedgeAnchor {
 // normals along the path.
 //
 // NavTraits gate (Phase 2): consumer must have `useCrawlspaces = true`
-// to traverse these. Only child-Link-rigged navigators (AI Follower,
-// AI Invader child variant) qualify; adult-rigged or non-Link
+// to traverse these. Only child-Link-rigged navigators (AI Player Follower,
+// NPC Invader child variant) qualify; adult-rigged or non-Link
 // navigators (most enemies, bosses) skip them.
 struct CrawlspaceAnchor {
     Vec3f entryPos;      // approximate centroid of the crawlspace-flagged wall(s)
@@ -182,7 +182,7 @@ struct CrawlspaceAnchor {
 //   - MovementClear from highPos to landingPos SUCCEEDS (no wall in
 //     between — opposite of the ledge predicate)
 //
-// Consumer use: future autonomous navigators (AI Invader) descending
+// Consumer use: future autonomous navigators (NPC Invader) descending
 // from a high walkable area to a lower one. Pairs naturally with
 // climb anchors for round-trip routes (climb up here → drop down
 // there). NavTraits gates per-navigator opt-in.
@@ -219,7 +219,7 @@ struct DropAnchor {
 // edges). BFS path refreshes fire several times per minute during
 // chase; pre-fix each refresh rebuilt the full adjacency from
 // scratch. Cache key includes every parameter that BuildAdjacency
-// reads, so different consumers (current: AI Follower; future: AI
+// reads, so different consumers (current: AI Player Follower; future: AI
 // Invader, synced enemies) coexist in the cache without thrash.
 struct AdjacencyCacheKey {
     uint16_t climbSurfaceMask = 0;
@@ -389,7 +389,7 @@ int FindNearestNode(const RoomNavData* data, const Vec3f& pos,
 // Multi-agent local avoidance placeholder (2026-05-13).
 //
 // PLACEHOLDER ONLY. The real implementation is deferred until there are
-// multiple AI agents in the same room (AI Invader landing alongside the
+// multiple AI agents in the same room (NPC Invader landing alongside the
 // Follower). At that point this will be replaced with an RVO/ORCA-style
 // reciprocal-velocity-obstacle pass that adjusts each agent's velocity
 // to avoid colliding with neighbors while still pursuing their goal.
@@ -519,7 +519,7 @@ int FindRandomReachableNode(const RoomNavData* data,
 // Parameters:
 //   `eligibleForSwimming`: when false, NODE_UNDERWATER nodes are rejected
 //     as both pass-through and destination. When true (Link-rigged
-//     navigators: AI Follower, NPC Invader), underwater nodes are valid.
+//     navigators: AI Player Follower, NPC Invader), underwater nodes are valid.
 //   `avoidHazardNodes`: when true (default for most navigators), the BFS
 //     limits hazard-node traversal to kHazardEscapeHops (= 2) — a path
 //     that crosses 1-2 hazard cells before exiting is fine, but deeper
@@ -642,8 +642,8 @@ void ForceRescanCurrentRoom();
 // traversal, not a descent or sibling drop). Returns true and writes
 // the anchor's basePos / topPos to `outBase` / `outTop` on hit.
 //
-// Used by autonomous-climb-engagement consumers (AI Follower's FOLLOW
-// state, future AI Invader) to detect "I'm at a ladder / vine wall /
+// Used by autonomous-climb-engagement consumers (AI Player Follower's FOLLOW
+// state, future NPC Invader) to detect "I'm at a ladder / vine wall /
 // climbable surface and the path I want goes up." Pure read; no graph
 // mutation.
 bool FindClimbAnchorAbove(const RoomNavData* data,
@@ -660,7 +660,7 @@ bool FindClimbAnchorAbove(const RoomNavData* data,
 // bounds; false otherwise (position is laterally or vertically outside
 // the grid extent).
 //
-// Used by CLIMBING-aware stick injection (AI Follower edge-prediction):
+// Used by CLIMBING-aware stick injection (AI Player Follower edge-prediction):
 // "if I move in direction D, will the predicted cell still be on the
 // wall?" Project current pos and predicted-next pos, look up cells.
 bool ProjectPositionToAnchorCell(const ClimbAnchor& anchor,
@@ -692,7 +692,7 @@ bool AnchorCellExists(const RoomNavData* data, const ClimbAnchor& anchor,
 //
 // Position-match doesn't suffer this: a path waypoint's `pos` is copied
 // verbatim from `data->nodes[i].pos`, so direct equality (or near-
-// equality within `tolerance`) is robust. Used by Player AI Follower's
+// equality within `tolerance`) is robust. Used by AI Player Follower's
 // substrate-path climb engagement.
 //
 // Cost: O(total climb nodes). Typical scene has ~500 climb nodes total,
@@ -709,7 +709,7 @@ uint16_t FindAnchorByClimbNodePosition(const RoomNavData* data,
 // Returns -1 if no floor matches. XZ proximity for the "near the
 // reference position" criterion + Y delta for the "at the right
 // altitude" criterion. Used by Stage 3 boundary-edge generation
-// (per-cell nearest floor) and by AI Follower dismount-direction
+// (per-cell nearest floor) and by AI Player Follower dismount-direction
 // resolution (toward floor near anchor.topPos).
 int FindNearestFloorNodeXZRadius(const RoomNavData* data,
                                   const Vec3f& pos,

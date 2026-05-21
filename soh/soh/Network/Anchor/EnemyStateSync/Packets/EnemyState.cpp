@@ -51,7 +51,7 @@ extern "C" {
 // Per-torch lit-state sync — host-authoritative `litTimer` so partial
 // multi-torch puzzle progress is visible across clients.
 #include "overlays/actors/ovl_Obj_Syokudai/z_obj_syokudai.h"
-// AI Invader state-machine sync (2026-05-20, bug 2 log 67) —
+// NPC Invader state-machine sync (2026-05-20, bug 2 log 67) —
 // peer-replica anim sync via ENEMY_STATE extras.
 #include "src/overlays/actors/ovl_En_Invader/z_en_invader.h"
 extern PlayState* gPlayState;
@@ -163,7 +163,7 @@ struct EnemyUpdateExtras {
     bool hasSyokudai     = false;
     s16  syokudaiLitTimer = 0;
 
-    // AI Invader state-machine sync (2026-05-20, bug 2 log 67). Peer
+    // NPC Invader state-machine sync (2026-05-20, bug 2 log 67). Peer
     // replicas need the owner's state + walk speed to pick the right
     // anim (CLIMBING / FOLLOW / fidget / DEAD) instead of running the
     // local state machine which always derives IDLE from peer's
@@ -294,7 +294,7 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.hasSyokudai       = true;
         e.syokudaiLitTimer  = torch->litTimer;
     } else if (gEnInvaderId != 0 && actor->id == gEnInvaderId) {
-        // AI Invader is a runtime-allocated custom actor (not a vanilla
+        // NPC Invader is a runtime-allocated custom actor (not a vanilla
         // ACTOR_ENUM), so the dispatch keys on the gEnInvaderId global
         // rather than a compile-time constant. State/speed/etc. drive
         // peer-replica anim selection (Anchor_TickInvaderActor's peer
@@ -637,7 +637,7 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         payload["dekunutsAnimFlagAndTimer"] = (int)extras.dekunutsAnimFlagAndTimer;
     }
 
-    // AI Invader state-machine sync (2026-05-20, bug 2 log 67).
+    // NPC Invader state-machine sync (2026-05-20, bug 2 log 67).
     if (extras.hasInvader) {
         payload["invaderState"]         = extras.invaderState;
         payload["invaderSpeedXZ"]       = extras.invaderSpeedXZ;
@@ -1345,7 +1345,7 @@ actor_found:
         }
     }
 
-    // AI Invader peer-replica anim sync (2026-05-20, bug 2 log 67).
+    // NPC Invader peer-replica anim sync (2026-05-20, bug 2 log 67).
     // Owner-side broadcasts state / speed / hoistContext / deathCause;
     // peer-side stores them on the EnInvader for the dispatcher's
     // peer-replica branch to consume. Write only when our local

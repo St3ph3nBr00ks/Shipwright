@@ -47,8 +47,8 @@ static void FlotillaNavTestStatsWidget(WidgetInfo& info) {
         }
     };
     renderRow("NPC Follower", AINavTest::ComputeNpcFollowerStats());
-    renderRow("AI Invader  ", AINavTest::ComputeAIInvaderStats());
-    renderRow("AI Follower ", AINavTest::ComputeAIFollowerStats());
+    renderRow("NPC Invader  ", AINavTest::ComputeAIInvaderStats());
+    renderRow("AI Player Follower ", AINavTest::ComputeAIFollowerStats());
 
     if (!history.empty()) {
         const auto& last = history.back();
@@ -58,8 +58,8 @@ static void FlotillaNavTestStatsWidget(WidgetInfo& info) {
             return ms >= 0 ? std::to_string(ms) + "ms" : std::string("(not reached)");
         };
         ImGui::Text("  NPC Follower: %s", fmtMs(last.npcFollowerMs).c_str());
-        ImGui::Text("  AI Invader:   %s", fmtMs(last.aiInvaderMs).c_str());
-        ImGui::Text("  AI Follower:  %s", fmtMs(last.aiFollowerMs).c_str());
+        ImGui::Text("  NPC Invader:   %s", fmtMs(last.aiInvaderMs).c_str());
+        ImGui::Text("  AI Player Follower:  %s", fmtMs(last.aiFollowerMs).c_str());
         ImGui::Text("  Status:       %s",
                     last.completedOrDNF ? "Completed / DNF" : "In progress");
     }
@@ -130,13 +130,13 @@ void SohMenu::AddMenuFlotilla() {
     // SohMenuSettings.cpp is still #if 0'd pending the audio routing and
     // verb-agreement work. Re-enable here when those land.
 
-    AddWidget(path, "AI Follower (non-host only)", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "AI Player Follower (non-host only)", WIDGET_SEPARATOR_TEXT);
 
-    // AI Follower — dev testing tool, non-host only. Activates the P2
+    // AI Player Follower — dev testing tool, non-host only. Activates the P2
     // shadow-AI that auto-follows P1 and engages nearby enemies. Hidden
     // when the local client is the effective host so the menu stays
     // consistent across host migrations.
-    AddWidget(path, "AI Follower (AFK mode - controls Link)", WIDGET_CUSTOM)
+    AddWidget(path, "AI Player Follower (AFK mode - controls Link)", WIDGET_CUSTOM)
         .HideInSearch(true)
         .CustomFunction([](WidgetInfo& info) {
             auto anchor = Anchor::Instance;
@@ -144,7 +144,7 @@ void SohMenu::AddMenuFlotilla() {
                 return;
             }
             bool followerActive = anchor->IsFollowerActive();
-            if (UIWidgets::Checkbox("AI Follower (AFK mode - controls Link)", &followerActive,
+            if (UIWidgets::Checkbox("AI Player Follower (AFK mode - controls Link)", &followerActive,
                                     UIWidgets::CheckboxOptions()
                                         .Color(THEME_COLOR)
                                         .Tooltip("P2 automatically follows P1 and engages nearby enemies. "
@@ -492,7 +492,7 @@ void SohMenu::AddMenuFlotilla() {
             "Spawn a Link-skel NPC that walks beside you using player-like navigation. "
             "Pure pathfinding in v1 - no combat, invulnerable. Substrate path-driven; "
             "routes around obstacles instead of pressing into them.\n\n"
-            "Independent of the AI Follower in Flotilla -> Player (which is the AFK-mode "
+            "Independent of the AI Player Follower in Flotilla -> Player (which is the AFK-mode "
             "tool that hijacks Link's body and is non-host-only). The NPC Companion works "
             "in single-player AND as host.\n\n"
             "Toggle ON spawns the NPC at your current position; toggle OFF despawns. "
@@ -526,7 +526,7 @@ void SohMenu::AddMenuFlotilla() {
         .CVar(CVAR_ENHANCEMENT("AI.NavTest.Enabled"))
         .Options(CheckboxOptions().Tooltip(
             "Master gate for the Navigation Test Harness. When enabled, "
-            "AI Invader / NPC Follower / Player AI Follower honor the "
+            "NPC Invader / NPC Follower / AI Player Follower honor the "
             "harness's combat-disable + reach-detection logic. "
             "Disable when not testing - vanilla AI resumes."));
 
@@ -539,11 +539,11 @@ void SohMenu::AddMenuFlotilla() {
                               "Keeps the locomotion trace clean.")
                      .DefaultValue(true));
 
-    AddWidget(path, "Include AI Follower (P2)", WIDGET_CVAR_CHECKBOX)
+    AddWidget(path, "Include AI Player Follower (P2)", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("AI.NavTest.IncludeAIFollower"))
         .Options(CheckboxOptions()
                      .Tooltip("Broadcast NAV_TEST_DIRECTIVE to P2 on Run Test "
-                              "(P2 teleports to spawn + enables AI Follower mode). "
+                              "(P2 teleports to spawn + enables AI Player Follower mode). "
                               "Disable for single-client tests.")
                      .DefaultValue(true));
 
@@ -557,8 +557,8 @@ void SohMenu::AddMenuFlotilla() {
 
     AddWidget(path, "Run Test", WIDGET_BUTTON)
         .Options(ButtonOptions().Tooltip(
-            "Spawn or relocate NPC Follower + AI Invader at the spawn "
-            "point, broadcast RUN to P2 (if Include AI Follower is on), "
+            "Spawn or relocate NPC Follower + NPC Invader at the spawn "
+            "point, broadcast RUN to P2 (if Include AI Player Follower is on), "
             "and start the run timer. Press again to start a new run "
             "(actors are relocated, not respawned)."))
         .Callback([](WidgetInfo& info) {
@@ -568,7 +568,7 @@ void SohMenu::AddMenuFlotilla() {
     AddWidget(path, "Kill All Enemies in Current Room", WIDGET_BUTTON)
         .Options(ButtonOptions().Tooltip(
             "Calls Actor_Kill on every ACTORCAT_ENEMY actor in the "
-            "current room EXCEPT AI Invader instances (which are kept "
+            "current room EXCEPT NPC Invader instances (which are kept "
             "alive as test agents)."))
         .Callback([](WidgetInfo& info) {
             AINavTest::KillAllEnemiesInRoom(gPlayState);

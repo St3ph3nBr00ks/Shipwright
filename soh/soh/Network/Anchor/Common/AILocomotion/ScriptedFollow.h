@@ -1,10 +1,10 @@
 /**
  * ScriptedFollow — shared substrate-path-driven FOLLOW step for the
- * scripted-position AI actors (NPC Follower, AI Invader).
+ * scripted-position AI actors (NPC Follower, NPC Invader).
  *
  * Phase 5 of the AI Actor Parity Plan (Plans/ai_actor_parity_plan.md).
  *
- * After Phase 3 ported both NPC Follower and AI Invader through
+ * After Phase 3 ported both NPC Follower and NPC Invader through
  * NavOrDirect, their TickFOLLOW handlers became ~85% structurally
  * identical:
  *   1. Resolve trail key (per-actor: friendly NPC uses owner clientId;

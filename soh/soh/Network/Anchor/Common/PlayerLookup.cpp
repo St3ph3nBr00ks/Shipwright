@@ -132,7 +132,7 @@ int GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount) {
 }
 
 // ---------------------------------------------------------------------------
-// PickHostileTargetForInvader — multi-player target picker for AI Invader.
+// PickHostileTargetForInvader — multi-player target picker for NPC Invader.
 // ---------------------------------------------------------------------------
 //
 // Walks the local actor list (local Player + ACTORCAT_NPC DummyPlayers +

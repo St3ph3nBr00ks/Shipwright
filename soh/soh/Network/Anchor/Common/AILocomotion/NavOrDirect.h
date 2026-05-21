@@ -1,12 +1,12 @@
 /**
  * NavOrDirect — shared substrate-path consumption helper for the three
- * AI actors (Player AI Follower, NPC Follower, AI Invader).
+ * AI actors (AI Player Follower, NPC Follower, NPC Invader).
  *
  * Replaces the inline substrate-path consumption code that previously
  * lived independently in each actor's TickFOLLOW / TickENGAGE. The
- * three implementations had drifted apart: AI Invader's ENGAGE used
+ * three implementations had drifted apart: NPC Invader's ENGAGE used
  * direct-yaw (no substrate at all), NPC Follower's ENGAGE same, and
- * Player AI Follower had two parallel implementations across
+ * AI Player Follower had two parallel implementations across
  * Follower.cpp and HookHandlers.cpp.
  *
  * This module consolidates the navigation policy into one decision:
@@ -16,8 +16,8 @@
  *
  * Mechanism-agnostic. Returns a Vec3f subgoal and a fallback enum.
  * Callers translate the subgoal into their own motion mechanism:
- *   - NPC Follower / AI Invader: write speedXZ + world.rot.y.
- *   - Player AI Follower: convert to camera-relative stick input + inject.
+ *   - NPC Follower / NPC Invader: write speedXZ + world.rot.y.
+ *   - AI Player Follower: convert to camera-relative stick input + inject.
  *
  * The 60u universal direct-yaw threshold lives here. The water-gate
  * (skip substrate when in water) lives here. The fallback selection
@@ -31,8 +31,8 @@
  *
  * Reference implementations this module consolidates:
  *   FollowerNPC.cpp:980-1034   — NPC Follower TickFOLLOW (most current).
- *   Invader.cpp:838-933        — AI Invader TickFOLLOW.
- *   Follower.cpp:4080-4124     — Player AI Follower pursuit planner.
+ *   Invader.cpp:838-933        — NPC Invader TickFOLLOW.
+ *   Follower.cpp:4080-4124     — AI Player Follower pursuit planner.
  */
 
 #pragma once
@@ -51,7 +51,7 @@ namespace AnchorAI {
 // direct-yaw locomotion regardless of nav-mesh availability — the
 // substrate path planner's fine-grained obstacle avoidance is not
 // worth the BFS cost at close range, and most strike-range combat
-// (≤70u for NPC Follower / AI Invader, similar for Player Follower)
+// (≤70u for NPC Follower / NPC Invader, similar for Player Follower)
 // already overlaps this band.
 //
 // Field-tuned at 60u (2026-05-18). Below this, callers should write
@@ -86,7 +86,7 @@ enum class PathEmptyFallback : uint8_t {
 
 // Caller-supplied policy. Each actor type configures which fallbacks
 // apply (Player Follower / NPC Follower never use RetreatHostile;
-// AI Invader never uses ReturnToLeader; etc.).
+// NPC Invader never uses ReturnToLeader; etc.).
 //
 // Multiple fallback classes can be true simultaneously; the helper picks
 // the highest-priority applicable one. Priority order: DirectYaw (inside
@@ -95,7 +95,7 @@ enum class PathEmptyFallback : uint8_t {
 struct FallbackPolicy {
     bool hasRangedReady    = false;  // actor has bow/slingshot + ammo + LOS to target
     bool isFriendlyActor   = false;  // Player Follower or NPC Follower
-    bool isHostileActor    = false;  // AI Invader (mutually exclusive with isFriendlyActor)
+    bool isHostileActor    = false;  // NPC Invader (mutually exclusive with isFriendlyActor)
     // Optional override: skip nav-mesh entirely (force direct-yaw + fallback selection).
     // Used by callers that have local knowledge of nav-data unavailability
     // (e.g. unscanned scene).

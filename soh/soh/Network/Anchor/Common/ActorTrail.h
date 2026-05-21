@@ -4,7 +4,7 @@
  * Foundation for the navigation system's "breadcrumb" pursuit: when a
  * navigator loses line-of-sight to its target, it can fall back to the
  * trail of recent positions the target left behind. Players are the
- * primary trailed entities, but synced enemies and AI Followers also
+ * primary trailed entities, but synced enemies and AI Player Followers also
  * leave trails when their NavTraits.leavesTrail is true — see
  * feedback_nav_helpers_entity_agnostic.md.
  *

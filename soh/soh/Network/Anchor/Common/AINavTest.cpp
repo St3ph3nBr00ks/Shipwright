@@ -228,7 +228,7 @@ void RunTest() {
     // a fresh save / first-time test with default-off CVars falls back
     // to direct-yaw pursuit on P1's nav consumers (NPC Follower + AI
     // Invader), defeating the harness's purpose. P2's RUN handler does
-    // the same enable for the Player AI Follower's nav consumer.
+    // the same enable for the AI Player Follower's nav consumer.
     EnableAllNavDataUsageFeatures();
 
     // ── 1. NPC Follower: spawn or relocate ────────────────────────
@@ -273,7 +273,7 @@ void RunTest() {
     }
     CVSet(CVAR_ENHANCEMENT("AI.FollowerNPC.Enabled"), 1);
 
-    // ── 2. AI Invader: spawn or relocate ──────────────────────────
+    // ── 2. NPC Invader: spawn or relocate ──────────────────────────
     // Find an existing Invader in the scene (we don't track a pointer
     // for it; walk the actor list).
     Actor* invader = nullptr;
@@ -290,7 +290,7 @@ void RunTest() {
     if (invader != nullptr) {
         invader->world.pos = spawnPos;
         invader->velocity.x = invader->velocity.y = invader->velocity.z = 0.0f;
-        SPDLOG_INFO("[NavTest] AI Invader relocated to spawn point");
+        SPDLOG_INFO("[NavTest] NPC Invader relocated to spawn point");
     } else if (gEnInvaderId != 0) {
         Actor* spawned = Actor_Spawn(
             &gPlayState->actorCtx, gPlayState, gEnInvaderId,
@@ -299,7 +299,7 @@ void RunTest() {
         if (spawned == nullptr) {
             SPDLOG_WARN("[NavTest] Actor_Spawn(gEnInvaderId) returned null");
         } else {
-            SPDLOG_INFO("[NavTest] AI Invader spawned at spawn point");
+            SPDLOG_INFO("[NavTest] NPC Invader spawned at spawn point");
         }
     }
 
@@ -339,7 +339,7 @@ void KillAllEnemiesInRoom(PlayState* play) {
     Actor* it = play->actorCtx.actorLists[ACTORCAT_ENEMY].head;
     while (it != nullptr) {
         Actor* next = it->next;
-        // Skip our test agents — AI Invader is ACTORCAT_ENEMY but we
+        // Skip our test agents — NPC Invader is ACTORCAT_ENEMY but we
         // explicitly want it alive for the test.
         if (gEnInvaderId != 0 && it->id == gEnInvaderId) {
             skipped++;
@@ -375,7 +375,7 @@ void ReportAIInvaderReach() {
     auto& run = sRunHistory[sActiveRunIndex];
     if (run.aiInvaderMs >= 0) return;
     run.aiInvaderMs = CurrentRunElapsedMs();
-    SPDLOG_INFO("[NavTest] Run {} AI Invader reached in {}ms",
+    SPDLOG_INFO("[NavTest] Run {} NPC Invader reached in {}ms",
                 sActiveRunIndex, run.aiInvaderMs);
 }
 
@@ -389,7 +389,7 @@ void ReportAIFollowerReach(int reportedMsFromP2) {
     run.aiFollowerMs = (reportedMsFromP2 > 0)
         ? reportedMsFromP2
         : CurrentRunElapsedMs();
-    SPDLOG_INFO("[NavTest] Run {} AI Follower (P2) reached in {}ms "
+    SPDLOG_INFO("[NavTest] Run {} AI Player Follower (P2) reached in {}ms "
                 "(source: {})",
                 sActiveRunIndex, run.aiFollowerMs,
                 reportedMsFromP2 > 0 ? "P2-measured" : "P1-measured");
@@ -455,7 +455,7 @@ void Tick() {
 void OnSceneSpawnActors() {
     // Currently a no-op — the only cached pointer in this module
     // (mFollowerNpcLocalActor) is already cleared by NPC Follower's
-    // own OnSceneSpawnActors hook in NpcCompanionInit.cpp. AI Invader
+    // own OnSceneSpawnActors hook in NpcCompanionInit.cpp. NPC Invader
     // is found by walking the actor list, so no pointer to clear.
     //
     // Reserved for future use (e.g. when we cache the spawned NPC

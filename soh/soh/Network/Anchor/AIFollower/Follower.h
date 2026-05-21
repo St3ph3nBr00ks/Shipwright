@@ -1,5 +1,5 @@
 /**
- * AiFollower / Follower — dedicated module for AI Follower state and
+ * AiFollower / Follower — dedicated module for AI Player Follower state and
  * behaviour. Extracted from HookHandlers.cpp per the SRP refactor
  * tracked at GitHub #173 + #169.
  *
@@ -14,7 +14,7 @@
  * Anchor nav helpers (ActorTrail::ComputePathTo, TargetSelection,
  * GroundFollowing, JumpResolver). At the end of Phase 2 the follower
  * will route through the same nav substrate that synced enemies and
- * AI Invader use, and the bespoke path code disappears.
+ * NPC Invader use, and the bespoke path code disappears.
  *
  * Naming: namespace `AnchorFollower` — flat single-namespace per
  * project convention (do not nest under `Anchor`; conflicts with
@@ -24,7 +24,7 @@
  *   - Plans/anchor_code_decoupling.md (#173 — module-extraction tracker)
  *   - Plans/ai_follower_enhancements_plan.md (roadmap)
  *   - Plans/nav_system_implementation_plan.md (Phase 2 consumer wiring)
- *   - GitHub #169 (AI Follower demo-ready improvements parent tracker)
+ *   - GitHub #169 (AI Player Follower demo-ready improvements parent tracker)
  */
 
 #pragma once

@@ -1,6 +1,6 @@
 /**
  * InvaderDescriptor — Director-side spawn-decision adapter for the
- * future AI Invader (ACTOR_EN_INVADER, ACTORCAT_NPC, hostile-NPC
+ * future NPC Invader (ACTOR_EN_INVADER, ACTORCAT_NPC, hostile-NPC
  * sibling of the NPC Follower).
  *
  * **Step 11 scope**: scaffold only.

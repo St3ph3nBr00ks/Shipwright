@@ -321,7 +321,7 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
         adjacency[e.fromIdx].push_back(e.toIdx);
         adjacency[e.toIdx].push_back(e.fromIdx);
     }
-    // P3.8 (user 2026-05-09 — "AI Follower is not targeting ladders
+    // P3.8 (user 2026-05-09 — "AI Player Follower is not targeting ladders
     // and climbable surfaces as part of its pathfinding"): inject
     // bidirectional edges between each climb anchor's base and top
     // nodes. The floodfill edge graph only contains step-up-allowed
@@ -388,7 +388,7 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
     // Per-actor gate is intentionally OFF for v1 — every consumer
     // gets ledge edges. Enemies that can't grab ledges will still
     // get stuck at the wall the same as before (no regression);
-    // Link-rigged AI Follower benefits via the mantle injection.
+    // Link-rigged AI Player Follower benefits via the mantle injection.
     // Revisit if a NavTraits.useLedgeAnchors gate becomes necessary.
     for (const LedgeAnchor& a : data->ledgeAnchors) {
         int ap = FindNearestNode(data, a.approachPos);
@@ -543,8 +543,8 @@ BuildAdjacencyList(const RoomNavData* data, uint16_t climbSurfaceMask = 0,
 // invalidated by erase/push_back during later runs, but those earlier
 // callers no longer hold references.
 //
-// Bounded to 5 entries — current consumer set is small (AI Follower
-// only). Future consumers (AI Invader, synced enemies with different
+// Bounded to 5 entries — current consumer set is small (AI Player Follower
+// only). Future consumers (NPC Invader, synced enemies with different
 // traits) coexist without thrash up to this cap; beyond it, FIFO
 // eviction churns the oldest entry. Tune kMaxAdjacencyCacheEntries
 // upward if consumer count grows past 5 distinct trait combinations.
@@ -1890,7 +1890,7 @@ static bool IsHazardousSurface(CollisionPoly* poly, s32 bgId, CollisionContext* 
 
 // Water-volume detection. Returns true if the (x, floorY, z) sample lies
 // below a water surface — i.e., the floor at that XZ is submerged.
-// Swim-capable navigators (Link-rigged: AI Follower, NPC Invader) traverse
+// Swim-capable navigators (Link-rigged: AI Player Follower, NPC Invader) traverse
 // underwater nodes; non-swimming navigators skip them via NavTraits filter.
 static bool IsUnderwater(f32 x, f32 floorY, f32 z, PlayState* play) {
     f32 waterSurfaceY = 0.0f;
@@ -3465,7 +3465,7 @@ static void DetectInterAnchorClimbBridges(RoomNavData* out) {
 // True ledges have a wall blocking the line test.
 //
 // Phase 1 (this commit) populates `ledgeAnchors` and supports debug-draw
-// visualization. Phase 2 (separate commit) wires AI Follower to USE the
+// visualization. Phase 2 (separate commit) wires AI Player Follower to USE the
 // anchors via jump-injection in HookHandlers.cpp's input hook.
 // ---------------------------------------------------------------------------
 
@@ -3727,7 +3727,7 @@ static void DetectCrawlspaces(
 // ledge clustering).
 //
 // Phase 1: detection + viz only. Phase 2 wires consumers (autonomous
-// nav for AI Invader / similar) to actually USE drop anchors as
+// nav for NPC Invader / similar) to actually USE drop anchors as
 // descent edges in pathfinding. NavTraits gates per-navigator opt-in;
 // adult Link can survive larger drops than child Link.
 // ---------------------------------------------------------------------------
@@ -4624,7 +4624,7 @@ static int ClassifyAndAddNode(RoomNavData* nav,
 
     // Underwater classification (commit 5) — water-volume detection via
     // WaterBox_GetSurface1. Underwater nodes are walkable for swim-capable
-    // navigators (Link-rigged: AI Follower, NPC Invader) and skipped by
+    // navigators (Link-rigged: AI Player Follower, NPC Invader) and skipped by
     // non-swimming navigators at consumer-side via the NavTraits filter.
     if (IsUnderwater(x, floorY, z, play)) {
         flags |= NODE_UNDERWATER;
@@ -6924,7 +6924,7 @@ static void OnDebugDrawRender() {
     // for forward-compat with parallel workstreams that may add their own
     // groups.
     // ActorTrail breadcrumb upper bound — kMaxWaypoints (30) per entity ×
-    // peak entity set (~8 = local player + remote DummyPlayers + AI Follower
+    // peak entity set (~8 = local player + remote DummyPlayers + AI Player Follower
     // + synced enemies with leavesTrail=true). Each marker is a 2-quad
     // vertical post → 8 verts + 2 Gfx commands. Reserve slop is fine; the
     // capacity-overshoot is a one-time scene-change allocation.

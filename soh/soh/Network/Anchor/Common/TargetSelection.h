@@ -2,7 +2,7 @@
  * TargetSelection — sticky target acquisition with hysteresis.
  *
  * The navigation system's "decide who to chase" layer. Any navigator
- * (synced enemy, AI Follower, future ally NPC) calls AcquireOrHoldTarget
+ * (synced enemy, AI Player Follower, future ally NPC) calls AcquireOrHoldTarget
  * to pick a target from a candidate pool (players, enemies, custom set);
  * the result is held for `targetStickyFrames` (per-actor NavTraits row,
  * default 120 ≈ 2s @ 60fps) before re-evaluation. Re-evaluation only

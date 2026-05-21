@@ -140,7 +140,7 @@ void SohMenu::AddMenuDevTools() {
                      .DefaultValue(true));
     AddWidget(path, "Warp Points", WIDGET_CUSTOM).CustomFunction(WarpPointsWidget).HideInSearch(true);
 
-    // Scene Log + AI Follower Recorder + Player Recorder moved to
+    // Scene Log + AI Player Follower Recorder + Player Recorder moved to
     // Flotilla -> Scene Info and Flotilla -> Player tabs. See SohMenuFlotilla.cpp.
 
     // Stats

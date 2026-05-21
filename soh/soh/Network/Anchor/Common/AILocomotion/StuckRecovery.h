@@ -1,9 +1,9 @@
 /**
  * StuckRecovery — shared TickSTUCK dispatch for scripted-position AI
- * actors (NPC Follower, AI Invader; future hostile / friendly actors
+ * actors (NPC Follower, NPC Invader; future hostile / friendly actors
  * with substrate paths).
  *
- * The NPC Follower and AI Invader TickSTUCK functions had drifted into
+ * The NPC Follower and NPC Invader TickSTUCK functions had drifted into
  * near-duplicate copies of the same three-tier recovery body:
  *
  *   Cycle 1 (default)             — yaw-nudge toward target + path reset
@@ -62,7 +62,7 @@ namespace AnchorAI {
 // path reset the caller wants. The helper does NOT reset the path
 // itself for the teleport tier because consumers' teleport semantics
 // differ (e.g. NPC Follower's TeleportNpcTo wraps cross-scene
-// handling; AI Invader does inline pos + Actor_UpdateBgCheckInfo).
+// handling; NPC Invader does inline pos + Actor_UpdateBgCheckInfo).
 //
 // `reason` is "next subgoal" when the dest is the path's current
 // waypoint, "fallback (path empty)" when it's the caller-supplied

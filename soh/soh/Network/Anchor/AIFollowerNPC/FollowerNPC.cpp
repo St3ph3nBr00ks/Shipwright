@@ -237,7 +237,7 @@ struct LocalNpcNavState {
     // lastPathRefreshFrame / lastPathTargetPos fields; AnchorAI::ChooseSubgoal
     // operates on the wrapped NavState directly so the consumer (TickFOLLOW
     // + TickENGAGE) calls the helper instead of inlining ComputePathTo.
-    // Mirrors AI Invader Phase 2 commit 79767e605.
+    // Mirrors NPC Invader Phase 2 commit 79767e605.
     AnchorAI::NavState navState;
 
     Vec3f    stuckCheckPos        = { 0.0f, 0.0f, 0.0f };
@@ -267,7 +267,7 @@ struct LocalNpcNavState {
     // emitted as periodic per-frame logs while airborne, summary
     // log at landing. `airborneState.jumpInProgress` flips false on
     // landing. The persistent jump-fire / peak-tracking / pos-resnap
-    // fields live in AnchorAI::AirborneState (shared with AI Invader
+    // fields live in AnchorAI::AirborneState (shared with NPC Invader
     // via Common/AILocomotion/AirborneRecovery); NPC-specific
     // diagnostic captures (yaw, speed, velocityY, log throttle,
     // floor-edge tracking) stay actor-side.
@@ -835,7 +835,7 @@ void Anchor::SetFollowerNpcActive(bool active) {
 // flap when the leader stands at the boundary.
 //   - dist >= kEnterFollow → IDLE → FOLLOW
 //   - dist <= kEnterIdle   → FOLLOW → IDLE
-// Same shape as the player-rigged AI Follower's kFollowThreshold pattern
+// Same shape as the AI Player Follower's kFollowThreshold pattern
 // but with explicit hysteresis since the NPC's locomotion is
 // direct-vector, not stick-injection (smoother but no built-in dead-zone).
 static constexpr float kEnterFollow = 80.0f;
@@ -843,7 +843,7 @@ static constexpr float kEnterIdle   = 50.0f;
 // Y-axis hysteresis pair (P0 audit / log 263 fix). Without these gates,
 // when the leader is directly above on a ledge (e.g., y=800 above NPC's
 // y=360), small XZ distance makes the actor declare itself "arrived"
-// and stop trying to climb. Mirrors Player AI Follower's
+// and stop trying to climb. Mirrors AI Player Follower's
 // kFollowYThreshold pattern (Follower.cpp:223) added 2026-05-12 for
 // the same bug class.
 //   - Arrival (FOLLOW→IDLE): require |dy| ≤ kEnterIdleY in addition
@@ -875,7 +875,7 @@ static constexpr float kWalkSpeed   = 5.04f;
 //   v4: 5.12    (further 20% reduction per user report 2026-05-19 PM —
 //                NPC + Invader still visibly outpaced Link in field test)
 //   v5: 5.376   (+5% per user report 2026-05-20 — NPC + Invader now
-//                slightly slower than Player AI Follower; bump back up)
+//                slightly slower than AI Player Follower; bump back up)
 static constexpr float kRunSpeed    = 5.376f;
 
 // Phase 5 — substrate path consumption + STUCK recovery.
@@ -891,7 +891,7 @@ static constexpr int   kStuckCheckMs        = 3000;   // matches player-Follower
 static constexpr int   kFollowProgressLogMs = 5000;   // throttled FOLLOW diagnostic period
 static constexpr float kStuckMinProgress    = 20.0f;
 static constexpr float kStuckNudgeDist      = 30.0f;  // direct world.pos nudge in STUCK
-// STUCK escalation (ported from Player AI Follower's G12 — Follower.cpp:1680).
+// STUCK escalation (ported from AI Player Follower's G12 — Follower.cpp:1680).
 // Counts consecutive FOLLOW→STUCK transitions within a sliding window:
 //   Cycle 1: legacy nudge (toward leader)
 //   Cycle 2: edge-triggered navPath cursor advance (skip stuck subgoal)
@@ -914,7 +914,7 @@ static constexpr float kClimbXzSnap         = 1.0f;   // smooth XZ snap rate to 
 // renders Link on ladders/vines.
 static constexpr float kClimbBodyOffset     = 12.0f;
 
-// Phase 8 — G-guard recovery teleports. Mirror the player-rigged
+// Phase 8 — G-guard recovery teleports. Mirror the
 // Follower's G10 / G14 semantics but adapted for direct world.pos
 // writes (no stick injection).
 //
@@ -995,7 +995,7 @@ Vec3f ComputeEffectiveTarget(const Vec3f& leaderPos) {
 // — that produced an unnatural "always staring at you" look. The NPC
 // preserves whatever facing direction it had when it stopped moving
 // (e.g., when it transitioned FOLLOW→IDLE on arriving at the leader).
-// This mirrors AI Follower (player-rigged), where Link's body keeps
+// This mirrors AI Player Follower, where Link's body keeps
 // its last facing while idle. The independent head-look-at-leader
 // (TickHeadLookAtLeader, dispatched separately) still tracks the
 // player so the NPC visually acknowledges us with eye/head movement
@@ -1012,7 +1012,7 @@ void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // P0 audit (log 263): re-engage when target moves away in
     // EITHER XZ or Y. Without the Y gate, the NPC stayed in IDLE
     // when the leader was directly above on a ledge (small XZ but
-    // 440u Y delta). Mirrors Player AI Follower's xzExceeds ||
+    // 440u Y delta). Mirrors AI Player Follower's xzExceeds ||
     // yExceeds pattern (Follower.cpp:4931 — fixed for the same
     // bug class on log 32). Phase 2 extracted to ShouldPursue3D.
     const Vec3f effectiveTarget = ComputeEffectiveTarget(leaderPos);
@@ -1064,7 +1064,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 
     // ---- Substrate-driven subgoal selection (via shared helper) ----
     // Phase 5 (2026-05-19): consolidated through RunScriptedFollowStep
-    // so NPC Follower and AI Invader share one entry point for the
+    // so NPC Follower and NPC Invader share one entry point for the
     // FOLLOW path-decision + climb-cell-flag detection. Each caller
     // does its own state transitions + locomotion drive based on the
     // returned ScriptedFollowResult.
@@ -1093,7 +1093,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         // correct baseline. Without seeding, |dy| and |dxz| compute
         // against zeroed init values (or stale post-prior-climb values)
         // and the first tick mis-picks SideL/R vs UpL/R based on
-        // world-coordinate magnitude. Matches AI Invader entry pattern.
+        // world-coordinate magnitude. Matches NPC Invader entry pattern.
         sLocalNav.climbPrevY  = a->world.pos.y;
         sLocalNav.climbPrevXZ = a->world.pos;
         SPDLOG_INFO("[FollowerNPC] FOLLOW→CLIMBING (path entered climb cell at "
@@ -1878,7 +1878,7 @@ void TickCLIMBING(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // try a position-match refresh first. If the subgoal cell
     // belongs to a DIFFERENT anchor than the cached one (spiral wall
     // cross-anchor bridges, L-shape vine wall spanning two anchors),
-    // switch the active anchor. Same shape as Player AI Follower's
+    // switch the active anchor. Same shape as AI Player Follower's
     // Option A refresh (Follower.cpp:2331+). Without this, NPC would
     // commit to the closest-basePos anchor at engagement and never
     // switch — symptom: stuck/teleport recovery at every cross-anchor
@@ -2581,7 +2581,7 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     }
 
     // ── Pursuit — substrate-aware (Phase 3, 2026-05-18) ───────────
-    // Was direct-yaw (ignored nav mesh). Same fix shape as AI Invader
+    // Was direct-yaw (ignored nav mesh). Same fix shape as NPC Invader
     // Phase 2's TickENGAGE: route through NavOrDirect so pursuit
     // follows the same path planner FOLLOW uses. Combat distance
     // measurements (strike range, target-fled) still measure against
@@ -3118,7 +3118,7 @@ s32 ChooseCombatExitState(EnFollower* this_, PlayState* play) {
 //      OR after kCrawlMaxDistance traveled (safety cap).
 //   6. Play kCrawlExit one-shot, transition to FOLLOW.
 //
-// AI Follower (player-rigged) handles this trivially — Player's
+// AI Player Follower handles this trivially — Player's
 // vanilla code detects crawlspace entry on BTN_A, sets
 // PLAYER_STATE2_CRAWLING, runs the camera-locked traversal. AI
 // Follower just injects stick_y=127 (Follower.cpp:2273). NPC has
@@ -3626,7 +3626,7 @@ bool TryFireG14(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // so the next FOLLOW tick re-plans via substrate (which should
     // include climb waypoints from NPC's current floor up to leader's).
     //
-    // Mirrors the Player AI Follower TeleportToLeader same-room Y gate
+    // Mirrors the AI Player Follower TeleportToLeader same-room Y gate
     // (Follower.cpp:1099). Threshold 100u matches.
     //
     // Substrate-subgoal case is NOT gated because the path planner
@@ -3663,7 +3663,7 @@ bool TryFireG14(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 // caller; the next FOLLOW tick will recompute. Combined effect:
 // "stuck → nudge forward 30u → recompute path → continue."
 //
-// STUCK escalation tiers (ported from Player AI Follower's G12):
+// STUCK escalation tiers (ported from AI Player Follower's G12):
 //   Cycle 1: legacy nudge toward leader + path reset
 //   Cycle 2: edge-triggered cursor advance (skip stuck subgoal) +
 //            legacy nudge; path NOT reset so cursor advance persists.
@@ -3778,7 +3778,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     // makes the actor "tag along" — same instance, no despawn/respawn,
     // visible in whichever room the leader currently occupies.
     //
-    // Reusable for AI Invader cross-room pursuit: same per-tick room
+    // Reusable for NPC Invader cross-room pursuit: same per-tick room
     // sync. For cross-SCENE pursuit, the scene transition still kills
     // the actor (engine-level), but the system-level state (CVar /
     // Invader-active flag) drives respawn via OnSceneSpawnActors.
@@ -3786,7 +3786,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
 
     // G18 — cutscene suspension. When a cutscene is running, freeze
     // the NPC entirely (no AI tick, no animation update, no
-    // locomotion). Same shape as the player-rigged AI Follower's G18
+    // locomotion). Same shape as the AI Player Follower's G18
     // gate. Without this, the NPC can wander into cutscene framing
     // or trigger collision with cutscene-locked actors.
     //
@@ -3816,7 +3816,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
     //   - NPC is not already CLIMBING,
     //   - NPC is within engagement distance of the anchor's basePos.
     //
-    // Pattern adapted from AI Follower's autonomous-climb engagement at
+    // Pattern adapted from AI Player Follower's autonomous-climb engagement at
     // Follower.cpp:1880-1940 (uses FindClimbAnchorAbove to detect leader's
     // anchor; we use FindClosestClimbAnchor as a fallback since
     // FindClimbAnchorAbove requires the leader's projection to be inside
@@ -3839,7 +3839,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
                 (int8_t)gPlayState->roomCtx.curRoom.num);
         const ::AnchorNavRoom::ClimbAnchor* anchor =
             FindClosestClimbAnchor(navData, leaderPos);
-        // Anchor-overhead sanity gate (ported from AI Invader, 2026-05-19,
+        // Anchor-overhead sanity gate (ported from NPC Invader, 2026-05-19,
         // log 253 fix). If the anchor's top extends meaningfully above
         // the leader's Y, the cell column passes THROUGH or above the
         // platform the leader is standing on. Riding the column to the
@@ -4506,7 +4506,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         // Build the abstract decision context; the shared helper maps
         // motion-axis → ClimbAnimStep and we map back to FollowerNpcAnim
         // below. See Common/AILocomotion/LocomotionAnim.h. Mirror of the
-        // identical AI Invader call site (Phase 6, 2026-05-19).
+        // identical NPC Invader call site (Phase 6, 2026-05-19).
         const auto upL   = FollowerNpcAnim::kClimbUpL;
         const auto upR   = FollowerNpcAnim::kClimbUpR;
         const auto sideL = FollowerNpcAnim::kClimbSideL;

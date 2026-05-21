@@ -27,7 +27,7 @@ extern PlayState* gPlayState;
  * the warp the same frame.
  *
  * NOT a generic "follow leader through any door" — that's
- * SCENE_TRANSITION_HANDOFF (used by the AI Follower). This packet pulls
+ * SCENE_TRANSITION_HANDOFF (used by the AI Player Follower). This packet pulls
  * teammates through ONE specific transition class (synced boss exits)
  * because keeping the team grouped at the dungeon-clear moment is part of
  * the demo's emotional payoff. Other transitions stay per-player.

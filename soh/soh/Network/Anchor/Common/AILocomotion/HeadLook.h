@@ -1,6 +1,6 @@
 /**
  * HeadLook — shared "look at target" head + upper-body yaw decision
- * for scripted-position AI actors (NPC Follower, AI Invader; future
+ * for scripted-position AI actors (NPC Follower, NPC Invader; future
  * actors that share Link's skel + need head-tracking).
  *
  * Math mirrors NPC Follower's TickHeadLookAtLeader (FollowerNPC.cpp

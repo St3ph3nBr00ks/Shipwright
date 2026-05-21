@@ -10,7 +10,7 @@ namespace ItemEligibility {
 
 bool CanPlayerCollectItem00(s16 item00Type, bool walletCapAware) {
     switch (item00Type) {
-        // Rupees — capacity-capped at wallet level. AI Follower (#172) leaves
+        // Rupees — capacity-capped at wallet level. AI Player Follower (#172) leaves
         // these always-collect because vanilla truncates surplus silently and
         // the follower acts in the local player's stead. MP item-drop sync
         // (#193) gates on wallet to keep capped surplus available for a

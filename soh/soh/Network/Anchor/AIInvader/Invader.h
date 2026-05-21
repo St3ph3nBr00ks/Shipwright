@@ -1,5 +1,5 @@
 /**
- * Invader — AI Invader Director-side tick driver and rendering hooks.
+ * Invader — NPC Invader Director-side tick driver and rendering hooks.
  *
  * Step 15a — scaffold: actor + draw-context flag.
  * Step 15b — Phase B equipment swap: Anchor_InvaderDrawBegin/End now
