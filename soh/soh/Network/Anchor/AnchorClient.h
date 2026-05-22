@@ -49,6 +49,17 @@ typedef struct AnchorClient {
     // Only available in PLAYER_UPDATE packets
     s32 linkAge;
     PosRot posRot;
+
+    // Active camera state, sourced from GET_ACTIVE_CAM(play). Drives the
+    // host-side "is the candidate spawn visible to this peer?" gate in
+    // AIDirector PickSpawnPosition — Link's posRot is a poor proxy for
+    // what the player can actually see (camera is offset behind/above
+    // Link and looks where the player aims it).
+    // Default {0,0,0}/{0,0,0} for pre-update peers; safe because the gate
+    // tests in-frustum which collapses to "not visible" when eye == at.
+    Vec3f cameraEye = { 0.0f, 0.0f, 0.0f };
+    Vec3f cameraAt  = { 0.0f, 0.0f, 0.0f };
+
     Vec3s jointTable[24];
     u8 movementFlags;
     Vec3s prevTransl;

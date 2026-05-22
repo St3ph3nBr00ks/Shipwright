@@ -43,6 +43,16 @@ void Anchor::SendPacket_PlayerUpdate() {
     payload["linkAge"] = gSaveContext.linkAge;
     payload["posRot"]["pos"] = player->actor.world.pos;
     payload["posRot"]["rot"] = player->actor.shape.rot;
+
+    // Active camera state — read by host's AIDirector PickSpawnPosition
+    // to gate spawns against every peer's actual view, not just Link's
+    // position. Camera eye = world-space camera origin; at = look-at
+    // point. Forward direction = normalize(at - eye).
+    Camera* activeCam = GET_ACTIVE_CAM(gPlayState);
+    if (activeCam != nullptr) {
+        payload["cameraEye"] = activeCam->eye;
+        payload["cameraAt"]  = activeCam->at;
+    }
     std::vector<int> jointArray;
     for (size_t i = 0; i < 24; i++) {
         Vec3s joint = player->skelAnime.jointTable[i];
@@ -95,6 +105,8 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
         client.entranceIndex = payload.value("entranceIndex", (s32)0);
         client.linkAge = payload.value("linkAge", (s32)LINK_AGE_ADULT);
         client.posRot = payload.value("posRot", PosRot{ 0 });
+        client.cameraEye = payload.value("cameraEye", Vec3f{ 0.0f, 0.0f, 0.0f });
+        client.cameraAt  = payload.value("cameraAt",  Vec3f{ 0.0f, 0.0f, 0.0f });
         std::vector<int> jointArray = payload.value("jointTable", std::vector<int>{});
         jointArray.resize(24 * 3); // Ensure it has enough elements, in case of missing data
         for (int i = 0; i < 24; i++) {

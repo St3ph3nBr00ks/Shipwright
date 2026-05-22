@@ -51,6 +51,8 @@
 extern "C" {
 #include "z64.h"
 #include "z64actor.h"
+#include "macros.h"     // GET_ACTIVE_CAM — local-player camera lookup for LOS gate
+#include "functions.h"  // BgCheck_AnyLineTest1 — LOS raycast for camera visibility gate
 // gEnInvaderId — runtime-allocated actor id for ACTOR_EN_INVADER.
 // Assigned by ActorDB::AddBuiltInCustomActors at boot; defined in
 // soh/src/code/z_play.c. Use this instead of a compile-time ACTOR_*
@@ -115,25 +117,100 @@ bool AllPlayersSettledInScene(const SessionView& view, int16_t sceneNum) {
     return true;
 }
 
+// Per-player camera visibility gate. Returns true if the candidate
+// position is in any in-scene player's view cone AND with clear LOS
+// (no scene geometry between camera eye and candidate).
+//
+// Cone is generous (120° total = 60° half-angle, dot product ≥ 0.5
+// against camera forward) so the gate catches "I just turned my view
+// and now I see the invader appear" cases — not just the tight render
+// frustum. Tighten via kCameraConeDot if spawn placement starves in
+// cramped rooms.
+//
+// Camera source per player: local → GET_ACTIVE_CAM(gPlayState); peer →
+// AnchorClient::cameraEye / cameraAt populated from PLAYER_UPDATE.
+// Peers whose camera state hasn't arrived yet (eye == at) are treated
+// as "not looking" — candidate passes their gate. Safe because
+// pre-release we're the only client and all peers send camera state;
+// when the mod ships, post-connect race window is the only window
+// where camera defaults apply.
+bool IsCandidateVisibleToAnyPlayer(const Vec3f& candidate,
+                                   int16_t sceneNum,
+                                   const SessionView& view) {
+    // cos(60°) — generous-cone threshold. Candidate's dot-product
+    // against camera forward must exceed this to count as "in cone".
+    constexpr float kCameraConeDot = 0.5f;
+
+    for (const PlayerSnapshot& p : view.players) {
+        if (p.sceneNum != sceneNum) continue;
+
+        Vec3f eye;
+        Vec3f at;
+        if (p.isLocal) {
+            if (gPlayState == nullptr) continue;
+            Camera* cam = GET_ACTIVE_CAM(gPlayState);
+            if (cam == nullptr) continue;
+            eye = cam->eye;
+            at  = cam->at;
+        } else {
+            if (Anchor::Instance == nullptr) continue;
+            auto it = Anchor::Instance->clients.find(p.clientId);
+            if (it == Anchor::Instance->clients.end()) continue;
+            eye = it->second.cameraEye;
+            at  = it->second.cameraAt;
+        }
+
+        // Forward vector. If eye == at (peer hasn't sent yet, or local
+        // cam in degenerate state), skip — treat as "not looking".
+        Vec3f forward = { at.x - eye.x, at.y - eye.y, at.z - eye.z };
+        float fwdLen  = std::sqrt(forward.x * forward.x +
+                                  forward.y * forward.y +
+                                  forward.z * forward.z);
+        if (fwdLen < 0.001f) continue;
+        forward.x /= fwdLen; forward.y /= fwdLen; forward.z /= fwdLen;
+
+        // Vector from eye to candidate. Same degenerate-check.
+        Vec3f toC = { candidate.x - eye.x, candidate.y - eye.y, candidate.z - eye.z };
+        float toLen = std::sqrt(toC.x * toC.x + toC.y * toC.y + toC.z * toC.z);
+        if (toLen < 0.001f) continue;
+        toC.x /= toLen; toC.y /= toLen; toC.z /= toLen;
+
+        // Frustum gate.
+        float dotFwd = forward.x * toC.x + forward.y * toC.y + forward.z * toC.z;
+        if (dotFwd < kCameraConeDot) continue;  // candidate outside cone
+
+        // LOS gate: raycast eye → candidate. Hit anywhere along the
+        // line means a wall is between the camera and the candidate —
+        // candidate is hidden from this player.
+        if (gPlayState == nullptr) continue;
+        Vec3f rayStart = eye;
+        Vec3f rayEnd   = candidate;
+        Vec3f hitPos;
+        CollisionPoly* hitPoly = nullptr;
+        s32 hit = BgCheck_AnyLineTest1(&gPlayState->colCtx,
+                                       &rayStart, &rayEnd,
+                                       &hitPos, &hitPoly, 0);
+        if (hit) continue;  // wall occludes; not visible from this player
+
+        // In cone AND clear LOS → visible. Reject candidate.
+        return true;
+    }
+    return false;
+}
+
 // Step 13: nav-aware spawn placement. Picks a walkable NavNode from
 // RoomNavData filtered by:
 //   - flags: NODE_WALKABLE set AND NODE_ORPHANED / NODE_HAZARD /
 //     NODE_UNDERWATER all clear.
 //   - distance: ≥ kMinPlayerDistU from any team member in the same
 //     scene (plan §7.2 predicate 4 — "avoid in-face spawn").
+//   - per-player camera visibility (LOS + generous frustum cone) —
+//     candidate must NOT be in any team member's actual view.
 //
 // Sampling strategy: random offset into the node vector + linear scan
 // up to kMaxSampledNodes. Avoids iterating the entire graph each call
 // (Hyrule Field has thousands of nodes) while still touching enough
 // candidates to find one passing the filters most ticks.
-//
-// Deferred to a follow-up if field-testing surfaces the need:
-//   - Line-of-sight gate (plan §7.2 #5). Requires BgCheck raycast
-//     against gPlayState; cheap to add later.
-//   - Reachability gate. Candidate node already exists in the graph,
-//     which implies it's reachable from at least the floodfill seeds.
-//     Real reachability-from-player would need FindBestReachable-
-//     SubgoalPath; add when an unreachable spawn surfaces.
 //
 // Returns nullopt when no candidate passes the filters or RoomNavData
 // isn't loaded for the (scene, room). Caller treats nullopt as
@@ -212,6 +289,12 @@ std::optional<Vec3f> PickSpawnPosition(int16_t sceneNum, int8_t roomNum,
             }
         }
         if (!sameFloorAsAnyPlayer) continue;
+
+        // Camera-visibility gate. Skip candidates any player can
+        // currently see (generous 120° cone + clear LOS). Heaviest
+        // gate — placed last so cheap rejections (flags / distance /
+        // Y-delta) trim the candidate pool first.
+        if (IsCandidateVisibleToAnyPlayer(n.pos, sceneNum, view)) continue;
 
         return n.pos;
     }
