@@ -50,71 +50,7 @@ extern "C" {
 #include "variables.h"
 #include "functions.h"  // Math_Atan2S, Math_StepToS, etc.
 #include "macros.h"     // BTN_*, ITEM_*, SLOT_*, GET_PLAYER, AMMO/CUR_CAPACITY/INV_CONTENT
-// Decomp actor headers used by the moved follower body — bombwall / breakwall /
-// shutter / door / climb / push-block / per-enemy struct branches. Mirrored
-// from HookHandlers.cpp so the follower body's references resolve.
-#include "src/overlays/actors/ovl_Bg_Bombwall/z_bg_bombwall.h"
-#include "src/overlays/actors/ovl_Bg_Breakwall/z_bg_breakwall.h"
-#include "src/overlays/actors/ovl_Bg_Haka_Zou/z_bg_haka_zou.h"
-#include "src/overlays/actors/ovl_Bg_Hidan_Hamstep/z_bg_hidan_hamstep.h"
-#include "src/overlays/actors/ovl_Bg_Hidan_Hrock/z_bg_hidan_hrock.h"
-#include "src/overlays/actors/ovl_Bg_Ice_Shelter/z_bg_ice_shelter.h"
-#include "src/overlays/actors/ovl_Bg_Jya_Bombchuiwa/z_bg_jya_bombchuiwa.h"
-#include "src/overlays/actors/ovl_Bg_Jya_Bombiwa/z_bg_jya_bombiwa.h"
-#include "src/overlays/actors/ovl_Bg_Mizu_Bwall/z_bg_mizu_bwall.h"
-#include "src/overlays/actors/ovl_Bg_Spot08_Bakudankabe/z_bg_spot08_bakudankabe.h"
-#include "src/overlays/actors/ovl_Bg_Spot11_Bakudankabe/z_bg_spot11_bakudankabe.h"
-#include "src/overlays/actors/ovl_Bg_Spot17_Bakudankabe/z_bg_spot17_bakudankabe.h"
-#include "src/overlays/actors/ovl_Bg_Ydan_Maruta/z_bg_ydan_maruta.h"
-#include "src/overlays/actors/ovl_Bg_Ydan_Sp/z_bg_ydan_sp.h"
-#include "src/overlays/actors/ovl_Door_Shutter/z_door_shutter.h"
-#include "src/overlays/actors/ovl_En_Door/z_en_door.h"
-#include "src/overlays/actors/ovl_En_Si/z_en_si.h"
-#include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
-#include "src/overlays/actors/ovl_Item_B_Heart/z_item_b_heart.h"
-#include "src/overlays/actors/ovl_Obj_Bombiwa/z_obj_bombiwa.h"
-#include "src/overlays/actors/ovl_Obj_Hamishi/z_obj_hamishi.h"
-#include "src/overlays/actors/ovl_Bg_Hidan_Dalm/z_bg_hidan_dalm.h"
-#include "src/overlays/actors/ovl_Bg_Hidan_Kowarerukabe/z_bg_hidan_kowarerukabe.h"
-#include "objects/gameplay_keep/gameplay_keep.h"
-#include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
-#include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
-#include "src/overlays/actors/ovl_En_Goma/z_en_goma.h"
-#include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
-#include "src/overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
-#include "src/overlays/actors/ovl_En_St/z_en_st.h"
-#include "src/overlays/actors/ovl_En_Test/z_en_test.h"
-#include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
-#include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
-#include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
-#include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
-#include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
-#include "src/overlays/actors/ovl_Obj_Oshihiki/z_obj_oshihiki.h"
-
 extern PlayState* gPlayState;
-extern MapData*   gMapData;
-
-// Forward-decls for static decomp functions referenced by the follower
-// body (mirrored from HookHandlers.cpp).
-void func_8086ED70(BgBombwall* bgBombwall, PlayState* play);
-void BgBreakwall_Wait(BgBreakwall* bgBreakwall, PlayState* play);
-void func_80883000(BgHakaZou* bgHakaZou, PlayState* play);
-void func_808887C4(BgHidanHamstep* bgHidanHamstep, PlayState* play);
-void func_808896B8(BgHidanHrock* bgHidanHrock, PlayState* play);
-void BgIceShelter_Idle(BgIceShelter* bgIceShelter, PlayState* play);
-void BgIceShelter_SetupMelt(BgIceShelter* bgIceShelter);
-void ObjBombiwa_Break(ObjBombiwa* objBombiwa, PlayState* play);
-void ObjHamishi_Break(ObjHamishi* objHamishi, PlayState* play);
-void BgJyaBombchuiwa_WaitForExplosion(BgJyaBombchuiwa* bgJyaBombchuiwa, PlayState* play);
-void BgMizuBwall_Idle(BgMizuBwall* bgMizuBwall, PlayState* play);
-void func_808B6BC0(BgSpot17Bakudankabe* bgSpot17Bakudankabe, PlayState* play);
-void func_808BF078(BgYdanMaruta* bgYdanMaruta, PlayState* play);
-void BgYdanSp_FloorWebIdle(BgYdanSp* bgYdanSp, PlayState* play);
-void BgYdanSp_WallWebIdle(BgYdanSp* bgYdanSp, PlayState* play);
-void BgYdanSp_BurnWeb(BgYdanSp* bgYdanSp, PlayState* play);
-void EnDoor_Idle(EnDoor* enDoor, PlayState* play);
-float OTRGetDimensionFromLeftEdge(float v);
-float OTRGetDimensionFromRightEdge(float v);
 }
 
 namespace AnchorFollower {
