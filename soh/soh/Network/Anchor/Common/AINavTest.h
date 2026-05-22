@@ -95,6 +95,15 @@ void RunTest();
 void KillAllEnemiesInRoom(PlayState* play);
 void ClearRunHistory();
 
+// One-shot startup clear. Forces AI.NavTest.Enabled off at game launch
+// so a harness session left on from a prior run cannot silently
+// suppress combat across all three AI actors (Pitfall: IsCombatDisabled
+// gate at Invader.cpp:2577 / FollowerNPC.cpp:2638 / Follower.cpp:4893).
+// Vanilla-altering features ship default-off, permanently — same rule
+// applies to this dev-tooling harness. Other harness sub-CVars are
+// left alone as user preferences.
+void ClearOnStartup();
+
 // Per-actor reach reporters. Called from each actor's TickFOLLOW (or
 // equivalent) when the actor reaches the target. No-op if no run is
 // active or the actor already reported reach for this run.

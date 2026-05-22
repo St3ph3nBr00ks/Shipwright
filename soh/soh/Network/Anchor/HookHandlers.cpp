@@ -852,6 +852,15 @@ extern "C" {
 
 void Anchor::RegisterHooks() {
 
+    // One-shot startup clear of the NavTest harness master CVar.
+    // AI.NavTest.Enabled persists across game launches (libultraship
+    // CVars are saved to disk); when left on from a prior dev session,
+    // it silently suppresses combat across AI Player Follower / NPC
+    // Follower / NPC Invader via IsCombatDisabled gates. Force-off at
+    // boot matches the project rule that vanilla-altering features
+    // ship default-off, permanently.
+    AINavTest::ClearOnStartup();
+
     // #region Hooks that are required for basic Anchor functionality
 
     // Defensive scene-transition draw-state reset (2026-05-20, log 66
@@ -876,6 +885,36 @@ void Anchor::RegisterHooks() {
             Anchor_LocalPlayerFaceSwapResetOnSceneTransition();
             Anchor_FollowerNpcDrawStateResetOnSceneTransition();
             Anchor_InvaderDrawStateResetOnSceneTransition();
+        });
+
+    // Pause-menu open analog of the OnSceneInit reset above. Pitfall 22
+    // (session_state.md) flagged this hazard class: the pause-menu draw
+    // chain runs Player_DrawImpl with the same shared sEye/sMouthTextures /
+    // modelGroup globals that cosmetic-sync swaps save and restore, but
+    // pause stays in the same scene so OnSceneInit doesn't fire.
+    //
+    // Crash class confirmed by log 268 (Tab-key in Inside Deku Tree):
+    // OnLinkSkeletonInit for pauseCtx->playerSkelAnime triggered a
+    // re-bake on pause open; ~60ms later the pause-menu draw frame hit
+    // Exception 0xc0000005 walking through ControllerUnblockGameInput.
+    //
+    // Rising-edge fire only (state 0 → !=0). Idempotent if it fires
+    // when no swap was active. Unconditional registration for the same
+    // reason as the OnSceneInit hook above (cosmetic packs work offline).
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(
+        []() {
+            static int sLastPauseState = 0;
+            if (gPlayState == nullptr) {
+                sLastPauseState = 0;
+                return;
+            }
+            const int curr = (int)gPlayState->pauseCtx.state;
+            if (sLastPauseState == 0 && curr != 0) {
+                Anchor_LocalPlayerFaceSwapResetOnSceneTransition();
+                Anchor_FollowerNpcDrawStateResetOnSceneTransition();
+                Anchor_InvaderDrawStateResetOnSceneTransition();
+            }
+            sLastPauseState = curr;
         });
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {

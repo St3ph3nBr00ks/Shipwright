@@ -359,6 +359,16 @@ void ClearRunHistory() {
     SPDLOG_INFO("[NavTest] Run history cleared");
 }
 
+void ClearOnStartup() {
+    if (CV(CVAR_ENHANCEMENT("AI.NavTest.Enabled"), 0) != 0) {
+        SPDLOG_WARN("[NavTest] AI.NavTest.Enabled was on at startup — "
+                    "clearing. Dev-tooling harness does not persist across "
+                    "game launches (would silently suppress combat across "
+                    "AI Player Follower / NPC Follower / NPC Invader).");
+        CVSet(CVAR_ENHANCEMENT("AI.NavTest.Enabled"), 0);
+    }
+}
+
 // ── Reach reporters ────────────────────────────────────────────────
 
 void ReportNpcFollowerReach() {
