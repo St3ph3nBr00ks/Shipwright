@@ -117,83 +117,103 @@ bool AllPlayersSettledInScene(const SessionView& view, int16_t sceneNum) {
     return true;
 }
 
-// Per-player camera visibility gate. Returns true if the candidate
-// position is in any in-scene player's view cone AND with clear LOS
-// (no scene geometry between camera eye and candidate).
+// Per-player visibility gate. Returns true if the candidate position
+// has clear line-of-sight to ANY player — either from their camera
+// position OR from their Link model's eye-height position. The
+// stronger of the two gates governs.
 //
-// Cone is generous (120° total = 60° half-angle, dot product ≥ 0.5
-// against camera forward) so the gate catches "I just turned my view
-// and now I see the invader appear" cases — not just the tight render
-// frustum. Tighten via kCameraConeDot if spawn placement starves in
-// cramped rooms.
+// Design (2026-05-22): direction-agnostic. The earlier 120° camera
+// cone was dropped because the cone's "behind the player" carve-out
+// surfaced spawns that became immediately visible the moment the
+// player rotated. Pure raycast from both the camera and Link's body
+// catches "could the player see this if they turned around right
+// now" cases. Trades cramped-room candidate availability for spawn-
+// surprise reliability (Dark-Souls-style "no invader appeared from
+// somewhere I could have witnessed").
 //
-// Camera source per player: local → GET_ACTIVE_CAM(gPlayState); peer →
-// AnchorClient::cameraEye / cameraAt populated from PLAYER_UPDATE.
-// Peers whose camera state hasn't arrived yet (eye == at) are treated
-// as "not looking" — candidate passes their gate. Safe because
-// pre-release we're the only client and all peers send camera state;
-// when the mod ships, post-connect race window is the only window
-// where camera defaults apply.
+// Two raycasts per player per candidate:
+//   1. Camera eye → candidate. Camera is offset behind/above Link
+//      and is the actual rendering viewpoint. Source: local → GET_-
+//      ACTIVE_CAM(gPlayState); peer → AnchorClient::cameraEye
+//      (populated by PLAYER_UPDATE). Skipped only when peer camera
+//      state hasn't arrived (eye == at sentinel from default-init).
+//   2. Link eye-height → candidate. Catches positions reachable by
+//      a turn-in-place even when the camera is currently looking
+//      elsewhere. Source: PlayerSnapshot::worldPos + kEyeHeightOffsetU.
+//      Always evaluated (no peer-data-missing case — worldPos is in
+//      every PLAYER_UPDATE).
+//
+// Candidate is rejected if EITHER raycast (across ALL players)
+// returns no-hit (= unoccluded sight line). If every player's both
+// raycasts hit geometry first, candidate is hidden from everyone →
+// safe to spawn.
 bool IsCandidateVisibleToAnyPlayer(const Vec3f& candidate,
                                    int16_t sceneNum,
                                    const SessionView& view) {
-    // cos(60°) — generous-cone threshold. Candidate's dot-product
-    // against camera forward must exceed this to count as "in cone".
-    constexpr float kCameraConeDot = 0.5f;
+    // Eye-height offset above Link's world.pos (foot position).
+    // Adult ~62u, child ~38u — flat 50u splits the difference and
+    // avoids per-player age-lookup branching. The raycast at this
+    // height matches roughly where Link's gaze would originate if
+    // he turned to face the candidate.
+    constexpr float kEyeHeightOffsetU = 50.0f;
+
+    if (gPlayState == nullptr) return false;
 
     for (const PlayerSnapshot& p : view.players) {
         if (p.sceneNum != sceneNum) continue;
 
-        Vec3f eye;
-        Vec3f at;
+        // ── Raycast 1: Camera eye → candidate ─────────────────────
+        Vec3f cameraEye{};
+        bool  cameraValid = false;
         if (p.isLocal) {
-            if (gPlayState == nullptr) continue;
             Camera* cam = GET_ACTIVE_CAM(gPlayState);
-            if (cam == nullptr) continue;
-            eye = cam->eye;
-            at  = cam->at;
-        } else {
-            if (Anchor::Instance == nullptr) continue;
+            if (cam != nullptr) {
+                cameraEye   = cam->eye;
+                cameraValid = true;
+            }
+        } else if (Anchor::Instance != nullptr) {
             auto it = Anchor::Instance->clients.find(p.clientId);
-            if (it == Anchor::Instance->clients.end()) continue;
-            eye = it->second.cameraEye;
-            at  = it->second.cameraAt;
+            if (it != Anchor::Instance->clients.end()) {
+                // Peer hasn't sent camera state yet if eye == at
+                // (default-zero from AnchorClient init).
+                const Vec3f& e = it->second.cameraEye;
+                const Vec3f& a = it->second.cameraAt;
+                if (!(e.x == a.x && e.y == a.y && e.z == a.z)) {
+                    cameraEye   = e;
+                    cameraValid = true;
+                }
+            }
+        }
+        if (cameraValid) {
+            Vec3f rayStart = cameraEye;
+            Vec3f rayEnd   = candidate;
+            Vec3f hitPos;
+            CollisionPoly* hitPoly = nullptr;
+            s32 hit = BgCheck_AnyLineTest1(&gPlayState->colCtx,
+                                           &rayStart, &rayEnd,
+                                           &hitPos, &hitPoly, 0);
+            if (!hit) {
+                // Unoccluded camera sightline → visible. Reject.
+                return true;
+            }
         }
 
-        // Forward vector. If eye == at (peer hasn't sent yet, or local
-        // cam in degenerate state), skip — treat as "not looking".
-        Vec3f forward = { at.x - eye.x, at.y - eye.y, at.z - eye.z };
-        float fwdLen  = std::sqrt(forward.x * forward.x +
-                                  forward.y * forward.y +
-                                  forward.z * forward.z);
-        if (fwdLen < 0.001f) continue;
-        forward.x /= fwdLen; forward.y /= fwdLen; forward.z /= fwdLen;
-
-        // Vector from eye to candidate. Same degenerate-check.
-        Vec3f toC = { candidate.x - eye.x, candidate.y - eye.y, candidate.z - eye.z };
-        float toLen = std::sqrt(toC.x * toC.x + toC.y * toC.y + toC.z * toC.z);
-        if (toLen < 0.001f) continue;
-        toC.x /= toLen; toC.y /= toLen; toC.z /= toLen;
-
-        // Frustum gate.
-        float dotFwd = forward.x * toC.x + forward.y * toC.y + forward.z * toC.z;
-        if (dotFwd < kCameraConeDot) continue;  // candidate outside cone
-
-        // LOS gate: raycast eye → candidate. Hit anywhere along the
-        // line means a wall is between the camera and the candidate —
-        // candidate is hidden from this player.
-        if (gPlayState == nullptr) continue;
-        Vec3f rayStart = eye;
+        // ── Raycast 2: Link eye-height → candidate ────────────────
+        Vec3f linkEye = { p.worldPos.x,
+                          p.worldPos.y + kEyeHeightOffsetU,
+                          p.worldPos.z };
+        Vec3f rayStart = linkEye;
         Vec3f rayEnd   = candidate;
         Vec3f hitPos;
         CollisionPoly* hitPoly = nullptr;
         s32 hit = BgCheck_AnyLineTest1(&gPlayState->colCtx,
                                        &rayStart, &rayEnd,
                                        &hitPos, &hitPoly, 0);
-        if (hit) continue;  // wall occludes; not visible from this player
-
-        // In cone AND clear LOS → visible. Reject candidate.
-        return true;
+        if (!hit) {
+            // Unoccluded Link-body sightline → reachable by turn-in-
+            // place. Reject candidate.
+            return true;
+        }
     }
     return false;
 }
@@ -290,9 +310,10 @@ std::optional<Vec3f> PickSpawnPosition(int16_t sceneNum, int8_t roomNum,
         }
         if (!sameFloorAsAnyPlayer) continue;
 
-        // Camera-visibility gate. Skip candidates any player can
-        // currently see (generous 120° cone + clear LOS). Heaviest
-        // gate — placed last so cheap rejections (flags / distance /
+        // Visibility gate. Skip candidates with unoccluded sightline
+        // from any player's camera OR Link body (eye-height) —
+        // direction-agnostic. Heaviest gate (two raycasts per player)
+        // — placed last so cheap rejections (flags / distance /
         // Y-delta) trim the candidate pool first.
         if (IsCandidateVisibleToAnyPlayer(n.pos, sceneNum, view)) continue;
 
