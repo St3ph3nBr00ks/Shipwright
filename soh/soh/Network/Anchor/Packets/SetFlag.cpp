@@ -5,6 +5,7 @@
 #include "soh/OTRGlobals.h"
 
 extern "C" {
+#include "z64.h"
 #include "functions.h"
 
 extern PlayState* gPlayState;
@@ -69,5 +70,42 @@ void Anchor::HandlePacket_SetFlag(nlohmann::json payload) {
         effect->parameters[1] = flagType;
         effect->parameters[2] = flag;
         effect->Apply();
+
+        // #193 fix 2 — active-despawn pass for static collectibles.
+        //
+        // SetSceneFlag::_Apply updates the runtime + persisted flag
+        // bitmasks, but the `VB_ITEM00_DESPAWN` check at
+        // z_en_item00.c:373 only fires inside `EnItem00_Init`. An
+        // EN_ITEM00 actor that's already alive when the flag arrives
+        // keeps rendering and remains pickable — so a peer who picked
+        // up a static heart in another scene works fine via late
+        // re-entry (Init re-checks), but simultaneous same-room pickup
+        // leaves the second client with a live stale copy.
+        //
+        // Walk ACTORCAT_MISC, find EnItem00 actors whose
+        // `collectibleFlag` matches, and kill them. This is the
+        // mirror of the local pickup path (z_en_item00.c:969,
+        // 980, 989) which calls both `Flags_SetCollectible` AND
+        // `Actor_Kill` atomically.
+        //
+        // FLAG_SCENE_TREASURE (chest open) is intentionally NOT
+        // mirrored here. Chests don't despawn on open — they animate
+        // into an open pose and stay in the scene. Cross-client chest
+        // open sync needs a separate animation/contents-distribution
+        // story (design doc Q on shared vs per-player chest contents).
+        if (sceneNum == gPlayState->sceneNum &&
+            flagType == FLAG_SCENE_COLLECTIBLE) {
+            Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
+            while (a != nullptr) {
+                Actor* next = a->next;
+                if (a->id == ACTOR_EN_ITEM00) {
+                    EnItem00* it = (EnItem00*)a;
+                    if (it->collectibleFlag == flag) {
+                        Actor_Kill(a);
+                    }
+                }
+                a = next;
+            }
+        }
     }
 }

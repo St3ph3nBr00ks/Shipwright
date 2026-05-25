@@ -1824,6 +1824,21 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // #193 static-actor filter — EN_ITEM00 instances placed directly
+        // in scene OTRs (Inside Deku Tree has recovery hearts at
+        // (-25,280,-81) / (87,744,-16); other scenes have similar
+        // bare-placed pickups) spawn during the scene's setup-actor
+        // loop, where `gPlayState->numSetupActors > 0`. Both clients
+        // load the same scene file and spawn identical copies
+        // independently — there's nothing to broadcast. Cross-client
+        // pickup sync flows separately through `FLAG_SCENE_COLLECTIBLE`
+        // → `SET_FLAG` (see `HandlePacket_SetFlag`'s active-despawn
+        // pass, also added in #193 fix 2). Same Fix-8 trick used for
+        // static enemy suppression.
+        if (gPlayState->numSetupActors > 0) {
+            return;
+        }
+
         // Receive-side: extension stamping only. Skip broadcast.
         if (g_isSpawningNetworkItemDrop) {
             ItemDropNetId ext;
