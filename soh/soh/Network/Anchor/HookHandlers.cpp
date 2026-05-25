@@ -1809,6 +1809,21 @@ void Anchor::RegisterHooks() {
                     (int)g_isSpawningNetworkItemDrop,
                     g_pendingItemDropDepth);
 
+        // #193 modal-visual phantom filter — vanilla `func_8083E4C4`
+        // (z_player.c) spawns a transient EN_ITEM00 with the 0x8000
+        // flag set during every GET_ITEM modal. It sits stationary at
+        // the player's position during the "got X" animation and dies
+        // with the modal — a render-only artifact, not a real drop.
+        // `EnItem00_Init` strips 0x8000 from `actor->params` (params
+        // &= 0xFF) before OnActorSpawn fires, but `ogParams` preserves
+        // the original. Skip everything (no broadcast, no extension
+        // stamping) — peer's own modal completion produces an
+        // identical local artifact when it picks up the same item, so
+        // the experience is per-player by design.
+        if ((((EnItem00*)actor)->ogParams & 0x8000) != 0) {
+            return;
+        }
+
         // Receive-side: extension stamping only. Skip broadcast.
         if (g_isSpawningNetworkItemDrop) {
             ItemDropNetId ext;
