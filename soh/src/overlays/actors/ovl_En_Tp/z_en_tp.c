@@ -8,6 +8,11 @@
 #include "objects/object_tp/object_tp.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// #193 fix 3 — suppress peer-side drop when ENEMY_DEFEATED has driven
+// the actor into a natural-death cycle. Host always drops; the
+// host-gate inside the predicate guarantees that. See HookHandlers.cpp.
+extern bool Anchor_ShouldSuppressEnTpDrop(Actor* actor);
+
 #define FLAGS 0
 
 void EnTp_Init(Actor* thisx, PlayState* play);
@@ -319,7 +324,9 @@ void EnTp_Die(EnTp* this, PlayState* play) {
             effectPos.y = ((Rand_ZeroOne() - 0.5f) * 5.0f) + this->actor.world.pos.y;
             EffectSsDeadDb_Spawn(play, &effectPos, &effectVelAccel, &effectVelAccel, 100, 0, 255, 255, 255, 255, 0, 0,
                                  255, 1, 9, 1);
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x50);
+            if (!Anchor_ShouldSuppressEnTpDrop(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x50);
+            }
         } else {
             for (i = 0; i < 1; i++) {
                 now =

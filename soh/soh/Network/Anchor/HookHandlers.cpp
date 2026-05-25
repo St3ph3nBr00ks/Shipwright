@@ -617,6 +617,60 @@ extern "C" bool Anchor_ShouldSuppressEnSwDrop(Actor* actor) {
             EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
 }
 
+// #193 fix 3 — latent dual-drop suppressors for four enemies whose
+// natural-death-cycle code calls `Item_DropCollectibleRandom` with no
+// existing peer-side suppressor. Inside Deku Tree drop-path audit
+// (2026-05-07, task_checklist_done.md) catalogued these as latent
+// — same dual-drop shape that bit Dekubaba / En_St / En_Sw /
+// En_Dekunuts / En_Hintnuts / En_Karebaba; just unsurfaced because
+// MP testing hadn't reached them yet. Wallmaster is repro-easy
+// (Inside Deku Tree basement); the other three need their natural
+// habitats.
+//
+// All four use the identical predicate shape — host-gate + (
+// networkDriveDying || PhaseImpliesPendingNaturalDeath). See the
+// Dekubaba / EnSw suppressors above for the full rationale on each
+// clause; not re-duplicated here.
+extern "C" bool Anchor_ShouldSuppressEnWallmasDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
+}
+
+extern "C" bool Anchor_ShouldSuppressEnValiDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
+}
+
+extern "C" bool Anchor_ShouldSuppressEnTpDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
+}
+
+extern "C" bool Anchor_ShouldSuppressEnGomaDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
+    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    return ext != nullptr &&
+           (ext->networkDriveDying ||
+            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
+}
+
 // C-callable: non-host tells host that its local Link was just hit by this enemy
 // so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
 // Phase 2). No-op when Anchor is disconnected, when this client is the room
