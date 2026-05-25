@@ -788,23 +788,49 @@ extern "C" void Anchor_BeginItemDropForKiller(uint32_t killerClientId) {
 //                       allowlist — fall back to v1 behaviour). Should
 //                       not occur once Phase 4 v2 admits all four
 //                       env-actor IDs to IsSyncedWorldActor.
-extern "C" void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
-                                                Vec3f* pos, s16 params) {
+//
+// #193 Phase 4 v3 — return type changed from `void` to `EnItem00*` so
+// capture-and-modify call sites (Bg_Haka_Tubo, Bg_Spot18_Basket — set
+// velocity.y / shape.rot.y on the spawned actor) keep compiling. On
+// the peer-suppress path the wrapper returns NULL; the caller's
+// `if (collectible != NULL)` post-modify branch becomes a no-op,
+// which is a cosmetic-only effect (peer's broadcast-spawned drops
+// don't inherit the fan-out velocity but land at the right position
+// and are pickable).
+//
+// #193 Phase 4 v3 race-D mitigation — peer-side scene check before
+// sending. If host has left the scene (or no host found in clients
+// map), the ENV_ACTOR_DROP would either be applied on host's wrong
+// scene or silently dropped at the receive guard. Falling back to a
+// local Item_DropCollectible preserves a visible drop on this client;
+// same shape as the offline branch above (single client, single drop,
+// no broadcast). Strictly better than silent loss.
+extern "C" EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                    Vec3f* pos, s16 params) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) {
-        Item_DropCollectible(play, pos, params);
-        return;
+        return Item_DropCollectible(play, pos, params);
     }
     if (::SceneAuthority::IsMyCurrentRoomHost()) {
-        Item_DropCollectible(play, pos, params);
-        return;
+        return Item_DropCollectible(play, pos, params);
     }
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(envActor);
     if (ext == nullptr || ext->netId == 0) {
-        Item_DropCollectible(play, pos, params);
-        return;
+        return Item_DropCollectible(play, pos, params);
     }
-    // Peer with a synced env actor: notify host, suppress local drop.
+    // Race-D peer-side scene check.
+    uint32_t hostId = ::SceneAuthority::GetRoomHostClientId(
+        (int16_t)gPlayState->sceneNum,
+        (int8_t)gPlayState->roomCtx.curRoom.num,
+        (uint8_t)(gSaveContext.linkAge & 0x1));
+    auto hostIt = Anchor::Instance->clients.find(hostId);
+    if (hostIt == Anchor::Instance->clients.end() ||
+        hostIt->second.sceneNum != (s16)gPlayState->sceneNum) {
+        return Item_DropCollectible(play, pos, params);
+    }
+    // Peer with a synced env actor and host in scope: notify host,
+    // suppress local drop.
     Anchor::Instance->SendPacket_EnvActorDrop(ext->netId, params, /*forRandom=*/0, *pos);
+    return nullptr;
 }
 
 // #193 Phase 4 v2 — sibling for `Item_DropCollectibleRandom` from
@@ -812,7 +838,9 @@ extern "C" void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
 // param shifted up by 4, NOT a specific ITEM00_*). Same behavioural
 // matrix as Anchor_DropCollectibleEnvActor; routes the random param
 // through `dropParamForRandom` so the host re-dispatches via
-// `Item_DropCollectibleRandom`.
+// `Item_DropCollectibleRandom`. Phase 4 v3 race-D mitigation
+// applies symmetrically. Random spawns don't have a single-actor
+// return-value capture pattern, so the wrapper stays `void`.
 extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
                                                      Vec3f* pos, s16 dropGroupParams) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) {
@@ -825,6 +853,17 @@ extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* env
     }
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(envActor);
     if (ext == nullptr || ext->netId == 0) {
+        Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
+        return;
+    }
+    // Race-D peer-side scene check (see Anchor_DropCollectibleEnvActor).
+    uint32_t hostId = ::SceneAuthority::GetRoomHostClientId(
+        (int16_t)gPlayState->sceneNum,
+        (int8_t)gPlayState->roomCtx.curRoom.num,
+        (uint8_t)(gSaveContext.linkAge & 0x1));
+    auto hostIt = Anchor::Instance->clients.find(hostId);
+    if (hostIt == Anchor::Instance->clients.end() ||
+        hostIt->second.sceneNum != (s16)gPlayState->sceneNum) {
         Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
         return;
     }

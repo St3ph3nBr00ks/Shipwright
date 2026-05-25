@@ -9,6 +9,12 @@
 #include "objects/object_haka_objects/object_haka_objects.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// #193 Phase 4 v3 — env-actor drop wrapper. Returns NULL when peer
+// suppresses the local drop, so the post-modify branches below see
+// a no-op. See HookHandlers.cpp for the full behavioural matrix.
+extern EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                Vec3f* pos, s16 params);
+
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
 void BgHakaTubo_Init(Actor* thisx, PlayState* play);
@@ -166,7 +172,7 @@ void BgHakaTubo_DropCollectible(BgHakaTubo* this, PlayState* play) {
                 Sfx_PlaySfxCentered(NA_SE_SY_CORRECT_CHIME);
                 // Drop rupees
                 for (i = 0; i < 9; i++) {
-                    collectible = Item_DropCollectible(play, &spawnPos, i % 3);
+                    collectible = Anchor_DropCollectibleEnvActor(play, &this->dyna.actor, &spawnPos, i % 3);
                     if (collectible != NULL) {
                         collectible->actor.velocity.y = 15.0f;
                         collectible->actor.world.rot.y = this->dyna.actor.shape.rot.y + (i * 0x1C71);
@@ -210,7 +216,7 @@ void BgHakaTubo_DropCollectible(BgHakaTubo* this, PlayState* play) {
             Sfx_PlaySfxCentered(NA_SE_SY_CORRECT_CHIME);
         }
         if (collectibleParams != -1) {
-            collectible = Item_DropCollectible(play, &spawnPos, collectibleParams);
+            collectible = Anchor_DropCollectibleEnvActor(play, &this->dyna.actor, &spawnPos, collectibleParams);
             if (collectible != NULL) {
                 collectible->actor.velocity.y = 15.0f;
                 collectible->actor.world.rot.y = this->dyna.actor.shape.rot.y;

@@ -9,6 +9,10 @@
 #include "objects/gameplay_field_keep/gameplay_field_keep.h"
 #include "include/z64actor.h"
 
+// #193 Phase 4 v3 — env-actor drop wrapper. See HookHandlers.cpp.
+extern EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                Vec3f* pos, s16 params);
+
 #define FLAGS 0
 
 void ObjComb_Init(Actor* thisx, PlayState* play);
@@ -143,7 +147,7 @@ void ObjComb_ChooseItemDrop(ObjComb* this, PlayState* play) {
             params = -1;
         }
         if (params >= 0 && !CVarGetInteger(CVAR_ENHANCEMENT("NoRandomDrops"), 0)) {
-            Item_DropCollectible(play, &this->actor.world.pos, params);
+            Anchor_DropCollectibleEnvActor(play, &this->actor, &this->actor.world.pos, params);
         }
     }
 }

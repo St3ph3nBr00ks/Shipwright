@@ -10,6 +10,10 @@
 #include "vt.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// #193 Phase 4 v3 — env-actor drop wrapper. See HookHandlers.cpp.
+extern EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                Vec3f* pos, s16 params);
+
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
 void EnTuboTrap_Init(Actor* thisx, PlayState* play);
@@ -77,7 +81,8 @@ void EnTuboTrap_DropCollectible(EnTuboTrap* this, PlayState* play) {
     s16 param3FF = (params >> 6) & 0x3FF;
 
     if (param3FF >= 0 && param3FF < 0x1A) {
-        Item_DropCollectible(play, &this->actor.world.pos, param3FF | ((params & 0x3F) << 8));
+        Anchor_DropCollectibleEnvActor(play, &this->actor, &this->actor.world.pos,
+                                       param3FF | ((params & 0x3F) << 8));
     }
 }
 

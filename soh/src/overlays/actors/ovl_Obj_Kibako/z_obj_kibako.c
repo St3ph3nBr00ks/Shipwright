@@ -24,8 +24,8 @@ void ObjKibako_SetupThrown(ObjKibako* this);
 void ObjKibako_Thrown(ObjKibako* this, PlayState* play);
 
 // #193 Phase 4 v2 — env-actor drop wrapper. See HookHandlers.cpp.
-extern void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
-                                            Vec3f* pos, s16 params);
+extern EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                Vec3f* pos, s16 params);
 
 const ActorInit Obj_Kibako_InitVars = {
     ACTOR_OBJ_KIBAKO,
