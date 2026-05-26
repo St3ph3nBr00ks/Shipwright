@@ -12,6 +12,7 @@
 #include "NPCInvader/Invader.h"          // Anchor_GetCurrentlyDrawingInvader (black-tint color fix)
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
 #include "Common/SyncedClaimableDrop.h"     // Plan B (#193) — drop arbitration registry
+#include "Common/DropAdapters/GroundDropAdapter.h"  // Plan B step 3 — ground-drop adapter
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
 #include <libultraship/libultraship.h>
@@ -1782,6 +1783,24 @@ void Anchor::RegisterHooks() {
                     itemNetId, (int)resolvedType,
                     actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
                     killerClientId, (long long)spawnTimeMs);
+
+        // Plan B step 3 — populate the SyncedClaimableDrop registry
+        // alongside the legacy broadcast path. Adapter dismissal is
+        // dormant until a subsequent step wires ITEM_COLLECTED →
+        // Resolved → adapter dispatch; for now this just accumulates
+        // a parallel view of in-flight drops that future steps can
+        // act on.
+        SyncedClaimableDrop::GroundDropAdapter::GetInstance()->RegisterSpawn(
+            itemNetId,
+            Anchor::Instance->ownClientId,
+            (int16_t)resolvedType,
+            actor->world.pos,
+            (int16_t)gPlayState->sceneNum,
+            (int8_t)gPlayState->roomCtx.curRoom.num,
+            (uint8_t)(gSaveContext.linkAge & 0x1),
+            killerClientId,
+            spawnTimeMs,
+            actor);
     });
 
     // Host sends enemy positions every frame to all clients in the same scene.

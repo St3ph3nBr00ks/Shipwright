@@ -1,5 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
+#include "soh/Network/Anchor/Common/DropAdapters/GroundDropAdapter.h"  // Plan B step 3
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -159,4 +160,27 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
 
     SPDLOG_INFO("[ItemDropSync] rx netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) killer={}",
                 itemNetId, (int)itemParams, pos.x, pos.y, pos.z, killerClientId);
+
+    // Plan B step 3 — populate the SyncedClaimableDrop registry from
+    // the peer-side spawn. Pairs with the host-side population in
+    // HookHandlers.cpp OnActorSpawn(EN_ITEM00). The sender's clientId
+    // (relay-injected `clientId` field) is the drop's authority — host
+    // who broadcast this drop.
+    //
+    // Note: roomNum and linkAge are not currently in the packet
+    // schema (per design doc §6 — schema unchanged for v1). Default
+    // to 0; these fields are not yet consumed by any code path. If
+    // future adapters need them they can be added to the wire format.
+    uint32_t authorityClientId = (uint32_t)payload.value("clientId", (uint32_t)0);
+    SyncedClaimableDrop::GroundDropAdapter::GetInstance()->RegisterSpawn(
+        itemNetId,
+        authorityClientId,
+        (int16_t)itemParams,
+        pos,
+        sceneNum,
+        /*roomNum=*/  0,
+        /*linkAge=*/  0,
+        killerClientId,
+        spawnTimeMs,
+        &spawned->actor);
 }
