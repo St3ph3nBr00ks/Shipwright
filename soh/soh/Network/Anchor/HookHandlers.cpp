@@ -11,6 +11,7 @@
 #include "Common/AINavTest.h"          // Navigation Test Harness — Tick() driver
 #include "NPCInvader/Invader.h"          // Anchor_GetCurrentlyDrawingInvader (black-tint color fix)
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
+#include "Common/SyncedClaimableDrop.h"     // Plan B (#193) — drop arbitration registry
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
 #include <libultraship/libultraship.h>
@@ -2911,6 +2912,11 @@ void Anchor::RegisterHooks() {
     COND_HOOK(OnActorDestroy, isConnected, [&](void* refActor) {
         Actor* actor = (Actor*)refActor;
         ObjectExtension::GetInstance().Free(actor);
+        // Plan B (#193) — scrub any stale visual-rep pointer from the
+        // SyncedClaimableDrop registry. The drop entry survives the actor
+        // (claim arbitration may still be in flight); only the actor's
+        // entry in visualReps needs to go before its memory is freed.
+        SyncedClaimableDrop::Registry::Instance().UnregisterFromAllDrops(actor);
     });
 
     // #endregion
