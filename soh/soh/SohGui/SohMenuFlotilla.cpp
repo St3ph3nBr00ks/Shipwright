@@ -204,6 +204,27 @@ void SohMenu::AddMenuFlotilla() {
             "describing what you saw.\n\n"
             "Default: off. Zero overhead when disabled."));
 
+    AddWidget(path, "Team", WIDGET_SEPARATOR_TEXT);
+
+    // #193 Q1 — Team Shares Pickups toggle.
+    AddWidget(path, "Team shares pickups", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_REMOTE_ANCHOR("TeamSharesPickups"))
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "When ON (default — cooperative): transient pickups (sticks, "
+            "nuts, rupees, hearts, bombs, arrows, magic, bombchus) are "
+            "cross-credited to all teammates. Each Dekubaba/Karebaba "
+            "kill yields one stick + one nut per teammate.\n\n"
+            "When OFF (competitive): each player keeps only what they "
+            "personally picked up. Per-player modal drops (Karebaba "
+            "stick, Dekubaba stem stick) are host-only — peer cannot "
+            "claim them. Ground drops (nuts, hearts, rupees) go to "
+            "whoever picks them up first; the other player's local "
+            "copy is killed by ITEM_COLLECTED.\n\n"
+            "Progression items (keys, bag upgrades, heart pieces, etc.) "
+            "always cross-broadcast regardless of this setting.\n\n"
+            "All clients in a session should use the same setting for "
+            "consistent results."));
+
     // -----------------------------------------------------------------
     // Scene Info
     // -----------------------------------------------------------------

@@ -470,6 +470,12 @@ void EnKarebaba_Dying(EnKarebaba* this, PlayState* play) {
 // a duplicate stick from being offered — the host already gave out the real one.
 extern bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor);
 
+// #193 Q1 — host-only-modal predicate. Per-player Actor_OfferGetItemNearby
+// must NOT run on peer; otherwise both clients run their own modal
+// locally and each get cross-credited via GIVE_ITEM (double-credit).
+// See HookHandlers.cpp comment for full rationale.
+extern bool Anchor_ShouldSuppressPerPlayerModal(void);
+
 void EnKarebaba_DeadItemDrop(EnKarebaba* this, PlayState* play) {
     // Both the killing client and the receiving client run the same 200-frame
     // countdown so respawn timing is synchronized.  The receiving client
@@ -482,7 +488,8 @@ void EnKarebaba_DeadItemDrop(EnKarebaba* this, PlayState* play) {
     }
     if (Actor_HasParent(&this->actor, play) || this->actor.params == 0) {
         EnKarebaba_SetupDead(this);
-    } else if (!Anchor_ShouldSuppressKarebabaDrop(&this->actor)) {
+    } else if (!Anchor_ShouldSuppressKarebabaDrop(&this->actor) &&
+               !Anchor_ShouldSuppressPerPlayerModal()) {
         Actor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
     }
 }
