@@ -31,11 +31,25 @@ extern "C" {
 namespace SyncedClaimableDrop {
 
 enum class DropState {
-    Available,   // Drop is in the world, pickup-eligible.
-    Claiming,    // Local pickup attempt in flight; awaiting host arbitration.
-    Claimed,     // Host has granted claim to claimerClientId; Item_Give pending.
-    Consumed,    // Item_Give has fired on the winner; pickup complete.
-    Dismissed,   // No pickup occurred (timer expired, scene exit, etc.).
+    Available,   // Pickup-eligible.
+                 //   Host:  vanilla pickup allowed.
+                 //   Peer:  vanilla pickup → send ITEM_PICKUP_REQUEST,
+                 //          transition to Claiming.
+    Claiming,    // Peer claim in flight; vanilla pickup suppressed
+                 // locally until host's grant arrives.
+    Resolved,    // Terminal. Inspect `claimerClientId`:
+                 //   != 0 → that client won; vanilla pickup runs (or
+                 //          ran) on that client.
+                 //   == 0 → drop dismissed without pickup (timer
+                 //          expired, scene exit, etc.).
+                 // Visual reps cleaned up by adapters either way.
+                 //
+                 // Earlier drafts split this into Claimed / Consumed /
+                 // Dismissed; the gap between Claimed and Consumed
+                 // (vanilla pickup mid-animation vs done) was
+                 // observed by no consumer, and Claimed-vs-Dismissed
+                 // collapsed to a single check on claimerClientId.
+                 // Consolidated to keep the state set minimal.
 };
 
 // One per logical drop event. Replicated across all clients with matching
