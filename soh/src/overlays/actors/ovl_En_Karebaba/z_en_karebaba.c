@@ -465,11 +465,6 @@ void EnKarebaba_Dying(EnKarebaba* this, PlayState* play) {
     }
 }
 
-// Anchor suppression hook: returns true when this Karebaba is in a network-driven
-// natural death cycle on a non-host client. The item drop is skipped to prevent
-// a duplicate stick from being offered — the host already gave out the real one.
-extern bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor);
-
 void EnKarebaba_DeadItemDrop(EnKarebaba* this, PlayState* play) {
     // Both the killing client and the receiving client run the same 200-frame
     // countdown so respawn timing is synchronized.  The receiving client
@@ -482,7 +477,7 @@ void EnKarebaba_DeadItemDrop(EnKarebaba* this, PlayState* play) {
     }
     if (Actor_HasParent(&this->actor, play) || this->actor.params == 0) {
         EnKarebaba_SetupDead(this);
-    } else if (!Anchor_ShouldSuppressKarebabaDrop(&this->actor)) {
+    } else {
         Actor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
     }
 }

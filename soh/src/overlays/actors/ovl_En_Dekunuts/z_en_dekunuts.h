@@ -32,12 +32,4 @@ void EnDekunuts_SetupDyingNet(struct EnDekunuts* actor, PlayState* play);
 s16  EnDekunuts_GetStateIndex(struct EnDekunuts* actor);
 void EnDekunuts_ApplyNetState(struct EnDekunuts* actor, s16 stateIndex);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-bool Anchor_ShouldSuppressDekunutsDrop(struct Actor* actor);
-#ifdef __cplusplus
-}
-#endif
-
 #endif

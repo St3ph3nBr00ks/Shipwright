@@ -10,10 +10,6 @@
 #include <stdlib.h>
 #include "soh/ResourceManagerHelpers.h"
 
-// #193 fix 3 — suppress peer-side drop when ENEMY_DEFEATED has driven
-// the actor into a natural-death cycle. Host always drops; the
-// host-gate inside the predicate guarantees that. See HookHandlers.cpp.
-extern bool Anchor_ShouldSuppressEnValiDrop(Actor* actor);
 
 #define FLAGS \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_IGNORE_QUAKE)
@@ -258,9 +254,7 @@ void EnVali_SetupDivideAndDie(EnVali* this, PlayState* play) {
         }
     }
 
-    if (!Anchor_ShouldSuppressEnValiDrop(&this->actor)) {
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x50);
-    }
+    Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x50);
     this->timer = Rand_S16Offset(10, 10);
     this->bodyCollider.base.acFlags &= ~AC_ON;
     SoundSource_PlaySfxAtFixedWorldPos(play, &this->actor.world.pos, 40, NA_SE_EN_BARI_SPLIT);

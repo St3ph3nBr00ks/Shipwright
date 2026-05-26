@@ -70,8 +70,6 @@ void EnHintnuts_SetPuzzleCounter(s16 value);
 #ifdef __cplusplus
 extern "C" {
 #endif
-bool Anchor_ShouldSuppressHintnutsDrop(struct Actor* actor);
-
 // Hintnut sync moved to host-authoritative (room host runs the state
 // machine; peers receive ENEMY_STATE and apply via ApplyNetState).
 // Returns true on peers (non-room-hosts) so the local actor's

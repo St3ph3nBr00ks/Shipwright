@@ -10,10 +10,6 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
-// #193 fix 3 — suppress peer-side drop when ENEMY_DEFEATED has driven
-// the actor into a natural-death cycle. Host always drops; the
-// host-gate inside the predicate guarantees that. See HookHandlers.cpp.
-extern bool Anchor_ShouldSuppressEnWallmasDrop(Actor* actor);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
@@ -263,9 +259,7 @@ void EnWallmas_SetupDie(EnWallmas* this, PlayState* play) {
     EffectSsDeadDb_Spawn(play, &this->actor.world.pos, &zeroVec, &zeroVec, 250, -10, 255, 255, 255, 255, 0, 0, 255, 1,
                          9, true);
 
-    if (!Anchor_ShouldSuppressEnWallmasDrop(&this->actor)) {
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xC0);
-    }
+    Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xC0);
     this->actionFunc = EnWallmas_Die;
     GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
 }
@@ -445,9 +439,7 @@ void EnWallmas_Cooldown(EnWallmas* this, PlayState* play) {
 void EnWallmas_Die(EnWallmas* this, PlayState* play) {
     if (Math_StepToF(&this->actor.scale.x, 0.0f, 0.0015) != 0) {
         Actor_SetScale(&this->actor, 0.01f);
-        if (!Anchor_ShouldSuppressEnWallmasDrop(&this->actor)) {
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xC0);
-        }
+        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xC0);
         Actor_Kill(&this->actor);
     }
     if (this->actor.params == WMT_SHADOWTAG) {

@@ -215,10 +215,8 @@ void EnHintnuts_SetupLeave(EnHintnuts* this, PlayState* play) {
     this->collider.base.ocFlags1 &= ~OC1_ON;
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
-    if (!Anchor_ShouldSuppressHintnutsDrop(&this->actor)) {
-        Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, this->actor.world.pos.x, this->actor.world.pos.y,
-                    this->actor.world.pos.z, 0x0, 0x0, 0x0, 0x3); // recovery heart
-    }
+    Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, this->actor.world.pos.x, this->actor.world.pos.y,
+                this->actor.world.pos.z, 0x0, 0x0, 0x0, 0x3); // recovery heart
     this->actionFunc = EnHintnuts_Leave;
 }
 

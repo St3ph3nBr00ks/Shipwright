@@ -8,15 +8,6 @@
 // Anchor multiplayer: nearest-player lookup (returns local player when not connected).
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 
-// #193 field-test fix — peer-side drop suppression. When peer's
-// Dekubaba runs SetupDyingNet (HandlePacket_EnemyDefeated path),
-// EnDekubaba_ShrinkDie fires Item_DropCollectible* locally on peer
-// which spawned a duplicate-but-uninteractable-feeling drop next to
-// the host-broadcast ITEM_DROP_SYNC drop. Mirror the En_St / En_Sw /
-// En_Dekunuts pattern: guard the drop call so peer's natural-cycle
-// drop is suppressed and only the host's broadcast is visible.
-extern bool Anchor_ShouldSuppressDekubabaDrop(Actor* actor);
-
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnDekubaba_Init(Actor* thisx, PlayState* play);
@@ -1089,22 +1080,15 @@ void EnDekubaba_ShrinkDie(EnDekubaba* this, PlayState* play) {
 
     if (Math_StepToF(&this->actor.scale.x, this->size * 0.1f * 0.01f, this->size * 0.1f * 0.01f)) {
         func_800286CC(play, &this->actor.home.pos, &sZeroVec, &sZeroVec, this->size * 500.0f, this->size * 100.0f);
-        // #193 field-test fix — peer suppresses local drop calls so
-        // host's broadcast ITEM_DROP_SYNC is the sole drop source.
-        // Without this, peer ends up with N+1 EnItem00 actors after
-        // a host-routed kill: peer's SetupDyingNet → ShrinkDie path
-        // spawns N drops locally, then ITEM_DROP_SYNC adds N more.
-        if (!Anchor_ShouldSuppressDekubabaDrop(&this->actor)) {
-            if (this->actor.dropFlag == 0) {
-                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
+        if (this->actor.dropFlag == 0) {
+            Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
 
-                if (this->actor.params == DEKUBABA_BIG) {
-                    Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
-                    Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
-                }
-            } else {
-                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x30);
+            if (this->actor.params == DEKUBABA_BIG) {
+                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
+                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
             }
+        } else {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x30);
         }
         Actor_Kill(&this->actor);
     }

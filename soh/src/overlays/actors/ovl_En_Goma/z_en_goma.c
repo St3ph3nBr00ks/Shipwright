@@ -12,10 +12,6 @@
 // extern "C" in HookHandlers.cpp:83.
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 
-// #193 fix 3 — suppress peer-side drop when ENEMY_DEFEATED has driven
-// the actor into a natural-death cycle. Host always drops; the
-// host-gate inside the predicate guarantees that. See HookHandlers.cpp.
-extern bool Anchor_ShouldSuppressEnGomaDrop(Actor* actor);
 
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -451,9 +447,7 @@ void EnGoma_Dead(EnGoma* this, PlayState* play) {
         Audio_PlaySoundGeneral(NA_SE_EN_EXTINCT, &this->actor.projectedPos, 4, &gSfxDefaultFreqAndVolScale,
                                &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
         Actor_Kill(&this->actor);
-        if (!Anchor_ShouldSuppressEnGomaDrop(&this->actor)) {
-            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0x30);
-        }
+        Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0x30);
     }
     this->visualState = 2;
 }
