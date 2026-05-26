@@ -12,6 +12,12 @@
 #include "soh/ResourceManagerHelpers.h"
 #include <libultraship/log/luslog.h>
 
+// Plan B step 4 — host-only-modal wrapper around Actor_OfferGetItemNearby.
+// When MP-connected: host runs the offer locally (vanilla); peer suppresses
+// it (peer's actor sits in DeadItemDrop until existing ENEMY_DEFEATED-
+// driven death sync kills it). Single-player: vanilla unchanged.
+extern void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, s32 getItemId);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnKarebaba_Init(Actor* thisx, PlayState* play);
@@ -478,7 +484,7 @@ void EnKarebaba_DeadItemDrop(EnKarebaba* this, PlayState* play) {
     if (Actor_HasParent(&this->actor, play) || this->actor.params == 0) {
         EnKarebaba_SetupDead(this);
     } else {
-        Actor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
+        Anchor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
     }
 }
 

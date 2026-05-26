@@ -8,6 +8,10 @@
 // Anchor multiplayer: nearest-player lookup (returns local player when not connected).
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 
+// Plan B step 4 — host-only-modal wrapper around Actor_OfferGetItemNearby.
+// See z_en_karebaba.c for the rationale.
+extern void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, s32 getItemId);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnDekubaba_Init(Actor* thisx, PlayState* play);
@@ -1109,7 +1113,7 @@ void EnDekubaba_DeadStickDrop(EnDekubaba* this, PlayState* play) {
         return;
     }
 
-    Actor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
+    Anchor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
 }
 
 // Update and associated functions
