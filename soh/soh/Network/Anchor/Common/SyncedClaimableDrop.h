@@ -30,6 +30,11 @@ extern "C" {
 
 namespace SyncedClaimableDrop {
 
+// Forward decl — full interface lives in DropAdapters/DropAdapter.h.
+// Each Drop is owned by exactly one adapter, which defines how to
+// dismiss the drop's visual representations when it resolves.
+class DropAdapter;
+
 enum class DropState {
     Available,   // Pickup-eligible.
                  //   Host:  vanilla pickup allowed.
@@ -70,6 +75,12 @@ struct Drop {
     uint32_t  killerClientId  = 0;   // Client whose action caused the drop.
 
     std::vector<Actor*> visualReps;  // Local actor pointers — populated by adapters.
+
+    // The adapter that owns this drop. Set by the calling site after
+    // AllocateDrop returns. Drives dismissal semantics on Resolved
+    // transition. Nullable: a drop with no adapter falls back to a
+    // direct Actor_Kill on every visual rep (defensive default).
+    DropAdapter* adapter = nullptr;
 };
 
 // Per-client registry. Stateful singleton; lifetime matches Anchor's.
