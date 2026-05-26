@@ -17,12 +17,6 @@ extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 // drop is suppressed and only the host's broadcast is visible.
 extern bool Anchor_ShouldSuppressDekubabaDrop(Actor* actor);
 
-// #193 Q1 — host-only-modal predicate. Suppresses peer's
-// `Actor_OfferGetItemNearby` so vanilla's per-player modal doesn't
-// produce double-credit when paired with GIVE_ITEM cross-broadcast.
-// See HookHandlers.cpp comment for full rationale.
-extern bool Anchor_ShouldSuppressPerPlayerModal(void);
-
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnDekubaba_Init(Actor* thisx, PlayState* play);
@@ -1131,9 +1125,7 @@ void EnDekubaba_DeadStickDrop(EnDekubaba* this, PlayState* play) {
         return;
     }
 
-    if (!Anchor_ShouldSuppressPerPlayerModal()) {
-        Actor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
-    }
+    Actor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
 }
 
 // Update and associated functions

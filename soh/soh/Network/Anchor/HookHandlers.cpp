@@ -189,22 +189,6 @@ extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
             EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
 }
 
-// #193 Q1 — host-only-modal predicate for per-player Actor_OfferGetItemNearby
-// drops (Karebaba's stick, Dekubaba's stem stick). Returns true on
-// non-host clients regardless of phase state, so peer never runs its
-// own per-player modal. Host's modal pickup fires `OnItemReceive` →
-// `SendPacket_GiveItem` → peer is cross-credited (cooperative mode)
-// or not (competitive mode, controlled by `gFlotilla.TeamSharesPickups`).
-//
-// Without this, vanilla's per-player modal fires on BOTH clients
-// independently, producing double-credit (each player runs their own
-// modal locally AND receives a GIVE_ITEM cross-broadcast from the
-// other player's modal — 2 items per player per kill).
-extern "C" bool Anchor_ShouldSuppressPerPlayerModal(void) {
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
-    return !::SceneAuthority::IsMyCurrentRoomHost();
-}
-
 // Receive-side state-machine logging dedup.
 // The OnActorUpdate driver blocks for En_Sw / En_St / En_Dekunuts run
 // every frame and decide apply-vs-block on (curState, netStateIndex).
