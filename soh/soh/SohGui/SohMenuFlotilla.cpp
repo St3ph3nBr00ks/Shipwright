@@ -204,7 +204,14 @@ void SohMenu::AddMenuFlotilla() {
             "describing what you saw.\n\n"
             "Default: off. Zero overhead when disabled."));
 
-    AddWidget(path, "Team", WIDGET_SEPARATOR_TEXT);
+    // -----------------------------------------------------------------
+    // Items
+    // -----------------------------------------------------------------
+    path.sidebarName = "Items";
+    path.column = SECTION_COLUMN_1;
+    AddSidebarEntry("Flotilla", path.sidebarName, 1);
+
+    AddWidget(path, "Pickup Sharing", WIDGET_SEPARATOR_TEXT);
 
     // #193 Q1 — Team Shares Pickups toggle.
     AddWidget(path, "Team shares pickups", WIDGET_CVAR_CHECKBOX)
