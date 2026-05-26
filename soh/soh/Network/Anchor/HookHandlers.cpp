@@ -13,6 +13,7 @@
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
 #include "Common/SyncedClaimableDrop.h"     // Plan B (#193) — drop arbitration registry
 #include "Common/DropAdapters/GroundDropAdapter.h"  // Plan B step 3 — ground-drop adapter
+#include "Common/DropAdapters/ModalPhantomAdapter.h"  // Plan B step 5 — modal-phantom adapter (Bug B fix)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
 #include <libultraship/libultraship.h>
@@ -1113,6 +1114,11 @@ void Anchor::RegisterHooks() {
             prevTransitionTrigger = TRANS_TRIGGER_OFF;
         }
 
+        // Plan B step 5 — backstop kill for stuck modal phantoms
+        // (Bug B class). Cheap walk; no-op when the adapter's phantom
+        // list is empty.
+        SyncedClaimableDrop::ModalPhantomAdapter::GetInstance()->Tick();
+
     });
 
     // Follower hook registration. Body moved to AIPlayerFollower/Follower.cpp's
@@ -1645,6 +1651,24 @@ void Anchor::RegisterHooks() {
         // drops are skipped from broadcast in this version, which
         // is acceptable for Phase 2 since FLEXIBLE drops are rare.)
         s16 resolvedType = (s16)(actor->params & 0xFF);
+
+        // Plan B step 5 — modal-completion phantom from func_8083E4C4
+        // (z_player.c). Vanilla `EnItem00_Init` strips the 0x8000 flag
+        // from `actor->params` (params &= 0xFF) before this hook fires,
+        // but `EnItem00::ogParams` preserves the original. Route
+        // phantoms to the ModalPhantomAdapter and skip the ground-drop
+        // pipeline entirely — phantoms are local-only render artifacts,
+        // never broadcast.
+        //
+        // This replaces the modal-visual filter that lived as a
+        // freestanding gate in fix 1 (051cd9801) and was removed in
+        // cleanup 2/4 ahead of Plan B. The filter logic now lives
+        // inside the adapter where it belongs.
+        if ((((EnItem00*)actor)->ogParams & 0x8000) != 0) {
+            SyncedClaimableDrop::ModalPhantomAdapter::GetInstance()
+                ->OnPhantomSpawn((EnItem00*)actor);
+            return;
+        }
 
         // #193 static-actor filter — EN_ITEM00 instances placed directly
         // in scene OTRs (Inside Deku Tree has recovery hearts at
@@ -2936,6 +2960,9 @@ void Anchor::RegisterHooks() {
         // (claim arbitration may still be in flight); only the actor's
         // entry in visualReps needs to go before its memory is freed.
         SyncedClaimableDrop::Registry::Instance().UnregisterFromAllDrops(actor);
+        // Plan B step 5 — also scrub from the modal-phantom adapter's
+        // local list (separate from the SyncedClaimableDrop registry).
+        SyncedClaimableDrop::ModalPhantomAdapter::GetInstance()->OnActorDestroyed(actor);
     });
 
     // #endregion
