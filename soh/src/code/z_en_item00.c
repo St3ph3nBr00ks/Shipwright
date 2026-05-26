@@ -515,7 +515,19 @@ void EnItem00_Init(Actor* thisx, PlayState* play) {
     this->actor.velocity.y = 0.0f;
     this->actor.gravity = 0.0f;
 
+    // #193 Bug B diagnostic — modal phantom from func_8083E4C4. Should
+    // despawn in 15 game-ticks via the unk_15A countdown loop in
+    // EnItem00_Update (line 792-797) + Actor_Kill at func_8001DFC8 line
+    // 639-643. User reported persists for several seconds. Logs spawn
+    // + Init-time state so we can correlate with the despawn (logged
+    // separately at Actor_Kill).
+    LUSLOG_INFO("[ItemPhantomDiag] spawn ogParams=0x%04X params=0x%02X unk_15A=%d unk_154=%d pos=(%.0f,%.0f,%.0f)",
+                (u16)this->ogParams, (u8)this->actor.params,
+                this->unk_15A, this->unk_154,
+                this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z);
+
     if (!GameInteractor_Should(VB_GIVE_ITEM_FROM_ITEM_00, true, this)) {
+        LUSLOG_INFO("[ItemPhantomDiag] VB gate returned false — Init exiting early (no Item_Give)");
         return;
     }
 
@@ -598,6 +610,17 @@ void EnItem00_Init(Actor* thisx, PlayState* play) {
 
 void EnItem00_Destroy(Actor* thisx, PlayState* play) {
     EnItem00* this = (EnItem00*)thisx;
+
+    // #193 Bug B diagnostic — log destroy for modal phantoms only so we
+    // can correlate against the spawn log (same actor, ogParams & 0x8000).
+    // Lets the field test confirm WHEN (and IF) the phantom despawns.
+    if ((this->ogParams & 0x8000) != 0) {
+        LUSLOG_INFO("[ItemPhantomDiag] destroy ogParams=0x%04X params=0x%02X unk_15A=%d unk_154=%d "
+                    "getItemId=%d pos=(%.0f,%.0f,%.0f)",
+                    (u16)this->ogParams, (u8)this->actor.params,
+                    this->unk_15A, this->unk_154, (int)this->getItemId,
+                    this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z);
+    }
 
     Collider_DestroyCylinder(play, &this->collider);
 }
