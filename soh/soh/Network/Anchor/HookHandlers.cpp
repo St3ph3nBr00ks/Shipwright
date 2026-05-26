@@ -1902,21 +1902,6 @@ void Anchor::RegisterHooks() {
         // is acceptable for Phase 2 since FLEXIBLE drops are rare.)
         s16 resolvedType = (s16)(actor->params & 0xFF);
 
-        // #193 modal-visual phantom filter — vanilla `func_8083E4C4`
-        // (z_player.c) spawns a transient EN_ITEM00 with the 0x8000
-        // flag set during every GET_ITEM modal. It sits stationary at
-        // the player's position during the "got X" animation and dies
-        // with the modal — a render-only artifact, not a real drop.
-        // `EnItem00_Init` strips 0x8000 from `actor->params` (params
-        // &= 0xFF) before OnActorSpawn fires, but `ogParams` preserves
-        // the original. Skip everything (no broadcast, no extension
-        // stamping) — peer's own modal completion produces an
-        // identical local artifact when it picks up the same item, so
-        // the experience is per-player by design.
-        if ((((EnItem00*)actor)->ogParams & 0x8000) != 0) {
-            return;
-        }
-
         // #193 static-actor filter — EN_ITEM00 instances placed directly
         // in scene OTRs (Inside Deku Tree has recovery hearts at
         // (-25,280,-81) / (87,744,-16); other scenes have similar
