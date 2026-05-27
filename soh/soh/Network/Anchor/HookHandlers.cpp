@@ -3719,35 +3719,28 @@ void Anchor::RegisterHooks() {
         // flag-replay phantom-grant chain goes through `Item_Give`
         // directly and does NOT pass through this gate. The
         // relaxation is safe with respect to that bug.
+        // Layer 2 eligibility gate — REMOVED (log 283/284 field-test fix).
+        //
+        // Previous behaviour: blocked pickup when local player couldn't
+        // benefit (no bag, full ammo, etc.) on the assumption that a
+        // teammate could use it instead. In practice this produced
+        // permanently unreachable drops in early-game scenarios where
+        // NEITHER player has the bag yet (Inside Deku Tree pre-nut-bag
+        // is the canonical case). Vanilla single-player silently
+        // truncates surplus pickups; MP should not be stricter — the
+        // killer-exclusive Layer 1 window above already gives the
+        // killer first dibs, and cross-credit (GIVE_ITEM via
+        // OnItemReceive) propagates the count to eligible teammates
+        // when the picker-up is eligible. If nobody is eligible the
+        // drop is consumed for zero net effect — same as vanilla SP.
+        //
+        // Future re-add path: when UPDATE_CLIENT_STATE carries a
+        // per-client eligibility bitmap (one bit per ITEM00_*), the
+        // gate can defer pickup ONLY when "some other teammate IS
+        // eligible AND I am not". v1 lacks that signal so a
+        // conservative "no gate" is the right default.
         s16 itemType = (s16)(item00->actor.params & 0xFF);
-        const bool killerExclusiveBypass = isLocalKiller && inExclusiveWindow;
-        if (killerExclusiveBypass) {
-            SPDLOG_DEBUG("[ItemDrop] netId={} killer-exclusive bypass — skipping Layer 2 "
-                         "(type=0x{:02X})",
-                         ext->netId, (int)itemType);
-        } else {
-            bool anyTeammateOnline = false;
-            for (auto& [otherId, other] : Anchor::Instance->clients) {
-                if (other.self) continue;
-                if (other.online && other.isSaveLoaded) {
-                    anyTeammateOnline = true;
-                    break;
-                }
-            }
-            if (anyTeammateOnline) {
-                if (!ItemEligibility::CanPlayerCollectItem00(itemType, /*walletCapAware=*/true)) {
-                    *should = false;
-                    SPDLOG_DEBUG("[ItemDrop] netId={} blocked — local player ineligible (type=0x{:02X}); "
-                                 "deferring to teammate",
-                                 ext->netId, (int)itemType);
-                    return;
-                }
-            } else {
-                SPDLOG_DEBUG("[ItemDrop] netId={} solo session — skipping Layer 2 eligibility "
-                             "(type=0x{:02X})",
-                             ext->netId, (int)itemType);
-            }
-        }
+        (void)itemType;  // reserved for future eligibility-bitmap rework
 
         // Gate passes. Diverge by host vs peer.
         //
