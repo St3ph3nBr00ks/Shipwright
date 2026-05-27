@@ -1496,52 +1496,15 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                 netId, killerClientId,
                 killerTeamId.empty() ? "(unattributed)" : killerTeamId);
 
-    // Plan B step 6 — short-circuit peer's modal-offer countdown.
-    //
-    // For Karebaba / Dekubaba stem (and any future modal-offering
-    // actor), peer's natural-death-cycle includes a ~200-frame
-    // DeadItemDrop countdown during which the actor is visible holding
-    // the offered item. With ModalOfferAdapter suppressing peer's
-    // `Actor_OfferGetItemNearby`, peer's player can no longer end the
-    // state by accepting locally — it has to wait for the countdown.
-    //
-    // If there's a SyncedClaimableDrop in the registry whose dropId
-    // matches the enemy's netId (the ModalOfferAdapter convention),
-    // dispatch the adapter's DismissVisualRep on every visual rep NOW.
-    // Default DismissVisualRep is Actor_Kill, which ends the visual
-    // immediately. Trade-off: skips the SetupDead animation, but the
-    // user's reported symptom is "stick stays visible too long", so
-    // immediate removal is the desired behaviour.
-    //
-    // Idempotent — if the Drop is already Resolved, the visualReps
-    // list is empty (OnActorDestroy scrubbed) and the loop is a no-op.
-    {
-        auto& reg = SyncedClaimableDrop::Registry::Instance();
-        SyncedClaimableDrop::Drop* drop = reg.Find(netId);
-        if (drop != nullptr && drop->adapter != nullptr &&
-            drop->state != SyncedClaimableDrop::DropState::Resolved) {
-            for (Actor* visualRep : drop->visualReps) {
-                drop->adapter->DismissVisualRep(*drop, visualRep);
-            }
-            drop->claimerClientId = killerClientId;  // 0 if no killer attributed.
-            reg.TransitionTo(*drop, SyncedClaimableDrop::DropState::Resolved);
-            SPDLOG_INFO("[EnemyDefeated] modal-offer dropId={} resolved via "
-                        "ENEMY_DEFEATED — dispatched DismissVisualRep through "
-                        "adapter '{}'",
-                        netId, drop->adapter->Name());
-        } else if (drop == nullptr) {
-            // Race fix (field test log 279): on peer, OnEnemyDefeat fires
-            // when host's offering actor enters its Dying state, BEFORE
-            // host enters DeadItemDrop and broadcasts ITEM_DROP_SYNC. So
-            // ENEMY_DEFEATED arrives on peer ~1s before the modal-offer
-            // drop is allocated. Buffer the netId here; the modal-offer
-            // branch of HandlePacket_ItemDropSync drains the buffer and
-            // dismisses immediately. Non-modal defeats also pass through
-            // (registry never gets a matching dropId, entry ages out at
-            // disconnect). Bounded by per-scene enemy count.
-            reg.MarkPendingDismissal(netId, killerClientId);
-        }
-    }
+    // Note: ENEMY_DEFEATED is NOT used to dismiss modal-offer Drops.
+    // It fires when the offering actor enters its Dying state, BEFORE
+    // the modal offer is even presented (DeadStickDrop / equivalent).
+    // Dismissal is driven by MODAL_OFFER_CLAIMED instead — see
+    // SendPacket_ModalOfferClaimed, fired from the host's modal-phantom
+    // OnActorSpawn hook (player accepted the offer). Earlier attempts
+    // (logs 277/279/280) to short-circuit via ENEMY_DEFEATED either
+    // kept the stem visible too long or killed it before pickup; the
+    // accept-driven approach is the only correct trigger.
 
     // AI Director: notify removal for director-spawned enemies. Host-only —
     // mNetIdToDescriptor only has entries on the authority that spawned them.
