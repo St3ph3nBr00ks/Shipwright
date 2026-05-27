@@ -1956,6 +1956,58 @@ void Anchor::RegisterHooks() {
             : std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now().time_since_epoch()).count();
 
+        // Cross-client kill attribution (field test log 283/284).
+        //
+        // When a peer's killing-blow on a synced enemy gets re-attributed
+        // to host (because host runs the natural-death cycle locally and
+        // its Item_DropCollectible call resolves the killer from
+        // Anchor_BeginItemDrop(NULL), defaulting to host's ownClientId),
+        // Layer 1's killer-exclusive window blocks the actual killer for
+        // 3 s — long enough that the drop frequently expires before they
+        // can attempt pickup.
+        //
+        // Recover the real killer by walking synced enemy categories
+        // near the EN_ITEM00 spawn position; if any has phase != Alive
+        // and HostBookkeeping has a damager recorded for its netId,
+        // use that as the attribution. Falls back to the
+        // Anchor_BeginItemDrop value when nothing matches (heart/rupee
+        // drops outside enemy deaths, etc.).
+        {
+            constexpr float kAttrRadius   = 200.0f;
+            constexpr float kAttrRadiusSq = kAttrRadius * kAttrRadius;
+            auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
+            uint32_t bestDamager = 0;
+            float    bestDistSq  = kAttrRadiusSq;
+            for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
+                Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+                while (a != nullptr) {
+                    const EnemyNetId* nidExt =
+                        ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                    if (nidExt != nullptr &&
+                        nidExt->phase != EnemyStateSync::LifecyclePhase::Alive) {
+                        const float dx = a->world.pos.x - actor->world.pos.x;
+                        const float dy = a->world.pos.y - actor->world.pos.y;
+                        const float dz = a->world.pos.z - actor->world.pos.z;
+                        const float dSq = dx * dx + dy * dy + dz * dz;
+                        if (dSq < bestDistSq) {
+                            uint32_t damager = bookkeeping.LookupDamager(nidExt->netId);
+                            if (damager != 0) {
+                                bestDistSq  = dSq;
+                                bestDamager = damager;
+                            }
+                        }
+                    }
+                    a = a->next;
+                }
+            }
+            if (bestDamager != 0 && bestDamager != killerClientId) {
+                SPDLOG_INFO("[ItemDropSync] killer attribution corrected: {} -> {} "
+                            "(via nearby dying-enemy damager lookup)",
+                            killerClientId, bestDamager);
+                killerClientId = bestDamager;
+            }
+        }
+
         // Stamp local extension first so the pickup gate can read it
         // even on the host. isFromBroadcast=false marks "local drop".
         ItemDropNetId ext;
