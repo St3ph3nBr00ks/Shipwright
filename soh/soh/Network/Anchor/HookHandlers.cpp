@@ -1815,9 +1815,60 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        // Host-side: broadcast iff this is the room host and the type
-        // is on the transient allowlist (Q7).
+        // Peer-local death-drop suppression (log 282 follow-up).
+        //
+        // When peer's local synced enemy enters its death cycle —
+        // DyingByLocal on a peer-killing-blow, or DyingByNetwork after
+        // host's ENEMY_DEFEATED arrives — its actor code path runs the
+        // natural-death drop call (e.g. Item_DropCollectible in
+        // z_en_dekubaba.c:1088 ITEM00_NUTS). On peer this spawns a
+        // local EN_ITEM00 with no extension that the broadcast pipe
+        // skips (correct: peers don't broadcast). But the actor stays
+        // alive as a non-interactive ghost drop until its 220-frame
+        // countdown expires. User reported "extra non-interactive nut"
+        // in field test 282.
+        //
+        // Detect by proximity to any synced enemy actor whose phase
+        // is past Alive (Dying / Dead). Host's matching ITEM_DROP_SYNC
+        // broadcast will arrive ~100ms later and spawn the real
+        // synced drop alongside.
+        //
+        // Static drops in setup-actor phase already returned above
+        // (numSetupActors > 0); modal phantoms already returned via
+        // the 0x8000 branch; network-spawn arrivals already returned
+        // via g_isSpawningNetworkItemDrop. So anything that reaches
+        // here on peer is a peer-local Actor_Spawn — and we want to
+        // suppress the subset that came from a nearby dying enemy.
         if (!::SceneAuthority::IsMyCurrentRoomHost()) {
+            constexpr float kSuppressRadius   = 300.0f;
+            constexpr float kSuppressRadiusSq = kSuppressRadius * kSuppressRadius;
+            bool suppress = false;
+            for (size_t ci = 0; ci < kSyncableActorCategoriesCount && !suppress; ++ci) {
+                Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+                while (a != nullptr) {
+                    const EnemyNetId* nidExt =
+                        ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                    if (nidExt != nullptr &&
+                        nidExt->phase != EnemyStateSync::LifecyclePhase::Alive) {
+                        const float dx = a->world.pos.x - actor->world.pos.x;
+                        const float dy = a->world.pos.y - actor->world.pos.y;
+                        const float dz = a->world.pos.z - actor->world.pos.z;
+                        if (dx * dx + dy * dy + dz * dz < kSuppressRadiusSq) {
+                            suppress = true;
+                            break;
+                        }
+                    }
+                    a = a->next;
+                }
+            }
+            if (suppress) {
+                SPDLOG_INFO("[ItemDropSync] Peer-local drop suppressed at "
+                            "({:.0f},{:.0f},{:.0f}) type=0x{:02X} — nearby synced "
+                            "enemy past Alive phase; host's ITEM_DROP_SYNC will replace",
+                            actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
+                            (int)resolvedType);
+                Actor_Kill(actor);
+            }
             return;
         }
 
