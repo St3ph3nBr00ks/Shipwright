@@ -13,6 +13,7 @@
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
 #include "Common/SyncedClaimableDrop.h"     // Plan B (#193) — drop arbitration registry
 #include "Common/DropAdapters/GroundDropAdapter.h"  // Plan B step 3 — ground-drop adapter
+#include "Common/DropAdapters/ModalOfferAdapter.h"  // MODAL_OFFER_CLAIMED match — adapter-identity check
 #include "Common/DropAdapters/ModalPhantomAdapter.h"  // Plan B step 5 — modal-phantom adapter (Bug B fix)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
@@ -1667,6 +1668,71 @@ void Anchor::RegisterHooks() {
         if ((((EnItem00*)actor)->ogParams & 0x8000) != 0) {
             SyncedClaimableDrop::ModalPhantomAdapter::GetInstance()
                 ->OnPhantomSpawn((EnItem00*)actor);
+
+            // MODAL_OFFER_CLAIMED — host detects modal accept here.
+            // The phantom spawn IS the accept signal (vanilla
+            // func_8083E4C4 in z_player.c only fires this path when
+            // the player has actually picked up the modal offer).
+            // Find the matching modal-offer Drop by position proximity
+            // of any registered visual rep, then broadcast so peers
+            // can dismiss their mirror stem at the moment of accept
+            // instead of waiting for the DeadStickDrop timeout.
+            //
+            // Host-only: ModalOfferAdapter suppresses peers' modal
+            // path entirely; a phantom on peer would be a vanilla-
+            // path artifact we don't expect to broadcast.
+            if (::SceneAuthority::IsMyCurrentRoomHost() &&
+                Anchor::Instance != nullptr && Anchor::Instance->isConnected) {
+                const Vec3f phantomPos = actor->world.pos;
+                auto& reg = SyncedClaimableDrop::Registry::Instance();
+                auto* modalOfferAdapter =
+                    SyncedClaimableDrop::ModalOfferAdapter::GetInstance();
+
+                uint32_t bestDropId   = 0;
+                float    bestDistSq   = 200.0f * 200.0f;  // match cap
+
+                for (const auto& [dropId, drop] : reg.GetAllDrops()) {
+                    if (drop.adapter != modalOfferAdapter) continue;
+                    if (drop.state ==
+                        SyncedClaimableDrop::DropState::Resolved) continue;
+                    for (Actor* vr : drop.visualReps) {
+                        if (vr == nullptr || vr->update == nullptr) continue;
+                        const float dx = vr->world.pos.x - phantomPos.x;
+                        const float dy = vr->world.pos.y - phantomPos.y;
+                        const float dz = vr->world.pos.z - phantomPos.z;
+                        const float dSq = dx * dx + dy * dy + dz * dz;
+                        if (dSq < bestDistSq) {
+                            bestDistSq = dSq;
+                            bestDropId = dropId;
+                        }
+                    }
+                }
+
+                if (bestDropId != 0) {
+                    SPDLOG_INFO("[ModalOfferClaimed] host-detected modal accept: phantom "
+                                "pos=({:.0f},{:.0f},{:.0f}) matched dropId={} "
+                                "distSq={:.0f}",
+                                phantomPos.x, phantomPos.y, phantomPos.z,
+                                bestDropId, bestDistSq);
+                    Anchor::Instance->SendPacket_ModalOfferClaimed(
+                        bestDropId, Anchor::Instance->ownClientId);
+                    // Local Resolve — relay echo will arrive shortly and
+                    // be a no-op via the state!=Resolved gate. We don't
+                    // dismiss visual reps locally on host either way;
+                    // vanilla state machine on host's offering actor
+                    // handles its own cleanup.
+                    if (SyncedClaimableDrop::Drop* d = reg.Find(bestDropId)) {
+                        d->claimerClientId = Anchor::Instance->ownClientId;
+                        reg.TransitionTo(*d,
+                            SyncedClaimableDrop::DropState::Resolved);
+                    }
+                } else {
+                    SPDLOG_DEBUG("[ModalOfferClaimed] host modal phantom at "
+                                 "({:.0f},{:.0f},{:.0f}) — no nearby modal-offer "
+                                 "Drop within 200u",
+                                 phantomPos.x, phantomPos.y, phantomPos.z);
+                }
+            }
             return;
         }
 

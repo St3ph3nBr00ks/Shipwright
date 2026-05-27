@@ -776,6 +776,24 @@ class Anchor : public Network {
     // See #193 Phase 4 v2.
     inline static const std::string ENV_ACTOR_DROP = "ENV_ACTOR_DROP";
 
+    // MODAL_OFFER_CLAIMED — host → all (team-broadcast). #193 Plan B
+    // follow-up to step 6. Sent when host's modal-offer pickup actually
+    // resolves — i.e. host's player accepted the offer presented by an
+    // actor in DeadStickDrop (or equivalent) state. Detected by the
+    // OnActorSpawn(EN_ITEM00 & 0x8000) hook on host (vanilla
+    // `func_8083E4C4` spawns the modal-completion phantom). Peers find
+    // the matching SyncedClaimableDrop by `offererNetId` and dispatch
+    // the adapter's DismissVisualRep on their mirror of the offering
+    // actor, ending the stem visual at the moment of accept rather
+    // than at the natural DeadStickDrop countdown timeout.
+    //
+    // Earlier attempts to drive dismissal from ENEMY_DEFEATED (commits
+    // 7236719a5 / b01dcc3d4, reverted in e3ab0cbf4) misfired because
+    // defeat hooks fire at the offering actor's Dying state, ~1s
+    // BEFORE the modal is even presented. MODAL_OFFER_CLAIMED is the
+    // correct trigger — the phantom spawn IS the accept signal.
+    inline static const std::string MODAL_OFFER_CLAIMED = "MODAL_OFFER_CLAIMED";
+
     // HEARTBEAT — every client → all clients. Sent every ~2s from the
     // network thread (NOT the game thread) so it survives game-thread
     // freezes (textbox stuck, cutscene gate, pause). Carries:
@@ -1134,6 +1152,16 @@ class Anchor : public Network {
     void SendPacket_EnvActorDrop(uint32_t netId, s16 dropParam,
                                  s16 dropParamForRandom, Vec3f pos);
     void HandlePacket_EnvActorDrop(nlohmann::json payload);
+
+    // MODAL_OFFER_CLAIMED — see packet-type comment above for the full
+    // rationale. Send-site: HookHandlers.cpp OnActorSpawn(EN_ITEM00)
+    // modal-phantom branch (host-only). Receive-side: dismisses the
+    // matching modal-offer Drop's visual reps on every client except
+    // the local claimer (whose offering actor is mid-cutscene and
+    // cleans itself up via the vanilla state machine).
+    void SendPacket_ModalOfferClaimed(uint32_t offererEnemyNetId,
+                                      uint32_t claimerClientId);
+    void HandlePacket_ModalOfferClaimed(nlohmann::json payload);
 
     // CUTSCENE_TEXT_ADVANCE — peer → effective scene host. Sent when a
     // local A/B/CUP press fires Message_ShouldAdvance during a cutscene-
