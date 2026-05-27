@@ -1116,7 +1116,8 @@ class Anchor : public Network {
                                  Vec3f pos, uint32_t killerClientId,
                                  int64_t spawnTimeMs,
                                  uint32_t offererEnemyNetId = 0,
-                                 s16 rotY = 0);
+                                 s16 rotY = 0,
+                                 bool invisibleDecorative = false);
     void HandlePacket_ItemDropSync(nlohmann::json payload);
 
     // ITEM_COLLECTED (#193 Phase 1) — local pickup gate has fired and

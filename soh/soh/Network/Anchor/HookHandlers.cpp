@@ -484,6 +484,18 @@ static int         g_pendingItemDropDepth          = 0;
 static bool     g_isSpawningNetworkItemDrop     = false;
 static uint32_t g_pendingNetworkItemDropNetId   = 0;
 
+// Thread-local flag set by Anchor_SpawnSyncedStickDrop to tag the
+// next OnActorSpawn(EN_ITEM00) as a "decorative invisible companion"
+// drop: the visible visual is provided by the offering actor's own
+// drawn stick (gDekuBabaStickDropDL); this EN_ITEM00 is the
+// interactive pickup collider with draw=NULL. The flag is consumed
+// (cleared) by the OnActorSpawn host path when stamping the deferred
+// broadcast record.
+static bool g_pendingItemDropInvisibleDecorative = false;
+extern "C" void Anchor_SetPendingItemDropInvisibleDecorative(bool flag) {
+    g_pendingItemDropInvisibleDecorative = flag;
+}
+
 // Deferred-broadcast queue (nut trajectory desync fix, log 281).
 //
 // `Item_DropCollectible(play, &pos, params)` sets the spawned EN_ITEM00's
@@ -507,6 +519,7 @@ struct PendingItemDropBroadcast {
     s16      resolvedType;
     uint32_t killerClientId;
     int64_t  spawnTimeMs;
+    bool     invisibleDecorative;  // Phase 3 C-hybrid stick-drop tag
 };
 static std::vector<PendingItemDropBroadcast> g_pendingItemDropBroadcasts;
 
@@ -558,12 +571,15 @@ extern "C" void Anchor_EndItemDrop(void) {
                     p.actor->world.pos,
                     p.killerClientId, p.spawnTimeMs,
                     /*offererEnemyNetId=*/ 0u,
-                    /*rotY=*/             rotY);
+                    /*rotY=*/             rotY,
+                    /*invisibleDecorative=*/ p.invisibleDecorative);
                 SPDLOG_INFO("[ItemDropSync] Host broadcast (deferred) netId={} type=0x{:02X} "
-                            "pos=({:.0f},{:.0f},{:.0f}) rotY={} killer={} spawnTimeMs={}",
+                            "pos=({:.0f},{:.0f},{:.0f}) rotY={} killer={} spawnTimeMs={} "
+                            "invisibleDecorative={}",
                             p.itemNetId, (int)p.resolvedType,
                             p.actor->world.pos.x, p.actor->world.pos.y, p.actor->world.pos.z,
-                            (int)rotY, p.killerClientId, (long long)p.spawnTimeMs);
+                            (int)rotY, p.killerClientId, (long long)p.spawnTimeMs,
+                            p.invisibleDecorative ? "true" : "false");
             }
         }
         g_pendingItemDropBroadcasts.clear();
@@ -2038,11 +2054,12 @@ void Anchor::RegisterHooks() {
         // capture rot.y == 0 and let each receiver pick its own RNG
         // trajectory — the nut/ammo desync seen in field test 281.
         g_pendingItemDropBroadcasts.push_back({
-            /*actor=*/         actor,
-            /*itemNetId=*/     itemNetId,
-            /*resolvedType=*/  resolvedType,
-            /*killerClientId=*/killerClientId,
-            /*spawnTimeMs=*/   spawnTimeMs,
+            /*actor=*/               actor,
+            /*itemNetId=*/           itemNetId,
+            /*resolvedType=*/        resolvedType,
+            /*killerClientId=*/      killerClientId,
+            /*spawnTimeMs=*/         spawnTimeMs,
+            /*invisibleDecorative=*/ g_pendingItemDropInvisibleDecorative,
         });
 
         // Plan B step 3 — populate the SyncedClaimableDrop registry

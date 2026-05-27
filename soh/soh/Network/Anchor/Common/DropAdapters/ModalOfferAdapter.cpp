@@ -109,28 +109,41 @@ extern "C" void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, int32
 //
 // WHEN CONNECTED:
 //   1. Spawn an EN_ITEM00 STICK at the offering actor's landing
-//      position. This becomes the sole interactive pickup target.
-//   2. Actor_Kill the offering actor so the small scale-0.03 head
-//      visual doesn't linger as decorative-but-confusing noise
-//      (log 291 B1/B2 feedback). The decorative "vanilla head with
-//      stick on the ground" effect was an explicit Q1 C-hybrid
-//      trade-off, but the user found it visually misleading — the
-//      small rotating head looked like it had pickup collision even
-//      though only the EN_ITEM00 STICK is interactive.
+//      position. This is the interactive pickup collider.
+//   2. Set the spawned EN_ITEM00's draw=NULL so it renders as
+//      invisible. The visual on the ground is provided by the
+//      offering actor's own gDekuBabaStickDropDL render in the
+//      DeadStickDrop / DeadItemDrop state (z_en_dekubaba.c:1423
+//      EnDekubaba_Draw branch). This matches user-preferred
+//      vanilla decoration appearance (log 292 feedback: the
+//      Dekubaba's drawn stick is the visually-correct one; the
+//      smaller EN_ITEM00 stick visual was unwanted).
+//   3. Set thread-local g_pendingItemDropInvisibleDecorative so
+//      the host's deferred ITEM_DROP_SYNC broadcast carries the
+//      invisible-decorative flag. Peer's HandlePacket_ItemDropSync
+//      applies the same draw=NULL to the network spawn so peer's
+//      visual is also just the synced offerer's decorative stick.
+//   4. Do NOT Actor_Kill the offerer here — keep it alive in its
+//      DeadStickDrop / DeadItemDrop state so its decorative
+//      drawn-stick render persists. Dismissal of the offerer on
+//      pickup is handled by ITEM_COLLECTED.associatedActorNetId.
 //
 // WHEN DISCONNECTED (solo):
 //   Helper is a no-op. Vanilla Anchor_OfferGetItemNearby in the
 //   DeadStickDrop / DeadItemDrop actionFunc remains unsuppressed
 //   and handles pickup. The vanilla decorative head stays visible
-//   for the full 200-frame timer.
-//
-// Ordering note: Item_DropCollectible runs BEFORE Actor_Kill on the
-// offerer so the OnActorSpawn(EN_ITEM00) killer-attribution
-// recovery (which walks synced enemies for phase != Alive within
-// 200u) still finds the offerer alive and looks up its damager.
+//   for the full 200-frame timer (or until vanilla Actor_HasParent
+//   triggers Actor_Kill on pickup).
+extern void Anchor_SetPendingItemDropInvisibleDecorative(bool flag);  // HookHandlers.cpp
 extern "C" void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play) {
     if (offerer == nullptr || play == nullptr) return;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
-    Item_DropCollectible(play, &offerer->world.pos, ITEM00_STICK);
-    Actor_Kill(offerer);
+    Anchor_SetPendingItemDropInvisibleDecorative(true);
+    EnItem00* spawned = Item_DropCollectible(play, &offerer->world.pos, ITEM00_STICK);
+    Anchor_SetPendingItemDropInvisibleDecorative(false);
+    if (spawned != nullptr) {
+        // Local invisibility on host. Peer-side invisibility is
+        // applied via the broadcast flag inside ItemDropSync.
+        spawned->actor.draw = NULL;
+    }
 }

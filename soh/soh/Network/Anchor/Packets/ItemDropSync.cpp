@@ -63,7 +63,8 @@ void Anchor::SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
                                      Vec3f pos, uint32_t killerClientId,
                                      int64_t spawnTimeMs,
                                      uint32_t offererEnemyNetId,
-                                     s16 rotY) {
+                                     s16 rotY,
+                                     bool invisibleDecorative) {
     if (!IsSaveLoaded() || gPlayState == nullptr) {
         return;
     }
@@ -105,6 +106,12 @@ void Anchor::SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
     // modal-offer drops (visual rep is the synced enemy actor itself,
     // no trajectory to sync).
     payload["rotY"]              = (int)rotY;
+    // Phase 3 C-hybrid stick drops: the visual is provided by the
+    // offering actor's own decorative drawn-stick render
+    // (gDekuBabaStickDropDL). The EN_ITEM00 is the interactive
+    // pickup collider — receivers set draw=NULL so peer's visual
+    // matches host's (just the offerer's decoration).
+    payload["invisibleDecorative"] = invisibleDecorative;
     PacketTimeline::SetTimelineField(payload);
 
     SPDLOG_INFO("[ItemDropSync] Sending netId={} params=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
@@ -264,10 +271,23 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
     spawned->actor.world.rot.y = networkRotY;
     spawned->actor.shape.rot.y = networkRotY;
 
+    // Phase 3 C-hybrid: when invisibleDecorative is true, this
+    // EN_ITEM00 is the interactive pickup collider paired with a
+    // decorative offering actor (Dekubaba head / Karebaba) whose
+    // gDekuBabaStickDropDL render provides the visible stick.
+    // Hide the EN_ITEM00 so the visual is solely the offerer's
+    // decoration. The actor's update / pickup gate / extension all
+    // remain functional — only draw is suppressed.
+    bool invisibleDecorative = payload.value("invisibleDecorative", false);
+    if (invisibleDecorative) {
+        spawned->actor.draw = NULL;
+    }
+
     SPDLOG_INFO("[ItemDropSync] rx netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
-                "rotY={} killer={} killerTeam='{}'",
+                "rotY={} killer={} killerTeam='{}' invisibleDecorative={}",
                 itemNetId, (int)itemParams, pos.x, pos.y, pos.z,
-                (int)networkRotY, killerClientId, killerTeamId);
+                (int)networkRotY, killerClientId, killerTeamId,
+                invisibleDecorative ? "true" : "false");
 
     // Plan B step 3 — populate the SyncedClaimableDrop registry from
     // the peer-side spawn. Pairs with the host-side population in
