@@ -472,9 +472,10 @@ extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
 // killer attribution must persist through the inner Begin/End — depth
 // counter ensures only the outermost Begin sets state and only the
 // outermost End clears it.
-static uint32_t g_pendingItemDropKillerClientId = 0;
-static int64_t  g_pendingItemDropSpawnTimeMs   = 0;
-static int      g_pendingItemDropDepth         = 0;
+static uint32_t    g_pendingItemDropKillerClientId = 0;
+static std::string g_pendingItemDropKillerTeamId;   // Phase 1 (spec Q2)
+static int64_t     g_pendingItemDropSpawnTimeMs    = 0;
+static int         g_pendingItemDropDepth          = 0;
 
 // Receive-side gate: set true while HandlePacket_ItemDropSync is calling
 // Actor_Spawn so the OnActorSpawn ACTOR_EN_ITEM00 hook knows not to
@@ -696,10 +697,12 @@ extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* env
 // without overwriting the broadcast-supplied killer/spawnTime state.
 // Pairs symmetrically with `Anchor_EndNetworkItemDropSpawn`.
 void Anchor_BeginNetworkItemDropSpawn(uint32_t netId, uint32_t killerClientId,
-                                       int64_t spawnTimeMs) {
+                                       int64_t spawnTimeMs,
+                                       const std::string& killerTeamId) {
     g_isSpawningNetworkItemDrop      = true;
     g_pendingNetworkItemDropNetId    = netId;
     g_pendingItemDropKillerClientId  = killerClientId;
+    g_pendingItemDropKillerTeamId    = killerTeamId;
     g_pendingItemDropSpawnTimeMs     = spawnTimeMs;
     g_pendingItemDropDepth++;
 }
@@ -712,6 +715,7 @@ void Anchor_EndNetworkItemDropSpawn(void) {
     g_pendingNetworkItemDropNetId    = 0;
     if (g_pendingItemDropDepth == 0) {
         g_pendingItemDropKillerClientId  = 0;
+        g_pendingItemDropKillerTeamId.clear();
         g_pendingItemDropSpawnTimeMs     = 0;
     }
 }
@@ -1806,12 +1810,13 @@ void Anchor::RegisterHooks() {
             ItemDropNetId ext;
             ext.netId           = g_pendingNetworkItemDropNetId;
             ext.killerClientId  = g_pendingItemDropKillerClientId;
+            ext.killerTeamId    = g_pendingItemDropKillerTeamId;
             ext.spawnTimeMs     = g_pendingItemDropSpawnTimeMs;
             ext.isFromBroadcast = true;
             ObjectExtension::GetInstance().Set<ItemDropNetId>(actor, std::move(ext));
-            SPDLOG_DEBUG("[ItemDropSync] Network drop: stamped netId={} killer={} type=0x{:02X}",
+            SPDLOG_DEBUG("[ItemDropSync] Network drop: stamped netId={} killer={} killerTeam='{}' type=0x{:02X}",
                          g_pendingNetworkItemDropNetId, g_pendingItemDropKillerClientId,
-                         (int)resolvedType);
+                         g_pendingItemDropKillerTeamId, (int)resolvedType);
             return;
         }
 
@@ -2010,9 +2015,19 @@ void Anchor::RegisterHooks() {
 
         // Stamp local extension first so the pickup gate can read it
         // even on the host. isFromBroadcast=false marks "local drop".
+        // killerTeamId looked up from clients map; empty when
+        // killerClientId is 0 (unattributed) or not in map.
+        std::string killerTeamIdStr;
+        if (killerClientId != 0) {
+            auto kit = Anchor::Instance->clients.find(killerClientId);
+            if (kit != Anchor::Instance->clients.end()) {
+                killerTeamIdStr = kit->second.teamId;
+            }
+        }
         ItemDropNetId ext;
         ext.netId           = itemNetId;
         ext.killerClientId  = killerClientId;
+        ext.killerTeamId    = killerTeamIdStr;
         ext.spawnTimeMs     = spawnTimeMs;
         ext.isFromBroadcast = false;
         ObjectExtension::GetInstance().Set<ItemDropNetId>(actor, std::move(ext));
@@ -3717,14 +3732,35 @@ void Anchor::RegisterHooks() {
         const bool isLocalKiller =
             (ext->killerClientId == Anchor::Instance->ownClientId);
 
-        // Layer 1.
-        if (inExclusiveWindow && !isLocalKiller) {
+        // Layer 1 — killer-exclusive window with team-aware bypass
+        // (spec §1 Q2). During the 3 s window:
+        //   - killer always bypasses
+        //   - same-team players bypass iff TeamSharesPickups=true
+        //   - everyone else is blocked until window expires
+        const bool teamSharesPickups =
+            CVarGetInteger(CVAR_REMOTE_ANCHOR("TeamSharesPickups"), 1) != 0;
+        const std::string localTeamId =
+            CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+        const bool isSameTeamAsKiller =
+            !ext->killerTeamId.empty() && (ext->killerTeamId == localTeamId);
+        const bool teammateBypass =
+            teamSharesPickups && isSameTeamAsKiller && !isLocalKiller;
+
+        if (inExclusiveWindow && !isLocalKiller && !teammateBypass) {
             *should = false;
-            SPDLOG_DEBUG("[ItemDrop] netId={} blocked — exclusive window ({} ms remaining) for killer={}",
+            SPDLOG_DEBUG("[ItemDrop] netId={} blocked — exclusive window cross-team "
+                         "({} ms remaining; killer={} killerTeam='{}' localTeam='{}' "
+                         "shares={})",
                          ext->netId,
                          (long long)(kKillerExclusiveMs - (nowMs - ext->spawnTimeMs)),
-                         ext->killerClientId);
+                         ext->killerClientId, ext->killerTeamId, localTeamId,
+                         teamSharesPickups ? "true" : "false");
             return;
+        }
+        if (inExclusiveWindow && teammateBypass) {
+            SPDLOG_DEBUG("[ItemDrop] netId={} teammate bypass (TeamSharesPickups=true, "
+                         "team='{}')",
+                         ext->netId, ext->killerTeamId);
         }
 
         // Layer 2 — per-player eligibility.

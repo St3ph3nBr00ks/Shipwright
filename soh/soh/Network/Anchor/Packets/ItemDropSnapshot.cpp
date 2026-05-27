@@ -18,7 +18,8 @@ extern SaveContext gSaveContext;
 // each per-drop Actor_Spawn the same way HandlePacket_ItemDropSync
 // does.
 void Anchor_BeginNetworkItemDropSpawn(uint32_t netId, uint32_t killerClientId,
-                                       int64_t spawnTimeMs);
+                                       int64_t spawnTimeMs,
+                                       const std::string& killerTeamId);
 void Anchor_EndNetworkItemDropSpawn(void);
 
 /**
@@ -84,6 +85,7 @@ void Anchor::SendPacket_ItemDropSnapshot(uint32_t targetClientId) {
                 entry["pos"]            = nlohmann::json::array(
                     { it->world.pos.x, it->world.pos.y, it->world.pos.z });
                 entry["killerClientId"] = ext->killerClientId;
+                entry["killerTeamId"]   = ext->killerTeamId;
                 entry["spawnTimeMs"]    = ext->spawnTimeMs;
                 drops.push_back(std::move(entry));
             }
@@ -136,6 +138,7 @@ void Anchor::HandlePacket_ItemDropSnapshot(nlohmann::json payload) {
         uint32_t netId          = (uint32_t)entry.value("netId", (uint32_t)0);
         u8       params         = (u8)entry.value("params", 0);
         uint32_t killerClientId = (uint32_t)entry.value("killerClientId", (uint32_t)0);
+        std::string killerTeamId = entry.value("killerTeamId", std::string{});
         int64_t  spawnTimeMs    = (int64_t)entry.value("spawnTimeMs", (int64_t)0);
 
         if (netId == 0) continue;
@@ -169,7 +172,7 @@ void Anchor::HandlePacket_ItemDropSnapshot(nlohmann::json payload) {
             continue;
         }
 
-        Anchor_BeginNetworkItemDropSpawn(netId, killerClientId, spawnTimeMs);
+        Anchor_BeginNetworkItemDropSpawn(netId, killerClientId, spawnTimeMs, killerTeamId);
         Actor* spawnedActor = Actor_Spawn(&gPlayState->actorCtx, gPlayState,
                                            ACTOR_EN_ITEM00, pos.x, pos.y, pos.z,
                                            0, 0, 0, (s16)params);

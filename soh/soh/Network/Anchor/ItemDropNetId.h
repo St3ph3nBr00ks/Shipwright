@@ -8,6 +8,7 @@
 // to compile unchanged.
 
 #include <cstdint>
+#include <string>
 
 // #193 Phase 2 — attached to ACTOR_EN_ITEM00 actors so the receive-side
 // pickup gate can read the host-authoritative drop metadata.
@@ -47,4 +48,12 @@ struct ItemDropNetId {
     int64_t         spawnTimeMs     = 0;
     bool            isFromBroadcast = false;
     ItemPickupState pickupState     = ItemPickupState::None;
+    // #193 Phase 1 (spec Q2) — killer's team identity at drop time,
+    // for the team-aware Layer 1 gate. Empty string when killer is
+    // unattributed (killerClientId == 0) or killer's AnchorClient is
+    // not in the local clients map. Layer 1 gate compares this to
+    // the local player's TeamId CVar and bypasses the killer-
+    // exclusive window for same-team players when TeamSharesPickups
+    // is true.
+    std::string     killerTeamId;
 };

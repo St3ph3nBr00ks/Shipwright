@@ -22,7 +22,8 @@ extern PlayState* gPlayState;
 // `OnActorSpawn(ACTOR_EN_ITEM00)` hook stamps the host-supplied netId
 // onto the receiver's local extension and skips re-broadcast.
 void Anchor_BeginNetworkItemDropSpawn(uint32_t netId, uint32_t killerClientId,
-                                       int64_t spawnTimeMs);
+                                       int64_t spawnTimeMs,
+                                       const std::string& killerTeamId);
 void Anchor_EndNetworkItemDropSpawn(void);
 
 /**
@@ -76,6 +77,18 @@ void Anchor::SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
     payload["params"]            = (int)itemParams;
     payload["pos"]               = nlohmann::json::array({ pos.x, pos.y, pos.z });
     payload["killerClientId"]    = killerClientId;
+    // Phase 1 (spec Q2) — killer's team identity. Empty when
+    // unattributed (killerClientId == 0) or killer is not in the
+    // local clients map. Used by Layer 1 gate on receivers for
+    // same-team bypass when TeamSharesPickups is true.
+    std::string killerTeamIdStr;
+    if (killerClientId != 0) {
+        auto it = Anchor::Instance->clients.find(killerClientId);
+        if (it != Anchor::Instance->clients.end()) {
+            killerTeamIdStr = it->second.teamId;
+        }
+    }
+    payload["killerTeamId"]      = killerTeamIdStr;
     payload["spawnTimeMs"]       = spawnTimeMs;
     // Plan B step 6 — nonzero signals a modal-offer drop. Peer uses
     // this to find its mirror of the offering actor (Karebaba /
@@ -95,9 +108,10 @@ void Anchor::SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
     PacketTimeline::SetTimelineField(payload);
 
     SPDLOG_INFO("[ItemDropSync] Sending netId={} params=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
-                "killer={} sceneNum={} offererNetId={} rotY={}",
+                "killer={} killerTeam='{}' sceneNum={} offererNetId={} rotY={}",
                 itemNetId, (int)itemParams, pos.x, pos.y, pos.z,
-                killerClientId, (int)gPlayState->sceneNum, offererEnemyNetId, (int)rotY);
+                killerClientId, killerTeamIdStr,
+                (int)gPlayState->sceneNum, offererEnemyNetId, (int)rotY);
 
     SendJsonToRemote(payload);
 }
@@ -122,6 +136,7 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
     uint32_t itemNetId       = (uint32_t)payload.value("netId", (uint32_t)0);
     u8       itemParams      = (u8)payload.value("params", 0);
     uint32_t killerClientId  = (uint32_t)payload.value("killerClientId", (uint32_t)0);
+    std::string killerTeamId = payload.value("killerTeamId", std::string{});
     int64_t  spawnTimeMs     = (int64_t)payload.value("spawnTimeMs", (int64_t)0);
 
     Vec3f pos = { 0.0f, 0.0f, 0.0f };
@@ -228,7 +243,7 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
     // host-supplied killer/spawnTime state. The OnActorSpawn EN_ITEM00
     // hook reads `g_isSpawningNetworkItemDrop = true` and routes to
     // the receive-side branch (stamp extension, skip broadcast).
-    Anchor_BeginNetworkItemDropSpawn(itemNetId, killerClientId, spawnTimeMs);
+    Anchor_BeginNetworkItemDropSpawn(itemNetId, killerClientId, spawnTimeMs, killerTeamId);
     EnItem00* spawned = Item_DropCollectible(gPlayState, &pos, (s16)itemParams);
     Anchor_EndNetworkItemDropSpawn();
 
@@ -250,9 +265,9 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
     spawned->actor.shape.rot.y = networkRotY;
 
     SPDLOG_INFO("[ItemDropSync] rx netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
-                "rotY={} killer={}",
+                "rotY={} killer={} killerTeam='{}'",
                 itemNetId, (int)itemParams, pos.x, pos.y, pos.z,
-                (int)networkRotY, killerClientId);
+                (int)networkRotY, killerClientId, killerTeamId);
 
     // Plan B step 3 — populate the SyncedClaimableDrop registry from
     // the peer-side spawn. Pairs with the host-side population in
