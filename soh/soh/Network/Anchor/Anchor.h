@@ -1115,7 +1115,8 @@ class Anchor : public Network {
     void SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
                                  Vec3f pos, uint32_t killerClientId,
                                  int64_t spawnTimeMs,
-                                 uint32_t offererEnemyNetId = 0);
+                                 uint32_t offererEnemyNetId = 0,
+                                 s16 rotY = 0);
     void HandlePacket_ItemDropSync(nlohmann::json payload);
 
     // ITEM_COLLECTED (#193 Phase 1) — local pickup gate has fired and

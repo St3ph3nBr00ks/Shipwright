@@ -483,6 +483,32 @@ static int      g_pendingItemDropDepth         = 0;
 static bool     g_isSpawningNetworkItemDrop     = false;
 static uint32_t g_pendingNetworkItemDropNetId   = 0;
 
+// Deferred-broadcast queue (nut trajectory desync fix, log 281).
+//
+// `Item_DropCollectible(play, &pos, params)` sets the spawned EN_ITEM00's
+// post-spawn random `world.rot.y` AT z_en_item00.c:1625, AFTER our
+// OnActorSpawn(EN_ITEM00) hook has already fired. Broadcasting from the
+// hook captures rot.y == 0, so each receiver runs its own local
+// Rand_CenteredFloat for the trajectory and the nut/ammo lands in a
+// different XZ spot per client. Sticks via the modal-offer path are
+// unaffected (visual rep is the synced enemy actor itself, not an
+// EN_ITEM00).
+//
+// Defer the broadcast: OnActorSpawn pushes a PendingItemDropBroadcast
+// record; Anchor_EndItemDrop (which fires at z_en_item00.c:1639, AFTER
+// the rotation assignment) drains the queue and sends ITEM_DROP_SYNC
+// with the now-correct rot.y. `Item_DropCollectibleRandom`'s inner loop
+// spawns multiple drops under the same outer Begin/End pair — all of
+// them are drained together at the depth==0 End.
+struct PendingItemDropBroadcast {
+    Actor*   actor;
+    uint32_t itemNetId;
+    s16      resolvedType;
+    uint32_t killerClientId;
+    int64_t  spawnTimeMs;
+};
+static std::vector<PendingItemDropBroadcast> g_pendingItemDropBroadcasts;
+
 extern "C" void Anchor_BeginItemDrop(Actor* fromActor) {
     // Inner / nested call: keep outer's killer attribution intact.
     if (g_pendingItemDropDepth++ > 0) {
@@ -516,6 +542,30 @@ extern "C" void Anchor_EndItemDrop(void) {
     if (g_pendingItemDropDepth == 0) {
         g_pendingItemDropKillerClientId = 0;
         g_pendingItemDropSpawnTimeMs = 0;
+
+        // Drain deferred broadcasts — at this point Item_DropCollectible
+        // (or _Random's loop) has finished setting each spawned actor's
+        // world.rot.y, so the broadcast now carries the same rotation
+        // both sides will use.
+        if (!g_pendingItemDropBroadcasts.empty() &&
+            Anchor::Instance != nullptr && Anchor::Instance->isConnected) {
+            for (const auto& p : g_pendingItemDropBroadcasts) {
+                if (p.actor == nullptr || p.actor->update == nullptr) continue;
+                const s16 rotY = (s16)p.actor->world.rot.y;
+                Anchor::Instance->SendPacket_ItemDropSync(
+                    p.itemNetId, (u8)p.resolvedType,
+                    p.actor->world.pos,
+                    p.killerClientId, p.spawnTimeMs,
+                    /*offererEnemyNetId=*/ 0u,
+                    /*rotY=*/             rotY);
+                SPDLOG_INFO("[ItemDropSync] Host broadcast (deferred) netId={} type=0x{:02X} "
+                            "pos=({:.0f},{:.0f},{:.0f}) rotY={} killer={} spawnTimeMs={}",
+                            p.itemNetId, (int)p.resolvedType,
+                            p.actor->world.pos.x, p.actor->world.pos.y, p.actor->world.pos.z,
+                            (int)rotY, p.killerClientId, (long long)p.spawnTimeMs);
+            }
+        }
+        g_pendingItemDropBroadcasts.clear();
     }
 }
 
@@ -1864,15 +1914,18 @@ void Anchor::RegisterHooks() {
         ext.isFromBroadcast = false;
         ObjectExtension::GetInstance().Set<ItemDropNetId>(actor, std::move(ext));
 
-        // Broadcast.
-        Anchor::Instance->SendPacket_ItemDropSync(itemNetId, (u8)resolvedType,
-                                                   actor->world.pos,
-                                                   killerClientId, spawnTimeMs);
-        SPDLOG_INFO("[ItemDropSync] Host broadcast netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
-                    "killer={} spawnTimeMs={}",
-                    itemNetId, (int)resolvedType,
-                    actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
-                    killerClientId, (long long)spawnTimeMs);
+        // Defer the broadcast until Anchor_EndItemDrop (which runs after
+        // Item_DropCollectible* sets the spawned actor's random
+        // world.rot.y at z_en_item00.c:1625). Broadcasting here would
+        // capture rot.y == 0 and let each receiver pick its own RNG
+        // trajectory — the nut/ammo desync seen in field test 281.
+        g_pendingItemDropBroadcasts.push_back({
+            /*actor=*/         actor,
+            /*itemNetId=*/     itemNetId,
+            /*resolvedType=*/  resolvedType,
+            /*killerClientId=*/killerClientId,
+            /*spawnTimeMs=*/   spawnTimeMs,
+        });
 
         // Plan B step 3 — populate the SyncedClaimableDrop registry
         // alongside the legacy broadcast path. Adapter dismissal is

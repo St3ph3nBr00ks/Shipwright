@@ -61,7 +61,8 @@ void Anchor_EndNetworkItemDropSpawn(void);
 void Anchor::SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
                                      Vec3f pos, uint32_t killerClientId,
                                      int64_t spawnTimeMs,
-                                     uint32_t offererEnemyNetId) {
+                                     uint32_t offererEnemyNetId,
+                                     s16 rotY) {
     if (!IsSaveLoaded() || gPlayState == nullptr) {
         return;
     }
@@ -82,12 +83,21 @@ void Anchor::SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
     // instead of spawning an EN_ITEM00. Zero (default) for normal
     // ground drops.
     payload["offererEnemyNetId"] = offererEnemyNetId;
+    // Trajectory rotation — host's post-spawn `world.rot.y` (set by
+    // Item_DropCollectible at z_en_item00.c:1625 via local RNG).
+    // Receivers override their local actor's rot.y with this value so
+    // the bouncy-fall trajectory matches across clients. Field test
+    // log 281 showed nuts landing in different XZ positions per client
+    // because each ran its own Rand_CenteredFloat. Zero default for
+    // modal-offer drops (visual rep is the synced enemy actor itself,
+    // no trajectory to sync).
+    payload["rotY"]              = (int)rotY;
     PacketTimeline::SetTimelineField(payload);
 
     SPDLOG_INFO("[ItemDropSync] Sending netId={} params=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
-                "killer={} sceneNum={} offererNetId={}",
+                "killer={} sceneNum={} offererNetId={} rotY={}",
                 itemNetId, (int)itemParams, pos.x, pos.y, pos.z,
-                killerClientId, (int)gPlayState->sceneNum, offererEnemyNetId);
+                killerClientId, (int)gPlayState->sceneNum, offererEnemyNetId, (int)rotY);
 
     SendJsonToRemote(payload);
 }
@@ -228,8 +238,21 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
         return;
     }
 
-    SPDLOG_INFO("[ItemDropSync] rx netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) killer={}",
-                itemNetId, (int)itemParams, pos.x, pos.y, pos.z, killerClientId);
+    // Trajectory sync — overwrite the local Rand_CenteredFloat'd rot.y
+    // (set inside Item_DropCollectible at z_en_item00.c:1625) with the
+    // host's rotation. The bouncy-fall actionFunc (func_8001E304) reads
+    // world.rot.y on the first physics tick to compute X/Z velocity, so
+    // setting it before the actor's update fires next frame produces
+    // identical trajectories across clients. Fix for field test log 281
+    // (nut lands in different XZ per client).
+    s16 networkRotY = (s16)payload.value("rotY", 0);
+    spawned->actor.world.rot.y = networkRotY;
+    spawned->actor.shape.rot.y = networkRotY;
+
+    SPDLOG_INFO("[ItemDropSync] rx netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
+                "rotY={} killer={}",
+                itemNetId, (int)itemParams, pos.x, pos.y, pos.z,
+                (int)networkRotY, killerClientId);
 
     // Plan B step 3 — populate the SyncedClaimableDrop registry from
     // the peer-side spawn. Pairs with the host-side population in
