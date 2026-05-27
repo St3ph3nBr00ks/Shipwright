@@ -3738,6 +3738,34 @@ void Anchor::RegisterHooks() {
         const int64_t kKillerExclusiveMs = 3000;
         const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        // Spawn-grace window — suppress ALL pickup attempts for the
+        // first kHostGraceMs after spawn so peers have a guaranteed
+        // visible window of the drop on the ground (log 290 Bug B).
+        // Without this, host's vanilla auto-pickup fires within 1-2
+        // frames of the broadcast when host's player is within the
+        // vanilla 30u proximity radius (which it always is after a
+        // sword-kill on a Dekubaba head), and peers see the network
+        // spawn appear + the ITEM_COLLECTED kill arrive on the same
+        // frame — the drop flashes for 0 frames and is gone.
+        //
+        // 750 ms is enough for peers to register the drop visually
+        // and start walking to it (race A can then arbitrate). Killer
+        // gets first pickup once the grace expires, before Layer 1
+        // expires for non-killer peers.
+        //
+        // The state-machine states above (Pending / Granted /
+        // Consumed) are checked FIRST so an in-progress arbitration
+        // is not re-blocked by grace.
+        constexpr int64_t kHostGraceMs = 750;
+        if (nowMs - ext->spawnTimeMs < kHostGraceMs) {
+            *should = false;
+            SPDLOG_DEBUG("[ItemDrop] netId={} grace period ({} ms remaining)",
+                         ext->netId,
+                         (long long)(kHostGraceMs - (nowMs - ext->spawnTimeMs)));
+            return;
+        }
+
         const bool inExclusiveWindow =
             (ext->killerClientId != 0) &&
             (nowMs - ext->spawnTimeMs < kKillerExclusiveMs);
