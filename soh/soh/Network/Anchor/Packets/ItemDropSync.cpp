@@ -1,6 +1,10 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncHelpers.h"  // kSyncableActorCategories — Plan B step 6
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
+#include "soh/Network/Anchor/Common/SyncedClaimableDrop.h"  // Plan B step 6
 #include "soh/Network/Anchor/Common/DropAdapters/GroundDropAdapter.h"  // Plan B step 3
+#include "soh/Network/Anchor/Common/DropAdapters/ModalOfferAdapter.h"  // Plan B step 6
+#include "soh/ObjectExtension/ObjectExtension.h"  // EnemyNetId lookup — Plan B step 6
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -56,27 +60,34 @@ void Anchor_EndNetworkItemDropSpawn(void);
 
 void Anchor::SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
                                      Vec3f pos, uint32_t killerClientId,
-                                     int64_t spawnTimeMs) {
+                                     int64_t spawnTimeMs,
+                                     uint32_t offererEnemyNetId) {
     if (!IsSaveLoaded() || gPlayState == nullptr) {
         return;
     }
 
     nlohmann::json payload;
-    payload["type"]            = ITEM_DROP_SYNC;
-    payload["targetTeamId"]    = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
-    payload["sceneNum"]        = (int)gPlayState->sceneNum;
-    payload["roomNum"]         = (int)gPlayState->roomCtx.curRoom.num;
-    payload["netId"]           = itemNetId;
-    payload["params"]          = (int)itemParams;
-    payload["pos"]             = nlohmann::json::array({ pos.x, pos.y, pos.z });
-    payload["killerClientId"]  = killerClientId;
-    payload["spawnTimeMs"]     = spawnTimeMs;
+    payload["type"]              = ITEM_DROP_SYNC;
+    payload["targetTeamId"]      = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    payload["sceneNum"]          = (int)gPlayState->sceneNum;
+    payload["roomNum"]           = (int)gPlayState->roomCtx.curRoom.num;
+    payload["netId"]             = itemNetId;
+    payload["params"]            = (int)itemParams;
+    payload["pos"]               = nlohmann::json::array({ pos.x, pos.y, pos.z });
+    payload["killerClientId"]    = killerClientId;
+    payload["spawnTimeMs"]       = spawnTimeMs;
+    // Plan B step 6 — nonzero signals a modal-offer drop. Peer uses
+    // this to find its mirror of the offering actor (Karebaba /
+    // Dekubaba stem) by EnemyNetId and register it as a visual rep,
+    // instead of spawning an EN_ITEM00. Zero (default) for normal
+    // ground drops.
+    payload["offererEnemyNetId"] = offererEnemyNetId;
     PacketTimeline::SetTimelineField(payload);
 
     SPDLOG_INFO("[ItemDropSync] Sending netId={} params=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
-                "killer={} sceneNum={}",
+                "killer={} sceneNum={} offererNetId={}",
                 itemNetId, (int)itemParams, pos.x, pos.y, pos.z,
-                killerClientId, (int)gPlayState->sceneNum);
+                killerClientId, (int)gPlayState->sceneNum, offererEnemyNetId);
 
     SendJsonToRemote(payload);
 }
@@ -110,6 +121,65 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
         pos.z = payload["pos"][2].get<float>();
     } else {
         SPDLOG_WARN("[ItemDropSync] Drop — malformed pos field");
+        return;
+    }
+
+    // Plan B step 6 — modal-offer drop branch. Host broadcasts these
+    // when ModalOfferAdapter::OfferGetItemNearby fires (Karebaba /
+    // Dekubaba stem). `offererEnemyNetId != 0` signals "this is a
+    // modal-offer drop, not a ground drop" — peer must NOT spawn an
+    // EN_ITEM00 (the visual rep is the offering actor itself).
+    uint32_t offererEnemyNetId = (uint32_t)payload.value("offererEnemyNetId", (uint32_t)0);
+    if (offererEnemyNetId != 0) {
+        uint32_t authorityClientIdForOffer = (uint32_t)payload.value("clientId", (uint32_t)0);
+
+        // Find peer's mirror of the offering actor by EnemyNetId. Walk
+        // every synced-actor category. The offering actor must already
+        // exist locally (synced via ENEMY_SPAWN / ENEMY_STATE) by the
+        // time the modal-offer broadcast arrives.
+        Actor* mirror = nullptr;
+        for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
+            Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+            while (a != nullptr) {
+                const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                if (ext != nullptr && ext->netId == offererEnemyNetId) {
+                    mirror = a;
+                    break;
+                }
+                a = a->next;
+            }
+            if (mirror != nullptr) break;
+        }
+
+        if (mirror == nullptr) {
+            SPDLOG_WARN("[ItemDropSync] modal-offer dropId={} offererNetId={} — no peer actor "
+                        "with matching EnemyNetId; mirror-rep registration skipped (peer's "
+                        "ENEMY_DEFEATED handler will still terminate the actor naturally)",
+                        itemNetId, offererEnemyNetId);
+            return;
+        }
+
+        // Register peer's mirror actor in the SyncedClaimableDrop
+        // registry. The Drop's dropId == offererEnemyNetId by
+        // convention (set by ModalOfferAdapter on host).
+        SyncedClaimableDrop::Registry& reg = SyncedClaimableDrop::Registry::Instance();
+        SyncedClaimableDrop::Drop* drop = reg.Find(itemNetId);
+        if (drop == nullptr) {
+            drop = reg.AllocateDrop(itemNetId, authorityClientIdForOffer,
+                                    (int16_t)itemParams, pos,
+                                    sceneNum, /*roomNum=*/ 0, /*linkAge=*/ 0,
+                                    killerClientId, spawnTimeMs);
+        }
+        if (drop != nullptr) {
+            if (drop->adapter == nullptr) {
+                drop->adapter = SyncedClaimableDrop::ModalOfferAdapter::GetInstance();
+            }
+            reg.RegisterVisualRep(itemNetId, mirror);
+        }
+
+        SPDLOG_INFO("[ItemDropSync] rx modal-offer dropId={} offererNetId={} mirror=found "
+                    "type=0x{:02X}",
+                    itemNetId, offererEnemyNetId, (int)itemParams);
         return;
     }
 

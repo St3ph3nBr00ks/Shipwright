@@ -1096,7 +1096,8 @@ class Anchor : public Network {
     // (heart pieces, small keys, tunics, shields) are NOT broadcast.
     void SendPacket_ItemDropSync(uint32_t itemNetId, u8 itemParams,
                                  Vec3f pos, uint32_t killerClientId,
-                                 int64_t spawnTimeMs);
+                                 int64_t spawnTimeMs,
+                                 uint32_t offererEnemyNetId = 0);
     void HandlePacket_ItemDropSync(nlohmann::json payload);
 
     // ITEM_COLLECTED (#193 Phase 1) — local pickup gate has fired and

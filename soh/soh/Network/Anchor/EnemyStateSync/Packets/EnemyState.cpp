@@ -5,6 +5,8 @@
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/Common/SkelAnimeWire.h"
+#include "soh/Network/Anchor/Common/SyncedClaimableDrop.h"  // Plan B step 6
+#include "soh/Network/Anchor/Common/DropAdapters/DropAdapter.h"  // Plan B step 6
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
 #include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
@@ -1493,6 +1495,42 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     SPDLOG_INFO("[EnemyDefeated] Received defeat for netId={} killerClientId={} killerTeamId={}",
                 netId, killerClientId,
                 killerTeamId.empty() ? "(unattributed)" : killerTeamId);
+
+    // Plan B step 6 — short-circuit peer's modal-offer countdown.
+    //
+    // For Karebaba / Dekubaba stem (and any future modal-offering
+    // actor), peer's natural-death-cycle includes a ~200-frame
+    // DeadItemDrop countdown during which the actor is visible holding
+    // the offered item. With ModalOfferAdapter suppressing peer's
+    // `Actor_OfferGetItemNearby`, peer's player can no longer end the
+    // state by accepting locally — it has to wait for the countdown.
+    //
+    // If there's a SyncedClaimableDrop in the registry whose dropId
+    // matches the enemy's netId (the ModalOfferAdapter convention),
+    // dispatch the adapter's DismissVisualRep on every visual rep NOW.
+    // Default DismissVisualRep is Actor_Kill, which ends the visual
+    // immediately. Trade-off: skips the SetupDead animation, but the
+    // user's reported symptom is "stick stays visible too long", so
+    // immediate removal is the desired behaviour.
+    //
+    // Idempotent — if the Drop is already Resolved, the visualReps
+    // list is empty (OnActorDestroy scrubbed) and the loop is a no-op.
+    {
+        auto& reg = SyncedClaimableDrop::Registry::Instance();
+        SyncedClaimableDrop::Drop* drop = reg.Find(netId);
+        if (drop != nullptr && drop->adapter != nullptr &&
+            drop->state != SyncedClaimableDrop::DropState::Resolved) {
+            for (Actor* visualRep : drop->visualReps) {
+                drop->adapter->DismissVisualRep(*drop, visualRep);
+            }
+            drop->claimerClientId = killerClientId;  // 0 if no killer attributed.
+            reg.TransitionTo(*drop, SyncedClaimableDrop::DropState::Resolved);
+            SPDLOG_INFO("[EnemyDefeated] modal-offer dropId={} resolved via "
+                        "ENEMY_DEFEATED — dispatched DismissVisualRep through "
+                        "adapter '{}'",
+                        netId, drop->adapter->Name());
+        }
+    }
 
     // AI Director: notify removal for director-spawned enemies. Host-only —
     // mNetIdToDescriptor only has entries on the authority that spawned them.

@@ -113,6 +113,7 @@ void ModalOfferAdapter::OfferGetItemNearby(Actor* offerer, PlayState* play, int3
 
     Registry& registry = Registry::Instance();
     Drop* drop = registry.Find(dropId);
+    bool newAllocation = false;
     if (drop == nullptr) {
         drop = registry.AllocateDrop(
             dropId,
@@ -124,11 +125,32 @@ void ModalOfferAdapter::OfferGetItemNearby(Actor* offerer, PlayState* play, int3
             (uint8_t)(gSaveContext.linkAge & 0x1),
             /*killerClientId=*/ Anchor::Instance->ownClientId,
             nowMs);
+        newAllocation = true;
     }
     if (drop == nullptr) return;
     if (drop->adapter == nullptr) drop->adapter = this;
 
     registry.RegisterVisualRep(dropId, offerer);
+
+    // Plan B step 6 — broadcast the modal-offer drop so peers can
+    // register their mirror of the offering actor as a visual rep.
+    // Peer's HandlePacket_ItemDropSync sees offererEnemyNetId != 0,
+    // skips EN_ITEM00 spawn, walks its synced-actor lists to find the
+    // matching actor (Karebaba / Dekubaba stem), registers it.
+    //
+    // Only fire on first allocation so duplicate-offer calls in the
+    // same frame don't double-broadcast (defensive — vanilla shouldn't
+    // call Actor_OfferGetItemNearby more than once per actor lifetime,
+    // but cheap to guard).
+    if (newAllocation) {
+        Anchor::Instance->SendPacket_ItemDropSync(
+            /*itemNetId=*/        dropId,
+            /*itemParams=*/       (uint8_t)itemType,
+            /*pos=*/              offerer->world.pos,
+            /*killerClientId=*/   Anchor::Instance->ownClientId,
+            /*spawnTimeMs=*/      nowMs,
+            /*offererEnemyNetId=*/ dropId);
+    }
 }
 
 }  // namespace SyncedClaimableDrop
