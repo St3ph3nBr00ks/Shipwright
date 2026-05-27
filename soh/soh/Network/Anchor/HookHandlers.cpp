@@ -3875,61 +3875,18 @@ void Anchor::RegisterHooks() {
         *should = false;
     });
 
-    // #193 Phase 3 — visual cue for non-killer during exclusive window.
+    // Visual cue for non-pickable drops: REMOVED.
     //
-    // Apply a scale-down to drops the local player CANNOT pick up yet
-    // (still inside the killer's 3s window AND not the local player's
-    // kill). Reverts to vanilla scale once the window expires. Cheap +
-    // visible: peer sees a smaller drop that "pops" to full size at the
-    // 3s mark, signaling "now anyone can collect".
-    //
-    // Hook fires post-update each frame; the EnItem00 update itself
-    // smooth-steps `actor.scale` toward `this->scale` (the actor's
-    // intended target scale). Overwriting scale.x/y/z directly takes
-    // immediate visual effect.
-    COND_ID_HOOK(OnActorUpdate, ACTOR_EN_ITEM00, isConnected, [&](void* refActor) {
-        Actor* actor = static_cast<Actor*>(refActor);
-        if (actor == nullptr || actor->update == nullptr) return;
+    // The previous shrink-to-60% behaviour conflated "this drop is
+    // currently un-pickable" with "this drop is small" and caused
+    // user-confusion side effects (Phase 1 field test log 288: peer
+    // saw drops materialise small and "pop" up to normal size on
+    // window expiry). Per design discussion 2026-05-27, the cue is
+    // being replaced by a material/colour swap (drop renders in
+    // muted grey while un-pickable). Design captured in
+    // Claude/Plans/item_drop_visual_cue_material_swap.md;
+    // implementation deferred until after stick-drop testing.
 
-        const ItemDropNetId* ext =
-            ObjectExtension::GetInstance().Get<ItemDropNetId>(actor);
-        if (ext == nullptr) return;
-        if (ext->killerClientId == 0) return;
-        if (ext->killerClientId == Anchor::Instance->ownClientId) return;
-
-        // Phase 1 follow-up (log 287 Bug 1) — also bypass the visual
-        // cue for teammates of the killer when TeamSharesPickups is
-        // true. Otherwise the drop visually shrinks for teammates even
-        // though they can pick it up immediately via the Layer 1
-        // teammate-bypass, then "pops" to full size on pickup — which
-        // the user reads as "initially small, then scaled up". The
-        // cue is meant to communicate "you have to wait" — bypassing
-        // teammates don't have to wait, so the cue is wrong for them.
-        const bool teamSharesPickups =
-            CVarGetInteger(CVAR_REMOTE_ANCHOR("TeamSharesPickups"), 1) != 0;
-        const std::string localTeamId =
-            CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
-        if (teamSharesPickups && !ext->killerTeamId.empty() &&
-            ext->killerTeamId == localTeamId) {
-            return;
-        }
-
-        const int64_t kKillerExclusiveMs = 3000;
-        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (nowMs - ext->spawnTimeMs >= kKillerExclusiveMs) {
-            // Window expired. Don't keep clamping scale — vanilla
-            // smooth-step will restore it on the next update tick.
-            return;
-        }
-
-        // Inside the window AND local player is cross-team (or
-        // TeamSharesPickups=false): shrink to 60% so non-eligible
-        // drops are visually distinct.
-        actor->scale.x *= 0.6f;
-        actor->scale.y *= 0.6f;
-        actor->scale.z *= 0.6f;
-    });
 
     COND_VB_SHOULD(VB_FIRE_TEMPLE_BOMBABLE_WALL_BREAK, isConnected, {
         BgHidanKowarerukabe* actor = va_arg(args, BgHidanKowarerukabe*);
