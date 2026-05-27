@@ -11,6 +11,11 @@ extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 // Plan B step 4 — host-only-modal wrapper around Actor_OfferGetItemNearby.
 // See z_en_karebaba.c for the rationale.
 extern void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, s32 getItemId);
+// Phase 3 C-hybrid: spawns an EN_ITEM00 STICK at the offering actor's
+// position WHEN CONNECTED. No-op when disconnected (vanilla
+// Actor_OfferGetItemNearby in the DeadStickDrop actionFunc handles
+// pickup in solo). See ModalOfferAdapter.cpp.
+extern void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
@@ -552,6 +557,24 @@ void EnDekubaba_SetupDeadStickDrop(EnDekubaba* this, PlayState* play) {
     this->actor.flags &= ~ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->timer = 200;
     this->actionFunc = EnDekubaba_DeadStickDrop;
+
+    // Phase 3 C-hybrid (Claude/Plans/item_drop_behavior_spec.md §1 Q1):
+    // spawn an EN_ITEM00 STICK at the head's landing position so the
+    // pickup goes through the standard ground-drop pipeline (both
+    // host and peer can walk into it; race A arbitrates). The head
+    // model in DeadStickDrop state remains visible as a vanilla
+    // decoration; dismissal of the head on pickup is handled by
+    // ITEM_COLLECTED.associatedActorNetId (Phase 3.4).
+    //
+    // Anchor_OfferGetItemNearby in EnDekubaba_DeadStickDrop is now a
+    // no-op on connected sessions (suppressed in ModalOfferAdapter);
+    // the head's 200-frame timer still controls its natural cleanup.
+    //
+    // Anchor_SpawnSyncedStickDrop is gated on Anchor connectivity: in
+    // a disconnected session it does nothing, so the vanilla offer
+    // mechanism (which runs unsuppressed when disconnected) remains
+    // the sole pickup path and there's no double-drop.
+    Anchor_SpawnSyncedStickDrop(&this->actor, play);
 }
 
 // Action functions

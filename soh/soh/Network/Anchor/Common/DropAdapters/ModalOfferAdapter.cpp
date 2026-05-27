@@ -73,84 +73,28 @@ void ModalOfferAdapter::OfferGetItemNearby(Actor* offerer, PlayState* play, int3
         return;
     }
 
-    // Peer: SUPPRESS the vanilla offer entirely. The offering actor
-    // stays alive in its modal-offering state until existing actor-
-    // death sync propagates host's modal completion (ENEMY_DEFEATED
-    // for Karebaba/Dekubaba → SetupDyingNet on peer).
-    if (!::SceneAuthority::IsMyCurrentRoomHost()) {
-        return;
-    }
-
-    // Host: vanilla offer runs; also register the offering actor in
-    // the Drop registry so future dismissal can route through this
-    // adapter. Step 4 keeps the registration host-local — no broadcast
-    // — because the existing actor-death sync handles peer-side
-    // dismissal for the v1 set of consumers (Karebaba, Dekubaba). A
-    // future step extends ITEM_DROP_SYNC with an `offererEnemyNetId`
-    // field so peer can register its mirror actor and dismissal routes
-    // through this adapter uniformly across mechanisms.
-    Actor_OfferGetItemNearby(offerer, play, getItemId);
-
-    // Need an EnemyNetId on the offerer to allocate a unique dropId.
-    // Karebaba / Dekubaba are synced enemies, so they should have one
-    // by the time the modal offer fires. If absent (unusual actor that
-    // calls Actor_OfferGetItemNearby but isn't in the sync allowlist),
-    // skip Drop allocation — vanilla path still ran above.
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(offerer);
-    if (ext == nullptr || ext->netId == 0) {
-        return;
-    }
-
-    // Reuse the offerer's EnemyNetId.netId as the dropId. Each Karebaba
-    // / Dekubaba has a unique netId, and an actor offers at most one
-    // modal item over its lifetime — so the netId is unique across the
-    // session for this purpose.
-    uint32_t dropId = ext->netId;
-    int16_t  itemType = GetItemTypeForGI(getItemId);
-    int64_t  nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         std::chrono::steady_clock::now().time_since_epoch())
-                         .count();
-
-    Registry& registry = Registry::Instance();
-    Drop* drop = registry.Find(dropId);
-    bool newAllocation = false;
-    if (drop == nullptr) {
-        drop = registry.AllocateDrop(
-            dropId,
-            Anchor::Instance->ownClientId,
-            itemType,
-            offerer->world.pos,
-            (int16_t)gPlayState->sceneNum,
-            (int8_t)gPlayState->roomCtx.curRoom.num,
-            (uint8_t)(gSaveContext.linkAge & 0x1),
-            /*killerClientId=*/ Anchor::Instance->ownClientId,
-            nowMs);
-        newAllocation = true;
-    }
-    if (drop == nullptr) return;
-    if (drop->adapter == nullptr) drop->adapter = this;
-
-    registry.RegisterVisualRep(dropId, offerer);
-
-    // Plan B step 6 — broadcast the modal-offer drop so peers can
-    // register their mirror of the offering actor as a visual rep.
-    // Peer's HandlePacket_ItemDropSync sees offererEnemyNetId != 0,
-    // skips EN_ITEM00 spawn, walks its synced-actor lists to find the
-    // matching actor (Karebaba / Dekubaba stem), registers it.
+    // Phase 3 C-hybrid (item_drop_behavior_spec.md §1 Q1): connected
+    // sessions SUPPRESS the vanilla offer on BOTH host and peer. The
+    // actual stick pickup is handled by an EN_ITEM00 STICK that the
+    // offering actor's setup function spawns at the head's landing
+    // position via Item_DropCollectible. That EN_ITEM00 goes through
+    // the standard ground-drop pickup pipeline (Layer 1 / race A /
+    // ITEM_COLLECTED), which both clients can drive — no
+    // modal-offer-specific arbitration needed.
     //
-    // Only fire on first allocation so duplicate-offer calls in the
-    // same frame don't double-broadcast (defensive — vanilla shouldn't
-    // call Actor_OfferGetItemNearby more than once per actor lifetime,
-    // but cheap to guard).
-    if (newAllocation) {
-        Anchor::Instance->SendPacket_ItemDropSync(
-            /*itemNetId=*/        dropId,
-            /*itemParams=*/       (uint8_t)itemType,
-            /*pos=*/              offerer->world.pos,
-            /*killerClientId=*/   Anchor::Instance->ownClientId,
-            /*spawnTimeMs=*/      nowMs,
-            /*offererEnemyNetId=*/ dropId);
-    }
+    // The decorative offering actor (Dekubaba head in DeadStickDrop,
+    // Karebaba in DeadItemDrop) remains visible for the vanilla
+    // "head with stick on the ground" look until either someone
+    // picks up the EN_ITEM00 STICK (dismissed via
+    // ITEM_COLLECTED.associatedActorNetId — see Phase 3.4) or the
+    // actor's existing 200-frame timer expires naturally.
+    //
+    // Earlier design (host runs vanilla offer + allocates Drop +
+    // broadcasts MODAL_OFFER_CLAIMED on host's pickup) is fully
+    // superseded by this approach. The MODAL_OFFER_CLAIMED packet
+    // and the host-side modal-phantom-detection branch in
+    // HookHandlers.cpp become dead code paths under this design.
+    return;
 }
 
 }  // namespace SyncedClaimableDrop
@@ -158,4 +102,15 @@ void ModalOfferAdapter::OfferGetItemNearby(Actor* offerer, PlayState* play, int3
 // extern "C" bridge — used by C decomp actor files via forward decl.
 extern "C" void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, int32_t getItemId) {
     SyncedClaimableDrop::ModalOfferAdapter::GetInstance()->OfferGetItemNearby(offerer, play, getItemId);
+}
+
+// Phase 3 C-hybrid helper for SetupDeadStickDrop / SetupDeadItemDrop
+// in z_en_dekubaba.c / z_en_karebaba.c. Spawns an EN_ITEM00 STICK at
+// the offering actor's landing position WHEN CONNECTED. Disconnected
+// sessions skip the spawn so vanilla's Anchor_OfferGetItemNearby (which
+// runs unsuppressed in that case) remains the sole pickup mechanism.
+extern "C" void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play) {
+    if (offerer == nullptr || play == nullptr) return;
+    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
+    Item_DropCollectible(play, &offerer->world.pos, ITEM00_STICK);
 }

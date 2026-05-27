@@ -1123,7 +1123,8 @@ class Anchor : public Network {
     // the local player's gSaveContext has been credited. Receivers
     // walk their actor list for the matching itemNetId and Actor_Kill
     // the local copy. Per-player attribution: only one client wins.
-    void SendPacket_ItemCollected(uint32_t itemNetId);
+    void SendPacket_ItemCollected(uint32_t itemNetId,
+                                  uint32_t associatedActorNetId = 0);
     void HandlePacket_ItemCollected(nlohmann::json payload);
 
     // ITEM_DROP_SNAPSHOT (#193 Phase 5) — late-join replay. Host

@@ -1,6 +1,9 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncHelpers.h"  // kSyncableActorCategories — Phase 3 associated-actor lookup
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
+#include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -110,8 +113,41 @@ void Anchor::HandlePacket_ItemPickupRequest(nlohmann::json payload) {
             const ItemDropNetId* ext =
                 ObjectExtension::GetInstance().Get<ItemDropNetId>(it);
             if (ext != nullptr && ext->netId == itemNetId) {
-                SPDLOG_INFO("[ItemPickupRequest] Granted netId={} to clientId={} — broadcasting ITEM_COLLECTED",
-                            itemNetId, senderClientId);
+                // Phase 3 C-hybrid: look up the decorative offering
+                // actor near the EN_ITEM00 (same proximity-walk as
+                // host-self pickup at HookHandlers.cpp). Embed its
+                // netId so receivers Actor_Kill the decoration at
+                // the moment of pickup.
+                uint32_t assocActorNetId = 0;
+                {
+                    constexpr float kAssocRadius   = 200.0f;
+                    constexpr float kAssocRadiusSq = kAssocRadius * kAssocRadius;
+                    float bestDistSq = kAssocRadiusSq;
+                    for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
+                        Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+                        while (a != nullptr) {
+                            const EnemyNetId* nidExt =
+                                ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                            if (nidExt != nullptr && nidExt->netId != 0 &&
+                                nidExt->phase != EnemyStateSync::LifecyclePhase::Alive &&
+                                a->update != nullptr) {
+                                const float dx = a->world.pos.x - it->world.pos.x;
+                                const float dy = a->world.pos.y - it->world.pos.y;
+                                const float dz = a->world.pos.z - it->world.pos.z;
+                                const float dSq = dx * dx + dy * dy + dz * dz;
+                                if (dSq < bestDistSq) {
+                                    bestDistSq      = dSq;
+                                    assocActorNetId = nidExt->netId;
+                                }
+                            }
+                            a = a->next;
+                        }
+                    }
+                }
+
+                SPDLOG_INFO("[ItemPickupRequest] Granted netId={} to clientId={} "
+                            "assocActorNetId={} — broadcasting ITEM_COLLECTED",
+                            itemNetId, senderClientId, assocActorNetId);
                 // Claim: kill the drop on host so future requests find
                 // it dead.
                 Actor_Kill(it);
@@ -120,11 +156,12 @@ void Anchor::HandlePacket_ItemPickupRequest(nlohmann::json payload) {
                 // we want the WINNER's id, so set it explicitly via a
                 // dedicated field).
                 nlohmann::json bcast;
-                bcast["type"]              = ITEM_COLLECTED;
-                bcast["targetTeamId"]      = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
-                bcast["sceneNum"]          = (int)gPlayState->sceneNum;
-                bcast["netId"]             = itemNetId;
-                bcast["winnerClientId"]    = senderClientId;
+                bcast["type"]                 = ITEM_COLLECTED;
+                bcast["targetTeamId"]         = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+                bcast["sceneNum"]             = (int)gPlayState->sceneNum;
+                bcast["netId"]                = itemNetId;
+                bcast["winnerClientId"]       = senderClientId;
+                bcast["associatedActorNetId"] = assocActorNetId;
                 PacketTimeline::SetTimelineField(bcast);
                 SendJsonToRemote(bcast);
                 return;

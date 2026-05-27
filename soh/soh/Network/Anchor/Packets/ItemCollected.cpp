@@ -1,5 +1,7 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncHelpers.h"  // kSyncableActorCategories — Phase 3 dismiss-associated
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
+#include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -40,20 +42,28 @@ extern PlayState* gPlayState;
  *      no-op. Idempotent.
  */
 
-void Anchor::SendPacket_ItemCollected(uint32_t itemNetId) {
+void Anchor::SendPacket_ItemCollected(uint32_t itemNetId,
+                                      uint32_t associatedActorNetId) {
     if (!IsSaveLoaded() || gPlayState == nullptr) {
         return;
     }
 
     nlohmann::json payload;
-    payload["type"]         = ITEM_COLLECTED;
-    payload["targetTeamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
-    payload["sceneNum"]     = (int)gPlayState->sceneNum;
-    payload["netId"]        = itemNetId;
+    payload["type"]                 = ITEM_COLLECTED;
+    payload["targetTeamId"]         = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    payload["sceneNum"]             = (int)gPlayState->sceneNum;
+    payload["netId"]                = itemNetId;
+    // Phase 3 C-hybrid: when the picked-up EN_ITEM00 was spawned by a
+    // decorative offering actor (Dekubaba head in DeadStickDrop /
+    // Karebaba in DeadItemDrop), embed the offering actor's EnemyNetId
+    // so receivers can Actor_Kill the decoration at the moment of
+    // pickup instead of waiting for its 200-frame timeout. Zero (the
+    // default) for all other drops — receivers ignore the field.
+    payload["associatedActorNetId"] = associatedActorNetId;
     PacketTimeline::SetTimelineField(payload);
 
-    SPDLOG_INFO("[ItemCollected] Sending netId={} sceneNum={}",
-                itemNetId, (int)gPlayState->sceneNum);
+    SPDLOG_INFO("[ItemCollected] Sending netId={} sceneNum={} assocActorNetId={}",
+                itemNetId, (int)gPlayState->sceneNum, associatedActorNetId);
 
     SendJsonToRemote(payload);
 }
@@ -79,6 +89,40 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
     if (itemNetId == 0) {
         SPDLOG_WARN("[ItemCollected] Drop — netId == 0");
         return;
+    }
+
+    // Phase 3 C-hybrid (Claude/Plans/item_drop_behavior_spec.md §1 Q1):
+    // dismiss the decorative offering actor (Dekubaba head in
+    // DeadStickDrop / Karebaba in DeadItemDrop) when its associated
+    // EN_ITEM00 STICK is collected. Without this, the head model
+    // lingers for its 200-frame timer after pickup. Fires on all
+    // receivers (host included via own-echo) — Actor_Kill is
+    // idempotent when the actor is already dead/dequeued.
+    uint32_t assocActorNetId = (uint32_t)payload.value("associatedActorNetId", (uint32_t)0);
+    if (assocActorNetId != 0) {
+        bool dismissed = false;
+        for (size_t ci = 0; ci < kSyncableActorCategoriesCount && !dismissed; ++ci) {
+            Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+            while (a != nullptr) {
+                const EnemyNetId* nidExt =
+                    ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                if (nidExt != nullptr && nidExt->netId == assocActorNetId &&
+                    a->update != nullptr) {
+                    SPDLOG_INFO("[ItemCollected] dismissing associated actor netId={} "
+                                "on pickup of itemNetId={}",
+                                assocActorNetId, itemNetId);
+                    Actor_Kill(a);
+                    dismissed = true;
+                    break;
+                }
+                a = a->next;
+            }
+        }
+        if (!dismissed) {
+            SPDLOG_DEBUG("[ItemCollected] associated actor netId={} not found locally "
+                         "(already dead, despawned, or not in synced categories)",
+                         assocActorNetId);
+        }
     }
 
     // Winner resolution. Two broadcast paths:

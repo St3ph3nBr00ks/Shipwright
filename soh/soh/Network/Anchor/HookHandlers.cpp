@@ -3853,9 +3853,42 @@ void Anchor::RegisterHooks() {
         // vanilla. Vanilla runs on the next gate fire after host's
         // ITEM_COLLECTED grant transitions state to Granted.
         if (::SceneAuthority::IsMyCurrentRoomHost()) {
-            SPDLOG_INFO("[ItemDrop] netId={} pickup by host — broadcasting ITEM_COLLECTED type=0x{:02X}",
-                        ext->netId, (int)itemType);
-            Anchor::Instance->SendPacket_ItemCollected(ext->netId);
+            // Phase 3 C-hybrid: look up the decorative offering actor
+            // (Dekubaba head / Karebaba) near the EN_ITEM00 to embed
+            // its EnemyNetId in ITEM_COLLECTED so receivers can
+            // Actor_Kill the decoration at the moment of pickup. Same
+            // proximity-walk pattern as killer-attribution recovery.
+            uint32_t assocActorNetId = 0;
+            {
+                constexpr float kAssocRadius   = 200.0f;
+                constexpr float kAssocRadiusSq = kAssocRadius * kAssocRadius;
+                float bestDistSq = kAssocRadiusSq;
+                for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
+                    Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+                    while (a != nullptr) {
+                        const EnemyNetId* nidExt =
+                            ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                        if (nidExt != nullptr && nidExt->netId != 0 &&
+                            nidExt->phase != EnemyStateSync::LifecyclePhase::Alive &&
+                            a->update != nullptr) {
+                            const float dx = a->world.pos.x - item00->actor.world.pos.x;
+                            const float dy = a->world.pos.y - item00->actor.world.pos.y;
+                            const float dz = a->world.pos.z - item00->actor.world.pos.z;
+                            const float dSq = dx * dx + dy * dy + dz * dz;
+                            if (dSq < bestDistSq) {
+                                bestDistSq      = dSq;
+                                assocActorNetId = nidExt->netId;
+                            }
+                        }
+                        a = a->next;
+                    }
+                }
+            }
+
+            SPDLOG_INFO("[ItemDrop] netId={} pickup by host — broadcasting ITEM_COLLECTED "
+                        "type=0x{:02X} assocActorNetId={}",
+                        ext->netId, (int)itemType, assocActorNetId);
+            Anchor::Instance->SendPacket_ItemCollected(ext->netId, assocActorNetId);
             // Mark Consumed so subsequent gate fires (vanilla's
             // multi-frame give-item flow) keep returning *should=true
             // without re-broadcasting ITEM_COLLECTED. Same fix as the

@@ -17,6 +17,8 @@
 // it (peer's actor sits in DeadItemDrop until existing ENEMY_DEFEATED-
 // driven death sync kills it). Single-player: vanilla unchanged.
 extern void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, s32 getItemId);
+// Phase 3 C-hybrid: see z_en_dekubaba.c for the full comment.
+extern void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
@@ -217,6 +219,11 @@ void EnKarebaba_SetupDeadItemDrop(EnKarebaba* this, PlayState* play) {
     LUSLOG_INFO("[Karebaba] SetupDeadItemDrop ptr=%p home=(%.0f,%.0f,%.0f)",
                 (void*)this,
                 this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
+
+    // Phase 3 C-hybrid (Claude/Plans/item_drop_behavior_spec.md §1 Q1) —
+    // mirror of EnDekubaba_SetupDeadStickDrop. See that function for
+    // the full rationale.
+    Anchor_SpawnSyncedStickDrop(&this->actor, play);
 }
 
 void EnKarebaba_SetupRetract(EnKarebaba* this) {
