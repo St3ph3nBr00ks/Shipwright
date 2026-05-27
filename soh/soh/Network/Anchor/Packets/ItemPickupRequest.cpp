@@ -118,7 +118,13 @@ void Anchor::HandlePacket_ItemPickupRequest(nlohmann::json payload) {
                 // host-self pickup at HookHandlers.cpp). Embed its
                 // netId so receivers Actor_Kill the decoration at
                 // the moment of pickup.
+                //
+                // ITEM_COLLECTED broadcasts do NOT echo to sender —
+                // host must ALSO dismiss the associated actor locally
+                // (verified log 290 P1 AnchorProfile: rx_pps=0 for
+                // ITEM_COLLECTED after host's own grant broadcast).
                 uint32_t assocActorNetId = 0;
+                Actor*   assocActor      = nullptr;
                 {
                     constexpr float kAssocRadius   = 200.0f;
                     constexpr float kAssocRadiusSq = kAssocRadius * kAssocRadius;
@@ -138,6 +144,7 @@ void Anchor::HandlePacket_ItemPickupRequest(nlohmann::json payload) {
                                 if (dSq < bestDistSq) {
                                     bestDistSq      = dSq;
                                     assocActorNetId = nidExt->netId;
+                                    assocActor      = a;
                                 }
                             }
                             a = a->next;
@@ -151,6 +158,14 @@ void Anchor::HandlePacket_ItemPickupRequest(nlohmann::json payload) {
                 // Claim: kill the drop on host so future requests find
                 // it dead.
                 Actor_Kill(it);
+                // Local dismissal of associated actor (host doesn't
+                // get its own ITEM_COLLECTED echo).
+                if (assocActor != nullptr) {
+                    SPDLOG_INFO("[ItemPickupRequest] dismissing associated actor netId={} "
+                                "locally on host (no own-echo for ITEM_COLLECTED)",
+                                assocActorNetId);
+                    Actor_Kill(assocActor);
+                }
                 // Broadcast ITEM_COLLECTED with the granted clientId
                 // (relay overwrites the sender's clientId field, but
                 // we want the WINNER's id, so set it explicitly via a

@@ -3858,7 +3858,14 @@ void Anchor::RegisterHooks() {
             // its EnemyNetId in ITEM_COLLECTED so receivers can
             // Actor_Kill the decoration at the moment of pickup. Same
             // proximity-walk pattern as killer-attribution recovery.
+            //
+            // ITEM_COLLECTED broadcasts do NOT echo back to the sender
+            // (verified log 290 P1 AnchorProfile: rx_pps=0 for
+            // ITEM_COLLECTED after host's own grant). So host must
+            // ALSO dismiss the associated actor LOCALLY here — peers
+            // dismiss via HandlePacket_ItemCollected.
             uint32_t assocActorNetId = 0;
+            Actor*   assocActor      = nullptr;
             {
                 constexpr float kAssocRadius   = 200.0f;
                 constexpr float kAssocRadiusSq = kAssocRadius * kAssocRadius;
@@ -3878,6 +3885,7 @@ void Anchor::RegisterHooks() {
                             if (dSq < bestDistSq) {
                                 bestDistSq      = dSq;
                                 assocActorNetId = nidExt->netId;
+                                assocActor      = a;
                             }
                         }
                         a = a->next;
@@ -3889,6 +3897,14 @@ void Anchor::RegisterHooks() {
                         "type=0x{:02X} assocActorNetId={}",
                         ext->netId, (int)itemType, assocActorNetId);
             Anchor::Instance->SendPacket_ItemCollected(ext->netId, assocActorNetId);
+
+            // Local dismissal (host doesn't get its own echo).
+            if (assocActor != nullptr) {
+                SPDLOG_INFO("[ItemDrop] dismissing associated actor netId={} locally on host "
+                            "(no own-echo for ITEM_COLLECTED)",
+                            assocActorNetId);
+                Actor_Kill(assocActor);
+            }
             // Mark Consumed so subsequent gate fires (vanilla's
             // multi-frame give-item flow) keep returning *should=true
             // without re-broadcasting ITEM_COLLECTED. Same fix as the
