@@ -105,12 +105,32 @@ extern "C" void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, int32
 }
 
 // Phase 3 C-hybrid helper for SetupDeadStickDrop / SetupDeadItemDrop
-// in z_en_dekubaba.c / z_en_karebaba.c. Spawns an EN_ITEM00 STICK at
-// the offering actor's landing position WHEN CONNECTED. Disconnected
-// sessions skip the spawn so vanilla's Anchor_OfferGetItemNearby (which
-// runs unsuppressed in that case) remains the sole pickup mechanism.
+// in z_en_dekubaba.c / z_en_karebaba.c.
+//
+// WHEN CONNECTED:
+//   1. Spawn an EN_ITEM00 STICK at the offering actor's landing
+//      position. This becomes the sole interactive pickup target.
+//   2. Actor_Kill the offering actor so the small scale-0.03 head
+//      visual doesn't linger as decorative-but-confusing noise
+//      (log 291 B1/B2 feedback). The decorative "vanilla head with
+//      stick on the ground" effect was an explicit Q1 C-hybrid
+//      trade-off, but the user found it visually misleading — the
+//      small rotating head looked like it had pickup collision even
+//      though only the EN_ITEM00 STICK is interactive.
+//
+// WHEN DISCONNECTED (solo):
+//   Helper is a no-op. Vanilla Anchor_OfferGetItemNearby in the
+//   DeadStickDrop / DeadItemDrop actionFunc remains unsuppressed
+//   and handles pickup. The vanilla decorative head stays visible
+//   for the full 200-frame timer.
+//
+// Ordering note: Item_DropCollectible runs BEFORE Actor_Kill on the
+// offerer so the OnActorSpawn(EN_ITEM00) killer-attribution
+// recovery (which walks synced enemies for phase != Alive within
+// 200u) still finds the offerer alive and looks up its damager.
 extern "C" void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play) {
     if (offerer == nullptr || play == nullptr) return;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
     Item_DropCollectible(play, &offerer->world.pos, ITEM00_STICK);
+    Actor_Kill(offerer);
 }
