@@ -88,6 +88,7 @@ private:
     struct PhantomEntry {
         Actor*  actor;
         int64_t spawnTimeMs;
+        int64_t lastDiagLogMs;  // Throttles per-phantom diagnostic to ~1 Hz.
     };
     std::vector<PhantomEntry> phantoms_;
 };

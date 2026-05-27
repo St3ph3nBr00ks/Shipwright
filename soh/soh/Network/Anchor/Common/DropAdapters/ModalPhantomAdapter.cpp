@@ -40,7 +40,7 @@ void ModalPhantomAdapter::OnPhantomSpawn(EnItem00* phantom) {
     for (const auto& entry : phantoms_) {
         if (entry.actor == actor) return;
     }
-    phantoms_.push_back({ actor, NowMs() });
+    phantoms_.push_back({ actor, NowMs(), /*lastDiagLogMs=*/ 0 });
     SPDLOG_INFO("[ModalPhantom] spawn tracked actor={} params=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
                 "list-size={}",
                 fmt::ptr(actor), (uint16_t)actor->params,
@@ -53,6 +53,12 @@ void ModalPhantomAdapter::OnActorDestroyed(Actor* actor) {
     auto end = std::remove_if(phantoms_.begin(), phantoms_.end(),
                               [actor](const PhantomEntry& e) { return e.actor == actor; });
     if (end != phantoms_.end()) {
+        // Diagnostic — confirms OnActorDestroy hook fired for a tracked
+        // phantom (i.e. vanilla cleanup path reached). Pairs with
+        // [ModalPhantom] tick / backstop lines so the log can be read
+        // end-to-end for any given phantom.
+        SPDLOG_INFO("[ModalPhantom] scrub actor={} (OnActorDestroy fired) remaining-list-size={}",
+                    fmt::ptr(actor), (size_t)(end - phantoms_.begin()));
         phantoms_.erase(end, phantoms_.end());
     }
 }
@@ -62,8 +68,24 @@ void ModalPhantomAdapter::Tick() {
     const int64_t now = NowMs();
     for (auto& entry : phantoms_) {
         if (entry.actor == nullptr) continue;
-        if (entry.actor->update == nullptr) continue;  // Already killed; OnActorDestroy will scrub.
         const int64_t age = now - entry.spawnTimeMs;
+        const bool updateNull = (entry.actor->update == nullptr);
+        const bool drawNull   = (entry.actor->draw == nullptr);
+
+        // Per-phantom diagnostic — ~1 Hz throttle. Confirms Tick is
+        // firing and prints the actor's update/draw status so we can
+        // distinguish "vanilla killed it but OnActorDestroy hasn't
+        // scrubbed yet" (update=null) from "Bug B repro — actor still
+        // live but backstop never fired" (update=live, age large).
+        if (now - entry.lastDiagLogMs >= 1000) {
+            entry.lastDiagLogMs = now;
+            SPDLOG_INFO("[ModalPhantom] tick actor={} age={}ms update={} draw={}",
+                        fmt::ptr(entry.actor), (long long)age,
+                        updateNull ? "null" : "live",
+                        drawNull ? "null" : "live");
+        }
+
+        if (updateNull) continue;  // Already killed; OnActorDestroy will scrub.
         if (age >= kPhantomBackstopMs) {
             SPDLOG_INFO("[ModalPhantom] backstop force-kill actor={} age={}ms "
                         "(vanilla unk_15A countdown stalled, Bug B class)",
