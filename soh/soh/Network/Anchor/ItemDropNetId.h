@@ -37,9 +37,24 @@
 // gSaveContext before the other's broadcast arrived. Host arbitration
 // serialises pickup so only one client's gSaveContext is credited.
 enum class ItemPickupState : uint8_t {
-    None    = 0,
-    Pending = 1,
-    Granted = 2,
+    None     = 0,
+    Pending  = 1,
+    Granted  = 2,
+    // #193 Phase 1 follow-up (log 287 Bug 2). Vanilla EnItem00 pickup
+    // takes multiple frames to complete: first frame fires Item_Give /
+    // Actor_OfferGetItemNearby, subsequent frames spin until
+    // Actor_HasParent becomes true and Actor_Kill fires. The gate
+    // fires every frame the player is in contact with the actor.
+    // Without this terminal state, the Granted→None transition lets
+    // the second gate-fire re-route through race A (sending a
+    // spurious ITEM_PICKUP_REQUEST and returning *should=false),
+    // which makes vanilla's pickup function return early and the
+    // actor lives to its 220-frame unk_15A timeout (~3.7s @ 60fps).
+    //
+    // Consumed is terminal: once the grant has been applied locally
+    // (first vanilla run), subsequent gate fires return *should=true
+    // unconditionally so vanilla's give-item flow can complete.
+    Consumed = 3,
 };
 
 struct ItemDropNetId {

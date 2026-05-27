@@ -3702,14 +3702,26 @@ void Anchor::RegisterHooks() {
         }
 
         // Race A mitigation: Granted state means host has arbitrated
-        // this drop in our favour. Clear the flag (back to None for
-        // safety / re-entry) and allow vanilla pickup to run.
+        // this drop in our favour. Transition to Consumed (terminal)
+        // and allow vanilla pickup to run.
         if (ext->pickupState == ItemPickupState::Granted) {
             ItemDropNetId* mut = const_cast<ItemDropNetId*>(ext);
-            mut->pickupState = ItemPickupState::None;
+            mut->pickupState = ItemPickupState::Consumed;
             SPDLOG_INFO("[ItemDrop] netId={} grant consumed — applying pickup",
                         ext->netId);
             // *should stays true; vanilla pickup runs.
+            return;
+        }
+
+        // Consumed (terminal): vanilla's first-frame pickup ran. Subsequent
+        // gate fires keep returning *should=true so vanilla's give-item
+        // flow can complete over multiple frames (Actor_OfferGetItemNearby
+        // / Actor_HasParent / Actor_Kill). Without this short-circuit,
+        // the gate re-routed to race A and sent spurious ITEM_PICKUP_REQUEST
+        // packets while suppressing vanilla — the actor lived to its
+        // 220-frame unk_15A timeout (log 287 Bug 2).
+        if (ext->pickupState == ItemPickupState::Consumed) {
+            // *should stays true; vanilla pickup continues. Idempotent.
             return;
         }
 
@@ -3844,6 +3856,12 @@ void Anchor::RegisterHooks() {
             SPDLOG_INFO("[ItemDrop] netId={} pickup by host — broadcasting ITEM_COLLECTED type=0x{:02X}",
                         ext->netId, (int)itemType);
             Anchor::Instance->SendPacket_ItemCollected(ext->netId);
+            // Mark Consumed so subsequent gate fires (vanilla's
+            // multi-frame give-item flow) keep returning *should=true
+            // without re-broadcasting ITEM_COLLECTED. Same fix as the
+            // peer Granted→Consumed transition.
+            ItemDropNetId* mut = const_cast<ItemDropNetId*>(ext);
+            mut->pickupState = ItemPickupState::Consumed;
             // *should stays true.
             return;
         }
@@ -3879,6 +3897,23 @@ void Anchor::RegisterHooks() {
         if (ext->killerClientId == 0) return;
         if (ext->killerClientId == Anchor::Instance->ownClientId) return;
 
+        // Phase 1 follow-up (log 287 Bug 1) — also bypass the visual
+        // cue for teammates of the killer when TeamSharesPickups is
+        // true. Otherwise the drop visually shrinks for teammates even
+        // though they can pick it up immediately via the Layer 1
+        // teammate-bypass, then "pops" to full size on pickup — which
+        // the user reads as "initially small, then scaled up". The
+        // cue is meant to communicate "you have to wait" — bypassing
+        // teammates don't have to wait, so the cue is wrong for them.
+        const bool teamSharesPickups =
+            CVarGetInteger(CVAR_REMOTE_ANCHOR("TeamSharesPickups"), 1) != 0;
+        const std::string localTeamId =
+            CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+        if (teamSharesPickups && !ext->killerTeamId.empty() &&
+            ext->killerTeamId == localTeamId) {
+            return;
+        }
+
         const int64_t kKillerExclusiveMs = 3000;
         const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -3888,8 +3923,9 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        // Inside the window: shrink to 60% so non-killer drops are
-        // visually distinct.
+        // Inside the window AND local player is cross-team (or
+        // TeamSharesPickups=false): shrink to 60% so non-eligible
+        // drops are visually distinct.
         actor->scale.x *= 0.6f;
         actor->scale.y *= 0.6f;
         actor->scale.z *= 0.6f;
