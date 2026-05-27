@@ -126,12 +126,25 @@ public:
     const std::unordered_map<uint32_t, Drop>& GetAllDrops() const { return drops_; }
     size_t Size() const { return drops_.size(); }
 
+    // Pending-dismissal queue — race-fix for the modal-offer case where
+    // peer receives ENEMY_DEFEATED for an offering actor (Karebaba /
+    // Dekubaba stem) BEFORE the corresponding ITEM_DROP_SYNC. The
+    // defeat hook can't dispatch dismissal because the Drop doesn't
+    // exist yet; it buffers the netId+killerClientId here. When
+    // HandlePacket_ItemDropSync allocates the modal-offer Drop, it
+    // checks ConsumePendingDismissal and, if a hit, immediately
+    // transitions the new Drop to Resolved and dismisses its visual
+    // reps. Both maps are cleared by Clear().
+    void     MarkPendingDismissal(uint32_t dropId, uint32_t killerClientId);
+    bool     ConsumePendingDismissal(uint32_t dropId, uint32_t& outKillerClientId);
+
 private:
     Registry() = default;
     Registry(const Registry&) = delete;
     Registry& operator=(const Registry&) = delete;
 
-    std::unordered_map<uint32_t, Drop> drops_;
+    std::unordered_map<uint32_t, Drop>     drops_;
+    std::unordered_map<uint32_t, uint32_t> pendingDismissals_;
 };
 
 }  // namespace SyncedClaimableDrop

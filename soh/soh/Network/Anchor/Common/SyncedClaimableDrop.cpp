@@ -85,6 +85,23 @@ void Registry::RemoveDrop(uint32_t dropId) {
 
 void Registry::Clear() {
     drops_.clear();
+    pendingDismissals_.clear();
+}
+
+void Registry::MarkPendingDismissal(uint32_t dropId, uint32_t killerClientId) {
+    if (dropId == 0) return;
+    pendingDismissals_[dropId] = killerClientId;
+    SPDLOG_INFO("[SyncedClaimableDrop] pending-dismissal queued dropId={} killer={} "
+                "(awaiting matching modal-offer ITEM_DROP_SYNC)",
+                dropId, killerClientId);
+}
+
+bool Registry::ConsumePendingDismissal(uint32_t dropId, uint32_t& outKillerClientId) {
+    auto it = pendingDismissals_.find(dropId);
+    if (it == pendingDismissals_.end()) return false;
+    outKillerClientId = it->second;
+    pendingDismissals_.erase(it);
+    return true;
 }
 
 }  // namespace SyncedClaimableDrop

@@ -180,6 +180,29 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
         SPDLOG_INFO("[ItemDropSync] rx modal-offer dropId={} offererNetId={} mirror=found "
                     "type=0x{:02X}",
                     itemNetId, offererEnemyNetId, (int)itemParams);
+
+        // Race-fix drain (field test log 279): peer's ENEMY_DEFEATED for
+        // this offering actor arrives BEFORE this packet, so the defeat
+        // handler buffered a pending dismissal. Consume it now: if hit,
+        // immediately dismiss visual reps and Resolve the Drop. Without
+        // this, peer waits ~3.5s for the vanilla 200-frame DeadStickDrop
+        // countdown to expire before the stem visual disappears.
+        if (drop != nullptr) {
+            uint32_t pendingKiller = 0;
+            if (reg.ConsumePendingDismissal(itemNetId, pendingKiller)) {
+                if (drop->adapter != nullptr &&
+                    drop->state != SyncedClaimableDrop::DropState::Resolved) {
+                    for (Actor* visualRep : drop->visualReps) {
+                        drop->adapter->DismissVisualRep(*drop, visualRep);
+                    }
+                    drop->claimerClientId = pendingKiller;
+                    reg.TransitionTo(*drop, SyncedClaimableDrop::DropState::Resolved);
+                    SPDLOG_INFO("[ItemDropSync] modal-offer dropId={} resolved via "
+                                "pending-dismissal drain — killer={}",
+                                itemNetId, pendingKiller);
+                }
+            }
+        }
         return;
     }
 

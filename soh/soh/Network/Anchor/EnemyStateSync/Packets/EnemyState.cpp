@@ -1529,6 +1529,17 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                         "ENEMY_DEFEATED — dispatched DismissVisualRep through "
                         "adapter '{}'",
                         netId, drop->adapter->Name());
+        } else if (drop == nullptr) {
+            // Race fix (field test log 279): on peer, OnEnemyDefeat fires
+            // when host's offering actor enters its Dying state, BEFORE
+            // host enters DeadItemDrop and broadcasts ITEM_DROP_SYNC. So
+            // ENEMY_DEFEATED arrives on peer ~1s before the modal-offer
+            // drop is allocated. Buffer the netId here; the modal-offer
+            // branch of HandlePacket_ItemDropSync drains the buffer and
+            // dismisses immediately. Non-modal defeats also pass through
+            // (registry never gets a matching dropId, entry ages out at
+            // disconnect). Bounded by per-scene enemy count.
+            reg.MarkPendingDismissal(netId, killerClientId);
         }
     }
 
