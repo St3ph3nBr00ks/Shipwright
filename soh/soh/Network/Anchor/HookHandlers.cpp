@@ -762,7 +762,12 @@ void Anchor_EndNetworkItemDropSpawn(void) {
 extern "C" void Anchor_BroadcastEnvActorDestroy(Actor* envActor) {
     if (envActor == nullptr) return;
     if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return;
-    if (Anchor::Instance->isKillingNetworkActor) return;
+    // Note: no isKillingNetworkActor guard here (private member,
+    // not accessible from a free function). Dedup is handled by
+    // HostBookkeeping::ClaimDefeatBroadcast below — a network-
+    // received destroy already marks the broadcast as claimed,
+    // so a re-entrant call from the receive path's Actor_Kill
+    // would no-op naturally.
 
     EnemyNetId* ext =
         const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(envActor));
@@ -4039,17 +4044,20 @@ void Anchor::RegisterHooks() {
             Anchor::Instance->SendPacket_ItemCollected(ext->netId, assocActorNetId);
 
             // Local dismissal (host doesn't get its own echo).
-            // Bracket with isKillingNetworkActor so OnActorKill
-            // doesn't emit a redundant ENEMY_DEFEATED — peers'
-            // ITEM_COLLECTED dismissal handlers Actor_Kill their own
-            // local copies independently.
+            // No isKillingNetworkActor bracket here — this code runs
+            // inside a COND_VB_SHOULD lambda which has no `this`
+            // capture (REGISTER_VB_SHOULD macro uses [] captures),
+            // so the bare member access doesn't compile. The
+            // OnActorKill ClaimDefeatBroadcast ledger dedups
+            // redundant ENEMY_DEFEATED broadcasts via the actor's
+            // phase state (already past Alive for offerers in
+            // DeadStickDrop / DeadItemDrop), so the bracket would
+            // be defensive at most.
             if (assocActor != nullptr) {
                 SPDLOG_INFO("[ItemDrop] dismissing associated actor netId={} locally on host "
                             "(no own-echo for ITEM_COLLECTED)",
                             assocActorNetId);
-                isKillingNetworkActor = true;
                 Actor_Kill(assocActor);
-                isKillingNetworkActor = false;
             }
             // Mark Consumed so subsequent gate fires (vanilla's
             // multi-frame give-item flow) keep returning *should=true
