@@ -108,25 +108,9 @@ extern "C" void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, int32
 // in z_en_dekubaba.c / z_en_karebaba.c.
 //
 // WHEN CONNECTED:
-//   1. Spawn an EN_ITEM00 STICK at the offering actor's landing
-//      position. This is the interactive pickup collider.
-//   2. Set the spawned EN_ITEM00's draw=NULL so it renders as
-//      invisible. The visual on the ground is provided by the
-//      offering actor's own gDekuBabaStickDropDL render in the
-//      DeadStickDrop / DeadItemDrop state (z_en_dekubaba.c:1423
-//      EnDekubaba_Draw branch). This matches user-preferred
-//      vanilla decoration appearance (log 292 feedback: the
-//      Dekubaba's drawn stick is the visually-correct one; the
-//      smaller EN_ITEM00 stick visual was unwanted).
-//   3. Set thread-local g_pendingItemDropInvisibleDecorative so
-//      the host's deferred ITEM_DROP_SYNC broadcast carries the
-//      invisible-decorative flag. Peer's HandlePacket_ItemDropSync
-//      applies the same draw=NULL to the network spawn so peer's
-//      visual is also just the synced offerer's decorative stick.
-//   4. Do NOT Actor_Kill the offerer here — keep it alive in its
-//      DeadStickDrop / DeadItemDrop state so its decorative
-//      drawn-stick render persists. Dismissal of the offerer on
-//      pickup is handled by ITEM_COLLECTED.associatedActorNetId.
+//   Spawn an EN_ITEM00 STICK at the offering actor's landing
+//   position. This is the interactive pickup collider AND the
+//   visible stick for the player to walk to.
 //
 // WHEN DISCONNECTED (solo):
 //   Helper is a no-op. Vanilla Anchor_OfferGetItemNearby in the
@@ -134,16 +118,22 @@ extern "C" void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, int32
 //   and handles pickup. The vanilla decorative head stays visible
 //   for the full 200-frame timer (or until vanilla Actor_HasParent
 //   triggers Actor_Kill on pickup).
-extern "C" void Anchor_SetPendingItemDropInvisibleDecorative(bool flag);  // HookHandlers.cpp
+//
+// Position note (log 297 regression fix): the earlier
+// invisible-decorative design relied on the Dekubaba head's
+// gDekuBabaStickDropDL render at the actor's world.pos for the
+// visible cue. But SetupDeadStickDrop sets shape.rot.x -= 0x4000
+// + shape.yOffset = 1000 + scale = 0.03, then the head is drawn
+// with Matrix_Translate(0, 0, 200, APPLY) on top — the visible
+// head ends up ~30+ world units offset from world.pos. The
+// invisible EN_ITEM00 collider stayed at world.pos so the player
+// could see the head but never reach the 30u xzDist pickup
+// radius. Making the EN_ITEM00 visible (no draw=NULL) puts the
+// pickable visual at the same XZ as the collider; the Dekubaba
+// head decoration remains but is now redundant rather than
+// load-bearing for pickup.
 extern "C" void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play) {
     if (offerer == nullptr || play == nullptr) return;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
-    Anchor_SetPendingItemDropInvisibleDecorative(true);
-    EnItem00* spawned = Item_DropCollectible(play, &offerer->world.pos, ITEM00_STICK);
-    Anchor_SetPendingItemDropInvisibleDecorative(false);
-    if (spawned != nullptr) {
-        // Local invisibility on host. Peer-side invisibility is
-        // applied via the broadcast flag inside ItemDropSync.
-        spawned->actor.draw = NULL;
-    }
+    (void)Item_DropCollectible(play, &offerer->world.pos, ITEM00_STICK);
 }
