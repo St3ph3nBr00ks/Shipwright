@@ -1,5 +1,7 @@
 #include "ItemEligibility.h"
 
+#include <libultraship/libultraship.h>
+
 extern "C" {
 #include "macros.h"
 #include "functions.h"
@@ -129,6 +131,25 @@ uint32_t ComputeLocalEligibilityBitmap() {
             bitmap |= EligibilityBitForItem00(t);
         }
     }
+
+    // Diagnostic for the "STICK bit never sets" bug (log 302 follow-up).
+    // Dumps the raw save-context values the STICK eligibility check reads,
+    // so we can tell whether Item_Give actually committed UPG_STICKS /
+    // AMMO(ITEM_STICK) by the time this hook runs. Same for NUTS — both
+    // share the "give upgrade on first pickup" code path. Strip after the
+    // root cause is identified.
+    SPDLOG_INFO(
+        "[Eligibility-Diag] bitmap=0x{:08X} | "
+        "UPG_STICKS={} CUR_CAPACITY(UPG_STICKS)={} AMMO(ITEM_STICK)={} "
+        "INV_CONTENT(ITEM_STICK)={} | "
+        "UPG_NUTS={} CUR_CAPACITY(UPG_NUTS)={} AMMO(ITEM_NUT)={} "
+        "INV_CONTENT(ITEM_NUT)={}",
+        bitmap,
+        (int)CUR_UPG_VALUE(UPG_STICKS), (int)CUR_CAPACITY(UPG_STICKS),
+        (int)AMMO(ITEM_STICK), (int)INV_CONTENT(ITEM_STICK),
+        (int)CUR_UPG_VALUE(UPG_NUTS), (int)CUR_CAPACITY(UPG_NUTS),
+        (int)AMMO(ITEM_NUT), (int)INV_CONTENT(ITEM_NUT));
+
     return bitmap;
 }
 
