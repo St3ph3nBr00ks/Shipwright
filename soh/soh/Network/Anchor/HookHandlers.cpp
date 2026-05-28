@@ -778,16 +778,23 @@ extern "C" void Anchor_EndNetworkEnvActorDestroy(void) {
 extern "C" void Anchor_BroadcastEnvActorDestroy(Actor* envActor) {
     if (envActor == nullptr) return;
     if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return;
-    if (g_isApplyingNetworkEnvActorDestroy) {
-        // Receive-side application — don't echo back.
-        return;
-    }
 
     EnemyNetId* ext =
         const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(envActor));
     if (ext == nullptr || ext->netId == 0) return;
 
+    // Transition phase unconditionally — both sender and receiver
+    // need ext->phase == Dead so subsequent assocActor proximity
+    // walks at pickup time can match this actor. Done BEFORE the
+    // echo-suppress short-circuit (which only blocks the network
+    // SendPacket, not state-tracking).
     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
+
+    if (g_isApplyingNetworkEnvActorDestroy) {
+        // Receive-side application — phase already transitioned;
+        // don't echo the broadcast back to the originator.
+        return;
+    }
 
     SPDLOG_INFO("[EnvActorDestroy] broadcasting actor id={} netId={} (cat={} pos=({:.0f},{:.0f},{:.0f}))",
                 envActor->id, ext->netId, (int)envActor->category,
