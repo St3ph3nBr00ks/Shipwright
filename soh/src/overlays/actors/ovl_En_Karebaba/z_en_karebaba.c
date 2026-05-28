@@ -233,22 +233,31 @@ void EnKarebaba_SetupDeadItemDrop(EnKarebaba* this, PlayState* play) {
     // test log 304 (Lost Woods, scene 85).
     //
     // Landing position is home.pos offset by kLandDistance units in
-    // the death direction (world.rot.y = shape.rot.y + 0x8000, i.e.
-    // opposite to the Karebaba's facing). Approximates the post-
-    // flight position visually (better than home.pos directly, which
-    // puts the head at the stem base — log 305 user feedback) while
-    // staying deterministic across clients. shape.rot is synced via
-    // ENEMY_STATE so both clients compute the same offset.
-    // Y stays at current value (already on the floor via
-    // EnKarebaba_Dying's `bgCheckFlags & 2` transition).
+    // the death direction. SetupDying set world.rot.y = shape.rot.y +
+    // 0x8000 (180° away from the Karebaba's facing), so world.rot.y
+    // IS the death direction. Y stays at current value (already on
+    // the floor via Dying's `bgCheckFlags & 2` transition).
+    //
+    // Use world.rot.y NOT shape.rot.y because shape.rot isn't synced
+    // via ENEMY_STATE for "binary skip-all" actors (HookHandlers.cpp
+    // line 2534-2540 — Karebaba's shape.rot is animation-driven and
+    // overriding it from network would corrupt Spin/Upright state).
+    // world.rot IS synced unconditionally (line 2541), so by the
+    // time SetupDeadItemDrop fires (~10 frames after SetupDying via
+    // the airborne phase), peer's world.rot.y has been overwritten
+    // each frame by OnActorUpdate to match host's netRot. Both
+    // clients then compute the same landing direction. Log 307 user
+    // feedback identified the divergence: P2-killed Karebabas placed
+    // the visible model at peer's locally-computed shape.rot.y +
+    // 0x8000 while the EN_ITEM00 collider was at host's value.
     {
         // Distance tuned on log 306 user feedback: 20u was visibly too
         // close to the stem base (head appeared "only slightly off
         // center"), 40u approximates the actual flight distance from
         // SetupDying's velocity + gravity physics.
         const f32 kLandDistance = 40.0f;
-        f32 dirX = Math_SinS(this->actor.shape.rot.y + 0x8000);
-        f32 dirZ = Math_CosS(this->actor.shape.rot.y + 0x8000);
+        f32 dirX = Math_SinS(this->actor.world.rot.y);
+        f32 dirZ = Math_CosS(this->actor.world.rot.y);
         this->actor.world.pos.x = this->actor.home.pos.x + dirX * kLandDistance;
         this->actor.world.pos.z = this->actor.home.pos.z + dirZ * kLandDistance;
     }
