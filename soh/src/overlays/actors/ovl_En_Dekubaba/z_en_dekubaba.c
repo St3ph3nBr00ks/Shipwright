@@ -362,6 +362,27 @@ s16 EnDekubaba_GetStateIndex(EnDekubaba* this) {
  * onto the right post-Hit branch; arg1 only governs one frame of behaviour.
  */
 void EnDekubaba_ApplyNetState(EnDekubaba* this, s16 stateIndex) {
+    // Collider mode fix (log 301 basement-dekubaba sword-bounce bug):
+    // SetupWait sets colType = COLTYPE_HARD + AC_HARD (sword bounces
+    // off the dormant baby form), and SetupGrow clears them again
+    // (lines 397-398 / 424-425). The remaining Setup functions
+    // (Retract/DecideLunge/PrepareLunge/Lunge/PullBack/Recover/Hit/
+    // StunnedVertical/Sway) don't touch colType at all — they rely on
+    // the Wait→Grow transition having already flipped it. When the
+    // host's ENEMY_STATE broadcast only ever observes state >= 2 for
+    // a dekubaba (e.g. a ceiling-anchored variant whose Wait→Grow→
+    // PullBack happens within one broadcast cycle), the non-host
+    // applies the received state directly via the switch below.
+    // SetupWait still ran from Init (HARD), so the non-host's
+    // collider stays HARD even when host has it in PullBack/Lunge —
+    // the player's sword bounces on every hit. Force non-Wait
+    // applies into the post-Grow collider mode here; the individual
+    // Setup functions handle their own AC_ON / OCELEM bits.
+    if (stateIndex != 0) {
+        this->collider.base.colType = COLTYPE_HIT6;
+        this->collider.base.acFlags &= ~AC_HARD;
+    }
+
     switch (stateIndex) {
         case 0:  EnDekubaba_SetupWait(this);             break;
         case 1:  EnDekubaba_SetupGrow(this);             break;
