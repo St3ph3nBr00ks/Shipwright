@@ -113,18 +113,24 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
                     //   - EN_KUSA: cut-stub → CutWaitRegrow →
                     //     SetupRegrow → Main (log 297 bug).
                     //   - EN_KAREBABA: DeadItemDrop → Dead → Regrow
-                    //     → Idle (log 304 bug — pickup-dismissal
-                    //     was Actor_Killing the Karebaba on the
-                    //     peer side too, removing it from the
-                    //     scene mid-cycle).
-                    // Same skip applied at the host local-
-                    // dismissal sites in HookHandlers.cpp and
-                    // ItemPickupRequest.cpp.
-                    if (a->id == ACTOR_EN_KUSA ||
-                        a->id == ACTOR_EN_KAREBABA) {
+                    //     → Idle. params=0 fast-forwards the peer's
+                    //     DeadItemDrop tick to SetupDead next frame
+                    //     so the visible head decoration disappears
+                    //     immediately on peer side (mirror of the
+                    //     host-side fast-forward in
+                    //     ItemPickupRequest.cpp + HookHandlers.cpp).
+                    if (a->id == ACTOR_EN_KUSA) {
                         SPDLOG_INFO("[ItemCollected] skipping dismiss for assoc netId={} "
-                                    "(actor id={} — natural respawn cycle in progress)",
-                                    assocActorNetId, a->id);
+                                    "(actor id=EN_KUSA — cut state regrows naturally)",
+                                    assocActorNetId);
+                        dismissed = true;
+                        break;
+                    }
+                    if (a->id == ACTOR_EN_KAREBABA) {
+                        a->params = 0;
+                        SPDLOG_INFO("[ItemCollected] fast-forwarding EN_KAREBABA assoc netId={} "
+                                    "to SetupDead (params=0)",
+                                    assocActorNetId);
                         dismissed = true;
                         break;
                     }

@@ -170,14 +170,20 @@ void Anchor::HandlePacket_ItemPickupRequest(nlohmann::json payload) {
                     //   - EN_KUSA: cut-stub → CutWaitRegrow →
                     //     SetupRegrow → Main (log 297 bug).
                     //   - EN_KAREBABA: DeadItemDrop → Dead → Regrow
-                    //     → Idle (log 304 bug — dismissal was
-                    //     Actor_Killing Karebabas mid-DeadItemDrop,
-                    //     removing them from the scene entirely).
-                    if (assocActor->id == ACTOR_EN_KUSA ||
-                        assocActor->id == ACTOR_EN_KAREBABA) {
+                    //     → Idle. params=0 fast-forwards the
+                    //     DeadItemDrop tick to SetupDead next frame
+                    //     so the visible head decoration disappears
+                    //     immediately (log 305: without this the
+                    //     stick model lingered for ~200 frames).
+                    if (assocActor->id == ACTOR_EN_KUSA) {
                         SPDLOG_INFO("[ItemPickupRequest] skipping dismiss for assoc netId={} "
-                                    "(actor id={} — natural respawn cycle in progress)",
-                                    assocActorNetId, assocActor->id);
+                                    "(actor id=EN_KUSA — cut state regrows naturally)",
+                                    assocActorNetId);
+                    } else if (assocActor->id == ACTOR_EN_KAREBABA) {
+                        assocActor->params = 0;
+                        SPDLOG_INFO("[ItemPickupRequest] fast-forwarding EN_KAREBABA assoc netId={} "
+                                    "to SetupDead (params=0; respawn cycle continues)",
+                                    assocActorNetId);
                     } else {
                         SPDLOG_INFO("[ItemPickupRequest] dismissing associated actor netId={} "
                                     "locally on host (no own-echo for ITEM_COLLECTED)",
