@@ -778,7 +778,7 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor,
 // Sent by any client when an enemy fires OnEnemyDefeat or Actor_Kill.
 // Q I Tier 2: host attributes locally; non-host route-to-host with relay-
 // enriched sender field for tamper-proof attribution.
-void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
+void Anchor::SendPacket_EnemyDefeated(uint32_t netId, int16_t shapeRotY, bool includeShapeRotY) {
     if (!IsSaveLoaded()) {
         return;
     }
@@ -788,6 +788,17 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
     payload["phase"]        = "DyingByLocal";
     payload["phaseChanged"] = true;
     payload["netId"] = netId;
+    if (includeShapeRotY) {
+        // Karebaba death-direction sync — host's shape.rot.y at
+        // OnEnemyDefeat time. Receive side reads this in the
+        // Karebaba branch of HandlePacket_EnemyDefeated and applies
+        // it BEFORE SetupDyingNet so peer's world.rot.y = shape.rot.y
+        // + 0x8000 matches host's. Avoids the netShapeRot lag bug
+        // — Spin rotates shape.rot.y up to ~38°/frame, so the prior
+        // ENEMY_UPDATE's cached value can be ~38° off when host's
+        // SetupDying fires.
+        payload["shapeRotY"] = (int)shapeRotY;
+    }
     PacketTimeline::SetTimelineField(payload);
 
     if (::SceneAuthority::IsMyCurrentRoomHost()) {
@@ -1631,24 +1642,37 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                         return;
                     }
                     // Override peer's local shape.rot.y with host's
-                    // cached netShapeRot.y BEFORE SetupDyingNet runs.
-                    // SetupDyingNet sets world.rot.y = shape.rot.y +
-                    // 0x8000 to capture the death-direction; without
+                    // value at OnEnemyDefeat time BEFORE SetupDyingNet
+                    // runs. SetupDyingNet sets world.rot.y = shape.rot.y
+                    // + 0x8000 to capture the death direction; without
                     // this override the peer's locally-driven Spin /
                     // Upright shape.rot.y (Karebaba is "binary skip-
                     // all" for shape.rot per HookHandlers.cpp:2534)
-                    // is used and the head flies a different direction
-                    // than host's. Log 308 user feedback: death
-                    // animation direction wasn't syncing either
-                    // direction. netShapeRot is captured from every
-                    // ENEMY_STATE packet so it holds host's value at
-                    // the most-recent broadcast (typically the Spin →
-                    // Dying transition that immediately preceded this
-                    // EnemyDefeated).
-                    actor->shape.rot.y = ext->netShapeRot.y;
+                    // would be used and the head would fly a different
+                    // direction than host's.
+                    //
+                    // First try the per-packet `shapeRotY` field —
+                    // host's exact value at OnEnemyDefeat (log 308
+                    // fix). Falls back to cached netShapeRot.y from
+                    // the last ENEMY_UPDATE packet (log 307 fix) for
+                    // compatibility — but that path is lossy during
+                    // Spin where shape.rot.y rotates up to ~38° per
+                    // frame, so one frame of packet lag = noticeable
+                    // direction divergence. The shapeRotY payload
+                    // field bypasses the lag entirely.
+                    int16_t syncedShapeRotY;
+                    const char* syncSource;
+                    if (payload.contains("shapeRotY")) {
+                        syncedShapeRotY = (int16_t)payload["shapeRotY"].get<int>();
+                        syncSource      = "payload";
+                    } else {
+                        syncedShapeRotY = ext->netShapeRot.y;
+                        syncSource      = "netShapeRot-cache";
+                    }
+                    actor->shape.rot.y = syncedShapeRotY;
                     SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle "
-                                "(shape.rot.y synced from netShapeRot=0x{:04X})",
-                                netId, (uint16_t)ext->netShapeRot.y);
+                                "(shape.rot.y synced from {}=0x{:04X})",
+                                netId, syncSource, (uint16_t)syncedShapeRotY);
                     EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);

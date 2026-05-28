@@ -3125,7 +3125,16 @@ void Anchor::RegisterHooks() {
                 bookkeeping.RecordPendingKill(ext->netId);
             }
         }
-        SendPacket_EnemyDefeated(ext->netId);
+        // Karebaba death-direction sync: capture shape.rot.y at
+        // OnEnemyDefeat time (= host's SetupDying time) so peer can
+        // apply the exact value before its own SetupDyingNet. Avoids
+        // the netShapeRot cache lag (~38°/frame during Spin) that
+        // made flight directions diverge in log 308.
+        if (actor->id == ACTOR_EN_KAREBABA) {
+            SendPacket_EnemyDefeated(ext->netId, actor->shape.rot.y, /*includeShapeRotY=*/true);
+        } else {
+            SendPacket_EnemyDefeated(ext->netId);
+        }
 
         // AI Director: notify removal for director-spawned enemies. Early-
         // exits inside OnEnemyRemoved if this netId isn't in the Director's

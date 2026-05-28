@@ -1053,7 +1053,13 @@ class Anchor : public Network {
     // ENEMY_STATE wire packet. All four emit type=ENEMY_STATE with the
     // matching phase tag; bodies live in EnemyStateSync/Packets/EnemyState.cpp.
     void SendPacket_EnemyUpdate(uint32_t netId, Actor* actor);   // phase=Alive       phaseChanged=false
-    void SendPacket_EnemyDefeated(uint32_t netId);               // phase=DyingByLocal phaseChanged=true
+    // shapeRotY is captured at OnEnemyDefeat time on host and shipped in
+    // the payload as `shapeRotY` so the peer's HandlePacket_EnemyDefeated
+    // can apply host's exact value before SetupDyingNet. Used by Karebaba
+    // to sync the death-flight direction; other actors pass the default
+    // (includeShapeRotY=false) and the field is omitted from the wire.
+    void SendPacket_EnemyDefeated(uint32_t netId, int16_t shapeRotY = 0,
+                                  bool includeShapeRotY = false);  // phase=DyingByLocal phaseChanged=true
     // ENEMY_STATE phase=Alive phaseChanged=true (dynamic spawn).
     // Optional descId / variantId / groupId carry AI Director identity
     // for director-spawned actors. Defaults to (0, 0, 0) for vanilla
