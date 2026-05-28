@@ -3944,11 +3944,17 @@ void Anchor::RegisterHooks() {
             Anchor::Instance->SendPacket_ItemCollected(ext->netId, assocActorNetId);
 
             // Local dismissal (host doesn't get its own echo).
+            // Bracket with isKillingNetworkActor so OnActorKill
+            // doesn't emit a redundant ENEMY_DEFEATED — peers'
+            // ITEM_COLLECTED dismissal handlers Actor_Kill their own
+            // local copies independently.
             if (assocActor != nullptr) {
                 SPDLOG_INFO("[ItemDrop] dismissing associated actor netId={} locally on host "
                             "(no own-echo for ITEM_COLLECTED)",
                             assocActorNetId);
+                isKillingNetworkActor = true;
                 Actor_Kill(assocActor);
+                isKillingNetworkActor = false;
             }
             // Mark Consumed so subsequent gate fires (vanilla's
             // multi-frame give-item flow) keep returning *should=true

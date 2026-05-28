@@ -160,11 +160,17 @@ void Anchor::HandlePacket_ItemPickupRequest(nlohmann::json payload) {
                 Actor_Kill(it);
                 // Local dismissal of associated actor (host doesn't
                 // get its own ITEM_COLLECTED echo).
+                // Bracket with isKillingNetworkActor so OnActorKill
+                // doesn't emit a redundant ENEMY_DEFEATED — peers'
+                // ITEM_COLLECTED dismissal handlers Actor_Kill their
+                // own local copies independently.
                 if (assocActor != nullptr) {
                     SPDLOG_INFO("[ItemPickupRequest] dismissing associated actor netId={} "
                                 "locally on host (no own-echo for ITEM_COLLECTED)",
                                 assocActorNetId);
+                    isKillingNetworkActor = true;
                     Actor_Kill(assocActor);
+                    isKillingNetworkActor = false;
                 }
                 // Broadcast ITEM_COLLECTED with the granted clientId
                 // (relay overwrites the sender's clientId field, but

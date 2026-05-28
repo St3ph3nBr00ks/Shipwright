@@ -111,7 +111,14 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
                     SPDLOG_INFO("[ItemCollected] dismissing associated actor netId={} "
                                 "on pickup of itemNetId={}",
                                 assocActorNetId, itemNetId);
+                    // Bracket with isKillingNetworkActor so OnActorKill
+                    // skips the redundant ENEMY_DEFEATED broadcast.
+                    // The actor's death is a pickup-dismissal, not a
+                    // combat defeat — no need to network it (peers
+                    // also Actor_Kill via this same handler).
+                    isKillingNetworkActor = true;
                     Actor_Kill(a);
+                    isKillingNetworkActor = false;
                     dismissed = true;
                     break;
                 }
