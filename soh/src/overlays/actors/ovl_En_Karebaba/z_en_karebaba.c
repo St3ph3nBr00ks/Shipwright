@@ -216,6 +216,26 @@ void EnKarebaba_SetupDeadItemDrop(EnKarebaba* this, PlayState* play) {
     this->actor.params = 200;
     this->actor.flags &= ~ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->actionFunc = EnKarebaba_DeadItemDrop;
+
+    // KAREBABA-MP-POS-SYNC: snap world.pos.xz to home.pos.xz before
+    // Anchor_SpawnSyncedStickDrop computes the visible head position.
+    // EnKarebaba is "binary skip-all" for world.pos (session_state.md
+    // — world.pos isn't synced via ENEMY_STATE). During EnKarebaba_
+    // Dying the actor flies with gravity (velocity.y=4, speedXZ=3) and
+    // lands wherever each client's local physics + bgCheck floor put
+    // it. Host's landing XZ may differ from peer's by 5-30u depending
+    // on packet timing. Without this snap the host broadcasts the
+    // invisible EN_ITEM00 at host's landing XZ but the peer's local
+    // Karebaba renders the visible head DList (gDekuBabaStickDropDL,
+    // line 604) at PEER's landing XZ — the player on peer walks to
+    // the visible head but the collider is 5-30u away and pickup
+    // never triggers. Field test log 304 (Lost Woods, scene 85).
+    // Snapping to home.pos.xz gives both clients a deterministic
+    // landing position; Y stays at current value (already on the
+    // floor via EnKarebaba_Dying's `bgCheckFlags & 2` transition).
+    this->actor.world.pos.x = this->actor.home.pos.x;
+    this->actor.world.pos.z = this->actor.home.pos.z;
+
     LUSLOG_INFO("[Karebaba] SetupDeadItemDrop ptr=%p home=(%.0f,%.0f,%.0f)",
                 (void*)this,
                 this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
