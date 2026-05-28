@@ -776,6 +776,23 @@ class Anchor : public Network {
     // See #193 Phase 4 v2.
     inline static const std::string ENV_ACTOR_DROP = "ENV_ACTOR_DROP";
 
+    // ENV_ACTOR_DESTROY — any client → all (team-broadcast). Sent
+    // when a synced env actor (grass, pot, crate, beehive, etc.) is
+    // destroyed locally — including cut events that DON'T call
+    // Actor_Kill (e.g. ENKUSA_TYPE_1 grass transitions to a cut-stub
+    // state without dying). Receivers find their local matching
+    // actor by EnemyNetId and Actor_Kill it. Idempotent — duplicate
+    // broadcasts (simultaneous-cut race) no-op safely.
+    //
+    // Distinct from ENV_ACTOR_DROP (peer→host drop-attribution
+    // routing) and from ENEMY_DEFEATED (which already syncs the
+    // Actor_Kill-driven destructions via OnActorKill). ENV_ACTOR_DESTROY
+    // fills the gap where the destruction event doesn't naturally
+    // produce an Actor_Kill on the sender side.
+    //
+    // Plan: Claude/Plans/env_actor_destroy_sync.md
+    inline static const std::string ENV_ACTOR_DESTROY = "ENV_ACTOR_DESTROY";
+
     // MODAL_OFFER_CLAIMED — host → all (team-broadcast). #193 Plan B
     // follow-up to step 6. Sent when host's modal-offer pickup actually
     // resolves — i.e. host's player accepted the offer presented by an
@@ -1155,6 +1172,14 @@ class Anchor : public Network {
     void SendPacket_EnvActorDrop(uint32_t netId, s16 dropParam,
                                  s16 dropParamForRandom, Vec3f pos);
     void HandlePacket_EnvActorDrop(nlohmann::json payload);
+
+    // ENV_ACTOR_DESTROY — any client → all. See packet-type comment
+    // above for full rationale. Send-site: Anchor_BroadcastEnvActorDestroy
+    // helper (HookHandlers.cpp), called from each env actor's
+    // cut/destroy state-transition. Receive-side: walk synced-actor
+    // categories for matching netId, Actor_Kill if found.
+    void SendPacket_EnvActorDestroy(uint32_t actorNetId, s16 actorId);
+    void HandlePacket_EnvActorDestroy(nlohmann::json payload);
 
     // MODAL_OFFER_CLAIMED — see packet-type comment above for the full
     // rationale. Send-site: HookHandlers.cpp OnActorSpawn(EN_ITEM00)

@@ -736,6 +736,54 @@ void Anchor_EndNetworkItemDropSpawn(void) {
     }
 }
 
+// Env-actor destruction broadcast helper. Called from each env
+// actor's cut/destroy state transition (e.g. EnKusa's cut-stub
+// transition for ENKUSA_TYPE_1, or any env actor's Destroy
+// callback when destruction doesn't naturally route through
+// Actor_Kill).
+//
+// Idempotent — dedups via the existing HostBookkeeping
+// ClaimDefeatBroadcast mechanism shared with OnActorKill. The
+// first call broadcasts; subsequent calls for the same netId are
+// no-ops.
+//
+// Sender's EnemyNetId.phase transitions to Dead so receive-side
+// queries see the destruction state consistently.
+//
+// Short-circuits on:
+//   - disconnected (no broadcast needed in solo).
+//   - isKillingNetworkActor (we're in the middle of applying a
+//     received destruction — don't echo it back).
+//   - actor has no EnemyNetId (not a synced actor — ignore).
+//   - netId 0 (assignment didn't complete — ignore).
+//   - already broadcast (ClaimDefeatBroadcast returns false).
+//
+// Plan: Claude/Plans/env_actor_destroy_sync.md §3.3.
+extern "C" void Anchor_BroadcastEnvActorDestroy(Actor* envActor) {
+    if (envActor == nullptr) return;
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return;
+    if (Anchor::Instance->isKillingNetworkActor) return;
+
+    EnemyNetId* ext =
+        const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(envActor));
+    if (ext == nullptr || ext->netId == 0) return;
+
+    // Dedup — share the broadcast-state ledger with OnActorKill so a
+    // later Actor_Kill on the same actor doesn't re-broadcast.
+    auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
+    if (!bookkeeping.ClaimDefeatBroadcast(ext->netId)) {
+        // Already broadcast (this call OR a sibling OnActorKill).
+        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
+        return;
+    }
+    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
+
+    SPDLOG_INFO("[EnvActorDestroy] broadcasting actor id={} netId={} (cat={} pos=({:.0f},{:.0f},{:.0f}))",
+                envActor->id, ext->netId, (int)envActor->category,
+                envActor->world.pos.x, envActor->world.pos.y, envActor->world.pos.z);
+    Anchor::Instance->SendPacket_EnvActorDestroy(ext->netId, envActor->id);
+}
+
 bool Anchor::IsLocalPlayerClimbing() const {
     if (gPlayState == nullptr) { return false; }
     Player* p = GET_PLAYER(gPlayState);
