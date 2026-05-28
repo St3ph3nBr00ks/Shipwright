@@ -4083,13 +4083,20 @@ void Anchor::RegisterHooks() {
             // DeadStickDrop / DeadItemDrop), so the bracket would
             // be defensive at most.
             if (assocActor != nullptr) {
-                // EN_KUSA (cut-stub regrowth state) must NOT be
-                // Actor_Killed on pickup — see ItemPickupRequest.cpp
-                // companion skip for the rationale.
-                if (assocActor->id == ACTOR_EN_KUSA) {
+                // Skip dismissal for actors with a natural respawn
+                // cycle the pickup must NOT interrupt:
+                //   - EN_KUSA: cut-stub state → CutWaitRegrow →
+                //     SetupRegrow → Main
+                //   - EN_KAREBABA: DeadItemDrop → Dead → Regrow →
+                //     Idle (z_en_karebaba.c). Field test log 304
+                //     showed the dismissal Actor_Killed Karebabas
+                //     mid-DeadItemDrop, removing them from the
+                //     scene entirely.
+                if (assocActor->id == ACTOR_EN_KUSA ||
+                    assocActor->id == ACTOR_EN_KAREBABA) {
                     SPDLOG_INFO("[ItemDrop] skipping dismiss for assoc netId={} "
-                                "(actor id=EN_KUSA — cut state regrows naturally)",
-                                assocActorNetId);
+                                "(actor id={} — natural respawn cycle in progress)",
+                                assocActorNetId, assocActor->id);
                 } else {
                     SPDLOG_INFO("[ItemDrop] dismissing associated actor netId={} locally on host "
                                 "(no own-echo for ITEM_COLLECTED)",

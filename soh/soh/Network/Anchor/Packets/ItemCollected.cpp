@@ -108,17 +108,23 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
                     ObjectExtension::GetInstance().Get<EnemyNetId>(a);
                 if (nidExt != nullptr && nidExt->netId == assocActorNetId &&
                     a->update != nullptr) {
-                    // EN_KUSA (cut-stub regrowth state) must NOT be
-                    // Actor_Killed on pickup — let the cut state's
-                    // own timer drive the regrow cycle. Killing here
-                    // makes the cut grass vanish entirely (log 297
-                    // field-test bug). Same skip applied at the host
-                    // local-dismissal sites in ItemPickupRequest.cpp
-                    // and HookHandlers.cpp.
-                    if (a->id == ACTOR_EN_KUSA) {
+                    // Skip dismissal for actors with a natural
+                    // respawn cycle the pickup must NOT interrupt:
+                    //   - EN_KUSA: cut-stub → CutWaitRegrow →
+                    //     SetupRegrow → Main (log 297 bug).
+                    //   - EN_KAREBABA: DeadItemDrop → Dead → Regrow
+                    //     → Idle (log 304 bug — pickup-dismissal
+                    //     was Actor_Killing the Karebaba on the
+                    //     peer side too, removing it from the
+                    //     scene mid-cycle).
+                    // Same skip applied at the host local-
+                    // dismissal sites in HookHandlers.cpp and
+                    // ItemPickupRequest.cpp.
+                    if (a->id == ACTOR_EN_KUSA ||
+                        a->id == ACTOR_EN_KAREBABA) {
                         SPDLOG_INFO("[ItemCollected] skipping dismiss for assoc netId={} "
-                                    "(actor id=EN_KUSA — cut state regrows naturally)",
-                                    assocActorNetId);
+                                    "(actor id={} — natural respawn cycle in progress)",
+                                    assocActorNetId, a->id);
                         dismissed = true;
                         break;
                     }
