@@ -11,6 +11,10 @@
 #include "Common/AINavTest.h"          // Navigation Test Harness — Tick() driver
 #include "NPCInvader/Invader.h"          // Anchor_GetCurrentlyDrawingInvader (black-tint color fix)
 #include "Common/ActorSyncScope.h"    // ActorSyncScope (Generic NPC State Sync Phase 0/1)
+#include "Common/SyncedClaimableDrop.h"     // Plan B (#193) — drop arbitration registry
+#include "Common/DropAdapters/GroundDropAdapter.h"  // Plan B step 3 — ground-drop adapter
+#include "Common/DropAdapters/ModalOfferAdapter.h"  // MODAL_OFFER_CLAIMED match — adapter-identity check
+#include "Common/DropAdapters/ModalPhantomAdapter.h"  // Plan B step 5 — modal-phantom adapter (Bug B fix)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
 #include <chrono>
 #include <libultraship/libultraship.h>
@@ -170,25 +174,6 @@ extern "C" bool Anchor_IsAnyPeerOnDyna(Actor* dynaActor) {
     return false;
 }
 
-// C-callable: returns true when a Karebaba's natural death cycle is running on this
-// (non-host) client so that its stick drop should be suppressed (no duplicate item).
-// Called from EnKarebaba_DeadItemDrop in z_en_karebaba.c.
-extern "C" bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor) {
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
-    // Host gate — see Anchor_ShouldSuppressDekubabaDrop for the field-
-    // test rationale. Host is the canonical drop source; suppressing on
-    // host eliminates the OnActorSpawn(EN_ITEM00) broadcast entirely.
-    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    // OR with networkDriveDying — engages the moment ENEMY_STATE
-    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
-    // packet arrives. Closes the peer-side dual-drop race documented
-    // in EnemyNetId::networkDriveDying (Anchor.h).
-    return ext != nullptr &&
-           (ext->networkDriveDying ||
-            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
-}
-
 // Receive-side state-machine logging dedup.
 // The OnActorUpdate driver blocks for En_Sw / En_St / En_Dekunuts run
 // every frame and decide apply-vs-block on (curState, netStateIndex).
@@ -214,69 +199,6 @@ bool ShouldLogStateChange(uint32_t netId, int16_t cur, int16_t net, bool blocked
 }
 }  // namespace
 
-// #135 / en_dekunuts_sync_plan.md §6 — suppresses Mad Scrub's
-// Item_DropCollectibleRandom on a non-host receiver during the natural
-// death cycle (after BossGoma_SetupDyingNet equivalent triggers).
-// Receiver is replaying host's already-broadcast death; host's drop
-// already came through the standard pipeline.
-extern "C" bool Anchor_ShouldSuppressDekunutsDrop(Actor* actor) {
-    if (actor == nullptr) return false;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
-    // Host is the canonical drop source — its Item_DropCollectible call
-    // fires OnActorSpawn(EN_ITEM00) which broadcasts ITEM_DROP_SYNC.
-    // Suppressing on host eliminates the broadcast entirely. The
-    // suppressor's whole purpose is "stop peer from spawning a duplicate
-    // local drop alongside the broadcast"; host has no duplicate to
-    // suppress.
-    //
-    // Field log 2026-05-07 (Inside Deku Tree, b7025ac20): peer killed
-    // dekubaba via DAMAGE_ENEMY routing; host's local OnEnemyDefeat
-    // hadn't fired yet by the time peer's "Non-host route-to-host"
-    // defeat packet arrived. Host took the `triggering natural death
-    // cycle` branch (SetupDyingNet on host's still-alive actor), which
-    // wrote phase=DyingByNetwork on host. The suppressor's phase check
-    // then returned true on host, killing host's vanilla ShrinkDie drop
-    // call and its OnActorSpawn(EN_ITEM00) broadcast — no nuts on
-    // either client. The host gate keeps host's drop path open
-    // regardless of how phase got written.
-    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    // OR with networkDriveDying — engages the moment ENEMY_STATE
-    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
-    // packet arrives. Closes the peer-side dual-drop race documented
-    // in EnemyNetId::networkDriveDying (Anchor.h).
-    return ext != nullptr &&
-           (ext->networkDriveDying ||
-            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
-}
-
-// En_Hintnuts (Inside Deku Tree Compound Room) — suppresses the
-// recovery-heart drop in EnHintnuts_SetupLeave on a non-host receiver
-// when the host already broadcast the kill. Mirrors the Dekunuts drop-
-// suppression pattern. Trigger condition: actor's lifecycle phase
-// indicates a network-driven death-cycle is in progress.
-//
-// Note: Hintnuts has no health-based death (no DyingByLocal phase via
-// damage). The Leave path is reached after the Talk dialog completes,
-// which is locally driven on each client. The suppression here is
-// defensive — if a future change routes Leave through a network-defeat
-// flow, the guard prevents double-drops. Today this is effectively a
-// no-op because both clients run their local Talk→Leave naturally.
-extern "C" bool Anchor_ShouldSuppressHintnutsDrop(Actor* actor) {
-    if (actor == nullptr) return false;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
-    if (gPlayState == nullptr) return false;
-    // Two-branch decision after the 2026-05-07 host-gate fix:
-    //   - Host: always run the drop. Host's Item_DropCollectible
-    //     fires OnActorSpawn(EN_ITEM00) → ITEM_DROP_SYNC broadcast,
-    //     and peer respawns the heart via the receive path.
-    //   - Peer: always suppress. Defense-in-depth against the
-    //     logs-216 actor-flood crash — any code path that reached
-    //     SetupLeave on peer (DIALOG_END routing prevents the
-    //     Talk→Leave path today, but future paths could) would
-    //     dup the heart per call and overflow MISC actor list.
-    return !::SceneAuthority::IsMyCurrentRoomHost();
-}
 
 // Hintnut state machine is host-authoritative (room host runs the AI;
 // peers receive ENEMY_STATE and apply via ApplyNetState). Peers must
@@ -510,112 +432,6 @@ extern "C" int Anchor_BossGomaConsumePeerSignaled(Actor* boss) {
     return 1;
 }
 
-// #90 / en_st_sync_plan_v2.md §5 — same predicate shape as the
-// Dekunuts suppressor, applied to En_St's drop site (line 996).
-extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
-    if (actor == nullptr) return false;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
-    // Host is the canonical drop source — its Item_DropCollectible call
-    // fires OnActorSpawn(EN_ITEM00) which broadcasts ITEM_DROP_SYNC.
-    // Suppressing on host eliminates the broadcast entirely. The
-    // suppressor's whole purpose is "stop peer from spawning a duplicate
-    // local drop alongside the broadcast"; host has no duplicate to
-    // suppress.
-    //
-    // Field log 2026-05-07 (Inside Deku Tree, b7025ac20): peer killed
-    // dekubaba via DAMAGE_ENEMY routing; host's local OnEnemyDefeat
-    // hadn't fired yet by the time peer's "Non-host route-to-host"
-    // defeat packet arrived. Host took the `triggering natural death
-    // cycle` branch (SetupDyingNet on host's still-alive actor), which
-    // wrote phase=DyingByNetwork on host. The suppressor's phase check
-    // then returned true on host, killing host's vanilla ShrinkDie drop
-    // call and its OnActorSpawn(EN_ITEM00) broadcast — no nuts on
-    // either client. The host gate keeps host's drop path open
-    // regardless of how phase got written.
-    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    // OR with networkDriveDying — engages the moment ENEMY_STATE
-    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
-    // packet arrives. Closes the peer-side dual-drop race documented
-    // in EnemyNetId::networkDriveDying (Anchor.h).
-    return ext != nullptr &&
-           (ext->networkDriveDying ||
-            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
-}
-
-// #193 field-test fix — same predicate shape as En_St / En_Sw /
-// En_Dekunuts suppressors, applied to En_Dekubaba's ShrinkDie drop
-// site. Field log 2026-05-06: Dekubaba killed by peer (race B routes
-// kill to host → host fires drop + broadcasts) AND peer's
-// SetupDyingNet → ShrinkDie path also called Item_DropCollectible
-// locally, producing duplicate drops. This guard suppresses the
-// peer-side natural-cycle drop call when phase indicates the actor
-// is dying via a network-driven path (DyingByNetwork /
-// AwaitingDeadItemDrop).
-extern "C" bool Anchor_ShouldSuppressDekubabaDrop(Actor* actor) {
-    if (actor == nullptr) return false;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
-    // Host is the canonical drop source — its Item_DropCollectible call
-    // fires OnActorSpawn(EN_ITEM00) which broadcasts ITEM_DROP_SYNC.
-    // Suppressing on host eliminates the broadcast entirely. The
-    // suppressor's whole purpose is "stop peer from spawning a duplicate
-    // local drop alongside the broadcast"; host has no duplicate to
-    // suppress.
-    //
-    // Field log 2026-05-07 (Inside Deku Tree, b7025ac20): peer killed
-    // dekubaba via DAMAGE_ENEMY routing; host's local OnEnemyDefeat
-    // hadn't fired yet by the time peer's "Non-host route-to-host"
-    // defeat packet arrived. Host took the `triggering natural death
-    // cycle` branch (SetupDyingNet on host's still-alive actor), which
-    // wrote phase=DyingByNetwork on host. The suppressor's phase check
-    // then returned true on host, killing host's vanilla ShrinkDie drop
-    // call and its OnActorSpawn(EN_ITEM00) broadcast — no nuts on
-    // either client. The host gate keeps host's drop path open
-    // regardless of how phase got written.
-    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    // OR with networkDriveDying — engages the moment ENEMY_STATE
-    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
-    // packet arrives. Closes the peer-side dual-drop race documented
-    // in EnemyNetId::networkDriveDying (Anchor.h).
-    return ext != nullptr &&
-           (ext->networkDriveDying ||
-            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
-}
-
-// #148 / en_sw_sync_plan.md §5 — same predicate shape, applied to
-// En_Sw's combat-variant drop site (line 686). Gold-variant En_Si
-// spawn deliberately NOT suppressed (cooperative collectible Design A).
-extern "C" bool Anchor_ShouldSuppressEnSwDrop(Actor* actor) {
-    if (actor == nullptr) return false;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return false;
-    // Host is the canonical drop source — its Item_DropCollectible call
-    // fires OnActorSpawn(EN_ITEM00) which broadcasts ITEM_DROP_SYNC.
-    // Suppressing on host eliminates the broadcast entirely. The
-    // suppressor's whole purpose is "stop peer from spawning a duplicate
-    // local drop alongside the broadcast"; host has no duplicate to
-    // suppress.
-    //
-    // Field log 2026-05-07 (Inside Deku Tree, b7025ac20): peer killed
-    // dekubaba via DAMAGE_ENEMY routing; host's local OnEnemyDefeat
-    // hadn't fired yet by the time peer's "Non-host route-to-host"
-    // defeat packet arrived. Host took the `triggering natural death
-    // cycle` branch (SetupDyingNet on host's still-alive actor), which
-    // wrote phase=DyingByNetwork on host. The suppressor's phase check
-    // then returned true on host, killing host's vanilla ShrinkDie drop
-    // call and its OnActorSpawn(EN_ITEM00) broadcast — no nuts on
-    // either client. The host gate keeps host's drop path open
-    // regardless of how phase got written.
-    if (::SceneAuthority::IsMyCurrentRoomHost()) return false;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    // OR with networkDriveDying — engages the moment ENEMY_STATE
-    // carries health<=0 from host, before the explicit ENEMY_DEFEATED
-    // packet arrives. Closes the peer-side dual-drop race documented
-    // in EnemyNetId::networkDriveDying (Anchor.h).
-    return ext != nullptr &&
-           (ext->networkDriveDying ||
-            EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase));
-}
 
 // C-callable: non-host tells host that its local Link was just hit by this enemy
 // so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
@@ -656,9 +472,10 @@ extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
 // killer attribution must persist through the inner Begin/End — depth
 // counter ensures only the outermost Begin sets state and only the
 // outermost End clears it.
-static uint32_t g_pendingItemDropKillerClientId = 0;
-static int64_t  g_pendingItemDropSpawnTimeMs   = 0;
-static int      g_pendingItemDropDepth         = 0;
+static uint32_t    g_pendingItemDropKillerClientId = 0;
+static std::string g_pendingItemDropKillerTeamId;   // Phase 1 (spec Q2)
+static int64_t     g_pendingItemDropSpawnTimeMs    = 0;
+static int         g_pendingItemDropDepth          = 0;
 
 // Receive-side gate: set true while HandlePacket_ItemDropSync is calling
 // Actor_Spawn so the OnActorSpawn ACTOR_EN_ITEM00 hook knows not to
@@ -666,6 +483,45 @@ static int      g_pendingItemDropDepth         = 0;
 // `isSpawningNetworkActor` pattern from ENEMY_SPAWN.
 static bool     g_isSpawningNetworkItemDrop     = false;
 static uint32_t g_pendingNetworkItemDropNetId   = 0;
+
+// Thread-local flag set by Anchor_SpawnSyncedStickDrop to tag the
+// next OnActorSpawn(EN_ITEM00) as a "decorative invisible companion"
+// drop: the visible visual is provided by the offering actor's own
+// drawn stick (gDekuBabaStickDropDL); this EN_ITEM00 is the
+// interactive pickup collider with draw=NULL. The flag is consumed
+// (cleared) by the OnActorSpawn host path when stamping the deferred
+// broadcast record.
+static bool g_pendingItemDropInvisibleDecorative = false;
+extern "C" void Anchor_SetPendingItemDropInvisibleDecorative(bool flag) {
+    g_pendingItemDropInvisibleDecorative = flag;
+}
+
+// Deferred-broadcast queue (nut trajectory desync fix, log 281).
+//
+// `Item_DropCollectible(play, &pos, params)` sets the spawned EN_ITEM00's
+// post-spawn random `world.rot.y` AT z_en_item00.c:1625, AFTER our
+// OnActorSpawn(EN_ITEM00) hook has already fired. Broadcasting from the
+// hook captures rot.y == 0, so each receiver runs its own local
+// Rand_CenteredFloat for the trajectory and the nut/ammo lands in a
+// different XZ spot per client. Sticks via the modal-offer path are
+// unaffected (visual rep is the synced enemy actor itself, not an
+// EN_ITEM00).
+//
+// Defer the broadcast: OnActorSpawn pushes a PendingItemDropBroadcast
+// record; Anchor_EndItemDrop (which fires at z_en_item00.c:1639, AFTER
+// the rotation assignment) drains the queue and sends ITEM_DROP_SYNC
+// with the now-correct rot.y. `Item_DropCollectibleRandom`'s inner loop
+// spawns multiple drops under the same outer Begin/End pair — all of
+// them are drained together at the depth==0 End.
+struct PendingItemDropBroadcast {
+    Actor*   actor;
+    uint32_t itemNetId;
+    s16      resolvedType;
+    uint32_t killerClientId;
+    int64_t  spawnTimeMs;
+    bool     invisibleDecorative;  // Phase 3 C-hybrid stick-drop tag
+};
+static std::vector<PendingItemDropBroadcast> g_pendingItemDropBroadcasts;
 
 extern "C" void Anchor_BeginItemDrop(Actor* fromActor) {
     // Inner / nested call: keep outer's killer attribution intact.
@@ -700,6 +556,33 @@ extern "C" void Anchor_EndItemDrop(void) {
     if (g_pendingItemDropDepth == 0) {
         g_pendingItemDropKillerClientId = 0;
         g_pendingItemDropSpawnTimeMs = 0;
+
+        // Drain deferred broadcasts — at this point Item_DropCollectible
+        // (or _Random's loop) has finished setting each spawned actor's
+        // world.rot.y, so the broadcast now carries the same rotation
+        // both sides will use.
+        if (!g_pendingItemDropBroadcasts.empty() &&
+            Anchor::Instance != nullptr && Anchor::Instance->isConnected) {
+            for (const auto& p : g_pendingItemDropBroadcasts) {
+                if (p.actor == nullptr || p.actor->update == nullptr) continue;
+                const s16 rotY = (s16)p.actor->world.rot.y;
+                Anchor::Instance->SendPacket_ItemDropSync(
+                    p.itemNetId, (u8)p.resolvedType,
+                    p.actor->world.pos,
+                    p.killerClientId, p.spawnTimeMs,
+                    /*offererEnemyNetId=*/ 0u,
+                    /*rotY=*/             rotY,
+                    /*invisibleDecorative=*/ p.invisibleDecorative);
+                SPDLOG_INFO("[ItemDropSync] Host broadcast (deferred) netId={} type=0x{:02X} "
+                            "pos=({:.0f},{:.0f},{:.0f}) rotY={} killer={} spawnTimeMs={} "
+                            "invisibleDecorative={}",
+                            p.itemNetId, (int)p.resolvedType,
+                            p.actor->world.pos.x, p.actor->world.pos.y, p.actor->world.pos.z,
+                            (int)rotY, p.killerClientId, (long long)p.spawnTimeMs,
+                            p.invisibleDecorative ? "true" : "false");
+            }
+        }
+        g_pendingItemDropBroadcasts.clear();
     }
 }
 
@@ -734,23 +617,49 @@ extern "C" void Anchor_BeginItemDropForKiller(uint32_t killerClientId) {
 //                       allowlist — fall back to v1 behaviour). Should
 //                       not occur once Phase 4 v2 admits all four
 //                       env-actor IDs to IsSyncedWorldActor.
-extern "C" void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
-                                                Vec3f* pos, s16 params) {
+//
+// #193 Phase 4 v3 — return type changed from `void` to `EnItem00*` so
+// capture-and-modify call sites (Bg_Haka_Tubo, Bg_Spot18_Basket — set
+// velocity.y / shape.rot.y on the spawned actor) keep compiling. On
+// the peer-suppress path the wrapper returns NULL; the caller's
+// `if (collectible != NULL)` post-modify branch becomes a no-op,
+// which is a cosmetic-only effect (peer's broadcast-spawned drops
+// don't inherit the fan-out velocity but land at the right position
+// and are pickable).
+//
+// #193 Phase 4 v3 race-D mitigation — peer-side scene check before
+// sending. If host has left the scene (or no host found in clients
+// map), the ENV_ACTOR_DROP would either be applied on host's wrong
+// scene or silently dropped at the receive guard. Falling back to a
+// local Item_DropCollectible preserves a visible drop on this client;
+// same shape as the offline branch above (single client, single drop,
+// no broadcast). Strictly better than silent loss.
+extern "C" EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                    Vec3f* pos, s16 params) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) {
-        Item_DropCollectible(play, pos, params);
-        return;
+        return Item_DropCollectible(play, pos, params);
     }
     if (::SceneAuthority::IsMyCurrentRoomHost()) {
-        Item_DropCollectible(play, pos, params);
-        return;
+        return Item_DropCollectible(play, pos, params);
     }
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(envActor);
     if (ext == nullptr || ext->netId == 0) {
-        Item_DropCollectible(play, pos, params);
-        return;
+        return Item_DropCollectible(play, pos, params);
     }
-    // Peer with a synced env actor: notify host, suppress local drop.
+    // Race-D peer-side scene check.
+    uint32_t hostId = ::SceneAuthority::GetRoomHostClientId(
+        (int16_t)gPlayState->sceneNum,
+        (int8_t)gPlayState->roomCtx.curRoom.num,
+        (uint8_t)(gSaveContext.linkAge & 0x1));
+    auto hostIt = Anchor::Instance->clients.find(hostId);
+    if (hostIt == Anchor::Instance->clients.end() ||
+        hostIt->second.sceneNum != (s16)gPlayState->sceneNum) {
+        return Item_DropCollectible(play, pos, params);
+    }
+    // Peer with a synced env actor and host in scope: notify host,
+    // suppress local drop.
     Anchor::Instance->SendPacket_EnvActorDrop(ext->netId, params, /*forRandom=*/0, *pos);
+    return nullptr;
 }
 
 // #193 Phase 4 v2 — sibling for `Item_DropCollectibleRandom` from
@@ -758,7 +667,9 @@ extern "C" void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
 // param shifted up by 4, NOT a specific ITEM00_*). Same behavioural
 // matrix as Anchor_DropCollectibleEnvActor; routes the random param
 // through `dropParamForRandom` so the host re-dispatches via
-// `Item_DropCollectibleRandom`.
+// `Item_DropCollectibleRandom`. Phase 4 v3 race-D mitigation
+// applies symmetrically. Random spawns don't have a single-actor
+// return-value capture pattern, so the wrapper stays `void`.
 extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
                                                      Vec3f* pos, s16 dropGroupParams) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) {
@@ -771,6 +682,17 @@ extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* env
     }
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(envActor);
     if (ext == nullptr || ext->netId == 0) {
+        Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
+        return;
+    }
+    // Race-D peer-side scene check (see Anchor_DropCollectibleEnvActor).
+    uint32_t hostId = ::SceneAuthority::GetRoomHostClientId(
+        (int16_t)gPlayState->sceneNum,
+        (int8_t)gPlayState->roomCtx.curRoom.num,
+        (uint8_t)(gSaveContext.linkAge & 0x1));
+    auto hostIt = Anchor::Instance->clients.find(hostId);
+    if (hostIt == Anchor::Instance->clients.end() ||
+        hostIt->second.sceneNum != (s16)gPlayState->sceneNum) {
         Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
         return;
     }
@@ -791,10 +713,12 @@ extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* env
 // without overwriting the broadcast-supplied killer/spawnTime state.
 // Pairs symmetrically with `Anchor_EndNetworkItemDropSpawn`.
 void Anchor_BeginNetworkItemDropSpawn(uint32_t netId, uint32_t killerClientId,
-                                       int64_t spawnTimeMs) {
+                                       int64_t spawnTimeMs,
+                                       const std::string& killerTeamId) {
     g_isSpawningNetworkItemDrop      = true;
     g_pendingNetworkItemDropNetId    = netId;
     g_pendingItemDropKillerClientId  = killerClientId;
+    g_pendingItemDropKillerTeamId    = killerTeamId;
     g_pendingItemDropSpawnTimeMs     = spawnTimeMs;
     g_pendingItemDropDepth++;
 }
@@ -807,6 +731,7 @@ void Anchor_EndNetworkItemDropSpawn(void) {
     g_pendingNetworkItemDropNetId    = 0;
     if (g_pendingItemDropDepth == 0) {
         g_pendingItemDropKillerClientId  = 0;
+        g_pendingItemDropKillerTeamId.clear();
         g_pendingItemDropSpawnTimeMs     = 0;
     }
 }
@@ -1259,6 +1184,11 @@ void Anchor::RegisterHooks() {
         } else {
             prevTransitionTrigger = TRANS_TRIGGER_OFF;
         }
+
+        // Plan B step 5 — backstop kill for stuck modal phantoms
+        // (Bug B class). Cheap walk; no-op when the adapter's phantom
+        // list is empty.
+        SyncedClaimableDrop::ModalPhantomAdapter::GetInstance()->Tick();
 
     });
 
@@ -1793,39 +1723,173 @@ void Anchor::RegisterHooks() {
         // is acceptable for Phase 2 since FLEXIBLE drops are rare.)
         s16 resolvedType = (s16)(actor->params & 0xFF);
 
-        // #193 instrumentation 2026-05-07 — diagnose mystery STICK
-        // spawn origin. Log every EN_ITEM00 spawn with resolved type +
-        // raw params + the depth/sequence flags so it can be matched
-        // against the [ItemDropTrace] entries from the three vanilla
-        // drop functions (z_en_item00.c). For unknown-source spawns
-        // (no matching trace line in the same frame), the spawn came
-        // from an Actor_Spawn(ACTOR_EN_ITEM00) call outside the
-        // wrapped paths — that's the path we're hunting. Drop after
-        // diagnosis.
-        SPDLOG_INFO("[ItemDropTrace] OnActorSpawn EN_ITEM00 params=0x{:04X} resolvedType=0x{:02X} "
-                    "pos=({:.0f},{:.0f},{:.0f}) g_isSpawningNetworkItemDrop={} g_pendingItemDropDepth={}",
-                    (uint16_t)actor->params, (int)resolvedType,
-                    actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
-                    (int)g_isSpawningNetworkItemDrop,
-                    g_pendingItemDropDepth);
+        // Plan B step 5 — modal-completion phantom from func_8083E4C4
+        // (z_player.c). Vanilla `EnItem00_Init` strips the 0x8000 flag
+        // from `actor->params` (params &= 0xFF) before this hook fires,
+        // but `EnItem00::ogParams` preserves the original. Route
+        // phantoms to the ModalPhantomAdapter and skip the ground-drop
+        // pipeline entirely — phantoms are local-only render artifacts,
+        // never broadcast.
+        //
+        // This replaces the modal-visual filter that lived as a
+        // freestanding gate in fix 1 (051cd9801) and was removed in
+        // cleanup 2/4 ahead of Plan B. The filter logic now lives
+        // inside the adapter where it belongs.
+        if ((((EnItem00*)actor)->ogParams & 0x8000) != 0) {
+            SyncedClaimableDrop::ModalPhantomAdapter::GetInstance()
+                ->OnPhantomSpawn((EnItem00*)actor);
+
+            // MODAL_OFFER_CLAIMED — host detects modal accept here.
+            // The phantom spawn IS the accept signal (vanilla
+            // func_8083E4C4 in z_player.c only fires this path when
+            // the player has actually picked up the modal offer).
+            // Find the matching modal-offer Drop by position proximity
+            // of any registered visual rep, then broadcast so peers
+            // can dismiss their mirror stem at the moment of accept
+            // instead of waiting for the DeadStickDrop timeout.
+            //
+            // Host-only: ModalOfferAdapter suppresses peers' modal
+            // path entirely; a phantom on peer would be a vanilla-
+            // path artifact we don't expect to broadcast.
+            if (::SceneAuthority::IsMyCurrentRoomHost() &&
+                Anchor::Instance != nullptr && Anchor::Instance->isConnected) {
+                const Vec3f phantomPos = actor->world.pos;
+                auto& reg = SyncedClaimableDrop::Registry::Instance();
+                auto* modalOfferAdapter =
+                    SyncedClaimableDrop::ModalOfferAdapter::GetInstance();
+
+                uint32_t bestDropId   = 0;
+                float    bestDistSq   = 200.0f * 200.0f;  // match cap
+
+                for (const auto& [dropId, drop] : reg.GetAllDrops()) {
+                    if (drop.adapter != modalOfferAdapter) continue;
+                    if (drop.state ==
+                        SyncedClaimableDrop::DropState::Resolved) continue;
+                    for (Actor* vr : drop.visualReps) {
+                        if (vr == nullptr || vr->update == nullptr) continue;
+                        const float dx = vr->world.pos.x - phantomPos.x;
+                        const float dy = vr->world.pos.y - phantomPos.y;
+                        const float dz = vr->world.pos.z - phantomPos.z;
+                        const float dSq = dx * dx + dy * dy + dz * dz;
+                        if (dSq < bestDistSq) {
+                            bestDistSq = dSq;
+                            bestDropId = dropId;
+                        }
+                    }
+                }
+
+                if (bestDropId != 0) {
+                    SPDLOG_INFO("[ModalOfferClaimed] host-detected modal accept: phantom "
+                                "pos=({:.0f},{:.0f},{:.0f}) matched dropId={} "
+                                "distSq={:.0f}",
+                                phantomPos.x, phantomPos.y, phantomPos.z,
+                                bestDropId, bestDistSq);
+                    Anchor::Instance->SendPacket_ModalOfferClaimed(
+                        bestDropId, Anchor::Instance->ownClientId);
+                    // Local Resolve — relay echo will arrive shortly and
+                    // be a no-op via the state!=Resolved gate. We don't
+                    // dismiss visual reps locally on host either way;
+                    // vanilla state machine on host's offering actor
+                    // handles its own cleanup.
+                    if (SyncedClaimableDrop::Drop* d = reg.Find(bestDropId)) {
+                        d->claimerClientId = Anchor::Instance->ownClientId;
+                        reg.TransitionTo(*d,
+                            SyncedClaimableDrop::DropState::Resolved);
+                    }
+                } else {
+                    SPDLOG_DEBUG("[ModalOfferClaimed] host modal phantom at "
+                                 "({:.0f},{:.0f},{:.0f}) — no nearby modal-offer "
+                                 "Drop within 200u",
+                                 phantomPos.x, phantomPos.y, phantomPos.z);
+                }
+            }
+            return;
+        }
+
+        // #193 static-actor filter — EN_ITEM00 instances placed directly
+        // in scene OTRs (Inside Deku Tree has recovery hearts at
+        // (-25,280,-81) / (87,744,-16); other scenes have similar
+        // bare-placed pickups) spawn during the scene's setup-actor
+        // loop, where `gPlayState->numSetupActors > 0`. Both clients
+        // load the same scene file and spawn identical copies
+        // independently — there's nothing to broadcast. Cross-client
+        // pickup sync flows separately through `FLAG_SCENE_COLLECTIBLE`
+        // → `SET_FLAG` (see `HandlePacket_SetFlag`'s active-despawn
+        // pass, also added in #193 fix 2). Same Fix-8 trick used for
+        // static enemy suppression.
+        if (gPlayState->numSetupActors > 0) {
+            return;
+        }
 
         // Receive-side: extension stamping only. Skip broadcast.
         if (g_isSpawningNetworkItemDrop) {
             ItemDropNetId ext;
             ext.netId           = g_pendingNetworkItemDropNetId;
             ext.killerClientId  = g_pendingItemDropKillerClientId;
+            ext.killerTeamId    = g_pendingItemDropKillerTeamId;
             ext.spawnTimeMs     = g_pendingItemDropSpawnTimeMs;
             ext.isFromBroadcast = true;
             ObjectExtension::GetInstance().Set<ItemDropNetId>(actor, std::move(ext));
-            SPDLOG_DEBUG("[ItemDropSync] Network drop: stamped netId={} killer={} type=0x{:02X}",
+            SPDLOG_DEBUG("[ItemDropSync] Network drop: stamped netId={} killer={} killerTeam='{}' type=0x{:02X}",
                          g_pendingNetworkItemDropNetId, g_pendingItemDropKillerClientId,
-                         (int)resolvedType);
+                         g_pendingItemDropKillerTeamId, (int)resolvedType);
             return;
         }
 
-        // Host-side: broadcast iff this is the room host and the type
-        // is on the transient allowlist (Q7).
+        // Peer-local death-drop suppression (log 282 follow-up).
+        //
+        // When peer's local synced enemy enters its death cycle —
+        // DyingByLocal on a peer-killing-blow, or DyingByNetwork after
+        // host's ENEMY_DEFEATED arrives — its actor code path runs the
+        // natural-death drop call (e.g. Item_DropCollectible in
+        // z_en_dekubaba.c:1088 ITEM00_NUTS). On peer this spawns a
+        // local EN_ITEM00 with no extension that the broadcast pipe
+        // skips (correct: peers don't broadcast). But the actor stays
+        // alive as a non-interactive ghost drop until its 220-frame
+        // countdown expires. User reported "extra non-interactive nut"
+        // in field test 282.
+        //
+        // Detect by proximity to any synced enemy actor whose phase
+        // is past Alive (Dying / Dead). Host's matching ITEM_DROP_SYNC
+        // broadcast will arrive ~100ms later and spawn the real
+        // synced drop alongside.
+        //
+        // Static drops in setup-actor phase already returned above
+        // (numSetupActors > 0); modal phantoms already returned via
+        // the 0x8000 branch; network-spawn arrivals already returned
+        // via g_isSpawningNetworkItemDrop. So anything that reaches
+        // here on peer is a peer-local Actor_Spawn — and we want to
+        // suppress the subset that came from a nearby dying enemy.
         if (!::SceneAuthority::IsMyCurrentRoomHost()) {
+            constexpr float kSuppressRadius   = 300.0f;
+            constexpr float kSuppressRadiusSq = kSuppressRadius * kSuppressRadius;
+            bool suppress = false;
+            for (size_t ci = 0; ci < kSyncableActorCategoriesCount && !suppress; ++ci) {
+                Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+                while (a != nullptr) {
+                    const EnemyNetId* nidExt =
+                        ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                    if (nidExt != nullptr &&
+                        nidExt->phase != EnemyStateSync::LifecyclePhase::Alive) {
+                        const float dx = a->world.pos.x - actor->world.pos.x;
+                        const float dy = a->world.pos.y - actor->world.pos.y;
+                        const float dz = a->world.pos.z - actor->world.pos.z;
+                        if (dx * dx + dy * dy + dz * dz < kSuppressRadiusSq) {
+                            suppress = true;
+                            break;
+                        }
+                    }
+                    a = a->next;
+                }
+            }
+            if (suppress) {
+                SPDLOG_INFO("[ItemDropSync] Peer-local drop suppressed at "
+                            "({:.0f},{:.0f},{:.0f}) type=0x{:02X} — nearby synced "
+                            "enemy past Alive phase; host's ITEM_DROP_SYNC will replace",
+                            actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
+                            (int)resolvedType);
+                Actor_Kill(actor);
+            }
             return;
         }
 
@@ -1913,24 +1977,108 @@ void Anchor::RegisterHooks() {
             : std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now().time_since_epoch()).count();
 
+        // Cross-client kill attribution (field test log 283/284).
+        //
+        // When a peer's killing-blow on a synced enemy gets re-attributed
+        // to host (because host runs the natural-death cycle locally and
+        // its Item_DropCollectible call resolves the killer from
+        // Anchor_BeginItemDrop(NULL), defaulting to host's ownClientId),
+        // Layer 1's killer-exclusive window blocks the actual killer for
+        // 3 s — long enough that the drop frequently expires before they
+        // can attempt pickup.
+        //
+        // Recover the real killer by walking synced enemy categories
+        // near the EN_ITEM00 spawn position; if any has phase != Alive
+        // and HostBookkeeping has a damager recorded for its netId,
+        // use that as the attribution. Falls back to the
+        // Anchor_BeginItemDrop value when nothing matches (heart/rupee
+        // drops outside enemy deaths, etc.).
+        {
+            constexpr float kAttrRadius   = 200.0f;
+            constexpr float kAttrRadiusSq = kAttrRadius * kAttrRadius;
+            auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
+            uint32_t bestDamager = 0;
+            float    bestDistSq  = kAttrRadiusSq;
+            for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
+                Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+                while (a != nullptr) {
+                    const EnemyNetId* nidExt =
+                        ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                    if (nidExt != nullptr &&
+                        nidExt->phase != EnemyStateSync::LifecyclePhase::Alive) {
+                        const float dx = a->world.pos.x - actor->world.pos.x;
+                        const float dy = a->world.pos.y - actor->world.pos.y;
+                        const float dz = a->world.pos.z - actor->world.pos.z;
+                        const float dSq = dx * dx + dy * dy + dz * dz;
+                        if (dSq < bestDistSq) {
+                            uint32_t damager = bookkeeping.LookupDamager(nidExt->netId);
+                            if (damager != 0) {
+                                bestDistSq  = dSq;
+                                bestDamager = damager;
+                            }
+                        }
+                    }
+                    a = a->next;
+                }
+            }
+            if (bestDamager != 0 && bestDamager != killerClientId) {
+                SPDLOG_INFO("[ItemDropSync] killer attribution corrected: {} -> {} "
+                            "(via nearby dying-enemy damager lookup)",
+                            killerClientId, bestDamager);
+                killerClientId = bestDamager;
+            }
+        }
+
         // Stamp local extension first so the pickup gate can read it
         // even on the host. isFromBroadcast=false marks "local drop".
+        // killerTeamId looked up from clients map; empty when
+        // killerClientId is 0 (unattributed) or not in map.
+        std::string killerTeamIdStr;
+        if (killerClientId != 0) {
+            auto kit = Anchor::Instance->clients.find(killerClientId);
+            if (kit != Anchor::Instance->clients.end()) {
+                killerTeamIdStr = kit->second.teamId;
+            }
+        }
         ItemDropNetId ext;
         ext.netId           = itemNetId;
         ext.killerClientId  = killerClientId;
+        ext.killerTeamId    = killerTeamIdStr;
         ext.spawnTimeMs     = spawnTimeMs;
         ext.isFromBroadcast = false;
         ObjectExtension::GetInstance().Set<ItemDropNetId>(actor, std::move(ext));
 
-        // Broadcast.
-        Anchor::Instance->SendPacket_ItemDropSync(itemNetId, (u8)resolvedType,
-                                                   actor->world.pos,
-                                                   killerClientId, spawnTimeMs);
-        SPDLOG_INFO("[ItemDropSync] Host broadcast netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "
-                    "killer={} spawnTimeMs={}",
-                    itemNetId, (int)resolvedType,
-                    actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
-                    killerClientId, (long long)spawnTimeMs);
+        // Defer the broadcast until Anchor_EndItemDrop (which runs after
+        // Item_DropCollectible* sets the spawned actor's random
+        // world.rot.y at z_en_item00.c:1625). Broadcasting here would
+        // capture rot.y == 0 and let each receiver pick its own RNG
+        // trajectory — the nut/ammo desync seen in field test 281.
+        g_pendingItemDropBroadcasts.push_back({
+            /*actor=*/               actor,
+            /*itemNetId=*/           itemNetId,
+            /*resolvedType=*/        resolvedType,
+            /*killerClientId=*/      killerClientId,
+            /*spawnTimeMs=*/         spawnTimeMs,
+            /*invisibleDecorative=*/ g_pendingItemDropInvisibleDecorative,
+        });
+
+        // Plan B step 3 — populate the SyncedClaimableDrop registry
+        // alongside the legacy broadcast path. Adapter dismissal is
+        // dormant until a subsequent step wires ITEM_COLLECTED →
+        // Resolved → adapter dispatch; for now this just accumulates
+        // a parallel view of in-flight drops that future steps can
+        // act on.
+        SyncedClaimableDrop::GroundDropAdapter::GetInstance()->RegisterSpawn(
+            itemNetId,
+            Anchor::Instance->ownClientId,
+            (int16_t)resolvedType,
+            actor->world.pos,
+            (int16_t)gPlayState->sceneNum,
+            (int8_t)gPlayState->roomCtx.curRoom.num,
+            (uint8_t)(gSaveContext.linkAge & 0x1),
+            killerClientId,
+            spawnTimeMs,
+            actor);
     });
 
     // Host sends enemy positions every frame to all clients in the same scene.
@@ -3061,6 +3209,14 @@ void Anchor::RegisterHooks() {
     COND_HOOK(OnActorDestroy, isConnected, [&](void* refActor) {
         Actor* actor = (Actor*)refActor;
         ObjectExtension::GetInstance().Free(actor);
+        // Plan B (#193) — scrub any stale visual-rep pointer from the
+        // SyncedClaimableDrop registry. The drop entry survives the actor
+        // (claim arbitration may still be in flight); only the actor's
+        // entry in visualReps needs to go before its memory is freed.
+        SyncedClaimableDrop::Registry::Instance().UnregisterFromAllDrops(actor);
+        // Plan B step 5 — also scrub from the modal-phantom adapter's
+        // local list (separate from the SyncedClaimableDrop registry).
+        SyncedClaimableDrop::ModalPhantomAdapter::GetInstance()->OnActorDestroyed(actor);
     });
 
     // #endregion
@@ -3157,6 +3313,18 @@ void Anchor::RegisterHooks() {
         if (itemEntry.modIndex == MOD_NONE &&
             (itemEntry.itemId >= ITEM_KEY_BOSS && itemEntry.itemId <= ITEM_KEY_SMALL)) {
             SendPacket_UpdateDungeonItems();
+            return;
+        }
+
+        // #193 Q1 — Team Shares Pickups toggle. When OFF (competitive
+        // mode), transient consumables (sticks / nuts / rupees / hearts
+        // / bombs / arrows / magic / bombchus — all ITEM_CATEGORY_JUNK)
+        // are NOT cross-broadcast: each player keeps only what they
+        // personally picked up. Progression items (keys, bag upgrades,
+        // hearts pieces, etc.) still cross-broadcast so the team's
+        // collective progression stays in sync regardless of mode.
+        if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("TeamSharesPickups"), 1) &&
+            itemEntry.getItemCategory == ITEM_CATEGORY_JUNK) {
             return;
         }
 
@@ -3551,14 +3719,26 @@ void Anchor::RegisterHooks() {
         }
 
         // Race A mitigation: Granted state means host has arbitrated
-        // this drop in our favour. Clear the flag (back to None for
-        // safety / re-entry) and allow vanilla pickup to run.
+        // this drop in our favour. Transition to Consumed (terminal)
+        // and allow vanilla pickup to run.
         if (ext->pickupState == ItemPickupState::Granted) {
             ItemDropNetId* mut = const_cast<ItemDropNetId*>(ext);
-            mut->pickupState = ItemPickupState::None;
+            mut->pickupState = ItemPickupState::Consumed;
             SPDLOG_INFO("[ItemDrop] netId={} grant consumed — applying pickup",
                         ext->netId);
             // *should stays true; vanilla pickup runs.
+            return;
+        }
+
+        // Consumed (terminal): vanilla's first-frame pickup ran. Subsequent
+        // gate fires keep returning *should=true so vanilla's give-item
+        // flow can complete over multiple frames (Actor_OfferGetItemNearby
+        // / Actor_HasParent / Actor_Kill). Without this short-circuit,
+        // the gate re-routed to race A and sent spurious ITEM_PICKUP_REQUEST
+        // packets while suppressing vanilla — the actor lived to its
+        // 220-frame unk_15A timeout (log 287 Bug 2).
+        if (ext->pickupState == ItemPickupState::Consumed) {
+            // *should stays true; vanilla pickup continues. Idempotent.
             return;
         }
 
@@ -3575,20 +3755,69 @@ void Anchor::RegisterHooks() {
         const int64_t kKillerExclusiveMs = 3000;
         const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        // Spawn-grace window — suppress ALL pickup attempts for the
+        // first kHostGraceMs after spawn so peers have a guaranteed
+        // visible window of the drop on the ground (log 290 Bug B).
+        // Without this, host's vanilla auto-pickup fires within 1-2
+        // frames of the broadcast when host's player is within the
+        // vanilla 30u proximity radius (which it always is after a
+        // sword-kill on a Dekubaba head), and peers see the network
+        // spawn appear + the ITEM_COLLECTED kill arrive on the same
+        // frame — the drop flashes for 0 frames and is gone.
+        //
+        // 750 ms is enough for peers to register the drop visually
+        // and start walking to it (race A can then arbitrate). Killer
+        // gets first pickup once the grace expires, before Layer 1
+        // expires for non-killer peers.
+        //
+        // The state-machine states above (Pending / Granted /
+        // Consumed) are checked FIRST so an in-progress arbitration
+        // is not re-blocked by grace.
+        constexpr int64_t kHostGraceMs = 750;
+        if (nowMs - ext->spawnTimeMs < kHostGraceMs) {
+            *should = false;
+            SPDLOG_DEBUG("[ItemDrop] netId={} grace period ({} ms remaining)",
+                         ext->netId,
+                         (long long)(kHostGraceMs - (nowMs - ext->spawnTimeMs)));
+            return;
+        }
+
         const bool inExclusiveWindow =
             (ext->killerClientId != 0) &&
             (nowMs - ext->spawnTimeMs < kKillerExclusiveMs);
         const bool isLocalKiller =
             (ext->killerClientId == Anchor::Instance->ownClientId);
 
-        // Layer 1.
-        if (inExclusiveWindow && !isLocalKiller) {
+        // Layer 1 — killer-exclusive window with team-aware bypass
+        // (spec §1 Q2). During the 3 s window:
+        //   - killer always bypasses
+        //   - same-team players bypass iff TeamSharesPickups=true
+        //   - everyone else is blocked until window expires
+        const bool teamSharesPickups =
+            CVarGetInteger(CVAR_REMOTE_ANCHOR("TeamSharesPickups"), 1) != 0;
+        const std::string localTeamId =
+            CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+        const bool isSameTeamAsKiller =
+            !ext->killerTeamId.empty() && (ext->killerTeamId == localTeamId);
+        const bool teammateBypass =
+            teamSharesPickups && isSameTeamAsKiller && !isLocalKiller;
+
+        if (inExclusiveWindow && !isLocalKiller && !teammateBypass) {
             *should = false;
-            SPDLOG_DEBUG("[ItemDrop] netId={} blocked — exclusive window ({} ms remaining) for killer={}",
+            SPDLOG_DEBUG("[ItemDrop] netId={} blocked — exclusive window cross-team "
+                         "({} ms remaining; killer={} killerTeam='{}' localTeam='{}' "
+                         "shares={})",
                          ext->netId,
                          (long long)(kKillerExclusiveMs - (nowMs - ext->spawnTimeMs)),
-                         ext->killerClientId);
+                         ext->killerClientId, ext->killerTeamId, localTeamId,
+                         teamSharesPickups ? "true" : "false");
             return;
+        }
+        if (inExclusiveWindow && teammateBypass) {
+            SPDLOG_DEBUG("[ItemDrop] netId={} teammate bypass (TeamSharesPickups=true, "
+                         "team='{}')",
+                         ext->netId, ext->killerTeamId);
         }
 
         // Layer 2 — per-player eligibility.
@@ -3635,35 +3864,28 @@ void Anchor::RegisterHooks() {
         // flag-replay phantom-grant chain goes through `Item_Give`
         // directly and does NOT pass through this gate. The
         // relaxation is safe with respect to that bug.
+        // Layer 2 eligibility gate — REMOVED (log 283/284 field-test fix).
+        //
+        // Previous behaviour: blocked pickup when local player couldn't
+        // benefit (no bag, full ammo, etc.) on the assumption that a
+        // teammate could use it instead. In practice this produced
+        // permanently unreachable drops in early-game scenarios where
+        // NEITHER player has the bag yet (Inside Deku Tree pre-nut-bag
+        // is the canonical case). Vanilla single-player silently
+        // truncates surplus pickups; MP should not be stricter — the
+        // killer-exclusive Layer 1 window above already gives the
+        // killer first dibs, and cross-credit (GIVE_ITEM via
+        // OnItemReceive) propagates the count to eligible teammates
+        // when the picker-up is eligible. If nobody is eligible the
+        // drop is consumed for zero net effect — same as vanilla SP.
+        //
+        // Future re-add path: when UPDATE_CLIENT_STATE carries a
+        // per-client eligibility bitmap (one bit per ITEM00_*), the
+        // gate can defer pickup ONLY when "some other teammate IS
+        // eligible AND I am not". v1 lacks that signal so a
+        // conservative "no gate" is the right default.
         s16 itemType = (s16)(item00->actor.params & 0xFF);
-        const bool killerExclusiveBypass = isLocalKiller && inExclusiveWindow;
-        if (killerExclusiveBypass) {
-            SPDLOG_DEBUG("[ItemDrop] netId={} killer-exclusive bypass — skipping Layer 2 "
-                         "(type=0x{:02X})",
-                         ext->netId, (int)itemType);
-        } else {
-            bool anyTeammateOnline = false;
-            for (auto& [otherId, other] : Anchor::Instance->clients) {
-                if (other.self) continue;
-                if (other.online && other.isSaveLoaded) {
-                    anyTeammateOnline = true;
-                    break;
-                }
-            }
-            if (anyTeammateOnline) {
-                if (!ItemEligibility::CanPlayerCollectItem00(itemType, /*walletCapAware=*/true)) {
-                    *should = false;
-                    SPDLOG_DEBUG("[ItemDrop] netId={} blocked — local player ineligible (type=0x{:02X}); "
-                                 "deferring to teammate",
-                                 ext->netId, (int)itemType);
-                    return;
-                }
-            } else {
-                SPDLOG_DEBUG("[ItemDrop] netId={} solo session — skipping Layer 2 eligibility "
-                             "(type=0x{:02X})",
-                             ext->netId, (int)itemType);
-            }
-        }
+        (void)itemType;  // reserved for future eligibility-bitmap rework
 
         // Gate passes. Diverge by host vs peer.
         //
@@ -3676,9 +3898,70 @@ void Anchor::RegisterHooks() {
         // vanilla. Vanilla runs on the next gate fire after host's
         // ITEM_COLLECTED grant transitions state to Granted.
         if (::SceneAuthority::IsMyCurrentRoomHost()) {
-            SPDLOG_INFO("[ItemDrop] netId={} pickup by host — broadcasting ITEM_COLLECTED type=0x{:02X}",
-                        ext->netId, (int)itemType);
-            Anchor::Instance->SendPacket_ItemCollected(ext->netId);
+            // Phase 3 C-hybrid: look up the decorative offering actor
+            // (Dekubaba head / Karebaba) near the EN_ITEM00 to embed
+            // its EnemyNetId in ITEM_COLLECTED so receivers can
+            // Actor_Kill the decoration at the moment of pickup. Same
+            // proximity-walk pattern as killer-attribution recovery.
+            //
+            // ITEM_COLLECTED broadcasts do NOT echo back to the sender
+            // (verified log 290 P1 AnchorProfile: rx_pps=0 for
+            // ITEM_COLLECTED after host's own grant). So host must
+            // ALSO dismiss the associated actor LOCALLY here — peers
+            // dismiss via HandlePacket_ItemCollected.
+            uint32_t assocActorNetId = 0;
+            Actor*   assocActor      = nullptr;
+            {
+                constexpr float kAssocRadius   = 200.0f;
+                constexpr float kAssocRadiusSq = kAssocRadius * kAssocRadius;
+                float bestDistSq = kAssocRadiusSq;
+                for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
+                    Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+                    while (a != nullptr) {
+                        const EnemyNetId* nidExt =
+                            ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                        if (nidExt != nullptr && nidExt->netId != 0 &&
+                            nidExt->phase != EnemyStateSync::LifecyclePhase::Alive &&
+                            a->update != nullptr) {
+                            const float dx = a->world.pos.x - item00->actor.world.pos.x;
+                            const float dy = a->world.pos.y - item00->actor.world.pos.y;
+                            const float dz = a->world.pos.z - item00->actor.world.pos.z;
+                            const float dSq = dx * dx + dy * dy + dz * dz;
+                            if (dSq < bestDistSq) {
+                                bestDistSq      = dSq;
+                                assocActorNetId = nidExt->netId;
+                                assocActor      = a;
+                            }
+                        }
+                        a = a->next;
+                    }
+                }
+            }
+
+            SPDLOG_INFO("[ItemDrop] netId={} pickup by host — broadcasting ITEM_COLLECTED "
+                        "type=0x{:02X} assocActorNetId={}",
+                        ext->netId, (int)itemType, assocActorNetId);
+            Anchor::Instance->SendPacket_ItemCollected(ext->netId, assocActorNetId);
+
+            // Local dismissal (host doesn't get its own echo).
+            // Bracket with isKillingNetworkActor so OnActorKill
+            // doesn't emit a redundant ENEMY_DEFEATED — peers'
+            // ITEM_COLLECTED dismissal handlers Actor_Kill their own
+            // local copies independently.
+            if (assocActor != nullptr) {
+                SPDLOG_INFO("[ItemDrop] dismissing associated actor netId={} locally on host "
+                            "(no own-echo for ITEM_COLLECTED)",
+                            assocActorNetId);
+                isKillingNetworkActor = true;
+                Actor_Kill(assocActor);
+                isKillingNetworkActor = false;
+            }
+            // Mark Consumed so subsequent gate fires (vanilla's
+            // multi-frame give-item flow) keep returning *should=true
+            // without re-broadcasting ITEM_COLLECTED. Same fix as the
+            // peer Granted→Consumed transition.
+            ItemDropNetId* mut = const_cast<ItemDropNetId*>(ext);
+            mut->pickupState = ItemPickupState::Consumed;
             // *should stays true.
             return;
         }
@@ -3692,43 +3975,18 @@ void Anchor::RegisterHooks() {
         *should = false;
     });
 
-    // #193 Phase 3 — visual cue for non-killer during exclusive window.
+    // Visual cue for non-pickable drops: REMOVED.
     //
-    // Apply a scale-down to drops the local player CANNOT pick up yet
-    // (still inside the killer's 3s window AND not the local player's
-    // kill). Reverts to vanilla scale once the window expires. Cheap +
-    // visible: peer sees a smaller drop that "pops" to full size at the
-    // 3s mark, signaling "now anyone can collect".
-    //
-    // Hook fires post-update each frame; the EnItem00 update itself
-    // smooth-steps `actor.scale` toward `this->scale` (the actor's
-    // intended target scale). Overwriting scale.x/y/z directly takes
-    // immediate visual effect.
-    COND_ID_HOOK(OnActorUpdate, ACTOR_EN_ITEM00, isConnected, [&](void* refActor) {
-        Actor* actor = static_cast<Actor*>(refActor);
-        if (actor == nullptr || actor->update == nullptr) return;
+    // The previous shrink-to-60% behaviour conflated "this drop is
+    // currently un-pickable" with "this drop is small" and caused
+    // user-confusion side effects (Phase 1 field test log 288: peer
+    // saw drops materialise small and "pop" up to normal size on
+    // window expiry). Per design discussion 2026-05-27, the cue is
+    // being replaced by a material/colour swap (drop renders in
+    // muted grey while un-pickable). Design captured in
+    // Claude/Plans/item_drop_visual_cue_material_swap.md;
+    // implementation deferred until after stick-drop testing.
 
-        const ItemDropNetId* ext =
-            ObjectExtension::GetInstance().Get<ItemDropNetId>(actor);
-        if (ext == nullptr) return;
-        if (ext->killerClientId == 0) return;
-        if (ext->killerClientId == Anchor::Instance->ownClientId) return;
-
-        const int64_t kKillerExclusiveMs = 3000;
-        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (nowMs - ext->spawnTimeMs >= kKillerExclusiveMs) {
-            // Window expired. Don't keep clamping scale — vanilla
-            // smooth-step will restore it on the next update tick.
-            return;
-        }
-
-        // Inside the window: shrink to 60% so non-killer drops are
-        // visually distinct.
-        actor->scale.x *= 0.6f;
-        actor->scale.y *= 0.6f;
-        actor->scale.z *= 0.6f;
-    });
 
     COND_VB_SHOULD(VB_FIRE_TEMPLE_BOMBABLE_WALL_BREAK, isConnected, {
         BgHidanKowarerukabe* actor = va_arg(args, BgHidanKowarerukabe*);

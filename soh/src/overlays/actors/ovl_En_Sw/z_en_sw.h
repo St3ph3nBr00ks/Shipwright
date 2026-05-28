@@ -61,12 +61,5 @@ void EnSw_SetupDyingNet(struct EnSw* actor, PlayState* play);
 s16  EnSw_GetStateIndex(struct EnSw* actor);
 void EnSw_ApplyNetState(struct EnSw* actor, s16 stateIndex);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-bool Anchor_ShouldSuppressEnSwDrop(struct Actor* actor);
-#ifdef __cplusplus
-}
-#endif
 
 #endif

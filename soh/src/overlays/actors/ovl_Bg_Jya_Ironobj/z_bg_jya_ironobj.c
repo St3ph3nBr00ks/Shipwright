@@ -8,6 +8,10 @@
 #include "objects/object_jya_iron/object_jya_iron.h"
 #include "overlays/actors/ovl_En_Ik/z_en_ik.h"
 
+// #193 Phase 4 v3 — env-actor drop wrapper. See HookHandlers.cpp.
+extern EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                Vec3f* pos, s16 params);
+
 #define FLAGS 0
 
 typedef void (*BgJyaIronobjIkFunc)(BgJyaIronobj*, PlayState*, EnIk*);
@@ -254,7 +258,7 @@ void func_808992E8(BgJyaIronobj* this, PlayState* play) {
             dropPos.y = this->dyna.actor.world.pos.y + 20.0f;
             dropPos.z = this->dyna.actor.world.pos.z;
             for (i = 0; i < 3; i++) {
-                Item_DropCollectible(play, &dropPos, ITEM00_HEART);
+                Anchor_DropCollectibleEnvActor(play, &this->dyna.actor, &dropPos, ITEM00_HEART);
                 dropPos.y += 18.0f;
             }
             Actor_Kill(&this->dyna.actor);

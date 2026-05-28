@@ -10,6 +10,7 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
 #define TIMER_SCALE ((f32)OS_CLOCK_RATE / 10000000000)

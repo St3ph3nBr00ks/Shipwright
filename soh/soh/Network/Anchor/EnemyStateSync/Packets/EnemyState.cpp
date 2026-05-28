@@ -5,6 +5,8 @@
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/Common/SkelAnimeWire.h"
+#include "soh/Network/Anchor/Common/SyncedClaimableDrop.h"  // Plan B step 6
+#include "soh/Network/Anchor/Common/DropAdapters/DropAdapter.h"  // Plan B step 6
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
 #include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
@@ -1493,6 +1495,16 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     SPDLOG_INFO("[EnemyDefeated] Received defeat for netId={} killerClientId={} killerTeamId={}",
                 netId, killerClientId,
                 killerTeamId.empty() ? "(unattributed)" : killerTeamId);
+
+    // Note: ENEMY_DEFEATED is NOT used to dismiss modal-offer Drops.
+    // It fires when the offering actor enters its Dying state, BEFORE
+    // the modal offer is even presented (DeadStickDrop / equivalent).
+    // Dismissal is driven by MODAL_OFFER_CLAIMED instead — see
+    // SendPacket_ModalOfferClaimed, fired from the host's modal-phantom
+    // OnActorSpawn hook (player accepted the offer). Earlier attempts
+    // (logs 277/279/280) to short-circuit via ENEMY_DEFEATED either
+    // kept the stem visible too long or killed it before pickup; the
+    // accept-driven approach is the only correct trigger.
 
     // AI Director: notify removal for director-spawned enemies. Host-only —
     // mNetIdToDescriptor only has entries on the authority that spawned them.

@@ -8,14 +8,14 @@
 // Anchor multiplayer: nearest-player lookup (returns local player when not connected).
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 
-// #193 field-test fix — peer-side drop suppression. When peer's
-// Dekubaba runs SetupDyingNet (HandlePacket_EnemyDefeated path),
-// EnDekubaba_ShrinkDie fires Item_DropCollectible* locally on peer
-// which spawned a duplicate-but-uninteractable-feeling drop next to
-// the host-broadcast ITEM_DROP_SYNC drop. Mirror the En_St / En_Sw /
-// En_Dekunuts pattern: guard the drop call so peer's natural-cycle
-// drop is suppressed and only the host's broadcast is visible.
-extern bool Anchor_ShouldSuppressDekubabaDrop(Actor* actor);
+// Plan B step 4 — host-only-modal wrapper around Actor_OfferGetItemNearby.
+// See z_en_karebaba.c for the rationale.
+extern void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, s32 getItemId);
+// Phase 3 C-hybrid: spawns an EN_ITEM00 STICK at the offering actor's
+// position WHEN CONNECTED. No-op when disconnected (vanilla
+// Actor_OfferGetItemNearby in the DeadStickDrop actionFunc handles
+// pickup in solo). See ModalOfferAdapter.cpp.
+extern void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
@@ -557,6 +557,24 @@ void EnDekubaba_SetupDeadStickDrop(EnDekubaba* this, PlayState* play) {
     this->actor.flags &= ~ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->timer = 200;
     this->actionFunc = EnDekubaba_DeadStickDrop;
+
+    // Phase 3 C-hybrid (Claude/Plans/item_drop_behavior_spec.md §1 Q1):
+    // spawn an EN_ITEM00 STICK at the head's landing position so the
+    // pickup goes through the standard ground-drop pipeline (both
+    // host and peer can walk into it; race A arbitrates). The head
+    // model in DeadStickDrop state remains visible as a vanilla
+    // decoration; dismissal of the head on pickup is handled by
+    // ITEM_COLLECTED.associatedActorNetId (Phase 3.4).
+    //
+    // Anchor_OfferGetItemNearby in EnDekubaba_DeadStickDrop is now a
+    // no-op on connected sessions (suppressed in ModalOfferAdapter);
+    // the head's 200-frame timer still controls its natural cleanup.
+    //
+    // Anchor_SpawnSyncedStickDrop is gated on Anchor connectivity: in
+    // a disconnected session it does nothing, so the vanilla offer
+    // mechanism (which runs unsuppressed when disconnected) remains
+    // the sole pickup path and there's no double-drop.
+    Anchor_SpawnSyncedStickDrop(&this->actor, play);
 }
 
 // Action functions
@@ -1089,22 +1107,15 @@ void EnDekubaba_ShrinkDie(EnDekubaba* this, PlayState* play) {
 
     if (Math_StepToF(&this->actor.scale.x, this->size * 0.1f * 0.01f, this->size * 0.1f * 0.01f)) {
         func_800286CC(play, &this->actor.home.pos, &sZeroVec, &sZeroVec, this->size * 500.0f, this->size * 100.0f);
-        // #193 field-test fix — peer suppresses local drop calls so
-        // host's broadcast ITEM_DROP_SYNC is the sole drop source.
-        // Without this, peer ends up with N+1 EnItem00 actors after
-        // a host-routed kill: peer's SetupDyingNet → ShrinkDie path
-        // spawns N drops locally, then ITEM_DROP_SYNC adds N more.
-        if (!Anchor_ShouldSuppressDekubabaDrop(&this->actor)) {
-            if (this->actor.dropFlag == 0) {
-                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
+        if (this->actor.dropFlag == 0) {
+            Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
 
-                if (this->actor.params == DEKUBABA_BIG) {
-                    Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
-                    Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
-                }
-            } else {
-                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x30);
+            if (this->actor.params == DEKUBABA_BIG) {
+                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
+                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_NUTS);
             }
+        } else {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x30);
         }
         Actor_Kill(&this->actor);
     }
@@ -1125,7 +1136,7 @@ void EnDekubaba_DeadStickDrop(EnDekubaba* this, PlayState* play) {
         return;
     }
 
-    Actor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
+    Anchor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
 }
 
 // Update and associated functions

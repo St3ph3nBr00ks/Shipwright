@@ -59,12 +59,5 @@ void EnSt_SetupDyingNet(struct EnSt* actor, PlayState* play);
 s16  EnSt_GetStateIndex(struct EnSt* actor);
 void EnSt_ApplyNetState(struct EnSt* actor, s16 stateIndex);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-bool Anchor_ShouldSuppressEnStDrop(struct Actor* actor);
-#ifdef __cplusplus
-}
-#endif
 
 #endif

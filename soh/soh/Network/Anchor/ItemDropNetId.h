@@ -8,6 +8,7 @@
 // to compile unchanged.
 
 #include <cstdint>
+#include <string>
 
 // #193 Phase 2 — attached to ACTOR_EN_ITEM00 actors so the receive-side
 // pickup gate can read the host-authoritative drop metadata.
@@ -36,9 +37,24 @@
 // gSaveContext before the other's broadcast arrived. Host arbitration
 // serialises pickup so only one client's gSaveContext is credited.
 enum class ItemPickupState : uint8_t {
-    None    = 0,
-    Pending = 1,
-    Granted = 2,
+    None     = 0,
+    Pending  = 1,
+    Granted  = 2,
+    // #193 Phase 1 follow-up (log 287 Bug 2). Vanilla EnItem00 pickup
+    // takes multiple frames to complete: first frame fires Item_Give /
+    // Actor_OfferGetItemNearby, subsequent frames spin until
+    // Actor_HasParent becomes true and Actor_Kill fires. The gate
+    // fires every frame the player is in contact with the actor.
+    // Without this terminal state, the Granted→None transition lets
+    // the second gate-fire re-route through race A (sending a
+    // spurious ITEM_PICKUP_REQUEST and returning *should=false),
+    // which makes vanilla's pickup function return early and the
+    // actor lives to its 220-frame unk_15A timeout (~3.7s @ 60fps).
+    //
+    // Consumed is terminal: once the grant has been applied locally
+    // (first vanilla run), subsequent gate fires return *should=true
+    // unconditionally so vanilla's give-item flow can complete.
+    Consumed = 3,
 };
 
 struct ItemDropNetId {
@@ -47,4 +63,12 @@ struct ItemDropNetId {
     int64_t         spawnTimeMs     = 0;
     bool            isFromBroadcast = false;
     ItemPickupState pickupState     = ItemPickupState::None;
+    // #193 Phase 1 (spec Q2) — killer's team identity at drop time,
+    // for the team-aware Layer 1 gate. Empty string when killer is
+    // unattributed (killerClientId == 0) or killer's AnchorClient is
+    // not in the local clients map. Layer 1 gate compares this to
+    // the local player's TeamId CVar and bypasses the killer-
+    // exclusive window for same-team players when TeamSharesPickups
+    // is true.
+    std::string     killerTeamId;
 };

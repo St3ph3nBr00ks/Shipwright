@@ -12,6 +12,14 @@
 #include "soh/ResourceManagerHelpers.h"
 #include <libultraship/log/luslog.h>
 
+// Plan B step 4 — host-only-modal wrapper around Actor_OfferGetItemNearby.
+// When MP-connected: host runs the offer locally (vanilla); peer suppresses
+// it (peer's actor sits in DeadItemDrop until existing ENEMY_DEFEATED-
+// driven death sync kills it). Single-player: vanilla unchanged.
+extern void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, s32 getItemId);
+// Phase 3 C-hybrid: see z_en_dekubaba.c for the full comment.
+extern void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnKarebaba_Init(Actor* thisx, PlayState* play);
@@ -211,6 +219,11 @@ void EnKarebaba_SetupDeadItemDrop(EnKarebaba* this, PlayState* play) {
     LUSLOG_INFO("[Karebaba] SetupDeadItemDrop ptr=%p home=(%.0f,%.0f,%.0f)",
                 (void*)this,
                 this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
+
+    // Phase 3 C-hybrid (Claude/Plans/item_drop_behavior_spec.md §1 Q1) —
+    // mirror of EnDekubaba_SetupDeadStickDrop. See that function for
+    // the full rationale.
+    Anchor_SpawnSyncedStickDrop(&this->actor, play);
 }
 
 void EnKarebaba_SetupRetract(EnKarebaba* this) {
@@ -465,11 +478,6 @@ void EnKarebaba_Dying(EnKarebaba* this, PlayState* play) {
     }
 }
 
-// Anchor suppression hook: returns true when this Karebaba is in a network-driven
-// natural death cycle on a non-host client. The item drop is skipped to prevent
-// a duplicate stick from being offered — the host already gave out the real one.
-extern bool Anchor_ShouldSuppressKarebabaDrop(Actor* actor);
-
 void EnKarebaba_DeadItemDrop(EnKarebaba* this, PlayState* play) {
     // Both the killing client and the receiving client run the same 200-frame
     // countdown so respawn timing is synchronized.  The receiving client
@@ -482,8 +490,8 @@ void EnKarebaba_DeadItemDrop(EnKarebaba* this, PlayState* play) {
     }
     if (Actor_HasParent(&this->actor, play) || this->actor.params == 0) {
         EnKarebaba_SetupDead(this);
-    } else if (!Anchor_ShouldSuppressKarebabaDrop(&this->actor)) {
-        Actor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
+    } else {
+        Anchor_OfferGetItemNearby(&this->actor, play, GI_STICKS_1);
     }
 }
 

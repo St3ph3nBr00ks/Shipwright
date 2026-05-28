@@ -1006,9 +1006,7 @@ void EnSt_Die(EnSt* this, PlayState* play) {
     if (DECR(this->finishDeathTimer) != 0) {
         EnSt_SpawnDeadEffect(this, play);
     } else {
-        if (!Anchor_ShouldSuppressEnStDrop(&this->actor)) {
-            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xE0);
-        }
+        Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xE0);
         Actor_Kill(&this->actor);
     }
 }

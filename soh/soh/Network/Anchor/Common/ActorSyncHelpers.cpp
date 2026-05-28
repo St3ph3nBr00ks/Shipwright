@@ -48,6 +48,16 @@ SkelAnime* GetEnemySkelAnime(Actor* actor) {
         case ACTOR_OBJ_TSUBO:
         case ACTOR_OBJ_KIBAKO:
         case ACTOR_OBJ_KIBAKO2:
+        // #193 Phase 4 v3 — six more breakable env actors. None have
+        // SkelAnime substruct; all store collider/state data at the
+        // SkelAnime offset and would false-positive the limbCount
+        // heuristic.
+        case ACTOR_BG_HAKA_TUBO:       // Shadow Temple giant skull jar (DynaPoly).
+        case ACTOR_BG_JYA_IRONOBJ:     // Spirit Temple Iron Knuckle pillar / throne (DynaPoly).
+        case ACTOR_BG_SPOT18_BASKET:   // Goron City prize basket.
+        case ACTOR_OBJ_COMB:           // Beehive (Lost Woods, Lake Hylia).
+        case ACTOR_EN_TUBO_TRAP:       // Flying pot enemy (Forest Temple).
+        case ACTOR_EN_WONDER_ITEM:     // Invisible collectible spot (Hyrule Field secrets).
             return nullptr;
         default: break;
     }
@@ -182,6 +192,33 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_OBJ_TSUBO:      return true;  // Breakable clay pot.
         case ACTOR_OBJ_KIBAKO:     return true;  // Small wooden crate.
         case ACTOR_OBJ_KIBAKO2:    return true;  // Large wooden crate (DynaPoly).
+
+        // #193 Phase 4 v3 — six more breakable env actors with direct
+        // `Item_DropCollectible*` calls. Admitting these to the synced
+        // allowlist gives their drop calls a netId, which is what
+        // `Anchor_DropCollectibleEnvActor` / `*Random*` use to route
+        // peer-side cut events to the host instead of producing a
+        // local duplicate drop alongside host's broadcast.
+        //
+        // Two related breakable actors were intentionally NOT admitted
+        // and need follow-up design work (filed as separate trackers):
+        //   - ACTOR_OBJ_MURE3 (Tower of Rupees) — uses
+        //     `Item_DropCollectible2` and captures the spawned
+        //     EnItem00* into a per-instance slot array for its own
+        //     Flags_SetSwitch tracking; the peer-suppress path would
+        //     leave the array NULL and break host's switch-flag firing
+        //     when peer is the picker. Needs a separate sync shape.
+        //   - ACTOR_OBJ_BEAN (bean stalk fairies) — drops
+        //     ITEM00_FLEXIBLE which routes to ACTOR_EN_ELF, not
+        //     EN_ITEM00. Fairies are intentionally per-player anyway
+        //     (each player's stalk grants their own heal); no sync
+        //     needed.
+        case ACTOR_BG_HAKA_TUBO:       return true;  // Shadow Temple giant skull jar.
+        case ACTOR_BG_JYA_IRONOBJ:     return true;  // Spirit Temple Iron Knuckle pillar/throne.
+        case ACTOR_BG_SPOT18_BASKET:   return true;  // Goron City prize basket.
+        case ACTOR_OBJ_COMB:           return true;  // Beehive.
+        case ACTOR_EN_TUBO_TRAP:       return true;  // Flying pot enemy (Forest Temple).
+        case ACTOR_EN_WONDER_ITEM:     return true;  // Invisible collectible spot (Hyrule Field secrets).
 
         default:                return false;
     }

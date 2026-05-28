@@ -36,8 +36,8 @@ void ObjTsubo_Thrown(ObjTsubo* this, PlayState* play);
 // soh/soh/Network/Anchor/HookHandlers.cpp. On connected peer with a
 // synced env actor, suppress local drop and notify host via
 // ENV_ACTOR_DROP; otherwise fall through to vanilla Item_Drop*.
-extern void Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
-                                            Vec3f* pos, s16 params);
+extern EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                Vec3f* pos, s16 params);
 
 static s16 D_80BA1B50 = 0;
 static s16 D_80BA1B54 = 0;

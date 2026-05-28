@@ -3,6 +3,14 @@
 #include "vt.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// #193 Phase 4 v3 — env-actor drop wrapper. Used for rupees/bombs.
+// The HEART_PIECE drop is intentionally left vanilla — it's a per-
+// player progression item (excluded from the transient broadcast
+// allowlist anyway) and peer's local copy is needed to drive the
+// per-actor `isHeartPieceGiven` flag.
+extern EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                Vec3f* pos, s16 params);
+
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
 void BgSpot18Basket_Init(Actor* thisx, PlayState* play);
@@ -377,7 +385,7 @@ void func_808B81A0(BgSpot18Basket* this, PlayState* play) {
 
         if (this->prize == 0) {
             for (i = 0; i < ARRAY_COUNT(D_808B85E4); i++) {
-                collectible = Item_DropCollectible(play, &tempVector, ITEM00_BOMBS_A);
+                collectible = Anchor_DropCollectibleEnvActor(play, actor, &tempVector, ITEM00_BOMBS_A);
                 if (collectible != NULL) {
                     collectible->actor.velocity.y = 11.0f;
                     collectible->actor.world.rot.y = D_808B85E4[i];
@@ -385,7 +393,7 @@ void func_808B81A0(BgSpot18Basket* this, PlayState* play) {
             }
         } else if (this->prize == 1) {
             for (i = 0; i < ARRAY_COUNT(D_808B85E4); i++) {
-                collectible = Item_DropCollectible(play, &tempVector, ITEM00_RUPEE_GREEN);
+                collectible = Anchor_DropCollectibleEnvActor(play, actor, &tempVector, ITEM00_RUPEE_GREEN);
                 if (collectible != NULL) {
                     collectible->actor.velocity.y = 11.0f;
                     collectible->actor.world.rot.y = D_808B85E4[i];
@@ -393,12 +401,13 @@ void func_808B81A0(BgSpot18Basket* this, PlayState* play) {
             }
         } else if (this->prize == 2) {
             if ((this->isHeartPieceGiven != 0) || Flags_GetCollectible(play, (actor->params & 0x3F))) {
-                collectible = Item_DropCollectible(play, &tempVector, ITEM00_RUPEE_PURPLE);
+                collectible = Anchor_DropCollectibleEnvActor(play, actor, &tempVector, ITEM00_RUPEE_PURPLE);
                 if (collectible != NULL) {
                     collectible->actor.velocity.y = 11.0f;
                     collectible->actor.world.rot.y = D_808B85E4[1];
                 }
             } else {
+                // Heart piece — per-player progression item, vanilla path.
                 collectible =
                     Item_DropCollectible(play, &tempVector, ((actor->params & 0x3F) << 8) | ITEM00_HEART_PIECE);
                 if (collectible != NULL) {
@@ -408,13 +417,13 @@ void func_808B81A0(BgSpot18Basket* this, PlayState* play) {
                 }
             }
 
-            collectible = Item_DropCollectible(play, &tempVector, ITEM00_RUPEE_RED);
+            collectible = Anchor_DropCollectibleEnvActor(play, actor, &tempVector, ITEM00_RUPEE_RED);
             if (collectible != NULL) {
                 collectible->actor.velocity.y = 11.0f;
                 collectible->actor.world.rot.y = D_808B85E4[0];
             }
 
-            collectible = Item_DropCollectible(play, &tempVector, ITEM00_RUPEE_BLUE);
+            collectible = Anchor_DropCollectibleEnvActor(play, actor, &tempVector, ITEM00_RUPEE_BLUE);
             if (collectible != NULL) {
                 collectible->actor.velocity.y = 11.0f;
                 collectible->actor.world.rot.y = D_808B85E4[2];

@@ -1,6 +1,9 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncHelpers.h"  // kSyncableActorCategories — Phase 3 associated-actor lookup
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
+#include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -110,21 +113,76 @@ void Anchor::HandlePacket_ItemPickupRequest(nlohmann::json payload) {
             const ItemDropNetId* ext =
                 ObjectExtension::GetInstance().Get<ItemDropNetId>(it);
             if (ext != nullptr && ext->netId == itemNetId) {
-                SPDLOG_INFO("[ItemPickupRequest] Granted netId={} to clientId={} — broadcasting ITEM_COLLECTED",
-                            itemNetId, senderClientId);
+                // Phase 3 C-hybrid: look up the decorative offering
+                // actor near the EN_ITEM00 (same proximity-walk as
+                // host-self pickup at HookHandlers.cpp). Embed its
+                // netId so receivers Actor_Kill the decoration at
+                // the moment of pickup.
+                //
+                // ITEM_COLLECTED broadcasts do NOT echo to sender —
+                // host must ALSO dismiss the associated actor locally
+                // (verified log 290 P1 AnchorProfile: rx_pps=0 for
+                // ITEM_COLLECTED after host's own grant broadcast).
+                uint32_t assocActorNetId = 0;
+                Actor*   assocActor      = nullptr;
+                {
+                    constexpr float kAssocRadius   = 200.0f;
+                    constexpr float kAssocRadiusSq = kAssocRadius * kAssocRadius;
+                    float bestDistSq = kAssocRadiusSq;
+                    for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
+                        Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
+                        while (a != nullptr) {
+                            const EnemyNetId* nidExt =
+                                ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+                            if (nidExt != nullptr && nidExt->netId != 0 &&
+                                nidExt->phase != EnemyStateSync::LifecyclePhase::Alive &&
+                                a->update != nullptr) {
+                                const float dx = a->world.pos.x - it->world.pos.x;
+                                const float dy = a->world.pos.y - it->world.pos.y;
+                                const float dz = a->world.pos.z - it->world.pos.z;
+                                const float dSq = dx * dx + dy * dy + dz * dz;
+                                if (dSq < bestDistSq) {
+                                    bestDistSq      = dSq;
+                                    assocActorNetId = nidExt->netId;
+                                    assocActor      = a;
+                                }
+                            }
+                            a = a->next;
+                        }
+                    }
+                }
+
+                SPDLOG_INFO("[ItemPickupRequest] Granted netId={} to clientId={} "
+                            "assocActorNetId={} — broadcasting ITEM_COLLECTED",
+                            itemNetId, senderClientId, assocActorNetId);
                 // Claim: kill the drop on host so future requests find
                 // it dead.
                 Actor_Kill(it);
+                // Local dismissal of associated actor (host doesn't
+                // get its own ITEM_COLLECTED echo).
+                // Bracket with isKillingNetworkActor so OnActorKill
+                // doesn't emit a redundant ENEMY_DEFEATED — peers'
+                // ITEM_COLLECTED dismissal handlers Actor_Kill their
+                // own local copies independently.
+                if (assocActor != nullptr) {
+                    SPDLOG_INFO("[ItemPickupRequest] dismissing associated actor netId={} "
+                                "locally on host (no own-echo for ITEM_COLLECTED)",
+                                assocActorNetId);
+                    isKillingNetworkActor = true;
+                    Actor_Kill(assocActor);
+                    isKillingNetworkActor = false;
+                }
                 // Broadcast ITEM_COLLECTED with the granted clientId
                 // (relay overwrites the sender's clientId field, but
                 // we want the WINNER's id, so set it explicitly via a
                 // dedicated field).
                 nlohmann::json bcast;
-                bcast["type"]              = ITEM_COLLECTED;
-                bcast["targetTeamId"]      = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
-                bcast["sceneNum"]          = (int)gPlayState->sceneNum;
-                bcast["netId"]             = itemNetId;
-                bcast["winnerClientId"]    = senderClientId;
+                bcast["type"]                 = ITEM_COLLECTED;
+                bcast["targetTeamId"]         = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+                bcast["sceneNum"]             = (int)gPlayState->sceneNum;
+                bcast["netId"]                = itemNetId;
+                bcast["winnerClientId"]       = senderClientId;
+                bcast["associatedActorNetId"] = assocActorNetId;
                 PacketTimeline::SetTimelineField(bcast);
                 SendJsonToRemote(bcast);
                 return;

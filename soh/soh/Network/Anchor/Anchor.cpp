@@ -415,6 +415,8 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_ItemPickupRequest(payload);
             else if (packetType == ENV_ACTOR_DROP)
                 HandlePacket_EnvActorDrop(payload);
+            else if (packetType == MODAL_OFFER_CLAIMED)
+                HandlePacket_ModalOfferClaimed(payload);
             else if (packetType == CUTSCENE_TEXT_ADVANCE)
                 HandlePacket_CutsceneTextAdvance(payload);
             else if (packetType == CUTSCENE_TEXT_ADVANCED)

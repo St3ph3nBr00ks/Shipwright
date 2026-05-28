@@ -8,6 +8,16 @@
 #include "vt.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// #193 Phase 4 v3 — env-actor drop wrappers. Used only on the
+// non-autoCollect branches (the 0x8000 autoCollect variants are
+// vanilla's modal-completion phantom shape and are already filtered
+// by the OnActorSpawn modal-visual gate, so wrapping them would
+// either suppress peer's local autoCollect or double-broadcast).
+extern EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
+                                                Vec3f* pos, s16 params);
+extern void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
+                                                 Vec3f* pos, s16 dropGroupParams);
+
 #define FLAGS 0
 
 void EnWonderItem_Init(Actor* thisx, PlayState* play);
@@ -85,14 +95,16 @@ void EnWonderItem_DropCollectible(EnWonderItem* this, PlayState* play, s32 autoC
         for (i = this->dropCount; i > 0; i--) {
             if (this->itemDrop < WONDERITEM_DROP_RANDOM) {
                 if ((this->itemDrop == WONDERITEM_DROP_FLEXIBLE) || !autoCollect) {
-                    Item_DropCollectible(play, &this->actor.world.pos, dropTable[this->itemDrop]);
+                    Anchor_DropCollectibleEnvActor(play, &this->actor, &this->actor.world.pos,
+                                                   dropTable[this->itemDrop]);
                 } else {
                     Item_DropCollectible(play, &this->actor.world.pos, dropTable[this->itemDrop] | 0x8000);
                 }
             } else {
                 randomDrop = this->itemDrop - WONDERITEM_DROP_RANDOM;
                 if (!autoCollect) {
-                    Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, randomDrop);
+                    Anchor_DropCollectibleRandomEnvActor(play, &this->actor, &this->actor.world.pos,
+                                                         randomDrop);
                 } else {
                     Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, randomDrop | 0x8000);
                 }
