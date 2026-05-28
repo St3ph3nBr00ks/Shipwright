@@ -108,6 +108,20 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
                     ObjectExtension::GetInstance().Get<EnemyNetId>(a);
                 if (nidExt != nullptr && nidExt->netId == assocActorNetId &&
                     a->update != nullptr) {
+                    // EN_KUSA (cut-stub regrowth state) must NOT be
+                    // Actor_Killed on pickup — let the cut state's
+                    // own timer drive the regrow cycle. Killing here
+                    // makes the cut grass vanish entirely (log 297
+                    // field-test bug). Same skip applied at the host
+                    // local-dismissal sites in ItemPickupRequest.cpp
+                    // and HookHandlers.cpp.
+                    if (a->id == ACTOR_EN_KUSA) {
+                        SPDLOG_INFO("[ItemCollected] skipping dismiss for assoc netId={} "
+                                    "(actor id=EN_KUSA — cut state regrows naturally)",
+                                    assocActorNetId);
+                        dismissed = true;
+                        break;
+                    }
                     SPDLOG_INFO("[ItemCollected] dismissing associated actor netId={} "
                                 "on pickup of itemNetId={}",
                                 assocActorNetId, itemNetId);

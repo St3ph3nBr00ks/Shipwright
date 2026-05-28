@@ -165,12 +165,24 @@ void Anchor::HandlePacket_ItemPickupRequest(nlohmann::json payload) {
                 // ITEM_COLLECTED dismissal handlers Actor_Kill their
                 // own local copies independently.
                 if (assocActor != nullptr) {
-                    SPDLOG_INFO("[ItemPickupRequest] dismissing associated actor netId={} "
-                                "locally on host (no own-echo for ITEM_COLLECTED)",
-                                assocActorNetId);
-                    isKillingNetworkActor = true;
-                    Actor_Kill(assocActor);
-                    isKillingNetworkActor = false;
+                    // EN_KUSA (and other env actors with a cut-stub
+                    // regrowth state) must NOT be Actor_Killed on
+                    // pickup — the cut state's natural timer drives
+                    // the regrow cycle. Killing the actor here causes
+                    // the cut grass to vanish entirely, preventing
+                    // regrowth (log 297 field-test bug).
+                    if (assocActor->id == ACTOR_EN_KUSA) {
+                        SPDLOG_INFO("[ItemPickupRequest] skipping dismiss for assoc netId={} "
+                                    "(actor id=EN_KUSA — cut state regrows naturally)",
+                                    assocActorNetId);
+                    } else {
+                        SPDLOG_INFO("[ItemPickupRequest] dismissing associated actor netId={} "
+                                    "locally on host (no own-echo for ITEM_COLLECTED)",
+                                    assocActorNetId);
+                        isKillingNetworkActor = true;
+                        Actor_Kill(assocActor);
+                        isKillingNetworkActor = false;
+                    }
                 }
                 // Broadcast ITEM_COLLECTED with the granted clientId
                 // (relay overwrites the sender's clientId field, but

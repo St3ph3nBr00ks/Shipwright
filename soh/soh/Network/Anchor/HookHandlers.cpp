@@ -4054,10 +4054,19 @@ void Anchor::RegisterHooks() {
             // DeadStickDrop / DeadItemDrop), so the bracket would
             // be defensive at most.
             if (assocActor != nullptr) {
-                SPDLOG_INFO("[ItemDrop] dismissing associated actor netId={} locally on host "
-                            "(no own-echo for ITEM_COLLECTED)",
-                            assocActorNetId);
-                Actor_Kill(assocActor);
+                // EN_KUSA (cut-stub regrowth state) must NOT be
+                // Actor_Killed on pickup — see ItemPickupRequest.cpp
+                // companion skip for the rationale.
+                if (assocActor->id == ACTOR_EN_KUSA) {
+                    SPDLOG_INFO("[ItemDrop] skipping dismiss for assoc netId={} "
+                                "(actor id=EN_KUSA — cut state regrows naturally)",
+                                assocActorNetId);
+                } else {
+                    SPDLOG_INFO("[ItemDrop] dismissing associated actor netId={} locally on host "
+                                "(no own-echo for ITEM_COLLECTED)",
+                                assocActorNetId);
+                    Actor_Kill(assocActor);
+                }
             }
             // Mark Consumed so subsequent gate fires (vanilla's
             // multi-frame give-item flow) keep returning *should=true
