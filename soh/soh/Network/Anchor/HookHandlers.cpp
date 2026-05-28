@@ -3274,6 +3274,22 @@ void Anchor::RegisterHooks() {
     // types attached to actors.
     COND_HOOK(OnActorDestroy, isConnected, [&](void* refActor) {
         Actor* actor = (Actor*)refActor;
+        // Read EnemyNetId BEFORE Free() wipes it. Used to scrub the
+        // host-bookkeeping damager entry once the actor's memory is
+        // about to be released. Damager attribution is consumed both
+        // at OnEnemyDefeat broadcast time (SendPacket_EnemyDefeated)
+        // AND at OnActorSpawn(EN_ITEM00) for the drop's killer
+        // attribution correction; clearing earlier (the old behavior
+        // in SendPacket_EnemyDefeated) lost the attribution between
+        // those two consumers and tagged peer-killed drops with the
+        // host's clientId. Per-actor cleanup here lives for the full
+        // lifetime; scene-transition cleanup handled separately by
+        // ClearStaleDamagers.
+        const EnemyNetId* nidExt =
+            ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+        if (nidExt != nullptr && nidExt->netId != 0) {
+            EnemyStateSync::HostBookkeeping::Instance().ClearDamager(nidExt->netId);
+        }
         ObjectExtension::GetInstance().Free(actor);
         // Plan B (#193) — scrub any stale visual-rep pointer from the
         // SyncedClaimableDrop registry. The drop entry survives the actor

@@ -800,7 +800,17 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId) {
         } else if (clients.contains(killerId)) {
             payload["killerTeamId"] = clients[killerId].teamId;
         }
-        bookkeeping.ClearDamager(netId);
+        // NOTE: do NOT ClearDamager(netId) here. The damager record is also
+        // consumed by the killer-attribution correction in
+        // OnActorSpawn(EN_ITEM00) (HookHandlers.cpp ~line 2080) which runs
+        // ~1 s later when SetupDeadStickDrop → Item_DropCollectible spawns
+        // the drop. Clearing here was correct in the "host received
+        // unattributed defeat from peer" code path (where this branch never
+        // runs), but masked the attribution in the Race-B path where host's
+        // own OnEnemyDefeat fires after applying peer-routed damage — drops
+        // ended up tagged with the host's clientId instead of the peer's.
+        // Damager cleanup is now deferred to OnActorDestroy (per-actor
+        // lifetime) + ClearStaleDamagers (per-scene transitions).
 
         SPDLOG_INFO("[EnemyDefeated] Host send for netId={} killerClientId={} killerTeamId={}",
                     netId,
