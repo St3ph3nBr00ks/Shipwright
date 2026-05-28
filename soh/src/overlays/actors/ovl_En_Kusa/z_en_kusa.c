@@ -32,6 +32,11 @@ extern EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor
                                                 Vec3f* pos, s16 params);
 extern void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
                                                  Vec3f* pos, s16 dropGroupParams);
+// Env-actor destruction broadcast — see Claude/Plans/env_actor_destroy_sync.md.
+// Idempotent (dedups via shared HostBookkeeping ledger), so safe to call from
+// any destruction path. Pairs with Actor_Kill broadcasts via OnActorKill —
+// whichever path fires first claims the broadcast, the second is a no-op.
+extern void Anchor_BroadcastEnvActorDestroy(Actor* envActor);
 void EnKusa_SetupCut(EnKusa* this);
 void EnKusa_SetupUprootedWaitRegrow(EnKusa* this);
 void EnKusa_SetupRegrow(EnKusa* this);
@@ -448,6 +453,16 @@ void EnKusa_Fall(EnKusa* this, PlayState* play) {
 }
 
 void EnKusa_SetupCut(EnKusa* this) {
+    // Env-actor cut-state sync (Claude/Plans/env_actor_destroy_sync.md).
+    // TYPE_1 / TYPE_2 grass transitions to a cut-stub state without
+    // Actor_Kill on the sender, so the OnActorKill → ENEMY_DEFEATED
+    // chain doesn't fire. Broadcast ENV_ACTOR_DESTROY explicitly so
+    // peer's grass at this netId is Actor_Killed and the cut event
+    // is visible cross-client. Idempotent — dedup via shared
+    // HostBookkeeping ledger means a sibling OnActorKill (from
+    // ENKUSA_TYPE_0 path) won't double-broadcast.
+    Anchor_BroadcastEnvActorDestroy(&this->actor);
+
     switch (this->actor.params & 3) {
         case ENKUSA_TYPE_2:
             EnKusa_SetupAction(this, EnKusa_DoNothing);
