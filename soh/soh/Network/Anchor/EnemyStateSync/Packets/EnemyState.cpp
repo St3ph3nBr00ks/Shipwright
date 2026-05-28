@@ -1630,7 +1630,25 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                         EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                         return;
                     }
-                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle", netId);
+                    // Override peer's local shape.rot.y with host's
+                    // cached netShapeRot.y BEFORE SetupDyingNet runs.
+                    // SetupDyingNet sets world.rot.y = shape.rot.y +
+                    // 0x8000 to capture the death-direction; without
+                    // this override the peer's locally-driven Spin /
+                    // Upright shape.rot.y (Karebaba is "binary skip-
+                    // all" for shape.rot per HookHandlers.cpp:2534)
+                    // is used and the head flies a different direction
+                    // than host's. Log 308 user feedback: death
+                    // animation direction wasn't syncing either
+                    // direction. netShapeRot is captured from every
+                    // ENEMY_STATE packet so it holds host's value at
+                    // the most-recent broadcast (typically the Spin →
+                    // Dying transition that immediately preceded this
+                    // EnemyDefeated).
+                    actor->shape.rot.y = ext->netShapeRot.y;
+                    SPDLOG_INFO("[EnemyDefeated] Karebaba netId={} — triggering natural death cycle "
+                                "(shape.rot.y synced from netShapeRot=0x{:04X})",
+                                netId, (uint16_t)ext->netShapeRot.y);
                     EnKarebaba_SetupDyingNet((EnKarebaba*)actor);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
