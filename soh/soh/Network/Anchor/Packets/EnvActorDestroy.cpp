@@ -1,7 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"  // kSyncableActorCategories
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
-#include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"  // ClaimDefeatBroadcast
 #include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"
@@ -21,6 +20,13 @@ extern PlayState* gPlayState;
 // actors without a specialized helper: Actor_Kill. See
 // HandlePacket_EnvActorDestroy dispatch below.
 void Anchor_ApplyEnKusaCut(Actor* thisx);  // z_en_kusa.c
+
+// Thread-local echo-suppress flag for Anchor_BroadcastEnvActorDestroy
+// — set true while applying a network-received destroy so the
+// per-actor helpers' internal Anchor_BroadcastEnvActorDestroy calls
+// (e.g. inside EnKusa_SetupCut) don't echo back to the originator.
+void Anchor_BeginNetworkEnvActorDestroy(void);  // HookHandlers.cpp
+void Anchor_EndNetworkEnvActorDestroy(void);
 }
 
 /**
@@ -90,20 +96,25 @@ void Anchor::HandlePacket_EnvActorDestroy(nlohmann::json payload) {
         return;
     }
 
-    // Claim the dedup ledger entry FIRST so any actor-specific
+    // Set the thread-local echo-suppress flag so any actor-specific
     // destroy helper invoked below (e.g. EnKusa_SetupCut) that
-    // internally calls Anchor_BroadcastEnvActorDestroy will see the
-    // netId already claimed and skip re-broadcasting. Prevents an
-    // echo loop where peer's receipt of destruction triggers peer's
-    // own cut transition which would otherwise broadcast back.
-    EnemyStateSync::HostBookkeeping::Instance().ClaimDefeatBroadcast(actorNetId);
+    // internally calls Anchor_BroadcastEnvActorDestroy will short-
+    // circuit and not echo the broadcast back. Cleared after the
+    // dispatch block. Replaced the earlier ledger-based dedup
+    // (commit 0beb6bdf6) which broke bidirectional sync for cyclic
+    // env actors — once a client received a destroy for netId N,
+    // the claim persisted across regrow and blocked the receiver's
+    // future broadcasts for the same netId. Echo-suppress with
+    // thread-local has no lasting state.
+    Anchor_BeginNetworkEnvActorDestroy();
 
     // Walk synced actor categories for the matching netId. Same
     // category set as the existing receive-side actor scans
     // (kSyncableActorCategories includes ENEMY/BOSS/PROP/BG/NPC/
     // SWITCH/ITEMACTION/MISC — env actors are spread across PROP/BG/
     // MISC depending on actor).
-    for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
+    bool matched = false;
+    for (size_t ci = 0; ci < kSyncableActorCategoriesCount && !matched; ++ci) {
         Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
         while (a != nullptr) {
             const EnemyNetId* ext =
@@ -127,13 +138,18 @@ void Anchor::HandlePacket_EnvActorDestroy(nlohmann::json payload) {
                                 actorNetId, a->id, (int)a->category);
                     Actor_Kill(a);
                 }
-                return;  // Idempotent: stop after first match.
+                matched = true;
+                break;
             }
             a = a->next;
         }
     }
 
-    SPDLOG_DEBUG("[EnvActorDestroy] rx actorNetId={} — no live local actor found "
-                 "(already destroyed, despawned, or not in synced categories)",
-                 actorNetId);
+    Anchor_EndNetworkEnvActorDestroy();
+
+    if (!matched) {
+        SPDLOG_DEBUG("[EnvActorDestroy] rx actorNetId={} — no live local actor found "
+                     "(already destroyed, despawned, or not in synced categories)",
+                     actorNetId);
+    }
 }

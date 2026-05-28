@@ -742,45 +742,51 @@ void Anchor_EndNetworkItemDropSpawn(void) {
 // callback when destruction doesn't naturally route through
 // Actor_Kill).
 //
-// Idempotent — dedups via the existing HostBookkeeping
-// ClaimDefeatBroadcast mechanism shared with OnActorKill. The
-// first call broadcasts; subsequent calls for the same netId are
-// no-ops.
+// Echo suppression: when this helper is called as part of
+// applying a network-received destroy (HandlePacket_EnvActorDestroy
+// invokes Anchor_ApplyEnKusaCut → EnKusa_SetupCut →
+// Anchor_BroadcastEnvActorDestroy), the thread-local
+// `g_isApplyingNetworkEnvActorDestroy` flag is set and the helper
+// short-circuits. Prevents the echo back to the originator and
+// further broadcast loops between peers.
 //
-// Sender's EnemyNetId.phase transitions to Dead so receive-side
-// queries see the destruction state consistently.
+// Earlier design (commit 0beb6bdf6) used HostBookkeeping's
+// ClaimDefeatBroadcast ledger as the echo guard. That broke
+// bidirectional sync for cyclic env actors: once a client RECEIVED
+// a destroy for netId N (claiming N in the ledger), the client
+// could never broadcast for N within the same scene visit — even
+// after N regrew and the local player cut it again. Removed in
+// favour of the thread-local flag below.
 //
 // Short-circuits on:
 //   - disconnected (no broadcast needed in solo).
-//   - isKillingNetworkActor (we're in the middle of applying a
-//     received destruction — don't echo it back).
 //   - actor has no EnemyNetId (not a synced actor — ignore).
 //   - netId 0 (assignment didn't complete — ignore).
-//   - already broadcast (ClaimDefeatBroadcast returns false).
+//   - g_isApplyingNetworkEnvActorDestroy (echo-suppress while
+//     applying a received destroy).
 //
 // Plan: Claude/Plans/env_actor_destroy_sync.md §3.3.
+static thread_local bool g_isApplyingNetworkEnvActorDestroy = false;
+
+extern "C" void Anchor_BeginNetworkEnvActorDestroy(void) {
+    g_isApplyingNetworkEnvActorDestroy = true;
+}
+extern "C" void Anchor_EndNetworkEnvActorDestroy(void) {
+    g_isApplyingNetworkEnvActorDestroy = false;
+}
+
 extern "C" void Anchor_BroadcastEnvActorDestroy(Actor* envActor) {
     if (envActor == nullptr) return;
     if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return;
-    // Note: no isKillingNetworkActor guard here (private member,
-    // not accessible from a free function). Dedup is handled by
-    // HostBookkeeping::ClaimDefeatBroadcast below — a network-
-    // received destroy already marks the broadcast as claimed,
-    // so a re-entrant call from the receive path's Actor_Kill
-    // would no-op naturally.
+    if (g_isApplyingNetworkEnvActorDestroy) {
+        // Receive-side application — don't echo back.
+        return;
+    }
 
     EnemyNetId* ext =
         const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(envActor));
     if (ext == nullptr || ext->netId == 0) return;
 
-    // Dedup — share the broadcast-state ledger with OnActorKill so a
-    // later Actor_Kill on the same actor doesn't re-broadcast.
-    auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
-    if (!bookkeeping.ClaimDefeatBroadcast(ext->netId)) {
-        // Already broadcast (this call OR a sibling OnActorKill).
-        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
-        return;
-    }
     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
 
     SPDLOG_INFO("[EnvActorDestroy] broadcasting actor id={} netId={} (cat={} pos=({:.0f},{:.0f},{:.0f}))",
