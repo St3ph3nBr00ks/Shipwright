@@ -278,9 +278,15 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
     // Hide the EN_ITEM00 so the visual is solely the offerer's
     // decoration. The actor's update / pickup gate / extension all
     // remain functional — only draw is suppressed.
+    // Also zero velocity / speedXZ so the EN_ITEM00 doesn't bounce
+    // out of the 30u pickup-proximity radius from the visible head's
+    // XZ (mirror of the host-side anchor-in-place in
+    // Anchor_SpawnSyncedStickDrop).
     bool invisibleDecorative = payload.value("invisibleDecorative", false);
     if (invisibleDecorative) {
-        spawned->actor.draw = NULL;
+        spawned->actor.draw       = NULL;
+        spawned->actor.velocity.y = 0.0f;
+        spawned->actor.speedXZ    = 0.0f;
     }
 
     SPDLOG_INFO("[ItemDropSync] rx netId={} type=0x{:02X} pos=({:.0f},{:.0f},{:.0f}) "

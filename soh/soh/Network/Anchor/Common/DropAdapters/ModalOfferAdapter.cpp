@@ -170,5 +170,15 @@ extern "C" void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play) {
         // Local invisibility on host. Peer-side invisibility is
         // applied via the broadcast flag inside ItemDropSync.
         spawned->actor.draw = NULL;
+        // Stop the vanilla Item_DropCollectible bounce — without this
+        // the EN_ITEM00 jumps with velocity.y=8 and speedXZ=2 in a
+        // random direction (~35-42u of XZ travel in 17-21 ticks),
+        // ending up well outside the 30u xzDist pickup radius from
+        // the visible Dekubaba head's XZ. Player walks to the head,
+        // never reaches the bounced collider. Zero velocity so the
+        // actor just falls straight down to the floor via gravity
+        // and rests under the visible decoration.
+        spawned->actor.velocity.y  = 0.0f;
+        spawned->actor.speedXZ     = 0.0f;
     }
 }
