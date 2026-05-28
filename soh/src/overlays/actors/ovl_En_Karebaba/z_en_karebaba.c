@@ -242,7 +242,11 @@ void EnKarebaba_SetupDeadItemDrop(EnKarebaba* this, PlayState* play) {
     // Y stays at current value (already on the floor via
     // EnKarebaba_Dying's `bgCheckFlags & 2` transition).
     {
-        const f32 kLandDistance = 20.0f;
+        // Distance tuned on log 306 user feedback: 20u was visibly too
+        // close to the stem base (head appeared "only slightly off
+        // center"), 40u approximates the actual flight distance from
+        // SetupDying's velocity + gravity physics.
+        const f32 kLandDistance = 40.0f;
         f32 dirX = Math_SinS(this->actor.shape.rot.y + 0x8000);
         f32 dirZ = Math_CosS(this->actor.shape.rot.y + 0x8000);
         this->actor.world.pos.x = this->actor.home.pos.x + dirX * kLandDistance;
