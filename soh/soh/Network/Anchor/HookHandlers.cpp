@@ -3309,6 +3309,30 @@ void Anchor::RegisterHooks() {
     });
 
     COND_HOOK(OnItemReceive, isConnected, [&](GetItemEntry itemEntry) {
+        // Phase 2 (#193 spec §4 Phase 2) — re-broadcast UPDATE_CLIENT_STATE
+        // whenever the local eligibility bitmap changes (e.g. just
+        // acquired a bag → now eligible for that ammo type; just
+        // capped → no longer eligible). Receiving clients use the
+        // bitmap to decide Layer 2 deferral on future drops.
+        //
+        // Send only on transition to avoid flooding UPDATE_CLIENT_STATE
+        // on every consumable pickup. The cached bitmap is per-process;
+        // resets to 0 on connect / scene change implicitly via
+        // SendPacket_UpdateClientState being called from those hooks
+        // (next OnItemReceive will see the new value as different from
+        // last-sent — harmless single redundant send).
+        {
+            static uint32_t s_lastObservedEligibilityBitmap = 0;
+            const uint32_t now = ItemEligibility::ComputeLocalEligibilityBitmap();
+            if (now != s_lastObservedEligibilityBitmap) {
+                SPDLOG_INFO("[Eligibility] bitmap changed 0x{:08X} -> 0x{:08X} — "
+                            "broadcasting UPDATE_CLIENT_STATE",
+                            s_lastObservedEligibilityBitmap, now);
+                s_lastObservedEligibilityBitmap = now;
+                SendPacket_UpdateClientState();
+            }
+        }
+
         // Handle vanilla dungeon items a bit differently
         if (itemEntry.modIndex == MOD_NONE &&
             (itemEntry.itemId >= ITEM_KEY_BOSS && itemEntry.itemId <= ITEM_KEY_SMALL)) {
@@ -3864,28 +3888,51 @@ void Anchor::RegisterHooks() {
         // flag-replay phantom-grant chain goes through `Item_Give`
         // directly and does NOT pass through this gate. The
         // relaxation is safe with respect to that bug.
-        // Layer 2 eligibility gate — REMOVED (log 283/284 field-test fix).
+        // Layer 2 — per-player eligibility with eligibility-bitmap bypass
+        // (Phase 2 of item_drop_behavior_spec.md, Q3 resolution).
         //
-        // Previous behaviour: blocked pickup when local player couldn't
-        // benefit (no bag, full ammo, etc.) on the assumption that a
-        // teammate could use it instead. In practice this produced
-        // permanently unreachable drops in early-game scenarios where
-        // NEITHER player has the bag yet (Inside Deku Tree pre-nut-bag
-        // is the canonical case). Vanilla single-player silently
-        // truncates surplus pickups; MP should not be stricter — the
-        // killer-exclusive Layer 1 window above already gives the
-        // killer first dibs, and cross-credit (GIVE_ITEM via
-        // OnItemReceive) propagates the count to eligible teammates
-        // when the picker-up is eligible. If nobody is eligible the
-        // drop is consumed for zero net effect — same as vanilla SP.
+        // Block ONLY when:
+        //   - local player is NOT eligible (CanPlayerCollectItem00 false),
+        //   - AND at least one online same-team teammate IS eligible
+        //     (their broadcast eligibilityBitmap has the relevant bit),
+        //   - AND we are NOT in the killer-exclusive bypass window.
         //
-        // Future re-add path: when UPDATE_CLIENT_STATE carries a
-        // per-client eligibility bitmap (one bit per ITEM00_*), the
-        // gate can defer pickup ONLY when "some other teammate IS
-        // eligible AND I am not". v1 lacks that signal so a
-        // conservative "no gate" is the right default.
+        // When no teammate is eligible, allow vanilla pickup
+        // (silent-truncate parity with single-player). When TeamSharesPickups
+        // is false (competitive), eligibility deferral makes no sense —
+        // there's no shared bag to defer toward, so the gate skips.
+        //
+        // Earlier full-removal (commit 5e3b794b8) was a placeholder until
+        // the bitmap broadcast (Phase 2) landed; this re-adds the gate
+        // with the bypass logic Q3 specified.
         s16 itemType = (s16)(item00->actor.params & 0xFF);
-        (void)itemType;  // reserved for future eligibility-bitmap rework
+        const bool killerExclusiveBypass = isLocalKiller && inExclusiveWindow;
+        if (!killerExclusiveBypass && teamSharesPickups) {
+            if (!ItemEligibility::CanPlayerCollectItem00(itemType, /*walletCapAware=*/true)) {
+                bool anyTeammateEligible = false;
+                const uint32_t itemBit = ItemEligibility::EligibilityBitForItem00(itemType);
+                if (itemBit != 0) {
+                    for (auto& [otherId, other] : Anchor::Instance->clients) {
+                        if (other.self || !other.online || !other.isSaveLoaded) continue;
+                        if (other.teamId != localTeamId) continue;
+                        if ((other.eligibilityBitmap & itemBit) != 0) {
+                            anyTeammateEligible = true;
+                            break;
+                        }
+                    }
+                }
+                if (anyTeammateEligible) {
+                    *should = false;
+                    SPDLOG_DEBUG("[ItemDrop] netId={} blocked — local ineligible, teammate "
+                                 "eligible (type=0x{:02X}); deferring",
+                                 ext->netId, (int)itemType);
+                    return;
+                }
+                SPDLOG_DEBUG("[ItemDrop] netId={} local ineligible but no teammate eligible "
+                             "— allowing silent-truncate (type=0x{:02X})",
+                             ext->netId, (int)itemType);
+            }
+        }
 
         // Gate passes. Diverge by host vs peer.
         //

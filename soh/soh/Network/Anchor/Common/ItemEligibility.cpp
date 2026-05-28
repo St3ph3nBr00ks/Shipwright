@@ -72,4 +72,64 @@ bool CanPlayerCollectItem00(s16 item00Type, bool walletCapAware) {
     }
 }
 
+uint32_t EligibilityBitForItem00(s16 item00Type) {
+    switch (item00Type) {
+        case ITEM00_RUPEE_GREEN:  return 1u << 0;
+        case ITEM00_RUPEE_BLUE:   return 1u << 1;
+        case ITEM00_RUPEE_RED:    return 1u << 2;
+        case ITEM00_RUPEE_ORANGE: return 1u << 3;
+        case ITEM00_RUPEE_PURPLE: return 1u << 4;
+        case ITEM00_HEART:        return 1u << 5;
+        case ITEM00_MAGIC_SMALL:  return 1u << 6;
+        case ITEM00_MAGIC_LARGE:  return 1u << 7;
+        case ITEM00_STICK:        return 1u << 8;
+        case ITEM00_NUTS:         return 1u << 9;
+        case ITEM00_SEEDS:        return 1u << 10;
+        case ITEM00_ARROWS_SINGLE:
+        case ITEM00_ARROWS_SMALL:
+        case ITEM00_ARROWS_MEDIUM:
+        case ITEM00_ARROWS_LARGE:
+            return 1u << 11;
+        case ITEM00_BOMBS_A:
+        case ITEM00_BOMBS_B:
+        case ITEM00_BOMBS_SPECIAL:
+            return 1u << 12;
+        case ITEM00_BOMBCHU:      return 1u << 13;
+        default:
+            return 0;
+    }
+}
+
+uint32_t ComputeLocalEligibilityBitmap() {
+    // Walks each canonical ITEM00_* representative and ORs in the bit
+    // when CanPlayerCollectItem00 returns true. Arrows / bombs use
+    // their canonical bag-cap-driven representative (small variant of
+    // each); the same eligibility bit covers all variants of that
+    // family per EligibilityBitForItem00's collapsed mapping.
+    static const s16 kRepresentatives[] = {
+        ITEM00_RUPEE_GREEN,
+        ITEM00_RUPEE_BLUE,
+        ITEM00_RUPEE_RED,
+        ITEM00_RUPEE_ORANGE,
+        ITEM00_RUPEE_PURPLE,
+        ITEM00_HEART,
+        ITEM00_MAGIC_SMALL,
+        ITEM00_MAGIC_LARGE,
+        ITEM00_STICK,
+        ITEM00_NUTS,
+        ITEM00_SEEDS,
+        ITEM00_ARROWS_SMALL,  // any arrow variant
+        ITEM00_BOMBS_A,       // any bomb variant
+        ITEM00_BOMBCHU,
+    };
+
+    uint32_t bitmap = 0;
+    for (s16 t : kRepresentatives) {
+        if (CanPlayerCollectItem00(t, /*walletCapAware=*/true)) {
+            bitmap |= EligibilityBitForItem00(t);
+        }
+    }
+    return bitmap;
+}
+
 }  // namespace ItemEligibility

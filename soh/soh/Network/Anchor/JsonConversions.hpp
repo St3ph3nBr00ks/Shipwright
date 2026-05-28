@@ -70,6 +70,7 @@ inline void from_json(const json& j, AnchorClient& client) {
     client.followerActive = j.value("followerActive", false);
     client.isClimbing = j.value("isClimbing", false);
     client.isCrawling = j.value("isCrawling", false);
+    client.eligibilityBitmap = j.value("eligibilityBitmap", (u32)0);
     // customSkeleton is runtime state — not deserialized
 }
 

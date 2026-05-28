@@ -102,6 +102,19 @@ typedef struct AnchorClient {
     // selected as a follower's leader target). Defaults to false for pre-update peers.
     bool followerActive = false;
 
+    // Phase 2 (#193 item_drop_behavior_spec.md §4 Phase 2) —
+    // per-client eligibility bitmap, one bit per ITEM00_* type
+    // (layout in ItemEligibility::EligibilityBitForItem00). Updated
+    // on save-load and on every OnItemReceive (vanilla VB_GIVE_ITEM
+    // proxy). Consumed by Layer 2 of the local pickup gate in
+    // VB_GIVE_ITEM_FROM_ITEM_00: when local player is ineligible AND
+    // SOME teammate's bitmap has the relevant bit set, defer pickup
+    // (drop stays for the eligible teammate); when NO teammate is
+    // eligible, allow vanilla pickup (silent-truncate parity with
+    // single-player). 0 for pre-update peers (acts as "no teammate
+    // eligible", which is the safe / lenient default).
+    uint32_t eligibilityBitmap = 0;
+
     // G1/G2 — set when the remote client's local Player is in a climbing state
     // (PLAYER_STATE1_CLIMBING_LADDER for vines/ladders, or HANGING_OFF_LEDGE /
     // CLIMBING_LEDGE during ledge-hoist). Broadcast on edge change so the

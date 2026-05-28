@@ -45,4 +45,39 @@ namespace ItemEligibility {
 // behaviour (used by AI Player Follower).
 bool CanPlayerCollectItem00(s16 item00Type, bool walletCapAware);
 
+// Phase 2 (spec §4 Phase 2) — eligibility-bitmap broadcast.
+//
+// Each client computes a uint32 bitmap of which ITEM00_* types they
+// currently CAN benefit from (per CanPlayerCollectItem00 with
+// walletCapAware=true) and broadcasts it on UPDATE_CLIENT_STATE.
+// The Layer 2 pickup gate consults peer bitmaps to decide whether
+// to defer pickup to a teammate.
+//
+// Returns the bit position for a given ITEM00_* type, or 0 if the
+// type doesn't have a tracked eligibility bit. Returns a single-bit
+// mask (1 << bit), not the bit index itself. Caller AND-tests against
+// the bitmap directly.
+//
+// Bit layout (see spec for rationale):
+//   bit 0  ITEM00_RUPEE_GREEN
+//   bit 1  ITEM00_RUPEE_BLUE
+//   bit 2  ITEM00_RUPEE_RED
+//   bit 3  ITEM00_RUPEE_ORANGE
+//   bit 4  ITEM00_RUPEE_PURPLE
+//   bit 5  ITEM00_HEART
+//   bit 6  ITEM00_MAGIC_SMALL
+//   bit 7  ITEM00_MAGIC_LARGE
+//   bit 8  ITEM00_STICK
+//   bit 9  ITEM00_NUTS
+//   bit 10 ITEM00_SEEDS
+//   bit 11 ITEM00_ARROWS_* (any of SINGLE/SMALL/MEDIUM/LARGE — same bag)
+//   bit 12 ITEM00_BOMBS_* (any of A/B/SPECIAL — same bag)
+//   bit 13 ITEM00_BOMBCHU
+uint32_t EligibilityBitForItem00(s16 item00Type);
+
+// Compute the local player's full eligibility bitmap by walking each
+// tracked ITEM00_* type and consulting CanPlayerCollectItem00 with
+// walletCapAware=true. Called on save-load and on inventory changes.
+uint32_t ComputeLocalEligibilityBitmap();
+
 }  // namespace ItemEligibility

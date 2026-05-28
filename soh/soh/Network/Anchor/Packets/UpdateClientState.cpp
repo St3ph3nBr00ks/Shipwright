@@ -1,6 +1,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/AIDirector/Director.h"  // step 6: forward reactive events
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
+#include "soh/Network/Anchor/Common/ItemEligibility.h"  // Phase 2 — eligibility bitmap
 #include "soh/Network/Anchor/Common/PacketSchemas.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
@@ -71,6 +72,11 @@ nlohmann::json Anchor::PrepClientState() {
         payload["entranceIndex"] = gSaveContext.entranceIndex;
         payload["dayTime"]   = (u16)gSaveContext.dayTime;
         payload["nightFlag"] = gSaveContext.nightFlag;
+        // Phase 2 (#193 spec §4 Phase 2) — broadcast per-client
+        // eligibility bitmap so other clients' Layer 2 pickup gates
+        // can defer to us when we're eligible for a drop they aren't.
+        payload["eligibilityBitmap"] =
+            (u32)ItemEligibility::ComputeLocalEligibilityBitmap();
     } else {
         payload["seed"] = 0;
         payload["isSaveLoaded"] = false;
@@ -78,6 +84,7 @@ nlohmann::json Anchor::PrepClientState() {
         payload["sceneNum"] = SCENE_ID_MAX;
         payload["curRoomNum"] = -1;
         payload["entranceIndex"] = 0x00;
+        payload["eligibilityBitmap"] = (u32)0;
     }
 
     return payload;
@@ -127,6 +134,7 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         clients[clientId].followerActive = client.followerActive;
         clients[clientId].isClimbing = client.isClimbing;
         clients[clientId].isCrawling = client.isCrawling;
+        clients[clientId].eligibilityBitmap = client.eligibilityBitmap;
 
         // Pillar F — record peer's maxSchema for outgoing field-clamping decisions.
         if (payload["state"].contains("maxSchema") && payload["state"]["maxSchema"].is_object()) {
