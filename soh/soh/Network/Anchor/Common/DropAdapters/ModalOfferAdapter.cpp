@@ -157,10 +157,27 @@ extern "C" void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play) {
     const f32 cosY   = Math_CosS(offerer->shape.rot.y);
     const f32 localZ = 200.0f * scaleY;
 
+    // XZ tracks the visible head — player walks toward the visible
+    // decoration, so the collider must be at the same XZ to land in
+    // the 30u EnItem00_Update pickup radius. Y stays at the
+    // offerer's world.pos.y though. SetupDeadStickDrop fires only
+    // from PrunedSomersault after `bgCheckFlags & 2` (actor on
+    // floor), so offerer.y IS the local floor height. Adding the
+    // shape.yOffset*scale + matrix-translate-200 components would
+    // put the EN_ITEM00 ~29-36u above the offerer; for a basement /
+    // ceiling-anchored dekubaba whose Y sits over an open pit (log
+    // 301 netId 2147489248 at Y=-851 dropped over the void),
+    // gravity pulled the invisible collider straight down to
+    // floorHeight <= -10000 and EnItem00_Update Actor_Killed it
+    // ~3 s after spawn, so neither player could pick up. The
+    // visible head's Y stays ~30u above where the player picks
+    // up the stick — same as vanilla single-player (player walks
+    // up to the decoration; pickup proximity hits on the head's
+    // XZ regardless of Y because EnItem00 uses xzDistToPlayer +
+    // 50u yDist tolerance).
     Vec3f visiblePos;
     visiblePos.x = offerer->world.pos.x + (sinY * cosX) * localZ;
-    visiblePos.y = offerer->world.pos.y + (offerer->shape.yOffset * scaleY)
-                                        + (-sinX) * localZ;
+    visiblePos.y = offerer->world.pos.y;
     visiblePos.z = offerer->world.pos.z + (cosY * cosX) * localZ;
 
     Anchor_SetPendingItemDropInvisibleDecorative(true);
