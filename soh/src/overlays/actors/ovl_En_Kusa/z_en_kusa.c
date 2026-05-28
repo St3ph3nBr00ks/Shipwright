@@ -482,6 +482,30 @@ void EnKusa_CutWaitRegrow(EnKusa* this, PlayState* play) {
 void EnKusa_DoNothing(EnKusa* this, PlayState* play) {
 }
 
+// Env-actor destroy-sync receive-side cut application (Option B,
+// Claude/Plans/env_actor_destroy_sync.md). Called from
+// HandlePacket_EnvActorDestroy when actor->id == ACTOR_EN_KUSA so
+// peer's grass enters the proper cut-stub state instead of being
+// Actor_Killed. Mirrors the vanilla cut transition in EnKusa_Main
+// at z_en_kusa.c:341-352:
+//   - TYPE_0 → Actor_Kill (single-use, no stub on either side).
+//   - TYPE_1 / TYPE_2 → SetupCut + ACTOR_FLAG_GRASS_DESTROYED.
+//
+// EnKusa_SetupCut internally calls Anchor_BroadcastEnvActorDestroy
+// to broadcast the cut. The receive path SHOULD NOT re-broadcast —
+// HandlePacket_EnvActorDestroy claims the dedup ledger entry
+// BEFORE calling this helper so the broadcast attempt no-ops via
+// ClaimDefeatBroadcast.
+void Anchor_ApplyEnKusaCut(Actor* thisx) {
+    EnKusa* this = (EnKusa*)thisx;
+    if ((this->actor.params & 3) == ENKUSA_TYPE_0) {
+        Actor_Kill(&this->actor);
+        return;
+    }
+    EnKusa_SetupCut(this);
+    this->actor.flags |= ACTOR_FLAG_GRASS_DESTROYED;
+}
+
 void EnKusa_SetupUprootedWaitRegrow(EnKusa* this) {
     this->actor.world.pos.x = this->actor.home.pos.x;
     this->actor.world.pos.y = this->actor.home.pos.y - 9.0f;

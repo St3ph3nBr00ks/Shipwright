@@ -1,6 +1,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"  // kSyncableActorCategories
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
+#include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"  // ClaimDefeatBroadcast
 #include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"
@@ -14,6 +15,12 @@ extern "C" {
 #include "macros.h"
 #include "z64.h"
 extern PlayState* gPlayState;
+
+// Per-actor receive-side destruction helpers. Each one transitions
+// the local actor into the right post-destroy state. Default for
+// actors without a specialized helper: Actor_Kill. See
+// HandlePacket_EnvActorDestroy dispatch below.
+void Anchor_ApplyEnKusaCut(Actor* thisx);  // z_en_kusa.c
 }
 
 /**
@@ -83,6 +90,14 @@ void Anchor::HandlePacket_EnvActorDestroy(nlohmann::json payload) {
         return;
     }
 
+    // Claim the dedup ledger entry FIRST so any actor-specific
+    // destroy helper invoked below (e.g. EnKusa_SetupCut) that
+    // internally calls Anchor_BroadcastEnvActorDestroy will see the
+    // netId already claimed and skip re-broadcasting. Prevents an
+    // echo loop where peer's receipt of destruction triggers peer's
+    // own cut transition which would otherwise broadcast back.
+    EnemyStateSync::HostBookkeeping::Instance().ClaimDefeatBroadcast(actorNetId);
+
     // Walk synced actor categories for the matching netId. Same
     // category set as the existing receive-side actor scans
     // (kSyncableActorCategories includes ENEMY/BOSS/PROP/BG/NPC/
@@ -95,10 +110,23 @@ void Anchor::HandlePacket_EnvActorDestroy(nlohmann::json payload) {
                 ObjectExtension::GetInstance().Get<EnemyNetId>(a);
             if (ext != nullptr && ext->netId == actorNetId &&
                 a->update != nullptr) {
-                SPDLOG_INFO("[EnvActorDestroy] rx actorNetId={} — Actor_Kill local copy "
-                            "(actor id={} cat={})",
-                            actorNetId, a->id, (int)a->category);
-                Actor_Kill(a);
+                // Per-actor receive-side dispatch. Most env actors
+                // get vanilla Actor_Kill — they don't have a
+                // distinct cut-stub state. En_Kusa is special: its
+                // TYPE_1 / TYPE_2 variants have a cut-stub state
+                // that should be visible on peer to match the
+                // sender's vanilla appearance + regrowth timer.
+                if (a->id == ACTOR_EN_KUSA) {
+                    SPDLOG_INFO("[EnvActorDestroy] rx actorNetId={} — applying EnKusa cut "
+                                "transition (preserves cut-stub state + regrowth timer)",
+                                actorNetId);
+                    Anchor_ApplyEnKusaCut(a);
+                } else {
+                    SPDLOG_INFO("[EnvActorDestroy] rx actorNetId={} — Actor_Kill local copy "
+                                "(actor id={} cat={})",
+                                actorNetId, a->id, (int)a->category);
+                    Actor_Kill(a);
+                }
                 return;  // Idempotent: stop after first match.
             }
             a = a->next;
