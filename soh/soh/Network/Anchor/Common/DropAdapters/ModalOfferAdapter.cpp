@@ -134,7 +134,7 @@ extern "C" void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, int32
 //   and handles pickup. The vanilla decorative head stays visible
 //   for the full 200-frame timer (or until vanilla Actor_HasParent
 //   triggers Actor_Kill on pickup).
-extern void Anchor_SetPendingItemDropInvisibleDecorative(bool flag);  // HookHandlers.cpp
+extern "C" void Anchor_SetPendingItemDropInvisibleDecorative(bool flag);  // HookHandlers.cpp
 extern "C" void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play) {
     if (offerer == nullptr || play == nullptr) return;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
