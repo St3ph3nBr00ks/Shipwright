@@ -41,6 +41,11 @@ enum class LifecyclePhase : uint8_t {
     AwaitingDeadItemDrop,   // Karebaba: SetupDeadItemDrop deferred to OnActorInit
     Dead,                   // health == 0 confirmed, no more updates
     Regrowing,              // Karebaba respawn cycle, position resets
+    Removed,                // taken out of scene by holder (carry-exit) —
+                            // distinct from Dead in that no drop / break VFX
+                            // should fire on receive. Recorded in SceneDeaths
+                            // so the static placement is suppressed on re-entry.
+                            // Producer: PlayerUpdate scene-exit-with-carry.
 };
 
 // Stable string for logging. Stable across ports — do NOT translate.

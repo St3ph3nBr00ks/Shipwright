@@ -36,6 +36,13 @@ void AnchorClient::RetireBakedModel() {
 
 // MARK: - Bandwidth profiler (#62)
 
+void Anchor::KillNetworkActorSilently(Actor* actor) {
+    if (actor == nullptr || actor->update == nullptr) return;
+    isKillingNetworkActor = true;
+    Actor_Kill(actor);
+    isKillingNetworkActor = false;
+}
+
 void Anchor::RecordProfileSample(const nlohmann::json& payload, bool tx) {
     if (CVarGetInteger("gEnhancements.AnchorProfiler", 0) == 0) return;
     if (!payload.contains("type")) return;

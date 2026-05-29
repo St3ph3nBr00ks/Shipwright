@@ -33,6 +33,16 @@ static Actor* AnchorFindActorByNetId(uint32_t netId) {
 // netIds resolve to "actor not found" in AnchorFindActorByNetId and are
 // silently dropped on the wire.
 static uint32_t sLastLocalHeldActorNetId = 0;
+// File-static tracker for the local player's last-broadcast sceneNum.
+// Combined with sLastLocalHeldActorNetId to detect scene-exit-while-
+// carrying: when the holder transitions scenes, the held actor is
+// destroyed by scene unload (no AnchorFindActorByNetId hit on
+// the new scene). Without intervention, the static placement re-spawns
+// on scene re-entry — visible "the pot I took is back" bug (log 318).
+// We record the netId in HostBookkeeping::SceneDeaths so the existing
+// IsSceneDeath suppression at HookHandlers.cpp OnActorSpawn kills the
+// re-spawn before any client sees it. Sentinel -1 marks pre-first-send.
+static int16_t sLastLocalSceneNum = -1;
 
 /**
  * PLAYER_UPDATE
@@ -49,6 +59,36 @@ void Anchor::SendPacket_PlayerUpdate() {
         return;
     }
 
+    Player* player = GET_PLAYER(gPlayState);
+
+    // Carry-exit detection runs BEFORE the no-peers-in-scene early-return
+    // below. Otherwise a holder walking alone into a different scene skips
+    // the carry-exit notification entirely (their PLAYER_UPDATE is gated
+    // off because no peer is in the new scene). We send via
+    // SendPacket_EnemyRemovedFromScene which broadcasts independent of
+    // scene, so the SceneDeath record propagates regardless of where peers
+    // currently are. Log 319 root cause: this block previously lived below
+    // the early-return and never fired on the holder's lone visit.
+    uint32_t currentHeldActorNetId = 0;
+    if (player->heldActor != nullptr) {
+        const EnemyNetId* ext =
+            ObjectExtension::GetInstance().Get<EnemyNetId>(player->heldActor);
+        if (ext != nullptr) currentHeldActorNetId = ext->netId;
+    }
+    const int16_t currentScene = (int16_t)gPlayState->sceneNum;
+    const bool sceneJustChanged =
+        (sLastLocalSceneNum != -1) && (sLastLocalSceneNum != currentScene);
+
+    bool didSendCarryExit = false;
+    if (sLastLocalHeldActorNetId != 0 &&
+        currentHeldActorNetId != sLastLocalHeldActorNetId &&
+        sceneJustChanged &&
+        AnchorFindActorByNetId(sLastLocalHeldActorNetId) == nullptr) {
+        SendPacket_EnemyRemovedFromScene(sLastLocalHeldActorNetId, sLastLocalSceneNum);
+        didSendCarryExit = true;
+    }
+    sLastLocalSceneNum = currentScene;
+
     uint32_t currentPlayerCount = 0;
     for (auto& [clientId, client] : clients) {
         if (client.sceneNum == gPlayState->sceneNum && client.online && client.isSaveLoaded && !client.self) {
@@ -56,10 +96,13 @@ void Anchor::SendPacket_PlayerUpdate() {
         }
     }
     if (currentPlayerCount == 0) {
+        // Keep sLastLocalHeldActorNetId in sync so a future frame (when
+        // peers re-join our scene) doesn't re-trigger the carry-exit
+        // detection on a stale comparison.
+        sLastLocalHeldActorNetId = currentHeldActorNetId;
         return;
     }
 
-    Player* player = GET_PLAYER(gPlayState);
     nlohmann::json payload;
 
     payload["type"] = PLAYER_UPDATE;
@@ -107,25 +150,18 @@ void Anchor::SendPacket_PlayerUpdate() {
         payload["upperJointTable"] = upperJointArray;
     }
 
-    // Held-actor sync (§3.2). Broadcast the netId of the actor we're
-    // currently carrying so the observer's DummyPlayer attaches its local
-    // copy and Player_PostLimbDrawGameplay drags it to the limb position.
-    uint32_t currentHeldActorNetId = 0;
-    if (player->heldActor != nullptr) {
-        const EnemyNetId* ext =
-            ObjectExtension::GetInstance().Get<EnemyNetId>(player->heldActor);
-        if (ext != nullptr) currentHeldActorNetId = ext->netId;
-    }
+    // Held-actor sync (§3.2). currentHeldActorNetId was computed at the
+    // top of the function (above the early-return) for carry-exit
+    // detection; broadcast it here too so observers' DummyPlayer attach
+    // edge-trigger has the value.
     payload["heldActorNetId"] = currentHeldActorNetId;
 
-    // Release-edge detection. When the held actor changes from non-zero
-    // to zero (or to a different netId), the previous frame's vanilla
-    // throw code (func_8084409C at z_player.c:9650 etc.) has already set
-    // speedXZ / velocity.y / world.rot.y on the released actor before
-    // Player_DetachHeldActor cleared the heldActor pointer. Read those
-    // off the actor (still alive in its new actionFunc=Thrown state) and
-    // ship them so the observer's local copy starts the same trajectory.
-    if (sLastLocalHeldActorNetId != 0 && currentHeldActorNetId != sLastLocalHeldActorNetId) {
+    // Throw release-edge: actor still alive in current scene; ship throw
+    // velocity so observer's local copy starts the same trajectory.
+    // Carry-exit was handled above the early-return — skip if it already
+    // fired so we don't re-broadcast something that's already gone.
+    if (!didSendCarryExit && sLastLocalHeldActorNetId != 0 &&
+        currentHeldActorNetId != sLastLocalHeldActorNetId) {
         Actor* released = AnchorFindActorByNetId(sLastLocalHeldActorNetId);
         if (released != nullptr) {
             payload["releasedActorNetId"] = sLastLocalHeldActorNetId;
@@ -242,5 +278,6 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
                 released->world.rot.y = (s16)payload["releaseYaw"].get<int>();
             }
         }
+
     }
 }

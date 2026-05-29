@@ -527,6 +527,7 @@ class Anchor : public Network {
     void HandlePacket_EnemyDefeated(nlohmann::json payload);  // phase=DyingByLocal phaseChanged=true
     void HandlePacket_EnemySpawn(nlohmann::json payload);     // phase=Alive       phaseChanged=true
     void HandlePacket_EnemyRespawn(nlohmann::json payload);   // phase=Regrowing   phaseChanged=true
+    void HandlePacket_EnemyRemovedFromScene(nlohmann::json payload);  // phase=Removed     phaseChanged=true
     // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
     void HandlePacket_SceneActorNetIds(nlohmann::json payload);
     void HandlePacket_DamageEnemy(nlohmann::json payload);
@@ -603,6 +604,18 @@ class Anchor : public Network {
     // isSpawningNetworkActor stays private since it's only touched from
     // Anchor::HandlePacket_EnemySpawn).
     bool isSpawningDirectorActor = false;
+
+    // Public wrapper around isKillingNetworkActor + Actor_Kill for
+    // external Flotilla modules that need to kill an actor without
+    // triggering the OnActorKill ENEMY_DEFEATED broadcast. The flag
+    // itself stays private (toggled internally by HandlePacket_EnemyDefeated
+    // and the OnActorSpawn pendingKill path); call sites outside
+    // Anchor:: member functions route through this helper.
+    //
+    // Current consumer: DummyPlayer's AnchorDummyDetachAndKillHeldActor
+    // (Plans/carry_held_actor_sync.md follow-up — passive "actor went
+    // away when holder left scene" semantic).
+    void KillNetworkActorSilently(Actor* actor);
 
     // Pillar A Phase 1 — global effective-host migration (pure-(a)).
     //
@@ -1071,6 +1084,13 @@ class Anchor : public Network {
                                uint8_t directorVariantId    = 0,
                                int     directorGroupId      = 0);
     void SendPacket_EnemyRespawn(uint32_t netId);                // phase=Regrowing   phaseChanged=true
+    // Carry-exit: the local player took an actor (held in hand) into a
+    // different scene. Caller passes the actor's netId and the scene it
+    // belonged to. Host records SceneDeath locally + broadcasts so peers
+    // do the same on receive — the existing OnActorSpawn IsSceneDeath
+    // suppression then kills the static-placement respawn on re-entry.
+    // No drop, no break VFX. See Plans/carry_held_actor_sync.md follow-up.
+    void SendPacket_EnemyRemovedFromScene(uint32_t netId, int16_t priorSceneNum); // phase=Removed phaseChanged=true
     void SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect);
     void SendPacket_EnemyHitPlayer(uint32_t netId);
     void HandlePacket_EnemyHitPlayer(nlohmann::json payload);
