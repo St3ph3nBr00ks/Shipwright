@@ -216,6 +216,52 @@ void EnKarebaba_SetupDeadItemDrop(EnKarebaba* this, PlayState* play) {
     this->actor.params = 200;
     this->actor.flags &= ~ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->actionFunc = EnKarebaba_DeadItemDrop;
+
+    // KAREBABA-MP-POS-SYNC: snap world.pos.xz to a deterministic
+    // landing position before Anchor_SpawnSyncedStickDrop computes
+    // the visible head position. EnKarebaba is "binary skip-all"
+    // for world.pos (session_state.md — world.pos isn't synced via
+    // ENEMY_STATE). During EnKarebaba_Dying the actor flies with
+    // gravity (velocity.y=4, speedXZ=3) and lands wherever each
+    // client's local physics + bgCheck floor put it. Host's landing
+    // XZ may differ from peer's by 5-30u depending on packet timing.
+    // Without this snap the host broadcasts the invisible EN_ITEM00
+    // at host's landing XZ but the peer's local Karebaba renders the
+    // visible head DList (gDekuBabaStickDropDL, line 604) at PEER's
+    // landing XZ — the player on peer walks to the visible head but
+    // the collider is 5-30u away and pickup never triggers. Field
+    // test log 304 (Lost Woods, scene 85).
+    //
+    // Landing position is home.pos offset by kLandDistance units in
+    // the death direction. SetupDying set world.rot.y = shape.rot.y +
+    // 0x8000 (180° away from the Karebaba's facing), so world.rot.y
+    // IS the death direction. Y stays at current value (already on
+    // the floor via Dying's `bgCheckFlags & 2` transition).
+    //
+    // Use world.rot.y NOT shape.rot.y because shape.rot isn't synced
+    // via ENEMY_STATE for "binary skip-all" actors (HookHandlers.cpp
+    // line 2534-2540 — Karebaba's shape.rot is animation-driven and
+    // overriding it from network would corrupt Spin/Upright state).
+    // world.rot IS synced unconditionally (line 2541), so by the
+    // time SetupDeadItemDrop fires (~10 frames after SetupDying via
+    // the airborne phase), peer's world.rot.y has been overwritten
+    // each frame by OnActorUpdate to match host's netRot. Both
+    // clients then compute the same landing direction. Log 307 user
+    // feedback identified the divergence: P2-killed Karebabas placed
+    // the visible model at peer's locally-computed shape.rot.y +
+    // 0x8000 while the EN_ITEM00 collider was at host's value.
+    {
+        // Distance tuned on log 306 user feedback: 20u was visibly too
+        // close to the stem base (head appeared "only slightly off
+        // center"), 40u approximates the actual flight distance from
+        // SetupDying's velocity + gravity physics.
+        const f32 kLandDistance = 40.0f;
+        f32 dirX = Math_SinS(this->actor.world.rot.y);
+        f32 dirZ = Math_CosS(this->actor.world.rot.y);
+        this->actor.world.pos.x = this->actor.home.pos.x + dirX * kLandDistance;
+        this->actor.world.pos.z = this->actor.home.pos.z + dirZ * kLandDistance;
+    }
+
     LUSLOG_INFO("[Karebaba] SetupDeadItemDrop ptr=%p home=(%.0f,%.0f,%.0f)",
                 (void*)this,
                 this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);

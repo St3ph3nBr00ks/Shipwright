@@ -3125,7 +3125,16 @@ void Anchor::RegisterHooks() {
                 bookkeeping.RecordPendingKill(ext->netId);
             }
         }
-        SendPacket_EnemyDefeated(ext->netId);
+        // Karebaba death-direction sync: capture shape.rot.y at
+        // OnEnemyDefeat time (= host's SetupDying time) so peer can
+        // apply the exact value before its own SetupDyingNet. Avoids
+        // the netShapeRot cache lag (~38°/frame during Spin) that
+        // made flight directions diverge in log 308.
+        if (actor->id == ACTOR_EN_KAREBABA) {
+            SendPacket_EnemyDefeated(ext->netId, actor->shape.rot.y, /*includeShapeRotY=*/true);
+        } else {
+            SendPacket_EnemyDefeated(ext->netId);
+        }
 
         // AI Director: notify removal for director-spawned enemies. Early-
         // exits inside OnEnemyRemoved if this netId isn't in the Director's
@@ -4083,12 +4092,30 @@ void Anchor::RegisterHooks() {
             // DeadStickDrop / DeadItemDrop), so the bracket would
             // be defensive at most.
             if (assocActor != nullptr) {
-                // EN_KUSA (cut-stub regrowth state) must NOT be
-                // Actor_Killed on pickup — see ItemPickupRequest.cpp
-                // companion skip for the rationale.
+                // Skip dismissal for actors with a natural respawn
+                // cycle the pickup must NOT interrupt:
+                //   - EN_KUSA: cut-stub state → CutWaitRegrow →
+                //     SetupRegrow → Main
+                //   - EN_KAREBABA: DeadItemDrop → Dead → Regrow →
+                //     Idle (z_en_karebaba.c). Field test log 304
+                //     showed the dismissal Actor_Killed Karebabas
+                //     mid-DeadItemDrop, removing them from the
+                //     scene entirely. For EN_KAREBABA also set
+                //     params=0 so the DeadItemDrop tick advances
+                //     to SetupDead next frame — without that, the
+                //     visible head decoration (gDekuBabaStickDropDL,
+                //     z_en_karebaba.c:604) stays drawn for the
+                //     remaining 200-frame countdown (log 305 user
+                //     feedback: "dropped stick model isn't
+                //     disappearing when picked up").
                 if (assocActor->id == ACTOR_EN_KUSA) {
                     SPDLOG_INFO("[ItemDrop] skipping dismiss for assoc netId={} "
                                 "(actor id=EN_KUSA — cut state regrows naturally)",
+                                assocActorNetId);
+                } else if (assocActor->id == ACTOR_EN_KAREBABA) {
+                    assocActor->params = 0;
+                    SPDLOG_INFO("[ItemDrop] fast-forwarding EN_KAREBABA assoc netId={} "
+                                "to SetupDead (params=0; respawn cycle continues)",
                                 assocActorNetId);
                 } else {
                     SPDLOG_INFO("[ItemDrop] dismissing associated actor netId={} locally on host "

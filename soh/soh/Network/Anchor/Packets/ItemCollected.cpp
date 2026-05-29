@@ -108,16 +108,28 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
                     ObjectExtension::GetInstance().Get<EnemyNetId>(a);
                 if (nidExt != nullptr && nidExt->netId == assocActorNetId &&
                     a->update != nullptr) {
-                    // EN_KUSA (cut-stub regrowth state) must NOT be
-                    // Actor_Killed on pickup — let the cut state's
-                    // own timer drive the regrow cycle. Killing here
-                    // makes the cut grass vanish entirely (log 297
-                    // field-test bug). Same skip applied at the host
-                    // local-dismissal sites in ItemPickupRequest.cpp
-                    // and HookHandlers.cpp.
+                    // Skip dismissal for actors with a natural
+                    // respawn cycle the pickup must NOT interrupt:
+                    //   - EN_KUSA: cut-stub → CutWaitRegrow →
+                    //     SetupRegrow → Main (log 297 bug).
+                    //   - EN_KAREBABA: DeadItemDrop → Dead → Regrow
+                    //     → Idle. params=0 fast-forwards the peer's
+                    //     DeadItemDrop tick to SetupDead next frame
+                    //     so the visible head decoration disappears
+                    //     immediately on peer side (mirror of the
+                    //     host-side fast-forward in
+                    //     ItemPickupRequest.cpp + HookHandlers.cpp).
                     if (a->id == ACTOR_EN_KUSA) {
                         SPDLOG_INFO("[ItemCollected] skipping dismiss for assoc netId={} "
                                     "(actor id=EN_KUSA — cut state regrows naturally)",
+                                    assocActorNetId);
+                        dismissed = true;
+                        break;
+                    }
+                    if (a->id == ACTOR_EN_KAREBABA) {
+                        a->params = 0;
+                        SPDLOG_INFO("[ItemCollected] fast-forwarding EN_KAREBABA assoc netId={} "
+                                    "to SetupDead (params=0)",
                                     assocActorNetId);
                         dismissed = true;
                         break;
