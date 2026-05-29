@@ -1,9 +1,14 @@
 #include "ImGuiUtils.h"
 #include <ship/Context.h>
 #include <ship/window/Window.h>
+#include <fast/Fast3dGui.h>  // libultraship#1097 — Fast3dGui owns the texture API now
 #include "assets/soh_assets.h"
 #include "soh/Enhancements/randomizer/rando_hash.h"
 #include "soh/Enhancements/randomizer/randomizerTypes.h"
+
+Fast::Fast3dGui* GetFast3dGui() {
+    return static_cast<Fast::Fast3dGui*>(Ship::Context::GetInstance()->GetWindow()->GetGui().get());
+}
 
 std::map<uint32_t, ItemMapEntry> itemMapping = {
     ITEM_MAP_ENTRY(ITEM_STICK),
@@ -215,9 +220,9 @@ const char* GetTextureForItemId(uint32_t itemId) {
 
 void RegisterImGuiItemIcons() {
     for (const auto& entry : itemMapping) {
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
+        GetFast3dGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
                                                                             ImVec4(1, 1, 1, 1));
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(
+        GetFast3dGui()->LoadGuiTexture(
             entry.second.nameFaded, entry.second.texturePath, ImVec4(1, 1, 1, 0.3f));
     }
 
@@ -225,9 +230,9 @@ void RegisterImGuiItemIcons() {
         ImVec4 gregGreen = ImVec4(42.0f / 255.0f, 169.0f / 255.0f, 40.0f / 255.0f, 1.0f);
         ImVec4 gregFadedGreen = gregGreen;
         gregFadedGreen.w = 0.3f;
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
+        GetFast3dGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
                                                                             gregGreen);
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.second.nameFaded,
+        GetFast3dGui()->LoadGuiTexture(entry.second.nameFaded,
                                                                             entry.second.texturePath, gregFadedGreen);
     }
 
@@ -235,48 +240,48 @@ void RegisterImGuiItemIcons() {
         ImVec4 aButtonBlue = ImVec4(90.f / 255.f, 90.f / 250.f, 255.f / 255.f, 255.f / 255.f);
         ImVec4 aButtonBlueFaded = aButtonBlue;
         aButtonBlueFaded.w = 0.3f;
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
+        GetFast3dGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
                                                                             aButtonBlue);
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.second.nameFaded,
+        GetFast3dGui()->LoadGuiTexture(entry.second.nameFaded,
                                                                             entry.second.texturePath, aButtonBlueFaded);
     }
 
     for (const auto& entry : customItemsMapping) {
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
+        GetFast3dGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
                                                                             ImVec4(1, 1, 1, 1));
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(
+        GetFast3dGui()->LoadGuiTexture(
             entry.second.nameFaded, entry.second.texturePath, ImVec4(1, 1, 1, 0.3f));
     }
 
     for (const auto& entry : jabbernutMapping) {
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
+        GetFast3dGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
                                                                             ImVec4(1, 1, 1, 1));
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(
+        GetFast3dGui()->LoadGuiTexture(
             entry.second.nameFaded, entry.second.texturePath, ImVec4(1, 1, 1, 0.3f));
     }
 
     for (const auto& entry : questMapping) {
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
+        GetFast3dGui()->LoadGuiTexture(entry.second.name, entry.second.texturePath,
                                                                             ImVec4(1, 1, 1, 1));
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(
+        GetFast3dGui()->LoadGuiTexture(
             entry.second.nameFaded, entry.second.texturePath, ImVec4(1, 1, 1, 0.3f));
     }
 
     for (const auto& [quest, entry] : songMapping) {
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.name, gSongNoteTex, entry.color);
+        GetFast3dGui()->LoadGuiTexture(entry.name, gSongNoteTex, entry.color);
         ImVec4 fadedCol = entry.color;
         fadedCol.w = 0.3f;
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.nameFaded, gSongNoteTex, fadedCol);
+        GetFast3dGui()->LoadGuiTexture(entry.nameFaded, gSongNoteTex, fadedCol);
     }
 
     for (const auto& entry : vanillaSongMapping) {
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.name, gSongNoteTex, entry.color);
+        GetFast3dGui()->LoadGuiTexture(entry.name, gSongNoteTex, entry.color);
         ImVec4 fadedCol = entry.color;
         fadedCol.w = 0.3f;
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.nameFaded, gSongNoteTex, fadedCol);
+        GetFast3dGui()->LoadGuiTexture(entry.nameFaded, gSongNoteTex, fadedCol);
     }
 
     for (const auto& entry : gSeedTextures) {
-        Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture(entry.tex, entry.tex, ImVec4(1, 1, 1, 1));
+        GetFast3dGui()->LoadGuiTexture(entry.tex, entry.tex, ImVec4(1, 1, 1, 1));
     }
 }

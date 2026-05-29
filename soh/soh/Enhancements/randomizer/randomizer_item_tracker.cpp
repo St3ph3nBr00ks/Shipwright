@@ -9,6 +9,7 @@
 #include "randomizer_check_tracker.h"
 #include "randomizer_item_tracker.h"
 #include "randomizerTypes.h"
+#include "soh/SohGui/ImGuiUtils.h"  // GetFast3dGui (libultraship#1097 adaptation)
 #include "soh/cvar_prefixes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/OTRGlobals.h"
@@ -805,7 +806,7 @@ void DrawItemCount(ItemTrackerItem item, bool hideMax) {
 void DrawEquip(ItemTrackerItem item) {
     bool hasEquip = HasEquipment(item);
     float iconSize = static_cast<float>(CVarGetInteger(CVAR_TRACKER_ITEM("IconSize"), 36));
-    ImGui::Image(Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(
+    ImGui::Image(GetFast3dGui()->GetTextureByName(
                      hasEquip && IsValidSaveFile() ? item.name : item.nameFaded),
                  ImVec2(iconSize, iconSize), ImVec2(0.0f, 0.0f), ImVec2(1, 1));
 
@@ -816,7 +817,7 @@ void DrawQuest(ItemTrackerItem item) {
     bool hasQuestItem = HasQuestItem(item);
     float iconSize = static_cast<float>(CVarGetInteger(CVAR_TRACKER_ITEM("IconSize"), 36));
     ImGui::BeginGroup();
-    ImGui::ImageWithBg(Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(
+    ImGui::ImageWithBg(GetFast3dGui()->GetTextureByName(
                            hasQuestItem && IsValidSaveFile() ? item.name : item.nameFaded),
                        ImVec2(iconSize, iconSize), ImVec2(0, 0), ImVec2(1, 1));
 
@@ -1215,7 +1216,7 @@ void DrawItem(ItemTrackerItem item) {
 
     ImGui::BeginGroup();
 
-    ImGui::Image(Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(
+    ImGui::Image(GetFast3dGui()->GetTextureByName(
                      hasItem && IsValidSaveFile() ? item.name : item.nameFaded),
                  ImVec2(iconSize, iconSize), ImVec2(0, 0), ImVec2(1, 1));
 
@@ -1301,7 +1302,7 @@ void DrawBottle(ItemTrackerItem item) {
     }
 
     float iconSize = static_cast<float>(CVarGetInteger(CVAR_TRACKER_ITEM("IconSize"), 36));
-    ImGui::Image(Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(
+    ImGui::Image(GetFast3dGui()->GetTextureByName(
                      hasItem && IsValidSaveFile() ? item.name : item.nameFaded),
                  ImVec2(iconSize, iconSize), ImVec2(0, 0), ImVec2(1, 1));
 
@@ -1317,11 +1318,11 @@ void DrawDungeonItem(ItemTrackerItem item) {
     bool hasSmallKey = GameInteractor::IsSaveLoaded() ? ((gSaveContext.inventory.dungeonKeys[item.data]) >= 0) : false;
     ImGui::BeginGroup();
     if (itemId == ITEM_KEY_SMALL) {
-        ImGui::Image(Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(
+        ImGui::Image(GetFast3dGui()->GetTextureByName(
                          hasSmallKey && IsValidSaveFile() ? item.name : item.nameFaded),
                      ImVec2(iconSize, iconSize), ImVec2(0, 0), ImVec2(1, 1));
     } else {
-        ImGui::Image(Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(
+        ImGui::Image(GetFast3dGui()->GetTextureByName(
                          hasItem && IsValidSaveFile() ? item.name : item.nameFaded),
                      ImVec2(iconSize, iconSize), ImVec2(0, 0), ImVec2(1, 1));
     }
@@ -1367,7 +1368,7 @@ void DrawSong(ItemTrackerItem item) {
     ImVec2 p = ImGui::GetCursorScreenPos();
     bool hasSong = HasSong(item);
     ImGui::SetCursorScreenPos(ImVec2(p.x + 6, p.y));
-    ImGui::Image(Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(
+    ImGui::Image(GetFast3dGui()->GetTextureByName(
                      hasSong && IsValidSaveFile() ? item.name : item.nameFaded),
                  ImVec2(iconSize / 1.5f, iconSize), ImVec2(0, 0), ImVec2(1, 1));
     Tooltip(SohUtils::GetQuestItemName(item.id).c_str());

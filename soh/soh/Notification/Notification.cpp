@@ -2,6 +2,7 @@
 #include "Notification.h"
 #include <libultraship/libultraship.h>
 #include "soh/OTRGlobals.h"
+#include "soh/SohGui/ImGuiUtils.h"  // GetFast3dGui (libultraship#1097 adaptation)
 
 extern "C" {
 #include "functions.h"
@@ -88,7 +89,7 @@ void Window::Draw() {
         ImGui::SetWindowPos(notificationPos);
 
         if (notification.itemIcon != nullptr) {
-            ImGui::Image(Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(notification.itemIcon),
+            ImGui::Image(GetFast3dGui()->GetTextureByName(notification.itemIcon),
                          ImVec2(24, 24));
             ImGui::SameLine();
         }

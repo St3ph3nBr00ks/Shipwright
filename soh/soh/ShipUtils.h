@@ -4,6 +4,10 @@
 #include <libultraship/libultraship.h>
 
 #ifdef __cplusplus
+#include <set>  // RandomElementFromSet — no longer transitively included after libultraship#1097
+#endif
+
+#ifdef __cplusplus
 
 void LoadGuiTextures();
 

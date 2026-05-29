@@ -39,9 +39,11 @@ class Menu : public GuiWindow {
     ImGuiTextFilter menuSearch;
     uint8_t searchSidebarIndex;
     UIWidgets::Colors defaultThemeIndex;
-    std::shared_ptr<std::vector<Ship::WindowBackend>> availableWindowBackends;
-    std::map<Ship::WindowBackend, const char*> availableWindowBackendsMap;
-    Ship::WindowBackend configWindowBackend;
+    // libultraship#1097 — Window::GetAvailableWindowBackends returns int32_t IDs now
+    // (Window is backend-agnostic). Concrete enum values come from Fast::WindowBackend.
+    std::shared_ptr<std::vector<int32_t>> availableWindowBackends;
+    std::map<Fast::WindowBackend, const char*> availableWindowBackendsMap;
+    Fast::WindowBackend configWindowBackend;
 
     std::unordered_map<uint32_t, disabledInfo> disabledMap;
     std::vector<disabledInfo> disabledVector;

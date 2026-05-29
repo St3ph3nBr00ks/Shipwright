@@ -99,16 +99,17 @@ void Menu::RemoveSidebarSearch() {
 }
 
 void Menu::UpdateWindowBackendObjects() {
-    Ship::WindowBackend runningWindowBackend = Ship::Context::GetInstance()->GetWindow()->GetWindowBackend();
+    Fast::WindowBackend runningWindowBackend = static_cast<Fast::WindowBackend>(Ship::Context::GetInstance()->GetWindow()->GetWindowBackend());
     int32_t configWindowBackendId = Ship::Context::GetInstance()->GetConfig()->GetInt("Window.Backend.Id", -1);
     if (Ship::Context::GetInstance()->GetWindow()->IsAvailableWindowBackend(configWindowBackendId)) {
-        configWindowBackend = static_cast<Ship::WindowBackend>(configWindowBackendId);
+        configWindowBackend = static_cast<Fast::WindowBackend>(configWindowBackendId);
     } else {
         configWindowBackend = runningWindowBackend;
     }
 
     availableWindowBackends = Ship::Context::GetInstance()->GetWindow()->GetAvailableWindowBackends();
-    for (auto& backend : *availableWindowBackends) {
+    for (auto backendId : *availableWindowBackends) {
+        auto backend = static_cast<Fast::WindowBackend>(backendId);
         availableWindowBackendsMap[backend] = windowBackendsMap.at(backend);
     }
 }

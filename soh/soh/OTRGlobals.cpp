@@ -857,7 +857,8 @@ void OTRGlobals::Initialize() {
     context->InitLogging(logLevel, logLevel, logFilePath);
     Ship::Context::GetInstance()->GetLogger()->set_pattern("[%H:%M:%S.%e] [%s:%#] [%l] %v");
 
-    context->InitGfxDebugger();
+    // GfxDebugger lifecycle moved into Fast3dWindow per libultraship#1097
+    // (Fast3dWindow.cpp:102 std::make_shared<GfxDebugger>); no SoH-side init call needed.
     context->InitFileDropMgr();
 
     // tell LUS to reserve 3 SoH specific threads (Game, Audio, Save)
