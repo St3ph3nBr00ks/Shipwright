@@ -64,6 +64,35 @@ typedef struct AnchorClient {
     u8 movementFlags;
     Vec3s prevTransl;
     Vec3s upperLimbRot;
+    // Upper-body anim joint table — drives the carry pose (rocks/pots/
+    // bombs over head). The vanilla upper→main merge runs only inside
+    // Player_Update (z_player.c:3634 AnimationContext_SetCopyTrue), which
+    // never fires for DummyPlayers; DummyPlayer_Update replicates the
+    // merge manually using a duplicate of sUpperBodyLimbCopyMap.
+    //
+    // upperMergeActiveThisFrame is a PER-FRAME gate: true only on packets
+    // where the owner was actively carrying an actor at send time. The
+    // vanilla merge gate is "upperActionFunc returned non-zero this
+    // frame" (z_player.c:3617). We approximate that with
+    // PLAYER_STATE1_CARRYING_ACTOR — covers the user-reported carry/
+    // throw case without overlaying stale upper joints onto walk / run /
+    // attack / etc. anims (which broke when the merge ran every frame).
+    // Other upper-action poses (bow draw, hookshot ready) are NOT synced
+    // by this gate — same as pre-§3.1 baseline.
+    //
+    // See Plans/carry_held_actor_sync.md §3.1.
+    Vec3s upperJointTable[24];
+    bool upperMergeActiveThisFrame = false;
+
+    // Held-actor sync (Plans/carry_held_actor_sync.md §3.2). netId of the
+    // actor this client is currently carrying overhead, or 0 if none.
+    // Observer's DummyPlayer_Update uses this to attach its local copy of
+    // the actor as the DummyPlayer's heldActor so Player_PostLimbDrawGameplay's
+    // writeback (z_player_lib.c:1944-1945) drags the rock to the DummyPlayer's
+    // left-hand position each draw frame. On release transitions, the owner
+    // additionally sends the throw velocity / yaw so the observer's local
+    // rock starts its arc on its own physics.
+    uint32_t heldActorNetId = 0;
     s8 currentBoots;
     s8 currentShield;
     s8 currentTunic;
