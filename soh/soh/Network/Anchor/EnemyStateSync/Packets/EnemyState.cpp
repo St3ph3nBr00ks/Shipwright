@@ -793,6 +793,37 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor,
     }
 }
 
+// Phase=Removed, phaseChanged=true — carry-exit broadcast.
+// Sent when the local player crossed scene boundaries while holding the
+// actor. Unlike DyingByLocal, NO drop / break VFX should fire on receive
+// — the pot/rock silently vanishes from the prior scene and is recorded
+// in SceneDeaths so the static placement is suppressed on re-entry.
+// See Plans/carry_held_actor_sync.md follow-up.
+void Anchor::SendPacket_EnemyRemovedFromScene(uint32_t netId, int16_t priorSceneNum) {
+    if (!IsSaveLoaded()) {
+        return;
+    }
+
+    nlohmann::json payload;
+    payload["type"]         = ENEMY_STATE;
+    payload["phase"]        = "Removed";
+    payload["phaseChanged"] = true;
+    payload["netId"]        = netId;
+    payload["sceneNum"]     = (int)priorSceneNum;
+    PacketTimeline::SetTimelineField(payload);
+
+    // Host records SceneDeath at send time — receivers cover the
+    // peer-was-holder case on receive.
+    if (::SceneAuthority::IsEffectiveHost()) {
+        EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(priorSceneNum, netId);
+    }
+
+    SPDLOG_INFO("[EnemyRemovedFromScene] Sending netId={} priorScene={}",
+                netId, (int)priorSceneNum);
+
+    SendJsonToRemote(payload);
+}
+
 // Phase=DyingByLocal, phaseChanged=true — defeat broadcast with attribution.
 // Sent by any client when an enemy fires OnEnemyDefeat or Actor_Kill.
 // Q I Tier 2: host attributes locally; non-host route-to-host with relay-
@@ -2090,8 +2121,61 @@ void Anchor::HandlePacket_EnemyState(nlohmann::json payload) {
         HandlePacket_EnemyDefeated(payload);
     } else if (phase == "Regrowing" && phaseChanged) {
         HandlePacket_EnemyRespawn(payload);
+    } else if (phase == "Removed" && phaseChanged) {
+        HandlePacket_EnemyRemovedFromScene(payload);
     } else {
         SPDLOG_WARN("[EnemyState] Unhandled phase combination netId={} phase={} phaseChanged={}",
                     netId, phase, phaseChanged);
+    }
+}
+
+// Phase=Removed, phaseChanged=true — carry-exit receive handler.
+// Records SceneDeath on host (so the existing IsSceneDeath suppression at
+// HookHandlers.cpp:1537 kills the re-spawned static placement on re-entry)
+// and silently Actor_Kills any local copy currently in the prior scene.
+// The kill goes through Anchor::KillNetworkActorSilently so OnActorKill's
+// ENEMY_DEFEATED broadcast doesn't fire AND no Item_DropCollectible runs
+// — the actor simply vanishes from the world.
+void Anchor::HandlePacket_EnemyRemovedFromScene(nlohmann::json payload) {
+    if (!IsSaveLoaded()) {
+        return;
+    }
+
+    uint32_t netId    = payload.value("netId", (uint32_t)0);
+    int16_t  priorScene = (int16_t)payload.value("sceneNum", (int)SCENE_ID_MAX);
+
+    SPDLOG_INFO("[EnemyRemovedFromScene] Received netId={} priorScene={}",
+                netId, (int)priorScene);
+
+    // Host records SceneDeath so OnActorSpawn suppresses the respawn.
+    // Non-host could in theory also benefit from the record, but its
+    // static-placement re-spawn isn't gated by IsSceneDeath (the
+    // suppression at HookHandlers.cpp:1537 is host-only); non-host
+    // catches up via the UpdateClientState SceneDeaths replay when
+    // they next transition into the scene.
+    if (::SceneAuthority::IsEffectiveHost()) {
+        EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(priorScene, netId);
+    }
+
+    // Silently Actor_Kill any local copy of the actor we currently have
+    // in our scene. We may be in a different scene than priorScene; if so,
+    // we have no local copy to kill — the SceneDeaths record covers the
+    // re-entry case.
+    if (gPlayState == nullptr || (int16_t)gPlayState->sceneNum != priorScene) {
+        return;
+    }
+    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
+        Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
+        while (a != nullptr) {
+            Actor* next = a->next;
+            EnemyNetId* ext = const_cast<EnemyNetId*>(
+                ObjectExtension::GetInstance().Get<EnemyNetId>(a));
+            if (ext != nullptr && ext->netId == netId) {
+                EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Removed);
+                KillNetworkActorSilently(a);
+                return;  // netIds are unique per actor — match is exclusive.
+            }
+            a = next;
+        }
     }
 }

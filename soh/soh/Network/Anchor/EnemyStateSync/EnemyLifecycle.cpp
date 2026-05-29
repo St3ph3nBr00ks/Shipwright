@@ -13,6 +13,7 @@ const char* LifecyclePhaseName(LifecyclePhase phase) {
         case LifecyclePhase::AwaitingDeadItemDrop:  return "AwaitingDeadItemDrop";
         case LifecyclePhase::Dead:                  return "Dead";
         case LifecyclePhase::Regrowing:             return "Regrowing";
+        case LifecyclePhase::Removed:               return "Removed";
     }
     return "<unknown>";
 }
@@ -31,8 +32,15 @@ bool IsRecognisedTransition(LifecyclePhase from, LifecyclePhase to) {
                 case LifecyclePhase::DyingByNetwork:       return true;
                 case LifecyclePhase::Dead:                 return true;
                 case LifecyclePhase::AwaitingDeadItemDrop: return true;
+                // Carry-exit: holder leaves scene while carrying. No drop,
+                // no break VFX — actor silently vanishes from the world.
+                case LifecyclePhase::Removed:              return true;
                 default: return false;
             }
+        case LifecyclePhase::Removed:
+            // Terminal for the scene visit. Scene reset returns to Alive
+            // mirror of the Dead → Alive edge for fresh spawns.
+            return to == LifecyclePhase::Alive;
         case LifecyclePhase::AwaitingDeadItemDrop:
             // OnActorInit fires SetupDeadItemDrop which advances the actor
             // into the natural-death cycle.
@@ -132,7 +140,8 @@ bool PhaseImpliesHasLocalDeath(LifecyclePhase phase) {
     return phase == LifecyclePhase::DyingByLocal ||
            phase == LifecyclePhase::DyingByNetwork ||
            phase == LifecyclePhase::AwaitingDeadItemDrop ||
-           phase == LifecyclePhase::Dead;
+           phase == LifecyclePhase::Dead ||
+           phase == LifecyclePhase::Removed;
 }
 
 bool PhaseImpliesDefeatPacketSent(LifecyclePhase phase) {
