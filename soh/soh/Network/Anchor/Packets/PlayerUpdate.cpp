@@ -107,6 +107,13 @@ void Anchor::SendPacket_PlayerUpdate() {
 
     payload["type"] = PLAYER_UPDATE;
     payload["sceneNum"] = gPlayState->sceneNum;
+    // curRoomNum on PLAYER_UPDATE (~20 Hz) so the host-side ENEMY_UPDATE filter
+    // (EnemyState.cpp ~705) sees mid-scene room transitions. UPDATE_CLIENT_STATE
+    // alone (scene-boundary only) left peer room state stale for the full
+    // duration peers spent in a sibling room — host kept broadcasting actor
+    // updates that the peer couldn't match locally, generating cross-room
+    // "No actor found for netId=… sceneNum=N" warning noise.
+    payload["curRoomNum"] = gPlayState->roomCtx.curRoom.num;
     payload["entranceIndex"] = gSaveContext.entranceIndex;
     payload["linkAge"] = gSaveContext.linkAge;
     payload["posRot"]["pos"] = player->actor.world.pos;
@@ -210,6 +217,10 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
         }
 
         client.sceneNum = payload.value("sceneNum", (s16)SCENE_ID_MAX);
+        // curRoomNum: default -1 matches UpdateClientState.cpp's "no save loaded"
+        // sentinel; the ENEMY_UPDATE filter's `client.curRoomNum == hostRoom`
+        // suppresses sends when the field is sentinel, which is the safe default.
+        client.curRoomNum = payload.value("curRoomNum", (s8)-1);
         client.entranceIndex = payload.value("entranceIndex", (s32)0);
         client.linkAge = payload.value("linkAge", (s32)LINK_AGE_ADULT);
         client.posRot = payload.value("posRot", PosRot{ 0 });
