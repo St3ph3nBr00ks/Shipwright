@@ -64,19 +64,25 @@ typedef struct AnchorClient {
     u8 movementFlags;
     Vec3s prevTransl;
     Vec3s upperLimbRot;
-    // Upper-body anim joint table — drives carry / hookshot / bow draw
-    // poses. The vanilla upper→main merge runs only inside Player_Update
-    // (z_player.c:3634 AnimationContext_SetCopyTrue), which never fires
-    // for DummyPlayers — DummyPlayer_Update replicates the merge manually
-    // using a duplicate of sUpperBodyLimbCopyMap.
-    // hasUpperJointTable gates the observer-side merge: when false (peer
-    // didn't send the field — pre-update peer or missing payload), the
-    // merge is skipped so the main joint table is rendered as-is. An
-    // empty default would otherwise overlay zero-rotations on upper-body
-    // limbs and break the pose.
+    // Upper-body anim joint table — drives the carry pose (rocks/pots/
+    // bombs over head). The vanilla upper→main merge runs only inside
+    // Player_Update (z_player.c:3634 AnimationContext_SetCopyTrue), which
+    // never fires for DummyPlayers; DummyPlayer_Update replicates the
+    // merge manually using a duplicate of sUpperBodyLimbCopyMap.
+    //
+    // upperMergeActiveThisFrame is a PER-FRAME gate: true only on packets
+    // where the owner was actively carrying an actor at send time. The
+    // vanilla merge gate is "upperActionFunc returned non-zero this
+    // frame" (z_player.c:3617). We approximate that with
+    // PLAYER_STATE1_CARRYING_ACTOR — covers the user-reported carry/
+    // throw case without overlaying stale upper joints onto walk / run /
+    // attack / etc. anims (which broke when the merge ran every frame).
+    // Other upper-action poses (bow draw, hookshot ready) are NOT synced
+    // by this gate — same as pre-§3.1 baseline.
+    //
     // See Plans/carry_held_actor_sync.md §3.1.
     Vec3s upperJointTable[24];
-    bool hasUpperJointTable = false;
+    bool upperMergeActiveThisFrame = false;
     s8 currentBoots;
     s8 currentShield;
     s8 currentTunic;

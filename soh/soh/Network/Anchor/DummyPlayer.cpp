@@ -229,12 +229,18 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
 
     // Upper-body anim merge — replicate z_player.c:3631-3635
     // (AnimationContext_SetCopyTrue with sUpperBodyLimbCopyMap) manually
-    // because Player_UpdateUpperBody never runs on DummyPlayer. Alias the
-    // upperSkelAnime joint table first (same pointer-rewrite pattern as
-    // the main jointTable above), then overlay the upper-body limbs into
-    // the main jointTable per the copy map.
+    // because Player_UpdateUpperBody never runs on DummyPlayer.
+    //
+    // Per-frame gate via upperMergeActiveThisFrame: the merge only runs
+    // when the owner sent upperJointTable in THIS packet (i.e., they
+    // were actively carrying an actor at send time). Without the gate,
+    // stale upper joints overlay onto every frame's main jointTable and
+    // visibly corrupt walk / run / attack anims — and the carry pose
+    // would never release after throw because the stale carryB_wait
+    // joints persist on the wire-cached upperJointTable.
+    //
     // See Plans/carry_held_actor_sync.md §3.1.
-    if (client.hasUpperJointTable) {
+    if (client.upperMergeActiveThisFrame) {
         player->upperSkelAnime.jointTable = client.upperJointTable;
         for (s32 i = 0; i < 22; i++) {
             if (kAnchorUpperBodyLimbCopyMap[i]) {

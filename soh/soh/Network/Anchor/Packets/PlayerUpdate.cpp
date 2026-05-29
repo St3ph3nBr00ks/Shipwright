@@ -63,18 +63,24 @@ void Anchor::SendPacket_PlayerUpdate() {
     payload["prevTransl"] = player->skelAnime.prevTransl;
     payload["movementFlags"] = player->skelAnime.movementFlags;
     payload["jointTable"] = jointArray;
-    // Upper-body anim joint table (carry / hookshot / bow draw poses).
-    // Sent alongside the main jointTable; observer merges upper-body
-    // limbs back into the main skeleton per sUpperBodyLimbCopyMap.
+    // Upper-body anim joint table — carry pose only. Sent only when the
+    // owner is actively carrying an actor; the field's absence in the
+    // packet tells the observer "do not merge upper limbs this frame",
+    // letting the main jointTable render unmodified for walk / run /
+    // attack / etc. Vanilla's merge gate is "upperActionFunc returned
+    // non-zero" (z_player.c:3617); we use PLAYER_STATE1_CARRYING_ACTOR
+    // as the conservative approximation.
     // See Plans/carry_held_actor_sync.md §3.1.
-    std::vector<int> upperJointArray;
-    for (size_t i = 0; i < 24; i++) {
-        Vec3s joint = player->upperSkelAnime.jointTable[i];
-        upperJointArray.push_back(joint.x);
-        upperJointArray.push_back(joint.y);
-        upperJointArray.push_back(joint.z);
+    if (player->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) {
+        std::vector<int> upperJointArray;
+        for (size_t i = 0; i < 24; i++) {
+            Vec3s joint = player->upperSkelAnime.jointTable[i];
+            upperJointArray.push_back(joint.x);
+            upperJointArray.push_back(joint.y);
+            upperJointArray.push_back(joint.z);
+        }
+        payload["upperJointTable"] = upperJointArray;
     }
-    payload["upperJointTable"] = upperJointArray;
     payload["upperLimbRot"] = player->upperLimbRot;
     payload["currentBoots"] = player->currentBoots;
     payload["currentShield"] = player->currentShield;
@@ -126,10 +132,10 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
             client.jointTable[i].y = jointArray[i * 3 + 1];
             client.jointTable[i].z = jointArray[i * 3 + 2];
         }
-        // Upper-body anim joint table — only apply when the peer actually
-        // sent the field. An empty default would zero out upper-body limb
-        // rotations on the observer's merge and break the pose for
-        // pre-upgrade peers; skip the merge in that case instead.
+        // Upper-body anim joint table — per-frame gate. The owner only
+        // includes the field when actively carrying an actor; otherwise
+        // we skip the observer-side merge so the main jointTable renders
+        // unmodified for walk / run / attack / etc.
         if (payload.contains("upperJointTable")) {
             std::vector<int> upperJointArray = payload["upperJointTable"].get<std::vector<int>>();
             upperJointArray.resize(24 * 3);
@@ -138,7 +144,9 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
                 client.upperJointTable[i].y = upperJointArray[i * 3 + 1];
                 client.upperJointTable[i].z = upperJointArray[i * 3 + 2];
             }
-            client.hasUpperJointTable = true;
+            client.upperMergeActiveThisFrame = true;
+        } else {
+            client.upperMergeActiveThisFrame = false;
         }
         client.movementFlags = payload.value("movementFlags", (u8)0);
         client.prevTransl = payload.value("prevTransl", Vec3s{ 0 });
