@@ -9,6 +9,7 @@
 #include "soh_assets.h"
 #include <soh/SohGui/SohGui.hpp>
 #include "soh/SohGui/UIWidgets.hpp"
+#include "soh/SohGui/ImGuiUtils.h"  // GetFast3dGui (libultraship#1097 adaptation)
 
 extern "C" {
 #include "z64item.h"
@@ -435,7 +436,7 @@ void TimeSplitsPopUpContext() {
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 2.0f));
             ImGui::ImageButton(
                 "QUEST_SKULL_TOKEN",
-                Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName("QUEST_SKULL_TOKEN"),
+                GetFast3dGui()->GetTextureByName("QUEST_SKULL_TOKEN"),
                 ImVec2(32.0f, 32.0f), ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0));
             ImGui::PopStyleVar();
             ImGui::TableNextColumn();
@@ -488,7 +489,7 @@ void TimeSplitsPopUpContext() {
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 2.0f));
                 auto ret = ImGui::ImageButton(
                     popupObject.splitImage.c_str(),
-                    Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(popupObject.splitImage),
+                    GetFast3dGui()->GetTextureByName(popupObject.splitImage),
                     ImVec2(32.0f, 32.0f), ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), popupObject.splitTint);
                 ImGui::PopStyleVar();
                 if (ret) {
@@ -664,7 +665,7 @@ void TimeSplitsDrawSplitsList() {
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(imagePadding, imagePadding));
             auto ret = ImGui::ImageButton(
                 split.splitImage.c_str(),
-                Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(split.splitImage), imageSize,
+                GetFast3dGui()->GetTextureByName(split.splitImage), imageSize,
                 ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), split.splitTint);
             ImGui::PopStyleVar();
             if (ret) {
@@ -748,7 +749,7 @@ void TimeSplitsDrawItemList(uint32_t type) {
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(imagePadding, imagePadding));
             auto ret = ImGui::ImageButton(
                 split.splitImage.c_str(),
-                Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(split.splitImage), imageSize,
+                GetFast3dGui()->GetTextureByName(split.splitImage), imageSize,
                 ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), split.splitTint);
             ImGui::PopStyleVar();
             if (ret) {
@@ -891,7 +892,7 @@ void TimeSplitsDrawManageList() {
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(imagePadding, imagePadding));
                 auto ret = ImGui::ImageButton(
                     data.splitImage.c_str(),
-                    Ship::Context::GetInstance()->GetWindow()->GetGui()->GetTextureByName(data.splitImage), imageSize,
+                    GetFast3dGui()->GetTextureByName(data.splitImage), imageSize,
                     ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), data.splitTint);
                 ImGui::PopStyleVar();
                 if (ret) {
@@ -976,9 +977,9 @@ void TimeSplitWindow::DrawElement() {
 void TimeSplitWindow::InitElement() {
     TimeSplitsUpdateWindowSize();
 
-    Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture("SPECIAL_TRIFORCE_PIECE_WHITE",
+    GetFast3dGui()->LoadGuiTexture("SPECIAL_TRIFORCE_PIECE_WHITE",
                                                                         gWTriforcePieceTex, ImVec4(1, 1, 1, 1));
-    Ship::Context::GetInstance()->GetWindow()->GetGui()->LoadGuiTexture("SPECIAL_SPLIT_ENTRANCE", gSplitEntranceTex,
+    GetFast3dGui()->LoadGuiTexture("SPECIAL_SPLIT_ENTRANCE", gSplitEntranceTex,
                                                                         ImVec4(1, 1, 1, 1));
     Color_RGBA8 defaultColour = { 0, 0, 0, 255 };
     windowColor = VecFromRGBA8(CVarGetColor(CVAR_ENHANCEMENT("TimeSplits.WindowColor.Value"), defaultColour));

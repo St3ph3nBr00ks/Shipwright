@@ -19,6 +19,11 @@ extern "C" {
 const char* GetTextureForItemId(uint32_t itemId);
 void RegisterImGuiItemIcons();
 
+// libultraship#1097 moved the texture API off Ship::Gui onto Fast::Fast3dGui.
+// Centralised helper avoids repeating the downcast at every consumer site.
+namespace Fast { class Fast3dGui; }
+Fast::Fast3dGui* GetFast3dGui();
+
 typedef struct {
     uint32_t id;
     std::string name;
