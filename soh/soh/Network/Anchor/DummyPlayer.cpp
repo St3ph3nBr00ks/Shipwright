@@ -191,13 +191,6 @@ static Actor* AnchorDummyFindActorByNetId(uint32_t netId) {
     return nullptr;
 }
 
-// Per-DummyPlayer cache of the heldActorNetId we last applied (clientId
-// → netId). Edge-trigger compares client.heldActorNetId against this to
-// decide whether to detach / re-attach. Persists across scene loads;
-// scene change makes both the lookup and the cached value stale, but
-// the FindActorByNetId failure cases handle that defensively.
-static std::unordered_map<uint32_t, uint32_t> sAppliedHeldActorNetId;
-
 static constexpr u8 kAnchorUpperBodyLimbCopyMap[22] = {
     0, // PLAYER_LIMB_NONE
     0, // PLAYER_LIMB_ROOT
@@ -274,34 +267,51 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         }
     }
 
-    // Held-actor attach / detach edge-trigger (§3.2).
-    // When the netId we're holding for this client changes, locate the
-    // local copy and set DummyPlayer->heldActor + actor->parent so that
-    // Player_PostLimbDrawGameplay's writeback (z_player_lib.c:1934-1947)
-    // drags the rock to the DummyPlayer's left-hand position each draw.
-    // This is the mechanism that gets P2's held rock to track P2's hand
-    // on host's view; pre-§3.2 the rock just sat at its spawn position
-    // on host because nothing reparented it. See OQ 6 resolution.
+    // Held-actor attach / detach — Phase 2 per-frame state-driven check
+    // (Plans/pillar_c2_live_actor_snapshot.md §5).
+    //
+    // The §3.2 edge-trigger missed the late-join race: PLAYER_UPDATE
+    // arrives at the joiner setting client.heldActorNetId = X before the
+    // Phase 1 LiveSpawn replay creates the local copy of the actor. The
+    // edge fired once with no local match (lookup returned null), and
+    // subsequent identical-value PLAYER_UPDATEs never re-fired the edge.
+    //
+    // Replacement: compare DummyPlayer's currently-attached netId
+    // against the expected netId from client state every frame; reconcile
+    // any mismatch. Self-heals across the LiveSpawn-race-before-attach
+    // case AND any future race involving disconnect/reconnect, scene
+    // transitions, or held-then-thrown-mid-join sequences. Covers an
+    // arbitrary number of clients (each DummyPlayer reconciles
+    // independently against its own client.heldActorNetId).
     {
-        uint32_t lastApplied = sAppliedHeldActorNetId[clientId];
-        if (client.heldActorNetId != lastApplied) {
-            // Detach previous (if it's still pointing at us).
-            if (lastApplied != 0) {
-                Actor* prev = AnchorDummyFindActorByNetId(lastApplied);
-                if (prev != nullptr && prev->parent == actor) {
-                    prev->parent = NULL;
+        uint32_t expectedNetId = client.heldActorNetId;
+        uint32_t currentNetId  = 0;
+        if (player->heldActor != nullptr) {
+            const EnemyNetId* ext =
+                ObjectExtension::GetInstance().Get<EnemyNetId>(player->heldActor);
+            if (ext != nullptr) currentNetId = ext->netId;
+        }
+
+        if (currentNetId != expectedNetId) {
+            // Detach whatever is currently attached.
+            if (player->heldActor != nullptr) {
+                if (player->heldActor->parent == actor) {
+                    player->heldActor->parent = NULL;
                 }
+                player->heldActor = NULL;
             }
-            player->heldActor = NULL;
-            // Attach new.
-            if (client.heldActorNetId != 0) {
-                Actor* held = AnchorDummyFindActorByNetId(client.heldActorNetId);
+            // Attach the expected actor if we can find it. When the
+            // local copy doesn't exist yet (Phase 1 LiveSpawn replay
+            // hasn't arrived, or the actor was destroyed and the
+            // network state hasn't caught up), the next frame's check
+            // retries automatically.
+            if (expectedNetId != 0) {
+                Actor* held = AnchorDummyFindActorByNetId(expectedNetId);
                 if (held != nullptr) {
                     player->heldActor = held;
                     held->parent = actor;
                 }
             }
-            sAppliedHeldActorNetId[clientId] = client.heldActorNetId;
         }
     }
     player->currentBoots = client.currentBoots;
@@ -652,20 +662,17 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play) {
     // correctly.
     actor->id = ACTOR_PLAYER;
 
-    // Held-actor sync (§3.2) — release any local actor still parented to
-    // this DummyPlayer so it doesn't carry a dangling `parent` pointer
-    // into the next frame's update. The actor itself stays alive; its
-    // next actionFunc tick will see Actor_HasNoParent and continue
-    // appropriately (e.g. transition to a Thrown state for pots/rocks).
+    // Held-actor sync (§3.2 + Phase 2) — release any local actor still
+    // parented to this DummyPlayer so it doesn't carry a dangling
+    // `parent` pointer into the next frame's update. The actor itself
+    // stays alive; its next actionFunc tick will see Actor_HasNoParent
+    // and continue appropriately (e.g. transition to a Thrown state for
+    // pots/rocks). Phase 2 removed the sAppliedHeldActorNetId map so we
+    // read directly from player->heldActor (the source of truth).
     {
-        uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(actor);
-        auto it = sAppliedHeldActorNetId.find(clientId);
-        if (it != sAppliedHeldActorNetId.end() && it->second != 0) {
-            Actor* prev = AnchorDummyFindActorByNetId(it->second);
-            if (prev != nullptr && prev->parent == actor) {
-                prev->parent = NULL;
-            }
-            it->second = 0;
+        Player* player = (Player*)actor;
+        if (player->heldActor != nullptr && player->heldActor->parent == actor) {
+            player->heldActor->parent = NULL;
         }
     }
 
