@@ -8,6 +8,8 @@ namespace {
 // Empty-set singleton for SceneDeaths()'s no-entry path so the
 // reference returned to callers stays valid.
 const std::unordered_set<uint32_t> kEmptyDeaths;
+// Empty-map singleton mirror for LiveSpawnsForScene().
+const std::unordered_map<uint32_t, LiveSpawnRecord> kEmptyLiveSpawns;
 }  // namespace
 
 HostBookkeeping& HostBookkeeping::Instance() {
@@ -76,6 +78,15 @@ void HostBookkeeping::ClearPendingKillsForScene(int16_t sceneNum, uint8_t timeli
 
 void HostBookkeeping::RecordSceneDeath(int16_t sceneNum, uint32_t netId) {
     mSceneDeaths[sceneNum].insert(netId);
+    // Phase 1 of pillar_c2_live_actor_snapshot.md — a recorded death
+    // means the actor is no longer alive on host, so drop it from the
+    // live-spawn index automatically. No-op when the actor was never
+    // in the index (e.g. static placements, or pendingKill-flow where
+    // the death arrived before the spawn ever happened).
+    auto it = mLiveSpawnsByScene.find(sceneNum);
+    if (it != mLiveSpawnsByScene.end()) {
+        it->second.erase(netId);
+    }
 }
 
 void HostBookkeeping::ClearSceneDeath(int16_t sceneNum, uint32_t netId) {
@@ -87,6 +98,10 @@ void HostBookkeeping::ClearSceneDeath(int16_t sceneNum, uint32_t netId) {
 
 void HostBookkeeping::ClearScene(int16_t sceneNum) {
     mSceneDeaths.erase(sceneNum);
+    // Phase 1 of pillar_c2_live_actor_snapshot.md — live spawns are
+    // scene-scoped and become stale when the scene is wiped (no peers in
+    // it). Cleared together so a re-entrant joiner sees a fresh state.
+    mLiveSpawnsByScene.erase(sceneNum);
 }
 
 bool HostBookkeeping::IsSceneDeath(int16_t sceneNum, uint32_t netId) const {
@@ -97,6 +112,31 @@ bool HostBookkeeping::IsSceneDeath(int16_t sceneNum, uint32_t netId) const {
 const std::unordered_set<uint32_t>& HostBookkeeping::SceneDeaths(int16_t sceneNum) const {
     auto it = mSceneDeaths.find(sceneNum);
     return it != mSceneDeaths.end() ? it->second : kEmptyDeaths;
+}
+
+// ---------------------------------------------------------------------
+// Live spawns (Phase 1 of pillar_c2_live_actor_snapshot.md)
+// ---------------------------------------------------------------------
+
+void HostBookkeeping::RecordLiveSpawn(int16_t sceneNum, uint32_t netId,
+                                      const LiveSpawnRecord& rec) {
+    mLiveSpawnsByScene[sceneNum][netId] = rec;
+}
+
+void HostBookkeeping::RemoveLiveSpawn(uint32_t netId) {
+    // Walk all scenes — the netId fully encodes scene but mirroring
+    // ClearDamager/RemoveLiveSpawn semantics (clean by netId alone) keeps
+    // the call sites simpler. Live-spawn map sizes are bounded
+    // (~hundreds per scene worst case) so this is acceptable.
+    for (auto& [sceneNum, perScene] : mLiveSpawnsByScene) {
+        perScene.erase(netId);
+    }
+}
+
+const std::unordered_map<uint32_t, LiveSpawnRecord>&
+HostBookkeeping::LiveSpawnsForScene(int16_t sceneNum) const {
+    auto it = mLiveSpawnsByScene.find(sceneNum);
+    return it != mLiveSpawnsByScene.end() ? it->second : kEmptyLiveSpawns;
 }
 
 // ---------------------------------------------------------------------
@@ -170,6 +210,7 @@ void HostBookkeeping::Reset() {
     mSceneDeaths.clear();
     mDefeatBroadcasts.clear();
     mDamagers.clear();
+    mLiveSpawnsByScene.clear();
 }
 
 // ---------------------------------------------------------------------

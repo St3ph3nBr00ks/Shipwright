@@ -32,8 +32,27 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <nlohmann/json_fwd.hpp>
+#include "z64math.h"
 
 namespace EnemyStateSync {
+
+// Live-spawn snapshot record. Captured at the moment host broadcasts
+// ENEMY_SPAWN for a dynamic actor; replayed verbatim from
+// UpdateClientState's join-trigger to peers that missed the original
+// broadcast (e.g. peer was in a different room when host's Obj_Mure2
+// dynamically spawned En_Ishi children).
+//
+// Phase 1 of Plans/pillar_c2_live_actor_snapshot.md.
+struct LiveSpawnRecord {
+    int16_t  actorId;
+    Vec3f    homePos;
+    Vec3s    homeRot;
+    int16_t  params;
+    // AI Director identity (Schema 5 — mandatory).
+    uint8_t  directorDescriptorId;
+    uint8_t  directorVariantId;
+    int      directorGroupId;
+};
 
 class HostBookkeeping {
 public:
@@ -66,6 +85,18 @@ public:
     // when no entry exists. Reference is valid until the next mutation
     // of mSceneDeaths.
     const std::unordered_set<uint32_t>& SceneDeaths(int16_t sceneNum) const;
+
+    // ----- liveSpawnsByScene (Phase 1 of pillar_c2_live_actor_snapshot.md) -----
+    // Per-scene index of dynamic spawns currently alive on the host. Used
+    // by UpdateClientState's join-trigger replay so a peer entering the
+    // scene late receives matching ENEMY_SPAWN packets and spawns the
+    // actors locally (mirror of SceneDeaths replay).
+    void RecordLiveSpawn(int16_t sceneNum, uint32_t netId, const LiveSpawnRecord& rec);
+    void RemoveLiveSpawn(uint32_t netId);
+    // Returns the netId→record map for the scene; empty map when no
+    // entry exists. Reference is valid until the next mutation.
+    const std::unordered_map<uint32_t, LiveSpawnRecord>&
+        LiveSpawnsForScene(int16_t sceneNum) const;
 
     // ----- sentDefeatThisScene + EnemyNetId::defeatPacketSent (merged) -----
     // ClaimDefeatBroadcast: inserts and returns true iff the netId was
@@ -108,6 +139,8 @@ private:
     std::unordered_map<int16_t, std::unordered_set<uint32_t>> mSceneDeaths;
     std::unordered_set<uint32_t>                              mDefeatBroadcasts;
     std::unordered_map<uint32_t /*netId*/, uint32_t /*clientId*/> mDamagers;
+    std::unordered_map<int16_t, std::unordered_map<uint32_t, LiveSpawnRecord>>
+        mLiveSpawnsByScene;
 };
 
 }  // namespace EnemyStateSync

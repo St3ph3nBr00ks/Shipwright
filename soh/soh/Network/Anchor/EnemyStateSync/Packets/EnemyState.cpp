@@ -772,6 +772,25 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor,
                 directorDescriptorId, directorVariantId);
 
     SendJsonToRemote(payload);
+
+    // Phase 1 of pillar_c2_live_actor_snapshot.md — record the spawn so
+    // a peer that joins this scene AFTER the broadcast (and missed the
+    // packet because they were in a different room / scene) can be
+    // caught up by UpdateClientState's join-trigger replay. Only fires
+    // for entries with a stable netId; entries without one wouldn't
+    // round-trip through HandlePacket_EnemySpawn anyway.
+    if (ext != nullptr && ext->netId != 0) {
+        EnemyStateSync::LiveSpawnRecord rec{};
+        rec.actorId              = actor->id;
+        rec.homePos              = actor->home.pos;
+        rec.homeRot              = actor->home.rot;
+        rec.params               = actor->params;
+        rec.directorDescriptorId = directorDescriptorId;
+        rec.directorVariantId    = directorVariantId;
+        rec.directorGroupId      = directorGroupId;
+        EnemyStateSync::HostBookkeeping::Instance()
+            .RecordLiveSpawn((int16_t)gPlayState->sceneNum, ext->netId, rec);
+    }
 }
 
 // Phase=DyingByLocal, phaseChanged=true — defeat broadcast with attribution.
