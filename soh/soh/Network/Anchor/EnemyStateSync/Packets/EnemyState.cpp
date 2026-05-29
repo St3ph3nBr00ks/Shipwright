@@ -1971,8 +1971,33 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
         }
     }
 
-    SPDLOG_WARN("[EnemyDefeated] No actor found for netId={} — buffering as pendingKill (scene not loaded yet?)",
-                netId);
+    // Two reasons we can fail to find the actor locally:
+    //   (a) Race-B: both clients independently ran OnActorKill on the
+    //       same actor (synced state machines converge); each broadcast
+    //       arrives at the other after the local kill already completed.
+    //       The pendingKill buffer here is redundant in this case but
+    //       harmless — the actor is gone and the netId will hit
+    //       deadEnemiesByScene if it ever respawns.
+    //   (b) Genuine pre-spawn arrival: the receiver hasn't loaded the
+    //       scene yet, so the actor isn't in the actor list. The
+    //       pendingKill buffer is the right action — OnActorSpawn will
+    //       kill it on the receiver's next entry to the scene.
+    //
+    // HasDefeatBroadcast(netId) is set by ClaimDefeatBroadcast on the
+    // local broadcast path, so its presence is the (a)-distinguishing
+    // signal. Demote the noisy race-B case to DEBUG; the genuine
+    // not-yet-spawned case stays at WARN.
+    const bool alreadyHandledLocally =
+        EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(netId);
+    if (alreadyHandledLocally) {
+        SPDLOG_DEBUG("[EnemyDefeated] No actor found for netId={} — already killed locally (race-B echo); "
+                     "pendingKill buffered defensively",
+                     netId);
+    } else {
+        SPDLOG_WARN("[EnemyDefeated] No actor found for netId={} — actor not yet spawned in our scene; "
+                    "buffering as pendingKill",
+                    netId);
+    }
     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
 
     // Also record the kill in deadEnemiesByScene so the scene host's
