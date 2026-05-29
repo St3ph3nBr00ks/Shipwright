@@ -174,6 +174,31 @@ void Math_Vec3s_Copy(Vec3s* dest, Vec3s* src) {
 // duplicate must be re-synced. PLAYER_LIMB_MAX = 22 verified
 // z64player.h:196 (2026-05-29).
 // See Plans/carry_held_actor_sync.md §3.1.
+// Detach + kill the held actor on a DummyPlayer when the holder is no
+// longer eligible to be holding it (left our scene, went offline, or
+// the DummyPlayer itself is being destroyed). Used to avoid the log
+// 317 break-on-detach bug: pots in ObjTsubo_LiftedUp state check
+// Actor_HasNoParent every tick and transition to SetupThrown on
+// parent-cleared, which immediately breaks the pot on floor contact.
+// Killing the actor instead matches vanilla's "held pot vanishes when
+// scene unloads for the holder" semantic. The isKillingNetworkActor
+// flag suppresses the OnActorKill hook's ENEMY_DEFEATED broadcast —
+// this is a passive "actor went away", not a defeat event.
+static void AnchorDummyDetachAndKillHeldActor(Actor* dummyActor) {
+    Player* player = (Player*)dummyActor;
+    if (player->heldActor == nullptr) return;
+    Actor* held = player->heldActor;
+    if (held->parent == dummyActor) {
+        held->parent = NULL;
+    }
+    player->heldActor = NULL;
+    if (held->update != nullptr) {
+        Anchor::Instance->isKillingNetworkActor = true;
+        Actor_Kill(held);
+        Anchor::Instance->isKillingNetworkActor = false;
+    }
+}
+
 // Walk the syncable actor categories looking for one whose EnemyNetId
 // extension matches `netId`. Returns nullptr when no match. Used by the
 // held-actor sync attach / detach to locate the local copy of an actor
@@ -230,6 +255,12 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     AnchorClient& client = Anchor::Instance->clients[clientId];
 
     if (client.sceneNum != gPlayState->sceneNum || !client.online || !client.isSaveLoaded) {
+        // Phase 2 follow-up — if we were carrying an actor on behalf of
+        // this client and they just left our scene (or went offline),
+        // drop the held actor properly so its LiftedUp state machine
+        // doesn't trip Actor_HasNoParent → SetupThrown → break on next
+        // tick. See AnchorDummyDetachAndKillHeldActor comment.
+        AnchorDummyDetachAndKillHeldActor(actor);
         actor->world.pos.x = -9999.0f;
         actor->world.pos.y = -9999.0f;
         actor->world.pos.z = -9999.0f;
@@ -662,19 +693,15 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play) {
     // correctly.
     actor->id = ACTOR_PLAYER;
 
-    // Held-actor sync (§3.2 + Phase 2) — release any local actor still
-    // parented to this DummyPlayer so it doesn't carry a dangling
-    // `parent` pointer into the next frame's update. The actor itself
-    // stays alive; its next actionFunc tick will see Actor_HasNoParent
-    // and continue appropriately (e.g. transition to a Thrown state for
-    // pots/rocks). Phase 2 removed the sAppliedHeldActorNetId map so we
-    // read directly from player->heldActor (the source of truth).
-    {
-        Player* player = (Player*)actor;
-        if (player->heldActor != nullptr && player->heldActor->parent == actor) {
-            player->heldActor->parent = NULL;
-        }
-    }
+    // Held-actor sync (§3.2 + Phase 2 + log 317 follow-up) — Actor_Kill
+    // any local actor we were carrying for this client. Detaching alone
+    // would leave the pot in ObjTsubo_LiftedUp state, which checks
+    // Actor_HasNoParent every tick and transitions to SetupThrown on
+    // parent-cleared, immediately breaking on floor contact. Killing
+    // matches the vanilla "held pot vanishes" semantic for the case
+    // where the holder is no longer present. See
+    // AnchorDummyDetachAndKillHeldActor comment.
+    AnchorDummyDetachAndKillHeldActor(actor);
 
     // Step 8 — release the custom skeleton shared_ptr so its memory can be freed.
     // Guard: only clear if this actor is still the active DummyPlayer for the client.
