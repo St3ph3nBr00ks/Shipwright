@@ -108,7 +108,8 @@ void Menu::UpdateWindowBackendObjects() {
     }
 
     availableWindowBackends = Ship::Context::GetInstance()->GetWindow()->GetAvailableWindowBackends();
-    for (auto& backend : *availableWindowBackends) {
+    for (auto backendId : *availableWindowBackends) {
+        auto backend = static_cast<Fast::WindowBackend>(backendId);
         availableWindowBackendsMap[backend] = windowBackendsMap.at(backend);
     }
 }
