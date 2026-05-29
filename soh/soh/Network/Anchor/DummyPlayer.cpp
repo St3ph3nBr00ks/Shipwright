@@ -192,11 +192,7 @@ static void AnchorDummyDetachAndKillHeldActor(Actor* dummyActor) {
         held->parent = NULL;
     }
     player->heldActor = NULL;
-    if (held->update != nullptr) {
-        Anchor::Instance->isKillingNetworkActor = true;
-        Actor_Kill(held);
-        Anchor::Instance->isKillingNetworkActor = false;
-    }
+    Anchor::Instance->KillNetworkActorSilently(held);
 }
 
 // Walk the syncable actor categories looking for one whose EnemyNetId

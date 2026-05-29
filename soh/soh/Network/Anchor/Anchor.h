@@ -604,6 +604,18 @@ class Anchor : public Network {
     // Anchor::HandlePacket_EnemySpawn).
     bool isSpawningDirectorActor = false;
 
+    // Public wrapper around isKillingNetworkActor + Actor_Kill for
+    // external Flotilla modules that need to kill an actor without
+    // triggering the OnActorKill ENEMY_DEFEATED broadcast. The flag
+    // itself stays private (toggled internally by HandlePacket_EnemyDefeated
+    // and the OnActorSpawn pendingKill path); call sites outside
+    // Anchor:: member functions route through this helper.
+    //
+    // Current consumer: DummyPlayer's AnchorDummyDetachAndKillHeldActor
+    // (Plans/carry_held_actor_sync.md follow-up — passive "actor went
+    // away when holder left scene" semantic).
+    void KillNetworkActorSilently(Actor* actor);
+
     // Pillar A Phase 1 — global effective-host migration (pure-(a)).
     //
     // Cached effective host client id. Recomputed by RecomputeEffectiveHost()
