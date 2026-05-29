@@ -3,7 +3,9 @@
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/ItemEligibility.h"  // Phase 2 — eligibility bitmap
 #include "soh/Network/Anchor/Common/PacketSchemas.h"
+#include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include <nlohmann/json.hpp>
@@ -287,6 +289,37 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
 
         if (::SceneAuthority::IsEffectiveHost() && nowLoaded &&
             (justLoaded || sceneChanged || sceneSpawned)) {
+            // Phase 1 of pillar_c2_live_actor_snapshot.md — replay live
+            // dynamic spawns BEFORE the SceneDeaths replay below. The
+            // deathset is a superset of "currently destroyed"; in the
+            // mixed case (some alive, some dead) we want the deaths to
+            // arrive AFTER the spawns so the spawn-then-immediately-kill
+            // sequence converges to the correct final state.
+            const auto& liveSpawns =
+                EnemyStateSync::HostBookkeeping::Instance().LiveSpawnsForScene(newScene);
+            if (!liveSpawns.empty()) {
+                SPDLOG_INFO("[EnemySpawn] Replaying {} live spawns in scene {} for client {}",
+                            liveSpawns.size(), (int)newScene, clientId);
+                for (const auto& [spawnNetId, rec] : liveSpawns) {
+                    nlohmann::json spawnPayload;
+                    spawnPayload["type"]                 = ENEMY_STATE;
+                    spawnPayload["phase"]                = "Alive";
+                    spawnPayload["phaseChanged"]         = true;
+                    spawnPayload["sceneNum"]             = (int)newScene;
+                    spawnPayload["actorId"]              = (int)rec.actorId;
+                    spawnPayload["pos"]                  = rec.homePos;
+                    spawnPayload["rot"]                  = rec.homeRot;
+                    spawnPayload["params"]               = (int)rec.params;
+                    spawnPayload["netId"]                = spawnNetId;
+                    spawnPayload["directorDescriptorId"] = rec.directorDescriptorId;
+                    spawnPayload["directorVariantId"]    = rec.directorVariantId;
+                    spawnPayload["directorGroupId"]      = rec.directorGroupId;
+                    spawnPayload["targetClientId"]       = clientId;
+                    PacketTimeline::SetTimelineField(spawnPayload);
+                    SendJsonToRemote(spawnPayload);
+                }
+            }
+
             const auto& deaths = EnemyStateSync::HostBookkeeping::Instance().SceneDeaths(newScene);
             if (!deaths.empty()) {
                 SPDLOG_INFO("[EnemyDefeated] Replaying {} dead enemies in scene {} for client {}",
