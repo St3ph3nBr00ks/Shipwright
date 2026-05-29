@@ -10,6 +10,14 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "vt.h"
 
+// #193 Phase 4 v3 exclusion — Shot_Sun's Sun's Song MAGIC_LARGE
+// drop fires locally on every client that plays the song; the sync
+// pipeline must NOT replicate one client's drop to the other. See
+// `HookHandlers.cpp` Anchor_BeginItemDropLocalOnly comment for the
+// full rationale.
+extern void Anchor_BeginItemDropLocalOnly(void);
+extern void Anchor_EndItemDropLocalOnly(void);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY)
 
 void ShotSun_Init(Actor* thisx, PlayState* play);
@@ -176,7 +184,11 @@ void ShotSun_UpdateHyliaSun(ShotSun* this, PlayState* play) {
             spawnPos.y = -800.0f;
             spawnPos.z = 7261.0f;
 
+            // Anchor MP exclusion: each client plays Sun's Song
+            // independently and triggers its own local drop.
+            Anchor_BeginItemDropLocalOnly();
             collectible = Item_DropCollectible(play, &spawnPos, ITEM00_MAGIC_LARGE);
+            Anchor_EndItemDropLocalOnly();
             if (collectible != NULL) {
                 collectible->unk_15A = 6000;
                 collectible->actor.speedXZ = 0.0f;

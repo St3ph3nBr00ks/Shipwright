@@ -496,6 +496,36 @@ extern "C" void Anchor_SetPendingItemDropInvisibleDecorative(bool flag) {
     g_pendingItemDropInvisibleDecorative = flag;
 }
 
+// #193 Phase 4 v3 exclusion list — per-player drop sources that
+// must NOT round-trip through the sync pipeline. Each client
+// triggers these locally on their own player-driven event (playing
+// Sun's Song for Shot_Sun, the diving game for En_Ex_Ruppy, etc.);
+// broadcasting host's drop would replicate it on peer where peer is
+// ALSO independently triggering their own, producing duplicate
+// pickups, and the peer-local-death-drop suppressor would wrongly
+// kill peer's correct local drop on the assumption it would be
+// replaced by host's.
+//
+// The shim wraps the call site: Anchor_BeginItemDropLocalOnly()
+// sets a thread-local flag, the OnActorSpawn(EN_ITEM00) hook reads
+// it and returns early (no broadcast on host, no suppression on
+// peer), Anchor_EndItemDropLocalOnly() clears it. Pairs with
+// Item_DropCollectible* and Actor_Spawn(EN_ITEM00, ...).
+//
+// z_player.c:7287 modal-completion phantom and z_en_ex_ruppy.c:351
+// dive-game ruppies ALREADY route through the 0x8000 modal-phantom
+// filter (HookHandlers.cpp:1804). Shot_Sun's drop at z_shot_sun.c:
+// 179 does NOT — it's a regular Item_DropCollectible(MAGIC_LARGE)
+// at a fixed scripted position. This shim is the remaining
+// exclusion mechanism.
+static bool g_isLocalOnlyItemDrop = false;
+extern "C" void Anchor_BeginItemDropLocalOnly(void) {
+    g_isLocalOnlyItemDrop = true;
+}
+extern "C" void Anchor_EndItemDropLocalOnly(void) {
+    g_isLocalOnlyItemDrop = false;
+}
+
 // Deferred-broadcast queue (nut trajectory desync fix, log 281).
 //
 // `Item_DropCollectible(play, &pos, params)` sets the spawned EN_ITEM00's
@@ -1884,6 +1914,20 @@ void Anchor::RegisterHooks() {
         // pass, also added in #193 fix 2). Same Fix-8 trick used for
         // static enemy suppression.
         if (gPlayState->numSetupActors > 0) {
+            return;
+        }
+
+        // #193 Phase 4 v3 exclusion gate — per-player drop sources
+        // wrapped with Anchor_BeginItemDropLocalOnly skip both the
+        // broadcast pipeline (host doesn't replicate) AND the
+        // peer-local death-drop suppressor (peer keeps its own
+        // local drop because peer triggered the same event
+        // independently). Used by Shot_Sun's scripted Sun's Song
+        // drop; the other two excluded sources (player modal-
+        // completion phantoms in z_player.c, En_Ex_Ruppy dive
+        // game) already filter via the 0x8000 ogParams branch
+        // above.
+        if (g_isLocalOnlyItemDrop) {
             return;
         }
 
