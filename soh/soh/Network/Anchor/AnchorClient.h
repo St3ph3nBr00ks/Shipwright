@@ -64,6 +64,19 @@ typedef struct AnchorClient {
     u8 movementFlags;
     Vec3s prevTransl;
     Vec3s upperLimbRot;
+    // Upper-body anim joint table — drives carry / hookshot / bow draw
+    // poses. The vanilla upper→main merge runs only inside Player_Update
+    // (z_player.c:3634 AnimationContext_SetCopyTrue), which never fires
+    // for DummyPlayers — DummyPlayer_Update replicates the merge manually
+    // using a duplicate of sUpperBodyLimbCopyMap.
+    // hasUpperJointTable gates the observer-side merge: when false (peer
+    // didn't send the field — pre-update peer or missing payload), the
+    // merge is skipped so the main joint table is rendered as-is. An
+    // empty default would otherwise overlay zero-rotations on upper-body
+    // limbs and break the pose.
+    // See Plans/carry_held_actor_sync.md §3.1.
+    Vec3s upperJointTable[24];
+    bool hasUpperJointTable = false;
     s8 currentBoots;
     s8 currentShield;
     s8 currentTunic;

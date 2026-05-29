@@ -63,6 +63,18 @@ void Anchor::SendPacket_PlayerUpdate() {
     payload["prevTransl"] = player->skelAnime.prevTransl;
     payload["movementFlags"] = player->skelAnime.movementFlags;
     payload["jointTable"] = jointArray;
+    // Upper-body anim joint table (carry / hookshot / bow draw poses).
+    // Sent alongside the main jointTable; observer merges upper-body
+    // limbs back into the main skeleton per sUpperBodyLimbCopyMap.
+    // See Plans/carry_held_actor_sync.md §3.1.
+    std::vector<int> upperJointArray;
+    for (size_t i = 0; i < 24; i++) {
+        Vec3s joint = player->upperSkelAnime.jointTable[i];
+        upperJointArray.push_back(joint.x);
+        upperJointArray.push_back(joint.y);
+        upperJointArray.push_back(joint.z);
+    }
+    payload["upperJointTable"] = upperJointArray;
     payload["upperLimbRot"] = player->upperLimbRot;
     payload["currentBoots"] = player->currentBoots;
     payload["currentShield"] = player->currentShield;
@@ -113,6 +125,20 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
             client.jointTable[i].x = jointArray[i * 3];
             client.jointTable[i].y = jointArray[i * 3 + 1];
             client.jointTable[i].z = jointArray[i * 3 + 2];
+        }
+        // Upper-body anim joint table — only apply when the peer actually
+        // sent the field. An empty default would zero out upper-body limb
+        // rotations on the observer's merge and break the pose for
+        // pre-upgrade peers; skip the merge in that case instead.
+        if (payload.contains("upperJointTable")) {
+            std::vector<int> upperJointArray = payload["upperJointTable"].get<std::vector<int>>();
+            upperJointArray.resize(24 * 3);
+            for (int i = 0; i < 24; i++) {
+                client.upperJointTable[i].x = upperJointArray[i * 3];
+                client.upperJointTable[i].y = upperJointArray[i * 3 + 1];
+                client.upperJointTable[i].z = upperJointArray[i * 3 + 2];
+            }
+            client.hasUpperJointTable = true;
         }
         client.movementFlags = payload.value("movementFlags", (u8)0);
         client.prevTransl = payload.value("prevTransl", Vec3s{ 0 });

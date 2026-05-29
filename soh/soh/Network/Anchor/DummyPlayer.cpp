@@ -160,6 +160,44 @@ void Math_Vec3s_Copy(Vec3s* dest, Vec3s* src) {
     dest->z = src->z;
 }
 
+// Verbatim duplicate of sUpperBodyLimbCopyMap from z_player.c:417-440.
+// The vanilla AnimationContext_SetCopyTrue merge at z_player.c:3634 runs
+// only inside Player_Update, which never fires for DummyPlayer actors
+// (their update func is reassigned to DummyPlayer_Update at
+// HookHandlers.cpp:1073). DummyPlayer_Update applies the merge manually
+// using this table so synced carry / hookshot / bow-draw poses render
+// on the upper body of remote players.
+//
+// If z_player.c diverges from this layout (PLAYER_LIMB_MAX changes, limb
+// enum reorders, or sUpperBodyLimbCopyMap gains new "true" entries) this
+// duplicate must be re-synced. PLAYER_LIMB_MAX = 22 verified
+// z64player.h:196 (2026-05-29).
+// See Plans/carry_held_actor_sync.md §3.1.
+static constexpr u8 kAnchorUpperBodyLimbCopyMap[22] = {
+    0, // PLAYER_LIMB_NONE
+    0, // PLAYER_LIMB_ROOT
+    0, // PLAYER_LIMB_WAIST
+    0, // PLAYER_LIMB_LOWER
+    0, // PLAYER_LIMB_R_THIGH
+    0, // PLAYER_LIMB_R_SHIN
+    0, // PLAYER_LIMB_R_FOOT
+    0, // PLAYER_LIMB_L_THIGH
+    0, // PLAYER_LIMB_L_SHIN
+    0, // PLAYER_LIMB_L_FOOT
+    1, // PLAYER_LIMB_UPPER
+    1, // PLAYER_LIMB_HEAD
+    1, // PLAYER_LIMB_HAT
+    1, // PLAYER_LIMB_COLLAR
+    1, // PLAYER_LIMB_L_SHOULDER
+    1, // PLAYER_LIMB_L_FOREARM
+    1, // PLAYER_LIMB_L_HAND
+    1, // PLAYER_LIMB_R_SHOULDER
+    1, // PLAYER_LIMB_R_FOREARM
+    1, // PLAYER_LIMB_R_HAND
+    1, // PLAYER_LIMB_SHEATH
+    1, // PLAYER_LIMB_TORSO
+};
+
 // Update the actor with new data from the client
 void DummyPlayer_Update(Actor* actor, PlayState* play) {
     Player* player = (Player*)actor;
@@ -188,6 +226,22 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     player->skelAnime.jointTable = client.jointTable;
     player->skelAnime.movementFlags = client.movementFlags;
     Math_Vec3s_Copy(&player->skelAnime.prevTransl, &client.prevTransl);
+
+    // Upper-body anim merge — replicate z_player.c:3631-3635
+    // (AnimationContext_SetCopyTrue with sUpperBodyLimbCopyMap) manually
+    // because Player_UpdateUpperBody never runs on DummyPlayer. Alias the
+    // upperSkelAnime joint table first (same pointer-rewrite pattern as
+    // the main jointTable above), then overlay the upper-body limbs into
+    // the main jointTable per the copy map.
+    // See Plans/carry_held_actor_sync.md §3.1.
+    if (client.hasUpperJointTable) {
+        player->upperSkelAnime.jointTable = client.upperJointTable;
+        for (s32 i = 0; i < 22; i++) {
+            if (kAnchorUpperBodyLimbCopyMap[i]) {
+                player->skelAnime.jointTable[i] = player->upperSkelAnime.jointTable[i];
+            }
+        }
+    }
     player->currentBoots = client.currentBoots;
     player->currentShield = client.currentShield;
     uint8_t prevTunic = player->currentTunic; // capture before overwrite for change detection
