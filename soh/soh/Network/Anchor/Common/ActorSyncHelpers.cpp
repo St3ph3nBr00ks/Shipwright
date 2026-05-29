@@ -220,6 +220,14 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_TUBO_TRAP:       return true;  // Flying pot enemy (Forest Temple).
         case ACTOR_EN_WONDER_ITEM:     return true;  // Invisible collectible spot (Hyrule Field secrets).
 
+        // Carry / held-actor sync (Plans/carry_held_actor_sync.md Step 0).
+        // Pickup-and-throw actors that the upcoming carry-sync work needs to
+        // look up by netId when attaching to a remote DummyPlayer. Side
+        // benefit: admission alone gives peer-visible destroy / respawn sync
+        // for small rocks via the existing ENEMY_STATE pipeline.
+        case ACTOR_EN_ISHI:            return true;  // Small/large throwable rocks (ACTOR_FLAG_THROW_ONLY).
+        case ACTOR_OBJ_MURE2:          return true;  // Rock/bush cluster spawner (spawns En_Ishi children).
+
         default:                return false;
     }
 }
