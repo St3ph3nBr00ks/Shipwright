@@ -6,6 +6,7 @@
 #include "Enhancements/enhancementTypes.h"
 #include "Enhancements/randomizer/dungeon.h"
 #include <libultraship/libultraship.h>
+#include <stb_image.h>  // libultraship#1097 — no longer pulled in transitively
 #include <soh/GameVersions.h>
 #include "resource/type/SohResourceType.h"
 #include "resource/type/Array.h"
