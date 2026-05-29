@@ -83,6 +83,16 @@ typedef struct AnchorClient {
     // See Plans/carry_held_actor_sync.md §3.1.
     Vec3s upperJointTable[24];
     bool upperMergeActiveThisFrame = false;
+
+    // Held-actor sync (Plans/carry_held_actor_sync.md §3.2). netId of the
+    // actor this client is currently carrying overhead, or 0 if none.
+    // Observer's DummyPlayer_Update uses this to attach its local copy of
+    // the actor as the DummyPlayer's heldActor so Player_PostLimbDrawGameplay's
+    // writeback (z_player_lib.c:1944-1945) drags the rock to the DummyPlayer's
+    // left-hand position each draw frame. On release transitions, the owner
+    // additionally sends the throw velocity / yaw so the observer's local
+    // rock starts its arc on its own physics.
+    uint32_t heldActorNetId = 0;
     s8 currentBoots;
     s8 currentShield;
     s8 currentTunic;

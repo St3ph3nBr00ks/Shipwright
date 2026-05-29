@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -8,6 +9,30 @@ extern "C" {
 #include "variables.h"
 extern PlayState* gPlayState;
 }
+
+// Walk the syncable actor categories looking for one whose EnemyNetId
+// extension matches `netId`. Returns nullptr when no match. Used by the
+// held-actor sync release-edge path to read throw velocity from a rock
+// that was just detached from the local player.
+static Actor* AnchorFindActorByNetId(uint32_t netId) {
+    if (netId == 0 || gPlayState == nullptr) return nullptr;
+    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
+        Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
+        while (a != nullptr) {
+            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+            if (ext != nullptr && ext->netId == netId) return a;
+            a = a->next;
+        }
+    }
+    return nullptr;
+}
+
+// File-static tracker for the local player's heldActor netId at the last
+// SendPacket_PlayerUpdate. Used to detect release-edge transitions.
+// Persists across reconnects — false-positive release events on stale
+// netIds resolve to "actor not found" in AnchorFindActorByNetId and are
+// silently dropped on the wire.
+static uint32_t sLastLocalHeldActorNetId = 0;
 
 /**
  * PLAYER_UPDATE
@@ -81,6 +106,35 @@ void Anchor::SendPacket_PlayerUpdate() {
         }
         payload["upperJointTable"] = upperJointArray;
     }
+
+    // Held-actor sync (§3.2). Broadcast the netId of the actor we're
+    // currently carrying so the observer's DummyPlayer attaches its local
+    // copy and Player_PostLimbDrawGameplay drags it to the limb position.
+    uint32_t currentHeldActorNetId = 0;
+    if (player->heldActor != nullptr) {
+        const EnemyNetId* ext =
+            ObjectExtension::GetInstance().Get<EnemyNetId>(player->heldActor);
+        if (ext != nullptr) currentHeldActorNetId = ext->netId;
+    }
+    payload["heldActorNetId"] = currentHeldActorNetId;
+
+    // Release-edge detection. When the held actor changes from non-zero
+    // to zero (or to a different netId), the previous frame's vanilla
+    // throw code (func_8084409C at z_player.c:9650 etc.) has already set
+    // speedXZ / velocity.y / world.rot.y on the released actor before
+    // Player_DetachHeldActor cleared the heldActor pointer. Read those
+    // off the actor (still alive in its new actionFunc=Thrown state) and
+    // ship them so the observer's local copy starts the same trajectory.
+    if (sLastLocalHeldActorNetId != 0 && currentHeldActorNetId != sLastLocalHeldActorNetId) {
+        Actor* released = AnchorFindActorByNetId(sLastLocalHeldActorNetId);
+        if (released != nullptr) {
+            payload["releasedActorNetId"] = sLastLocalHeldActorNetId;
+            payload["releaseSpeedXZ"]     = released->speedXZ;
+            payload["releaseVelocityY"]   = released->velocity.y;
+            payload["releaseYaw"]         = (int)released->world.rot.y;
+        }
+    }
+    sLastLocalHeldActorNetId = currentHeldActorNetId;
     payload["upperLimbRot"] = player->upperLimbRot;
     payload["currentBoots"] = player->currentBoots;
     payload["currentShield"] = player->currentShield;
@@ -168,5 +222,25 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
         // Pre-update peers default to CS_STATE_IDLE (0) — treated as
         // out-of-cutscene for the multi-player dialogue detection.
         client.csCtxState = (s8)payload.value("csCtxState", 0);
+
+        // Held-actor sync (§3.2). Update the netId; DummyPlayer_Update
+        // performs the actual attach / detach edge-trigger using this
+        // value (it has the Player* + can write player->heldActor).
+        client.heldActorNetId = payload.value("heldActorNetId", (uint32_t)0);
+
+        // Release-edge throw velocity. When the owner just released a
+        // held actor, the payload carries the speedXZ / velocity.y / yaw
+        // the vanilla throw code wrote to it. Apply to our local copy so
+        // its actionFunc (already transitioning to a Thrown state) reads
+        // the matching trajectory inputs and produces a symmetric arc.
+        if (payload.contains("releasedActorNetId")) {
+            uint32_t releasedNetId = payload["releasedActorNetId"].get<uint32_t>();
+            Actor* released = AnchorFindActorByNetId(releasedNetId);
+            if (released != nullptr) {
+                released->speedXZ    = payload["releaseSpeedXZ"].get<f32>();
+                released->velocity.y = payload["releaseVelocityY"].get<f32>();
+                released->world.rot.y = (s16)payload["releaseYaw"].get<int>();
+            }
+        }
     }
 }

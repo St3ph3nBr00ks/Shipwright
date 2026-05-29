@@ -1,4 +1,5 @@
 #include "Anchor.h"
+#include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/SceneMultiplayerConfig.h"
 #include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 #include "soh/Enhancements/nametag.h"
@@ -173,6 +174,30 @@ void Math_Vec3s_Copy(Vec3s* dest, Vec3s* src) {
 // duplicate must be re-synced. PLAYER_LIMB_MAX = 22 verified
 // z64player.h:196 (2026-05-29).
 // See Plans/carry_held_actor_sync.md §3.1.
+// Walk the syncable actor categories looking for one whose EnemyNetId
+// extension matches `netId`. Returns nullptr when no match. Used by the
+// held-actor sync attach / detach to locate the local copy of an actor
+// the remote player is carrying.
+static Actor* AnchorDummyFindActorByNetId(uint32_t netId) {
+    if (netId == 0 || gPlayState == nullptr) return nullptr;
+    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
+        Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
+        while (a != nullptr) {
+            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+            if (ext != nullptr && ext->netId == netId) return a;
+            a = a->next;
+        }
+    }
+    return nullptr;
+}
+
+// Per-DummyPlayer cache of the heldActorNetId we last applied (clientId
+// → netId). Edge-trigger compares client.heldActorNetId against this to
+// decide whether to detach / re-attach. Persists across scene loads;
+// scene change makes both the lookup and the cached value stale, but
+// the FindActorByNetId failure cases handle that defensively.
+static std::unordered_map<uint32_t, uint32_t> sAppliedHeldActorNetId;
+
 static constexpr u8 kAnchorUpperBodyLimbCopyMap[22] = {
     0, // PLAYER_LIMB_NONE
     0, // PLAYER_LIMB_ROOT
@@ -246,6 +271,37 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
             if (kAnchorUpperBodyLimbCopyMap[i]) {
                 player->skelAnime.jointTable[i] = player->upperSkelAnime.jointTable[i];
             }
+        }
+    }
+
+    // Held-actor attach / detach edge-trigger (§3.2).
+    // When the netId we're holding for this client changes, locate the
+    // local copy and set DummyPlayer->heldActor + actor->parent so that
+    // Player_PostLimbDrawGameplay's writeback (z_player_lib.c:1934-1947)
+    // drags the rock to the DummyPlayer's left-hand position each draw.
+    // This is the mechanism that gets P2's held rock to track P2's hand
+    // on host's view; pre-§3.2 the rock just sat at its spawn position
+    // on host because nothing reparented it. See OQ 6 resolution.
+    {
+        uint32_t lastApplied = sAppliedHeldActorNetId[clientId];
+        if (client.heldActorNetId != lastApplied) {
+            // Detach previous (if it's still pointing at us).
+            if (lastApplied != 0) {
+                Actor* prev = AnchorDummyFindActorByNetId(lastApplied);
+                if (prev != nullptr && prev->parent == &actor->actor) {
+                    prev->parent = NULL;
+                }
+            }
+            player->heldActor = NULL;
+            // Attach new.
+            if (client.heldActorNetId != 0) {
+                Actor* held = AnchorDummyFindActorByNetId(client.heldActorNetId);
+                if (held != nullptr) {
+                    player->heldActor = held;
+                    held->parent = &actor->actor;
+                }
+            }
+            sAppliedHeldActorNetId[clientId] = client.heldActorNetId;
         }
     }
     player->currentBoots = client.currentBoots;
@@ -595,6 +651,23 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play) {
     // asserts. Set the id back to ACTOR_PLAYER so that `numLoaded` will be decremented
     // correctly.
     actor->id = ACTOR_PLAYER;
+
+    // Held-actor sync (§3.2) — release any local actor still parented to
+    // this DummyPlayer so it doesn't carry a dangling `parent` pointer
+    // into the next frame's update. The actor itself stays alive; its
+    // next actionFunc tick will see Actor_HasNoParent and continue
+    // appropriately (e.g. transition to a Thrown state for pots/rocks).
+    {
+        uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(actor);
+        auto it = sAppliedHeldActorNetId.find(clientId);
+        if (it != sAppliedHeldActorNetId.end() && it->second != 0) {
+            Actor* prev = AnchorDummyFindActorByNetId(it->second);
+            if (prev != nullptr && prev->parent == actor) {
+                prev->parent = NULL;
+            }
+            it->second = 0;
+        }
+    }
 
     // Step 8 — release the custom skeleton shared_ptr so its memory can be freed.
     // Guard: only clear if this actor is still the active DummyPlayer for the client.
