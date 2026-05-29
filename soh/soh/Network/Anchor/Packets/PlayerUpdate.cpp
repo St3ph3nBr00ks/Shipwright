@@ -1,5 +1,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
+#include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -33,6 +35,16 @@ static Actor* AnchorFindActorByNetId(uint32_t netId) {
 // netIds resolve to "actor not found" in AnchorFindActorByNetId and are
 // silently dropped on the wire.
 static uint32_t sLastLocalHeldActorNetId = 0;
+// File-static tracker for the local player's last-broadcast sceneNum.
+// Combined with sLastLocalHeldActorNetId to detect scene-exit-while-
+// carrying: when the holder transitions scenes, the held actor is
+// destroyed by scene unload (no AnchorFindActorByNetId hit on
+// the new scene). Without intervention, the static placement re-spawns
+// on scene re-entry — visible "the pot I took is back" bug (log 318).
+// We record the netId in HostBookkeeping::SceneDeaths so the existing
+// IsSceneDeath suppression at HookHandlers.cpp OnActorSpawn kills the
+// re-spawn before any client sees it. Sentinel -1 marks pre-first-send.
+static int16_t sLastLocalSceneNum = -1;
 
 /**
  * PLAYER_UPDATE
@@ -118,13 +130,17 @@ void Anchor::SendPacket_PlayerUpdate() {
     }
     payload["heldActorNetId"] = currentHeldActorNetId;
 
-    // Release-edge detection. When the held actor changes from non-zero
-    // to zero (or to a different netId), the previous frame's vanilla
-    // throw code (func_8084409C at z_player.c:9650 etc.) has already set
-    // speedXZ / velocity.y / world.rot.y on the released actor before
-    // Player_DetachHeldActor cleared the heldActor pointer. Read those
-    // off the actor (still alive in its new actionFunc=Thrown state) and
-    // ship them so the observer's local copy starts the same trajectory.
+    // Release-edge detection. Distinguishes:
+    //   - Real throw: actor still alive in current scene; ship throw
+    //     velocity so observer's local copy starts the same trajectory.
+    //   - Scene-exit-with-carry: actor was destroyed by scene unload
+    //     (no AnchorFindActorByNetId hit). Mark it as a SceneDeath for
+    //     the prior scene so re-entry doesn't respawn the static
+    //     placement (log 318 follow-up).
+    const int16_t currentScene = (int16_t)gPlayState->sceneNum;
+    const bool sceneJustChanged =
+        (sLastLocalSceneNum != -1) && (sLastLocalSceneNum != currentScene);
+
     if (sLastLocalHeldActorNetId != 0 && currentHeldActorNetId != sLastLocalHeldActorNetId) {
         Actor* released = AnchorFindActorByNetId(sLastLocalHeldActorNetId);
         if (released != nullptr) {
@@ -132,9 +148,29 @@ void Anchor::SendPacket_PlayerUpdate() {
             payload["releaseSpeedXZ"]     = released->speedXZ;
             payload["releaseVelocityY"]   = released->velocity.y;
             payload["releaseYaw"]         = (int)released->world.rot.y;
+        } else if (sceneJustChanged) {
+            // Holder left the scene while carrying. Record the netId on
+            // host so OnActorSpawn's existing IsSceneDeath check
+            // suppresses the static-placement respawn. Non-host
+            // piggybacks the notification on this packet for host to
+            // record on receive.
+            payload["carriedOutOfSceneNetId"] = sLastLocalHeldActorNetId;
+            payload["carriedOutOfSceneNum"]   = (int)sLastLocalSceneNum;
+            if (::SceneAuthority::IsEffectiveHost()) {
+                EnemyStateSync::HostBookkeeping::Instance()
+                    .RecordSceneDeath(sLastLocalSceneNum, sLastLocalHeldActorNetId);
+                SPDLOG_INFO("[CarrySync] Scene-exit-with-carry on host: "
+                            "netId={} priorScene={} — recorded SceneDeath",
+                            sLastLocalHeldActorNetId, (int)sLastLocalSceneNum);
+            } else {
+                SPDLOG_INFO("[CarrySync] Scene-exit-with-carry on non-host: "
+                            "netId={} priorScene={} — notifying host",
+                            sLastLocalHeldActorNetId, (int)sLastLocalSceneNum);
+            }
         }
     }
     sLastLocalHeldActorNetId = currentHeldActorNetId;
+    sLastLocalSceneNum       = currentScene;
     payload["upperLimbRot"] = player->upperLimbRot;
     payload["currentBoots"] = player->currentBoots;
     payload["currentShield"] = player->currentShield;
@@ -241,6 +277,22 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
                 released->velocity.y = payload["releaseVelocityY"].get<f32>();
                 released->world.rot.y = (s16)payload["releaseYaw"].get<int>();
             }
+        }
+
+        // Scene-exit-with-carry notification (log 318 follow-up). Sender
+        // crossed scenes while holding a netId; their scene unload
+        // destroyed the actor. Host records the netId in SceneDeaths so
+        // the subsequent OnActorSpawn for the re-loaded static placement
+        // is suppressed before the actor is visible to any client.
+        if (payload.contains("carriedOutOfSceneNetId") &&
+            ::SceneAuthority::IsEffectiveHost()) {
+            int16_t  priorScene = (int16_t)payload["carriedOutOfSceneNum"].get<int>();
+            uint32_t carriedNetId = payload["carriedOutOfSceneNetId"].get<uint32_t>();
+            EnemyStateSync::HostBookkeeping::Instance()
+                .RecordSceneDeath(priorScene, carriedNetId);
+            SPDLOG_INFO("[CarrySync] Recorded scene-exit-with-carry from client={}: "
+                        "netId={} priorScene={}",
+                        clientId, carriedNetId, (int)priorScene);
         }
     }
 }
