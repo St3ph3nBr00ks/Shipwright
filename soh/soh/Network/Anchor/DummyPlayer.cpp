@@ -288,7 +288,7 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
             // Detach previous (if it's still pointing at us).
             if (lastApplied != 0) {
                 Actor* prev = AnchorDummyFindActorByNetId(lastApplied);
-                if (prev != nullptr && prev->parent == &actor->actor) {
+                if (prev != nullptr && prev->parent == actor) {
                     prev->parent = NULL;
                 }
             }
@@ -298,7 +298,7 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 Actor* held = AnchorDummyFindActorByNetId(client.heldActorNetId);
                 if (held != nullptr) {
                     player->heldActor = held;
-                    held->parent = &actor->actor;
+                    held->parent = actor;
                 }
             }
             sAppliedHeldActorNetId[clientId] = client.heldActorNetId;
