@@ -766,6 +766,19 @@ void Anchor_EndNetworkItemDropSpawn(void) {
     }
 }
 
+// #231 / heart-vs-rupee desync — exposed for z_en_item00.c so the
+// vanilla func_8001F404 substitution chain (heart→rupee at full HP,
+// adult-stick→rupee, child-seeds→arrows, no-bow→cancel, etc.) can
+// be skipped on receivers. Each substitution branches on the LOCAL
+// client's gSaveContext (health, inventory, age) and produces a
+// type-desync between host and peer when their game state differs.
+// The host's broadcast carries the authoritative type — receivers
+// must spawn that type verbatim, even if vanilla code would have
+// substituted it locally.
+extern "C" bool Anchor_IsReceivingNetworkItemDrop(void) {
+    return g_isSpawningNetworkItemDrop;
+}
+
 // Env-actor destruction broadcast helper. Called from each env
 // actor's cut/destroy state transition (e.g. EnKusa's cut-stub
 // transition for ENKUSA_TYPE_1, or any env actor's Destroy

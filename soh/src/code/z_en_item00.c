@@ -26,6 +26,14 @@ void func_8001E5C8(EnItem00* this, PlayState* play);
 // stamp the right player on the resulting EnItem00 actor.
 extern void Anchor_BeginItemDrop(Actor* fromActor);
 extern void Anchor_EndItemDrop(void);
+// True when Item_DropCollectible is being called from
+// HandlePacket_ItemDropSync to spawn a host-broadcast drop locally.
+// Used to bypass func_8001F404's local-state-dependent substitutions
+// (heart→rupee at full HP, adult-stick→rupee, age-based arrow/seed
+// swaps, inventory-based cancellations) so the receiver spawns the
+// host-authoritative type verbatim. See #231 follow-up + Anchor_
+// IsReceivingNetworkItemDrop's definition in HookHandlers.cpp.
+extern bool Anchor_IsReceivingNetworkItemDrop(void);
 
 void EnItem00_DrawRupee(EnItem00* this, PlayState* play);
 void EnItem00_DrawCollectible(EnItem00* this, PlayState* play);
@@ -1611,7 +1619,12 @@ EnItem00* Item_DropCollectible(PlayState* play, Vec3f* spawnPos, s16 params) {
         EffectSsDeadSound_SpawnStationary(play, spawnPos, NA_SE_EV_BUTTERFRY_TO_FAIRY, true, DEADSOUND_REPEAT_MODE_OFF,
                                           40);
     } else {
-        if (!param8000) {
+        // #231 follow-up — skip func_8001F404's local-state substitutions
+        // when this spawn is the receive side of an ITEM_DROP_SYNC. The
+        // host's broadcast already carries the authoritative type; running
+        // the substitution again here desyncs visuals + pickup behaviour
+        // (e.g. host's HEART drop becomes peer's RUPEE_GREEN at full HP).
+        if (!param8000 && !Anchor_IsReceivingNetworkItemDrop()) {
             params = func_8001F404(params & 0x00FF);
         }
 
@@ -1663,7 +1676,10 @@ EnItem00* Item_DropCollectible2(PlayState* play, Vec3f* spawnPos, s16 params) {
         EffectSsDeadSound_SpawnStationary(play, spawnPos, NA_SE_EV_BUTTERFRY_TO_FAIRY, true, DEADSOUND_REPEAT_MODE_OFF,
                                           40);
     } else {
-        params = func_8001F404(params & 0x00FF);
+        // #231 follow-up — same desync-guard as Item_DropCollectible above.
+        if (!Anchor_IsReceivingNetworkItemDrop()) {
+            params = func_8001F404(params & 0x00FF);
+        }
         if (params != -1) {
             spawnedActor = (EnItem00*)Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, spawnPos->x, spawnPos->y,
                                                   spawnPos->z, 0, 0, 0, params | param8000 | param3F00);
@@ -1787,7 +1803,8 @@ void Item_DropCollectibleRandom(PlayState* play, Actor* fromActor, Vec3f* spawnP
     if (dropId != 0xFF && (!CVarGetInteger(CVAR_ENHANCEMENT("NoHeartDrops"), 0) || dropId != ITEM00_HEART)) {
         dropQuantity = sDropQuantities[params + dropTableIndex];
         while (dropQuantity > 0) {
-            if (!param8000) {
+            // #231 follow-up — same desync-guard as Item_DropCollectible above.
+            if (!param8000 && !Anchor_IsReceivingNetworkItemDrop()) {
                 dropId = func_8001F404(dropId);
                 if (dropId != 0xFF) {
                     spawnedActor = (EnItem00*)Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, spawnPos->x,
