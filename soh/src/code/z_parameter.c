@@ -1883,6 +1883,32 @@ u8 Item_Give(PlayState* play, u8 item) {
     }
 
     lusprintf(__FILE__, __LINE__, 2, "Item Give - item: %#x", item);
+    // DIAG #231 Bug B — Item Give fires on peer side without going through
+    // VB_GIVE_ITEM_FROM_ITEM_00 (log 327 showed Item Give on P2 with no
+    // preceding `[ItemDrop.diag] VB hook fired` log). Caller is unknown.
+    // Log additional context here to identify whether the trigger is a
+    // vanilla EN_ITEM00 in pickup state (would show in en_item00_pickup_count)
+    // or a non-EN_ITEM00 path (zero pickup_count + Item_Give fired anyway →
+    // GiveItem packet, randomizer hook, timesaver hook, or another non-VB
+    // call site).
+    if (gPlayState != NULL) {
+        int en_item00_total = 0;
+        int en_item00_pickup = 0;
+        Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
+        while (a != NULL) {
+            if (a->id == ACTOR_EN_ITEM00) {
+                en_item00_total++;
+                if (a->parent != NULL) {
+                    en_item00_pickup++;
+                }
+            }
+            a = a->next;
+        }
+        LUSLOG_INFO("[ItemGive.diag] item=0x%x health=%d/%d en_item00_total=%d in_pickup=%d",
+                    (int)item,
+                    (int)gSaveContext.health, (int)gSaveContext.healthCapacity,
+                    en_item00_total, en_item00_pickup);
+    }
     static s16 sAmmoRefillCounts[] = { 5, 10, 20, 30, 5, 10, 30, 0, 5, 20, 1, 5, 20, 50, 200, 10 };
     s16 i;
     s16 slot;
