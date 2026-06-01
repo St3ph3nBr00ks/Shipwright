@@ -185,16 +185,10 @@ static int         g_pendingItemDropDepth          = 0;
 static bool     g_isSpawningNetworkItemDrop     = false;
 static uint32_t g_pendingNetworkItemDropNetId   = 0;
 
-// Host-side gate: set true while HandlePacket_EnvActorDrop is calling
-// Item_DropCollectible* on the host to fulfil a peer's grass-cut. The
-// vanilla func_8001F404 substitution chain in z_en_item00.c (heart→
-// rupee at full HP, etc.) keys on the LOCAL gSaveContext, so on the
-// host this substitutes against host's state instead of the cutter's.
-// Suppressing substitution here makes the host's broadcast carry the
-// peer-intended drop type verbatim. Distinct from
-// g_isSpawningNetworkItemDrop because on this path we DO want the
-// resulting OnActorSpawn(EN_ITEM00) to broadcast ITEM_DROP_SYNC.
-static bool     g_isHostingPeerEnvActorDrop     = false;
+// g_isHostingPeerEnvActorDrop moved to Bridge/EnvActorBridge.cpp on
+// 2026-06-01 per refactor A.8. Read via Anchor_IsHostingPeerEnvActorDrop()
+// accessor (declared below for IsReceivingNetworkItemDrop's OR).
+extern "C" bool Anchor_IsHostingPeerEnvActorDrop(void);
 
 // Thread-local flag set by Anchor_SpawnSyncedStickDrop to tag the
 // next OnActorSpawn(EN_ITEM00) as a "decorative invisible companion"
@@ -377,116 +371,9 @@ extern "C" void Anchor_BeginItemDropForKiller(uint32_t killerClientId) {
 // same shape as the offline branch above (single client, single drop,
 // no broadcast). Strictly better than silent loss.
 //
-// Policy 3 (cutter's vanilla wins) — peer pre-substitutes the dropId
-// against PEER'S gSaveContext via func_8001F404 BEFORE sending. Host's
-// HandlePacket_EnvActorDrop brackets the resulting Item_DropCollectible
-// with Anchor_BeginHostingPeerEnvActorDrop so substitution is bypassed
-// on the host side. Net effect: the cutter's local single-player
-// vanilla outcome (heart-vs-rupee, adult-stick→rupee, no-bow→cancel,
-// etc.) is broadcast verbatim to everyone.
-extern "C" s16 func_8001F404(s16 dropId);
-extern "C" EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
-                                                    Vec3f* pos, s16 params) {
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) {
-        return Item_DropCollectible(play, pos, params);
-    }
-    if (::SceneAuthority::IsMyCurrentRoomHost()) {
-        return Item_DropCollectible(play, pos, params);
-    }
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(envActor);
-    if (ext == nullptr || ext->netId == 0) {
-        return Item_DropCollectible(play, pos, params);
-    }
-    // Race-D peer-side scene check.
-    uint32_t hostId = ::SceneAuthority::GetRoomHostClientId(
-        (int16_t)gPlayState->sceneNum,
-        (int8_t)gPlayState->roomCtx.curRoom.num,
-        (uint8_t)(gSaveContext.linkAge & 0x1));
-    auto hostIt = Anchor::Instance->clients.find(hostId);
-    if (hostIt == Anchor::Instance->clients.end() ||
-        hostIt->second.sceneNum != (s16)gPlayState->sceneNum) {
-        return Item_DropCollectible(play, pos, params);
-    }
-    // Policy 3: pre-substitute on peer side against peer's state.
-    // Mirrors Item_DropCollectible's own pre-spawn substitution path
-    // (z_en_item00.c:1622-1631). The 0x8000 param-bit (also called
-    // param8000 in z_en_item00.c) means "skip substitution"; preserve
-    // that semantic by forwarding the raw params unchanged.
-    s16 paramBody = params & 0x00FF;
-    s16 paramFlags = params & ~0x00FF;
-    if (!(params & 0x8000)) {
-        s16 resolved = func_8001F404(paramBody);
-        if (resolved == -1 || resolved == 0xFF) {
-            // Peer's vanilla would have suppressed the drop entirely
-            // (e.g. arrows when no bow owned). No broadcast — match
-            // single-player behaviour exactly.
-            return nullptr;
-        }
-        paramBody = resolved;
-    }
-    s16 resolvedParams = (s16)((paramFlags & 0xFF00) | (paramBody & 0x00FF));
-    if (resolvedParams != params) {
-        SPDLOG_INFO("[EnvActorDrop] peer pre-substituted params=0x{:04X} -> 0x{:04X} (cutter HP {}/{})",
-                    (int)(uint16_t)params, (int)(uint16_t)resolvedParams,
-                    (int)gSaveContext.health, (int)gSaveContext.healthCapacity);
-    }
-    // Peer with a synced env actor and host in scope: notify host,
-    // suppress local drop.
-    Anchor::Instance->SendPacket_EnvActorDrop(ext->netId, resolvedParams, /*forRandom=*/0, *pos);
-    return nullptr;
-}
-
-// #193 Phase 4 v2 — sibling for `Item_DropCollectibleRandom` from
-// env-actor sites (En_Kusa TYPE_0/TYPE_2 path passes a "drop group"
-// param shifted up by 4, NOT a specific ITEM00_*). Same behavioural
-// matrix as Anchor_DropCollectibleEnvActor; routes the random param
-// through `dropParamForRandom` so the host re-dispatches via
-// `Item_DropCollectibleRandom`. Phase 4 v3 race-D mitigation
-// applies symmetrically. Random spawns don't have a single-actor
-// return-value capture pattern, so the wrapper stays `void`.
-//
-// Policy 3 known gap (2026-05-31): the random path on host runs the
-// random-table RNG pick + FLEXIBLE substitution chain + final
-// func_8001F404 against HOST's gSaveContext. The host-side bracket
-// `Anchor_BeginHostingPeerEnvActorDrop` skips the final func_8001F404
-// but NOT the FLEXIBLE chain at z_en_item00.c:1755-1801, which keys on
-// host's health/magic/ammo/rupees. Full policy 3 for the random path
-// would require either:
-//   (a) sending cutter's gSaveContext shadow with the packet so host
-//       swaps state during the call, or
-//   (b) peer pre-resolves the full chain locally (dry-run helper).
-// Affects EnKusa TYPE_0/TYPE_2, Obj_Mure, and other random-table env
-// actors. Single-drop EnKusa TYPE_1 (the most common heart drop path)
-// IS fully policy-3 compliant via Anchor_DropCollectibleEnvActor.
-extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
-                                                     Vec3f* pos, s16 dropGroupParams) {
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) {
-        Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
-        return;
-    }
-    if (::SceneAuthority::IsMyCurrentRoomHost()) {
-        Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
-        return;
-    }
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(envActor);
-    if (ext == nullptr || ext->netId == 0) {
-        Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
-        return;
-    }
-    // Race-D peer-side scene check (see Anchor_DropCollectibleEnvActor).
-    uint32_t hostId = ::SceneAuthority::GetRoomHostClientId(
-        (int16_t)gPlayState->sceneNum,
-        (int8_t)gPlayState->roomCtx.curRoom.num,
-        (uint8_t)(gSaveContext.linkAge & 0x1));
-    auto hostIt = Anchor::Instance->clients.find(hostId);
-    if (hostIt == Anchor::Instance->clients.end() ||
-        hostIt->second.sceneNum != (s16)gPlayState->sceneNum) {
-        Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
-        return;
-    }
-    Anchor::Instance->SendPacket_EnvActorDrop(ext->netId, /*dropParam=*/0,
-                                               dropGroupParams, *pos);
-}
+// Anchor_DropCollectibleEnvActor + Anchor_DropCollectibleRandomEnvActor
+// (and the func_8001F404 forward-decl they needed) moved to
+// Bridge/EnvActorBridge.cpp on 2026-06-01 per refactor A.8.
 
 // Receive-side helper called from HandlePacket_ItemDropSync /
 // HandlePacket_ItemDropSnapshot to bracket the local Actor_Spawn so
@@ -534,86 +421,16 @@ void Anchor_EndNetworkItemDropSpawn(void) {
 // must spawn that type verbatim, even if vanilla code would have
 // substituted it locally.
 extern "C" bool Anchor_IsReceivingNetworkItemDrop(void) {
-    return g_isSpawningNetworkItemDrop || g_isHostingPeerEnvActorDrop;
+    return g_isSpawningNetworkItemDrop || Anchor_IsHostingPeerEnvActorDrop();
 }
 
-// Bracket the host-side Item_DropCollectible* call in
-// HandlePacket_EnvActorDrop so func_8001F404 substitution is skipped
-// against host's gSaveContext. The peer's intended drop type is
-// re-broadcast verbatim via the normal ITEM_DROP_SYNC pipeline.
-extern "C" void Anchor_BeginHostingPeerEnvActorDrop(void) {
-    g_isHostingPeerEnvActorDrop = true;
-}
+// Anchor_BeginHostingPeerEnvActorDrop / Anchor_EndHostingPeerEnvActorDrop
+// moved to Bridge/EnvActorBridge.cpp on 2026-06-01 per refactor A.8.
 
-extern "C" void Anchor_EndHostingPeerEnvActorDrop(void) {
-    g_isHostingPeerEnvActorDrop = false;
-}
-
-// Env-actor destruction broadcast helper. Called from each env
-// actor's cut/destroy state transition (e.g. EnKusa's cut-stub
-// transition for ENKUSA_TYPE_1, or any env actor's Destroy
-// callback when destruction doesn't naturally route through
-// Actor_Kill).
-//
-// Echo suppression: when this helper is called as part of
-// applying a network-received destroy (HandlePacket_EnvActorDestroy
-// invokes Anchor_ApplyEnKusaCut → EnKusa_SetupCut →
-// Anchor_BroadcastEnvActorDestroy), the thread-local
-// `g_isApplyingNetworkEnvActorDestroy` flag is set and the helper
-// short-circuits. Prevents the echo back to the originator and
-// further broadcast loops between peers.
-//
-// Earlier design (commit 0beb6bdf6) used HostBookkeeping's
-// ClaimDefeatBroadcast ledger as the echo guard. That broke
-// bidirectional sync for cyclic env actors: once a client RECEIVED
-// a destroy for netId N (claiming N in the ledger), the client
-// could never broadcast for N within the same scene visit — even
-// after N regrew and the local player cut it again. Removed in
-// favour of the thread-local flag below.
-//
-// Short-circuits on:
-//   - disconnected (no broadcast needed in solo).
-//   - actor has no EnemyNetId (not a synced actor — ignore).
-//   - netId 0 (assignment didn't complete — ignore).
-//   - g_isApplyingNetworkEnvActorDestroy (echo-suppress while
-//     applying a received destroy).
-//
-// Plan: Claude/Plans/env_actor_destroy_sync.md §3.3.
-static thread_local bool g_isApplyingNetworkEnvActorDestroy = false;
-
-extern "C" void Anchor_BeginNetworkEnvActorDestroy(void) {
-    g_isApplyingNetworkEnvActorDestroy = true;
-}
-extern "C" void Anchor_EndNetworkEnvActorDestroy(void) {
-    g_isApplyingNetworkEnvActorDestroy = false;
-}
-
-extern "C" void Anchor_BroadcastEnvActorDestroy(Actor* envActor) {
-    if (envActor == nullptr) return;
-    if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return;
-
-    EnemyNetId* ext =
-        const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(envActor));
-    if (ext == nullptr || ext->netId == 0) return;
-
-    // Transition phase unconditionally — both sender and receiver
-    // need ext->phase == Dead so subsequent assocActor proximity
-    // walks at pickup time can match this actor. Done BEFORE the
-    // echo-suppress short-circuit (which only blocks the network
-    // SendPacket, not state-tracking).
-    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
-
-    if (g_isApplyingNetworkEnvActorDestroy) {
-        // Receive-side application — phase already transitioned;
-        // don't echo the broadcast back to the originator.
-        return;
-    }
-
-    SPDLOG_INFO("[EnvActorDestroy] broadcasting actor id={} netId={} (cat={} pos=({:.0f},{:.0f},{:.0f}))",
-                envActor->id, ext->netId, (int)envActor->category,
-                envActor->world.pos.x, envActor->world.pos.y, envActor->world.pos.z);
-    Anchor::Instance->SendPacket_EnvActorDestroy(ext->netId, envActor->id);
-}
+// Anchor_BeginNetworkEnvActorDestroy / Anchor_EndNetworkEnvActorDestroy /
+// Anchor_BroadcastEnvActorDestroy moved to Bridge/EnvActorBridge.cpp
+// on 2026-06-01 per refactor A.8 (along with the
+// `g_isApplyingNetworkEnvActorDestroy` thread_local they share).
 
 bool Anchor::IsLocalPlayerClimbing() const {
     if (gPlayState == nullptr) { return false; }
