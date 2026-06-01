@@ -17,7 +17,7 @@
 // pairs across this domain. The hooks in HookHandlers' OnActorSpawn
 // (EN_ITEM00) path read/write these directly through the header.
 
-#include "Bridge/ItemDropBridgeState.h"
+#include "ItemDropBridgeState.h"
 
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
