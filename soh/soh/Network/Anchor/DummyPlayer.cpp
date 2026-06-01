@@ -195,23 +195,6 @@ static void AnchorDummyDetachAndKillHeldActor(Actor* dummyActor) {
     Anchor::Instance->KillNetworkActorSilently(held);
 }
 
-// Walk the syncable actor categories looking for one whose EnemyNetId
-// extension matches `netId`. Returns nullptr when no match. Used by the
-// held-actor sync attach / detach to locate the local copy of an actor
-// the remote player is carrying.
-static Actor* AnchorDummyFindActorByNetId(uint32_t netId) {
-    if (netId == 0 || gPlayState == nullptr) return nullptr;
-    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
-        Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
-        while (a != nullptr) {
-            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(a);
-            if (ext != nullptr && ext->netId == netId) return a;
-            a = a->next;
-        }
-    }
-    return nullptr;
-}
-
 static constexpr u8 kAnchorUpperBodyLimbCopyMap[22] = {
     0, // PLAYER_LIMB_NONE
     0, // PLAYER_LIMB_ROOT
@@ -333,7 +316,7 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
             // network state hasn't caught up), the next frame's check
             // retries automatically.
             if (expectedNetId != 0) {
-                Actor* held = AnchorDummyFindActorByNetId(expectedNetId);
+                Actor* held = FindActorByNetId(gPlayState, expectedNetId);
                 if (held != nullptr) {
                     player->heldActor = held;
                     held->parent = actor;

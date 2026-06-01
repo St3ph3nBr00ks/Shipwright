@@ -92,19 +92,7 @@ void Anchor::HandlePacket_TalkRequest(nlohmann::json payload) {
 
     uint32_t netId = payload.value("netId", (uint32_t)0);
 
-    Actor* actor = nullptr;
-    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
-        actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
-        while (actor != nullptr) {
-            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-            if (ext != nullptr && ext->netId == netId) {
-                goto actor_found;
-            }
-            actor = actor->next;
-        }
-    }
-    actor = nullptr;
-actor_found:
+    Actor* actor = FindActorByNetId(gPlayState, netId);
     if (actor == nullptr) {
         SPDLOG_WARN("[TalkRequest] No actor found for netId={}", netId);
         return;

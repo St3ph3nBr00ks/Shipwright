@@ -157,23 +157,11 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
         return;
     }
 
-    // Walk every syncable actor category looking for the netId match.
-    // Widened beyond ACTORCAT_ENEMY so non-host damage to non-ENEMY synced
-    // actors (allowlisted via IsSyncedWorldActor or mid-transition BOSS /
+    // Find the target across all syncable categories. Widened beyond
+    // ACTORCAT_ENEMY so non-host damage to non-ENEMY synced actors
+    // (allowlisted via IsSyncedWorldActor or mid-transition BOSS /
     // ITEMACTION / MISC instances) doesn't silently drop.
-    Actor* actor = nullptr;
-    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
-        actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
-        while (actor != nullptr) {
-            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-            if (ext != nullptr && ext->netId == netId) {
-                goto damage_target_found;
-            }
-            actor = actor->next;
-        }
-    }
-    actor = nullptr;
-damage_target_found:
+    Actor* actor = FindActorByNetId(gPlayState, netId);
     if (actor == nullptr) {
         return;
     }

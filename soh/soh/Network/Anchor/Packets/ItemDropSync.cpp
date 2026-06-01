@@ -165,23 +165,11 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
     if (offererEnemyNetId != 0) {
         uint32_t authorityClientIdForOffer = (uint32_t)payload.value("clientId", (uint32_t)0);
 
-        // Find peer's mirror of the offering actor by EnemyNetId. Walk
-        // every synced-actor category. The offering actor must already
-        // exist locally (synced via ENEMY_SPAWN / ENEMY_STATE) by the
-        // time the modal-offer broadcast arrives.
-        Actor* mirror = nullptr;
-        for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
-            Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
-            while (a != nullptr) {
-                const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(a);
-                if (ext != nullptr && ext->netId == offererEnemyNetId) {
-                    mirror = a;
-                    break;
-                }
-                a = a->next;
-            }
-            if (mirror != nullptr) break;
-        }
+        // Find peer's mirror of the offering actor by EnemyNetId.
+        // The offering actor must already exist locally (synced via
+        // ENEMY_SPAWN / ENEMY_STATE) by the time the modal-offer
+        // broadcast arrives.
+        Actor* mirror = FindActorByNetId(gPlayState, offererEnemyNetId);
 
         if (mirror == nullptr) {
             SPDLOG_WARN("[ItemDropSync] modal-offer dropId={} offererNetId={} — no peer actor "

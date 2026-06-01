@@ -155,3 +155,23 @@ uint32_t EncodeEnemyNetId(Actor* actor);
 // The host's authoritative value is broadcast in ENEMY_SPAWN; non-host
 // adopts it via `HandlePacket_EnemySpawn` to keep both clients aligned.
 uint32_t EncodeUniqueDynamicNetId(Actor* actor);
+
+// Refactor A.10 — public netId-to-actor lookup. Walks all 8 syncable
+// categories and returns the first actor whose `EnemyNetId` extension
+// matches. Returns nullptr if `netId == 0`, `play == nullptr`, or no
+// match is found. Promoted from `DummyPlayer::AnchorDummyFindActorByNetId`
+// (private helper added 2026-05-29) to replace ~17 hand-rolled scan
+// loops across `Packets/`, `EnemyStateSync/`, and `AIDirector/`.
+//
+// Per `Plans/A.10_design_review.md` (DR-1):
+//   - 11 sites can substitute via direct one-liner call.
+//   - 6 sites have side conditions (post-check `actor->id == X`, pre-
+//     check `update != nullptr`, phase filter, etc.) and call this
+//     helper plus a small wrapper predicate.
+//
+// Iteration ordering matches `kSyncableActorCategories`: ENEMY first,
+// then BOSS / PROP / BG / NPC / SWITCH / ITEMACTION / MISC. Behaviour
+// is preserved across all 17 call-site conversions — the helper body
+// is byte-identical to the long-form loop modulo the `PlayState*`
+// parameter (formerly read from the global `gPlayState`).
+Actor* FindActorByNetId(PlayState* play, uint32_t netId);
