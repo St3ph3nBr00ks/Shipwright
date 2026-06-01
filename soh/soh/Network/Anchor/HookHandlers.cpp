@@ -484,6 +484,17 @@ static int         g_pendingItemDropDepth          = 0;
 static bool     g_isSpawningNetworkItemDrop     = false;
 static uint32_t g_pendingNetworkItemDropNetId   = 0;
 
+// Host-side gate: set true while HandlePacket_EnvActorDrop is calling
+// Item_DropCollectible* on the host to fulfil a peer's grass-cut. The
+// vanilla func_8001F404 substitution chain in z_en_item00.c (heart→
+// rupee at full HP, etc.) keys on the LOCAL gSaveContext, so on the
+// host this substitutes against host's state instead of the cutter's.
+// Suppressing substitution here makes the host's broadcast carry the
+// peer-intended drop type verbatim. Distinct from
+// g_isSpawningNetworkItemDrop because on this path we DO want the
+// resulting OnActorSpawn(EN_ITEM00) to broadcast ITEM_DROP_SYNC.
+static bool     g_isHostingPeerEnvActorDrop     = false;
+
 // Thread-local flag set by Anchor_SpawnSyncedStickDrop to tag the
 // next OnActorSpawn(EN_ITEM00) as a "decorative invisible companion"
 // drop: the visible visual is provided by the offering actor's own
@@ -664,6 +675,15 @@ extern "C" void Anchor_BeginItemDropForKiller(uint32_t killerClientId) {
 // local Item_DropCollectible preserves a visible drop on this client;
 // same shape as the offline branch above (single client, single drop,
 // no broadcast). Strictly better than silent loss.
+//
+// Policy 3 (cutter's vanilla wins) — peer pre-substitutes the dropId
+// against PEER'S gSaveContext via func_8001F404 BEFORE sending. Host's
+// HandlePacket_EnvActorDrop brackets the resulting Item_DropCollectible
+// with Anchor_BeginHostingPeerEnvActorDrop so substitution is bypassed
+// on the host side. Net effect: the cutter's local single-player
+// vanilla outcome (heart-vs-rupee, adult-stick→rupee, no-bow→cancel,
+// etc.) is broadcast verbatim to everyone.
+extern "C" s16 func_8001F404(s16 dropId);
 extern "C" EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envActor,
                                                     Vec3f* pos, s16 params) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) {
@@ -686,9 +706,32 @@ extern "C" EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envA
         hostIt->second.sceneNum != (s16)gPlayState->sceneNum) {
         return Item_DropCollectible(play, pos, params);
     }
+    // Policy 3: pre-substitute on peer side against peer's state.
+    // Mirrors Item_DropCollectible's own pre-spawn substitution path
+    // (z_en_item00.c:1622-1631). The 0x8000 param-bit (also called
+    // param8000 in z_en_item00.c) means "skip substitution"; preserve
+    // that semantic by forwarding the raw params unchanged.
+    s16 paramBody = params & 0x00FF;
+    s16 paramFlags = params & ~0x00FF;
+    if (!(params & 0x8000)) {
+        s16 resolved = func_8001F404(paramBody);
+        if (resolved == -1 || resolved == 0xFF) {
+            // Peer's vanilla would have suppressed the drop entirely
+            // (e.g. arrows when no bow owned). No broadcast — match
+            // single-player behaviour exactly.
+            return nullptr;
+        }
+        paramBody = resolved;
+    }
+    s16 resolvedParams = (s16)((paramFlags & 0xFF00) | (paramBody & 0x00FF));
+    if (resolvedParams != params) {
+        SPDLOG_INFO("[EnvActorDrop] peer pre-substituted params=0x{:04X} -> 0x{:04X} (cutter HP {}/{})",
+                    (int)(uint16_t)params, (int)(uint16_t)resolvedParams,
+                    (int)gSaveContext.health, (int)gSaveContext.healthCapacity);
+    }
     // Peer with a synced env actor and host in scope: notify host,
     // suppress local drop.
-    Anchor::Instance->SendPacket_EnvActorDrop(ext->netId, params, /*forRandom=*/0, *pos);
+    Anchor::Instance->SendPacket_EnvActorDrop(ext->netId, resolvedParams, /*forRandom=*/0, *pos);
     return nullptr;
 }
 
@@ -700,6 +743,20 @@ extern "C" EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envA
 // `Item_DropCollectibleRandom`. Phase 4 v3 race-D mitigation
 // applies symmetrically. Random spawns don't have a single-actor
 // return-value capture pattern, so the wrapper stays `void`.
+//
+// Policy 3 known gap (2026-05-31): the random path on host runs the
+// random-table RNG pick + FLEXIBLE substitution chain + final
+// func_8001F404 against HOST's gSaveContext. The host-side bracket
+// `Anchor_BeginHostingPeerEnvActorDrop` skips the final func_8001F404
+// but NOT the FLEXIBLE chain at z_en_item00.c:1755-1801, which keys on
+// host's health/magic/ammo/rupees. Full policy 3 for the random path
+// would require either:
+//   (a) sending cutter's gSaveContext shadow with the packet so host
+//       swaps state during the call, or
+//   (b) peer pre-resolves the full chain locally (dry-run helper).
+// Affects EnKusa TYPE_0/TYPE_2, Obj_Mure, and other random-table env
+// actors. Single-drop EnKusa TYPE_1 (the most common heart drop path)
+// IS fully policy-3 compliant via Anchor_DropCollectibleEnvActor.
 extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
                                                      Vec3f* pos, s16 dropGroupParams) {
     if (!Anchor::Instance || !Anchor::Instance->isConnected) {
@@ -764,6 +821,31 @@ void Anchor_EndNetworkItemDropSpawn(void) {
         g_pendingItemDropKillerTeamId.clear();
         g_pendingItemDropSpawnTimeMs     = 0;
     }
+}
+
+// #231 / heart-vs-rupee desync — exposed for z_en_item00.c so the
+// vanilla func_8001F404 substitution chain (heart→rupee at full HP,
+// adult-stick→rupee, child-seeds→arrows, no-bow→cancel, etc.) can
+// be skipped on receivers. Each substitution branches on the LOCAL
+// client's gSaveContext (health, inventory, age) and produces a
+// type-desync between host and peer when their game state differs.
+// The host's broadcast carries the authoritative type — receivers
+// must spawn that type verbatim, even if vanilla code would have
+// substituted it locally.
+extern "C" bool Anchor_IsReceivingNetworkItemDrop(void) {
+    return g_isSpawningNetworkItemDrop || g_isHostingPeerEnvActorDrop;
+}
+
+// Bracket the host-side Item_DropCollectible* call in
+// HandlePacket_EnvActorDrop so func_8001F404 substitution is skipped
+// against host's gSaveContext. The peer's intended drop type is
+// re-broadcast verbatim via the normal ITEM_DROP_SYNC pipeline.
+extern "C" void Anchor_BeginHostingPeerEnvActorDrop(void) {
+    g_isHostingPeerEnvActorDrop = true;
+}
+
+extern "C" void Anchor_EndHostingPeerEnvActorDrop(void) {
+    g_isHostingPeerEnvActorDrop = false;
 }
 
 // Env-actor destruction broadcast helper. Called from each env
@@ -3232,10 +3314,24 @@ void Anchor::RegisterHooks() {
     // new room, gPlayState->curRoom.num reflects the destination; actors in the
     // old room have actor->room != curRoom.num, so we can detect and skip them.
     COND_HOOK(OnActorKill, isConnected, [&](void* refActor) {
+        Actor* actor = static_cast<Actor*>(refActor);
+        // Log 331 diagnostic — track EN_ITEM00 deaths to find what
+        // kills drops on peer side outside the ITEM_COLLECTED path.
+        if (actor->id == ACTOR_EN_ITEM00) {
+            const ItemDropNetId* idExt =
+                ObjectExtension::GetInstance().Get<ItemDropNetId>(actor);
+            const uint32_t idNet = (idExt != nullptr) ? idExt->netId : 0u;
+            const int idState = (idExt != nullptr) ? (int)idExt->pickupState : -1;
+            const bool hasParent = (actor->parent != nullptr);
+            SPDLOG_INFO("[ItemDrop.diag] OnActorKill EN_ITEM00 netId={} params=0x{:02X} pickupState={} hasParent={} pos=({:.0f},{:.0f},{:.0f}) isNetSpawning={} isLocalOnly={}",
+                        idNet, (int)actor->params, idState, hasParent ? "true" : "false",
+                        actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
+                        g_isSpawningNetworkItemDrop ? "true" : "false",
+                        g_isLocalOnlyItemDrop ? "true" : "false");
+        }
         if (isKillingNetworkActor) {
             return; // This kill originated from a received ENEMY_DEFEATED — do not echo.
         }
-        Actor* actor = static_cast<Actor*>(refActor);
         if (!IsSaveLoaded()) {
             return;
         }
@@ -3375,7 +3471,21 @@ void Anchor::RegisterHooks() {
               [&](s16 flagType, s16 flag) { SendPacket_UnsetFlag(SCENE_ID_MAX, flagType, flag); });
 
     COND_HOOK(OnSceneFlagSet, isConnected,
-              [&](s16 sceneNum, s16 flagType, s16 flag) { SendPacket_SetFlag(sceneNum, flagType, flag); });
+              [&](s16 sceneNum, s16 flagType, s16 flag) {
+                  // Skip FLAG_SCENE_COLLECTIBLE flag=0 — vanilla
+                  // Flags_SetCollectible (z_actor.c:824) skips the
+                  // bitmask update for flag=0 yet still fires
+                  // OnSceneFlagSet, so the hook fires for every
+                  // grass-drop pickup with a collectibleFlag of 0
+                  // (heart, rupee, nut from grass). Sending the
+                  // packet has no positive effect (no flag bit is
+                  // updated on receiver) and triggers SetFlag.cpp's
+                  // collateral despawn walk that kills every ground
+                  // drop in the scene. Belt-and-suspenders with the
+                  // receive-side flag != 0 guard in SetFlag.cpp.
+                  if (flagType == FLAG_SCENE_COLLECTIBLE && flag == 0) return;
+                  SendPacket_SetFlag(sceneNum, flagType, flag);
+              });
 
     COND_HOOK(OnSceneFlagUnset, isConnected,
               [&](s16 sceneNum, s16 flagType, s16 flag) { SendPacket_UnsetFlag(sceneNum, flagType, flag); });
