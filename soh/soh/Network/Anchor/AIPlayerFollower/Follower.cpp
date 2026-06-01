@@ -4004,9 +4004,26 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
             reachTopY = navData->climbAnchors[followerClimbAnchorIdx].topPos.y;
         }
     }
-    SPDLOG_INFO("[ClimbDiag] HCSA-5 reachTopY={:.0f} pos.y={:.0f}",
-                reachTopY, player->actor.world.pos.y);
-    bool reachedTop =
+    // #233 — gate `reachedTop` on whether the substrate path is
+    // requesting ASCENT (target meaningfully above current pos).
+    // When the path routes the follower DOWN through a vine
+    // (followerClimbTopTarget.y < pos.y), the original
+    // pos.y >= reachTopY gate fires immediately because the
+    // follower starts on a platform ABOVE the vine's top. The
+    // exit cycles CLIMBING→IDLE→FOLLOW→CLIMBING indefinitely
+    // (log 339/340). For descents, leave `reachedTop=false` and
+    // let the climb-down stick injection (followerMoveTarget set
+    // to followerClimbTopTarget below) drive Link DOWN; existing
+    // detach-detect (HCSA-1) and fell-out (HCSA-2) exits handle
+    // vine-end. Tolerance: kAutonomousClimbReachY — same band
+    // used by the reachedTop check itself, so "ascent" means
+    // target is at least one reach-band above current pos.
+    const bool pathRequestsAscent =
+        (followerClimbTopTarget.y > player->actor.world.pos.y + kAutonomousClimbReachY);
+    SPDLOG_INFO("[ClimbDiag] HCSA-5 reachTopY={:.0f} pos.y={:.0f} target.y={:.0f} ascent={}",
+                reachTopY, player->actor.world.pos.y,
+                followerClimbTopTarget.y, pathRequestsAscent);
+    bool reachedTop = pathRequestsAscent &&
         (player->actor.world.pos.y >= reachTopY - kAutonomousClimbReachY);
     bool timedOut = (followerAutonomousClimbFrames >= MsToGameTicks(kAutonomousClimbMaxMs));
     // While leader is still climbing, suppress the reachedTop exit
