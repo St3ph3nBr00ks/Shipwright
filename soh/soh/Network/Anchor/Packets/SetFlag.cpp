@@ -93,7 +93,16 @@ void Anchor::HandlePacket_SetFlag(nlohmann::json payload) {
         // into an open pose and stay in the scene. Cross-client chest
         // open sync needs a separate animation/contents-distribution
         // story (design doc Q on shared vs per-player chest contents).
-        if (sceneNum == gPlayState->sceneNum &&
+        // Skip the walk for flag == 0. Heart/rupee/nut drops from grass +
+        // killed enemies have `collectibleFlag = (params & 0x3F00) >> 8 = 0`
+        // (no scene-collectible association). Vanilla `Flags_SetCollectible`
+        // is a no-op for flag == 0 (z_actor.c:824 guards the bitmask update),
+        // but `GameInteractor_ExecuteOnSceneFlagSet` fires regardless, so
+        // the host's pickup-of-untracked-drop broadcasts SET_FLAG flag=0.
+        // Without this guard, the receiver walks ACTORCAT_MISC and kills
+        // EVERY ground drop with `collectibleFlag == 0` — every grass-cut
+        // heart, nut, rupee in the scene disappears when one is picked up.
+        if (flag != 0 && sceneNum == gPlayState->sceneNum &&
             flagType == FLAG_SCENE_COLLECTIBLE) {
             Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
             while (a != nullptr) {

@@ -91,6 +91,37 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
         return;
     }
 
+    // Diagnostic for log 331 multi-drop disappearance investigation —
+    // count EN_ITEM00 actors visible to ItemCollected's walk so we can
+    // tell whether the actor list has the target netId at receive time.
+    int dbgEnItem00Total = 0;
+    int dbgEnItem00Alive = 0;
+    int dbgEnItem00WithExt = 0;
+    int dbgEnItem00MatchAlive = 0;
+    int dbgEnItem00MatchDead = 0;
+    {
+        Actor* itDbg = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
+        while (itDbg != nullptr) {
+            if (itDbg->id == ACTOR_EN_ITEM00) {
+                dbgEnItem00Total++;
+                if (itDbg->update != nullptr) dbgEnItem00Alive++;
+                const ItemDropNetId* dext =
+                    ObjectExtension::GetInstance().Get<ItemDropNetId>(itDbg);
+                if (dext != nullptr) {
+                    dbgEnItem00WithExt++;
+                    if (dext->netId == itemNetId) {
+                        if (itDbg->update != nullptr) dbgEnItem00MatchAlive++;
+                        else dbgEnItem00MatchDead++;
+                    }
+                }
+            }
+            itDbg = itDbg->next;
+        }
+    }
+    SPDLOG_INFO("[ItemCollected.diag] rx netId={} actor-list: total={} alive={} withExt={} matchAlive={} matchDead={}",
+                itemNetId, dbgEnItem00Total, dbgEnItem00Alive, dbgEnItem00WithExt,
+                dbgEnItem00MatchAlive, dbgEnItem00MatchDead);
+
     // Phase 3 C-hybrid (Claude/Plans/item_drop_behavior_spec.md §1 Q1):
     // dismiss the decorative offering actor (Dekubaba head in
     // DeadStickDrop / Karebaba in DeadItemDrop) when its associated
@@ -195,8 +226,10 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
                         mut->pickupState = ItemPickupState::Granted;
                         SPDLOG_INFO("[ItemCollected] rx netId={} GRANT for local — transitioning Pending → Granted",
                                     itemNetId);
+                    } else {
+                        SPDLOG_INFO("[ItemCollected] rx netId={} self-echo (winner==own, pickupState={}) — no action",
+                                    itemNetId, (int)ext->pickupState);
                     }
-                    // else: host-self-echo; no action.
                     return;
                 }
 
@@ -210,6 +243,7 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
         it = it->next;
     }
 
-    SPDLOG_DEBUG("[ItemCollected] rx netId={} winner={} — no local copy found",
-                 itemNetId, winnerClientId);
+    SPDLOG_INFO("[ItemCollected] rx netId={} winner={} — no local copy found "
+                "(actor list had {} EN_ITEM00, {} with extension, {} matching but dead)",
+                itemNetId, winnerClientId, dbgEnItem00Total, dbgEnItem00WithExt, dbgEnItem00MatchDead);
 }
