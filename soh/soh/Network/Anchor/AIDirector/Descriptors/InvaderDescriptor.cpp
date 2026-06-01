@@ -119,8 +119,9 @@ bool AllPlayersSettledInScene(const SessionView& view, int16_t sceneNum) {
 
 // Per-player visibility gate. Returns true if the candidate position
 // has clear line-of-sight to ANY player — either from their camera
-// position OR from their Link model's eye-height position. The
-// stronger of the two gates governs.
+// position OR from their Link model's eye-height position, AND to
+// either the candidate's foot or head height. The stronger of the
+// gates governs.
 //
 // Design (2026-05-22): direction-agnostic. The earlier 120° camera
 // cone was dropped because the cone's "behind the player" carve-out
@@ -131,22 +132,29 @@ bool AllPlayersSettledInScene(const SessionView& view, int16_t sceneNum) {
 // surprise reliability (Dark-Souls-style "no invader appeared from
 // somewhere I could have witnessed").
 //
-// Two raycasts per player per candidate:
-//   1. Camera eye → candidate. Camera is offset behind/above Link
-//      and is the actual rendering viewpoint. Source: local → GET_-
-//      ACTIVE_CAM(gPlayState); peer → AnchorClient::cameraEye
-//      (populated by PLAYER_UPDATE). Skipped only when peer camera
-//      state hasn't arrived (eye == at sentinel from default-init).
-//   2. Link eye-height → candidate. Catches positions reachable by
-//      a turn-in-place even when the camera is currently looking
-//      elsewhere. Source: PlayerSnapshot::worldPos + kEyeHeightOffsetU.
-//      Always evaluated (no peer-data-missing case — worldPos is in
-//      every PLAYER_UPDATE).
+// #235 (2026-06-01): foot-only raycast wasn't enough. Spawned Invaders
+// have a Link-skel body extending ~50-70u UP from the foot position.
+// Low occluders (Deku Tree parapets, basement rim, Hyrule Field
+// outcroppings, waist-high tree roots) hide the foot-ray but the
+// upper body pokes above and is camera-visible. Fix: cast to BOTH
+// foot AND head height; require all rays to be occluded before
+// declaring "hidden".
 //
-// Candidate is rejected if EITHER raycast (across ALL players)
-// returns no-hit (= unoccluded sight line). If every player's both
-// raycasts hit geometry first, candidate is hidden from everyone →
-// safe to spawn.
+// Four raycasts per player per candidate:
+//   1. Camera eye → candidate.foot (Y=candidate.y).
+//   2. Camera eye → candidate.head (Y=candidate.y + kInvaderHeadOffsetU).
+//   3. Link eye   → candidate.foot.
+//   4. Link eye   → candidate.head.
+//
+// Candidate is rejected if ANY raycast (across ALL players × both
+// targets) returns no-hit (= unoccluded sight line). If every
+// (player × source × target) combination hits geometry first,
+// candidate is hidden from everyone → safe to spawn.
+//
+// Camera source is skipped per-player when the peer hasn't sent
+// camera state yet (`cameraEye == cameraAt` sentinel); the local
+// player's camera comes from `GET_ACTIVE_CAM(gPlayState)`. Link-eye
+// source is always available (worldPos is in every PLAYER_UPDATE).
 bool IsCandidateVisibleToAnyPlayer(const Vec3f& candidate,
                                    int16_t sceneNum,
                                    const SessionView& view) {
@@ -156,13 +164,38 @@ bool IsCandidateVisibleToAnyPlayer(const Vec3f& candidate,
     // height matches roughly where Link's gaze would originate if
     // he turned to face the candidate.
     constexpr float kEyeHeightOffsetU = 50.0f;
+    // #235 — head-height offset on the candidate. Same 50u value
+    // splits the adult / child Link-skel body span for the spawned
+    // Invader. Casting to this height catches the "head pokes above
+    // a low parapet" case the foot-only raycast missed.
+    constexpr float kInvaderHeadOffsetU = 50.0f;
 
     if (gPlayState == nullptr) return false;
+
+    const Vec3f candidateFoot = candidate;
+    const Vec3f candidateHead = { candidate.x,
+                                  candidate.y + kInvaderHeadOffsetU,
+                                  candidate.z };
+
+    // Returns true if the segment [src, dst] is UNOCCLUDED (no
+    // collision poly between). Caller treats unoccluded as
+    // "visible → reject candidate".
+    auto isUnoccluded = [&](const Vec3f& src, const Vec3f& dst) -> bool {
+        Vec3f rayStart = src;
+        Vec3f rayEnd   = dst;
+        Vec3f hitPos;
+        CollisionPoly* hitPoly = nullptr;
+        s32 hit = BgCheck_AnyLineTest1(&gPlayState->colCtx,
+                                       &rayStart, &rayEnd,
+                                       &hitPos, &hitPoly, 0);
+        return !hit;
+    };
 
     for (const PlayerSnapshot& p : view.players) {
         if (p.sceneNum != sceneNum) continue;
 
-        // ── Raycast 1: Camera eye → candidate ─────────────────────
+        // Resolve camera-eye source. Skipped when peer hasn't sent
+        // camera state yet (sentinel: eye == at from default-init).
         Vec3f cameraEye{};
         bool  cameraValid = false;
         if (p.isLocal) {
@@ -174,8 +207,6 @@ bool IsCandidateVisibleToAnyPlayer(const Vec3f& candidate,
         } else if (Anchor::Instance != nullptr) {
             auto it = Anchor::Instance->clients.find(p.clientId);
             if (it != Anchor::Instance->clients.end()) {
-                // Peer hasn't sent camera state yet if eye == at
-                // (default-zero from AnchorClient init).
                 const Vec3f& e = it->second.cameraEye;
                 const Vec3f& a = it->second.cameraAt;
                 if (!(e.x == a.x && e.y == a.y && e.z == a.z)) {
@@ -184,36 +215,20 @@ bool IsCandidateVisibleToAnyPlayer(const Vec3f& candidate,
                 }
             }
         }
+
+        // ── Raycasts 1 + 2: camera-eye → foot, camera-eye → head.
         if (cameraValid) {
-            Vec3f rayStart = cameraEye;
-            Vec3f rayEnd   = candidate;
-            Vec3f hitPos;
-            CollisionPoly* hitPoly = nullptr;
-            s32 hit = BgCheck_AnyLineTest1(&gPlayState->colCtx,
-                                           &rayStart, &rayEnd,
-                                           &hitPos, &hitPoly, 0);
-            if (!hit) {
-                // Unoccluded camera sightline → visible. Reject.
-                return true;
-            }
+            if (isUnoccluded(cameraEye, candidateFoot)) return true;
+            if (isUnoccluded(cameraEye, candidateHead)) return true;
         }
 
-        // ── Raycast 2: Link eye-height → candidate ────────────────
-        Vec3f linkEye = { p.worldPos.x,
-                          p.worldPos.y + kEyeHeightOffsetU,
-                          p.worldPos.z };
-        Vec3f rayStart = linkEye;
-        Vec3f rayEnd   = candidate;
-        Vec3f hitPos;
-        CollisionPoly* hitPoly = nullptr;
-        s32 hit = BgCheck_AnyLineTest1(&gPlayState->colCtx,
-                                       &rayStart, &rayEnd,
-                                       &hitPos, &hitPoly, 0);
-        if (!hit) {
-            // Unoccluded Link-body sightline → reachable by turn-in-
-            // place. Reject candidate.
-            return true;
-        }
+        // ── Raycasts 3 + 4: link-eye → foot, link-eye → head.
+        // Always evaluated — worldPos is in every PLAYER_UPDATE.
+        const Vec3f linkEye = { p.worldPos.x,
+                                p.worldPos.y + kEyeHeightOffsetU,
+                                p.worldPos.z };
+        if (isUnoccluded(linkEye, candidateFoot)) return true;
+        if (isUnoccluded(linkEye, candidateHead)) return true;
     }
     return false;
 }
