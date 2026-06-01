@@ -324,3 +324,16 @@ uint32_t EncodeUniqueDynamicNetId(Actor* actor) {
     // 256 collisions — extreme overflow, return whatever we have.
     return netId;
 }
+
+Actor* FindActorByNetId(PlayState* play, uint32_t netId) {
+    if (netId == 0 || play == nullptr) return nullptr;
+    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
+        Actor* a = play->actorCtx.actorLists[kSyncableActorCategories[i]].head;
+        while (a != nullptr) {
+            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(a);
+            if (ext != nullptr && ext->netId == netId) return a;
+            a = a->next;
+        }
+    }
+    return nullptr;
+}
