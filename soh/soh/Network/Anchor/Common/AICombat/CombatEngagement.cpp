@@ -1,4 +1,4 @@
-// Refactor B.5 Phase 1+2+3 — shared combat-engagement helpers.
+// Refactor B.5 Phase 1+2+3+4 — shared combat-engagement helpers.
 
 #include "CombatEngagement.h"
 
@@ -115,6 +115,55 @@ StandbyEvaluation EvaluateStandby(const CombatStandbyContext& ctx) {
     } else {
         out.decision = StandbyEvaluation::Decision::StayStandby;
     }
+    return out;
+}
+
+Actor* ResolveAttackTarget(const ResolveAttackTargetContext& ctx) {
+    Actor* target = ctx.existingTarget;
+    if (target == nullptr) return nullptr;
+    if (target->update == nullptr) return nullptr;
+    if (ctx.checkTargetHealth && target->colChkInfo.health <= 0) {
+        return nullptr;
+    }
+    return target;
+}
+
+AttackTickResult TickAttackATAndComplete(const AttackTickContext& ctx) {
+    AttackTickResult out;
+
+    // AT-window registration — single-shot per swing. Mirrors the
+    // original block at FollowerNPC.cpp:2434-2445 and Invader.cpp:
+    // 2176-2183. swingFiredAT is set AFTER the active window closes
+    // so multiple frames inside the window each re-register the AT
+    // (catches a target that passes through the swing arc), but the
+    // flag prevents re-registration after the window even if the
+    // anim re-enters the window later (shouldn't happen, but
+    // defence in depth).
+    const float curFrame = ctx.curAnimFrame;
+    const bool inActiveWindow =
+        (curFrame >= ctx.activeStartFrame && curFrame <= ctx.activeEndFrame);
+    if (inActiveWindow && ctx.swingFiredAT != nullptr && !*ctx.swingFiredAT) {
+        if (ctx.registerATWindow) ctx.registerATWindow();
+    } else if (!inActiveWindow && curFrame > ctx.activeEndFrame) {
+        if (ctx.swingFiredAT != nullptr) *ctx.swingFiredAT = true;
+    }
+
+    // Anim-complete check. Invader uses two extra guards
+    // (guardEndFramePositive + minSwingHoldTicks) to handle the case
+    // where InvEnsureAnimation hasn't replaced the previous state's
+    // anim yet on the first tick — without them the state would
+    // early-exit because `curFrame >= endFrame` is true from
+    // leftover idle-anim state. Follower's dispatcher-driven anim
+    // selection makes those guards unnecessary; it passes the
+    // defaults (minSwingHoldTicks=0, guardEndFramePositive=false)
+    // and they no-op.
+    const bool holdElapsed =
+        (ctx.minSwingHoldTicks <= 0) ||
+        (ctx.curTick >= ctx.entryFrame + (uint64_t)ctx.minSwingHoldTicks);
+    const bool endFrameValid =
+        !ctx.guardEndFramePositive || (ctx.endAnimFrame > 0.0f);
+    out.readyToExit =
+        holdElapsed && endFrameValid && (ctx.curAnimFrame >= ctx.endAnimFrame);
     return out;
 }
 

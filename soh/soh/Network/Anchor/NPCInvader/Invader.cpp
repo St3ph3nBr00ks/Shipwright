@@ -2151,6 +2151,11 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
     Actor* a = &this_->actor;
     a->speedXZ = 0.0f;
 
+    // On-entry — explicit animation dispatch + entry-frame tracking.
+    // Per DR-2 §"Policy axis #4" Option 2, Invader keeps its
+    // explicit-dispatch animation pattern (no dispatcher-driven
+    // anim selection), so the on-entry handshake stays in the
+    // caller. Follower's TickATTACK has no equivalent block.
     if (this_->prevState != EN_INVADER_STATE_ATTACK) {
         sAttackState.entryFrame = Anchor::Instance->gameFrameCounter.load(
                                        std::memory_order_relaxed);
@@ -2162,37 +2167,45 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
         InvEnsureAnimation(this_, play, InvaderAnim::kSwordSwing, 1);
     }
 
-    if (sAttackState.target != nullptr &&
-        (sAttackState.target->update == nullptr)) {
-        sAttackState.target = nullptr;
-    }
+    // B.5 Phase 4 — shared target validation. checkTargetHealth=false
+    // (Invader chases until Actor_Kill, doesn't retreat from
+    // dying targets the way Follower does).
+    AnchorAICombat::ResolveAttackTargetContext resolveCtx;
+    resolveCtx.existingTarget    = sAttackState.target;
+    resolveCtx.checkTargetHealth = false;
+    sAttackState.target = AnchorAICombat::ResolveAttackTarget(resolveCtx);
 
     if (sAttackState.target != nullptr) {
         a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 
-    const float curFrame = this_->skelAnime.curFrame;
-    const bool inActiveWindow = (curFrame >= kAttackActiveStartFrame &&
-                                  curFrame <= kAttackActiveEndFrame);
-    if (inActiveWindow && !sAttackState.swingFiredAT) {
+    // AT-window registration + anim-complete check. Invader passes
+    // the hold-frame + endFrame-positive guards to handle the case
+    // where InvEnsureAnimation hasn't replaced the previous state's
+    // anim yet on the first tick — without them the state would
+    // early-exit because `curFrame >= endFrame` is true from
+    // leftover idle-anim state.
+    AnchorAICombat::AttackTickContext atkCtx;
+    atkCtx.self             = a;
+    atkCtx.play             = play;
+    atkCtx.registerATWindow = [this_, play]() {
         PositionAttackQuad(this_);
         CollisionCheck_SetAT(play, &play->colChkCtx, &this_->atCollider.base);
-    } else if (!inActiveWindow && curFrame > kAttackActiveEndFrame) {
-        sAttackState.swingFiredAT = true;
-    }
+    };
+    atkCtx.curAnimFrame           = this_->skelAnime.curFrame;
+    atkCtx.endAnimFrame           = this_->skelAnime.endFrame;
+    atkCtx.activeStartFrame       = kAttackActiveStartFrame;
+    atkCtx.activeEndFrame         = kAttackActiveEndFrame;
+    atkCtx.swingFiredAT           = &sAttackState.swingFiredAT;
+    atkCtx.curTick                = Anchor::Instance->gameFrameCounter.load(
+                                        std::memory_order_relaxed);
+    atkCtx.entryFrame             = sAttackState.entryFrame;
+    atkCtx.minSwingHoldTicks      = kMinSwingHoldTicks;
+    atkCtx.guardEndFramePositive  = true;
+    const auto eval = AnchorAICombat::TickAttackATAndComplete(atkCtx);
 
-    // Exit only when anim has actually started AND finished, AND a
-    // minimum hold has elapsed since entry. If Agent 2 hasn't wired
-    // anim selection yet, endFrame may stay at the previous state's
-    // value (typically non-zero); without these guards the state
-    // would early-exit on the first tick because (curFrame >=
-    // endFrame) is true from leftover idle-anim state.
-    const uint64_t curTick = Anchor::Instance->gameFrameCounter.load(
-                                  std::memory_order_relaxed);
-    const bool holdElapsed = curTick >= sAttackState.entryFrame + kMinSwingHoldTicks;
-    if (holdElapsed && this_->skelAnime.endFrame > 0.0f &&
-        this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
+    if (eval.readyToExit) {
         const s32 next = ChooseCombatExitState(this_, play);
         SPDLOG_INFO("[Invader] ATTACK→{} (swing complete)",
                     (next == EN_INVADER_STATE_STANDBY ? "STANDBY" : "IDLE/FOLLOW"));

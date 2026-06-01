@@ -209,4 +209,92 @@ struct CombatStandbyContext {
 
 StandbyEvaluation EvaluateStandby(const CombatStandbyContext& ctx);
 
+// ----------------------------------------------------------------------------
+// Phase 4 — shared TickATTACK target resolution + AT-window + anim-complete.
+//
+// Both NPC Follower and NPC Invader's TickATTACK handler share the
+// same overall structure, but with policy axes that DR-2 §"Phase 0
+// animation-entry policy" identified:
+//
+//   1. Target validation: existing target invalidated if update==null
+//      OR (Follower-only) health<=0.
+//   2. Face target (per-actor — uses file-local YawTowardTarget).
+//   3. AT-window: single-shot per swing while curAnimFrame is in
+//      [activeStartFrame, activeEndFrame]. Caller's
+//      `registerATWindow` closure wraps PositionAttackQuad +
+//      CollisionCheck_SetAT against the actor's own atCollider.
+//   4. Anim-complete: Follower uses plain `curFrame >= endFrame`;
+//      Invader adds two guards (entry-frame hold + endFrame > 0)
+//      to handle the case where the swing anim hasn't been wired
+//      yet on the first tick.
+//
+// To preserve the original "face-then-AT" execution order (PositionAttack-
+// Quad uses shape.rot.y just written by face logic), Phase 4 splits the
+// shared logic into TWO helpers:
+//
+//   - `ResolveAttackTarget(...)` runs first; returns the resolved
+//     target (nullptr if invalidated).
+//   - Caller then writes the rotation locally using its own
+//     YawTowardTarget.
+//   - `TickAttackATAndComplete(...)` runs second; AT-window
+//     registration + anim-complete decision.
+//
+// Per-actor still owns: speedXZ=0, on-entry animation handshake
+// (Invader's explicit `InvEnsureAnimation` per DR-2 Phase 0 Option
+// 2 — kept in the caller), face logic, post-exit SPDLOG + state
+// transition + Follower's sLocalNav.navState.path.Reset().
+// ----------------------------------------------------------------------------
+struct ResolveAttackTargetContext {
+    // Caller's existing target (sAttackState.target from each TU).
+    Actor* existingTarget = nullptr;
+
+    // Whether health<=0 invalidates the target. Follower true,
+    // Invader false (Invader chases until Actor_Kill).
+    bool checkTargetHealth = true;
+};
+
+// Returns the resolved face-target (nullptr if invalidated). Caller
+// updates sAttackState.target = result before facing.
+Actor* ResolveAttackTarget(const ResolveAttackTargetContext& ctx);
+
+struct AttackTickContext {
+    Actor* self;
+    PlayState* play;
+
+    // AT-window registration closure. Should call
+    // PositionAttackQuad(this_) and
+    // CollisionCheck_SetAT(play, &play->colChkCtx, &this_->atCollider.base).
+    // Both wrapped because the actor pointer types differ (EnFollower*
+    // vs EnInvader*).
+    std::function<void()> registerATWindow;
+
+    // Animation cursor + window thresholds.
+    float curAnimFrame    = 0.0f;
+    float endAnimFrame    = 0.0f;
+    float activeStartFrame = 0.0f;
+    float activeEndFrame   = 0.0f;
+
+    // File-static swing-fired flag (sAttackState.swingFiredAT in
+    // each TU). Toggled true after the active window closes so the
+    // AT registers exactly once per swing.
+    bool* swingFiredAT = nullptr;
+
+    // Invader-style exit guards. Follower passes defaults
+    // (curTick=0, entryFrame=0, minSwingHoldTicks=0,
+    // guardEndFramePositive=false) and the guards no-op.
+    uint64_t curTick               = 0;
+    uint64_t entryFrame            = 0;
+    int      minSwingHoldTicks     = 0;
+    bool     guardEndFramePositive = false;
+};
+
+struct AttackTickResult {
+    bool readyToExit = false;
+};
+
+// Runs the AT-window registration step (single-shot per swing) and
+// returns whether the swing anim has completed (caller transitions
+// to ChooseCombatExitState's result on true).
+AttackTickResult TickAttackATAndComplete(const AttackTickContext& ctx);
+
 }  // namespace AnchorAICombat

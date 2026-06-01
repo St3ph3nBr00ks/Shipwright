@@ -2407,47 +2407,54 @@ void PositionAttackQuad(EnFollower* this_) {
 // ATTACK handler — locks NPC in place, faces target, plays swing
 // anim (set up by dispatcher's AnimForState), activates AT during
 // apex frames, and transitions back to FOLLOW when the anim ends.
+//
+// B.5 Phase 4 — shared via AnchorAICombat::ResolveAttackTarget +
+// TickAttackATAndComplete. Per-actor body retains:
+//   - speedXZ=0
+//   - face logic (file-local YawTowardTarget)
+//   - exit transition + SPDLOG + path reset
+// (Follower's dispatcher-driven anim entry needs no on-entry hook;
+// see DR-2 §"Policy axis #4". Invader's TickATTACK keeps the
+// explicit InvEnsureAnimation call locally.)
 void TickATTACK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     (void)leaderPos;
     Actor* a = &this_->actor;
     a->speedXZ = 0.0f;
 
-    // Validate target — if it died or scene-changed (update went null)
-    // mid-swing, just complete the swing harmlessly and return to FOLLOW.
-    if (sAttackState.target != nullptr &&
-        (sAttackState.target->update == nullptr ||
-         sAttackState.target->colChkInfo.health <= 0)) {
-        sAttackState.target = nullptr;
-    }
+    // Validate target — if it died or scene-changed mid-swing, the
+    // helper invalidates so subsequent face-logic gracefully skips
+    // and the swing completes harmlessly.
+    AnchorAICombat::ResolveAttackTargetContext resolveCtx;
+    resolveCtx.existingTarget    = sAttackState.target;
+    resolveCtx.checkTargetHealth = true;
+    sAttackState.target = AnchorAICombat::ResolveAttackTarget(resolveCtx);
 
     // Face the target each frame so the swing tracks a moving enemy.
+    // Must run BEFORE TickAttackATAndComplete so PositionAttackQuad
+    // sees the freshly-written shape.rot.y.
     if (sAttackState.target != nullptr) {
         a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 
-    // Active-frame AT registration. Single-shot per swing — once the
-    // AT has been registered and a hit landed (or the active window
-    // ended), don't re-register on the same swing. swingFiredAT
-    // resets on each ATTACK entry.
-    const float curFrame = this_->skelAnime.curFrame;
-    const bool inActiveWindow = (curFrame >= kAttackActiveStartFrame &&
-                                  curFrame <= kAttackActiveEndFrame);
-    if (inActiveWindow && !sAttackState.swingFiredAT) {
+    // AT-window registration + anim-complete check. Follower has no
+    // hold guards — passes defaults (minSwingHoldTicks=0,
+    // guardEndFramePositive=false) so they no-op.
+    AnchorAICombat::AttackTickContext atkCtx;
+    atkCtx.self             = a;
+    atkCtx.play             = play;
+    atkCtx.registerATWindow = [this_, play]() {
         PositionAttackQuad(this_);
         CollisionCheck_SetAT(play, &play->colChkCtx, &this_->atCollider.base);
-        // Don't set swingFiredAT here — keep registering the AT for
-        // every frame in the active window so a passing enemy gets
-        // hit. Set after the window closes so the "single-swing"
-        // semantics hold even if the swing didn't connect.
-    } else if (!inActiveWindow && curFrame > kAttackActiveEndFrame) {
-        sAttackState.swingFiredAT = true;
-    }
+    };
+    atkCtx.curAnimFrame     = this_->skelAnime.curFrame;
+    atkCtx.endAnimFrame     = this_->skelAnime.endFrame;
+    atkCtx.activeStartFrame = kAttackActiveStartFrame;
+    atkCtx.activeEndFrame   = kAttackActiveEndFrame;
+    atkCtx.swingFiredAT     = &sAttackState.swingFiredAT;
+    const auto eval = AnchorAICombat::TickAttackATAndComplete(atkCtx);
 
-    // Anim complete — exit to STANDBY (if enemy still in detect range,
-    // weapon stays drawn for next swing) or FOLLOW (no enemy left,
-    // sheathe and resume leader-following).
-    if (this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
+    if (eval.readyToExit) {
         const s32 nextState = ChooseCombatExitState(this_, play);
         SPDLOG_INFO("[FollowerNPC] ATTACK→{} (swing complete)",
                     (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
