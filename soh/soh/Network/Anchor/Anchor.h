@@ -867,6 +867,13 @@ class Anchor : public Network {
     void DrawMenu();
     void ProcessIncomingPacketQueue();
     void SendJsonToRemote(nlohmann::json packet);
+    // Refactor A.11 — broadcast helper for ENEMY_STATE-family per-client
+    // loops (SendPacket_EnemyDefeated host branch, SendPacket_EnemyRespawn).
+    // Stamps payload["targetClientId"] per peer and dispatches via
+    // SendJsonToRemote for every online + isSaveLoaded + !self client.
+    // Mutates payload in place — the targetClientId field is set per
+    // iteration. Callers may set additional fields before invoking.
+    void BroadcastJsonToScenePeers(nlohmann::json& payload);
     bool IsSaveLoaded();
     bool CanTeleportTo(uint32_t clientId);
     uint32_t GetDummyPlayerClientId(const Actor* actor);

@@ -10,6 +10,7 @@
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
 #include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
+#include "soh/Network/Anchor/EnemyStateSync/EnemyStatePayload.h"  // refactor A.11
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"
 
@@ -583,12 +584,9 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         return;
     }
 
-    nlohmann::json payload;
-    payload["type"]         = ENEMY_STATE;
-    payload["phase"]        = "Alive";
-    payload["phaseChanged"] = false;
+    auto payload = EnemyStateSync::BuildBaseEnemyStatePayload(
+        EnemyStateSync::LifecyclePhase::Alive, netId, /*phaseChanged=*/false);
     payload["sceneNum"] = gPlayState->sceneNum;
-    payload["netId"]    = netId;
     payload["pos"]      = actor->world.pos;
     payload["rot"]      = actor->world.rot;
     payload["shapeRot"] = actor->shape.rot;
@@ -596,7 +594,6 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     payload["scale"]    = actor->scale;
     payload["scope"]    = AnchorSync::ActorSyncScopeToString(scope);
     payload["quiet"]    = true;
-    PacketTimeline::SetTimelineField(payload);
 
     if (extras.hasKarebaba) {
         payload["actionState"] = extras.karebabaActionState;
@@ -737,17 +734,18 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor,
         return;
     }
 
-    nlohmann::json payload;
-    payload["type"]         = ENEMY_STATE;
-    payload["phase"]        = "Alive";
-    payload["phaseChanged"] = true;
+    // EnemySpawn passes netId=0 to the factory; the actor's assigned
+    // netId is added below from the EnemyNetId extension as an
+    // optional field (it may be absent for actors whose host-side
+    // assignment hasn't completed yet).
+    auto payload = EnemyStateSync::BuildBaseEnemyStatePayload(
+        EnemyStateSync::LifecyclePhase::Alive, /*netId=*/0, /*phaseChanged=*/true);
     payload["sceneNum"] = gPlayState->sceneNum;
     payload["actorId"]  = actor->id;
     payload["pos"]      = actor->home.pos;
     payload["rot"]      = actor->home.rot;
     payload["params"]   = actor->params;
     payload["scope"]    = AnchorSync::ActorSyncScopeToString(scope);
-    PacketTimeline::SetTimelineField(payload);
 
     // Host-authoritative netId for dynamic spawns (#67-Gohma crash fix).
     // The host's OnActorSpawn assigned a collision-free netId via
@@ -804,13 +802,9 @@ void Anchor::SendPacket_EnemyRemovedFromScene(uint32_t netId, int16_t priorScene
         return;
     }
 
-    nlohmann::json payload;
-    payload["type"]         = ENEMY_STATE;
-    payload["phase"]        = "Removed";
-    payload["phaseChanged"] = true;
-    payload["netId"]        = netId;
-    payload["sceneNum"]     = (int)priorSceneNum;
-    PacketTimeline::SetTimelineField(payload);
+    auto payload = EnemyStateSync::BuildBaseEnemyStatePayload(
+        EnemyStateSync::LifecyclePhase::Removed, netId);
+    payload["sceneNum"] = (int)priorSceneNum;
 
     // Host records SceneDeath at send time — receivers cover the
     // peer-was-holder case on receive.
@@ -833,11 +827,8 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId, int16_t shapeRotY, bool in
         return;
     }
 
-    nlohmann::json payload;
-    payload["type"]         = ENEMY_STATE;
-    payload["phase"]        = "DyingByLocal";
-    payload["phaseChanged"] = true;
-    payload["netId"] = netId;
+    auto payload = EnemyStateSync::BuildBaseEnemyStatePayload(
+        EnemyStateSync::LifecyclePhase::DyingByLocal, netId);
     if (includeShapeRotY) {
         // Karebaba death-direction sync — host's shape.rot.y at
         // OnEnemyDefeat time. Receive side reads this in the
@@ -849,7 +840,6 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId, int16_t shapeRotY, bool in
         // SetupDying fires.
         payload["shapeRotY"] = (int)shapeRotY;
     }
-    PacketTimeline::SetTimelineField(payload);
 
     if (::SceneAuthority::IsMyCurrentRoomHost()) {
         auto& bookkeeping = EnemyStateSync::HostBookkeeping::Instance();
@@ -878,12 +868,7 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId, int16_t shapeRotY, bool in
                     payload.value("killerClientId", (uint32_t)0),
                     payload.value("killerTeamId", std::string("(unattributed)")));
 
-        for (auto& [clientId, client] : clients) {
-            if (client.online && client.isSaveLoaded && !client.self) {
-                payload["targetClientId"] = clientId;
-                SendJsonToRemote(payload);
-            }
-        }
+        BroadcastJsonToScenePeers(payload);
     } else {
         SPDLOG_INFO("[EnemyDefeated] Non-host route-to-host for netId={} (host will attribute and re-broadcast)",
                     netId);
@@ -899,23 +884,14 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId, int16_t shapeRotY, bool in
 void Anchor::SendPacket_EnemyRespawn(uint32_t netId) {
     if (!IsSaveLoaded()) return;
 
-    nlohmann::json payload;
-    payload["type"]         = ENEMY_STATE;
-    payload["phase"]        = "Regrowing";
-    payload["phaseChanged"] = true;
-    payload["netId"]    = netId;
+    auto payload = EnemyStateSync::BuildBaseEnemyStatePayload(
+        EnemyStateSync::LifecyclePhase::Regrowing, netId);
     payload["sceneNum"] = (s16)gPlayState->sceneNum;
     payload["quiet"]    = true;
-    PacketTimeline::SetTimelineField(payload);
 
     SPDLOG_INFO("[EnemyRespawn] Sending respawn for netId={}", netId);
 
-    for (auto& [clientId, client] : clients) {
-        if (client.online && client.isSaveLoaded && !client.self) {
-            payload["targetClientId"] = clientId;
-            SendJsonToRemote(payload);
-        }
-    }
+    BroadcastJsonToScenePeers(payload);
 }
 
 // ===========================================================================

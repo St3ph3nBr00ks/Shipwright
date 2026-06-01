@@ -268,6 +268,15 @@ void Anchor::SendJsonToRemote(nlohmann::json payload) {
     outgoingPacketQueue.push(payload);
 }
 
+void Anchor::BroadcastJsonToScenePeers(nlohmann::json& payload) {
+    for (auto& [clientId, client] : clients) {
+        if (client.online && client.isSaveLoaded && !client.self) {
+            payload["targetClientId"] = clientId;
+            SendJsonToRemote(payload);
+        }
+    }
+}
+
 void Anchor::OnIncomingJson(nlohmann::json payload) {
     // If it doesn't contain a type, it's not a valid payload
     if (!payload.contains("type")) {
