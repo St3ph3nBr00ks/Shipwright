@@ -50,6 +50,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/StepPhase.h"         // shared step-phase + footstep SFX
 #include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
 #include "soh/Network/Anchor/Common/AILocomotion/StuckRecovery.h"     // shared TickSTUCK dispatch
+#include "soh/Network/Anchor/Common/AICombat/CombatEngagement.h"      // B.5 Phase 1: shared ChooseCombatExitState
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Network/Anchor/Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
@@ -2669,19 +2670,24 @@ bool TryEngageCombat(EnInvader* this_, PlayState* play) {
 }
 
 // Defined after the Tick handlers per its forward-decl above.
+//
+// B.5 Phase 1 — body delegates to AnchorAICombat::ChooseCombatExitState
+// (shared with NPC Follower). Per-actor wrapper binds the target picker
+// (PickHostileTarget with kRangedYFilter for elevated targets), the
+// post-combat cooldown duration, the file-static cooldown/exit-frame
+// slots, and the IDLE/STANDBY return states.
 s32 ChooseCombatExitState(EnInvader* this_, PlayState* play) {
-    const uint64_t curFrame = Anchor::Instance->gameFrameCounter.load(
-                                  std::memory_order_relaxed);
-    sCombatCooldownEndFrame = curFrame +
-        (uint64_t)Anchor::Instance->MsToGameTicks(kPostCombatCooldownMs);
-    // Open the sheathe-delay window. InvStateToModelGroup will keep
-    // the last-combat weapon visible for kInvSheatheDelayMs in
-    // non-combat states.
-    sLastCombatExitFrame = curFrame;
-    Actor* nearby = PickHostileTarget(&this_->actor, play, kStandbyDetectDist,
-                                       /*maxYDelta=*/kRangedYFilter);
-    return (nearby != nullptr) ? EN_INVADER_STATE_STANDBY
-                               : EN_INVADER_STATE_IDLE;
+    AnchorAICombat::CombatExitContext ctx;
+    ctx.findNearbyEnemy = [this_, play]() {
+        return PickHostileTarget(&this_->actor, play, kStandbyDetectDist,
+                                  /*maxYDelta=*/kRangedYFilter);
+    };
+    ctx.postCombatCooldownMs      = kPostCombatCooldownMs;
+    ctx.outCombatCooldownEndFrame = &sCombatCooldownEndFrame;
+    ctx.outLastCombatExitFrame    = &sLastCombatExitFrame;
+    ctx.stateIfNearbyEnemy        = EN_INVADER_STATE_STANDBY;
+    ctx.stateIfNoEnemy            = EN_INVADER_STATE_IDLE;
+    return AnchorAICombat::ChooseCombatExitState(ctx);
 }
 
 // ---------------------------------------------------------------------
