@@ -2006,119 +2006,47 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     toTarget);
     }
 
-    switch (followerAIState) {
-
-        case FollowerAIState::IDLE: {
-            // Body extracted to Anchor::HandleStateIdle
-            // (Phase 1 commit 10 of the SRP refactor).
-            HandleStateIdle(player, dummyActor, sideTarget, p2Pos);
-            break;
-        }
-
-        case FollowerAIState::FOLLOW: {
-            // Body extracted to Anchor::HandleStateFollow
-            // (Phase 1 commit 11 of the SRP refactor).
-            HandleStateFollow(player, sideTarget, p2Pos);
-            break;
-        }
-
-        case FollowerAIState::STUCK: {
-            // Body extracted to Anchor::HandleStateStuck
-            // (Phase 1 commit 8 of the SRP refactor). Phase 2 commit 5
-            // added leaderPos / p2Pos so JumpResolver can evaluate the
-            // gap with the right reference points.
-            HandleStateStuck(player, leaderPos, p2Pos);
-            break;
-        }
-
-        case FollowerAIState::ENGAGE: {
-            // Body extracted to Anchor::HandleStateEngage
-            // (Phase 1 commit 12 of the SRP refactor).
-            HandleStateEngage(player, leaderPos, p2Pos);
-            break;
-        }
-
-        case FollowerAIState::ATTACK: {
-            // Body extracted to Anchor::HandleStateAttack
-            // (Phase 1 commit 12 of the SRP refactor).
-            HandleStateAttack(player, p2Pos);
-            break;
-        }
-
-
-        // G1/G2 — leader is climbing. Bug 2 redesign (2026-04-22):
-        // instead of writing world.pos = leaderPos every frame
-        // (which fights gravity between actor-update and our hook,
-        // producing the "hover slightly below leader" symptom),
-        // we point followerMoveTarget at leader's XZ at follower's
-        // current Y (the ladder base / current rung) and let the
-        // ShouldActorUpdate stick injection drive Link.
-        //
-        // The state machine sets a flag (followerOnLadderTarget)
-        // so the stick-inject hook knows to use raw stick_y for
-        // up/down rather than camera-relative XZ projection.
-        // Once Link's PLAYER_STATE1_CLIMBING_LADDER fires (Link
-        // physically grabbed the ladder), stick_y direction
-        // toggles based on Δy to leader: positive (up) if leader
-        // is higher, negative (down) if lower, zero when within
-        // tolerance. OoT plays the real climb animation natively.
-        //
-        // Exit when leader's isClimbing flips back to false. The
-        // top-of-hook re-arm only fires on rising edge so we
-        // don't loop back into CLIMBING if leader's still
-        // sticky-eligible.
-        case FollowerAIState::CLIMBING: {
-            // Body extracted to Anchor::HandleStateClimbing
-            // (Phase 1 commit 7 of the SRP refactor).
-            HandleStateClimbing(player, leaderPos, leaderActor);
-            break;
-        }
-
-        // G4 — shield reflect. Inject BTN_R while ENGAGE target is a
-        // known shield-reflect class (Mad Scrub). Movement freezes
-        // (no stick) so Link plants the shield. Returns to ENGAGE
-        // when target leaves the reflect-class window or is defeated.
-        case FollowerAIState::BLOCK: {
-            // Body extracted to Anchor::HandleStateBlock
-            // (Phase 1 commit 6 of the SRP refactor).
-            HandleStateBlock(player, p2Pos);
-            break;
-        }
-
-        // G6/G7/G8 — ranged attack. Inject BTN_Z + BTN_A while ENGAGE
-        // target is a known ranged-required class (Gohma ceiling, larvae,
-        // Skullwalltulas on vines). Movement freezes so Link aims.
-        case FollowerAIState::RANGED_ATTACK: {
-            // Body extracted to Anchor::HandleStateRangedAttack
-            // (Phase 1 commit 8 of the SRP refactor).
-            HandleStateRangedAttack(player, p2Pos);
-            break;
-        }
-
-        // Reserved — placeholder for G19 (Gohma weak-point window).
-        // No transitions wired today; ENGAGE never picks STANDBY.
-        case FollowerAIState::STANDBY: {
-            // Body extracted to Anchor::HandleStateStandby
-            // (Phase 1 commit 6 of the SRP refactor).
-            HandleStateStandby();
-            break;
-        }
-
-        // Item pickup (Claude/Plans/ai_follower_item_pickup.md).
-        // Walks toward followerTargetItem until pickup fires
-        // (En_Item00 is collision-triggered; contact → collect).
-        // Exit paths:
-        //   - target actor gone (collected by us OR by leader) → RETURN
-        //   - timeout elapsed (couldn't reach) → RETURN
-        //   - leader beyond leash → RETURN (follow takes priority)
-        //   - leader started climbing → let top-of-hook G1/G2 take over
-        //   - item on a different floor (|Δy| ≥ kMaxYDelta) → RETURN
-        case FollowerAIState::COLLECT_ITEM: {
-            // Body extracted to Anchor::HandleStateCollectItem
-            // (Phase 1 commit 9 of the SRP refactor).
-            HandleStateCollectItem(player, leaderPos, p2Pos);
-            break;
-        }
+    // B.1 — dispatch table. Replaces the prior switch (one case per
+    // FollowerAIState) with a static member-fn pointer table indexed
+    // by enum value. Per Plans/B.1_design_review.md (DR-6). Each
+    // DispatchState* wrapper unpacks FollowerTickContext and forwards
+    // to the matching HandleState* with its original heterogeneous
+    // signature — keeps handler bodies untouched.
+    //
+    // Adding a new state: define HandleStateX + DispatchStateX, add
+    // the enum value, append the table entry. The switch-case
+    // mechanical scattered across this dispatcher and the
+    // adjacent heartbeat-log block (followerStateFrames % 60)
+    // disappears.
+    const FollowerTickContext tickCtx = {
+        /*player      =*/ player,
+        /*dummyActor  =*/ dummyActor,
+        /*leaderActor =*/ leaderActor,
+        /*leaderPos   =*/ leaderPos,
+        /*sideTarget  =*/ sideTarget,
+        /*p2Pos       =*/ p2Pos,
+    };
+    using FollowerStateHandler = void (Anchor::*)(const FollowerTickContext&);
+    // NOTE: array entries must follow FollowerAIState declaration order
+    // (Anchor.h:196 — IDLE, FOLLOW, STUCK, ENGAGE, ATTACK, CLIMBING,
+    // BLOCK, RANGED_ATTACK, STANDBY, COLLECT_ITEM).
+    static constexpr FollowerStateHandler kFollowerHandlers[] = {
+        &Anchor::DispatchStateIdle,          // IDLE
+        &Anchor::DispatchStateFollow,        // FOLLOW
+        &Anchor::DispatchStateStuck,         // STUCK
+        &Anchor::DispatchStateEngage,        // ENGAGE
+        &Anchor::DispatchStateAttack,        // ATTACK
+        &Anchor::DispatchStateClimbing,      // CLIMBING
+        &Anchor::DispatchStateBlock,         // BLOCK
+        &Anchor::DispatchStateRangedAttack,  // RANGED_ATTACK
+        &Anchor::DispatchStateStandby,       // STANDBY
+        &Anchor::DispatchStateCollectItem,   // COLLECT_ITEM
+    };
+    constexpr size_t kFollowerHandlerCount =
+        sizeof(kFollowerHandlers) / sizeof(kFollowerHandlers[0]);
+    const size_t stateIdx = static_cast<size_t>(followerAIState);
+    if (stateIdx < kFollowerHandlerCount) {
+        (this->*kFollowerHandlers[stateIdx])(tickCtx);
     }
 
     // End-of-block position override was intentionally removed when
@@ -3255,6 +3183,48 @@ void Anchor::TickFollowerInput(Actor* actor) {
 // distToLeader) unless explicitly passed. Future commits expand the set as
 // more states are extracted.
 // ---------------------------------------------------------------------------
+
+// B.1 — dispatch-table wrappers (DR-6 §"Recommended"). Each unpacks
+// FollowerTickContext and forwards to the matching HandleState* with
+// its original heterogeneous signature, so handler bodies don't need
+// to change for the table to work. The table indexes into these
+// wrappers via FollowerAIState (see Follower.cpp:~2009 inside
+// TickFollower).
+//
+// If later refactor unifies handler signatures around
+// FollowerTickContext (Plans/B.1_design_review.md §"Recommendation"
+// Option C end-state), these wrappers can be deleted and the table
+// can point directly at HandleState* methods.
+void Anchor::DispatchStateIdle(const FollowerTickContext& ctx) {
+    HandleStateIdle(ctx.player, ctx.dummyActor, ctx.sideTarget, ctx.p2Pos);
+}
+void Anchor::DispatchStateFollow(const FollowerTickContext& ctx) {
+    HandleStateFollow(ctx.player, ctx.sideTarget, ctx.p2Pos);
+}
+void Anchor::DispatchStateStuck(const FollowerTickContext& ctx) {
+    HandleStateStuck(ctx.player, ctx.leaderPos, ctx.p2Pos);
+}
+void Anchor::DispatchStateEngage(const FollowerTickContext& ctx) {
+    HandleStateEngage(ctx.player, ctx.leaderPos, ctx.p2Pos);
+}
+void Anchor::DispatchStateAttack(const FollowerTickContext& ctx) {
+    HandleStateAttack(ctx.player, ctx.p2Pos);
+}
+void Anchor::DispatchStateClimbing(const FollowerTickContext& ctx) {
+    HandleStateClimbing(ctx.player, ctx.leaderPos, ctx.leaderActor);
+}
+void Anchor::DispatchStateBlock(const FollowerTickContext& ctx) {
+    HandleStateBlock(ctx.player, ctx.p2Pos);
+}
+void Anchor::DispatchStateRangedAttack(const FollowerTickContext& ctx) {
+    HandleStateRangedAttack(ctx.player, ctx.p2Pos);
+}
+void Anchor::DispatchStateStandby(const FollowerTickContext& /*ctx*/) {
+    HandleStateStandby();
+}
+void Anchor::DispatchStateCollectItem(const FollowerTickContext& ctx) {
+    HandleStateCollectItem(ctx.player, ctx.leaderPos, ctx.p2Pos);
+}
 
 void Anchor::HandleStateStandby() {
     // STANDBY: hold position for kAttackDuration frames, then drop to
