@@ -1,6 +1,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/Common/TransientGate.h"  // ScopedNetworkItemDropSpawn (B.6)
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -12,15 +13,6 @@ extern "C" {
 extern PlayState* gPlayState;
 extern SaveContext gSaveContext;
 }
-
-// Network-spawn gate helpers — implemented in HookHandlers.cpp.
-// Forward-declared here so HandlePacket_ItemDropSnapshot can bracket
-// each per-drop Actor_Spawn the same way HandlePacket_ItemDropSync
-// does.
-void Anchor_BeginNetworkItemDropSpawn(uint32_t netId, uint32_t killerClientId,
-                                       int64_t spawnTimeMs,
-                                       const std::string& killerTeamId);
-void Anchor_EndNetworkItemDropSpawn(void);
 
 /**
  * ITEM_DROP_SNAPSHOT — host → joining peer (targeted).
@@ -172,11 +164,14 @@ void Anchor::HandlePacket_ItemDropSnapshot(nlohmann::json payload) {
             continue;
         }
 
-        Anchor_BeginNetworkItemDropSpawn(netId, killerClientId, spawnTimeMs, killerTeamId);
-        Actor* spawnedActor = Actor_Spawn(&gPlayState->actorCtx, gPlayState,
-                                           ACTOR_EN_ITEM00, pos.x, pos.y, pos.z,
-                                           0, 0, 0, (s16)params);
-        Anchor_EndNetworkItemDropSpawn();
+        Actor* spawnedActor;
+        {
+            AnchorBridge::ScopedNetworkItemDropSpawn spawnGuard(
+                netId, killerClientId, spawnTimeMs, killerTeamId);
+            spawnedActor = Actor_Spawn(&gPlayState->actorCtx, gPlayState,
+                                       ACTOR_EN_ITEM00, pos.x, pos.y, pos.z,
+                                       0, 0, 0, (s16)params);
+        }
         if (spawnedActor != nullptr) {
             spawned++;
         }

@@ -1,6 +1,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"  // kSyncableActorCategories
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
+#include "soh/Network/Anchor/Common/TransientGate.h"  // ScopedNetworkEnvActorDestroy (B.6)
 #include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/cvar_prefixes.h"
@@ -20,13 +21,6 @@ extern PlayState* gPlayState;
 // actors without a specialized helper: Actor_Kill. See
 // HandlePacket_EnvActorDestroy dispatch below.
 void Anchor_ApplyEnKusaCut(Actor* thisx);  // z_en_kusa.c
-
-// Thread-local echo-suppress flag for Anchor_BroadcastEnvActorDestroy
-// — set true while applying a network-received destroy so the
-// per-actor helpers' internal Anchor_BroadcastEnvActorDestroy calls
-// (e.g. inside EnKusa_SetupCut) don't echo back to the originator.
-void Anchor_BeginNetworkEnvActorDestroy(void);  // HookHandlers.cpp
-void Anchor_EndNetworkEnvActorDestroy(void);
 }
 
 /**
@@ -106,33 +100,34 @@ void Anchor::HandlePacket_EnvActorDestroy(nlohmann::json payload) {
     // the claim persisted across regrow and blocked the receiver's
     // future broadcasts for the same netId. Echo-suppress with
     // thread-local has no lasting state.
-    Anchor_BeginNetworkEnvActorDestroy();
+    bool matched;
+    {
+        AnchorBridge::ScopedNetworkEnvActorDestroy destroyGuard;
 
-    // Find the matching netId on local. Env actors are spread
-    // across PROP/BG/MISC depending on actor type; FindActorByNetId
-    // walks all 8 syncable categories.
-    Actor* a = FindActorByNetId(gPlayState, actorNetId);
-    const bool matched = (a != nullptr && a->update != nullptr);
-    if (matched) {
-        // Per-actor receive-side dispatch. Most env actors get
-        // vanilla Actor_Kill — they don't have a distinct cut-stub
-        // state. En_Kusa is special: its TYPE_1 / TYPE_2 variants
-        // have a cut-stub state that should be visible on peer to
-        // match the sender's vanilla appearance + regrowth timer.
-        if (a->id == ACTOR_EN_KUSA) {
-            SPDLOG_INFO("[EnvActorDestroy] rx actorNetId={} — applying EnKusa cut "
-                        "transition (preserves cut-stub state + regrowth timer)",
-                        actorNetId);
-            Anchor_ApplyEnKusaCut(a);
-        } else {
-            SPDLOG_INFO("[EnvActorDestroy] rx actorNetId={} — Actor_Kill local copy "
-                        "(actor id={} cat={})",
-                        actorNetId, a->id, (int)a->category);
-            Actor_Kill(a);
+        // Find the matching netId on local. Env actors are spread
+        // across PROP/BG/MISC depending on actor type; FindActorByNetId
+        // walks all 8 syncable categories.
+        Actor* a = FindActorByNetId(gPlayState, actorNetId);
+        matched = (a != nullptr && a->update != nullptr);
+        if (matched) {
+            // Per-actor receive-side dispatch. Most env actors get
+            // vanilla Actor_Kill — they don't have a distinct cut-stub
+            // state. En_Kusa is special: its TYPE_1 / TYPE_2 variants
+            // have a cut-stub state that should be visible on peer to
+            // match the sender's vanilla appearance + regrowth timer.
+            if (a->id == ACTOR_EN_KUSA) {
+                SPDLOG_INFO("[EnvActorDestroy] rx actorNetId={} — applying EnKusa cut "
+                            "transition (preserves cut-stub state + regrowth timer)",
+                            actorNetId);
+                Anchor_ApplyEnKusaCut(a);
+            } else {
+                SPDLOG_INFO("[EnvActorDestroy] rx actorNetId={} — Actor_Kill local copy "
+                            "(actor id={} cat={})",
+                            actorNetId, a->id, (int)a->category);
+                Actor_Kill(a);
+            }
         }
     }
-
-    Anchor_EndNetworkEnvActorDestroy();
 
     if (!matched) {
         SPDLOG_DEBUG("[EnvActorDestroy] rx actorNetId={} — no live local actor found "

@@ -2,6 +2,7 @@
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"  // kSyncableActorCategories — Plan B step 6
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SyncedClaimableDrop.h"  // Plan B step 6
+#include "soh/Network/Anchor/Common/TransientGate.h"  // ScopedNetworkItemDropSpawn (B.6)
 #include "soh/Network/Anchor/Common/DropAdapters/GroundDropAdapter.h"  // Plan B step 3
 #include "soh/Network/Anchor/Common/DropAdapters/ModalOfferAdapter.h"  // Plan B step 6
 #include "soh/ObjectExtension/ObjectExtension.h"  // EnemyNetId lookup — Plan B step 6
@@ -15,16 +16,6 @@ extern "C" {
 #include "z64.h"
 extern PlayState* gPlayState;
 }
-
-// Phase 2 receive-side gate — implemented in HookHandlers.cpp (file-scope
-// statics). Forward-declared here so HandlePacket_ItemDropSync can bracket
-// its `Actor_Spawn` call with the network-spawn flag, ensuring the
-// `OnActorSpawn(ACTOR_EN_ITEM00)` hook stamps the host-supplied netId
-// onto the receiver's local extension and skips re-broadcast.
-void Anchor_BeginNetworkItemDropSpawn(uint32_t netId, uint32_t killerClientId,
-                                       int64_t spawnTimeMs,
-                                       const std::string& killerTeamId);
-void Anchor_EndNetworkItemDropSpawn(void);
 
 /**
  * ITEM_DROP_SYNC — host → all clients (team-broadcast).
@@ -232,15 +223,19 @@ void Anchor::HandlePacket_ItemDropSync(nlohmann::json payload) {
     // position (raw Actor_Spawn → Init runs default actionFunc, no
     // velocity setup) — observed in field log 2026-05-06.
     //
-    // `Anchor_BeginNetworkItemDropSpawn` increments the shim's depth
-    // counter so the inner `Anchor_BeginItemDrop(NULL)` call inside
+    // ScopedNetworkItemDropSpawn increments the shim's depth counter
+    // (so the inner `Anchor_BeginItemDrop(NULL)` call inside
     // Item_DropCollectible sees depth>0 and skips overwriting the
-    // host-supplied killer/spawnTime state. The OnActorSpawn EN_ITEM00
-    // hook reads `g_isSpawningNetworkItemDrop = true` and routes to
-    // the receive-side branch (stamp extension, skip broadcast).
-    Anchor_BeginNetworkItemDropSpawn(itemNetId, killerClientId, spawnTimeMs, killerTeamId);
-    EnItem00* spawned = Item_DropCollectible(gPlayState, &pos, (s16)itemParams);
-    Anchor_EndNetworkItemDropSpawn();
+    // host-supplied killer/spawnTime state) and sets
+    // `g_isSpawningNetworkItemDrop = true` so the OnActorSpawn
+    // EN_ITEM00 hook routes to the receive-side branch (stamp
+    // extension, skip broadcast).
+    EnItem00* spawned;
+    {
+        AnchorBridge::ScopedNetworkItemDropSpawn spawnGuard(
+            itemNetId, killerClientId, spawnTimeMs, killerTeamId);
+        spawned = Item_DropCollectible(gPlayState, &pos, (s16)itemParams);
+    }
 
     if (spawned == nullptr) {
         SPDLOG_WARN("[ItemDropSync] Item_DropCollectible failed for netId={} type=0x{:02X}",
