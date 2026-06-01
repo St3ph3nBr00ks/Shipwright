@@ -132,68 +132,12 @@ bool ShouldLogStateChange(uint32_t netId, int16_t cur, int16_t net, bool blocked
 // Anchor_ShouldSuppressHintnutsLocalAI moved to Bridge/NPCAIBridge.cpp
 // on 2026-06-01 per refactor A.8.
 
-// Sender wrapper — routes a local nutball-on-hintnut collision to the
-// room host. Host applies HitByScrubProjectile1+2 on its own copy of
-// the actor and broadcasts the resulting state via ENEMY_STATE.
-extern "C" void Anchor_NotifyProjectileHitEnemy(Actor* targetActor, s16 projectileActorId) {
-    if (targetActor == nullptr) return;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(targetActor);
-    if (ext == nullptr) return;  // unsynced actor — silently drop
-    Anchor::Instance->SendPacket_ProjectileHitEnemy(ext->netId, projectileActorId);
-}
+// Anchor_NotifyProjectileHitEnemy / Anchor_NotifyTalkRequest /
+// Anchor_NotifyDialogEnd moved to Bridge/EnemySyncBridge.cpp on
+// 2026-06-01 per refactor A.8.
 
-// Sender wrapper — peer's Run actionFunc calls this when its local
-// Link initiates dialog with the hintnut. Host runs the canonical
-// SetupTalk on its local actor and broadcasts state=Talk so peer's
-// rx-driver applies it (instead of host's stale Run state reverting
-// peer back). See Packets/TalkRequest.cpp.
-extern "C" void Anchor_NotifyTalkRequest(Actor* targetActor) {
-    if (targetActor == nullptr) return;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(targetActor);
-    if (ext == nullptr) return;
-    Anchor::Instance->SendPacket_TalkRequest(ext->netId);
-}
-
-// Sender wrapper — peer's Talk actionFunc calls this when its local
-// Message_GetState returns TEXT_STATE_EVENT (dialog closed on peer).
-// Host runs the canonical SetupLeave on its local actor and
-// broadcasts state=Leave back via ENEMY_STATE so peer's rx-driver
-// applies it (instead of peer's local SetupLeave running and
-// spawning hearts every 50ms). See Packets/DialogEnd.cpp.
-extern "C" void Anchor_NotifyDialogEnd(Actor* targetActor) {
-    if (targetActor == nullptr) return;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(targetActor);
-    if (ext == nullptr) return;
-    Anchor::Instance->SendPacket_DialogEnd(ext->netId);
-}
-
-// Sender wrapper — peer's BossGoma_Encounter case 3 calls this when
-// its local actor.projectedPos check passes (peer is looking up at
-// Goma during the intro). Host receives and increments its local
-// Goma's lookedAtFrames so the fight progresses regardless of which
-// player triggered the look. See Packets/BossGomaLookedAt.cpp + #67.
-extern "C" void Anchor_NotifyBossGomaLookedAt(Actor* boss) {
-    if (boss == nullptr) return;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
-    if (::SceneAuthority::IsMyCurrentRoomHost()) return;  // host's own check fires the local path
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(boss);
-    if (ext == nullptr) return;
-    Anchor::Instance->SendPacket_BossGomaLookedAt(ext->netId);
-}
-
-// Sender wrapper — dialog client's EnMd_BlockPath calls this when its
-// transition to Walk fires for the post-Deku-Tree confrontation
-// (DEKU_TREE_DEAD + !SPOKE + KOKIRI). Broadcasts to team so peers
-// can transition their local Mido through the same Walk path and play
-// the walk-away cinematic instead of despawning abruptly when the SPOKE
-// flag syncs. See Packets/MidoPostDekuLeave.cpp + #184 follow-up.
-extern "C" void Anchor_NotifyMidoPostDekuLeave(void) {
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
-    Anchor::Instance->SendPacket_MidoPostDekuLeave();
-}
+// Anchor_NotifyBossGomaLookedAt + Anchor_NotifyMidoPostDekuLeave
+// moved to Bridge/BossGomaBridge.cpp on 2026-06-01 per refactor A.8.
 
 // #191 — Anchor-aware override for Message_ShouldAdvance during a
 // cutscene-internal textbox. C-callable from z_message_PAL.c.
@@ -326,40 +270,11 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
     return 0;
 }
 
-// Receive-side accessor — case 3 of BossGoma_Encounter calls this
-// each frame. Returns 1 (and clears the flag) if a BOSS_GOMA_LOOKED_AT
-// has been received during this encounter; the caller then fires
-// BossGoma_SetupEncounterState4 immediately, skipping the local
-// 15-frame frustum-check accumulator (which doesn't trip on host
-// because host's camera isn't pointing at Goma in MP). Returns 0
-// for single-player / disconnected / non-Boss_Goma callers, in
-// which case case 3 falls through to its vanilla logic.
-extern "C" int Anchor_BossGomaConsumePeerSignaled(Actor* boss) {
-    if (boss == nullptr) return 0;
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return 0;
-    EnemyNetId* ext = const_cast<EnemyNetId*>(
-        ObjectExtension::GetInstance().Get<EnemyNetId>(boss));
-    if (ext == nullptr) return 0;
-    if (!ext->bossGomaPeerSignaled) return 0;
-    ext->bossGomaPeerSignaled = false;
-    SPDLOG_INFO("[BossGoma] case-3 consumed peer-signal flag → firing eye-roll cinematic");
-    return 1;
-}
+// Anchor_BossGomaConsumePeerSignaled moved to Bridge/BossGomaBridge.cpp
+// on 2026-06-01 per refactor A.8.
 
-
-// C-callable: non-host tells host that its local Link was just hit by this enemy
-// so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
-// Phase 2). No-op when Anchor is disconnected, when this client is the room
-// host (it would handle the hit locally), or when the actor lacks an EnemyNetId
-// extension (never reached the sync pipeline). Uses Pillar A Phase 2 per-room
-// authority so the gate stays correct when the original room owner is offline.
-extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
-    if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
-    if (::SceneAuthority::IsMyCurrentRoomHost()) return;
-    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-    if (ext == nullptr) return;
-    Anchor::Instance->SendPacket_EnemyHitPlayer(ext->netId);
-}
+// Anchor_NotifyEnemyHitPlayer moved to Bridge/EnemySyncBridge.cpp on
+// 2026-06-01 per refactor A.8.
 
 // #193 Phase 2 — Item-drop killer-attribution shim.
 //
