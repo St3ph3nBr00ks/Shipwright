@@ -1149,8 +1149,8 @@ actor_found:
         }
 
         if (actor->id == ACTOR_EN_KAREBABA && payload.contains("actionState")) {
-            ext->netStateIndex  = (s16)payload["actionState"].get<int>();
-            ext->netActorParams = (s16)payload.value("actorParams", (int)0);
+            ext->netStateIndex            = (s16)payload["actionState"].get<int>();
+            ext->karebaba.netActorParams  = (s16)payload.value("actorParams", (int)0);
         }
 
         // KB-08 / #7 — cache Dekubaba host state so OnActorUpdate can call
