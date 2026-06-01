@@ -136,4 +136,77 @@ struct EngageExitContext {
 
 EngageExitDecision EvaluateEngageExit(const EngageExitContext& ctx);
 
+// ----------------------------------------------------------------------------
+// Phase 3 — shared TickSTANDBY target resolution + handoff decision.
+//
+// Both NPC Follower and NPC Invader's TickSTANDBY zero speedXZ, refresh
+// the face-target (validate existing then re-acquire via per-actor
+// picker), then pick one of three exits:
+//   - HandoffToOther (→ FOLLOW): the locomotion layer should resume
+//     pursuit. Follower's predicate is leader-based; Invader's is
+//     target-based — see `shouldHandoff` doc below.
+//   - DropToIdle (→ IDLE): no target in detect range AND no handoff.
+//     Follower drops to IDLE only when leader is close; Invader drops
+//     to IDLE unconditionally (no leader concept).
+//   - StayStandby: target acquired AND no handoff. TryEngageCombat
+//     will swap to ATTACK / BLOCK / ENGAGE / RANGED_ATTACK once a
+//     tier matches.
+//
+// `EvaluateStandby` returns the resolved face-target + decision; the
+// caller updates `sAttackState.target`, applies per-actor facing
+// (YawTowardTarget is file-local in each TU; Follower falls back to
+// facing the leader, Invader skips facing when no target), and
+// runs the per-actor state transition + SPDLOG.
+// ----------------------------------------------------------------------------
+struct StandbyEvaluation {
+    enum class Decision {
+        StayStandby,
+        HandoffToOther,  // caller transitions to its FOLLOW-equivalent.
+        DropToIdle,      // caller transitions to IDLE.
+    };
+    Decision decision      = Decision::StayStandby;
+    Actor*   faceTarget    = nullptr;  // resolved target (null if none in range).
+};
+
+struct CombatStandbyContext {
+    Actor* self;
+    PlayState* play;
+
+    // Existing target from caller's combat-state file-static
+    // (sAttackState.target). May be null, stale, or freshly valid.
+    Actor* existingTarget = nullptr;
+
+    // Re-acquisition closure. Called when existingTarget is invalid
+    // (null / update==nullptr / health<=0 if checkTargetHealth).
+    // Follower passes FindNearestEnemyForAttack; Invader passes
+    // PickHostileTarget.
+    std::function<Actor*()> findNearbyEnemy;
+
+    // Whether to invalidate the existing target on health <= 0.
+    // Follower true (NPC retreats from dying targets); Invader false.
+    bool checkTargetHealth = true;
+
+    // Per-actor handoff predicate. Returns true when STANDBY should
+    // transition to the caller's FOLLOW-equivalent. Receives the
+    // resolved face-target (nullptr if no target acquired) so the
+    // predicate can branch on target presence.
+    //
+    //   Follower: `[a, &leaderPos](Actor*) {
+    //                return ShouldPursue3D(a->world.pos, leaderPos,
+    //                                       kEnterFollowBand); }`
+    //     — leader-based. Returns true whether or not a target was
+    //     acquired (no-enemy + far-leader → FOLLOW; target + far-leader
+    //     → FOLLOW).
+    //
+    //   Invader: `[a](Actor* t) {
+    //                if (t == nullptr) return false;
+    //                return ShouldPursue3D(a->world.pos, t->world.pos,
+    //                                       kStandbyIdleBand); }`
+    //     — target-based. Returns false when target is null (so the
+    //     no-target branch falls through to DropToIdle).
+    std::function<bool(Actor* faceTarget)> shouldHandoff;
+};
+
+StandbyEvaluation EvaluateStandby(const CombatStandbyContext& ctx);
+
 }  // namespace AnchorAICombat

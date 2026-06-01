@@ -1,4 +1,4 @@
-// Refactor B.5 Phase 1+2 — shared combat-engagement helpers.
+// Refactor B.5 Phase 1+2+3 — shared combat-engagement helpers.
 
 #include "CombatEngagement.h"
 
@@ -82,6 +82,39 @@ EngageExitDecision EvaluateEngageExit(const EngageExitContext& ctx) {
     }
 
     out.kind = EngageExitKind::ContinuePursuit;
+    return out;
+}
+
+StandbyEvaluation EvaluateStandby(const CombatStandbyContext& ctx) {
+    StandbyEvaluation out;
+
+    // Validate existing target → re-acquire if invalid. Same shape as
+    // the original TickSTANDBY bodies in FollowerNPC.cpp:3017-3024 and
+    // Invader.cpp:2526-2533.
+    Actor* faceTarget = ctx.existingTarget;
+    bool invalid = (faceTarget == nullptr || faceTarget->update == nullptr);
+    if (!invalid && ctx.checkTargetHealth) {
+        invalid = (faceTarget->colChkInfo.health <= 0);
+    }
+    if (invalid) {
+        faceTarget = ctx.findNearbyEnemy ? ctx.findNearbyEnemy() : nullptr;
+    }
+    out.faceTarget = faceTarget;
+
+    // Decision precedence: handoff > drop-to-idle > stay-standby.
+    // Follower's leader-far case triggers HandoffToOther regardless
+    // of target presence (so "no enemy + far leader" goes FOLLOW
+    // rather than IDLE). Invader's predicate returns false when
+    // target is null, so the no-target branch falls through.
+    const bool wantsHandoff =
+        ctx.shouldHandoff ? ctx.shouldHandoff(faceTarget) : false;
+    if (wantsHandoff) {
+        out.decision = StandbyEvaluation::Decision::HandoffToOther;
+    } else if (faceTarget == nullptr) {
+        out.decision = StandbyEvaluation::Decision::DropToIdle;
+    } else {
+        out.decision = StandbyEvaluation::Decision::StayStandby;
+    }
     return out;
 }
 

@@ -3009,60 +3009,62 @@ void TickSTANDBY(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
     a->speedXZ = 0.0f;
 
-    // Face nearest enemy if known. Falls back to facing leader so the
-    // alert pose has a sensible orientation when target is null.
-    Actor* faceTarget = sAttackState.target;
-    if (faceTarget == nullptr || faceTarget->update == nullptr ||
-        faceTarget->colChkInfo.health <= 0) {
-        faceTarget = FindNearestEnemyForAttack(this_, play, kStandbyDetectDist);
-        if (faceTarget != nullptr) {
-            sAttackState.target = faceTarget;  // refresh target tracking
-        }
-    }
-    a->shape.rot.y = (faceTarget != nullptr)
-                       ? YawTowardTarget(a->world.pos, faceTarget->world.pos)
+    // B.5 Phase 3 — shared target resolution + handoff decision.
+    // Leader-based handoff (returns true regardless of target
+    // presence): "no enemy + far leader" → FOLLOW; "target + far
+    // leader" → FOLLOW too. "no enemy + near leader" falls through
+    // to DropToIdle.
+    AnchorAICombat::CombatStandbyContext ctx;
+    ctx.self              = a;
+    ctx.play              = play;
+    ctx.existingTarget    = sAttackState.target;
+    ctx.findNearbyEnemy   = [this_, play]() {
+        return FindNearestEnemyForAttack(this_, play, kStandbyDetectDist);
+    };
+    ctx.checkTargetHealth = true;
+    ctx.shouldHandoff     = [a, &leaderPos](Actor*) {
+        return AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
+                                        kEnterFollowBand);
+    };
+    const auto eval = AnchorAICombat::EvaluateStandby(ctx);
+
+    // Reflect resolved target. Matches the original "set nullptr in
+    // no-target branch" + "refresh on re-acquire" idiom.
+    sAttackState.target = eval.faceTarget;
+
+    // Face logic — per-actor because YawTowardTarget is file-local.
+    // Follower falls back to facing the leader when no target is
+    // resolved (alert pose with a sensible orientation).
+    a->shape.rot.y = (eval.faceTarget != nullptr)
+                       ? YawTowardTarget(a->world.pos, eval.faceTarget->world.pos)
                        : YawTowardTarget(a->world.pos, leaderPos);
     a->world.rot.y = a->shape.rot.y;
 
-    // No enemy in detect range — drop back to IDLE / FOLLOW so the
-    // dispatcher's animType=0 logic fires next tick (weapon sheathes
-    // visually via the free-variant idle anim). Phase 3 P1-E: 3D-aware
-    // — if leader is meaningfully above/below (ledge), → FOLLOW so the
-    // navigator can engage CLIMBING / hoist / drop subgoals instead of
-    // dropping to IDLE under the leader's feet.
-    if (faceTarget == nullptr) {
-        sAttackState.target = nullptr;
-        if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
-                                     kEnterFollowBand)) {
-            SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (no enemies, leader far)");
+    switch (eval.decision) {
+        case AnchorAICombat::StandbyEvaluation::Decision::HandoffToOther: {
+            // Two SPDLOG variants (preserved from the original): the
+            // no-enemy case versus the target-acquired case render
+            // different metrics.
+            if (eval.faceTarget == nullptr) {
+                SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (no enemies, leader far)");
+            } else {
+                const float leaderDistXZ = AnchorDist::DistXZ(a->world.pos, leaderPos);
+                const float leaderDy     = std::fabs(leaderPos.y - a->world.pos.y);
+                SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (leader beyond hysteresis "
+                            "XZ={:.0f}u/{:.0f}u, |dy|={:.0f}u/{:.0f}u)",
+                            leaderDistXZ, kEnterFollow,
+                            leaderDy, kEnterFollowY);
+            }
             this_->state = EN_FOLLOWER_STATE_FOLLOW;
-        } else {
+            return;
+        }
+        case AnchorAICombat::StandbyEvaluation::Decision::DropToIdle: {
             SPDLOG_INFO("[FollowerNPC] STANDBY→IDLE (no enemies, near leader)");
             this_->state = EN_FOLLOWER_STATE_IDLE;
+            return;
         }
-        return;
-    }
-
-    // Leader yields combat — STANDBY won't chase the leader (combat
-    // states lock speedXZ=0), but FOLLOW will. Hand off to FOLLOW once
-    // leader is moderately far — kEnterFollow=80u was the threshold
-    // for IDLE→FOLLOW, and using the same value here gives consistent
-    // "follow leader" behaviour. Without this fix (log 160 — leash
-    // was 600u), the NPC stayed locked in STANDBY/RANGED_ATTACK
-    // cycle even as the leader walked across Hyrule Field. The
-    // combat cooldown gives FOLLOW a beat to make progress before
-    // TryEngageCombat re-engages. Phase 3 P1-E: 3D-aware so a leader
-    // climbing to a ledge above (small XZ, huge Y) also triggers
-    // STANDBY→FOLLOW handoff.
-    if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
-                                 kEnterFollowBand)) {
-        const float leaderDistXZ = AnchorDist::DistXZ(a->world.pos, leaderPos);
-        const float leaderDy     = std::fabs(leaderPos.y - a->world.pos.y);
-        SPDLOG_INFO("[FollowerNPC] STANDBY→FOLLOW (leader beyond hysteresis "
-                    "XZ={:.0f}u/{:.0f}u, |dy|={:.0f}u/{:.0f}u)",
-                    leaderDistXZ, kEnterFollow,
-                    leaderDy, kEnterFollowY);
-        this_->state = EN_FOLLOWER_STATE_FOLLOW;
+        case AnchorAICombat::StandbyEvaluation::Decision::StayStandby:
+            break;
     }
 
     // Otherwise stay in STANDBY. TryEngageCombat (called pre-dispatch)
