@@ -131,58 +131,45 @@ void Anchor::HandlePacket_ItemCollected(nlohmann::json payload) {
     // idempotent when the actor is already dead/dequeued.
     uint32_t assocActorNetId = (uint32_t)payload.value("associatedActorNetId", (uint32_t)0);
     if (assocActorNetId != 0) {
-        bool dismissed = false;
-        for (size_t ci = 0; ci < kSyncableActorCategoriesCount && !dismissed; ++ci) {
-            Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
-            while (a != nullptr) {
-                const EnemyNetId* nidExt =
-                    ObjectExtension::GetInstance().Get<EnemyNetId>(a);
-                if (nidExt != nullptr && nidExt->netId == assocActorNetId &&
-                    a->update != nullptr) {
-                    // Skip dismissal for actors with a natural
-                    // respawn cycle the pickup must NOT interrupt:
-                    //   - EN_KUSA: cut-stub → CutWaitRegrow →
-                    //     SetupRegrow → Main (log 297 bug).
-                    //   - EN_KAREBABA: DeadItemDrop → Dead → Regrow
-                    //     → Idle. params=0 fast-forwards the peer's
-                    //     DeadItemDrop tick to SetupDead next frame
-                    //     so the visible head decoration disappears
-                    //     immediately on peer side (mirror of the
-                    //     host-side fast-forward in
-                    //     ItemPickupRequest.cpp + HookHandlers.cpp).
-                    if (a->id == ACTOR_EN_KUSA) {
-                        SPDLOG_INFO("[ItemCollected] skipping dismiss for assoc netId={} "
-                                    "(actor id=EN_KUSA — cut state regrows naturally)",
-                                    assocActorNetId);
-                        dismissed = true;
-                        break;
-                    }
-                    if (a->id == ACTOR_EN_KAREBABA) {
-                        a->params = 0;
-                        SPDLOG_INFO("[ItemCollected] fast-forwarding EN_KAREBABA assoc netId={} "
-                                    "to SetupDead (params=0)",
-                                    assocActorNetId);
-                        dismissed = true;
-                        break;
-                    }
-                    SPDLOG_INFO("[ItemCollected] dismissing associated actor netId={} "
-                                "on pickup of itemNetId={}",
-                                assocActorNetId, itemNetId);
-                    // Bracket with isKillingNetworkActor so OnActorKill
-                    // skips the redundant ENEMY_DEFEATED broadcast.
-                    // The actor's death is a pickup-dismissal, not a
-                    // combat defeat — no need to network it (peers
-                    // also Actor_Kill via this same handler).
-                    isKillingNetworkActor = true;
-                    Actor_Kill(a);
-                    isKillingNetworkActor = false;
-                    dismissed = true;
-                    break;
-                }
-                a = a->next;
-            }
+        Actor* a = FindActorByNetId(gPlayState, assocActorNetId);
+        // Filter out dead actors — only act on a live mirror.
+        if (a != nullptr && a->update == nullptr) {
+            a = nullptr;
         }
-        if (!dismissed) {
+        if (a != nullptr) {
+            // Skip dismissal for actors with a natural respawn cycle
+            // the pickup must NOT interrupt:
+            //   - EN_KUSA: cut-stub → CutWaitRegrow → SetupRegrow → Main
+            //     (log 297 bug).
+            //   - EN_KAREBABA: DeadItemDrop → Dead → Regrow → Idle.
+            //     params=0 fast-forwards the peer's DeadItemDrop tick
+            //     to SetupDead next frame so the visible head
+            //     decoration disappears immediately on peer side
+            //     (mirror of the host-side fast-forward in
+            //     ItemPickupRequest.cpp + HookHandlers.cpp).
+            if (a->id == ACTOR_EN_KUSA) {
+                SPDLOG_INFO("[ItemCollected] skipping dismiss for assoc netId={} "
+                            "(actor id=EN_KUSA — cut state regrows naturally)",
+                            assocActorNetId);
+            } else if (a->id == ACTOR_EN_KAREBABA) {
+                a->params = 0;
+                SPDLOG_INFO("[ItemCollected] fast-forwarding EN_KAREBABA assoc netId={} "
+                            "to SetupDead (params=0)",
+                            assocActorNetId);
+            } else {
+                SPDLOG_INFO("[ItemCollected] dismissing associated actor netId={} "
+                            "on pickup of itemNetId={}",
+                            assocActorNetId, itemNetId);
+                // Bracket with isKillingNetworkActor so OnActorKill
+                // skips the redundant ENEMY_DEFEATED broadcast.
+                // The actor's death is a pickup-dismissal, not a
+                // combat defeat — no need to network it (peers
+                // also Actor_Kill via this same handler).
+                isKillingNetworkActor = true;
+                Actor_Kill(a);
+                isKillingNetworkActor = false;
+            }
+        } else {
             SPDLOG_DEBUG("[ItemCollected] associated actor netId={} not found locally "
                          "(already dead, despawned, or not in synced categories)",
                          assocActorNetId);

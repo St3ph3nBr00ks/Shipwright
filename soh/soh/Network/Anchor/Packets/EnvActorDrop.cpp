@@ -136,26 +136,13 @@ void Anchor::HandlePacket_EnvActorDrop(nlohmann::json payload) {
         return;
     }
 
-    // Walk the syncable actor categories for the matching netId. If the
-    // actor exists and is alive on host, run the drop. If it's already
-    // dead (host cut their copy first and the drop already fired), skip
-    // — this is the de-dup path that eliminates the simultaneous-cut
-    // double-drop case.
-    bool hostActorAlive = false;
-    for (size_t ci = 0; ci < kSyncableActorCategoriesCount; ++ci) {
-        Actor* it = gPlayState->actorCtx.actorLists[kSyncableActorCategories[ci]].head;
-        while (it != nullptr) {
-            if (it->update != nullptr) {
-                const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(it);
-                if (ext != nullptr && ext->netId == netId) {
-                    hostActorAlive = true;
-                    break;
-                }
-            }
-            it = it->next;
-        }
-        if (hostActorAlive) break;
-    }
+    // Find the matching netId on host's actor list. If the actor
+    // exists and is alive on host, run the drop. If it's already
+    // dead (host cut their copy first and the drop already fired),
+    // skip — this is the de-dup path that eliminates the
+    // simultaneous-cut double-drop case.
+    Actor* hostActor = FindActorByNetId(gPlayState, netId);
+    bool hostActorAlive = (hostActor != nullptr && hostActor->update != nullptr);
     if (!hostActorAlive) {
         SPDLOG_INFO("[EnvActorDrop] netId={} — actor not alive on host (already cut or never spawned); skipping drop",
                     netId);
