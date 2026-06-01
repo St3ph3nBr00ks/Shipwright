@@ -2522,48 +2522,57 @@ void TickSTANDBY(EnInvader* this_, PlayState* play, const Vec3f& targetHintPos) 
     Actor* a = &this_->actor;
     a->speedXZ = 0.0f;
 
-    // Face nearest hostile target.
-    Actor* faceTarget = sAttackState.target;
-    if (faceTarget == nullptr || faceTarget->update == nullptr) {
-        faceTarget = PickHostileTarget(a, play, kStandbyDetectDist,
-                                       /*maxYDelta=*/kRangedYFilter);
-        if (faceTarget != nullptr) {
-            sAttackState.target = faceTarget;
-        }
-    }
-    if (faceTarget != nullptr) {
-        a->shape.rot.y = YawTowardTarget(a->world.pos, faceTarget->world.pos);
+    // B.5 Phase 3 — shared target resolution + handoff decision.
+    // Target-based handoff: returns false when no target (so the
+    // no-target branch falls through to DropToIdle → IDLE).
+    // checkTargetHealth=false (Invader chases until Actor_Kill).
+    AnchorAICombat::CombatStandbyContext ctx;
+    ctx.self              = a;
+    ctx.play              = play;
+    ctx.existingTarget    = sAttackState.target;
+    ctx.findNearbyEnemy   = [a, play]() {
+        return PickHostileTarget(a, play, kStandbyDetectDist,
+                                  /*maxYDelta=*/kRangedYFilter);
+    };
+    ctx.checkTargetHealth = false;
+    ctx.shouldHandoff     = [a](Actor* faceTarget) {
+        if (faceTarget == nullptr) return false;
+        return AnchorAI::ShouldPursue3D(a->world.pos,
+                                        faceTarget->world.pos,
+                                        kStandbyIdleBand);
+    };
+    const auto eval = AnchorAICombat::EvaluateStandby(ctx);
+
+    sAttackState.target = eval.faceTarget;
+
+    // Face logic — Invader only faces when a target is acquired
+    // (no leader-fallback unlike Follower).
+    if (eval.faceTarget != nullptr) {
+        a->shape.rot.y = YawTowardTarget(a->world.pos, eval.faceTarget->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 
-    // No target in detect range → drop to IDLE (Agent 2's locomotion
-    // will pick up from there).
-    if (faceTarget == nullptr) {
-        sAttackState.target = nullptr;
-        SPDLOG_INFO("[Invader] STANDBY→IDLE (no targets in detect range)");
-        this_->state = EN_INVADER_STATE_IDLE;
-        return;
-    }
-
-    // Target is far enough that the locomotion layer should resume
-    // pursuit toward it. Hand off to FOLLOW (Agent 2 wires the
-    // pursuit toward sAttackState.target via the target hint; for
-    // now FOLLOW may default to IDLE if Agent 2's locomotion isn't
-    // landed yet — that's acceptable, TryEngageCombat will re-fire
-    // once a tier matches). Phase 3 P1-E: 3D-aware so a target who
-    // jumped to a ledge above (small XZ, huge Y) also triggers FOLLOW
-    // — letting the substrate path engage CLIMBING/hoist subgoals
-    // instead of staring at the wall in STANDBY forever.
-    if (AnchorAI::ShouldPursue3D(a->world.pos, faceTarget->world.pos,
-                                 kStandbyIdleBand)) {
-        const float distXZ =
-            AnchorDist::DistXZ(a->world.pos, faceTarget->world.pos);
-        const float dy =
-            std::fabs(faceTarget->world.pos.y - a->world.pos.y);
-        SPDLOG_INFO("[Invader] STANDBY→FOLLOW (target XZ={:.0f}u, "
-                    "|dy|={:.0f}u — handoff to locomotion)",
-                    distXZ, dy);
-        this_->state = EN_INVADER_STATE_FOLLOW;
+    switch (eval.decision) {
+        case AnchorAICombat::StandbyEvaluation::Decision::HandoffToOther: {
+            // shouldHandoff returns false when faceTarget is null, so
+            // this branch only fires with a non-null target.
+            const float distXZ =
+                AnchorDist::DistXZ(a->world.pos, eval.faceTarget->world.pos);
+            const float dy =
+                std::fabs(eval.faceTarget->world.pos.y - a->world.pos.y);
+            SPDLOG_INFO("[Invader] STANDBY→FOLLOW (target XZ={:.0f}u, "
+                        "|dy|={:.0f}u — handoff to locomotion)",
+                        distXZ, dy);
+            this_->state = EN_INVADER_STATE_FOLLOW;
+            return;
+        }
+        case AnchorAICombat::StandbyEvaluation::Decision::DropToIdle: {
+            SPDLOG_INFO("[Invader] STANDBY→IDLE (no targets in detect range)");
+            this_->state = EN_INVADER_STATE_IDLE;
+            return;
+        }
+        case AnchorAICombat::StandbyEvaluation::Decision::StayStandby:
+            break;
     }
     // Otherwise stay in STANDBY; TryEngageCombat will re-engage once
     // a tier matches.
