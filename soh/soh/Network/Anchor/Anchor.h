@@ -975,6 +975,34 @@ class Anchor : public Network {
     // parameters for parent-function locals it needs (e.g., player,
     // p2Pos). Future commits in Phase 1 add more handlers; eventually
     // TickFollower's switch becomes a thin dispatcher.
+    //
+    // B.1 — TickFollower dispatch table. Per Plans/B.1_design_review.md
+    // (DR-6 Option C/D), the switch at Follower.cpp:2009 is replaced
+    // with a member-fn pointer table indexed by FollowerAIState. To
+    // keep handler bodies untouched (zero-risk MVP), each
+    // DispatchState* wrapper unpacks FollowerTickContext and calls
+    // the matching HandleState* with its original heterogeneous
+    // signature. The wrappers are thin (~3 LoC each) and only exist
+    // to give the dispatch table a uniform method-pointer type.
+    struct FollowerTickContext {
+        Player* player       = nullptr;
+        Actor*  dummyActor   = nullptr;
+        Actor*  leaderActor  = nullptr;
+        Vec3f   leaderPos    = { 0.0f, 0.0f, 0.0f };
+        Vec3f   sideTarget   = { 0.0f, 0.0f, 0.0f };
+        Vec3f   p2Pos        = { 0.0f, 0.0f, 0.0f };
+    };
+    void DispatchStateIdle        (const FollowerTickContext& ctx);
+    void DispatchStateFollow      (const FollowerTickContext& ctx);
+    void DispatchStateStuck       (const FollowerTickContext& ctx);
+    void DispatchStateEngage      (const FollowerTickContext& ctx);
+    void DispatchStateAttack      (const FollowerTickContext& ctx);
+    void DispatchStateClimbing    (const FollowerTickContext& ctx);
+    void DispatchStateBlock       (const FollowerTickContext& ctx);
+    void DispatchStateRangedAttack(const FollowerTickContext& ctx);
+    void DispatchStateStandby     (const FollowerTickContext& ctx);
+    void DispatchStateCollectItem (const FollowerTickContext& ctx);
+
     void HandleStateStandby();
     void HandleStateBlock(Player* player, const Vec3f& p2Pos);
     void HandleStateClimbing(Player* player, const Vec3f& leaderPos, Actor* leaderActor);
