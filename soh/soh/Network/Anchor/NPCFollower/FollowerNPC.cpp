@@ -2847,40 +2847,47 @@ void TickBLOCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
         sBlockState.hitAnimFrames--;
     }
 
-    // Exit after kBlockDurationMs — re-evaluate. Phase 5 P2-H: 3D-aware
-    // recheck via IsArrived3D. Without the Y gate, a target that
-    // jumped/climbed to a ledge directly above during the block window
-    // would still satisfy the XZ distance and trigger ATTACK — the
-    // swing then whiffed into empty air. Reuse kEngageStrikeY (Link
-    // body-height reach) added in Phase 3.
-    const uint64_t durationTicks =
-        (uint64_t)Anchor::Instance->MsToGameTicks(kBlockDurationMs);
-    if (curFrame >= sBlockState.entryFrame + durationTicks) {
-        // If target still alive and in melee + vertical reach, swap to ATTACK.
-        if (sAttackState.target != nullptr &&
-            AnchorAI::IsInStrikeRange(a->world.pos,
-                                       sAttackState.target->world.pos,
-                                       kAttackEngageStrikeBand)) {
-            const float distXZ = AnchorDist::DistXZ(a->world.pos,
-                                                     sAttackState.target->world.pos);
-            const float dy = std::fabs(sAttackState.target->world.pos.y -
-                                        a->world.pos.y);
+    // B.5 Phase 5 — shared block-timer-expiry decision. Continue path
+    // (block still ongoing) falls through; ExpiredInStrike →
+    // BLOCK→ATTACK; Expired → BLOCK→ChooseCombatExitState. Original
+    // body's "Phase 5 P2-H: 3D-aware" strike check lives inside the
+    // shared helper.
+    AnchorAICombat::BlockTimerContext blockCtx;
+    blockCtx.self            = a;
+    blockCtx.target          = sAttackState.target;
+    blockCtx.curFrame        = curFrame;
+    blockCtx.entryFrame      = sBlockState.entryFrame;
+    blockCtx.blockDurationMs = kBlockDurationMs;
+    blockCtx.strikeBand      = kAttackEngageStrikeBand;
+    const auto timer = AnchorAICombat::EvaluateBlockTimer(blockCtx);
+
+    switch (timer.kind) {
+        case AnchorAICombat::BlockTimerDecision::Kind::Continue:
+            break;
+        case AnchorAICombat::BlockTimerDecision::Kind::ExpiredInStrike: {
+            // Target still in melee + vertical reach — swap to ATTACK.
             SPDLOG_INFO("[FollowerNPC] BLOCK→ATTACK (block timer expired, "
                         "target still in range XZ={:.0f}u |dy|={:.0f}u)",
-                        distXZ, dy);
+                        timer.distXZ, timer.dyToTarget);
             this_->state = EN_FOLLOWER_STATE_ATTACK;
+            // Follower-side animation-entry policy (DR-2 §"Policy axis
+            // #4"): set stopAnimPlaying=0 so the dispatcher can wire
+            // kSwordSwing on the next tick.
             this_->stopAnimPlaying = 0;
             sAttackState.swingFiredAT = false;
             return;
         }
-        // Otherwise drop back to STANDBY (target out of melee but
-        // still maybe nearby) or FOLLOW (no enemy detected).
-        const s32 nextState = ChooseCombatExitState(this_, play);
-        SPDLOG_INFO("[FollowerNPC] BLOCK→{} (block timer expired)",
-                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
-        this_->state = nextState;
-        if (nextState == EN_FOLLOWER_STATE_FOLLOW) {
-            sAttackState.target = nullptr;
+        case AnchorAICombat::BlockTimerDecision::Kind::Expired: {
+            // Target gone or out of strike range — drop back to
+            // STANDBY (if any enemy nearby) or FOLLOW (clean exit).
+            const s32 nextState = ChooseCombatExitState(this_, play);
+            SPDLOG_INFO("[FollowerNPC] BLOCK→{} (block timer expired)",
+                        (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
+            this_->state = nextState;
+            if (nextState == EN_FOLLOWER_STATE_FOLLOW) {
+                sAttackState.target = nullptr;
+            }
+            return;
         }
     }
 }

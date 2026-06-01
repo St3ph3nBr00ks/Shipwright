@@ -1,4 +1,4 @@
-// Refactor B.5 Phase 1+2+3+4 — shared combat-engagement helpers.
+// Refactor B.5 Phase 1+2+3+4+5 — shared combat-engagement helpers.
 
 #include "CombatEngagement.h"
 
@@ -126,6 +126,36 @@ Actor* ResolveAttackTarget(const ResolveAttackTargetContext& ctx) {
         return nullptr;
     }
     return target;
+}
+
+BlockTimerDecision EvaluateBlockTimer(const BlockTimerContext& ctx) {
+    BlockTimerDecision out;
+
+    const uint64_t durationTicks =
+        (uint64_t)Anchor::Instance->MsToGameTicks(ctx.blockDurationMs);
+    if (ctx.curFrame < ctx.entryFrame + durationTicks) {
+        out.kind = BlockTimerDecision::Kind::Continue;
+        return out;
+    }
+
+    // Timer expired. Phase 5 P2-H carries over from the original
+    // body: 3D-aware strike check — IsInStrikeRange enforces both XZ
+    // and Y so a target that jumped/climbed/dropped out of vertical
+    // reach during the block window doesn't trigger ATTACK into
+    // empty air.
+    if (ctx.target != nullptr &&
+        AnchorAI::IsInStrikeRange(ctx.self->world.pos,
+                                  ctx.target->world.pos,
+                                  ctx.strikeBand)) {
+        out.kind       = BlockTimerDecision::Kind::ExpiredInStrike;
+        out.distXZ     = AnchorDist::DistXZ(ctx.self->world.pos,
+                                            ctx.target->world.pos);
+        out.dyToTarget = std::fabs(ctx.target->world.pos.y - ctx.self->world.pos.y);
+        return out;
+    }
+
+    out.kind = BlockTimerDecision::Kind::Expired;
+    return out;
 }
 
 AttackTickResult TickAttackATAndComplete(const AttackTickContext& ctx) {

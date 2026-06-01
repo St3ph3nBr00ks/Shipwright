@@ -2426,34 +2426,41 @@ void TickBLOCK(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
         sBlockState.hitAnimFrames--;
     }
 
-    // Phase 5 P2-H: 3D-aware BLOCK timer recheck. If the target moved
-    // vertically out of reach during the block window (jumped to a
-    // ledge above, fell to a pit below), the XZ-only "in range" check
-    // would trigger ATTACK into empty air. Reuse kEngageStrikeY
-    // (Link body height) added in Phase 3.
-    const uint64_t durationTicks =
-        (uint64_t)Anchor::Instance->MsToGameTicks(kBlockDurationMs);
-    if (curFrame >= sBlockState.entryFrame + durationTicks) {
-        if (sAttackState.target != nullptr &&
-            AnchorAI::IsInStrikeRange(a->world.pos,
-                                       sAttackState.target->world.pos,
-                                       kAttackEngageStrikeBand)) {
-            const float distXZ = AnchorDist::DistXZ(a->world.pos,
-                                                     sAttackState.target->world.pos);
-            const float dy = std::fabs(sAttackState.target->world.pos.y -
-                                        a->world.pos.y);
+    // B.5 Phase 5 — shared block-timer-expiry decision. Original
+    // "Phase 5 P2-H" 3D-aware strike check lives inside the helper.
+    AnchorAICombat::BlockTimerContext blockCtx;
+    blockCtx.self            = a;
+    blockCtx.target          = sAttackState.target;
+    blockCtx.curFrame        = curFrame;
+    blockCtx.entryFrame      = sBlockState.entryFrame;
+    blockCtx.blockDurationMs = kBlockDurationMs;
+    blockCtx.strikeBand      = kAttackEngageStrikeBand;
+    const auto timer = AnchorAICombat::EvaluateBlockTimer(blockCtx);
+
+    switch (timer.kind) {
+        case AnchorAICombat::BlockTimerDecision::Kind::Continue:
+            break;
+        case AnchorAICombat::BlockTimerDecision::Kind::ExpiredInStrike: {
             SPDLOG_INFO("[Invader] BLOCK→ATTACK (timer expired, target in range "
-                        "XZ={:.0f}u |dy|={:.0f}u)", distXZ, dy);
+                        "XZ={:.0f}u |dy|={:.0f}u)",
+                        timer.distXZ, timer.dyToTarget);
             this_->state = EN_INVADER_STATE_ATTACK;
+            // Invader keeps explicit-dispatch animation policy
+            // (DR-2 §"Policy axis #4" Option 2): TickATTACK's
+            // on-entry block will call InvEnsureAnimation(kSwordSwing).
+            // No stopAnimPlaying handshake needed here.
             sAttackState.swingFiredAT = false;
             return;
         }
-        const s32 next = ChooseCombatExitState(this_, play);
-        SPDLOG_INFO("[Invader] BLOCK→{} (timer expired)",
-                    (next == EN_INVADER_STATE_STANDBY ? "STANDBY" : "IDLE/FOLLOW"));
-        this_->state = next;
-        if (next != EN_INVADER_STATE_STANDBY) {
-            sAttackState.target = nullptr;
+        case AnchorAICombat::BlockTimerDecision::Kind::Expired: {
+            const s32 next = ChooseCombatExitState(this_, play);
+            SPDLOG_INFO("[Invader] BLOCK→{} (timer expired)",
+                        (next == EN_INVADER_STATE_STANDBY ? "STANDBY" : "IDLE/FOLLOW"));
+            this_->state = next;
+            if (next != EN_INVADER_STATE_STANDBY) {
+                sAttackState.target = nullptr;
+            }
+            return;
         }
     }
 }

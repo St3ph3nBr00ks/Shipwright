@@ -297,4 +297,58 @@ struct AttackTickResult {
 // to ChooseCombatExitState's result on true).
 AttackTickResult TickAttackATAndComplete(const AttackTickContext& ctx);
 
+// ----------------------------------------------------------------------------
+// Phase 5 — shared TickBLOCK timer-expiry decision.
+//
+// TickBLOCK has high per-actor variance (DR-2 §"Phase 5 risk: medium-high"):
+//
+//   - Animation entry: Follower delegates to dispatcher (no anim wire
+//     in TickBLOCK); Invader fires `InvEnsureAnimation(kBlockWait)` on
+//     state-entry — DR-2 §"Policy axis #4" Option 2.
+//   - Per-tick anim override: Invader swaps kBlockWait↔kBlockHit
+//     based on `hitAnimFrames`; Follower has no equivalent.
+//   - Frontal deflect: Invader-only AC_HIT absorption (DR-2
+//     §"Policy axis #6"); Follower has none.
+//   - Target validation: Follower exits via `ChooseCombatExitState`
+//     when target invalidates mid-block; Invader just nulls the
+//     target slot.
+//   - Exit cleanup: each actor clears `sAttackState.target` under
+//     different conditions.
+//
+// Given the divergence, Phase 5 narrow-scopes to the single shared
+// block: the **timer-expiry decision** at the end of each TickBLOCK
+// body. Both actors check `curFrame >= entryFrame + durationTicks`
+// then branch on whether the target is in strike range. Returns
+// {Continue, ExpiredInStrike, Expired}; caller switches on it and
+// applies its per-actor state transition + SPDLOG.
+//
+// Entry-frame capture, per-tick anim override, target validation,
+// face logic, frontal deflect, hitAnimFrames decrement stay
+// per-actor (too divergent to share cleanly without extensive
+// callback parametrization).
+// ----------------------------------------------------------------------------
+struct BlockTimerContext {
+    Actor* self;
+    Actor* target;
+    uint64_t curFrame;
+    uint64_t entryFrame;
+    int blockDurationMs;
+    AnchorAI::ThresholdPair strikeBand;  // typically kAttackEngageStrikeBand
+};
+
+struct BlockTimerDecision {
+    enum class Kind {
+        Continue,         // Block still ongoing — caller proceeds with current frame.
+        ExpiredInStrike,  // Target in strike range — caller transitions to ATTACK.
+        Expired,          // Timer up, no in-range target — caller calls ChooseCombatExitState.
+    };
+    Kind kind = Kind::Continue;
+    // Populated when kind == ExpiredInStrike (so caller's SPDLOG can
+    // render the same metrics the original body did).
+    float distXZ     = 0.0f;
+    float dyToTarget = 0.0f;
+};
+
+BlockTimerDecision EvaluateBlockTimer(const BlockTimerContext& ctx);
+
 }  // namespace AnchorAICombat
