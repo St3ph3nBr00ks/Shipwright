@@ -2,6 +2,7 @@
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/Common/TransientGate.h"
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -12,21 +13,6 @@ extern "C" {
 #include "z64.h"
 extern PlayState* gPlayState;
 }
-
-// Killer-attribution shim defined in HookHandlers.cpp. Forward-declared
-// here so HandlePacket_EnvActorDrop can attribute the resulting
-// ITEM_DROP_SYNC broadcast to the peer who cut the grass (rather than
-// to the host who is merely running the drop on peer's behalf).
-extern "C" void Anchor_BeginItemDropForKiller(uint32_t killerClientId);
-extern "C" void Anchor_EndItemDrop(void);
-
-// Heart-vs-rupee desync reverse direction — bracket the host-side
-// Item_DropCollectible* call so func_8001F404 doesn't substitute the
-// peer's intended drop type against host's gSaveContext (host full HP
-// would turn peer's heart into a rupee, etc.). Pairs with the existing
-// receiver-side bypass in z_en_item00.c.
-extern "C" void Anchor_BeginHostingPeerEnvActorDrop(void);
-extern "C" void Anchor_EndHostingPeerEnvActorDrop(void);
 
 /**
  * ENV_ACTOR_DROP — peer → host (targeted at room host).
@@ -153,8 +139,8 @@ void Anchor::HandlePacket_EnvActorDrop(nlohmann::json payload) {
     // OnActorSpawn(EN_ITEM00) hook reads g_pendingItemDropKillerClientId
     // and broadcasts ITEM_DROP_SYNC with that value; peer (the cutter)
     // gets the 3s exclusivity window on its own drop.
-    Anchor_BeginItemDropForKiller(senderClientId);
-    Anchor_BeginHostingPeerEnvActorDrop();
+    AnchorBridge::ScopedItemDropForKiller       killerGuard(senderClientId);
+    AnchorBridge::ScopedHostingPeerEnvActorDrop hostingGuard;
     if (dropParamForRandom != 0) {
         Item_DropCollectibleRandom(gPlayState, NULL, &pos, dropParamForRandom);
         SPDLOG_INFO("[EnvActorDrop] netId={} ran Item_DropCollectibleRandom param=0x{:02X} killer={}",
@@ -164,6 +150,6 @@ void Anchor::HandlePacket_EnvActorDrop(nlohmann::json payload) {
         SPDLOG_INFO("[EnvActorDrop] netId={} ran Item_DropCollectible param=0x{:02X} killer={}",
                     netId, (int)dropParam, senderClientId);
     }
-    Anchor_EndHostingPeerEnvActorDrop();
-    Anchor_EndItemDrop();
+    // hostingGuard + killerGuard destructors fire here (reverse order
+    // of construction: HostingPeerEnvActorDrop End, then ItemDrop End).
 }
