@@ -2205,50 +2205,63 @@ void TickENGAGE(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     (void)leaderHintPos;
     Actor* a = &this_->actor;
 
-    if (sAttackState.target == nullptr ||
-        sAttackState.target->update == nullptr) {
-        const s32 next = ChooseCombatExitState(this_, play);
-        SPDLOG_INFO("[Invader] ENGAGE→{} (target lost)",
-                    (next == EN_INVADER_STATE_STANDBY ? "STANDBY" : "IDLE/FOLLOW"));
-        this_->state = next;
-        sAttackState.target = nullptr;
-        a->speedXZ = 0.0f;
-        return;
-    }
+    // B.5 Phase 2 — shared exit-decision logic. checkTargetHealth=false
+    // (Invader chases until Actor_Kill) and leaderPos=nullptr (no
+    // leader-leash concept for hostile NPCs).
+    AnchorAICombat::EngageExitContext exitCtx;
+    exitCtx.self              = a;
+    exitCtx.target            = sAttackState.target;
+    exitCtx.checkTargetHealth = false;
+    exitCtx.leaderPos         = nullptr;
+    exitCtx.breakBand         = kEngageBreakBand;
+    exitCtx.strikeBand        = kEngageStrikeBand;
+    const auto decision = AnchorAICombat::EvaluateEngageExit(exitCtx);
 
+    switch (decision.kind) {
+        case AnchorAICombat::EngageExitKind::TargetLost: {
+            const s32 next = ChooseCombatExitState(this_, play);
+            SPDLOG_INFO("[Invader] ENGAGE→{} (target lost)",
+                        (next == EN_INVADER_STATE_STANDBY ? "STANDBY" : "IDLE/FOLLOW"));
+            this_->state = next;
+            sAttackState.target = nullptr;
+            a->speedXZ = 0.0f;
+            return;
+        }
+        case AnchorAICombat::EngageExitKind::TargetFled: {
+            const s32 next = ChooseCombatExitState(this_, play);
+            SPDLOG_INFO("[Invader] ENGAGE→{} (target fled: XZ={:.0f}u/{:.0f}u, "
+                        "|dy|={:.0f}u/{:.0f}u)",
+                        (next == EN_INVADER_STATE_STANDBY ? "STANDBY" : "IDLE/FOLLOW"),
+                        decision.distXZ, kEngageBreakDist,
+                        decision.dyToTarget, kEngageBreakDistY);
+            this_->state = next;
+            sAttackState.target = nullptr;
+            a->speedXZ = 0.0f;
+            return;
+        }
+        case AnchorAICombat::EngageExitKind::StrikeRange: {
+            // Invader uses the explicit-animation policy (DR-2 §"Policy
+            // axis #4"). TickATTACK's entry will call InvEnsureAnimation
+            // — no stopAnimPlaying handshake needed here.
+            SPDLOG_INFO("[Invader] ENGAGE→ATTACK (strike range, "
+                        "XZ={:.0f}u, |dy|={:.0f}u)",
+                        decision.distXZ, decision.dyToTarget);
+            this_->state = EN_INVADER_STATE_ATTACK;
+            sAttackState.swingFiredAT = false;
+            a->speedXZ = 0.0f;
+            return;
+        }
+        case AnchorAICombat::EngageExitKind::LeaderTooFar:
+            // Not applicable: leaderPos==nullptr suppresses this exit
+            // in EvaluateEngageExit. Defensive fall-through to pursuit.
+        case AnchorAICombat::EngageExitKind::ContinuePursuit:
+            break;
+    }
+    // ContinuePursuit: sAttackState.target is guaranteed non-null
+    // (TargetLost was checked above). Snapshot pos + distXZ for the
+    // pursuit body.
     const Vec3f& targetPos = sAttackState.target->world.pos;
-    const float distXZ = AnchorDist::DistXZ(a->world.pos, targetPos);
-    const float dyToTarget = std::fabs(targetPos.y - a->world.pos.y);
-
-    // Phase 3 P1-G: 3D-aware "fled" — target jumping to a ledge above
-    // or dropping to a pit below also yields combat (the XZ-only check
-    // would keep ENGAGE going against a target Invader can't reach).
-    if (AnchorAI::ShouldPursue3D(a->world.pos, targetPos,
-                                 kEngageBreakBand)) {
-        const s32 next = ChooseCombatExitState(this_, play);
-        SPDLOG_INFO("[Invader] ENGAGE→{} (target fled: XZ={:.0f}u/{:.0f}u, "
-                    "|dy|={:.0f}u/{:.0f}u)",
-                    (next == EN_INVADER_STATE_STANDBY ? "STANDBY" : "IDLE/FOLLOW"),
-                    distXZ, kEngageBreakDist,
-                    dyToTarget, kEngageBreakDistY);
-        this_->state = next;
-        sAttackState.target = nullptr;
-        a->speedXZ = 0.0f;
-        return;
-    }
-
-    // Phase 3 P1-G: 3D-aware strike — require Y reach in addition to
-    // XZ. Prior XZ-only check fired ATTACK when target stood on a
-    // ledge directly above, whiffing the swing every cycle.
-    if (AnchorAI::IsInStrikeRange(a->world.pos, targetPos,
-                                   kEngageStrikeBand)) {
-        SPDLOG_INFO("[Invader] ENGAGE→ATTACK (strike range, "
-                    "XZ={:.0f}u, |dy|={:.0f}u)", distXZ, dyToTarget);
-        this_->state = EN_INVADER_STATE_ATTACK;
-        sAttackState.swingFiredAT = false;
-        a->speedXZ = 0.0f;
-        return;
-    }
+    const float  distXZ    = decision.distXZ;
 
     // ── Pursuit — substrate-aware (Phase 2, log-237 fix) ───────────
     // Pre-Phase-2 this state used direct-yaw, ignoring nav mesh entirely.

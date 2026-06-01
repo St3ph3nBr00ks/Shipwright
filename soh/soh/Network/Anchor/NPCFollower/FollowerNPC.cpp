@@ -2506,80 +2506,77 @@ static constexpr float kRangedAcquireDist = 500.0f;  // max range to enter RANGE
 void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
 
-    // Validate target.
-    if (sAttackState.target == nullptr ||
-        sAttackState.target->update == nullptr ||
-        sAttackState.target->colChkInfo.health <= 0) {
-        const s32 nextState = ChooseCombatExitState(this_, play);
-        SPDLOG_INFO("[FollowerNPC] ENGAGE→{} (target lost/dead)",
-                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
-        this_->state = nextState;
-        sAttackState.target = nullptr;
-        a->speedXZ = 0.0f;
-        return;
-    }
+    // B.5 Phase 2 — shared exit-decision logic. Wraps target-lost,
+    // leader-leash bail, target-fled, and strike-range entry into a
+    // single call. Per-actor state transitions + SPDLOG remain
+    // local because Follower's enum values + log strings differ
+    // from Invader's.
+    AnchorAICombat::EngageExitContext exitCtx;
+    exitCtx.self              = a;
+    exitCtx.target            = sAttackState.target;
+    exitCtx.checkTargetHealth = true;
+    exitCtx.leaderPos         = &leaderPos;
+    exitCtx.leaderLeashBand   = kEngageLeaderLeashBand;
+    exitCtx.breakBand         = kEngageBreakBand;
+    exitCtx.strikeBand        = kEngageStrikeBand;
+    const auto decision = AnchorAICombat::EvaluateEngageExit(exitCtx);
 
+    switch (decision.kind) {
+        case AnchorAICombat::EngageExitKind::TargetLost: {
+            const s32 nextState = ChooseCombatExitState(this_, play);
+            SPDLOG_INFO("[FollowerNPC] ENGAGE→{} (target lost/dead)",
+                        (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"));
+            this_->state = nextState;
+            sAttackState.target = nullptr;
+            a->speedXZ = 0.0f;
+            return;
+        }
+        case AnchorAICombat::EngageExitKind::LeaderTooFar: {
+            // Always FOLLOW (not STANDBY) — yielding to leader is
+            // the explicit intent of this exit.
+            SPDLOG_INFO("[FollowerNPC] ENGAGE→FOLLOW (leader too far: "
+                        "XZ={:.0f}u/{:.0f}u, |dy|={:.0f}u/{:.0f}u)",
+                        decision.leaderDistXZ, kEngageLeaderLeash,
+                        decision.leaderDy, kEngageLeaderLeashY);
+            this_->state = EN_FOLLOWER_STATE_FOLLOW;
+            sAttackState.target = nullptr;
+            a->speedXZ = 0.0f;
+            return;
+        }
+        case AnchorAICombat::EngageExitKind::TargetFled: {
+            const s32 nextState = ChooseCombatExitState(this_, play);
+            SPDLOG_INFO("[FollowerNPC] ENGAGE→{} (target fled: XZ={:.0f}u/{:.0f}u, "
+                        "|dy|={:.0f}u/{:.0f}u)",
+                        (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"),
+                        decision.distXZ, kEngageBreakDist,
+                        decision.dyToTarget, kEngageBreakDistY);
+            this_->state = nextState;
+            sAttackState.target = nullptr;
+            a->speedXZ = 0.0f;
+            return;
+        }
+        case AnchorAICombat::EngageExitKind::StrikeRange: {
+            // Target carries over (sAttackState.target stays valid;
+            // ATTACK uses it directly). `stopAnimPlaying = 0` lets
+            // the dispatcher wire kSwordSwing — Follower-side
+            // animation-entry policy (DR-2 §"Policy axis #4").
+            SPDLOG_INFO("[FollowerNPC] ENGAGE→ATTACK (strike range, "
+                        "XZ={:.0f}u, |dy|={:.0f}u)",
+                        decision.distXZ, decision.dyToTarget);
+            this_->state = EN_FOLLOWER_STATE_ATTACK;
+            this_->stopAnimPlaying = 0;
+            sAttackState.swingFiredAT = false;
+            a->speedXZ = 0.0f;
+            return;
+        }
+        case AnchorAICombat::EngageExitKind::ContinuePursuit:
+            break;
+    }
+    // ContinuePursuit: sAttackState.target is guaranteed non-null
+    // (TargetLost was checked above). Snapshot pos + distXZ for the
+    // pursuit body.
     const Vec3f& targetPos = sAttackState.target->world.pos;
-    const float distXZ = AnchorDist::DistXZ(a->world.pos, targetPos);
-    const float dyToTarget = std::fabs(targetPos.y - a->world.pos.y);
-
-    // Leader-leash bail — don't chase enemies forever away from leader.
-    // Always FOLLOW (not STANDBY) — yielding to leader is the explicit
-    // intent of this exit. Phase 3 P1-F: 3D-aware via ShouldPursue3D so
-    // a leader climbing to a ledge above (huge Y, small XZ) also yields
-    // combat — the prior XZ-only check kept NPC fighting indefinitely
-    // when leader topped a wall during a pursuit.
-    if (AnchorAI::ShouldPursue3D(a->world.pos, leaderPos,
-                                 kEngageLeaderLeashBand)) {
-        const float leaderDistXZ =
-            AnchorDist::DistXZ(a->world.pos, leaderPos);
-        const float leaderDy = std::fabs(leaderPos.y - a->world.pos.y);
-        SPDLOG_INFO("[FollowerNPC] ENGAGE→FOLLOW (leader too far: "
-                    "XZ={:.0f}u/{:.0f}u, |dy|={:.0f}u/{:.0f}u)",
-                    leaderDistXZ, kEngageLeaderLeash,
-                    leaderDy, kEngageLeaderLeashY);
-        this_->state = EN_FOLLOWER_STATE_FOLLOW;
-        sAttackState.target = nullptr;
-        a->speedXZ = 0.0f;
-        return;
-    }
-
-    // Enemy fled past pursuit range — exit; STANDBY if any other
-    // enemy is in detect range, else FOLLOW. Phase 3 P1-G: 3D-aware
-    // so a target that jumped/flew to a ledge above (small XZ, huge
-    // Y) also counts as "fled" — the XZ-only check kept NPC stuck
-    // in ENGAGE chasing a target it could no longer reach.
-    if (AnchorAI::ShouldPursue3D(a->world.pos, targetPos,
-                                 kEngageBreakBand)) {
-        const s32 nextState = ChooseCombatExitState(this_, play);
-        SPDLOG_INFO("[FollowerNPC] ENGAGE→{} (target fled: XZ={:.0f}u/{:.0f}u, "
-                    "|dy|={:.0f}u/{:.0f}u)",
-                    (nextState == EN_FOLLOWER_STATE_STANDBY ? "STANDBY" : "FOLLOW"),
-                    distXZ, kEngageBreakDist,
-                    dyToTarget, kEngageBreakDistY);
-        this_->state = nextState;
-        sAttackState.target = nullptr;
-        a->speedXZ = 0.0f;
-        return;
-    }
-
-    // In strike range — transition to ATTACK. Target carries over
-    // (sAttackState.target stays valid; ATTACK uses it directly).
-    // Phase 3 P1-G: require BOTH XZ close AND vertical reach (Link's
-    // sword swing covers ~60u of vertical body height). Prior
-    // XZ-only check fired ATTACK when target was directly above on
-    // a ledge — the swing whiffed into empty air every cycle.
-    if (AnchorAI::IsInStrikeRange(a->world.pos, targetPos,
-                                   kEngageStrikeBand)) {
-        SPDLOG_INFO("[FollowerNPC] ENGAGE→ATTACK (strike range, "
-                    "XZ={:.0f}u, |dy|={:.0f}u)",
-                    distXZ, dyToTarget);
-        this_->state = EN_FOLLOWER_STATE_ATTACK;
-        this_->stopAnimPlaying = 0;  // let kSwordSwing override flow through
-        sAttackState.swingFiredAT = false;
-        a->speedXZ = 0.0f;
-        return;
-    }
+    const float  distXZ    = decision.distXZ;
 
     // ── Pursuit — substrate-aware (Phase 3, 2026-05-18) ───────────
     // Was direct-yaw (ignored nav mesh). Same fix shape as NPC Invader
