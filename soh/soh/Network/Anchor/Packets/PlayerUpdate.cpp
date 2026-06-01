@@ -10,33 +10,16 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
-// Walk the syncable actor categories looking for one whose EnemyNetId
-// extension matches `netId`. Returns nullptr when no match. Used by the
-// held-actor sync release-edge path to read throw velocity from a rock
-// that was just detached from the local player.
-static Actor* AnchorFindActorByNetId(uint32_t netId) {
-    if (netId == 0 || gPlayState == nullptr) return nullptr;
-    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
-        Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
-        while (a != nullptr) {
-            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(a);
-            if (ext != nullptr && ext->netId == netId) return a;
-            a = a->next;
-        }
-    }
-    return nullptr;
-}
-
 // File-static tracker for the local player's heldActor netId at the last
 // SendPacket_PlayerUpdate. Used to detect release-edge transitions.
 // Persists across reconnects — false-positive release events on stale
-// netIds resolve to "actor not found" in AnchorFindActorByNetId and are
+// netIds resolve to "actor not found" in `FindActorByNetId` and are
 // silently dropped on the wire.
 static uint32_t sLastLocalHeldActorNetId = 0;
 // File-static tracker for the local player's last-broadcast sceneNum.
 // Combined with sLastLocalHeldActorNetId to detect scene-exit-while-
 // carrying: when the holder transitions scenes, the held actor is
-// destroyed by scene unload (no AnchorFindActorByNetId hit on
+// destroyed by scene unload (no `FindActorByNetId` hit on
 // the new scene). Without intervention, the static placement re-spawns
 // on scene re-entry — visible "the pot I took is back" bug (log 318).
 // We record the netId in HostBookkeeping::SceneDeaths so the existing
@@ -83,7 +66,7 @@ void Anchor::SendPacket_PlayerUpdate() {
     if (sLastLocalHeldActorNetId != 0 &&
         currentHeldActorNetId != sLastLocalHeldActorNetId &&
         sceneJustChanged &&
-        AnchorFindActorByNetId(sLastLocalHeldActorNetId) == nullptr) {
+        FindActorByNetId(gPlayState, sLastLocalHeldActorNetId) == nullptr) {
         SendPacket_EnemyRemovedFromScene(sLastLocalHeldActorNetId, sLastLocalSceneNum);
         didSendCarryExit = true;
     }
@@ -169,7 +152,7 @@ void Anchor::SendPacket_PlayerUpdate() {
     // fired so we don't re-broadcast something that's already gone.
     if (!didSendCarryExit && sLastLocalHeldActorNetId != 0 &&
         currentHeldActorNetId != sLastLocalHeldActorNetId) {
-        Actor* released = AnchorFindActorByNetId(sLastLocalHeldActorNetId);
+        Actor* released = FindActorByNetId(gPlayState, sLastLocalHeldActorNetId);
         if (released != nullptr) {
             payload["releasedActorNetId"] = sLastLocalHeldActorNetId;
             payload["releaseSpeedXZ"]     = released->speedXZ;
@@ -282,7 +265,7 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
         // the matching trajectory inputs and produces a symmetric arc.
         if (payload.contains("releasedActorNetId")) {
             uint32_t releasedNetId = payload["releasedActorNetId"].get<uint32_t>();
-            Actor* released = AnchorFindActorByNetId(releasedNetId);
+            Actor* released = FindActorByNetId(gPlayState, releasedNetId);
             if (released != nullptr) {
                 released->speedXZ    = payload["releaseSpeedXZ"].get<f32>();
                 released->velocity.y = payload["releaseVelocityY"].get<f32>();

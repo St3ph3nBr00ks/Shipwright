@@ -113,20 +113,7 @@ void Anchor::HandlePacket_ProjectileHitEnemy(nlohmann::json payload) {
     uint32_t netId             = payload.value("netId", (uint32_t)0);
     s16      projectileActorId = (s16)payload.value("projectileActorId", (int)0);
 
-    // Walk every syncable actor category for the target.
-    Actor* actor = nullptr;
-    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
-        actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
-        while (actor != nullptr) {
-            const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-            if (ext != nullptr && ext->netId == netId) {
-                goto actor_found;
-            }
-            actor = actor->next;
-        }
-    }
-    actor = nullptr;
-actor_found:
+    Actor* actor = FindActorByNetId(gPlayState, netId);
     if (actor == nullptr) {
         SPDLOG_WARN("[ProjectileHitEnemy] No actor found for netId={}", netId);
         return;

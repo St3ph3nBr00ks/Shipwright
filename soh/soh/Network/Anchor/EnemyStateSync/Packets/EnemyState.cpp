@@ -925,20 +925,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     s8 health      = (s8)payload.value("health", 1);
     Vec3f scale    = payload.value("scale", Vec3f{ 1.0f, 1.0f, 1.0f });
 
-    Actor* actor = nullptr;
-    EnemyNetId* ext = nullptr;
-    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
-        actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
-        while (actor != nullptr) {
-            ext = const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
-            if (ext != nullptr && ext->netId == netId) {
-                goto actor_found;
-            }
-            actor = actor->next;
-        }
-    }
-    actor = nullptr;
-actor_found:
+    Actor* actor = FindActorByNetId(gPlayState, netId);
+    EnemyNetId* ext = (actor != nullptr)
+        ? const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor))
+        : nullptr;
     if (actor == nullptr) {
         // Suppress the warning on host: when a peer broadcasts a push-block
         // update for an actor in a different scene/room, the host's view
@@ -1469,19 +1459,12 @@ void Anchor::HandlePacket_EnemySpawn(nlohmann::json payload) {
     // defence in depth covering legit duplicate-delivery cases too.
     if (payload.contains("netId")) {
         uint32_t incomingNetId = payload["netId"].get<uint32_t>();
-        for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
-            Actor* existing = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
-            while (existing != nullptr) {
-                const EnemyNetId* ext =
-                    ObjectExtension::GetInstance().Get<EnemyNetId>(existing);
-                if (ext != nullptr && ext->netId == incomingNetId) {
-                    SPDLOG_INFO("[EnemySpawn] Drop duplicate spawn — netId={} already "
-                                "exists for actorId={} ptr={} (idempotency guard)",
-                                incomingNetId, existing->id, (void*)existing);
-                    return;
-                }
-                existing = existing->next;
-            }
+        Actor* existing = FindActorByNetId(gPlayState, incomingNetId);
+        if (existing != nullptr) {
+            SPDLOG_INFO("[EnemySpawn] Drop duplicate spawn — netId={} already "
+                        "exists for actorId={} ptr={} (idempotency guard)",
+                        incomingNetId, existing->id, (void*)existing);
+            return;
         }
     }
 
@@ -1610,13 +1593,12 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     // Walk every syncable actor category looking for the netId match.
     // Covers ENEMY + BOSS plus runtime category transitions
     // (Karebaba→MISC, Armos→BG, etc.).
-    for (size_t catIdx = 0; catIdx < kSyncableActorCategoriesCount; catIdx++) {
-        Actor* actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[catIdx]].head;
-        while (actor != nullptr) {
-            Actor* next = actor->next;
-            EnemyNetId* ext = const_cast<EnemyNetId*>(
-                ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
-            if (ext != nullptr && ext->netId == netId) {
+    {
+        Actor* actor = FindActorByNetId(gPlayState, netId);
+        EnemyNetId* ext = (actor != nullptr)
+            ? const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor))
+            : nullptr;
+        if (actor != nullptr) {
                 if (::SceneAuthority::IsMyCurrentRoomHost()) {
                     EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(gPlayState->sceneNum, netId);
                 }
@@ -1918,13 +1900,11 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                                 netId, (int)actor->params);
                 }
 
-                SPDLOG_INFO("[EnemyDefeated] Killing actor id={} netId={}", actor->id, netId);
-                isKillingNetworkActor = true;
-                Actor_Kill(actor);
-                isKillingNetworkActor = false;
-                return;
-            }
-            actor = next;
+            SPDLOG_INFO("[EnemyDefeated] Killing actor id={} netId={}", actor->id, netId);
+            isKillingNetworkActor = true;
+            Actor_Kill(actor);
+            isKillingNetworkActor = false;
+            return;
         }
     }
 
@@ -2165,18 +2145,11 @@ void Anchor::HandlePacket_EnemyRemovedFromScene(nlohmann::json payload) {
     if (gPlayState == nullptr || (int16_t)gPlayState->sceneNum != priorScene) {
         return;
     }
-    for (size_t i = 0; i < kSyncableActorCategoriesCount; i++) {
-        Actor* a = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
-        while (a != nullptr) {
-            Actor* next = a->next;
-            EnemyNetId* ext = const_cast<EnemyNetId*>(
-                ObjectExtension::GetInstance().Get<EnemyNetId>(a));
-            if (ext != nullptr && ext->netId == netId) {
-                EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Removed);
-                KillNetworkActorSilently(a);
-                return;  // netIds are unique per actor — match is exclusive.
-            }
-            a = next;
-        }
+    Actor* a = FindActorByNetId(gPlayState, netId);
+    if (a != nullptr) {
+        EnemyNetId* ext = const_cast<EnemyNetId*>(
+            ObjectExtension::GetInstance().Get<EnemyNetId>(a));
+        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Removed);
+        KillNetworkActorSilently(a);
     }
 }

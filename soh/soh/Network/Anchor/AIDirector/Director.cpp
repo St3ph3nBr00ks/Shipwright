@@ -473,24 +473,7 @@ bool Director::ExecuteDespawn(uint32_t netId, DefeatCause cause) {
         return false;
     }
 
-    // Walk every syncable actor category looking for the netId match.
-    // Same iteration pattern as HandlePacket_EnemyDefeated. Most spawns
-    // are ACTORCAT_ENEMY but Karebaba etc. can change category mid-life
-    // so we walk the full set.
-    Actor* foundActor = nullptr;
-    for (size_t catIdx = 0; catIdx < kSyncableActorCategoriesCount; ++catIdx) {
-        Actor* actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[catIdx]].head;
-        while (actor != nullptr) {
-            const EnemyNetId* ext =
-                ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
-            if (ext != nullptr && ext->netId == netId) {
-                foundActor = actor;
-                break;
-            }
-            actor = actor->next;
-        }
-        if (foundActor != nullptr) break;
-    }
+    Actor* foundActor = FindActorByNetId(gPlayState, netId);
 
     if (foundActor == nullptr) {
         // Actor not in host's current actor lists. Could be: already
