@@ -112,7 +112,8 @@ void Anchor::HandlePacket_EnvActorDestroy(nlohmann::json payload) {
     // across PROP/BG/MISC depending on actor type; FindActorByNetId
     // walks all 8 syncable categories.
     Actor* a = FindActorByNetId(gPlayState, actorNetId);
-    if (a != nullptr && a->update != nullptr) {
+    const bool matched = (a != nullptr && a->update != nullptr);
+    if (matched) {
         // Per-actor receive-side dispatch. Most env actors get
         // vanilla Actor_Kill — they don't have a distinct cut-stub
         // state. En_Kusa is special: its TYPE_1 / TYPE_2 variants
