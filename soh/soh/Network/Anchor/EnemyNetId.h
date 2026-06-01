@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include "EnemyStateSync/EnemyLifecycle.h"
+#include "EnemySync/PerActor/EnKarebabaState.h"  // refactor A.7
 
 struct EnemyNetId {
     uint32_t netId = 0;
@@ -80,12 +81,19 @@ struct EnemyNetId {
     // AwaitingDeadItemDrop / Dead. Write sites moved to TransitionTo()
     // calls during Phase 1 step 2; this commit drops the boolean storage.
 
-    // Per-actor-type state machine sync fields.
-    // Currently used by ACTOR_EN_KAREBABA (Withered Deku Baba) to keep its
-    // Idle/Awaken/Upright/Spin/Retract state in sync with the host.
-    // -1 means no state received yet (initial value).
+    // Shared per-actor-type action-state cache. Receive-side cache for
+    // the last `actionState` payload field; consumers map to the actor's
+    // native action-function index via `<Actor>_ApplyNetState`. Driven
+    // by ACTOR_EN_KAREBABA, ACTOR_EN_DEKUBABA, ACTOR_EN_GOMA,
+    // ACTOR_EN_DEKUNUTS, ACTOR_EN_HINTNUTS, ACTOR_EN_ST, ACTOR_EN_SW,
+    // ACTOR_BOSS_GOMA, ACTOR_EN_GOROIWA. -1 means no state received yet.
     s16 netStateIndex = -1;
-    s16 netActorParams = 0;
+
+    // Refactor A.7 — Karebaba-specific per-actor state. Other actors
+    // leave at default. First per-actor extract under EnemySync/PerActor/;
+    // see EnemySync/PerActor/EnKarebabaState.h for the pattern future
+    // regrow-class enemies should follow.
+    EnemySync::EnKarebabaState karebaba;
 
     // pendingNaturalDeath was deleted at end of C2 Phase 1 step 5b.
     // Read sites use EnemyStateSync::PhaseImpliesPendingNaturalDeath(

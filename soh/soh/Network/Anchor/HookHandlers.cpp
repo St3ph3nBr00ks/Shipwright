@@ -2797,7 +2797,7 @@ void Anchor::RegisterHooks() {
                                 SPDLOG_INFO("[EnKarebaba] rx netId={} apply {}→{}",
                                             ext->netId, (int)curState, (int)ext->netStateIndex);
                             }
-                            EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->netActorParams);
+                            EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->karebaba.netActorParams);
                         } else if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                             SPDLOG_INFO("[EnKarebaba] rx netId={} block net={} local={} (dormant-active filter)",
                                         ext->netId, (int)ext->netStateIndex, (int)curState);
