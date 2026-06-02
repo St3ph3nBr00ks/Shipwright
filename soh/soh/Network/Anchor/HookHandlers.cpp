@@ -842,10 +842,30 @@ void Anchor::RegisterHooks() {
                 // SendPacket_EnemySpawn runs after the netId block below so the
                 // actor already has a valid extension when the send path reads it.
                 // We defer the actual send to after netId assignment — see below.
-            } else if (!isSpawningNetworkActor) {
+            } else if (!isSpawningNetworkActor && !isSpawningDirectorActor) {
                 // Non-host: kill locally-generated dynamic actors immediately.
                 // The host's canonical copy arrives via ENEMY_SPAWN and is spawned
                 // by HandlePacket_EnemySpawn (which sets isSpawningNetworkActor).
+                //
+                // Tactical 3.6.A exemption (Plans/invader_per_room_authority_handoff.md
+                // §3.6.A, issue #166 / log 351): also exempt
+                // isSpawningDirectorActor. The Director runs on the global
+                // effective host but spawns into per-room-host territory.
+                // When effective host ≠ room host (random clientId draws —
+                // ~50% of sessions), the Director's spawns previously got
+                // killed here, with no peer ever seeing a functional Invader.
+                //
+                // Caveat: this lets the Director's Invader survive on the
+                // effective host even when the host isn't room host of the
+                // spawn target room. ENEMY_STATE broadcasts come from the
+                // per-room host (via HookHandlers.cpp:1682's IsMyCurrentRoomHost
+                // gate), so the broadcast direction is reversed from typical:
+                // peer (room host) broadcasts → effective host (Director)
+                // receives. This is functional but architecturally awkward.
+                // The full fix is Step 5 (per-room authority for the Director
+                // itself); this exemption is the stopgap that makes Force
+                // Spawn reliable on any clientId arrangement for field
+                // testing.
                 SPDLOG_INFO("[EnemySpawn] Suppressing dynamic spawn actorId={} on non-host", actor->id);
                 Actor_Kill(actor);
                 return;
