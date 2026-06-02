@@ -478,10 +478,25 @@ bool Director::ExecuteDespawn(uint32_t netId, DefeatCause cause) {
     if (foundActor == nullptr) {
         // Actor not in host's current actor lists. Could be: already
         // destroyed by scene unload, never existed on host, or peer-only.
-        // Still proceed with the bookkeeping cleanup so the live count
-        // doesn't stay phantom-locked. OnEnemyRemoved is idempotent.
+        // Peer replicas in that case won't get an OnActorKill-driven
+        // defeat signal — broadcast ENEMY_DEFEATED explicitly so
+        // they clean up. Caller (e.g. InvaderDescriptor's host-actor
+        // reconciliation follow-spawn) typically queues a fresh spawn
+        // right after — order matters: defeat-broadcast first so peers
+        // Actor_Kill the old replica before the new ENEMY_SPAWN lands.
+        // RecordSceneDeath also removes the entry from
+        // LiveSpawnsByScene so a future late-joiner's snapshot replay
+        // doesn't re-spawn the now-defeated netId on top of the
+        // fresh follow-spawn.
+        if (Anchor::Instance != nullptr) {
+            Anchor::Instance->SendPacket_EnemyDefeated(netId);
+        }
+        if (gPlayState != nullptr) {
+            EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(
+                (int16_t)gPlayState->sceneNum, netId);
+        }
         SPDLOG_INFO("[Director] ExecuteDespawn: netId={} not found in host's "
-                    "actor lists — cleaning up bookkeeping only", netId);
+                    "actor lists — broadcasting defeat + cleaning up bookkeeping", netId);
         OnEnemyRemoved(netId, cause);
         return false;
     }

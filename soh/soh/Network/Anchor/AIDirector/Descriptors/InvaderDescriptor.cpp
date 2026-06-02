@@ -28,6 +28,7 @@
 
 #include "InvaderDescriptor.h"
 #include "../../Anchor.h"  // Phase 1 §7.5 — Anchor::Instance->MsToGameTicks for orphan / grace timers
+#include "../../Common/ActorSyncHelpers.h"  // FindActorByNetId — host-actor-missing detection (#234)
                            // (TWO levels up — Descriptors/ is nested under AIDirector/ which is
                            // under Anchor/; relative path Director.h is one level up but Anchor.h
                            // is two)
@@ -934,6 +935,59 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
             // Target) so the Kakariko entry-cutscene window doesn't
             // kill the follow-spawn (log 199 symptom).
             toDespawn.push_back(netId);
+            continue;
+        }
+
+        // #234 — host-actor reconciliation. Scene cleanup (Game Over,
+        // void respawn, scene reload) destroys local actors via
+        // Actor_Delete which bypasses OnActorKill. The Director's
+        // mNetIdToDescriptor stays populated but host has no local
+        // actor to ENEMY_UPDATE from — peer replicas freeze and host
+        // can't accept further damage. Per user spec (2026-06-01):
+        // the Invader must remain active for all remaining players,
+        // NOT despawn just because one player died. If the dead
+        // player respawns in the room the Invader is in, it must
+        // reappear for them. Solution: piggyback on the existing
+        // follow-spawn pipeline (sibling of scene-transition
+        // continuation). Pick a fresh spawn position via
+        // PickSpawnPosition (200u+ from any player) so the new
+        // Invader doesn't land on top of the respawning player; queue
+        // it with bypassCooldown=true. ExecuteDespawn will explicitly
+        // broadcast ENEMY_DEFEATED for the old netId so peer replicas
+        // clean up before the new ENEMY_SPAWN arrives.
+        //
+        // Gate: only re-instantiate when host is in the Invader's
+        // tracked (scene, room). Cross-scene case (host transitioned
+        // away from the Invader, leaving a stuck peer replica behind)
+        // needs per-scene authority — a Pillar A Phase 2 concern; the
+        // 60s orphan timer is the long-term cleanup for now.
+        const bool hostActorPresent =
+            (gPlayState != nullptr && FindActorByNetId(gPlayState, netId) != nullptr);
+        const bool hostInTrackedScene =
+            (gPlayState != nullptr &&
+             (int16_t)gPlayState->sceneNum == state.lastKnownSceneNum &&
+             (int8_t)gPlayState->roomCtx.curRoom.num == state.lastKnownRoomNum);
+        if (!hostActorPresent && hostInTrackedScene && anyValid != nullptr) {
+            auto reSpawnPos = PickSpawnPosition(
+                state.lastKnownSceneNum,
+                state.lastKnownRoomNum,
+                view);
+            if (reSpawnPos.has_value()) {
+                SPDLOG_INFO("[InvaderDescriptor] OnTick: netId={} host actor missing "
+                            "(scene cleanup bypassed OnActorKill) — re-instantiating "
+                            "via follow-spawn at ({:.0f},{:.0f},{:.0f}); sticky target=client {}",
+                            netId, reSpawnPos->x, reSpawnPos->y, reSpawnPos->z,
+                            anyValid->clientId);
+                state.targetClientId = anyValid->clientId;
+                toFollowSpawn.push_back({netId, *reSpawnPos});
+            } else {
+                // PickSpawnPosition failed (nav graph not loaded yet,
+                // or all sampled nodes too close to a player). Skip
+                // this tick; try again next tick.
+                SPDLOG_INFO("[InvaderDescriptor] OnTick: netId={} host actor missing "
+                            "but PickSpawnPosition returned no candidate — "
+                            "deferring re-instantiate", netId);
+            }
             continue;
         }
 
