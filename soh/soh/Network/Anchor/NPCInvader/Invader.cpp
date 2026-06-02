@@ -39,6 +39,7 @@
 
 #include "Invader.h"
 
+#include "soh/Network/Anchor/NPCInvader/InvaderTunables.h"  // B.2 — balance tuning
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/PlayerLookup.h"  // PickHostileTargetForInvader (Agent 4)
 #include "soh/Network/Anchor/Common/ActorTrail.h"    // Nav-parity Phase A: substrate path consumption
@@ -77,6 +78,12 @@ extern PlayState* gPlayState;
 
 namespace {
 
+// B.2 — balance tunables (combat / engagement / RANGED / STANDBY / CRAWL /
+// follow / climb / leash etc.) moved to InvaderTunables.h. `using
+// namespace` keeps consumer code below using bare names. See the
+// header for full rationale comments.
+using namespace InvaderTunables;
+
 // Set during EnInvader_Draw's Player_DrawImpl call; cleared after.
 // Read by the VB_APPLY_TUNIC_COLOR hook to know which actor's tunic
 // is being rendered, so it can apply the black-tint override. File-
@@ -112,99 +119,15 @@ static Gfx** sSavedPlayerWaistDLists     = nullptr;
 static s8    sSavedPlayerHeldItemAction  = 0;
 static bool  sSavedHeldItemActionActive  = false;
 
-// ---------------------------------------------------------------------
-// Combat tuning constants (cloned from FollowerNPC).
-// ---------------------------------------------------------------------
-constexpr float kAttackEngageDist     = 80.0f;
-constexpr float kAttackQuadForward    = 60.0f;
-constexpr float kAttackQuadHalfWidth  = 25.0f;
-constexpr float kAttackQuadBaseY      = 5.0f;
-constexpr float kAttackQuadTopY       = 65.0f;
-constexpr float kAttackActiveStartFrame = 4.0f;
-constexpr float kAttackActiveEndFrame   = 12.0f;
-
-// Detection range bumped 250→1000 on 2026-05-17 (log 233 testing).
-// User observation: "NPC Invader only started pathfinding to player
-// when the player got close, within ~300 units. NPC Invader had line
-// of sight on the player from much further away and should have begun
-// pathfinding."
-//
-// Invader's PickHostileTargetForInvader (Common/PlayerLookup.cpp)
-// only ever returns player-aligned actors (local Player + DummyPlayers
-// + NPC Follower when targetable) — vanilla enemies are NEVER
-// candidates here, so widening the range does not cause the Invader
-// to attack scene enemies. Defensive retaliation against non-player
-// enemies remains a deferred feature (post-#208).
-constexpr float kEngageAcquireDist  = 1000.0f;
-constexpr float kEngageBreakDist    = 1500.0f;
-constexpr float kEngageBreakDistY   = 400.0f;  // Y "fled" gate — wider than Follower's 250u; Invader pursues across larger maps
-constexpr float kEngageStrikeDist   = 70.0f;
-constexpr float kEngageStrikeY      = 60.0f;   // Link body height — ATTACK only when target body in vertical reach
-// Fix C: grouped form. Float constants stay accessible for log strings.
-constexpr AnchorAI::ThresholdPair kEngageBreakBand        = { kEngageBreakDist,  kEngageBreakDistY };
-constexpr AnchorAI::ThresholdPair kEngageStrikeBand       = { kEngageStrikeDist, kEngageStrikeY };
-constexpr AnchorAI::ThresholdPair kAttackEngageStrikeBand = { kAttackEngageDist, kEngageStrikeY };  // BLOCK timer recheck
-// Speed history:
-//   v1: 12.0     (50% faster than Link — visibly outran in tests)
-//   v2: 9.0      (still too fast)
-//   v3: 8.0      (matches Link R_RUN_SPEED_LIMIT — still felt fast)
-//   v4: 6.4      (20% reduction from v3 per user report 2026-05-19;
-//                 scripted-position locomotion lacks Link's anim
-//                 blending which makes vanilla movement read smoother
-//                 at the same nominal speed)
-//   v5: 5.12     (further 20% reduction per user report 2026-05-19 PM)
-//   v6: 5.376    (+5% per user report 2026-05-20 — pursuit slightly
-//                 slower than AI Player Follower; bump to match)
-constexpr float kEngageWalkSpeed    = 5.04f;
-constexpr float kEngageRunDistance  = 150.0f;
-constexpr float kEngageRunSpeed     = 5.376f;
-
-constexpr int   kBlockDurationMs        = 2000;
-constexpr float kBlockHpThresholdRatio  = 0.5f;
-constexpr int   kBlockFrontalAngle      = 0x4000;  // ±90° in s16
-
-constexpr float kRangedMinDist     = 90.0f;
-constexpr float kRangedAcquireDist = 500.0f;
-constexpr float kRangedBreakDist   = 800.0f;
-constexpr float kRangedSpawnFrame  = 5.0f;
-constexpr float kRangedSpawnHeightY = 50.0f;
-constexpr float kRangedYFilter     = 250.0f;
-constexpr float kRangedElevatedYDelta = 60.0f;
-
-constexpr float kStandbyDetectDist = 600.0f;
-// Idle leader-leash radius — STANDBY drops to FOLLOW outside this.
-// Was 80u; widened to 150u 2026-05-17 after log 230 showed an
-// ATTACK→STANDBY→FOLLOW→ATTACK cycle every ~1s. With 80u the
-// hysteresis between STANDBY-exit (80u) and combat-entry
-// (kAttackEngageDist=80u) was zero — any player motion in/out of the
-// 80u ring triggered a chase-then-immediate-swing pattern. 150u
-// creates a "wait at attention" band of 80-150u where the Invader
-// holds in STANDBY while the player drifts away, only chasing when
-// the player meaningfully retreats.
-constexpr float kStandbyIdleRadius = 150.0f;
-constexpr float kStandbyIdleY      = 100.0f;  // Y handoff to FOLLOW (Phase 3 P1-E) — narrower than break-Y to keep close-range vertical hostiles in STANDBY
-constexpr AnchorAI::ThresholdPair kStandbyIdleBand = { kStandbyIdleRadius, kStandbyIdleY };  // Fix C
-
-// Post-combat re-engagement cooldown. Was 1500ms; bumped to 2500ms
-// 2026-05-17 alongside kStandbyIdleRadius widening — together they
-// space the Invader's swings out into a more "deliberate hunter"
-// rhythm. TryEngageCombat checks `curFrame < sCombatCooldownEndFrame`
-// before re-firing combat tiers.
-constexpr int   kPostCombatCooldownMs = 2500;
+// Combat / engagement / RANGED / STANDBY / cooldown / sheathe-delay
+// tunables live in InvaderTunables.h (B.2 refactor 2026-06-01). Names
+// preserved verbatim via in-TU `using namespace InvaderTunables;`. See
+// the header for full rationale comments (detection-range bump 2026-05-17,
+// speed history v1-v6, idle radius widening for "wait at attention"
+// 80-150u band, etc.).
 static uint64_t sCombatCooldownEndFrame = 0;
-// Last combat weapon. 0 = melee (sword); 1 = ranged. Set at every
-// combat entry by TryEngageCombat; consumed by STANDBY anim/facing
-// preference AND by the equipment-swap path for sheathe-delay retention.
+// Last combat weapon. 0 = melee (sword); 1 = ranged.
 static s32 sLastCombatWeapon = 0;
-
-// Sheathe-delay: keep last-combat weapon visible for kInvSheatheDelayMs
-// after combat exit. Without this, the visible weapon flashes
-// armed→default→armed every combat cycle as the Invader transitions
-// FOLLOW (default modelGroup) → ENGAGE/ATTACK (armed) → STANDBY/IDLE.
-// 4000ms matches NPC Follower's kSheatheDelayMs — same vanilla-Link
-// "Link keeps weapon drawn for a few seconds after combat" feel.
-// Set by ChooseCombatExitState; consumed by InvStateToModelGroup.
-constexpr int   kInvSheatheDelayMs   = 4000;
 static uint64_t sLastCombatExitFrame = 0;
 
 // Helper — model group for the most-recent combat weapon. Used both
@@ -269,14 +192,7 @@ struct AttackState {
 };
 static AttackState sAttackState;
 
-// Minimum ticks any swing/shot state must hold before the
-// curFrame>=endFrame anim-completion check is allowed to exit. This
-// guards against a stale endFrame from the previous state's anim
-// being non-zero when ATTACK/RANGED_ATTACK is entered — without the
-// guard, the very first tick would early-exit because (curFrame >=
-// endFrame) is true from leftover idle anim state. Matches roughly
-// the kSwordSwing + kBowShoot anim length in ticks.
-constexpr int kMinSwingHoldTicks = 6;
+// kMinSwingHoldTicks in InvaderTunables.h.
 
 struct BlockState {
     uint64_t entryFrame    = 0;
@@ -284,22 +200,10 @@ struct BlockState {
 };
 static BlockState sBlockState;
 
-// Parity gap 3 — DEAD state hold timer. Captures the gameFrameCounter
-// at DEAD entry; TickDEAD waits for kInvaderDeathHoldMs to elapse, then
-// calls Actor_Kill which fires the OnActorKill broadcast path
-// (ENEMY_DEFEATED + Director::OnEnemyRemoved). File-scope is safe
-// because actor states are non-reentrant per actor.
-constexpr int kInvaderDeathHoldMs = 3000;  // 3s — matches FollowerNPC's kFollowerNpcDeathHoldMs
+// kInvaderDeathHoldMs in InvaderTunables.h.
 static uint64_t sDeathEntryInvFrame = 0;
 
-// Item 1 — environmental death thresholds (clones of
-// kFollowerNpcVoidThresholdY / kFollowerNpcDrowningMs from
-// FollowerNPC.cpp:98-99). Void: actor's Y dipped below the world's
-// out-of-bounds threshold. Drown: spent N ms continuously in SWIMMING.
-// Both transition the actor to DEAD with the corresponding
-// deathCause (0 = void/generic kDeath, 1 = drown kDeathDrown).
-constexpr float kInvaderVoidThresholdY = -3000.0f;
-constexpr int   kInvaderDrowningMs     = 30000;  // Player default; matches Follower
+// kInvaderVoidThresholdY / kInvaderDrowningMs in InvaderTunables.h.
 
 // Item 6 — swim-start tracking for drown timer. Static is safe because
 // only one Invader's tick runs at a time. Reset on SWIMMING exit (when
@@ -307,17 +211,13 @@ constexpr int   kInvaderDrowningMs     = 30000;  // Player default; matches Foll
 static uint64_t sInvSwimStartFrame = 0;
 static bool     sInvWasSwimming    = false;
 
-// Parity gap 5 — crawlspace traversal state. Same shape as FollowerNPC's
-// sCrawlState (FollowerNPC.cpp:2958-2964). anchor pointer is borrowed
-// from the room's RoomNavData::crawlspaceAnchors vector; it's invalidated
+// Parity gap 5 — crawlspace traversal state. anchor pointer is borrowed
+// from the room's RoomNavData::crawlspaceAnchors vector; invalidated
 // on scene transition, but TickCRAWLING bails to FOLLOW + clears the
-// pointer if it ever sees a null mid-crawl (defensive).
-constexpr float kInvCrawlSpeed         = 3.5f;
-constexpr float kInvCrawlEntryRadius   = 150.0f;
-constexpr float kInvCrawlMinCrossDist  = 20.0f;
-constexpr float kInvCrawlExitMargin    = 30.0f;
-constexpr float kInvCrawlMaxDistance   = 400.0f;
-constexpr float kInvCrawlExitYDrop     = 20.0f;  // matches FollowerNPC bddc0b598
+// pointer if it ever sees a null mid-crawl (defensive). Tunables
+// (kInvCrawlSpeed / kInvCrawlEntryRadius / kInvCrawlMinCrossDist /
+// kInvCrawlExitMargin / kInvCrawlMaxDistance / kInvCrawlExitYDrop)
+// live in InvaderTunables.h.
 
 struct CrawlInvState {
     const ::AnchorNavRoom::CrawlspaceAnchor* anchor = nullptr;
@@ -357,90 +257,9 @@ Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
 // handlers call it to build the FallbackPolicy for NavOrDirect.
 bool InvaderHasRangedWeapon();
 
-// ---------------------------------------------------------------------
-// Phase 2 — locomotion tuning constants. Cloned from FollowerNPC
-// with the leader-friendly thresholds inverted into target-hostile
-// pursuit thresholds. NOTE post-#208: revisit state shape against
-// canonical follower design pass.
-// ---------------------------------------------------------------------
-
-// Hysteresis: IDLE→FOLLOW fires when target XZ-distance exceeds this.
-// Larger than kInvFollowIdleDist so the NPC doesn't oscillate at the
-// boundary. Bumped 250→1000 on 2026-05-17 (log 233) to match the
-// kEngageAcquireDist range — outside 1000u the Invader returns to
-// IDLE and the target picker may select a different hostile. Inside
-// 1000u, IDLE→FOLLOW engages and TryEngageCombat Tier 2 immediately
-// promotes to ENGAGE pursuit.
-constexpr float kInvFollowEngageDist = 1000.0f;
-// FOLLOW→IDLE fires when target XZ-distance falls inside this. Slightly
-// smaller than kEngageStrikeDist so FOLLOW hands off to combat
-// (TryEngageCombat picks ATTACK / ENGAGE) BEFORE the IDLE re-entry
-// snaps the chase. Field test will likely retune; this is a starting
-// point that mirrors FollowerNPC's 50u kEnterIdle scaled to pursuit.
-constexpr float kInvFollowIdleDist = 60.0f;
-// P0 audit / log 263 fix — Y-axis gate on the FOLLOW→IDLE "arrived"
-// check. Without this the Invader declares itself arrived when the
-// target is directly above on a ledge (small XZ, huge Y delta), then
-// oscillates FOLLOW↔IDLE without ever engaging the next climb segment.
-// Same shape as FollowerNPC's kEnterIdleY and AI Player Follower's
-// kFollowYThreshold (already in place since log 32).
-constexpr float kInvFollowIdleY    = 40.0f;
-constexpr AnchorAI::ThresholdPair kInvFollowIdleBand = { kInvFollowIdleDist, kInvFollowIdleY };  // Fix C
-// FOLLOW pursuit speeds. Same numerics as FollowerNPC's kRunSpeed /
-// kRunDistance.
-constexpr float kInvWalkSpeed   = 5.04f;  // +5% 2026-05-20 (was 4.8 — slightly behind AI Player Follower)
-constexpr float kInvRunSpeed    = 5.376f; // +5% 2026-05-20 (was 5.12 — slightly behind AI Player Follower)
-constexpr float kInvRunDistance = 200.0f;
-// STUCK detection — no progress over this window triggers a one-tick
-// nudge. Same shape as FollowerNPC's kStuckCheckMs / kStuckMinProgress
-// but Invader's nudge distance is smaller (chase enemies don't have
-// the "find route around stairs" goal that the friendly follower does).
-constexpr int   kInvStuckCheckMs    = 3000;
-constexpr float kInvStuckMinProgress = 20.0f;
-// STUCK escalation (ported from AI Player Follower's G12). Matches
-// NPC Follower's kStuckCycleWindowMs / kStuckCycleEscalation. See
-// FollowerNPC.cpp:TickSTUCK for the routing semantics.
-constexpr int kInvStuckCycleWindowMs  = 3000;
-constexpr int kInvStuckCycleEscalation = 3;
-
-// Log 242 diagnostic — throttle for the FOLLOW progress snapshot.
-// 5s is long enough that a healthy FOLLOW tick doesn't spam the log
-// but short enough that a "stuck for 34s" symptom produces 6-7 data
-// points to diagnose against.
-constexpr int   kInvFollowProgressLogMs = 5000;
-constexpr float kInvStuckNudgeDist   = 30.0f;
-// G10 leash — 3D distance threshold + timeout. The Invader can be
-// far from the target; we use a longer leash than FollowerNPC's
-// (1200u/2000ms) so the Invader doesn't teleport away from a hostile
-// it's actively pursuing. Fires only when in IDLE/FOLLOW/STUCK
-// (combat / engage states stay put). Snaps to target on fire.
-constexpr float kInvLeashDistance  = 2000.0f;
-constexpr int   kInvLeashTimeoutMs = 5000;
-
-// ── Nav-parity Phase A — substrate path tuning ────────────────────
-// Same numerics as FollowerNPC's kPathRefresh*/kAdvanceSubgoalDist.
-// Re-querying every 500ms hits the trail-decay sweet spot — long
-// enough to amortise the BFS cost, short enough that a target who
-// just stepped around a corner doesn't run dry on the current path.
-constexpr int   kInvPathRefreshMs       = 500;
-constexpr float kInvPathRetargetDist    = 60.0f;
-constexpr float kInvAdvanceSubgoalDist  = 30.0f;
-// Proximity inside which TickFOLLOW skips substrate-path computation
-// and walks straight at the target. Matches FollowerNPC's
-// kFollowProxLimit — avoids spurious re-paths around small obstacles
-// when the target is right there.
-constexpr float kInvFollowProxLimit     = 30.0f;
-
-// ── Nav-parity Phase B — CLIMBING tuning ───────────────────────────
-// Same numerics as FollowerNPC's kClimbSpeedY / kClimbBodyOffset.
-// Vanilla Link climbs at ~4-5u/frame; halved to 2.0 on 2026-05-19 PM
-// per user report — 4.0 still felt too fast on the vine wall.
-constexpr float kInvClimbSpeedY     = 2.0f;
-constexpr float kInvClimbBodyOffset = 12.0f;
-// Engagement gate when leader-climb force-engage fires. Same shape as
-// FollowerNPC's kClimbForceEngageBaseDistSq (200u). Squared form to
-// avoid the sqrt at gate-check time.
-constexpr float kInvClimbForceEngageBaseDistSq = 200.0f * 200.0f;
+// Phase 2/A/B nav-parity tunables (kInvFollowEngageDist / kInvFollowIdle*
+// kInvWalk/Run* / kInvStuck* / kInvLeash* / kInvPath* / kInvClimb*)
+// in InvaderTunables.h.
 
 // Local nav baseline. Same shape as FollowerNPC's sLocalNav (subset).
 // Nav-parity Phase A added substrate path consumption + the cached
@@ -2976,20 +2795,9 @@ bool TryEnterCrawling(EnInvader* this_, PlayState* play, const Vec3f& targetPos)
 //
 // Cloned from FollowerNPC's TryFireG14 (FollowerNPC.cpp:3297). Invader
 // is "close to target but not closing" — distance unchanged for >
-// kInvCloseFailTimeoutMs → snap to target's pos. Catches pathological
-// orbits where G10 (long leash) doesn't fire because the Invader is
-// inside the leash band, but the Invader can't actually make progress
-// because of geometry.
-//
-// Uses sLocalInvNav.closeFailFrames / closeFailBaseline (added below).
-// Skips combat states + scripted-traversal states (SWIMMING /
-// LEDGE_HOIST / CRAWLING / DEAD) — those are their own scripted
-// motion.
+// kInvCloseFailTimeoutMs → snap to target. Tunables in
+// InvaderTunables.h. Skips combat / scripted-traversal states.
 // ---------------------------------------------------------------------
-constexpr float kInvCloseFailMinDistance   = 200.0f;
-constexpr float kInvCloseFailMaxDistance   = 1200.0f;
-constexpr int   kInvCloseFailTimeoutMs     = 10000;
-constexpr float kInvCloseFailProgressDelta = 30.0f;
 
 bool TryFireG14Invader(EnInvader* this_, PlayState* play) {
     Actor* a = &this_->actor;

@@ -19,6 +19,7 @@
 
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/NPCFollower/FollowerNPC.h"
+#include "soh/Network/Anchor/NPCFollower/FollowerNpcTunables.h"  // B.2 — balance tuning
 #include "soh/Network/Anchor/Common/ActorTrail.h"     // Phase 5: substrate path consumption
 #include "soh/Network/Anchor/Common/AILocomotion/NavOrDirect.h"  // Phase 3 (2026-05-18): shared substrate-path helper
 #include "soh/Network/Anchor/Common/AILocomotion/ScriptedFollow.h"  // Phase 5 (2026-05-19): shared scripted-FOLLOW step
@@ -53,19 +54,13 @@ extern PlayState* gPlayState;
 extern s16        gEnFollowerId;
 }
 
-// ----------------------------------------------------------------------------
-// Stage 1+2 (npc_follower_health_and_respawn_plan): health constants
-// and helpers. Stage 3+ will add ApplyDamage() that calls
-// FollowerNpcInvulnerable() before applying.
-// ----------------------------------------------------------------------------
-// Floor for the per-spawn health cap. The leader-mirroring helper
-// returns max(this, gSaveContext.healthCapacity / 16) so the NPC
-// always has at least 3 hearts even before Link picks up his
-// starting heart container.
-constexpr s8 kFollowerNpcMinHealth = 3;
-// Hard cap so we never overflow the s8 EnFollower::health field
-// (max 127). 20 hearts is OoT's max anyway.
-constexpr s8 kFollowerNpcMaxHealth = 20;
+// B.2 — balance tunables (kFollowerNpcMinHealth/MaxHealth/DeathHoldMs/
+// RespawnCooldownMs/DrowningMs/VoidThresholdY, kEnter{Idle,Follow}{,Y,Band},
+// kRunDistance/WalkSpeed/RunSpeed, kPathRefreshMs..kStuckCycleEscalation,
+// kClimb*, kNpcLeash*/kNpcCloseFail*, kSheatheDelayMs) live in
+// FollowerNpcTunables.h. `using namespace` keeps consumer code below
+// using bare names. See the header for full rationale comments.
+using namespace FollowerNpcTunables;
 
 bool FollowerNpcInvulnerable() {
     return CVarGetInteger(CVAR_ENHANCEMENT("AI.FollowerNPC.Invulnerable"), 1) != 0;
@@ -96,18 +91,6 @@ s8 FollowerNpcMaxHealthFromLink() {
     if (hearts > kFollowerNpcMaxHealth) hearts = kFollowerNpcMaxHealth;
     return (s8)hearts;
 }
-
-// Stage 2 — death/respawn timings. All in milliseconds, converted to
-// game ticks via Anchor::MsToGameTicks at the comparison site so the
-// values stay correct at any framerate (20fps default vs unlocked).
-constexpr int kFollowerNpcDeathHoldMs       = 3000;   // anim hold + ground lay
-// User-spec is "10 seconds total from death to respawn". We achieve
-// that by setting this cooldown so deathHold + cooldown ≈ 10s.
-// Log 161 timing: death @ 02:20:58, respawn @ 02:21:12 = 13.9s with
-// the prior 10s cooldown — felt long. 7s cooldown gives 10s total.
-constexpr int kFollowerNpcRespawnCooldownMs = 7000;
-constexpr int kFollowerNpcDrowningMs        = 30000;  // user-spec (Player default)
-constexpr float kFollowerNpcVoidThresholdY  = -3000.0f;  // Y below this = void death
 
 // Stage 2 — find the door actor closest to `nearPos` (typically the
 // leader's position). Returns the door's world.pos + facing, or
@@ -388,11 +371,10 @@ static s32 sLastCombatWeapon = 0;
 // after each RANGED_ATTACK exit, FOLLOW's modelGroup is DEFAULT
 // (empty hands), then next combat tick re-drew the weapon).
 //
-// 4000ms picked empirically — long enough to bridge most STANDBY ↔
+// 4000ms picked empirically (kSheatheDelayMs lives in
+// FollowerNpcTunables.h) — long enough to bridge most STANDBY ↔
 // FOLLOW ↔ combat cycles without visible flicker, short enough to
-// feel responsive (NPC sheathes within a few seconds of true combat
-// end). Player's vanilla sheathe is similar order of magnitude.
-static constexpr int kSheatheDelayMs = 4000;
+// feel responsive. Player's vanilla sheathe is similar magnitude.
 static uint64_t sLastCombatExitFrame = 0;
 
 // Helper — model group for the most-recent combat weapon. Used both
@@ -832,109 +814,11 @@ void Anchor::SetFollowerNpcActive(bool active) {
 // Phase 4 — state machine + locomotion.
 // ----------------------------------------------------------------------------
 //
-// Distance thresholds for IDLE / FOLLOW transitions. Hysteresis prevents
-// flap when the leader stands at the boundary.
-//   - dist >= kEnterFollow → IDLE → FOLLOW
-//   - dist <= kEnterIdle   → FOLLOW → IDLE
-// Same shape as the AI Player Follower's kFollowThreshold pattern
-// but with explicit hysteresis since the NPC's locomotion is
-// direct-vector, not stick-injection (smoother but no built-in dead-zone).
-static constexpr float kEnterFollow = 80.0f;
-static constexpr float kEnterIdle   = 50.0f;
-// Y-axis hysteresis pair (P0 audit / log 263 fix). Without these gates,
-// when the leader is directly above on a ledge (e.g., y=800 above NPC's
-// y=360), small XZ distance makes the actor declare itself "arrived"
-// and stop trying to climb. Mirrors AI Player Follower's
-// kFollowYThreshold pattern (Follower.cpp:223) added 2026-05-12 for
-// the same bug class.
-//   - Arrival (FOLLOW→IDLE): require |dy| ≤ kEnterIdleY in addition
-//     to XZ.
-//   - Re-engage (IDLE→FOLLOW): trigger on XZ exceeds OR |dy| exceeds
-//     kEnterFollowY (hysteresis upper bound).
-static constexpr float kEnterIdleY   = 40.0f;
-static constexpr float kEnterFollowY = 60.0f;
-// Fix C: grouped form — preferred at predicate call sites; the
-// individual float constants stay accessible for log strings + speed
-// scaling. Float and band forms are interchangeable via predicate
-// overloads (NavStateTransitions.h).
-static constexpr AnchorAI::ThresholdPair kEnterIdleBand   = { kEnterIdle,   kEnterIdleY };
-static constexpr AnchorAI::ThresholdPair kEnterFollowBand = { kEnterFollow, kEnterFollowY };
-
-// Walk and run speeds in OoT units/frame. Matches Link's vanilla walk
-// (~6.0) and run (~12.0). The NPC walks when close to leader and runs
-// when leader is far — gives a natural feel without making the NPC
-// always sprint.
-static constexpr float kRunDistance = 250.0f;  // beyond this, run instead of walk
-static constexpr float kWalkSpeed   = 5.04f;
-// Speed history:
-//   v1: 12.0    (50% faster than Link — visibly outran Link in tests)
-//   v2: 8.0     (matches Link R_RUN_SPEED_LIMIT — still felt fast in
-//                harness; scripted-position locomotion lacks Link's
-//                anim-blending which makes vanilla movement read
-//                smoother at the same nominal speed)
-//   v3: 6.4     (20% reduction from v2 per user report 2026-05-19)
-//   v4: 5.12    (further 20% reduction per user report 2026-05-19 PM —
-//                NPC + Invader still visibly outpaced Link in field test)
-//   v5: 5.376   (+5% per user report 2026-05-20 — NPC + Invader now
-//                slightly slower than AI Player Follower; bump back up)
-static constexpr float kRunSpeed    = 5.376f;
-
-// Phase 5 — substrate path consumption + STUCK recovery.
-//
-// Path refresh policy: re-query ComputePathTo every kPathRefreshMs OR
-// when the captured target has moved beyond kPathRetargetDist (leader
-// walked far enough that the path is stale). 500ms = 2Hz refresh —
-// fast enough to track a moving leader without spamming the planner.
-static constexpr int   kPathRefreshMs       = 500;
-static constexpr float kPathRetargetDist    = 60.0f;
-static constexpr float kAdvanceSubgoalDist  = 30.0f;  // advance cursor when within this XZ
-static constexpr int   kStuckCheckMs        = 3000;   // matches player-Follower's tuned 3s
-static constexpr int   kFollowProgressLogMs = 5000;   // throttled FOLLOW diagnostic period
-static constexpr float kStuckMinProgress    = 20.0f;
-static constexpr float kStuckNudgeDist      = 30.0f;  // direct world.pos nudge in STUCK
-// STUCK escalation (ported from AI Player Follower's G12 — Follower.cpp:1680).
-// Counts consecutive FOLLOW→STUCK transitions within a sliding window:
-//   Cycle 1: legacy nudge (toward leader)
-//   Cycle 2: edge-triggered navPath cursor advance (skip stuck subgoal)
-//   Cycle 3+: teleport to next subgoal OR leader as fallback
-// Cycle counter decays after kStuckCycleWindowMs of no new STUCK.
-static constexpr int kStuckCycleWindowMs  = 3000;
-static constexpr int kStuckCycleEscalation = 3;
-
-// Phase 6 — scripted-climb constants. Tuned to match Link's vanilla
-// climb feel; field-test in Inside Deku Tree may refine.
-static constexpr float kClimbSpeedY         = 2.0f;   // u/frame upward; halved 2026-05-19 PM per user report (was 4.0 — too fast)
-static constexpr float kClimbSubgoalReach3D = 24.0f;  // advance cursor when within 3D
-static constexpr float kClimbXzSnap         = 1.0f;   // smooth XZ snap rate to subgoal (per frame fraction)
-//
-// Body offset from wall surface. Climb cells sit ON the climbable
-// polygon; the NPC's world.pos is at its body center, so snapping
-// directly to a cell embeds the body half-into the wall. Offset
-// along anchor.planeNormal (which points OUT from wall) by this
-// amount so the body sits in front of the wall, matching how OoT
-// renders Link on ladders/vines.
-static constexpr float kClimbBodyOffset     = 12.0f;
-
-// Phase 8 — G-guard recovery teleports. Mirror the
-// Follower's G10 / G14 semantics but adapted for direct world.pos
-// writes (no stick injection).
-//
-// G10 leash: NPC distance to leader > kNpcLeashDistance for >
-// kNpcLeashTimeoutMs → teleport NPC to leader's pos. Catches "NPC
-// stuck behind a closed door / left in another scene / fell into
-// untracked geometry."
-static constexpr float kNpcLeashDistance      = 1200.0f;  // 3D units
-static constexpr int   kNpcLeashTimeoutMs     = 2000;     // 2s, framerate-aware
-//
-// G14 close-fail: NPC in the 200-1200u band (close enough that G10
-// won't fire) but making < kNpcCloseFailProgressDelta progress
-// across kNpcCloseFailTimeoutMs → teleport NPC to current substrate
-// subgoal. Catches "NPC stuck in tight geometry between rooms /
-// path-around-obstacle outside the substrate's understanding."
-static constexpr float kNpcCloseFailMinDistance   = 200.0f;
-static constexpr float kNpcCloseFailMaxDistance   = 1200.0f;
-static constexpr int   kNpcCloseFailTimeoutMs     = 10000;  // 10s
-static constexpr float kNpcCloseFailProgressDelta = 30.0f;
+// Distance/locomotion/path/climb/leash tunables live in
+// FollowerNpcTunables.h (B.2 refactor 2026-06-01). Names preserved
+// verbatim; brought in via `using namespace FollowerNpcTunables;` at
+// the top of this TU. See the header for full rationale comments.
+// ----------------------------------------------------------------------------
 
 namespace {
 
