@@ -2,6 +2,8 @@
 
 #include <cmath>  // sqrtf
 
+#include <spdlog/spdlog.h>  // SPDLOG_INFO — first-call diagnostic
+
 extern "C" {
 #include "z64math.h"  // Matrix_MultVec3f
 }
@@ -34,6 +36,24 @@ extern "C" void Anchor_ComputeBladeWorldFromMatrix(Vec3f* outTip, Vec3f* outBase
     // non-const Vec3f* even though it only reads the input.
     Matrix_MultVec3f(const_cast<Vec3f*>(&kSwordTipLocal),  outTip);
     Matrix_MultVec3f(const_cast<Vec3f*>(&kSwordBaseLocal), outBase);
+
+    // [SwordBlade.Diag] — Option D first-call diagnostic.
+    // One-shot per process: confirms the helper is actually invoked
+    // on first frame and produces non-degenerate world positions.
+    // If outTip/outBase both come back at (0,0,0), the matrix stack
+    // was identity — likely because the caller wasn't inside a
+    // post-limb callback when invoking. After the first log,
+    // subsequent calls are silent; per-frame logging happens at the
+    // per-actor diagnostic site (Invader.Diag AT registered ...).
+    static bool sFirstCallLogged = false;
+    if (!sFirstCallLogged) {
+        SPDLOG_INFO("[SwordBlade.Diag] First Anchor_ComputeBladeWorldFromMatrix "
+                    "call: tip=({:.1f},{:.1f},{:.1f}) base=({:.1f},{:.1f},{:.1f}) "
+                    "(non-degenerate if matrix stack was at L_HAND limb)",
+                    outTip->x, outTip->y, outTip->z,
+                    outBase->x, outBase->y, outBase->z);
+        sFirstCallLogged = true;
+    }
 }
 
 extern "C" void Anchor_BuildAtQuadFromBlade(
