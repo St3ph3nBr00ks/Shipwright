@@ -3513,9 +3513,23 @@ void Anchor::HandleClimbStateAutonomous(Player* player, const Vec3f& leaderPos) 
     if (followerAutonomousClimb &&
         followerPostTeleportFrames == 0 &&
         followerClimbPrevY > -1.0e8f) {
+        // #236 — skip detach-detect when Link is legitimately on the
+        // wall/ledge. During a descent approach, OoT auto-grabs the
+        // platform edge as Link walks off — Y briefly drops 7-8u
+        // during the hang-transition (log 347 21:58:21+). Without
+        // this gate, detach-detect kicks the follower out of CLIMBING
+        // before the BTN_A injection below can convert HANGING into
+        // CLIMBING_LADDER. Same logic for someone mid-climb: vanilla
+        // climb-down stick speed is ~3-5u/frame so the gated 6u
+        // threshold is fine for actual descent, but in-state checks
+        // remove false positives entirely.
+        const u32 sf1Detach = player->stateFlags1;
+        const bool legitOnWall =
+            (sf1Detach & (PLAYER_STATE1_HANGING_OFF_LEDGE |
+                          PLAYER_STATE1_CLIMBING_LADDER)) != 0;
         constexpr f32 kClimbDetachDropPerFrame = 6.0f;
         const f32 yDrop = followerClimbPrevY - player->actor.world.pos.y;
-        if (yDrop > kClimbDetachDropPerFrame) {
+        if (!legitOnWall && yDrop > kClimbDetachDropPerFrame) {
             SPDLOG_INFO("[Follower] climb-detached (Y dropped {:.1f}u "
                         "from {:.0f} to {:.0f} — exiting CLIMBING)",
                         yDrop, followerClimbPrevY,
