@@ -479,6 +479,24 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     // Link took zero damage. See Plans/invader_field_test_log349_findings.md.
     Collider_UpdateCylinder(&player->actor, &player->cylinder);
 
+    // [DummyPlayer.Diag] — log 354 Issue A investigation. Edge-trigger
+    // on AC_HIT transition (false→true) so we can confirm whether the
+    // Invader's AT collider is registering hits against the DummyPlayer's
+    // body cylinder at all. acFlags is bit-packed by CollisionCheck_AT
+    // during the pre-update collision pass. invincibilityTimer is
+    // mirrored from the remote peer via PLAYER_UPDATE — non-zero blocks
+    // both the broadcast gate AND the SetAC gate below.
+    static std::unordered_map<uint32_t, bool> sLastAcHitState;
+    const bool acHitNow = (player->cylinder.base.acFlags & AC_HIT) != 0;
+    if (acHitNow && !sLastAcHitState[clientId]) {
+        SPDLOG_INFO("[DummyPlayer.Diag] AC_HIT edge clientId={} invincibilityTimer={} damage={} damageEffect={} acFlags=0x{:X}",
+                    clientId, player->invincibilityTimer,
+                    (int)player->actor.colChkInfo.damage,
+                    (int)player->actor.colChkInfo.damageEffect,
+                    player->cylinder.base.acFlags);
+    }
+    sLastAcHitState[clientId] = acHitNow;
+
     if (player->cylinder.base.acFlags & AC_HIT && player->invincibilityTimer == 0) {
         Anchor::Instance->SendPacket_DamagePlayer(client.clientId, player->actor.colChkInfo.damageEffect,
                                                   player->actor.colChkInfo.damage);
@@ -489,10 +507,28 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         }
     }
 
-    if (!(player->stateFlags2 & PLAYER_STATE2_FROZEN) &&
+    const bool wouldSetAC =
+        !(player->stateFlags2 & PLAYER_STATE2_FROZEN) &&
         !(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_DAMAGED)) &&
-        (player->invincibilityTimer <= 0)) {
+        (player->invincibilityTimer <= 0);
+    if (wouldSetAC) {
         CollisionCheck_SetAC(play, &play->colChkCtx, &player->cylinder.base);
+    }
+
+    // [DummyPlayer.Diag] — rate-limited heartbeat (~1Hz at 20fps tick)
+    // showing the SetAC gate's inputs. Confirms whether DummyPlayer's
+    // AC is being registered each frame and what invincibilityTimer
+    // value we see. If wouldSetAC is consistently false, the AC isn't
+    // in the collision-check list → AC_HIT can never fire → no damage
+    // broadcast can ever happen.
+    static int sDummyDiagHeartbeat = 0;
+    if (++sDummyDiagHeartbeat >= 20) {
+        SPDLOG_INFO("[DummyPlayer.Diag] heartbeat clientId={} invincibilityTimer={} stateFlags1=0x{:X} stateFlags2=0x{:X} wouldSetAC={} pos=({:.0f},{:.0f},{:.0f})",
+                    clientId, player->invincibilityTimer,
+                    player->stateFlags1, player->stateFlags2, wouldSetAC,
+                    player->actor.world.pos.x, player->actor.world.pos.y,
+                    player->actor.world.pos.z);
+        sDummyDiagHeartbeat = 0;
     }
 
     Collider_ResetCylinderAC(play, &player->cylinder.base);

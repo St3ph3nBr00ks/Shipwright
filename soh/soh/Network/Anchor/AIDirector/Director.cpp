@@ -162,6 +162,24 @@ void Director::Tick() {
     // values regardless of empty-registry / invalid-view early-exits.
     ++mGlobalFrameCounter;
 
+    // [Director.Diag] — log 354 Fix 1 investigation. Confirms that
+    // Director::Tick is running during the post-Continue scene reload
+    // window. Rate-limited to ~1Hz, but ONLY within the first ~6s
+    // after a local scene change (where Fix 1's grace period applies).
+    // After the window, the heartbeat goes silent to avoid log spam.
+    const uint64_t framesSinceChange = GetFramesSinceLocalSceneChange();
+    if (framesSinceChange < 120 /* ~6s @ 20fps */) {
+        static uint64_t sDirectorDiagLastLogFrame = 0;
+        if (sDirectorDiagLastLogFrame == 0 ||
+            mGlobalFrameCounter - sDirectorDiagLastLogFrame >= 20) {
+            SPDLOG_INFO("[Director.Diag] Tick running gframe={} framesSinceSceneChange={} sceneNum={} roomNum={}",
+                        mGlobalFrameCounter, framesSinceChange,
+                        gPlayState ? (int)gPlayState->sceneNum : -1,
+                        gPlayState ? (int)gPlayState->roomCtx.curRoom.num : -1);
+            sDirectorDiagLastLogFrame = mGlobalFrameCounter;
+        }
+    }
+
     // No descriptors registered → nothing to do. Step 1 always lands here
     // because nothing has called Register() yet. Step 7 lands TestDescriptor;
     // step 11 lands InvaderDescriptor.
@@ -181,6 +199,20 @@ void Director::Tick() {
     // loaded) → skip proposal work this tick.
     SessionView view = BuildSessionView();
     if (!view.IsValid()) {
+        // [Director.Diag] — log 354 Fix 1 investigation. If the
+        // SessionView is invalid post-scene-change, Tick returns
+        // before reaching OnTick. Rate-limited within the
+        // post-scene-change window so we see WHY OnTick isn't
+        // firing (no players? everyone in cutscene?).
+        if (framesSinceChange < 120) {
+            static uint64_t sDirectorDiagInvalidLogFrame = 0;
+            if (sDirectorDiagInvalidLogFrame == 0 ||
+                mGlobalFrameCounter - sDirectorDiagInvalidLogFrame >= 20) {
+                SPDLOG_INFO("[Director.Diag] SessionView invalid (players.size()={}); skipping OnTick framesSinceSceneChange={}",
+                            view.players.size(), framesSinceChange);
+                sDirectorDiagInvalidLogFrame = mGlobalFrameCounter;
+            }
+        }
         return;
     }
 

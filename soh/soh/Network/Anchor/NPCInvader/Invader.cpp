@@ -2011,6 +2011,21 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
     atkCtx.registerATWindow = [this_, play]() {
         PositionAttackQuad(this_);
         CollisionCheck_SetAT(play, &play->colChkCtx, &this_->atCollider.base);
+        // [Invader.Diag] — log 354 Issue A investigation. Confirms the
+        // AT collider IS being registered during the swing's active
+        // window (anim frames 4-12 of kSwordSwing). If this fires but
+        // DummyPlayer's [DummyPlayer.Diag] AC_HIT edge doesn't, the
+        // sword quad isn't geometrically overlapping the DummyPlayer's
+        // body cylinder — either AT positioning is wrong or
+        // DummyPlayer's cylinder position lags. Rate-limited to
+        // 1 log per ~10 swings to keep volume sane during heavy combat.
+        static int sATDiagCounter = 0;
+        if (++sATDiagCounter % 10 == 1) {
+            SPDLOG_INFO("[Invader.Diag] AT registered invPos=({:.0f},{:.0f},{:.0f}) shape.rot.y=0x{:04X} curFrame={:.1f}",
+                        this_->actor.world.pos.x, this_->actor.world.pos.y,
+                        this_->actor.world.pos.z, (int)this_->actor.shape.rot.y,
+                        this_->skelAnime.curFrame);
+        }
     };
     atkCtx.curAnimFrame           = this_->skelAnime.curFrame;
     atkCtx.endAnimFrame           = this_->skelAnime.endFrame;

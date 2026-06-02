@@ -99,6 +99,11 @@ struct InvaderRuntimeState {
     // period elapses (sceneSettled == true again), so a subsequent
     // host transition re-arms the log.
     bool     reconcileBlockedLogged = false;
+
+    // [InvaderDescriptor.Diag] log 354 — edge-trigger flag so the
+    // "host actor went MISSING" diagnostic fires once per host-
+    // absence event (re-armed when host's actor comes back).
+    bool     hostActorMissingLogged = false;
 };
 
 class InvaderDescriptor : public SpawnableEnemyDescriptor {
