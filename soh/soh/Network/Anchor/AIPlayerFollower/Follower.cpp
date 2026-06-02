@@ -2258,8 +2258,8 @@ void Anchor::TickFollowerInput(Actor* actor) {
             (followerClimbTopTarget.y <
              actor->world.pos.y - kClimbDescentTolerance);
         if ((sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) && pathRequestsDescent) {
-            input.cur.btn   |= BTN_A;
-            input.press.btn |= BTN_A;
+            input.cur.button   |= BTN_A;
+            input.press.button |= BTN_A;
             SPDLOG_INFO("[Follower] CLIMBING descent: BTN_A grab vine from hang "
                         "(pos.y={:.0f} target.y={:.0f})",
                         actor->world.pos.y, followerClimbTopTarget.y);
