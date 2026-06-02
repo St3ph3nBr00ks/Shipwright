@@ -348,6 +348,15 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
     localPlayer->headLimbRot  = this->headLimbRot;
     localPlayer->upperLimbRot = this->upperLimbRot;
 
+    // [FollowerNPC.Diag] cross-wire diagnostic. Capture localPlayer's
+    // leftHandPos BEFORE Player_DrawImpl, then again AFTER. If they
+    // differ, Player_DrawImpl wrote to localPlayer->leftHandPos
+    // during the NPC's draw — confirming the cross-wire hypothesis
+    // where the override callback's D_80160000 write contaminates
+    // local Player state. Rate-limited to 1 log per ~60 draws (~3s)
+    // to keep volume sane.
+    Vec3f savedLeftHandPos = localPlayer->leftHandPos;
+
     Anchor_FollowerNpcDrawBegin(thisx);
     Player_DrawImpl(play,
                     this->skelAnime.skeleton,
@@ -361,6 +370,27 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
                     EnFollower_PostLimbDraw /* sword blade tracking (#238); strictly writes swordTip/swordBase, no Player-state side effects */,
                     localPlayer /* thisx for callbacks */);
     Anchor_FollowerNpcDrawEnd();
+
+    // [FollowerNPC.Diag] cross-wire — log delta + post-draw values.
+    {
+        static int sDiagCounter = 0;
+        if (++sDiagCounter % 60 == 1) {
+            const float dx = localPlayer->leftHandPos.x - savedLeftHandPos.x;
+            const float dy = localPlayer->leftHandPos.y - savedLeftHandPos.y;
+            const float dz = localPlayer->leftHandPos.z - savedLeftHandPos.z;
+            const float deltaSq = dx*dx + dy*dy + dz*dz;
+            LUSLOG_INFO("[FollowerNPC.Diag] localPlayer leftHandPos "
+                        "pre=(%.1f,%.1f,%.1f) post=(%.1f,%.1f,%.1f) deltaSq=%.1f "
+                        "npc.swordBase=(%.1f,%.1f,%.1f) npc.world.pos=(%.1f,%.1f,%.1f) "
+                        "localPlayer.world.pos=(%.1f,%.1f,%.1f)",
+                        savedLeftHandPos.x, savedLeftHandPos.y, savedLeftHandPos.z,
+                        localPlayer->leftHandPos.x, localPlayer->leftHandPos.y, localPlayer->leftHandPos.z,
+                        deltaSq,
+                        this->swordBase.x, this->swordBase.y, this->swordBase.z,
+                        this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z,
+                        localPlayer->actor.world.pos.x, localPlayer->actor.world.pos.y, localPlayer->actor.world.pos.z);
+        }
+    }
 
     // Restore. Scoped to this one draw call.
     localPlayer->headLimbRot  = savedHead;

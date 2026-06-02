@@ -455,6 +455,14 @@ void EnInvader_Draw(Actor* thisx, PlayState* play) {
     localPlayer->headLimbRot  = this->headLimbRot;
     localPlayer->upperLimbRot = this->upperLimbRot;
 
+    // [Invader.Diag] cross-wire diagnostic. Capture localPlayer's
+    // leftHandPos BEFORE Player_DrawImpl, then again AFTER. If they
+    // differ, the NPC's draw wrote to localPlayer->leftHandPos —
+    // confirming the cross-wire hypothesis (override callback's
+    // D_80160000 write contaminates local Player state). Rate-
+    // limited to 1 log per ~60 draws (~3s).
+    Vec3f savedLeftHandPos = localPlayer->leftHandPos;
+
     // Set draw-context flag so VB_APPLY_TUNIC_COLOR knows this draw
     // is an Invader and applies the hostile-black tint instead of
     // inheriting the previous draw's env color.
@@ -471,6 +479,27 @@ void EnInvader_Draw(Actor* thisx, PlayState* play) {
                     EnInvader_PostLimbDraw /* sword blade tracking — see comment above */,
                     localPlayer);
     Anchor_InvaderDrawEnd();
+
+    // [Invader.Diag] cross-wire — log delta + post-draw values.
+    {
+        static int sDiagCounter = 0;
+        if (++sDiagCounter % 60 == 1) {
+            const float dx = localPlayer->leftHandPos.x - savedLeftHandPos.x;
+            const float dy = localPlayer->leftHandPos.y - savedLeftHandPos.y;
+            const float dz = localPlayer->leftHandPos.z - savedLeftHandPos.z;
+            const float deltaSq = dx*dx + dy*dy + dz*dz;
+            LUSLOG_INFO("[Invader.Diag] localPlayer leftHandPos "
+                        "pre=(%.1f,%.1f,%.1f) post=(%.1f,%.1f,%.1f) deltaSq=%.1f "
+                        "inv.swordBase=(%.1f,%.1f,%.1f) inv.world.pos=(%.1f,%.1f,%.1f) "
+                        "localPlayer.world.pos=(%.1f,%.1f,%.1f)",
+                        savedLeftHandPos.x, savedLeftHandPos.y, savedLeftHandPos.z,
+                        localPlayer->leftHandPos.x, localPlayer->leftHandPos.y, localPlayer->leftHandPos.z,
+                        deltaSq,
+                        this->swordBase.x, this->swordBase.y, this->swordBase.z,
+                        this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z,
+                        localPlayer->actor.world.pos.x, localPlayer->actor.world.pos.y, localPlayer->actor.world.pos.z);
+        }
+    }
 
     // Restore. Scoped to this one draw call so Player's own next draw
     // uses the user's actual head/upper rotation.
