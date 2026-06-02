@@ -5,7 +5,7 @@
 #include <spdlog/spdlog.h>  // SPDLOG_INFO — first-call diagnostic
 
 extern "C" {
-#include "z64math.h"  // Matrix_MultVec3f
+#include "functions.h"  // Matrix_MultVec3f
 }
 
 // Local-space sword offsets. Source: z_player_lib.c:1664-1678
