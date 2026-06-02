@@ -451,22 +451,33 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     // the "same" scene (sceneNum) but their world-state is independent,
     // so any collision / lock-on / damage between them is meaningless.
     // Treat them as the pvpMode=0 case: disable lock-on and skip the
-    // collider setup entirely. This runs BEFORE the PvP gate because
-    // cross-timeline trumps every PvP mode (including FF).
+    // collider setup entirely. This runs BEFORE the AC-registration
+    // block below because cross-timeline trumps every interaction
+    // (including PvP-FF and hostile-NPC PvE).
     if (client.linkAge != gSaveContext.linkAge) {
         actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
         return;
     }
 
-    if (Anchor::Instance->roomState.pvpMode == 0 ||
-        (Anchor::Instance->roomState.pvpMode == 1 &&
-         client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default")) ||
-        SceneMultiplayerConfig::ShouldDisablePvP(gPlayState)) {
-        actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
-        return;
-    }
-
-    actor->flags &= ~ACTOR_FLAG_LOCK_ON_DISABLED;
+    // Hostile-NPC PvE damage path — AC registration + AC_HIT broadcast
+    // fires regardless of PvP mode. The Invader (and any future
+    // hostile-NPC actor) uses an AT_TYPE_ENEMY AT collider; the
+    // DummyPlayer's cylinder AC is AC_TYPE_ENEMY (inherited from
+    // Player_Init), so AT_TYPE_ENEMY → AC_TYPE_ENEMY hits register
+    // here naturally. PvP-on path REPLACES this for PvP friendly-fire
+    // semantics (handled below by re-registering with adjusted
+    // types). PvP-off Player AT colliders are AT_TYPE_PLAYER and do
+    // NOT register against AC_TYPE_ENEMY, so this block does not
+    // produce accidental friendly-fire in non-PvP sessions.
+    //
+    // Without this lift, the original code returned at the PvP gate
+    // below for pvpMode==0 sessions, leaving DummyPlayer's AC
+    // unregistered — host's CollisionCheck never tested Invader AT
+    // against DummyPlayer AC, so AC_HIT never fired, so no
+    // DAMAGE_PLAYER broadcast reached the peer's local Link. Field-
+    // test log 349: Invader swung sword ~30 times over 75s; P2's
+    // Link took zero damage. See Plans/invader_field_test_log349_findings.md.
+    Collider_UpdateCylinder(&player->actor, &player->cylinder);
 
     if (player->cylinder.base.acFlags & AC_HIT && player->invincibilityTimer == 0) {
         Anchor::Instance->SendPacket_DamagePlayer(client.clientId, player->actor.colChkInfo.damageEffect,
@@ -478,7 +489,28 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         }
     }
 
-    Collider_UpdateCylinder(&player->actor, &player->cylinder);
+    if (!(player->stateFlags2 & PLAYER_STATE2_FROZEN) &&
+        !(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_DAMAGED)) &&
+        (player->invincibilityTimer <= 0)) {
+        CollisionCheck_SetAC(play, &play->colChkCtx, &player->cylinder.base);
+    }
+
+    Collider_ResetCylinderAC(play, &player->cylinder.base);
+
+    // PvP gate — controls lock-on enable + OC (physical push-apart
+    // between players) + AT (DummyPlayer's own attack collider for
+    // PvP friendly-fire) + mass. These behaviours are PvP-specific
+    // and intentionally remain gated. The AC block above is the only
+    // piece that hostile-NPC PvE needs.
+    if (Anchor::Instance->roomState.pvpMode == 0 ||
+        (Anchor::Instance->roomState.pvpMode == 1 &&
+         client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default")) ||
+        SceneMultiplayerConfig::ShouldDisablePvP(gPlayState)) {
+        actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
+        return;
+    }
+
+    actor->flags &= ~ACTOR_FLAG_LOCK_ON_DISABLED;
 
     if (!(player->stateFlags2 & PLAYER_STATE2_FROZEN)) {
         if (!(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_HANGING_OFF_LEDGE |
@@ -487,12 +519,8 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         }
 
         if (!(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_DAMAGED)) &&
-            (player->invincibilityTimer <= 0)) {
-            CollisionCheck_SetAC(play, &play->colChkCtx, &player->cylinder.base);
-
-            if (player->invincibilityTimer < 0) {
-                CollisionCheck_SetAT(play, &play->colChkCtx, &player->cylinder.base);
-            }
+            (player->invincibilityTimer < 0)) {
+            CollisionCheck_SetAT(play, &play->colChkCtx, &player->cylinder.base);
         }
     }
 
@@ -501,8 +529,6 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     } else {
         player->actor.colChkInfo.mass = 50;
     }
-
-    Collider_ResetCylinderAC(play, &player->cylinder.base);
 }
 
 void DummyPlayer_Draw(Actor* actor, PlayState* play) {
