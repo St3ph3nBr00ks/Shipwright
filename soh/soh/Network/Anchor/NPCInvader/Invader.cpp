@@ -52,6 +52,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
 #include "soh/Network/Anchor/Common/AILocomotion/StuckRecovery.h"     // shared TickSTUCK dispatch
 #include "soh/Network/Anchor/Common/AICombat/CombatEngagement.h"      // B.5 Phase 1: shared ChooseCombatExitState
+#include "soh/Network/Anchor/Common/AICombat/SwordBladeTracking.h"    // #238: per-frame sword tip/base + AT quad builder
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Network/Anchor/Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
@@ -1915,24 +1916,31 @@ Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
 
 // ---------------------------------------------------------------------
 // AT quad positioning — flat plane in front of the Invader at chest
-// height. Same vertex order as FollowerNPC's PositionAttackQuad.
+// height.
+//
+// REWRITTEN 2026-06-02 (#238 / Plans/invader_combat_repair_sequenced_plan.md Step 2):
+// previously built a fixed-distance plane 60u in front of the body
+// using shape.rot.y forward/right vectors. That plane only intersected
+// target cylinders at exactly ~60u depth — point-blank ATTACK swings
+// (typical post-ENGAGE→ATTACK) overshot, missing every hit. New
+// approach mirrors vanilla Player: derive the quad's vertices from
+// the actual blade tip + base positions written each draw frame by
+// EnInvader_PostLimbDraw. Quad now tracks the blade through the
+// swing animation so collision fires where the blade visually is.
+//
+// Same vertex order as FollowerNPC's PositionAttackQuad (which
+// gets the matching rewrite in this same commit).
 // ---------------------------------------------------------------------
 void PositionAttackQuad(EnInvader* this_) {
-    Actor* a = &this_->actor;
-    const float yawRad = (float)a->shape.rot.y * (3.14159265f / 32768.0f);
-    const float fx = sinf(yawRad);
-    const float fz = cosf(yawRad);
-    const float rx = cosf(yawRad);
-    const float rz = -sinf(yawRad);
-    const Vec3f& p = a->world.pos;
-    Vec3f bottomLeft  = { p.x + fx * kAttackQuadForward - rx * kAttackQuadHalfWidth,
-                          p.y + kAttackQuadBaseY,
-                          p.z + fz * kAttackQuadForward - rz * kAttackQuadHalfWidth };
-    Vec3f bottomRight = { p.x + fx * kAttackQuadForward + rx * kAttackQuadHalfWidth,
-                          p.y + kAttackQuadBaseY,
-                          p.z + fz * kAttackQuadForward + rz * kAttackQuadHalfWidth };
-    Vec3f topRight    = { bottomRight.x, p.y + kAttackQuadTopY, bottomRight.z };
-    Vec3f topLeft     = { bottomLeft.x,  p.y + kAttackQuadTopY, bottomLeft.z };
+    // Half-width 8u: thin perpendicular extent. Vanilla Player's blade
+    // visual is narrow; the AT quad just needs enough lateral area to
+    // pass through a target cylinder's footprint as the blade swings.
+    constexpr float kBladeHalfWidth = 8.0f;
+    Vec3f bottomLeft, bottomRight, topLeft, topRight;
+    Anchor_BuildAtQuadFromBlade(&this_->swordTip, &this_->swordBase,
+                                kBladeHalfWidth,
+                                &bottomLeft, &bottomRight,
+                                &topLeft,    &topRight);
     Collider_SetQuadVertices(&this_->atCollider, &bottomLeft, &bottomRight,
                              &topLeft, &topRight);
 }
@@ -2011,19 +2019,22 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
     atkCtx.registerATWindow = [this_, play]() {
         PositionAttackQuad(this_);
         CollisionCheck_SetAT(play, &play->colChkCtx, &this_->atCollider.base);
-        // [Invader.Diag] — log 354 Issue A investigation. Confirms the
-        // AT collider IS being registered during the swing's active
-        // window (anim frames 4-12 of kSwordSwing). If this fires but
-        // DummyPlayer's [DummyPlayer.Diag] AC_HIT edge doesn't, the
-        // sword quad isn't geometrically overlapping the DummyPlayer's
-        // body cylinder — either AT positioning is wrong or
-        // DummyPlayer's cylinder position lags. Rate-limited to
-        // 1 log per ~10 swings to keep volume sane during heavy combat.
+        // [Invader.Diag] — issue #238. Logs the blade tip + base
+        // world positions that PositionAttackQuad just wrote, plus
+        // the actor body position for reference. If swordTip/Base
+        // are at sensible blade-extending coordinates AND the
+        // DummyPlayer is in proximity but AC_HIT still doesn't fire,
+        // the quad-vs-cylinder geometry test itself is to blame.
+        // Rate-limited to 1 log per ~10 swings to keep volume sane.
         static int sATDiagCounter = 0;
         if (++sATDiagCounter % 10 == 1) {
-            SPDLOG_INFO("[Invader.Diag] AT registered invPos=({:.0f},{:.0f},{:.0f}) shape.rot.y=0x{:04X} curFrame={:.1f}",
+            SPDLOG_INFO("[Invader.Diag] AT registered invPos=({:.0f},{:.0f},{:.0f}) "
+                        "swordTip=({:.0f},{:.0f},{:.0f}) swordBase=({:.0f},{:.0f},{:.0f}) "
+                        "curFrame={:.1f}",
                         this_->actor.world.pos.x, this_->actor.world.pos.y,
-                        this_->actor.world.pos.z, (int)this_->actor.shape.rot.y,
+                        this_->actor.world.pos.z,
+                        this_->swordTip.x, this_->swordTip.y, this_->swordTip.z,
+                        this_->swordBase.x, this_->swordBase.y, this_->swordBase.z,
                         this_->skelAnime.curFrame);
         }
     };

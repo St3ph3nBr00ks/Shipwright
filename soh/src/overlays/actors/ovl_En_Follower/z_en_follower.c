@@ -54,6 +54,17 @@ extern void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play);
 extern void Anchor_FollowerNpcDrawBegin(Actor* npc);
 extern void Anchor_FollowerNpcDrawEnd(void);
 
+// Returns the currently-drawing EnFollower's Actor* (set by
+// Anchor_FollowerNpcDrawBegin; cleared by Anchor_FollowerNpcDrawEnd).
+// Used inside the post-limb callback so we can write to the
+// follower's swordTip/swordBase fields without modifying the
+// callback's `thisx` arg (which is the local Player, needed for
+// Player_OverrideLimbDrawGameplayDefault).
+extern Actor* Anchor_GetCurrentlyDrawingFollowerNpc(void);
+
+// Sword blade-tracking helper — issue #238 / Plans/invader_combat_repair_sequenced_plan.md Step 2+4.
+extern void Anchor_ComputeBladeWorldFromMatrix(Vec3f* outTip, Vec3f* outBase);
+
 // gPlayerSkelHeaders[], Player_DrawImpl, Player_OverrideLimbDrawGameplayDefault,
 // and Player_PostLimbDrawGameplay are all declared in standard headers
 // (variables.h + functions.h) pulled by global.h via z_en_follower.h.
@@ -167,6 +178,12 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     this->hoistTargetPos.x  = 0.0f; this->hoistTargetPos.y = 0.0f; this->hoistTargetPos.z = 0.0f;
     this->hoistEntryYaw     = 0;
 
+    // Sword blade-position tracking (#238). Init to zero; first draw
+    // frame's post-limb callback will populate with real world
+    // positions.
+    this->swordTip.x  = 0.0f; this->swordTip.y  = 0.0f; this->swordTip.z  = 0.0f;
+    this->swordBase.x = 0.0f; this->swordBase.y = 0.0f; this->swordBase.z = 0.0f;
+
     // Player-equivalent scale (matches Link). 0.01f. Same as the pause
     // menu preview and as Player_Init does for the real Link.
     Actor_SetScale(thisx, 0.01f);
@@ -249,6 +266,39 @@ void EnFollower_Update(Actor* thisx, PlayState* play) {
     LinkAnimation_Update(play, &this->skelAnime);
 }
 
+// Post-limb callback (#238 / Plans/invader_combat_repair_sequenced_plan.md
+// Step 2+4). Fires after each limb's display list during Player_DrawImpl.
+// When the L_HAND limb is being drawn (Link is left-handed; sword is
+// in left hand), the matrix stack reflects the L_HAND transform —
+// Matrix_MultVec3f then transforms the standard sword tip/base local
+// offsets to world space. We retrieve the EnFollower being drawn via
+// Anchor_GetCurrentlyDrawingFollowerNpc (set/cleared by the surrounding
+// Anchor_FollowerNpcDrawBegin/End calls) so we don't have to overwrite
+// the `thisx` (= local Player) parameter that the override callback
+// path depends on.
+//
+// Scoped strictly to writing this->swordTip / this->swordBase. We do
+// NOT clone Player_PostLimbDrawGameplay's other side effects (writes
+// to leftHandPos, meleeWeaponInfo, hooked-actor positions, etc.) —
+// those would corrupt the local Player's state, which is exactly
+// what the previous "post-limb MUST be NULL" guard was designed to
+// prevent.
+//
+// Same shape as EnInvader_PostLimbDraw in z_en_invader.c — see
+// session_state.md "AI actor naming convention" for the rationale
+// behind the per-actor file split despite identical logic.
+static void EnFollower_PostLimbDraw(PlayState* play, s32 limbIndex,
+                                     Gfx** dList, Vec3s* rot, void* thisx) {
+    (void)play; (void)dList; (void)rot; (void)thisx;
+    if (limbIndex == PLAYER_LIMB_L_HAND) {
+        Actor* followerActor = Anchor_GetCurrentlyDrawingFollowerNpc();
+        if (followerActor != NULL) {
+            EnFollower* fol = (EnFollower*)followerActor;
+            Anchor_ComputeBladeWorldFromMatrix(&fol->swordTip, &fol->swordBase);
+        }
+    }
+}
+
 void EnFollower_Draw(Actor* thisx, PlayState* play) {
     EnFollower* this = (EnFollower*)thisx;
 
@@ -308,7 +358,7 @@ void EnFollower_Draw(Actor* thisx, PlayState* play) {
                     this->currentBoots,
                     this->currentFace,
                     Player_OverrideLimbDrawGameplayDefault,
-                    NULL /* post-limb: see comment above — must be NULL */,
+                    EnFollower_PostLimbDraw /* sword blade tracking (#238); strictly writes swordTip/swordBase, no Player-state side effects */,
                     localPlayer /* thisx for callbacks */);
     Anchor_FollowerNpcDrawEnd();
 
