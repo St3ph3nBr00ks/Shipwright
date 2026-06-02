@@ -295,6 +295,14 @@ void Anchor::RegisterHooks() {
             Anchor_LocalPlayerFaceSwapResetOnSceneTransition();
             Anchor_FollowerNpcDrawStateResetOnSceneTransition();
             Anchor_InvaderDrawStateResetOnSceneTransition();
+            // Phase 3 / issue #237: stamp the scene-change frame so
+            // Fix 1's grace period kicks in on same-scene reloads
+            // (Game Over → Continue at the same scene). The polling
+            // observer in Director::Tick uses curScene != prevScene
+            // and misses same-scene transitions. OnSceneInit fires
+            // unconditionally on every scene init regardless of
+            // sceneNum change, so this is the reliable signal.
+            AnchorDirector::Director::Instance().OnSceneInitFromHook(sceneNum);
         });
 
     // Pause-menu open analog of the OnSceneInit reset above. Pitfall 22

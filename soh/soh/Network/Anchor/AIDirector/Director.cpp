@@ -135,6 +135,28 @@ SpawnableEnemyDescriptor* Director::Register(std::unique_ptr<SpawnableEnemyDescr
     return raw;
 }
 
+void Director::OnSceneInitFromHook(int16_t sceneNum) {
+    // Stamp the scene-change frame unconditionally. The polling observer
+    // in Tick() can miss same-scene reloads (Game Over → Continue at the
+    // same scene's entrance 0) because curScene == prevLocalSceneNum.
+    // The OnSceneInit hook fires for EVERY scene init regardless of
+    // whether the scene number changed, so it's the reliable signal.
+    //
+    // We stamp mGlobalFrameCounter as the new "last scene change" marker
+    // so GetFramesSinceLocalSceneChange() returns ~0 immediately after
+    // this hook fires. Subsequent Tick calls will see fresh counter and
+    // re-enter the grace-period diagnostic window.
+    //
+    // Also reset mPrevLocalSceneNum / mPrevLocalRoomNum to the sentinel
+    // values so the polling observer in Tick re-detects the new scene
+    // on its next pass (defensive — even if curScene != prevScene now,
+    // we want to ensure both code paths converge to the right state).
+    //
+    // Issue #237 / Phase 3 of Plans/invader_combat_repair_sequenced_plan.md.
+    (void)sceneNum;  // currently unused; available for per-scene logic later
+    mLastLocalSceneChangeFrame = mGlobalFrameCounter;
+}
+
 void Director::Tick() {
     // Director runs on every client but only the global-effective-host
     // actually decides spawns. Non-host clients still receive

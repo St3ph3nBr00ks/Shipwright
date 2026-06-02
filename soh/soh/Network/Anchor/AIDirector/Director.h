@@ -248,6 +248,20 @@ public:
             : 0;
     }
 
+    // Fix 1 (Phase 3 follow-up — issue #237). Called from the
+    // GameInteractor::OnSceneInit hook in HookHandlers.cpp to stamp
+    // mLastLocalSceneChangeFrame unconditionally on every scene init.
+    //
+    // The Tick observer's `curScene != mPrevLocalSceneNum` check
+    // misses same-scene reloads (e.g., Game Over → Continue at the
+    // same scene's entrance 0). When P1 dies in scene 0 and respawns
+    // in scene 0, the scene numbers are equal pre/post-Continue —
+    // the polling observer can't detect the transition. OnSceneInit
+    // fires unconditionally for every scene init, including same-
+    // scene reloads, so this is the reliable signal for "the scene
+    // just freshly initialised, restart the grace period."
+    void OnSceneInitFromHook(int16_t sceneNum);
+
 private:
     Director();  // step 7: constructs default descriptor registry
     Director(const Director&) = delete;
