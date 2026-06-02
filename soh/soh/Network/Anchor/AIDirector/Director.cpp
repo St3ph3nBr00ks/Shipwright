@@ -211,6 +211,16 @@ void Director::Tick() {
             evt.roomNum  = curRoom;
             NotifyEvent(evt);
         }
+        // Fix 1 — stamp the scene-change frame whenever the local
+        // player's (scene, room) changes, including the first observation
+        // (mPrevLocalSceneNum == -1 → curScene). The first-observation
+        // stamp is what lets descriptors apply the grace period at
+        // session start too; otherwise a fresh boot would see
+        // mLastLocalSceneChangeFrame == 0 and treat the first ~1.5s as
+        // "settled" before the scene init actually finishes.
+        if (changed) {
+            mLastLocalSceneChangeFrame = mGlobalFrameCounter;
+        }
         mPrevLocalSceneNum = curScene;
         mPrevLocalRoomNum  = curRoom;
     }
