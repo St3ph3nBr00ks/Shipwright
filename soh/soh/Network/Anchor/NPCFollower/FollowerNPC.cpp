@@ -2150,10 +2150,10 @@ void TickLEDGE_HOIST(EnFollower* this_, PlayState* play, const Vec3f& leaderPos)
 // ----------------------------------------------------------------------------
 static constexpr float kAttackEngageDist     = 80.0f;   // melee acquisition range (XZ)
 static constexpr float kAttackBreakDist      = 200.0f;  // bail if enemy fled past this
-static constexpr float kAttackQuadForward    = 60.0f;   // sword reach in front of NPC
-static constexpr float kAttackQuadHalfWidth  = 25.0f;   // sword arc half-width
-static constexpr float kAttackQuadBaseY      = 5.0f;    // bottom of quad above feet
-static constexpr float kAttackQuadTopY       = 65.0f;   // top of quad (chest height)
+// kAttackQuadForward / HalfWidth / BaseY / TopY removed 2026-06-02
+// (#238) — PositionAttackQuad now derives the quad vertices per-frame
+// from the actual blade tip/base positions via Anchor_BuildAtQuadFromBlade
+// rather than using these fixed forward-distance constants.
 
 // Forward decl — defined in the STANDBY section below. Used by every
 // combat state's exit transition (TickATTACK / TickENGAGE / TickBLOCK
