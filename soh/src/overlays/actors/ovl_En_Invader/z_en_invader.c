@@ -39,6 +39,19 @@ extern void Anchor_TickInvaderActor(Actor* invader, PlayState* play);
 extern void Anchor_InvaderDrawBegin(Actor* invader);
 extern void Anchor_InvaderDrawEnd(void);
 
+// Host-authority gate for the AC_HIT damage drain below. Race-B fix:
+// on non-room-host clients the local drain consumes colChkInfo.damage
+// BEFORE the OnActorUpdate forwarder can read it, so peer's hits never
+// reach host via DAMAGE_ENEMY — peer's HP drops but host's stays full,
+// driving the two clients out of sync. Gating the drain on
+// Anchor_IsCurrentRoomHost() leaves colChkInfo.damage intact on peer
+// long enough for the forwarder (HookHandlers.cpp:1838-1855) to send
+// DAMAGE_ENEMY to host; host's queued-damage drain then applies the
+// authoritative HP decrement and broadcasts via ENEMY_STATE. Falls
+// back to true (drain enabled) when Anchor isn't active, preserving
+// single-player behaviour. Defined in Bridge/AnchorCoreBridge.cpp.
+extern bool Anchor_IsCurrentRoomHost(void);
+
 #define FLAGS                                                                                                          \
     (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
@@ -313,7 +326,16 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
     // v1: any non-zero damage value = 1 HP loss → one-shot kill on
     // any Player AT (sword, slingshot, deku stick, bombs, etc.).
     // Combat-AI variants will tune per-weapon damage values later.
-    if (this->collider.base.acFlags & AC_HIT) {
+    //
+    // Host-authority gate (Race-B fix): drain only on the room host.
+    // On non-host clients, leave colChkInfo.damage intact so the
+    // OnActorUpdate forwarder (HookHandlers.cpp:1838-1855) reads a
+    // non-zero value and broadcasts DAMAGE_ENEMY to host; host's
+    // queued-damage drain (DamageEnemy.cpp:DrainPendingSyncDamage)
+    // applies the authoritative decrement and broadcasts the new HP
+    // via ENEMY_STATE. Falls back to true (drain enabled) when Anchor
+    // is disconnected or in single-player.
+    if (Anchor_IsCurrentRoomHost() && (this->collider.base.acFlags & AC_HIT)) {
         this->collider.base.acFlags &= ~AC_HIT;
         const s8 hpBefore = this->actor.colChkInfo.health;
         const u8 dmg      = this->actor.colChkInfo.damage;
