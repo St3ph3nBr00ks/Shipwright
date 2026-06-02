@@ -215,6 +215,33 @@ void Director::Tick() {
         mPrevLocalRoomNum  = curRoom;
     }
 
+    // #234 — stale-tracker reconciliation. Scene Init cleanup (Game
+    // Over / respawn / scene reload on host) destroys actors via
+    // Actor_Delete which bypasses the OnActorKill hook, leaving the
+    // netId in mNetIdToDescriptor with no live host actor. Peer
+    // replicas stop receiving ENEMY_UPDATE but never get an
+    // ENEMY_DEFEATED either, so they're stuck in-world. Detect the
+    // mismatch and broadcast defeat + clean up bookkeeping; the
+    // descriptor's normal proposal loop below then re-evaluates
+    // whether to spawn a fresh Invader for whoever remains in scene.
+    if (!mNetIdToDescriptor.empty() && gPlayState != nullptr) {
+        std::vector<uint32_t> staleNetIds;
+        for (const auto& [netId, descId] : mNetIdToDescriptor) {
+            if (FindActorByNetId(gPlayState, netId) == nullptr) {
+                staleNetIds.push_back(netId);
+            }
+        }
+        for (uint32_t netId : staleNetIds) {
+            SPDLOG_INFO("[Director] Tick: stale netId={} — local actor missing "
+                        "(scene-cleanup bypassed OnActorKill); broadcasting defeat",
+                        netId);
+            if (Anchor::Instance != nullptr) {
+                Anchor::Instance->SendPacket_EnemyDefeated(netId);
+            }
+            OnEnemyRemoved(netId, DefeatCause::SceneExit);
+        }
+    }
+
     // Phase 1 §7.5 lifecycle scan — descriptors manage their active
     // spawns BEFORE the proposal loop (sticky-target re-eval, orphan
     // timer, all-unavailable despawn, scene-follow timers).
