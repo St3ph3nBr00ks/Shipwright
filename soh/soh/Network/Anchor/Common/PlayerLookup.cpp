@@ -184,6 +184,17 @@ Actor* PickHostileTargetForInvader(Actor* invader, PlayState* play) {
     // Anchor is available (gives the same answer as IsValidTarget — see
     // Anchor.cpp:727); falls back to gSaveContext.fileNum >= 0 when
     // Anchor isn't around (test harness / standalone).
+    //
+    // #234 — health gate. When local Link is dying / dead
+    // (gSaveContext.health <= 0), the picker should skip them so the
+    // Invader retargets to a remaining DummyPlayer instead. Without
+    // this, the Invader continues "hunting" a dead target — its
+    // AI tries to engage the corpse, blocking retarget until either
+    // GameOver triggers scene re-init (destroying the Invader on
+    // host's side per the leak in #234 Part A) or the player
+    // respawns. Per user clarification 2026-06-01 PM: Invader's
+    // spawn/despawn lifecycle is independent of player kill events;
+    // retargeting on local death is the expected behavior.
     {
         Player* localPlayer = GET_PLAYER(play);
         if (localPlayer != nullptr) {
@@ -192,7 +203,8 @@ Actor* PickHostileTargetForInvader(Actor* invader, PlayState* play) {
                     ? Anchor::Instance->IsSaveLoaded()
                     : (gSaveContext.fileNum >= 0);
             const bool inCutscene = (play->csCtx.state != CS_STATE_IDLE);
-            if (saveLoaded && !inCutscene) {
+            const bool isAlive    = (gSaveContext.health > 0);
+            if (saveLoaded && !inCutscene && isAlive) {
                 considerCandidate(&localPlayer->actor);
             }
         }
