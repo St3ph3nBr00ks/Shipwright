@@ -2240,6 +2240,30 @@ void Anchor::TickFollowerInput(Actor* actor) {
     } else if (followerAIState == FollowerAIState::CLIMBING) {
         SPDLOG_INFO("[ClimbDiag] TFI-1 CLIMBING block entry nowOnLadder={} anchorIdx={}",
                     nowOnLadder, (int)followerClimbAnchorIdx);
+
+        // #236 — descent grab. When Link auto-grabs a platform edge that
+        // sits above a climb anchor (vine top reaches the platform Y),
+        // inject BTN_A to convert PLAYER_STATE1_HANGING_OFF_LEDGE into
+        // PLAYER_STATE1_CLIMBING_LADDER. Gated on:
+        //   - CLIMBING state (caller already guaranteed via the outer
+        //     else-if), so we don't pull Link off unrelated ledge-hangs.
+        //   - HANGING_OFF_LEDGE actively set on Link's state flags.
+        //   - Target is meaningfully BELOW current pos (descent intent —
+        //     mirror of #233's pathRequestsAscent gate, opposite sign).
+        // Without this, Link auto-grabs the ledge and sits there
+        // indefinitely; the CLIMBING handler has no stick injection
+        // that drives a hang→climb transition.
+        static constexpr float kClimbDescentTolerance = 16.0f;
+        const bool pathRequestsDescent =
+            (followerClimbTopTarget.y <
+             actor->world.pos.y - kClimbDescentTolerance);
+        if ((sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) && pathRequestsDescent) {
+            input.cur.btn   |= BTN_A;
+            input.press.btn |= BTN_A;
+            SPDLOG_INFO("[Follower] CLIMBING descent: BTN_A grab vine from hang "
+                        "(pos.y={:.0f} target.y={:.0f})",
+                        actor->world.pos.y, followerClimbTopTarget.y);
+        }
         // Bug 2 (2026-04-22): natural ladder grab + climb.
         // Two phases:
         //   (a) Not on ladder yet (nowOnLadder == false):
@@ -2590,6 +2614,18 @@ void Anchor::TickFollowerInput(Actor* actor) {
             // place" symptom). Anchor.basePos is the ladder's actual
             // attach position; walking there produces a guaranteed
             // OoT collision grab.
+            //
+            // #236 — descent-from-above: when the follower starts on
+            // a platform ABOVE the anchor's top (e.g. drop down a vine
+            // from a high ledge), walking to anchor.basePos drives Link
+            // toward a point well below the floor he's standing on, so
+            // the cliff edge blocks progress. Target anchor.topPos.xz
+            // instead — the top of the vine where it meets the ledge.
+            // Once Link reaches topPos.xz, vanilla ledge-grab catches
+            // him on the edge and the BTN_A injection above (descent
+            // grab) converts HANGING→CLIMBING_LADDER. Then the
+            // nowOnLadder=true branch's negative stick_y drives the
+            // descent.
             Vec3f approachTarget = followerMoveTarget;
             if (followerClimbAnchorIdx != UINT16_MAX) {
                 const ::AnchorNavRoom::RoomNavData* navData =
@@ -2598,8 +2634,13 @@ void Anchor::TickFollowerInput(Actor* actor) {
                         (int8_t)gPlayState->roomCtx.curRoom.num);
                 if (navData != nullptr &&
                     followerClimbAnchorIdx < navData->climbAnchors.size()) {
-                    approachTarget =
-                        navData->climbAnchors[followerClimbAnchorIdx].basePos;
+                    const auto& anc =
+                        navData->climbAnchors[followerClimbAnchorIdx];
+                    // Above the anchor's top (descent entry)?
+                    static constexpr float kAboveAnchorTolerance = 16.0f;
+                    const bool aboveAnchorTop =
+                        (p2w.y > anc.topPos.y + kAboveAnchorTolerance);
+                    approachTarget = aboveAnchorTop ? anc.topPos : anc.basePos;
                 }
             }
             // Walk toward ladder. Reuse the standard
