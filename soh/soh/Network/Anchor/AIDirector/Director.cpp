@@ -162,6 +162,58 @@ void Director::Tick() {
     // values regardless of empty-registry / invalid-view early-exits.
     ++mGlobalFrameCounter;
 
+    // Phase 1 §7.5 local-player scene/room transition observer.
+    //
+    // RELOCATED 2026-06-02 (Step 1 of Plans/invader_combat_repair_sequenced_plan.md):
+    // previously lived AFTER the `if (!view.IsValid()) return;` early-
+    // return below, but that meant `mLastLocalSceneChangeFrame` never
+    // updated during the brief invalid-view window post-Continue —
+    // and Fix 1's grace period plus all `[*.Diag]` logs gated on
+    // `framesSinceLocalSceneChange < 120` were silently
+    // unobservable. Observer is pure state tracking, runs regardless
+    // of session validity. Empty-registry / no-descriptor cases are
+    // safe because `NotifyEvent` early-returns on an empty descriptor
+    // list. See #237.
+    //
+    // DirectorEvent::PlayerEnteredRoom fires for the HOST's own
+    // transitions — scene-following hunts the local player when they
+    // warp. step-6's UCS-receive wiring (UpdateClientState.cpp) only
+    // fires events for REMOTE peers; local transitions don't route
+    // through that path because the host doesn't UCS-broadcast back to
+    // itself. Rather than add a new GameInteractor hook (more coupling),
+    // poll gPlayState here and fire the event ourselves on change.
+    //
+    // The first observation is consumed silently (no prior baseline) —
+    // we don't want to emit a fake "entered" event on the very first
+    // Tick after save-load when mPrevLocalSceneNum is -1. Subsequent
+    // transitions fire normally.
+    if (gPlayState != nullptr && Anchor::Instance != nullptr) {
+        const int16_t curScene = (int16_t)gPlayState->sceneNum;
+        const int8_t  curRoom  = (int8_t)gPlayState->roomCtx.curRoom.num;
+        const bool changed = (curScene != mPrevLocalSceneNum) ||
+                             (curRoom  != mPrevLocalRoomNum);
+        if (changed && mPrevLocalSceneNum >= 0) {
+            DirectorEventPayload evt{};
+            evt.type     = DirectorEvent::PlayerEnteredRoom;
+            evt.clientId = Anchor::Instance->ownClientId;
+            evt.sceneNum = curScene;
+            evt.roomNum  = curRoom;
+            NotifyEvent(evt);
+        }
+        // Fix 1 — stamp the scene-change frame whenever the local
+        // player's (scene, room) changes, including the first observation
+        // (mPrevLocalSceneNum == -1 → curScene). The first-observation
+        // stamp is what lets descriptors apply the grace period at
+        // session start too; otherwise a fresh boot would see
+        // mLastLocalSceneChangeFrame == 0 and treat the first ~1.5s as
+        // "settled" before the scene init actually finishes.
+        if (changed) {
+            mLastLocalSceneChangeFrame = mGlobalFrameCounter;
+        }
+        mPrevLocalSceneNum = curScene;
+        mPrevLocalRoomNum  = curRoom;
+    }
+
     // [Director.Diag] — log 354 Fix 1 investigation. Confirms that
     // Director::Tick is running during the post-Continue scene reload
     // window. Rate-limited to ~1Hz, but ONLY within the first ~6s
@@ -216,46 +268,10 @@ void Director::Tick() {
         return;
     }
 
-    // Phase 1 §7.5 local-player scene/room transition observer.
-    //
-    // DirectorEvent::PlayerEnteredRoom needs to fire for the HOST's own
-    // transitions too — scene-following hunts the local player when they
-    // warp. step-6's UCS-receive wiring (UpdateClientState.cpp) only
-    // fires events for REMOTE peers; local transitions don't route
-    // through that path because the host doesn't UCS-broadcast back to
-    // itself. Rather than add a new GameInteractor hook (more coupling),
-    // poll gPlayState here and fire the event ourselves on change.
-    //
-    // The first observation is consumed silently (no prior baseline) —
-    // we don't want to emit a fake "entered" event on the very first
-    // Tick after save-load when mPrevLocalSceneNum is -1. Subsequent
-    // transitions fire normally.
-    if (gPlayState != nullptr && Anchor::Instance != nullptr) {
-        const int16_t curScene = (int16_t)gPlayState->sceneNum;
-        const int8_t  curRoom  = (int8_t)gPlayState->roomCtx.curRoom.num;
-        const bool changed = (curScene != mPrevLocalSceneNum) ||
-                             (curRoom  != mPrevLocalRoomNum);
-        if (changed && mPrevLocalSceneNum >= 0) {
-            DirectorEventPayload evt{};
-            evt.type     = DirectorEvent::PlayerEnteredRoom;
-            evt.clientId = Anchor::Instance->ownClientId;
-            evt.sceneNum = curScene;
-            evt.roomNum  = curRoom;
-            NotifyEvent(evt);
-        }
-        // Fix 1 — stamp the scene-change frame whenever the local
-        // player's (scene, room) changes, including the first observation
-        // (mPrevLocalSceneNum == -1 → curScene). The first-observation
-        // stamp is what lets descriptors apply the grace period at
-        // session start too; otherwise a fresh boot would see
-        // mLastLocalSceneChangeFrame == 0 and treat the first ~1.5s as
-        // "settled" before the scene init actually finishes.
-        if (changed) {
-            mLastLocalSceneChangeFrame = mGlobalFrameCounter;
-        }
-        mPrevLocalSceneNum = curScene;
-        mPrevLocalRoomNum  = curRoom;
-    }
+    // Observer relocated to above the SessionView check — see top of
+    // Tick. The previous location here meant the observer didn't run
+    // during the brief invalid-view window post-Continue. Step 1 of
+    // Plans/invader_combat_repair_sequenced_plan.md, tracker #237.
 
     // Phase 1 §7.5 lifecycle scan — descriptors manage their active
     // spawns BEFORE the proposal loop (sticky-target re-eval, orphan
