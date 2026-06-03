@@ -461,22 +461,38 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
 
     // Hostile-NPC PvE damage path — AC registration + AC_HIT broadcast
     // fires regardless of PvP mode. The Invader (and any future
-    // hostile-NPC actor) uses an AT_TYPE_ENEMY AT collider; the
-    // DummyPlayer's cylinder AC is AC_TYPE_ENEMY (inherited from
-    // Player_Init), so AT_TYPE_ENEMY → AC_TYPE_ENEMY hits register
-    // here naturally. PvP-on path REPLACES this for PvP friendly-fire
-    // semantics (handled below by re-registering with adjusted
-    // types). PvP-off Player AT colliders are AT_TYPE_PLAYER and do
-    // NOT register against AC_TYPE_ENEMY, so this block does not
-    // produce accidental friendly-fire in non-PvP sessions.
+    // hostile-NPC actor) uses an AT_TYPE_ENEMY AT collider; we stamp
+    // AC_TYPE_ENEMY unconditionally so AT_TYPE_ENEMY → AC_TYPE_ENEMY
+    // hits register here naturally. PvP friendly-fire requires
+    // AC_TYPE_PLAYER (since Player AT colliders are AT_TYPE_PLAYER)
+    // — that bit is added only when PvP is active.
     //
-    // Without this lift, the original code returned at the PvP gate
+    // Field-test log 359: with the pre-fix `AC_TYPE_PLAYER`-only AC
+    // (set in DummyPlayer_Init line 119), Player swings damaged the
+    // DummyPlayer in pvpMode=0 sessions (friendly fire), and Invader
+    // swings (AT_TYPE_ENEMY) failed to register at all. Re-stamping
+    // each frame fixes both: PvP-off → AC_TYPE_ENEMY only (Invader
+    // hits, Player misses); PvP-on (and same-team in mode 1 not
+    // active, etc.) → AC_TYPE_ENEMY | AC_TYPE_PLAYER (both hit).
+    //
+    // Without this fix, the original code returned at the PvP gate
     // below for pvpMode==0 sessions, leaving DummyPlayer's AC
     // unregistered — host's CollisionCheck never tested Invader AT
     // against DummyPlayer AC, so AC_HIT never fired, so no
     // DAMAGE_PLAYER broadcast reached the peer's local Link. Field-
     // test log 349: Invader swung sword ~30 times over 75s; P2's
     // Link took zero damage. See Plans/invader_field_test_log349_findings.md.
+    const bool pvpActive =
+        (Anchor::Instance->roomState.pvpMode != 0) &&
+        !(Anchor::Instance->roomState.pvpMode == 1 &&
+          client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default")) &&
+        !SceneMultiplayerConfig::ShouldDisablePvP(gPlayState);
+    player->cylinder.base.acFlags =
+        (player->cylinder.base.acFlags & ~AC_TYPE_ALL) | AC_TYPE_ENEMY;
+    if (pvpActive) {
+        player->cylinder.base.acFlags |= AC_TYPE_PLAYER;
+    }
+
     Collider_UpdateCylinder(&player->actor, &player->cylinder);
 
     // [DummyPlayer.Diag] — log 354 Issue A investigation. Edge-trigger
@@ -537,11 +553,9 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     // between players) + AT (DummyPlayer's own attack collider for
     // PvP friendly-fire) + mass. These behaviours are PvP-specific
     // and intentionally remain gated. The AC block above is the only
-    // piece that hostile-NPC PvE needs.
-    if (Anchor::Instance->roomState.pvpMode == 0 ||
-        (Anchor::Instance->roomState.pvpMode == 1 &&
-         client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default")) ||
-        SceneMultiplayerConfig::ShouldDisablePvP(gPlayState)) {
+    // piece that hostile-NPC PvE needs. Reuses `pvpActive` so the AC
+    // type bits stay in lockstep with the gate.
+    if (!pvpActive) {
         actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
         return;
     }
