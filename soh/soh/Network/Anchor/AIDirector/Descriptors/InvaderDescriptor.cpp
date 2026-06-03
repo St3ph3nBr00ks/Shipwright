@@ -647,6 +647,7 @@ void InvaderDescriptor::OnSpawnExecuted(uint32_t netId, const Vec3f& worldPos) {
     // scene-following continuation that just landed.
     InvaderRuntimeState& state = mActiveInvaders[netId];
     state.lastSpawnPos        = worldPos;
+    state.lastBroadcastPos    = worldPos;  // primed so reconcile before first OnTick still has a usable value
     state.pendingFollowSpawn  = false;
     state.followGraceFrames   = 0;
     state.orphanFrames        = 0;
@@ -981,8 +982,18 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
         // away from the Invader, leaving a stuck peer replica behind)
         // needs per-scene authority — a Pillar A Phase 2 concern; the
         // 60s orphan timer is the long-term cleanup for now.
-        const bool hostActorPresent =
-            (gPlayState != nullptr && FindActorByNetId(gPlayState, netId) != nullptr);
+        Actor* hostInvaderActor =
+            (gPlayState != nullptr) ? FindActorByNetId(gPlayState, netId) : nullptr;
+        const bool hostActorPresent = (hostInvaderActor != nullptr);
+
+        // Snapshot live broadcast position whenever the actor exists.
+        // Used by the host-actor-missing reconcile branch below so that
+        // host death/respawn re-instantiates the Invader at its pre-
+        // death position (and not a fresh PickSpawnPosition pick).
+        if (hostActorPresent) {
+            state.lastBroadcastPos = hostInvaderActor->world.pos;
+        }
+
         const bool hostInTrackedScene =
             (gPlayState != nullptr &&
              (int16_t)gPlayState->sceneNum == state.lastKnownSceneNum &&
@@ -1034,22 +1045,53 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
 
         if (!hostActorPresent && hostInTrackedScene && anyValid != nullptr &&
             sceneSettled) {
-            auto reSpawnPos = PickSpawnPosition(
-                state.lastKnownSceneNum,
-                state.lastKnownRoomNum,
-                view);
+            // Per user spec (2026-06-04, field-test log 362 follow-up):
+            // when any other player remains active in the Invader's
+            // tracked scene+room, the Invader should preserve its
+            // pre-death position — i.e. the remaining player "maintains"
+            // the room state across the dying player's death cycle,
+            // same as static enemies + puzzle elements survive a death
+            // without resetting. Fresh PickSpawnPosition only when NO
+            // peer is in the tracked room (avoids stranding Invader at
+            // a stale position if everyone left the room while it was
+            // unmanned).
+            bool peerInTrackedRoom = false;
+            for (const auto& p : view.players) {
+                if (p.sceneNum == state.lastKnownSceneNum &&
+                    p.roomNum  == state.lastKnownRoomNum) {
+                    peerInTrackedRoom = true;
+                    break;
+                }
+            }
+
+            std::optional<Vec3f> reSpawnPos;
+            const char* posSource = nullptr;
+            if (peerInTrackedRoom) {
+                reSpawnPos = state.lastBroadcastPos;
+                posSource = "preserved (peer in tracked room)";
+            } else {
+                reSpawnPos = PickSpawnPosition(
+                    state.lastKnownSceneNum,
+                    state.lastKnownRoomNum,
+                    view);
+                posSource = "fresh PickSpawnPosition";
+            }
+
             if (reSpawnPos.has_value()) {
                 SPDLOG_INFO("[InvaderDescriptor] OnTick: netId={} host actor missing "
                             "(scene cleanup bypassed OnActorKill) — re-instantiating "
-                            "via follow-spawn at ({:.0f},{:.0f},{:.0f}); sticky target=client {}",
+                            "via follow-spawn at ({:.0f},{:.0f},{:.0f}) [{}]; "
+                            "sticky target=client {}",
                             netId, reSpawnPos->x, reSpawnPos->y, reSpawnPos->z,
-                            anyValid->clientId);
+                            posSource, anyValid->clientId);
                 state.targetClientId = anyValid->clientId;
                 toFollowSpawn.push_back({netId, *reSpawnPos});
             } else {
                 // PickSpawnPosition failed (nav graph not loaded yet,
                 // or all sampled nodes too close to a player). Skip
-                // this tick; try again next tick.
+                // this tick; try again next tick. Only reachable via
+                // the PickSpawnPosition branch; lastBroadcastPos
+                // always has a value (primed in OnSpawnExecuted).
                 SPDLOG_INFO("[InvaderDescriptor] OnTick: netId={} host actor missing "
                             "but PickSpawnPosition returned no candidate — "
                             "deferring re-instantiate", netId);
