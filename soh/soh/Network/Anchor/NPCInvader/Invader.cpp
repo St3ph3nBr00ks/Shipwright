@@ -1989,10 +1989,24 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
     // TickATTACK does NOT call InvEnsureAnimation itself; the
     // dispatcher loop below this function fires kSwordSwing via
     // InvAnimForState. Matches FollowerNPC.cpp:TickATTACK shape.
-    if (this_->prevState != EN_INVADER_STATE_ATTACK) {
+    const bool atkIsEntryFrame =
+        (this_->prevState != EN_INVADER_STATE_ATTACK);
+    if (atkIsEntryFrame) {
         sAttackState.entryFrame = Anchor::Instance->gameFrameCounter.load(
                                        std::memory_order_relaxed);
         this_->stopAnimPlaying = 0;
+        // Phase 0 Option A bug-fix (log 367): clear swingFiredAT
+        // defensively. The original entry block reset this via the
+        // ATTACK→STANDBY exit path, but the entry frame still saw
+        // skelAnime carrying the PREVIOUS state's anim (kWait from
+        // STANDBY, ~30 of 40 frames). TickAttackATAndComplete would
+        // see `curFrame > activeEndFrame` and set swingFiredAT=true
+        // before kSwordSwing's active window arrived, blocking AT
+        // registration for the entire swing. The skip-on-entry guard
+        // below (atkIsEntryFrame) is the primary fix; this reset is
+        // belt-and-braces against any future ATTACK re-entry path that
+        // forgets to clear it.
+        sAttackState.swingFiredAT = false;
     }
 
     // B.5 Phase 4 — shared target validation. checkTargetHealth=false
@@ -2008,12 +2022,27 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
         a->world.rot.y = a->shape.rot.y;
     }
 
+    // Phase 0 Option A — skip AT-window + anim-complete check on the
+    // entry frame. The dispatcher runs AFTER TickATTACK, so on this
+    // tick skelAnime still reflects the previous state's anim
+    // (kWait / kRun / etc., NOT kSwordSwing). The dispatcher will fire
+    // kSwordSwing later this frame; from Frame N+1 onward, skelAnime
+    // is fresh and the AT-window check works correctly. Without this
+    // skip, the previous anim's curFrame (often > activeEndFrame=12)
+    // would set swingFiredAT=true prematurely (log 367 — Invader sword
+    // swings landed AT on first attack only, missed all subsequent).
+    // kMinSwingHoldTicks=6 already guards readyToExit on entry; this
+    // skip is purely about preventing the AT-window flag misfire.
+    if (atkIsEntryFrame) {
+        return;
+    }
+
     // AT-window registration + anim-complete check. Invader passes
     // the hold-frame + endFrame-positive guards to handle the case
-    // where InvEnsureAnimation hasn't replaced the previous state's
-    // anim yet on the first tick — without them the state would
-    // early-exit because `curFrame >= endFrame` is true from
-    // leftover idle-anim state.
+    // where the dispatcher hasn't replaced the previous state's anim
+    // yet on the first tick — without them the state would early-exit
+    // because `curFrame >= endFrame` is true from leftover idle-anim
+    // state.
     AnchorAICombat::AttackTickContext atkCtx;
     atkCtx.self             = a;
     atkCtx.play             = play;
@@ -2310,7 +2339,9 @@ void TickRANGED_ATTACK(EnInvader* this_, PlayState* play, const Vec3f& leaderHin
     Actor* a = &this_->actor;
     a->speedXZ = 0.0f;
 
-    if (this_->prevState != EN_INVADER_STATE_RANGED_ATTACK) {
+    const bool rangedIsEntryFrame =
+        (this_->prevState != EN_INVADER_STATE_RANGED_ATTACK);
+    if (rangedIsEntryFrame) {
         sAttackState.entryFrame = Anchor::Instance->gameFrameCounter.load(
                                        std::memory_order_relaxed);
         // Phase 0 Option A — dispatcher-driven anim. TickRANGED_ATTACK
@@ -2319,6 +2350,23 @@ void TickRANGED_ATTACK(EnInvader* this_, PlayState* play, const Vec3f& leaderHin
         // kRangedSpawnFrame (~frame 5) of the dispatcher-fired anim.
         // stopAnimPlaying=0 clears any lingering one-shot.
         this_->stopAnimPlaying = 0;
+        // Phase 0 Option A bug-fix (log 367 sibling): defensively reset
+        // swingFiredAT so the arrow-fire check below starts cleanly.
+        // Same skip-on-entry guard as TickATTACK prevents the arrow
+        // from firing on the entry frame against the previous state's
+        // anim curFrame (kWait often > kRangedSpawnFrame=5).
+        sAttackState.swingFiredAT = false;
+    }
+
+    // Phase 0 Option A — skip on entry frame. The dispatcher fires
+    // kBowShoot AFTER TickRANGED_ATTACK returns; on this tick
+    // skelAnime still reflects the previous state's anim. Without this
+    // skip, the arrow-fire predicate (`curFrame >= kRangedSpawnFrame`)
+    // would trip on the previous anim's curFrame and shoot an arrow
+    // before the bow-draw animation starts. From Frame N+1 onward,
+    // skelAnime is fresh and the predicate works correctly.
+    if (rangedIsEntryFrame) {
+        return;
     }
 
     if (sAttackState.target == nullptr ||
