@@ -17,6 +17,7 @@
 
 #include "soh/ActorDB.h"
 #include "soh/OTRGlobals.h"
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -2622,8 +2623,25 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
         sp74 = player->talkActor;
     }
 
+    // Pillar G.iii (#239): mask PLAYER_STATE1_DEAD out of the effective
+    // stateFlags1 when multiplayer says "advance time during Game Over".
+    // The D_80116068 per-category bitmask suppresses 9 of 12 actor
+    // categories whenever DEAD is set on the local Player — this is the
+    // gate that freezes the dying client's actor updates for the entire
+    // ~10s death cycle. With the bit masked here, NPC (DummyPlayer) and
+    // ENEMY (Invader, synced enemies) keep updating → position sync to
+    // peers continues throughout death. Single-player keeps the legacy
+    // freeze: the bridge returns false unless multiplayer is active.
+    // Other suppression bits (TALKING / IN_ITEM_CS / IN_CUTSCENE /
+    // GETTING_ITEM) are untouched. See R-doc:
+    // Claude/Plans/death_cycle_actor_update_gate.md
+    u32 effectiveStateFlags1 = player->stateFlags1;
+    if (Anchor_ShouldAdvanceWorldTime(ANCHOR_TIME_CTX_GAME_OVER)) {
+        effectiveStateFlags1 &= ~PLAYER_STATE1_DEAD;
+    }
+
     for (i = 0; i < ARRAY_COUNT(actorCtx->actorLists); i++, sp80++) {
-        unkCondition = (*sp80 & player->stateFlags1);
+        unkCondition = (*sp80 & effectiveStateFlags1);
 
         actor = actorCtx->actorLists[i].head;
         while (actor != NULL) {

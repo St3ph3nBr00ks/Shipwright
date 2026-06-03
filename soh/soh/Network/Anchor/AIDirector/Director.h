@@ -55,6 +55,14 @@ struct PlayerSnapshot {
     bool         isInvulnerable;        // invincibilityTimer != 0
     bool         followerActive;        // AI Player Follower mode is on for this client
     bool         isClimbing;            // peer's local Player is climbing (G1/G2)
+    // #234 Part B (2026-06-04). True for the duration of the death cycle
+    // — from killing blow until the dying player presses Continue and
+    // respawns. Local: derived from gSaveContext.health <= 0. Peer:
+    // derived from client.stateFlags1 & PLAYER_STATE1_DEAD (broadcast
+    // via PLAYER_UPDATE). Consumed by IsValidTarget so the Invader's
+    // sticky-target re-eval skips dead players, retargeting to live
+    // ones instead of "hunting" a corpse.
+    bool         isDead = false;
 
     // step 12+ fields — populated lazily when a descriptor needs them.
     bool         currentRoomHasLiveBoss = false;

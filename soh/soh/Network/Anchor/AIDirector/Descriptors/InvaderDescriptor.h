@@ -83,6 +83,16 @@ bool IsSceneFlaggedNoInvaders(int16_t sceneNum);
 // has the signals (#208-blocked).
 struct InvaderRuntimeState {
     Vec3f    lastSpawnPos      = { 0.0f, 0.0f, 0.0f };
+    // Live-tracked broadcast position — updated every OnTick when the
+    // host actor is present, snapshotting actor->world.pos. Used by the
+    // host-actor-missing reconcile path so a host death/respawn cycle
+    // re-instantiates the Invader at its pre-death position rather than
+    // a fresh PickSpawnPosition pick. Conceptually: the remaining
+    // players "maintain" the room state across the dying player's death
+    // cycle — same as how static enemies survive a player's death by
+    // remaining in their pre-death positions. Default { 0, 0, 0 } is
+    // overwritten in OnSpawnExecuted before any reconcile can fire.
+    Vec3f    lastBroadcastPos  = { 0.0f, 0.0f, 0.0f };
     uint32_t targetClientId    = 0;     // sticky — 0 means "needs initial target"
     int16_t  lastKnownSceneNum = 0;
     int8_t   lastKnownRoomNum  = 0;

@@ -28,6 +28,7 @@ extern "C" {
 #define ANCHOR_TIME_CTX_CUTSCENE         3
 #define ANCHOR_TIME_CTX_OCARINA          4
 #define ANCHOR_TIME_CTX_SCENE_TRANSITION 5
+#define ANCHOR_TIME_CTX_GAME_OVER        6  // Pillar G.iii (#239)
 
 // Returns true if world time should advance this frame for the given context.
 // Phase 1 / Pillar G.i: PauseMenu in multiplayer always returns true; every

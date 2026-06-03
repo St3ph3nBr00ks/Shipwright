@@ -709,6 +709,7 @@ SessionView Director::BuildSessionView() const {
                 if (localPlayer != nullptr) {
                     snap.worldPos       = localPlayer->actor.world.pos;
                     snap.isInvulnerable = (localPlayer->invincibilityTimer != 0);
+                    snap.isDead         = (localPlayer->stateFlags1 & PLAYER_STATE1_DEAD) != 0;
                 }
             }
         } else {
@@ -718,6 +719,7 @@ SessionView Director::BuildSessionView() const {
             snap.isSaveLoaded   = client.isSaveLoaded;
             snap.isInCutscene   = (client.csCtxState != CS_STATE_IDLE);
             snap.isInvulnerable = (client.invincibilityTimer != 0);
+            snap.isDead         = (client.stateFlags1 & PLAYER_STATE1_DEAD) != 0;
         }
 
         // step 12+ fields left at struct-default values until the

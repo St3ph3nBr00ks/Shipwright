@@ -36,6 +36,18 @@ static bool LegacyAdvanceWorldTimeRule(TimeContext ctx) {
             return gPlayState->msgCtx.ocarinaMode == OCARINA_MODE_00;
         case TimeContext::SceneTransition:
             return gPlayState->transitionMode == TRANS_MODE_OFF;
+        case TimeContext::GameOver:
+            // Legacy: world freezes during the death cycle. Routed via
+            // PLAYER_STATE1_DEAD on the local player's stateFlags1, which
+            // gates D_80116068 suppression in z_actor.c:Actor_UpdateAll.
+            // Returning true here means "advance time" — i.e. the gate
+            // SHOULD NOT suppress. Returning false means "freeze" — the
+            // gate suppresses normally. Equivalence to vanilla legacy
+            // behaviour: false iff PLAYER_STATE1_DEAD is set on the local
+            // Player. Use gameOverCtx as a proxy since stateFlags1 isn't
+            // directly accessible here — the death cycle holds
+            // gameOverCtx.state != GAMEOVER_INACTIVE throughout.
+            return gPlayState->gameOverCtx.state == GAMEOVER_INACTIVE;
     }
     return true;
 }
@@ -47,12 +59,22 @@ bool ShouldAdvanceWorldTime(TimeContext context) {
     // The pause-menu UI itself still renders normally; only the
     // "world ticks" gate flips.
     //
+    // Pillar G.iii (#239): same rule for the death cycle on the dying
+    // client. Without this, on host death the actor suppression at
+    // z_actor.c:2625-2658 (driven by D_80116068 & PLAYER_STATE1_DEAD)
+    // freezes Actor_UpdateAll for ENEMY/BG/SWITCH/BOSS/PROP/MISC/NPC/
+    // EXPLOSIVE/CHEST categories. Peers see all host-authoritative
+    // state freeze for the ~10s death cycle. With this gate flipped,
+    // the dying client's actor updates continue → host keeps
+    // broadcasting → peers see normal sync throughout death.
+    //
     // All other contexts (text-box, item-get, cutscene, ocarina,
     // scene-transition) continue returning the legacy answer until the
     // §4.G.ii rules land.
     const bool multiplayerActive = (::Anchor::Instance != nullptr) &&
                                    ::Anchor::Instance->isEnabled;
-    if (multiplayerActive && context == TimeContext::PauseMenu) {
+    if (multiplayerActive && (context == TimeContext::PauseMenu ||
+                              context == TimeContext::GameOver)) {
         return true;
     }
     return LegacyAdvanceWorldTimeRule(context);
