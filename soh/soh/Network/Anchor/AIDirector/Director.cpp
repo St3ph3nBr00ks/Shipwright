@@ -297,10 +297,19 @@ void Director::Tick() {
 
     // Phase 1 §7.5 lifecycle scan — descriptors manage their active
     // spawns BEFORE the proposal loop (sticky-target re-eval, orphan
-    // timer, all-unavailable despawn, scene-follow timers).
-    // Default OnTick is a no-op for descriptors that don't care.
+    // timer, all-unavailable despawn, scene-follow timers, host-actor-
+    // missing reconcile per Fix 1).
+    //
+    // NOT gated on IsEnabled — lifecycle is independent of new-spawn
+    // permission. Field-test log 361: an Invader spawned via ForceSpawn
+    // (which bypasses IsEnabled) killed P1; after Continue, OnTick
+    // never fired because `AI.Invaders.Enabled` CVar was off, so Fix 1's
+    // reconcile path was unreachable and the netId stayed dangling.
+    // Default OnTick is a no-op for descriptors that don't care, and
+    // descriptors tracking active spawns iterate over those spawns
+    // regardless of whether the global enable bit is on — see
+    // InvaderDescriptor::OnTick which guards on mActiveInvaders.empty().
     for (auto& d : mDescriptors) {
-        if (!d->IsEnabled()) continue;
         d->OnTick(*this, view);
     }
 
