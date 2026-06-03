@@ -8,15 +8,17 @@
  * subject to the 0.8× hysteresis factor that prevents rapid wagging
  * across equidistant candidates.
  *
- * Per-navigator state lives on EnemyNetId (Anchor.h) — the canonical
- * "per-actor nav state" container. Lifecycle: state is reset on
- * navigator death / scene change via the same paths that clear netState
- * (existing OnActorKill / OnSceneSpawnActors flow).
+ * Per-navigator state lives on AnchorNavExt (Common/AnchorNavExt.h) —
+ * the canonical "per-actor nav state" container, lifted from
+ * EnemyNetId in refactor B.4 (2026-06-04). Lifecycle: state is reset
+ * on navigator death / scene change via the same paths that clear
+ * netState (existing OnActorKill / OnSceneSpawnActors flow).
  */
 
 #include "TargetSelection.h"
 
 #include "ActorSyncHelpers.h"  // IsSyncableActor / IsSyncedBossActor / kSyncableActorCategories
+#include "AnchorNavExt.h"      // B.4 — per-navigator nav-substrate state (lifted from EnemyNetId)
 #include "DistanceMath.h"
 #include "NavCVars.h"
 #include "NavTraits.h"
@@ -71,15 +73,15 @@ std::unordered_map<const Actor*, std::vector<Actor*>>& CustomCandidatesMap() {
     return map;
 }
 
-EnemyNetId* GetMutableNavExt(Actor* actor) {
+AnchorNavExt* GetMutableNavExt(Actor* actor) {
     if (actor == nullptr) return nullptr;
-    return const_cast<EnemyNetId*>(
-        ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+    return const_cast<AnchorNavExt*>(
+        ObjectExtension::GetInstance().Get<AnchorNavExt>(actor));
 }
 
-const EnemyNetId* GetNavExt(const Actor* actor) {
+const AnchorNavExt* GetNavExt(const Actor* actor) {
     if (actor == nullptr) return nullptr;
-    return ObjectExtension::GetInstance().Get<EnemyNetId>(const_cast<Actor*>(actor));
+    return ObjectExtension::GetInstance().Get<AnchorNavExt>(const_cast<Actor*>(actor));
 }
 
 bool ActorIsAlive(const Actor* actor) {
@@ -143,14 +145,14 @@ Actor* NearestInSet(Actor* navigator, TargetSet set, PlayState* play) {
 // Returns the held target Actor*, or nullptr if either no target is
 // held, or the held representation is FixedPos / invalid (caller must
 // fall through to fresh acquisition).
-Actor* LookupHeldActor(const EnemyNetId* ext, PlayState* play) {
+Actor* LookupHeldActor(const AnchorNavExt* ext, PlayState* play) {
     if (ext == nullptr || play == nullptr) return nullptr;
-    if (ext->navHeldKind == EnemyNetId::HeldTargetKind::None ||
-        ext->navHeldKind == EnemyNetId::HeldTargetKind::FixedPos) {
+    if (ext->navHeldKind == AnchorNavExt::HeldTargetKind::None ||
+        ext->navHeldKind == AnchorNavExt::HeldTargetKind::FixedPos) {
         return nullptr;
     }
 
-    if (ext->navHeldKind == EnemyNetId::HeldTargetKind::Player) {
+    if (ext->navHeldKind == AnchorNavExt::HeldTargetKind::Player) {
         // Walk ACTORCAT_PLAYER and ACTORCAT_NPC (for DummyPlayer) to find
         // the matching client ID. Local player is always slot 0; remote
         // DummyPlayers carry their clientId via Anchor::GetDummyPlayerClientId
@@ -179,7 +181,7 @@ Actor* LookupHeldActor(const EnemyNetId* ext, PlayState* play) {
     }
 
     // Enemy held — walk syncable categories for the matching netId.
-    if (ext->navHeldKind == EnemyNetId::HeldTargetKind::Enemy) {
+    if (ext->navHeldKind == AnchorNavExt::HeldTargetKind::Enemy) {
         const uint32_t want = ext->navTargetNetId;
         if (want == 0) return nullptr;
         for (uint8_t cat : kSyncableActorCategories) {
@@ -202,10 +204,10 @@ Actor* LookupHeldActor(const EnemyNetId* ext, PlayState* play) {
 
 // Bind `target` into the navigator's nav-ext state. Pure write; caller
 // has already determined that target is valid.
-void BindTarget(EnemyNetId* ext, Actor* target, const NavTraits& traits) {
+void BindTarget(AnchorNavExt* ext, Actor* target, const NavTraits& traits) {
     if (ext == nullptr || target == nullptr) return;
     if (target->id == ACTOR_PLAYER || target->id == ACTOR_EN_OE2) {
-        ext->navHeldKind = EnemyNetId::HeldTargetKind::Player;
+        ext->navHeldKind = AnchorNavExt::HeldTargetKind::Player;
         if (target->id == ACTOR_PLAYER) {
             ext->navTargetClientId = 0;
         } else {
@@ -223,7 +225,7 @@ void BindTarget(EnemyNetId* ext, Actor* target, const NavTraits& traits) {
         ext->navTargetNetId = 0;
     } else {
         // Treat as enemy.
-        ext->navHeldKind = EnemyNetId::HeldTargetKind::Enemy;
+        ext->navHeldKind = AnchorNavExt::HeldTargetKind::Enemy;
         const EnemyNetId* tExt =
             ObjectExtension::GetInstance().Get<EnemyNetId>(target);
         ext->navTargetNetId    = (tExt != nullptr) ? tExt->netId : 0;
@@ -234,9 +236,9 @@ void BindTarget(EnemyNetId* ext, Actor* target, const NavTraits& traits) {
     ext->navTargetIsStale     = false;
 }
 
-void ClearHeld(EnemyNetId* ext) {
+void ClearHeld(AnchorNavExt* ext) {
     if (ext == nullptr) return;
-    ext->navHeldKind          = EnemyNetId::HeldTargetKind::None;
+    ext->navHeldKind          = AnchorNavExt::HeldTargetKind::None;
     ext->navTargetClientId    = 0xFF;
     ext->navTargetNetId       = 0;
     ext->navTargetTimerFrames = 0;
@@ -265,7 +267,7 @@ Actor* AcquireOrHoldTarget(Actor* navigator, TargetSet set, PlayState* play) {
         return NearestInSet(navigator, set, play);
     }
 
-    EnemyNetId* ext = GetMutableNavExt(navigator);
+    AnchorNavExt* ext = GetMutableNavExt(navigator);
     if (ext == nullptr) {
         // No extension → cannot persist held state. Fall back to nearest.
         return NearestInSet(navigator, set, play);
@@ -329,8 +331,8 @@ TargetChoice ChooseTarget(Actor* navigator, TargetSet set, PlayState* play) {
         out.isStale     = false;
     } else {
         // Surface the cached fallback if a held target was recently lost.
-        const EnemyNetId* ext = GetNavExt(navigator);
-        if (ext != nullptr && ext->navHeldKind != EnemyNetId::HeldTargetKind::None) {
+        const AnchorNavExt* ext = GetNavExt(navigator);
+        if (ext != nullptr && ext->navHeldKind != AnchorNavExt::HeldTargetKind::None) {
             out.fallbackPos = ext->navHeldTargetPos;
             out.isStale     = true;
         }
@@ -339,13 +341,13 @@ TargetChoice ChooseTarget(Actor* navigator, TargetSet set, PlayState* play) {
 }
 
 void HoldPositionTarget(Actor* navigator, const Vec3f* targetPos) {
-    EnemyNetId* ext = GetMutableNavExt(navigator);
+    AnchorNavExt* ext = GetMutableNavExt(navigator);
     if (ext == nullptr) return;
     if (targetPos == nullptr) {
         ClearHeld(ext);
         return;
     }
-    ext->navHeldKind          = EnemyNetId::HeldTargetKind::FixedPos;
+    ext->navHeldKind          = AnchorNavExt::HeldTargetKind::FixedPos;
     ext->navHeldTargetPos     = *targetPos;
     ext->navTargetClientId    = 0xFF;
     ext->navTargetNetId       = 0;
@@ -354,21 +356,21 @@ void HoldPositionTarget(Actor* navigator, const Vec3f* targetPos) {
 }
 
 uint8_t GetHeldTargetClientId(const Actor* navigator) {
-    const EnemyNetId* ext = GetNavExt(navigator);
+    const AnchorNavExt* ext = GetNavExt(navigator);
     if (ext == nullptr) return 0xFF;
-    if (ext->navHeldKind != EnemyNetId::HeldTargetKind::Player) return 0xFF;
+    if (ext->navHeldKind != AnchorNavExt::HeldTargetKind::Player) return 0xFF;
     return ext->navTargetClientId;
 }
 
 uint32_t GetHeldTargetNetId(const Actor* navigator) {
-    const EnemyNetId* ext = GetNavExt(navigator);
+    const AnchorNavExt* ext = GetNavExt(navigator);
     if (ext == nullptr) return 0;
-    if (ext->navHeldKind != EnemyNetId::HeldTargetKind::Enemy) return 0;
+    if (ext->navHeldKind != AnchorNavExt::HeldTargetKind::Enemy) return 0;
     return ext->navTargetNetId;
 }
 
 void ResetTargetLock(Actor* navigator) {
-    EnemyNetId* ext = GetMutableNavExt(navigator);
+    AnchorNavExt* ext = GetMutableNavExt(navigator);
     if (ext == nullptr) return;
     ClearHeld(ext);
 }

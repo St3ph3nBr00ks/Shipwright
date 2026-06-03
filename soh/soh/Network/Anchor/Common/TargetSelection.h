@@ -10,7 +10,8 @@
  * (c) held target is meaningfully further than another candidate
  * (hysteresis-gated, 0.8× factor).
  *
- * Per-navigator state lives in EnemyNetId (Anchor.h) — see
+ * Per-navigator state lives in AnchorNavExt (Common/AnchorNavExt.h),
+ * lifted from EnemyNetId in refactor B.4 (2026-06-04) — see
  * navHeldKind / navTargetClientId / navTargetNetId / navHeldTargetPos /
  * navTargetTimerFrames.
  *
@@ -56,7 +57,7 @@ struct TargetChoice {
 // Acquire or hold a target for `navigator` against the given set.
 //
 // First call (or after ResetTargetLock): evaluates nearest member of `set`
-// and binds it to the navigator's EnemyNetId state. Subsequent calls return
+// and binds it to the navigator's AnchorNavExt state. Subsequent calls return
 // the held target until invalidated. See plan §6 for full algorithm.
 //
 // `play` may be nullptr; in that case falls through to legacy nearest-of-set.

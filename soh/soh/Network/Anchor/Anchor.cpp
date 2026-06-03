@@ -1,5 +1,6 @@
 #include "Anchor.h"
 #include "AIDirector/Director.h"
+#include "Common/AnchorNavExt.h"  // B.4 — per-navigator nav state extension
 #include "Common/PacketSchemas.h"
 #include "WorldStateSync/WorldStateSync.h"
 #include <nlohmann/json.hpp>
@@ -536,6 +537,9 @@ struct DummyPlayerClientId {
 static ObjectExtension::Register<DummyPlayerClientId> DummyPlayerClientIdRegister;
 ObjectExtension::Register<EnemyNetId> EnemyNetIdRegister;
 ObjectExtension::Register<ItemDropNetId> ItemDropNetIdRegister;
+// B.4 — per-navigator nav-substrate state lifted off EnemyNetId.
+// Same actor keys; the two extensions coexist on synced actors.
+ObjectExtension::Register<AnchorNavExt> AnchorNavExtRegister;
 
 uint32_t Anchor::GetDummyPlayerClientId(const Actor* actor) {
     const DummyPlayerClientId* clientId = ObjectExtension::GetInstance().Get<DummyPlayerClientId>(actor);

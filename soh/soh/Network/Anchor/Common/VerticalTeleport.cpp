@@ -23,6 +23,7 @@
 #include "VerticalTeleport.h"
 
 #include "ActorSyncHelpers.h"  // IsSyncableActor (avoid teleporting non-syncable actors)
+#include "AnchorNavExt.h"      // B.4 — per-navigator nav-substrate state (lifted from EnemyNetId)
 #include "ClimbableSurfaces.h"
 #include "NavCVars.h"
 #include "NavTraits.h"
@@ -73,10 +74,10 @@ constexpr float kRimOffsetUnits = 12.0f;
 // limits Shape B to same-room teleports. The same-room invariant is
 // derived from `target->room == navigator->room`.
 
-EnemyNetId* GetMutableNavExt(Actor* actor) {
+AnchorNavExt* GetMutableNavExt(Actor* actor) {
     if (actor == nullptr) return nullptr;
-    return const_cast<EnemyNetId*>(
-        ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+    return const_cast<AnchorNavExt*>(
+        ObjectExtension::GetInstance().Get<AnchorNavExt>(actor));
 }
 
 }  // anonymous namespace
@@ -152,7 +153,7 @@ bool TryVerticalTeleportEnemy(Actor* navigator, Actor* target, PlayState* play) 
     const NavTraits& traits = GetTraitsForActor(navigator->id);
     if (!traits.eligibleForVerticalTeleport) return false;
 
-    EnemyNetId* ext = GetMutableNavExt(navigator);
+    AnchorNavExt* ext = GetMutableNavExt(navigator);
     if (ext == nullptr) return false;
 
     // Resolve target position. If `target` is null, fall back to the
@@ -163,7 +164,7 @@ bool TryVerticalTeleportEnemy(Actor* navigator, Actor* target, PlayState* play) 
     if (target != nullptr && target->update != nullptr) {
         targetPos  = target->world.pos;
         haveTarget = true;
-    } else if (ext->navHeldKind == EnemyNetId::HeldTargetKind::FixedPos) {
+    } else if (ext->navHeldKind == AnchorNavExt::HeldTargetKind::FixedPos) {
         targetPos  = ext->navHeldTargetPos;
         haveTarget = true;
     }
