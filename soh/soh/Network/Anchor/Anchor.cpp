@@ -393,7 +393,20 @@ void Anchor::ProcessIncomingPacketQueue() {
 
         nlohmann::json payload = packets[i];
 
-        std::string packetType = payload["type"].get<std::string>();
+        // #197 — safe packet-type extraction. The previous form
+        // `payload["type"].get<std::string>()` threw nlohmann::json::
+        // out_of_range when the JSON object was missing "type" (or
+        // type_error when "type" was non-string), and the throw was
+        // OUTSIDE the try-catch below. A malformed packet from a peer
+        // — schema drift, buggy client, or hostile probe — escaped
+        // past the safety net and crashed the listener thread. Use
+        // `value(...)` for default-on-miss + explicit empty-string
+        // bail; the catch below still covers any remaining surprises.
+        std::string packetType = payload.value("type", std::string(""));
+        if (packetType.empty()) {
+            SPDLOG_WARN("[Anchor] Incoming packet missing or non-string 'type' field; dropping");
+            continue;
+        }
 
         isProcessingIncomingPacket = true;
 
@@ -501,6 +514,18 @@ void Anchor::ProcessIncomingPacketQueue() {
                 HandlePacket_SceneDeathsCleared(payload);
             else if (packetType == DIRECTOR_STATE_SYNC)
                 HandlePacket_DirectorStateSync(payload);
+            else {
+                // #198 — terminal else for unknown packet types. Previously
+                // the dispatch chain had no fallthrough, so an unrecognised
+                // type silently dropped with zero diagnostic. Schema drift,
+                // client-version skew, or a deliberately-malformed packet
+                // would all behave as "this packet just doesn't do anything"
+                // without ever surfacing a warning. SPDLOG_WARN gives field
+                // testers a grep-able signal without flooding under normal
+                // operation (unknown types should be rare).
+                SPDLOG_WARN("[Anchor] Unknown packet type: '{}' (payload size={})",
+                            packetType, payload.dump().size());
+            }
         } catch (const std::exception& e) {
             SPDLOG_ERROR("[Anchor] Exception while processing incoming packet {}", e.what());
             SPDLOG_ERROR("[Anchor] Packet: {}", payload.dump());
