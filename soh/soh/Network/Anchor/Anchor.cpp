@@ -277,6 +277,79 @@ void Anchor::BroadcastJsonToScenePeers(nlohmann::json& payload) {
     }
 }
 
+// B.3 — Packet handler registry. Maps wire-string packet type to the
+// matching Anchor::HandlePacket_* member function. Lookup happens in
+// OnIncomingJson's per-packet dispatch (see usage below).
+//
+// Function-local static is initialised on first call (thread-safe per
+// C++11 § [stmt.dcl]/4 magic-statics). The map is `const` after
+// construction; no mutation after initialization. Storage is one
+// 51-entry std::unordered_map with string keys (the wire-format
+// constants from `Common/PacketSchemas.h`).
+//
+// Per Plans/decoupling_gap_audit_2026-05-16.md §13.5 (filed as #198):
+// the registry's lookup-miss branch is the natural home for the
+// terminal "unknown packet type" warning. The previous 50-branch
+// if/else-if chain had no fallthrough.
+const std::unordered_map<std::string, void (Anchor::*)(nlohmann::json)>&
+Anchor::GetPacketHandlerRegistry() {
+    using H = void (Anchor::*)(nlohmann::json);
+    static const std::unordered_map<std::string, H> kRegistry = {
+        { ALL_CLIENT_STATE,        &Anchor::HandlePacket_AllClientState        },
+        { ENEMY_STATE,             &Anchor::HandlePacket_EnemyState            },
+        { SCENE_ACTOR_NETIDS,      &Anchor::HandlePacket_SceneActorNetIds      },
+        { DAMAGE_ENEMY,            &Anchor::HandlePacket_DamageEnemy           },
+        { DAMAGE_PLAYER,           &Anchor::HandlePacket_DamagePlayer          },
+        { ENEMY_HIT_PLAYER,        &Anchor::HandlePacket_EnemyHitPlayer        },
+        { PROJECTILE_HIT_ENEMY,    &Anchor::HandlePacket_ProjectileHitEnemy    },
+        { TALK_REQUEST,            &Anchor::HandlePacket_TalkRequest           },
+        { DIALOG_END,              &Anchor::HandlePacket_DialogEnd             },
+        { BOSS_GOMA_LOOKED_AT,     &Anchor::HandlePacket_BossGomaLookedAt      },
+        { MIDO_POST_DEKU_LEAVE,    &Anchor::HandlePacket_MidoPostDekuLeave     },
+        { ITEM_DROP_SYNC,          &Anchor::HandlePacket_ItemDropSync          },
+        { ITEM_COLLECTED,          &Anchor::HandlePacket_ItemCollected         },
+        { ITEM_DROP_SNAPSHOT,      &Anchor::HandlePacket_ItemDropSnapshot      },
+        { ITEM_PICKUP_REQUEST,     &Anchor::HandlePacket_ItemPickupRequest     },
+        { ENV_ACTOR_DROP,          &Anchor::HandlePacket_EnvActorDrop          },
+        { ENV_ACTOR_DESTROY,       &Anchor::HandlePacket_EnvActorDestroy       },
+        { MODAL_OFFER_CLAIMED,     &Anchor::HandlePacket_ModalOfferClaimed     },
+        { CUTSCENE_TEXT_ADVANCE,   &Anchor::HandlePacket_CutsceneTextAdvance   },
+        { CUTSCENE_TEXT_ADVANCED,  &Anchor::HandlePacket_CutsceneTextAdvanced  },
+        { FOLLOWER_NPC_SPAWN,      &Anchor::HandlePacket_FollowerNpcSpawn      },
+        { FOLLOWER_NPC_STATE,      &Anchor::HandlePacket_FollowerNpcState      },
+        { FOLLOWER_NPC_DESPAWN,    &Anchor::HandlePacket_FollowerNpcDespawn    },
+        { NAV_TEST_DIRECTIVE,      &Anchor::HandlePacket_NavTestDirective      },
+        { DISABLE_ANCHOR,          &Anchor::HandlePacket_DisableAnchor         },
+        { ENTRANCE_DISCOVERED,     &Anchor::HandlePacket_EntranceDiscovered    },
+        { GAME_COMPLETE,           &Anchor::HandlePacket_GameComplete          },
+        { GIVE_ITEM,               &Anchor::HandlePacket_GiveItem              },
+        { OCARINA_SFX,             &Anchor::HandlePacket_OcarinaSfx            },
+        { PLAYER_UPDATE,           &Anchor::HandlePacket_PlayerUpdate          },
+        { PLAYER_SFX,              &Anchor::HandlePacket_PlayerSfx             },
+        { UPDATE_TEAM_STATE,       &Anchor::HandlePacket_UpdateTeamState       },
+        { REQUEST_TEAM_STATE,      &Anchor::HandlePacket_RequestTeamState      },
+        { REQUEST_TELEPORT,        &Anchor::HandlePacket_RequestTeleport       },
+        { SERVER_MESSAGE,          &Anchor::HandlePacket_ServerMessage         },
+        { SET_CHECK_STATUS,        &Anchor::HandlePacket_SetCheckStatus        },
+        { SET_FLAG,                &Anchor::HandlePacket_SetFlag               },
+        { TELEPORT_TO,             &Anchor::HandlePacket_TeleportTo            },
+        { UNSET_FLAG,              &Anchor::HandlePacket_UnsetFlag             },
+        { UPDATE_BEANS_COUNT,      &Anchor::HandlePacket_UpdateBeansCount      },
+        { UPDATE_CLIENT_STATE,     &Anchor::HandlePacket_UpdateClientState     },
+        { UPDATE_ROOM_STATE,       &Anchor::HandlePacket_UpdateRoomState       },
+        { UPDATE_DUNGEON_ITEMS,    &Anchor::HandlePacket_UpdateDungeonItems    },
+        { SCENE_TRANSITION_HANDOFF,&Anchor::HandlePacket_SceneTransitionHandoff},
+        { BOSS_EXIT_TEAM_WARP,     &Anchor::HandlePacket_BossExitTeamWarp      },
+        { WORLD_FLAG_SET,          &Anchor::HandlePacket_WorldFlagSet          },
+        { WORLD_FLAG_UNSET,        &Anchor::HandlePacket_WorldFlagUnset        },
+        { WORLD_STATE_REQUEST,     &Anchor::HandlePacket_WorldStateRequest     },
+        { WORLD_STATE_SNAPSHOT,    &Anchor::HandlePacket_WorldStateSnapshot    },
+        { SCENE_DEATHS_CLEARED,    &Anchor::HandlePacket_SceneDeathsCleared    },
+        { DIRECTOR_STATE_SYNC,     &Anchor::HandlePacket_DirectorStateSync     },
+    };
+    return kRegistry;
+}
+
 void Anchor::OnIncomingJson(nlohmann::json payload) {
     // If it doesn't contain a type, it's not a valid payload
     if (!payload.contains("type")) {
@@ -410,119 +483,29 @@ void Anchor::ProcessIncomingPacketQueue() {
 
         isProcessingIncomingPacket = true;
 
+        // B.3 — packet-handler registry (was a 50-branch if/else-if
+        // chain). The string→member-fn-pointer map is initialised once
+        // on first call (function-local static = thread-safe init in
+        // C++11+, never re-entered after construction). Lookup is O(1)
+        // average vs. O(N) for the previous chain. The terminal #198
+        // unknown-type warning is built into the lookup-miss branch.
+        //
+        // Add a new packet type:
+        //   1. Add `Handle Packet_Foo` declaration in Anchor.h.
+        //   2. Implement in `Packets/.../Foo.cpp`.
+        //   3. Add ONE line to the registry below: `{FOO, &Anchor::HandlePacket_Foo},`.
+        // No edit to the dispatch site itself — matches the AIDirector
+        // descriptor-pattern + per-X registry convention used elsewhere.
         try {
-            // packetType here is a string so we can't use a switch statement
-            if (packetType == ALL_CLIENT_STATE)
-                HandlePacket_AllClientState(payload);
-            else if (packetType == ENEMY_STATE)
-                HandlePacket_EnemyState(payload);
-            else if (packetType == SCENE_ACTOR_NETIDS)
-                HandlePacket_SceneActorNetIds(payload);
-            else if (packetType == DAMAGE_ENEMY)
-                HandlePacket_DamageEnemy(payload);
-            else if (packetType == DAMAGE_PLAYER)
-                HandlePacket_DamagePlayer(payload);
-            else if (packetType == ENEMY_HIT_PLAYER)
-                HandlePacket_EnemyHitPlayer(payload);
-            else if (packetType == PROJECTILE_HIT_ENEMY)
-                HandlePacket_ProjectileHitEnemy(payload);
-            else if (packetType == TALK_REQUEST)
-                HandlePacket_TalkRequest(payload);
-            else if (packetType == DIALOG_END)
-                HandlePacket_DialogEnd(payload);
-            else if (packetType == BOSS_GOMA_LOOKED_AT)
-                HandlePacket_BossGomaLookedAt(payload);
-            else if (packetType == MIDO_POST_DEKU_LEAVE)
-                HandlePacket_MidoPostDekuLeave(payload);
-            else if (packetType == ITEM_DROP_SYNC)
-                HandlePacket_ItemDropSync(payload);
-            else if (packetType == ITEM_COLLECTED)
-                HandlePacket_ItemCollected(payload);
-            else if (packetType == ITEM_DROP_SNAPSHOT)
-                HandlePacket_ItemDropSnapshot(payload);
-            else if (packetType == ITEM_PICKUP_REQUEST)
-                HandlePacket_ItemPickupRequest(payload);
-            else if (packetType == ENV_ACTOR_DROP)
-                HandlePacket_EnvActorDrop(payload);
-            else if (packetType == ENV_ACTOR_DESTROY)
-                HandlePacket_EnvActorDestroy(payload);
-            else if (packetType == MODAL_OFFER_CLAIMED)
-                HandlePacket_ModalOfferClaimed(payload);
-            else if (packetType == CUTSCENE_TEXT_ADVANCE)
-                HandlePacket_CutsceneTextAdvance(payload);
-            else if (packetType == CUTSCENE_TEXT_ADVANCED)
-                HandlePacket_CutsceneTextAdvanced(payload);
-            else if (packetType == FOLLOWER_NPC_SPAWN)
-                HandlePacket_FollowerNpcSpawn(payload);
-            else if (packetType == FOLLOWER_NPC_STATE)
-                HandlePacket_FollowerNpcState(payload);
-            else if (packetType == FOLLOWER_NPC_DESPAWN)
-                HandlePacket_FollowerNpcDespawn(payload);
-            else if (packetType == NAV_TEST_DIRECTIVE)
-                HandlePacket_NavTestDirective(payload);
-            else if (packetType == DISABLE_ANCHOR)
-                HandlePacket_DisableAnchor(payload);
-            else if (packetType == ENTRANCE_DISCOVERED)
-                HandlePacket_EntranceDiscovered(payload);
-            else if (packetType == GAME_COMPLETE)
-                HandlePacket_GameComplete(payload);
-            else if (packetType == GIVE_ITEM)
-                HandlePacket_GiveItem(payload);
-            else if (packetType == OCARINA_SFX)
-                HandlePacket_OcarinaSfx(payload);
-            else if (packetType == PLAYER_UPDATE)
-                HandlePacket_PlayerUpdate(payload);
-            else if (packetType == PLAYER_SFX)
-                HandlePacket_PlayerSfx(payload);
-            else if (packetType == UPDATE_TEAM_STATE)
-                HandlePacket_UpdateTeamState(payload);
-            else if (packetType == REQUEST_TEAM_STATE)
-                HandlePacket_RequestTeamState(payload);
-            else if (packetType == REQUEST_TELEPORT)
-                HandlePacket_RequestTeleport(payload);
-            else if (packetType == SERVER_MESSAGE)
-                HandlePacket_ServerMessage(payload);
-            else if (packetType == SET_CHECK_STATUS)
-                HandlePacket_SetCheckStatus(payload);
-            else if (packetType == SET_FLAG)
-                HandlePacket_SetFlag(payload);
-            else if (packetType == TELEPORT_TO)
-                HandlePacket_TeleportTo(payload);
-            else if (packetType == UNSET_FLAG)
-                HandlePacket_UnsetFlag(payload);
-            else if (packetType == UPDATE_BEANS_COUNT)
-                HandlePacket_UpdateBeansCount(payload);
-            else if (packetType == UPDATE_CLIENT_STATE)
-                HandlePacket_UpdateClientState(payload);
-            else if (packetType == UPDATE_ROOM_STATE)
-                HandlePacket_UpdateRoomState(payload);
-            else if (packetType == UPDATE_DUNGEON_ITEMS)
-                HandlePacket_UpdateDungeonItems(payload);
-            else if (packetType == SCENE_TRANSITION_HANDOFF)
-                HandlePacket_SceneTransitionHandoff(payload);
-            else if (packetType == BOSS_EXIT_TEAM_WARP)
-                HandlePacket_BossExitTeamWarp(payload);
-            else if (packetType == WORLD_FLAG_SET)
-                HandlePacket_WorldFlagSet(payload);
-            else if (packetType == WORLD_FLAG_UNSET)
-                HandlePacket_WorldFlagUnset(payload);
-            else if (packetType == WORLD_STATE_REQUEST)
-                HandlePacket_WorldStateRequest(payload);
-            else if (packetType == WORLD_STATE_SNAPSHOT)
-                HandlePacket_WorldStateSnapshot(payload);
-            else if (packetType == SCENE_DEATHS_CLEARED)
-                HandlePacket_SceneDeathsCleared(payload);
-            else if (packetType == DIRECTOR_STATE_SYNC)
-                HandlePacket_DirectorStateSync(payload);
-            else {
-                // #198 — terminal else for unknown packet types. Previously
-                // the dispatch chain had no fallthrough, so an unrecognised
-                // type silently dropped with zero diagnostic. Schema drift,
-                // client-version skew, or a deliberately-malformed packet
-                // would all behave as "this packet just doesn't do anything"
-                // without ever surfacing a warning. SPDLOG_WARN gives field
-                // testers a grep-able signal without flooding under normal
-                // operation (unknown types should be rare).
+            const auto& registry = GetPacketHandlerRegistry();
+            auto it = registry.find(packetType);
+            if (it != registry.end()) {
+                (this->*(it->second))(payload);
+            } else {
+                // #198 — unknown packet types are rare in normal operation;
+                // a warning fires for schema drift / client-version skew /
+                // hostile-peer probes. Without this, unknown types silently
+                // dropped with zero diagnostic.
                 SPDLOG_WARN("[Anchor] Unknown packet type: '{}' (payload size={})",
                             packetType, payload.dump().size());
             }

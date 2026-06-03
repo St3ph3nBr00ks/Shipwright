@@ -861,6 +861,15 @@ class Anchor : public Network {
     void Enable();
     void Disable();
     void OnIncomingJson(nlohmann::json payload);
+
+    // B.3 — Packet handler registry. Maps wire-string packet type
+    // (Common/PacketSchemas.h) to the matching HandlePacket_* member-
+    // function pointer. Lookup is used by OnIncomingJson to dispatch
+    // each incoming packet. Function-local static map (initialised
+    // thread-safely on first call per C++11 magic statics); returned
+    // by const ref. Add a new packet type by adding one entry.
+    static const std::unordered_map<std::string, void (Anchor::*)(nlohmann::json)>&
+        GetPacketHandlerRegistry();
     void OnConnected();
     void OnDisconnected();
     void ProcessOutgoingPackets();
