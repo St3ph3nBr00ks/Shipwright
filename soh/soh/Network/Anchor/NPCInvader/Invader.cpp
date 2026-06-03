@@ -1981,20 +1981,18 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
     Actor* a = &this_->actor;
     a->speedXZ = 0.0f;
 
-    // On-entry — explicit animation dispatch + entry-frame tracking.
-    // Per DR-2 §"Policy axis #4" Option 2, Invader keeps its
-    // explicit-dispatch animation pattern (no dispatcher-driven
-    // anim selection), so the on-entry handshake stays in the
-    // caller. Follower's TickATTACK has no equivalent block.
+    // On-entry — entry-frame tracking + clear any lingering one-shot
+    // hold so the dispatcher's per-tick InvAnimForState pick
+    // (kSwordSwing for ATTACK) can flow through this frame.
+    // Per Phase 0 Option A (B.5 design review DR-2), Invader uses
+    // the same dispatcher-driven animation pattern as NPC Follower:
+    // TickATTACK does NOT call InvEnsureAnimation itself; the
+    // dispatcher loop below this function fires kSwordSwing via
+    // InvAnimForState. Matches FollowerNPC.cpp:TickATTACK shape.
     if (this_->prevState != EN_INVADER_STATE_ATTACK) {
         sAttackState.entryFrame = Anchor::Instance->gameFrameCounter.load(
                                        std::memory_order_relaxed);
-        // Parity gap 1 — fire kSwordSwing on entry. stopAnimPlaying=0
-        // ensures EnsureAnimation can pick a new anim even if an older
-        // one-shot was in flight. Combat anims are always armed/fighter
-        // (modelAnimType=1) regardless of dispatcher hint.
         this_->stopAnimPlaying = 0;
-        InvEnsureAnimation(this_, play, InvaderAnim::kSwordSwing, 1);
     }
 
     // B.5 Phase 4 — shared target validation. checkTargetHealth=false
@@ -2229,28 +2227,14 @@ void TickBLOCK(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     if (this_->prevState != EN_INVADER_STATE_BLOCK) {
         sBlockState.entryFrame    = curFrame;
         sBlockState.hitAnimFrames = 0;
-        // Parity gap 1 — fire kBlockWait on entry. Loop anim so the
-        // pose holds for the full block duration. Dispatcher overrides
-        // to kBlockHit during the hit-reaction window.
+        // Phase 0 Option A — dispatcher-driven anim. TickBLOCK does
+        // NOT call InvEnsureAnimation itself; the dispatcher fires
+        // kBlockWait via InvAnimForState, and overrides to kBlockHit
+        // when sBlockState.hitAnimFrames > 0 (see dispatcher below,
+        // mirrors FollowerNPC.cpp:4140-4143). stopAnimPlaying=0
+        // clears any lingering one-shot so kBlockWait starts cleanly.
         this_->stopAnimPlaying = 0;
-        InvEnsureAnimation(this_, play, InvaderAnim::kBlockWait, 1);
         SPDLOG_INFO("[Invader] BLOCK entry — HP={}", (int)this_->health);
-    }
-
-    // Parity gap 1 — kBlockHit override while the hit-reaction counter
-    // is non-zero. One-shot anim plays out then dispatcher returns to
-    // kBlockWait via the standard hold-then-resume pattern.
-    if (sBlockState.hitAnimFrames > 0 &&
-        (InvaderAnim)this_->currentAnim != InvaderAnim::kBlockHit) {
-        this_->stopAnimPlaying = 0;
-        InvEnsureAnimation(this_, play, InvaderAnim::kBlockHit, 1);
-    } else if (sBlockState.hitAnimFrames == 0 &&
-               (InvaderAnim)this_->currentAnim == InvaderAnim::kBlockHit &&
-               this_->skelAnime.endFrame > 0.0f &&
-               this_->skelAnime.curFrame >= this_->skelAnime.endFrame) {
-        // Hit anim complete — return to held block pose.
-        this_->stopAnimPlaying = 0;
-        InvEnsureAnimation(this_, play, InvaderAnim::kBlockWait, 1);
     }
 
     if (sAttackState.target != nullptr &&
@@ -2301,10 +2285,10 @@ void TickBLOCK(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
                         "XZ={:.0f}u |dy|={:.0f}u)",
                         timer.distXZ, timer.dyToTarget);
             this_->state = EN_INVADER_STATE_ATTACK;
-            // Invader keeps explicit-dispatch animation policy
-            // (DR-2 §"Policy axis #4" Option 2): TickATTACK's
-            // on-entry block will call InvEnsureAnimation(kSwordSwing).
-            // No stopAnimPlaying handshake needed here.
+            // Phase 0 Option A — dispatcher-driven anim. The dispatcher
+            // below picks kSwordSwing for ATTACK via InvAnimForState;
+            // TickATTACK's on-entry block (next frame) clears
+            // stopAnimPlaying so the anim starts cleanly.
             sAttackState.swingFiredAT = false;
             return;
         }
@@ -2329,10 +2313,12 @@ void TickRANGED_ATTACK(EnInvader* this_, PlayState* play, const Vec3f& leaderHin
     if (this_->prevState != EN_INVADER_STATE_RANGED_ATTACK) {
         sAttackState.entryFrame = Anchor::Instance->gameFrameCounter.load(
                                        std::memory_order_relaxed);
-        // Parity gap 1 — fire kBowShoot on entry. One-shot draw + release.
-        // Arrow spawns at curFrame >= kRangedSpawnFrame (~frame 5).
+        // Phase 0 Option A — dispatcher-driven anim. TickRANGED_ATTACK
+        // does NOT call InvEnsureAnimation itself; the dispatcher fires
+        // kBowShoot via InvAnimForState. Arrow spawns at curFrame >=
+        // kRangedSpawnFrame (~frame 5) of the dispatcher-fired anim.
+        // stopAnimPlaying=0 clears any lingering one-shot.
         this_->stopAnimPlaying = 0;
-        InvEnsureAnimation(this_, play, InvaderAnim::kBowShoot, 1);
     }
 
     if (sAttackState.target == nullptr ||
@@ -3571,6 +3557,17 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
             if (anim.advanceLR) {
                 this_->climbNextIsRight = !this_->climbNextIsRight;
             }
+        }
+
+        // Phase 0 Option A — BLOCK kBlockHit override. While the
+        // block-hit counter is non-zero AND state is still BLOCK,
+        // override the kBlockWait default with the one-shot kBlockHit.
+        // Counter decrements in TickBLOCK so this fires for ~12 ticks
+        // after a successful frontal deflect. Mirrors NPC Follower's
+        // pattern at FollowerNPC.cpp:4140-4143.
+        if (this_->state == EN_INVADER_STATE_BLOCK &&
+            sBlockState.hitAnimFrames > 0) {
+            want = InvaderAnim::kBlockHit;
         }
 
         // Phase 4 — airborne anim override. If jump fired this tick OR
