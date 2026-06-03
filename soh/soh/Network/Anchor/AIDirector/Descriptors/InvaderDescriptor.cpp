@@ -808,6 +808,15 @@ bool InvaderDescriptor::IsValidTarget(const PlayerSnapshot& p) const {
     // IsPersistentTarget below.
     if (!p.isSaveLoaded) return false;
     if (p.isInCutscene)  return false;
+    // #234 Part B (2026-06-04 — log 363 follow-up). Skip players who are
+    // currently in the death cycle (PLAYER_STATE1_DEAD set, Continue not
+    // yet pressed). Without this, the Invader's sticky-target re-eval
+    // keeps the dead player as target → the actor-side combat picker
+    // continues engaging the corpse. User-visible bug: "Invader continues
+    // swinging at dead players on the ground waiting to respawn." Dead
+    // peers naturally rejoin the candidate pool when their stateFlags1
+    // clears DEAD during revive (z_player.c:9517).
+    if (p.isDead)        return false;
     if (IsSceneFlaggedNoInvaders(p.sceneNum)) return false;
     if (IsBossRoomWithLiveBoss(p.sceneNum, p.roomNum)) return false;
     return true;

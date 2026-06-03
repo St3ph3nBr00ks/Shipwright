@@ -234,6 +234,17 @@ Actor* PickHostileTargetForInvader(Actor* invader, PlayState* play) {
                     else if (!c.online || !c.isSaveLoaded)        valid = false;
                     // Peer in cutscene (csCtxState != CS_STATE_IDLE).
                     else if (c.csCtxState != CS_STATE_IDLE)       valid = false;
+                    // #234 Part B (2026-06-04 — log 363 follow-up). Peer
+                    // in death cycle (PLAYER_STATE1_DEAD set, Continue
+                    // not yet pressed). Without this, the Invader keeps
+                    // swinging at the corpse since its combat picker
+                    // returns the dead peer as the closest valid target.
+                    // Peer rejoins the candidate pool when their
+                    // stateFlags1 clears DEAD during revive
+                    // (z_player.c:9517). Mirror of the local-player
+                    // gSaveContext.health gate further up — this branch
+                    // handles peers via the broadcast stateFlags1.
+                    else if (c.stateFlags1 & PLAYER_STATE1_DEAD)  valid = false;
                     // Peer in a different scene. The DummyPlayer's world.pos
                     // is parked at -9999 for out-of-scene peers by
                     // DummyPlayer_Update, but this is belt-and-braces — a
