@@ -2529,6 +2529,12 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 // Called from the dispatcher pre-state-handler block. Only fires from
 // IDLE / FOLLOW (engagement doesn't preempt CLIMBING / SWIMMING / etc.).
 // Returns true if engaged.
+// B.5 Phase 6 — body delegates to AnchorAICombat::EvaluateCombatTiers
+// (Common/AICombat/CombatEngagement.h). The per-actor pre-checks
+// (invuln gate, combat-disable gate, eligible-state gate, cooldown)
+// and the post-decision SPDLOG + state transition + sAttackState +
+// stopAnimPlaying bookkeeping stay here; the tier-1/2/3 picker/HP/
+// range logic is shared with NPC Invader's matching wrapper.
 bool TryEngageCombat(EnFollower* this_, PlayState* play) {
     if (FollowerNpcInvulnerable()) return false;  // gated on same toggle as damage
     if (AINavTest::IsCombatDisabled()) return false;  // Navigation Test Harness
@@ -2553,102 +2559,88 @@ bool TryEngageCombat(EnFollower* this_, PlayState* play) {
 
     const char* fromName = StateName(this_->state);
 
-    // Tier 1 — enemy already in melee range. Pick BLOCK over ATTACK
-    // when HP is low (defensive cycle); otherwise ATTACK.
-    Actor* meleeEnemy = FindNearestEnemyForAttack(this_, play, kAttackEngageDist);
-    if (meleeEnemy != nullptr) {
-        const s8 maxHp = FollowerNpcMaxHealthFromLink();
-        const bool lowHp =
-            (maxHp > 0) &&
-            ((float)this_->health / (float)maxHp <= kBlockHpThresholdRatio);
-        if (lowHp) {
-            SPDLOG_INFO("[FollowerNPC] {}→BLOCK (low HP {}/{}, target "
-                        "enemyId=0x{:X})",
-                        fromName, (int)this_->health, (int)maxHp,
-                        (uint16_t)meleeEnemy->id);
-            this_->state = EN_FOLLOWER_STATE_BLOCK;
-            this_->stopAnimPlaying = 0;  // let kBlockWait flow through
-            sAttackState.target = meleeEnemy;
-            sAttackState.swingFiredAT = false;
-            sLastCombatWeapon = 0;  // melee — STANDBY shows sword+shield
-            return true;
-        }
+    // Tier 3 wide Y filter — see original docstring (catches
+    // Skullwalltulas on ceilings, Keese in flight, etc.).
+    static constexpr float kRangedYFilter = 250.0f;
+
+    AnchorAICombat::EngageCombatContext ctx;
+    ctx.self                 = &this_->actor;
+    ctx.play                 = play;
+    ctx.pickMeleeTarget      = [this_, play](float maxRange) {
+        return FindNearestEnemyForAttack(this_, play, maxRange);
+    };
+    ctx.pickPursueTarget     = [this_, play](float maxRange) {
+        return FindNearestEnemyForAttack(this_, play, maxRange);
+    };
+    ctx.pickRangedTarget     = [this_, play](float maxRange, float maxYDelta) {
+        return FindNearestEnemyForAttack(this_, play, maxRange, maxYDelta);
+    };
+    ctx.maxHpReader          = []() { return FollowerNpcMaxHealthFromLink(); };
+    ctx.currentHealth        = this_->health;
+    ctx.hasRangedWeapon      = []() { return FollowerNpcHasRangedWeapon(); };
+    ctx.attackEngageDist     = kAttackEngageDist;
+    ctx.engageAcquireDist    = kEngageAcquireDist;
+    ctx.rangedAcquireDist    = kRangedAcquireDist;
+    ctx.rangedYFilter        = kRangedYFilter;
+    ctx.rangedMinDist        = kRangedMinDist;
+    ctx.rangedElevatedYDelta = 60.0f;  // Follower's hardcoded default
+    ctx.blockHpThresholdRatio = kBlockHpThresholdRatio;
+    const auto decision = AnchorAICombat::EvaluateCombatTiers(ctx);
+
+    switch (decision.kind) {
+    case AnchorAICombat::EngageDecision::Kind::None:
+        return false;
+
+    case AnchorAICombat::EngageDecision::Kind::Block:
+        SPDLOG_INFO("[FollowerNPC] {}→BLOCK (low HP {}/{}, target "
+                    "enemyId=0x{:X})",
+                    fromName, (int)decision.hp, (int)decision.maxHp,
+                    (uint16_t)decision.target->id);
+        this_->state = EN_FOLLOWER_STATE_BLOCK;
+        this_->stopAnimPlaying = 0;  // let kBlockWait flow through
+        sAttackState.target = decision.target;
+        sAttackState.swingFiredAT = false;
+        sLastCombatWeapon = 0;  // melee — STANDBY shows sword+shield
+        return true;
+
+    case AnchorAICombat::EngageDecision::Kind::Attack:
         SPDLOG_INFO("[FollowerNPC] {}→ATTACK (target enemyId=0x{:X} at "
                     "({:.0f},{:.0f},{:.0f}))",
-                    fromName, (uint16_t)meleeEnemy->id,
-                    meleeEnemy->world.pos.x, meleeEnemy->world.pos.y,
-                    meleeEnemy->world.pos.z);
+                    fromName, (uint16_t)decision.target->id,
+                    decision.target->world.pos.x, decision.target->world.pos.y,
+                    decision.target->world.pos.z);
         this_->state = EN_FOLLOWER_STATE_ATTACK;
         this_->stopAnimPlaying = 0;
-        sAttackState.target = meleeEnemy;
+        sAttackState.target = decision.target;
         sAttackState.swingFiredAT = false;
         sLastCombatWeapon = 0;  // melee — STANDBY keeps sword+shield
         return true;
-    }
 
-    // Tier 2 — ENGAGE pursuit if a GROUND-level enemy is in pursuit
-    // range. Tight Y filter (default 60u) so ceiling-perched enemies
-    // are skipped here; they fall through to Tier 3 (ranged). This
-    // makes the NPC prefer melee for ground enemies — log 163 showed
-    // NPC firing arrows at Deku Babas at 499u when it could have just
-    // walked up and swung. User feedback: "Why is the NPC Follower
-    // not using the sword and shield and engaging dekubaba in melee
-    // combat?"
-    Actor* pursueEnemy = FindNearestEnemyForAttack(this_, play, kEngageAcquireDist);
-    if (pursueEnemy != nullptr) {
+    case AnchorAICombat::EngageDecision::Kind::Engage:
         SPDLOG_INFO("[FollowerNPC] {}→ENGAGE (target enemyId=0x{:X} at "
                     "({:.0f},{:.0f},{:.0f}))",
-                    fromName, (uint16_t)pursueEnemy->id,
-                    pursueEnemy->world.pos.x, pursueEnemy->world.pos.y,
-                    pursueEnemy->world.pos.z);
+                    fromName, (uint16_t)decision.target->id,
+                    decision.target->world.pos.x, decision.target->world.pos.y,
+                    decision.target->world.pos.z);
         this_->state = EN_FOLLOWER_STATE_ENGAGE;
-        sAttackState.target = pursueEnemy;
+        sAttackState.target = decision.target;
         sAttackState.swingFiredAT = false;
         sLastCombatWeapon = 0;  // melee pursuit — STANDBY shows sword+shield
         return true;
-    }
 
-    // Tier 3 — RANGED_ATTACK as last resort. Fires only when:
-    //   (a) Player owns a ranged weapon (bow / slingshot), AND
-    //   (b) No ground-level enemy in pursuit range (Tier 2 fell
-    //       through — only elevated/flying enemies remain).
-    //
-    // Wide Y filter (250u vs the 60u default) catches Skullwalltulas
-    // on cave ceilings, Keese in flight, etc. — enemies that NPC
-    // cannot reach by walking. Ground-level enemies in [pursuit,
-    // ranged] range get pursued via FOLLOW (which re-enters
-    // TryEngageCombat once close enough for ENGAGE/ATTACK).
-    static constexpr float kRangedYFilter = 250.0f;
-    if (FollowerNpcHasRangedWeapon()) {
-        Actor* rangedEnemy = FindNearestEnemyForAttack(this_, play,
-                                                        kRangedAcquireDist,
-                                                        kRangedYFilter);
-        if (rangedEnemy != nullptr) {
-            const float dx = rangedEnemy->world.pos.x - this_->actor.world.pos.x;
-            const float dz = rangedEnemy->world.pos.z - this_->actor.world.pos.z;
-            const float dy = rangedEnemy->world.pos.y - this_->actor.world.pos.y;
-            const float distXZ = std::sqrt(dx*dx + dz*dz);
-            // Additional gate: only ranged-attack when the enemy is
-            // genuinely out of melee reach. Ground enemies (|dy|<60)
-            // were already handled by Tier 2's pursuit; if they
-            // somehow got here (e.g., Tier 2 returned null due to a
-            // race), we'd rather pursue than shoot them.
-            const bool isElevated = std::fabs(dy) > 60.0f;
-            if (isElevated && distXZ >= kRangedMinDist) {
-                SPDLOG_INFO("[FollowerNPC] {}→RANGED_ATTACK (elevated target "
-                            "enemyId=0x{:X} at ({:.0f},{:.0f},{:.0f}) "
-                            "dist={:.0f} dy={:+.0f})",
-                            fromName, (uint16_t)rangedEnemy->id,
-                            rangedEnemy->world.pos.x, rangedEnemy->world.pos.y,
-                            rangedEnemy->world.pos.z, distXZ, dy);
-                this_->state = EN_FOLLOWER_STATE_RANGED_ATTACK;
-                this_->stopAnimPlaying = 0;  // let kBowShoot flow through
-                sAttackState.target = rangedEnemy;
-                sAttackState.swingFiredAT = false;  // reused as "shot fired" flag
-                sLastCombatWeapon = 1;  // ranged — STANDBY keeps bow drawn
-                return true;
-            }
-        }
+    case AnchorAICombat::EngageDecision::Kind::RangedAttack:
+        SPDLOG_INFO("[FollowerNPC] {}→RANGED_ATTACK (elevated target "
+                    "enemyId=0x{:X} at ({:.0f},{:.0f},{:.0f}) "
+                    "dist={:.0f} dy={:+.0f})",
+                    fromName, (uint16_t)decision.target->id,
+                    decision.target->world.pos.x, decision.target->world.pos.y,
+                    decision.target->world.pos.z, decision.distXZ, decision.dy);
+        this_->state = EN_FOLLOWER_STATE_RANGED_ATTACK;
+        this_->stopAnimPlaying = 0;  // let kBowShoot flow through
+        sAttackState.target = decision.target;
+        sAttackState.swingFiredAT = false;  // reused as "shot fired" flag
+        sLastCombatWeapon = 1;  // ranged — STANDBY keeps bow drawn
+        return true;
     }
 
     return false;

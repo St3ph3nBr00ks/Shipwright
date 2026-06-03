@@ -351,4 +351,103 @@ struct BlockTimerDecision {
 
 BlockTimerDecision EvaluateBlockTimer(const BlockTimerContext& ctx);
 
+// ----------------------------------------------------------------------------
+// Phase 6 — shared TryEngageCombat tier-1/2/3 evaluation.
+//
+// Both NPC Follower and NPC Invader's TryEngageCombat runs the same
+// engagement-decision ladder once per non-combat tick:
+//
+//   Tier 1 (melee, `attackEngageDist`):
+//     - Pick nearest reachable enemy/player target within XZ + Y bands.
+//     - If HP-ratio <= blockHpThresholdRatio → BLOCK.
+//     - Else → ATTACK.
+//
+//   Tier 2 (pursuit, `engageAcquireDist`):
+//     - Pick nearest ground-level target. Tight Y filter (~60u) so
+//       elevated targets fall through to Tier 3.
+//     - → ENGAGE (locomotion drives pursuit to melee range).
+//
+//   Tier 3 (ranged, `rangedAcquireDist`):
+//     - Gated on `hasRangedWeapon()`. Wide Y filter for elevated
+//       targets. Additional XZ + |dy| gate so only genuinely
+//       out-of-reach targets get the arrow.
+//     - → RANGED_ATTACK.
+//
+// Per-actor differences (per DR-2 §"Policy axes"):
+//   1. Target picker — Follower's `FindNearestEnemyForAttack` walks
+//      ACTORCAT_ENEMY; Invader's `PickHostileTarget` walks player
+//      actors (local + DummyPlayers + NPC Follower).
+//   2. Max-HP source — Follower reads Link's healthCapacity; Invader
+//      reads `this_->maxHealth` (intrinsic to actor).
+//   3. Ranged-weapon ownership — Follower checks Link's inventory;
+//      Invader v1 also checks Link's inventory (will change when
+//      Invader gains independent gear).
+//   4. State enum values — Follower's STATE_ATTACK / _BLOCK / _ENGAGE
+//      / _RANGED_ATTACK vs Invader's matching constants.
+//   5. `kRangedYFilter` value — Follower uses local 250u; Invader
+//      uses `kRangedYFilter` tunable.
+//   6. `kRangedElevatedYDelta` value — Follower hardcoded 60u;
+//      Invader uses tunable.
+//   7. Log message format — Follower logs `enemyId=0xXXXX`; Invader
+//      logs `target Player at (X,Y,Z)`. Caller handles SPDLOG;
+//      shared helper just returns the decision + diagnostic fields.
+//   8. State transition + sAttackState bookkeeping — caller applies
+//      after the decision returns (so per-actor file-static state
+//      stays per-actor).
+//
+// The shared helper does NOT perform pre-checks (combat-disable
+// gate, eligible-state gate, cooldown gate, invuln gate). Those
+// stay in the caller because the gates differ across actors:
+//   - Follower has `FollowerNpcInvulnerable()` (gated by CVar);
+//     Invader has no equivalent.
+//   - Eligible-state check uses per-actor state-enum constants.
+// ----------------------------------------------------------------------------
+struct EngageCombatContext {
+    Actor* self;
+    PlayState* play;
+
+    // Per-actor target pickers. Each closure binds the caller's
+    // `this_` + tuning constants. Tier 1 + 2 use the same 2-arg
+    // signature; Tier 3 needs the Y-filter override.
+    std::function<Actor*(float maxRange)>                 pickMeleeTarget;
+    std::function<Actor*(float maxRange)>                 pickPursueTarget;
+    std::function<Actor*(float maxRange, float maxYDelta)> pickRangedTarget;
+
+    // Per-actor health metrics.
+    std::function<int8_t()> maxHpReader;  // closure to defer the call
+    int8_t                  currentHealth = 0;
+
+    // Per-actor ranged-weapon ownership gate.
+    std::function<bool()>   hasRangedWeapon;
+
+    // Tunables — caller passes its own constants. Match the
+    // existing per-actor tunable headers
+    // (`InvaderTunables.h` / per-file FollowerNPC.cpp constants).
+    float attackEngageDist      = 0.0f;
+    float engageAcquireDist     = 0.0f;
+    float rangedAcquireDist     = 0.0f;
+    float rangedYFilter         = 0.0f;
+    float rangedMinDist         = 0.0f;
+    float rangedElevatedYDelta  = 60.0f;  // Follower's hardcoded default
+    float blockHpThresholdRatio = 0.0f;
+};
+
+struct EngageDecision {
+    enum class Kind {
+        None,           // No tier matched — caller returns false.
+        Block,          // Tier 1, low-HP branch.
+        Attack,         // Tier 1, normal branch.
+        Engage,         // Tier 2 pursuit.
+        RangedAttack,   // Tier 3 elevated target.
+    };
+    Kind   kind            = Kind::None;
+    Actor* target          = nullptr;
+    int8_t hp              = 0;     // populated for Block diagnostic (only)
+    int8_t maxHp           = 0;     // populated for Block diagnostic (only)
+    float  distXZ          = 0.0f;  // populated for RangedAttack diagnostic
+    float  dy              = 0.0f;  // populated for RangedAttack diagnostic
+};
+
+EngageDecision EvaluateCombatTiers(const EngageCombatContext& ctx);
+
 }  // namespace AnchorAICombat

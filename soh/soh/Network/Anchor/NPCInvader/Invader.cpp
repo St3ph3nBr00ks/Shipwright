@@ -2503,6 +2503,12 @@ void TickSTANDBY(EnInvader* this_, PlayState* play, const Vec3f& targetHintPos) 
 
 // Tier-ordered engagement check. Mirrors FollowerNPC's TryEngageCombat
 // but targets are Players (hostile) instead of enemies (friendly).
+// B.5 Phase 6 — body delegates to AnchorAICombat::EvaluateCombatTiers
+// (Common/AICombat/CombatEngagement.h). The per-actor pre-checks
+// (combat-disable gate, eligible-state gate, cooldown) and the
+// post-decision SPDLOG + state transition + sAttackState bookkeeping
+// stay here; the tier-1/2/3 picker/HP/range logic is shared with
+// NPC Follower's matching wrapper.
 bool TryEngageCombat(EnInvader* this_, PlayState* play) {
     // Navigation Test Harness combat-disable gate. When the harness is
     // running with combat disabled, all engagement tiers short-circuit
@@ -2526,76 +2532,83 @@ bool TryEngageCombat(EnInvader* this_, PlayState* play) {
     const char* fromName = StateName(this_->state);
     Actor* selfActor = &this_->actor;
 
-    // Tier 1 — melee range. BLOCK if low HP, otherwise ATTACK.
-    Actor* meleeTarget = PickHostileTarget(selfActor, play, kAttackEngageDist);
-    if (meleeTarget != nullptr) {
-        const s8 maxHp = (this_->maxHealth > 0) ? this_->maxHealth : 1;
-        const bool lowHp =
-            ((float)this_->health / (float)maxHp <= kBlockHpThresholdRatio);
-        if (lowHp) {
-            SPDLOG_INFO("[Invader] {}→BLOCK (low HP {}/{}, target Player at "
-                        "({:.0f},{:.0f},{:.0f}))",
-                        fromName, (int)this_->health, (int)maxHp,
-                        meleeTarget->world.pos.x, meleeTarget->world.pos.y,
-                        meleeTarget->world.pos.z);
-            this_->state = EN_INVADER_STATE_BLOCK;
-            sAttackState.target = meleeTarget;
-            sAttackState.swingFiredAT = false;
-            sLastCombatWeapon = 0;
-            return true;
-        }
+    AnchorAICombat::EngageCombatContext ctx;
+    ctx.self                 = selfActor;
+    ctx.play                 = play;
+    ctx.pickMeleeTarget      = [selfActor, play](float maxRange) {
+        return PickHostileTarget(selfActor, play, maxRange);
+    };
+    ctx.pickPursueTarget     = [selfActor, play](float maxRange) {
+        return PickHostileTarget(selfActor, play, maxRange);
+    };
+    ctx.pickRangedTarget     = [selfActor, play](float maxRange, float maxYDelta) {
+        return PickHostileTarget(selfActor, play, maxRange, maxYDelta);
+    };
+    ctx.maxHpReader          = [this_]() {
+        return (this_->maxHealth > 0) ? this_->maxHealth : (int8_t)1;
+    };
+    ctx.currentHealth        = this_->health;
+    ctx.hasRangedWeapon      = []() { return InvaderHasRangedWeapon(); };
+    ctx.attackEngageDist     = kAttackEngageDist;
+    ctx.engageAcquireDist    = kEngageAcquireDist;
+    ctx.rangedAcquireDist    = kRangedAcquireDist;
+    ctx.rangedYFilter        = kRangedYFilter;
+    ctx.rangedMinDist        = kRangedMinDist;
+    ctx.rangedElevatedYDelta = kRangedElevatedYDelta;
+    ctx.blockHpThresholdRatio = kBlockHpThresholdRatio;
+    const auto decision = AnchorAICombat::EvaluateCombatTiers(ctx);
+
+    switch (decision.kind) {
+    case AnchorAICombat::EngageDecision::Kind::None:
+        return false;
+
+    case AnchorAICombat::EngageDecision::Kind::Block:
+        SPDLOG_INFO("[Invader] {}→BLOCK (low HP {}/{}, target Player at "
+                    "({:.0f},{:.0f},{:.0f}))",
+                    fromName, (int)decision.hp, (int)decision.maxHp,
+                    decision.target->world.pos.x, decision.target->world.pos.y,
+                    decision.target->world.pos.z);
+        this_->state = EN_INVADER_STATE_BLOCK;
+        sAttackState.target = decision.target;
+        sAttackState.swingFiredAT = false;
+        sLastCombatWeapon = 0;
+        return true;
+
+    case AnchorAICombat::EngageDecision::Kind::Attack:
         SPDLOG_INFO("[Invader] {}→ATTACK (target Player at "
                     "({:.0f},{:.0f},{:.0f}))",
                     fromName,
-                    meleeTarget->world.pos.x, meleeTarget->world.pos.y,
-                    meleeTarget->world.pos.z);
+                    decision.target->world.pos.x, decision.target->world.pos.y,
+                    decision.target->world.pos.z);
         this_->state = EN_INVADER_STATE_ATTACK;
-        sAttackState.target = meleeTarget;
+        sAttackState.target = decision.target;
         sAttackState.swingFiredAT = false;
         sLastCombatWeapon = 0;
         return true;
-    }
 
-    // Tier 2 — ENGAGE pursuit (ground-level targets only via tight Y
-    // filter so elevated targets fall through to ranged).
-    Actor* pursueTarget = PickHostileTarget(selfActor, play, kEngageAcquireDist);
-    if (pursueTarget != nullptr) {
+    case AnchorAICombat::EngageDecision::Kind::Engage:
         SPDLOG_INFO("[Invader] {}→ENGAGE (target Player at "
                     "({:.0f},{:.0f},{:.0f}))",
                     fromName,
-                    pursueTarget->world.pos.x, pursueTarget->world.pos.y,
-                    pursueTarget->world.pos.z);
+                    decision.target->world.pos.x, decision.target->world.pos.y,
+                    decision.target->world.pos.z);
         this_->state = EN_INVADER_STATE_ENGAGE;
-        sAttackState.target = pursueTarget;
+        sAttackState.target = decision.target;
         sAttackState.swingFiredAT = false;
         sLastCombatWeapon = 0;
         return true;
-    }
 
-    // Tier 3 — RANGED_ATTACK. Wide Y filter for elevated targets.
-    if (InvaderHasRangedWeapon()) {
-        Actor* rangedTarget = PickHostileTarget(selfActor, play,
-                                                 kRangedAcquireDist,
-                                                 kRangedYFilter);
-        if (rangedTarget != nullptr) {
-            const float dx = rangedTarget->world.pos.x - selfActor->world.pos.x;
-            const float dz = rangedTarget->world.pos.z - selfActor->world.pos.z;
-            const float dy = rangedTarget->world.pos.y - selfActor->world.pos.y;
-            const float distXZ = std::sqrt(dx * dx + dz * dz);
-            const bool isElevated = std::fabs(dy) > kRangedElevatedYDelta;
-            if (isElevated && distXZ >= kRangedMinDist) {
-                SPDLOG_INFO("[Invader] {}→RANGED_ATTACK (elevated target at "
-                            "({:.0f},{:.0f},{:.0f}) dist={:.0f} dy={:+.0f})",
-                            fromName,
-                            rangedTarget->world.pos.x, rangedTarget->world.pos.y,
-                            rangedTarget->world.pos.z, distXZ, dy);
-                this_->state = EN_INVADER_STATE_RANGED_ATTACK;
-                sAttackState.target = rangedTarget;
-                sAttackState.swingFiredAT = false;
-                sLastCombatWeapon = 1;
-                return true;
-            }
-        }
+    case AnchorAICombat::EngageDecision::Kind::RangedAttack:
+        SPDLOG_INFO("[Invader] {}→RANGED_ATTACK (elevated target at "
+                    "({:.0f},{:.0f},{:.0f}) dist={:.0f} dy={:+.0f})",
+                    fromName,
+                    decision.target->world.pos.x, decision.target->world.pos.y,
+                    decision.target->world.pos.z, decision.distXZ, decision.dy);
+        this_->state = EN_INVADER_STATE_RANGED_ATTACK;
+        sAttackState.target = decision.target;
+        sAttackState.swingFiredAT = false;
+        sLastCombatWeapon = 1;
+        return true;
     }
 
     return false;

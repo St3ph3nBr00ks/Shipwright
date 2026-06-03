@@ -197,4 +197,72 @@ AttackTickResult TickAttackATAndComplete(const AttackTickContext& ctx) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6 — TryEngageCombat tier-1/2/3 evaluation.
+//
+// Behaviour mirror of the original `TryEngageCombat` bodies in
+// FollowerNPC.cpp:2532–2655 and Invader.cpp:2506–2602 (minus the
+// per-actor pre-checks the caller still performs: invuln gate,
+// eligible-state gate, cooldown gate).
+// ---------------------------------------------------------------------------
+EngageDecision EvaluateCombatTiers(const EngageCombatContext& ctx) {
+    EngageDecision decision;
+
+    // Tier 1 — melee range. BLOCK if low HP, else ATTACK.
+    if (ctx.pickMeleeTarget) {
+        Actor* meleeTarget = ctx.pickMeleeTarget(ctx.attackEngageDist);
+        if (meleeTarget != nullptr) {
+            int8_t maxHp = (ctx.maxHpReader) ? ctx.maxHpReader() : (int8_t)1;
+            if (maxHp <= 0) maxHp = 1;
+            const bool lowHp =
+                ((float)ctx.currentHealth / (float)maxHp <=
+                 ctx.blockHpThresholdRatio);
+
+            decision.target = meleeTarget;
+            decision.hp     = ctx.currentHealth;
+            decision.maxHp  = maxHp;
+            decision.kind   = lowHp ? EngageDecision::Kind::Block
+                                    : EngageDecision::Kind::Attack;
+            return decision;
+        }
+    }
+
+    // Tier 2 — pursuit (ground-level targets only via the per-actor
+    // picker's Y filter; elevated targets fall through to Tier 3).
+    if (ctx.pickPursueTarget) {
+        Actor* pursueTarget = ctx.pickPursueTarget(ctx.engageAcquireDist);
+        if (pursueTarget != nullptr) {
+            decision.target = pursueTarget;
+            decision.kind   = EngageDecision::Kind::Engage;
+            return decision;
+        }
+    }
+
+    // Tier 3 — RANGED_ATTACK. Gated on `hasRangedWeapon()`. Wide Y
+    // filter for elevated targets + XZ + |dy| gates so only genuinely
+    // out-of-reach targets get the arrow.
+    if (ctx.pickRangedTarget && ctx.hasRangedWeapon && ctx.hasRangedWeapon()) {
+        Actor* rangedTarget =
+            ctx.pickRangedTarget(ctx.rangedAcquireDist, ctx.rangedYFilter);
+        if (rangedTarget != nullptr && ctx.self != nullptr) {
+            const float dx     = rangedTarget->world.pos.x - ctx.self->world.pos.x;
+            const float dz     = rangedTarget->world.pos.z - ctx.self->world.pos.z;
+            const float dy     = rangedTarget->world.pos.y - ctx.self->world.pos.y;
+            const float distXZ = std::sqrt(dx * dx + dz * dz);
+            const bool isElevated =
+                std::fabs(dy) > ctx.rangedElevatedYDelta;
+            if (isElevated && distXZ >= ctx.rangedMinDist) {
+                decision.target = rangedTarget;
+                decision.distXZ = distXZ;
+                decision.dy     = dy;
+                decision.kind   = EngageDecision::Kind::RangedAttack;
+                return decision;
+            }
+        }
+    }
+
+    // No tier matched.
+    return decision;
+}
+
 }  // namespace AnchorAICombat
