@@ -52,6 +52,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
 #include "soh/Network/Anchor/Common/AILocomotion/StuckRecovery.h"     // shared TickSTUCK dispatch
 #include "soh/Network/Anchor/Common/AICombat/CombatEngagement.h"      // B.5 Phase 1: shared ChooseCombatExitState
+#include "soh/Network/Anchor/Common/AICombat/SwordBladeTracking.h"    // #238: per-frame sword tip/base + AT quad builder
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Network/Anchor/Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
@@ -1915,24 +1916,34 @@ Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
 
 // ---------------------------------------------------------------------
 // AT quad positioning — flat plane in front of the Invader at chest
-// height. Same vertex order as FollowerNPC's PositionAttackQuad.
+// height.
+//
+// REWRITTEN 2026-06-02 (#238 / Plans/invader_combat_repair_sequenced_plan.md Step 2):
+// previously built a fixed-distance plane 60u in front of the body
+// using shape.rot.y forward/right vectors. That plane only intersected
+// target cylinders at exactly ~60u depth — point-blank ATTACK swings
+// (typical post-ENGAGE→ATTACK) overshot, missing every hit. New
+// approach mirrors vanilla Player: derive the quad's vertices from
+// the actual blade tip + base positions written each draw frame by
+// EnInvader_PostLimbDraw. Quad now tracks the blade through the
+// swing animation so collision fires where the blade visually is.
+//
+// Same vertex order as FollowerNPC's PositionAttackQuad (which
+// gets the matching rewrite in this same commit).
 // ---------------------------------------------------------------------
 void PositionAttackQuad(EnInvader* this_) {
-    Actor* a = &this_->actor;
-    const float yawRad = (float)a->shape.rot.y * (3.14159265f / 32768.0f);
-    const float fx = sinf(yawRad);
-    const float fz = cosf(yawRad);
-    const float rx = cosf(yawRad);
-    const float rz = -sinf(yawRad);
-    const Vec3f& p = a->world.pos;
-    Vec3f bottomLeft  = { p.x + fx * kAttackQuadForward - rx * kAttackQuadHalfWidth,
-                          p.y + kAttackQuadBaseY,
-                          p.z + fz * kAttackQuadForward - rz * kAttackQuadHalfWidth };
-    Vec3f bottomRight = { p.x + fx * kAttackQuadForward + rx * kAttackQuadHalfWidth,
-                          p.y + kAttackQuadBaseY,
-                          p.z + fz * kAttackQuadForward + rz * kAttackQuadHalfWidth };
-    Vec3f topRight    = { bottomRight.x, p.y + kAttackQuadTopY, bottomRight.z };
-    Vec3f topLeft     = { bottomLeft.x,  p.y + kAttackQuadTopY, bottomLeft.z };
+    // Fix B (log 358 follow-up): sweep quad between previous and
+    // current frame's blade poses. Previously this used the single-
+    // snapshot Anchor_BuildAtQuadFromBlade with an 8u perpendicular
+    // halfWidth — quad area was ~5× smaller than vanilla Player's
+    // sweep quad, producing the "Invader's hit zone is quite small"
+    // user report. New geometry mirrors vanilla Player exactly.
+    Vec3f bottomLeft, bottomRight, topLeft, topRight;
+    Anchor_BuildSweepAtQuadFromBlade(
+        &this_->prevSwordTip, &this_->prevSwordBase,
+        &this_->swordTip,     &this_->swordBase,
+        &bottomLeft, &bottomRight,
+        &topLeft,    &topRight);
     Collider_SetQuadVertices(&this_->atCollider, &bottomLeft, &bottomRight,
                              &topLeft, &topRight);
 }
@@ -2011,6 +2022,32 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
     atkCtx.registerATWindow = [this_, play]() {
         PositionAttackQuad(this_);
         CollisionCheck_SetAT(play, &play->colChkCtx, &this_->atCollider.base);
+        // [Invader.Diag] — issue #238 + Fix B sweep. Logs both
+        // frames of blade endpoints that form the sweep quad. The
+        // delta between prev and cur tip/base IS the swept arc per
+        // frame — large delta = wide quad covering significant area.
+        // If prev ≈ cur, the quad is degenerate and no hits register
+        // (correct for stationary blade, suboptimal for first swing
+        // frame after spawn).
+        static int sATDiagCounter = 0;
+        if (++sATDiagCounter % 10 == 1) {
+            const float tipDx = this_->swordTip.x  - this_->prevSwordTip.x;
+            const float tipDy = this_->swordTip.y  - this_->prevSwordTip.y;
+            const float tipDz = this_->swordTip.z  - this_->prevSwordTip.z;
+            const float tipDeltaSq = tipDx*tipDx + tipDy*tipDy + tipDz*tipDz;
+            SPDLOG_INFO("[Invader.Diag] AT registered invPos=({:.0f},{:.0f},{:.0f}) "
+                        "curTip=({:.0f},{:.0f},{:.0f}) curBase=({:.0f},{:.0f},{:.0f}) "
+                        "prevTip=({:.0f},{:.0f},{:.0f}) prevBase=({:.0f},{:.0f},{:.0f}) "
+                        "tipDeltaSq={:.1f} curFrame={:.1f}",
+                        this_->actor.world.pos.x, this_->actor.world.pos.y,
+                        this_->actor.world.pos.z,
+                        this_->swordTip.x, this_->swordTip.y, this_->swordTip.z,
+                        this_->swordBase.x, this_->swordBase.y, this_->swordBase.z,
+                        this_->prevSwordTip.x, this_->prevSwordTip.y, this_->prevSwordTip.z,
+                        this_->prevSwordBase.x, this_->prevSwordBase.y, this_->prevSwordBase.z,
+                        tipDeltaSq,
+                        this_->skelAnime.curFrame);
+        }
     };
     atkCtx.curAnimFrame           = this_->skelAnime.curFrame;
     atkCtx.endAnimFrame           = this_->skelAnime.endFrame;

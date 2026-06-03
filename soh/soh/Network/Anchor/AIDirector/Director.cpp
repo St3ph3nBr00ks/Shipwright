@@ -135,6 +135,28 @@ SpawnableEnemyDescriptor* Director::Register(std::unique_ptr<SpawnableEnemyDescr
     return raw;
 }
 
+void Director::OnSceneInitFromHook(int16_t sceneNum) {
+    // Stamp the scene-change frame unconditionally. The polling observer
+    // in Tick() can miss same-scene reloads (Game Over → Continue at the
+    // same scene's entrance 0) because curScene == prevLocalSceneNum.
+    // The OnSceneInit hook fires for EVERY scene init regardless of
+    // whether the scene number changed, so it's the reliable signal.
+    //
+    // We stamp mGlobalFrameCounter as the new "last scene change" marker
+    // so GetFramesSinceLocalSceneChange() returns ~0 immediately after
+    // this hook fires. Subsequent Tick calls will see fresh counter and
+    // re-enter the grace-period diagnostic window.
+    //
+    // Also reset mPrevLocalSceneNum / mPrevLocalRoomNum to the sentinel
+    // values so the polling observer in Tick re-detects the new scene
+    // on its next pass (defensive — even if curScene != prevScene now,
+    // we want to ensure both code paths converge to the right state).
+    //
+    // Issue #237 / Phase 3 of Plans/invader_combat_repair_sequenced_plan.md.
+    (void)sceneNum;  // currently unused; available for per-scene logic later
+    mLastLocalSceneChangeFrame = mGlobalFrameCounter;
+}
+
 void Director::Tick() {
     // Director runs on every client but only the global-effective-host
     // actually decides spawns. Non-host clients still receive
@@ -162,32 +184,21 @@ void Director::Tick() {
     // values regardless of empty-registry / invalid-view early-exits.
     ++mGlobalFrameCounter;
 
-    // No descriptors registered → nothing to do. Step 1 always lands here
-    // because nothing has called Register() yet. Step 7 lands TestDescriptor;
-    // step 11 lands InvaderDescriptor.
-    if (mDescriptors.empty()) {
-        return;
-    }
-
-    // First-tick initialization for newly-registered descriptors.
-    if (!mInitializedDescriptors) {
-        for (auto& d : mDescriptors) {
-            d->Initialize(*this);
-        }
-        mInitializedDescriptors = true;
-    }
-
-    // Build the per-tick view. Empty / invalid (no players with save
-    // loaded) → skip proposal work this tick.
-    SessionView view = BuildSessionView();
-    if (!view.IsValid()) {
-        return;
-    }
-
     // Phase 1 §7.5 local-player scene/room transition observer.
     //
-    // DirectorEvent::PlayerEnteredRoom needs to fire for the HOST's own
-    // transitions too — scene-following hunts the local player when they
+    // RELOCATED 2026-06-02 (Step 1 of Plans/invader_combat_repair_sequenced_plan.md):
+    // previously lived AFTER the `if (!view.IsValid()) return;` early-
+    // return below, but that meant `mLastLocalSceneChangeFrame` never
+    // updated during the brief invalid-view window post-Continue —
+    // and Fix 1's grace period plus all `[*.Diag]` logs gated on
+    // `framesSinceLocalSceneChange < 120` were silently
+    // unobservable. Observer is pure state tracking, runs regardless
+    // of session validity. Empty-registry / no-descriptor cases are
+    // safe because `NotifyEvent` early-returns on an empty descriptor
+    // list. See #237.
+    //
+    // DirectorEvent::PlayerEnteredRoom fires for the HOST's own
+    // transitions — scene-following hunts the local player when they
     // warp. step-6's UCS-receive wiring (UpdateClientState.cpp) only
     // fires events for REMOTE peers; local transitions don't route
     // through that path because the host doesn't UCS-broadcast back to
@@ -211,16 +222,94 @@ void Director::Tick() {
             evt.roomNum  = curRoom;
             NotifyEvent(evt);
         }
+        // Fix 1 — stamp the scene-change frame whenever the local
+        // player's (scene, room) changes, including the first observation
+        // (mPrevLocalSceneNum == -1 → curScene). The first-observation
+        // stamp is what lets descriptors apply the grace period at
+        // session start too; otherwise a fresh boot would see
+        // mLastLocalSceneChangeFrame == 0 and treat the first ~1.5s as
+        // "settled" before the scene init actually finishes.
+        if (changed) {
+            mLastLocalSceneChangeFrame = mGlobalFrameCounter;
+        }
         mPrevLocalSceneNum = curScene;
         mPrevLocalRoomNum  = curRoom;
     }
 
+    // [Director.Diag] — log 354 Fix 1 investigation. Confirms that
+    // Director::Tick is running during the post-Continue scene reload
+    // window. Rate-limited to ~1Hz, but ONLY within the first ~6s
+    // after a local scene change (where Fix 1's grace period applies).
+    // After the window, the heartbeat goes silent to avoid log spam.
+    const uint64_t framesSinceChange = GetFramesSinceLocalSceneChange();
+    if (framesSinceChange < 120 /* ~6s @ 20fps */) {
+        static uint64_t sDirectorDiagLastLogFrame = 0;
+        if (sDirectorDiagLastLogFrame == 0 ||
+            mGlobalFrameCounter - sDirectorDiagLastLogFrame >= 20) {
+            SPDLOG_INFO("[Director.Diag] Tick running gframe={} framesSinceSceneChange={} sceneNum={} roomNum={}",
+                        mGlobalFrameCounter, framesSinceChange,
+                        gPlayState ? (int)gPlayState->sceneNum : -1,
+                        gPlayState ? (int)gPlayState->roomCtx.curRoom.num : -1);
+            sDirectorDiagLastLogFrame = mGlobalFrameCounter;
+        }
+    }
+
+    // No descriptors registered → nothing to do. Step 1 always lands here
+    // because nothing has called Register() yet. Step 7 lands TestDescriptor;
+    // step 11 lands InvaderDescriptor.
+    if (mDescriptors.empty()) {
+        return;
+    }
+
+    // First-tick initialization for newly-registered descriptors.
+    if (!mInitializedDescriptors) {
+        for (auto& d : mDescriptors) {
+            d->Initialize(*this);
+        }
+        mInitializedDescriptors = true;
+    }
+
+    // Build the per-tick view. Empty / invalid (no players with save
+    // loaded) → skip proposal work this tick.
+    SessionView view = BuildSessionView();
+    if (!view.IsValid()) {
+        // [Director.Diag] — log 354 Fix 1 investigation. If the
+        // SessionView is invalid post-scene-change, Tick returns
+        // before reaching OnTick. Rate-limited within the
+        // post-scene-change window so we see WHY OnTick isn't
+        // firing (no players? everyone in cutscene?).
+        if (framesSinceChange < 120) {
+            static uint64_t sDirectorDiagInvalidLogFrame = 0;
+            if (sDirectorDiagInvalidLogFrame == 0 ||
+                mGlobalFrameCounter - sDirectorDiagInvalidLogFrame >= 20) {
+                SPDLOG_INFO("[Director.Diag] SessionView invalid (players.size()={}); skipping OnTick framesSinceSceneChange={}",
+                            view.players.size(), framesSinceChange);
+                sDirectorDiagInvalidLogFrame = mGlobalFrameCounter;
+            }
+        }
+        return;
+    }
+
+    // Observer relocated to above the SessionView check — see top of
+    // Tick. The previous location here meant the observer didn't run
+    // during the brief invalid-view window post-Continue. Step 1 of
+    // Plans/invader_combat_repair_sequenced_plan.md, tracker #237.
+
     // Phase 1 §7.5 lifecycle scan — descriptors manage their active
     // spawns BEFORE the proposal loop (sticky-target re-eval, orphan
-    // timer, all-unavailable despawn, scene-follow timers).
-    // Default OnTick is a no-op for descriptors that don't care.
+    // timer, all-unavailable despawn, scene-follow timers, host-actor-
+    // missing reconcile per Fix 1).
+    //
+    // NOT gated on IsEnabled — lifecycle is independent of new-spawn
+    // permission. Field-test log 361: an Invader spawned via ForceSpawn
+    // (which bypasses IsEnabled) killed P1; after Continue, OnTick
+    // never fired because `AI.Invaders.Enabled` CVar was off, so Fix 1's
+    // reconcile path was unreachable and the netId stayed dangling.
+    // Default OnTick is a no-op for descriptors that don't care, and
+    // descriptors tracking active spawns iterate over those spawns
+    // regardless of whether the global enable bit is on — see
+    // InvaderDescriptor::OnTick which guards on mActiveInvaders.empty().
     for (auto& d : mDescriptors) {
-        if (!d->IsEnabled()) continue;
         d->OnTick(*this, view);
     }
 

@@ -897,6 +897,26 @@ void InvaderDescriptor::OnEvent(const DirectorEventPayload& evt) {
 }
 
 void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
+    // [InvaderDescriptor.Diag] — log 354 Fix 1 investigation.
+    // Heartbeat at OnTick entry so we can confirm OnTick is being
+    // called after the post-Continue scene reload, and see whether
+    // mActiveInvaders is empty or holds the in-flight Invader. Rate-
+    // limited to ~1Hz, only within the first ~6s of a local scene
+    // change (where Fix 1's grace period applies). Outside that
+    // window the heartbeat is silent.
+    const uint64_t framesSinceChange = director.GetFramesSinceLocalSceneChange();
+    if (framesSinceChange < 120 /* ~6s @ 20fps */) {
+        static uint64_t sOnTickDiagLastLog = 0;
+        static uint64_t sOnTickDiagCounter = 0;
+        ++sOnTickDiagCounter;
+        if (sOnTickDiagLastLog == 0 ||
+            sOnTickDiagCounter - sOnTickDiagLastLog >= 20) {
+            SPDLOG_INFO("[InvaderDescriptor.Diag] OnTick fired mActiveInvaders.size()={} framesSinceSceneChange={}",
+                        mActiveInvaders.size(), framesSinceChange);
+            sOnTickDiagLastLog = sOnTickDiagCounter;
+        }
+    }
+
     // No active Invaders → nothing to manage.
     if (mActiveInvaders.empty()) return;
 
@@ -967,7 +987,53 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
             (gPlayState != nullptr &&
              (int16_t)gPlayState->sceneNum == state.lastKnownSceneNum &&
              (int8_t)gPlayState->roomCtx.curRoom.num == state.lastKnownRoomNum);
-        if (!hostActorPresent && hostInTrackedScene && anyValid != nullptr) {
+
+        // [InvaderDescriptor.Diag] — log 354 Fix 1 investigation.
+        // Edge-triggered log when host actor goes missing for a tracked
+        // Invader. Fires ONCE per (netId, host-absence) transition;
+        // re-arms when hostActorPresent flips true again. Shows the
+        // four condition values that drive the reconcile branch so we
+        // can see why "deferring reconcile" vs "re-instantiating" vs
+        // neither fires.
+        if (!hostActorPresent && !state.hostActorMissingLogged) {
+            SPDLOG_INFO("[InvaderDescriptor.Diag] netId={} host actor went MISSING "
+                        "lastKnownScene={} lastKnownRoom={} curScene={} curRoom={} "
+                        "hostInTrackedScene={} anyValid={} framesSinceSceneChange={}",
+                        netId, state.lastKnownSceneNum, (int)state.lastKnownRoomNum,
+                        gPlayState ? (int)gPlayState->sceneNum : -1,
+                        gPlayState ? (int)gPlayState->roomCtx.curRoom.num : -1,
+                        hostInTrackedScene, anyValid != nullptr,
+                        director.GetFramesSinceLocalSceneChange());
+            state.hostActorMissingLogged = true;
+        }
+        if (hostActorPresent) {
+            state.hostActorMissingLogged = false;
+        }
+
+        // Fix 1 (Plans/invader_field_test_log349_findings.md Issue B):
+        // grace period after the local player's last scene/room change.
+        // Without this, host's own death-respawn scene reload triggers
+        // this reconcile path inside the same frame the new scene init
+        // runs — the OoT engine clears host's actor list before
+        // re-spawning setup actors, so FindActorByNetId returns nullptr
+        // even though the Invader is "supposed" to still exist (peer
+        // still has its replica). Defer reconcile for ~1.5s after a
+        // local scene change so the transition can settle. If the actor
+        // legitimately is missing (real kill, scene unload with no
+        // return), reconcile fires normally after the grace period.
+        //
+        // Framerate-aware via Anchor::MsToGameTicks (see session_state.md
+        // "Framerate-aware timer infrastructure"). Default fallback ~30
+        // ticks = 1.5s @ 20fps for the disconnected / pre-Anchor case.
+        constexpr int kReconcileGraceMs = 1500;
+        const int graceFrames = (Anchor::Instance != nullptr)
+            ? Anchor::Instance->MsToGameTicks(kReconcileGraceMs)
+            : 30;
+        const bool sceneSettled =
+            director.GetFramesSinceLocalSceneChange() >= (uint64_t)graceFrames;
+
+        if (!hostActorPresent && hostInTrackedScene && anyValid != nullptr &&
+            sceneSettled) {
             auto reSpawnPos = PickSpawnPosition(
                 state.lastKnownSceneNum,
                 state.lastKnownRoomNum,
@@ -989,6 +1055,24 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
                             "deferring re-instantiate", netId);
             }
             continue;
+        }
+
+        // Diagnostic — if reconcile WOULD have fired but the grace
+        // period blocked it, log once so field tests can see the gate
+        // working. Edge-triggered via state.reconcileBlockedLastTick
+        // to avoid per-frame log spam during the grace window.
+        if (!hostActorPresent && hostInTrackedScene && anyValid != nullptr &&
+            !sceneSettled && !state.reconcileBlockedLogged) {
+            SPDLOG_INFO("[InvaderDescriptor] OnTick: netId={} host actor missing "
+                        "but within scene-change grace period "
+                        "(framesSinceChange={} graceFrames={}); deferring reconcile",
+                        netId,
+                        director.GetFramesSinceLocalSceneChange(),
+                        graceFrames);
+            state.reconcileBlockedLogged = true;
+        }
+        if (sceneSettled) {
+            state.reconcileBlockedLogged = false;
         }
 
         if (targetInvalid) {

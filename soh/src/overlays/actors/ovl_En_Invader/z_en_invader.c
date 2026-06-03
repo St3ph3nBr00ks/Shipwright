@@ -39,6 +39,30 @@ extern void Anchor_TickInvaderActor(Actor* invader, PlayState* play);
 extern void Anchor_InvaderDrawBegin(Actor* invader);
 extern void Anchor_InvaderDrawEnd(void);
 
+// Returns the currently-drawing EnInvader's Actor* (set by
+// Anchor_InvaderDrawBegin; cleared by Anchor_InvaderDrawEnd). Used
+// inside the post-limb callback so we can write to the invader's
+// swordTip/swordBase fields without modifying the callback's
+// `thisx` arg (which is the local Player, needed for
+// Player_OverrideLimbDrawGameplayDefault).
+extern Actor* Anchor_GetCurrentlyDrawingInvader(void);
+
+// Sword blade-tracking helpers — issue #238 / Plans/invader_combat_repair_sequenced_plan.md Step 2.
+extern void Anchor_ComputeBladeWorldFromMatrix(Vec3f* outTip, Vec3f* outBase);
+
+// Host-authority gate for the AC_HIT damage drain below. Race-B fix:
+// on non-room-host clients the local drain consumes colChkInfo.damage
+// BEFORE the OnActorUpdate forwarder can read it, so peer's hits never
+// reach host via DAMAGE_ENEMY — peer's HP drops but host's stays full,
+// driving the two clients out of sync. Gating the drain on
+// Anchor_IsCurrentRoomHost() leaves colChkInfo.damage intact on peer
+// long enough for the forwarder (HookHandlers.cpp:1838-1855) to send
+// DAMAGE_ENEMY to host; host's queued-damage drain then applies the
+// authoritative HP decrement and broadcasts via ENEMY_STATE. Falls
+// back to true (drain enabled) when Anchor isn't active, preserving
+// single-player behaviour. Defined in Bridge/AnchorCoreBridge.cpp.
+extern bool Anchor_IsCurrentRoomHost(void);
+
 #define FLAGS                                                                                                          \
     (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
@@ -183,6 +207,27 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     // when the death triggered from SWIMMING.
     this->deathCause      = 0;
 
+    // Sword blade-position tracking (#238). Init to zero; first draw
+    // frame's post-limb callback will populate with real world
+    // positions. If PositionAttackQuad runs before the first draw
+    // (e.g., immediate IDLE→ATTACK on spawn), the quad uses zero
+    // positions for that one frame — degenerate, no hit, recovers on
+    // next frame.
+    //
+    // Fix B (log 358 follow-up): also init the prev* fields. Until
+    // two consecutive post-limb callbacks have fired, prev and cur
+    // are both meaningless (or both zero, or cur=real and prev=0 —
+    // a sweep from origin to current position, which would produce
+    // a massive nonsense quad). The first post-limb call shifts
+    // cur→prev BEFORE writing new cur, so on call 1 prev becomes
+    // zero (same as cur was), and on call 2 prev = call-1's cur.
+    // By the time the actor first enters ATTACK (many frames later),
+    // both prev and cur are valid recent values.
+    this->swordTip.x      = 0.0f; this->swordTip.y      = 0.0f; this->swordTip.z      = 0.0f;
+    this->swordBase.x     = 0.0f; this->swordBase.y     = 0.0f; this->swordBase.z     = 0.0f;
+    this->prevSwordTip.x  = 0.0f; this->prevSwordTip.y  = 0.0f; this->prevSwordTip.z  = 0.0f;
+    this->prevSwordBase.x = 0.0f; this->prevSwordBase.y = 0.0f; this->prevSwordBase.z = 0.0f;
+
     // Player-equivalent scale + shadow. Matches Link's footprint so
     // the Invader visually reads as a hostile Link, not a giant.
     Actor_SetScale(thisx, 0.01f);
@@ -313,7 +358,16 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
     // v1: any non-zero damage value = 1 HP loss → one-shot kill on
     // any Player AT (sword, slingshot, deku stick, bombs, etc.).
     // Combat-AI variants will tune per-weapon damage values later.
-    if (this->collider.base.acFlags & AC_HIT) {
+    //
+    // Host-authority gate (Race-B fix): drain only on the room host.
+    // On non-host clients, leave colChkInfo.damage intact so the
+    // OnActorUpdate forwarder (HookHandlers.cpp:1838-1855) reads a
+    // non-zero value and broadcasts DAMAGE_ENEMY to host; host's
+    // queued-damage drain (DamageEnemy.cpp:DrainPendingSyncDamage)
+    // applies the authoritative decrement and broadcasts the new HP
+    // via ENEMY_STATE. Falls back to true (drain enabled) when Anchor
+    // is disconnected or in single-player.
+    if (Anchor_IsCurrentRoomHost() && (this->collider.base.acFlags & AC_HIT)) {
         this->collider.base.acFlags &= ~AC_HIT;
         const s8 hpBefore = this->actor.colChkInfo.health;
         const u8 dmg      = this->actor.colChkInfo.damage;
@@ -357,15 +411,51 @@ void EnInvader_Update(Actor* thisx, PlayState* play) {
     }
 }
 
+// Post-limb callback (#238 / Plans/invader_combat_repair_sequenced_plan.md
+// Step 2). Fires after each limb's display list during Player_DrawImpl.
+// When the L_HAND limb is being drawn (Link is left-handed; sword is
+// in left hand), the matrix stack reflects the L_HAND transform —
+// Matrix_MultVec3f then transforms the standard sword tip/base local
+// offsets to world space. We retrieve the EnInvader being drawn via
+// Anchor_GetCurrentlyDrawingInvader (set/cleared by the surrounding
+// Anchor_InvaderDrawBegin/End calls) so we don't have to overwrite
+// the `thisx` (= local Player) parameter that the override callback
+// path depends on.
+//
+// Scoped strictly to writing this->swordTip / this->swordBase. We do
+// NOT clone Player_PostLimbDrawGameplay's other side effects
+// (writes to leftHandPos, meleeWeaponInfo, hooked-actor positions,
+// etc.) — those would corrupt the local Player's state, which is
+// exactly what the previous "post-limb MUST be NULL" guard was
+// designed to prevent.
+static void EnInvader_PostLimbDraw(PlayState* play, s32 limbIndex,
+                                    Gfx** dList, Vec3s* rot, void* thisx) {
+    (void)play; (void)dList; (void)rot; (void)thisx;
+    if (limbIndex == PLAYER_LIMB_L_HAND) {
+        Actor* invaderActor = Anchor_GetCurrentlyDrawingInvader();
+        if (invaderActor != NULL) {
+            EnInvader* inv = (EnInvader*)invaderActor;
+            // Fix B: shift LAST frame's blade endpoints into prev*
+            // BEFORE computing this frame's blade. PositionAttackQuad
+            // then sweeps from (prev tip, prev base) to (cur tip, cur
+            // base) — vanilla Player's sweep-quad geometry.
+            inv->prevSwordTip  = inv->swordTip;
+            inv->prevSwordBase = inv->swordBase;
+            Anchor_ComputeBladeWorldFromMatrix(&inv->swordTip, &inv->swordBase);
+        }
+    }
+}
+
 void EnInvader_Draw(Actor* thisx, PlayState* play) {
     EnInvader* this = (EnInvader*)thisx;
 
     // Inherit local player's equipment state. Same rationale as
     // EnFollower_Draw — Player_OverrideLimbDrawGameplayDefault casts
-    // thisx to Player*, so the callback thisx MUST be the local
-    // Player* and post-limb callback MUST be NULL (otherwise the
-    // local Player's hand positions get overwritten each Invader
-    // draw frame). See z_en_follower.c for the full diagnosis.
+    // thisx to Player*, so the override-callback `thisx` MUST be the
+    // local Player*. The post-limb callback (EnInvader_PostLimbDraw)
+    // ignores `thisx` and instead retrieves the Invader via
+    // Anchor_GetCurrentlyDrawingInvader — see the post-limb comment
+    // above for the full rationale.
     Player* localPlayer = GET_PLAYER(play);
 
     this->currentTunic = localPlayer->currentTunic;
@@ -383,6 +473,14 @@ void EnInvader_Draw(Actor* thisx, PlayState* play) {
     localPlayer->headLimbRot  = this->headLimbRot;
     localPlayer->upperLimbRot = this->upperLimbRot;
 
+    // [Invader.Diag] cross-wire diagnostic. Capture localPlayer's
+    // leftHandPos BEFORE Player_DrawImpl, then again AFTER. If they
+    // differ, the NPC's draw wrote to localPlayer->leftHandPos —
+    // confirming the cross-wire hypothesis (override callback's
+    // D_80160000 write contaminates local Player state). Rate-
+    // limited to 1 log per ~60 draws (~3s).
+    Vec3f savedLeftHandPos = localPlayer->leftHandPos;
+
     // Set draw-context flag so VB_APPLY_TUNIC_COLOR knows this draw
     // is an Invader and applies the hostile-black tint instead of
     // inheriting the previous draw's env color.
@@ -396,9 +494,30 @@ void EnInvader_Draw(Actor* thisx, PlayState* play) {
                     this->currentBoots,
                     this->currentFace,
                     Player_OverrideLimbDrawGameplayDefault,
-                    NULL /* post-limb: MUST be NULL — see comment above */,
+                    EnInvader_PostLimbDraw /* sword blade tracking — see comment above */,
                     localPlayer);
     Anchor_InvaderDrawEnd();
+
+    // [Invader.Diag] cross-wire — log delta + post-draw values.
+    {
+        static int sDiagCounter = 0;
+        if (++sDiagCounter % 60 == 1) {
+            const float dx = localPlayer->leftHandPos.x - savedLeftHandPos.x;
+            const float dy = localPlayer->leftHandPos.y - savedLeftHandPos.y;
+            const float dz = localPlayer->leftHandPos.z - savedLeftHandPos.z;
+            const float deltaSq = dx*dx + dy*dy + dz*dz;
+            LUSLOG_INFO("[Invader.Diag] localPlayer leftHandPos "
+                        "pre=(%.1f,%.1f,%.1f) post=(%.1f,%.1f,%.1f) deltaSq=%.1f "
+                        "inv.swordBase=(%.1f,%.1f,%.1f) inv.world.pos=(%.1f,%.1f,%.1f) "
+                        "localPlayer.world.pos=(%.1f,%.1f,%.1f)",
+                        savedLeftHandPos.x, savedLeftHandPos.y, savedLeftHandPos.z,
+                        localPlayer->leftHandPos.x, localPlayer->leftHandPos.y, localPlayer->leftHandPos.z,
+                        deltaSq,
+                        this->swordBase.x, this->swordBase.y, this->swordBase.z,
+                        this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z,
+                        localPlayer->actor.world.pos.x, localPlayer->actor.world.pos.y, localPlayer->actor.world.pos.z);
+        }
+    }
 
     // Restore. Scoped to this one draw call so Player's own next draw
     // uses the user's actual head/upper rotation.

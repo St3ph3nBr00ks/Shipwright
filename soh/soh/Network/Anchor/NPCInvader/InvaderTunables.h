@@ -16,14 +16,14 @@
 
 namespace InvaderTunables {
 
-// --- Combat — sword AT collider quad ---------------------------------------
-// Engagement distance (ATTACK strike), forward/half-width/Y-span of the
-// AT quad, and the per-anim window during which the quad is active.
+// --- Combat — sword AT collider ---------------------------------------
+// Engagement distance (ATTACK strike) + active-frame window of the
+// sword swing animation. AT quad geometry constants
+// (kAttackQuadForward / HalfWidth / BaseY / TopY) removed 2026-06-02
+// (#238) — the quad is now built per-frame from the actual blade
+// tip/base positions via Anchor_BuildAtQuadFromBlade rather than
+// using fixed forward-distance vertices.
 inline constexpr float kAttackEngageDist       = 80.0f;
-inline constexpr float kAttackQuadForward      = 60.0f;
-inline constexpr float kAttackQuadHalfWidth    = 25.0f;
-inline constexpr float kAttackQuadBaseY        = 5.0f;
-inline constexpr float kAttackQuadTopY         = 65.0f;
 inline constexpr float kAttackActiveStartFrame = 4.0f;
 inline constexpr float kAttackActiveEndFrame   = 12.0f;
 

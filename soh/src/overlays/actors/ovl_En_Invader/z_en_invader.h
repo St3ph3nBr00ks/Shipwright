@@ -236,6 +236,23 @@ typedef struct EnInvader {
     f32 syncedSpeedXZ;
     s8  syncedHoistContext;
     u8  syncedDeathCause;
+
+    // Sword blade-position tracking — issue #238 / Plans/invader_combat_repair_sequenced_plan.md Step 2.
+    // Updated each draw frame by EnInvader_PostLimbDraw when the L_HAND
+    // limb is being rendered (Matrix_MultVec3f transforms the standard
+    // sword tip/base offsets through L_HAND's current matrix). Consumed
+    // by Invader.cpp::PositionAttackQuad to build the AT collider's
+    // four vertices spanning the actual blade per frame, mirroring how
+    // vanilla Player tracks its own meleeWeaponInfo[].tip / .base.
+    Vec3f swordTip;
+    Vec3f swordBase;
+    // Fix B (log 358 follow-up): prevSword* hold LAST frame's blade
+    // endpoints. PositionAttackQuad now builds a quad spanning the
+    // SWEPT area between prev and current — vanilla Player's approach
+    // for sword AT geometry, much larger effective hitbox than the
+    // single-snapshot quad it replaces.
+    Vec3f prevSwordTip;
+    Vec3f prevSwordBase;
 } EnInvader;
 
 #ifdef __cplusplus

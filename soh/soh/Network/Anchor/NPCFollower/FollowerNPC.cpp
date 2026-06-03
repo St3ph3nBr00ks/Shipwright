@@ -30,6 +30,7 @@
 #include "soh/Network/Anchor/Common/AILocomotion/StuckEscalation.h"   // shared STUCK escalation tiers
 #include "soh/Network/Anchor/Common/AILocomotion/StuckRecovery.h"     // shared TickSTUCK dispatch
 #include "soh/Network/Anchor/Common/AICombat/CombatEngagement.h"      // B.5 Phase 1: shared ChooseCombatExitState
+#include "soh/Network/Anchor/Common/AICombat/SwordBladeTracking.h"    // #238: per-frame sword tip/base + AT quad builder
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
 #include "soh/Network/Anchor/Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
@@ -2149,10 +2150,10 @@ void TickLEDGE_HOIST(EnFollower* this_, PlayState* play, const Vec3f& leaderPos)
 // ----------------------------------------------------------------------------
 static constexpr float kAttackEngageDist     = 80.0f;   // melee acquisition range (XZ)
 static constexpr float kAttackBreakDist      = 200.0f;  // bail if enemy fled past this
-static constexpr float kAttackQuadForward    = 60.0f;   // sword reach in front of NPC
-static constexpr float kAttackQuadHalfWidth  = 25.0f;   // sword arc half-width
-static constexpr float kAttackQuadBaseY      = 5.0f;    // bottom of quad above feet
-static constexpr float kAttackQuadTopY       = 65.0f;   // top of quad (chest height)
+// kAttackQuadForward / HalfWidth / BaseY / TopY removed 2026-06-02
+// (#238) — PositionAttackQuad now derives the quad vertices per-frame
+// from the actual blade tip/base positions via Anchor_BuildAtQuadFromBlade
+// rather than using these fixed forward-distance constants.
 
 // Forward decl — defined in the STANDBY section below. Used by every
 // combat state's exit transition (TickATTACK / TickENGAGE / TickBLOCK
@@ -2263,27 +2264,33 @@ Actor* FindNearestEnemyForAttack(EnFollower* this_, PlayState* play, float maxRa
     return nearest;
 }
 
-// Position the AT quad as a flat plane in front of the NPC at chest
-// height. Vertices: bottom-left, bottom-right, top-right, top-left
-// (counter-clockwise from below). Quad faces forward along the NPC's
-// rotation. Player's sword AT is more anatomical (sword tip → grip)
-// but for v1 a simple forward plane is sufficient.
+// REWRITTEN 2026-06-02 (#238 / Plans/invader_combat_repair_sequenced_plan.md
+// Step 2+4): previously built a fixed-distance plane 60u in front of
+// the body using shape.rot.y forward/right vectors. That plane only
+// intersected target cylinders at exactly ~60u depth — point-blank
+// ATTACK swings (typical post-ENGAGE→ATTACK) overshot, missing every
+// hit. Same bug as Invader's PositionAttackQuad (Invader's version is
+// the cloned source). New approach mirrors vanilla Player: derive the
+// quad's vertices from the actual blade tip + base positions written
+// each draw frame by EnFollower_PostLimbDraw. Quad now tracks the
+// blade through the swing animation so collision fires where the
+// blade visually is.
+//
+// Shared helper used by both NPC Follower and NPC Invader so the
+// two paths can't diverge again. When DR-2 / B.5 lands the combat
+// extract to `Common/AICombat/`, this stays.
 void PositionAttackQuad(EnFollower* this_) {
-    Actor* a = &this_->actor;
-    const float yawRad = (float)a->shape.rot.y * (3.14159265f / 32768.0f);
-    const float fx = sinf(yawRad);  // forward unit vector
-    const float fz = cosf(yawRad);
-    const float rx = cosf(yawRad);  // right (perpendicular to forward)
-    const float rz = -sinf(yawRad);
-    const Vec3f& p = a->world.pos;
-    Vec3f bottomLeft  = { p.x + fx * kAttackQuadForward - rx * kAttackQuadHalfWidth,
-                          p.y + kAttackQuadBaseY,
-                          p.z + fz * kAttackQuadForward - rz * kAttackQuadHalfWidth };
-    Vec3f bottomRight = { p.x + fx * kAttackQuadForward + rx * kAttackQuadHalfWidth,
-                          p.y + kAttackQuadBaseY,
-                          p.z + fz * kAttackQuadForward + rz * kAttackQuadHalfWidth };
-    Vec3f topRight    = { bottomRight.x, p.y + kAttackQuadTopY, bottomRight.z };
-    Vec3f topLeft     = { bottomLeft.x,  p.y + kAttackQuadTopY, bottomLeft.z };
+    // Fix B sweep quad — see Invader.cpp's PositionAttackQuad for the
+    // rationale. Single-snapshot Anchor_BuildAtQuadFromBlade is
+    // replaced with Anchor_BuildSweepAtQuadFromBlade so the quad
+    // covers the area between previous and current frame's blade
+    // poses — vanilla Player's geometry.
+    Vec3f bottomLeft, bottomRight, topLeft, topRight;
+    Anchor_BuildSweepAtQuadFromBlade(
+        &this_->prevSwordTip, &this_->prevSwordBase,
+        &this_->swordTip,     &this_->swordBase,
+        &bottomLeft, &bottomRight,
+        &topLeft,    &topRight);
     Collider_SetQuadVertices(&this_->atCollider, &bottomLeft, &bottomRight,
                               &topLeft, &topRight);
 }

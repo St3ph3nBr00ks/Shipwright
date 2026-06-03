@@ -92,6 +92,18 @@ struct InvaderRuntimeState {
     Vec3f    pendingFollowPos  = { 0.0f, 0.0f, 0.0f };  // captured entrance pos
     int16_t  pendingFollowScene = 0;
     int8_t   pendingFollowRoom  = 0;
+
+    // Fix 1 (log 349 Issue B): edge-trigger flag so the "reconcile
+    // deferred by scene-change grace period" diagnostic only fires
+    // once per grace window. Cleared back to false once the grace
+    // period elapses (sceneSettled == true again), so a subsequent
+    // host transition re-arms the log.
+    bool     reconcileBlockedLogged = false;
+
+    // [InvaderDescriptor.Diag] log 354 — edge-trigger flag so the
+    // "host actor went MISSING" diagnostic fires once per host-
+    // absence event (re-armed when host's actor comes back).
+    bool     hostActorMissingLogged = false;
 };
 
 class InvaderDescriptor : public SpawnableEnemyDescriptor {

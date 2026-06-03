@@ -451,22 +451,67 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     // the "same" scene (sceneNum) but their world-state is independent,
     // so any collision / lock-on / damage between them is meaningless.
     // Treat them as the pvpMode=0 case: disable lock-on and skip the
-    // collider setup entirely. This runs BEFORE the PvP gate because
-    // cross-timeline trumps every PvP mode (including FF).
+    // collider setup entirely. This runs BEFORE the AC-registration
+    // block below because cross-timeline trumps every interaction
+    // (including PvP-FF and hostile-NPC PvE).
     if (client.linkAge != gSaveContext.linkAge) {
         actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
         return;
     }
 
-    if (Anchor::Instance->roomState.pvpMode == 0 ||
-        (Anchor::Instance->roomState.pvpMode == 1 &&
-         client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default")) ||
-        SceneMultiplayerConfig::ShouldDisablePvP(gPlayState)) {
-        actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
-        return;
+    // Hostile-NPC PvE damage path — AC registration + AC_HIT broadcast
+    // fires regardless of PvP mode. The Invader (and any future
+    // hostile-NPC actor) uses an AT_TYPE_ENEMY AT collider; we stamp
+    // AC_TYPE_ENEMY unconditionally so AT_TYPE_ENEMY → AC_TYPE_ENEMY
+    // hits register here naturally. PvP friendly-fire requires
+    // AC_TYPE_PLAYER (since Player AT colliders are AT_TYPE_PLAYER)
+    // — that bit is added only when PvP is active.
+    //
+    // Field-test log 359: with the pre-fix `AC_TYPE_PLAYER`-only AC
+    // (set in DummyPlayer_Init line 119), Player swings damaged the
+    // DummyPlayer in pvpMode=0 sessions (friendly fire), and Invader
+    // swings (AT_TYPE_ENEMY) failed to register at all. Re-stamping
+    // each frame fixes both: PvP-off → AC_TYPE_ENEMY only (Invader
+    // hits, Player misses); PvP-on (and same-team in mode 1 not
+    // active, etc.) → AC_TYPE_ENEMY | AC_TYPE_PLAYER (both hit).
+    //
+    // Without this fix, the original code returned at the PvP gate
+    // below for pvpMode==0 sessions, leaving DummyPlayer's AC
+    // unregistered — host's CollisionCheck never tested Invader AT
+    // against DummyPlayer AC, so AC_HIT never fired, so no
+    // DAMAGE_PLAYER broadcast reached the peer's local Link. Field-
+    // test log 349: Invader swung sword ~30 times over 75s; P2's
+    // Link took zero damage. See Plans/invader_field_test_log349_findings.md.
+    const bool pvpActive =
+        (Anchor::Instance->roomState.pvpMode != 0) &&
+        !(Anchor::Instance->roomState.pvpMode == 1 &&
+          client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default")) &&
+        !SceneMultiplayerConfig::ShouldDisablePvP(gPlayState);
+    player->cylinder.base.acFlags =
+        (player->cylinder.base.acFlags & ~AC_TYPE_ALL) | AC_TYPE_ENEMY;
+    if (pvpActive) {
+        player->cylinder.base.acFlags |= AC_TYPE_PLAYER;
     }
 
-    actor->flags &= ~ACTOR_FLAG_LOCK_ON_DISABLED;
+    Collider_UpdateCylinder(&player->actor, &player->cylinder);
+
+    // [DummyPlayer.Diag] — log 354 Issue A investigation. Edge-trigger
+    // on AC_HIT transition (false→true) so we can confirm whether the
+    // Invader's AT collider is registering hits against the DummyPlayer's
+    // body cylinder at all. acFlags is bit-packed by CollisionCheck_AT
+    // during the pre-update collision pass. invincibilityTimer is
+    // mirrored from the remote peer via PLAYER_UPDATE — non-zero blocks
+    // both the broadcast gate AND the SetAC gate below.
+    static std::unordered_map<uint32_t, bool> sLastAcHitState;
+    const bool acHitNow = (player->cylinder.base.acFlags & AC_HIT) != 0;
+    if (acHitNow && !sLastAcHitState[clientId]) {
+        SPDLOG_INFO("[DummyPlayer.Diag] AC_HIT edge clientId={} invincibilityTimer={} damage={} damageEffect={} acFlags=0x{:X}",
+                    clientId, player->invincibilityTimer,
+                    (int)player->actor.colChkInfo.damage,
+                    (int)player->actor.colChkInfo.damageEffect,
+                    player->cylinder.base.acFlags);
+    }
+    sLastAcHitState[clientId] = acHitNow;
 
     if (player->cylinder.base.acFlags & AC_HIT && player->invincibilityTimer == 0) {
         Anchor::Instance->SendPacket_DamagePlayer(client.clientId, player->actor.colChkInfo.damageEffect,
@@ -478,7 +523,44 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         }
     }
 
-    Collider_UpdateCylinder(&player->actor, &player->cylinder);
+    const bool wouldSetAC =
+        !(player->stateFlags2 & PLAYER_STATE2_FROZEN) &&
+        !(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_DAMAGED)) &&
+        (player->invincibilityTimer <= 0);
+    if (wouldSetAC) {
+        CollisionCheck_SetAC(play, &play->colChkCtx, &player->cylinder.base);
+    }
+
+    // [DummyPlayer.Diag] — rate-limited heartbeat (~1Hz at 20fps tick)
+    // showing the SetAC gate's inputs. Confirms whether DummyPlayer's
+    // AC is being registered each frame and what invincibilityTimer
+    // value we see. If wouldSetAC is consistently false, the AC isn't
+    // in the collision-check list → AC_HIT can never fire → no damage
+    // broadcast can ever happen.
+    static int sDummyDiagHeartbeat = 0;
+    if (++sDummyDiagHeartbeat >= 20) {
+        SPDLOG_INFO("[DummyPlayer.Diag] heartbeat clientId={} invincibilityTimer={} stateFlags1=0x{:X} stateFlags2=0x{:X} wouldSetAC={} pos=({:.0f},{:.0f},{:.0f})",
+                    clientId, player->invincibilityTimer,
+                    player->stateFlags1, player->stateFlags2, wouldSetAC,
+                    player->actor.world.pos.x, player->actor.world.pos.y,
+                    player->actor.world.pos.z);
+        sDummyDiagHeartbeat = 0;
+    }
+
+    Collider_ResetCylinderAC(play, &player->cylinder.base);
+
+    // PvP gate — controls lock-on enable + OC (physical push-apart
+    // between players) + AT (DummyPlayer's own attack collider for
+    // PvP friendly-fire) + mass. These behaviours are PvP-specific
+    // and intentionally remain gated. The AC block above is the only
+    // piece that hostile-NPC PvE needs. Reuses `pvpActive` so the AC
+    // type bits stay in lockstep with the gate.
+    if (!pvpActive) {
+        actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
+        return;
+    }
+
+    actor->flags &= ~ACTOR_FLAG_LOCK_ON_DISABLED;
 
     if (!(player->stateFlags2 & PLAYER_STATE2_FROZEN)) {
         if (!(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_HANGING_OFF_LEDGE |
@@ -487,12 +569,8 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         }
 
         if (!(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_DAMAGED)) &&
-            (player->invincibilityTimer <= 0)) {
-            CollisionCheck_SetAC(play, &play->colChkCtx, &player->cylinder.base);
-
-            if (player->invincibilityTimer < 0) {
-                CollisionCheck_SetAT(play, &play->colChkCtx, &player->cylinder.base);
-            }
+            (player->invincibilityTimer < 0)) {
+            CollisionCheck_SetAT(play, &play->colChkCtx, &player->cylinder.base);
         }
     }
 
@@ -501,8 +579,6 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     } else {
         player->actor.colChkInfo.mass = 50;
     }
-
-    Collider_ResetCylinderAC(play, &player->cylinder.base);
 }
 
 void DummyPlayer_Draw(Actor* actor, PlayState* play) {

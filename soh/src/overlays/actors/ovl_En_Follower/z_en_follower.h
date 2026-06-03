@@ -182,6 +182,21 @@ typedef struct EnFollower {
     s8    hoistContext;
     Vec3f hoistTargetPos;
     s16   hoistEntryYaw;
+
+    // Sword blade-position tracking — issue #238 / Plans/invader_combat_repair_sequenced_plan.md Step 2+4.
+    // Updated each draw frame by EnFollower_PostLimbDraw when the
+    // L_HAND limb is being rendered (Matrix_MultVec3f transforms the
+    // standard sword tip/base offsets through L_HAND's current matrix).
+    // Consumed by FollowerNPC.cpp::PositionAttackQuad to build the AT
+    // collider's four vertices spanning the actual blade per frame,
+    // mirroring how vanilla Player tracks its own meleeWeaponInfo[].
+    // Same shape as EnInvader::swordTip / swordBase.
+    Vec3f swordTip;
+    Vec3f swordBase;
+    // Fix B (log 358 follow-up): prevSword* hold LAST frame's blade
+    // endpoints — see EnInvader::prevSwordTip for full rationale.
+    Vec3f prevSwordTip;
+    Vec3f prevSwordBase;
 } EnFollower;
 
 #ifdef __cplusplus

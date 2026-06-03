@@ -233,6 +233,35 @@ public:
         return mDescriptors;
     }
 
+    // Fix 1 — frames elapsed since the local player's last scene or
+    // room change. Used by InvaderDescriptor::OnTick to defer reconcile
+    // for a grace period after a scene transition (prevents host's own
+    // death-respawn from triggering spurious re-instantiation). See
+    // mLastLocalSceneChangeFrame declaration for the full rationale.
+    //
+    // Returns mGlobalFrameCounter when no change has been observed yet
+    // (mLastLocalSceneChangeFrame == 0 initial), which means "lots of
+    // frames" — callers treat that as "settled" and proceed normally.
+    uint64_t GetFramesSinceLocalSceneChange() const {
+        return (mGlobalFrameCounter >= mLastLocalSceneChangeFrame)
+            ? mGlobalFrameCounter - mLastLocalSceneChangeFrame
+            : 0;
+    }
+
+    // Fix 1 (Phase 3 follow-up — issue #237). Called from the
+    // GameInteractor::OnSceneInit hook in HookHandlers.cpp to stamp
+    // mLastLocalSceneChangeFrame unconditionally on every scene init.
+    //
+    // The Tick observer's `curScene != mPrevLocalSceneNum` check
+    // misses same-scene reloads (e.g., Game Over → Continue at the
+    // same scene's entrance 0). When P1 dies in scene 0 and respawns
+    // in scene 0, the scene numbers are equal pre/post-Continue —
+    // the polling observer can't detect the transition. OnSceneInit
+    // fires unconditionally for every scene init, including same-
+    // scene reloads, so this is the reliable signal for "the scene
+    // just freshly initialised, restart the grace period."
+    void OnSceneInitFromHook(int16_t sceneNum);
+
 private:
     Director();  // step 7: constructs default descriptor registry
     Director(const Director&) = delete;
@@ -281,6 +310,18 @@ private:
     // "ticks since boot". Cooldown ledger compares against this counter
     // via MsToGameTicks(ms). Persists across descriptor (un)registration.
     uint64_t mGlobalFrameCounter = 0;
+
+    // Fix 1 (Plans/invader_field_test_log349_findings.md Issue B):
+    // frame at which the local player last changed scene or room.
+    // Set in Tick alongside the scene-change observer (mPrevLocalSceneNum
+    // update). Consumed by descriptors via GetFramesSinceLocalSceneChange()
+    // to defer reconcile logic for a grace period after a scene transition
+    // — otherwise host's own death-respawn scene reload wipes the local
+    // actor list and reconcile fires inside the same frame, re-instantiating
+    // the Invader with fresh HP/state at a new position. Initialised to 0
+    // so the first tick reads "0 frames since change" — conservative
+    // (reconcile waits one grace period at startup, harmless).
+    uint64_t mLastLocalSceneChangeFrame = 0;
 };
 
 }  // namespace AnchorDirector
