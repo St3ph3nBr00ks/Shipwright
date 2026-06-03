@@ -22,6 +22,7 @@ enum class TimeContext {
     Cutscene,
     Ocarina,
     SceneTransition,
+    GameOver,         // Pillar G.iii (#239) — death cycle on the dying client.
 };
 
 // Returns true = advance world time; false = hold world frozen.
