@@ -193,6 +193,10 @@ typedef struct EnFollower {
     // Same shape as EnInvader::swordTip / swordBase.
     Vec3f swordTip;
     Vec3f swordBase;
+    // Fix B (log 358 follow-up): prevSword* hold LAST frame's blade
+    // endpoints — see EnInvader::prevSwordTip for full rationale.
+    Vec3f prevSwordTip;
+    Vec3f prevSwordBase;
 } EnFollower;
 
 #ifdef __cplusplus

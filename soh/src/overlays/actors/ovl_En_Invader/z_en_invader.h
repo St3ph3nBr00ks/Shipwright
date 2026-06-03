@@ -246,6 +246,13 @@ typedef struct EnInvader {
     // vanilla Player tracks its own meleeWeaponInfo[].tip / .base.
     Vec3f swordTip;
     Vec3f swordBase;
+    // Fix B (log 358 follow-up): prevSword* hold LAST frame's blade
+    // endpoints. PositionAttackQuad now builds a quad spanning the
+    // SWEPT area between prev and current — vanilla Player's approach
+    // for sword AT geometry, much larger effective hitbox than the
+    // single-snapshot quad it replaces.
+    Vec3f prevSwordTip;
+    Vec3f prevSwordBase;
 } EnInvader;
 
 #ifdef __cplusplus

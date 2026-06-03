@@ -213,8 +213,20 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     // (e.g., immediate IDLE→ATTACK on spawn), the quad uses zero
     // positions for that one frame — degenerate, no hit, recovers on
     // next frame.
-    this->swordTip.x  = 0.0f; this->swordTip.y  = 0.0f; this->swordTip.z  = 0.0f;
-    this->swordBase.x = 0.0f; this->swordBase.y = 0.0f; this->swordBase.z = 0.0f;
+    //
+    // Fix B (log 358 follow-up): also init the prev* fields. Until
+    // two consecutive post-limb callbacks have fired, prev and cur
+    // are both meaningless (or both zero, or cur=real and prev=0 —
+    // a sweep from origin to current position, which would produce
+    // a massive nonsense quad). The first post-limb call shifts
+    // cur→prev BEFORE writing new cur, so on call 1 prev becomes
+    // zero (same as cur was), and on call 2 prev = call-1's cur.
+    // By the time the actor first enters ATTACK (many frames later),
+    // both prev and cur are valid recent values.
+    this->swordTip.x      = 0.0f; this->swordTip.y      = 0.0f; this->swordTip.z      = 0.0f;
+    this->swordBase.x     = 0.0f; this->swordBase.y     = 0.0f; this->swordBase.z     = 0.0f;
+    this->prevSwordTip.x  = 0.0f; this->prevSwordTip.y  = 0.0f; this->prevSwordTip.z  = 0.0f;
+    this->prevSwordBase.x = 0.0f; this->prevSwordBase.y = 0.0f; this->prevSwordBase.z = 0.0f;
 
     // Player-equivalent scale + shadow. Matches Link's footprint so
     // the Invader visually reads as a hostile Link, not a giant.
@@ -423,6 +435,12 @@ static void EnInvader_PostLimbDraw(PlayState* play, s32 limbIndex,
         Actor* invaderActor = Anchor_GetCurrentlyDrawingInvader();
         if (invaderActor != NULL) {
             EnInvader* inv = (EnInvader*)invaderActor;
+            // Fix B: shift LAST frame's blade endpoints into prev*
+            // BEFORE computing this frame's blade. PositionAttackQuad
+            // then sweeps from (prev tip, prev base) to (cur tip, cur
+            // base) — vanilla Player's sweep-quad geometry.
+            inv->prevSwordTip  = inv->swordTip;
+            inv->prevSwordBase = inv->swordBase;
             Anchor_ComputeBladeWorldFromMatrix(&inv->swordTip, &inv->swordBase);
         }
     }

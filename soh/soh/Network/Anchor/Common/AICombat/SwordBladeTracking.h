@@ -69,25 +69,40 @@ extern "C" {
 // not check `limbIndex`.
 void Anchor_ComputeBladeWorldFromMatrix(Vec3f* outTip, Vec3f* outBase);
 
-// Build the four AT quad vertices spanning the blade from base to
-// tip with `halfWidth` perpendicular extent on either side.
+// Build the four AT quad vertices spanning the SWEPT VOLUME between
+// the previous frame's blade and the current frame's blade.
 //
-// The perpendicular direction is computed as cross(bladeDir,
-// world_up). For a vertical sword swing this produces a horizontal
-// quad strip whose XZ footprint passes through target cylinders'
-// XZ footprint as the blade swings. For a horizontal swing the quad
-// is vertical and similarly intersects.
+// Mirrors vanilla Player's `func_80090480` (`z_player_lib.c:1566`)
+// which builds Player's sword AT collider from `meleeWeaponInfo[0]`
+// (current frame) AND `meleeWeaponInfo[1]` (previous frame). The
+// area between two consecutive blade poses IS the swept arc the
+// blade visually carved through this frame, and that's what should
+// register as the AT hitbox.
 //
-// Degenerate case: if `tip == base` or the blade is exactly vertical
-// (cross product zero), the function falls back to a world-X-axis
-// perpendicular so the quad is still non-degenerate.
+// Field-test log 358 confirmed the prior single-snapshot quad
+// (Anchor_BuildAtQuadFromBlade, removed) was ~5× smaller in area
+// than vanilla's swept quad — covering only the blade at one
+// instant rather than its swept volume. The user-visible symptom
+// was "Invader's hit zone is quite small."
 //
-// Output Vec3f pointers are pass-by-pointer for C-compat. Vertex
-// order matches Collider_SetQuadVertices's expected layout
-// (bottomLeft, bottomRight, topLeft, topRight) — the names "bottom"/
-// "top" map to base/tip respectively along the blade.
-void Anchor_BuildAtQuadFromBlade(
-    const Vec3f* tip, const Vec3f* base, float halfWidth,
+// Vertex layout (matches Collider_SetQuadVertices expected order):
+//   bottomLeft  = previous frame's base (hand pivot, prev frame).
+//   bottomRight = current frame's base.
+//   topLeft     = previous frame's tip.
+//   topRight    = current frame's tip.
+//
+// The "left edge" (bottomLeft → topLeft) is the previous frame's
+// blade. The "right edge" (bottomRight → topRight) is the current
+// frame's blade. The area between is the volume the blade swept
+// through this frame.
+//
+// Degenerate case: if prev ≈ cur (stationary blade, or first frame
+// after spawn before prev has been populated), the quad collapses
+// toward a line and no hits register. That's correct behaviour —
+// a stationary sword doesn't carve through anything.
+void Anchor_BuildSweepAtQuadFromBlade(
+    const Vec3f* prevTip, const Vec3f* prevBase,
+    const Vec3f* curTip,  const Vec3f* curBase,
     Vec3f* outBottomLeft, Vec3f* outBottomRight,
     Vec3f* outTopLeft, Vec3f* outTopRight);
 

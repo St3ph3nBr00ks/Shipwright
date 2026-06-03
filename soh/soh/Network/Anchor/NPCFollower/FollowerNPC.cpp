@@ -2280,15 +2280,17 @@ Actor* FindNearestEnemyForAttack(EnFollower* this_, PlayState* play, float maxRa
 // two paths can't diverge again. When DR-2 / B.5 lands the combat
 // extract to `Common/AICombat/`, this stays.
 void PositionAttackQuad(EnFollower* this_) {
-    // Half-width 8u: thin perpendicular extent. Vanilla Player's blade
-    // visual is narrow; the AT quad just needs enough lateral area to
-    // pass through a target cylinder's footprint as the blade swings.
-    constexpr float kBladeHalfWidth = 8.0f;
+    // Fix B sweep quad — see Invader.cpp's PositionAttackQuad for the
+    // rationale. Single-snapshot Anchor_BuildAtQuadFromBlade is
+    // replaced with Anchor_BuildSweepAtQuadFromBlade so the quad
+    // covers the area between previous and current frame's blade
+    // poses — vanilla Player's geometry.
     Vec3f bottomLeft, bottomRight, topLeft, topRight;
-    Anchor_BuildAtQuadFromBlade(&this_->swordTip, &this_->swordBase,
-                                kBladeHalfWidth,
-                                &bottomLeft, &bottomRight,
-                                &topLeft,    &topRight);
+    Anchor_BuildSweepAtQuadFromBlade(
+        &this_->prevSwordTip, &this_->prevSwordBase,
+        &this_->swordTip,     &this_->swordBase,
+        &bottomLeft, &bottomRight,
+        &topLeft,    &topRight);
     Collider_SetQuadVertices(&this_->atCollider, &bottomLeft, &bottomRight,
                               &topLeft, &topRight);
 }

@@ -178,11 +178,14 @@ void EnFollower_Init(Actor* thisx, PlayState* play) {
     this->hoistTargetPos.x  = 0.0f; this->hoistTargetPos.y = 0.0f; this->hoistTargetPos.z = 0.0f;
     this->hoistEntryYaw     = 0;
 
-    // Sword blade-position tracking (#238). Init to zero; first draw
-    // frame's post-limb callback will populate with real world
-    // positions.
-    this->swordTip.x  = 0.0f; this->swordTip.y  = 0.0f; this->swordTip.z  = 0.0f;
-    this->swordBase.x = 0.0f; this->swordBase.y = 0.0f; this->swordBase.z = 0.0f;
+    // Sword blade-position tracking (#238 + Fix B sweep). prev* fields
+    // hold last frame's blade endpoints so PositionAttackQuad can
+    // build a quad covering the swept arc between consecutive frames.
+    // See EnInvader_Init for the full rationale on the prev/cur shift.
+    this->swordTip.x      = 0.0f; this->swordTip.y      = 0.0f; this->swordTip.z      = 0.0f;
+    this->swordBase.x     = 0.0f; this->swordBase.y     = 0.0f; this->swordBase.z     = 0.0f;
+    this->prevSwordTip.x  = 0.0f; this->prevSwordTip.y  = 0.0f; this->prevSwordTip.z  = 0.0f;
+    this->prevSwordBase.x = 0.0f; this->prevSwordBase.y = 0.0f; this->prevSwordBase.z = 0.0f;
 
     // Player-equivalent scale (matches Link). 0.01f. Same as the pause
     // menu preview and as Player_Init does for the real Link.
@@ -294,6 +297,10 @@ static void EnFollower_PostLimbDraw(PlayState* play, s32 limbIndex,
         Actor* followerActor = Anchor_GetCurrentlyDrawingFollowerNpc();
         if (followerActor != NULL) {
             EnFollower* fol = (EnFollower*)followerActor;
+            // Fix B: shift current → prev BEFORE writing new current.
+            // PositionAttackQuad uses both to build a sweep quad.
+            fol->prevSwordTip  = fol->swordTip;
+            fol->prevSwordBase = fol->swordBase;
             Anchor_ComputeBladeWorldFromMatrix(&fol->swordTip, &fol->swordBase);
         }
     }

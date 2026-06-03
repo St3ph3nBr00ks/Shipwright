@@ -1932,15 +1932,18 @@ Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
 // gets the matching rewrite in this same commit).
 // ---------------------------------------------------------------------
 void PositionAttackQuad(EnInvader* this_) {
-    // Half-width 8u: thin perpendicular extent. Vanilla Player's blade
-    // visual is narrow; the AT quad just needs enough lateral area to
-    // pass through a target cylinder's footprint as the blade swings.
-    constexpr float kBladeHalfWidth = 8.0f;
+    // Fix B (log 358 follow-up): sweep quad between previous and
+    // current frame's blade poses. Previously this used the single-
+    // snapshot Anchor_BuildAtQuadFromBlade with an 8u perpendicular
+    // halfWidth — quad area was ~5× smaller than vanilla Player's
+    // sweep quad, producing the "Invader's hit zone is quite small"
+    // user report. New geometry mirrors vanilla Player exactly.
     Vec3f bottomLeft, bottomRight, topLeft, topRight;
-    Anchor_BuildAtQuadFromBlade(&this_->swordTip, &this_->swordBase,
-                                kBladeHalfWidth,
-                                &bottomLeft, &bottomRight,
-                                &topLeft,    &topRight);
+    Anchor_BuildSweepAtQuadFromBlade(
+        &this_->prevSwordTip, &this_->prevSwordBase,
+        &this_->swordTip,     &this_->swordBase,
+        &bottomLeft, &bottomRight,
+        &topLeft,    &topRight);
     Collider_SetQuadVertices(&this_->atCollider, &bottomLeft, &bottomRight,
                              &topLeft, &topRight);
 }
@@ -2019,22 +2022,30 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
     atkCtx.registerATWindow = [this_, play]() {
         PositionAttackQuad(this_);
         CollisionCheck_SetAT(play, &play->colChkCtx, &this_->atCollider.base);
-        // [Invader.Diag] — issue #238. Logs the blade tip + base
-        // world positions that PositionAttackQuad just wrote, plus
-        // the actor body position for reference. If swordTip/Base
-        // are at sensible blade-extending coordinates AND the
-        // DummyPlayer is in proximity but AC_HIT still doesn't fire,
-        // the quad-vs-cylinder geometry test itself is to blame.
-        // Rate-limited to 1 log per ~10 swings to keep volume sane.
+        // [Invader.Diag] — issue #238 + Fix B sweep. Logs both
+        // frames of blade endpoints that form the sweep quad. The
+        // delta between prev and cur tip/base IS the swept arc per
+        // frame — large delta = wide quad covering significant area.
+        // If prev ≈ cur, the quad is degenerate and no hits register
+        // (correct for stationary blade, suboptimal for first swing
+        // frame after spawn).
         static int sATDiagCounter = 0;
         if (++sATDiagCounter % 10 == 1) {
+            const float tipDx = this_->swordTip.x  - this_->prevSwordTip.x;
+            const float tipDy = this_->swordTip.y  - this_->prevSwordTip.y;
+            const float tipDz = this_->swordTip.z  - this_->prevSwordTip.z;
+            const float tipDeltaSq = tipDx*tipDx + tipDy*tipDy + tipDz*tipDz;
             SPDLOG_INFO("[Invader.Diag] AT registered invPos=({:.0f},{:.0f},{:.0f}) "
-                        "swordTip=({:.0f},{:.0f},{:.0f}) swordBase=({:.0f},{:.0f},{:.0f}) "
-                        "curFrame={:.1f}",
+                        "curTip=({:.0f},{:.0f},{:.0f}) curBase=({:.0f},{:.0f},{:.0f}) "
+                        "prevTip=({:.0f},{:.0f},{:.0f}) prevBase=({:.0f},{:.0f},{:.0f}) "
+                        "tipDeltaSq={:.1f} curFrame={:.1f}",
                         this_->actor.world.pos.x, this_->actor.world.pos.y,
                         this_->actor.world.pos.z,
                         this_->swordTip.x, this_->swordTip.y, this_->swordTip.z,
                         this_->swordBase.x, this_->swordBase.y, this_->swordBase.z,
+                        this_->prevSwordTip.x, this_->prevSwordTip.y, this_->prevSwordTip.z,
+                        this_->prevSwordBase.x, this_->prevSwordBase.y, this_->prevSwordBase.z,
+                        tipDeltaSq,
                         this_->skelAnime.curFrame);
         }
     };
