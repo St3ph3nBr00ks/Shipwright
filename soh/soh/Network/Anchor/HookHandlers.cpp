@@ -2029,6 +2029,37 @@ void Anchor::RegisterHooks() {
                 (forceNetHealth || actor->colChkInfo.health >= ext->netHealth)) {
                 actor->colChkInfo.health = ext->netHealth;
             }
+            // #203 — Race-B mitigation. Peer's local vanilla damage decremented
+            // colChkInfo.health to 0 before host's authoritative ENEMY_STATE
+            // caught up. Without clamping, peer's actor->update() fires the
+            // vanilla death cycle on this client (phase = DyingByLocal); the
+            // SetupDyingNet guard (`Anchor_ShouldSuppressXxxDrop`) only
+            // suppresses when phase is DyingByNetwork / AwaitingDeadItemDrop,
+            // so peer's death cycle calls Item_DropCollectibleRandom locally
+            // and host suppresses its own drop on receipt of ENEMY_DEFEATED.
+            // Result: drop appears only on the killer's screen.
+            //
+            // Clamp local HP to 1 so peer stays alive long enough for host's
+            // ENEMY_DEFEATED to arrive. Host then drives the authoritative
+            // death + ITEM_DROP_SYNC broadcast that every client receives.
+            //
+            // Gates:
+            //   forceNetHealth — boss actors already have host-authoritative
+            //     HP overwrite above; race-B can't happen there (peer's HP
+            //     gets restored to netHealth every frame).
+            //   PhaseImpliesHasLocalDeath — host has ack'd a death already;
+            //     don't resurrect the dying actor.
+            //
+            // UX cost: ~RTT/2 visible delay (~25-75ms typical) between peer's
+            // killing blow and the death animation. Sub-perceptual in practice.
+            //
+            // Affected enemies: En_St / En_Sw / En_Dekunuts / En_Goma — anything
+            // on the SetupDyingNet path with the suppression guard.
+            if (!forceNetHealth &&
+                actor->colChkInfo.health == 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                actor->colChkInfo.health = 1;
+            }
             // Karebaba: pre-compute local state and active/dormant flags here so they
             // can guard BOTH the scale re-apply below and the state-machine sync.
             // Computed even when netStateIndex < 0 or hasLocalDeath so the scale guard
