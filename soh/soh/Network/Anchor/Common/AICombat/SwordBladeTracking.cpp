@@ -91,7 +91,7 @@ extern "C" void Anchor_BuildSweepAtQuadFromBlade(
 void Anchor_PositionAttackQuadFromBlade(
     const Vec3f* prevTip, const Vec3f* prevBase,
     const Vec3f* curTip,  const Vec3f* curBase,
-    struct ColliderQuad* atCollider) {
+    ColliderQuad* atCollider) {
     Vec3f bottomLeft, bottomRight, topLeft, topRight;
     Anchor_BuildSweepAtQuadFromBlade(
         prevTip, prevBase, curTip, curBase,

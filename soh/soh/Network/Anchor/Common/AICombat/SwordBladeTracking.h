@@ -113,10 +113,16 @@ void Anchor_BuildSweepAtQuadFromBlade(
 // Per-actor wrappers now reduce to a one-line forward to this helper
 // loaded with the actor's prev/cur blade fields and its atCollider.
 // See Plans/npc_helpers_tier1_extract_2026-06-03.md item 2.
+// ColliderQuad without `struct` keyword — z64collision_check.h
+// (included via z64.h above) defines it as an anonymous-struct
+// typedef, so there is no `struct ColliderQuad` tag. Adding the
+// `struct` keyword would forward-declare a separate (incomplete)
+// struct tag that doesn't match the typedef, breaking every TU
+// that later sees `ColliderQuad atCollider;` field declarations.
 void Anchor_PositionAttackQuadFromBlade(
     const Vec3f* prevTip, const Vec3f* prevBase,
     const Vec3f* curTip,  const Vec3f* curBase,
-    struct ColliderQuad* atCollider);
+    ColliderQuad* atCollider);
 
 #ifdef __cplusplus
 }
