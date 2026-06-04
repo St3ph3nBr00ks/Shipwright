@@ -921,7 +921,15 @@ void Environment_Update(PlayState* play, EnvironmentContext* envCtx, LightContex
             }
         }
 
-        if ((pauseCtx->state == 0) && (gameOverCtx->state == GAMEOVER_INACTIVE)) {
+        // Pillar G.i follow-up — route the dayTime gate's pause check
+        // through Anchor_PauseMenuFreezesWorld. In solo / MP-off the
+        // predicate returns `pauseCtx.state != 0` (identical to the
+        // original check). In MP it returns false even while the
+        // pause UI is up, so the day/night cycle keeps advancing for
+        // peers — matching Pillar G.i's "MP world keeps moving"
+        // semantics. The bridge header is already included for the
+        // G.ii SceneTransition routing in the inner condition.
+        if (!Anchor_PauseMenuFreezesWorld() && (gameOverCtx->state == GAMEOVER_INACTIVE)) {
             if (((msgCtx->msgLength == 0) && (msgCtx->msgMode == 0)) ||
                 (((void)0, gSaveContext.gameMode) == GAMEMODE_END_CREDITS)) {
                 // Pillar G.ii — SceneTransition gate routed through the
