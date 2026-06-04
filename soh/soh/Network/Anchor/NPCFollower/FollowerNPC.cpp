@@ -33,6 +33,8 @@
 #include "soh/Network/Anchor/Common/AICombat/SwordBladeTracking.h"    // #238: per-frame sword tip/base + AT quad builder
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
+#include "soh/Network/Anchor/Common/YawMath.h"        // AnchorYaw::YawTowardTarget (Tier 1)
+#include "soh/Network/Anchor/Common/EquipmentSwap.h"  // AnchorEquipmentSwap::* (Tier 1)
 #include "soh/Network/Anchor/Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
 #include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
 #include "soh/cvar_prefixes.h"
@@ -342,17 +344,11 @@ static Actor* sCurrentlyDrawingNpc = nullptr;
 // File-scope save slot — single instance because actor draws don't
 // nest (each actor's full draw sequence completes before the next
 // actor begins). If nesting ever becomes possible, switch to a stack.
-static bool      sEquipmentSwapActive       = false;
-static s32       sSavedPlayerModelGroup     = 0;
-static u8        sSavedPlayerLeftHandType   = 0;
-static u8        sSavedPlayerRightHandType  = 0;
-static u8        sSavedPlayerSheathType     = 0;
-static Gfx**     sSavedPlayerLeftHandDLists  = nullptr;
-static Gfx**     sSavedPlayerRightHandDLists = nullptr;
-static Gfx**     sSavedPlayerSheathDLists    = nullptr;
-static Gfx**     sSavedPlayerWaistDLists     = nullptr;
-static s8        sSavedPlayerHeldItemAction  = 0;
-static bool      sSavedHeldItemActionActive  = false;
+//
+// Tier 1 refactor (2026-06-04) — the save fields + apply/restore
+// logic moved to Common/EquipmentSwap.{h,cpp} since NPC Follower
+// and NPC Invader shared byte-identical bodies. See plan items 4+5.
+static AnchorEquipmentSwap::EquipmentSwapState sEquipmentSwapState;
 
 // Last combat type used. 0 = melee (sword+shield); 1 = ranged (bow).
 // Set by combat state ENTRY in TryEngageCombat. Used by the
@@ -437,123 +433,46 @@ extern "C" void Anchor_FollowerNpcDrawBegin(Actor* npc) {
 
     // Phase B equipment swap. Save Player's current model state +
     // apply NPC's intended model. End() restores.
+    // Tier 1 refactor (2026-06-04) — shared body in
+    // AnchorEquipmentSwap::ApplySwap. Wrapper resolves the NPC-
+    // specific intended model group (via NpcStateToModelGroup —
+    // reads the Follower state enum + sheathe-delay tunable) and
+    // forwards.
     if (gPlayState == nullptr) return;
     Player* localPlayer = GET_PLAYER(gPlayState);
     if (localPlayer == nullptr) return;
 
     EnFollower* asFollower = (EnFollower*)npc;
     const s32 intendedGroup = NpcStateToModelGroup(asFollower->state);
-
-    // No-op if we're already at the intended group (saves a redundant
-    // SetModels call when NPC is in IDLE and Player has nothing
-    // special equipped — the most common case).
-    if (intendedGroup == localPlayer->modelGroup) {
-        sEquipmentSwapActive = false;
-        return;
-    }
-
-    // Save state. We save BOTH the model group (for the canonical
-    // restore via Player_SetModels) AND the raw DList/type fields
-    // (defensive — in case something between save and restore
-    // mutates them, the raw restore brings them back exactly).
-    sSavedPlayerModelGroup       = localPlayer->modelGroup;
-    sSavedPlayerLeftHandType     = localPlayer->leftHandType;
-    sSavedPlayerRightHandType    = localPlayer->rightHandType;
-    sSavedPlayerSheathType       = localPlayer->sheathType;
-    sSavedPlayerLeftHandDLists   = localPlayer->leftHandDLists;
-    sSavedPlayerRightHandDLists  = localPlayer->rightHandDLists;
-    sSavedPlayerSheathDLists     = localPlayer->sheathDLists;
-    sSavedPlayerWaistDLists      = localPlayer->waistDLists;
-
-    // Bow vs slingshot inventory check. Player_SetModels picks the
-    // bow vs slingshot DList variant via Player_HoldsSlingshot(this),
-    // which checks Player's heldItemAction (NOT inventory ownership).
-    // When NPC is the shooter, Player isn't actively holding either —
-    // so the default selection is bow. That makes child Link's NPC
-    // visually wield a bow even when only the slingshot is owned
-    // (log 163 user complaint). Fix: if intended group is
-    // BOW_SLINGSHOT and Player has slingshot but not bow,
-    // temporarily set heldItemAction to PLAYER_IA_SLINGSHOT so the
-    // SetModels DList pick resolves correctly. Restore at End.
-    sSavedHeldItemActionActive = false;
-    if (intendedGroup == PLAYER_MODELGROUP_BOW_SLINGSHOT) {
-        const u8 bowSlot   = INV_CONTENT(ITEM_BOW);
-        const u8 slingSlot = INV_CONTENT(ITEM_SLINGSHOT);
-        const bool hasBow       = (bowSlot   != ITEM_NONE);
-        const bool hasSlingshot = (slingSlot != ITEM_NONE);
-        s8 desired = -1;
-        if (hasSlingshot && !hasBow) {
-            desired = PLAYER_IA_SLINGSHOT;
-        } else if (hasBow && !hasSlingshot) {
-            desired = PLAYER_IA_BOW;
-        }  // both / neither → no override (let Player's natural state pick)
-        if (desired >= 0 && localPlayer->heldItemAction != desired) {
-            sSavedPlayerHeldItemAction = localPlayer->heldItemAction;
-            sSavedHeldItemActionActive = true;
-            localPlayer->heldItemAction = desired;
-        }
-    }
-
-    // Apply NPC's intended model. Player_SetModels writes
-    // leftHandType/DLists, rightHandType/DLists, sheathType/DLists,
-    // waistDLists from sPlayerDListGroups[type][linkAge]. Does NOT
-    // write modelAnimType (we control that separately via
-    // currentAnimType).
-    Player_SetModels(localPlayer, intendedGroup);
-    localPlayer->modelGroup = intendedGroup;  // SetModels doesn't touch this; SetModelGroup does
-    sEquipmentSwapActive = true;
+    AnchorEquipmentSwap::ApplySwap(localPlayer, intendedGroup,
+                                    sEquipmentSwapState);
 }
 
 extern "C" void Anchor_FollowerNpcDrawEnd(void) {
     sCurrentlyDrawingNpc = nullptr;
 
-    if (!sEquipmentSwapActive) return;
-    sEquipmentSwapActive = false;
-
+    // Tier 1 refactor (2026-06-04) — shared body in
+    // AnchorEquipmentSwap::RestoreSwap. No-op when no swap is active.
     if (gPlayState == nullptr) return;
     Player* localPlayer = GET_PLAYER(gPlayState);
-    if (localPlayer == nullptr) return;
-
-    // Restore. Both the canonical SetModels call (so any internal
-    // bookkeeping is consistent) AND the raw fields (defensive,
-    // since the EquipmentAlwaysVisible CVar branches inside
-    // Player_SetModels may pick slightly different DLists than the
-    // user originally had).
-    Player_SetModels(localPlayer, sSavedPlayerModelGroup);
-    localPlayer->modelGroup      = sSavedPlayerModelGroup;
-    localPlayer->leftHandType    = sSavedPlayerLeftHandType;
-    localPlayer->rightHandType   = sSavedPlayerRightHandType;
-    localPlayer->sheathType      = sSavedPlayerSheathType;
-    localPlayer->leftHandDLists  = sSavedPlayerLeftHandDLists;
-    localPlayer->rightHandDLists = sSavedPlayerRightHandDLists;
-    localPlayer->sheathDLists    = sSavedPlayerSheathDLists;
-    localPlayer->waistDLists     = sSavedPlayerWaistDLists;
-    if (sSavedHeldItemActionActive) {
-        localPlayer->heldItemAction = sSavedPlayerHeldItemAction;
-        sSavedHeldItemActionActive  = false;
-    }
+    AnchorEquipmentSwap::RestoreSwap(localPlayer, sEquipmentSwapState);
 }
 
 extern "C" Actor* Anchor_GetCurrentlyDrawingFollowerNpc(void) {
     return sCurrentlyDrawingNpc;
 }
 
-// Defensive scene-transition reset. Called from the OnSceneInit hook in
-// HookHandlers.cpp. Clears the equipment-swap active flag without
-// running the End-path restore — the saved Player DList pointers
-// (sSavedPlayer{LeftHand,RightHand,Sheath,Waist}DLists) reference the
-// old scene's allocated resources, which may have been freed during
-// the transition. Restoring them would write dangling pointers into
-// Link's draw state and crash on the first Player_Draw of the new
-// scene. Player_Init re-binds these naturally for the new scene; we
-// just need to prevent the next DrawBegin from short-circuiting on a
-// stale-active flag, and prevent the matching End-call (if any) from
-// writing stale data on top of the new scene's freshly-initialized
-// Player state.
+// Defensive scene-transition reset. Called from the OnSceneInit hook
+// in HookHandlers.cpp. Clears the equipment-swap active flag without
+// running the End-path restore — see AnchorEquipmentSwap::Reset-
+// ForSceneTransition for the dangling-pointer rationale (Pitfall 22).
 extern "C" void Anchor_FollowerNpcDrawStateResetOnSceneTransition(void) {
-    sEquipmentSwapActive       = false;
-    sSavedHeldItemActionActive = false;
-    sCurrentlyDrawingNpc       = nullptr;
+    // Tier 1 refactor (2026-06-04) — equipment-swap reset moved to
+    // AnchorEquipmentSwap::ResetForSceneTransition. Per-actor
+    // context pointer reset stays here. Called from the central
+    // OnSceneInit handler in HookHandlers.cpp (Pitfall 22).
+    AnchorEquipmentSwap::ResetForSceneTransition(sEquipmentSwapState);
+    sCurrentlyDrawingNpc = nullptr;
 }
 
 // ----------------------------------------------------------------------------
@@ -834,17 +753,14 @@ bool IsLocalOwnerNPC(Actor* npc) {
 // (LocalNpcNavState + sLocalNav defined at file scope above so the
 // spawn helper can reset them.)
 
-// Compute XZ distance squared between two world positions.
-inline float Dist2DSq(const Vec3f& a, const Vec3f& b) {
-    const float dx = a.x - b.x;
-    const float dz = a.z - b.z;
-    return dx * dx + dz * dz;
-}
+// Tier 1 refactor (2026-06-04) — Dist2DSq migrated to the existing
+// AnchorDist::DistXZSq helper at Common/DistanceMath.h. The local
+// inline was byte-identical to the shared one. Call sites updated
+// in this same commit.
 
-// Yaw toward target XZ (s16 binary angle).
-inline s16 YawTowardTarget(const Vec3f& from, const Vec3f& to) {
-    return Math_Atan2S(to.z - from.z, to.x - from.x);
-}
+// Tier 1 refactor (2026-06-04) — YawTowardTarget extracted to
+// Common/YawMath.h as AnchorYaw::YawTowardTarget. Call sites
+// updated in this same commit.
 
 // Forward-decl — defined further down (with TickCLIMBING since it's
 // the primary consumer). ComputeEffectiveTarget needs it for the
@@ -994,7 +910,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // When false (DirectYaw fallback, target inside 60u or water-gated,
     // or path empty), subgoal is the target position itself.
     const Vec3f& subgoal = nav.subgoal;
-    const s16 yaw = YawTowardTarget(a->world.pos, subgoal);
+    const s16 yaw = AnchorYaw::YawTowardTarget(a->world.pos, subgoal);
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
 
@@ -1018,7 +934,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // band, NPC effectively halts at the current distance. The
     // IDLE re-entry check (distToTargetSq <= kEnterIdle²) handles
     // the IDLE switch when NPC drifts in further.
-    const float distToLeaderSq = Dist2DSq(a->world.pos, leaderPos);
+    const float distToLeaderSq = AnchorDist::DistXZSq(a->world.pos, leaderPos);
     Player*     leader         = GET_PLAYER(play);
     const float leaderSpeed    = (leader != nullptr) ? leader->actor.speedXZ : 0.0f;
     float       speed;
@@ -1104,7 +1020,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     if (progressLogTicks > 0 &&
         curFrame >= sLocalNav.lastFollowProgressLogFrame + (uint64_t)progressLogTicks) {
         const float distToSubgoal = std::sqrt(
-            Dist2DSq(a->world.pos, nav.subgoal));
+            AnchorDist::DistXZSq(a->world.pos, nav.subgoal));
         const float distToLeader = std::sqrt(distToLeaderSq);
         SPDLOG_INFO("[FollowerNPC.follow] pos=({:.0f},{:.0f},{:.0f}) "
                     "target=({:.0f},{:.0f},{:.0f}) path.size={} path.idx={} "
@@ -1997,7 +1913,7 @@ const ::AnchorNavRoom::LedgeAnchor* FindClosestLedgeAnchor(
     const ::AnchorNavRoom::LedgeAnchor* best = nullptr;
     float bestDistSq = std::numeric_limits<float>::max();
     for (const auto& anc : navData->ledgeAnchors) {
-        const float distSq = Dist2DSq(nearPos, anc.approachPos);
+        const float distSq = AnchorDist::DistXZSq(nearPos, anc.approachPos);
         if (distSq > kHoistApproachMatchXZSq) continue;
         const float lift = anc.topPos.y - nearPos.y;
         if (lift < 20.0f) continue;  // too low; standard step / nothing to hoist
@@ -2280,19 +2196,14 @@ Actor* FindNearestEnemyForAttack(EnFollower* this_, PlayState* play, float maxRa
 // two paths can't diverge again. When DR-2 / B.5 lands the combat
 // extract to `Common/AICombat/`, this stays.
 void PositionAttackQuad(EnFollower* this_) {
-    // Fix B sweep quad — see Invader.cpp's PositionAttackQuad for the
-    // rationale. Single-snapshot Anchor_BuildAtQuadFromBlade is
-    // replaced with Anchor_BuildSweepAtQuadFromBlade so the quad
-    // covers the area between previous and current frame's blade
-    // poses — vanilla Player's geometry.
-    Vec3f bottomLeft, bottomRight, topLeft, topRight;
-    Anchor_BuildSweepAtQuadFromBlade(
+    // Tier 1 refactor (2026-06-04) — body extracted to
+    // Anchor_PositionAttackQuadFromBlade. Wrapper kept as the
+    // per-actor binding point because it knows the EnFollower
+    // blade-field layout. See Plans/npc_helpers_tier1_extract.md.
+    Anchor_PositionAttackQuadFromBlade(
         &this_->prevSwordTip, &this_->prevSwordBase,
         &this_->swordTip,     &this_->swordBase,
-        &bottomLeft, &bottomRight,
-        &topLeft,    &topRight);
-    Collider_SetQuadVertices(&this_->atCollider, &bottomLeft, &bottomRight,
-                              &topLeft, &topRight);
+        &this_->atCollider);
 }
 
 // ATTACK handler — locks NPC in place, faces target, plays swing
@@ -2302,7 +2213,10 @@ void PositionAttackQuad(EnFollower* this_) {
 // B.5 Phase 4 — shared via AnchorAICombat::ResolveAttackTarget +
 // TickAttackATAndComplete. Per-actor body retains:
 //   - speedXZ=0
-//   - face logic (file-local YawTowardTarget)
+//   - face logic (uses AnchorYaw::YawTowardTarget; stays per-actor
+//     because the target-selection semantics differ between Follower
+//     and Invader — Follower falls back to facing leader, Invader
+//     keeps last facing)
 //   - exit transition + SPDLOG + path reset
 // (Follower's dispatcher-driven anim entry needs no on-entry hook;
 // see DR-2 §"Policy axis #4". Invader's TickATTACK keeps the
@@ -2324,7 +2238,7 @@ void TickATTACK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // Must run BEFORE TickAttackATAndComplete so PositionAttackQuad
     // sees the freshly-written shape.rot.y.
     if (sAttackState.target != nullptr) {
-        a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
+        a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 
@@ -2539,7 +2453,7 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // Drive locomotion toward chosen subgoal. Speed band is
     // target-distance-relative (not subgoal-distance) so pursuit pace
     // matches actual distance-to-target.
-    a->shape.rot.y = YawTowardTarget(a->world.pos, nav.subgoal);
+    a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, nav.subgoal);
     a->world.rot.y = a->shape.rot.y;
     a->speedXZ = (distXZ > kRunDistance) ? kRunSpeed : kWalkSpeed;
 }
@@ -2699,19 +2613,13 @@ struct BlockState {
 };
 static BlockState sBlockState;
 
-// Returns true if the attacker is within ±kBlockFrontalAngle of the
-// NPC's facing direction (i.e., NPC has the attacker in its frontal
-// cone). Used to decide if a hit is blocked or takes full damage.
-bool IsFrontalAttacker(EnFollower* this_, Actor* attacker) {
-    if (attacker == nullptr) return false;
-    Actor* a = &this_->actor;
-    const s16 yawToAttacker = YawTowardTarget(a->world.pos, attacker->world.pos);
-    // s16 angle subtraction wraps naturally — the resulting delta is
-    // the signed shortest angular distance. Take abs and compare.
-    const s16 delta = (s16)(yawToAttacker - a->shape.rot.y);
-    const int absDelta = (delta < 0) ? -(int)delta : (int)delta;
-    return absDelta < kBlockFrontalAngle;
-}
+// Tier 1 refactor (2026-06-04) — IsFrontalAttacker extracted to
+// AnchorAICombat::IsFrontalHit (Common/AICombat/CombatEngagement.h).
+// Renamed because the function checks hit geometry, not attacker
+// classification. Call sites updated in this same commit; the null
+// check the local wrapper used to do is already done by the callers
+// (short-circuit before invocation). kBlockFrontalAngle stays here
+// as the per-actor tunable (Follower default 0x4000 = ±90°).
 
 void TickBLOCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     (void)leaderPos;
@@ -2744,7 +2652,7 @@ void TickBLOCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 
     // Face target each frame so the shield always faces the threat.
     if (sAttackState.target != nullptr) {
-        a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
+        a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 
@@ -2853,7 +2761,7 @@ void TickRANGED_ATTACK(EnFollower* this_, PlayState* play, const Vec3f& leaderPo
     }
 
     // Face target (yaw only — body alignment for the shoot anim).
-    a->shape.rot.y = YawTowardTarget(a->world.pos, tp);
+    a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, tp);
     a->world.rot.y = a->shape.rot.y;
 
     // Spawn arrow at release frame. swingFiredAT field is reused
@@ -2954,12 +2862,12 @@ void TickSTANDBY(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // no-target branch" + "refresh on re-acquire" idiom.
     sAttackState.target = eval.faceTarget;
 
-    // Face logic — per-actor because YawTowardTarget is file-local.
-    // Follower falls back to facing the leader when no target is
-    // resolved (alert pose with a sensible orientation).
+    // Face logic — per-actor because the no-target fallback differs
+    // between Follower (face the leader) and Invader (keep facing).
+    // Math uses AnchorYaw::YawTowardTarget (Tier 1, shared).
     a->shape.rot.y = (eval.faceTarget != nullptr)
-                       ? YawTowardTarget(a->world.pos, eval.faceTarget->world.pos)
-                       : YawTowardTarget(a->world.pos, leaderPos);
+                       ? AnchorYaw::YawTowardTarget(a->world.pos, eval.faceTarget->world.pos)
+                       : AnchorYaw::YawTowardTarget(a->world.pos, leaderPos);
     a->world.rot.y = a->shape.rot.y;
 
     switch (eval.decision) {
@@ -3777,7 +3685,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             anchor = nullptr;
         }
         if (anchor != nullptr) {
-            const float distBaseSq = Dist2DSq(npc->world.pos, anchor->basePos);
+            const float distBaseSq = AnchorDist::DistXZSq(npc->world.pos, anchor->basePos);
             if (distBaseSq < kClimbForceEngageBaseDistSq) {
                 if (PopulateAnchorClimbPath(navData, *anchor,
                                             npc->world.pos, leaderPos,
@@ -4612,7 +4520,10 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             bool blocked = false;
             if (this_->state == EN_FOLLOWER_STATE_BLOCK && dmgUnits > 0) {
                 if (sAttackState.target == nullptr ||
-                    IsFrontalAttacker(this_, sAttackState.target)) {
+                    AnchorAICombat::IsFrontalHit(this_->actor.world.pos,
+                                                  this_->actor.shape.rot.y,
+                                                  sAttackState.target->world.pos,
+                                                  kBlockFrontalAngle)) {
                     blocked = true;
                     sBlockState.hitAnimFrames = kBlockHitAnimFrames;
                     this_->stopAnimPlaying = 0;  // let kBlockHit override flow through

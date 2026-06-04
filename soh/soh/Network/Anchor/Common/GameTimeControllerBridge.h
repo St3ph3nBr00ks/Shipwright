@@ -16,9 +16,11 @@
 
 #ifdef __cplusplus
 #include <stdbool.h>
+#include <stdint.h>
 extern "C" {
 #else
 #include <stdbool.h>
+#include <stdint.h>
 #endif
 
 // Mirrors GameTimeController::TimeContext (in GameTimeController.h).
@@ -82,6 +84,44 @@ bool Anchor_PauseLiveWorldRendering(void);
 // Internal carry resets to 0 when the pause menu closes (state == 0) so
 // the rate stays predictable across pause sessions.
 bool Anchor_PauseMenuShouldExtraTick(void);
+
+// Pillar G.ii — item-get presentation mode for a getItem entry.
+//
+// Mirrors GameTimeController::ItemPresentationMode (in GameTimeController.h).
+// Macros and the C++ enum MUST stay numerically aligned. If a new
+// presentation mode is added, update:
+//   - GameTimeController.h (ItemPresentationMode enum)
+//   - GameTimeController.cpp (GetItemPresentationMode logic)
+//   - this file (ANCHOR_ITEM_PRESENTATION_* macro)
+//   - z_player.c func_8083A434 (call-site switch)
+//
+// Default in single-player AND when multiplayer is off: VANILLA. Default
+// in multiplayer for non-iconic items: NOTIFICATION_ONLY.
+#define ANCHOR_ITEM_PRESENTATION_VANILLA            0
+#define ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY  1
+
+// Returns the presentation mode for a given GI_* item-get id. C callers
+// use the return value to branch the item-get sequence: VANILLA → run
+// the legacy freeze cutscene; NOTIFICATION_ONLY → call
+// Anchor_GiveItemNonBlocking(play, this) and return early.
+int Anchor_GetItemPresentationMode(int16_t getItemId);
+
+// Pillar G.ii — non-blocking item give. Writes the item to inventory
+// via the standard Item_Give helper, emits a Notification toast (icon
+// + item name + brief description) with a 6-second timer, and plays
+// the item-get jingle. Does NOT set PLAYER_STATE1_GETTING_ITEM /
+// PLAYER_STATE1_IN_CUTSCENE, does NOT lock the camera, does NOT run
+// the cutscene action. Player retains full control throughout.
+//
+// Caller must verify the gate via Anchor_GetItemPresentationMode
+// returned ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY before calling.
+//
+// `getItemId` argument is the GI_* id (this->getItemId at the call
+// site). `itemId` argument is the inventory ITEM_* id
+// (this->getItemEntry.itemId at the call site). Both are needed because
+// some helpers (e.g. icon lookup) key on inventory id while others
+// (e.g. message lookup) key on get id.
+void Anchor_GiveItemNonBlocking(int16_t getItemId, uint8_t itemId);
 
 #ifdef __cplusplus
 }

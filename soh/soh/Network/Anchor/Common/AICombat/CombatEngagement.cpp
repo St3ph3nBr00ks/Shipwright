@@ -4,6 +4,7 @@
 
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZ
+#include "soh/Network/Anchor/Common/YawMath.h"       // AnchorYaw::YawTowardTarget (Tier 1 IsFrontalHit)
 
 #include <atomic>
 #include <cmath>
@@ -263,6 +264,20 @@ EngageDecision EvaluateCombatTiers(const EngageCombatContext& ctx) {
 
     // No tier matched.
     return decision;
+}
+
+// Tier 1 refactor (2026-06-04) — extracted from NPC Follower's
+// IsFrontalAttacker (FollowerNPC.cpp:2706-2714) and NPC Invader's
+// IsFrontalAttacker (Invader.cpp:1964-1971). Bodies were near-
+// identical; differences were comments only. See plan item 3.
+bool IsFrontalHit(const Vec3f& defenderPos, s16 defenderYaw,
+                  const Vec3f& attackerPos, s16 blockArc) {
+    const s16 yawToAttacker = AnchorYaw::YawTowardTarget(defenderPos, attackerPos);
+    // s16 angle subtraction wraps naturally — the resulting delta is
+    // the signed shortest angular distance. Take abs and compare.
+    const s16 delta    = (s16)(yawToAttacker - defenderYaw);
+    const int absDelta = (delta < 0) ? -(int)delta : (int)delta;
+    return absDelta < blockArc;
 }
 
 }  // namespace AnchorAICombat

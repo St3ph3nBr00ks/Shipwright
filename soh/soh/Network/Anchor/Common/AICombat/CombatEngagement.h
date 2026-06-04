@@ -450,4 +450,18 @@ struct EngageDecision {
 
 EngageDecision EvaluateCombatTiers(const EngageCombatContext& ctx);
 
+// Tier 1 refactor (2026-06-04) — block-arc geometry check shared by
+// NPC Follower and NPC Invader's TickBLOCK. Returns true when the
+// attacker's position lies inside ±blockArc of the defender's facing
+// (i.e. the defender has the attacker in its frontal cone). Source-
+// agnostic — works for any incoming hit position regardless of
+// whether the source is an actor; only the math matters.
+//
+// Previously named IsFrontalAttacker, scoped to file-local per-actor
+// helpers. See Plans/npc_helpers_tier1_extract_2026-06-03.md item 3.
+// Renamed because the function describes hit geometry, not attacker
+// classification.
+bool IsFrontalHit(const Vec3f& defenderPos, s16 defenderYaw,
+                  const Vec3f& attackerPos, s16 blockArc = 0x4000);
+
 }  // namespace AnchorAICombat
