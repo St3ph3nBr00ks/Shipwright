@@ -1961,14 +1961,9 @@ void PositionAttackQuad(EnInvader* this_) {
                              &topLeft, &topRight);
 }
 
-bool IsFrontalAttacker(EnInvader* this_, Actor* attacker) {
-    if (attacker == nullptr) return false;
-    Actor* a = &this_->actor;
-    const s16 yawToAttacker = AnchorYaw::YawTowardTarget(a->world.pos, attacker->world.pos);
-    const s16 delta = (s16)(yawToAttacker - a->shape.rot.y);
-    const int absDelta = (delta < 0) ? -(int)delta : (int)delta;
-    return absDelta < kBlockFrontalAngle;
-}
+// Tier 1 refactor (2026-06-04) — IsFrontalAttacker extracted to
+// AnchorAICombat::IsFrontalHit (Common/AICombat/CombatEngagement.h).
+// kBlockFrontalAngle stays here as the per-actor tunable.
 
 bool InvaderHasRangedWeapon() {
     // v1: gate ranged engagement on the local player's inventory so
@@ -2297,7 +2292,10 @@ void TickBLOCK(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     // pass through to the normal drain.
     if ((this_->collider.base.acFlags & AC_HIT) &&
         sAttackState.target != nullptr &&
-        IsFrontalAttacker(this_, sAttackState.target)) {
+        AnchorAICombat::IsFrontalHit(this_->actor.world.pos,
+                                      this_->actor.shape.rot.y,
+                                      sAttackState.target->world.pos,
+                                      kBlockFrontalAngle)) {
         this_->collider.base.acFlags  &= ~AC_HIT;
         this_->actor.colChkInfo.damage = 0;
         sBlockState.hitAnimFrames = 12;  // play kBlockHit reaction (Agent 2 anim)

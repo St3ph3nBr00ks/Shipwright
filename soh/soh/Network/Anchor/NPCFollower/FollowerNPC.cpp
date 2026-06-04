@@ -2700,19 +2700,13 @@ struct BlockState {
 };
 static BlockState sBlockState;
 
-// Returns true if the attacker is within ±kBlockFrontalAngle of the
-// NPC's facing direction (i.e., NPC has the attacker in its frontal
-// cone). Used to decide if a hit is blocked or takes full damage.
-bool IsFrontalAttacker(EnFollower* this_, Actor* attacker) {
-    if (attacker == nullptr) return false;
-    Actor* a = &this_->actor;
-    const s16 yawToAttacker = AnchorYaw::YawTowardTarget(a->world.pos, attacker->world.pos);
-    // s16 angle subtraction wraps naturally — the resulting delta is
-    // the signed shortest angular distance. Take abs and compare.
-    const s16 delta = (s16)(yawToAttacker - a->shape.rot.y);
-    const int absDelta = (delta < 0) ? -(int)delta : (int)delta;
-    return absDelta < kBlockFrontalAngle;
-}
+// Tier 1 refactor (2026-06-04) — IsFrontalAttacker extracted to
+// AnchorAICombat::IsFrontalHit (Common/AICombat/CombatEngagement.h).
+// Renamed because the function checks hit geometry, not attacker
+// classification. Call sites updated in this same commit; the null
+// check the local wrapper used to do is already done by the callers
+// (short-circuit before invocation). kBlockFrontalAngle stays here
+// as the per-actor tunable (Follower default 0x4000 = ±90°).
 
 void TickBLOCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     (void)leaderPos;
@@ -4613,7 +4607,10 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             bool blocked = false;
             if (this_->state == EN_FOLLOWER_STATE_BLOCK && dmgUnits > 0) {
                 if (sAttackState.target == nullptr ||
-                    IsFrontalAttacker(this_, sAttackState.target)) {
+                    AnchorAICombat::IsFrontalHit(this_->actor.world.pos,
+                                                  this_->actor.shape.rot.y,
+                                                  sAttackState.target->world.pos,
+                                                  kBlockFrontalAngle)) {
                     blocked = true;
                     sBlockState.hitAnimFrames = kBlockHitAnimFrames;
                     this_->stopAnimPlaying = 0;  // let kBlockHit override flow through
