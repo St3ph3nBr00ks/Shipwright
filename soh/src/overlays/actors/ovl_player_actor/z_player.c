@@ -7389,6 +7389,47 @@ s32 Player_ActionHandler_2(Player* this, PlayState* play) {
 
                 // Show cutscene when picking up a item.
                 if (showItemCutscene && !skipItemCutscene && !skipItemCutsceneRando) {
+                    // Pillar G.ii v2 — MP-aware non-blocking item-get.
+                    // Replaces the vanilla freeze + camera + animation for
+                    // non-iconic items with a Notification toast. Gate is
+                    // here (not in func_8083A434) because the cutscene
+                    // setup happens BELOW in this same block; gating at
+                    // the callback fired too late (v1, log 389, commit
+                    // 7dc080091 revert).
+                    //
+                    // Uses the local `giEntry` (correctly populated at
+                    // line 7340-7345 above) — NOT this->getItemEntry,
+                    // which isn't updated until the cutscene action
+                    // runs. This avoids v1's stale-name bug.
+                    //
+                    // Decision logic:
+                    //   - Single-player or kill switch off → Vanilla
+                    //   - Iconic allowlist (ocarinas / Light Arrows /
+                    //     Great Fairy spells / Ice Trap) → Vanilla
+                    //   - Everything else in MP → NotificationOnly
+                    // The dedicated cutscene paths for Master Sword,
+                    // spiritual stones, medallions, and songs don't
+                    // reach this branch — they keep their cutscenes
+                    // automatically.
+                    {
+                        int presentationMode = Anchor_GetItemPresentationMode(
+                            (int16_t)giEntry.getItemId);
+                        if (presentationMode == ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY) {
+                            // Skip cutscene + state flags entirely. Bridge
+                            // helper writes inventory via Item_Give + emits
+                            // Notification toast (6s, with built-in fade).
+                            // Clear getItemId/getItemEntry the same way
+                            // the silent skip-cutscene branch below does
+                            // so the put-away wait doesn't re-fire on
+                            // the next tick.
+                            Anchor_GiveItemNonBlocking(
+                                (int16_t)giEntry.getItemId,
+                                (uint8_t)giEntry.itemId);
+                            this->getItemId = GI_NONE;
+                            this->getItemEntry = (GetItemEntry)GET_ITEM_NONE;
+                            return 1;
+                        }
+                    }
 
                     Player_DetachHeldActor(play, this);
                     func_8083AE40(this, giEntry.objectId);
