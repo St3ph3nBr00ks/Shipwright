@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>  // int16_t for GetItemPresentationMode signature
+
 // Multiplayer-aware time-control gate (Pillar G).
 //
 // Single gate function that owns the "does world time advance this frame"
