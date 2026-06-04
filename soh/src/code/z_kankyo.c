@@ -896,7 +896,19 @@ void Environment_Update(PlayState* play, EnvironmentContext* envCtx, LightContex
         Rumble_ClearRequests();
     }
 
-    if (pauseCtx->state == 0) {
+    // Pillar G.i — outer gate for Environment_Update's world-time body.
+    // This is THE gate that decides whether dayTime / skyboxTime /
+    // nextDayTime / nightFlag / envCtx light state advances. The
+    // previous Pillar G.i routing wired pause-aware checks at the
+    // INNER dayTime advancement and at z_play.c:1169 (isPaused), but
+    // this outer gate was never routed — the entire body short-
+    // circuited in MP+pause regardless of those changes. Route it now
+    // through Anchor_PauseMenuFreezesWorld so the function body runs
+    // during MP-pause and the day/night cycle keeps progressing for
+    // peers, matching the Pillar G.i "MP world keeps moving" intent.
+    // The inner skybox-rotation block below keeps its raw pauseCtx
+    // check (it's a small visual flourish + gates on debugState too).
+    if (!Anchor_PauseMenuFreezesWorld()) {
         if ((play->pauseCtx.state == 0) && (play->pauseCtx.debugState == 0)) {
             if (play->skyboxId == SKYBOX_NORMAL_SKY) {
                 play->skyboxCtx.rot.y -= 0.001f;
