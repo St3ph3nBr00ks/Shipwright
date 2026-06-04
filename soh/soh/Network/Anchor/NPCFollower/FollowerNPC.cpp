@@ -34,6 +34,7 @@
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
 #include "soh/Network/Anchor/Common/YawMath.h"        // AnchorYaw::YawTowardTarget (Tier 1)
+#include "soh/Network/Anchor/Common/EquipmentSwap.h"  // AnchorEquipmentSwap::* (Tier 1)
 #include "soh/Network/Anchor/Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
 #include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
 #include "soh/cvar_prefixes.h"
@@ -343,17 +344,11 @@ static Actor* sCurrentlyDrawingNpc = nullptr;
 // File-scope save slot — single instance because actor draws don't
 // nest (each actor's full draw sequence completes before the next
 // actor begins). If nesting ever becomes possible, switch to a stack.
-static bool      sEquipmentSwapActive       = false;
-static s32       sSavedPlayerModelGroup     = 0;
-static u8        sSavedPlayerLeftHandType   = 0;
-static u8        sSavedPlayerRightHandType  = 0;
-static u8        sSavedPlayerSheathType     = 0;
-static Gfx**     sSavedPlayerLeftHandDLists  = nullptr;
-static Gfx**     sSavedPlayerRightHandDLists = nullptr;
-static Gfx**     sSavedPlayerSheathDLists    = nullptr;
-static Gfx**     sSavedPlayerWaistDLists     = nullptr;
-static s8        sSavedPlayerHeldItemAction  = 0;
-static bool      sSavedHeldItemActionActive  = false;
+//
+// Tier 1 refactor (2026-06-04) — the save fields + apply/restore
+// logic moved to Common/EquipmentSwap.{h,cpp} since NPC Follower
+// and NPC Invader shared byte-identical bodies. See plan items 4+5.
+static AnchorEquipmentSwap::EquipmentSwapState sEquipmentSwapState;
 
 // Last combat type used. 0 = melee (sword+shield); 1 = ranged (bow).
 // Set by combat state ENTRY in TryEngageCombat. Used by the
@@ -438,123 +433,46 @@ extern "C" void Anchor_FollowerNpcDrawBegin(Actor* npc) {
 
     // Phase B equipment swap. Save Player's current model state +
     // apply NPC's intended model. End() restores.
+    // Tier 1 refactor (2026-06-04) — shared body in
+    // AnchorEquipmentSwap::ApplySwap. Wrapper resolves the NPC-
+    // specific intended model group (via NpcStateToModelGroup —
+    // reads the Follower state enum + sheathe-delay tunable) and
+    // forwards.
     if (gPlayState == nullptr) return;
     Player* localPlayer = GET_PLAYER(gPlayState);
     if (localPlayer == nullptr) return;
 
     EnFollower* asFollower = (EnFollower*)npc;
     const s32 intendedGroup = NpcStateToModelGroup(asFollower->state);
-
-    // No-op if we're already at the intended group (saves a redundant
-    // SetModels call when NPC is in IDLE and Player has nothing
-    // special equipped — the most common case).
-    if (intendedGroup == localPlayer->modelGroup) {
-        sEquipmentSwapActive = false;
-        return;
-    }
-
-    // Save state. We save BOTH the model group (for the canonical
-    // restore via Player_SetModels) AND the raw DList/type fields
-    // (defensive — in case something between save and restore
-    // mutates them, the raw restore brings them back exactly).
-    sSavedPlayerModelGroup       = localPlayer->modelGroup;
-    sSavedPlayerLeftHandType     = localPlayer->leftHandType;
-    sSavedPlayerRightHandType    = localPlayer->rightHandType;
-    sSavedPlayerSheathType       = localPlayer->sheathType;
-    sSavedPlayerLeftHandDLists   = localPlayer->leftHandDLists;
-    sSavedPlayerRightHandDLists  = localPlayer->rightHandDLists;
-    sSavedPlayerSheathDLists     = localPlayer->sheathDLists;
-    sSavedPlayerWaistDLists      = localPlayer->waistDLists;
-
-    // Bow vs slingshot inventory check. Player_SetModels picks the
-    // bow vs slingshot DList variant via Player_HoldsSlingshot(this),
-    // which checks Player's heldItemAction (NOT inventory ownership).
-    // When NPC is the shooter, Player isn't actively holding either —
-    // so the default selection is bow. That makes child Link's NPC
-    // visually wield a bow even when only the slingshot is owned
-    // (log 163 user complaint). Fix: if intended group is
-    // BOW_SLINGSHOT and Player has slingshot but not bow,
-    // temporarily set heldItemAction to PLAYER_IA_SLINGSHOT so the
-    // SetModels DList pick resolves correctly. Restore at End.
-    sSavedHeldItemActionActive = false;
-    if (intendedGroup == PLAYER_MODELGROUP_BOW_SLINGSHOT) {
-        const u8 bowSlot   = INV_CONTENT(ITEM_BOW);
-        const u8 slingSlot = INV_CONTENT(ITEM_SLINGSHOT);
-        const bool hasBow       = (bowSlot   != ITEM_NONE);
-        const bool hasSlingshot = (slingSlot != ITEM_NONE);
-        s8 desired = -1;
-        if (hasSlingshot && !hasBow) {
-            desired = PLAYER_IA_SLINGSHOT;
-        } else if (hasBow && !hasSlingshot) {
-            desired = PLAYER_IA_BOW;
-        }  // both / neither → no override (let Player's natural state pick)
-        if (desired >= 0 && localPlayer->heldItemAction != desired) {
-            sSavedPlayerHeldItemAction = localPlayer->heldItemAction;
-            sSavedHeldItemActionActive = true;
-            localPlayer->heldItemAction = desired;
-        }
-    }
-
-    // Apply NPC's intended model. Player_SetModels writes
-    // leftHandType/DLists, rightHandType/DLists, sheathType/DLists,
-    // waistDLists from sPlayerDListGroups[type][linkAge]. Does NOT
-    // write modelAnimType (we control that separately via
-    // currentAnimType).
-    Player_SetModels(localPlayer, intendedGroup);
-    localPlayer->modelGroup = intendedGroup;  // SetModels doesn't touch this; SetModelGroup does
-    sEquipmentSwapActive = true;
+    AnchorEquipmentSwap::ApplySwap(localPlayer, intendedGroup,
+                                    sEquipmentSwapState);
 }
 
 extern "C" void Anchor_FollowerNpcDrawEnd(void) {
     sCurrentlyDrawingNpc = nullptr;
 
-    if (!sEquipmentSwapActive) return;
-    sEquipmentSwapActive = false;
-
+    // Tier 1 refactor (2026-06-04) — shared body in
+    // AnchorEquipmentSwap::RestoreSwap. No-op when no swap is active.
     if (gPlayState == nullptr) return;
     Player* localPlayer = GET_PLAYER(gPlayState);
-    if (localPlayer == nullptr) return;
-
-    // Restore. Both the canonical SetModels call (so any internal
-    // bookkeeping is consistent) AND the raw fields (defensive,
-    // since the EquipmentAlwaysVisible CVar branches inside
-    // Player_SetModels may pick slightly different DLists than the
-    // user originally had).
-    Player_SetModels(localPlayer, sSavedPlayerModelGroup);
-    localPlayer->modelGroup      = sSavedPlayerModelGroup;
-    localPlayer->leftHandType    = sSavedPlayerLeftHandType;
-    localPlayer->rightHandType   = sSavedPlayerRightHandType;
-    localPlayer->sheathType      = sSavedPlayerSheathType;
-    localPlayer->leftHandDLists  = sSavedPlayerLeftHandDLists;
-    localPlayer->rightHandDLists = sSavedPlayerRightHandDLists;
-    localPlayer->sheathDLists    = sSavedPlayerSheathDLists;
-    localPlayer->waistDLists     = sSavedPlayerWaistDLists;
-    if (sSavedHeldItemActionActive) {
-        localPlayer->heldItemAction = sSavedPlayerHeldItemAction;
-        sSavedHeldItemActionActive  = false;
-    }
+    AnchorEquipmentSwap::RestoreSwap(localPlayer, sEquipmentSwapState);
 }
 
 extern "C" Actor* Anchor_GetCurrentlyDrawingFollowerNpc(void) {
     return sCurrentlyDrawingNpc;
 }
 
-// Defensive scene-transition reset. Called from the OnSceneInit hook in
-// HookHandlers.cpp. Clears the equipment-swap active flag without
-// running the End-path restore — the saved Player DList pointers
-// (sSavedPlayer{LeftHand,RightHand,Sheath,Waist}DLists) reference the
-// old scene's allocated resources, which may have been freed during
-// the transition. Restoring them would write dangling pointers into
-// Link's draw state and crash on the first Player_Draw of the new
-// scene. Player_Init re-binds these naturally for the new scene; we
-// just need to prevent the next DrawBegin from short-circuiting on a
-// stale-active flag, and prevent the matching End-call (if any) from
-// writing stale data on top of the new scene's freshly-initialized
-// Player state.
+// Defensive scene-transition reset. Called from the OnSceneInit hook
+// in HookHandlers.cpp. Clears the equipment-swap active flag without
+// running the End-path restore — see AnchorEquipmentSwap::Reset-
+// ForSceneTransition for the dangling-pointer rationale (Pitfall 22).
 extern "C" void Anchor_FollowerNpcDrawStateResetOnSceneTransition(void) {
-    sEquipmentSwapActive       = false;
-    sSavedHeldItemActionActive = false;
-    sCurrentlyDrawingNpc       = nullptr;
+    // Tier 1 refactor (2026-06-04) — equipment-swap reset moved to
+    // AnchorEquipmentSwap::ResetForSceneTransition. Per-actor
+    // context pointer reset stays here. Called from the central
+    // OnSceneInit handler in HookHandlers.cpp (Pitfall 22).
+    AnchorEquipmentSwap::ResetForSceneTransition(sEquipmentSwapState);
+    sCurrentlyDrawingNpc = nullptr;
 }
 
 // ----------------------------------------------------------------------------

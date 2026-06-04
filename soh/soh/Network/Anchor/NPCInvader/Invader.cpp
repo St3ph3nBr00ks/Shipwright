@@ -56,6 +56,7 @@
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
 #include "soh/Network/Anchor/Common/YawMath.h"       // AnchorYaw::YawTowardTarget (Tier 1)
+#include "soh/Network/Anchor/Common/EquipmentSwap.h" // AnchorEquipmentSwap::* (Tier 1)
 #include "soh/Network/Anchor/Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
 #include "soh/Network/Anchor/Common/SceneAuthority.h"  // IsEffectiveHost — peer-replica gate
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
@@ -99,27 +100,13 @@ static Actor* sCurrentlyDrawingInvader = nullptr;
 // FollowerNPC.cpp's equipment-swap save slot). If two actors ever
 // share the same gfx context concurrently, this becomes a stack.
 //
-// sEquipmentSwapActive controls whether End() should restore — set
-// true in Begin() only when a real swap happened. Defensive: lets
-// End() be a no-op when Begin() short-circuited (e.g. gPlayState
-// null, localPlayer null, or already at the intended group).
-static bool  sEquipmentSwapActive       = false;
-static s32   sSavedPlayerModelGroup     = 0;
-static u8    sSavedPlayerLeftHandType   = 0;
-static u8    sSavedPlayerRightHandType  = 0;
-static u8    sSavedPlayerSheathType     = 0;
-static Gfx** sSavedPlayerLeftHandDLists  = nullptr;
-static Gfx** sSavedPlayerRightHandDLists = nullptr;
-static Gfx** sSavedPlayerSheathDLists    = nullptr;
-static Gfx** sSavedPlayerWaistDLists     = nullptr;
-// Bow / slingshot DList-pick override. Player_HoldsSlingshot reads
-// heldItemAction (NOT inventory) to pick bow vs slingshot DLists when
-// model is BOW_SLINGSHOT. When the Invader is the shooter the Player
-// isn't actually holding either — so Begin temporarily writes
-// PLAYER_IA_BOW or PLAYER_IA_SLINGSHOT based on inventory ownership,
-// and End restores. Same trick as FollowerNPC.cpp:495-499.
-static s8    sSavedPlayerHeldItemAction  = 0;
-static bool  sSavedHeldItemActionActive  = false;
+// Tier 1 refactor (2026-06-04) — equipment-swap save slot moved to
+// AnchorEquipmentSwap::EquipmentSwapState. NPC Follower and NPC
+// Invader shared byte-identical save/swap/restore bodies; only the
+// per-actor model-group selector (InvStateToModelGroup) and the
+// draw-context pointer (sCurrentlyDrawingInvader) stay per-actor.
+// See Plans/npc_helpers_tier1_extract_2026-06-03.md items 4+5.
+static AnchorEquipmentSwap::EquipmentSwapState sEquipmentSwapState;
 
 // Combat / engagement / RANGED / STANDBY / cooldown / sheathe-delay
 // tunables live in InvaderTunables.h (B.2 refactor 2026-06-01). Names
@@ -3836,104 +3823,29 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
 extern "C" void Anchor_InvaderDrawBegin(Actor* invader) {
     sCurrentlyDrawingInvader = invader;
 
-    // Phase B equipment swap. Save Player's current model state and
-    // apply the Invader's state-mapped model. End() restores.
-    //
-    // State→model mapping with sheathe-delay (2026-05-19): combat
-    // states show their weapon, non-combat states are unarmed unless
-    // within the post-combat sheathe-delay window. Mirrors NPC
-    // Follower's polish so the Invader visually draws/sheathes its
-    // weapon during the engagement cycle (FOLLOW unarmed → ENGAGE
-    // arming → ATTACK swinging → STANDBY armed → IDLE/FOLLOW
-    // sheathed after ~4s).
-    sEquipmentSwapActive = false;
+    // Phase B equipment swap. Tier 1 refactor (2026-06-04) — shared
+    // body in AnchorEquipmentSwap::ApplySwap. Wrapper resolves the
+    // Invader-specific intended model group (via InvStateToModelGroup
+    // — reads the Invader state enum + post-combat sheathe-delay
+    // window) and forwards.
     if (gPlayState == nullptr || invader == nullptr) return;
     Player* localPlayer = GET_PLAYER(gPlayState);
     if (localPlayer == nullptr) return;
 
     EnInvader* asInvader = (EnInvader*)invader;
     const s32 intendedGroup = InvStateToModelGroup(asInvader->state);
-
-    // No-op if we're already at the intended group.
-    if (intendedGroup == (s32)localPlayer->modelGroup) {
-        return;
-    }
-
-    // Save. Both the modelGroup (for the canonical Player_SetModels
-    // restore) AND the raw DList/type fields (defensive — in case
-    // Player_SetModels's EquipmentAlwaysVisible CVar branches resolve
-    // slightly different DLists on restore than the user originally had).
-    sSavedPlayerModelGroup       = localPlayer->modelGroup;
-    sSavedPlayerLeftHandType     = localPlayer->leftHandType;
-    sSavedPlayerRightHandType    = localPlayer->rightHandType;
-    sSavedPlayerSheathType       = localPlayer->sheathType;
-    sSavedPlayerLeftHandDLists   = localPlayer->leftHandDLists;
-    sSavedPlayerRightHandDLists  = localPlayer->rightHandDLists;
-    sSavedPlayerSheathDLists     = localPlayer->sheathDLists;
-    sSavedPlayerWaistDLists      = localPlayer->waistDLists;
-
-    // Bow vs slingshot DList pick — Player_SetModels reads
-    // heldItemAction (NOT inventory) so the default for BOW_SLINGSHOT
-    // resolves to bow. When the Invader is the shooter and child Link
-    // owns only slingshot, force the held-item to slingshot so the
-    // DList picker sees the right weapon. Restore at End. Same shape
-    // as FollowerNPC.cpp:483-500.
-    sSavedHeldItemActionActive = false;
-    if (intendedGroup == PLAYER_MODELGROUP_BOW_SLINGSHOT) {
-        const u8 bowSlot   = INV_CONTENT(ITEM_BOW);
-        const u8 slingSlot = INV_CONTENT(ITEM_SLINGSHOT);
-        const bool hasBow       = (bowSlot   != ITEM_NONE);
-        const bool hasSlingshot = (slingSlot != ITEM_NONE);
-        s8 desired = -1;
-        if (hasSlingshot && !hasBow) {
-            desired = PLAYER_IA_SLINGSHOT;
-        } else if (hasBow && !hasSlingshot) {
-            desired = PLAYER_IA_BOW;
-        }  // both / neither → no override
-        if (desired >= 0 && localPlayer->heldItemAction != desired) {
-            sSavedPlayerHeldItemAction = localPlayer->heldItemAction;
-            sSavedHeldItemActionActive = true;
-            localPlayer->heldItemAction = desired;
-        }
-    }
-
-    // Apply Invader's intended model. Player_SetModels writes
-    // leftHandType/DLists, rightHandType/DLists, sheathType/DLists,
-    // waistDLists from sPlayerDListGroups[type][linkAge]. Does NOT
-    // write modelGroup itself — trailing assignment handles that.
-    Player_SetModels(localPlayer, intendedGroup);
-    localPlayer->modelGroup = (u8)intendedGroup;
-    sEquipmentSwapActive = true;
+    AnchorEquipmentSwap::ApplySwap(localPlayer, intendedGroup,
+                                    sEquipmentSwapState);
 }
 
 extern "C" void Anchor_InvaderDrawEnd(void) {
     sCurrentlyDrawingInvader = nullptr;
 
-    if (!sEquipmentSwapActive) return;
-    sEquipmentSwapActive = false;
-
+    // Tier 1 refactor (2026-06-04) — shared body in
+    // AnchorEquipmentSwap::RestoreSwap. No-op when no swap is active.
     if (gPlayState == nullptr) return;
     Player* localPlayer = GET_PLAYER(gPlayState);
-    if (localPlayer == nullptr) return;
-
-    // Restore. Both the canonical SetModels call (so any internal
-    // bookkeeping inside Player_SetModels remains consistent) AND
-    // the raw fields (defensive — the EquipmentAlwaysVisible branches
-    // inside Player_SetModels may pick slightly different DLists than
-    // the user originally had).
-    Player_SetModels(localPlayer, sSavedPlayerModelGroup);
-    localPlayer->modelGroup      = (u8)sSavedPlayerModelGroup;
-    localPlayer->leftHandType    = sSavedPlayerLeftHandType;
-    localPlayer->rightHandType   = sSavedPlayerRightHandType;
-    localPlayer->sheathType      = sSavedPlayerSheathType;
-    localPlayer->leftHandDLists  = sSavedPlayerLeftHandDLists;
-    localPlayer->rightHandDLists = sSavedPlayerRightHandDLists;
-    localPlayer->sheathDLists    = sSavedPlayerSheathDLists;
-    localPlayer->waistDLists     = sSavedPlayerWaistDLists;
-    if (sSavedHeldItemActionActive) {
-        localPlayer->heldItemAction = sSavedPlayerHeldItemAction;
-        sSavedHeldItemActionActive  = false;
-    }
+    AnchorEquipmentSwap::RestoreSwap(localPlayer, sEquipmentSwapState);
 }
 
 extern "C" Actor* Anchor_GetCurrentlyDrawingInvader(void) {
@@ -3945,7 +3857,10 @@ extern "C" Actor* Anchor_GetCurrentlyDrawingInvader(void) {
 // See FollowerNPC.cpp's Anchor_FollowerNpcDrawStateResetOnSceneTransition
 // for full rationale — same pattern, separate per-actor swap state.
 extern "C" void Anchor_InvaderDrawStateResetOnSceneTransition(void) {
-    sEquipmentSwapActive       = false;
-    sSavedHeldItemActionActive = false;
-    sCurrentlyDrawingInvader   = nullptr;
+    // Tier 1 refactor (2026-06-04) — equipment-swap reset moved to
+    // AnchorEquipmentSwap::ResetForSceneTransition. Per-actor
+    // context pointer reset stays here. Called from the central
+    // OnSceneInit handler in HookHandlers.cpp (Pitfall 22).
+    AnchorEquipmentSwap::ResetForSceneTransition(sEquipmentSwapState);
+    sCurrentlyDrawingInvader = nullptr;
 }
