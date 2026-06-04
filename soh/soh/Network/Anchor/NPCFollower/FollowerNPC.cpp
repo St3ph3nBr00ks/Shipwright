@@ -2337,6 +2337,31 @@ void TickATTACK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     atkCtx.registerATWindow = [this_, play]() {
         PositionAttackQuad(this_);
         CollisionCheck_SetAT(play, &play->colChkCtx, &this_->atCollider.base);
+        // [FollowerNPC.Diag] — issue follow-up to log 369. Mirror of
+        // Invader.cpp:2059-2076. Rate-limited (every 10th call) so a
+        // continuous swing produces a representative sample, not a
+        // flood. Logs both frames of blade endpoints that form the
+        // sweep quad. Used to distinguish "AT registered but missed
+        // the target's collider" from "AT never fired".
+        static int sFollowerATDiagCounter = 0;
+        if (++sFollowerATDiagCounter % 10 == 1) {
+            const float tipDx = this_->swordTip.x  - this_->prevSwordTip.x;
+            const float tipDy = this_->swordTip.y  - this_->prevSwordTip.y;
+            const float tipDz = this_->swordTip.z  - this_->prevSwordTip.z;
+            const float tipDeltaSq = tipDx*tipDx + tipDy*tipDy + tipDz*tipDz;
+            SPDLOG_INFO("[FollowerNPC.Diag] AT registered npcPos=({:.0f},{:.0f},{:.0f}) "
+                        "curTip=({:.0f},{:.0f},{:.0f}) curBase=({:.0f},{:.0f},{:.0f}) "
+                        "prevTip=({:.0f},{:.0f},{:.0f}) prevBase=({:.0f},{:.0f},{:.0f}) "
+                        "tipDeltaSq={:.1f} curFrame={:.1f}",
+                        this_->actor.world.pos.x, this_->actor.world.pos.y,
+                        this_->actor.world.pos.z,
+                        this_->swordTip.x, this_->swordTip.y, this_->swordTip.z,
+                        this_->swordBase.x, this_->swordBase.y, this_->swordBase.z,
+                        this_->prevSwordTip.x, this_->prevSwordTip.y, this_->prevSwordTip.z,
+                        this_->prevSwordBase.x, this_->prevSwordBase.y, this_->prevSwordBase.z,
+                        tipDeltaSq,
+                        this_->skelAnime.curFrame);
+        }
     };
     atkCtx.curAnimFrame     = this_->skelAnime.curFrame;
     atkCtx.endAnimFrame     = this_->skelAnime.endFrame;
