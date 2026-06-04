@@ -3,11 +3,72 @@
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 
 extern "C" {
 #include "macros.h"
 #include "variables.h"
 extern PlayState* gPlayState;
+}
+
+// Distance-based outbound throttle for PLAYER_UPDATE. Mirrors the
+// ENEMY_UPDATE throttle landed in d0638bb5c + d043b4a89. PLAYER_UPDATE
+// is broadcast every frame from every connected client; when peers are
+// far away, the per-frame pos/joint/camera churn doesn't need to fire at
+// the full game rate.
+//
+// Tiers (measured 3D from the local player's world.pos to the NEAREST
+// peer's last-known posRot.pos in the same scene):
+//   < kPlayerThrottleNearDist        no throttle (full rate, ~20-60 Hz)
+//   < kPlayerThrottleFarDist         cap at kPlayerThrottleMidIntervalMs (~15 Hz)
+//   ≥ kPlayerThrottleFarDist         cap at kPlayerThrottleFarIntervalMs (~5 Hz)
+//
+// Critical-edge fields (held-actor, released-actor, linkAge, equipment,
+// csCtxState, sceneNum/entranceIndex/curRoomNum, item state) BYPASS the
+// throttle so sync correctness is preserved — a carry-throw release at
+// 1500u still arrives in the same frame it happened.
+//
+// CVar: gEnhancements.PlayerUpdateThrottleEnabled (default 1).
+constexpr float    kPlayerThrottleNearDist      = 500.0f;
+constexpr float    kPlayerThrottleFarDist       = 1000.0f;
+constexpr uint64_t kPlayerThrottleMidIntervalMs = 66;   // ~15 Hz
+constexpr uint64_t kPlayerThrottleFarIntervalMs = 200;  // ~5 Hz
+
+// Snapshot of last-sent critical-edge fields. Any difference between the
+// current frame's values and this snapshot forces an immediate send,
+// bypassing the throttle. Persists for the process lifetime; sentinel
+// values chosen so the FIRST send after launch always fires (all-zero
+// snapshot won't typically match the first frame's full state).
+struct PlayerUpdateCriticalSnapshot {
+    bool     valid              = false;
+    int32_t  sceneNum           = -1;
+    int8_t   curRoomNum         = -1;
+    int32_t  entranceIndex      = 0;
+    int32_t  linkAge            = -1;
+    uint32_t heldActorNetId     = 0;
+    int8_t   currentBoots       = -1;
+    int8_t   currentShield      = -1;
+    int8_t   currentTunic       = -1;
+    uint8_t  buttonItem0        = 0;
+    int8_t   itemAction         = -1;
+    int8_t   heldItemAction     = -1;
+    uint8_t  modelGroup         = 0;
+    int8_t   csCtxState         = -1;
+    bool     isClimbing         = false;
+    bool     isCrawling         = false;
+    bool     isCarrying         = false;
+    bool     isInvincible       = false;
+};
+
+static PlayerUpdateCriticalSnapshot sLastSentCritical;
+static uint64_t                     sLastPlayerUpdateMs = 0;
+
+static uint64_t PlayerUpdateNowMonotonicMs() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 // File-static tracker for the local player's heldActor netId at the last
@@ -85,6 +146,98 @@ void Anchor::SendPacket_PlayerUpdate() {
         sLastLocalHeldActorNetId = currentHeldActorNetId;
         return;
     }
+
+    // ---- Distance-based outbound throttle (#61 follow-up) ----
+    // Skip this frame's send when peers are far away AND no critical-edge
+    // field changed since the last send. Mirrors the ENEMY_UPDATE throttle.
+    // See file-top constants + PlayerUpdateCriticalSnapshot doc comment.
+    const bool throttleEnabled =
+        CVarGetInteger("gEnhancements.PlayerUpdateThrottleEnabled", 1) != 0;
+
+    // Build the current critical-edge snapshot. Cheap (just reads); we use
+    // it both for the throttle decision and to update sLastSentCritical
+    // after a send actually fires.
+    PlayerUpdateCriticalSnapshot curCritical;
+    curCritical.valid          = true;
+    curCritical.sceneNum       = (int32_t)gPlayState->sceneNum;
+    curCritical.curRoomNum     = (int8_t)gPlayState->roomCtx.curRoom.num;
+    curCritical.entranceIndex  = (int32_t)gSaveContext.entranceIndex;
+    curCritical.linkAge        = (int32_t)gSaveContext.linkAge;
+    curCritical.heldActorNetId = currentHeldActorNetId;
+    curCritical.currentBoots   = (int8_t)player->currentBoots;
+    curCritical.currentShield  = (int8_t)player->currentShield;
+    curCritical.currentTunic   = (int8_t)player->currentTunic;
+    curCritical.buttonItem0    = (uint8_t)gSaveContext.equips.buttonItems[0];
+    curCritical.itemAction     = (int8_t)player->itemAction;
+    curCritical.heldItemAction = (int8_t)player->heldItemAction;
+    curCritical.modelGroup     = (uint8_t)player->modelGroup;
+    curCritical.csCtxState     = (int8_t)gPlayState->csCtx.state;
+    curCritical.isClimbing     =
+        (player->stateFlags1 &
+         (PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_CLIMBING_LADDER)) != 0;
+    curCritical.isCrawling     = (player->stateFlags2 & PLAYER_STATE2_CRAWLING) != 0;
+    curCritical.isCarrying     = (player->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) != 0;
+    curCritical.isInvincible   = (player->invincibilityTimer != 0);
+
+    auto criticalChanged = [&]() -> bool {
+        const PlayerUpdateCriticalSnapshot& a = sLastSentCritical;
+        const PlayerUpdateCriticalSnapshot& b = curCritical;
+        if (!a.valid)                                       return true;
+        if (a.sceneNum       != b.sceneNum)                 return true;
+        if (a.curRoomNum     != b.curRoomNum)               return true;
+        if (a.entranceIndex  != b.entranceIndex)            return true;
+        if (a.linkAge        != b.linkAge)                  return true;
+        if (a.heldActorNetId != b.heldActorNetId)           return true;
+        if (a.currentBoots   != b.currentBoots)             return true;
+        if (a.currentShield  != b.currentShield)            return true;
+        if (a.currentTunic   != b.currentTunic)             return true;
+        if (a.buttonItem0    != b.buttonItem0)              return true;
+        if (a.itemAction     != b.itemAction)               return true;
+        if (a.heldItemAction != b.heldItemAction)           return true;
+        if (a.modelGroup     != b.modelGroup)               return true;
+        if (a.csCtxState     != b.csCtxState)               return true;
+        if (a.isClimbing     != b.isClimbing)               return true;
+        if (a.isCrawling     != b.isCrawling)               return true;
+        if (a.isCarrying     != b.isCarrying)               return true;
+        if (a.isInvincible   != b.isInvincible)             return true;
+        return false;
+    };
+
+    const uint64_t nowMs = PlayerUpdateNowMonotonicMs();
+
+    if (throttleEnabled && !criticalChanged()) {
+        // Compute distance to NEAREST same-scene peer. Tier the cap by it.
+        float bestDistSq = std::numeric_limits<float>::infinity();
+        for (auto& [cid, c] : clients) {
+            if (!c.online || !c.isSaveLoaded || c.self) continue;
+            if (c.sceneNum != gPlayState->sceneNum) continue;
+            float dx = c.posRot.pos.x - player->actor.world.pos.x;
+            float dy = c.posRot.pos.y - player->actor.world.pos.y;
+            float dz = c.posRot.pos.z - player->actor.world.pos.z;
+            float ds = dx * dx + dy * dy + dz * dz;
+            if (ds < bestDistSq) bestDistSq = ds;
+        }
+        uint64_t minIntervalMs = 0;
+        if (std::isfinite(bestDistSq)) {
+            const float bestDist = sqrtf(bestDistSq);
+            if (bestDist > kPlayerThrottleFarDist) {
+                minIntervalMs = kPlayerThrottleFarIntervalMs;
+            } else if (bestDist > kPlayerThrottleNearDist) {
+                minIntervalMs = kPlayerThrottleMidIntervalMs;
+            }
+        }
+        if (minIntervalMs > 0 && sLastPlayerUpdateMs != 0 &&
+            (nowMs - sLastPlayerUpdateMs) < minIntervalMs) {
+            // Throttled this frame. We do NOT update sLastLocalHeldActorNetId
+            // here — the next un-throttled send will compare against the
+            // same baseline, so a release-edge that happens mid-throttle
+            // still fires correctly when the throttle releases (because
+            // currentHeldActorNetId will then differ from the still-stale
+            // sLastLocalHeldActorNetId baseline). Same for sLastSentCritical.
+            return;
+        }
+    }
+    // ---- End throttle gate ----
 
     nlohmann::json payload;
 
@@ -187,6 +340,13 @@ void Anchor::SendPacket_PlayerUpdate() {
             SendJsonToRemote(payload);
         }
     }
+
+    // Update throttle bookkeeping AFTER a successful send. Critical-edge
+    // snapshot and last-send timestamp captured here only; throttled frames
+    // leave these untouched so a delayed critical-edge change is detected
+    // against the last-actually-sent baseline.
+    sLastSentCritical   = curCritical;
+    sLastPlayerUpdateMs = nowMs;
 }
 
 void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
