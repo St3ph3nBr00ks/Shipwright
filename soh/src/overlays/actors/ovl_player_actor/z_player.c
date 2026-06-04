@@ -7471,6 +7471,39 @@ s32 Player_ActionHandler_2(Player* this, PlayState* play) {
                         }
                     }
 
+                    // Pillar G.ii v2 — MP-aware non-blocking chest open
+                    // (Path 2, BTN_A direct-open). Sibling of the Path 1
+                    // gate above (~line 7391). Same policy: iconic items
+                    // keep the vanilla cutscene; everything else in MP
+                    // pops the chest open visually + emits a Notification
+                    // toast, no freeze.
+                    //
+                    // Chest-specific preservation in the non-blocking path:
+                    //   - Play box_kick animation (chest open visual cue)
+                    //   - Set chest->unk_1F4 = -1 (fast-open visual state)
+                    //   - SKIP Player_SetupWaitForPutAway / cutscene action
+                    //   - SKIP stateFlags1 = GETTING_ITEM | IN_CUTSCENE
+                    //   - SKIP func_80832224 (cutscene state init)
+                    //   - SKIP chest reposition + camera change
+                    // Player retains full control throughout.
+                    {
+                        int presentationMode = Anchor_GetItemPresentationMode(
+                            (int16_t)giEntry.getItemId);
+                        if (presentationMode == ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY) {
+                            // Open the chest visually first so the lid pops
+                            // and the player gets the standard feedback.
+                            chest->unk_1F4 = -1;
+                            Player_AnimPlayOnce(play, this, &gPlayerAnim_link_normal_box_kick);
+
+                            Anchor_GiveItemNonBlocking(
+                                (int16_t)giEntry.getItemId,
+                                (uint8_t)giEntry.itemId);
+                            this->getItemId = GI_NONE;
+                            this->getItemEntry = (GetItemEntry)GET_ITEM_NONE;
+                            return 1;
+                        }
+                    }
+
                     if (GameInteractor_Should(VB_GIVE_ITEM_FROM_CHEST, true, chest)) {
                         Player_SetupWaitForPutAway(play, this, func_8083A434);
                     }
