@@ -228,6 +228,27 @@ void EnInvader_Init(Actor* thisx, PlayState* play) {
     this->prevSwordTip.x  = 0.0f; this->prevSwordTip.y  = 0.0f; this->prevSwordTip.z  = 0.0f;
     this->prevSwordBase.x = 0.0f; this->prevSwordBase.y = 0.0f; this->prevSwordBase.z = 0.0f;
 
+    // Fix 2 (Plans/invader_per_room_authority_handoff.md §3.1 + OQ1 = 3.1a.A).
+    // Per-Invader authority key — captures (scene, room, timeline) at
+    // spawn time so the peer-replica gate in Anchor_TickInvaderActor can
+    // ask "am I the room host of THIS Invader's tracked room?". Reads
+    // gPlayState / gSaveContext directly (matches the SceneAuthority
+    // GetRoomHostClientId self-state convention — see
+    // SceneAuthority.cpp:46-49 self-state quirk note).
+    //
+    // play may be null in extreme edge cases (defensive — Actor_Spawn
+    // always supplies it, but mirror EnInvader_Init's other null checks);
+    // fall back to the actor's own scene if gPlayState happens to be
+    // unavailable.
+    if (play != NULL) {
+        this->trackedScene    = (s16)play->sceneNum;
+        this->trackedRoom     = (s8)play->roomCtx.curRoom.num;
+    } else {
+        this->trackedScene    = -1;
+        this->trackedRoom     = -1;
+    }
+    this->trackedTimeline = (u8)(gSaveContext.linkAge & 0x1);
+
     // Player-equivalent scale + shadow. Matches Link's footprint so
     // the Invader visually reads as a hostile Link, not a giant.
     Actor_SetScale(thisx, 0.01f);
