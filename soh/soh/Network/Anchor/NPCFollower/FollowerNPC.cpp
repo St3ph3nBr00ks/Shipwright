@@ -2278,19 +2278,14 @@ Actor* FindNearestEnemyForAttack(EnFollower* this_, PlayState* play, float maxRa
 // two paths can't diverge again. When DR-2 / B.5 lands the combat
 // extract to `Common/AICombat/`, this stays.
 void PositionAttackQuad(EnFollower* this_) {
-    // Fix B sweep quad — see Invader.cpp's PositionAttackQuad for the
-    // rationale. Single-snapshot Anchor_BuildAtQuadFromBlade is
-    // replaced with Anchor_BuildSweepAtQuadFromBlade so the quad
-    // covers the area between previous and current frame's blade
-    // poses — vanilla Player's geometry.
-    Vec3f bottomLeft, bottomRight, topLeft, topRight;
-    Anchor_BuildSweepAtQuadFromBlade(
+    // Tier 1 refactor (2026-06-04) — body extracted to
+    // Anchor_PositionAttackQuadFromBlade. Wrapper kept as the
+    // per-actor binding point because it knows the EnFollower
+    // blade-field layout. See Plans/npc_helpers_tier1_extract.md.
+    Anchor_PositionAttackQuadFromBlade(
         &this_->prevSwordTip, &this_->prevSwordBase,
         &this_->swordTip,     &this_->swordBase,
-        &bottomLeft, &bottomRight,
-        &topLeft,    &topRight);
-    Collider_SetQuadVertices(&this_->atCollider, &bottomLeft, &bottomRight,
-                              &topLeft, &topRight);
+        &this_->atCollider);
 }
 
 // ATTACK handler — locks NPC in place, faces target, plays swing

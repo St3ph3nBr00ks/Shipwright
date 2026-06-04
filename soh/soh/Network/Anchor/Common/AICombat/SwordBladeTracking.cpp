@@ -83,3 +83,19 @@ extern "C" void Anchor_BuildSweepAtQuadFromBlade(
     *outTopLeft     = *prevTip;
     *outTopRight    = *curTip;
 }
+
+// Tier 1 refactor (2026-06-04) — extracted from byte-identical
+// PositionAttackQuad wrappers in FollowerNPC.cpp and Invader.cpp.
+// Composes the sweep-quad build with the collider vertex set so
+// the per-actor wrappers reduce to a one-line forward.
+void Anchor_PositionAttackQuadFromBlade(
+    const Vec3f* prevTip, const Vec3f* prevBase,
+    const Vec3f* curTip,  const Vec3f* curBase,
+    struct ColliderQuad* atCollider) {
+    Vec3f bottomLeft, bottomRight, topLeft, topRight;
+    Anchor_BuildSweepAtQuadFromBlade(
+        prevTip, prevBase, curTip, curBase,
+        &bottomLeft, &bottomRight, &topLeft, &topRight);
+    Collider_SetQuadVertices(atCollider, &bottomLeft, &bottomRight,
+                             &topLeft, &topRight);
+}

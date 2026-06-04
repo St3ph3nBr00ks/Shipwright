@@ -106,6 +106,18 @@ void Anchor_BuildSweepAtQuadFromBlade(
     Vec3f* outBottomLeft, Vec3f* outBottomRight,
     Vec3f* outTopLeft, Vec3f* outTopRight);
 
+// Tier 1 refactor (2026-06-04) — convenience wrapper combining the
+// quad construction above with Collider_SetQuadVertices, extracted
+// from byte-identical PositionAttackQuad wrappers in NPC Follower
+// (FollowerNPC.cpp:2280-2294) and NPC Invader (Invader.cpp:1947-1961).
+// Per-actor wrappers now reduce to a one-line forward to this helper
+// loaded with the actor's prev/cur blade fields and its atCollider.
+// See Plans/npc_helpers_tier1_extract_2026-06-03.md item 2.
+void Anchor_PositionAttackQuadFromBlade(
+    const Vec3f* prevTip, const Vec3f* prevBase,
+    const Vec3f* curTip,  const Vec3f* curBase,
+    struct ColliderQuad* atCollider);
+
 #ifdef __cplusplus
 }
 #endif

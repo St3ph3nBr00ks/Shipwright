@@ -1945,20 +1945,14 @@ Actor* PickHostileTarget(Actor* self, PlayState* play, float maxRange,
 // gets the matching rewrite in this same commit).
 // ---------------------------------------------------------------------
 void PositionAttackQuad(EnInvader* this_) {
-    // Fix B (log 358 follow-up): sweep quad between previous and
-    // current frame's blade poses. Previously this used the single-
-    // snapshot Anchor_BuildAtQuadFromBlade with an 8u perpendicular
-    // halfWidth — quad area was ~5× smaller than vanilla Player's
-    // sweep quad, producing the "Invader's hit zone is quite small"
-    // user report. New geometry mirrors vanilla Player exactly.
-    Vec3f bottomLeft, bottomRight, topLeft, topRight;
-    Anchor_BuildSweepAtQuadFromBlade(
+    // Tier 1 refactor (2026-06-04) — body extracted to
+    // Anchor_PositionAttackQuadFromBlade. Fix B (log 358 follow-up)
+    // sweep-quad rationale lives in the helper now. Wrapper kept
+    // as the per-actor binding point.
+    Anchor_PositionAttackQuadFromBlade(
         &this_->prevSwordTip, &this_->prevSwordBase,
         &this_->swordTip,     &this_->swordBase,
-        &bottomLeft, &bottomRight,
-        &topLeft,    &topRight);
-    Collider_SetQuadVertices(&this_->atCollider, &bottomLeft, &bottomRight,
-                             &topLeft, &topRight);
+        &this_->atCollider);
 }
 
 // Tier 1 refactor (2026-06-04) — IsFrontalAttacker extracted to
