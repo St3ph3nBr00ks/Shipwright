@@ -5,6 +5,9 @@
 #include "EquipmentSwap.h"
 
 extern "C" {
+#include "variables.h"  // gSaveContext, gItemSlots — INV_CONTENT macro
+                        // expands to gSaveContext.inventory.items[
+                        // gItemSlots[item]] (Pitfall 9).
 #include "functions.h"  // Player_SetModels
 #include "macros.h"     // INV_CONTENT, ITEM_BOW/SLINGSHOT/NONE, PLAYER_IA_*
 #include "z64player.h"  // PLAYER_MODELGROUP_BOW_SLINGSHOT
