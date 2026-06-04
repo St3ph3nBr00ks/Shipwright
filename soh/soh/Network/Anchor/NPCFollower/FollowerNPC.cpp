@@ -834,12 +834,10 @@ bool IsLocalOwnerNPC(Actor* npc) {
 // (LocalNpcNavState + sLocalNav defined at file scope above so the
 // spawn helper can reset them.)
 
-// Compute XZ distance squared between two world positions.
-inline float Dist2DSq(const Vec3f& a, const Vec3f& b) {
-    const float dx = a.x - b.x;
-    const float dz = a.z - b.z;
-    return dx * dx + dz * dz;
-}
+// Tier 1 refactor (2026-06-04) — Dist2DSq migrated to the existing
+// AnchorDist::DistXZSq helper at Common/DistanceMath.h. The local
+// inline was byte-identical to the shared one. Call sites updated
+// in this same commit.
 
 // Yaw toward target XZ (s16 binary angle).
 inline s16 YawTowardTarget(const Vec3f& from, const Vec3f& to) {
@@ -1018,7 +1016,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // band, NPC effectively halts at the current distance. The
     // IDLE re-entry check (distToTargetSq <= kEnterIdle²) handles
     // the IDLE switch when NPC drifts in further.
-    const float distToLeaderSq = Dist2DSq(a->world.pos, leaderPos);
+    const float distToLeaderSq = AnchorDist::DistXZSq(a->world.pos, leaderPos);
     Player*     leader         = GET_PLAYER(play);
     const float leaderSpeed    = (leader != nullptr) ? leader->actor.speedXZ : 0.0f;
     float       speed;
@@ -1104,7 +1102,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     if (progressLogTicks > 0 &&
         curFrame >= sLocalNav.lastFollowProgressLogFrame + (uint64_t)progressLogTicks) {
         const float distToSubgoal = std::sqrt(
-            Dist2DSq(a->world.pos, nav.subgoal));
+            AnchorDist::DistXZSq(a->world.pos, nav.subgoal));
         const float distToLeader = std::sqrt(distToLeaderSq);
         SPDLOG_INFO("[FollowerNPC.follow] pos=({:.0f},{:.0f},{:.0f}) "
                     "target=({:.0f},{:.0f},{:.0f}) path.size={} path.idx={} "
@@ -1997,7 +1995,7 @@ const ::AnchorNavRoom::LedgeAnchor* FindClosestLedgeAnchor(
     const ::AnchorNavRoom::LedgeAnchor* best = nullptr;
     float bestDistSq = std::numeric_limits<float>::max();
     for (const auto& anc : navData->ledgeAnchors) {
-        const float distSq = Dist2DSq(nearPos, anc.approachPos);
+        const float distSq = AnchorDist::DistXZSq(nearPos, anc.approachPos);
         if (distSq > kHoistApproachMatchXZSq) continue;
         const float lift = anc.topPos.y - nearPos.y;
         if (lift < 20.0f) continue;  // too low; standard step / nothing to hoist
@@ -3777,7 +3775,7 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
             anchor = nullptr;
         }
         if (anchor != nullptr) {
-            const float distBaseSq = Dist2DSq(npc->world.pos, anchor->basePos);
+            const float distBaseSq = AnchorDist::DistXZSq(npc->world.pos, anchor->basePos);
             if (distBaseSq < kClimbForceEngageBaseDistSq) {
                 if (PopulateAnchorClimbPath(navData, *anchor,
                                             npc->world.pos, leaderPos,

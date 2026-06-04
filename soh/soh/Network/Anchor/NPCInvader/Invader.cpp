@@ -235,11 +235,10 @@ static CrawlInvState sCrawlInvState;
 // functions; kept inside this TU rather than reaching into
 // FollowerNPC's anonymous namespace.
 // ---------------------------------------------------------------------
-inline float Dist2DSq(const Vec3f& a, const Vec3f& b) {
-    const float dx = a.x - b.x;
-    const float dz = a.z - b.z;
-    return dx * dx + dz * dz;
-}
+// Tier 1 refactor (2026-06-04) — Dist2DSq migrated to the existing
+// AnchorDist::DistXZSq helper at Common/DistanceMath.h. The local
+// inline was byte-identical to the shared one. Call sites updated
+// in this same commit.
 
 inline s16 YawTowardTarget(const Vec3f& from, const Vec3f& to) {
     return Math_Atan2S(to.z - from.z, to.x - from.x);
@@ -924,7 +923,7 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     // the subgoal) so pursuit pace stays correlated with how far the
     // chase ultimately is. Substrate routing doesn't change the
     // runtime-energy band.
-    const float distSq = Dist2DSq(a->world.pos, targetPos);
+    const float distSq = AnchorDist::DistXZSq(a->world.pos, targetPos);
     const float dist   = std::sqrt(distSq);
     a->speedXZ = (dist > kInvRunDistance) ? kInvRunSpeed : kInvWalkSpeed;
 
@@ -1007,7 +1006,7 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     if (progressLogTicks > 0 &&
         curFrame >= sLocalInvNav.lastFollowProgressLogFrame + (uint64_t)progressLogTicks) {
         const float distToSubgoal = std::sqrt(
-            Dist2DSq(a->world.pos, nav.subgoal));
+            AnchorDist::DistXZSq(a->world.pos, nav.subgoal));
         SPDLOG_INFO("[Invader.follow] pos=({:.0f},{:.0f},{:.0f}) "
                     "target=({:.0f},{:.0f},{:.0f}) path.size={} path.idx={} "
                     "distToSubgoal={:.0f}u distToTarget={:.0f}u speedXZ={:.1f} "
@@ -1539,7 +1538,7 @@ bool TryEngageAutoClimbInv(EnInvader* this_, PlayState* play, Actor* target) {
         FindClosestClimbAnchorInv(navData, target->world.pos);
     if (anchor == nullptr) return false;
 
-    const float distBaseSq = Dist2DSq(this_->actor.world.pos, anchor->basePos);
+    const float distBaseSq = AnchorDist::DistXZSq(this_->actor.world.pos, anchor->basePos);
     if (distBaseSq >= kInvClimbForceEngageBaseDistSq) return false;
 
     // Anchor-overhead sanity gate (2026-05-19, log 253 fix). If the
