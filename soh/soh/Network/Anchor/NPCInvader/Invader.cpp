@@ -2961,7 +2961,35 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     if (invader == nullptr || play == nullptr) return;
     EnInvader* this_ = (EnInvader*)invader;
 
-    // Peer-replica branch (2026-05-20, bug 2 log 67). On non-host
+    // Fix 2 (Plans/invader_per_room_authority_handoff.md §3.1) — refresh
+    // the per-Invader authority key each tick from the local PlayState.
+    // EnInvader_Init populates these at spawn, but the actor's room
+    // could change later (rare — v1 Invader doesn't pursue across
+    // rooms, but defensive in case a future feature relocates the
+    // Invader between rooms within the same scene). Updating once per
+    // tick keeps the authority gate consistent with where the actor
+    // actually lives.
+    //
+    // Don't touch sentinel -1 values from Init's null-play fallback —
+    // overwrite them with real values now that we definitely have a
+    // valid play context.
+    this_->trackedScene    = (s16)play->sceneNum;
+    this_->trackedRoom     = (s8)play->roomCtx.curRoom.num;
+    this_->trackedTimeline = (u8)(gSaveContext.linkAge & 0x1);
+
+    // Per-Invader authority for this tick. Was previously gated on
+    // global SceneAuthority::IsEffectiveHost() — Fix 2 §3.1 switches to
+    // per-(scene, room, timeline) authority so when the global effective
+    // host transitions out of the Invader's room (death respawn,
+    // intentional scene change), a peer who remains in the room becomes
+    // the room host and takes over the Invader's state machine without
+    // the Invader freezing or being re-instantiated.
+    const bool iAmAuthorityForThisInvader =
+        ::SceneAuthority::IsRoomHost(this_->trackedScene,
+                                     this_->trackedRoom,
+                                     this_->trackedTimeline);
+
+    // Peer-replica branch (2026-05-20, bug 2 log 67). On non-authority
     // clients, the Invader's state machine should NOT run — the
     // owner broadcasts authoritative pos + state via ENEMY_STATE,
     // peer applies + picks anim from the synced fields. Without this
@@ -2976,7 +3004,7 @@ extern "C" void Anchor_TickInvaderActor(Actor* invader, PlayState* play) {
     // (skip Actor_MoveXZGravity, drive playSpeed + step-phase SFX when
     // walking) are candidate for helper extraction once a third
     // consumer surfaces.
-    if (!::SceneAuthority::IsEffectiveHost() && this_->syncedHasState) {
+    if (!iAmAuthorityForThisInvader && this_->syncedHasState) {
         // Apply synced state to the actor so anim picking + state-
         // dependent renders (modelGroup swap in DrawBegin, head-look
         // gate, etc.) see the owner's truth.

@@ -253,6 +253,39 @@ typedef struct EnInvader {
     // single-snapshot quad it replaces.
     Vec3f prevSwordTip;
     Vec3f prevSwordBase;
+
+    // Per-Invader authority key (Fix 2 — Plans/invader_per_room_authority_handoff.md
+    // §3.1 + OQ1 resolution 3.1a.A). Captures the (sceneNum, roomNum,
+    // timeline) tuple that this Invader is "anchored" to for the purpose
+    // of per-room authority election. The peer-replica gate in
+    // Anchor_TickInvaderActor consults SceneAuthority::IsRoomHost against
+    // these values to decide whether the local client should run the AI
+    // state machine for THIS Invader.
+    //
+    // Why on the actor (not on Director's per-netId state): the actor
+    // tick runs on every client every frame (called from
+    // EnInvader_Update), but Director's mActiveInvaders only exists on
+    // the global-effective-host (today). The gate fires per-actor so the
+    // data must live where the actor can read it without bouncing
+    // through the Director.
+    //
+    // Lifecycle:
+    //   - Set in EnInvader_Init from gPlayState->sceneNum /
+    //     roomCtx.curRoom.num / (gSaveContext.linkAge & 0x1) at spawn.
+    //   - Updated whenever the Invader transitions rooms (rare for v1;
+    //     the v1 Invader doesn't pursue across rooms but lifecycle
+    //     correctness still requires updating it if a future event
+    //     does relocate the Invader).
+    //   - Read by the peer-replica gate (Invader.cpp,
+    //     Anchor_TickInvaderActor) and InvaderDescriptor::OnTick's
+    //     reconcile gate.
+    //
+    // Initial value -1 / -1 / 0 is the "uninitialized" sentinel — the
+    // gate falls back to global effective-host semantics until the
+    // first Init sets these.
+    s16 trackedScene;
+    s8  trackedRoom;
+    u8  trackedTimeline;
 } EnInvader;
 
 #ifdef __cplusplus
