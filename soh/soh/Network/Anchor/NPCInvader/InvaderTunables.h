@@ -109,10 +109,22 @@ inline constexpr float kInvCrawlExitYDrop      = 20.0f;
 // outside 1000u the Invader returns to IDLE so target picker may
 // select a different hostile. Y gate prevents the "target on ledge
 // above" false-arrival oscillation (log 263 fix class).
+//
+// Hysteresis split (#240, 2026-06-04 — log 364 thrash):
+//   - dist >= kInvFollowEnterDist (80u) → IDLE → FOLLOW
+//   - dist <= kInvFollowIdleDist  (60u) → FOLLOW → IDLE
+// Gives a 20u dead band [60u, 80u] where the NPC stays in its current
+// state. Without the split, IDLE→FOLLOW fired whenever PickHostileTarget
+// returned non-null, producing the immediate FOLLOW→IDLE→FOLLOW thrash
+// at the boundary (8× transitions in 600ms in log 364 lines 1379-1388).
+// Mirrors NPC Follower's kEnterFollow=80 / kEnterIdle=50 (FollowerNpcTunables.h).
 inline constexpr float kInvFollowEngageDist = 1000.0f;
 inline constexpr float kInvFollowIdleDist   = 60.0f;
 inline constexpr float kInvFollowIdleY      = 40.0f;
-inline constexpr AnchorAI::ThresholdPair kInvFollowIdleBand = { kInvFollowIdleDist, kInvFollowIdleY };
+inline constexpr float kInvFollowEnterDist  = 80.0f;
+inline constexpr float kInvFollowEnterY     = 60.0f;
+inline constexpr AnchorAI::ThresholdPair kInvFollowIdleBand  = { kInvFollowIdleDist,  kInvFollowIdleY  };
+inline constexpr AnchorAI::ThresholdPair kInvFollowEnterBand = { kInvFollowEnterDist, kInvFollowEnterY };
 inline constexpr float kInvWalkSpeed        = 5.04f;
 inline constexpr float kInvRunSpeed         = 5.376f;
 inline constexpr float kInvRunDistance      = 200.0f;

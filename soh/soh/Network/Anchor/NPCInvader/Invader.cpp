@@ -725,6 +725,19 @@ void TickIDLE(EnInvader* this_, PlayState* play) {
                                        /*maxYDelta=*/kRangedYFilter);
     if (target != nullptr) {
         sLocalInvNav.lastTarget = target;
+
+        // #240 — hysteresis enter check. Without this, the IDLE→FOLLOW
+        // transition fires whenever the picker returns a non-null
+        // target, regardless of distance. Combined with FOLLOW→IDLE
+        // arrival at 60u, that produced a same-frame thrash at the
+        // boundary (log 364 lines 1379-1388: 8 FOLLOW→IDLE transitions
+        // in 600ms). The enter check at 80u gives a 20u dead band so
+        // the NPC stays put within [60u, 80u].
+        if (!AnchorAI::ShouldPursue3D(a->world.pos, target->world.pos,
+                                       kInvFollowEnterBand)) {
+            return;  // target acquired but inside dead band — stay IDLE
+        }
+
         this_->state = EN_INVADER_STATE_FOLLOW;
         // Reset stuck baseline on transition so the FOLLOW handler
         // measures progress from the engagement point.
