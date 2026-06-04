@@ -5653,46 +5653,16 @@ void func_8083A40C(PlayState* play, Player* this) {
 }
 
 void func_8083A434(PlayState* play, Player* this) {
-    // Pillar G.ii — MP-aware item-get presentation gate. Routes through
-    // the GameTimeController bridge so each getItem id can independently
-    // pick between the vanilla freeze cutscene and the non-blocking
-    // Notification toast path. Defaults: single-player + the 6-item
-    // iconic allowlist (ocarinas / Light Arrows / Great Fairy spells)
-    // + Ice Trap keep the vanilla freeze; everything else in MP routes
-    // to the toast. Master CVar `gEnhancements.Anchor.NonBlockingItemGet`
-    // (default 1) is a kill switch — set to 0 to revert to vanilla
-    // everywhere at runtime.
-    //
-    // Songs, medallions, spiritual stones, and Master Sword use their
-    // own dedicated cutscene paths that bypass this function entirely,
-    // so they keep their full cutscenes automatically without needing
-    // an explicit allowlist entry here.
-    //
-    // Belt-and-suspenders runtime guard: when `talkActor != NULL` the
-    // pickup is part of an NPC dialog / trade-quest exchange. The
-    // vanilla Player_Action_8084E6D4 runs func_8084DF6C to clear
-    // `exchangeItemId` and re-enter the talk loop; bypassing leaves
-    // exchange state stuck → trade-quest corruption. Force Vanilla
-    // for any talk-actor pickup regardless of getItem id. This also
-    // preserves NPC-given iconic items (Saria's Ocarina, Zelda's
-    // Light Arrows, Great Fairy spells) even if their GI_* values
-    // ever drop off the allowlist by accident.
-    {
-        int isNpcDialogGive = (this->talkActor != NULL);
-        int presentationMode = isNpcDialogGive
-            ? ANCHOR_ITEM_PRESENTATION_VANILLA
-            : Anchor_GetItemPresentationMode((int16_t)this->getItemId);
-        if (presentationMode == ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY) {
-            // Skip the vanilla cutscene entirely. Inventory write +
-            // Notification toast happen inside the bridge helper.
-            // Player retains full control — no PLAYER_STATE1_GETTING_ITEM,
-            // no IN_CUTSCENE flag, no camera pan, no action handler swap.
-            Anchor_GiveItemNonBlocking((int16_t)this->getItemId,
-                                       (uint8_t)this->getItemEntry.itemId);
-            return;
-        }
-    }
-
+    // Pillar G.ii Note: an earlier attempt gated the freeze here, but
+    // this function is the AFTER-put-away callback — the real cutscene
+    // setup (camera, anim, stateFlags1) happens at the CALLER (around
+    // z_player.c:7421-7434 + sibling at 7463-7468) BEFORE this runs.
+    // Gating here leaves the player stuck in GETTING_ITEM with no
+    // action handler. The correct gate site is the caller's
+    // `if (showItemCutscene && !skipItemCutscene && ...)` branch in
+    // Player_Action_808493AC. See bridge helpers
+    // Anchor_GetItemPresentationMode / Anchor_GiveItemNonBlocking
+    // (GameTimeControllerBridge.h) for the policy + non-blocking give.
     Player_SetupActionPreserveAnimMovement(play, this, Player_Action_8084E6D4, 0);
 
     this->stateFlags1 |= PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_IN_CUTSCENE;
