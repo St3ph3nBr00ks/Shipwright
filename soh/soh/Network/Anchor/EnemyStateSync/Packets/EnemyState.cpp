@@ -587,6 +587,14 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     auto payload = EnemyStateSync::BuildBaseEnemyStatePayload(
         EnemyStateSync::LifecyclePhase::Alive, netId, /*phaseChanged=*/false);
     payload["sceneNum"] = gPlayState->sceneNum;
+    // actorId on every ENEMY_STATE outbound — Phase 5 Step 1 (#62
+    // bandwidth audit, 2026-06-04) needs it to bucket by actor type
+    // rather than per-instance netId. ENEMY_SPAWN (phase=Alive
+    // phaseChanged=true) already includes it; this matches the update
+    // path. ~5-13 wire bytes (e.g. `"actorId":85,`) vs typical
+    // 100-200 byte payload — small overhead, enables clean profiling
+    // without an out-of-band lookup at audit time.
+    payload["actorId"]  = actor->id;
     payload["pos"]      = actor->world.pos;
     payload["rot"]      = actor->world.rot;
     payload["shapeRot"] = actor->shape.rot;
