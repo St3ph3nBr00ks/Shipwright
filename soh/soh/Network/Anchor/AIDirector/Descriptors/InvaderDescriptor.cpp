@@ -32,6 +32,7 @@
                            // (TWO levels up — Descriptors/ is nested under AIDirector/ which is
                            // under Anchor/; relative path Director.h is one level up but Anchor.h
                            // is two)
+#include "../../Common/SceneAuthority.h"  // Fix 2 §3.2 — IsRoomHost gate on reconcile
 #include "../Director.h"
 
 #include "soh/cvar_prefixes.h"
@@ -52,6 +53,7 @@
 extern "C" {
 #include "z64.h"
 #include "z64actor.h"
+#include "variables.h"  // gSaveContext — Fix 2 §3.2 timeline derivation for IsRoomHost call
 #include "macros.h"     // GET_ACTIVE_CAM — local-player camera lookup for LOS gate
 #include "functions.h"  // BgCheck_AnyLineTest1 — LOS raycast for camera visibility gate
 // gEnInvaderId — runtime-allocated actor id for ACTOR_EN_INVADER.
@@ -1052,8 +1054,33 @@ void InvaderDescriptor::OnTick(Director& director, const SessionView& view) {
         const bool sceneSettled =
             director.GetFramesSinceLocalSceneChange() >= (uint64_t)graceFrames;
 
+        // Fix 2 §3.2 — per-room authority gate on reconcile. Reconcile re-
+        // instantiates the Invader via a fresh ENEMY_SPAWN, which is only
+        // valid when the local client is the room host of the Invader's
+        // tracked (scene, room, timeline). Otherwise two clients could
+        // race to reconcile the same dangling netId — global effective
+        // host (running Director.Tick today) AND any peer who happens to
+        // also be in the tracked room. After §3.6.B flips Director.Tick's
+        // gate to IsMyCurrentRoomHost, only the room host runs OnTick at
+        // all, so this gate becomes redundant for that path; but it's
+        // still belt-and-suspenders for cross-room cases where Director
+        // tracks an Invader in a different (scene, room) than the one
+        // the local client is currently in.
+        //
+        // Timeline is derived from the local linkAge — same convention as
+        // every other IsRoomHost call site (HookHandlers ENEMY_STATE
+        // broadcast site, DamageEnemy forward, Invader.cpp peer-replica
+        // branch). The Invader actor itself doesn't carry a timeline at
+        // descriptor level; the tracked age is implicit in "which client
+        // is in the tracked scene/room with the matching linkAge."
+        const uint8_t reconcileTimeline = (uint8_t)(gSaveContext.linkAge & 0x1);
+        const bool iAmRoomHostForInvader =
+            ::SceneAuthority::IsRoomHost(state.lastKnownSceneNum,
+                                         state.lastKnownRoomNum,
+                                         reconcileTimeline);
+
         if (!hostActorPresent && hostInTrackedScene && anyValid != nullptr &&
-            sceneSettled) {
+            sceneSettled && iAmRoomHostForInvader) {
             // Per user spec (2026-06-04, field-test log 362 follow-up):
             // when any other player remains active in the Invader's
             // tracked scene+room, the Invader should preserve its
