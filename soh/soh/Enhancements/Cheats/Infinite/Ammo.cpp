@@ -1,5 +1,6 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/OTRGlobals.h"
 #include "soh/ShipInit.hpp"
 #include "z64save.h"
@@ -12,7 +13,10 @@ extern SaveContext gSaveContext;
 
 #define CVAR_INFINITE_AMMO_NAME CVAR_CHEAT("InfiniteAmmo")
 #define CVAR_INFINITE_AMMO_DEFAULT 0
-#define CVAR_INFINITE_AMMO_VALUE CVarGetInteger(CVAR_INFINITE_AMMO_NAME, CVAR_INFINITE_AMMO_DEFAULT)
+// Settings-sync v1 — InfiniteAmmo is class B (drift causes unfairness
+// — host's 100-arrow stockpile vs. peer's 30 left after sharing kills).
+// Reads route through AnchorCVarSync; falls back to local on disconnect.
+#define CVAR_INFINITE_AMMO_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_INFINITE_AMMO_NAME, CVAR_INFINITE_AMMO_DEFAULT)
 
 void OnGameFrameUpdateInfiniteAmmo() {
     if (!GameInteractor::IsSaveLoaded(true)) {

@@ -534,7 +534,7 @@ void PressRandomButton::_Apply() {
 GameInteractionEffectQueryResult AddOrTakeAmmo::CanBeApplied() {
     if (!GameInteractor::IsSaveLoaded(true)) {
         return GameInteractionEffectQueryResult::TemporarilyNotPossible;
-    } else if (parameters[1] != ITEM_BEAN && CVarGetInteger(CVAR_CHEAT("InfiniteAmmo"), 0)) {
+    } else if (parameters[1] != ITEM_BEAN && Anchor_GetEnforcedInt(CVAR_CHEAT("InfiniteAmmo"), 0)) {
         return GameInteractionEffectQueryResult::NotPossible;
     } else if (!GameInteractor::CanAddOrTakeAmmo(parameters[0], parameters[1])) {
         return GameInteractionEffectQueryResult::NotPossible;

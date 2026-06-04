@@ -104,10 +104,10 @@ void EnBlkobj_DarkLinkFight(EnBlkobj* this, PlayState* play) {
         // Dark Link room completed.
         // Check for if Dark Link is defeated in authentic gameplay.
         // Check for if all enemies are defeated with enemy randomizer or crowd control on.
-        uint8_t roomCleared = (!CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
+        uint8_t roomCleared = (!Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
                                !(CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) &&
                                Actor_Find(&play->actorCtx, ACTOR_EN_TORCH2, ACTORCAT_BOSS) == NULL) ||
-                              ((CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
+                              ((Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
                                 (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0))) &&
                                Flags_GetTempClear(play, this->dyna.actor.room));
         if (roomCleared) {

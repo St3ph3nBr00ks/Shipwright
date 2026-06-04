@@ -359,7 +359,7 @@ void KaleidoScope_HandleItemCycles(PlayState* play) {
     // in case it currently holds a mask
     // to allow adult link to wear it if the setting is enabled
     gSlotAgeReqs[SLOT_TRADE_CHILD] =
-        (CVarGetInteger(CVAR_ENHANCEMENT("AdultMasks"), 0) || CVarGetInteger(CVAR_CHEAT("TimelessEquipment"), 0)) &&
+        (CVarGetInteger(CVAR_ENHANCEMENT("AdultMasks"), 0) || Anchor_GetEnforcedInt(CVAR_CHEAT("TimelessEquipment"), 0)) &&
                 INV_CONTENT(ITEM_TRADE_CHILD) >= ITEM_MASK_KEATON && INV_CONTENT(ITEM_TRADE_CHILD) <= ITEM_MASK_TRUTH
             ? AGE_REQ_NONE
             : AGE_REQ_CHILD;
@@ -367,7 +367,7 @@ void KaleidoScope_HandleItemCycles(PlayState* play) {
     // also update the age requirements for the masks itself
     for (int i = ITEM_MASK_KEATON; i <= ITEM_MASK_TRUTH; i += 1) {
         gItemAgeReqs[i] =
-            CVarGetInteger(CVAR_ENHANCEMENT("AdultMasks"), 0) || CVarGetInteger(CVAR_CHEAT("TimelessEquipment"), 0)
+            CVarGetInteger(CVAR_ENHANCEMENT("AdultMasks"), 0) || Anchor_GetEnforcedInt(CVAR_CHEAT("TimelessEquipment"), 0)
                 ? AGE_REQ_NONE
                 : AGE_REQ_CHILD;
     }

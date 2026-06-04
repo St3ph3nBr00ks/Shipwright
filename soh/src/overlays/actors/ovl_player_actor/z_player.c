@@ -37,11 +37,13 @@
 #include <stdlib.h>
 #include <assert.h>
 
-// Settings-sync v1 — host-authoritative read of class-A damage
-// multipliers. Forward-decl uses plain `extern` (Pitfall 7); the
-// real definition lives in Common/EnforcedCVars.cpp with C linkage.
-// Falls back to local CVarGetInteger on disconnect / unknown name.
-extern int Anchor_GetEnforcedInt(const char* cvarName, int localDefault);
+// Settings-sync v1 — host-authoritative read of the audited enforced
+// CVars (damage multipliers, ammo, speed, climb, tunic, shield, etc).
+// Forward-decl uses plain `extern` (Pitfall 7); real definitions live
+// in Common/EnforcedCVars.cpp with C linkage. Both fall back to local
+// CVarGetInteger / CVarGetFloat on disconnect or unknown name.
+extern int   Anchor_GetEnforcedInt(const char* cvarName, int localDefault);
+extern float Anchor_GetEnforcedFloat(const char* cvarName, float localDefault);
 
 // Some player animations are played at this reduced speed, for reasons yet unclear.
 // This is called "adjusted" for now.
@@ -2301,7 +2303,7 @@ void Player_InitExplosiveIA(PlayState* play, Player* this) {
                            this->actor.world.pos.y, this->actor.world.pos.z, 0, this->actor.shape.rot.y, 0, 0);
     if (spawnedActor != NULL) {
         if ((explosiveType != 0) && (play->bombchuBowlingStatus != 0)) {
-            if (!CVarGetInteger(CVAR_CHEAT("InfiniteAmmo"), 0)) {
+            if (!Anchor_GetEnforcedInt(CVAR_CHEAT("InfiniteAmmo"), 0)) {
                 play->bombchuBowlingStatus--;
             }
             if (play->bombchuBowlingStatus == 0) {
@@ -2753,10 +2755,10 @@ LinkAnimationHeader* func_808346C4(PlayState* play, Player* this) {
     Player_DetachHeldActor(play, this);
 
     if (this->unk_870 < 0.5f) {
-        return D_808543A4[Player_HoldsTwoHandedWeapon(this) && !(CVarGetInteger(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
+        return D_808543A4[Player_HoldsTwoHandedWeapon(this) && !(Anchor_GetEnforcedInt(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
                                                                  (this->heldItemAction != PLAYER_IA_DEKU_STICK))];
     } else {
-        return D_808543AC[Player_HoldsTwoHandedWeapon(this) && !(CVarGetInteger(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
+        return D_808543AC[Player_HoldsTwoHandedWeapon(this) && !(Anchor_GetEnforcedInt(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
                                                                  (this->heldItemAction != PLAYER_IA_DEKU_STICK))];
     }
 }
@@ -3011,11 +3013,11 @@ s32 func_808350A4(PlayState* play, Player* this) {
             func_80834380(play, this, &item, &arrowType);
 
             if (gSaveContext.minigameState == 1) {
-                if (!CVarGetInteger(CVAR_CHEAT("InfiniteAmmo"), 0)) {
+                if (!Anchor_GetEnforcedInt(CVAR_CHEAT("InfiniteAmmo"), 0)) {
                     play->interfaceCtx.hbaAmmo--;
                 }
             } else if (play->shootingGalleryStatus != 0) {
-                if (!CVarGetInteger(CVAR_CHEAT("InfiniteAmmo"), 0)) {
+                if (!Anchor_GetEnforcedInt(CVAR_CHEAT("InfiniteAmmo"), 0)) {
                     play->shootingGalleryStatus--;
                 }
             } else {
@@ -3453,7 +3455,7 @@ void Player_UseItem(PlayState* play, Player* this, s32 item) {
                  (temp = Player_ActionToExplosive(this, itemAction),
                   ((temp >= 0) && ((AMMO(sExplosiveInfos[temp].itemId) == 0) ||
                                    (play->actorCtx.actorLists[ACTORCAT_EXPLOSIVE].length >= 3 &&
-                                    !CVarGetInteger(CVAR_ENHANCEMENT("RemoveExplosiveLimit"), 0))))))) {
+                                    !Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RemoveExplosiveLimit"), 0))))))) {
                 // Prevent some items from being used if player is out of ammo.
                 // Also prevent explosives from being used if there are 3 or more active (outside of bombchu bowling)
                 Sfx_PlaySfxCentered(NA_SE_SY_ERROR);
@@ -4704,7 +4706,7 @@ int func_8083816C(s32 arg0) {
 }
 
 void func_8083819C(Player* this, PlayState* play) {
-    if (this->currentShield == PLAYER_SHIELD_DEKU && (CVarGetInteger(CVAR_CHEAT("FireproofDekuShield"), 0) == 0)) {
+    if (this->currentShield == PLAYER_SHIELD_DEKU && (Anchor_GetEnforcedInt(CVAR_CHEAT("FireproofDekuShield"), 0) == 0)) {
         Actor_Spawn(&play->actorCtx, play, ACTOR_ITEM_SHIELD, this->actor.world.pos.x, this->actor.world.pos.y,
                     this->actor.world.pos.z, 0, 0, 0, 1);
         Inventory_DeleteEquipment(play, EQUIP_TYPE_SHIELD);
@@ -4828,18 +4830,18 @@ s32 func_808382DC(Player* this, PlayState* play) {
 
                             if (this->unk_870 < 0.5f) {
                                 anim = D_808543BC[Player_HoldsTwoHandedWeapon(this) &&
-                                                  !(CVarGetInteger(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
+                                                  !(Anchor_GetEnforcedInt(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
                                                     (this->heldItemAction != PLAYER_IA_DEKU_STICK))];
                             } else {
                                 anim = D_808543B4[Player_HoldsTwoHandedWeapon(this) &&
-                                                  !(CVarGetInteger(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
+                                                  !(Anchor_GetEnforcedInt(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
                                                     (this->heldItemAction != PLAYER_IA_DEKU_STICK))];
                             }
                             LinkAnimation_PlayOnce(play, &this->upperSkelAnime, anim);
                         } else {
                             Player_AnimPlayOnce(play, this,
                                                 D_808543C4[Player_HoldsTwoHandedWeapon(this) &&
-                                                           !(CVarGetInteger(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
+                                                           !(Anchor_GetEnforcedInt(CVAR_CHEAT("ShieldTwoHanded"), 0) &&
                                                              (this->heldItemAction != PLAYER_IA_DEKU_STICK))]);
                         }
                     }
@@ -4898,7 +4900,7 @@ s32 func_808382DC(Player* this, PlayState* play) {
                      SurfaceType_IsWallDamage(&play->colCtx, this->actor.floorPoly, this->actor.floorBgId) &&
                      (this->floorTypeTimer >= D_808544F4[sp48])) ||
                     ((sp48 >= 0) &&
-                     ((this->currentTunic != PLAYER_TUNIC_GORON && CVarGetInteger(CVAR_CHEAT("SuperTunic"), 0) == 0) ||
+                     ((this->currentTunic != PLAYER_TUNIC_GORON && Anchor_GetEnforcedInt(CVAR_CHEAT("SuperTunic"), 0) == 0) ||
                       (this->floorTypeTimer >= D_808544F4[sp48])))) {
                     this->floorTypeTimer = 0;
                     this->actor.colChkInfo.damage = 4;
@@ -5729,7 +5731,7 @@ s32 func_8083A6AC(Player* this, PlayState* play) {
 
         if (BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &sp74, &sp68, &sp84, true, false, false,
                                     true, &sp80) &&
-            ((ABS(sp84->normal.y) < 600) || (CVarGetInteger(CVAR_CHEAT("ClimbEverything"), 0) != 0))) {
+            ((ABS(sp84->normal.y) < 600) || (Anchor_GetEnforcedInt(CVAR_CHEAT("ClimbEverything"), 0) != 0))) {
             f32 nx = COLPOLY_GET_NORMAL(sp84->normal.x);
             f32 ny = COLPOLY_GET_NORMAL(sp84->normal.y);
             f32 nz = COLPOLY_GET_NORMAL(sp84->normal.z);
@@ -7147,17 +7149,17 @@ void func_8083DFE0(Player* this, f32* arg1, s16* arg2) {
             maxSpeed *= 1.5f;
         }
 
-        if (CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f &&
+        if (Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f &&
             !CVarGetInteger(CVAR_CHEAT("SpeedModifier.DoesntChangeJump"), 0)) {
             if (CVarGetInteger(CVAR_CHEAT("SpeedModifier.SpeedToggle"), 0)) {
                 if (gWalkSpeedToggle) {
-                    maxSpeed *= CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
+                    maxSpeed *= Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
                 }
             } else {
                 const s32 mod1Mask = CVarGetInteger(CVAR_CHEAT("SpeedModifier.Btn"), BTN_CUSTOM_MODIFIER1);
 
                 if (mod1Mask != 0 && CHECK_BTN_ALL(sControlInput->cur.button, mod1Mask)) {
-                    maxSpeed *= CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
+                    maxSpeed *= Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
                 }
             }
         }
@@ -8894,16 +8896,16 @@ void Player_Action_80842180(Player* this, PlayState* play) {
                 sp2C *= 1.5f;
             }
 
-            if (CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f) {
+            if (Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f) {
                 if (CVarGetInteger(CVAR_CHEAT("SpeedModifier.SpeedToggle"), 0)) {
                     if (gWalkSpeedToggle) {
-                        sp2C *= CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
+                        sp2C *= Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
                     }
                 } else {
                     const s32 mod1Mask = CVarGetInteger(CVAR_CHEAT("SpeedModifier.Btn"), BTN_CUSTOM_MODIFIER1);
 
                     if (mod1Mask != 0 && CHECK_BTN_ALL(sControlInput->cur.button, mod1Mask)) {
-                        sp2C *= CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
+                        sp2C *= Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
                     }
                 }
             }
@@ -9553,7 +9555,7 @@ static AnimSfxEntry D_808545F0[] = {
 };
 
 void Player_Action_80843CEC(Player* this, PlayState* play) {
-    if (this->currentTunic != PLAYER_TUNIC_GORON && CVarGetInteger(CVAR_CHEAT("SuperTunic"), 0) == 0) {
+    if (this->currentTunic != PLAYER_TUNIC_GORON && Anchor_GetEnforcedInt(CVAR_CHEAT("SuperTunic"), 0) == 0) {
         if ((play->roomCtx.curRoom.behaviorType2 == ROOM_BEHAVIOR_TYPE2_3) || (sFloorType == 9) ||
             ((func_80838144(sFloorType) >= 0) &&
              !SurfaceType_IsWallDamage(&play->colCtx, this->actor.floorPoly, this->actor.floorBgId))) {
@@ -11332,7 +11334,7 @@ void Player_ProcessSceneCollision(PlayState* play, Player* this) {
 
         // conflicts arise from these two being enabled at once, and with ClimbEverything on, FixVineFall is redundant
         // anyway
-        if (CVarGetInteger(CVAR_ENHANCEMENT("FixVineFall"), 0) && !CVarGetInteger(CVAR_CHEAT("ClimbEverything"), 0)) {
+        if (CVarGetInteger(CVAR_ENHANCEMENT("FixVineFall"), 0) && !Anchor_GetEnforcedInt(CVAR_CHEAT("ClimbEverything"), 0)) {
             /* This fixes the "started climbing a wall and then immediately fell off" bug.
              * The main idea is if a climbing wall is detected, double-check that it will
              * still be valid once climbing begins by doing a second raycast with a small
@@ -11405,7 +11407,7 @@ void Player_ProcessSceneCollision(PlayState* play, Player* this) {
         if ((this->actor.bgCheckFlags & 0x200) && (sShapeYawToTouchedWall < 0x3000)) {
             CollisionPoly* wallPoly = this->actor.wallPoly;
 
-            if (ABS(wallPoly->normal.y) < 600 || (CVarGetInteger(CVAR_CHEAT("ClimbEverything"), 0) != 0)) {
+            if (ABS(wallPoly->normal.y) < 600 || (Anchor_GetEnforcedInt(CVAR_CHEAT("ClimbEverything"), 0) != 0)) {
                 f32 wallPolyNormalX = COLPOLY_GET_NORMAL(wallPoly->normal.x);
                 f32 wallPolyNormalY = COLPOLY_GET_NORMAL(wallPoly->normal.y);
                 f32 wallPolyNormalZ = COLPOLY_GET_NORMAL(wallPoly->normal.z);
@@ -11699,7 +11701,7 @@ void Player_UpdateBodyBurn(PlayState* play, Player* this) {
     s32 sp58;
     s32 sp54;
 
-    if (this->currentTunic == PLAYER_TUNIC_GORON || CVarGetInteger(CVAR_CHEAT("SuperTunic"), 0) != 0) {
+    if (this->currentTunic == PLAYER_TUNIC_GORON || Anchor_GetEnforcedInt(CVAR_CHEAT("SuperTunic"), 0) != 0) {
         sp54 = 20;
     } else {
         sp54 = (s32)(this->linearVelocity * 0.4f) + 1;
@@ -12344,7 +12346,7 @@ void Player_Update(Actor* thisx, PlayState* play) {
             }
         }
 
-        if (CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f &&
+        if (Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f &&
             CVarGetInteger(CVAR_CHEAT("SpeedModifier.SpeedToggle"), 0)) {
             const s32 mod1Mask = CVarGetInteger(CVAR_CHEAT("SpeedModifier.Btn"), BTN_CUSTOM_MODIFIER1);
 
@@ -12816,10 +12818,10 @@ void func_8084AEEC(Player* this, f32* arg1, f32 arg2, s16 arg3) {
     // #region SOH [Enhancement]
     f32 swimMod = 1.0f;
 
-    if (CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f) {
+    if (Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f) {
         if (CVarGetInteger(CVAR_CHEAT("SpeedModifier.SpeedToggle"), 0) == 1) {
             if (gWalkSpeedToggle) {
-                swimMod *= CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
+                swimMod *= Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
             }
             // sControlInput is NULL to prevent inputs while surfacing after obtaining an underwater item so we want to
             // ignore it for that case
@@ -12827,7 +12829,7 @@ void func_8084AEEC(Player* this, f32* arg1, f32 arg2, s16 arg3) {
             const s32 mod1Mask = CVarGetInteger(CVAR_CHEAT("SpeedModifier.Btn"), BTN_CUSTOM_MODIFIER1);
 
             if (mod1Mask != 0 && CHECK_BTN_ALL(sControlInput->cur.button, mod1Mask)) {
-                swimMod *= CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
+                swimMod *= Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
             }
         }
         temp1 = this->skelAnime.curFrame - 10.0f;
@@ -14075,7 +14077,7 @@ void func_8084DBC4(PlayState* play, Player* this, f32 arg2) {
     func_8084AEEC(this, &this->linearVelocity, sp2C * 0.5f, sp2A);
     // Original implementation of func_8084AEEC (SurfaceWithoutSwimMod) to prevent velocity increases via swim mod which
     // push Link into the air #region SOH [Enhancement]
-    if (CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f) {
+    if (Anchor_GetEnforcedFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f) {
         SurfaceWithoutSwimMod(this, &this->actor.velocity.y, arg2, this->yaw);
         // #endregion
     } else {

@@ -761,7 +761,8 @@ void RegisterEnemyRandomizer() {
         for (s32 i = 0; i < 3; i++) {
             // Offset small jellyfish with Enemy Randomizer, otherwise it gets
             // stuck in a loop spawning more big jellyfish with seeded spawns.
-            if (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
+            // Settings-sync v1 — runtime gate uses host-authoritative value.
+            if (Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
                 rotY += rand() % 50;
             }
 

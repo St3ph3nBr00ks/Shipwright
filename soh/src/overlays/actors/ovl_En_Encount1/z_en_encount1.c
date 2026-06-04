@@ -319,7 +319,7 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
     // been spawned and/or killed.
     int8_t enemyCount = play->actorCtx.actorLists[ACTORCAT_ENEMY].length;
     if ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
-        (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15)) {
+        (Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15)) {
 
         // SoH multiplayer / vanilla: gating + cooldown is shared across
         // all players. If host's local Link is airborne/in-water, pause
@@ -413,7 +413,7 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
             int spawnedThisPlayer = 0;
             while (spawnedThisPlayer < playerBudget &&
                    ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
-                    (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15))) {
+                    (Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15))) {
 
                 if (play->sceneNum == SCENE_HYRULE_FIELD) {
                     spawnDist = Rand_CenteredFloat(40.0f) + 200.0f;

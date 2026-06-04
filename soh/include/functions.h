@@ -2468,6 +2468,15 @@ void func_80838940(Player* this, LinkAnimationHeader* anim, f32 arg2, PlayState*
 
 // #endregion
 
+// #region SOH [Settings-Sync — Flotilla]
+// Host-authoritative read of the 20 audited gameplay CVars. Returns
+// host's enforced value when a session is connected, otherwise delegates
+// to local CVarGetInteger/CVarGetFloat. See Plans/settings_sync_design.md
+// + Common/EnforcedCVars.{h,cpp}.
+int   Anchor_GetEnforcedInt(const char* cvarName, int localDefault);
+float Anchor_GetEnforcedFloat(const char* cvarName, float localDefault);
+// #endregion
+
 #ifdef __cplusplus
 #undef this
 };

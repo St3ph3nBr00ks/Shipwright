@@ -458,7 +458,7 @@ void BossGoma_SetupCeilingIdle(BossGoma* this) {
 void BossGoma_SetupFallJump(BossGoma* this) {
     // When in Enemy Randomizer, reset the state of the spawned Gohma Larva because it's not done
     // by the (non-existent) Larva themselves.
-    if (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
+    if (Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
         this->childrenGohmaState[0] = this->childrenGohmaState[1] = this->childrenGohmaState[2] = 0;
     }
     Animation_Change(&this->skelanime, &gGohmaLandAnim, 1.0f, 0.0f, 0.0f, ANIMMODE_ONCE, -5.0f);
@@ -1595,7 +1595,7 @@ void BossGoma_CeilingIdle(BossGoma* this, PlayState* play) {
 
     if (this->framesUntilNextAction == 0) {
         Actor* nearbyEnTest = NULL;
-        if (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
+        if (Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
             nearbyEnTest = Actor_FindNearby(play, &this->actor, -1, ACTORCAT_ENEMY, 8000.0f);
         }
         if (this->childrenGohmaState[0] == 0 && this->childrenGohmaState[1] == 0 && this->childrenGohmaState[2] == 0) {
@@ -1603,7 +1603,7 @@ void BossGoma_CeilingIdle(BossGoma* this, PlayState* play) {
             BossGoma_SetupCeilingPrepareSpawnGohmas(this);
         } else if ((this->childrenGohmaState[0] < 0 && this->childrenGohmaState[1] < 0 &&
                     this->childrenGohmaState[2] < 0) ||
-                   (nearbyEnTest == NULL && CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0))) {
+                   (nearbyEnTest == NULL && Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0))) {
             // In authentic gameplay, check if all baby Ghomas are dead. In Enemy Randomizer, check if there's no
             // enemies alive.
             BossGoma_SetupFallJump(this);

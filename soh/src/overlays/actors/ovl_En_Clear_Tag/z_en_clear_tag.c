@@ -262,7 +262,7 @@ void EnClearTag_Init(Actor* thisx, PlayState* play) {
 
         // Change Arwing to regular enemy instead of boss with enemy randomizer and crowd control.
         // This way Arwings will be considered for "clear enemy" rooms properly.
-        if (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
+        if (Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
             (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0))) {
             Actor_ChangeCategory(play, &play->actorCtx, thisx, ACTORCAT_ENEMY);
         }
@@ -479,7 +479,7 @@ void EnClearTag_Update(Actor* thisx, PlayState* play2) {
 
                     // Introduce a range requirement in Enemy Rando so Arwings don't shoot the player from
                     // across the map. Especially noticeable in big maps like Lake Hylia and Hyrule Field.
-                    uint8_t enemyRandoShootLaser = !CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
+                    uint8_t enemyRandoShootLaser = !Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
                                                    this->actor.xzDistToPlayer < 1000.0f;
 
                     // Check if the Arwing should fire its laser.

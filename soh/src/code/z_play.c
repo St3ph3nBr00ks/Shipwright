@@ -581,7 +581,7 @@ void Play_Init(GameState* thisx) {
     Fault_AddClient(&D_801614B8, ZeldaArena_Display, NULL, NULL);
 
     // In order to keep masks equipped on first load, we need to pre-set the age reqs for the item and slot
-    if (CVarGetInteger(CVAR_ENHANCEMENT("AdultMasks"), 0) || CVarGetInteger(CVAR_CHEAT("TimelessEquipment"), 0)) {
+    if (CVarGetInteger(CVAR_ENHANCEMENT("AdultMasks"), 0) || Anchor_GetEnforcedInt(CVAR_CHEAT("TimelessEquipment"), 0)) {
         for (int i = ITEM_MASK_KEATON; i <= ITEM_MASK_TRUTH; i += 1) {
             gItemAgeReqs[i] = AGE_REQ_NONE;
         }

@@ -387,7 +387,7 @@ void EnExRuppy_Draw(Actor* thisx, PlayState* play) {
     if (!this->invisible) {
         OPEN_DISPS(play->state.gfxCtx);
 
-        if (CVarGetInteger(CVAR_ENHANCEMENT("NewDrops"), 0)) {
+        if (Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("NewDrops"), 0)) {
             func_8002EBCC(&this->actor, play, 0);
             func_8002ED80(&this->actor, play, 0);
 

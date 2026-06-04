@@ -68,7 +68,7 @@ void SwitchAge() {
 /// Switches Link's age and respawns him at the last entrance he entered.
 void RegisterOcarinaTimeTravel() {
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnOcarinaSongAction>([]() {
-        if (!GameInteractor::IsSaveLoaded(true) || !CVarGetInteger(CVAR_ENHANCEMENT("TimeTravel"), 0)) {
+        if (!GameInteractor::IsSaveLoaded(true) || !Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("TimeTravel"), 0)) {
             return;
         }
 
@@ -85,7 +85,7 @@ void RegisterOcarinaTimeTravel() {
                                 !nearbyFrogs && !nearbyGossipStone;
         bool hasOcarinaOfTime = (INV_CONTENT(ITEM_OCARINA_TIME) == ITEM_OCARINA_TIME);
         bool hasMasterSword = CHECK_OWNED_EQUIP(EQUIP_TYPE_SWORD, EQUIP_INV_SWORD_MASTER);
-        int timeTravelSetting = CVarGetInteger(CVAR_ENHANCEMENT("TimeTravel"), 0);
+        int timeTravelSetting = Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("TimeTravel"), 0);
         bool meetsTimeTravelRequirements = false;
 
         switch (timeTravelSetting) {

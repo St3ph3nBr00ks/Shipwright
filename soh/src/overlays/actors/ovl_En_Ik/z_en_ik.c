@@ -234,7 +234,7 @@ void func_80A74398(Actor* thisx, PlayState* play) {
     Effect_Add(play, &this->blureIdx, EFFECT_BLURE1, 0, 0, &blureInit);
     func_80A74714(this);
 
-    uint8_t enemyRandoCCActive = CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
+    uint8_t enemyRandoCCActive = Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
                                  (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0));
 
     if (this->switchFlags != 0xFF) {
@@ -306,7 +306,7 @@ void func_80A747C0(EnIk* this, PlayState* play) {
         this->skelAnime.playSpeed = 1.0f;
         // Disable miniboss music with Enemy Randomizer because the music would keep
         // playing if the enemy was never defeated, which is common with Enemy Randomizer.
-        if (!CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
+        if (!Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
             func_800F5ACC(NA_BGM_MINI_BOSS);
         }
     }
@@ -670,7 +670,7 @@ void func_80A75A38(EnIk* this, PlayState* play) {
                 Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xB0);
                 // Don't set flag when Enemy Rando or CrowdControl are on.
                 // Instead Iron Knuckles rely on the "clear room" flag.
-                if (this->switchFlags != 0xFF && !CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
+                if (this->switchFlags != 0xFF && !Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
                     !(CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0))) {
                     Flags_SetSwitch(play, this->switchFlags);
                 }
@@ -1462,7 +1462,7 @@ void EnIk_Init(Actor* thisx, PlayState* play) {
     }
 
     // Immediately trigger Iron Knuckle for Enemy Rando and Crowd Control
-    if ((CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
+    if ((Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
          (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0))) &&
         (thisx->params == 2 || thisx->params == 3)) {
         this->skelAnime.playSpeed = 1.0f;

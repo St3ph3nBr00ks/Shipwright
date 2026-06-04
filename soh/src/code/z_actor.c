@@ -3361,7 +3361,7 @@ Actor* Actor_Spawn(ActorContext* actorCtx, PlayState* play, s16 actorId, f32 pos
 
     objBankIndex = Object_GetIndex(&gPlayState->objectCtx, dbEntry->objectId);
 
-    if (objBankIndex < 0 && (!gMapLoading || CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0))) {
+    if (objBankIndex < 0 && (!gMapLoading || Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0))) {
         objBankIndex = 0;
     }
 
@@ -3445,7 +3445,7 @@ Actor* Actor_SpawnAsChild(ActorContext* actorCtx, Actor* parent, PlayState* play
     // Gohma (z_boss_goma.c) and the falling platform spawning Stalfos in
     // Forest Temple (z_bg_mori_bigst.c) that normally rely on this behaviour are changed when
     // Enemy Rando is on so they still work properly even without assigning a parent.
-    if (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
+    if (Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
         (spawnedActor->id == ACTOR_EN_FLOORMAS || spawnedActor->id == ACTOR_EN_PEEHAT)) {
         return spawnedActor;
     }
