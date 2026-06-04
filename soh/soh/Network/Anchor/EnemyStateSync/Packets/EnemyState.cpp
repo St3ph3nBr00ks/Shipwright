@@ -216,9 +216,22 @@ constexpr float kScaleEpsilon     = 0.01f;
 // distant skel-animated actors targets that cost without changing the
 // experience near the player.
 constexpr float    kThrottleNearDist        = 500.0f;
-constexpr float    kThrottleFarDist         = 1500.0f;
+constexpr float    kThrottleFarDist         = 1000.0f;  // lowered 1500→1000 (log 373: −41% needs tightening to hit 60% target)
 constexpr uint64_t kThrottleMidIntervalMs   = 66;   // ~15 Hz
 constexpr uint64_t kThrottleFarIntervalMs   = 200;  // ~5 Hz
+
+// Joint-table quantization for the delta-filter hash. Skel-animated
+// actors (En_St, En_Sw, En_Invader) have subtle idle anim cycles where
+// most limbs move ≪1.4° per frame, but the cumulative jitter changes
+// the full-precision joint hash every frame and defeats Step 2a's no-
+// delta skip. Quantizing to 8 bits = 256 steps per circle = ~1.4° per
+// step matches the existing kRotThresholdS16=256 rotation threshold,
+// so any motion that would PASS the existing rotation filter still
+// changes the hash; only sub-threshold jitter is masked. Result: more
+// frames hit the skip path without changing the receiver-side
+// experience (motion below 1.4° per frame is also below the
+// perception threshold at 20 Hz).
+constexpr uint32_t kJointQuantBits = 8;
 
 uint64_t NowMonotonicMs() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -228,19 +241,31 @@ uint64_t NowMonotonicMs() {
 // FNV-1a over the skeleton's joint rotations plus (when present) morph
 // rotations. A distinct separator mixed in when morphTable is present
 // keeps an absent morphTable from colliding with a zero-filled one.
+//
+// Each rotation axis is quantized by `kJointQuantBits` before mixing so
+// sub-1.4° jitter in idle anim cycles doesn't change the hash —
+// matches kRotThresholdS16=256 semantics. See constant declaration for
+// rationale.
 uint64_t HashLimbs(const SkelAnime* anime, uint8_t limbCount) {
     if (anime == nullptr || limbCount == 0) return 0;
     // Bound matches SkelAnimeWire::Serialize/Deserialize; the actor
     // struct allocates exactly limbCount Vec3s slots. See SkelAnimeWire.h.
     const uint8_t bounded = std::min(limbCount, SkelAnimeWire::kHardCap);
     uint64_t h = 14695981039346656037ULL;
-    auto mix16 = [&h](uint16_t v) { h ^= (uint64_t)v; h *= 1099511628211ULL; };
+    auto mix16 = [&h](uint16_t v) {
+        const uint16_t q = (uint16_t)(v >> kJointQuantBits);
+        h ^= (uint64_t)q;
+        h *= 1099511628211ULL;
+    };
     for (uint8_t i = 0; i < bounded; i++) {
         mix16((uint16_t)anime->jointTable[i].x);
         mix16((uint16_t)anime->jointTable[i].y);
         mix16((uint16_t)anime->jointTable[i].z);
     }
     if (anime->morphTable != nullptr) {
+        // Use a literal-sentinel that survives quantization
+        // (0xFFFFu >> 8 = 0xFFu, still distinguishable from a
+        // zero-filled morph table at the same position).
         mix16(0xFFFFu);
         for (uint8_t i = 0; i < bounded; i++) {
             mix16((uint16_t)anime->morphTable[i].x);
