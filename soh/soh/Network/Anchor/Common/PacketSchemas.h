@@ -28,7 +28,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"ENTRANCE_DISCOVERED", 1},
     {"GAME_COMPLETE", 1},
     {"GIVE_ITEM", 1},
-    {"HANDSHAKE", 1},
+    {"HANDSHAKE", 2},  // bump-history: 2 (settings-sync v1 — embedded roomState now carries cvars block; mirrors UPDATE_ROOM_STATE schema 2).
     {"HEARTBEAT", 1},  // #194 follow-up — every-client liveness signal sent from network thread.
     {"ITEM_DROP_SYNC", 1},  // #193 Phase 1 — host-fanout of EnItem00 drops with killer attribution.
     {"ITEM_COLLECTED", 1},  // #193 Phase 1 / race A — host arbitration broadcast; receivers Actor_Kill or apply pickup based on winner clientId.
@@ -56,7 +56,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"UPDATE_BEANS_COUNT", 1},
     {"UPDATE_CLIENT_STATE", 1},
     {"UPDATE_DUNGEON_ITEMS", 1},
-    {"UPDATE_ROOM_STATE", 1},
+    {"UPDATE_ROOM_STATE", 2},  // bump-history: 2 (settings-sync v1 — added "cvars" sub-object with 20 enforced gameplay CVars).
     {"UPDATE_TEAM_STATE", 1},
     {"WORLD_FLAG_SET", 1},        // Pillar C v1
     {"WORLD_FLAG_UNSET", 1},      // Pillar C v1 unset symmetry
