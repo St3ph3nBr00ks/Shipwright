@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <unordered_map>
 
 extern "C" {
@@ -203,6 +204,21 @@ constexpr float kThresholdXZSq    = 4.0f;
 constexpr float kThresholdY       = 2.0f;
 constexpr s16   kRotThresholdS16  = 256;
 constexpr float kScaleEpsilon     = 0.01f;
+
+// Step 3 (#61 / #62 — distance-based rate throttle). Distant actors don't
+// need per-frame updates even when their joint table or state machine is
+// changing every tick. Tier bands measured 3D from the nearest peer's Link:
+//   < kThrottleNearDist        no throttle (delta filter governs)
+//   < kThrottleFarDist         cap at kThrottleMidIntervalMs (~15 Hz)
+//   ≥ kThrottleFarDist         cap at kThrottleFarIntervalMs (~5 Hz)
+// Log 372 showed En_St + En_Sw alone at ~185 KB/s peak; the dominant cost
+// was sub-1.4° skel-anim jitter that defeats the delta filter. Throttling
+// distant skel-animated actors targets that cost without changing the
+// experience near the player.
+constexpr float    kThrottleNearDist        = 500.0f;
+constexpr float    kThrottleFarDist         = 1500.0f;
+constexpr uint64_t kThrottleMidIntervalMs   = 66;   // ~15 Hz
+constexpr uint64_t kThrottleFarIntervalMs   = 200;  // ~5 Hz
 
 uint64_t NowMonotonicMs() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -498,22 +514,60 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         return;
     }
 
-    const bool     skipEnabled  = CVarGetInteger("gEnhancements.EnemyUpdateSkipEnabled", 1) != 0;
-    const uint64_t keepaliveMs  = (uint64_t)std::max(1, CVarGetInteger("gEnhancements.EnemyUpdateKeepaliveMs", 250));
+    const bool     skipEnabled     = CVarGetInteger("gEnhancements.EnemyUpdateSkipEnabled", 1) != 0;
+    const bool     throttleEnabled = CVarGetInteger("gEnhancements.EnemyUpdateThrottleEnabled", 1) != 0;
+    const uint64_t keepaliveMs     = (uint64_t)std::max(1, CVarGetInteger("gEnhancements.EnemyUpdateKeepaliveMs", 250));
 
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
 
-    EnemyUpdateExtras extras;
-    uint64_t          nowMs = 0;
+    EnemyUpdateExtras extras = GatherExtras(actor);
+    uint64_t          nowMs  = NowMonotonicMs();
+
+    // Step 3 — distance-based rate throttle. Cap the send rate for actors
+    // far from every peer's Link. Operates BEFORE the delta filter because
+    // skel-animated actors (En_St, En_Sw, En_Invader) defeat the joint-hash
+    // delta filter at long range — their joint cycles change every frame
+    // even when nothing the player can perceive is changing. Keepalive is
+    // unaffected: when no peer is in the room the early-return above already
+    // dropped the packet.
+    if (throttleEnabled) {
+        auto cacheIt = sLastSentByNetId.find(netId);
+        if (cacheIt != sLastSentByNetId.end()) {
+            float bestDistSq = std::numeric_limits<float>::infinity();
+            for (auto& [cid, c] : clients) {
+                if (!c.online || !c.isSaveLoaded || c.self) continue;
+                if (c.sceneNum != gPlayState->sceneNum) continue;
+                float dx = c.posRot.pos.x - actor->world.pos.x;
+                float dy = c.posRot.pos.y - actor->world.pos.y;
+                float dz = c.posRot.pos.z - actor->world.pos.z;
+                float distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq < bestDistSq) bestDistSq = distSq;
+            }
+            uint64_t minIntervalMs = 0;
+            if (std::isfinite(bestDistSq)) {
+                const float bestDist = sqrtf(bestDistSq);
+                if (bestDist > kThrottleFarDist) {
+                    minIntervalMs = kThrottleFarIntervalMs;
+                } else if (bestDist > kThrottleNearDist) {
+                    minIntervalMs = kThrottleMidIntervalMs;
+                }
+            }
+            if (minIntervalMs > 0) {
+                const uint64_t sinceMs = nowMs - cacheIt->second.lastSentMs;
+                if (sinceMs < minIntervalMs) {
+                    SPDLOG_TRACE("[EnemyUpdate] Throttled netId={} sinceMs={} minMs={}",
+                                 netId, sinceMs, minIntervalMs);
+                    return;
+                }
+            }
+        }
+    }
+
     if (skipEnabled) {
-        extras = GatherExtras(actor);
-        nowMs  = NowMonotonicMs();
         if (ShouldSkipEnemyUpdate(netId, actor, ext, extras, nowMs, keepaliveMs)) {
             SPDLOG_TRACE("[EnemyUpdate] Skipped netId={} (no-delta within {}ms)", netId, keepaliveMs);
             return;
         }
-    } else {
-        extras = GatherExtras(actor);
     }
 
     // State-machine TX logging — fires on the host once per delta. Local-
