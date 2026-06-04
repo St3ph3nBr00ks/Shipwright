@@ -2145,6 +2145,10 @@ void Anchor::TickFollowerInput(Actor* actor) {
     u32 sf1 = player->stateFlags1;
     u32 sf2 = player->stateFlags2;
     bool nowOnLadder = (sf1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
+    // #236 — set when the CLIMBING-state BTN_A descent-grab fires below.
+    // Suppresses the hang-state resolution's BTN_B drop-down so the two
+    // injections don't race in the same frame on a planned vine descent.
+    bool climbDescentGrabRequested = false;
     // CLIMBING_LADDER is normally blocked (stick during a real
     // climb would spam OoT's input). Bug 2 (2026-04-22): when
     // our follower state is CLIMBING, we WANT stick injection
@@ -2278,21 +2282,34 @@ void Anchor::TickFollowerInput(Actor* actor) {
         //   - CLIMBING state (caller already guaranteed via the outer
         //     else-if), so we don't pull Link off unrelated ledge-hangs.
         //   - HANGING_OFF_LEDGE actively set on Link's state flags.
+        //   - Active climb anchor (followerClimbAnchorIdx != UINT16_MAX).
+        //     Without this gate, an incidental ledge-hang during a
+        //     CLIMBING-state transient (anchor lost mid-climb, brief
+        //     re-anchor window) would inject BTN_A toward whatever
+        //     surface Link grabbed. With the gate, BTN_A only fires
+        //     when there's a real vine/ladder to grab.
         //   - Target is meaningfully BELOW current pos (descent intent —
         //     mirror of #233's pathRequestsAscent gate, opposite sign).
         // Without this, Link auto-grabs the ledge and sits there
         // indefinitely; the CLIMBING handler has no stick injection
-        // that drives a hang→climb transition.
+        // that drives a hang→climb transition. Sets
+        // climbDescentGrabRequested so the hang-state resolution block
+        // below skips BTN_B (both would otherwise fire in the same
+        // frame: leader well below makes the global drop-down fire too).
         static constexpr float kClimbDescentTolerance = 16.0f;
         const bool pathRequestsDescent =
             (followerClimbTopTarget.y <
              actor->world.pos.y - kClimbDescentTolerance);
-        if ((sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) && pathRequestsDescent) {
+        if ((sf1 & PLAYER_STATE1_HANGING_OFF_LEDGE) &&
+            pathRequestsDescent &&
+            followerClimbAnchorIdx != UINT16_MAX) {
             input.cur.button   |= BTN_A;
             input.press.button |= BTN_A;
+            climbDescentGrabRequested = true;
             SPDLOG_INFO("[Follower] CLIMBING descent: BTN_A grab vine from hang "
-                        "(pos.y={:.0f} target.y={:.0f})",
-                        actor->world.pos.y, followerClimbTopTarget.y);
+                        "(pos.y={:.0f} target.y={:.0f} anchorIdx={})",
+                        actor->world.pos.y, followerClimbTopTarget.y,
+                        (int)followerClimbAnchorIdx);
         }
         // Bug 2 (2026-04-22): natural ladder grab + climb.
         // Two phases:
@@ -2879,9 +2896,19 @@ void Anchor::TickFollowerInput(Actor* actor) {
             // probably "is the substrate path's next subgoal on the
             // other side of this hang surface" — defer until that
             // pattern is observed.
-            if (dropDown) {
+            if (dropDown && !climbDescentGrabRequested) {
                 input.press.button |= BTN_B;
                 input.cur.button   |= BTN_B;
+            } else if (dropDown && climbDescentGrabRequested) {
+                // #236 — mutex with CLIMBING-state descent grab. When
+                // following a leader DOWN a vine, the leader's Y is far
+                // below the follower's so dropDown=true; the
+                // CLIMBING-state code already injected BTN_A on this
+                // frame to convert HANGING→CLIMBING_LADDER. Skipping
+                // BTN_B here prevents the two injections from racing in
+                // vanilla's hang-state handler.
+                SPDLOG_INFO("[Follower] hang-state BTN_B suppressed "
+                            "(CLIMBING descent grab active this frame)");
             } else {
                 // BTN_A injection above (DO_ACTION_CLIMB) covers
                 // climb-up. If the prompt isn't showing for some
