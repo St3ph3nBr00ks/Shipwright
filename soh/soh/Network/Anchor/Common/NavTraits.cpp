@@ -83,10 +83,40 @@ static NavTraits MakeGoroiwaTraits() {
 }
 
 static NavTraits MakeNoVerticalTeleportTraits() {
-    // Karebaba, Dekubaba, Vali (Bari), TP (Tailpasaran): stem-anchored or
-    // animation-driven world.pos that would orphan if teleported.
+    // Vali (Bari): stem-anchored, animation-driven world.pos that would
+    // orphan if teleported. Still emits a trail — Bari hovers in a small
+    // patrol pattern that's useful for navigators to track when LOS
+    // breaks behind room geometry.
     NavTraits t = {};
     t.eligibleForVerticalTeleport = false;
+    return t;
+}
+
+static NavTraits MakeStationaryActorTraits() {
+    // Stationary props (torches, grass, pots, crates, bombable rocks,
+    // grass / rupee clusters, the Deku Tree lowering platform). Never
+    // translate before they're destroyed / broken / lifted, so the
+    // 3 Hz × 30-slot trail buffer would be 30 identical waypoints —
+    // useless to any navigator. Layer 3 BFS pathfinds directly to
+    // their known position; no trail consumer needs them.
+    NavTraits t = {};
+    t.leavesTrail = false;
+    return t;
+}
+
+static NavTraits MakeStationaryAnchoredTraits() {
+    // Anchored AI whose `world.pos` animates locally but whose home
+    // never translates (Karebaba, Dekubaba, TP/Tailpasaran).
+    // `world.pos` for these tracks the animated head/tail tip, not a
+    // stable navigation target — recording it as trail waypoints would
+    // mislead navigators (chasing an animated head-tip arc).
+    // Navigators should target the home, which doesn't need a trail.
+    // Vertical teleport stays disabled per
+    // MakeNoVerticalTeleportTraits' rationale (would orphan the
+    // animation rig).
+    NavTraits t = {};
+    t.eligibleForVerticalTeleport = false;
+    t.leavesTrail                 = false;
     return t;
 }
 
@@ -219,11 +249,32 @@ static const std::unordered_map<s16, NavTraits>& GetOverrides() {
         // Goroiwa-class: waypoint-driven; steering and stickiness must match host.
         { ACTOR_EN_GOROIWA, MakeGoroiwaTraits() },
 
-        // Animation-anchored enemies (no vertical teleport).
-        { ACTOR_EN_KAREBABA, MakeNoVerticalTeleportTraits() },
-        { ACTOR_EN_DEKUBABA, MakeNoVerticalTeleportTraits() },
+        // Animation-anchored enemies (no vertical teleport, no trail —
+        // home is fixed; world.pos tracks the animated tip which is
+        // useless as a trail waypoint).
+        { ACTOR_EN_KAREBABA, MakeStationaryAnchoredTraits() },
+        { ACTOR_EN_DEKUBABA, MakeStationaryAnchoredTraits() },
+        { ACTOR_EN_TP,       MakeStationaryAnchoredTraits() },  // Tailpasaran
+        // Vali (Bari) keeps leavesTrail=true — hovers in a small patrol
+        // pattern that's useful for trail-following when LOS breaks.
         { ACTOR_EN_VALI,     MakeNoVerticalTeleportTraits() },  // Bari (Big Jellyfish)
-        { ACTOR_EN_TP,       MakeNoVerticalTeleportTraits() },  // Tailpasaran
+
+        // Stationary props — leavesTrail=false. Never translate before
+        // they're broken / cut / lifted, so trail capture would be
+        // 30 identical waypoints. Hintnuts / Dekunuts (Mad Scrubs)
+        // intentionally NOT in this list — they leave trails so
+        // navigators can track their emerge / shoot / hide cycle.
+        { ACTOR_OBJ_SYOKUDAI, MakeStationaryActorTraits() },  // torches
+        { ACTOR_EN_KUSA,      MakeStationaryActorTraits() },  // grass
+        { ACTOR_OBJ_TSUBO,    MakeStationaryActorTraits() },  // pots
+        { ACTOR_OBJ_KIBAKO,   MakeStationaryActorTraits() },  // crates (small)
+        { ACTOR_OBJ_KIBAKO2,  MakeStationaryActorTraits() },  // crates (large)
+        { ACTOR_OBJ_BOMBIWA,  MakeStationaryActorTraits() },  // bombable rock (large)
+        { ACTOR_OBJ_HAMISHI,  MakeStationaryActorTraits() },  // bombable rock (small)
+        { ACTOR_OBJ_MURE,     MakeStationaryActorTraits() },  // grass cluster
+        { ACTOR_OBJ_MURE2,    MakeStationaryActorTraits() },  // grass cluster (variant)
+        { ACTOR_OBJ_MURE3,    MakeStationaryActorTraits() },  // rupee stack (Tower of Rupees)
+        { ACTOR_BG_YDAN_HASI, MakeStationaryActorTraits() },  // Deku Tree lowering platform
 
         // Fliers (no ground following).
         { ACTOR_EN_PEEHAT,   MakeFlierTraits() },
