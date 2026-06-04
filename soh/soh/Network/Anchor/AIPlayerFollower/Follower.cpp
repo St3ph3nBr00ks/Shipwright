@@ -1910,6 +1910,36 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     followerStateFrames           = 0;
                     followerClimbStuckCheckPos    = p2Pos;
 
+                    // #242 — XZ-snap to anchor base when within ~30u so
+                    // OoT collision attaches Link to the vine immediately.
+                    // Without this, mid-air engagements (substrate
+                    // teleport-recovery drops Link a few units off the
+                    // vine XZ) leave Link 13-25u east/west of the anchor;
+                    // OoT gravity then drops him 3-5u/frame and the
+                    // detach-detect (>6u/frame) fires within 2-3 frames,
+                    // ejecting CLIMBING before stick walking reaches the
+                    // ladder. Log 373 21:05:30-35 shows the cycle in
+                    // action (free-fall deltas 7.5u → 10.5u → 13.5u →
+                    // 16.5u — accelerating gravity).
+                    //
+                    // Y preserved so the climb starts at Link's current
+                    // height (the autonomous pipeline drives the ascent
+                    // from there). When further than 30u, leave Link
+                    // alone — stick injection has time to walk him in
+                    // without falling.
+                    constexpr f32 kAnchorSnapRadius = 30.0f;
+                    f32 anchorDxSq = AnchorDist::DistXZSq(anchorBase, p2Pos);
+                    if (anchorDxSq <= kAnchorSnapRadius * kAnchorSnapRadius) {
+                        Vec3f anchorXz = { anchorBase.x, p2Pos.y, anchorBase.z };
+                        player->actor.world.pos = anchorXz;
+                        player->actor.prevPos   = anchorXz;
+                        p2Pos = anchorXz;
+                        SPDLOG_INFO("[Follower] Leader-climbing engagement: "
+                                    "XZ-snap to anchor base ({:.0f},{:.0f}) "
+                                    "— was {:.1f}u from anchor",
+                                    anchorBase.x, anchorBase.z, sqrtf(anchorDxSq));
+                    }
+
                     // Force facing toward anchor base at engagement —
                     // OoT's ladder grab needs Link facing the wall.
                     // (Same fix as Stage 6 trigger; see comment there.)
