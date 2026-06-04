@@ -56,6 +56,19 @@ bool IsEnforced(const char* cvarName);
 // authoritative value.
 void OnCvarsReceivedDispatch();
 
+// Owner-side helper for UI widget callbacks. Snapshots local enforced
+// CVars, broadcasts via SendPacket_UpdateRoomState, and updates the
+// auto-poll's last-broadcast baseline so the next 1-second tick
+// doesn't double-broadcast the same state.
+//
+// No-op when not owner / not connected — safe to call from any widget
+// that targets an enforced CVar without per-call gating. The Phase 3
+// Flotilla → Host Settings sidebar widgets call this from their
+// `.Callback` for instant propagation (otherwise the auto-poll
+// catches the change within ~1s but the owner sees up to a 1s
+// "wrong enforcement" window between widget click and own-echo).
+void TriggerOwnerBroadcastNow();
+
 }  // namespace AnchorCVarSync
 
 // C-linkage shims for OoT decomp consumers (z_player.c etc.). The

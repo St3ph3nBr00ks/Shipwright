@@ -1,4 +1,5 @@
 #include "SohMenu.h"
+#include "soh/Network/Anchor/Anchor.h"
 #include <ship/window/gui/GuiMenuBar.h>
 #include <ship/window/gui/GuiElement.h>
 #include <ship/utils/StringHelper.h>
@@ -163,6 +164,26 @@ void SohMenu::InitElement() {
                return !CVarGetInteger(CVAR_PREFIX_ADVANCED_RESOLUTION ".VerticalResolutionToggle", 0);
            },
             "Vertical Resolution Toggle is Off" } },
+        // Settings-sync Phase 3 — true when local client cannot edit
+        // enforced gameplay CVars. Covers: Anchor disabled, not yet
+        // connected, global-room (admin pane is suppressed there per
+        // existing convention at Menu.cpp), or connected but not the
+        // original room owner. Widgets in Flotilla → Host Settings push
+        // this DisableOption in their PreFunc; the menu layer renders
+        // them as read-only diagnostic displays for peers / disconnected
+        // users. Strict-host rule (design doc §2): effective-host
+        // migration does NOT transfer write authority for the cvars
+        // block — only the original `ownerClientId` can edit.
+        { DISABLE_FOR_ANCHOR_NOT_OWNER,
+          { [](disabledInfo& info) -> bool {
+               Anchor* a = Anchor::Instance;
+               if (a == nullptr || !a->isEnabled || !a->isConnected) return true;
+               bool isGlobalRoom = (std::string("soh-global") ==
+                                    CVarGetString(CVAR_REMOTE_ANCHOR("RoomId"), ""));
+               if (isGlobalRoom) return true;
+               return a->roomState.ownerClientId != a->ownClientId;
+           },
+            "Only the room owner can change enforced gameplay settings." } },
     };
 }
 

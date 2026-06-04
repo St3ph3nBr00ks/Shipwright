@@ -1,7 +1,9 @@
 #include "SohMenu.h"
 #include "SohGui.hpp"
 #include "soh/OTRGlobals.h"
+#include "soh/Enhancements/enhancementTypes.h"
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/Network/Anchor/Common/NavCVars.h"
 #include "soh/Network/Anchor/Common/AINavTest.h"
 #include "soh/resource/type/Skeleton.h"
@@ -69,6 +71,66 @@ namespace SohGui {
 
 extern std::shared_ptr<SohMenu> mSohMenu;
 using namespace UIWidgets;
+
+// Combobox maps for the Phase 3 Flotilla → Host Settings sidebar.
+// Duplicated from SohMenuEnhancements.cpp's file-static maps so widgets
+// here don't reach into a different TU's anonymous namespace. The same
+// underlying CVar values back both widgets — host's enforced value
+// always wins via AnchorCVarSync::GetEnforcedInt regardless of which
+// widget the user clicked.
+static const std::map<int32_t, const char*> sFlotillaTimeTravelOptions = {
+    { TIME_TRAVEL_DISABLED, "Disabled" },
+    { TIME_TRAVEL_OOT, "Ocarina of Time" },
+    { TIME_TRAVEL_OOT_MS, "Ocarina of Time + Master Sword" },
+    { TIME_TRAVEL_ANY, "Any Ocarina" },
+    { TIME_TRAVEL_ANY_MS, "Any Ocarina + Master Sword" },
+};
+
+static const std::map<int32_t, const char*> sFlotillaDamageMultPowers = {
+    { DAMAGE_VANILLA, "Vanilla (1x)" },      { DAMAGE_DOUBLE, "Double (2x)" },
+    { DAMAGE_QUADRUPLE, "Quadruple (4x)" },  { DAMAGE_OCTUPLE, "Octuple (8x)" },
+    { DAMAGE_FOOLISH, "Foolish (16x)" },     { DAMAGE_RIDICULOUS, "Ridiculous (32x)" },
+    { DAMAGE_MERCILESS, "Merciless (64x)" }, { DAMAGE_TORTURE, "Pure Torture (128x)" },
+    { DAMAGE_OHKO, "OHKO (256x)" },
+};
+
+static const std::map<int32_t, const char*> sFlotillaFallDamagePowers = {
+    { DAMAGE_VANILLA, "Vanilla (1x)" },      { DAMAGE_DOUBLE, "Double (2x)" },
+    { DAMAGE_QUADRUPLE, "Quadruple (4x)" },  { DAMAGE_OCTUPLE, "Octuple (8x)" },
+    { DAMAGE_FOOLISH, "Foolish (16x)" },     { DAMAGE_RIDICULOUS, "Ridiculous (32x)" },
+    { DAMAGE_MERCILESS, "Merciless (64x)" }, { DAMAGE_TORTURE, "Pure Torture (128x)" },
+};
+
+static const std::map<int32_t, const char*> sFlotillaVoidDamagePowers = {
+    { DAMAGE_VANILLA, "Vanilla (1x)" },      { DAMAGE_DOUBLE, "Double (2x)" },
+    { DAMAGE_QUADRUPLE, "Quadruple (4x)" },  { DAMAGE_OCTUPLE, "Octuple (8x)" },
+    { DAMAGE_FOOLISH, "Foolish (16x)" },     { DAMAGE_RIDICULOUS, "Ridiculous (32x)" },
+    { DAMAGE_MERCILESS, "Merciless (64x)" },
+};
+
+static const std::map<int32_t, const char*> sFlotillaBonkDamageValues = {
+    { BONK_DAMAGE_NONE, "No Damage" },        { BONK_DAMAGE_QUARTER_HEART, "0.25 Hearts" },
+    { BONK_DAMAGE_HALF_HEART, "0.5 Hearts" }, { BONK_DAMAGE_1_HEART, "1 Heart" },
+    { BONK_DAMAGE_2_HEARTS, "2 Hearts" },     { BONK_DAMAGE_4_HEARTS, "4 Hearts" },
+    { BONK_DAMAGE_8_HEARTS, "8 Hearts" },     { BONK_DAMAGE_OHKO, "OHKO" },
+};
+
+// Shared PreFunc — disables the widget when the local client is not
+// the owner of an active non-global session. Centralised so every
+// enforced widget in the sidebar uses the same evaluation.
+static void FlotillaHostSettingsPreFunc(WidgetInfo& info) {
+    if (mSohMenu->GetDisabledMap().at(DISABLE_FOR_ANCHOR_NOT_OWNER).active) {
+        info.activeDisables.push_back(DISABLE_FOR_ANCHOR_NOT_OWNER);
+    }
+}
+
+// Shared Callback — fires an immediate UPDATE_ROOM_STATE so peers see
+// the change within the relay RTT (~100ms) rather than waiting for the
+// 1-second auto-poll. No-op on non-owner / disconnected (gated inside
+// TriggerOwnerBroadcastNow).
+static void FlotillaHostSettingsCallback(WidgetInfo& info) {
+    AnchorCVarSync::TriggerOwnerBroadcastNow();
+}
 
 void SohMenu::AddMenuFlotilla() {
     AddMenuEntry("Flotilla", CVAR_SETTING("Menu.FlotillaSidebarSection"));
@@ -231,6 +293,222 @@ void SohMenu::AddMenuFlotilla() {
             "always cross-broadcast regardless of this setting.\n\n"
             "All clients in a session should use the same setting for "
             "consistent results."));
+
+    // -----------------------------------------------------------------
+    // Host Settings (Phase 3 of host-authoritative settings sync)
+    //
+    // Every widget here writes to a CVar that runtime gameplay code
+    // reads through AnchorCVarSync::GetEnforcedInt / GetEnforcedFloat
+    // — when a session is connected, host's value wins regardless of
+    // peer's local CVar (the strict-host rule: original room owner is
+    // the sole writer; effective-host migration does NOT transfer write
+    // authority; see Plans/settings_sync_design.md §2).
+    //
+    // UI gate via DISABLE_FOR_ANCHOR_NOT_OWNER + the shared PreFunc
+    // helper: editable on owner+connected, dimmed (with "Only the room
+    // owner..." tooltip) for peers / effective-host / disconnected /
+    // global-room. Disconnected / global users still see the displayed
+    // value (= their local CVar), so the sidebar doubles as a preview
+    // of what the user would broadcast if they hosted.
+    //
+    // Callback path: TriggerOwnerBroadcastNow() forces an immediate
+    // UPDATE_ROOM_STATE so peers see the change within relay RTT
+    // (~100ms). Without it the 1-second auto-poll would still propagate
+    // — just less snappy.
+    // -----------------------------------------------------------------
+    path.sidebarName = "Host Settings";
+    path.column = SECTION_COLUMN_1;
+    AddSidebarEntry("Flotilla", path.sidebarName, 2);
+
+    AddWidget(path, "Class A — must match (drift causes desync / crash)", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Time Travel with Song of Time", WIDGET_CVAR_COMBOBOX)
+        .CVar(CVAR_ENHANCEMENT("TimeTravel"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(ComboboxOptions()
+                     .ComboMap(sFlotillaTimeTravelOptions)
+                     .DefaultIndex(TIME_TRAVEL_OOT)
+                     .Tooltip("Cross-timeline age switch tier. Host-authoritative — "
+                              "peer playing Song of Time uses the host's tier "
+                              "(refused entirely if host has Disabled). Class A: "
+                              "drift would let peers warp into a different timeline "
+                              "than the host."));
+
+    AddWidget(path, "Damage Multiplier", WIDGET_CVAR_COMBOBOX)
+        .CVar(CVAR_ENHANCEMENT("DamageMult"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(ComboboxOptions()
+                     .ComboMap(sFlotillaDamageMultPowers)
+                     .DefaultIndex(0)
+                     .Tooltip("Multiplies all enemy / hazard damage. Host-authoritative "
+                              "— peer takes the same multiplied damage from a Stalfos "
+                              "hit as host would. Class A: drift = HP desync."));
+
+    AddWidget(path, "Fall Damage Multiplier", WIDGET_CVAR_COMBOBOX)
+        .CVar(CVAR_ENHANCEMENT("FallDamageMult"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(ComboboxOptions()
+                     .ComboMap(sFlotillaFallDamagePowers)
+                     .DefaultIndex(0)
+                     .Tooltip("Multiplies fall damage. Class A."));
+
+    AddWidget(path, "Void Damage Multiplier", WIDGET_CVAR_COMBOBOX)
+        .CVar(CVAR_ENHANCEMENT("VoidDamageMult"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(ComboboxOptions()
+                     .ComboMap(sFlotillaVoidDamagePowers)
+                     .DefaultIndex(0)
+                     .Tooltip("Multiplies damage taken on void-out. Class A."));
+
+    AddWidget(path, "Freeze Time##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_CHEAT("FreezeTime"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Locks the world clock. Host-authoritative — peers' time "
+            "freezes/unfreezes in lockstep with host. Class A: drift = "
+            "event-gate misfires + scene corruption."));
+
+    AddWidget(path, "Randomized Enemies##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RandomizedEnemies"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Randomizes enemy actor types at spawn. Host-authoritative — "
+            "every client spawns the same randomized roster. Class A: "
+            "drift = netId lookup fails on differing actor types."));
+
+    AddWidget(path, "New Drops##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("NewDrops"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Rewrites item drop tables. Host-authoritative — peers see "
+            "the same drops host's table would produce. Class A: drift = "
+            "inventory mismatch."));
+
+    AddWidget(path, "Hyper Enemies##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("HyperEnemies"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Runs enemy update twice per frame (2x speed). Host-authoritative "
+            "— peers' enemies double-tick to match host. Class A: drift = "
+            "animation desync."));
+
+    path.column = SECTION_COLUMN_2;
+    AddWidget(path, "Class B — should match (drift causes UX / fairness divergence)",
+              WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Unrestricted Items##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_CHEAT("NoRestrictItems"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Allows any item to be equipped/used regardless of restrictions."));
+
+    AddWidget(path, "Bonk Damage Multiplier##Flotilla", WIDGET_CVAR_COMBOBOX)
+        .CVar(CVAR_ENHANCEMENT("BonkDamageMult"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(ComboboxOptions()
+                     .ComboMap(sFlotillaBonkDamageValues)
+                     .DefaultIndex(BONK_DAMAGE_NONE)
+                     .Tooltip("Damage from bonking into walls / objects."));
+
+    AddWidget(path, "Infinite Ammo##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_CHEAT("InfiniteAmmo"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Per-frame refill of ammo (arrows, nuts, sticks, bombs, etc.). "
+            "Host-authoritative — peers' refill hook (re)registers to "
+            "match host."));
+
+    AddWidget(path, "Climb Everything##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_CHEAT("ClimbEverything"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Treats every wall as climbable. Host-authoritative."));
+
+    AddWidget(path, "Hookshot Everything##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_CHEAT("HookshotEverything"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Allows hookshot/longshot to latch onto any surface."));
+
+    AddWidget(path, "Speed Modifier: %.2fx##Flotilla", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar(CVAR_CHEAT("SpeedModifier.Value"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(FloatSliderOptions()
+                     .Format("%.2f")
+                     .Min(0.1f)
+                     .Max(10.0f)
+                     .DefaultValue(1.0f)
+                     .Tooltip(
+                         "Movement speed multiplier — only the .Value is "
+                         "synced. Activation (.SpeedToggle / .Btn) stays "
+                         "local: peer still needs to bind a modifier button "
+                         "or set SpeedToggle locally for the boost to "
+                         "actually apply."));
+
+    AddWidget(path, "Super Tunic##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_CHEAT("SuperTunic"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "All tunics grant all environmental immunities (Goron + Zora "
+            "+ Kokiri behaviour combined)."));
+
+    AddWidget(path, "Timeless Equipment##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_CHEAT("TimelessEquipment"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Child can equip adult items and vice versa."));
+
+    AddWidget(path, "Bomb Timer Multiplier: %.2fx##Flotilla", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar(CVAR_CHEAT("BombTimerMultiplier"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(FloatSliderOptions()
+                     .Format("%.2f")
+                     .Min(0.1f)
+                     .Max(5.0f)
+                     .DefaultValue(1.0f)
+                     .Tooltip("Multiplies bomb fuse duration. Applied at "
+                              "spawn — new bombs use host's value, existing "
+                              "ones keep their current fuse."));
+
+    AddWidget(path, "Shield with Two-Handed Weapons##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_CHEAT("ShieldTwoHanded"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Allows shielding while wielding Megaton Hammer / similar "
+            "two-handed weapons."));
+
+    AddWidget(path, "Remove Explosive Limit##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("RemoveExplosiveLimit"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Removes the 3-active-explosive cap; allows 4+ bombs / "
+            "bombchus simultaneously."));
+
+    AddWidget(path, "Fireproof Deku Shield##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_CHEAT("FireproofDekuShield"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Prevents the Deku Shield from burning on fire damage."));
 
     // -----------------------------------------------------------------
     // Scene Info

@@ -274,3 +274,27 @@ void RegisterEnforcedCVarsAutoSync() {
 static RegisterShipInitFunc gInitAutoSync(RegisterEnforcedCVarsAutoSync);
 
 }  // namespace
+
+// Reopened: AnchorCVarSync::TriggerOwnerBroadcastNow needs access to the
+// anonymous-namespace helpers above (SnapshotLocalEnforcedCVars, the
+// sLastBroadcastSnapshot / sBaselineCaptured statics). Defining it here
+// keeps the snapshot state local to this TU while making the function
+// callable from Phase 3 widget code.
+namespace AnchorCVarSync {
+
+void TriggerOwnerBroadcastNow() {
+    Anchor* anchor = Anchor::Instance;
+    if (anchor == nullptr || !anchor->isEnabled || !anchor->isConnected) return;
+    if (anchor->roomState.ownerClientId != anchor->ownClientId) return;
+
+    // Update the auto-poll's baseline BEFORE broadcasting so the next
+    // 1-second tick observes no drift and skips its own redundant
+    // broadcast. Without this, every widget click would produce two
+    // packets ~1s apart: the immediate one here + the auto-poll's
+    // detection of "current vs. previous baseline differs".
+    sLastBroadcastSnapshot = SnapshotLocalEnforcedCVars();
+    sBaselineCaptured = true;
+    anchor->SendPacket_UpdateRoomState();
+}
+
+}  // namespace AnchorCVarSync

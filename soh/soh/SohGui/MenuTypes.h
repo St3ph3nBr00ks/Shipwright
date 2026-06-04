@@ -20,6 +20,12 @@ typedef enum {
     DISABLE_FOR_FRAME_ADVANCE_OFF,
     DISABLE_FOR_ADVANCED_RESOLUTION_OFF,
     DISABLE_FOR_VERTICAL_RESOLUTION_OFF,
+    // Settings-sync Phase 3 (Flotilla → Host Settings sidebar): true when
+    // the local client is NOT the room owner of an active session (peer,
+    // disconnected, or global-room). Widgets gated on this become read-
+    // only diagnostic displays; only the owner can change enforced
+    // gameplay CVars per the strict-host rule (design doc §2).
+    DISABLE_FOR_ANCHOR_NOT_OWNER,
 } DisableOption;
 
 struct WidgetInfo;
