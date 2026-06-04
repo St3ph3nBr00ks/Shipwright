@@ -114,6 +114,51 @@ bool IsEnforced(const char* cvarName) {
     return false;
 }
 
+void OnCvarsReceivedDispatch() {
+    // Fires every RegisterShipInitFunc listener attached to the 20
+    // enforced CVar names. This recovers the side-effect propagation
+    // that UI widgets get for free via WIDGET_CVAR_CHECKBOX -> ShipInit::
+    // Init(cvarName), but which network-driven CVar changes bypass
+    // entirely (the relay updates roomState.cvars directly, no local
+    // CVar listener fires).
+    //
+    // Concretely: each `RegisterXxx` function called from here ends
+    // with `COND_HOOK(hookType, CVAR_X_VALUE, body)` which unregisters
+    // its previous hook and re-registers it iff the condition evaluates
+    // true. CVAR_X_VALUE is now `AnchorCVarSync::GetEnforcedInt(...)` so
+    // the condition reflects the host's authoritative value. The hook
+    // therefore (un)registers on the peer to match what the host has
+    // configured — closing the "peer's InfiniteAmmo refill never fires
+    // even though host has it on" class of bug.
+    //
+    // Unconditional dispatch (no diff against last snapshot) keeps the
+    // logic simple. Cost per call is ~20 hook re-registration cycles —
+    // negligible compared to the per-receive deserialisation. UI widget
+    // toggles already do this via ShipInit::Init at every checkbox flip,
+    // so this is the same code path under a different trigger.
+
+    ShipInit::Init(CVAR_ENHANCEMENT("TimeTravel"));
+    ShipInit::Init(CVAR_ENHANCEMENT("DamageMult"));
+    ShipInit::Init(CVAR_ENHANCEMENT("FallDamageMult"));
+    ShipInit::Init(CVAR_ENHANCEMENT("VoidDamageMult"));
+    ShipInit::Init(CVAR_CHEAT("FreezeTime"));
+    ShipInit::Init(CVAR_ENHANCEMENT("RandomizedEnemies"));
+    ShipInit::Init(CVAR_ENHANCEMENT("NewDrops"));
+    ShipInit::Init(CVAR_ENHANCEMENT("HyperEnemies"));
+    ShipInit::Init(CVAR_CHEAT("NoRestrictItems"));
+    ShipInit::Init(CVAR_ENHANCEMENT("BonkDamageMult"));
+    ShipInit::Init(CVAR_CHEAT("InfiniteAmmo"));
+    ShipInit::Init(CVAR_CHEAT("ClimbEverything"));
+    ShipInit::Init(CVAR_CHEAT("HookshotEverything"));
+    ShipInit::Init(CVAR_CHEAT("SpeedModifier.Value"));
+    ShipInit::Init(CVAR_CHEAT("SuperTunic"));
+    ShipInit::Init(CVAR_CHEAT("TimelessEquipment"));
+    ShipInit::Init(CVAR_CHEAT("BombTimerMultiplier"));
+    ShipInit::Init(CVAR_CHEAT("ShieldTwoHanded"));
+    ShipInit::Init(CVAR_ENHANCEMENT("RemoveExplosiveLimit"));
+    ShipInit::Init(CVAR_CHEAT("FireproofDekuShield"));
+}
+
 }  // namespace AnchorCVarSync
 
 // extern "C" shims for C-decomp consumers (z_player.c etc.).

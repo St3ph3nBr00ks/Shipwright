@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -144,5 +145,15 @@ void Anchor::HandlePacket_UpdateRoomState(nlohmann::json payload) {
         SPDLOG_INFO("[SettingsSync] Received cvars from owner={} infiniteAmmo={} damageMult={} timeTravel={} speedModifier={:.2f}",
                     roomState.ownerClientId, (int)roomState.cvars.infiniteAmmo, roomState.cvars.damageMult,
                     roomState.cvars.timeTravel, roomState.cvars.speedModifierValue);
+
+        // Re-fire any RegisterShipInitFunc listeners gated on enforced CVar
+        // names. This propagates host-side changes to peer-local hook
+        // registrations (COND_HOOK / COND_VB_SHOULD blocks in Cheats/* and
+        // Difficulty/* and elsewhere). Without it, peers' per-frame side
+        // effects — InfiniteAmmo refill, FreezeTime clock-lock,
+        // HyperEnemies double-tick, BonkDamage bonk handler — never
+        // engage on wire updates even though the wrapper read returns
+        // host's value. See OnCvarsReceivedDispatch() for rationale.
+        AnchorCVarSync::OnCvarsReceivedDispatch();
     }
 }

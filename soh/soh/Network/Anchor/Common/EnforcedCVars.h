@@ -41,6 +41,21 @@ float GetEnforcedFloat(const char* cvarName, float localDefault);
 // peer gate logic.
 bool IsEnforced(const char* cvarName);
 
+// Triggers ShipInit::Init(cvarName) for every enforced CVar after the
+// receive side has updated roomState.cvars. This re-fires any
+// RegisterShipInitFunc listeners gated on those names, which in turn
+// re-evaluate their COND_HOOK / COND_VB_SHOULD blocks against the
+// wrapper's new return value. Without this, peer-side hooks
+// (InfiniteAmmo's per-frame refill, FreezeTime's freeze, HyperEnemies'
+// double-tick, etc.) stay registered or unregistered according to
+// peer's local CVar — never re-evaluated when host's value changes
+// over the wire.
+//
+// Call from HandlePacket_UpdateRoomState AFTER updating
+// roomState.cvars so the listeners' wrapper reads return host's
+// authoritative value.
+void OnCvarsReceivedDispatch();
+
 }  // namespace AnchorCVarSync
 
 // C-linkage shims for OoT decomp consumers (z_player.c etc.). The
