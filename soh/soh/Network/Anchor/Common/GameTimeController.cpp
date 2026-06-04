@@ -3,12 +3,16 @@
 #include "soh/Network/Anchor/Anchor.h"  // ::Anchor::Instance / isEnabled
                                         // (also pre-loads libultraship.h + z64.h)
 #include "soh/cvar_prefixes.h"          // CVAR_REMOTE_ANCHOR for live-world toggle
+#include "soh/Notification/Notification.h"  // Notification::Emit for G.ii NotificationOnly path
+#include "soh/SohGui/ImGuiUtils.h"          // GetTextureForItemId (notification icon)
+#include "soh/util.h"                       // SohUtils::GetItemName
 
 #include <libultraship/bridge/consolevariablebridge.h>  // CVarGetInteger
 
 extern "C" {
 #include "macros.h"
 #include "variables.h"  // gSaveContext (Pitfall 9): SceneTransition rule reads gameMode
+#include "functions.h"  // Item_Give (z_parameter.c) for G.ii non-blocking item write
 extern PlayState* gPlayState;
 }
 
@@ -87,6 +91,58 @@ bool ShouldAdvanceWorldTime(TimeContext context) {
     return LegacyAdvanceWorldTimeRule(context);
 }
 
+// ---------------------------------------------------------------------------
+// Pillar G.ii — item-get presentation policy.
+//
+// Centralised gate that decides, per getItem id, whether the standard
+// item-get sequence (z_player.c func_8083A434) plays the full vanilla
+// freeze cutscene or falls through to the Notification toast path.
+//
+// Allowlist: items where the narrative moment justifies preserving the
+// interruption. Songs, medallions, spiritual stones, and Master Sword
+// are NOT listed here because they use dedicated cutscene paths that
+// don't go through func_8083A434 at all — they keep their full cutscenes
+// automatically.
+// ---------------------------------------------------------------------------
+
+bool IsNonBlockingItemGetEnabled() {
+    return CVarGetInteger(CVAR_ENHANCEMENT("Anchor.NonBlockingItemGet"), 1) != 0;
+}
+
+ItemPresentationMode GetItemPresentationMode(int16_t getItemId) {
+    // Single-player → never override.
+    if (::Anchor::Instance == nullptr || !::Anchor::Instance->isEnabled) {
+        return ItemPresentationMode::Vanilla;
+    }
+    // User kill switch → always vanilla.
+    if (!IsNonBlockingItemGetEnabled()) {
+        return ItemPresentationMode::Vanilla;
+    }
+    // Iconic allowlist — quest-cutscene items whose narrative moment
+    // justifies the freeze. Songs / medallions / spiritual stones /
+    // Master Sword are intentionally NOT here — they use separate
+    // cutscene paths that bypass func_8083A434.
+    //
+    // Ice Trap is also allowlisted: the vanilla cutscene action has a
+    // randomizer-specific damage path (z_player.c Player_Action_8084E6D4)
+    // that spawns EN_CLEAR_TAG and fires PLAYER_HIT_RESPONSE_ICE_TRAP.
+    // Bypassing the cutscene would silently no-op the trap → broken
+    // randomizer experience. Vanilla also uses GI_ICE_TRAP for some
+    // surprise chests, so this protects both modes.
+    switch (getItemId) {
+        case GI_OCARINA_OOT:     // Princess Zelda escape (sometimes Sheik gives in Rando)
+        case GI_OCARINA_FAIRY:   // Saria's gift
+        case GI_ARROW_LIGHT:     // Princess Zelda (post-Tower) — sage-grant flavour
+        case GI_DINS_FIRE:       // Great Fairy
+        case GI_FARORES_WIND:    // Great Fairy
+        case GI_NAYRUS_LOVE:     // Great Fairy
+        case GI_ICE_TRAP:        // randomizer damage path; safety allowlist
+            return ItemPresentationMode::Vanilla;
+        default:
+            return ItemPresentationMode::NotificationOnly;
+    }
+}
+
 }  // namespace GameTimeController
 
 // ---------------------------------------------------------------------------
@@ -149,4 +205,69 @@ extern "C" bool Anchor_PauseMenuShouldExtraTick(void) {
         return true;
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Pillar G.ii — item-get presentation bridge.
+//
+// Returns the mode as an int (matches ANCHOR_ITEM_PRESENTATION_*). C
+// callers branch on the return value to decide whether to run the
+// vanilla cutscene or fall through to the Notification-only path.
+// ---------------------------------------------------------------------------
+extern "C" int Anchor_GetItemPresentationMode(int16_t getItemId) {
+    return static_cast<int>(GameTimeController::GetItemPresentationMode(getItemId));
+}
+
+// Non-blocking item-give. Called from z_player.c func_8083A434 when
+// Anchor_GetItemPresentationMode returned NOTIFICATION_ONLY. Skips the
+// vanilla freeze cutscene entirely: writes the item to inventory via
+// the standard Item_Give helper, then emits a Notification toast.
+//
+// The toast uses the existing SoH Notification system
+// (`Notification::Emit`) which already supports icon + multi-segment
+// text + auto-fade timer + queueing. Timer is set to 6 seconds with
+// the renderer's built-in fade-out in the last second.
+//
+// Side effects intentionally NOT replicated from the vanilla cutscene:
+//   - Player_SetupActionPreserveAnimMovement (cutscene action handler)
+//   - PLAYER_STATE1_GETTING_ITEM / PLAYER_STATE1_IN_CUTSCENE flags
+//   - Camera pan / "look at item" framing
+//   - Link's hands-up animation pose
+//   - Talk-actor exchange (handled by caller's vanilla path for items
+//     that flow through GiveItemEntryFromActor — non-blocking only fires
+//     for chest/scrub/NPC standard gives where no exchange is pending)
+//
+// Side effects replicated:
+//   - Inventory write via Item_Give (handles ammo / bottle / capacity
+//     upgrades / etc. uniformly via z_parameter.c's existing logic).
+//   - Item-get audio cue (handled by Notification's default sound when
+//     mute=false).
+extern "C" void Anchor_GiveItemNonBlocking(int16_t getItemId, uint8_t itemId) {
+    if (gPlayState == nullptr) return;
+
+    // Inventory write. Item_Give handles bottle slot allocation, ammo
+    // increments, capacity upgrades (heart container / quiver / etc.),
+    // and trade-quest state updates uniformly. Falls back to no-op
+    // for unrecognised ids — safe.
+    Item_Give(gPlayState, itemId);
+
+    // Notification toast. ~6 seconds with the last 1s fading out via
+    // the Notification renderer's interpolation. Player retains full
+    // control throughout — toast does not capture input.
+    Notification::Emit({
+        .itemIcon = GetTextureForItemId(itemId),
+        .prefix = "You",
+        .prefixColor = ImVec4(0.8f, 0.8f, 1.0f, 1.0f),
+        .message = "got",
+        .messageColor = ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+        .suffix = SohUtils::GetItemName(itemId),
+        .suffixColor = ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
+        .remainingTime = 6.0f,
+        .mute = false,  // play notification chime
+    });
+
+    // Avoid unused-param warning when getItemId isn't consulted in the
+    // current implementation. Reserved for future per-getId branching
+    // (e.g. heart container animation cue) without changing the signature.
+    (void)getItemId;
 }
