@@ -1480,10 +1480,20 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     if (gEnInvaderId != 0 && actor->id == gEnInvaderId &&
         payload.contains("invaderState")) {
         EnInvader* inv = (EnInvader*)actor;
-        // Skip if WE are the host/owner — our local state machine is
-        // already authoritative. (The owner echo is filtered earlier in
-        // the receive pipeline for most enemies, but defensive here.)
-        if (!::SceneAuthority::IsEffectiveHost()) {
+        // Fix 2 (§3.1 / OQ1): gate on per-Invader room authority instead
+        // of global IsEffectiveHost. If we are the room host of THIS
+        // Invader's tracked (scene, room, timeline), our local state
+        // machine is authoritative — incoming synced fields would fight
+        // it. If we're NOT the room host, accept the broadcast.
+        //
+        // Pre-Fix-2 gate was global IsEffectiveHost: meant any non-host
+        // accepted the sync (correct only when effective host == room
+        // host of the Invader's room; broken when divergent).
+        const bool iAmAuthorityForThisInvader =
+            ::SceneAuthority::IsRoomHost(inv->trackedScene,
+                                         inv->trackedRoom,
+                                         inv->trackedTimeline);
+        if (!iAmAuthorityForThisInvader) {
             inv->syncedHasState    = 1;
             inv->syncedState       = payload["invaderState"].get<int>();
             inv->syncedSpeedXZ     = payload.value("invaderSpeedXZ", 0.0f);
