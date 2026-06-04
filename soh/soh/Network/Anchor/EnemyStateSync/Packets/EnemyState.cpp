@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <optional>       // Fix 2 §3.4 hygiene follow-up — value-copy of LiveSpawnRecord
 #include <unordered_map>
 #include <unordered_set>  // Fix 2 §3.4 — per-netId notified-clients tracking
 
@@ -854,18 +855,33 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // time a client appears in the loop they're treated as new.
     auto& notifiedClients = sNotifiedSpawnByNetId[netId];
 
-    const auto& liveSpawnsForScene =
-        EnemyStateSync::HostBookkeeping::Instance().LiveSpawnsForScene(
-            gPlayState->sceneNum);
-    auto liveRecIt = liveSpawnsForScene.find(netId);
-    const EnemyStateSync::LiveSpawnRecord* liveRec =
-        (liveRecIt != liveSpawnsForScene.end()) ? &liveRecIt->second : nullptr;
+    // Fix 2 §3.4 hygiene follow-up — copy the LiveSpawnRecord by value
+    // instead of holding a pointer into the inner map. LiveSpawnsForScene
+    // returns const ref to mLiveSpawnsByScene's inner unordered_map; any
+    // mutation to mLiveSpawnsByScene during the broadcast loop below
+    // (RecordSceneDeath / RecordLiveSpawn) can invalidate the reference —
+    // RecordSceneDeath::erase on the same inner map, or outer-map rehash
+    // from a new sceneNum operator[] insertion. Audit log 374 traced a
+    // 0xC0000005 + RAX=0xABABABAB crash to this dangling-reference
+    // hazard. LiveSpawnRecord is a ~28-byte POD so the value copy is
+    // negligible. Scope braces signal that the inner-map reference's
+    // lifetime ends before the broadcast loop dereferences anything.
+    std::optional<EnemyStateSync::LiveSpawnRecord> liveRec;
+    {
+        const auto& liveSpawnsForScene =
+            EnemyStateSync::HostBookkeeping::Instance().LiveSpawnsForScene(
+                gPlayState->sceneNum);
+        auto liveRecIt = liveSpawnsForScene.find(netId);
+        if (liveRecIt != liveSpawnsForScene.end()) {
+            liveRec = liveRecIt->second;
+        }
+    }
 
     for (auto& [clientId, client] : clients) {
         if (client.sceneNum == gPlayState->sceneNum && client.curRoomNum == hostRoom &&
             client.online && client.isSaveLoaded && !client.self) {
             // Per-frame SPAWN re-send check (Fix 2 §3.4 prototype).
-            if (liveRec != nullptr &&
+            if (liveRec.has_value() &&
                 notifiedClients.find(clientId) == notifiedClients.end()) {
                 // Client missing from notified set; build + send SPAWN
                 // for them before the steady-state ENEMY_STATE. Mirrors
