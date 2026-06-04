@@ -55,6 +55,7 @@
 #include "soh/Network/Anchor/Common/AICombat/SwordBladeTracking.h"    // #238: per-frame sword tip/base + AT quad builder
 #include "soh/Network/Anchor/Common/AINavTest.h"  // Navigation Test Harness — combat-disable gate + reach reporting
 #include "soh/Network/Anchor/Common/DistanceMath.h"  // AnchorDist::DistXZSq
+#include "soh/Network/Anchor/Common/YawMath.h"       // AnchorYaw::YawTowardTarget (Tier 1)
 #include "soh/Network/Anchor/Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
 #include "soh/Network/Anchor/Common/SceneAuthority.h"  // IsEffectiveHost — peer-replica gate
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Parity gap 5: CrawlspaceAnchor lookup
@@ -240,9 +241,9 @@ static CrawlInvState sCrawlInvState;
 // inline was byte-identical to the shared one. Call sites updated
 // in this same commit.
 
-inline s16 YawTowardTarget(const Vec3f& from, const Vec3f& to) {
-    return Math_Atan2S(to.z - from.z, to.x - from.x);
-}
+// Tier 1 refactor (2026-06-04) — YawTowardTarget extracted to
+// Common/YawMath.h as AnchorYaw::YawTowardTarget. Call sites
+// updated in this same commit.
 
 // Forward declaration — PickHostileTarget is defined further down
 // (after Phase 2 handlers) because it's an Agent 3 helper that lives
@@ -915,7 +916,7 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
     // When usingNavMesh = true, subgoal is the current path waypoint.
     // When usingNavMesh = false (DirectYaw fallback, target inside 60u
     // or water-gated), subgoal is the target position itself.
-    const s16 yaw = YawTowardTarget(a->world.pos, nav.subgoal);
+    const s16 yaw = AnchorYaw::YawTowardTarget(a->world.pos, nav.subgoal);
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
 
@@ -1963,7 +1964,7 @@ void PositionAttackQuad(EnInvader* this_) {
 bool IsFrontalAttacker(EnInvader* this_, Actor* attacker) {
     if (attacker == nullptr) return false;
     Actor* a = &this_->actor;
-    const s16 yawToAttacker = YawTowardTarget(a->world.pos, attacker->world.pos);
+    const s16 yawToAttacker = AnchorYaw::YawTowardTarget(a->world.pos, attacker->world.pos);
     const s16 delta = (s16)(yawToAttacker - a->shape.rot.y);
     const int absDelta = (delta < 0) ? -(int)delta : (int)delta;
     return absDelta < kBlockFrontalAngle;
@@ -2030,7 +2031,7 @@ void TickATTACK(EnInvader* this_, PlayState* play, const Vec3f& targetSeedPos) {
     sAttackState.target = AnchorAICombat::ResolveAttackTarget(resolveCtx);
 
     if (sAttackState.target != nullptr) {
-        a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
+        a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 
@@ -2252,7 +2253,7 @@ void TickENGAGE(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     // Drive locomotion toward chosen subgoal. Speed band stays target-
     // relative (not subgoal-relative) so pursuit pace matches actual
     // distance-to-target.
-    a->shape.rot.y = YawTowardTarget(a->world.pos, nav.subgoal);
+    a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, nav.subgoal);
     a->world.rot.y = a->shape.rot.y;
     a->speedXZ = (distXZ > kEngageRunDistance) ? kEngageRunSpeed : kEngageWalkSpeed;
 }
@@ -2284,7 +2285,7 @@ void TickBLOCK(EnInvader* this_, PlayState* play, const Vec3f& leaderHintPos) {
     }
 
     if (sAttackState.target != nullptr) {
-        a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
+        a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 
@@ -2407,7 +2408,7 @@ void TickRANGED_ATTACK(EnInvader* this_, PlayState* play, const Vec3f& leaderHin
         return;
     }
 
-    a->shape.rot.y = YawTowardTarget(a->world.pos, tp);
+    a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, tp);
     a->world.rot.y = a->shape.rot.y;
 
     if (!sAttackState.swingFiredAT &&
@@ -2483,7 +2484,7 @@ void TickSTANDBY(EnInvader* this_, PlayState* play, const Vec3f& targetHintPos) 
     // Face logic — Invader only faces when a target is acquired
     // (no leader-fallback unlike Follower).
     if (eval.faceTarget != nullptr) {
-        a->shape.rot.y = YawTowardTarget(a->world.pos, eval.faceTarget->world.pos);
+        a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, eval.faceTarget->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 

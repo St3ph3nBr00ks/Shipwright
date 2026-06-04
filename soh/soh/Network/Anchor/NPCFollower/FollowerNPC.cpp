@@ -33,6 +33,7 @@
 #include "soh/Network/Anchor/Common/AICombat/SwordBladeTracking.h"    // #238: per-frame sword tip/base + AT quad builder
 #include "soh/Network/Anchor/Common/AINavTest.h"      // Navigation Test Harness — combat-disable + reach
 #include "soh/Network/Anchor/Common/DistanceMath.h"   // AnchorDist::DistXZSq
+#include "soh/Network/Anchor/Common/YawMath.h"        // AnchorYaw::YawTowardTarget (Tier 1)
 #include "soh/Network/Anchor/Common/AILocomotion/NavStateTransitions.h"  // 3D-aware arrive/pursue/progress predicates
 #include "soh/Enhancements/RoomNavData/RoomNavData.h" // Phase 6: ClimbAnchor lookup
 #include "soh/cvar_prefixes.h"
@@ -839,10 +840,9 @@ bool IsLocalOwnerNPC(Actor* npc) {
 // inline was byte-identical to the shared one. Call sites updated
 // in this same commit.
 
-// Yaw toward target XZ (s16 binary angle).
-inline s16 YawTowardTarget(const Vec3f& from, const Vec3f& to) {
-    return Math_Atan2S(to.z - from.z, to.x - from.x);
-}
+// Tier 1 refactor (2026-06-04) — YawTowardTarget extracted to
+// Common/YawMath.h as AnchorYaw::YawTowardTarget. Call sites
+// updated in this same commit.
 
 // Forward-decl — defined further down (with TickCLIMBING since it's
 // the primary consumer). ComputeEffectiveTarget needs it for the
@@ -992,7 +992,7 @@ void TickFOLLOW(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // When false (DirectYaw fallback, target inside 60u or water-gated,
     // or path empty), subgoal is the target position itself.
     const Vec3f& subgoal = nav.subgoal;
-    const s16 yaw = YawTowardTarget(a->world.pos, subgoal);
+    const s16 yaw = AnchorYaw::YawTowardTarget(a->world.pos, subgoal);
     a->shape.rot.y = yaw;
     a->world.rot.y = yaw;
 
@@ -2300,7 +2300,10 @@ void PositionAttackQuad(EnFollower* this_) {
 // B.5 Phase 4 — shared via AnchorAICombat::ResolveAttackTarget +
 // TickAttackATAndComplete. Per-actor body retains:
 //   - speedXZ=0
-//   - face logic (file-local YawTowardTarget)
+//   - face logic (uses AnchorYaw::YawTowardTarget; stays per-actor
+//     because the target-selection semantics differ between Follower
+//     and Invader — Follower falls back to facing leader, Invader
+//     keeps last facing)
 //   - exit transition + SPDLOG + path reset
 // (Follower's dispatcher-driven anim entry needs no on-entry hook;
 // see DR-2 §"Policy axis #4". Invader's TickATTACK keeps the
@@ -2322,7 +2325,7 @@ void TickATTACK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // Must run BEFORE TickAttackATAndComplete so PositionAttackQuad
     // sees the freshly-written shape.rot.y.
     if (sAttackState.target != nullptr) {
-        a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
+        a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 
@@ -2537,7 +2540,7 @@ void TickENGAGE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // Drive locomotion toward chosen subgoal. Speed band is
     // target-distance-relative (not subgoal-distance) so pursuit pace
     // matches actual distance-to-target.
-    a->shape.rot.y = YawTowardTarget(a->world.pos, nav.subgoal);
+    a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, nav.subgoal);
     a->world.rot.y = a->shape.rot.y;
     a->speedXZ = (distXZ > kRunDistance) ? kRunSpeed : kWalkSpeed;
 }
@@ -2703,7 +2706,7 @@ static BlockState sBlockState;
 bool IsFrontalAttacker(EnFollower* this_, Actor* attacker) {
     if (attacker == nullptr) return false;
     Actor* a = &this_->actor;
-    const s16 yawToAttacker = YawTowardTarget(a->world.pos, attacker->world.pos);
+    const s16 yawToAttacker = AnchorYaw::YawTowardTarget(a->world.pos, attacker->world.pos);
     // s16 angle subtraction wraps naturally — the resulting delta is
     // the signed shortest angular distance. Take abs and compare.
     const s16 delta = (s16)(yawToAttacker - a->shape.rot.y);
@@ -2742,7 +2745,7 @@ void TickBLOCK(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
 
     // Face target each frame so the shield always faces the threat.
     if (sAttackState.target != nullptr) {
-        a->shape.rot.y = YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
+        a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, sAttackState.target->world.pos);
         a->world.rot.y = a->shape.rot.y;
     }
 
@@ -2851,7 +2854,7 @@ void TickRANGED_ATTACK(EnFollower* this_, PlayState* play, const Vec3f& leaderPo
     }
 
     // Face target (yaw only — body alignment for the shoot anim).
-    a->shape.rot.y = YawTowardTarget(a->world.pos, tp);
+    a->shape.rot.y = AnchorYaw::YawTowardTarget(a->world.pos, tp);
     a->world.rot.y = a->shape.rot.y;
 
     // Spawn arrow at release frame. swingFiredAT field is reused
@@ -2952,12 +2955,12 @@ void TickSTANDBY(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     // no-target branch" + "refresh on re-acquire" idiom.
     sAttackState.target = eval.faceTarget;
 
-    // Face logic — per-actor because YawTowardTarget is file-local.
-    // Follower falls back to facing the leader when no target is
-    // resolved (alert pose with a sensible orientation).
+    // Face logic — per-actor because the no-target fallback differs
+    // between Follower (face the leader) and Invader (keep facing).
+    // Math uses AnchorYaw::YawTowardTarget (Tier 1, shared).
     a->shape.rot.y = (eval.faceTarget != nullptr)
-                       ? YawTowardTarget(a->world.pos, eval.faceTarget->world.pos)
-                       : YawTowardTarget(a->world.pos, leaderPos);
+                       ? AnchorYaw::YawTowardTarget(a->world.pos, eval.faceTarget->world.pos)
+                       : AnchorYaw::YawTowardTarget(a->world.pos, leaderPos);
     a->world.rot.y = a->shape.rot.y;
 
     switch (eval.decision) {
