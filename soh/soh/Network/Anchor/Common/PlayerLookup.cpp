@@ -271,3 +271,12 @@ Actor* PickHostileTargetForInvader(Actor* invader, PlayState* play) {
 
     return best;
 }
+
+bool AnyPeerInScene(int16_t sceneNum) {
+    if (Anchor::Instance == nullptr) return false;
+    for (auto& [clientId, client] : Anchor::Instance->clients) {
+        if (!client.online || !client.isSaveLoaded || client.self) continue;
+        if (client.sceneNum == sceneNum) return true;
+    }
+    return false;
+}

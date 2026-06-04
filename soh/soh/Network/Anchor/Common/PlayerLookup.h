@@ -70,3 +70,9 @@ int GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount);
 // of Anchor_GetNearestPlayerActor remain unchanged; this helper is
 // the new entry point for the Invader actor's target-acquisition path.
 Actor* PickHostileTargetForInvader(Actor* invader, PlayState* play);
+
+// Returns true if any peer (non-self, online, save-loaded) is currently
+// in `sceneNum`. Use this when a hook or handler needs to gate work on
+// "is anyone besides me in this scene". Mirrors the inline loop pattern
+// duplicated across HookHandlers.cpp pre-extraction (~2 verified sites).
+bool AnyPeerInScene(int16_t sceneNum);

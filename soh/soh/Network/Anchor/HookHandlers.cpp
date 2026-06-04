@@ -392,17 +392,8 @@ void Anchor::RegisterHooks() {
                 static int16_t sLastHostSceneEntered = -1;
                 const int16_t  curScene             = (int16_t)gPlayState->sceneNum;
                 if (sLastHostSceneEntered >= 0 && sLastHostSceneEntered != curScene) {
-                    bool anyPeerInPrevScene = false;
-                    if (Anchor::Instance != nullptr) {
-                        for (auto& [otherId, other] : Anchor::Instance->clients) {
-                            if (!other.online || !other.isSaveLoaded || other.self) continue;
-                            if (other.sceneNum == sLastHostSceneEntered) {
-                                anyPeerInPrevScene = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!anyPeerInPrevScene && Anchor::Instance != nullptr) {
+                    if (!AnyPeerInScene(sLastHostSceneEntered) &&
+                        Anchor::Instance != nullptr) {
                         Anchor::Instance->SendPacket_SceneDeathsCleared(
                             sLastHostSceneEntered, 0xFF);
                     }
@@ -823,15 +814,7 @@ void Anchor::RegisterHooks() {
             ::SceneAuthority::IsMyCurrentRoomHost() &&
             (int16_t)gPlayState->sceneNum != sLastClearedSceneNum) {
             const int16_t targetScene = (int16_t)gPlayState->sceneNum;
-            bool anyPeerInScene = false;
-            for (auto& [clientId, client] : Anchor::Instance->clients) {
-                if (!client.self && client.online && client.isSaveLoaded &&
-                    client.sceneNum == targetScene) {
-                    anyPeerInScene = true;
-                    break;
-                }
-            }
-            if (!anyPeerInScene) {
+            if (!AnyPeerInScene(targetScene)) {
                 auto& bk = EnemyStateSync::HostBookkeeping::Instance();
                 bk.ClearScene(targetScene);
                 // Same gate clears the per-scene-visit broadcast-dedup set:
