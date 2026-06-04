@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>  // Fix 2 §3.4 — per-netId notified-clients tracking
 
 extern "C" {
 #include "variables.h"
@@ -199,6 +200,38 @@ struct EnemyUpdateLastSent {
 // File-scope cache. Cleared on scene-load (HookHandlers.cpp OnSceneSpawnActors)
 // and on reconnect (Anchor.cpp OnConnected) via Anchor_ClearEnemyUpdateCache.
 std::unordered_map<uint32_t, EnemyUpdateLastSent> sLastSentByNetId;
+
+// Fix 2 §3.4 — per-frame ENEMY_SPAWN re-send tracking.
+//
+// Maps netId → set of clientIds that have been notified of the SPAWN.
+// The room-host (now running ExecuteSpawn after §3.6.B) populates this
+// on SendPacket_EnemySpawn for clients currently in the room, and
+// consults it in SendPacket_EnemyUpdate's broadcast loop. Any in-room
+// client missing from the set gets a fresh SPAWN built from the
+// HostBookkeeping LiveSpawnRecord before the per-frame ENEMY_STATE
+// goes out.
+//
+// Why this is necessary post-§3.6.B: UpdateClientState's join-trigger
+// LiveSpawnsByScene replay runs on the EFFECTIVE host. After §3.6.B,
+// ExecuteSpawn (and thus LiveSpawnsByScene population) runs on the
+// ROOM host. When effective host ≠ room host, the effective host's
+// LiveSpawnsByScene is empty for that scene — the replay path misses
+// the spawn. The per-frame re-send catches this on the broadcaster
+// side instead.
+//
+// Cost model: one unordered_set lookup per (client, netId) pair per
+// broadcast cycle. Negligible until live-Invader count × in-room peer
+// count grows beyond ~10×10 = 100 per-frame lookups, which is well
+// within current usage. If profiling shows >1% per-frame overhead,
+// the alternative is the LiveSpawnsByScene migration approach (room
+// host populates the singleton + effective host's replay path
+// consults it via a sync packet). Documented in §3.4 of the plan.
+//
+// Cleared by Anchor_ClearEnemyUpdateCache (scene transition) alongside
+// sLastSentByNetId so the tracking state has the same lifetime as the
+// delta-filter cache. Per-netId entries are also removed when the
+// actor's defeat is processed (RemoveLiveSpawn fires; see hook below).
+std::unordered_map<uint32_t, std::unordered_set<uint32_t>> sNotifiedSpawnByNetId;
 
 constexpr float kThresholdXZSq    = 4.0f;
 constexpr float kThresholdY       = 2.0f;
@@ -498,8 +531,14 @@ void UpdateLastSentCache(uint32_t netId,
 // Public — called on scene-load (HookHandlers.cpp OnSceneSpawnActors) and on
 // reconnect (Anchor.cpp OnConnected) so a fresh peer sees a send on the
 // next frame instead of waiting for the keepalive timer to elapse.
+//
+// Fix 2 §3.4 — also clears the spawn-notification tracking. Scene
+// transitions invalidate the "who has seen the spawn" book — the
+// receiver-side actor pool is wiped, and the next batch of broadcasts
+// needs to re-establish notification from scratch.
 void Anchor_ClearEnemyUpdateCache() {
     sLastSentByNetId.clear();
+    sNotifiedSpawnByNetId.clear();
 }
 
 // Public — drop a single netId from the dedup cache so the next
@@ -508,8 +547,15 @@ void Anchor_ClearEnemyUpdateCache() {
 // we WANT the packet to go out even if the steady-state cache thinks
 // nothing has changed since the last broadcast (the joining peer hasn't
 // seen any of those broadcasts yet).
+//
+// Fix 2 §3.4 — also drops the per-netId spawn-notification entry so
+// the next ENEMY_STATE broadcast re-establishes notification for all
+// in-room clients (treats them as if newly arrived). Use this when an
+// actor's identity has changed on the wire (e.g. mid-boss snapshot
+// re-seeds full state).
 void Anchor_ClearEnemyUpdateCacheForNetId(uint32_t netId) {
     sLastSentByNetId.erase(netId);
+    sNotifiedSpawnByNetId.erase(netId);
 }
 
 // ===========================================================================
@@ -785,9 +831,67 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                  netId, actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
                  (int)actor->colChkInfo.health);
 
+    // Fix 2 §3.4 — per-frame ENEMY_SPAWN re-send. Before broadcasting
+    // the per-frame ENEMY_STATE to a client, verify they've been
+    // notified of the SPAWN; if not (they joined the room AFTER the
+    // original broadcast, or §3.6.B routing left them stale), build
+    // a fresh ENEMY_SPAWN from the LiveSpawnRecord and send it first.
+    //
+    // Why this is here (and not at SendPacket_EnemySpawn alone): after
+    // §3.6.B flips Director.Tick to room-host authority, ExecuteSpawn
+    // populates LiveSpawnsByScene on the ROOM host's local singleton.
+    // The existing UpdateClientState join-trigger replay runs on the
+    // EFFECTIVE host — when those two clients differ, the effective
+    // host's LiveSpawnsByScene is empty for that scene and the replay
+    // misses the spawn. The per-frame re-send catches this on the
+    // broadcaster side (room host) which DOES have the record.
+    //
+    // We look up the LiveSpawnRecord via HostBookkeeping; if no record
+    // exists (non-Director vanilla dynamic spawn whose SendPacket_
+    // EnemySpawn didn't write a record, or a future actor type that
+    // bypasses HostBookkeeping), skip the re-send and rely on the
+    // existing late-join mechanisms. The set is keyed lazily — first
+    // time a client appears in the loop they're treated as new.
+    auto& notifiedClients = sNotifiedSpawnByNetId[netId];
+
+    const auto& liveSpawnsForScene =
+        EnemyStateSync::HostBookkeeping::Instance().LiveSpawnsForScene(
+            gPlayState->sceneNum);
+    auto liveRecIt = liveSpawnsForScene.find(netId);
+    const EnemyStateSync::LiveSpawnRecord* liveRec =
+        (liveRecIt != liveSpawnsForScene.end()) ? &liveRecIt->second : nullptr;
+
     for (auto& [clientId, client] : clients) {
         if (client.sceneNum == gPlayState->sceneNum && client.curRoomNum == hostRoom &&
             client.online && client.isSaveLoaded && !client.self) {
+            // Per-frame SPAWN re-send check (Fix 2 §3.4 prototype).
+            if (liveRec != nullptr &&
+                notifiedClients.find(clientId) == notifiedClients.end()) {
+                // Client missing from notified set; build + send SPAWN
+                // for them before the steady-state ENEMY_STATE. Mirrors
+                // the UpdateClientState replay-build pattern (line
+                // 304-319 in Session/UpdateClientState.cpp).
+                nlohmann::json spawnPayload;
+                spawnPayload["type"]                 = ENEMY_STATE;
+                spawnPayload["phase"]                = "Alive";
+                spawnPayload["phaseChanged"]         = true;
+                spawnPayload["sceneNum"]             = (int)gPlayState->sceneNum;
+                spawnPayload["actorId"]              = (int)liveRec->actorId;
+                spawnPayload["pos"]                  = liveRec->homePos;
+                spawnPayload["rot"]                  = liveRec->homeRot;
+                spawnPayload["params"]               = (int)liveRec->params;
+                spawnPayload["netId"]                = netId;
+                spawnPayload["directorDescriptorId"] = liveRec->directorDescriptorId;
+                spawnPayload["directorVariantId"]    = liveRec->directorVariantId;
+                spawnPayload["directorGroupId"]      = liveRec->directorGroupId;
+                spawnPayload["targetClientId"]       = clientId;
+                PacketTimeline::SetTimelineField(spawnPayload);
+                SendJsonToRemote(spawnPayload);
+                SPDLOG_INFO("[EnemyUpdate] Per-frame SPAWN re-send to client={} "
+                            "for netId={} actorId={} (Fix 2 §3.4 prototype)",
+                            clientId, netId, liveRec->actorId);
+                notifiedClients.insert(clientId);
+            }
             payload["targetClientId"] = clientId;
             SendJsonToRemote(payload);
         }
@@ -875,6 +979,23 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor,
         rec.directorGroupId      = directorGroupId;
         EnemyStateSync::HostBookkeeping::Instance()
             .RecordLiveSpawn((int16_t)gPlayState->sceneNum, ext->netId, rec);
+
+        // Fix 2 §3.4 — seed the per-frame re-send notification set with
+        // every client currently in the room. The SPAWN we just
+        // broadcast (line above this block) reaches all of them, so
+        // they don't need a per-frame re-send. Future clients entering
+        // the room (post-SPAWN) won't be in the set on their first
+        // SendPacket_EnemyUpdate loop iteration and will get the
+        // re-send treatment.
+        auto& notifiedClients = sNotifiedSpawnByNetId[ext->netId];
+        const s8 hostRoom = (s8)gPlayState->roomCtx.curRoom.num;
+        for (auto& [clientId, client] : clients) {
+            if (client.sceneNum == gPlayState->sceneNum &&
+                client.curRoomNum == hostRoom &&
+                client.online && client.isSaveLoaded && !client.self) {
+                notifiedClients.insert(clientId);
+            }
+        }
     }
 }
 
