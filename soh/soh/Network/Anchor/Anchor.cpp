@@ -54,6 +54,22 @@ void Anchor::RecordProfileSample(const nlohmann::json& payload, bool tx) {
     auto& bucket = (tx ? profileTx : profileRx)[type];
     bucket.count += 1;
     bucket.bytes += bytes;
+
+    // Phase 5 Step 1 (#62 — bandwidth audit). For ENEMY_STATE outbound
+    // packets only, also bucket by actorId so the per-actor-type
+    // contributor breakdown shows up in the flush. The OoT actorId
+    // field is included in the payload by EnemyStateSync's
+    // BuildBaseEnemyStatePayload (see also Plans/decoupling_gap_audit
+    // §A.7). netId would be too granular (one bucket per actor
+    // instance); actorId is the right "what is the noisy class of
+    // actor" axis.
+    if (tx && type == ENEMY_STATE && payload.contains("actorId")) {
+        const uint16_t actorId =
+            (uint16_t)payload.value("actorId", (int)0);
+        auto& actorBucket = enemyStateTxByActorId[actorId];
+        actorBucket.count += 1;
+        actorBucket.bytes += bytes;
+    }
 }
 
 void Anchor::FlushProfileIfDue() {
@@ -85,8 +101,45 @@ void Anchor::FlushProfileIfDue() {
                     tx.count * 1000.0 / elapsed, tx.bytes * 1000.0 / elapsed,
                     rx.count * 1000.0 / elapsed, rx.bytes * 1000.0 / elapsed);
     }
+
+    // Phase 5 Step 1 (#62 — bandwidth audit). Per-actorId breakdown of
+    // outbound ENEMY_STATE. Sorted by tx_Bps desc; capped at top-N so
+    // a busy scene with many actor types doesn't drown the log. Empty
+    // → skip the section entirely (single-player or no ENEMY_STATE
+    // outbound this window).
+    if (!enemyStateTxByActorId.empty()) {
+        std::vector<std::pair<uint16_t, ProfileBucket>> actorRanking;
+        actorRanking.reserve(enemyStateTxByActorId.size());
+        for (const auto& kv : enemyStateTxByActorId) {
+            actorRanking.push_back(kv);
+        }
+        std::sort(actorRanking.begin(), actorRanking.end(),
+                  [](const std::pair<uint16_t, ProfileBucket>& a,
+                     const std::pair<uint16_t, ProfileBucket>& b) {
+                      return a.second.bytes > b.second.bytes;
+                  });
+
+        constexpr size_t kBandwidthAuditTopN = 12;
+        const size_t reportCount =
+            std::min(kBandwidthAuditTopN, actorRanking.size());
+        SPDLOG_INFO("[BandwidthAudit] ENEMY_STATE top-{} by tx bytes (window={}ms) "
+                    "— actorId    tx_pps    tx_Bps  avg_pkt_bytes",
+                    reportCount, elapsed);
+        for (size_t i = 0; i < reportCount; ++i) {
+            const auto& [actorId, bucket] = actorRanking[i];
+            const double pps    = bucket.count * 1000.0 / elapsed;
+            const double Bps    = bucket.bytes * 1000.0 / elapsed;
+            const double avgPkt = (bucket.count > 0)
+                                      ? (double)bucket.bytes / (double)bucket.count
+                                      : 0.0;
+            SPDLOG_INFO("[BandwidthAudit] actorId=0x{:04X}  {:>8.1f}  {:>8.0f}  {:>14.1f}",
+                        actorId, pps, Bps, avgPkt);
+        }
+    }
+
     profileTx.clear();
     profileRx.clear();
+    enemyStateTxByActorId.clear();
     profileWindowStartMs = nowMs;
 }
 

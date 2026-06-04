@@ -113,6 +113,17 @@ class Anchor : public Network {
     struct ProfileBucket { uint64_t count = 0; uint64_t bytes = 0; };
     std::unordered_map<std::string, ProfileBucket> profileTx;
     std::unordered_map<std::string, ProfileBucket> profileRx;
+
+    // Bandwidth audit (#62 follow-up — Phase 5 Step 1, 2026-06-04).
+    // Per-actor-id breakdown of outbound ENEMY_STATE packets. Lets us
+    // identify which actor types are the dominant bandwidth contributors
+    // so the threshold/delta-compression work targets the right
+    // actors first. Keyed on the OoT `actorId` field carried in the
+    // payload (e.g. 0x55=Dekubaba, 0x95=Skullwalltula). Same window
+    // as the main profiler; both flush together. Reuses the same
+    // CVar gate.
+    std::unordered_map<uint16_t, ProfileBucket> enemyStateTxByActorId;
+
     std::mutex profileMutex;
     uint64_t   profileWindowStartMs = 0;
     static constexpr uint64_t kProfilerWindowMs = 10000;
