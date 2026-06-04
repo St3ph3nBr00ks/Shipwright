@@ -8,6 +8,7 @@
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"  // Pillar G.ii: SceneTransition gate routing
 
 typedef enum {
     /* 0 */ LENS_FLARE_CIRCLE0,
@@ -923,8 +924,14 @@ void Environment_Update(PlayState* play, EnvironmentContext* envCtx, LightContex
         if ((pauseCtx->state == 0) && (gameOverCtx->state == GAMEOVER_INACTIVE)) {
             if (((msgCtx->msgLength == 0) && (msgCtx->msgMode == 0)) ||
                 (((void)0, gSaveContext.gameMode) == GAMEMODE_END_CREDITS)) {
+                // Pillar G.ii — SceneTransition gate routed through the
+                // single GameTimeController authority. Legacy predicate
+                // (`transitionMode == TRANS_MODE_OFF || gameMode !=
+                // GAMEMODE_NORMAL`) is preserved inside the gate; this
+                // routing is behavior-preserving in every mode. Future
+                // G.ii rule changes touch GameTimeController.cpp only.
                 if ((envCtx->unk_1A == 0) && !FrameAdvance_IsEnabled(play) &&
-                    (play->transitionMode == TRANS_MODE_OFF || ((void)0, gSaveContext.gameMode) != GAMEMODE_NORMAL)) {
+                    Anchor_ShouldAdvanceWorldTime(ANCHOR_TIME_CTX_SCENE_TRANSITION)) {
 
                     if (IS_DAY || gTimeIncrement >= 0x190) {
                         gSaveContext.dayTime += gTimeIncrement;

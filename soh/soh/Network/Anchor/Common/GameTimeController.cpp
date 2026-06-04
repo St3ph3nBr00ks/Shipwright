@@ -8,6 +8,7 @@
 
 extern "C" {
 #include "macros.h"
+#include "variables.h"  // gSaveContext (Pitfall 9): SceneTransition rule reads gameMode
 extern PlayState* gPlayState;
 }
 
@@ -35,7 +36,13 @@ static bool LegacyAdvanceWorldTimeRule(TimeContext ctx) {
         case TimeContext::Ocarina:
             return gPlayState->msgCtx.ocarinaMode == OCARINA_MODE_00;
         case TimeContext::SceneTransition:
-            return gPlayState->transitionMode == TRANS_MODE_OFF;
+            // Legacy z_kankyo.c:927 dayTime gate accepts EITHER no-transition
+            // OR not-in-normal-gamemode (file-select / name-entry / end-credits
+            // bypass the transition-mode freeze). The gamemode-OR is part of
+            // the SceneTransition predicate, not a separate context — bundle
+            // both clauses so consumers get the full behavior.
+            return gPlayState->transitionMode == TRANS_MODE_OFF ||
+                   gSaveContext.gameMode != GAMEMODE_NORMAL;
         case TimeContext::GameOver:
             // Legacy: world freezes during the death cycle. Routed via
             // PLAYER_STATE1_DEAD on the local player's stateFlags1, which
