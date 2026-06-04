@@ -158,11 +158,59 @@ void Director::OnSceneInitFromHook(int16_t sceneNum) {
 }
 
 void Director::Tick() {
-    // Director runs on every client but only the global-effective-host
-    // actually decides spawns. Non-host clients still receive
-    // DIRECTOR_STATE_SYNC (step 5) so their cached state is visible in
-    // the debug panel, but Tick early-exits here.
-    if (!::SceneAuthority::IsEffectiveHost()) {
+    // Local-tick counter. Incremented BEFORE the authority gate so it
+    // ticks unconditionally on every client regardless of room-host
+    // status. mGlobalFrameCounter is a local Director member (not
+    // synced) and consumers like GetFramesSinceLocalSceneChange()
+    // measure local deltas — keeping the increment unconditional makes
+    // it a pure per-client wall-clock measure independent of authority.
+    //
+    // Fix 2 §3.6.B + checkpoint decision (2026-06-03): the previous
+    // placement AFTER the IsEffectiveHost gate meant the counter
+    // froze on non-host clients, which would break Fix 1's
+    // GetFramesSinceLocalSceneChange grace period on any client that
+    // wasn't the global host. After the gate flip below the symmetric
+    // hazard exists with IsMyCurrentRoomHost (a client briefly not
+    // room-host of any room — e.g. between disconnects — would
+    // freeze the counter), so the simplest fix is to move the
+    // increment above all authority gates.
+    ++mGlobalFrameCounter;
+
+    // Fix 2 §3.6.B — Director runs on the per-room host of the local
+    // client's current (scene, room, timeline) rather than the global
+    // effective host. This closes log 351's host-mismatch bug class:
+    // when the global effective host's clientId isn't the lowest in
+    // the target scene/room, Director-spawned actors used to be killed
+    // by OnActorSpawn's room-host suppression (HookHandlers.cpp:845)
+    // before they could be tracked. Running Director on the room host
+    // means ExecuteSpawn fires on the client that ALSO passes the
+    // OnActorSpawn suppression — spawn succeeds + ENEMY_STATE flows
+    // normally + peer replicas materialize as expected.
+    //
+    // Subtleties:
+    //  - Multi-client overlapping rooms: when both P1 and P2 are in
+    //    the same (scene, room), the room-host election picks the
+    //    lowest clientId. Only that one runs Director per-tick; the
+    //    other's Director is dormant. Authority transitions naturally
+    //    as players move between rooms.
+    //  - Per-Invader bookkeeping across rooms: if P1's Director
+    //    spawned Invader X in room A and P1 then left room A while P2
+    //    stayed, P2 becomes room host of room A. P2's Director needs
+    //    to know about Invader X. DIRECTOR_STATE_SYNC already round-
+    //    trips mActiveInvaders per descriptor (see
+    //    InvaderDescriptor.h:147 SerializeMigrationState), so P2
+    //    already has the bookkeeping; with the per-room gate, P2
+    //    starts running OnTick / reconcile for it without any further
+    //    sync work.
+    //  - Empty-room fallback: when no online client is in the local
+    //    (scene, room, timeline), IsMyCurrentRoomHost falls through
+    //    GetRoomHostClientId's fallback to IsEffectiveHost — so the
+    //    global effective host still runs Director when no one is in
+    //    a room (e.g. between scene transitions / pre-save-load).
+    //  - gPlayState null case: IsMyCurrentRoomHost falls back to
+    //    IsEffectiveHost (SceneAuthority.cpp:103), so pre-scene-load
+    //    Tick still gates on the global host. Counter still ticks.
+    if (!::SceneAuthority::IsMyCurrentRoomHost()) {
         return;
     }
 
@@ -178,11 +226,6 @@ void Director::Tick() {
                     mDescriptors.size());
         sLoggedFirstHostTick = true;
     }
-
-    // Host-side tick counter. Incremented unconditionally after the
-    // IsEffectiveHost gate so the cooldown ledger reads consistent
-    // values regardless of empty-registry / invalid-view early-exits.
-    ++mGlobalFrameCounter;
 
     // Phase 1 §7.5 local-player scene/room transition observer.
     //
