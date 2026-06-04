@@ -2,6 +2,14 @@
 
 #include <nlohmann/json.hpp>
 
+// Forward decl — defined in EnemyStateSync/Packets/EnemyState.cpp, declared
+// in ../Anchor.h:71. Forward-declared here instead of including Anchor.h to
+// avoid pulling its transitive header chain into this small bookkeeping TU.
+// Used by RecordSceneDeath to keep the per-frame ENEMY_SPAWN re-send
+// notification book (sNotifiedSpawnByNetId, Fix 2 §3.4) in sync with
+// LiveSpawnRecord lifecycle.
+void Anchor_ClearEnemyUpdateCacheForNetId(uint32_t netId);
+
 namespace EnemyStateSync {
 
 namespace {
@@ -87,6 +95,14 @@ void HostBookkeeping::RecordSceneDeath(int16_t sceneNum, uint32_t netId) {
     if (it != mLiveSpawnsByScene.end()) {
         it->second.erase(netId);
     }
+    // Fix 2 §3.4 hygiene — the per-frame ENEMY_SPAWN re-send book keys
+    // off netId; once the LiveSpawnRecord is gone the notification entry
+    // is meaningless. Audit log 374 found seven RecordSceneDeath sites
+    // and none paired with the cache clear, leaving orphaned set entries
+    // that grow unbounded across room bounces. Coupling the clear here
+    // keeps the two structures in sync at the data layer regardless of
+    // which call site triggered the death.
+    Anchor_ClearEnemyUpdateCacheForNetId(netId);
 }
 
 void HostBookkeeping::ClearSceneDeath(int16_t sceneNum, uint32_t netId) {
