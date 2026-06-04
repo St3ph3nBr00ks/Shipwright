@@ -1,4 +1,5 @@
 #include "AnchorSwitchAge.h"
+#include "EnforcedCVars.h"
 #include "SceneMultiplayerConfig.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
@@ -31,7 +32,12 @@ Result SwitchAgeAndTeleport(s32 targetLinkAge,
     // Q 4.B.6 — TimeTravel CVar gate. When the enhancement is disabled,
     // the player has explicitly opted out of mid-game age switching.
     // Cross-timeline teleport refuses without any side effects.
-    if (CVarGetInteger(CVAR_ENHANCEMENT("TimeTravel"), TIME_TRAVEL_OOT) == TIME_TRAVEL_DISABLED) {
+    //
+    // Settings-sync v1 — TimeTravel is class A. The host's tier value
+    // is authoritative when connected so peers can't bypass a host's
+    // explicit opt-out (and vice versa). Falls back to local CVar on
+    // disconnect via AnchorCVarSync::GetEnforcedInt.
+    if (AnchorCVarSync::GetEnforcedInt(CVAR_ENHANCEMENT("TimeTravel"), TIME_TRAVEL_OOT) == TIME_TRAVEL_DISABLED) {
         SPDLOG_INFO("[AnchorSwitchAge] Refused: CVAR_ENHANCEMENT(TimeTravel) == DISABLED");
         return Result::RefusedTimeTravelDisabled;
     }

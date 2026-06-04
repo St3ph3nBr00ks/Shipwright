@@ -136,5 +136,13 @@ void Anchor::HandlePacket_UpdateRoomState(nlohmann::json payload) {
         if (cvars.contains("shieldTwoHanded"))      roomState.cvars.shieldTwoHanded      = cvars["shieldTwoHanded"].get<u8>();
         if (cvars.contains("removeExplosiveLimit")) roomState.cvars.removeExplosiveLimit = cvars["removeExplosiveLimit"].get<u8>();
         if (cvars.contains("fireproofDekuShield"))  roomState.cvars.fireproofDekuShield  = cvars["fireproofDekuShield"].get<u8>();
+
+        // Diagnostic: confirms cvars block round-tripped successfully. Useful
+        // for verifying owner-side admin-pane edits propagate to peers, and
+        // for catching wire-format drift after future schema bumps. Logged
+        // only when the cvars sub-object is present (v1 senders skipped).
+        SPDLOG_INFO("[SettingsSync] Received cvars from owner={} infiniteAmmo={} damageMult={} timeTravel={} speedModifier={:.2f}",
+                    roomState.ownerClientId, (int)roomState.cvars.infiniteAmmo, roomState.cvars.damageMult,
+                    roomState.cvars.timeTravel, roomState.cvars.speedModifierValue);
     }
 }

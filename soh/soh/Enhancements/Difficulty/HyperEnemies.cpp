@@ -1,5 +1,6 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 #include "functions.h"
 #include "macros.h"
@@ -8,7 +9,10 @@ extern "C" PlayState* gPlayState;
 
 static constexpr int32_t CVAR_HYPER_ENEMIES_DEFAULT = 0;
 #define CVAR_HYPER_ENEMIES_NAME CVAR_ENHANCEMENT("HyperEnemies")
-#define CVAR_HYPER_ENEMIES_VALUE CVarGetInteger(CVAR_HYPER_ENEMIES_NAME, CVAR_HYPER_ENEMIES_DEFAULT)
+// Settings-sync v1 — HyperEnemies is class A (drift causes desync —
+// enemy moves 2x on host, 1x on peer → anims out of sync). Reads
+// route through AnchorCVarSync; falls back to local on disconnect.
+#define CVAR_HYPER_ENEMIES_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_HYPER_ENEMIES_NAME, CVAR_HYPER_ENEMIES_DEFAULT)
 
 static void MakeHyperEnemies(void* refActor) {
     // Run the update function a second time to make enemies and minibosses move and act twice as fast.

@@ -37,6 +37,12 @@
 #include <stdlib.h>
 #include <assert.h>
 
+// Settings-sync v1 — host-authoritative read of class-A damage
+// multipliers. Forward-decl uses plain `extern` (Pitfall 7); the
+// real definition lives in Common/EnforcedCVars.cpp with C linkage.
+// Falls back to local CVarGetInteger on disconnect / unknown name.
+extern int Anchor_GetEnforcedInt(const char* cvarName, int localDefault);
+
 // Some player animations are played at this reduced speed, for reasons yet unclear.
 // This is called "adjusted" for now.
 #define PLAYER_ANIM_ADJUSTED_SPEED (2.0f / 3.0f)
@@ -4507,7 +4513,8 @@ s32 func_80837B18_modified(PlayState* play, Player* this, s32 damage, u8 modifie
 
     s32 modifiedDamage = damage;
     if (modified) {
-        modifiedDamage *= (1 << CVarGetInteger(CVAR_ENHANCEMENT("DamageMult"), 0));
+        // Settings-sync v1 — host-authoritative bit-shift tier.
+        modifiedDamage *= (1 << Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("DamageMult"), 0));
     }
 
     return Health_ChangeBy(play, modifiedDamage);
@@ -4735,7 +4742,8 @@ s32 func_808382DC(Player* this, PlayState* play) {
 
     if (this->unk_A86 != 0) {
         if (!Player_InBlockingCsMode(play, this)) {
-            Player_InflictDamageModified(play, -16 * (1 << CVarGetInteger(CVAR_ENHANCEMENT("VoidDamageMult"), 0)),
+            // Settings-sync v1 — VoidDamageMult is class A.
+            Player_InflictDamageModified(play, -16 * (1 << Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("VoidDamageMult"), 0)),
                                          false);
             this->unk_A86 = 0;
         }
@@ -9613,8 +9621,9 @@ s32 func_80843E64(PlayState* play, Player* this) {
 
         impactInfo = &D_80854600[impactIndex];
 
+        // Settings-sync v1 — FallDamageMult is class A.
         if (Player_InflictDamageModified(
-                play, impactInfo->damage * (1 << CVarGetInteger(CVAR_ENHANCEMENT("FallDamageMult"), 0)), false)) {
+                play, impactInfo->damage * (1 << Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("FallDamageMult"), 0)), false)) {
             return -1;
         }
 

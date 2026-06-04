@@ -1,12 +1,16 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" PlayState* gPlayState;
 
 #define CVAR_UNRESTRICTED_ITEMS_NAME CVAR_CHEAT("NoRestrictItems")
 #define CVAR_UNRESTRICTED_ITEMS_DEFAULT 0
-#define CVAR_UNRESTRICTED_ITEMS_VALUE CVarGetInteger(CVAR_UNRESTRICTED_ITEMS_NAME, CVAR_UNRESTRICTED_ITEMS_DEFAULT)
+// Settings-sync v1 — NoRestrictItems is class B (drift causes unfairness
+// — host uses Master Sword as child, peer cannot). Reads route through
+// AnchorCVarSync; falls back to local on disconnect.
+#define CVAR_UNRESTRICTED_ITEMS_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_UNRESTRICTED_ITEMS_NAME, CVAR_UNRESTRICTED_ITEMS_DEFAULT)
 
 void OnGameFrameUpdateUnrestrictedItems() {
     if (!GameInteractor::IsSaveLoaded(true)) {

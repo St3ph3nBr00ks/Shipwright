@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 #include "soh/Enhancements/enhancementTypes.h"
 
@@ -11,7 +12,10 @@ extern SaveContext gSaveContext;
 
 static constexpr BonkDamage CVAR_BONK_DAMAGE_DEFAULT = BONK_DAMAGE_NONE;
 #define CVAR_BONK_DAMAGE_NAME CVAR_ENHANCEMENT("BonkDamageMult")
-#define CVAR_BONK_DAMAGE_VALUE CVarGetInteger(CVAR_BONK_DAMAGE_NAME, CVAR_BONK_DAMAGE_DEFAULT)
+// Settings-sync v1 — BonkDamageMult is class B (drift causes unfairness
+// — host OHKO on bonk, peer unscathed). Reads route through
+// AnchorCVarSync; falls back to local on disconnect.
+#define CVAR_BONK_DAMAGE_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_BONK_DAMAGE_NAME, CVAR_BONK_DAMAGE_DEFAULT)
 #define CVAR_BONK_DAMAGE_SET (CVAR_BONK_DAMAGE_VALUE != CVAR_BONK_DAMAGE_DEFAULT)
 
 static void RegisterBonkDamage() {
