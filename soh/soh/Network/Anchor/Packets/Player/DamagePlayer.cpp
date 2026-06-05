@@ -117,12 +117,12 @@ void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
         const f32 dx = self->actor.world.pos.x - apx;
         const f32 dz = self->actor.world.pos.z - apz;
         // Bug A fix (2026-06-05) — OoT's Math_Atan2 family takes (z, x),
-        // NOT (x, z). The prior order produced a yaw rotated ~90° which
-        // sometimes pushed the player INTO the attacker (field-test 413
-        // — "P1 knocked forward into the Goroiwa 3D model"). Mirror
-        // Actor_WorldYawTowardActor / Math_Vec3f_Yaw which use
-        // Math_Atan2S(z_delta, x_delta).
-        knockbackYaw = Math_FAtan2F(dz, dx);
+        // NOT (x, z). Bug D fix (2026-06-05, log 416) — use Math_Atan2S
+        // (returns s16 binary angle) rather than Math_FAtan2F (returns
+        // f32 in RADIANS). The float-to-s16 truncation collapsed every
+        // angle to 0..3 — every knockback ended up pointing south /
+        // basically nowhere. The vanilla path uses Math_Atan2S; mirror it.
+        knockbackYaw = Math_Atan2S(dz, dx);
         // [Bug1.Diag] (2026-06-05) — break down the yaw computation so
         // we can verify direction is correct from the payload values.
         SPDLOG_INFO("[Bug1.Diag] RECV knockbackYaw computation: "
