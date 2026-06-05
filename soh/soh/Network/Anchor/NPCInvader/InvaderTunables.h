@@ -102,8 +102,13 @@ inline constexpr int   kInvSheatheDelayMs    = 4000;
 inline constexpr int kMinSwingHoldTicks = 6;
 
 // --- DEAD ----------------------------------------------------------------
-// 3s death hold — matches FollowerNPC's kFollowerNpcDeathHoldMs.
-inline constexpr int kInvaderDeathHoldMs = 3000;
+// 2026-06-05 — bumped 3000→3500ms after field-test 406 confirmed the
+// death animation (gPlayerAnim_link_normal_back_downA, ~70 frames at
+// 20 ticks/s ≈ 3.5s including end-of-motion stillness) was being cut
+// off ~10 frames early by the prior 3000ms hold. The Invader doesn't
+// respawn (Actor_Kill at hold-end), so no compensating cooldown to
+// adjust. Matches FollowerNPC's kFollowerNpcDeathHoldMs.
+inline constexpr int kInvaderDeathHoldMs = 3500;
 
 // --- Environmental death --------------------------------------------------
 inline constexpr float kInvaderVoidThresholdY = -3000.0f;

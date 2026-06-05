@@ -35,8 +35,15 @@ inline constexpr s8 kFollowerNpcMaxHealth = 20;
 
 // User-spec: 10s total from death to respawn. DeathHold (anim hold +
 // ground lay) + RespawnCooldown ≈ 10s.
-inline constexpr int kFollowerNpcDeathHoldMs       = 3000;
-inline constexpr int kFollowerNpcRespawnCooldownMs = 7000;
+//
+// 2026-06-05 — DeathHold bumped 3000→3500ms after field-test 406
+// confirmed the death animation (gPlayerAnim_link_normal_back_downA,
+// ~70 frames @ 20 ticks/s ≈ 3.5s including end-of-motion stillness)
+// was being cut off ~10 frames early by the prior 3000ms hold. The
+// RespawnCooldown is dropped 7000→6500ms in lockstep to keep the
+// total death-to-respawn at the user-spec 10s.
+inline constexpr int kFollowerNpcDeathHoldMs       = 3500;
+inline constexpr int kFollowerNpcRespawnCooldownMs = 6500;
 inline constexpr int kFollowerNpcDrowningMs        = 30000;  // Player default
 inline constexpr float kFollowerNpcVoidThresholdY  = -3000.0f;
 
