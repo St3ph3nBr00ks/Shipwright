@@ -102,26 +102,22 @@ bool Anchor_PauseMenuShouldExtraTick(void);
 
 // Returns the presentation mode for a given GI_* item-get id. C callers
 // use the return value to branch the item-get sequence: VANILLA → run
-// the legacy freeze cutscene; NOTIFICATION_ONLY → call
-// Anchor_GiveItemNonBlocking(play, this) and return early.
+// the legacy freeze cutscene; NOTIFICATION_ONLY → route through the
+// silent-give path (Path 1: force skipItemCutscene=true so vanilla
+// runs func_8083E4C4 + emit Anchor_EmitItemGetToast after; Path 2:
+// inline chest-open visuals + Item_Give + Anchor_EmitItemGetToast).
 int Anchor_GetItemPresentationMode(int16_t getItemId);
 
-// Pillar G.ii — non-blocking item give. Writes the item to inventory
-// via the standard Item_Give helper, emits a Notification toast (icon
-// + item name + brief description) with a 6-second timer, and plays
-// the item-get jingle. Does NOT set PLAYER_STATE1_GETTING_ITEM /
-// PLAYER_STATE1_IN_CUTSCENE, does NOT lock the camera, does NOT run
-// the cutscene action. Player retains full control throughout.
+// Pillar G.ii — emit a corner Notification toast for an item-get that
+// was routed through the silent (non-cutscene) path. NO-OP in single-
+// player so vanilla FastDrops users don't suddenly see toasts. NO
+// inventory write — caller is responsible (either via the existing
+// func_8083E4C4 silent-give path in Path 1, or via inline Item_Give
+// in Path 2 chest-open path).
 //
-// Caller must verify the gate via Anchor_GetItemPresentationMode
-// returned ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY before calling.
-//
-// `getItemId` argument is the GI_* id (this->getItemId at the call
-// site). `itemId` argument is the inventory ITEM_* id
-// (this->getItemEntry.itemId at the call site). Both are needed because
-// some helpers (e.g. icon lookup) key on inventory id while others
-// (e.g. message lookup) key on get id.
-void Anchor_GiveItemNonBlocking(int16_t getItemId, uint8_t itemId);
+// `getItemId` reserved for future per-id branching (unused today).
+// `itemId` is the ITEM_* inventory id used for the icon + name lookup.
+void Anchor_EmitItemGetToast(int16_t getItemId, uint8_t itemId);
 
 #ifdef __cplusplus
 }

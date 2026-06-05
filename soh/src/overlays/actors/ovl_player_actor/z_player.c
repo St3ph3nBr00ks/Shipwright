@@ -5653,16 +5653,14 @@ void func_8083A40C(PlayState* play, Player* this) {
 }
 
 void func_8083A434(PlayState* play, Player* this) {
-    // Pillar G.ii Note: an earlier attempt gated the freeze here, but
-    // this function is the AFTER-put-away callback — the real cutscene
-    // setup (camera, anim, stateFlags1) happens at the CALLER (around
-    // z_player.c:7421-7434 + sibling at 7463-7468) BEFORE this runs.
-    // Gating here leaves the player stuck in GETTING_ITEM with no
-    // action handler. The correct gate site is the caller's
-    // `if (showItemCutscene && !skipItemCutscene && ...)` branch in
-    // Player_Action_808493AC. See bridge helpers
-    // Anchor_GetItemPresentationMode / Anchor_GiveItemNonBlocking
-    // (GameTimeControllerBridge.h) for the policy + non-blocking give.
+    // Pillar G.ii note: do NOT gate here. This function is the
+    // after-put-away callback — by the time it runs, the caller in
+    // Player_ActionHandler_2 (around line 7391 / 7458) has already
+    // engaged the cutscene camera, set PLAYER_STATE1_GETTING_ITEM,
+    // and registered the get-item animation. The MP-aware gate lives
+    // at those caller sites: Path 1 ORs into `skipItemCutscene` →
+    // routes through func_8083E4C4 silent give; Path 2 inlines the
+    // chest-visual + Item_Give + Anchor_EmitItemGetToast.
     Player_SetupActionPreserveAnimMovement(play, this, Player_Action_8084E6D4, 0);
 
     this->stateFlags1 |= PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_IN_CUTSCENE;
@@ -7378,7 +7376,19 @@ s32 Player_ActionHandler_2(Player* this, PlayState* play) {
                 // Skip cutscenes from picking up consumables with "Fast Pickup Text" enabled, even when the player
                 // never picked it up before. But only for bushes/rocks/enemies because otherwise it can lead to
                 // softlocks in deku mask theatre and potentially other places.
-                uint8_t skipItemCutscene = CVarGetInteger(CVAR_ENHANCEMENT("FastDrops"), 0) && isDropToSkip;
+                //
+                // Pillar G.ii v3 — OR in the MP-aware gate. When Anchor is
+                // enabled AND the item isn't in the iconic allowlist
+                // (Anchor_GetItemPresentationMode returns NOTIFICATION_ONLY),
+                // route through the existing skip-cutscene branch
+                // (func_8083E4C4 silent give). Reuses the vanilla
+                // skip-cutscene infrastructure instead of building a
+                // parallel path. The MP-only toast is emitted by
+                // Anchor_EmitItemGetToast in the silent-give else branch
+                // below.
+                uint8_t skipItemCutscene = (CVarGetInteger(CVAR_ENHANCEMENT("FastDrops"), 0) && isDropToSkip) ||
+                                           (Anchor_GetItemPresentationMode((int16_t)giEntry.getItemId) ==
+                                            ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY);
 
                 // Same as above but for rando. Rando is different because we want to enable cutscenes for items that
                 // the player already has because those items could be a randomized item coming from scrubs,
@@ -7389,47 +7399,6 @@ s32 Player_ActionHandler_2(Player* this, PlayState* play) {
 
                 // Show cutscene when picking up a item.
                 if (showItemCutscene && !skipItemCutscene && !skipItemCutsceneRando) {
-                    // Pillar G.ii v2 — MP-aware non-blocking item-get.
-                    // Replaces the vanilla freeze + camera + animation for
-                    // non-iconic items with a Notification toast. Gate is
-                    // here (not in func_8083A434) because the cutscene
-                    // setup happens BELOW in this same block; gating at
-                    // the callback fired too late (v1, log 389, commit
-                    // 7dc080091 revert).
-                    //
-                    // Uses the local `giEntry` (correctly populated at
-                    // line 7340-7345 above) — NOT this->getItemEntry,
-                    // which isn't updated until the cutscene action
-                    // runs. This avoids v1's stale-name bug.
-                    //
-                    // Decision logic:
-                    //   - Single-player or kill switch off → Vanilla
-                    //   - Iconic allowlist (ocarinas / Light Arrows /
-                    //     Great Fairy spells / Ice Trap) → Vanilla
-                    //   - Everything else in MP → NotificationOnly
-                    // The dedicated cutscene paths for Master Sword,
-                    // spiritual stones, medallions, and songs don't
-                    // reach this branch — they keep their cutscenes
-                    // automatically.
-                    {
-                        int presentationMode = Anchor_GetItemPresentationMode(
-                            (int16_t)giEntry.getItemId);
-                        if (presentationMode == ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY) {
-                            // Skip cutscene + state flags entirely. Bridge
-                            // helper writes inventory via Item_Give + emits
-                            // Notification toast (6s, with built-in fade).
-                            // Clear getItemId/getItemEntry the same way
-                            // the silent skip-cutscene branch below does
-                            // so the put-away wait doesn't re-fire on
-                            // the next tick.
-                            Anchor_GiveItemNonBlocking(
-                                (int16_t)giEntry.getItemId,
-                                (uint8_t)giEntry.itemId);
-                            this->getItemId = GI_NONE;
-                            this->getItemEntry = (GetItemEntry)GET_ITEM_NONE;
-                            return 1;
-                        }
-                    }
 
                     Player_DetachHeldActor(play, this);
                     func_8083AE40(this, giEntry.objectId);
@@ -7448,6 +7417,9 @@ s32 Player_ActionHandler_2(Player* this, PlayState* play) {
 
                 // Don't show cutscene when picking up an item.
                 func_8083E4C4(play, this, &giEntry);
+                // Pillar G.ii v3 — toast for MP silent-give. NO-OP in
+                // single-player so vanilla FastDrops behavior is preserved.
+                Anchor_EmitItemGetToast((int16_t)giEntry.getItemId, (uint8_t)giEntry.itemId);
                 this->getItemId = GI_NONE;
                 this->getItemEntry = (GetItemEntry)GET_ITEM_NONE;
             }
@@ -7471,37 +7443,28 @@ s32 Player_ActionHandler_2(Player* this, PlayState* play) {
                         }
                     }
 
-                    // Pillar G.ii v2 — MP-aware non-blocking chest open
-                    // (Path 2, BTN_A direct-open). Sibling of the Path 1
-                    // gate above (~line 7391). Same policy: iconic items
-                    // keep the vanilla cutscene; everything else in MP
-                    // pops the chest open visually + emits a Notification
-                    // toast, no freeze.
+                    // Pillar G.ii v3 — MP-aware non-blocking chest open
+                    // (Path 2, BTN_A direct-open). Path 2 has no native
+                    // skip-cutscene branch (unlike Path 1 which can ride
+                    // on FastDrops' existing skipItemCutscene flag), so
+                    // the silent-give is inlined here: lid pops, box-kick
+                    // animation plays, Item_Give writes inventory, toast
+                    // emits. Skips cutscene-state-flag setup and camera
+                    // change. Player retains full control throughout.
                     //
-                    // Chest-specific preservation in the non-blocking path:
-                    //   - Play box_kick animation (chest open visual cue)
-                    //   - Set chest->unk_1F4 = -1 (fast-open visual state)
-                    //   - SKIP Player_SetupWaitForPutAway / cutscene action
-                    //   - SKIP stateFlags1 = GETTING_ITEM | IN_CUTSCENE
-                    //   - SKIP func_80832224 (cutscene state init)
-                    //   - SKIP chest reposition + camera change
-                    // Player retains full control throughout.
-                    {
-                        int presentationMode = Anchor_GetItemPresentationMode(
-                            (int16_t)giEntry.getItemId);
-                        if (presentationMode == ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY) {
-                            // Open the chest visually first so the lid pops
-                            // and the player gets the standard feedback.
-                            chest->unk_1F4 = -1;
-                            Player_AnimPlayOnce(play, this, &gPlayerAnim_link_normal_box_kick);
-
-                            Anchor_GiveItemNonBlocking(
-                                (int16_t)giEntry.getItemId,
-                                (uint8_t)giEntry.itemId);
-                            this->getItemId = GI_NONE;
-                            this->getItemEntry = (GetItemEntry)GET_ITEM_NONE;
-                            return 1;
-                        }
+                    // Iconic items (allowlist) hit the default Vanilla
+                    // case and fall through to the original cutscene
+                    // path below — Master Sword and song/medallion paths
+                    // don't reach here anyway.
+                    if (Anchor_GetItemPresentationMode((int16_t)giEntry.getItemId) ==
+                        ANCHOR_ITEM_PRESENTATION_NOTIFICATION_ONLY) {
+                        chest->unk_1F4 = -1;
+                        Player_AnimPlayOnce(play, this, &gPlayerAnim_link_normal_box_kick);
+                        Item_Give(play, (uint8_t)giEntry.itemId);
+                        Anchor_EmitItemGetToast((int16_t)giEntry.getItemId, (uint8_t)giEntry.itemId);
+                        this->getItemId = GI_NONE;
+                        this->getItemEntry = (GetItemEntry)GET_ITEM_NONE;
+                        return 1;
                     }
 
                     if (GameInteractor_Should(VB_GIVE_ITEM_FROM_CHEST, true, chest)) {

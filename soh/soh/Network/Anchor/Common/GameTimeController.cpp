@@ -12,7 +12,6 @@
 extern "C" {
 #include "macros.h"
 #include "variables.h"  // gSaveContext (Pitfall 9): SceneTransition rule reads gameMode
-#include "functions.h"  // Item_Give (z_parameter.c) for G.ii non-blocking item write
 extern PlayState* gPlayState;
 }
 
@@ -218,42 +217,24 @@ extern "C" int Anchor_GetItemPresentationMode(int16_t getItemId) {
     return static_cast<int>(GameTimeController::GetItemPresentationMode(getItemId));
 }
 
-// Non-blocking item-give. Called from z_player.c func_8083A434 when
-// Anchor_GetItemPresentationMode returned NOTIFICATION_ONLY. Skips the
-// vanilla freeze cutscene entirely: writes the item to inventory via
-// the standard Item_Give helper, then emits a Notification toast.
+// Emit a corner Notification toast for an item-get that was routed
+// through the silent (non-cutscene) path. NO-OP in single-player so
+// vanilla FastDrops users don't suddenly see toasts when this helper
+// is reachable. Designed to be called from z_player.c right after the
+// silent give (Path 1 → func_8083E4C4; Path 2 → inline Item_Give).
 //
-// The toast uses the existing SoH Notification system
-// (`Notification::Emit`) which already supports icon + multi-segment
-// text + auto-fade timer + queueing. Timer is set to 6 seconds with
-// the renderer's built-in fade-out in the last second.
+// Inventory write is NOT done here — caller is responsible. This
+// helper purely provides the user-visible toast for the MP non-
+// blocking pickup experience. Sound chime is emitted by the
+// Notification system (`mute = false`).
 //
-// Side effects intentionally NOT replicated from the vanilla cutscene:
-//   - Player_SetupActionPreserveAnimMovement (cutscene action handler)
-//   - PLAYER_STATE1_GETTING_ITEM / PLAYER_STATE1_IN_CUTSCENE flags
-//   - Camera pan / "look at item" framing
-//   - Link's hands-up animation pose
-//   - Talk-actor exchange (handled by caller's vanilla path for items
-//     that flow through GiveItemEntryFromActor — non-blocking only fires
-//     for chest/scrub/NPC standard gives where no exchange is pending)
-//
-// Side effects replicated:
-//   - Inventory write via Item_Give (handles ammo / bottle / capacity
-//     upgrades / etc. uniformly via z_parameter.c's existing logic).
-//   - Item-get audio cue (handled by Notification's default sound when
-//     mute=false).
-extern "C" void Anchor_GiveItemNonBlocking(int16_t getItemId, uint8_t itemId) {
-    if (gPlayState == nullptr) return;
-
-    // Inventory write. Item_Give handles bottle slot allocation, ammo
-    // increments, capacity upgrades (heart container / quiver / etc.),
-    // and trade-quest state updates uniformly. Falls back to no-op
-    // for unrecognised ids — safe.
-    Item_Give(gPlayState, itemId);
-
-    // Notification toast. ~6 seconds with the last 1s fading out via
-    // the Notification renderer's interpolation. Player retains full
-    // control throughout — toast does not capture input.
+// `getItemId` reserved for future per-id branching (e.g. heart-
+// container variant), currently unused — keep in signature for ABI
+// stability.
+extern "C" void Anchor_EmitItemGetToast(int16_t getItemId, uint8_t itemId) {
+    if (::Anchor::Instance == nullptr || !::Anchor::Instance->isEnabled) {
+        return;  // single-player or MP off → silent, vanilla behavior
+    }
     Notification::Emit({
         .itemIcon = GetTextureForItemId(itemId),
         .prefix = "You",
@@ -263,11 +244,7 @@ extern "C" void Anchor_GiveItemNonBlocking(int16_t getItemId, uint8_t itemId) {
         .suffix = SohUtils::GetItemName(itemId),
         .suffixColor = ImVec4(1.0f, 0.9f, 0.5f, 1.0f),
         .remainingTime = 6.0f,
-        .mute = false,  // play notification chime
+        .mute = false,
     });
-
-    // Avoid unused-param warning when getItemId isn't consulted in the
-    // current implementation. Reserved for future per-getId branching
-    // (e.g. heart container animation cue) without changing the signature.
     (void)getItemId;
 }
