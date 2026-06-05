@@ -513,14 +513,45 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     }
     sLastAcHitState[clientId] = acHitNow;
 
-    if (player->cylinder.base.acFlags & AC_HIT && player->invincibilityTimer == 0) {
+    // Bug 1 fix (2026-06-05) — local post-hit suppression timer.
+    // player->invincibilityTimer is overwritten from peer state at line 360
+    // every tick, so the iframes we set below are stomped before the next
+    // frame. Without a locally-owned timer, the AT collider's next active
+    // frame re-triggers AC_HIT before the peer's iframes round-trip back —
+    // result: 2+ DAMAGE_PLAYER packets per single swing (field-test log 406
+    // showed two AC_HIT edges 100ms apart with both invincibilityTimer=0).
+    //
+    // Keep the local suppression keyed by clientId, decrement each tick,
+    // gate the send on max(peer-synced timer, local suppression).
+    static std::unordered_map<uint32_t, int> sLocalPostHitGuard;
+    auto& localGuard = sLocalPostHitGuard[clientId];
+    if (localGuard > 0) {
+        --localGuard;
+    }
+    const bool gateOpen = (player->cylinder.base.acFlags & AC_HIT) != 0 &&
+                          player->invincibilityTimer == 0 &&
+                          localGuard == 0;
+    if (gateOpen) {
+        // Bug 3 fix (2026-06-05) — pass the attacker's world position so
+        // the peer-side knockback yaw is computed from the actual
+        // attacker (e.g. Invader actor) rather than from the sender's
+        // own player. cylinder.base.at is the actor that just AT-hit
+        // this DummyPlayer's AC bumper.
+        const Vec3f* attackerPos = (player->cylinder.base.at != nullptr)
+            ? &player->cylinder.base.at->world.pos
+            : nullptr;
         Anchor::Instance->SendPacket_DamagePlayer(client.clientId, player->actor.colChkInfo.damageEffect,
-                                                  player->actor.colChkInfo.damage);
+                                                  player->actor.colChkInfo.damage, attackerPos);
         if (player->actor.colChkInfo.damageEffect == DUMMY_PLAYER_HIT_RESPONSE_STUN) {
             Actor_SetColorFilter(&player->actor, 0, 0xFF, 0, 24);
         } else {
             player->invincibilityTimer = 20;
         }
+        // 20 ticks ≈ 1s at 20fps — same window as vanilla post-hit iframes.
+        // Slightly longer than the round-trip the peer's PLAYER_UPDATE
+        // typically takes to sync its iframes back; once that arrives,
+        // either gate is sufficient to keep blocking.
+        localGuard = 20;
     }
 
     const bool wouldSetAC =
