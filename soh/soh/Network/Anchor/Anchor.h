@@ -1535,6 +1535,11 @@ class Anchor : public Network {
 
     void SendPacket_ClearTeamState(std::string teamId);
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage);
+    // Bug 3 (2026-06-05) — overload with attacker position so the
+    // receive-side knockback yaw is computed from the actual attacker
+    // (e.g. a hostile NPC) instead of from the sender's own player.
+    void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
+                                 const Vec3f* attackerPos);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);
     void SendPacket_GameComplete();
     void SendPacket_GiveItem(u16 modId, s16 getItemId);

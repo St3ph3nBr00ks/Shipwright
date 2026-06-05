@@ -14,7 +14,14 @@ void func_80838280(Player* player);
  * DAMAGE_PLAYER
  */
 
-void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage) {
+// Bug 3 fix (2026-06-05) — overload carrying the attacker's world
+// position so the receive-side knockback yaw is computed from the
+// actual attacker (e.g. Invader actor) instead of from the sender's
+// player. The legacy two-arg overload kept for callers that don't
+// have an attacker actor handy (PvP friendly-fire from the sender's
+// sword — the sender's player IS the attacker).
+void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
+                                     const Vec3f* attackerPos) {
     if (!IsSaveLoaded()) {
         return;
     }
@@ -24,8 +31,19 @@ void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage) {
     payload["targetClientId"] = clientId;
     payload["damageEffect"] = damageEffect;
     payload["damage"] = damage;
+    if (attackerPos != nullptr) {
+        payload["attackerPos"] = {
+            { "x", attackerPos->x },
+            { "y", attackerPos->y },
+            { "z", attackerPos->z },
+        };
+    }
 
     SendJsonToRemote(payload);
+}
+
+void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage) {
+    SendPacket_DamagePlayer(clientId, damageEffect, damage, nullptr);
 }
 
 void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
@@ -60,6 +78,18 @@ void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
         return;
     }
 
-    func_80837C0C(gPlayState, self, damageEffect, 4.0f, 5.0f,
-                  Actor_WorldYawTowardActor(&otherPlayer->actor, &self->actor), 20);
+    // Bug 3 fix (2026-06-05) — knockback yaw from the actual attacker if
+    // the sender included an attackerPos field (e.g. Invader's
+    // world.pos), else fall back to "yaw from sender's player toward
+    // self" (legacy behaviour — PvP friendly-fire still uses this).
+    s16 knockbackYaw;
+    if (payload.contains("attackerPos")) {
+        const auto& ap = payload["attackerPos"];
+        const f32 dx = self->actor.world.pos.x - ap.value("x", 0.0f);
+        const f32 dz = self->actor.world.pos.z - ap.value("z", 0.0f);
+        knockbackYaw = Math_FAtan2F(dx, dz);
+    } else {
+        knockbackYaw = Actor_WorldYawTowardActor(&otherPlayer->actor, &self->actor);
+    }
+    func_80837C0C(gPlayState, self, damageEffect, 4.0f, 5.0f, knockbackYaw, 20);
 }
