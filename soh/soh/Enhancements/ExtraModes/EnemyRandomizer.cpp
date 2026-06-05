@@ -3,6 +3,7 @@
 #include "soh/Enhancements/randomizer/3drando/random.hpp"
 #include "soh/Enhancements/randomizer/SeedContext.h"
 #include "soh/Enhancements/enhancementTypes.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "variables.h"
 #include "soh/cvar_prefixes.h"
@@ -31,7 +32,15 @@ extern std::shared_ptr<SohMenu> mSohMenu;
 
 #define CVAR_ENEMY_RANDOMIZER_NAME CVAR_ENHANCEMENT("RandomizedEnemies")
 #define CVAR_ENEMY_RANDOMIZER_DEFAULT ENEMY_RANDOMIZER_OFF
-#define CVAR_ENEMY_RANDOMIZER_VALUE CVarGetInteger(CVAR_ENEMY_RANDOMIZER_NAME, CVAR_ENEMY_RANDOMIZER_DEFAULT)
+// Settings-sync v2 — host-authoritative. The COND_HOOK / COND_VB_SHOULD
+// dispatch chain inside RegisterEnemyRandomizer gates on
+// ENEMY_RANDOMIZER_ENABLED, which derives from this macro. Routing
+// through the wrapper means peer's hooks (un)register based on host's
+// value (re-fired by OnCvarsReceivedDispatch on every wire receive),
+// not peer's local CVar. The randomization itself is seed-deterministic
+// from scene + actor position (see GetRandomizedEnemy:456), so both
+// clients pick the same substitute once their hooks are enabled.
+#define CVAR_ENEMY_RANDOMIZER_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_ENEMY_RANDOMIZER_NAME, CVAR_ENEMY_RANDOMIZER_DEFAULT)
 #define ENEMY_RANDOMIZER_ENABLED CVAR_ENEMY_RANDOMIZER_VALUE != CVAR_ENEMY_RANDOMIZER_DEFAULT
 
 typedef struct EnemyEntry {
