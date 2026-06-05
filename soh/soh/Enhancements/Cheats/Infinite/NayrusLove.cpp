@@ -1,5 +1,6 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 #include "z64save.h"
 
@@ -7,8 +8,9 @@ extern "C" SaveContext gSaveContext;
 
 #define CVAR_INFINITE_NAYRUS_LOVE_NAME CVAR_CHEAT("InfiniteNayru")
 #define CVAR_INFINITE_NAYRUS_LOVE_DEFAULT 0
+// Settings-sync v2 — host-authoritative.
 #define CVAR_INFINITE_NAYRUS_LOVE_VALUE \
-    CVarGetInteger(CVAR_INFINITE_NAYRUS_LOVE_NAME, CVAR_INFINITE_NAYRUS_LOVE_DEFAULT)
+    AnchorCVarSync::GetEnforcedInt(CVAR_INFINITE_NAYRUS_LOVE_NAME, CVAR_INFINITE_NAYRUS_LOVE_DEFAULT)
 
 void OnGameFrameUpdateInfiniteNayrusLove() {
     if (!GameInteractor::IsSaveLoaded(true)) {

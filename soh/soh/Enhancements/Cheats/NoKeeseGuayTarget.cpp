@@ -1,5 +1,6 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -8,7 +9,8 @@ extern "C" {
 
 static constexpr int32_t CVAR_NOKEESEGUAYTARGET_DEFAULT = 0;
 #define CVAR_NOKEESEGUAYTARGET_NAME CVAR_CHEAT("NoKeeseGuayTarget")
-#define CVAR_NOKEESEGUAYTARGET_VALUE CVarGetInteger(CVAR_NOKEESEGUAYTARGET_NAME, CVAR_NOKEESEGUAYTARGET_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_NOKEESEGUAYTARGET_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_NOKEESEGUAYTARGET_NAME, CVAR_NOKEESEGUAYTARGET_DEFAULT)
 
 void RegisterNoKeeseGuayTarget() {
     // Dive Attack

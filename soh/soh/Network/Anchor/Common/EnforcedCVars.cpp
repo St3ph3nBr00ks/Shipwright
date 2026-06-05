@@ -1,4 +1,5 @@
 #include "EnforcedCVars.h"
+#include "EnforcedCVarRegistry.h"
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/ShipInit.hpp"
@@ -7,28 +8,13 @@
 
 namespace AnchorCVarSync {
 
-// Maps the project's CVAR_CHEAT(...) / CVAR_ENHANCEMENT(...) macro
-// expansions to the matching MultiplayerCVars field. v1 uses a
-// strcmp chain — 20 string comparisons per call is negligible at
-// the read-site frequencies in question (most are per-frame at
-// 60Hz, single-digit number of sites each). Convert to a
-// std::unordered_map<std::string, std::function<...>> only if a
-// profiler flags the chain as a hot spot.
-//
-// Add new entries here when the MultiplayerCVars struct grows; the
-// helper falls through to the local CVar on any unknown name, so
-// forgetting an entry produces a graceful "local takes effect"
-// failure mode rather than a crash.
-
 static const Anchor* GetActiveAnchor() {
     // Gate on isConnected (not isEnabled): between Enable() being
     // requested and the relay's HANDSHAKE-reply UPDATE_ROOM_STATE
-    // arriving, roomState.cvars is still zero-initialised and would
-    // return wrong defaults for the three non-zero-default fields
-    // (timeTravel = 1, speedModifierValue = 1.0f,
-    // bombTimerMultiplier = 1.0f). isConnected gates the window
-    // such that we read enforced values only after the owner's
-    // snapshot has arrived.
+    // arriving, the enforced maps are still empty and the wrapper
+    // would return local-default fallback. Gating on isConnected
+    // closes a brief window between Enable() and the maps being
+    // populated by the relay's snapshot reply.
     if (Anchor::Instance == nullptr) return nullptr;
     if (!Anchor::Instance->isEnabled) return nullptr;
     if (!Anchor::Instance->isConnected) return nullptr;
@@ -37,131 +23,52 @@ static const Anchor* GetActiveAnchor() {
 
 int32_t GetEnforcedInt(const char* cvarName, int32_t localDefault) {
     const Anchor* anchor = GetActiveAnchor();
-    if (anchor == nullptr) {
-        return CVarGetInteger(cvarName, localDefault);
-    }
-
-    const MultiplayerCVars& cv = anchor->roomState.cvars;
-
-    // Class A — drift causes desync/crash
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("TimeTravel")) == 0)        return cv.timeTravel;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("DamageMult")) == 0)        return cv.damageMult;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("FallDamageMult")) == 0)    return cv.fallDamageMult;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("VoidDamageMult")) == 0)    return cv.voidDamageMult;
-    if (strcmp(cvarName, CVAR_CHEAT("FreezeTime")) == 0)              return cv.freezeTime;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("RandomizedEnemies")) == 0) return cv.randomizedEnemies;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("NewDrops")) == 0)          return cv.newDrops;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("HyperEnemies")) == 0)      return cv.hyperEnemies;
-
-    // Class B — drift causes UX / fairness divergence
-    if (strcmp(cvarName, CVAR_CHEAT("NoRestrictItems")) == 0)         return cv.noRestrictItems;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("BonkDamageMult")) == 0)    return cv.bonkDamageMult;
-    if (strcmp(cvarName, CVAR_CHEAT("InfiniteAmmo")) == 0)            return cv.infiniteAmmo;
-    if (strcmp(cvarName, CVAR_CHEAT("ClimbEverything")) == 0)         return cv.climbEverything;
-    if (strcmp(cvarName, CVAR_CHEAT("HookshotEverything")) == 0)      return cv.hookshotEverything;
-    if (strcmp(cvarName, CVAR_CHEAT("SuperTunic")) == 0)              return cv.superTunic;
-    if (strcmp(cvarName, CVAR_CHEAT("TimelessEquipment")) == 0)       return cv.timelessEquipment;
-    if (strcmp(cvarName, CVAR_CHEAT("ShieldTwoHanded")) == 0)         return cv.shieldTwoHanded;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("RemoveExplosiveLimit")) == 0) return cv.removeExplosiveLimit;
-    if (strcmp(cvarName, CVAR_CHEAT("FireproofDekuShield")) == 0)     return cv.fireproofDekuShield;
-
-    // Unknown CVar — caller is using the wrapper for a name we don't
-    // enforce. Graceful fallback so misuse doesn't break behaviour.
+    if (anchor == nullptr) return CVarGetInteger(cvarName, localDefault);
+    const auto& map = anchor->roomState.enforcedInts;
+    auto it = map.find(cvarName);
+    if (it != map.end()) return it->second;
+    // Unknown CVar (not in the host's broadcast) — fall back to local
+    // so non-enforced reads behave like vanilla.
     return CVarGetInteger(cvarName, localDefault);
 }
 
 float GetEnforcedFloat(const char* cvarName, float localDefault) {
     const Anchor* anchor = GetActiveAnchor();
-    if (anchor == nullptr) {
-        return CVarGetFloat(cvarName, localDefault);
-    }
-
-    const MultiplayerCVars& cv = anchor->roomState.cvars;
-
-    if (strcmp(cvarName, CVAR_CHEAT("SpeedModifier.Value")) == 0)     return cv.speedModifierValue;
-    if (strcmp(cvarName, CVAR_CHEAT("BombTimerMultiplier")) == 0)     return cv.bombTimerMultiplier;
-
+    if (anchor == nullptr) return CVarGetFloat(cvarName, localDefault);
+    const auto& map = anchor->roomState.enforcedFloats;
+    auto it = map.find(cvarName);
+    if (it != map.end()) return it->second;
     return CVarGetFloat(cvarName, localDefault);
 }
 
 bool IsEnforced(const char* cvarName) {
     if (GetActiveAnchor() == nullptr) return false;
-
-    // Integer-class enforced names
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("TimeTravel")) == 0)        return true;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("DamageMult")) == 0)        return true;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("FallDamageMult")) == 0)    return true;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("VoidDamageMult")) == 0)    return true;
-    if (strcmp(cvarName, CVAR_CHEAT("FreezeTime")) == 0)              return true;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("RandomizedEnemies")) == 0) return true;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("NewDrops")) == 0)          return true;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("HyperEnemies")) == 0)      return true;
-    if (strcmp(cvarName, CVAR_CHEAT("NoRestrictItems")) == 0)         return true;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("BonkDamageMult")) == 0)    return true;
-    if (strcmp(cvarName, CVAR_CHEAT("InfiniteAmmo")) == 0)            return true;
-    if (strcmp(cvarName, CVAR_CHEAT("ClimbEverything")) == 0)         return true;
-    if (strcmp(cvarName, CVAR_CHEAT("HookshotEverything")) == 0)      return true;
-    if (strcmp(cvarName, CVAR_CHEAT("SuperTunic")) == 0)              return true;
-    if (strcmp(cvarName, CVAR_CHEAT("TimelessEquipment")) == 0)       return true;
-    if (strcmp(cvarName, CVAR_CHEAT("ShieldTwoHanded")) == 0)         return true;
-    if (strcmp(cvarName, CVAR_ENHANCEMENT("RemoveExplosiveLimit")) == 0) return true;
-    if (strcmp(cvarName, CVAR_CHEAT("FireproofDekuShield")) == 0)     return true;
-
-    // Float-class enforced names
-    if (strcmp(cvarName, CVAR_CHEAT("SpeedModifier.Value")) == 0)     return true;
-    if (strcmp(cvarName, CVAR_CHEAT("BombTimerMultiplier")) == 0)     return true;
-
+    for (const auto& e : kEnforcedInts) {
+        if (std::strcmp(e.cvarName, cvarName) == 0) return true;
+    }
+    for (const auto& e : kEnforcedFloats) {
+        if (std::strcmp(e.cvarName, cvarName) == 0) return true;
+    }
     return false;
 }
 
 void OnCvarsReceivedDispatch() {
-    // Fires every RegisterShipInitFunc listener attached to the 20
-    // enforced CVar names. This recovers the side-effect propagation
-    // that UI widgets get for free via WIDGET_CVAR_CHECKBOX -> ShipInit::
-    // Init(cvarName), but which network-driven CVar changes bypass
-    // entirely (the relay updates roomState.cvars directly, no local
-    // CVar listener fires).
-    //
-    // Concretely: each `RegisterXxx` function called from here ends
-    // with `COND_HOOK(hookType, CVAR_X_VALUE, body)` which unregisters
-    // its previous hook and re-registers it iff the condition evaluates
-    // true. CVAR_X_VALUE is now `AnchorCVarSync::GetEnforcedInt(...)` so
-    // the condition reflects the host's authoritative value. The hook
-    // therefore (un)registers on the peer to match what the host has
-    // configured — closing the "peer's InfiniteAmmo refill never fires
-    // even though host has it on" class of bug.
-    //
-    // Unconditional dispatch (no diff against last snapshot) keeps the
-    // logic simple. Cost per call is ~20 hook re-registration cycles —
-    // negligible compared to the per-receive deserialisation. UI widget
-    // toggles already do this via ShipInit::Init at every checkbox flip,
-    // so this is the same code path under a different trigger.
-
-    ShipInit::Init(CVAR_ENHANCEMENT("TimeTravel"));
-    ShipInit::Init(CVAR_ENHANCEMENT("DamageMult"));
-    ShipInit::Init(CVAR_ENHANCEMENT("FallDamageMult"));
-    ShipInit::Init(CVAR_ENHANCEMENT("VoidDamageMult"));
-    ShipInit::Init(CVAR_CHEAT("FreezeTime"));
-    ShipInit::Init(CVAR_ENHANCEMENT("RandomizedEnemies"));
-    ShipInit::Init(CVAR_ENHANCEMENT("NewDrops"));
-    ShipInit::Init(CVAR_ENHANCEMENT("HyperEnemies"));
-    ShipInit::Init(CVAR_CHEAT("NoRestrictItems"));
-    ShipInit::Init(CVAR_ENHANCEMENT("BonkDamageMult"));
-    ShipInit::Init(CVAR_CHEAT("InfiniteAmmo"));
-    ShipInit::Init(CVAR_CHEAT("ClimbEverything"));
-    ShipInit::Init(CVAR_CHEAT("HookshotEverything"));
-    ShipInit::Init(CVAR_CHEAT("SpeedModifier.Value"));
-    ShipInit::Init(CVAR_CHEAT("SuperTunic"));
-    ShipInit::Init(CVAR_CHEAT("TimelessEquipment"));
-    ShipInit::Init(CVAR_CHEAT("BombTimerMultiplier"));
-    ShipInit::Init(CVAR_CHEAT("ShieldTwoHanded"));
-    ShipInit::Init(CVAR_ENHANCEMENT("RemoveExplosiveLimit"));
-    ShipInit::Init(CVAR_CHEAT("FireproofDekuShield"));
+    // Re-fire RegisterShipInitFunc listeners attached to every enforced
+    // CVar name. COND_HOOK / COND_VB_SHOULD blocks inside the
+    // registered functions re-evaluate against the wrapper's new
+    // return value (i.e. host's authoritative value just deserialised
+    // into roomState.enforced{Ints,Floats}).
+    for (const auto& e : kEnforcedInts) {
+        ShipInit::Init(e.cvarName);
+    }
+    for (const auto& e : kEnforcedFloats) {
+        ShipInit::Init(e.cvarName);
+    }
 }
 
 }  // namespace AnchorCVarSync
 
-// extern "C" shims for C-decomp consumers (z_player.c etc.).
+// extern "C" shims for C-decomp consumers.
 extern "C" int32_t Anchor_GetEnforcedInt(const char* cvarName, int32_t localDefault) {
     return AnchorCVarSync::GetEnforcedInt(cvarName, localDefault);
 }
@@ -174,94 +81,95 @@ extern "C" float Anchor_GetEnforcedFloat(const char* cvarName, float localDefaul
 // Owner-side auto-broadcast of local CVar changes
 // ============================================================================
 //
-// HANDSHAKE-time PrepRoomState primes the relay with the owner's local CVar
-// values on first connect. Beyond that, the relay only learns about changes
-// when SendPacket_UpdateRoomState fires — which today only happens when the
-// owner toggles a widget in the Network → Anchor admin pane (and, once
-// Phase 3 lands, the Flotilla → Host Settings sidebar).
-//
-// Console-driven changes (`set gEnhancements.DamageMult 2`) and CVar-file
-// reloads bypass the widget-callback path entirely, leaving the relay's
-// cached roomState stale. A peer that disconnects and reconnects after a
-// console change receives the *previous* broadcast value, not the current
-// local value — which surfaced in field test log 376.
-//
-// This poll closes the gap: on the owner's frame update, once per second,
-// snapshot the local CVars and compare to the last broadcast. Any drift
-// triggers a fresh SendPacket_UpdateRoomState. The 1-second cadence keeps
-// the bandwidth cost negligible while making console edits propagate
-// within the same RTT envelope as widget toggles.
+// HANDSHAKE-time PrepRoomState primes the relay with the owner's local
+// values on first connect. Beyond that, the relay only learns about
+// changes when SendPacket_UpdateRoomState fires — admin pane / Host
+// Settings widget callbacks fire it immediately via
+// TriggerOwnerBroadcastNow(); the auto-poll below catches console set,
+// file reloads, and any other write path that bypasses widget
+// callbacks. Closes the log-376 reconnect-race: relay cache stays
+// current with owner's console edits.
 
 namespace {
 
 constexpr int kPollIntervalFrames = 60;  // ~1 second @ 60 Hz; throttle.
 
-MultiplayerCVars sLastBroadcastSnapshot{};
+// Captured local snapshot at last broadcast. Empty until the first
+// poll-cycle baseline is captured after connect.
+std::unordered_map<std::string, int32_t> sLastBroadcastInts;
+std::unordered_map<std::string, float>   sLastBroadcastFloats;
 bool sBaselineCaptured = false;
 int  sFramesSinceCheck = 0;
 
-MultiplayerCVars SnapshotLocalEnforcedCVars() {
-    MultiplayerCVars s{};
-    s.timeTravel           = CVarGetInteger(CVAR_ENHANCEMENT("TimeTravel"), 1);
-    s.damageMult           = CVarGetInteger(CVAR_ENHANCEMENT("DamageMult"), 0);
-    s.fallDamageMult       = CVarGetInteger(CVAR_ENHANCEMENT("FallDamageMult"), 0);
-    s.voidDamageMult       = CVarGetInteger(CVAR_ENHANCEMENT("VoidDamageMult"), 0);
-    s.freezeTime           = CVarGetInteger(CVAR_CHEAT("FreezeTime"), 0);
-    s.randomizedEnemies    = CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0);
-    s.newDrops             = CVarGetInteger(CVAR_ENHANCEMENT("NewDrops"), 0);
-    s.hyperEnemies         = CVarGetInteger(CVAR_ENHANCEMENT("HyperEnemies"), 0);
-    s.noRestrictItems      = CVarGetInteger(CVAR_CHEAT("NoRestrictItems"), 0);
-    s.bonkDamageMult       = CVarGetInteger(CVAR_ENHANCEMENT("BonkDamageMult"), 0);
-    s.infiniteAmmo         = CVarGetInteger(CVAR_CHEAT("InfiniteAmmo"), 0);
-    s.climbEverything      = CVarGetInteger(CVAR_CHEAT("ClimbEverything"), 0);
-    s.hookshotEverything   = CVarGetInteger(CVAR_CHEAT("HookshotEverything"), 0);
-    s.speedModifierValue   = CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
-    s.superTunic           = CVarGetInteger(CVAR_CHEAT("SuperTunic"), 0);
-    s.timelessEquipment    = CVarGetInteger(CVAR_CHEAT("TimelessEquipment"), 0);
-    s.bombTimerMultiplier  = CVarGetFloat(CVAR_CHEAT("BombTimerMultiplier"), 1.0f);
-    s.shieldTwoHanded      = CVarGetInteger(CVAR_CHEAT("ShieldTwoHanded"), 0);
-    s.removeExplosiveLimit = CVarGetInteger(CVAR_ENHANCEMENT("RemoveExplosiveLimit"), 0);
-    s.fireproofDekuShield  = CVarGetInteger(CVAR_CHEAT("FireproofDekuShield"), 0);
-    return s;
+void SnapshotLocalEnforcedCVars(
+    std::unordered_map<std::string, int32_t>& outInts,
+    std::unordered_map<std::string, float>& outFloats)
+{
+    outInts.clear();
+    outFloats.clear();
+    for (const auto& e : AnchorCVarSync::kEnforcedInts) {
+        outInts[e.cvarName] = CVarGetInteger(e.cvarName, e.defaultValue);
+    }
+    for (const auto& e : AnchorCVarSync::kEnforcedFloats) {
+        outFloats[e.cvarName] = CVarGetFloat(e.cvarName, e.defaultValue);
+    }
 }
 
-bool EnforcedCVarsEqual(const MultiplayerCVars& a, const MultiplayerCVars& b) {
-    return std::memcmp(&a, &b, sizeof(MultiplayerCVars)) == 0;
+bool SnapshotsEqual(
+    const std::unordered_map<std::string, int32_t>& aInts,
+    const std::unordered_map<std::string, float>& aFloats,
+    const std::unordered_map<std::string, int32_t>& bInts,
+    const std::unordered_map<std::string, float>& bFloats)
+{
+    if (aInts.size() != bInts.size() || aFloats.size() != bFloats.size()) return false;
+    for (const auto& [k, v] : aInts) {
+        auto it = bInts.find(k);
+        if (it == bInts.end() || it->second != v) return false;
+    }
+    for (const auto& [k, v] : aFloats) {
+        auto it = bFloats.find(k);
+        if (it == bFloats.end() || it->second != v) return false;
+    }
+    return true;
 }
 
 void OnFrameUpdateAutoSyncCVars() {
     Anchor* anchor = Anchor::Instance;
     if (anchor == nullptr || !anchor->isEnabled || !anchor->isConnected) {
         // Reset on disconnect — next reconnect's HANDSHAKE re-primes the
-        // relay, so we want to re-capture baseline rather than carry stale
-        // state from the prior session.
+        // relay, so we want to re-capture baseline rather than carry
+        // stale state from the prior session.
         sBaselineCaptured = false;
         sFramesSinceCheck = 0;
         return;
     }
     if (anchor->roomState.ownerClientId != anchor->ownClientId) {
-        // Non-owner — never broadcasts cvars. Effective-host migration
-        // freezes the block per the strict-host rule (design doc §2).
+        // Non-owner — never broadcasts. Effective-host migration
+        // freezes the block per the strict-host rule.
         return;
     }
 
     if (++sFramesSinceCheck < kPollIntervalFrames) return;
     sFramesSinceCheck = 0;
 
-    MultiplayerCVars current = SnapshotLocalEnforcedCVars();
+    std::unordered_map<std::string, int32_t> curInts;
+    std::unordered_map<std::string, float>   curFloats;
+    SnapshotLocalEnforcedCVars(curInts, curFloats);
 
     if (!sBaselineCaptured) {
         // First poll after connect / ownership acquisition. HANDSHAKE's
-        // PrepRoomState already primed the relay with these exact values
-        // — record the baseline without re-broadcasting.
-        sLastBroadcastSnapshot = current;
+        // PrepRoomState already primed the relay with these exact
+        // values — record the baseline without re-broadcasting.
+        sLastBroadcastInts = curInts;
+        sLastBroadcastFloats = curFloats;
         sBaselineCaptured = true;
         return;
     }
 
-    if (EnforcedCVarsEqual(current, sLastBroadcastSnapshot)) return;
+    if (SnapshotsEqual(curInts, curFloats, sLastBroadcastInts, sLastBroadcastFloats)) return;
 
-    sLastBroadcastSnapshot = current;
+    sLastBroadcastInts = curInts;
+    sLastBroadcastFloats = curFloats;
     anchor->SendPacket_UpdateRoomState();
     SPDLOG_INFO("[SettingsSync] Local enforced CVar drift detected — broadcast triggered.");
 }
@@ -275,11 +183,8 @@ static RegisterShipInitFunc gInitAutoSync(RegisterEnforcedCVarsAutoSync);
 
 }  // namespace
 
-// Reopened: AnchorCVarSync::TriggerOwnerBroadcastNow needs access to the
-// anonymous-namespace helpers above (SnapshotLocalEnforcedCVars, the
-// sLastBroadcastSnapshot / sBaselineCaptured statics). Defining it here
-// keeps the snapshot state local to this TU while making the function
-// callable from Phase 3 widget code.
+// Reopened so the public helper can touch the anonymous-namespace
+// snapshot statics. See v1 module structure for the pattern rationale.
 namespace AnchorCVarSync {
 
 void TriggerOwnerBroadcastNow() {
@@ -289,10 +194,8 @@ void TriggerOwnerBroadcastNow() {
 
     // Update the auto-poll's baseline BEFORE broadcasting so the next
     // 1-second tick observes no drift and skips its own redundant
-    // broadcast. Without this, every widget click would produce two
-    // packets ~1s apart: the immediate one here + the auto-poll's
-    // detection of "current vs. previous baseline differs".
-    sLastBroadcastSnapshot = SnapshotLocalEnforcedCVars();
+    // broadcast.
+    SnapshotLocalEnforcedCVars(sLastBroadcastInts, sLastBroadcastFloats);
     sBaselineCaptured = true;
     anchor->SendPacket_UpdateRoomState();
 }

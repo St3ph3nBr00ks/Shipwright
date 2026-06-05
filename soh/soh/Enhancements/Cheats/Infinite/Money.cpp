@@ -1,5 +1,6 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 #include "z64save.h"
 #include "variables.h"
@@ -12,7 +13,8 @@ extern s32 Flags_GetRandomizerInf(RandomizerInf flag);
 
 #define CVAR_INFINITE_MONEY_NAME CVAR_CHEAT("InfiniteMoney")
 #define CVAR_INFINITE_MONEY_DEFAULT 0
-#define CVAR_INFINITE_MONEY_VALUE CVarGetInteger(CVAR_INFINITE_MONEY_NAME, CVAR_INFINITE_MONEY_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_INFINITE_MONEY_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_INFINITE_MONEY_NAME, CVAR_INFINITE_MONEY_DEFAULT)
 
 void OnGameFrameUpdateInfiniteMoney() {
     if (!GameInteractor::IsSaveLoaded(true) || (IS_RANDO && !Flags_GetRandomizerInf(RAND_INF_HAS_WALLET))) {

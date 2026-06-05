@@ -70,54 +70,30 @@ void Anchor_ClearEnemyUpdateCache();
 // packet immediately, regardless of what other peers have already received.
 void Anchor_ClearEnemyUpdateCacheForNetId(uint32_t netId);
 
-// Settings-sync v1 (2026-06-03) — host-authoritative force-match of
-// gameplay-affecting CVars. See Plans/settings_sync_design.md and
-// Research/settings_sync_audit.md. Wire carrier is the existing
-// UPDATE_ROOM_STATE packet (schema bumped 1 -> 2). Read-site wrappers
-// land in Phase 2 (Common/EnforcedCVars). Original room owner
-// (RoomState::ownerClientId, NOT effective host) is the only writer
-// per the strict-host rule; effective-host migration freezes this
-// block at last-set values until the original owner reconnects.
+// Settings-sync v2 (2026-06-04 refactor) — host-authoritative force-match
+// of gameplay-affecting CVars. See Plans/settings_sync_design.md and
+// Research/settings_sync_audit.md. Wire carrier is UPDATE_ROOM_STATE
+// (schema 3 — wire-format break from v1's named-field shape to a
+// dictionary keyed by full CVar macro expansion). Read-site wrappers
+// in Common/EnforcedCVars. Single source of truth for the enforced set
+// is Common/EnforcedCVarRegistry.cpp — each new enforced CVar is one
+// entry in either kEnforcedInts or kEnforcedFloats. Original room owner
+// (RoomState::ownerClientId, NOT effective host) is the only writer per
+// the strict-host rule; effective-host migration freezes the block
+// at last-set values until the original owner reconnects.
 //
-// Class A (drift = desync/crash) and class B (drift = UX/fairness)
-// are mixed here intentionally — both are force-matched.
-//
-// SpeedModifier is a CVar sub-tree (.Value, .SpeedToggle,
-// .DoesntChangeJump, .Btn). v1 syncs only the .Value multiplier;
-// extending to the full sub-tree is a follow-up if drift surfaces
-// in field testing.
-typedef struct {
-    // Class A
-    s32 timeTravel;          // gEnhancements.TimeTravel (tier 0-4, default 1)
-    s32 damageMult;          // gEnhancements.DamageMult (bit-shift tier)
-    s32 fallDamageMult;      // gEnhancements.FallDamageMult (bit-shift tier)
-    s32 voidDamageMult;      // gEnhancements.VoidDamageMult (bit-shift tier)
-    u8  freezeTime;          // gCheats.FreezeTime
-    u8  randomizedEnemies;   // gEnhancements.RandomizedEnemies
-    u8  newDrops;            // gEnhancements.NewDrops
-    u8  hyperEnemies;        // gEnhancements.HyperEnemies
-    // Class B
-    u8  noRestrictItems;     // gCheats.NoRestrictItems
-    s32 bonkDamageMult;      // gEnhancements.BonkDamageMult (BonkDamage enum)
-    u8  infiniteAmmo;        // gCheats.InfiniteAmmo
-    u8  climbEverything;     // gCheats.ClimbEverything
-    u8  hookshotEverything;  // gCheats.HookshotEverything
-    f32 speedModifierValue;  // gCheats.SpeedModifier.Value (default 1.0f)
-    u8  superTunic;          // gCheats.SuperTunic
-    u8  timelessEquipment;   // gCheats.TimelessEquipment
-    f32 bombTimerMultiplier; // gCheats.BombTimerMultiplier (default 1.0f)
-    u8  shieldTwoHanded;     // gCheats.ShieldTwoHanded
-    u8  removeExplosiveLimit;// gEnhancements.RemoveExplosiveLimit
-    u8  fireproofDekuShield; // gCheats.FireproofDekuShield
-} MultiplayerCVars;
-
+// The enforcedInts / enforcedFloats maps hold ONLY entries the host
+// actually sent. Wrapper reads check membership and fall back to local
+// CVar on miss — so an entry absent from the host's broadcast is
+// transparent to gameplay.
 typedef struct {
     uint32_t ownerClientId;
     u8 pvpMode;           // 0 = off, 1 = on, 2 = on with friendly fire
     u8 showLocationsMode; // 0 = none, 1 = team, 2 = all
     u8 teleportMode;      // 0 = off, 1 = team, 2 = all
     u8 syncItemsAndFlags; // 0 = off, 1 = on
-    MultiplayerCVars cvars;
+    std::unordered_map<std::string, int32_t> enforcedInts;
+    std::unordered_map<std::string, float>   enforcedFloats;
 } RoomState;
 
 // Forward-decl for the Anchor::TickFollower parameter — defined in

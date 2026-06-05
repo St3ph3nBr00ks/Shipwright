@@ -1,5 +1,6 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -9,7 +10,8 @@ extern PlayState* gPlayState;
 
 #define CVAR_EASY_QPA_NAME CVAR_CHEAT("EasyQPA")
 #define CVAR_EASY_QPA_DEFAULT 0
-#define CVAR_EASY_QPA_VALUE CVarGetInteger(CVAR_EASY_QPA_NAME, CVAR_EASY_QPA_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_EASY_QPA_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_EASY_QPA_NAME, CVAR_EASY_QPA_DEFAULT)
 
 void OnGameFrameUpdateEasyQPA() {
     if (!GameInteractor::IsSaveLoaded(true)) {

@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/EnforcedCVarRegistry.h"
 #include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
@@ -11,7 +12,14 @@ extern PlayState* gPlayState;
 }
 
 /**
- * UPDATE_ROOM_STATE
+ * UPDATE_ROOM_STATE — schema 3 (settings-sync v2)
+ *
+ * Wire format break from v1: the `state.cvars` object now uses the full
+ * CVar macro expansion as keys (e.g. "gEnhancements.DamageMult") rather
+ * than the v1 short-name convention ("damageMult"). Old v1 receivers
+ * looking for short keys will see none and gracefully fall back to local
+ * CVars (degradation, not crash). The set of enforced CVars is iterated
+ * from Common/EnforcedCVarRegistry.cpp's `kEnforcedInts` / `kEnforcedFloats`.
  */
 
 nlohmann::json Anchor::PrepRoomState() {
@@ -20,71 +28,37 @@ nlohmann::json Anchor::PrepRoomState() {
     bool isGlobalRoom = (std::string("soh-global") == CVarGetString(CVAR_REMOTE_ANCHOR("RoomId"), ""));
 
     if (isGlobalRoom) {
-        // Global room uses hardcoded settings
+        // Global room uses hardcoded session-topology settings.
         payload["pvpMode"] = 0;
         payload["showLocationsMode"] = 0;
         payload["teleportMode"] = 0;
         payload["syncItemsAndFlags"] = 0;
-
-        // Settings-sync v1 (UPDATE_ROOM_STATE schema 2) — global-room
-        // path: hardcoded defaults. Sending the block explicitly (rather
-        // than omitting it) ensures peers transitioning from a non-global
-        // room overwrite any stale cvars values; relying on the
-        // receiver's `.contains()` guard would leave the prior owner's
-        // settings in place.
-        nlohmann::json& cvars = payload["cvars"] = nlohmann::json::object();
-        cvars["timeTravel"]           = 1;     // TIME_TRAVEL_OOT
-        cvars["damageMult"]           = 0;
-        cvars["fallDamageMult"]       = 0;
-        cvars["voidDamageMult"]       = 0;
-        cvars["freezeTime"]           = 0;
-        cvars["randomizedEnemies"]    = 0;
-        cvars["newDrops"]             = 0;
-        cvars["hyperEnemies"]         = 0;
-        cvars["noRestrictItems"]      = 0;
-        cvars["bonkDamageMult"]       = 0;
-        cvars["infiniteAmmo"]         = 0;
-        cvars["climbEverything"]      = 0;
-        cvars["hookshotEverything"]   = 0;
-        cvars["speedModifierValue"]   = 1.0f;
-        cvars["superTunic"]           = 0;
-        cvars["timelessEquipment"]    = 0;
-        cvars["bombTimerMultiplier"]  = 1.0f;
-        cvars["shieldTwoHanded"]      = 0;
-        cvars["removeExplosiveLimit"] = 0;
-        cvars["fireproofDekuShield"]  = 0;
     } else {
         payload["pvpMode"] = CVarGetInteger(CVAR_REMOTE_ANCHOR("RoomSettings.PvpMode"), 1);
         payload["showLocationsMode"] = CVarGetInteger(CVAR_REMOTE_ANCHOR("RoomSettings.ShowLocationsMode"), 1);
         payload["teleportMode"] = CVarGetInteger(CVAR_REMOTE_ANCHOR("RoomSettings.TeleportMode"), 1);
         payload["syncItemsAndFlags"] = CVarGetInteger(CVAR_REMOTE_ANCHOR("RoomSettings.SyncItemsAndFlags"), 1);
+    }
 
-        // Settings-sync v1 (UPDATE_ROOM_STATE schema 2) — snapshot local
-        // gameplay CVars into the wire payload. Senders other than the
-        // original owner have their payload ignored by the relay (see
-        // findOrCreateRoom at server.go:287); the owner's snapshot is
-        // authoritative.
-        nlohmann::json& cvars = payload["cvars"] = nlohmann::json::object();
-        cvars["timeTravel"]           = CVarGetInteger(CVAR_ENHANCEMENT("TimeTravel"), 1 /* TIME_TRAVEL_OOT */);
-        cvars["damageMult"]           = CVarGetInteger(CVAR_ENHANCEMENT("DamageMult"), 0);
-        cvars["fallDamageMult"]       = CVarGetInteger(CVAR_ENHANCEMENT("FallDamageMult"), 0);
-        cvars["voidDamageMult"]       = CVarGetInteger(CVAR_ENHANCEMENT("VoidDamageMult"), 0);
-        cvars["freezeTime"]           = CVarGetInteger(CVAR_CHEAT("FreezeTime"), 0);
-        cvars["randomizedEnemies"]    = CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0);
-        cvars["newDrops"]             = CVarGetInteger(CVAR_ENHANCEMENT("NewDrops"), 0);
-        cvars["hyperEnemies"]         = CVarGetInteger(CVAR_ENHANCEMENT("HyperEnemies"), 0);
-        cvars["noRestrictItems"]      = CVarGetInteger(CVAR_CHEAT("NoRestrictItems"), 0);
-        cvars["bonkDamageMult"]       = CVarGetInteger(CVAR_ENHANCEMENT("BonkDamageMult"), 0);
-        cvars["infiniteAmmo"]         = CVarGetInteger(CVAR_CHEAT("InfiniteAmmo"), 0);
-        cvars["climbEverything"]      = CVarGetInteger(CVAR_CHEAT("ClimbEverything"), 0);
-        cvars["hookshotEverything"]   = CVarGetInteger(CVAR_CHEAT("HookshotEverything"), 0);
-        cvars["speedModifierValue"]   = CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f);
-        cvars["superTunic"]           = CVarGetInteger(CVAR_CHEAT("SuperTunic"), 0);
-        cvars["timelessEquipment"]    = CVarGetInteger(CVAR_CHEAT("TimelessEquipment"), 0);
-        cvars["bombTimerMultiplier"]  = CVarGetFloat(CVAR_CHEAT("BombTimerMultiplier"), 1.0f);
-        cvars["shieldTwoHanded"]      = CVarGetInteger(CVAR_CHEAT("ShieldTwoHanded"), 0);
-        cvars["removeExplosiveLimit"] = CVarGetInteger(CVAR_ENHANCEMENT("RemoveExplosiveLimit"), 0);
-        cvars["fireproofDekuShield"]  = CVarGetInteger(CVAR_CHEAT("FireproofDekuShield"), 0);
+    // Enforced CVars block. Iterate the registry; emit each CVar's
+    // local value (or hardcoded default for the global-room path).
+    // Senders other than the original owner have their payload
+    // ignored by the relay (see findOrCreateRoom at server.go:287);
+    // the owner's snapshot is authoritative. The cvars block is
+    // emitted on BOTH branches (global + non-global) so peers
+    // transitioning from a non-global room overwrite any stale values
+    // rather than relying on the receiver's `.contains()` guard which
+    // would leave the prior owner's settings in place.
+    nlohmann::json& cvars = payload["cvars"] = nlohmann::json::object();
+    for (const auto& e : AnchorCVarSync::kEnforcedInts) {
+        cvars[e.cvarName] = isGlobalRoom
+            ? e.defaultValue
+            : CVarGetInteger(e.cvarName, e.defaultValue);
+    }
+    for (const auto& e : AnchorCVarSync::kEnforcedFloats) {
+        cvars[e.cvarName] = isGlobalRoom
+            ? e.defaultValue
+            : CVarGetFloat(e.cvarName, e.defaultValue);
     }
 
     return payload;
@@ -109,51 +83,57 @@ void Anchor::HandlePacket_UpdateRoomState(nlohmann::json payload) {
     roomState.teleportMode = payload["state"]["teleportMode"].get<u8>();
     roomState.syncItemsAndFlags = payload["state"]["syncItemsAndFlags"].get<u8>();
 
-    // Settings-sync v1 (schema 2). Pre-Pillar-F senders + legacy v1
-    // senders won't carry the "cvars" object — fall back to existing
-    // values (zero-initialised at construction; subsequent updates
-    // from a v2 sender refresh them). Each field is also individually
-    // .contains()-guarded so a partially-populated payload from a
-    // future schema bump still applies what it can.
+    // Settings-sync v2 (UPDATE_ROOM_STATE schema 3). Iterate registry;
+    // for each enforced CVar name look up the JSON value and write
+    // into the map. Missing keys are dropped — the wrapper will fall
+    // back to local for those reads, which is correct behaviour for
+    // mid-rollout schema mismatches.
     if (payload["state"].contains("cvars") && payload["state"]["cvars"].is_object()) {
         const auto& cvars = payload["state"]["cvars"];
-        if (cvars.contains("timeTravel"))           roomState.cvars.timeTravel           = cvars["timeTravel"].get<s32>();
-        if (cvars.contains("damageMult"))           roomState.cvars.damageMult           = cvars["damageMult"].get<s32>();
-        if (cvars.contains("fallDamageMult"))       roomState.cvars.fallDamageMult       = cvars["fallDamageMult"].get<s32>();
-        if (cvars.contains("voidDamageMult"))       roomState.cvars.voidDamageMult       = cvars["voidDamageMult"].get<s32>();
-        if (cvars.contains("freezeTime"))           roomState.cvars.freezeTime           = cvars["freezeTime"].get<u8>();
-        if (cvars.contains("randomizedEnemies"))    roomState.cvars.randomizedEnemies    = cvars["randomizedEnemies"].get<u8>();
-        if (cvars.contains("newDrops"))             roomState.cvars.newDrops             = cvars["newDrops"].get<u8>();
-        if (cvars.contains("hyperEnemies"))         roomState.cvars.hyperEnemies         = cvars["hyperEnemies"].get<u8>();
-        if (cvars.contains("noRestrictItems"))      roomState.cvars.noRestrictItems      = cvars["noRestrictItems"].get<u8>();
-        if (cvars.contains("bonkDamageMult"))       roomState.cvars.bonkDamageMult       = cvars["bonkDamageMult"].get<s32>();
-        if (cvars.contains("infiniteAmmo"))         roomState.cvars.infiniteAmmo         = cvars["infiniteAmmo"].get<u8>();
-        if (cvars.contains("climbEverything"))      roomState.cvars.climbEverything      = cvars["climbEverything"].get<u8>();
-        if (cvars.contains("hookshotEverything"))   roomState.cvars.hookshotEverything   = cvars["hookshotEverything"].get<u8>();
-        if (cvars.contains("speedModifierValue"))   roomState.cvars.speedModifierValue   = cvars["speedModifierValue"].get<f32>();
-        if (cvars.contains("superTunic"))           roomState.cvars.superTunic           = cvars["superTunic"].get<u8>();
-        if (cvars.contains("timelessEquipment"))    roomState.cvars.timelessEquipment    = cvars["timelessEquipment"].get<u8>();
-        if (cvars.contains("bombTimerMultiplier"))  roomState.cvars.bombTimerMultiplier  = cvars["bombTimerMultiplier"].get<f32>();
-        if (cvars.contains("shieldTwoHanded"))      roomState.cvars.shieldTwoHanded      = cvars["shieldTwoHanded"].get<u8>();
-        if (cvars.contains("removeExplosiveLimit")) roomState.cvars.removeExplosiveLimit = cvars["removeExplosiveLimit"].get<u8>();
-        if (cvars.contains("fireproofDekuShield"))  roomState.cvars.fireproofDekuShield  = cvars["fireproofDekuShield"].get<u8>();
+        roomState.enforcedInts.clear();
+        roomState.enforcedFloats.clear();
+        for (const auto& e : AnchorCVarSync::kEnforcedInts) {
+            if (cvars.contains(e.cvarName)) {
+                roomState.enforcedInts[e.cvarName] = cvars[e.cvarName].get<int32_t>();
+            }
+        }
+        for (const auto& e : AnchorCVarSync::kEnforcedFloats) {
+            if (cvars.contains(e.cvarName)) {
+                roomState.enforcedFloats[e.cvarName] = cvars[e.cvarName].get<float>();
+            }
+        }
 
-        // Diagnostic: confirms cvars block round-tripped successfully. Useful
-        // for verifying owner-side admin-pane edits propagate to peers, and
-        // for catching wire-format drift after future schema bumps. Logged
-        // only when the cvars sub-object is present (v1 senders skipped).
-        SPDLOG_INFO("[SettingsSync] Received cvars from owner={} infiniteAmmo={} damageMult={} timeTravel={} speedModifier={:.2f}",
-                    roomState.ownerClientId, (int)roomState.cvars.infiniteAmmo, roomState.cvars.damageMult,
-                    roomState.cvars.timeTravel, roomState.cvars.speedModifierValue);
+        // Diagnostic: confirms cvars block round-tripped successfully.
+        // Logs a handful of representative values for quick sanity
+        // checking. Useful for verifying owner-side admin-pane / Host
+        // Settings widget edits propagate to peers, and for catching
+        // wire-format drift after future schema bumps. Logged only
+        // when the cvars sub-object is present.
+        auto intOrZero = [&](const char* name) -> int32_t {
+            auto it = roomState.enforcedInts.find(name);
+            return it != roomState.enforcedInts.end() ? it->second : 0;
+        };
+        auto floatOrZero = [&](const char* name) -> float {
+            auto it = roomState.enforcedFloats.find(name);
+            return it != roomState.enforcedFloats.end() ? it->second : 0.0f;
+        };
+        SPDLOG_INFO("[SettingsSync] Received cvars from owner={} count={} (ints={} floats={}) infiniteAmmo={} damageMult={} speedModifier={:.2f}",
+                    roomState.ownerClientId,
+                    roomState.enforcedInts.size() + roomState.enforcedFloats.size(),
+                    roomState.enforcedInts.size(),
+                    roomState.enforcedFloats.size(),
+                    intOrZero(CVAR_CHEAT("InfiniteAmmo")),
+                    intOrZero(CVAR_ENHANCEMENT("DamageMult")),
+                    floatOrZero(CVAR_CHEAT("SpeedModifier.Value")));
 
-        // Re-fire any RegisterShipInitFunc listeners gated on enforced CVar
-        // names. This propagates host-side changes to peer-local hook
-        // registrations (COND_HOOK / COND_VB_SHOULD blocks in Cheats/* and
-        // Difficulty/* and elsewhere). Without it, peers' per-frame side
-        // effects — InfiniteAmmo refill, FreezeTime clock-lock,
-        // HyperEnemies double-tick, BonkDamage bonk handler — never
-        // engage on wire updates even though the wrapper read returns
-        // host's value. See OnCvarsReceivedDispatch() for rationale.
+        // Re-fire any RegisterShipInitFunc listeners gated on enforced
+        // CVar names. This propagates host-side changes to peer-local
+        // hook registrations (COND_HOOK / COND_VB_SHOULD blocks in
+        // Cheats/* and Difficulty/* and elsewhere). Without it, peers'
+        // per-frame side effects — InfiniteAmmo refill, FreezeTime
+        // clock-lock, HyperEnemies double-tick, BonkDamage bonk
+        // handler — never engage on wire updates even though the
+        // wrapper read returns host's value.
         AnchorCVarSync::OnCvarsReceivedDispatch();
     }
 }
