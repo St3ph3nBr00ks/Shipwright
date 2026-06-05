@@ -528,9 +528,34 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     if (localGuard > 0) {
         --localGuard;
     }
-    const bool gateOpen = (player->cylinder.base.acFlags & AC_HIT) != 0 &&
-                          player->invincibilityTimer == 0 &&
-                          localGuard == 0;
+    const bool acHitForGate     = (player->cylinder.base.acFlags & AC_HIT) != 0;
+    const bool peerIframesOpen  = player->invincibilityTimer == 0;
+    const bool localGuardOpen   = localGuard == 0;
+    const bool gateOpen         = acHitForGate && peerIframesOpen && localGuardOpen;
+
+    // [Bug1.Diag] (2026-06-05) — log every gate evaluation when AC_HIT
+    // is present, so the next field-test session ground-truths whether
+    // double-sends happen, get suppressed by the local guard, or are
+    // already single-sends. Includes suppression cases (gate false
+    // because localGuard > 0 or peer iframes > 0). Single line per
+    // frame; minimal volume because AC_HIT only stays set for the
+    // active frames of an enemy swing. attackerId is whatever
+    // cylinder.base.at points at (the actor that just AT-hit us).
+    if (acHitForGate) {
+        const u16 attackerId = (player->cylinder.base.at != nullptr)
+            ? player->cylinder.base.at->id : 0;
+        const uint64_t curFrame = (Anchor::Instance != nullptr)
+            ? Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed) : 0;
+        SPDLOG_INFO("[Bug1.Diag] send-gate clientId={} curFrame={} gateOpen={} "
+                    "acHit={} peerIT={} localGuard={} damage={} damageEffect={} "
+                    "attackerId=0x{:04X}",
+                    clientId, curFrame, gateOpen,
+                    acHitForGate, player->invincibilityTimer, localGuard,
+                    (int)player->actor.colChkInfo.damage,
+                    (int)player->actor.colChkInfo.damageEffect,
+                    attackerId);
+    }
+
     if (gateOpen) {
         // Bug 3 fix (2026-06-05) — pass the attacker's world position so
         // the peer-side knockback yaw is computed from the actual
@@ -552,6 +577,20 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         // typically takes to sync its iframes back; once that arrives,
         // either gate is sufficient to keep blocking.
         localGuard = 20;
+
+        // [Bug1.Diag] — log every actual send so we can count packets
+        // per swing. If we still see two entries 100ms apart for one
+        // enemy swing, the localGuard isn't taking effect; if we see
+        // exactly one, the send-side is doing the right thing and the
+        // bug lives on the receive side.
+        const uint64_t curFrame = (Anchor::Instance != nullptr)
+            ? Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed) : 0;
+        SPDLOG_INFO("[Bug1.Diag] SEND DAMAGE_PLAYER to clientId={} curFrame={} "
+                    "damage={} damageEffect={} (localGuard armed to {})",
+                    client.clientId, curFrame,
+                    (int)player->actor.colChkInfo.damage,
+                    (int)player->actor.colChkInfo.damageEffect,
+                    localGuard);
     }
 
     const bool wouldSetAC =
