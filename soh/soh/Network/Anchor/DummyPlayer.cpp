@@ -557,8 +557,13 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     // active frames of an enemy swing. attackerId is whatever
     // cylinder.base.at points at (the actor that just AT-hit us).
     if (acHitForGate) {
-        const u16 attackerId = (player->cylinder.base.at != nullptr)
-            ? player->cylinder.base.at->id : 0;
+        // Bug C fix (2026-06-05) — `.ac` is the attacker on an AC bumper,
+        // NOT `.at`. CollisionCheck_SetATvsAC sets `ac->ac = at->actor`
+        // (z_collision_check.c:1740). The DummyPlayer's cylinder is
+        // used only as AC in non-PvP, so `.at` stays null and reading
+        // it always produced attackerId=0x0000 in field-test 414.
+        const u16 attackerId = (player->cylinder.base.ac != nullptr)
+            ? player->cylinder.base.ac->id : 0;
         const uint64_t curFrame = (Anchor::Instance != nullptr)
             ? Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed) : 0;
         SPDLOG_INFO("[Bug1.Diag] send-gate clientId={} curFrame={} gateOpen={} "
@@ -572,13 +577,22 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     }
 
     if (gateOpen) {
-        // Bug 3 fix (2026-06-05) — pass the attacker's world position so
-        // the peer-side knockback yaw is computed from the actual
+        // Bug 3 fix (2026-06-05) — pass the attacker's world position
+        // so the peer-side knockback yaw is computed from the actual
         // attacker (e.g. Invader actor) rather than from the sender's
-        // own player. cylinder.base.at is the actor that just AT-hit
-        // this DummyPlayer's AC bumper.
-        const Vec3f* attackerPos = (player->cylinder.base.at != nullptr)
-            ? &player->cylinder.base.at->world.pos
+        // own player.
+        //
+        // Bug C fix (2026-06-05) — `.ac` is the attacker on an AC
+        // bumper, NOT `.at`. CollisionCheck_SetATvsAC writes
+        // `ac->ac = at->actor` (z_collision_check.c:1740). The prior
+        // `.at` read was always NULL because DummyPlayer's cylinder
+        // is only registered as AC (non-PvP), so attackerPos was
+        // never set and the receive side fell through to the
+        // legacy "yaw from sender's player" path — which produced
+        // the wrong-direction knockback on the receiver in field-
+        // test 413.
+        const Vec3f* attackerPos = (player->cylinder.base.ac != nullptr)
+            ? &player->cylinder.base.ac->world.pos
             : nullptr;
         Anchor::Instance->SendPacket_DamagePlayer(client.clientId, player->actor.colChkInfo.damageEffect,
                                                   player->actor.colChkInfo.damage, attackerPos);
