@@ -590,11 +590,34 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
     s16 loopMode;
 
     if (this->collider.base.atFlags & AT_HIT) {
+        // Anchor Bug 2 fix (2026-06-05) — gate the entire AT_HIT
+        // branch on "the AC that was hit was the local Link", not a
+        // DummyPlayer at a remote peer's position. Without this
+        // gate, every vanilla side effect of the branch fires on
+        // the wrong target whenever Goroiwa's AT happens to overlap
+        // a DummyPlayer on our machine:
+        //   - Anchor_NotifyEnemyHitPlayer would tell the host that
+        //     OUR local Link was hit (false — Link was nowhere near
+        //     the boulder).
+        //   - ENGOROIWA_PLAYER_IN_THE_WAY + reverse-direction state
+        //     would alter our local Goroiwa replica's authoritative
+        //     copy without justification.
+        //   - func_8002F6D4 would apply knockback to OUR local Link
+        //     even though Link wasn't hit (field-test 406 / 409 —
+        //     when boulder hit P1 on P1's machine, P2 also got
+        //     knockback on P2's machine because P1's DummyPlayer on
+        //     P2 was overlapping the boulder).
+        // The atFlags clear runs unconditionally so AT_HIT doesn't
+        // re-fire next frame; the rest of the branch only runs when
+        // the local Link was the actual AC.
+        s32 atHitLocalLink =
+            (this->collider.base.ac == &GET_PLAYER(play)->actor);
+        this->collider.base.atFlags &= ~AT_HIT;
+        if (atHitLocalLink) {
         // Multiplayer (#153 Phase 2): tell the host that this client's local Link
         // just got hit by this boulder so the host reverses its authoritative copy.
         // No-op on host and when disconnected — the regular branch below still runs.
         Anchor_NotifyEnemyHitPlayer(&this->actor);
-        this->collider.base.atFlags &= ~AT_HIT;
         this->stateFlags &= ~ENGOROIWA_PLAYER_IN_THE_WAY;
         yawDiff = this->actor.yawTowardsPlayer - this->actor.world.rot.y;
         if (yawDiff > -0x4000 && yawDiff < 0x4000) {
@@ -613,6 +636,7 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
         if ((this->actor.home.rot.z & 1) == 1) {
             this->collisionDisabledTimer = 50;
         }
+        }  // end of Anchor Bug 2 fix `if (atHitLocalLink)` block
     } else if (moveFuncs[(this->actor.params >> 10) & 1](this, play)) {
         loopMode = (this->actor.params >> 8) & 3;
         if (loopMode == ENGOROIWA_LOOPMODE_ONEWAY_BREAK &&
