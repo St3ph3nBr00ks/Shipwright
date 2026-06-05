@@ -92,10 +92,21 @@ static ColliderCylinderInit sColliderInit = {
     { 12, 60, 0, { 0, 0, 0 } },
 };
 
-// Step 15d — sword swing AT collider (quad). Same shape as
-// EnFollower's sAtColliderInit but flipped to enemy alignment:
-// AT_TYPE_ENEMY so Player AC bumpers (AC_TYPE_PLAYER) accept hits
-// from this Invader. dmgFlags 0x00000100 = standard sword damage.
+// Step 15d — sword swing AT collider (quad). Originally cloned from
+// EnFollower's sAtColliderInit with the AT type flipped to
+// AT_TYPE_ENEMY for hostile alignment, but kept Follower's
+// Player-style damage configuration. Field-test log 406 confirmed
+// (Bug 7) that this combination is not recognised by Player's
+// shield-block path — shield was up + frontal, but damage applied
+// anyway. Vanilla enemy-sword ATs (e.g. Stalfos, EnTest's
+// sSwordColliderInit at z_en_test.c:183) use a different
+// configuration that Player's shield-block predicate accepts:
+//   ELEMTYPE_UNK0           (was UNK2)
+//   dmgFlags 0xFFCFFFFF     (mask, all bits — was 0x00000100 single bit)
+//   TOUCH_UNK7 added        (was missing)
+// Damage value preserved at 0x08 (1/2 heart — keeps the Invader's
+// "intentionally a touch deadlier than Stalfos" identity).
+//
 // Quad vertices are positioned per-frame by the C++ tick driver
 // (PositionAttackQuad) during the active frames of the swing anim.
 static ColliderQuadInit sAtColliderInit = {
@@ -108,16 +119,10 @@ static ColliderQuadInit sAtColliderInit = {
         COLSHAPE_QUAD,
     },
     {
-        ELEMTYPE_UNK2,
-        // dmgFlags=0x100 (standard sword flag); effect=0; damage=0x08.
-        // Damage units are 16-per-heart, so 0x08 = 1/2 heart per swing.
-        // Was 0x01 (1/16 heart, ~6%) — user reported "less than 1/4
-        // heart" 2026-05-17. Vanilla Stalfos's sword AT is 4 damage
-        // (1/4 heart); Invader is intentionally a touch deadlier to
-        // sell the "hunter" identity.
-        { 0x00000100, 0x00, 0x08 },
-        { 0xFFCFFFFF, 0x00, 0x00 },
-        TOUCH_ON | TOUCH_SFX_NORMAL,
+        ELEMTYPE_UNK0,
+        { 0xFFCFFFFF, 0x00, 0x08 },
+        { 0x00000000, 0x00, 0x00 },
+        TOUCH_ON | TOUCH_SFX_NORMAL | TOUCH_UNK7,
         BUMP_NONE,
         OCELEM_NONE,
     },
