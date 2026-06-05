@@ -111,8 +111,11 @@ void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
     s16 knockbackYaw;
     if (payload.contains("attackerPos")) {
         const auto& ap = payload["attackerPos"];
-        const f32 dx = self->actor.world.pos.x - ap.value("x", 0.0f);
-        const f32 dz = self->actor.world.pos.z - ap.value("z", 0.0f);
+        const f32 apx = ap.value("x", 0.0f);
+        const f32 apy = ap.value("y", 0.0f);
+        const f32 apz = ap.value("z", 0.0f);
+        const f32 dx = self->actor.world.pos.x - apx;
+        const f32 dz = self->actor.world.pos.z - apz;
         // Bug A fix (2026-06-05) — OoT's Math_Atan2 family takes (z, x),
         // NOT (x, z). The prior order produced a yaw rotated ~90° which
         // sometimes pushed the player INTO the attacker (field-test 413
@@ -120,8 +123,24 @@ void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
         // Actor_WorldYawTowardActor / Math_Vec3f_Yaw which use
         // Math_Atan2S(z_delta, x_delta).
         knockbackYaw = Math_FAtan2F(dz, dx);
+        // [Bug1.Diag] (2026-06-05) — break down the yaw computation so
+        // we can verify direction is correct from the payload values.
+        SPDLOG_INFO("[Bug1.Diag] RECV knockbackYaw computation: "
+                    "self.pos=({:.0f},{:.0f},{:.0f}) "
+                    "attackerPos=({:.0f},{:.0f},{:.0f}) "
+                    "dx={:.1f} dz={:.1f} yaw=0x{:04X}",
+                    self->actor.world.pos.x, self->actor.world.pos.y,
+                    self->actor.world.pos.z, apx, apy, apz,
+                    dx, dz, (uint16_t)knockbackYaw);
     } else {
         knockbackYaw = Actor_WorldYawTowardActor(&otherPlayer->actor, &self->actor);
+        SPDLOG_INFO("[Bug1.Diag] RECV knockbackYaw fallback (no attackerPos): "
+                    "self.pos=({:.0f},{:.0f},{:.0f}) "
+                    "otherPlayer.pos=({:.0f},{:.0f},{:.0f}) yaw=0x{:04X}",
+                    self->actor.world.pos.x, self->actor.world.pos.y,
+                    self->actor.world.pos.z, otherPlayer->actor.world.pos.x,
+                    otherPlayer->actor.world.pos.y, otherPlayer->actor.world.pos.z,
+                    (uint16_t)knockbackYaw);
     }
     const u8 healthBefore = gSaveContext.health;
     func_80837C0C(gPlayState, self, damageEffect, 4.0f, 5.0f, knockbackYaw, 20);

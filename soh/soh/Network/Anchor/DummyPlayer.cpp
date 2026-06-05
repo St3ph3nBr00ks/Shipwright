@@ -614,12 +614,23 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         // bug lives on the receive side.
         const uint64_t curFrame = (Anchor::Instance != nullptr)
             ? Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed) : 0;
+        // [Bug1.Diag] (2026-06-05) — also log the actual attackerPos
+        // being sent + DummyPlayer's own world pos, so receive-side
+        // diagnostics can verify the dx/dz/yaw computation is correct.
+        const f32 attX = (attackerPos != nullptr) ? attackerPos->x : 0.0f;
+        const f32 attY = (attackerPos != nullptr) ? attackerPos->y : 0.0f;
+        const f32 attZ = (attackerPos != nullptr) ? attackerPos->z : 0.0f;
         SPDLOG_INFO("[Bug1.Diag] SEND DAMAGE_PLAYER to clientId={} curFrame={} "
-                    "damage={} damageEffect={} (localGuard armed to {})",
+                    "damage={} damageEffect={} (localGuard armed to {}) "
+                    "attackerPos=({:.0f},{:.0f},{:.0f}) hasAttackerPos={} "
+                    "dummyPos=({:.0f},{:.0f},{:.0f})",
                     client.clientId, curFrame,
                     (int)player->actor.colChkInfo.damage,
                     (int)player->actor.colChkInfo.damageEffect,
-                    localGuard);
+                    localGuard, attX, attY, attZ,
+                    attackerPos != nullptr,
+                    player->actor.world.pos.x, player->actor.world.pos.y,
+                    player->actor.world.pos.z);
     }
 
     const bool wouldSetAC =

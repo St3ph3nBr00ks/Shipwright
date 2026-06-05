@@ -617,6 +617,26 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
         // The atFlags clear runs unconditionally so AT_HIT doesn't
         // re-fire next frame regardless of who was hit.
         s32 linkInRange = (this->actor.xzDistToPlayer < 100.0f);
+        // [Bug1.Diag] (2026-06-05) — log every Goroiwa AT_HIT so the next
+        // field-test correlates against the host's send log. linkInRange
+        // is the gate that decides whether vanilla knockdown applies to
+        // the LOCAL Link. If gate=false, only the DummyPlayer was hit
+        // and Goroiwa's vanilla local-Link path is skipped (correct).
+        // collider.base.ac is the actor whose AC was hit (the target).
+        {
+            Actor* hitTarget = this->collider.base.ac;
+            const u16 hitTargetId = (hitTarget != NULL) ? hitTarget->id : 0;
+            LUSLOG_INFO("[Bug1.Diag] Goroiwa AT_HIT linkInRange=%d "
+                        "xzDistToPlayer=%.1f Goroiwa.pos=(%.0f,%.0f,%.0f) "
+                        "hitTargetId=0x%04X hitTarget.pos=(%.0f,%.0f,%.0f)",
+                        linkInRange, this->actor.xzDistToPlayer,
+                        this->actor.world.pos.x, this->actor.world.pos.y,
+                        this->actor.world.pos.z,
+                        (int)hitTargetId,
+                        hitTarget ? hitTarget->world.pos.x : 0.0f,
+                        hitTarget ? hitTarget->world.pos.y : 0.0f,
+                        hitTarget ? hitTarget->world.pos.z : 0.0f);
+        }
         this->collider.base.atFlags &= ~AT_HIT;
         if (linkInRange) {
         // Multiplayer (#153 Phase 2): tell the host that this client's local Link
