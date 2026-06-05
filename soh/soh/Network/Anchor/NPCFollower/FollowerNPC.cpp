@@ -798,10 +798,10 @@ Vec3f ComputeEffectiveTarget(const Vec3f& leaderPos) {
 // preserves whatever facing direction it had when it stopped moving
 // (e.g., when it transitioned FOLLOW→IDLE on arriving at the leader).
 // This mirrors AI Player Follower, where Link's body keeps
-// its last facing while idle. The independent head-look-at-leader
-// (TickHeadLookAtLeader, dispatched separately) still tracks the
-// player so the NPC visually acknowledges us with eye/head movement
-// without rotating the whole body.
+// its last facing while idle. The independent head-look
+// (TickHeadLookAt, dispatched separately) still tracks the leader
+// (or combat target, 2026-06-05) so the NPC visually acknowledges
+// us with eye/head movement without rotating the whole body.
 void TickIDLE(EnFollower* this_, PlayState* play, const Vec3f& leaderPos) {
     Actor* a = &this_->actor;
     a->speedXZ = 0.0f;
@@ -1235,11 +1235,19 @@ void TickStepPhaseAndSfx(EnFollower* this_, PlayState* play) {
 //
 // Drives the NPC's pose values written into Player's headLimbRot /
 // upperLimbRot via the EnFollower_Draw save/swap/restore.
-void TickHeadLookAtLeader(EnFollower* this_, const Vec3f& leaderPos) {
+//
+// 2026-06-05 — renamed from TickHeadLookAtLeader to TickHeadLookAt
+// + generalised parameter (was hardcoded to leader). Caller (the
+// dispatcher) now picks the target based on state: combat states
+// look at the current combat target so the upper-body twist
+// produces a sword arc actually pointing at the enemy; non-combat
+// states look at the leader. Mirrors NPC Invader's
+// TickHeadLookAtTarget pattern.
+void TickHeadLookAt(EnFollower* this_, const Vec3f& lookAtPos) {
     AnchorAI::HeadLookInputs in;
     in.actorPos  = this_->actor.world.pos;
     in.actorYaw  = this_->actor.shape.rot.y;
-    in.targetPos = leaderPos;
+    in.targetPos = lookAtPos;
     AnchorAI::StepHeadLookToward(in, &this_->headLimbRot, &this_->upperLimbRot);
 }
 
@@ -3989,7 +3997,30 @@ extern "C" void Anchor_TickFollowerNpcActor(Actor* npc, PlayState* play) {
         AnchorAI::ResetHeadLookToNeutral(&this_->headLimbRot,
                                           &this_->upperLimbRot);
     } else {
-        TickHeadLookAtLeader(this_, leaderPos);
+        // 2026-06-05 — pick the look-at target by state. In combat
+        // states with a known target, the head + upper-body twist
+        // toward the enemy; the AT quad is built from the (post-
+        // twist) L_HAND world position so the sword arc actually
+        // points at the target. Otherwise track the leader (the
+        // long-standing companion behaviour).
+        //
+        // Field-test observation 2026-06-05: with the prior leader-
+        // hardcoded head-look, the Follower's upper body twisted
+        // away from off-axis enemies during combat, causing sword
+        // swings to whiff. The Invader has the equivalent
+        // target-tracking head-look (TickHeadLookAtTarget) and
+        // doesn't show this miss class.
+        const bool inCombat =
+            (this_->state == EN_FOLLOWER_STATE_ATTACK        ||
+             this_->state == EN_FOLLOWER_STATE_ENGAGE        ||
+             this_->state == EN_FOLLOWER_STATE_BLOCK         ||
+             this_->state == EN_FOLLOWER_STATE_RANGED_ATTACK ||
+             this_->state == EN_FOLLOWER_STATE_STANDBY);
+        if (inCombat && sAttackState.target != nullptr) {
+            TickHeadLookAt(this_, sAttackState.target->world.pos);
+        } else {
+            TickHeadLookAt(this_, leaderPos);
+        }
     }
 
     // Animation. Run AFTER dispatch so any state transitions made by
