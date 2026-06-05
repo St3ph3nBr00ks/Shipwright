@@ -2,6 +2,7 @@
 #include "GameTimeControllerBridge.h"
 #include "soh/Network/Anchor/Anchor.h"  // ::Anchor::Instance / isEnabled
                                         // (also pre-loads libultraship.h + z64.h)
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"  // AnchorCVarSync::GetEnforcedInt (G.ii host-auth read)
 #include "soh/cvar_prefixes.h"          // CVAR_REMOTE_ANCHOR for live-world toggle
 #include "soh/Notification/Notification.h"  // Notification::Emit for G.ii NotificationOnly path
 #include "soh/SohGui/ImGuiUtils.h"          // GetTextureForItemId (notification icon)
@@ -105,7 +106,12 @@ bool ShouldAdvanceWorldTime(TimeContext context) {
 // ---------------------------------------------------------------------------
 
 bool IsNonBlockingItemGetEnabled() {
-    return CVarGetInteger(CVAR_ENHANCEMENT("Anchor.NonBlockingItemGet"), 1) != 0;
+    // Host-authoritative read via AnchorCVarSync — when a session is
+    // connected, all clients see the host's value regardless of their
+    // own local CVar. Defaults to 1 (enabled) for single-player and
+    // pre-connect MP. Registered in EnforcedCVarRegistry.cpp Class B.
+    return AnchorCVarSync::GetEnforcedInt(
+               CVAR_ENHANCEMENT("Anchor.NonBlockingItemGet"), 1) != 0;
 }
 
 ItemPresentationMode GetItemPresentationMode(int16_t getItemId) {
@@ -231,6 +237,13 @@ extern "C" int Anchor_GetItemPresentationMode(int16_t getItemId) {
 // `getItemId` reserved for future per-id branching (e.g. heart-
 // container variant), currently unused — keep in signature for ABI
 // stability.
+extern "C" bool Anchor_IsPillarGiiActive(void) {
+    if (::Anchor::Instance == nullptr || !::Anchor::Instance->isEnabled) {
+        return false;
+    }
+    return GameTimeController::IsNonBlockingItemGetEnabled();
+}
+
 extern "C" void Anchor_EmitItemGetToast(int16_t getItemId, uint8_t itemId) {
     if (::Anchor::Instance == nullptr || !::Anchor::Instance->isEnabled) {
         return;  // single-player or MP off → silent, vanilla behavior

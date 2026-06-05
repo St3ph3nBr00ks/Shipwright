@@ -6,6 +6,7 @@
 #include <soh/Enhancements/cosmetics/authenticGfxPatches.h>
 #include <soh/Enhancements/TimeDisplay/TimeDisplay.h>
 #include <soh/Enhancements/RoomNavData/RoomNavData.h>
+#include <soh/Network/Anchor/Common/GameTimeControllerBridge.h>  // Anchor_IsPillarGiiActive (FastChests UI gate)
 
 extern "C" {
 #include "functions.h"
@@ -453,8 +454,30 @@ void SohMenu::AddMenuEnhancements() {
         .Options(CheckboxOptions().Tooltip("Speeds up ship in Shadow Temple."));
     AddWidget(path, "Fast Chests", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("FastChests"))
-        .Options(CheckboxOptions().Tooltip("Makes Link always kick the chest to open it, instead of doing the longer "
-                                           "chest opening animation for major items."));
+        .PreFunc([](WidgetInfo& info) {
+            // When Anchor multiplayer is active AND Pillar G.ii non-
+            // blocking item pickups is on (the default), non-iconic
+            // chest opens go through the inline silent-give path
+            // (z_player.c Path 2) which already forces the fast box-
+            // kick animation. The user-visible FastChests setting then
+            // becomes effectively-on for the majority of chests
+            // regardless of this checkbox value. Disable the widget
+            // and surface the override in the tooltip so the UI isn't
+            // misleading.
+            //
+            // Iconic chest items (in the G.ii allowlist) DO still
+            // honor the user's FastChests setting because they fall
+            // through to the vanilla cutscene path. But those are
+            // rare enough that the UX trade-off favors a single
+            // clear "forced" state when MP is on.
+            info.options->disabled = Anchor_IsPillarGiiActive();
+        })
+        .Options(CheckboxOptions()
+                     .Tooltip("Makes Link always kick the chest to open it, instead of doing the longer "
+                              "chest opening animation for major items.")
+                     .DisabledTooltip("Effectively forced ON for non-iconic chests while multiplayer's "
+                                      "Non-Blocking Item Pickups (Flotilla → Host Settings) is enabled. "
+                                      "Disable that toggle to take back per-checkbox control."));
     AddWidget(path, "Skip Water Take Breath Animation", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("SkipSwimDeepEndAnim"))
         .Options(CheckboxOptions().Tooltip("Skips Link's taking breath animation after coming up from water. "

@@ -404,6 +404,24 @@ void SohMenu::AddMenuFlotilla() {
     AddWidget(path, "Class B — should match (drift causes UX / fairness divergence)",
               WIDGET_SEPARATOR_TEXT);
 
+    AddWidget(path, "Non-Blocking Item Pickups##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.NonBlockingItemGet"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Pillar G.ii — Replaces the freeze + cutscene + textbox for "
+            "non-iconic item pickups (chest items, ground drops, scrub "
+            "gives, etc.) with a corner Notification toast. World keeps "
+            "moving throughout — Link stays controllable, NPCs / "
+            "Invaders / projectiles continue. Iconic items (ocarinas, "
+            "Light Arrows, Great Fairy spells, Ice Trap) keep their "
+            "vanilla cutscenes. Songs / medallions / spiritual stones / "
+            "Master Sword use dedicated cutscene paths that are "
+            "unaffected by this toggle.\n\n"
+            "Host-authoritative — every client in the session uses "
+            "host's value. Default: on. Disable to revert to the "
+            "vanilla freeze behavior everywhere."));
+
     AddWidget(path, "Unrestricted Items##Flotilla", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_CHEAT("NoRestrictItems"))
         .PreFunc(FlotillaHostSettingsPreFunc)

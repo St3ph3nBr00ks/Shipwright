@@ -160,6 +160,14 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     { CVAR_ENHANCEMENT("FastBoomerang"),             0 },
     { CVAR_ENHANCEMENT("InstantPutaway"),            0 },
     { CVAR_ENHANCEMENT("PauseWarp"),                 0 },
+
+    // --- Pillar G.ii — non-blocking item-get cutscene skip ---
+    // Default 1 (enabled). When on, MP routes non-iconic item-gets
+    // through the silent-give path + Notification toast; iconic
+    // items (ocarinas / Light Arrows / Great Fairy spells / Ice
+    // Trap) keep their vanilla cutscenes. Host-authoritative so all
+    // clients in a session experience the same item-pickup cadence.
+    { CVAR_ENHANCEMENT("Anchor.NonBlockingItemGet"), 1 },
 };
 
 const std::vector<FloatCVarEntry> kEnforcedFloats = {

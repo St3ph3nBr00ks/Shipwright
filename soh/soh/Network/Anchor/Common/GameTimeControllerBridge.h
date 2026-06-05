@@ -119,6 +119,14 @@ int Anchor_GetItemPresentationMode(int16_t getItemId);
 // `itemId` is the ITEM_* inventory id used for the icon + name lookup.
 void Anchor_EmitItemGetToast(int16_t getItemId, uint8_t itemId);
 
+// Pillar G.ii — composite predicate: Anchor is connected AND the
+// Non-Blocking Item Pickups toggle is on (host-authoritative read).
+// True means the user-visible vanilla FastChests setting is
+// effectively overridden for non-iconic chests (Path 2 inline gate
+// forces fast box-kick regardless). UI surfaces consult this to
+// disable widgets that would be misleading.
+bool Anchor_IsPillarGiiActive(void);
+
 #ifdef __cplusplus
 }
 #endif
