@@ -1,6 +1,7 @@
 #include "Anchor.h"
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/SceneMultiplayerConfig.h"
+#include "soh/Network/Anchor/Common/SceneAuthority.h"  // IsMyCurrentRoomHost — Bug B fix gate (2026-06-05)
 #include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 #include "soh/Enhancements/nametag.h"
 #include <unordered_map>
@@ -531,7 +532,21 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     const bool acHitForGate     = (player->cylinder.base.acFlags & AC_HIT) != 0;
     const bool peerIframesOpen  = player->invincibilityTimer == 0;
     const bool localGuardOpen   = localGuard == 0;
-    const bool gateOpen         = acHitForGate && peerIframesOpen && localGuardOpen;
+    // Bug B fix (2026-06-05) — only the AUTHORITATIVE room host should
+    // broadcast DAMAGE_PLAYER from a DummyPlayer AC_HIT. Without this
+    // gate, peers also send DAMAGE_PLAYER whenever a synced enemy
+    // (Goroiwa, etc.) hits their local DummyPlayer-of-the-host-or-
+    // other-peer — which is just a replicated collider, not an
+    // authoritative damage event. Field-test 413 confirmed this caused
+    // P1 to be knocked back whenever Goroiwa hit P1's DummyPlayer on
+    // P2's machine.
+    //
+    // Pillar A Phase 2's IsMyCurrentRoomHost() is the correct
+    // authority: the room host owns BOTH the per-room hostile NPCs
+    // (Invader) AND the synced vanilla enemies in that room.
+    const bool authoritative    = ::SceneAuthority::IsMyCurrentRoomHost();
+    const bool gateOpen         = acHitForGate && peerIframesOpen
+                               && localGuardOpen && authoritative;
 
     // [Bug1.Diag] (2026-06-05) — log every gate evaluation when AC_HIT
     // is present, so the next field-test session ground-truths whether
@@ -547,9 +562,9 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         const uint64_t curFrame = (Anchor::Instance != nullptr)
             ? Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed) : 0;
         SPDLOG_INFO("[Bug1.Diag] send-gate clientId={} curFrame={} gateOpen={} "
-                    "acHit={} peerIT={} localGuard={} damage={} damageEffect={} "
-                    "attackerId=0x{:04X}",
-                    clientId, curFrame, gateOpen,
+                    "authoritative={} acHit={} peerIT={} localGuard={} damage={} "
+                    "damageEffect={} attackerId=0x{:04X}",
+                    clientId, curFrame, gateOpen, authoritative,
                     acHitForGate, player->invincibilityTimer, localGuard,
                     (int)player->actor.colChkInfo.damage,
                     (int)player->actor.colChkInfo.damageEffect,

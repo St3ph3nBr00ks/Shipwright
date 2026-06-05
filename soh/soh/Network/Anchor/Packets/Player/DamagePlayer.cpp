@@ -113,7 +113,13 @@ void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
         const auto& ap = payload["attackerPos"];
         const f32 dx = self->actor.world.pos.x - ap.value("x", 0.0f);
         const f32 dz = self->actor.world.pos.z - ap.value("z", 0.0f);
-        knockbackYaw = Math_FAtan2F(dx, dz);
+        // Bug A fix (2026-06-05) — OoT's Math_Atan2 family takes (z, x),
+        // NOT (x, z). The prior order produced a yaw rotated ~90° which
+        // sometimes pushed the player INTO the attacker (field-test 413
+        // — "P1 knocked forward into the Goroiwa 3D model"). Mirror
+        // Actor_WorldYawTowardActor / Math_Vec3f_Yaw which use
+        // Math_Atan2S(z_delta, x_delta).
+        knockbackYaw = Math_FAtan2F(dz, dx);
     } else {
         knockbackYaw = Actor_WorldYawTowardActor(&otherPlayer->actor, &self->actor);
     }
