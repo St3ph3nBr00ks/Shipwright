@@ -590,46 +590,6 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
     s16 loopMode;
 
     if (this->collider.base.atFlags & AT_HIT) {
-        // Bug 2 fix Stage 1 (2026-06-05) — source-side colChkInfo.damage
-        // fill so DummyPlayer's AC_HIT detector reads the truthful value
-        // for the cross-machine DAMAGE_PLAYER broadcast.
-        //
-        // Goroiwa's AT collider does NOT carry damage info on its
-        // dmgInfo; vanilla applies damage through func_8002F6D4 below,
-        // which bypasses the standard CollisionCheck damage-info AT→AC
-        // transfer. The AC target's colChkInfo.damage stays 0 even
-        // though a hit landed. For a host-only Goroiwa hit on the real
-        // Link, that's fine (vanilla's func_8002F6D4 handles damage via
-        // its own internal path against GET_PLAYER). For cross-machine
-        // (host's Goroiwa hits peer's DummyPlayer), DummyPlayer.cpp's
-        // AC_HIT detector reads colChkInfo.damage to populate
-        // DAMAGE_PLAYER's wire field — and gets 0 → peer takes no
-        // damage. Log 418 confirmed.
-        //
-        // Filling the AC target's colChkInfo.damage with the vanilla
-        // Goroiwa damage value (1/4 heart = 4 HP) at AT_HIT detection
-        // closes the gap. The `== 0` guard preserves any non-zero
-        // value vanilla would have filled via another path (defensive
-        // — Goroiwa's AT shouldn't have one today, but a future
-        // variant might).
-        //
-        // Wire-multiplier caveat: DamagePlayer.cpp:94 does
-        // `colChkInfo.damage = damage * 8` on receive. If
-        // DummyPlayer.cpp ships the raw colChkInfo.damage value (4) as
-        // wire damage, the receiver applies 4*8 = 32 HP (~2 hearts) —
-        // 8× too much. Stage 2 work: tune the multiplier OR pre-divide
-        // at send. Stage 1 just proves the source-side fill round-trips
-        // through the network — observe the actual HP delta and adjust.
-        if (this->collider.base.ac != NULL &&
-            this->collider.base.ac->colChkInfo.damage == 0) {
-            this->collider.base.ac->colChkInfo.damage = 4;  // vanilla = 1/4 heart
-            LUSLOG_INFO("[Bug2.Diag] Goroiwa AT_HIT source-fill: ac=0x%04X "
-                        "damage 0->4 ac.pos=(%.0f,%.0f,%.0f)",
-                        (int)this->collider.base.ac->id,
-                        this->collider.base.ac->world.pos.x,
-                        this->collider.base.ac->world.pos.y,
-                        this->collider.base.ac->world.pos.z);
-        }
         // Anchor Bug 2 fix (2026-06-05, revised 2026-06-05 after
         // field-test 411). Gate the entire AT_HIT branch on "was
         // the local Link actually hit?" so the cross-machine

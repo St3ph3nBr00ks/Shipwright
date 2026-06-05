@@ -81,7 +81,7 @@ static DamageTable DummyPlayerDamageTable = {
     /* Giant jump    */ DMG_ENTRY(8, DUMMY_PLAYER_HIT_RESPONSE_NORMAL),
     /* Master jump   */ DMG_ENTRY(4, DUMMY_PLAYER_HIT_RESPONSE_NORMAL),
     /* Unknown 1     */ DMG_ENTRY(0, PLAYER_HIT_RESPONSE_NONE),
-    /* Unblockable   */ DMG_ENTRY(0, PLAYER_HIT_RESPONSE_NONE),
+    /* Unblockable   */ DMG_ENTRY(2, DUMMY_PLAYER_HIT_RESPONSE_NORMAL),  // Bug 2 fix (2026-06-05) — Goroiwa, Bigokuta, falling rocks, etc. all use the Unblockable damage type (AT dmgFlags bit 29 = 0x20000000). Entry was accidentally zeroed during the original DummyPlayer table customization, silently filtering every direct-collision attacker to damage=0 → cross-machine DAMAGE_PLAYER shipped damage=0 → peer took no damage. See Plans/dummy_player_damage_table_audit.md.
     /* Hammer jump   */ DMG_ENTRY(4, PLAYER_HIT_RESPONSE_KNOCKBACK_LARGE),
     /* Unknown 2     */ DMG_ENTRY(0, PLAYER_HIT_RESPONSE_NONE),
 };
