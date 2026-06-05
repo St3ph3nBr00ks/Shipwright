@@ -590,30 +590,35 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
     s16 loopMode;
 
     if (this->collider.base.atFlags & AT_HIT) {
-        // Anchor Bug 2 fix (2026-06-05) — gate the entire AT_HIT
-        // branch on "the AC that was hit was the local Link", not a
-        // DummyPlayer at a remote peer's position. Without this
-        // gate, every vanilla side effect of the branch fires on
-        // the wrong target whenever Goroiwa's AT happens to overlap
-        // a DummyPlayer on our machine:
-        //   - Anchor_NotifyEnemyHitPlayer would tell the host that
-        //     OUR local Link was hit (false — Link was nowhere near
-        //     the boulder).
-        //   - ENGOROIWA_PLAYER_IN_THE_WAY + reverse-direction state
-        //     would alter our local Goroiwa replica's authoritative
-        //     copy without justification.
-        //   - func_8002F6D4 would apply knockback to OUR local Link
-        //     even though Link wasn't hit (field-test 406 / 409 —
-        //     when boulder hit P1 on P1's machine, P2 also got
-        //     knockback on P2's machine because P1's DummyPlayer on
-        //     P2 was overlapping the boulder).
+        // Anchor Bug 2 fix (2026-06-05, revised 2026-06-05 after
+        // field-test 411). Gate the entire AT_HIT branch on "was
+        // the local Link actually hit?" so the cross-machine
+        // knockback bug doesn't trigger (see commit message of the
+        // original Bug 2 attempt for the symptom).
+        //
+        // Why the criterion is xzDistToPlayer, not collider.ac:
+        // collider.base.ac holds only the LAST AC overlap processed
+        // by CollisionCheck_AT — when Goroiwa's AT overlaps BOTH
+        // the local Link AND a nearby DummyPlayer in the same pass,
+        // the DummyPlayer (registered later in colAC[] because NPC
+        // category comes after PLAYER) overwrites collider.ac.
+        // A pointer-equality gate then incorrectly fails the local-
+        // Link hit and skips the knockdown / rollback / restart,
+        // which field-test 411 confirmed.
+        //
+        // xzDistToPlayer is auto-computed every frame against the
+        // local Link (z_actor.c:2664-2669) and isn't overwritten by
+        // collision results. If Link is within Goroiwa's hit radius
+        // (cylinder radius 58 + Player body radius ~30 = ~88u; use
+        // 100u with a small margin), the local Link was actually
+        // hit and the full vanilla branch fires. If far, only a
+        // DummyPlayer overlapped — skip.
+        //
         // The atFlags clear runs unconditionally so AT_HIT doesn't
-        // re-fire next frame; the rest of the branch only runs when
-        // the local Link was the actual AC.
-        s32 atHitLocalLink =
-            (this->collider.base.ac == &GET_PLAYER(play)->actor);
+        // re-fire next frame regardless of who was hit.
+        s32 linkInRange = (this->actor.xzDistToPlayer < 100.0f);
         this->collider.base.atFlags &= ~AT_HIT;
-        if (atHitLocalLink) {
+        if (linkInRange) {
         // Multiplayer (#153 Phase 2): tell the host that this client's local Link
         // just got hit by this boulder so the host reverses its authoritative copy.
         // No-op on host and when disconnected — the regular branch below still runs.
