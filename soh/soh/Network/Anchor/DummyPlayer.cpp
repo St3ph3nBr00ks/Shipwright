@@ -554,6 +554,47 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         localGuard = 20;
     }
 
+    // Bug 2 fix (2026-06-05) — clear AT_HIT on any registered AT
+    // collider whose ac points to this DummyPlayer's actor. Without
+    // this, vanilla enemy actors (e.g. EnGoroiwa at z_en_goroiwa.c:
+    // 592-615) that ALSO read their own AT_HIT flag to apply local-
+    // Player knockback (via func_8002F6D4) fire on the wrong target —
+    // the local Link gets knockback even though the AC that was hit
+    // was this DummyPlayer at the remote peer's position.
+    //
+    // Root cause (regression): commit 2dcc812f2 (2026-06-02) moved
+    // DummyPlayer's AC registration outside the PvP gate so hostile
+    // NPCs (Invader) could damage peers. That exposed the vanilla
+    // enemy "AT_HIT → apply knockback to GET_PLAYER" pattern as a
+    // wrong-target hit on the local Link. Reverting 2dcc812f2 would
+    // re-break Invader damage, so we clear AT_HIT instead.
+    //
+    // Walks play->colChkCtx.colAT[colATCount]; for each registered
+    // AT collider with `ac == &player->actor && (atFlags & AT_HIT)`,
+    // clears AT_HIT. Runs after the AC_HIT handler so DummyPlayer's
+    // own send-side broadcast fires first. Goroiwa-class enemies
+    // (ACTORCAT_PROP) run later in Actor_UpdateAll's category-ordered
+    // loop than NPC, so the cleared flag is visible to them this
+    // same frame.
+    //
+    // Trade-off: a hostile NPC reading its own AT_HIT for a future
+    // state change ALSO sees the clear. Invader's current damage
+    // path doesn't depend on AT_HIT post-handler (the host already
+    // broadcast DAMAGE_PLAYER above). Future hostile NPCs that need
+    // a state-change-on-Player-hit signal should use the explicit
+    // Anchor_NotifyEnemyHitPlayer route (already used by Goroiwa for
+    // waypoint reversal at z_en_goroiwa.c:596).
+    if (player->cylinder.base.acFlags & AC_HIT) {
+        for (s16 i = 0; i < play->colChkCtx.colATCount; i++) {
+            Collider* atCol = play->colChkCtx.colAT[i];
+            if (atCol != nullptr &&
+                atCol->ac == &player->actor &&
+                (atCol->atFlags & AT_HIT)) {
+                atCol->atFlags &= ~AT_HIT;
+            }
+        }
+    }
+
     const bool wouldSetAC =
         !(player->stateFlags2 & PLAYER_STATE2_FROZEN) &&
         !(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_DAMAGED)) &&
