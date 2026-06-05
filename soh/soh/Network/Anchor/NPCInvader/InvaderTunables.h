@@ -23,7 +23,13 @@ namespace InvaderTunables {
 // (#238) — the quad is now built per-frame from the actual blade
 // tip/base positions via Anchor_BuildAtQuadFromBlade rather than
 // using fixed forward-distance vertices.
-inline constexpr float kAttackEngageDist       = 80.0f;
+// 2026-06-05 — tightened from 80→50 after field-test 406 confirmed
+// the Invader was committing to ATTACK from well outside actual
+// sword reach, missing most swings. Vanilla sword swept-quad reach
+// is ~40-50u from the actor's world.pos; 50u gives a small margin
+// without overshooting. Sibling kEngageStrikeDist (ENGAGE→ATTACK
+// branch) tightened 70→45 in the same commit.
+inline constexpr float kAttackEngageDist       = 50.0f;
 inline constexpr float kAttackActiveStartFrame = 4.0f;
 inline constexpr float kAttackActiveEndFrame   = 12.0f;
 
@@ -35,7 +41,14 @@ inline constexpr float kAttackActiveEndFrame   = 12.0f;
 inline constexpr float kEngageAcquireDist  = 1000.0f;
 inline constexpr float kEngageBreakDist    = 1500.0f;
 inline constexpr float kEngageBreakDistY   = 400.0f;
-inline constexpr float kEngageStrikeDist   = 70.0f;
+// 2026-06-05 — tightened from 70→45 after field-test 406 confirmed
+// the ENGAGE→ATTACK threshold was too wide. Strike from ENGAGE
+// should land tighter than the IDLE/FOLLOW→ATTACK trigger because
+// the Invader has already been closing distance during ENGAGE; the
+// 5u headroom below kAttackEngageDist (50u) means an ENGAGE-driven
+// strike commits at the inner edge of the sword's swept-quad
+// reach. Y tolerance unchanged here (tracked separately as #241).
+inline constexpr float kEngageStrikeDist   = 45.0f;
 inline constexpr float kEngageStrikeY      = 60.0f;
 inline constexpr AnchorAI::ThresholdPair kEngageBreakBand        = { kEngageBreakDist,  kEngageBreakDistY };
 inline constexpr AnchorAI::ThresholdPair kEngageStrikeBand       = { kEngageStrikeDist, kEngageStrikeY };
