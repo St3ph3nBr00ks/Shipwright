@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -11,7 +12,8 @@ s32 Camera_BGCheck(Camera* camera, Vec3f* from, Vec3f* to);
 
 #define CVAR_REMOTE_BOMBCHU_NAME CVAR_ENHANCEMENT("RemoteBombchu")
 #define CVAR_REMOTE_BOMBCHU_DEFAULT 0
-#define CVAR_REMOTE_BOMBCHU_VALUE CVarGetInteger(CVAR_REMOTE_BOMBCHU_NAME, CVAR_REMOTE_BOMBCHU_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_REMOTE_BOMBCHU_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_REMOTE_BOMBCHU_NAME, CVAR_REMOTE_BOMBCHU_DEFAULT)
 
 // Camera constants
 #define CAM_DIST 200.0f

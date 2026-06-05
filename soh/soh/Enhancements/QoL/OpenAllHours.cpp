@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/OTRGlobals.h"
 #include "soh/ShipInit.hpp"
 
@@ -9,7 +10,8 @@ extern PlayState* gPlayState;
 
 static constexpr int32_t CVAR_OPEN_ALL_HOURS_DEFAULT = 0;
 #define CVAR_OPEN_ALL_HOURS_NAME CVAR_ENHANCEMENT("OpenAllHours")
-#define CVAR_OPEN_ALL_HOURS_VALUE CVarGetInteger(CVAR_OPEN_ALL_HOURS_NAME, CVAR_OPEN_ALL_HOURS_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_OPEN_ALL_HOURS_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_OPEN_ALL_HOURS_NAME, CVAR_OPEN_ALL_HOURS_DEFAULT)
 
 static constexpr int32_t DOOR_DAY_CHEST_GAME = 653;
 static constexpr int32_t DOOR_DAY_BOMBCHU_SHOP = 2689;

@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -11,7 +12,8 @@ extern SaveContext gSaveContext;
 }
 
 #define CVAR_BLOCKLIFT_NAME CVAR_ENHANCEMENT("FasterHeavyBlockLift")
-#define CVAR_BLOCKLIFT_VALUE CVarGetInteger(CVAR_BLOCKLIFT_NAME, 0)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_BLOCKLIFT_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_BLOCKLIFT_NAME, 0)
 
 #define CVAR_SKIP_CUTSCENE_NAME CVAR_ENHANCEMENT("TimeSavers.SkipCutscene.OnePoint")
 #define CVAR_SKIP_CUTSCENE_VALUE CVarGetInteger(CVAR_SKIP_CUTSCENE_NAME, IS_RANDO)

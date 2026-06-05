@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/OTRGlobals.h"
 #include "soh/SaveManager.h"
 #include "soh/ShipInit.hpp"
@@ -14,7 +15,10 @@ extern PlayState* gPlayState;
 
 static constexpr int32_t CVAR_PERM_HEART_LOSS_DEFAULT = 0;
 #define CVAR_PERM_HEART_LOSS_NAME CVAR_ENHANCEMENT("PermanentHeartLoss")
-#define CVAR_PERM_HEART_LOSS_VALUE CVarGetInteger(CVAR_PERM_HEART_LOSS_NAME, CVAR_PERM_HEART_LOSS_DEFAULT)
+// Settings-sync v2 — host-authoritative. DeleteFileOnDeath stays local
+// since v1 audit classified it as Class B but it's an explicit save-
+// destruction action where peer should retain individual control.
+#define CVAR_PERM_HEART_LOSS_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_PERM_HEART_LOSS_NAME, CVAR_PERM_HEART_LOSS_DEFAULT)
 
 static constexpr int32_t CVAR_DELETE_FILE_DEFAULT = 0;
 #define CVAR_DELETE_FILE_NAME CVAR_ENHANCEMENT("DeleteFileOnDeath")

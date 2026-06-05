@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -8,7 +9,8 @@ extern PlayState* gPlayState;
 
 static constexpr int32_t CVAR_CUCCOS_TO_RETURN_DEFAULT = 7;
 #define CVAR_CUCCOS_TO_RETURN_NAME CVAR_ENHANCEMENT("CuccosToReturn")
-#define CVAR_CUCCOS_TO_RETURN_VALUE CVarGetInteger(CVAR_CUCCOS_TO_RETURN_NAME, CVAR_CUCCOS_TO_RETURN_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_CUCCOS_TO_RETURN_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_CUCCOS_TO_RETURN_NAME, CVAR_CUCCOS_TO_RETURN_DEFAULT)
 #define CVAR_CUCCOS_TO_RETURN_SET (CVAR_CUCCOS_TO_RETURN_VALUE != CVAR_CUCCOS_TO_RETURN_DEFAULT)
 
 static void RegisterCuccosToReturn() {

@@ -1,5 +1,6 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -9,7 +10,8 @@ extern PlayState* gPlayState;
 }
 
 #define CVAR_BOUNCE_OFF_WALLS_NAME CVAR_ENHANCEMENT("BounceOffWalls")
-#define CVAR_BOUNCE_OFF_WALLS_VALUE CVarGetInteger(CVAR_BOUNCE_OFF_WALLS_NAME, 0)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_BOUNCE_OFF_WALLS_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_BOUNCE_OFF_WALLS_NAME, 0)
 
 static RegisterShipInitFunc initFunc(
     []() {

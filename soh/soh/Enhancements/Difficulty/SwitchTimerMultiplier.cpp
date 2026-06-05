@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -7,7 +8,8 @@ extern PlayState* gPlayState;
 
 static constexpr int32_t CVAR_SWITCH_TIMER_DEFAULT = 0;
 #define CVAR_SWITCH_TIMER_NAME CVAR_ENHANCEMENT("SwitchTimerMultiplier")
-#define CVAR_SWITCH_TIMER_VALUE CVarGetInteger(CVAR_SWITCH_TIMER_NAME, CVAR_SWITCH_TIMER_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_SWITCH_TIMER_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_SWITCH_TIMER_NAME, CVAR_SWITCH_TIMER_DEFAULT)
 
 void RegisterSwitchTimerMultiplier() {
     COND_VB_SHOULD(VB_SWITCH_TIMER_TICK, CVAR_SWITCH_TIMER_VALUE != 0, {

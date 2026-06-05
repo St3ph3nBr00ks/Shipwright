@@ -1,6 +1,7 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/enhancementTypes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -10,7 +11,8 @@ extern PlayState* gPlayState;
 
 #define CVAR_DEKU_STICK_NAME CVAR_CHEAT("DekuStick")
 #define CVAR_DEKU_STICK_DEFAULT DEKU_STICK_NORMAL
-#define CVAR_DEKU_STICK_VALUE CVarGetInteger(CVAR_DEKU_STICK_NAME, CVAR_DEKU_STICK_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_DEKU_STICK_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_DEKU_STICK_NAME, CVAR_DEKU_STICK_DEFAULT)
 
 void RegisterDekuStickCheats() {
     COND_VB_SHOULD(VB_DEKU_STICK_BREAK, CVAR_DEKU_STICK_VALUE != DEKU_STICK_NORMAL, { *should = false; });

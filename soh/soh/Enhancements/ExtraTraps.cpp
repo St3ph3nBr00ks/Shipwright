@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 #include "soh/Enhancements/randomizer/SeedContext.h"
 #include "soh/Notification/Notification.h"
@@ -13,7 +14,12 @@ GetItemEntry ItemTable_RetrieveEntry(s16 modIndex, s16 getItemID);
 
 #define CVAR_EXTRA_TRAPS_NAME CVAR_ENHANCEMENT("ExtraTraps.Enabled")
 #define CVAR_EXTRA_TRAPS_DEFAULT 0
-#define CVAR_EXTRA_TRAPS_VALUE CVarGetInteger(CVAR_EXTRA_TRAPS_NAME, CVAR_EXTRA_TRAPS_DEFAULT)
+// Settings-sync v2 — host-authoritative master toggle. Individual
+// trap-type CVars (ExtraTraps.Ice / .Burn / etc.) are read at the
+// pick-trap site; those reads are inside the EnabledHook so once
+// host's master gate flips, peer's hook fires and reads the synced
+// sub-toggles too.
+#define CVAR_EXTRA_TRAPS_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_EXTRA_TRAPS_NAME, CVAR_EXTRA_TRAPS_DEFAULT)
 
 typedef enum {
     ADD_ICE_TRAP,

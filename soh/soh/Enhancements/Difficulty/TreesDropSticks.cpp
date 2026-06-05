@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -9,7 +10,8 @@ extern PlayState* gPlayState;
 
 static constexpr int32_t CVAR_TREES_DROP_STICKS_DEFAULT = 0;
 #define CVAR_TREES_DROP_STICKS_NAME CVAR_ENHANCEMENT("TreesDropSticks")
-#define CVAR_TREES_DROP_STICKS_VALUE CVarGetInteger(CVAR_TREES_DROP_STICKS_NAME, CVAR_TREES_DROP_STICKS_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_TREES_DROP_STICKS_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_TREES_DROP_STICKS_NAME, CVAR_TREES_DROP_STICKS_DEFAULT)
 
 static void RegisterTreesDropSticks() {
     COND_VB_SHOULD(VB_TREE_DROP_COLLECTIBLE, CVAR_TREES_DROP_STICKS_VALUE, {

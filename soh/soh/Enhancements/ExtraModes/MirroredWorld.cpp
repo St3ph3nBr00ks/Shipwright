@@ -1,5 +1,6 @@
 #include "soh/Enhancements/cosmetics/authenticGfxPatches.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/Enhancements/randomizer/3drando/random.hpp"
 #include "soh/Enhancements/randomizer/SeedContext.h"
 #include "soh/Enhancements/enhancementTypes.h"
@@ -14,7 +15,10 @@ extern PlayState* gPlayState;
 static constexpr MirroredWorldMode CVAR_MIRRORED_WORLD_DEFAULT = MIRRORED_WORLD_OFF;
 #define CVAR_MIRRORED_WORLD_NAME CVAR_ENHANCEMENT("MirroredWorld")
 #define CVAR_MIRRORED_WORLD_MODE_NAME CVAR_ENHANCEMENT("MirroredWorldMode")
-#define CVAR_MIRRORED_WORLD_MODE_VALUE CVarGetInteger(CVAR_MIRRORED_WORLD_MODE_NAME, CVAR_MIRRORED_WORLD_DEFAULT)
+// Settings-sync v2 — host-authoritative. MirroredWorldMode (the actual
+// mode value) is in the enforced registry; the master toggle CVar
+// "MirroredWorld" without "Mode" is read elsewhere unwrapped.
+#define CVAR_MIRRORED_WORLD_MODE_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_MIRRORED_WORLD_MODE_NAME, CVAR_MIRRORED_WORLD_DEFAULT)
 
 static bool prevMirroredWorld = false;
 

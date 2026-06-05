@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -8,7 +9,8 @@ extern SaveContext gSaveContext;
 
 static constexpr int32_t CVAR_HURT_CONTAINER_DEFAULT = 0;
 #define CVAR_HURT_CONTAINER_NAME CVAR_ENHANCEMENT("HurtContainer")
-#define CVAR_HURT_CONTAINER_VALUE CVarGetInteger(CVAR_HURT_CONTAINER_NAME, CVAR_HURT_CONTAINER_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_HURT_CONTAINER_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_HURT_CONTAINER_NAME, CVAR_HURT_CONTAINER_DEFAULT)
 
 static bool hurtEnabled = false;
 

@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/OTRGlobals.h"
 #include "soh/ShipInit.hpp"
 
@@ -10,7 +11,8 @@ extern PlayState* gPlayState;
 
 static constexpr int32_t CVAR_DAMPE_ALL_NIGHT_DEFAULT = 0;
 #define CVAR_DAMPE_ALL_NIGHT_NAME CVAR_ENHANCEMENT("DampeAllNight")
-#define CVAR_DAMPE_ALL_NIGHT_VALUE CVarGetInteger(CVAR_DAMPE_ALL_NIGHT_NAME, CVAR_DAMPE_ALL_NIGHT_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_DAMPE_ALL_NIGHT_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_DAMPE_ALL_NIGHT_NAME, CVAR_DAMPE_ALL_NIGHT_DEFAULT)
 
 static constexpr s16 DAMPE_HUT_DOOR_OPEN = 447;
 static constexpr s16 DAMPE_HUT_DOOR_CLOSED = 774;

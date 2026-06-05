@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 #include "soh/Enhancements/enhancementTypes.h"
 
@@ -9,7 +10,8 @@ extern PlayState* gPlayState;
 
 static constexpr DampeDropRate CVAR_DAMPE_DROP_RATE_DEFAULT = DAMPE_NORMAL;
 #define CVAR_DAMPE_DROP_RATE_NAME CVAR_ENHANCEMENT("DampeDropRate")
-#define CVAR_DAMPE_DROP_RATE_VALUE CVarGetInteger(CVAR_DAMPE_DROP_RATE_NAME, CVAR_DAMPE_DROP_RATE_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_DAMPE_DROP_RATE_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_DAMPE_DROP_RATE_NAME, CVAR_DAMPE_DROP_RATE_DEFAULT)
 #define CVAR_DAMPE_DROP_RATE_SET (CVAR_DAMPE_DROP_RATE_VALUE != CVAR_DAMPE_DROP_RATE_DEFAULT)
 
 static void RegisterDampeFire() {

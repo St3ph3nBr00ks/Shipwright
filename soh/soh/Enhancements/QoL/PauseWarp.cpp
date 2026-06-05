@@ -1,6 +1,7 @@
 #include <string>
 #include "soh/Enhancements/custom-message/CustomMessageTypes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -15,7 +16,8 @@ u8 Randomizer_GetSettingValue(RandomizerSettingKey);
 
 static constexpr int32_t CVAR_PAUSE_WARP_DEFAULT = 0;
 #define CVAR_PAUSE_WARP_NAME CVAR_ENHANCEMENT("PauseWarp")
-#define CVAR_PAUSE_WARP_VALUE CVarGetInteger(CVAR_PAUSE_WARP_NAME, CVAR_PAUSE_WARP_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_PAUSE_WARP_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_PAUSE_WARP_NAME, CVAR_PAUSE_WARP_DEFAULT)
 
 static const int songMessageMap[] = {
     TEXT_WARP_MINUET_OF_FOREST,  TEXT_WARP_BOLERO_OF_FIRE,     TEXT_WARP_SERENADE_OF_WATER,

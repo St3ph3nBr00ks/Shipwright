@@ -1,5 +1,6 @@
 #include <libultraship/bridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 #include "functions.h"
 
@@ -7,7 +8,8 @@ extern "C" PlayState* gPlayState;
 
 static constexpr int32_t CVAR_SHADOW_TAG_DEFAULT = 0;
 #define CVAR_SHADOW_TAG_NAME CVAR_ENHANCEMENT("ShadowTag")
-#define CVAR_SHADOW_TAG_VALUE CVarGetInteger(CVAR_SHADOW_TAG_NAME, CVAR_SHADOW_TAG_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_SHADOW_TAG_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_SHADOW_TAG_NAME, CVAR_SHADOW_TAG_DEFAULT)
 
 static bool shouldSpawn = false;
 static uint16_t delayTimer = 60;

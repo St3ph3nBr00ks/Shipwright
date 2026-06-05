@@ -1,4 +1,5 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/ShipInit.hpp"
 
 extern "C" {
@@ -10,12 +11,14 @@ extern PlayState* gPlayState;
 
 static constexpr int32_t CVAR_RUPEE_DASH_DEFAULT = 0;
 #define CVAR_RUPEE_DASH_NAME CVAR_ENHANCEMENT("RupeeDash")
-#define CVAR_RUPEE_DASH_VALUE CVarGetInteger(CVAR_RUPEE_DASH_NAME, CVAR_RUPEE_DASH_DEFAULT)
+// Settings-sync v2 — host-authoritative.
+#define CVAR_RUPEE_DASH_VALUE AnchorCVarSync::GetEnforcedInt(CVAR_RUPEE_DASH_NAME, CVAR_RUPEE_DASH_DEFAULT)
 
 static constexpr int32_t CVAR_RUPEE_DASH_INTERVAL_DEFAULT = 5;
 #define CVAR_RUPEE_DASH_INTERVAL_NAME CVAR_ENHANCEMENT("RupeeDashInterval")
+// Settings-sync v2 — host-authoritative.
 #define CVAR_RUPEE_DASH_INTERVAL_TIME \
-    CVarGetInteger(CVAR_RUPEE_DASH_INTERVAL_NAME, CVAR_RUPEE_DASH_INTERVAL_DEFAULT) * 20
+    AnchorCVarSync::GetEnforcedInt(CVAR_RUPEE_DASH_INTERVAL_NAME, CVAR_RUPEE_DASH_INTERVAL_DEFAULT) * 20
 
 static void UpdateRupeeDash() {
     // Initialize Timer
