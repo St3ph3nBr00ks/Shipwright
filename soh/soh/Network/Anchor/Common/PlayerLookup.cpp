@@ -280,3 +280,40 @@ bool AnyPeerInScene(int16_t sceneNum) {
     }
     return false;
 }
+
+// ─── Live-Link relation helpers (Pitfall 28) ─────────────────────────
+// Bypass the #153 nearest-player overlay so vanilla effect-application
+// gates can ask "what is my actual relation to GET_PLAYER right now?"
+// without reading values overwritten by the AI-targeting patch in
+// HookHandlers.cpp's ShouldActorUpdate hook.
+//
+// These do NOT replace the cached fields — they live alongside them.
+// AI decisions ("should I lunge?") keep using `actor->xzDistToPlayer`
+// which the overlay has correctly steered to the closest player.
+// Effect gates ("did I just hit the local Link?", "should I knock
+// back the player?") use these helpers instead.
+//
+// All three return a safe sentinel (9999.0f / 0 / 9999.0f) when called
+// with NULL pointers; vanilla call sites tend to be inside actor
+// update bodies where GET_PLAYER and the calling actor are guaranteed
+// non-null, so this is belt-and-suspenders only.
+extern "C" f32 Anchor_DistXZToLocalLink(Actor* actor, PlayState* play) {
+    if (actor == nullptr || play == nullptr) return 9999.0f;
+    Player* p = GET_PLAYER(play);
+    if (p == nullptr) return 9999.0f;
+    return Actor_WorldDistXZToActor(actor, &p->actor);
+}
+
+extern "C" s16 Anchor_YawTowardLocalLink(Actor* actor, PlayState* play) {
+    if (actor == nullptr || play == nullptr) return 0;
+    Player* p = GET_PLAYER(play);
+    if (p == nullptr) return 0;
+    return Actor_WorldYawTowardActor(actor, &p->actor);
+}
+
+extern "C" f32 Anchor_HeightDiffToLocalLink(Actor* actor, PlayState* play) {
+    if (actor == nullptr || play == nullptr) return 9999.0f;
+    Player* p = GET_PLAYER(play);
+    if (p == nullptr) return 9999.0f;
+    return Actor_HeightDiff(actor, &p->actor);
+}

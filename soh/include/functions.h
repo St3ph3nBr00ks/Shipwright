@@ -2477,6 +2477,22 @@ int   Anchor_GetEnforcedInt(const char* cvarName, int localDefault);
 float Anchor_GetEnforcedFloat(const char* cvarName, float localDefault);
 // #endregion
 
+// #region SOH [Live-Link relation — Flotilla, Pitfall 28]
+// Truthful local-Link distance / yaw / height. Bypasses the #153
+// nearest-player overlay that HookHandlers.cpp::ShouldActorUpdate
+// writes into actor->xzDistToPlayer / yawTowardsPlayer / yDistToPlayer.
+//
+// Rule: AI-decision gates ("should I lunge at the nearest player?")
+// keep reading the cached fields — the overlay correctly steers them.
+// Effect-application gates ("should I knock back the LOCAL Link
+// because I just hit it?") MUST use these helpers — the cached fields
+// can point at a DummyPlayer while the effect fires on GET_PLAYER.
+// See z_en_goroiwa.c knockback gate, log 417/418.
+f32 Anchor_DistXZToLocalLink(Actor* actor, PlayState* play);
+s16 Anchor_YawTowardLocalLink(Actor* actor, PlayState* play);
+f32 Anchor_HeightDiffToLocalLink(Actor* actor, PlayState* play);
+// #endregion
+
 #ifdef __cplusplus
 #undef this
 };

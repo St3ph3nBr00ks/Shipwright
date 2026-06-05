@@ -616,7 +616,19 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
         //
         // The atFlags clear runs unconditionally so AT_HIT doesn't
         // re-fire next frame regardless of who was hit.
-        s32 linkInRange = (this->actor.xzDistToPlayer < 100.0f);
+        // Bug 1 fix (2026-06-05, log 417/418) — do NOT trust the cached
+        // xzDistToPlayer field. HookHandlers.cpp::ShouldActorUpdate
+        // (#153) overwrites it every frame with distance-to-nearest-
+        // player so AI targets the closer DummyPlayer. The overlay is
+        // correct for AI, but vanilla's "did I hit the local Link?"
+        // gate reads the SAME field. Result: when P2's DummyPlayer is
+        // closer than P1's real Link, the gate passes against the
+        // DummyPlayer distance and the knockback below fires on
+        // GET_PLAYER (= real Link). Log 417 confirmed: 85.8u cached
+        // (= P2 DummyPlayer) vs. 374u real Link distance.
+        // Anchor_DistXZToLocalLink bypasses the overlay. See Pitfall 28.
+        f32 liveXzDist = Anchor_DistXZToLocalLink(&this->actor, play);
+        s32 linkInRange = (liveXzDist < 100.0f);
         // [Bug1.Diag] (2026-06-05) — log every Goroiwa AT_HIT so the next
         // field-test correlates against the host's send log. linkInRange
         // is the gate that decides whether vanilla knockdown applies to
@@ -626,16 +638,30 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
         {
             Actor* hitTarget = this->collider.base.ac;
             const u16 hitTargetId = (hitTarget != NULL) ? hitTarget->id : 0;
+            // [Bug1.Diag] (2026-06-05) — also log GET_PLAYER's identity to test
+            // the hypothesis "P2's DummyPlayer is at the head of PLAYER list and
+            // xzDistToPlayer was computed against it instead of P1's real Link."
+            // If getPlayerId != ACTOR_PLAYER (0x0000), hypothesis confirmed.
+            // If getPlayerId == ACTOR_PLAYER but getPlayer.pos != P1's actual
+            // position, something else moved Link's pos. If everything matches
+            // and P1 was actually within 100u, hypothesis B (user misperception).
+            Player* gp = GET_PLAYER(play);
             LUSLOG_INFO("[Bug1.Diag] Goroiwa AT_HIT linkInRange=%d "
-                        "xzDistToPlayer=%.1f Goroiwa.pos=(%.0f,%.0f,%.0f) "
-                        "hitTargetId=0x%04X hitTarget.pos=(%.0f,%.0f,%.0f)",
-                        linkInRange, this->actor.xzDistToPlayer,
+                        "liveXzDist=%.1f cachedXzDistToPlayer=%.1f "
+                        "Goroiwa.pos=(%.0f,%.0f,%.0f) "
+                        "hitTargetId=0x%04X hitTarget.pos=(%.0f,%.0f,%.0f) "
+                        "getPlayerId=0x%04X getPlayer.pos=(%.0f,%.0f,%.0f)",
+                        linkInRange, liveXzDist, this->actor.xzDistToPlayer,
                         this->actor.world.pos.x, this->actor.world.pos.y,
                         this->actor.world.pos.z,
                         (int)hitTargetId,
                         hitTarget ? hitTarget->world.pos.x : 0.0f,
                         hitTarget ? hitTarget->world.pos.y : 0.0f,
-                        hitTarget ? hitTarget->world.pos.z : 0.0f);
+                        hitTarget ? hitTarget->world.pos.z : 0.0f,
+                        (gp != NULL) ? (int)gp->actor.id : 0,
+                        (gp != NULL) ? gp->actor.world.pos.x : 0.0f,
+                        (gp != NULL) ? gp->actor.world.pos.y : 0.0f,
+                        (gp != NULL) ? gp->actor.world.pos.z : 0.0f);
         }
         this->collider.base.atFlags &= ~AT_HIT;
         if (linkInRange) {

@@ -76,3 +76,27 @@ Actor* PickHostileTargetForInvader(Actor* invader, PlayState* play);
 // "is anyone besides me in this scene". Mirrors the inline loop pattern
 // duplicated across HookHandlers.cpp pre-extraction (~2 verified sites).
 bool AnyPeerInScene(int16_t sceneNum);
+
+// Live-Link distance / yaw / height helpers — see Pitfall 28.
+//
+// `actor->xzDistToPlayer` and friends are computed once per frame in
+// z_actor.c:2686-2690 against `player` cached at the top of
+// Actor_UpdateAll, then OVERWRITTEN by HookHandlers.cpp:2496-2499's
+// nearest-player overlay (#153) so AI pursues the closer DummyPlayer
+// when one is in scene. That overlay is correct for AI targeting and
+// MUST stay — it's what makes enemies target peers in multiplayer.
+//
+// But vanilla also uses the same cached fields to gate effect
+// application against the LOCAL Link ("did I just hit the player?",
+// "should I knock back the player?"). With the overlay active, those
+// gates read distance-to-DummyPlayer instead of distance-to-local-Link
+// and fire effects against `GET_PLAYER(play)` (= real Link) anyway —
+// see log 417/418 Goroiwa bug.
+//
+// These helpers return the TRUTHFUL local-Link relation regardless of
+// what the overlay wrote into the cache. Use them at any effect-
+// application gate; never at AI-decision gates (those are correctly
+// served by the cached fields with overlay).
+extern "C" f32 Anchor_DistXZToLocalLink(Actor* actor, PlayState* play);
+extern "C" s16 Anchor_YawTowardLocalLink(Actor* actor, PlayState* play);
+extern "C" f32 Anchor_HeightDiffToLocalLink(Actor* actor, PlayState* play);
