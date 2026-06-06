@@ -569,6 +569,7 @@ class Anchor : public Network {
     void DrainPendingSyncDamage(Actor* actor);
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);
     void HandlePacket_DamagePlayer(nlohmann::json payload);
+    void HandlePacket_ShieldBouncePlayer(nlohmann::json payload);
     void HandlePacket_DisableAnchor(nlohmann::json payload);
     void HandlePacket_EntranceDiscovered(nlohmann::json payload);
     void HandlePacket_GameComplete(nlohmann::json payload);
@@ -686,6 +687,7 @@ class Anchor : public Network {
     inline static const std::string ENEMY_STATE = "ENEMY_STATE";
     inline static const std::string DAMAGE_ENEMY = "DAMAGE_ENEMY";
     inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
+    inline static const std::string SHIELD_BOUNCE_PLAYER = "SHIELD_BOUNCE_PLAYER";
     inline static const std::string ENEMY_HIT_PLAYER = "ENEMY_HIT_PLAYER";
     inline static const std::string PROJECTILE_HIT_ENEMY = "PROJECTILE_HIT_ENEMY";
     inline static const std::string TALK_REQUEST = "TALK_REQUEST";
@@ -1551,6 +1553,15 @@ class Anchor : public Network {
                                  const Vec3f* attackerPos,
                                  u32 knockbackType, f32 knockbackSpeed,
                                  f32 knockbackYVelocity, u32 knockbackDamage);
+    // Sent from host to peer when the host's hostile NPC AT was bounced
+    // by the peer's DummyPlayer shield (cross-machine shield block). The
+    // peer's receive handler mirrors vanilla shield-bounce side-effects
+    // on its local Link: small backward push (linearVelocity = -18),
+    // face direction, and a local particle + sfx spawn at shield height.
+    // hitOffsetY = host-side shield hit position Y minus DummyPlayer
+    // world.pos.Y, used to place peer's local particle at equivalent
+    // shield height (~30-50u above feet typically).
+    void SendPacket_ShieldBouncePlayer(u32 clientId, u16 attackerId, f32 hitOffsetY);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);
     void SendPacket_GameComplete();
     void SendPacket_GiveItem(u16 modId, s16 getItemId);

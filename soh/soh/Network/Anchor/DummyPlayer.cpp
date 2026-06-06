@@ -13,6 +13,7 @@ extern "C" {
 #include "macros.h"
 #include "variables.h"
 #include "functions.h"
+#include "overlays/effects/ovl_Effect_Ss_HitMark/z_eff_ss_hitmark.h"  // EFFECT_HITMARK_METAL
 extern PlayState* gPlayState;
 
 void Player_UseItem(PlayState* play, Player* player, s32 item);
@@ -600,15 +601,48 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                                && localGuardOpen && authoritative
                                && shieldBlockOpen;
 
-    // Shield-blocked log — when the AT was bounced by the peer's shield,
-    // surface it once per swing so field-test confirms the block fired.
-    // Bounded by acHitForGate so we don't spam during non-hit frames.
-    if (acHitForGate && shieldBounced) {
+    // Shield-block side effects on host + notification to peer. Triggers
+    // when the shieldQuad's AC_BOUNCED is set this frame AND the body
+    // would otherwise have been gated open by AC_HIT. The shield-block
+    // event is reportable independent of peerIframesOpen / localGuard
+    // (those are damage-rate-limiters; a shield bounce is a separate
+    // class of event from a damage hit). Authoritative gate still
+    // applies — non-host machines should not broadcast.
+    //
+    // Three vanilla-parity effects must fire:
+    //   1. Host-local particle + sfx at the shield's actual hit position
+    //      (Bug 3 — log 426 reported the wrong-position particle came
+    //      from somewhere else; the correct spark at shieldQuad.bumper.hitPos
+    //      should appear regardless of the wrong-position artifact).
+    //   2. Peer-local particle + sfx at peer's own shield (Bug 2 — peer
+    //      sees its OWN shield being struck).
+    //   3. Peer-local knockback push (Bug 1 — vanilla z_player.c:4856
+    //      sets linearVelocity = -18 on the player when shield bounces;
+    //      need same on peer's local Link).
+    if (acHitForGate && shieldBounced && authoritative) {
         const u16 blockedAttackerId = (player->cylinder.base.ac != nullptr)
                                       ? player->cylinder.base.ac->id : 0;
+        // bumper.hitPos is Vec3s set by CollisionCheck when AC_BOUNCED
+        // fires. Convert to Vec3f for the spawn helpers.
+        Vec3f hitPos;
+        hitPos.x = (f32)player->shieldQuad.info.bumper.hitPos.x;
+        hitPos.y = (f32)player->shieldQuad.info.bumper.hitPos.y;
+        hitPos.z = (f32)player->shieldQuad.info.bumper.hitPos.z;
+
+        // Effect 1 — host-local particle + sfx at shield hit position.
+        EffectSsHitMark_SpawnFixedScale(gPlayState, EFFECT_HITMARK_METAL, &hitPos);
+        CollisionCheck_SpawnShieldParticlesMetalSound(gPlayState, &hitPos, &player->actor.projectedPos);
+
+        // Effects 2 + 3 — notify peer via SHIELD_BOUNCE_PLAYER packet.
+        // Carries the local-shield-hit-position offset relative to player
+        // so peer can spawn its particle at the equivalent local shield
+        // position (peer's local Link will be in a similar shield pose).
+        const f32 hitOffsetY = hitPos.y - player->actor.world.pos.y;  // ~chest height
+        Anchor::Instance->SendPacket_ShieldBouncePlayer(client.clientId, blockedAttackerId, hitOffsetY);
+
         SPDLOG_INFO("[DummyPlayer] shield BLOCKED clientId={} attackerId=0x{:04X} "
-                    "(AC_HIT on body suppressed by shieldQuad AC_BOUNCED)",
-                    clientId, blockedAttackerId);
+                    "hitPos=({:.1f},{:.1f},{:.1f}) — particle local + SHIELD_BOUNCE_PLAYER sent",
+                    clientId, blockedAttackerId, hitPos.x, hitPos.y, hitPos.z);
     }
 
     // Per-frame send-gate evaluation log removed — gate behavior is

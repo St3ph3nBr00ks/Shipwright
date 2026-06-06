@@ -354,6 +354,7 @@ Anchor::GetPacketHandlerRegistry() {
         { SCENE_ACTOR_NETIDS,      &Anchor::HandlePacket_SceneActorNetIds      },
         { DAMAGE_ENEMY,            &Anchor::HandlePacket_DamageEnemy           },
         { DAMAGE_PLAYER,           &Anchor::HandlePacket_DamagePlayer          },
+        { SHIELD_BOUNCE_PLAYER,    &Anchor::HandlePacket_ShieldBouncePlayer    },
         { ENEMY_HIT_PLAYER,        &Anchor::HandlePacket_EnemyHitPlayer        },
         { PROJECTILE_HIT_ENEMY,    &Anchor::HandlePacket_ProjectileHitEnemy    },
         { TALK_REQUEST,            &Anchor::HandlePacket_TalkRequest           },
