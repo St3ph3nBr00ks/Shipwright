@@ -590,94 +590,26 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
     s16 loopMode;
 
     if (this->collider.base.atFlags & AT_HIT) {
-        // Anchor Bug 2 fix (2026-06-05, revised 2026-06-05 after
-        // field-test 411). Gate the entire AT_HIT branch on "was
-        // the local Link actually hit?" so the cross-machine
-        // knockback bug doesn't trigger (see commit message of the
-        // original Bug 2 attempt for the symptom).
+        // Anchor cross-machine PvE damage routing. See Pitfall 28 +
+        // Plans/dummy_player_damage_table_audit.md for the full pattern.
+        // Two integration points needed for vanilla parity when host's
+        // AT hits either local Link OR a cross-machine DummyPlayer:
         //
-        // Why the criterion is xzDistToPlayer, not collider.ac:
-        // collider.base.ac holds only the LAST AC overlap processed
-        // by CollisionCheck_AT — when Goroiwa's AT overlaps BOTH
-        // the local Link AND a nearby DummyPlayer in the same pass,
-        // the DummyPlayer (registered later in colAC[] because NPC
-        // category comes after PLAYER) overwrites collider.ac.
-        // A pointer-equality gate then incorrectly fails the local-
-        // Link hit and skips the knockdown / rollback / restart,
-        // which field-test 411 confirmed.
+        //   linkInRange gate — uses live local-Link distance (NOT the
+        //     #153-overlaid cached xzDistToPlayer field, which gets
+        //     overwritten with distance-to-DummyPlayer every frame).
+        //     100u = Goroiwa hit radius 58 + Link body 30 + 12u margin.
         //
-        // xzDistToPlayer is auto-computed every frame against the
-        // local Link (z_actor.c:2664-2669) and isn't overwritten by
-        // collision results. If Link is within Goroiwa's hit radius
-        // (cylinder radius 58 + Player body radius ~30 = ~88u; use
-        // 100u with a small margin), the local Link was actually
-        // hit and the full vanilla branch fires. If far, only a
-        // DummyPlayer overlapped — skip.
-        //
-        // The atFlags clear runs unconditionally so AT_HIT doesn't
-        // re-fire next frame regardless of who was hit.
-        // Bug 1 fix (2026-06-05, log 417/418) — do NOT trust the cached
-        // xzDistToPlayer field. HookHandlers.cpp::ShouldActorUpdate
-        // (#153) overwrites it every frame with distance-to-nearest-
-        // player so AI targets the closer DummyPlayer. The overlay is
-        // correct for AI, but vanilla's "did I hit the local Link?"
-        // gate reads the SAME field. Result: when P2's DummyPlayer is
-        // closer than P1's real Link, the gate passes against the
-        // DummyPlayer distance and the knockback below fires on
-        // GET_PLAYER (= real Link). Log 417 confirmed: 85.8u cached
-        // (= P2 DummyPlayer) vs. 374u real Link distance.
-        // Anchor_DistXZToLocalLink bypasses the overlay. See Pitfall 28.
+        //   Part A / Part B split — Part A (enemy reaction) fires for
+        //     any AT_HIT; Part B (local-Link knockback / sfx / host
+        //     signal) only when local Link was the actual target.
+        //     Cross-machine target routing happens in DummyPlayer.cpp
+        //     via the Path A vanilla-knockback DAMAGE_PLAYER block.
         f32 liveXzDist = Anchor_DistXZToLocalLink(&this->actor, play);
         s32 linkInRange = (liveXzDist < 100.0f);
-        // [Bug1.Diag] (2026-06-05) — log every Goroiwa AT_HIT so the next
-        // field-test correlates against the host's send log. linkInRange
-        // is the gate that decides whether vanilla knockdown applies to
-        // the LOCAL Link. If gate=false, only the DummyPlayer was hit
-        // and Goroiwa's vanilla local-Link path is skipped (correct).
-        // collider.base.ac is the actor whose AC was hit (the target).
-        {
-            Actor* hitTarget = this->collider.base.ac;
-            const u16 hitTargetId = (hitTarget != NULL) ? hitTarget->id : 0;
-            // [Bug1.Diag] (2026-06-05) — also log GET_PLAYER's identity to test
-            // the hypothesis "P2's DummyPlayer is at the head of PLAYER list and
-            // xzDistToPlayer was computed against it instead of P1's real Link."
-            // If getPlayerId != ACTOR_PLAYER (0x0000), hypothesis confirmed.
-            // If getPlayerId == ACTOR_PLAYER but getPlayer.pos != P1's actual
-            // position, something else moved Link's pos. If everything matches
-            // and P1 was actually within 100u, hypothesis B (user misperception).
-            Player* gp = GET_PLAYER(play);
-            LUSLOG_INFO("[Bug1.Diag] Goroiwa AT_HIT linkInRange=%d "
-                        "liveXzDist=%.1f cachedXzDistToPlayer=%.1f "
-                        "Goroiwa.pos=(%.0f,%.0f,%.0f) "
-                        "hitTargetId=0x%04X hitTarget.pos=(%.0f,%.0f,%.0f) "
-                        "getPlayerId=0x%04X getPlayer.pos=(%.0f,%.0f,%.0f)",
-                        linkInRange, liveXzDist, this->actor.xzDistToPlayer,
-                        this->actor.world.pos.x, this->actor.world.pos.y,
-                        this->actor.world.pos.z,
-                        (int)hitTargetId,
-                        hitTarget ? hitTarget->world.pos.x : 0.0f,
-                        hitTarget ? hitTarget->world.pos.y : 0.0f,
-                        hitTarget ? hitTarget->world.pos.z : 0.0f,
-                        (gp != NULL) ? (int)gp->actor.id : 0,
-                        (gp != NULL) ? gp->actor.world.pos.x : 0.0f,
-                        (gp != NULL) ? gp->actor.world.pos.y : 0.0f,
-                        (gp != NULL) ? gp->actor.world.pos.z : 0.0f);
-        }
         this->collider.base.atFlags &= ~AT_HIT;
 
-        // Bug 2 Path A (2026-06-05, field-test 420) — split the vanilla
-        // AT_HIT branch in two so the enemy state-machine reaction
-        // (Reverse + restart-roll + collision cooldown) fires whenever
-        // AT_HIT, regardless of whether the hit target was the local
-        // Link or a cross-machine DummyPlayer. Pre-split, the entire
-        // branch was gated on linkInRange=1 → host's Goroiwa kept
-        // rolling through P2's DummyPlayer because P1 was far.
-        //
-        // Part A — enemy reaction. ALWAYS fires on AT_HIT. Reverse
-        // direction toward whoever was hit (yawTowardsPlayer is correctly
-        // overlaid by #153 to point at the closer-of-players, so on host
-        // when only DummyPlayer was hit, this correctly points at the
-        // DummyPlayer). Setup next state, arm collision cooldown.
+        // Part A — enemy reaction. ALWAYS fires on AT_HIT.
         this->stateFlags &= ~ENGOROIWA_PLAYER_IN_THE_WAY;
         yawDiff = this->actor.yawTowardsPlayer - this->actor.world.rot.y;
         if (yawDiff > -0x4000 && yawDiff < 0x4000) {
@@ -692,14 +624,13 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
             this->collisionDisabledTimer = 50;
         }
 
-        // Part B — local-Link effects. Only fires when GET_PLAYER was
-        // the target. Cross-machine routing handled by DummyPlayer.cpp's
-        // AC_HIT detection → DAMAGE_PLAYER with Path A vanilla-knockback
-        // block → peer's Player_Update reproduces this same code path
-        // via knockback fields set in DamagePlayer.cpp receive.
+        // Part B — local-Link effects. Only fires when local Link was
+        // the actual target. Cross-machine peer routing is via
+        // DummyPlayer.cpp's AC_HIT detection + Path A vanilla-knockback
+        // DAMAGE_PLAYER block (Common/EnemyKnockbackTable.cpp entry
+        // ACTOR_EN_GOROIWA mirrors the func_8002F6D4 args below).
         if (linkInRange) {
-            // Multiplayer (#153 Phase 2): tell the host that this client's local
-            // Link just got hit by this boulder so the host reverses its
+            // #153 Phase 2 — non-host signals host to reverse its
             // authoritative copy. No-op on host and when disconnected.
             Anchor_NotifyEnemyHitPlayer(&this->actor);
             func_8002F6D4(play, &this->actor, 2.0f, this->actor.yawTowardsPlayer, 0.0f, 0);

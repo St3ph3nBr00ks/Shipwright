@@ -497,21 +497,18 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
 
     Collider_UpdateCylinder(&player->actor, &player->cylinder);
 
-    // [DummyPlayer.Diag] — log 354 Issue A investigation. Edge-trigger
-    // on AC_HIT transition (false→true) so we can confirm whether the
-    // Invader's AT collider is registering hits against the DummyPlayer's
-    // body cylinder at all. acFlags is bit-packed by CollisionCheck_AT
-    // during the pre-update collision pass. invincibilityTimer is
-    // mirrored from the remote peer via PLAYER_UPDATE — non-zero blocks
-    // both the broadcast gate AND the SetAC gate below.
+    // AC_HIT edge log — fires when collider transitions false→true.
+    // Useful for verifying that a new attacker's AT actually registers
+    // against the DummyPlayer's body cylinder. acFlags is bit-packed by
+    // CollisionCheck_AT during the pre-update collision pass.
     static std::unordered_map<uint32_t, bool> sLastAcHitState;
     const bool acHitNow = (player->cylinder.base.acFlags & AC_HIT) != 0;
     if (acHitNow && !sLastAcHitState[clientId]) {
-        SPDLOG_INFO("[DummyPlayer.Diag] AC_HIT edge clientId={} invincibilityTimer={} damage={} damageEffect={} acFlags=0x{:X}",
-                    clientId, player->invincibilityTimer,
+        SPDLOG_INFO("[DummyPlayer] AC_HIT edge clientId={} attackerId=0x{:04X} damage={} damageEffect={}",
+                    clientId,
+                    (player->cylinder.base.ac != nullptr) ? player->cylinder.base.ac->id : 0,
                     (int)player->actor.colChkInfo.damage,
-                    (int)player->actor.colChkInfo.damageEffect,
-                    player->cylinder.base.acFlags);
+                    (int)player->actor.colChkInfo.damageEffect);
     }
     sLastAcHitState[clientId] = acHitNow;
 
@@ -549,33 +546,9 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     const bool gateOpen         = acHitForGate && peerIframesOpen
                                && localGuardOpen && authoritative;
 
-    // [Bug1.Diag] (2026-06-05) — log every gate evaluation when AC_HIT
-    // is present, so the next field-test session ground-truths whether
-    // double-sends happen, get suppressed by the local guard, or are
-    // already single-sends. Includes suppression cases (gate false
-    // because localGuard > 0 or peer iframes > 0). Single line per
-    // frame; minimal volume because AC_HIT only stays set for the
-    // active frames of an enemy swing. attackerId is whatever
-    // cylinder.base.at points at (the actor that just AT-hit us).
-    if (acHitForGate) {
-        // Bug C fix (2026-06-05) — `.ac` is the attacker on an AC bumper,
-        // NOT `.at`. CollisionCheck_SetATvsAC sets `ac->ac = at->actor`
-        // (z_collision_check.c:1740). The DummyPlayer's cylinder is
-        // used only as AC in non-PvP, so `.at` stays null and reading
-        // it always produced attackerId=0x0000 in field-test 414.
-        const u16 attackerId = (player->cylinder.base.ac != nullptr)
-            ? player->cylinder.base.ac->id : 0;
-        const uint64_t curFrame = (Anchor::Instance != nullptr)
-            ? Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed) : 0;
-        SPDLOG_INFO("[Bug1.Diag] send-gate clientId={} curFrame={} gateOpen={} "
-                    "authoritative={} acHit={} peerIT={} localGuard={} damage={} "
-                    "damageEffect={} attackerId=0x{:04X}",
-                    clientId, curFrame, gateOpen, authoritative,
-                    acHitForGate, player->invincibilityTimer, localGuard,
-                    (int)player->actor.colChkInfo.damage,
-                    (int)player->actor.colChkInfo.damageEffect,
-                    attackerId);
-    }
+    // Per-frame send-gate evaluation log removed — gate behavior is
+    // observable via the SEND log presence/absence below. Re-enable if
+    // a future bug suspects double-sends or stuck localGuard.
 
     if (gateOpen) {
         // Bug 3 fix (2026-06-05) — pass the attacker's world position
@@ -645,34 +618,15 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         // either gate is sufficient to keep blocking.
         localGuard = 20;
 
-        // [Bug1.Diag] — log every actual send so we can count packets
-        // per swing. If we still see two entries 100ms apart for one
-        // enemy swing, the localGuard isn't taking effect; if we see
-        // exactly one, the send-side is doing the right thing and the
-        // bug lives on the receive side.
-        const uint64_t curFrame = (Anchor::Instance != nullptr)
-            ? Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed) : 0;
-        // [Bug1.Diag] (2026-06-05) — also log the actual attackerPos
-        // being sent + DummyPlayer's own world pos, so receive-side
-        // diagnostics can verify the dx/dz/yaw computation is correct.
-        const f32 attX = (attackerPos != nullptr) ? attackerPos->x : 0.0f;
-        const f32 attY = (attackerPos != nullptr) ? attackerPos->y : 0.0f;
-        const f32 attZ = (attackerPos != nullptr) ? attackerPos->z : 0.0f;
-        SPDLOG_INFO("[Bug1.Diag] SEND DAMAGE_PLAYER to clientId={} curFrame={} "
-                    "wireDamage={} (tableFiltered={} rawAtDamage={}) "
-                    "damageEffect={} (localGuard armed to {}) "
-                    "attackerPos=({:.0f},{:.0f},{:.0f}) hasAttackerPos={} "
-                    "dummyPos=({:.0f},{:.0f},{:.0f})",
-                    client.clientId, curFrame,
-                    (int)sendDamage,
-                    (int)player->actor.colChkInfo.damage,
-                    (player->cylinder.info.acHitInfo != nullptr)
-                        ? (int)player->cylinder.info.acHitInfo->toucher.damage : -1,
+        // SEND log — single line per successful send. Wire damage / kb
+        // params / attacker info on one row for easy field-test parsing.
+        const u16 attackerId = (player->cylinder.base.ac != nullptr)
+                               ? player->cylinder.base.ac->id : 0;
+        SPDLOG_INFO("[DummyPlayer] SEND DAMAGE_PLAYER clientId={} attackerId=0x{:04X} "
+                    "damage={} effect={} kbType={} kbSpeed={:.1f}",
+                    client.clientId, attackerId, (int)sendDamage,
                     (int)player->actor.colChkInfo.damageEffect,
-                    localGuard, attX, attY, attZ,
-                    attackerPos != nullptr,
-                    player->actor.world.pos.x, player->actor.world.pos.y,
-                    player->actor.world.pos.z);
+                    kbType, kbSpeed);
     }
 
     const bool wouldSetAC =
