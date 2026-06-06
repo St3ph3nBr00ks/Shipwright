@@ -4,6 +4,7 @@
 
 extern "C" {
 #include "macros.h"  // GET_PLAYER, SQ
+#include "functions.h"  // Actor_WorldDistXZToActor / _HeightDiff / _WorldYawTowardActor
 extern SaveContext gSaveContext;
 }
 
