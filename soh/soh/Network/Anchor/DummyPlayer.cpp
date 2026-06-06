@@ -584,13 +584,12 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         if (player->cylinder.info.acHitInfo != nullptr) {
             sendDamage = player->cylinder.info.acHitInfo->toucher.damage;
         }
-        // Path A (2026-06-05) — look up vanilla knockback params for
-        // this attacker. When registered, ship them so the peer's
-        // Player_Update reproduces the exact local-hit response
-        // (animation, iframes, damage application). When NOT registered,
-        // sentinel type=0 routes the receiver through the legacy
-        // func_80837C0C-direct path. See
-        // Common/EnemyKnockbackTable.{h,cpp}.
+        // Path A — look up vanilla knockback params for this attacker.
+        // Registered → ship the knockback block; peer's Player_Update
+        // reproduces the exact local-hit response. Not registered →
+        // kbType=0 sentinel; receiver falls back to legacy
+        // func_80837C0C path (loses vanilla animation / iframe parity).
+        // See Common/EnemyKnockbackTable.{h,cpp}.
         u32 kbType = 0;
         f32 kbSpeed = 0.0f;
         f32 kbYVel = 0.0f;
@@ -602,6 +601,34 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 kbSpeed  = kbp.speed;
                 kbYVel   = kbp.yVelocity;
                 kbDamage = kbp.damage;
+            } else {
+                // Path A bypass instrumentation. Fires once per
+                // (attackerId) global so log volume stays bounded —
+                // catches new vanilla attackers that should be added
+                // to EnemyKnockbackTable when they first hit a peer.
+                //
+                // Intentional bypass cases (custom actors with their
+                // own damage semantics — Invader, future NPCs) won't
+                // produce false positives if they're explicitly
+                // suppressed below. Add IDs to sExpectedBypassIds as
+                // new bypass-by-design senders surface.
+                static const std::unordered_set<u16> sExpectedBypassIds = {
+                    // Custom actors that intentionally don't use Path A:
+                    //   (none today — placeholder. Invader DOES want
+                    //    Path A eventually; track separately.)
+                };
+                static std::unordered_set<u16> sLoggedBypass;
+                const u16 attackerId = player->cylinder.base.ac->id;
+                if (sExpectedBypassIds.find(attackerId) == sExpectedBypassIds.end() &&
+                    sLoggedBypass.find(attackerId) == sLoggedBypass.end()) {
+                    sLoggedBypass.insert(attackerId);
+                    SPDLOG_WARN("[Path A bypass] attackerId=0x{:04X} hit a DummyPlayer "
+                                "but is NOT in EnemyKnockbackTable. Peer will use legacy "
+                                "func_80837C0C path (loses vanilla animation + iframes). "
+                                "Add an entry to Common/EnemyKnockbackTable.cpp to fix. "
+                                "(Logged once per attackerId per session.)",
+                                attackerId);
+                }
             }
         }
         Anchor::Instance->SendPacket_DamagePlayer(client.clientId, player->actor.colChkInfo.damageEffect,
