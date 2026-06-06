@@ -91,7 +91,14 @@ void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
         return;
     }
 
-    self->actor.colChkInfo.damage = damage * 8; // Arbitrary number currently, need to fine tune
+    // Bug 2 fix Option C (2026-06-05) — wire damage is the raw AT damage
+    // value in HP units (e.g., Goroiwa = 4, Iron Knuckle = 64). Sender
+    // reads cylinder.info.acHitInfo->toucher.damage and ships it as-is.
+    // Apply directly without scaling. The legacy `* 8` was an arbitrary
+    // calibration when the wire field carried the table-filtered damage
+    // value in 1/2-heart units; with the source change in
+    // DummyPlayer.cpp the wire field is now in HP units directly.
+    self->actor.colChkInfo.damage = damage;
 
     if (damageEffect == DUMMY_PLAYER_HIT_RESPONSE_FIRE) {
         for (int i = 0; i < ARRAY_COUNT(self->bodyFlameTimers); i++) {

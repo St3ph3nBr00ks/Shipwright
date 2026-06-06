@@ -594,8 +594,24 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         const Vec3f* attackerPos = (player->cylinder.base.ac != nullptr)
             ? &player->cylinder.base.ac->world.pos
             : nullptr;
+        // Bug 2 fix Option C (2026-06-05) — ship the raw AT damage value
+        // from the attacker's collider element, NOT the table-filtered
+        // colChkInfo.damage. The DummyPlayer damage table (used by
+        // CollisionCheck at z_collision_check.c:3023) collapses every
+        // attacker that uses a given damage type bit to ONE damage value
+        // — but Goroiwa = 4 HP, Iron Knuckle = 64 HP, Bigokuta = 8 HP all
+        // share bit 29 ("Unblockable"). The table cannot represent them
+        // distinctly. acHitInfo points at the AT ColliderInfo of the
+        // attacker that just landed; toucher.damage is the raw per-
+        // collider damage value (in HP units). Shipping that gives
+        // vanilla parity for every attacker. See
+        // Plans/dummy_player_damage_table_audit.md.
+        u8 sendDamage = player->actor.colChkInfo.damage;
+        if (player->cylinder.info.acHitInfo != nullptr) {
+            sendDamage = player->cylinder.info.acHitInfo->toucher.damage;
+        }
         Anchor::Instance->SendPacket_DamagePlayer(client.clientId, player->actor.colChkInfo.damageEffect,
-                                                  player->actor.colChkInfo.damage, attackerPos);
+                                                  sendDamage, attackerPos);
         if (player->actor.colChkInfo.damageEffect == DUMMY_PLAYER_HIT_RESPONSE_STUN) {
             Actor_SetColorFilter(&player->actor, 0, 0xFF, 0, 24);
         } else {
@@ -621,11 +637,15 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         const f32 attY = (attackerPos != nullptr) ? attackerPos->y : 0.0f;
         const f32 attZ = (attackerPos != nullptr) ? attackerPos->z : 0.0f;
         SPDLOG_INFO("[Bug1.Diag] SEND DAMAGE_PLAYER to clientId={} curFrame={} "
-                    "damage={} damageEffect={} (localGuard armed to {}) "
+                    "wireDamage={} (tableFiltered={} rawAtDamage={}) "
+                    "damageEffect={} (localGuard armed to {}) "
                     "attackerPos=({:.0f},{:.0f},{:.0f}) hasAttackerPos={} "
                     "dummyPos=({:.0f},{:.0f},{:.0f})",
                     client.clientId, curFrame,
+                    (int)sendDamage,
                     (int)player->actor.colChkInfo.damage,
+                    (player->cylinder.info.acHitInfo != nullptr)
+                        ? (int)player->cylinder.info.acHitInfo->toucher.damage : -1,
                     (int)player->actor.colChkInfo.damageEffect,
                     localGuard, attX, attY, attZ,
                     attackerPos != nullptr,
