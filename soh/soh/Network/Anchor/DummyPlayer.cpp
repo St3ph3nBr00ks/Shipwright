@@ -514,13 +514,20 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         !SceneMultiplayerConfig::ShouldDisablePvP(gPlayState);
 
     // Widen AC type bits on every collider the DummyPlayer can register
-    // as AC. Body cylinder + shield quad both need AC_TYPE_ENEMY so
-    // cross-machine hostile NPC ATs (AT_TYPE_ENEMY) match. The shield
-    // patch closes the "shield doesn't block Invader" bug — vanilla
-    // Player_UpdateShieldCollider registers shieldQuad with AC_TYPE_PLAYER
-    // only, so without this patch Invader/Goroiwa/etc. ATs bypass the
-    // shield and hit the body cylinder. Same root cause as the hintnut
-    // nutsball-not-blocked bug. See WidenDummyAcForCrossMachine doc.
+    // as AC.
+    //
+    // Body cylinder: vanilla Player init is AC_TYPE_PLAYER only (PvP
+    // friendly-fire). Stamping AC_TYPE_ENEMY each frame is what lets
+    // cross-machine hostile NPCs (Invader, Goroiwa, etc.) register hits.
+    // This is the load-bearing patch — without it, no DAMAGE_PLAYER
+    // ever fires for cross-machine PvE.
+    //
+    // Shield quad: vanilla init at z_player.c:10700 is
+    // `AC_ON | AC_HARD | AC_TYPE_ENEMY` — it ALREADY accepts
+    // AT_TYPE_ENEMY. The widen call here is defensive symmetry only;
+    // it's a no-op against vanilla today. The actual "shield blocks
+    // hostile NPCs" fix is the AC_BOUNCED check at the AC_HIT gate
+    // below, NOT the type bits.
     WidenDummyAcForCrossMachine(&player->cylinder.base, pvpActive);
     WidenDummyAcForCrossMachine(&player->shieldQuad.base, pvpActive);
 
@@ -559,6 +566,23 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     const bool acHitForGate     = (player->cylinder.base.acFlags & AC_HIT) != 0;
     const bool peerIframesOpen  = player->invincibilityTimer == 0;
     const bool localGuardOpen   = localGuard == 0;
+    // Shield-bounce check — mirrors vanilla Player_Update (z_player.c:4813).
+    // When an AT collides with both the shield quad AND the body cylinder
+    // in the same frame, the shield's AC_HARD bumper sets AC_BOUNCED on the
+    // shield. Vanilla Player reads this as "attack blocked, suppress body
+    // damage." DummyPlayer.cpp doesn't run vanilla Player_Update, so we
+    // mirror that check explicitly here. Without this, hostile NPC ATs
+    // (Invader, hintnut nutsballs, etc.) hit the body AC, fire AC_HIT,
+    // and DAMAGE_PLAYER broadcasts as if no shield was up.
+    //
+    // Note: the shield AC is registered every draw frame by vanilla
+    // Player_UpdateShieldCollider (z_player_lib.c:1525) when stateFlags1
+    // carries PLAYER_STATE1_SHIELDING. The state is mirrored from peer via
+    // PLAYER_UPDATE and applied in DummyPlayer_Update's Player_SetModelsForHoldingShield
+    // call — so as long as PLAYER_UPDATE is current, the shield AC exists
+    // and AC_BOUNCED accurately reflects whether the AT was blocked.
+    const bool shieldBounced = (player->shieldQuad.base.acFlags & AC_BOUNCED) != 0;
+    const bool shieldBlockOpen = !shieldBounced;
     // Bug B fix (2026-06-05) — only the AUTHORITATIVE room host should
     // broadcast DAMAGE_PLAYER from a DummyPlayer AC_HIT. Without this
     // gate, peers also send DAMAGE_PLAYER whenever a synced enemy
@@ -573,7 +597,19 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     // (Invader) AND the synced vanilla enemies in that room.
     const bool authoritative    = ::SceneAuthority::IsMyCurrentRoomHost();
     const bool gateOpen         = acHitForGate && peerIframesOpen
-                               && localGuardOpen && authoritative;
+                               && localGuardOpen && authoritative
+                               && shieldBlockOpen;
+
+    // Shield-blocked log — when the AT was bounced by the peer's shield,
+    // surface it once per swing so field-test confirms the block fired.
+    // Bounded by acHitForGate so we don't spam during non-hit frames.
+    if (acHitForGate && shieldBounced) {
+        const u16 blockedAttackerId = (player->cylinder.base.ac != nullptr)
+                                      ? player->cylinder.base.ac->id : 0;
+        SPDLOG_INFO("[DummyPlayer] shield BLOCKED clientId={} attackerId=0x{:04X} "
+                    "(AC_HIT on body suppressed by shieldQuad AC_BOUNCED)",
+                    clientId, blockedAttackerId);
+    }
 
     // Per-frame send-gate evaluation log removed — gate behavior is
     // observable via the SEND log presence/absence below. Re-enable if
