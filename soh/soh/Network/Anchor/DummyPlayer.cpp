@@ -623,10 +623,18 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     sLoggedBypass.find(attackerId) == sLoggedBypass.end()) {
                     sLoggedBypass.insert(attackerId);
                     SPDLOG_WARN("[Path A bypass] attackerId=0x{:04X} hit a DummyPlayer "
-                                "but is NOT in EnemyKnockbackTable. Peer will use legacy "
-                                "func_80837C0C path (loses vanilla animation + iframes). "
-                                "Add an entry to Common/EnemyKnockbackTable.cpp to fix. "
-                                "(Logged once per attackerId per session.)",
+                                "but is NOT in EnemyKnockbackTable. Full fix is TWO parts: "
+                                "(1) add entry to Common/EnemyKnockbackTable.cpp — "
+                                "extract speed/yVel/type/kbDamage from the actor's "
+                                "func_8002F6D4/_71C/_758/_7A0 call site (Bug 2 = "
+                                "cross-machine damage parity); "
+                                "(2) gate that call in the actor's AT_HIT branch on "
+                                "Anchor_DistXZToLocalLink(actor, play) < HIT_RADIUS — "
+                                "see Pitfall 28 in session_state.md (Bug 1 = host's "
+                                "local Link must not be falsely knocked back when only "
+                                "a DummyPlayer was hit). Without (2) the host still has "
+                                "Bug 1 for this attacker even after (1) ships damage "
+                                "correctly. Logged once per attackerId per session.",
                                 attackerId);
                 }
             }
