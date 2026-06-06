@@ -52,6 +52,29 @@ static inline bool DebugLogSwapWindows() {
     return CVarGetInteger(CVAR_ANCHOR_DEBUG_LOG_SWAP_WINDOWS, 0) != 0;
 }
 
+// Widen a DummyPlayer collider's AC type bits so cross-machine hostile
+// NPCs (Invader and synced vanilla enemies like Goroiwa, etc.) can
+// register hits against it. Vanilla Player colliders are
+// AC_TYPE_PLAYER only (sized for PvP friendly-fire); cross-machine
+// PvE damage requires AC_TYPE_ENEMY so AT_TYPE_ENEMY toucher flags
+// from hostile NPCs match.
+//
+// Single point of truth for "which AC types should this DummyPlayer
+// collider accept this frame." Called per-collider per-frame so the
+// type bits stay in lockstep with the live PvP gate. PvP-on adds
+// AC_TYPE_PLAYER on top so PvP-friendly-fire path still works.
+//
+// Apply to every AC-registering collider on the DummyPlayer. Today:
+// body cylinder + shieldQuad. New collider additions (sword AT for
+// PvP, hookshot grab, etc.) should call this same helper so we don't
+// re-introduce the "shield doesn't block Invader" bug class for them.
+static inline void WidenDummyAcForCrossMachine(Collider* base, bool pvpActive) {
+    base->acFlags = (base->acFlags & ~AC_TYPE_ALL) | AC_TYPE_ENEMY;
+    if (pvpActive) {
+        base->acFlags |= AC_TYPE_PLAYER;
+    }
+}
+
 static DamageTable DummyPlayerDamageTable = {
     /* Deku nut      */ DMG_ENTRY(0, DUMMY_PLAYER_HIT_RESPONSE_STUN),
     /* Deku stick    */ DMG_ENTRY(2, DUMMY_PLAYER_HIT_RESPONSE_NORMAL),
@@ -489,11 +512,17 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         !(Anchor::Instance->roomState.pvpMode == 1 &&
           client.teamId == CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default")) &&
         !SceneMultiplayerConfig::ShouldDisablePvP(gPlayState);
-    player->cylinder.base.acFlags =
-        (player->cylinder.base.acFlags & ~AC_TYPE_ALL) | AC_TYPE_ENEMY;
-    if (pvpActive) {
-        player->cylinder.base.acFlags |= AC_TYPE_PLAYER;
-    }
+
+    // Widen AC type bits on every collider the DummyPlayer can register
+    // as AC. Body cylinder + shield quad both need AC_TYPE_ENEMY so
+    // cross-machine hostile NPC ATs (AT_TYPE_ENEMY) match. The shield
+    // patch closes the "shield doesn't block Invader" bug — vanilla
+    // Player_UpdateShieldCollider registers shieldQuad with AC_TYPE_PLAYER
+    // only, so without this patch Invader/Goroiwa/etc. ATs bypass the
+    // shield and hit the body cylinder. Same root cause as the hintnut
+    // nutsball-not-blocked bug. See WidenDummyAcForCrossMachine doc.
+    WidenDummyAcForCrossMachine(&player->cylinder.base, pvpActive);
+    WidenDummyAcForCrossMachine(&player->shieldQuad.base, pvpActive);
 
     Collider_UpdateCylinder(&player->actor, &player->cylinder);
 
