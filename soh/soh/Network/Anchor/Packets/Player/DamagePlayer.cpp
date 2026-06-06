@@ -23,6 +23,21 @@ void func_80838280(Player* player);
 // sword — the sender's player IS the attacker).
 void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
                                      const Vec3f* attackerPos) {
+    // Backward-compat path — no knockback block → receive falls back to
+    // legacy func_80837C0C-direct path. Used by callers that don't have
+    // vanilla knockback params handy.
+    SendPacket_DamagePlayer(clientId, damageEffect, damage, attackerPos,
+                            0 /* no knockback */, 0.0f, 0.0f, 0);
+}
+
+void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage) {
+    SendPacket_DamagePlayer(clientId, damageEffect, damage, nullptr);
+}
+
+void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
+                                     const Vec3f* attackerPos,
+                                     u32 knockbackType, f32 knockbackSpeed,
+                                     f32 knockbackYVelocity, u32 knockbackDamage) {
     if (!IsSaveLoaded()) {
         return;
     }
@@ -39,12 +54,20 @@ void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
             { "z", attackerPos->z },
         };
     }
+    // Path A vanilla-knockback block. Receiver detects presence and
+    // routes through Player_Update's natural knockback flow instead of
+    // calling func_80837C0C directly. knockbackType=0 → block omitted
+    // (receiver falls back to legacy path for that packet).
+    if (knockbackType != 0) {
+        payload["knockback"] = {
+            { "type", knockbackType },
+            { "speed", knockbackSpeed },
+            { "yVelocity", knockbackYVelocity },
+            { "damage", knockbackDamage },
+        };
+    }
 
     SendJsonToRemote(payload);
-}
-
-void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage) {
-    SendPacket_DamagePlayer(clientId, damageEffect, damage, nullptr);
 }
 
 void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
@@ -150,8 +173,48 @@ void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
                     (uint16_t)knockbackYaw);
     }
     const u8 healthBefore = gSaveContext.health;
+
+    // Path A — vanilla-knockback flow (preferred). When sender included
+    // a "knockback" block, set GET_PLAYER's knockback fields the same
+    // way the source enemy's func_8002F6D4 / _71C / _758 call would
+    // have done locally. Player_Update reads those fields next tick
+    // and calls func_80837C0C internally with the right args (animation
+    // map via knockbackResponse[], iframes via Player_SetIntangibility,
+    // damage applied via func_80837B18 against colChkInfo.damage). This
+    // matches vanilla local-hit behavior exactly — no parameter guessing.
+    if (payload.contains("knockback")) {
+        const auto& kb     = payload["knockback"];
+        const u32 kbType   = kb.value("type", 0u);
+        const f32 kbSpeed  = kb.value("speed", 0.0f);
+        const f32 kbYVel   = kb.value("yVelocity", 0.0f);
+        const u32 kbDamage = kb.value("damage", 0u);
+
+        // Mirrors func_8002F698 (z_actor.c:2216-2224) — writes the
+        // 5 knockback fields on the local Link. Player_Update at
+        // z_player.c:4795 picks them up on its next frame.
+        self->knockbackDamage   = kbDamage;
+        self->knockbackType     = kbType;
+        self->knockbackRot      = knockbackYaw;
+        self->knockbackSpeed    = kbSpeed;
+        self->knockbackYVelocity = kbYVel;
+
+        SPDLOG_INFO("[Bug1.Diag] RECV DAMAGE_PLAYER APPLIED — vanilla-kb path. "
+                    "kbType={} kbSpeed={:.1f} kbYVel={:.1f} kbDamage={} "
+                    "colChkInfo.damage={} healthBefore={} healthAfter={} "
+                    "knockbackYaw=0x{:04X} (Player_Update will process next frame)",
+                    kbType, kbSpeed, kbYVel, kbDamage,
+                    (int)self->actor.colChkInfo.damage,
+                    (int)healthBefore, (int)gSaveContext.health,
+                    (uint16_t)knockbackYaw);
+        return;
+    }
+
+    // Legacy fallback — sender didn't supply knockback block (PvP
+    // friendly-fire, Invader pre-migration, etc.). Use the direct
+    // func_80837C0C call. This loses vanilla iframes / animation
+    // parity but is what the path was before Path A landed.
     func_80837C0C(gPlayState, self, damageEffect, 4.0f, 5.0f, knockbackYaw, 20);
-    SPDLOG_INFO("[Bug1.Diag] RECV DAMAGE_PLAYER APPLIED — func_80837C0C done. "
+    SPDLOG_INFO("[Bug1.Diag] RECV DAMAGE_PLAYER APPLIED — legacy func_80837C0C. "
                 "colChkInfo.damage={} healthBefore={} healthAfter={} "
                 "knockbackYaw=0x{:04X}",
                 (int)self->actor.colChkInfo.damage,

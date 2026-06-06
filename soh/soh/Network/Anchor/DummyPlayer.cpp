@@ -2,6 +2,7 @@
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/SceneMultiplayerConfig.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"  // IsMyCurrentRoomHost — Bug B fix gate (2026-06-05)
+#include "soh/Network/Anchor/Common/EnemyKnockbackTable.h"  // Path A vanilla knockback lookup (2026-06-05)
 #include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
 #include "soh/Enhancements/nametag.h"
 #include <unordered_map>
@@ -610,8 +611,29 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         if (player->cylinder.info.acHitInfo != nullptr) {
             sendDamage = player->cylinder.info.acHitInfo->toucher.damage;
         }
+        // Path A (2026-06-05) — look up vanilla knockback params for
+        // this attacker. When registered, ship them so the peer's
+        // Player_Update reproduces the exact local-hit response
+        // (animation, iframes, damage application). When NOT registered,
+        // sentinel type=0 routes the receiver through the legacy
+        // func_80837C0C-direct path. See
+        // Common/EnemyKnockbackTable.{h,cpp}.
+        u32 kbType = 0;
+        f32 kbSpeed = 0.0f;
+        f32 kbYVel = 0.0f;
+        u32 kbDamage = 0;
+        if (player->cylinder.base.ac != nullptr) {
+            AnchorKnockback::KnockbackParams kbp;
+            if (AnchorKnockback::LookupKnockback(player->cylinder.base.ac->id, &kbp)) {
+                kbType   = kbp.type;
+                kbSpeed  = kbp.speed;
+                kbYVel   = kbp.yVelocity;
+                kbDamage = kbp.damage;
+            }
+        }
         Anchor::Instance->SendPacket_DamagePlayer(client.clientId, player->actor.colChkInfo.damageEffect,
-                                                  sendDamage, attackerPos);
+                                                  sendDamage, attackerPos,
+                                                  kbType, kbSpeed, kbYVel, kbDamage);
         if (player->actor.colChkInfo.damageEffect == DUMMY_PLAYER_HIT_RESPONSE_STUN) {
             Actor_SetColorFilter(&player->actor, 0, 0xFF, 0, 24);
         } else {

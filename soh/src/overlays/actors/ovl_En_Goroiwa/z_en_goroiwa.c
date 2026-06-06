@@ -664,11 +664,20 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
                         (gp != NULL) ? gp->actor.world.pos.z : 0.0f);
         }
         this->collider.base.atFlags &= ~AT_HIT;
-        if (linkInRange) {
-        // Multiplayer (#153 Phase 2): tell the host that this client's local Link
-        // just got hit by this boulder so the host reverses its authoritative copy.
-        // No-op on host and when disconnected — the regular branch below still runs.
-        Anchor_NotifyEnemyHitPlayer(&this->actor);
+
+        // Bug 2 Path A (2026-06-05, field-test 420) — split the vanilla
+        // AT_HIT branch in two so the enemy state-machine reaction
+        // (Reverse + restart-roll + collision cooldown) fires whenever
+        // AT_HIT, regardless of whether the hit target was the local
+        // Link or a cross-machine DummyPlayer. Pre-split, the entire
+        // branch was gated on linkInRange=1 → host's Goroiwa kept
+        // rolling through P2's DummyPlayer because P1 was far.
+        //
+        // Part A — enemy reaction. ALWAYS fires on AT_HIT. Reverse
+        // direction toward whoever was hit (yawTowardsPlayer is correctly
+        // overlaid by #153 to point at the closer-of-players, so on host
+        // when only DummyPlayer was hit, this correctly points at the
+        // DummyPlayer). Setup next state, arm collision cooldown.
         this->stateFlags &= ~ENGOROIWA_PLAYER_IN_THE_WAY;
         yawDiff = this->actor.yawTowardsPlayer - this->actor.world.rot.y;
         if (yawDiff > -0x4000 && yawDiff < 0x4000) {
@@ -678,16 +687,27 @@ void EnGoroiwa_Roll(EnGoroiwa* this, PlayState* play) {
                 EnGoroiwa_FaceNextWaypoint(this, play);
             }
         }
-        func_8002F6D4(play, &this->actor, 2.0f, this->actor.yawTowardsPlayer, 0.0f, 0);
-        osSyncPrintf(VT_FGCOL(CYAN));
-        osSyncPrintf("Player ぶっ飛ばし\n"); // "Player knocked down"
-        osSyncPrintf(VT_RST);
         onHitSetupFuncs[(this->actor.params >> 10) & 1](this);
-        Player_PlaySfx(&GET_PLAYER(play)->actor, NA_SE_PL_BODY_HIT);
         if ((this->actor.home.rot.z & 1) == 1) {
             this->collisionDisabledTimer = 50;
         }
-        }  // end of Anchor Bug 2 fix `if (atHitLocalLink)` block
+
+        // Part B — local-Link effects. Only fires when GET_PLAYER was
+        // the target. Cross-machine routing handled by DummyPlayer.cpp's
+        // AC_HIT detection → DAMAGE_PLAYER with Path A vanilla-knockback
+        // block → peer's Player_Update reproduces this same code path
+        // via knockback fields set in DamagePlayer.cpp receive.
+        if (linkInRange) {
+            // Multiplayer (#153 Phase 2): tell the host that this client's local
+            // Link just got hit by this boulder so the host reverses its
+            // authoritative copy. No-op on host and when disconnected.
+            Anchor_NotifyEnemyHitPlayer(&this->actor);
+            func_8002F6D4(play, &this->actor, 2.0f, this->actor.yawTowardsPlayer, 0.0f, 0);
+            osSyncPrintf(VT_FGCOL(CYAN));
+            osSyncPrintf("Player ぶっ飛ばし\n"); // "Player knocked down"
+            osSyncPrintf(VT_RST);
+            Player_PlaySfx(&GET_PLAYER(play)->actor, NA_SE_PL_BODY_HIT);
+        }
     } else if (moveFuncs[(this->actor.params >> 10) & 1](this, play)) {
         loopMode = (this->actor.params >> 8) & 3;
         if (loopMode == ENGOROIWA_LOOPMODE_ONEWAY_BREAK &&

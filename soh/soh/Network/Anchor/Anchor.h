@@ -1540,6 +1540,17 @@ class Anchor : public Network {
     // (e.g. a hostile NPC) instead of from the sender's own player.
     void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
                                  const Vec3f* attackerPos);
+    // Path A vanilla-knockback overload (2026-06-05) — when the sender
+    // knows the attacker's vanilla knockback params (via
+    // EnemyKnockbackTable lookup), pass them through so the peer's
+    // Player_Update reproduces the exact local-hit response (animation,
+    // iframes via Player_SetIntangibility, HP application).
+    // knockbackType in {0,1,2,3} per z64player.h PLAYER_KNOCKBACK_*.
+    // 0 = no knockback block sent (legacy receiver fallback path).
+    void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
+                                 const Vec3f* attackerPos,
+                                 u32 knockbackType, f32 knockbackSpeed,
+                                 f32 knockbackYVelocity, u32 knockbackDamage);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);
     void SendPacket_GameComplete();
     void SendPacket_GiveItem(u16 modId, s16 getItemId);
