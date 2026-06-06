@@ -148,13 +148,23 @@ void BgJyaGoroiwa_Move(BgJyaGoroiwa* this, PlayState* play) {
     if (this->collider.base.atFlags & AT_HIT) {
         this->collider.base.atFlags &= ~AT_HIT & ~AT_ON;
 
+        // Pitfall 28 + Path A — sibling of En_Goroiwa, same shape.
+        // Always-fire: yaw flip + state machine (rolls onward whatever
+        // we hit). Local-Link knockback only when local Link is the
+        // actual target. Cross-machine peer routing via DummyPlayer.cpp
+        // (Common/EnemyKnockbackTable.cpp entry ACTOR_BG_JYA_GOROIWA).
+        // 100u = collider sphere radius 58 + Link body 30 + margin.
+        s32 linkInRange = (Anchor_DistXZToLocalLink(thisx, play) < 100.0f);
+
         relYawTowardsPlayer = thisx->yawTowardsPlayer - thisx->world.rot.y;
         if ((relYawTowardsPlayer > -0x4000) && (relYawTowardsPlayer < 0x4000)) {
             thisx->world.rot.y += 0x8000;
         }
 
-        func_8002F6D4(play, thisx, 2.0f, thisx->yawTowardsPlayer, 0.0f, 0);
-        Player_PlaySfx(&GET_PLAYER(play)->actor, NA_SE_PL_BODY_HIT);
+        if (linkInRange) {
+            func_8002F6D4(play, thisx, 2.0f, thisx->yawTowardsPlayer, 0.0f, 0);
+            Player_PlaySfx(&GET_PLAYER(play)->actor, NA_SE_PL_BODY_HIT);
+        }
 
         this->yOffsetSpeed = 10.0f;
         this->speedFactor = 0.5f;

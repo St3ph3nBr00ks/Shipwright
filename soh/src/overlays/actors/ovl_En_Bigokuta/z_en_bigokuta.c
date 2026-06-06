@@ -729,6 +729,15 @@ void func_809BE798(EnBigokuta* this, PlayState* play) {
         this->cylinder[0].base.atFlags &= ~AT_HIT;
         this->cylinder[1].base.atFlags &= ~AT_HIT;
         this->collider.base.atFlags &= ~AT_HIT;
+
+        // Pitfall 28 + Path A — split into always-fire enemy reaction
+        // (state machine: yaw/effectRot calc + actionFunc-dependent
+        // state changes) and linkInRange-gated local-Link knockback.
+        // Cross-machine peer routing via DummyPlayer.cpp
+        // (Common/EnemyKnockbackTable.cpp entry ACTOR_EN_BIGOKUTA).
+        // 90u = collider cylinder radius 50 + Link body 30 + margin.
+        s32 linkInRange = (Anchor_DistXZToLocalLink(&this->actor, play) < 90.0f);
+
         yawDiff = this->actor.yawTowardsPlayer - this->actor.world.rot.y;
         if (yawDiff > 0x4000) {
             effectRot = 0x4000;
@@ -739,7 +748,9 @@ void func_809BE798(EnBigokuta* this, PlayState* play) {
         } else {
             effectRot = -0x6000;
         }
-        func_8002F71C(play, &this->actor, 10.0f, this->actor.world.rot.y + effectRot, 5.0f);
+        if (linkInRange) {
+            func_8002F71C(play, &this->actor, 10.0f, this->actor.world.rot.y + effectRot, 5.0f);
+        }
         if (this->actionFunc == func_809BDC08) {
             func_809BD4A4(this);
             this->unk_196 = 40;
