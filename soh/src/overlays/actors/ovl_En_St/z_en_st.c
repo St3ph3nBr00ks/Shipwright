@@ -404,10 +404,28 @@ s32 EnSt_CheckHitLink(EnSt* this, PlayState* play) {
         Audio_PlayActorSound2(&this->actor, NA_SE_EN_STALTU_ROLL);
     }
 
+    // Always set the spin-timer cooldown on host. The OC2 gate fired
+    // because SOMETHING (local Link OR a DummyPlayer) overlapped; vanilla
+    // single-player resets this regardless.
     this->gaveDamageSpinTimer = 30;
-    play->damagePlayer(play, -8);
-    Audio_PlayActorSound2(&player->actor, NA_SE_PL_BODY_HIT);
-    func_8002F71C(play, &this->actor, 4.0f, this->actor.yawTowardsPlayer, 6.0f);
+
+    // VMP Phase B + Pitfall 28 — split the local-Link side effects from
+    // the cross-machine broadcast.
+    //
+    // (1) Broadcast to any peers' DummyPlayers in range. Their local
+    //     Player_Update consumes the DAMAGE_PLAYER packet and applies
+    //     vanilla parity (HP loss via gPlayState->damagePlayer + knockback
+    //     animation via the Path A knockback fields).
+    Anchor_BroadcastDirectDamageInRange(&this->actor, play, 60.0f, 8);
+
+    // (2) Local-Link vanilla path — gated on actual proximity to GET_PLAYER.
+    //     Without the gate, host's local Link took 8 HP whenever a peer's
+    //     DummyPlayer's OC overlapped the Skulltula (Bug 1).
+    if (Anchor_DistXZToLocalLink(&this->actor, play) < 60.0f) {
+        play->damagePlayer(play, -8);
+        Audio_PlayActorSound2(&player->actor, NA_SE_PL_BODY_HIT);
+        func_8002F71C(play, &this->actor, 4.0f, this->actor.yawTowardsPlayer, 6.0f);
+    }
     return true;
 }
 

@@ -197,6 +197,17 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // got blown up when peer was the closer DummyPlayer).
     { ACTOR_EN_EX_RUPPY, { 2.0f, 0.0f, 2 /* LARGE */, 0 } },
 
+    // ─── En_St (Skulltula — VMP Phase B) #90 ─────────────────────
+    // z_en_st.c:410 — func_8002F71C(play, this, 4.0f, yawTowardsPlayer, 6.0f)
+    // Also calls play->damagePlayer(play, -8) directly. VMP Phase B
+    // broadcast helper at z_en_st.c handles cross-machine direct damage;
+    // source-side linkInRange gate at z_en_st.c (Bug 1 fix). Yaw is
+    // `yawTowardsPlayer` (affected by #153 overlay) but the receiver
+    // computes its own yaw from attackerPos→self via Math_Atan2S, so the
+    // overlay-affected host value is replaced with the truth-of-impact
+    // direction on the peer.
+    { ACTOR_EN_ST, { 4.0f, 6.0f, 2 /* LARGE */, 0 } },
+
     // ─── Path A phase WRAPPED (2026-06-07) ──────────────────────
     // 20 entries above. The remaining ~11 vanilla actors that call
     // func_8002F* alongside the player-effect path are Vanilla
