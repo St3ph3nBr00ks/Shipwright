@@ -1,5 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
-#include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)\n#include "soh/Network/Anchor/ItemDropNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
+#include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
+#include "soh/Network/Anchor/ItemDropNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"  // kSyncableActorCategories — Plan B step 6
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SyncedClaimableDrop.h"  // Plan B step 6
