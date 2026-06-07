@@ -59,6 +59,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Reeba/z_en_reeba.h"
 // en_ik_sync_plan.md — Iron Knuckle (En_Ik) state-machine sync.
 #include "overlays/actors/ovl_En_Ik/z_en_ik.h"
+// #99 / en_poh_sync_plan.md — Poe (En_Poh) state-machine sync.
+#include "overlays/actors/ovl_En_Poh/z_en_poh.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -171,6 +173,10 @@ struct EnemyUpdateExtras {
     // en_ik_sync_plan.md — En_Ik (Iron Knuckle) state-machine sync.
     bool hasEnIk         = false;
     s16  enIkActionState = 0;
+
+    // #99 / en_poh_sync_plan.md §4 — En_Poh (Poe) state-machine sync.
+    bool hasEnPoh         = false;
+    s16  enPohActionState = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
     // triggering the fight starts it on every client. Plus stunned/
@@ -407,6 +413,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnIk* ik            = (EnIk*)actor;
         e.hasEnIk           = true;
         e.enIkActionState   = EnIk_GetStateIndex(ik);
+    } else if (actor->id == ACTOR_EN_POH) {
+        EnPoh* poh              = (EnPoh*)actor;
+        e.hasEnPoh              = true;
+        e.enPohActionState      = EnPoh_GetStateIndex(poh);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -509,6 +519,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnIk != prev.hasEnIk) return true;
     if (cur.hasEnIk) {
         if (cur.enIkActionState != prev.enIkActionState) return true;
+    }
+    if (cur.hasEnPoh != prev.hasEnPoh) return true;
+    if (cur.hasEnPoh) {
+        if (cur.enPohActionState != prev.enPohActionState) return true;
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
@@ -771,6 +785,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enIkActionState);
             }
         }
+        if (extras.hasEnPoh) {
+            s16 prev = prevExtras && prevExtras->hasEnPoh ? prevExtras->enPohActionState : -1;
+            if (prev != extras.enPohActionState) {
+                SPDLOG_INFO("[EnPoh] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enPohActionState);
+            }
+        }
         if (extras.hasDekunuts) {
             s16 prev = prevExtras && prevExtras->hasDekunuts ? prevExtras->dekunutsActionState : -1;
             if (prev != extras.dekunutsActionState) {
@@ -924,6 +945,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // en_ik_sync_plan.md — En_Ik (Iron Knuckle) state-machine sync.
     if (extras.hasEnIk) {
         payload["actionState"] = extras.enIkActionState;
+    }
+
+    // #99 / en_poh_sync_plan.md §4 — En_Poh (Poe) state-machine sync.
+    if (extras.hasEnPoh) {
+        payload["actionState"] = extras.enPohActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1571,6 +1597,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_IK && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // #99 / en_poh_sync_plan.md — cache En_Poh (Poe) actionState.
+        if (actor->id == ACTOR_EN_POH && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // Boss_Goma — cache host actionState. Receive driver in
         // HookHandlers' OnActorUpdate non-host block invokes
         // BossGoma_BridgeToCombat when local Goma is in Encounter (0x00)
@@ -2196,6 +2226,27 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnIk netId={} — triggering natural death cycle", netId);
                     EnIk_SetupDyingNet((EnIk*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Poh (Poe): route through EnPoh_SetupDyingNet so the
+                // 28-frame charge animation + post-death gravity-fall + soul-
+                // rise natural cycle plays on the receiver without echoing
+                // GameInteractor_ExecuteOnEnemyDefeat. The 28-frame cycle's
+                // internal GameInteractor_ExecuteOnEnemyDefeat fire (at
+                // unk_198==1) is dedup'd by HostBookkeeping::HasDefeatBroadcast.
+                // Plan: Plans/en_poh_sync_plan.md §4 step 6 / #99.
+                if (actor->id == ACTOR_EN_POH) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnPoh.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnPoh netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnPoh netId={} — triggering natural death cycle", netId);
+                    EnPoh_SetupDyingNet((EnPoh*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
