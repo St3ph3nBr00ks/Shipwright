@@ -129,6 +129,15 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // calls Collide).
     { ACTOR_BG_HIDAN_FIREWALL, { 5.0f, 1.0f, 2 /* LARGE */, 0 } },
 
+    // ─── En_Mm (Running Man / Marathon Runner — body shove) ──────
+    // z_en_mm.c:471 — func_8002F71C(play, this, 3.0f, yawTowardsPlayer, 4.0f)
+    // Gate is OC2_HIT_PLAYER (body overlap), not AT_HIT — fires when the
+    // sprinting Running Man bumps into the player after the marathon prize
+    // has been claimed (ITEMGETINF_3B). Source-side linkInRange gate
+    // added at z_en_mm.c:470 (OC2 fires for both local Link and any
+    // DummyPlayer overlap on host, Bug 1 territory).
+    { ACTOR_EN_MM, { 3.0f, 4.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)

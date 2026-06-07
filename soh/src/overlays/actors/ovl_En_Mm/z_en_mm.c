@@ -467,7 +467,14 @@ void func_80AAE294(EnMm* this, PlayState* play) {
                 func_80033480(play, &dustPos, 50.0f, 2, 350, 20, 0);
             }
 
-            if (this->collider.base.ocFlags2 & OC2_HIT_PLAYER) {
+            // Pitfall 28 + Path A — gate local-Link knockback on live
+            // distance to GET_PLAYER. OC2_HIT_PLAYER fires for body
+            // overlap against any Player-category actor, including
+            // DummyPlayers on host. Cross-machine routing via
+            // DummyPlayer.cpp AC_HIT + EnemyKnockbackTable entry
+            // ACTOR_EN_MM. 30u = body overlap radius + margin.
+            if ((this->collider.base.ocFlags2 & OC2_HIT_PLAYER) &&
+                Anchor_DistXZToLocalLink(&this->actor, play) < 30.0f) {
                 func_8002F71C(play, &this->actor, 3.0f, this->actor.yawTowardsPlayer, 4.0f);
             }
         }
