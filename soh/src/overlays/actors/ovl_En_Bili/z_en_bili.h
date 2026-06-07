@@ -35,4 +35,24 @@ typedef enum {
     /*  1 */ EN_BILI_TYPE_DYING
 } EnBiliType;
 
+// Anchor multiplayer state-machine sync (#128 / en_bili_sync_plan.md).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp etc.), so the param name in the declaration
+// uses `actor` instead. The implementations in z_en_bili.c keep
+// `this` per OoT decomp convention.
+void EnBili_SetupDyingNet(struct EnBili* actor, PlayState* play);
+s16  EnBili_GetStateIndex(struct EnBili* actor);
+void EnBili_ApplyNetState(struct EnBili* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and we're replaying
+// the burnt → die sequence). Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnBiliDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif
