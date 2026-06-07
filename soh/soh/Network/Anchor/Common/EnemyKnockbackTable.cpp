@@ -67,6 +67,16 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // source edit needed.
     { ACTOR_EN_GELDB, { 6.0f, 6.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Flare Dancer (En_Fd flame attack) #98 ───────────────────
+    // z_en_fd.c:315 — func_8002F71C(play, this, speedXZ+2.0f, yawTowardsPlayer, 6.0f)
+    // Speed is variable (this->actor.speedXZ + 2.0f). Flare Dancer's
+    // speedXZ at attack impact is typically 2 (slow dance approach),
+    // giving knockback speed ≈ 4. Use 4.0 as baseline; the variable
+    // value isn't reproducible cross-machine without per-frame ship.
+    // Source-side linkInRange gate added at z_en_fd.c:304 (the AT_HIT
+    // branch was unconditional re: GET_PLAYER, Bug 1 territory).
+    { ACTOR_EN_FD, { 4.0f, 6.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (z_en_brob.c func_8002F71C 5.0/yaw/1.0)
     //  ACTOR_EN_FD     — Flare Dancer (z_en_fd.c:315 func_8002F71C speed+2/yaw/6.0)

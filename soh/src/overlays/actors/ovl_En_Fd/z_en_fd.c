@@ -310,9 +310,17 @@ s32 EnFd_ColliderCheck(EnFd* this, PlayState* play) {
         if (this->collider.base.atFlags & AT_BOUNCED) {
             return false;
         }
-        this->attackTimer = 30;
-        Audio_PlayActorSound2(&player->actor, NA_SE_PL_BODY_HIT);
-        func_8002F71C(play, &this->actor, this->actor.speedXZ + 2.0f, this->actor.yawTowardsPlayer, 6.0f);
+        // Pitfall 28 + Path A — gate local-Link effects on live distance
+        // to GET_PLAYER so host's Link isn't falsely knocked back when
+        // only a DummyPlayer was hit. Cross-machine routing handled by
+        // DummyPlayer.cpp's AC_HIT detection + Path A
+        // (Common/EnemyKnockbackTable.cpp entry ACTOR_EN_FD). 80u
+        // collider-distributed-JntSph reach + Link body 30u + margin.
+        if (Anchor_DistXZToLocalLink(&this->actor, play) < 80.0f) {
+            this->attackTimer = 30;
+            Audio_PlayActorSound2(&player->actor, NA_SE_PL_BODY_HIT);
+            func_8002F71C(play, &this->actor, this->actor.speedXZ + 2.0f, this->actor.yawTowardsPlayer, 6.0f);
+        }
     }
     return false;
 }
