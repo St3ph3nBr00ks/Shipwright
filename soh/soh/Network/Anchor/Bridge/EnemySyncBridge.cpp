@@ -167,3 +167,22 @@ extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
     if (ext == nullptr) return;
     Anchor::Instance->SendPacket_EnemyHitPlayer(ext->netId);
 }
+
+// Receiver-side predicate -- true when an En_Peehat (Peahat) death cycle
+// was network-driven. Three actor-side sites use this to suppress
+// Item_DropCollectibleRandom so host's authoritative ITEM_DROP_SYNC isn't
+// double-applied:
+//   - EnPeehat_StateExplode (adult death, 3 x 0x40 drops + 1 bomb spawn;
+//     bomb spawn is unsuppressed pending EXPLOSIVE_SPAWN packet family).
+//   - EnPeehat_HitWhenGrounded (periodic hit-reward drops every 16 frames
+//     while grounded adult takes damage; only suppressed while dying so
+//     pre-death hit-reward drops still emit on both clients as today).
+//   - EnPeehat_Larva_StateSeekPlayer (larva self-kill on collision,
+//     0x20 drop).
+// See z_en_peehat.c + Plans/en_peehat_sync_plan.md section 6 step 3+5 / #107.
+extern "C" bool Anchor_ShouldSuppressEnPeehatDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}

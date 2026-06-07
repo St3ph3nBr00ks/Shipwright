@@ -70,6 +70,9 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Ik/z_en_ik.h"
 // #99 / en_poh_sync_plan.md — Poe (En_Poh) state-machine sync.
 #include "src/overlays/actors/ovl_En_Poh/z_en_poh.h"
+
+// #107 / en_peehat_sync_plan.md - Peahat (En_Peehat) state-machine sync.
+#include "src/overlays/actors/ovl_En_Peehat/z_en_peehat.h"
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // Issue #153 — En_Goroiwa is ACTORCAT_PROP, the first non-ENEMY actor synced.
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
@@ -2540,6 +2543,38 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnPoh] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // #107 / en_peehat_sync_plan.md §3 - En_Peehat (Peahat)
+            // state-machine sync. Dormant filter: states 0/1 (grounded
+            // buried forms) shouldn't override active patrol states
+            // 4/5/6/9/10 (Flying_Fly / Ground_Seek / Larva_Seek /
+            // Ground_Hover / Ground_ReturnHome). Death states 13/14
+            // (Adult_StateDie / StateExplode) gated by
+            // PhaseImpliesHasLocalDeath.
+            if (actor->id == ACTOR_EN_PEEHAT && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnPeehat* ph = (EnPeehat*)actor;
+                s16 curState = EnPeehat_GetStateIndex(ph);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
+                bool localIsActive = (curState == 4 || curState == 5 || curState == 6 ||
+                                      curState == 9 || curState == 10);
+                bool deathStateNet = (ext->netStateIndex >= 13);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnPeehat] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnPeehat_ApplyNetState(ph, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnPeehat] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }
