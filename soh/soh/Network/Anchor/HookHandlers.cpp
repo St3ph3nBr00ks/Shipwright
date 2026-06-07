@@ -1879,9 +1879,25 @@ void Anchor::RegisterHooks() {
             // host's back-cylinder application kills the Skulltula
             // from peer's armored bounce.
             //
-            // Detection: swayTimer == 60 (just-set by CheckHitFrontside
-            // this frame) is a robust signal. CheckHitBackside resets it
-            // to 0 on legitimate back hits.
+            // Detection: swayTimer == 59 (log 435 calibration). The
+            // sequence is:
+            //   CheckHitFrontside sets swayTimer = 60.
+            //   Then EnSt_Update (z_en_st.c:1098) calls EnSt_Sway which
+            //   immediately decrements: swayTimer = 59.
+            //   THEN OnActorUpdate (this hook) fires post-update with
+            //   the decremented value visible.
+            //
+            // Re-hit during ongoing sway: swayTimer was 30 → CheckHit
+            // Frontside sets to 60 → EnSt_Sway decrements to 59. Same
+            // observation point.
+            //
+            // Frame with no hit but ongoing sway: swayTimer decrements
+            // by 1 from its prior value — anything OTHER than 59 means
+            // "not just-hit this frame" (assuming the prior value
+            // wasn't exactly 60, which only happens on a hit frame).
+            //
+            // CheckHitBackside resets swayTimer to 0 on legitimate back
+            // hits — those show swayTimer == 0 at OnActorUpdate time.
             //
             // When detected, suppress the damage value but still send
             // the wire packet with `isArmoredHit=true` so host fires the
@@ -1890,9 +1906,9 @@ void Anchor::RegisterHooks() {
             bool isArmoredHit = false;
             if (actor->id == ACTOR_EN_ST) {
                 EnSt* st = (EnSt*)actor;
-                if (st->swayTimer == 60 && forwardDamage > 0) {
+                if (st->swayTimer == 59 && forwardDamage > 0) {
                     SPDLOG_INFO("[DamageEnemy] En_St armored-hit netId={} "
-                                "swayTimer=60 → forwarding damage=0 isArmoredHit=true "
+                                "swayTimer=59 → forwarding damage=0 isArmoredHit=true "
                                 "(front-shield bounce + sway anim sync)",
                                 ext->netId);
                     forwardDamage = 0;
