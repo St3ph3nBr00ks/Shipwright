@@ -223,6 +223,16 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // broadcast helper + linkInRange gate at z_en_go.c.
     { ACTOR_EN_GO, { 4.0f, 6.0f, 2 /* LARGE */, 0 } },
 
+    // ─── En_Go2 (Goron NPC variant — rolling body shove, VMP Phase B) ──
+    // z_en_go2.c:915 — func_8002F71C(play, this, arg2, yawTowardsPlayer, 6.0f)
+    // Also calls play->damagePlayer(play, -4) directly. Speed is variable
+    // (`arg2` = 1.5 for ContinueRolling, speedXZ * 1.5 otherwise). Use
+    // 4.0 baseline in the wire payload — actual speed isn't reproducible
+    // cross-machine without per-frame ship. Sibling of En_Go (DMT vs
+    // Goron City variants). Broadcast helper + linkInRange gate at
+    // z_en_go2.c.
+    { ACTOR_EN_GO2, { 4.0f, 6.0f, 2 /* LARGE */, 0 } },
+
     // ─── Path A phase WRAPPED (2026-06-07) ──────────────────────
     // 20 entries above. The remaining ~11 vanilla actors that call
     // func_8002F* alongside the player-effect path are Vanilla

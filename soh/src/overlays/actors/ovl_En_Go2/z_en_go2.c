@@ -911,9 +911,19 @@ s32 func_80A44AB0(EnGo2* this, PlayState* play) {
 
                 arg2 = this->actionFunc == EnGo2_ContinueRolling ? 1.5f : this->actor.speedXZ * 1.5f;
 
-                play->damagePlayer(play, -4);
-                func_8002F71C(play, &this->actor, arg2, this->actor.yawTowardsPlayer, 6.0f);
-                Audio_PlayActorSound2(&player->actor, NA_SE_PL_BODY_HIT);
+                // VMP Phase B + Pitfall 28 — Goron NPC rolling body shove.
+                // Broadcast direct damage to peers; gate local-Link vanilla
+                // path on proximity. 50u = rolling Goron's body cyl + Link
+                // body 30u + margin. Wire knockback speed in
+                // EnemyKnockbackTable uses 4.0 baseline; the variable
+                // `arg2` (1.5 for ContinueRolling, speedXZ*1.5 otherwise)
+                // isn't reproducible cross-machine without per-frame ship.
+                Anchor_BroadcastDirectDamageInRange(&this->actor, play, 50.0f, 4);
+                if (Anchor_DistXZToLocalLink(&this->actor, play) < 50.0f) {
+                    play->damagePlayer(play, -4);
+                    func_8002F71C(play, &this->actor, arg2, this->actor.yawTowardsPlayer, 6.0f);
+                    Audio_PlayActorSound2(&player->actor, NA_SE_PL_BODY_HIT);
+                }
                 this->collider.base.ocFlags1 &= ~0x8;
             }
         }
