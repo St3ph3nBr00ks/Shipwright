@@ -95,6 +95,16 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // if field-test surfaces false-knockback on host.
     { ACTOR_EN_BX, { 6.0f, 6.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Door_Killer (patrol door enemy) — no per-actor tracker ──
+    // z_door_killer.c:381 — func_8002F6D4(play, this, 6.0f, yawTowardsPlayer, 6.0f, 16)
+    // Uses func_8002F6D4 (not _71C) — last arg 16 is kbDmg (additive
+    // damage applied during knockback animation). Existing coordinate-
+    // based gate at z_door_killer.c:374-380 (`|playerPosRelToDoor.y|<20
+    // && |x|<20 && 0<z<100`) is a precise box check around the door
+    // that naturally prevents Bug 1 (only fires when local Link is
+    // physically passing through the door's impact zone).
+    { ACTOR_DOOR_KILLER, { 6.0f, 6.0f, 2 /* LARGE */, 16 /* kbDmg */ } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)
