@@ -50,9 +50,17 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // Cosmetic difference; functional parity holds.
     { ACTOR_EN_BIGOKUTA, { 10.0f, 5.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Bari (En_Ba — jellyfish blob split from Vali) #128 ──────
+    // z_en_ba.c:310 — func_8002F71C(play, this, 8.0f, yawTowardsPlayer, 8.0f)
+    // Existing pointer-equality gate at z_en_ba.c:309
+    // (`collider.base.at == &player->actor`) handles Bug 1 for the
+    // typical case (same shape as En_Ik / En_GeldB — fails-closed
+    // when DummyPlayer overwrites .at, no false knockback on local
+    // Link). No per-actor source edit needed.
+    { ACTOR_EN_BA, { 8.0f, 8.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_GELDB  — Gerudo (z_en_geldB.c:924 func_8002F71C 6.0/yaw/6.0)
-    //  ACTOR_EN_BA     — Bari (z_en_ba.c:310 func_8002F71C 8.0/yaw/8.0)
     //  ACTOR_EN_BROB   — Coiled spike (z_en_brob.c func_8002F71C 5.0/yaw/1.0)
     //  ACTOR_EN_FD     — Flare Dancer (z_en_fd.c:315 func_8002F71C speed+2/yaw/6.0)
     //  ACTOR_EN_HONOTRAP — Fire trap (z_en_honotrap.c:324 func_8002F71C 5.0/yaw/0.0)
