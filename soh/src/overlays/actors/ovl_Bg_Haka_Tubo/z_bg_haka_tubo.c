@@ -122,7 +122,14 @@ void BgHakaTubo_Idle(BgHakaTubo* this, PlayState* play) {
     // Colliding with flame circle
     if (this->flamesCollider.base.atFlags & AT_HIT) {
         this->flamesCollider.base.atFlags &= ~AT_HIT;
-        func_8002F71C(play, &this->dyna.actor, 5.0f, this->dyna.actor.yawTowardsPlayer, 5.0f);
+        // Pitfall 28 + Path A — gate local-Link knockback on live
+        // distance to GET_PLAYER. Cross-machine routing via
+        // DummyPlayer.cpp AC_HIT + EnemyKnockbackTable entry
+        // ACTOR_BG_HAKA_TUBO. 80u = flame collider radius (~50u
+        // from collider init) + Link body 30u + margin.
+        if (Anchor_DistXZToLocalLink(&this->dyna.actor, play) < 80.0f) {
+            func_8002F71C(play, &this->dyna.actor, 5.0f, this->dyna.actor.yawTowardsPlayer, 5.0f);
+        }
     }
     // Colliding with hitbox inside the pot
     if (this->potCollider.base.acFlags & AC_HIT) {

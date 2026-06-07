@@ -105,6 +105,13 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // physically passing through the door's impact zone).
     { ACTOR_DOOR_KILLER, { 6.0f, 6.0f, 2 /* LARGE */, 16 /* kbDmg */ } },
 
+    // ─── Bg_Haka_Tubo (Shadow Temple skull jar flames) ────────────
+    // z_bg_haka_tubo.c:125 — func_8002F71C(play, this, 5.0f, yawTowardsPlayer, 5.0f)
+    // No per-actor tracker (BG-class environmental hazard). Source-side
+    // linkInRange gate added at z_bg_haka_tubo.c:123 (the AT_HIT branch
+    // was unconditional re: GET_PLAYER, Bug 1 territory).
+    { ACTOR_BG_HAKA_TUBO, { 5.0f, 5.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)
