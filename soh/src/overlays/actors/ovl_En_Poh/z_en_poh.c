@@ -10,6 +10,12 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Anchor multiplayer — nearest-player helper for targeting fixes.
+// Implementation lives in HookHandlers.cpp as extern "C". Plain
+// `extern` here (not `extern "C"`, which is a C++ keyword — see
+// session_state.md Pitfall 7). #99 / en_poh_sync_plan.md §4 step 1.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_IGNORE_QUAKE)
 
@@ -463,7 +469,10 @@ void func_80ADE9BC(EnPoh* this) {
 }
 
 void EnPoh_MoveTowardsPlayerHeight(EnPoh* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer — track the nearest player's Y instead of the
+    // local Link's Y so peer's local Poe converges on whoever is closest
+    // (matches host's authoritative target). #99 / en_poh_sync_plan.md §4 step 1.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     Math_StepToF(&this->actor.world.pos.y, player->actor.world.pos.y, 1.0f);
     this->actor.world.pos.y += 2.5f * Math_SinS(this->unk_195 * 0x800);
@@ -524,7 +533,11 @@ void func_80ADEC9C(EnPoh* this, PlayState* play) {
     Player* player;
     s16 facingDiff;
 
-    player = GET_PLAYER(play);
+    // Anchor multiplayer — facing check must read the player the host
+    // is tracking, not each receiver's local Link. Otherwise the attack
+    // engagement gate (Player_IsFacingActor below) fires on the wrong
+    // player. #99 / en_poh_sync_plan.md §4 step 1.
+    player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     SkelAnime_Update(&this->skelAnime);
     if (this->unk_198 != 0) {
         this->unk_198--;
@@ -1198,4 +1211,78 @@ void EnPoh_DrawSoul(Actor* thisx, PlayState* play) {
         gSPDisplayList(POLY_XLU_DISP++, this->info->soulDisplayList);
     }
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync — #99 / en_poh_sync_plan.md.
+// =============================================================================
+
+// Drives the natural death cycle on a non-host receiver when an
+// ENEMY_DEFEATED packet arrives. Mirror of `func_80ADE48C` (the local
+// "transition to death-charge" setup called when the damaged anim
+// completes with health==0) without firing
+// GameInteractor_ExecuteOnEnemyDefeat. The 28-frame `func_80ADF15C`
+// cycle will fire GameInteractor_ExecuteOnEnemyDefeat at unk_198==1
+// — that's expected; HostBookkeeping::HasDefeatBroadcast dedup guard
+// at HookHandlers.cpp prevents echo back to host.
+void EnPoh_SetupDyingNet(EnPoh* this, PlayState* play) {
+    this->actor.speedXZ = 0.0f;
+    this->actor.world.rot.y = this->actor.shape.rot.y;
+    this->unk_198 = 0;
+    this->actor.naviEnemyId = 0xFF;
+    this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    this->actionFunc = func_80ADF15C;
+}
+
+// Returns the index matching the current actionFunc per the state
+// machine table in en_poh_sync_plan.md §2. Indices >= 12 are death/
+// soul-talk states; indices 0/1 are init-transient. Returns -1 if
+// no match (shouldn't happen).
+s16 EnPoh_GetStateIndex(EnPoh* this) {
+    if (this->actionFunc == func_80ADEF38)        return 0;
+    if (this->actionFunc == EnPoh_ComposerAppear) return 1;
+    if (this->actionFunc == func_80ADEAC4)        return 2;
+    if (this->actionFunc == EnPoh_Idle)           return 3;
+    if (this->actionFunc == func_80ADEC9C)        return 4;
+    if (this->actionFunc == EnPoh_Attack)         return 5;
+    if (this->actionFunc == func_80ADEECC)        return 6;
+    if (this->actionFunc == func_80ADF894)        return 7;
+    if (this->actionFunc == func_80ADF574)        return 8;
+    if (this->actionFunc == func_80ADF5E0)        return 9;
+    if (this->actionFunc == EnPoh_Disappear)      return 10;
+    if (this->actionFunc == EnPoh_Appear)         return 11;
+    if (this->actionFunc == func_80ADF15C)        return 12;
+    if (this->actionFunc == EnPoh_Death)          return 13;
+    if (this->actionFunc == func_80ADFE28)        return 14;
+    if (this->actionFunc == func_80ADFE80)        return 15;
+    if (this->actionFunc == EnPoh_TalkRegular)    return 16;
+    if (this->actionFunc == EnPoh_TalkComposer)   return 17;
+    if (this->actionFunc == func_80AE009C)        return 18;
+    return -1;
+}
+
+// Applies a remote state-index by invoking the matching setup helper.
+// Init states 0/1 are skipped (each client runs EnPoh_SetupInitialAction
+// autonomously after Object_IsLoaded). Death/soul states 12+ are skipped
+// (driven via SetupDyingNet from the defeat handler; the dormant filter
+// at the call site also blocks). State 6 (post-hit recoil) is skipped
+// because func_80ADE28C reads `colliderCyl.info.acHitInfo->toucher.dmgFlags`
+// which would be stale/invalid on a receive-side replay — peer's local
+// AC_HIT will trigger this state naturally if applicable.
+void EnPoh_ApplyNetState(EnPoh* this, s16 stateIndex) {
+    switch (stateIndex) {
+        // Init states 0/1 skipped (autonomous on each client).
+        case 2:  func_80ADE114(this);        break;  // Idle anim 1
+        case 3:  EnPoh_SetupIdle(this);      break;  // Idle anim 2
+        case 4:  func_80ADE1BC(this);        break;  // Charge toward player
+        case 5:  EnPoh_SetupAttack(this);    break;  // Lantern swing
+        // Case 6 skipped — see comment above.
+        case 7:  func_80ADE368(this);        break;  // Flee
+        case 8:  func_80ADE4C8(this);        break;  // Hookshot spin
+        case 9:  func_80ADE514(this);        break;  // Turn-around
+        case 10: EnPoh_SetupDisappear(this); break;
+        case 11: EnPoh_SetupAppear(this);    break;
+        // States 12-18 (death/soul/talk) skipped — see comment above.
+        default: break;
+    }
 }

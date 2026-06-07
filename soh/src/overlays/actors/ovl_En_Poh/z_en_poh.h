@@ -59,4 +59,27 @@ typedef struct EnPoh {
     /* 0x0368 */ MtxF unk_368;
 } EnPoh; // size = 0x03A8
 
+// Anchor multiplayer state-machine sync (#99 / en_poh_sync_plan.md).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp, etc.), so the param name in the declaration
+// uses `actor` instead. The implementations in z_en_poh.c keep
+// `this` per OoT decomp convention.
+void EnPoh_SetupDyingNet(struct EnPoh* actor, PlayState* play);
+s16  EnPoh_GetStateIndex(struct EnPoh* actor);
+void EnPoh_ApplyNetState(struct EnPoh* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — reserved for symmetry with
+// other per-enemy sync plans. En_Poh's death cycle does NOT call
+// Item_DropCollectibleRandom (Poe yields a soul-talk interaction
+// with ITEM_POE bottle pickup instead), so this predicate is
+// currently unused by z_en_poh.c. Defined extern "C" in
+// Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnPohDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

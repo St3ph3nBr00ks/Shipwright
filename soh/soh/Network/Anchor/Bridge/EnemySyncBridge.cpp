@@ -125,6 +125,22 @@ extern "C" bool Anchor_ShouldSuppressEnFireflyDrop(Actor* actor) {
         || ext->networkDriveDying;
 }
 
+// Receiver-side predicate -- reserved for API consistency. En_Poh's
+// death cycle (EnPoh_Death -> soul-talk states) does NOT call
+// Item_DropCollectibleRandom; Poe yields ITEM_POE via a per-client
+// soul-talk interaction (z_en_poh.c:826 Item_Give path) rather than
+// the EN_ITEM00 drop chain. This predicate is currently unused at
+// the actor-side call sites but is exposed for symmetry with sibling
+// per-enemy sync plans and as a future hook if a drop call is ever
+// added to the death cycle.
+// See z_en_poh.c + Plans/en_poh_sync_plan.md section 4 step 3+5 / #99.
+extern "C" bool Anchor_ShouldSuppressEnPohDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // C-callable: non-host tells host that its local Link was just hit by this enemy
 // so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
 // Phase 2). No-op when Anchor is disconnected, when this client is the room
