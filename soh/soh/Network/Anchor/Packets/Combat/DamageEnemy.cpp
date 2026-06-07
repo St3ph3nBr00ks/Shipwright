@@ -369,8 +369,30 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             ((EnIk*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_HINTNUTS:
-            // Hintnuts — z_en_hintnuts.c:533. No acHitInfo deref.
-            ((EnHintnuts*)actor)->collider.base.acFlags |= AC_HIT;
+            // INTENTIONALLY EXCLUDED — log 438 P1 crash.
+            //
+            // `EnHintnuts_ColliderCheck` (z_en_hintnuts.c:536) derefs
+            // `this->collider.base.ac->id` to discriminate nutball vs.
+            // weapon hits. Setting AC_HIT WITHOUT populating
+            // `collider.base.ac` (which only the real collision engine
+            // does — z_collision_check.c:1739-1740 sets `ac->ac =
+            // at->actor` atomically with the flag bit) leaves `ac` at
+            // NULL → 0xC0000005 access violation when the actor's own
+            // ColliderCheck runs on the next tick.
+            //
+            // Hintnut sync does NOT need this drain. Two reasons:
+            //  1. PROJECTILE_HIT_ENEMY is the canonical host-authoritative
+            //     path for Hintnut state transitions (it calls
+            //     HitByScrubProjectile1/2 directly on host, then
+            //     broadcasts the resulting state via ENEMY_STATE).
+            //  2. Race-B clamp neutralises the damage value to 0 by the
+            //     time the peer's DAMAGE_ENEMY wire packet arrives, so
+            //     no health decrement is intended here anyway.
+            //
+            // Case body is a no-op. Leave the explicit case in place so
+            // a future reader sees "yes this was considered, and yes
+            // it's deliberately empty" rather than the default fall-
+            // through being mistaken for an oversight.
             break;
         case ACTOR_EN_PEEHAT: {
             // Peahat — z_en_peehat.c checks colCylinder (grounded variant)
