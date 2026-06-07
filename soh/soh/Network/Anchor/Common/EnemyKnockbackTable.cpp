@@ -112,6 +112,13 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // was unconditional re: GET_PLAYER, Bug 1 territory).
     { ACTOR_BG_HAKA_TUBO, { 5.0f, 5.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Bg_Hidan_Curtain (Fire Temple flame curtain) ────────────
+    // z_bg_hidan_curtain.c:219 — func_8002F71C(play, this, 5.0f, yawTowardsPlayer, 1.0f)
+    // No per-actor tracker (BG-class hazard). Source-side linkInRange
+    // gate added at z_bg_hidan_curtain.c:217 (unconditional func_8002F71C
+    // was Bug 1 territory).
+    { ACTOR_BG_HIDAN_CURTAIN, { 5.0f, 1.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)
