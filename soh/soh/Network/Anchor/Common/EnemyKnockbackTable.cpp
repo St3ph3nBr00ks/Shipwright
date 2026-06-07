@@ -172,6 +172,14 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // No per-actor tracker (BG-class hazard).
     { ACTOR_BG_HIDAN_SEKIZOU, { 5.0f, 1.0f, 2 /* LARGE */, 0 } },
 
+    // ─── En_Niw (regular cucco — swarm attack body slam) ─────────
+    // z_en_niw.c:1080 — func_8002F6D4(play, this, 2.0f, world.rot.y, 0.0f, 0x10)
+    // Yaw is `world.rot.y` (own facing — not affected by #153 overlay).
+    // kbDmg=0x10 (1 heart additive). Source-side linkInRange gate
+    // added at z_en_niw.c:1079 (the gate used xyzDistToPlayerSq which
+    // is overwritten by #153's nearest-player overlay).
+    { ACTOR_EN_NIW, { 2.0f, 0.0f, 2 /* LARGE */, 0x10 /* kbDmg */ } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)
