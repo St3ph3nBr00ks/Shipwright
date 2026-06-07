@@ -1866,6 +1866,34 @@ void Anchor::RegisterHooks() {
                 (ext->peerKillingBlowOriginalDamage > 0)
                     ? ext->peerKillingBlowOriginalDamage
                     : (u8)actor->colChkInfo.damage;
+
+            // #90 / log 434 fix — En_St armored-hit broadcast suppression.
+            //
+            // CollisionCheck populates colChkInfo.damage for ANY peer hit
+            // on the Skulltula regardless of which cylinder was struck.
+            // Vanilla's EnSt_CheckHitFrontside (z_en_st.c:440) rejects
+            // front-shield hits without calling Actor_ApplyDamage AND
+            // sets swayTimer to exactly 60. Without this gate, peer's
+            // front-shield hits would still broadcast colChkInfo.damage
+            // to host — and after the AC_HIT routing fix in a5a940261,
+            // host's back-cylinder application kills the Skulltula
+            // from peer's armored bounce. Bug observed in log 434.
+            //
+            // Gate: when peer's local actor is En_St AND swayTimer
+            // is exactly 60 (just-set by CheckHitFrontside this frame),
+            // suppress the damage forward. CheckHitBackside resets
+            // swayTimer to 0 on legitimate back hits — the != 60
+            // case covers all back-hit scenarios cleanly.
+            if (actor->id == ACTOR_EN_ST) {
+                EnSt* st = (EnSt*)actor;
+                if (st->swayTimer == 60 && forwardDamage > 0) {
+                    SPDLOG_INFO("[DamageEnemy] En_St armored-hit suppress netId={} "
+                                "swayTimer=60 → not forwarding damage={} (front-shield bounce)",
+                                ext->netId, (int)forwardDamage);
+                    forwardDamage = 0;
+                }
+            }
+
             if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) && forwardDamage > 0) {
                 // #174/#175: forward damageEffect (set on enemy by collision damage-table
                 // lookup) and atHitEffect (set on the player by CollisionCheck_SetATvsAC
