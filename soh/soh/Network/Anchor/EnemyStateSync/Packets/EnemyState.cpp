@@ -49,6 +49,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_St/z_en_st.h"
 // #148 / en_sw_sync_plan.md — Skullwalltula state-machine sync.
 #include "overlays/actors/ovl_En_Sw/z_en_sw.h"
+// en_ssh_sync_plan.md — Cursed Skulltula people state-machine sync.
+#include "overlays/actors/ovl_En_Ssh/z_en_ssh.h"
 // en_test_sync_plan.md — Stalfos state-machine sync.
 #include "overlays/actors/ovl_En_Test/z_en_test.h"
 // Plans/en_wf_sync_plan.md — Wolfos state-machine sync.
@@ -191,6 +193,14 @@ struct EnemyUpdateExtras {
     // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
     bool hasEnBili         = false;
     s16  enBiliActionState = 0;
+
+    // en_ssh_sync_plan.md — Cursed Skulltula people. State-machine +
+    // stun + hitCount + stateFlags sync per OQ B/C/D resolutions.
+    bool hasEnSsh         = false;
+    s16  enSshActionState = 0;
+    u8   enSshHitCount    = 0;
+    s16  enSshStunTimer   = 0;
+    u16  enSshStateFlags  = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
     // triggering the fight starts it on every client. Plus stunned/
@@ -407,6 +417,13 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnSw* sw            = (EnSw*)actor;
         e.hasEnSw           = true;
         e.enSwActionState   = EnSw_GetStateIndex(sw);
+    } else if (actor->id == ACTOR_EN_SSH) {
+        EnSsh* ssh          = (EnSsh*)actor;
+        e.hasEnSsh          = true;
+        e.enSshActionState  = EnSsh_GetStateIndex(ssh);
+        e.enSshHitCount     = ssh->hitCount;
+        e.enSshStunTimer    = ssh->stunTimer;
+        e.enSshStateFlags   = ssh->stateFlags;
     } else if (actor->id == ACTOR_EN_TEST) {
         EnTest* tst         = (EnTest*)actor;
         e.hasEnTest         = true;
@@ -527,6 +544,13 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnSw != prev.hasEnSw) return true;
     if (cur.hasEnSw) {
         if (cur.enSwActionState != prev.enSwActionState) return true;
+    }
+    if (cur.hasEnSsh != prev.hasEnSsh) return true;
+    if (cur.hasEnSsh) {
+        if (cur.enSshActionState != prev.enSshActionState) return true;
+        if (cur.enSshHitCount    != prev.enSshHitCount)    return true;
+        if (cur.enSshStunTimer   != prev.enSshStunTimer)   return true;
+        if (cur.enSshStateFlags  != prev.enSshStateFlags)  return true;
     }
     if (cur.hasEnTest != prev.hasEnTest) return true;
     if (cur.hasEnTest) {
@@ -966,6 +990,19 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
     if (extras.hasEnSw) {
         payload["actionState"] = extras.enSwActionState;
+    }
+
+    // en_ssh_sync_plan.md — En_Ssh (Cursed Skulltula people).
+    // OQ B/C/D: ship stunTimer + stateFlags + hitCount alongside
+    // actionState for vanilla parity. Reader applies these directly
+    // to the actor's fields (no filter — small ints / flags). Main
+    // actionState uses the overloaded "actionState" key (mirror of
+    // EnSt/EnSw); secondary fields use enSsh-prefixed keys.
+    if (extras.hasEnSsh) {
+        payload["actionState"]      = extras.enSshActionState;
+        payload["enSshHitCount"]    = (int)extras.enSshHitCount;
+        payload["enSshStunTimer"]   = (int)extras.enSshStunTimer;
+        payload["enSshStateFlags"]  = (int)extras.enSshStateFlags;
     }
 
     // en_test_sync_plan.md §3 — En_Test (Stalfos) state-machine sync.
@@ -1632,6 +1669,25 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         // #148 / en_sw_sync_plan.md — cache En_Sw actionState.
         if (actor->id == ACTOR_EN_SW && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // en_ssh_sync_plan.md — En_Ssh (Cursed Skulltula people).
+        // Cache actionState; HookHandlers driver applies via filter.
+        // OQ B/C/D: stunTimer / hitCount / stateFlags written directly
+        // to the actor here (no EnemyNetId cache needed; small overhead).
+        if (actor->id == ACTOR_EN_SSH) {
+            EnSsh* ssh = (EnSsh*)actor;
+            if (payload.contains("actionState")) {
+                ext->netStateIndex = (s16)payload["actionState"].get<int>();
+            }
+            if (payload.contains("enSshHitCount")) {
+                ssh->hitCount = (u8)payload["enSshHitCount"].get<int>();
+            }
+            if (payload.contains("enSshStunTimer")) {
+                ssh->stunTimer = (s16)payload["enSshStunTimer"].get<int>();
+            }
+            if (payload.contains("enSshStateFlags")) {
+                ssh->stateFlags = (u16)payload["enSshStateFlags"].get<int>();
+            }
         }
         // en_test_sync_plan.md — cache En_Test actionState.
         if (actor->id == ACTOR_EN_TEST && payload.contains("actionState")) {

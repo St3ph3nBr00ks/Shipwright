@@ -2377,6 +2377,37 @@ void Anchor::RegisterHooks() {
                 }
             }
 
+            // en_ssh_sync_plan.md §3 — En_Ssh (Cursed Skulltula people)
+            // state-machine sync. Dormant-to-active filter: states 0/1
+            // (Start init transient / Wait on ceiling) don't override
+            // active ground states 2/3/4/6 (Drop/Land/Idle/Return).
+            // State 5 (Talk) is locally-owned — peer's textbox interaction
+            // drives Talk independently; never apply over wire. No death
+            // gating — EnSsh has no combat-death cycle (cursed-human NPCs).
+            // OQ B/C/D: hitCount / stunTimer / stateFlags are applied
+            // directly in the EnemyState.cpp receiver — no extra work here.
+            if (actor->id == ACTOR_EN_SSH && ext->netStateIndex >= 0) {
+                EnSsh* ssh = (EnSsh*)actor;
+                s16 curState = EnSsh_GetStateIndex(ssh);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
+                bool localIsActive = (curState >= 2 && curState <= 6);
+                bool netIsTalk     = (ext->netStateIndex == 5);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !netIsTalk) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnSsh] rx netId={} apply {}->{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnSsh_ApplyNetState(ssh, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnSsh] rx netId={} block net={} local={} (filter)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
+                    }
+                }
+            }
+
             // #148 / en_sw_sync_plan.md §3 — Skullwalltula state-machine
             // sync. swType-gated dormant-to-active filter:
             //   combat (swType=0): dormant=6 (wall idle); active=7/8/9

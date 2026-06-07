@@ -89,6 +89,12 @@ bool IsSyncedWorldActor(int16_t actorId) {
     switch (actorId) {
         case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
         case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
+        case ACTOR_EN_SSH:      return true;  // en_ssh_sync_plan.md — Cursed Skulltula
+                                              // people (Skulltula House NPCs).
+                                              // ACTORCAT_NPC; state-machine + animation +
+                                              // damage/sway sync. No combat-death cycle
+                                              // (Init-time Actor_Kill on gsTokens
+                                              // threshold is the only kill path).
         case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
         case ACTOR_EN_REEBA:    return true;  // #102 Leever — small variant
                                               // stays ACTORCAT_MISC, big variant

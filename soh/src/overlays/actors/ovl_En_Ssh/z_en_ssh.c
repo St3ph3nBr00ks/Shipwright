@@ -907,3 +907,49 @@ void EnSsh_Draw(Actor* thisx, PlayState* play) {
     CLOSE_DISPS(play->state.gfxCtx);
     SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnSsh_OverrideLimbDraw, EnSsh_PostLimbDraw, &this->actor);
 }
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (en_ssh_sync_plan.md).
+// Mirror of EnSt's pattern (en_st_sync_plan_v2.md / z_en_st.c §1153+).
+// No SetupDyingNet — EnSsh has no combat-death cycle (cursed-human NPCs).
+// =============================================================================
+
+s16 EnSsh_GetStateIndex(EnSsh* this) {
+    if (this->actionFunc == EnSsh_Start)  return 0;
+    if (this->actionFunc == EnSsh_Wait)   return 1;
+    if (this->actionFunc == EnSsh_Drop)   return 2;
+    if (this->actionFunc == EnSsh_Land)   return 3;
+    if (this->actionFunc == EnSsh_Idle)   return 4;
+    if (this->actionFunc == EnSsh_Talk)   return 5;
+    if (this->actionFunc == EnSsh_Return) return 6;
+    return -1;
+}
+
+void EnSsh_ApplyNetState(EnSsh* this, s16 stateIndex) {
+    switch (stateIndex) {
+        // 0 (Start) — init transient; not network-observed in practice.
+        // 1 (Wait) — dormant; receive driver filters this out before
+        //            calling here when peer is in active state.
+        // 5 (Talk) — locally-owned (textbox interaction). Skipped at
+        //            the driver site; never reaches this switch.
+        case 2:
+            EnSsh_SetDropAnimation(this);
+            EnSsh_SetupAction(this, EnSsh_Drop);
+            break;
+        case 3:
+            EnSsh_SetLandAnimation(this);
+            EnSsh_SetupAction(this, EnSsh_Land);
+            break;
+        case 4:
+            // No "SetIdleAnimation" — Idle uses whatever anim Land
+            // finished with (SSH_ANIM_WAIT via timer expiry path).
+            EnSsh_SetupAction(this, EnSsh_Idle);
+            break;
+        case 6:
+            EnSsh_SetReturnAnimation(this);
+            EnSsh_SetupAction(this, EnSsh_Return);
+            break;
+        default:
+            break;
+    }
+}

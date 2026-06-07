@@ -41,4 +41,11 @@ typedef struct EnSsh {
 
 #define ENSSH_FATHER 0
 
+// Anchor multiplayer sync — declared so HookHandlers.cpp and
+// EnemyState.cpp can call into the actor's state-machine helpers.
+// Mirror of EnSt's pattern (en_st_sync_plan_v2.md / z_en_st.h).
+// `actor` rather than `this` per Pitfall 1 (C++ keyword collision).
+s16  EnSsh_GetStateIndex(struct EnSsh* actor);
+void EnSsh_ApplyNetState(struct EnSsh* actor, s16 stateIndex);
+
 #endif
