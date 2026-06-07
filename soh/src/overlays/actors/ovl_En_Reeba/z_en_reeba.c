@@ -12,6 +12,10 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Multiplayer targeting (#102 / en_reeba_sync_plan.md §3 step 1).
+// Defined extern "C" in HookHandlers.cpp.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_LOCK_ON_DISABLED)
@@ -171,7 +175,11 @@ void EnReeba_Destroy(Actor* thisx, PlayState* play) {
 
 void func_80AE4F40(EnReeba* this, PlayState* play) {
     f32 frames = Animation_GetLastFrame(&object_reeba_Anim_0001E4);
-    Player* player = GET_PLAYER(play);
+    // #102 / en_reeba_sync_plan.md §3 step 1 — nearest player including
+    // DummyPlayers. Drives the emerge `waitTimer` from the player's velocity;
+    // without this fix host's velocity was the only input even when peer's
+    // DummyPlayer was the actual nearest target.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s16 playerSpeed;
 
     Animation_Change(&this->skelanime, &object_reeba_Anim_0001E4, 2.0f, 0.0f, frames, ANIMMODE_LOOP, -10.0f);
@@ -198,7 +206,12 @@ void func_80AE4F40(EnReeba* this, PlayState* play) {
 }
 
 void func_80AE5054(EnReeba* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // #102 / en_reeba_sync_plan.md §3 step 1 — nearest player including
+    // DummyPlayers. Drives the initial roll direction via aimType switch
+    // on player.shape.rot.y + linearVelocity; using GET_PLAYER alone aimed
+    // at the host's local Link even when the leever's emerge was triggered
+    // by a peer's proximity.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     f32 playerLinearVel;
 
     SkelAnime_Update(&this->skelanime);
@@ -480,10 +493,17 @@ void func_80AE5C38(EnReeba* this, PlayState* play) {
 
             EffectSsDeadDb_Spawn(play, &pos, &velocity, &accel, 120, 0, 255, 255, 255, 255, 255, 0, 0, 1, 9, true);
 
-            if (!this->isBig) {
-                Item_DropCollectibleRandom(play, &this->actor, &pos, 0xE0);
-            } else {
-                Item_DropCollectibleRandom(play, &this->actor, &pos, 0xC0);
+            // #102 / en_reeba_sync_plan.md §3 step 3 — suppress drop when the
+            // death cycle was network-driven (peer's ENEMY_DEFEATED arrived
+            // and we're replaying the shrink → drop sequence on this client).
+            // Host's local kill broadcasts ENEMY_DEFEATED + ITEM_DROP_SYNC
+            // separately; receiver mustn't double-drop.
+            if (!Anchor_ShouldSuppressEnReebaDrop(&this->actor)) {
+                if (!this->isBig) {
+                    Item_DropCollectibleRandom(play, &this->actor, &pos, 0xE0);
+                } else {
+                    Item_DropCollectibleRandom(play, &this->actor, &pos, 0xC0);
+                }
             }
 
             if (this->actor.parent != NULL) {
@@ -584,7 +604,12 @@ void func_80AE5EDC(EnReeba* this, PlayState* play) {
 void EnReeba_Update(Actor* thisx, PlayState* play2) {
     PlayState* play = play2;
     EnReeba* this = (EnReeba*)thisx;
-    Player* player = GET_PLAYER(play);
+    // #102 / en_reeba_sync_plan.md §3 step 1 — nearest player including
+    // DummyPlayers. Used only for the AT_HIT pointer-compare at line below
+    // (`this->collider.base.at == &player->actor`). Host-side gameplay: if
+    // the leever's collider just hit a peer's DummyPlayer, the pointer
+    // compare must succeed for the "stop attacking after hit" path to fire.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     func_80AE5EDC(this, play);
     this->actionfunc(this, play);
@@ -682,5 +707,64 @@ void EnReeba_Draw(Actor* thisx, PlayState* play) {
         debugPos.z = (Math_CosS(this->actor.world.rot.y) * 30.0f) + this->actor.world.pos.z;
         DebugDisplay_AddObject(debugPos.x, debugPos.y, debugPos.z, this->actor.world.rot.x, this->actor.world.rot.y,
                                this->actor.world.rot.z, 1.0f, 1.0f, 1.0f, 255, 0, 0, 255, 4, play->state.gfxCtx);
+    }
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (#102 / en_reeba_sync_plan.md).
+// =============================================================================
+
+// Triggers EnReeba's death cycle on a non-host receiver without firing
+// GameInteractor_ExecuteOnEnemyDefeat. Mirrors vanilla `func_80AE5BC4`
+// (arrow-kill entry, z_en_reeba.c:452-459) — both small + big variants
+// converge on the same `func_80AE5C38` shrink-and-drop sequence.
+void EnReeba_SetupDyingNet(EnReeba* this, PlayState* play) {
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_RIVA_DEAD);
+    Enemy_StartFinishingBlow(play, &this->actor);
+    this->actor.speedXZ = -8.0f;
+    this->actor.world.rot.y = this->actor.yawTowardsPlayer;
+    Actor_SetColorFilter(&this->actor, 0x4000, 0xFF, 0, 8);
+    this->waitTimer = 14;
+    this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    this->actionfunc = func_80AE5C38;
+}
+
+s16 EnReeba_GetStateIndex(EnReeba* this) {
+    if (this->actionfunc == func_80AE4F40) return 0;   // emerge init transient
+    if (this->actionfunc == func_80AE5054) return 1;   // rising from ground
+    if (this->actionfunc == func_80AE5270) return 2;   // rolling (small)
+    if (this->actionfunc == func_80AE538C) return 3;   // big re-arm
+    if (this->actionfunc == func_80AE53AC) return 4;   // rolling (big)
+    if (this->actionfunc == func_80AE561C) return 5;   // post-bounce decel
+    if (this->actionfunc == func_80AE5688) return 6;   // begin-burrow
+    if (this->actionfunc == func_80AE56E0) return 7;   // sinking into ground
+    if (this->actionfunc == func_80AE57F0) return 8;   // damaged setup
+    if (this->actionfunc == func_80AE5854) return 9;   // being-damaged
+    if (this->actionfunc == func_80AE58EC) return 10;  // stunned setup
+    if (this->actionfunc == func_80AE5938) return 11;  // stunned-decel
+    if (this->actionfunc == func_80AE5A9C) return 12;  // post-stun-wait
+    if (this->actionfunc == func_80AE5BC4) return 13;  // death entry
+    if (this->actionfunc == func_80AE5C38) return 14;  // dying — shrink + drop
+    if (this->actionfunc == func_80AE5E48) return 15;  // recovery shake
+    return -1;
+}
+
+void EnReeba_ApplyNetState(EnReeba* this, PlayState* play, s16 stateIndex) {
+    // Death-class states (8-15) are not callable from this path; the
+    // caller's PhaseImpliesHasLocalDeath gate in the receive driver
+    // blocks them already. Only assign the actionfunc pointer; the
+    // function's body will run on the next EnReeba_Update tick to
+    // initialize any per-state setup.
+    switch (stateIndex) {
+        case 0:  this->actionfunc = func_80AE4F40; break;
+        case 1:  this->actionfunc = func_80AE5054; break;
+        case 2:  this->actionfunc = func_80AE5270; break;
+        case 3:  this->actionfunc = func_80AE538C; break;
+        case 4:  this->actionfunc = func_80AE53AC; break;
+        case 5:  this->actionfunc = func_80AE561C; break;
+        case 6:  this->actionfunc = func_80AE5688; break;
+        case 7:  this->actionfunc = func_80AE56E0; break;
+        // 8-15 (damage/stun/death/recovery): skip silently.
+        default: break;
     }
 }
