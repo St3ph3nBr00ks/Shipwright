@@ -111,6 +111,9 @@ class Anchor : public Network {
     friend void AnchorFollower::CaptureFrame(const AnchorFollower::FollowerFrameContext&);
 
   private:
+    // ========================================================================
+    // SECTION — Connection state + packet queues
+    // ========================================================================
     uint32_t spawningDummyPlayerForClientId = 0;
     // Local monotonic counter sent in UPDATE_CLIENT_STATE so the host can detect
     // same-scene reloads (Game Over continue, void-out) in addition to scene
@@ -544,6 +547,11 @@ class Anchor : public Network {
     void BackfillEnemyNetIds();
     void SetDummyPlayerClientId(const Actor* actor, uint32_t clientId);
 
+    // ========================================================================
+    // SECTION — HandlePacket_* (receive-side dispatch table, private)
+    // Dispatch routes are wired up via the packet-handler registry
+    // (Anchor.cpp B.3 refactor); these declarations are the targets.
+    // ========================================================================
     void HandlePacket_AllClientState(nlohmann::json payload);
     // Pillar C2 Phase 4 — unified ENEMY_STATE handler. Sole entry point
     // for incoming enemy lifecycle packets; dispatches by phase to the
@@ -622,6 +630,11 @@ class Anchor : public Network {
     void HandlePacket_BossExitTeamWarp(nlohmann::json payload);
 
   public:
+    // ========================================================================
+    // SECTION — Public state + accessors
+    // External Flotilla modules read these fields directly. New members
+    // intended for cross-module access land here per Pitfall 16.
+    // ========================================================================
     uint32_t ownClientId;
 
     // Set to true for the duration of AnchorDirector::Director::ExecuteSpawn's
@@ -1136,6 +1149,11 @@ class Anchor : public Network {
     // function lambda inside TickFollower; promoted in Phase 1 commit 10
     // so HandleStateIdle / HandleStateFollow can reference it.
     Actor* ScanForItemCandidate(Player* player);
+
+    // ========================================================================
+    // SECTION — SendPacket_* (host-side / broadcast emitters, public)
+    // Called from HookHandlers.cpp / Packets/* / external Flotilla modules.
+    // ========================================================================
 
     // Pillar C2 Phase 4 — phase-specific senders for the unified
     // ENEMY_STATE wire packet. All four emit type=ENEMY_STATE with the
