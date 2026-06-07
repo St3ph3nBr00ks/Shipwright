@@ -12,6 +12,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"  // #90 — PhaseImpliesPendingNaturalDeath
 #include "soh/ObjectExtension/ObjectExtension.h"
 
 extern "C" {
@@ -55,6 +56,18 @@ extern "C" void Anchor_NotifyDialogEnd(Actor* targetActor) {
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(targetActor);
     if (ext == nullptr) return;
     Anchor::Instance->SendPacket_DialogEnd(ext->netId);
+}
+
+// Receiver-side predicate — true when an En_St death cycle was network-
+// driven (peer received ENEMY_DEFEATED and is replaying the bounce → die
+// sequence). EnSt_Die uses this to suppress the random-drop call so
+// host's authoritative ITEM_DROP_SYNC isn't double-applied.
+// See z_en_st.c EnSt_Die + Plans/en_st_sync_plan_v2.md §3 step 3+5.
+extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
 // C-callable: non-host tells host that its local Link was just hit by this enemy

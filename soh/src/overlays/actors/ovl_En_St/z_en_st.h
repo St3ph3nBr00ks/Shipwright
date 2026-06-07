@@ -59,5 +59,16 @@ void EnSt_SetupDyingNet(struct EnSt* actor, PlayState* play);
 s16  EnSt_GetStateIndex(struct EnSt* actor);
 void EnSt_ApplyNetState(struct EnSt* actor, s16 stateIndex);
 
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and we're replaying
+// the bounce → die sequence). Defined extern "C" in HookHandlers.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnStDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 
 #endif

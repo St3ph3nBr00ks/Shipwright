@@ -309,7 +309,12 @@ void EnSt_InitColliders(EnSt* this, PlayState* play) {
 
 void EnSt_CheckBodyStickHit(EnSt* this, PlayState* play) {
     ColliderInfo* body = &this->colCylinder[0].info;
-    Player* player = GET_PLAYER(play);
+    // #90 / en_st_sync_plan_v2.md §3 step 1 — nearest player including
+    // DummyPlayers. Original GET_PLAYER read host's local Link only,
+    // which flipped damage-flag routing wrongly when a peer's DummyPlayer
+    // was the actual attacker holding the Deku stick. unk_860 is the
+    // Deku-stick-held flag; mirrored on DummyPlayer via PLAYER_UPDATE.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     if (player->unk_860 != 0) {
         body->bumper.dmgFlags |= 2;
@@ -384,7 +389,10 @@ void EnSt_UpdateCylinders(EnSt* this, PlayState* play) {
 }
 
 s32 EnSt_CheckHitLink(EnSt* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // #90 / en_st_sync_plan_v2.md §3 step 1 — nearest player including
+    // DummyPlayers. Used only for body-hit SFX positioning (line ~432).
+    // Cosmetic; correcting for completeness/parity with sibling fixes.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 hit;
     s32 i;
 
@@ -1024,7 +1032,14 @@ void EnSt_Die(EnSt* this, PlayState* play) {
     if (DECR(this->finishDeathTimer) != 0) {
         EnSt_SpawnDeadEffect(this, play);
     } else {
-        Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xE0);
+        // #90 / en_st_sync_plan_v2.md §3 step 3 — suppress drop when the
+        // death cycle was network-driven (peer's ENEMY_DEFEATED arrived
+        // and we're replaying the bounce → die sequence on this client).
+        // Host's local kill broadcasts ENEMY_DEFEATED + ITEM_DROP_SYNC
+        // separately; receiver mustn't double-drop.
+        if (!Anchor_ShouldSuppressEnStDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xE0);
+        }
         Actor_Kill(&this->actor);
     }
 }
