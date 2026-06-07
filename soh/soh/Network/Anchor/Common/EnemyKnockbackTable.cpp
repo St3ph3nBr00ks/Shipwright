@@ -197,14 +197,25 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // got blown up when peer was the closer DummyPlayer).
     { ACTOR_EN_EX_RUPPY, { 2.0f, 0.0f, 2 /* LARGE */, 0 } },
 
-    // Future entries (Pitfall 28 audit remaining queue):
-    //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
-    //    based — needs different cross-machine treatment, not Path A)
-    //  ACTOR_EN_FD     — Flare Dancer (z_en_fd.c:315 func_8002F71C speed+2/yaw/6.0)
-    //  ACTOR_EN_HONOTRAP — Fire trap (z_en_honotrap.c:324 func_8002F71C 5.0/yaw/0.0)
-    //  ACTOR_EN_MB     — Moblin (7 sites — needs per-site analysis)
-    //  ACTOR_EN_IK shield AC handling (separate from axe AT)
-    //  ... (full list in Plans/pitfall_28_actor_audit.md Tier 2/4)
+    // ─── Path A phase WRAPPED (2026-06-07) ──────────────────────
+    // 20 entries above. The remaining ~11 vanilla actors that call
+    // func_8002F* alongside the player-effect path are Vanilla
+    // Mirror Pattern (VMP) territory, NOT pure Path A — they call
+    // `play->damagePlayer(play, -N)` directly (En_St / En_Ssh /
+    // En_Go / En_Go2), write Player state fields directly
+    // (En_Bdfire `bodyIsBurning`), or are reversed-semantics
+    // bouncebacks (En_Fire_Rock), or grab/throw mechanics requiring
+    // multi-packet sync (En_Mb / En_Rr / En_Dh).
+    //
+    // See Plans/pitfall_28_actor_audit.md "Phase 1 coverage
+    // summary" for the full classification ledger, and
+    // session_state.md "Vanilla Mirror Pattern" + its "Candidate
+    // queue" for the Phase 2 implementation path.
+    //
+    // Documented edge cases (not Path A, not VMP):
+    //  ACTOR_EN_BROB   — DynaPolyActor_IsPlayerOnTop per-player trigger
+    //  ACTOR_DEMO_KEKKAI — Two variants share one actorId
+    //  ACTOR_BG_JYA_ZURERUKABE — Local GET_PLAYER climb-ladder gate
 };
 
 bool LookupKnockback(int16_t actorId, KnockbackParams* out) {
