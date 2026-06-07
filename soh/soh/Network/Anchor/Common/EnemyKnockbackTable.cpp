@@ -158,6 +158,20 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // No per-actor tracker (BG-class hazard).
     { ACTOR_BG_HIDAN_FWBIG, { 5.0f, 1.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Bg_Hidan_Sekizou (Fire Temple fire-breathing statue) ────
+    // z_bg_hidan_sekizou.c:262 (inside func_8088D750) —
+    //   func_8002F71C(play, this, 5.0f, phi_a3, 1.0f)
+    // Yaw `phi_a3` is computed from `yawTowardsPlayer` at line 243
+    // then cardinal-snapped via a switch table — partially affected
+    // by #153 overlay (cache read at line 243). Receiver uses host's
+    // shipped yaw verbatim via Player_Update; for a statue facing a
+    // fixed cardinal direction this is functionally correct (host's
+    // statue snaps to the closest cardinal, peer's local statue
+    // independently snaps). Source-side linkInRange gate added at
+    // z_bg_hidan_sekizou.c:276 (AT_HIT branch).
+    // No per-actor tracker (BG-class hazard).
+    { ACTOR_BG_HIDAN_SEKIZOU, { 5.0f, 1.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)

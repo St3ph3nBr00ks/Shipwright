@@ -275,7 +275,16 @@ void BgHidanSekizou_Update(Actor* thisx, PlayState* play2) {
 
     if (this->collider.base.atFlags & AT_HIT) {
         this->collider.base.atFlags &= ~AT_HIT;
-        func_8088D750(this, play);
+        // Pitfall 28 + Path A — gate local-Link knockback on live
+        // distance to GET_PLAYER. func_8088D750 calls func_8002F71C
+        // unconditionally with a cardinal-snapped yaw derived from
+        // yawTowardsPlayer (line 243). Cross-machine routing via
+        // DummyPlayer.cpp AC_HIT + EnemyKnockbackTable entry
+        // ACTOR_BG_HIDAN_SEKIZOU. 100u = fire-breath collider reach
+        // + Link body 30 + margin.
+        if (Anchor_DistXZToLocalLink(&this->dyna.actor, play) < 100.0f) {
+            func_8088D750(this, play);
+        }
     }
 
     this->updateFunc(this, play);
