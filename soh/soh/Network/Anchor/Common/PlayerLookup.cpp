@@ -1,6 +1,8 @@
 #include "PlayerLookup.h"
 #include "soh/Network/Anchor/Anchor.h"  // DummyPlayer_Update forward decl, AnchorClient
 #include "soh/Network/Anchor/AIDirector/Descriptors/InvaderDescriptor.h"  // AnchorDirector::IsSceneFlaggedNoInvaders
+#include "soh/Network/Anchor/Common/EnemyKnockbackTable.h"  // VMP Phase B — broadcast helper looks up kb params
+#include "soh/Network/Anchor/Common/SceneAuthority.h"        // VMP Phase B — host-authority gate
 
 extern "C" {
 #include "macros.h"  // GET_PLAYER, SQ
@@ -317,4 +319,79 @@ extern "C" f32 Anchor_HeightDiffToLocalLink(Actor* actor, PlayState* play) {
     Player* p = GET_PLAYER(play);
     if (p == nullptr) return 9999.0f;
     return Actor_HeightDiff(actor, &p->actor);
+}
+
+// VMP Phase B — broadcast direct damage to peers' DummyPlayers in range.
+// Walks ACTORCAT_NPC for DummyPlayer actors (same iteration as
+// FindNearestPlayerActor) plus the Pillar B Phase 3 cross-timeline
+// filter. For each DummyPlayer within `range` XZ of `attacker`, sends a
+// DAMAGE_PLAYER packet with `directDamage` + knockback params looked up
+// from EnemyKnockbackTable on the attacker's id.
+//
+// Gated on Anchor's room-host authority — only the authoritative client
+// for the current room broadcasts. Mirrors the gate used in
+// DummyPlayer.cpp's AC_HIT path (`SceneAuthority::IsMyCurrentRoomHost`)
+// so multiple machines don't double-broadcast the same event.
+//
+// Returns the number of peers notified (0 when no peers in range, or
+// when not the authoritative host).
+extern "C" int Anchor_BroadcastDirectDamageInRange(Actor* attacker, PlayState* play,
+                                                   f32 range, u8 directDamage) {
+    if (attacker == nullptr || play == nullptr || directDamage == 0) return 0;
+    if (Anchor::Instance == nullptr) return 0;
+    if (!SceneAuthority::IsMyCurrentRoomHost()) return 0;
+
+    // Look up the attacker's vanilla knockback params. If registered,
+    // ship the knockback block alongside directDamage so the receiver
+    // gets full vanilla parity (animation + iframes via Player_Update).
+    // If not registered, ship directDamage alone — peer receiver still
+    // applies damage via gPlayState->damagePlayer but no knockback.
+    AnchorKnockback::KnockbackParams kbp{};
+    bool haveKb = AnchorKnockback::LookupKnockback(attacker->id, &kbp);
+
+    const f32 rangeSq = range * range;
+    const Vec3f attackerPos = attacker->world.pos;
+    int notified = 0;
+
+    Actor* npc = play->actorCtx.actorLists[ACTORCAT_NPC].head;
+    while (npc != nullptr) {
+        if (npc->id == ACTOR_EN_OE2 && npc->update == DummyPlayer_Update) {
+            const uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(npc);
+            auto it = Anchor::Instance->clients.find(clientId);
+            // Cross-timeline filter (Pillar B Phase 3).
+            if (it != Anchor::Instance->clients.end() &&
+                it->second.linkAge == gSaveContext.linkAge &&
+                it->second.online && it->second.isSaveLoaded) {
+                const f32 dx = npc->world.pos.x - attackerPos.x;
+                const f32 dz = npc->world.pos.z - attackerPos.z;
+                if (dx * dx + dz * dz < rangeSq) {
+                    // Wire `damage` field = 0 (NOT directDamage). The
+                    // receiver writes `damage` into colChkInfo.damage; for
+                    // vanilla OC2 touch attackers the func_8002F71C kbDmg=0
+                    // so the knockback path applies zero additional HP.
+                    // The directDamage field separately drives
+                    // gPlayState->damagePlayer(-N) on the peer — that's the
+                    // single source of HP loss, matching vanilla.
+                    if (haveKb) {
+                        Anchor::Instance->SendPacket_DamagePlayer(
+                            clientId, DUMMY_PLAYER_HIT_RESPONSE_NORMAL,
+                            0 /* damage; HP comes via directDamage */,
+                            &attackerPos,
+                            kbp.type, kbp.speed, kbp.yVelocity, kbp.damage,
+                            directDamage);
+                    } else {
+                        Anchor::Instance->SendPacket_DamagePlayer(
+                            clientId, DUMMY_PLAYER_HIT_RESPONSE_NORMAL,
+                            0 /* damage; HP comes via directDamage */,
+                            &attackerPos,
+                            0u, 0.0f, 0.0f, 0u,
+                            directDamage);
+                    }
+                    ++notified;
+                }
+            }
+        }
+        npc = npc->next;
+    }
+    return notified;
 }

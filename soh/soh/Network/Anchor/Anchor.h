@@ -1447,6 +1447,20 @@ class Anchor : public Network {
                                  const Vec3f* attackerPos,
                                  u32 knockbackType, f32 knockbackSpeed,
                                  f32 knockbackYVelocity, u32 knockbackDamage);
+    // VMP Phase B (2026-06-07) — direct-damage extension for OC2-style
+    // touch attackers (En_St, En_Ssh, En_Go, En_Go2) that call
+    // `play->damagePlayer(play, -N)` directly in addition to knockback.
+    // directDamage = the N value (positive HP units); receiver invokes
+    // gPlayState->damagePlayer(gPlayState, -directDamage) to mirror the
+    // vanilla local effect. directDamage=0 = no direct damage (the
+    // existing Path A AT-collider path handles damage via colChkInfo).
+    // See EnemyKnockbackTable.cpp footer + Plans/pitfall_28_actor_audit.md
+    // "Phase 2 — VMP".
+    void SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
+                                 const Vec3f* attackerPos,
+                                 u32 knockbackType, f32 knockbackSpeed,
+                                 f32 knockbackYVelocity, u32 knockbackDamage,
+                                 u8 directDamage);
     // Sent from host to peer when the host's hostile NPC AT was bounced
     // by the peer's DummyPlayer shield (cross-machine shield block). The
     // peer's receive handler mirrors vanilla shield-bounce side-effects

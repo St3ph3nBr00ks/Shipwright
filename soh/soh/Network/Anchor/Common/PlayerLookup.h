@@ -100,3 +100,26 @@ bool AnyPeerInScene(int16_t sceneNum);
 extern "C" f32 Anchor_DistXZToLocalLink(Actor* actor, PlayState* play);
 extern "C" s16 Anchor_YawTowardLocalLink(Actor* actor, PlayState* play);
 extern "C" f32 Anchor_HeightDiffToLocalLink(Actor* actor, PlayState* play);
+
+// VMP Phase B — direct-damage broadcast helper for OC2-style touch
+// attackers (En_St, En_Ssh, En_Go, En_Go2, etc.) that call
+// `play->damagePlayer(play, -N)` directly INSTEAD OF going through the
+// AT collider damage path. DummyPlayer.cpp's existing AC_HIT detector
+// only catches AT-collider hits, so OC2 touch attacks don't broadcast
+// via the standard Path A wire path — they need this explicit helper.
+//
+// Call after the actor's existing gate passes ("did I just touch a
+// player?"). The helper walks DummyPlayers in the local scene and
+// sends DAMAGE_PLAYER to each peer whose DummyPlayer is within `range`
+// XZ of the attacker. Knockback params come from EnemyKnockbackTable
+// lookup on `attacker->id`; if the attacker isn't registered the
+// helper still sends `directDamage` but with no knockback block.
+//
+// `directDamage` is the HP units the actor would have passed to
+// `play->damagePlayer(play, -directDamage)`. Receiver mirrors that
+// call locally on the peer's machine. See
+// Plans/pitfall_28_actor_audit.md "Phase 2 — VMP".
+//
+// Returns the number of peers notified.
+extern "C" int Anchor_BroadcastDirectDamageInRange(Actor* attacker, PlayState* play,
+                                                   f32 range, u8 directDamage);

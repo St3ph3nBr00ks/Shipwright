@@ -51,6 +51,16 @@ void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
                                      const Vec3f* attackerPos,
                                      u32 knockbackType, f32 knockbackSpeed,
                                      f32 knockbackYVelocity, u32 knockbackDamage) {
+    SendPacket_DamagePlayer(clientId, damageEffect, damage, attackerPos,
+                            knockbackType, knockbackSpeed, knockbackYVelocity,
+                            knockbackDamage, 0 /* no direct damage */);
+}
+
+void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
+                                     const Vec3f* attackerPos,
+                                     u32 knockbackType, f32 knockbackSpeed,
+                                     f32 knockbackYVelocity, u32 knockbackDamage,
+                                     u8 directDamage) {
     if (!IsSaveLoaded()) {
         return;
     }
@@ -74,6 +84,9 @@ void Anchor::SendPacket_DamagePlayer(u32 clientId, u8 damageEffect, u8 damage,
             { "yVelocity", knockbackYVelocity },
             { "damage", knockbackDamage },
         };
+    }
+    if (directDamage != 0) {
+        payload["directDamage"] = directDamage;
     }
 
     SendJsonToRemote(payload);
@@ -174,6 +187,25 @@ void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
         knockbackYaw = Math_Atan2S(dz, dx);
     } else {
         knockbackYaw = Actor_WorldYawTowardActor(&otherPlayer->actor, &self->actor);
+    }
+
+    // VMP Phase B — direct-damage extension. OC2-style touch attackers
+    // (En_St, En_Ssh, En_Go, En_Go2) call `play->damagePlayer(play, -N)`
+    // directly alongside the knockback setup. Mirror that here so the
+    // peer takes the same HP damage the host's local Link would take.
+    // Applied UNCONDITIONALLY before the knockback / legacy branches:
+    // - With knockback block: kbDamage is typically 0 (matches vanilla
+    //   func_8002F71C wrappers), so all HP loss comes through this path.
+    // - Without knockback block: directDamage is the only HP loss path.
+    // The wire `damage` field is set on colChkInfo.damage below; for VMP
+    // senders that's 0 (avoid double-application). See
+    // Common/PlayerLookup.cpp Anchor_BroadcastDirectDamageInRange.
+    if (payload.contains("directDamage")) {
+        const u8 directDamage = payload.value("directDamage", (u8)0);
+        if (directDamage != 0 && gPlayState->damagePlayer != nullptr) {
+            gPlayState->damagePlayer(gPlayState, -(s32)directDamage);
+            SPDLOG_INFO("[DamagePlayer] VMP directDamage applied: -{} HP", (int)directDamage);
+        }
     }
 
     // Path A — vanilla-knockback flow. When sender includes a
