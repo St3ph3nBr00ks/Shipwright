@@ -208,6 +208,14 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // direction on the peer.
     { ACTOR_EN_ST, { 4.0f, 6.0f, 2 /* LARGE */, 0 } },
 
+    // ─── En_Ssh (Gold Skulltula — VMP Phase B) #148 ──────────────
+    // z_en_ssh.c:479 — func_8002F71C(play, this, 4.0f, yawTowardsPlayer, 6.0f)
+    // Also calls play->damagePlayer(play, -8) directly. Sibling actor of
+    // En_St with identical params (same skel/animation family). Same
+    // VMP Phase B treatment: broadcast helper + linkInRange gate at
+    // z_en_ssh.c.
+    { ACTOR_EN_SSH, { 4.0f, 6.0f, 2 /* LARGE */, 0 } },
+
     // ─── Path A phase WRAPPED (2026-06-07) ──────────────────────
     // 20 entries above. The remaining ~11 vanilla actors that call
     // func_8002F* alongside the player-effect path are Vanilla

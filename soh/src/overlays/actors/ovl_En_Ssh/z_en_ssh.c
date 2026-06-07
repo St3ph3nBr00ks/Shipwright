@@ -475,8 +475,16 @@ s32 EnSsh_CheckHitPlayer(EnSsh* this, PlayState* play) {
     }
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_STALTU_ROLL);
     Audio_PlayActorSound2(&this->actor, NA_SE_VO_ST_ATTACK);
-    play->damagePlayer(play, -8);
-    func_8002F71C(play, &this->actor, 4.0f, this->actor.yawTowardsPlayer, 6.0f);
+
+    // VMP Phase B + Pitfall 28 — broadcast direct damage to peer
+    // DummyPlayers in range; gate the local-Link vanilla path on
+    // proximity to GET_PLAYER. Same shape as En_St. Range = 60u
+    // (Gold Skulltula colliders mirror regular Skulltula).
+    Anchor_BroadcastDirectDamageInRange(&this->actor, play, 60.0f, 8);
+    if (Anchor_DistXZToLocalLink(&this->actor, play) < 60.0f) {
+        play->damagePlayer(play, -8);
+        func_8002F71C(play, &this->actor, 4.0f, this->actor.yawTowardsPlayer, 6.0f);
+    }
     this->hitCount--;
     return true;
 }
