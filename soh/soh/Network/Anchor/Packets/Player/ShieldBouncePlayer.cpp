@@ -12,6 +12,24 @@ extern PlayState* gPlayState;
 // SHIELD_BOUNCE_PLAYER — host → peer notification when host's hostile
 // NPC AT was bounced by the peer's DummyPlayer shield.
 //
+// Implements the **Vanilla Mirror Pattern** for shield-bounce
+// side-effects. See session_state.md → "Vanilla Mirror Pattern" for
+// the canonical 4-step recipe. This packet + DAMAGE_PLAYER (Path A)
+// are the two current instances of the pattern.
+//
+// Vanilla origin: Player_Update at z_player.c:4813 reads
+//   `sp64 = (shieldQuad.acFlags & AC_BOUNCED) != 0` and applies
+//   linearVelocity = -18; CollisionCheck_HitSolid at
+//   z_collision_check.c:1597 spawns the hitmark/particles/sfx
+//   branched on collider->colType (per-shield via shieldColTypes[]
+//   at z_player_lib.c:1525).
+//
+// Receiver mirror: this handler sets self->linearVelocity = -18 (so
+// Player_Update consumes it naturally) and calls the same
+// EffectSsHitMark / shield-particle / sfx primitives with the
+// peer's local-shield colType — pick branch derived from
+// self->currentShield, which is already synced via PLAYER_UPDATE.
+//
 // Closes three vanilla-parity gaps from the cross-machine shield-block
 // path (log 426 field-test):
 //

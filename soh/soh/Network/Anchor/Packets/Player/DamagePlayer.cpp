@@ -12,6 +12,21 @@ void func_80838280(Player* player);
 
 /**
  * DAMAGE_PLAYER
+ *
+ * Implements the **Vanilla Mirror Pattern** for enemy AT damage +
+ * knockback. See session_state.md → "Vanilla Mirror Pattern" for
+ * the canonical 4-step recipe. This packet is the "Path A" instance
+ * of the pattern; ShieldBouncePlayer.cpp is another instance.
+ *
+ * Sender-side surface: DummyPlayer.cpp's AC_HIT detection +
+ *   Common/EnemyKnockbackTable.cpp (per-attacker constants).
+ * Vanilla origin: enemy AT_HIT branch calls func_8002F6D4 / _71C /
+ *   _758 / _7A0 → 5 knockback fields on GET_PLAYER → Player_Update
+ *   z_player.c:4795 consumes them on the next tick.
+ * Receiver mirror: HandlePacket_DamagePlayer sets the same 5 fields
+ *   on self (local Link) via the "knockback" payload block, letting
+ *   Player_Update reproduce vanilla animation + iframes + damage
+ *   application by construction.
  */
 
 // Overload chain — three signatures, all funnel through the bottom one:
