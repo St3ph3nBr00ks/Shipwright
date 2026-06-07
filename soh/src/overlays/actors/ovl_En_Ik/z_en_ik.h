@@ -37,4 +37,23 @@ typedef struct EnIk {
     /* 0x04D8 */ char unk_4D8[0x04];
 } EnIk; // size = 0x04DC
 
+// Anchor multiplayer state-machine sync (en_ik_sync_plan.md).
+// `this` is a C++ keyword — header decls use `actor`. Implementations
+// in z_en_ik.c keep `this` per OoT decomp convention.
+void EnIk_SetupDyingNet(struct EnIk* actor, PlayState* play);
+s16  EnIk_GetStateIndex(struct EnIk* actor);
+void EnIk_ApplyNetState(struct EnIk* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and we're replaying
+// the death anim -> drop sequence). Defined extern "C" in
+// Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnIkDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

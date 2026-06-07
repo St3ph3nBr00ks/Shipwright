@@ -57,6 +57,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Firefly/z_en_firefly.h"
 // #102 / en_reeba_sync_plan.md — Leever (En_Reeba) state-machine sync.
 #include "overlays/actors/ovl_En_Reeba/z_en_reeba.h"
+// en_ik_sync_plan.md — Iron Knuckle (En_Ik) state-machine sync.
+#include "overlays/actors/ovl_En_Ik/z_en_ik.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -165,6 +167,10 @@ struct EnemyUpdateExtras {
     // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
     bool hasEnReeba         = false;
     s16  enReebaActionState = 0;
+
+    // en_ik_sync_plan.md — En_Ik (Iron Knuckle) state-machine sync.
+    bool hasEnIk         = false;
+    s16  enIkActionState = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
     // triggering the fight starts it on every client. Plus stunned/
@@ -397,6 +403,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnReeba* rb             = (EnReeba*)actor;
         e.hasEnReeba            = true;
         e.enReebaActionState    = EnReeba_GetStateIndex(rb);
+    } else if (actor->id == ACTOR_EN_IK) {
+        EnIk* ik            = (EnIk*)actor;
+        e.hasEnIk           = true;
+        e.enIkActionState   = EnIk_GetStateIndex(ik);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -495,6 +505,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnReeba != prev.hasEnReeba) return true;
     if (cur.hasEnReeba) {
         if (cur.enReebaActionState != prev.enReebaActionState) return true;
+    }
+    if (cur.hasEnIk != prev.hasEnIk) return true;
+    if (cur.hasEnIk) {
+        if (cur.enIkActionState != prev.enIkActionState) return true;
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
@@ -750,6 +764,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enReebaActionState);
             }
         }
+        if (extras.hasEnIk) {
+            s16 prev = prevExtras && prevExtras->hasEnIk ? prevExtras->enIkActionState : -1;
+            if (prev != extras.enIkActionState) {
+                SPDLOG_INFO("[EnIk] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enIkActionState);
+            }
+        }
         if (extras.hasDekunuts) {
             s16 prev = prevExtras && prevExtras->hasDekunuts ? prevExtras->dekunutsActionState : -1;
             if (prev != extras.dekunutsActionState) {
@@ -898,6 +919,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
     if (extras.hasEnReeba) {
         payload["actionState"] = extras.enReebaActionState;
+    }
+
+    // en_ik_sync_plan.md — En_Ik (Iron Knuckle) state-machine sync.
+    if (extras.hasEnIk) {
+        payload["actionState"] = extras.enIkActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1541,6 +1567,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_REEBA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // en_ik_sync_plan.md — cache En_Ik (Iron Knuckle) actionState.
+        if (actor->id == ACTOR_EN_IK && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // Boss_Goma — cache host actionState. Receive driver in
         // HookHandlers' OnActorUpdate non-host block invokes
         // BossGoma_BridgeToCombat when local Goma is in Encounter (0x00)
@@ -2143,6 +2173,29 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnReeba netId={} — triggering natural death cycle", netId);
                     EnReeba_SetupDyingNet((EnReeba*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Ik (Iron Knuckle): route through EnIk_SetupDyingNet so the
+                // death anim -> 24-tick countdown -> drop natural cycle plays on
+                // the receiver without echoing GameInteractor_ExecuteOnEnemyDefeat.
+                // All variants (Spirit Temple white/sleeping + Gerudo Training
+                // Ground red) share the combat state machine and converge on
+                // func_80A75A38. Spirit Temple `params == 0` boss death is
+                // handled separately by func_80A781CC (host-only cutscene path);
+                // its OnEnemyDefeat broadcast is dedup'd by HostBookkeeping.
+                // Plan: Plans/en_ik_sync_plan.md §3 step 2.
+                if (actor->id == ACTOR_EN_IK) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnIk.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnIk netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnIk netId={} — triggering natural death cycle", netId);
+                    EnIk_SetupDyingNet((EnIk*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
