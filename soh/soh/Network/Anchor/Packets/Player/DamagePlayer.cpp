@@ -1,6 +1,8 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
+#include <unordered_map>
+#include <unordered_set>
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 
 extern "C" {
@@ -118,6 +120,42 @@ void Anchor::HandlePacket_DamagePlayer(nlohmann::json payload) {
         self->actor.freezeTimer = 20;
         Actor_SetColorFilter(&self->actor, 0, 0xFF, 0, 24);
         return;
+    }
+
+    // Vanilla Mirror Pattern — candidate-queue gap instrumentation for
+    // hit-response effects that arrive via DAMAGE_PLAYER's damageEffect
+    // dispatch but lack full vanilla parity. Currently handled via
+    // func_80837C0C-direct (loses vanilla ice-trap freeze animation,
+    // electric-shock recoil chain, etc.). See session_state.md →
+    // "Vanilla Mirror Pattern" → candidate queue entry for "Ice Trap
+    // / Electric Shock effects." Once per damageEffect value globally.
+    {
+        struct HitResponseGap {
+            const char* name;
+            const char* missingEffect;
+        };
+        static const std::unordered_map<u8, HitResponseGap> sHitResponseGaps = {
+            { PLAYER_HIT_RESPONSE_ICE_TRAP,
+              { "Ice Trap",
+                "vanilla ice-cube freeze anim + func_80832224 + frozen state" } },
+            { PLAYER_HIT_RESPONSE_ELECTRIC_SHOCK,
+              { "Electric Shock",
+                "vanilla shock-jitter anim + bodyShockTimer flow" } },
+        };
+        static std::unordered_set<u8> sLoggedHitResponseGap;
+        auto gapIt = sHitResponseGaps.find(damageEffect);
+        if (gapIt != sHitResponseGaps.end() &&
+            sLoggedHitResponseGap.find(damageEffect) == sLoggedHitResponseGap.end()) {
+            sLoggedHitResponseGap.insert(damageEffect);
+            SPDLOG_WARN("[VanillaMirror.gap] damageEffect={} ({}) arrived via DAMAGE_PLAYER "
+                        "but vanilla parity for — {} — is NOT fully mirrored. "
+                        "Current receive uses func_80837C0C-direct which produces an "
+                        "approximation; full vanilla flow requires invoking the same "
+                        "Player_Update branches the local hit would take. See "
+                        "session_state.md → 'Vanilla Mirror Pattern' for the recipe. "
+                        "Logged once per damageEffect value per session.",
+                        (int)damageEffect, gapIt->second.name, gapIt->second.missingEffect);
+        }
     }
 
     // Knockback yaw — from sender's `attackerPos` (preferred — accurate

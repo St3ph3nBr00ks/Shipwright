@@ -541,11 +541,71 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     static std::unordered_map<uint32_t, bool> sLastAcHitState;
     const bool acHitNow = (player->cylinder.base.acFlags & AC_HIT) != 0;
     if (acHitNow && !sLastAcHitState[clientId]) {
+        const u16 acHitAttackerId = (player->cylinder.base.ac != nullptr) ? player->cylinder.base.ac->id : 0;
         SPDLOG_INFO("[DummyPlayer] AC_HIT edge clientId={} attackerId=0x{:04X} damage={} damageEffect={}",
                     clientId,
-                    (player->cylinder.base.ac != nullptr) ? player->cylinder.base.ac->id : 0,
+                    acHitAttackerId,
                     (int)player->actor.colChkInfo.damage,
                     (int)player->actor.colChkInfo.damageEffect);
+
+        // Vanilla Mirror Pattern — candidate-queue gap instrumentation.
+        // Fires once per (attackerId) globally so log volume stays
+        // bounded. Catches when a candidate-queue attacker actually
+        // reaches a DummyPlayer in field-test, signalling that the
+        // missing Vanilla Mirror Pattern instance is now demand-driven
+        // by real gameplay (not just theoretical).
+        //
+        // Each entry names the attacker + the missing vanilla effect.
+        // The 4-step recipe to fix is in session_state.md → "Vanilla
+        // Mirror Pattern". Implementation references existing Path A
+        // (DamagePlayer.cpp) and ShieldBounce (ShieldBouncePlayer.cpp)
+        // as templates.
+        //
+        // Edge-triggered (false→true of AC_HIT) so we don't re-log on
+        // every AT-active frame. Combined with the per-attackerId-once
+        // global rate-limit, the log fires at most once per attacker
+        // per process lifetime.
+        {
+            struct VanillaMirrorCandidate {
+                const char* name;
+                const char* missingEffect;
+            };
+            static const std::unordered_map<u16, VanillaMirrorCandidate> sCandidates = {
+                { ACTOR_EN_RR,
+                  { "Like Like",
+                    "equipment theft — vanilla calls Inventory_DeleteEquipment(EQUIP_TYPE_SHIELD/TUNIC)" } },
+                { ACTOR_EN_WALLMAS,
+                  { "Wallmaster",
+                    "teleport to room entrance on grab" } },
+                { ACTOR_EN_FLOORMAS,
+                  { "Floormaster",
+                    "teleport to room entrance on grab" } },
+                { ACTOR_EN_RD,
+                  { "Redead / Gibdo",
+                    "grab freeze (sets freezeTimer + csCtx state)" } },
+                { ACTOR_EN_DHA,
+                  { "Dead Hand Arm",
+                    "grab restrain + Dead Hand bite sequence" } },
+                { ACTOR_BOSS_MO,
+                  { "Morpha (boss)",
+                    "nucleus grab + spin + position lock" } },
+            };
+            static std::unordered_set<u16> sLoggedCandidateGap;
+            auto candIt = sCandidates.find(acHitAttackerId);
+            if (candIt != sCandidates.end() &&
+                sLoggedCandidateGap.find(acHitAttackerId) == sLoggedCandidateGap.end()) {
+                sLoggedCandidateGap.insert(acHitAttackerId);
+                SPDLOG_WARN("[VanillaMirror.gap] attackerId=0x{:04X} ({}) hit a DummyPlayer "
+                            "but its vanilla side-effect — {} — is NOT mirrored "
+                            "cross-machine. Path A (DAMAGE_PLAYER) delivers damage + "
+                            "knockback only. Add a Vanilla Mirror Pattern instance for "
+                            "this effect: see session_state.md → 'Vanilla Mirror Pattern' "
+                            "(candidate queue lists this attacker; 4-step recipe + "
+                            "DamagePlayer.cpp + ShieldBouncePlayer.cpp are the templates). "
+                            "Logged once per attackerId per session.",
+                            acHitAttackerId, candIt->second.name, candIt->second.missingEffect);
+            }
+        }
     }
     sLastAcHitState[clientId] = acHitNow;
 
