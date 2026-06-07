@@ -138,6 +138,14 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // DummyPlayer overlap on host, Bug 1 territory).
     { ACTOR_EN_MM, { 3.0f, 4.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Bg_Ydan_Maruta (Deku Tree spike trap log) ───────────────
+    // z_bg_ydan_maruta.c:141 — func_8002F71C(play, this, 7.0f, shape.rot.y, 6.0f)
+    // Yaw is `shape.rot.y` (own facing — not affected by #153 overlay).
+    // No per-actor tracker (BG-class hazard). Source-side linkInRange
+    // gate added at z_bg_ydan_maruta.c:140 (the AT_HIT branch was
+    // unconditional re: GET_PLAYER, Bug 1 territory).
+    { ACTOR_BG_YDAN_MARUTA, { 7.0f, 6.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)

@@ -138,7 +138,14 @@ void BgYdanMaruta_Destroy(Actor* thisx, PlayState* play) {
 
 void func_808BEFF4(BgYdanMaruta* this, PlayState* play) {
     if (this->collider.base.atFlags & AT_HIT) {
-        func_8002F71C(play, &this->dyna.actor, 7.0f, this->dyna.actor.shape.rot.y, 6.0f);
+        // Pitfall 28 + Path A — gate local-Link knockback on live
+        // distance to GET_PLAYER. Cross-machine routing via
+        // DummyPlayer.cpp AC_HIT + EnemyKnockbackTable entry
+        // ACTOR_BG_YDAN_MARUTA. 70u = spike-log collider radius +
+        // Link body 30 + margin.
+        if (Anchor_DistXZToLocalLink(&this->dyna.actor, play) < 70.0f) {
+            func_8002F71C(play, &this->dyna.actor, 7.0f, this->dyna.actor.shape.rot.y, 6.0f);
+        }
     }
     this->dyna.actor.shape.rot.x += 0x360;
     CollisionCheck_SetAT(play, &play->colChkCtx, &this->collider.base);
