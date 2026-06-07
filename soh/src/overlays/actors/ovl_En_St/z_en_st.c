@@ -460,14 +460,24 @@ s32 EnSt_CheckHitBackside(EnSt* this, PlayState* play) {
     if (cyl->base.acFlags & AC_HIT) {
         cyl->base.acFlags &= ~AC_HIT;
         hit = true;
-        flags |= cyl->info.acHitInfo->toucher.dmgFlags;
+        // #90 / log 431 bug — cross-machine sync sets AC_HIT
+        // synthetically without populating acHitInfo (no real AT
+        // collider arrived). Null-guard the dereference so peer-
+        // attributed damage still routes through the standard
+        // melee path (flags |= 0 means no special arrow/ice/fire
+        // routing; falls through to BounceAround on death).
+        if (cyl->info.acHitInfo != NULL) {
+            flags |= cyl->info.acHitInfo->toucher.dmgFlags;
+        }
     }
 
     cyl = &this->colCylinder[1];
     if (cyl->base.acFlags & AC_HIT) {
         cyl->base.acFlags &= ~AC_HIT;
         hit = true;
-        flags |= cyl->info.acHitInfo->toucher.dmgFlags;
+        if (cyl->info.acHitInfo != NULL) {
+            flags |= cyl->info.acHitInfo->toucher.dmgFlags;
+        }
     }
 
     if (!hit) {

@@ -259,17 +259,27 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
         case ACTOR_EN_SW:
             ((EnSw*)actor)->collider.base.acFlags |= AC_HIT;
             break;
-        // ACTOR_EN_ST (Skulltula) and ACTOR_EN_DEKUNUTS (Mad Scrub) are
-        // INTENTIONALLY OMITTED — both read `info.acHitInfo->toucher.dmgFlags`
-        // unconditionally when AC_HIT fires (z_en_st.c:433/440,
-        // z_en_dekunuts.c:451). CollisionCheck_AT normally populates
-        // acHitInfo alongside the AC_HIT bit; setting only the bit synthetic-
-        // ally leaves acHitInfo as a stale or null pointer, and the dereference
-        // crashes the host (verified in log 115 — exception 0xC0000005 on
-        // Skulltula damage receive). Until we synthesise a fake AT collider
-        // OR patch these actors with a null-check guard, leave AC_HIT off for
-        // them. damageEffect / atHitEffect propagation still happens — they
-        // just won't run their hit-reaction code on remote-only damage.
+        case ACTOR_EN_ST: {
+            // #90 / log 431 fix — host applies peer's damage by setting
+            // AC_HIT on cylinders [0], [1] (back-side body+legs that drive
+            // damage application via EnSt_CheckHitBackside) and [2]
+            // (front armor that drives sway via EnSt_CheckHitFrontside).
+            // The acHitInfo deref in EnSt_CheckHitBackside is null-guarded
+            // (z_en_st.c:460+) so synthetic bit-set without a real AT
+            // collider is safe — flags |= 0 falls through to the standard
+            // melee → BounceAround death path. The earlier crash documented
+            // here (log 115 — 0xC0000005 on Skulltula damage receive) is
+            // resolved by the null-guard.
+            EnSt* st = (EnSt*)actor;
+            st->colCylinder[0].base.acFlags |= AC_HIT;
+            st->colCylinder[1].base.acFlags |= AC_HIT;
+            st->colCylinder[2].base.acFlags |= AC_HIT;
+            break;
+        }
+        // ACTOR_EN_DEKUNUTS (Mad Scrub) is still INTENTIONALLY OMITTED —
+        // reads `info.acHitInfo->toucher.dmgFlags` unconditionally
+        // (z_en_dekunuts.c:451). Needs the same null-guard treatment as
+        // En_St did (log 431 fix); pending follow-up.
         case ACTOR_EN_TEST:
             // bodyCollider — z_en_test.c:1666 reads AC_HIT here. swordCollider
             // and shieldCollider are AT colliders (Stalfos hitting Link), not AC.
