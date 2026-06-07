@@ -34,6 +34,9 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Peehat/z_en_peehat.h"
 #include "src/overlays/actors/ovl_En_Poh/z_en_poh.h"
 #include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
+// En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
+// as En_St. Added 2026-06-07 after audit triggered by En_St fixes.
+#include "src/overlays/actors/ovl_En_Ssh/z_en_ssh.h"
 // Bug B — En_Goma (Boss_Goma's larvae) needs AC_HIT for its damage block to
 // fire. Larva is null-guarded in z_en_goma.c so synthetic AC_HIT without
 // acHitInfo no longer crashes (treated as dmgFlags=0 → falls through to the
@@ -197,8 +200,8 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
         return;
     }
 
-    // En_St armored-hit special path: peer hit the invulnerable front
-    // shield. Set AC_HIT on cyl [2] only so host's CheckHitFrontside
+    // En_St / En_Ssh armored-hit special path: peer hit the invulnerable
+    // front shield. Set AC_HIT on cyl [2] only so host's CheckHitFront(side)
     // fires the sway anim WITHOUT calling Actor_ApplyDamage. The
     // resulting swayTimer / playSwayFlag changes are captured in
     // host's joint table on the next ENEMY_STATE broadcast — sway
@@ -207,6 +210,13 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
         EnSt* st = (EnSt*)actor;
         st->colCylinder[2].base.acFlags |= AC_HIT;
         SPDLOG_INFO("[DamageEnemy] En_St armored-hit RECV netId={} — set cyl[2] AC_HIT "
+                    "(sway anim will propagate via ENEMY_STATE)", netId);
+        return;
+    }
+    if (isArmoredHit && actor->id == ACTOR_EN_SSH) {
+        EnSsh* ssh = (EnSsh*)actor;
+        ssh->colCylinder[2].base.acFlags |= AC_HIT;
+        SPDLOG_INFO("[DamageEnemy] En_Ssh armored-hit RECV netId={} — set cyl[2] AC_HIT "
                     "(sway anim will propagate via ENEMY_STATE)", netId);
         return;
     }
@@ -393,6 +403,30 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // Null-guard landed in the same commit as this case addition.
             ((EnDekunuts*)actor)->collider.base.acFlags |= AC_HIT;
             break;
+        case ACTOR_EN_SSH: {
+            // En_Ssh — Skulltula sibling, identical multi-collider
+            // pattern to En_St. Same fix shape: AC_HIT on cyl [0] (body)
+            // and [1] (legs) ONLY — cyl [2] (front armor) is excluded
+            // because EnSsh_CollisionCheck calls EnSsh_CheckHitFront
+            // FIRST (z_en_ssh.c:543) and short-circuits when it fires.
+            // Front-shield AC_HIT is set ONLY by the armored-hit
+            // receiver branch above (handles isArmoredHit=true wire
+            // flag for sway anim sync).
+            //
+            // No acHitInfo deref in EnSsh_CheckHitBack or
+            // EnSsh_CheckHitFront — synthetic AC_HIT without real AT
+            // collider is safe (verified z_en_ssh.c:510-537 + 492-508).
+            //
+            // Per user direction: EnSsh actors are intended as cursed-
+            // human NPCs and shouldn't normally die. This fix ensures
+            // damage/sway visual consistency between clients when they
+            // are hit; it doesn't change the gameplay design that
+            // these actors aren't part of the standard kill flow.
+            EnSsh* ssh = (EnSsh*)actor;
+            ssh->colCylinder[0].base.acFlags |= AC_HIT;
+            ssh->colCylinder[1].base.acFlags |= AC_HIT;
+            break;
+        }
         case ACTOR_EN_TEST:
             // bodyCollider — z_en_test.c:1666 reads AC_HIT here. swordCollider
             // and shieldCollider are AT colliders (Stalfos hitting Link), not AC.

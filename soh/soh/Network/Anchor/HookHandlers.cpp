@@ -60,6 +60,7 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
 #include "src/overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
 #include "src/overlays/actors/ovl_En_St/z_en_st.h"
+#include "src/overlays/actors/ovl_En_Ssh/z_en_ssh.h"
 #include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
 // #47 / en_firefly_sync_plan.md — Keese (En_Firefly) state-machine sync.
 #include "src/overlays/actors/ovl_En_Firefly/z_en_firefly.h"
@@ -1909,6 +1910,24 @@ void Anchor::RegisterHooks() {
                 if (st->swayTimer == 59 && forwardDamage > 0) {
                     SPDLOG_INFO("[DamageEnemy] En_St armored-hit netId={} "
                                 "swayTimer=59 → forwarding damage=0 isArmoredHit=true "
+                                "(front-shield bounce + sway anim sync)",
+                                ext->netId);
+                    forwardDamage = 0;
+                    isArmoredHit = true;
+                }
+            } else if (actor->id == ACTOR_EN_SSH) {
+                // En_Ssh — same multi-collider front-shield pattern as En_St
+                // but DIFFERENT sway-timer calibration. EnSsh_Sway is called
+                // from EnSsh_Draw (z_en_ssh.c:904), not EnSsh_Update — so
+                // the decrement happens AFTER OnActorUpdate fires. The
+                // pre-decrement value (60, just set by CheckHitFront)
+                // is visible here. Per-actor calibration required because
+                // the two siblings have different update→draw timing for
+                // the same logical mechanism.
+                EnSsh* ssh = (EnSsh*)actor;
+                if (ssh->swayTimer == 60 && forwardDamage > 0) {
+                    SPDLOG_INFO("[DamageEnemy] En_Ssh armored-hit netId={} "
+                                "swayTimer=60 → forwarding damage=0 isArmoredHit=true "
                                 "(front-shield bounce + sway anim sync)",
                                 ext->netId);
                     forwardDamage = 0;
