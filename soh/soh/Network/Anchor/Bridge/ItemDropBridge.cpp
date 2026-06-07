@@ -20,6 +20,7 @@
 #include "ItemDropBridgeState.h"
 
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)\n#include "soh/Network/Anchor/ItemDropNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 

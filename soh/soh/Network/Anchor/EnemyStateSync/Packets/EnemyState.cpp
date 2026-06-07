@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/Network/Anchor/AIDirector/Director.h"  // Director::OnEnemyRemoved (step 3 hook)
 #include "soh/Network/Anchor/Common/ActorSyncScope.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"

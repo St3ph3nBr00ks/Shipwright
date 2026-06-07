@@ -1,6 +1,7 @@
 #include "ActorSyncHelpers.h"
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 
 extern "C" {
 #include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"

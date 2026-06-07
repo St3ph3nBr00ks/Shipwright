@@ -34,6 +34,7 @@
 // syncable-actor categories per frame, reads the EnemyNetId extension,
 // and updates the per-navigator stuck-on-slope counter.
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/ActorTrail.h"  // breadcrumb overlay (DebugDraw)
 #include "soh/ObjectExtension/ObjectExtension.h"

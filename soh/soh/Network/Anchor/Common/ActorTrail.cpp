@@ -18,6 +18,7 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Layer 3 fallback
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/ShipInit.hpp"
 

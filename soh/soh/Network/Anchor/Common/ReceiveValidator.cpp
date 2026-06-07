@@ -1,6 +1,7 @@
 #include "ReceiveValidator.h"
 #include "ActorSyncHelpers.h"  // kSyncableActorCategories
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include <libultraship/log/luslog.h>
 
 extern "C" {

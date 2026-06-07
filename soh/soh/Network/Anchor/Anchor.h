@@ -41,8 +41,11 @@ extern "C" {
 // Per-actor / per-client / per-drop value types — moved out of this header
 // 2026-05-21 per Plans/decoupling_gap_audit_2026-05-16.md §3.3. Re-included
 // here so existing #include "Anchor.h" sites continue to compile unchanged.
-#include "EnemyNetId.h"
-#include "ItemDropNetId.h"
+// #243.7.2 — EnemyNetId.h / ItemDropNetId.h includes removed.
+// Consumers that need the types include them directly. Anchor.h
+// itself references the type NAMES only in comments + parameter
+// names (e.g. `uint32_t offererEnemyNetId`); no actual type
+// dependency.
 #include "AnchorClient.h"
 
 // Forward declaration — full type lives in
