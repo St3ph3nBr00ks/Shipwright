@@ -11,6 +11,20 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Anchor multiplayer (Plans/en_wf_sync_plan.md §3 step 1): replace
+// GET_PLAYER reads with the nearest-player lookup so peer/host both
+// agree on the player Wolfos is targeting for damage/dodge/circle
+// decisions. Defined extern "C" in soh/soh/Network/Anchor/HookHandlers.cpp.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
+// EnWf_ApplyNetState (defined at the bottom of this TU) calls
+// EnWf_SetupRunAtPlayer / EnWf_SetupSidestep which take a PlayState arg —
+// the recreate is reached from C++ HookHandlers' OnActorUpdate rx-driver
+// without a play arg, so use the global. Declared here per the SoH
+// convention of TU-local extern declarations for vanilla globals
+// (matches gameconsole.h / Boss_Dodongo / Boss_Goma patterns).
+extern PlayState* gPlayState;
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
 void EnWf_Init(Actor* thisx, PlayState* play);
@@ -44,6 +58,14 @@ void EnWf_Sidestep(EnWf* this, PlayState* play);
 void EnWf_SetupDie(EnWf* this);
 void EnWf_Die(EnWf* this, PlayState* play);
 s32 EnWf_DodgeRanged(PlayState* play, EnWf* this);
+// Anchor multiplayer state-machine sync — defined at the bottom of
+// this TU (Plans/en_wf_sync_plan.md §3 steps 2 + 8).
+void EnWf_SetupDamaged(EnWf* this);
+void EnWf_SetupRecoilFromBlockedSlash(EnWf* this);
+void EnWf_SetupStunned(EnWf* this);
+void EnWf_SetupDyingNet(EnWf* this, PlayState* play);
+s16  EnWf_GetStateIndex(EnWf* this);
+void EnWf_ApplyNetState(EnWf* this, s16 stateIndex);
 
 static ColliderJntSphElementInit sJntSphItemsInit[4] = {
     {
@@ -286,7 +308,7 @@ void EnWf_Destroy(Actor* thisx, PlayState* play) {
 }
 
 s32 EnWf_ChangeAction(PlayState* play, EnWf* this, s16 mustChoose) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 pad;
     s16 wallYawDiff;
     s16 playerYawDiff;
@@ -428,7 +450,7 @@ void EnWf_Wait(EnWf* this, PlayState* play) {
     s32 pad;
     s16 angle;
 
-    player = GET_PLAYER(play);
+    player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     SkelAnime_Update(&this->skelAnime);
 
     if (this->unk_2E2 != 0) {
@@ -501,7 +523,7 @@ void EnWf_RunAtPlayer(EnWf* this, PlayState* play) {
     s32 pad;
     f32 baseRange = 0.0f;
     s16 playerFacingAngleDiff;
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 playSpeed;
 
     if (!EnWf_DodgeRanged(play, this)) {
@@ -641,7 +663,7 @@ void EnWf_RunAroundPlayer(EnWf* this, PlayState* play) {
     s32 animPrevFrame;
     s32 animFrameSpeedDiff;
     s32 animSpeed;
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     Math_SmoothStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer + this->runAngle, 1, 4000, 1);
 
@@ -734,7 +756,7 @@ void EnWf_SetupSlash(EnWf* this) {
 }
 
 void EnWf_Slash(EnWf* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s16 shapeAngleDiff = player->actor.shape.rot.y - this->actor.shape.rot.y;
     s16 yawAngleDiff = this->actor.yawTowardsPlayer - this->actor.shape.rot.y;
     s32 curFrame = this->skelAnime.curFrame;
@@ -804,7 +826,7 @@ void EnWf_SetupRecoilFromBlockedSlash(EnWf* this) {
 }
 
 void EnWf_RecoilFromBlockedSlash(EnWf* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s16 angle1 = player->actor.shape.rot.y - this->actor.shape.rot.y;
     s16 angle2 = this->actor.yawTowardsPlayer - this->actor.shape.rot.y;
 
@@ -1013,7 +1035,7 @@ void EnWf_SetupBlocking(EnWf* this) {
 }
 
 void EnWf_Blocking(EnWf* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 pad;
 
     if (this->actionTimer != 0) {
@@ -1069,7 +1091,7 @@ void EnWf_SetupSidestep(EnWf* this, PlayState* play) {
 
     Animation_Change(&this->skelAnime, &gWolfosRunningAnim, 1.0f, 0.0f, lastFrame, ANIMMODE_LOOP_INTERP, -4.0f);
 
-    player = GET_PLAYER(play);
+    player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     angle = player->actor.shape.rot.y + this->runAngle;
 
     if (Math_SinS(angle - this->actor.yawTowardsPlayer) > 0.0f) {
@@ -1094,7 +1116,7 @@ void EnWf_SetupSidestep(EnWf* this, PlayState* play) {
 
 void EnWf_Sidestep(EnWf* this, PlayState* play) {
     s16 angleDiff1;
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 animPrevFrame;
     s32 animFrameSpeedDiff;
     s32 animSpeed;
@@ -1158,7 +1180,7 @@ void EnWf_Sidestep(EnWf* this, PlayState* play) {
                 EnWf_SetupWait(this);
                 this->actionTimer = (Rand_ZeroOne() * 3.0f) + 1.0f;
             } else {
-                Player* player2 = GET_PLAYER(play);
+                Player* player2 = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
                 s16 angleDiff2 = player2->actor.shape.rot.y - this->actor.yawTowardsPlayer;
 
                 this->actor.world.rot.y = this->actor.shape.rot.y;
@@ -1214,7 +1236,13 @@ void EnWf_Die(EnWf* this, PlayState* play) {
     }
 
     if (SkelAnime_Update(&this->skelAnime)) {
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        // Anchor multiplayer (Plans/en_wf_sync_plan.md §3 step 3): suppress
+        // the random-drop call when the death cycle is network-driven so
+        // host's authoritative ITEM_DROP_SYNC isn't double-applied. The
+        // Actor_Kill below still fires — death completes for both clients.
+        if (!Anchor_ShouldSuppressEnWfDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        }
 
         if (this->switchFlag != 0xFF) {
             Flags_SetSwitch(play, this->switchFlag);
@@ -1495,4 +1523,100 @@ s32 EnWf_DodgeRanged(PlayState* play, EnWf* this) {
     }
 
     return false;
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (Plans/en_wf_sync_plan.md).
+// =============================================================================
+
+// Triggers EnWf's Die natural cycle on a non-host receiver without firing
+// GameInteractor_ExecuteOnEnemyDefeat (prevents wire echo). Mirror of
+// EnKarebaba_SetupDyingNet / EnSt_SetupDyingNet / EnSw_SetupDyingNet.
+// Body inlines the work that EnWf_SetupDie does so we don't re-emit
+// the death broadcast.
+void EnWf_SetupDyingNet(EnWf* this, PlayState* play) {
+    Enemy_StartFinishingBlow(play, &this->actor);
+    Animation_MorphToPlayOnce(&this->skelAnime, &gWolfosRearingUpFallingOverAnim, -4.0f);
+    this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    this->actor.world.rot.y = this->actor.yawTowardsPlayer;
+    this->action = WOLFOS_ACTION_DIE;
+    this->actionTimer = this->skelAnime.animLength;
+    if (this->actor.bgCheckFlags & 1) {
+        this->unk_300 = false;
+        this->actor.speedXZ = -6.0f;
+    } else {
+        this->unk_300 = true;
+    }
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_WOLFOS_DEAD);
+    EnWf_SetupAction(this, EnWf_Die);
+}
+
+// State-index derivation: En_Wf already maintains an `s32 action` field on
+// the struct (set in every Setup* helper), so we read it directly instead
+// of comparing actionFunc against file-static labels (as En_St / En_Sw do).
+// Returns the matching WOLFOS_ACTION_* enum value.
+s16 EnWf_GetStateIndex(EnWf* this) {
+    return (s16)this->action;
+}
+
+// Drive the receiver's local state machine to match the host's. Each case
+// invokes the matching Setup* helper. Death state (WOLFOS_ACTION_DIE) is
+// driven separately via SetupDyingNet from HandlePacket_EnemyDefeated;
+// the rx driver gates death states with PhaseImpliesHasLocalDeath so
+// they never reach this switch.
+//
+// Two state indices are intentionally absent from the EnWfAction enum:
+// index 1 and 13 — gaps in the decomp / reserved. They never appear on
+// the wire (EnWf_GetStateIndex returns this->action which is only ever
+// assigned a named WOLFOS_ACTION_* value).
+//
+// WOLFOS_ACTION_TURN_TOWARDS_PLAYER (4) covers both EnWf_SomersaultAndAttack
+// (set in SetupSomersaultAndAttack at z_en_wf.c:969) and any direct turn —
+// the receiver's recreate calls SetupSomersaultAndAttack which is the
+// observable form of state 4.
+void EnWf_ApplyNetState(EnWf* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case WOLFOS_ACTION_WAIT_TO_APPEAR:
+            EnWf_SetupWaitToAppear(this);
+            break;
+        case WOLFOS_ACTION_WAIT:
+            EnWf_SetupWait(this);
+            break;
+        case WOLFOS_ACTION_RUN_AT_PLAYER:
+            EnWf_SetupRunAtPlayer(this, gPlayState);
+            break;
+        case WOLFOS_ACTION_SEARCH_FOR_PLAYER:
+            EnWf_SetupSearchForPlayer(this);
+            break;
+        case WOLFOS_ACTION_RUN_AROUND_PLAYER:
+            EnWf_SetupRunAroundPlayer(this);
+            break;
+        case WOLFOS_ACTION_SLASH:
+            EnWf_SetupSlash(this);
+            break;
+        case WOLFOS_ACTION_RECOIL_FROM_BLOCKED_SLASH:
+            EnWf_SetupRecoilFromBlockedSlash(this);
+            break;
+        case WOLFOS_ACTION_BACKFLIP_AWAY:
+            EnWf_SetupBackflipAway(this);
+            break;
+        case WOLFOS_ACTION_STUNNED:
+            EnWf_SetupStunned(this);
+            break;
+        case WOLFOS_ACTION_DAMAGED:
+            EnWf_SetupDamaged(this);
+            break;
+        case WOLFOS_ACTION_TURN_TOWARDS_PLAYER:
+            EnWf_SetupSomersaultAndAttack(this);
+            break;
+        case WOLFOS_ACTION_BLOCKING:
+            EnWf_SetupBlocking(this);
+            break;
+        case WOLFOS_ACTION_SIDESTEP:
+            EnWf_SetupSidestep(this, gPlayState);
+            break;
+        // WOLFOS_ACTION_DIE — death-class. Driven via SetupDyingNet. Skip silently.
+        default:
+            break;
+    }
 }

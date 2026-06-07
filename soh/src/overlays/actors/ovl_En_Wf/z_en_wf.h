@@ -88,4 +88,25 @@ typedef enum {
     /* 1 */ WOLFOS_WHITE
 } EnWfType;
 
+// Anchor multiplayer state-machine sync (Plans/en_wf_sync_plan.md).
+// Header decls use `actor` instead of `this` — Pitfall 1: `this` is a
+// C++ reserved keyword and z_en_wf.h is included from C++ TUs
+// (EnemyState.cpp, HookHandlers.cpp). The .c implementations keep the
+// `this` param name per OoT decomp convention.
+void EnWf_SetupDyingNet(struct EnWf* actor, PlayState* play);
+s16  EnWf_GetStateIndex(struct EnWf* actor);
+void EnWf_ApplyNetState(struct EnWf* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current Wolfos
+// death cycle was network-driven (ENEMY_DEFEATED received and we're
+// replaying the rear-up-and-fall animation). Defined extern "C" in
+// soh/soh/Network/Anchor/Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnWfDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif
