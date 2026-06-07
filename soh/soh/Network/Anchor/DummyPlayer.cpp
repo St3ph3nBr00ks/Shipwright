@@ -619,7 +619,21 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     //   3. Peer-local knockback push (Bug 1 — vanilla z_player.c:4856
     //      sets linearVelocity = -18 on the player when shield bounces;
     //      need same on peer's local Link).
-    if (acHitForGate && shieldBounced && authoritative) {
+    // Edge-trigger the shield-bounce event so vanilla parity holds.
+    // Vanilla z_player.c:4813 reads sp64 and applies linearVelocity=-18
+    // each frame sp64 is true, BUT vanilla's CollisionCheck only sets
+    // shield's AC_BOUNCED on the actual collision frame (one tick).
+    // Our gate `acHitForGate && shieldBounced` would fire every tick
+    // of the Invader's AT-active window (3-5 frames), shipping that
+    // many SHIELD_BOUNCE_PLAYER packets and each one resetting peer's
+    // linearVelocity = -18 between Player_Update calls → cumulative
+    // pushback far exceeds vanilla. Fix: track false→true edge.
+    static std::unordered_map<uint32_t, bool> sLastShieldBouncedHit;
+    const bool shieldBouncedNow  = acHitForGate && shieldBounced;
+    const bool shieldBouncedEdge = shieldBouncedNow && !sLastShieldBouncedHit[clientId];
+    sLastShieldBouncedHit[clientId] = shieldBouncedNow;
+
+    if (shieldBouncedEdge && authoritative) {
         const u16 blockedAttackerId = (player->cylinder.base.ac != nullptr)
                                       ? player->cylinder.base.ac->id : 0;
         // bumper.hitPos is Vec3s set by CollisionCheck when AC_BOUNCED
@@ -630,19 +644,33 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         hitPos.z = (f32)player->shieldQuad.info.bumper.hitPos.z;
 
         // Effect 1 — host-local particle + sfx at shield hit position.
-        EffectSsHitMark_SpawnFixedScale(gPlayState, EFFECT_HITMARK_METAL, &hitPos);
-        CollisionCheck_SpawnShieldParticlesMetalSound(gPlayState, &hitPos, &player->actor.projectedPos);
+        // Branch on the DummyPlayer's currentShield (mirrored from peer
+        // via PLAYER_UPDATE) so Deku Shield gets the wood-bounce visual,
+        // Hylian/Mirror get metal sparks. Mirrors vanilla
+        // CollisionCheck_HitSolid logic at z_collision_check.c:1597.
+        const bool isWoodShield = (player->currentShield == PLAYER_SHIELD_DEKU);
+        if (isWoodShield) {
+            EffectSsHitMark_SpawnFixedScale(gPlayState, EFFECT_HITMARK_DUST, &hitPos);
+            Audio_PlaySoundGeneral(NA_SE_IT_REFLECTION_WOOD, &player->actor.projectedPos, 4,
+                                   &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale,
+                                   &gSfxDefaultReverb);
+        } else {
+            EffectSsHitMark_SpawnFixedScale(gPlayState, EFFECT_HITMARK_METAL, &hitPos);
+            CollisionCheck_SpawnShieldParticlesMetalSound(gPlayState, &hitPos, &player->actor.projectedPos);
+        }
 
         // Effects 2 + 3 — notify peer via SHIELD_BOUNCE_PLAYER packet.
-        // Carries the local-shield-hit-position offset relative to player
-        // so peer can spawn its particle at the equivalent local shield
-        // position (peer's local Link will be in a similar shield pose).
+        // Peer's own currentShield drives its effect choice (peer is the
+        // one shielding, knows its own shield type). No need to ship
+        // shield-type info over the wire.
         const f32 hitOffsetY = hitPos.y - player->actor.world.pos.y;  // ~chest height
         Anchor::Instance->SendPacket_ShieldBouncePlayer(client.clientId, blockedAttackerId, hitOffsetY);
 
         SPDLOG_INFO("[DummyPlayer] shield BLOCKED clientId={} attackerId=0x{:04X} "
-                    "hitPos=({:.1f},{:.1f},{:.1f}) — particle local + SHIELD_BOUNCE_PLAYER sent",
-                    clientId, blockedAttackerId, hitPos.x, hitPos.y, hitPos.z);
+                    "hitPos=({:.1f},{:.1f},{:.1f}) shieldType={} ({}) — "
+                    "host effect spawned + SHIELD_BOUNCE_PLAYER sent (edge)",
+                    clientId, blockedAttackerId, hitPos.x, hitPos.y, hitPos.z,
+                    (int)player->currentShield, isWoodShield ? "wood" : "metal");
     }
 
     // Per-frame send-gate evaluation log removed — gate behavior is

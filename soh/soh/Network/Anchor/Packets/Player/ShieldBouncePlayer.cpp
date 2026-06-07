@@ -85,7 +85,7 @@ void Anchor::HandlePacket_ShieldBouncePlayer(nlohmann::json payload) {
     // We don't have the exact local shield-quad bumper hitPos handy
     // (peer's shield collider isn't necessarily mid-process when this
     // packet arrives), so approximate using world.pos + hitOffsetY +
-    // a small forward offset (10u in shape.rot.y direction).
+    // a small forward offset (20u in shape.rot.y direction).
     Vec3f localHitPos;
     f32 forwardX = Math_SinS(self->actor.shape.rot.y) * 20.0f;
     f32 forwardZ = Math_CosS(self->actor.shape.rot.y) * 20.0f;
@@ -93,12 +93,28 @@ void Anchor::HandlePacket_ShieldBouncePlayer(nlohmann::json payload) {
     localHitPos.y = self->actor.world.pos.y + hitOffsetY;
     localHitPos.z = self->actor.world.pos.z + forwardZ;
 
-    EffectSsHitMark_SpawnFixedScale(gPlayState, EFFECT_HITMARK_METAL, &localHitPos);
-    CollisionCheck_SpawnShieldParticlesMetalSound(gPlayState, &localHitPos, &self->actor.projectedPos);
+    // Branch on peer's local shield type — peer IS the one shielding,
+    // so its own currentShield is the source of truth for what visual
+    // and sound the shield bounce should produce. Mirrors vanilla
+    // CollisionCheck_HitSolid (z_collision_check.c:1597) which switches
+    // on collider->colType — and player shield colType is per-shield
+    // (z_player_lib.c:1525-1530 shieldColTypes[] = METAL/WOOD/METAL/METAL).
+    const bool isWoodShield = (self->currentShield == PLAYER_SHIELD_DEKU);
+    if (isWoodShield) {
+        EffectSsHitMark_SpawnFixedScale(gPlayState, EFFECT_HITMARK_DUST, &localHitPos);
+        Audio_PlaySoundGeneral(NA_SE_IT_REFLECTION_WOOD, &self->actor.projectedPos, 4,
+                               &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale,
+                               &gSfxDefaultReverb);
+    } else {
+        EffectSsHitMark_SpawnFixedScale(gPlayState, EFFECT_HITMARK_METAL, &localHitPos);
+        CollisionCheck_SpawnShieldParticlesMetalSound(gPlayState, &localHitPos, &self->actor.projectedPos);
+    }
 
     SPDLOG_INFO("[ShieldBouncePlayer] APPLIED clientId={} attackerId=0x{:04X} "
-                "linearVelocity={:.1f} yaw=0x{:04X} hitPos=({:.1f},{:.1f},{:.1f})",
+                "linearVelocity={:.1f} yaw=0x{:04X} hitPos=({:.1f},{:.1f},{:.1f}) "
+                "shieldType={} ({})",
                 clientId, attackerId, self->linearVelocity,
                 (uint16_t)self->yaw,
-                localHitPos.x, localHitPos.y, localHitPos.z);
+                localHitPos.x, localHitPos.y, localHitPos.z,
+                (int)self->currentShield, isWoodShield ? "wood" : "metal");
 }
