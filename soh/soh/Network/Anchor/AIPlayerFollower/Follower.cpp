@@ -17,6 +17,7 @@
 #include "Follower.h"
 #include "FollowerRecorder.h"
 #include "../Anchor.h"
+#include "../EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/cvar_prefixes.h"
 #include "../Common/ActorSyncHelpers.h"
 #include "../Common/DistanceMath.h"

@@ -56,6 +56,7 @@
 #include <libultraship/libultraship.h>  // SPDLOG_*
 
 #include "../Anchor.h"
+#include "../EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "../Common/ActorSyncHelpers.h"  // kSyncableActorCategories (ExecuteDespawn actor walk)
 #include "../Common/SceneAuthority.h"
 #include "soh/ActorDB.h"  // ActorDB::Instance->RetrieveEntry — pre-spawn object lookup
