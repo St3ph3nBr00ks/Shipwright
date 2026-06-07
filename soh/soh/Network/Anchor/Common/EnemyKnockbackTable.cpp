@@ -77,8 +77,17 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // branch was unconditional re: GET_PLAYER, Bug 1 territory).
     { ACTOR_EN_FD, { 4.0f, 6.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Fire Trap (En_Honotrap flame drop) #143 ─────────────────
+    // z_en_honotrap.c:324 — func_8002F71C(play, this, 5.0f, yawTowardsPlayer, 0.0f)
+    // Flame projectile drops vertically; single-impact (FlameDrop
+    // action transitions to vanish after AT_HIT). Source-side
+    // linkInRange gate added at z_en_honotrap.c:322-326 (the AT_HIT
+    // branch was unconditional re: GET_PLAYER, Bug 1 territory).
+    { ACTOR_EN_HONOTRAP, { 5.0f, 0.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
-    //  ACTOR_EN_BROB   — Coiled spike (z_en_brob.c func_8002F71C 5.0/yaw/1.0)
+    //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
+    //    based — needs different cross-machine treatment, not Path A)
     //  ACTOR_EN_FD     — Flare Dancer (z_en_fd.c:315 func_8002F71C speed+2/yaw/6.0)
     //  ACTOR_EN_HONOTRAP — Fire trap (z_en_honotrap.c:324 func_8002F71C 5.0/yaw/0.0)
     //  ACTOR_EN_MB     — Moblin (7 sites — needs per-site analysis)

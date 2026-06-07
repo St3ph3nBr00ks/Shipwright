@@ -321,7 +321,14 @@ void EnHonotrap_SetupFlameDrop(EnHonotrap* this) {
 void EnHonotrap_FlameDrop(EnHonotrap* this, PlayState* play) {
     if ((this->collider.cyl.base.atFlags & AT_HIT) || (this->timer <= 0)) {
         if ((this->collider.cyl.base.atFlags & AT_HIT) && !(this->collider.cyl.base.atFlags & AT_BOUNCED)) {
-            func_8002F71C(play, &this->actor, 5.0f, this->actor.yawTowardsPlayer, 0.0f);
+            // Pitfall 28 + Path A — gate local-Link knockback on live
+            // distance to GET_PLAYER. Cross-machine routing handled by
+            // DummyPlayer.cpp AC_HIT + EnemyKnockbackTable entry
+            // ACTOR_EN_HONOTRAP. 50u = collider cylinder radius 12 +
+            // Link body 30 + margin (flame projectile, tight contact).
+            if (Anchor_DistXZToLocalLink(&this->actor, play) < 50.0f) {
+                func_8002F71C(play, &this->actor, 5.0f, this->actor.yawTowardsPlayer, 0.0f);
+            }
         }
         this->actor.velocity.x = this->actor.velocity.y = this->actor.velocity.z = 0.0f;
         EnHonotrap_SetupFlameVanish(this);
