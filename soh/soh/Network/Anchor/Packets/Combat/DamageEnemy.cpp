@@ -272,20 +272,36 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             ((EnSw*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_ST: {
-            // #90 / log 431 fix — host applies peer's damage by setting
-            // AC_HIT on cylinders [0], [1] (back-side body+legs that drive
-            // damage application via EnSt_CheckHitBackside) and [2]
-            // (front armor that drives sway via EnSt_CheckHitFrontside).
-            // The acHitInfo deref in EnSt_CheckHitBackside is null-guarded
-            // (z_en_st.c:460+) so synthetic bit-set without a real AT
-            // collider is safe — flags |= 0 falls through to the standard
-            // melee → BounceAround death path. The earlier crash documented
-            // here (log 115 — 0xC0000005 on Skulltula damage receive) is
-            // resolved by the null-guard.
+            // #90 / log 431+433 fix — host applies peer's damage via the
+            // back-side body+legs cylinders ONLY ([0] and [1]).
+            //
+            // Cylinder [2] (front shield) is INTENTIONALLY EXCLUDED.
+            // EnSt_CheckColliders (z_en_st.c:519) calls
+            // EnSt_CheckHitFrontside FIRST and returns "armored reaction"
+            // (sway anim, no damage) when [2]'s AC_HIT is set. Setting
+            // [2] here makes EVERY peer hit register as an armored
+            // bounce — damage never applies, HP never decrements,
+            // Skulltula stays alive forever (regression observed in
+            // log 433: drains showed preHp=2 on every hit, no kill).
+            //
+            // The acHitInfo deref in EnSt_CheckHitBackside is null-
+            // guarded (z_en_st.c:460+) so synthetic bit-set on [0]/[1]
+            // without a real AT collider is safe — flags |= 0 falls
+            // through to the standard melee → BounceAround death path.
+            // The earlier crash documented historically (log 115 —
+            // 0xC0000005 on Skulltula damage receive) is resolved by
+            // the null-guard.
+            //
+            // Sway anim cross-machine sync for peer's armored-side
+            // hits (log 433 bug 2) is NOT solved by this fix — peer's
+            // local Skulltula fires sway locally, but host's local
+            // copy doesn't. Would need either wire-side info about
+            // which cylinder was hit OR ENEMY_STATE broadcasting
+            // swayTimer / playSwayFlag / swayAngle fields. Acceptable
+            // cosmetic gap until a follow-up sync pass.
             EnSt* st = (EnSt*)actor;
             st->colCylinder[0].base.acFlags |= AC_HIT;
             st->colCylinder[1].base.acFlags |= AC_HIT;
-            st->colCylinder[2].base.acFlags |= AC_HIT;
             break;
         }
         // 2026-06-07 wave — same audit pass that fixed En_St (log 431).
