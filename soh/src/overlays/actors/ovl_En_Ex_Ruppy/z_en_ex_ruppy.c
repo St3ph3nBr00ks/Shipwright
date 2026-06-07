@@ -319,7 +319,13 @@ void EnExRuppy_WaitToBlowUp(EnExRuppy* this, PlayState* play) {
     if (this->type == 2) {
         distToBlowUp = 30.0f;
     }
-    if (this->actor.xyzDistToPlayerSq < SQ(distToBlowUp)) {
+    // Pitfall 28 + Path A — gate local-Link knockback on live distance
+    // to GET_PLAYER. xyzDistToPlayerSq is overwritten by #153's
+    // nearest-player overlay; without the gate, a DummyPlayer near the
+    // exploding ruppee would trigger the explosion against host's
+    // real Link. Cross-machine routing via DummyPlayer.cpp AC_HIT +
+    // EnemyKnockbackTable entry ACTOR_EN_EX_RUPPY.
+    if (Anchor_DistXZToLocalLink(&this->actor, play) < distToBlowUp) {
         parent = (EnExRuppyParentActor*)this->actor.parent;
         if (parent != NULL) {
             if (parent->actor.update != NULL) {

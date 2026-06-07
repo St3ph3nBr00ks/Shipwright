@@ -188,6 +188,15 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // added at z_en_attack_niw.c:365 (xyzDistToPlayerSq gate, Bug 1).
     { ACTOR_EN_ATTACK_NIW, { 2.0f, 0.0f, 2 /* LARGE */, 0x10 /* kbDmg */ } },
 
+    // ─── En_Ex_Ruppy (Zora dive-game exploding ruppee) ───────────
+    // z_en_ex_ruppy.c:340 — func_8002F71C(play, this, 2.0f, yawTowardsPlayer, 0.0f)
+    // Self-destructs after AT_HIT (Actor_Kill at line 342). Gate
+    // is xyzDistToPlayerSq proximity (line 322), affected by #153
+    // overlay. Source-side linkInRange gate added at
+    // z_en_ex_ruppy.c:322 (Bug 1 territory — host's local Link
+    // got blown up when peer was the closer DummyPlayer).
+    { ACTOR_EN_EX_RUPPY, { 2.0f, 0.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)
