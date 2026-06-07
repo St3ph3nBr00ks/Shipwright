@@ -66,6 +66,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
 // #102 / en_reeba_sync_plan.md — Leever (En_Reeba) state-machine sync.
 #include "src/overlays/actors/ovl_En_Reeba/z_en_reeba.h"
+// en_ik_sync_plan.md — Iron Knuckle (En_Ik) state-machine sync.
+#include "src/overlays/actors/ovl_En_Ik/z_en_ik.h"
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // Issue #153 — En_Goroiwa is ACTORCAT_PROP, the first non-ENEMY actor synced.
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
@@ -2473,6 +2475,36 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnReeba] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // en_ik_sync_plan.md §3 step 7 — En_Ik (Iron Knuckle) state-
+            // machine sync. Dormant filter: state 0 (wake-up stand-up anim)
+            // is the only "dormant" transition; once past wake-up, all
+            // states 1-9 are active combat. Death state 10 gated by
+            // PhaseImpliesHasLocalDeath. All variants (white / red /
+            // sleeping) share the combat state machine.
+            if (actor->id == ACTOR_EN_IK && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnIk* ik = (EnIk*)actor;
+                s16 curState = EnIk_GetStateIndex(ik);
+                bool netIsDormant  = (ext->netStateIndex == 0);
+                bool localIsActive = (curState >= 1 && curState <= 9);
+                bool deathStateNet = (ext->netStateIndex == 10);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnIk] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnIk_ApplyNetState(ik, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnIk] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }

@@ -125,6 +125,19 @@ extern "C" bool Anchor_ShouldSuppressEnFireflyDrop(Actor* actor) {
         || ext->networkDriveDying;
 }
 
+// Receiver-side predicate — true when an En_Ik (Iron Knuckle) death cycle
+// was network-driven (peer received ENEMY_DEFEATED and is replaying the
+// death anim -> 24-tick countdown -> drop sequence). func_80A75A38 uses
+// this to suppress Item_DropCollectibleRandom so host's authoritative
+// ITEM_DROP_SYNC isn't double-applied.
+// See z_en_ik.c func_80A75A38 + Plans/en_ik_sync_plan.md §3 step 3+5.
+extern "C" bool Anchor_ShouldSuppressEnIkDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // C-callable: non-host tells host that its local Link was just hit by this enemy
 // so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
 // Phase 2). No-op when Anchor is disconnected, when this client is the room

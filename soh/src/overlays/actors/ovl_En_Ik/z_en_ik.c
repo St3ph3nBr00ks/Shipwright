@@ -667,7 +667,12 @@ void func_80A75A38(EnIk* this, PlayState* play) {
                 EffectSsDeadDb_Spawn(play, &pos, &sp7C, &sp7C, 100, 0, 255, 255, 255, 255, 0, 0, 255, 1, 9, true);
             }
             if (this->animationTimer == 0) {
-                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xB0);
+                // en_ik_sync_plan.md §3 step 3 — suppress local random drop when
+                // this death cycle was network-driven; host's authoritative
+                // ITEM_DROP_SYNC handles the broadcast.
+                if (!Anchor_ShouldSuppressEnIkDrop(&this->actor)) {
+                    Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xB0);
+                }
                 // Don't set flag when Enemy Rando or CrowdControl are on.
                 // Instead Iron Knuckles rely on the "clear room" flag.
                 if (this->switchFlags != 0xFF && !Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
@@ -1481,3 +1486,70 @@ const ActorInit En_Ik_InitVars = {
     (ActorFunc)EnIk_Draw,
     NULL,
 };
+
+// ===========================================================================
+// Anchor multiplayer state-machine sync — Plans/en_ik_sync_plan.md.
+// ===========================================================================
+
+// Triggers EnIk's death-anim -> 24-tick countdown -> drop natural cycle on a
+// non-host receiver without firing GameInteractor_ExecuteOnEnemyDefeat.
+// Inlined body of func_80A7598C minus the OnEnemyDefeat call (which would
+// re-broadcast ENEMY_DEFEATED from the receiver). Enemy_StartFinishingBlow
+// is included because the host's path calls it from func_80A75C38:743
+// immediately before func_80A7598C — the receiver replicates the full
+// transition.
+void EnIk_SetupDyingNet(EnIk* this, PlayState* play) {
+    f32 frames = Animation_GetLastFrame(&gIronKnuckleDeathAnim);
+
+    Enemy_StartFinishingBlow(play, &this->actor);
+    this->actor.colChkInfo.health = 0;
+    this->unk_2FE = 0;
+    this->unk_2F8 = 2;
+    this->actor.speedXZ = 0.0f;
+    Animation_Change(&this->skelAnime, &gIronKnuckleDeathAnim, 1.0f, 0.0f, frames, ANIMMODE_ONCE, -4.0f);
+    this->animationTimer = 0x18;
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_IRONNACK_DEAD);
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_CUTBODY);
+    EnIk_SetupAction(this, func_80A75A38);
+    // NOTE: deliberately omit GameInteractor_ExecuteOnEnemyDefeat (which
+    // func_80A7598C would call). Echoing would re-broadcast ENEMY_DEFEATED
+    // from the receiver.
+}
+
+// 11 combat action functions form the synced combat state machine. The
+// cutscene-side state machine (this->action 0-5 + sActionFuncs[]) is NOT
+// synced — those states are driven by the cutscene command list and run
+// deterministically on every client. See Plans/en_ik_sync_plan.md §2.
+s16 EnIk_GetStateIndex(EnIk* this) {
+    if (this->actionFunc == func_80A747C0) return 0;  // wake-up stand-up
+    if (this->actionFunc == func_80A7492C) return 1;  // standby idle
+    if (this->actionFunc == func_80A74BA4) return 2;  // walk/run-and-block
+    if (this->actionFunc == func_80A74EBC) return 3;  // vertical axe slam
+    if (this->actionFunc == func_80A7510C) return 4;  // axe-stuck recovery
+    if (this->actionFunc == func_80A75260) return 5;  // horizontal axe sweep
+    if (this->actionFunc == func_80A7545C) return 6;  // recover from horizontal
+    if (this->actionFunc == func_80A75530) return 7;  // rotate-and-attack
+    if (this->actionFunc == func_80A7567C) return 8;  // shield raised
+    if (this->actionFunc == func_80A758B0) return 9;  // flinch (knockback)
+    if (this->actionFunc == func_80A75A38) return 10; // death tick
+    return -1;
+}
+
+void EnIk_ApplyNetState(EnIk* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  func_80A74714(this); break;  // wake-up stand-up
+        case 1:  func_80A7489C(this); break;  // standby idle
+        case 2:  func_80A74AAC(this); break;  // walk/run-and-block
+        case 3:  func_80A74E2C(this); break;  // vertical slam
+        case 4:  func_80A7506C(this); break;  // axe-stuck recovery
+        case 5:  func_80A751C8(this); break;  // horizontal sweep
+        case 6:  func_80A753D0(this); break;  // recover from horizontal
+        case 7:  func_80A754A0(this); break;  // rotate-and-attack
+        case 8:  func_80A755F0(this); break;  // shield raised
+        case 9:  func_80A75790(this); break;  // flinch
+        // 10 — death class. Driven via SetupDyingNet by
+        //    HandlePacket_EnemyDefeated; skip silently here so a stale
+        //    alive-state packet doesn't override the death.
+        default: break;
+    }
+}
