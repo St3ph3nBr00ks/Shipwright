@@ -3,6 +3,7 @@
 #ifdef __cplusplus
 
 #include "soh/Network/Network.h"
+#include "soh/Network/Anchor/Common/PacketTypes.h"  // #243.7.1 — packet-type wire identifiers (re-exported as Anchor::FOO aliases below)
 #include "soh/ObjectExtension/ObjectExtension.h"
 #include "soh/resource/type/Skeleton.h"
 #include <libultraship/libultraship.h>
@@ -690,200 +691,72 @@ class Anchor : public Network {
 
     inline static const std::string clientVersion = (char*)gGitCommitHash;
 
-    // Packet types //
-    inline static const std::string ALL_CLIENT_STATE = "ALL_CLIENT_STATE";
-    // Pillar C2 Phase 4 — unified enemy lifecycle packet. Consolidates
-    // the four legacy enemy packet types (ENEMY_UPDATE, ENEMY_DEFEATED,
-    // ENEMY_SPAWN, ENEMY_RESPAWN) under one wire identifier with phase +
-    // phaseChanged tags. All emit/receive logic lives in
-    // EnemyStateSync/Packets/EnemyState.cpp.
-    inline static const std::string ENEMY_STATE = "ENEMY_STATE";
-    inline static const std::string DAMAGE_ENEMY = "DAMAGE_ENEMY";
-    inline static const std::string DAMAGE_PLAYER = "DAMAGE_PLAYER";
-    inline static const std::string SHIELD_BOUNCE_PLAYER = "SHIELD_BOUNCE_PLAYER";
-    inline static const std::string ENEMY_HIT_PLAYER = "ENEMY_HIT_PLAYER";
-    inline static const std::string PROJECTILE_HIT_ENEMY = "PROJECTILE_HIT_ENEMY";
-    inline static const std::string TALK_REQUEST = "TALK_REQUEST";
-    inline static const std::string DIALOG_END = "DIALOG_END";
-    inline static const std::string BOSS_GOMA_LOOKED_AT = "BOSS_GOMA_LOOKED_AT";
-    inline static const std::string MIDO_POST_DEKU_LEAVE = "MIDO_POST_DEKU_LEAVE";
-    inline static const std::string CUTSCENE_TEXT_ADVANCE = "CUTSCENE_TEXT_ADVANCE";
-    inline static const std::string CUTSCENE_TEXT_ADVANCED = "CUTSCENE_TEXT_ADVANCED";
-    // NPC Follower (Flotilla — Plans/npc_follower_plan.md §2.9).
-    // Single-owner authority: the client that toggled the CVar owns
-    // its local NPC; SPAWN announces, STATE periodically broadcasts
-    // pos/rot at ~10Hz, DESPAWN tears down. Peers spawn/apply/kill
-    // read-only replicas keyed by ownerClientId.
-    inline static const std::string FOLLOWER_NPC_SPAWN   = "FOLLOWER_NPC_SPAWN";
-    inline static const std::string FOLLOWER_NPC_STATE   = "FOLLOWER_NPC_STATE";
-    inline static const std::string FOLLOWER_NPC_DESPAWN = "FOLLOWER_NPC_DESPAWN";
-    inline static const std::string NAV_TEST_DIRECTIVE   = "NAV_TEST_DIRECTIVE";
-    inline static const std::string DISABLE_ANCHOR = "DISABLE_ANCHOR";
-    inline static const std::string ENTRANCE_DISCOVERED = "ENTRANCE_DISCOVERED";
-    inline static const std::string GAME_COMPLETE = "GAME_COMPLETE";
-    inline static const std::string GIVE_ITEM = "GIVE_ITEM";
-    inline static const std::string HANDSHAKE = "HANDSHAKE";
-    inline static const std::string OCARINA_SFX = "OCARINA_SFX";
-    inline static const std::string PLAYER_SFX = "PLAYER_SFX";
-    inline static const std::string PLAYER_UPDATE = "PLAYER_UPDATE";
-    inline static const std::string REQUEST_TEAM_STATE = "REQUEST_TEAM_STATE";
-    inline static const std::string REQUEST_TELEPORT = "REQUEST_TELEPORT";
-    inline static const std::string SERVER_MESSAGE = "SERVER_MESSAGE";
-    inline static const std::string SET_CHECK_STATUS = "SET_CHECK_STATUS";
-    inline static const std::string SET_FLAG = "SET_FLAG";
-    inline static const std::string TELEPORT_TO = "TELEPORT_TO";
-    inline static const std::string UNSET_FLAG = "UNSET_FLAG";
-    inline static const std::string UPDATE_BEANS_COUNT = "UPDATE_BEANS_COUNT";
-    inline static const std::string UPDATE_CLIENT_STATE = "UPDATE_CLIENT_STATE";
-    inline static const std::string UPDATE_DUNGEON_ITEMS = "UPDATE_DUNGEON_ITEMS";
-    inline static const std::string UPDATE_ROOM_STATE = "UPDATE_ROOM_STATE";
-    inline static const std::string UPDATE_TEAM_STATE = "UPDATE_TEAM_STATE";
-    // Leader→follower scene-transition handoff. Sent by the leader on edge-
-    // detect of `gPlayState->transitionTrigger` OFF→START. Payload carries the
-    // source sceneNum, destination nextEntranceIndex, and the world-space
-    // position (+rotation) of the trigger in the source scene so the follower
-    // can navigate there and fire its own transition. Supersedes the G13
-    // boss-room deactivate path and unblocks cross-scene doors / grotto /
-    // crawlspace entry. See #169.
-    inline static const std::string SCENE_TRANSITION_HANDOFF = "SCENE_TRANSITION_HANDOFF";
-
-    // AI Director migration snapshot. Broadcast from the global-effective-
-    // host on every ledger mutation (RecordSpawn, OnEnemyRemoved). Carries
-    // mLastSpawnFrameByKey + mLiveCountByDescriptor + mNetIdToDescriptor +
-    // per-descriptor SerializeMigrationState(). Peers cache into their own
-    // Director instance so a future host-migration target has fresh state.
-    // See Plans/ai_director_plan.md §2.8.
-    inline static const std::string DIRECTOR_STATE_SYNC = "DIRECTOR_STATE_SYNC";
-
-    // BOSS_EXIT_TEAM_WARP — team-routed scene transition for synced boss
-    // exits. When a team member enters the dungeon-clear blue warp, all
-    // teammates in the same boss room transition to the same destination
-    // entrance / next-cutscene, in lockstep. Routed via `targetTeamId`.
-    inline static const std::string BOSS_EXIT_TEAM_WARP = "BOSS_EXIT_TEAM_WARP";
-
-    // Pillar C v1 — globally-replicated world state. Plan in
-    // Claude/Plans/pillar_c_worldstatesync.md.
-    inline static const std::string WORLD_FLAG_SET        = "WORLD_FLAG_SET";
-    inline static const std::string WORLD_FLAG_UNSET      = "WORLD_FLAG_UNSET";
-    inline static const std::string WORLD_STATE_REQUEST   = "WORLD_STATE_REQUEST";
-    inline static const std::string WORLD_STATE_SNAPSHOT  = "WORLD_STATE_SNAPSHOT";
-
-    // Test 1.5 exit-gated fix — host broadcasts when a scene becomes
-    // unoccupied (last player + host all transitioned out). Receivers
-    // clear scene-scoped buffered state for that scene so the next
-    // entrant sees fresh actor pool (vanilla respawn parity).
-    inline static const std::string SCENE_DEATHS_CLEARED  = "SCENE_DEATHS_CLEARED";
-
-    // KB-18 (#177) Option 4 — host-authoritative netId snapshot. Host
-    // broadcasts the per-static-actor netId table on scene-spawn so non-
-    // hosts override their locally-computed (potentially divergent) netIds
-    // with the host's value. Solves the entire class of post-init
-    // home.pos non-determinism (En_Sw raycast + future actors).
-    inline static const std::string SCENE_ACTOR_NETIDS = "SCENE_ACTOR_NETIDS";
-
-    // ITEM_DROP_SYNC — host → all clients (team-broadcast). Sent on
-    // each host-side `OnActorSpawn(ACTOR_EN_ITEM00)` for transient
-    // drop types (rupees, hearts, ammo, magic, sticks, nuts, seeds).
-    // Carries the drop's authoritative netId, ITEM00_* params, world
-    // position, killerClientId (the player who triggered the drop —
-    // captured at the `Item_DropCollectible*` call site via the
-    // Anchor_BeginItemDrop / EndItemDrop shim), and spawnTimeMs (host
-    // monotonic clock at drop time, used for the killer-exclusive
-    // grace window). Receivers spawn a matching local EnItem00 with
-    // an `ItemDropNetId` extension stamped from the payload. See #193.
-    inline static const std::string ITEM_DROP_SYNC = "ITEM_DROP_SYNC";
-
-    // ITEM_COLLECTED — collector client → all (team-broadcast). Sent
-    // when a local pickup gate passes and the player's gSaveContext
-    // has been credited. Receivers walk their actor list for the
-    // matching itemNetId and Actor_Kill the local copy. Per-player
-    // pickup attribution: only one client claims the drop. See #193.
-    inline static const std::string ITEM_COLLECTED = "ITEM_COLLECTED";
-
-    // ITEM_DROP_SNAPSHOT — host → joining peer (targeted). Late-join
-    // replay of in-flight EN_ITEM00 drops in the joining peer's scene.
-    // Sent when a peer transitions into the host's scene (UPDATE_CLIENT_STATE
-    // edge): host walks ACTORCAT_MISC for live EN_ITEM00 with
-    // ItemDropNetId, packs the list, sends to the named client. Mirrors
-    // the SCENE_ACTOR_NETIDS pattern. See #193 Phase 5.
-    inline static const std::string ITEM_DROP_SNAPSHOT = "ITEM_DROP_SNAPSHOT";
-
-    // ITEM_PICKUP_REQUEST — peer → room host (targeted). Race A
-    // mitigation. Sent when peer's local pickup gate passes Layers 1+2
-    // (3s exclusivity + per-player eligibility). Peer's vanilla pickup
-    // is suppressed; peer waits for host's ITEM_COLLECTED arbitration
-    // broadcast. Host walks for the matching netId; if alive, kills
-    // the drop locally (claim) and broadcasts ITEM_COLLECTED with the
-    // sender's clientId; if dead (already collected by host or another
-    // peer), drops the request silently. Eliminates the post-window
-    // simultaneous-pickup double-credit.
-    inline static const std::string ITEM_PICKUP_REQUEST = "ITEM_PICKUP_REQUEST";
-
-    // ENV_ACTOR_DROP — peer → host (targeted). Phase 4 v2. When peer's
-    // local env actor (En_Kusa grass, Obj_Mure cluster child, etc.) is
-    // cut/destroyed and would have dropped an item, peer suppresses
-    // its local `Item_DropCollectible*` call and broadcasts this packet
-    // with the env actor's netId + the drop param peer chose. Host
-    // walks its actor list for the matching netId; if the actor is
-    // still alive on host (peer's cut beat host's own potential cut
-    // of the same shrub), host fires `Item_DropCollectible` with the
-    // peer-supplied param, attributed to peer. The OnActorSpawn
-    // EN_ITEM00 hook then broadcasts ITEM_DROP_SYNC. Net result: one
-    // drop per cut event, regardless of which client triggered it.
-    // See #193 Phase 4 v2.
-    inline static const std::string ENV_ACTOR_DROP = "ENV_ACTOR_DROP";
-
-    // ENV_ACTOR_DESTROY — any client → all (team-broadcast). Sent
-    // when a synced env actor (grass, pot, crate, beehive, etc.) is
-    // destroyed locally — including cut events that DON'T call
-    // Actor_Kill (e.g. ENKUSA_TYPE_1 grass transitions to a cut-stub
-    // state without dying). Receivers find their local matching
-    // actor by EnemyNetId and Actor_Kill it. Idempotent — duplicate
-    // broadcasts (simultaneous-cut race) no-op safely.
+    // ========================================================================
+    // SECTION — Packet types (wire identifiers)
     //
-    // Distinct from ENV_ACTOR_DROP (peer→host drop-attribution
-    // routing) and from ENEMY_DEFEATED (which already syncs the
-    // Actor_Kill-driven destructions via OnActorKill). ENV_ACTOR_DESTROY
-    // fills the gap where the destruction event doesn't naturally
-    // produce an Actor_Kill on the sender side.
+    // Constants now live in `Common/PacketTypes.h` (#243.7.1 extraction).
+    // These class-scope references preserve the historical `Anchor::FOO`
+    // form so existing call sites work unchanged. Catalogue + semantic
+    // documentation lives in the PacketTypes.h header — go there to add
+    // new types or read what each packet does.
     //
-    // Plan: Claude/Plans/env_actor_destroy_sync.md
-    inline static const std::string ENV_ACTOR_DESTROY = "ENV_ACTOR_DESTROY";
-
-    // MODAL_OFFER_CLAIMED — host → all (team-broadcast). #193 Plan B
-    // follow-up to step 6. Sent when host's modal-offer pickup actually
-    // resolves — i.e. host's player accepted the offer presented by an
-    // actor in DeadStickDrop (or equivalent) state. Detected by the
-    // OnActorSpawn(EN_ITEM00 & 0x8000) hook on host (vanilla
-    // `func_8083E4C4` spawns the modal-completion phantom). Peers find
-    // the matching SyncedClaimableDrop by `offererNetId` and dispatch
-    // the adapter's DismissVisualRep on their mirror of the offering
-    // actor, ending the stem visual at the moment of accept rather
-    // than at the natural DeadStickDrop countdown timeout.
-    //
-    // Earlier attempts to drive dismissal from ENEMY_DEFEATED (commits
-    // 7236719a5 / b01dcc3d4, reverted in e3ab0cbf4) misfired because
-    // defeat hooks fire at the offering actor's Dying state, ~1s
-    // BEFORE the modal is even presented. MODAL_OFFER_CLAIMED is the
-    // correct trigger — the phantom spawn IS the accept signal.
-    inline static const std::string MODAL_OFFER_CLAIMED = "MODAL_OFFER_CLAIMED";
-
-    // HEARTBEAT — every client → all clients. Sent every ~2s from the
-    // network thread (NOT the game thread) so it survives game-thread
-    // freezes (textbox stuck, cutscene gate, pause). Carries:
-    //   - sendTimeMs: monotonic-clock timestamp at network-thread send,
-    //     used by receivers to detect connection liveness.
-    //   - gameFrameCounter: monotonic counter incremented from
-    //     OnGameFrameUpdate, used by receivers to detect game-thread
-    //     liveness (counter stale → game frozen, but heartbeats
-    //     arriving → connection alive).
-    // The two-axis liveness model lets peers distinguish "client offline"
-    // from "client connected but frozen" — surfaced via
-    // IsClientLikelyFrozen() and IsClientGameFrozen() respectively.
-    // See #194 for the originating bug class (host's send loop stalled
-    // during a hintnut dialog freeze, relay timed out, peers had no
-    // signal until reconnect).
-    inline static const std::string HEARTBEAT = "HEARTBEAT";
+    // Members are references (`const std::string&`), so the existing
+    // assignment / comparison / serialization patterns all work natively.
+    // ========================================================================
+    inline static const std::string& ALL_CLIENT_STATE         = PacketTypes::ALL_CLIENT_STATE;
+    inline static const std::string& BOSS_EXIT_TEAM_WARP      = PacketTypes::BOSS_EXIT_TEAM_WARP;
+    inline static const std::string& BOSS_GOMA_LOOKED_AT      = PacketTypes::BOSS_GOMA_LOOKED_AT;
+    inline static const std::string& CUTSCENE_TEXT_ADVANCE    = PacketTypes::CUTSCENE_TEXT_ADVANCE;
+    inline static const std::string& CUTSCENE_TEXT_ADVANCED   = PacketTypes::CUTSCENE_TEXT_ADVANCED;
+    inline static const std::string& DAMAGE_ENEMY             = PacketTypes::DAMAGE_ENEMY;
+    inline static const std::string& DAMAGE_PLAYER            = PacketTypes::DAMAGE_PLAYER;
+    inline static const std::string& DIALOG_END               = PacketTypes::DIALOG_END;
+    inline static const std::string& DIRECTOR_STATE_SYNC      = PacketTypes::DIRECTOR_STATE_SYNC;
+    inline static const std::string& DISABLE_ANCHOR           = PacketTypes::DISABLE_ANCHOR;
+    inline static const std::string& ENEMY_HIT_PLAYER         = PacketTypes::ENEMY_HIT_PLAYER;
+    inline static const std::string& ENEMY_STATE              = PacketTypes::ENEMY_STATE;
+    inline static const std::string& ENTRANCE_DISCOVERED      = PacketTypes::ENTRANCE_DISCOVERED;
+    inline static const std::string& ENV_ACTOR_DESTROY        = PacketTypes::ENV_ACTOR_DESTROY;
+    inline static const std::string& ENV_ACTOR_DROP           = PacketTypes::ENV_ACTOR_DROP;
+    inline static const std::string& FOLLOWER_NPC_DESPAWN     = PacketTypes::FOLLOWER_NPC_DESPAWN;
+    inline static const std::string& FOLLOWER_NPC_SPAWN       = PacketTypes::FOLLOWER_NPC_SPAWN;
+    inline static const std::string& FOLLOWER_NPC_STATE       = PacketTypes::FOLLOWER_NPC_STATE;
+    inline static const std::string& GAME_COMPLETE            = PacketTypes::GAME_COMPLETE;
+    inline static const std::string& GIVE_ITEM                = PacketTypes::GIVE_ITEM;
+    inline static const std::string& HANDSHAKE                = PacketTypes::HANDSHAKE;
+    inline static const std::string& HEARTBEAT                = PacketTypes::HEARTBEAT;
+    inline static const std::string& ITEM_COLLECTED           = PacketTypes::ITEM_COLLECTED;
+    inline static const std::string& ITEM_DROP_SNAPSHOT       = PacketTypes::ITEM_DROP_SNAPSHOT;
+    inline static const std::string& ITEM_DROP_SYNC           = PacketTypes::ITEM_DROP_SYNC;
+    inline static const std::string& ITEM_PICKUP_REQUEST      = PacketTypes::ITEM_PICKUP_REQUEST;
+    inline static const std::string& MIDO_POST_DEKU_LEAVE     = PacketTypes::MIDO_POST_DEKU_LEAVE;
+    inline static const std::string& MODAL_OFFER_CLAIMED      = PacketTypes::MODAL_OFFER_CLAIMED;
+    inline static const std::string& NAV_TEST_DIRECTIVE       = PacketTypes::NAV_TEST_DIRECTIVE;
+    inline static const std::string& OCARINA_SFX              = PacketTypes::OCARINA_SFX;
+    inline static const std::string& PLAYER_SFX               = PacketTypes::PLAYER_SFX;
+    inline static const std::string& PLAYER_UPDATE            = PacketTypes::PLAYER_UPDATE;
+    inline static const std::string& PROJECTILE_HIT_ENEMY     = PacketTypes::PROJECTILE_HIT_ENEMY;
+    inline static const std::string& REQUEST_TEAM_STATE       = PacketTypes::REQUEST_TEAM_STATE;
+    inline static const std::string& REQUEST_TELEPORT         = PacketTypes::REQUEST_TELEPORT;
+    inline static const std::string& SCENE_ACTOR_NETIDS       = PacketTypes::SCENE_ACTOR_NETIDS;
+    inline static const std::string& SCENE_DEATHS_CLEARED     = PacketTypes::SCENE_DEATHS_CLEARED;
+    inline static const std::string& SCENE_TRANSITION_HANDOFF = PacketTypes::SCENE_TRANSITION_HANDOFF;
+    inline static const std::string& SERVER_MESSAGE           = PacketTypes::SERVER_MESSAGE;
+    inline static const std::string& SET_CHECK_STATUS         = PacketTypes::SET_CHECK_STATUS;
+    inline static const std::string& SET_FLAG                 = PacketTypes::SET_FLAG;
+    inline static const std::string& SHIELD_BOUNCE_PLAYER     = PacketTypes::SHIELD_BOUNCE_PLAYER;
+    inline static const std::string& TALK_REQUEST             = PacketTypes::TALK_REQUEST;
+    inline static const std::string& TELEPORT_TO              = PacketTypes::TELEPORT_TO;
+    inline static const std::string& UNSET_FLAG               = PacketTypes::UNSET_FLAG;
+    inline static const std::string& UPDATE_BEANS_COUNT       = PacketTypes::UPDATE_BEANS_COUNT;
+    inline static const std::string& UPDATE_CLIENT_STATE      = PacketTypes::UPDATE_CLIENT_STATE;
+    inline static const std::string& UPDATE_DUNGEON_ITEMS     = PacketTypes::UPDATE_DUNGEON_ITEMS;
+    inline static const std::string& UPDATE_ROOM_STATE        = PacketTypes::UPDATE_ROOM_STATE;
+    inline static const std::string& UPDATE_TEAM_STATE        = PacketTypes::UPDATE_TEAM_STATE;
+    inline static const std::string& WORLD_FLAG_SET           = PacketTypes::WORLD_FLAG_SET;
+    inline static const std::string& WORLD_FLAG_UNSET         = PacketTypes::WORLD_FLAG_UNSET;
+    inline static const std::string& WORLD_STATE_REQUEST      = PacketTypes::WORLD_STATE_REQUEST;
+    inline static const std::string& WORLD_STATE_SNAPSHOT     = PacketTypes::WORLD_STATE_SNAPSHOT;
 
     static Anchor* Instance;
     std::map<uint32_t, AnchorClient> clients;
