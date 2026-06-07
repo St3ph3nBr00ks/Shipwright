@@ -601,7 +601,12 @@ void EnBili_UpdateDamage(EnBili* this, PlayState* play) {
                 EnBili_SetupBurnt(this);
             }
 
-            if (this->collider.info.acHitInfo->toucher.dmgFlags & 0x1F820) { // DMG_ARROW
+            // #128 / log 431 audit — cross-machine sync sets AC_HIT
+            // synthetically without populating acHitInfo. Null-guard
+            // the deref; when null, the DMG_ARROW culling override
+            // doesn't apply (Biri stays cull-able for distant peers).
+            if (this->collider.info.acHitInfo != NULL &&
+                (this->collider.info.acHitInfo->toucher.dmgFlags & 0x1F820)) { // DMG_ARROW
                 this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
             }
         }

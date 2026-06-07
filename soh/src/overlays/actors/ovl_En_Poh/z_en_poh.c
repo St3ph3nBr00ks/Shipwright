@@ -305,10 +305,21 @@ void func_80ADE28C(EnPoh* this) {
     } else {
         Animation_PlayOnce(&this->skelAnime, &gPoeComposerDamagedAnim);
     }
-    if (this->colliderCyl.info.acHitInfo->toucher.dmgFlags & 0x0001F824) {
+    // #99 / log 431 audit — cross-machine sync sets AC_HIT synthetically
+    // without populating acHitInfo / base.ac (no real AT collider arrived).
+    // Null-guard both derefs; when null, fall back to facing-flip via the
+    // existing yawToward + 0x8000 path. The 0x0001F824 dmgFlags branch is
+    // the "arrow / shock-style" knockback direction; not having an
+    // attacker actor means we can't read the arrow's facing — using the
+    // default yawTowardsAttacker branch is the conservative fallback.
+    if (this->colliderCyl.info.acHitInfo != NULL && this->colliderCyl.base.ac != NULL &&
+        (this->colliderCyl.info.acHitInfo->toucher.dmgFlags & 0x0001F824)) {
         this->actor.world.rot.y = this->colliderCyl.base.ac->world.rot.y;
-    } else {
+    } else if (this->colliderCyl.base.ac != NULL) {
         this->actor.world.rot.y = Actor_WorldYawTowardActor(&this->actor, this->colliderCyl.base.ac) + 0x8000;
+    } else {
+        // No attacker reference (sync-only damage). Flip facing 180°.
+        this->actor.world.rot.y = this->actor.shape.rot.y + 0x8000;
     }
     this->colliderCyl.base.acFlags &= ~AC_ON;
     this->actor.speedXZ = 5.0f;

@@ -22,6 +22,18 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_St/z_en_st.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
+// 2026-06-07 wave — actors landing the same AC_HIT routing as En_St
+// (log 431 follow-up audit). Each enemy below either has no acHitInfo
+// deref in its damage code (safe-easy add) or its deref is null-
+// guarded in the same commit as the case addition. See bug findings
+// doc Plans/Testing/BugFindings_EnSt_Log431_2026-06-07.md.
+#include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
+#include "src/overlays/actors/ovl_En_Reeba/z_en_reeba.h"
+#include "src/overlays/actors/ovl_En_Ik/z_en_ik.h"
+#include "src/overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
+#include "src/overlays/actors/ovl_En_Peehat/z_en_peehat.h"
+#include "src/overlays/actors/ovl_En_Poh/z_en_poh.h"
+#include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
 // Bug B — En_Goma (Boss_Goma's larvae) needs AC_HIT for its damage block to
 // fire. Larva is null-guarded in z_en_goma.c so synthetic AC_HIT without
 // acHitInfo no longer crashes (treated as dmgFlags=0 → falls through to the
@@ -276,10 +288,67 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             st->colCylinder[2].base.acFlags |= AC_HIT;
             break;
         }
-        // ACTOR_EN_DEKUNUTS (Mad Scrub) is still INTENTIONALLY OMITTED —
-        // reads `info.acHitInfo->toucher.dmgFlags` unconditionally
-        // (z_en_dekunuts.c:451). Needs the same null-guard treatment as
-        // En_St did (log 431 fix); pending follow-up.
+        // 2026-06-07 wave — same audit pass that fixed En_St (log 431).
+        // The following actors all gate damage on `acFlags & AC_HIT` but
+        // were missing from this switch — peer's DAMAGE_ENEMY arrived,
+        // host's colChkInfo.damage incremented, but host's update path
+        // never saw AC_HIT and so never called Actor_ApplyDamage. Each
+        // case below either has NO acHitInfo deref in damage code
+        // (safe direct add) or its deref is null-guarded in the same
+        // commit landing this case.
+        case ACTOR_EN_WF: {
+            // Wolfos — z_en_wf.c:1287 checks body + tail cyl AC_HIT.
+            // No acHitInfo deref in damage path; safe-easy add.
+            EnWf* wf = (EnWf*)actor;
+            wf->colliderCylinderBody.base.acFlags |= AC_HIT;
+            wf->colliderCylinderTail.base.acFlags |= AC_HIT;
+            break;
+        }
+        case ACTOR_EN_REEBA:
+            // Leever — z_en_reeba.c:545. No acHitInfo deref. Single cyl.
+            ((EnReeba*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_IK:
+            // Iron Knuckle — z_en_ik.c:301/710 reads bodyCollider AC_HIT.
+            // No acHitInfo deref in damage path. AT colliders for axe are
+            // host-authoritative (separate codepath).
+            ((EnIk*)actor)->bodyCollider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_HINTNUTS:
+            // Hintnuts — z_en_hintnuts.c:533. No acHitInfo deref.
+            ((EnHintnuts*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_PEEHAT: {
+            // Peahat — z_en_peehat.c checks colCylinder (grounded variant)
+            // and colJntSph (flying variant) for AC_HIT in different
+            // state branches. Set both so peer damage routes correctly
+            // regardless of variant / state. No acHitInfo deref in
+            // damage path.
+            EnPeehat* ph = (EnPeehat*)actor;
+            ph->colCylinder.base.acFlags |= AC_HIT;
+            ph->colJntSph.base.acFlags |= AC_HIT;
+            break;
+        }
+        case ACTOR_EN_POH:
+            // Poe — z_en_poh.c:308 derefs `colliderCyl.info.acHitInfo
+            // ->toucher.dmgFlags` AND `colliderCyl.base.ac->world.rot.y`
+            // unconditionally inside func_80ADE28C. Null-guards landed in
+            // the same commit as this case addition. Safe to set AC_HIT.
+            ((EnPoh*)actor)->colliderCyl.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_BILI:
+            // Biri jellyfish — z_en_bili.c:604 derefs
+            // `collider.info.acHitInfo->toucher.dmgFlags` unconditionally
+            // inside EnBili_UpdateDamage. Null-guard landed in the same
+            // commit as this case addition.
+            ((EnBili*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_DEKUNUTS:
+            // Mad Scrub — z_en_dekunuts.c:213 derefs
+            // `collider.info.acHitInfo->toucher.dmgFlags` unconditionally.
+            // Null-guard landed in the same commit as this case addition.
+            ((EnDekunuts*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
         case ACTOR_EN_TEST:
             // bodyCollider — z_en_test.c:1666 reads AC_HIT here. swordCollider
             // and shieldCollider are AT colliders (Stalfos hitting Link), not AC.

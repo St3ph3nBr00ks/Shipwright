@@ -210,10 +210,19 @@ void EnDekunuts_SetupGasp(EnDekunuts* this) {
 
 void EnDekunuts_SetupBeDamaged(EnDekunuts* this) {
     Animation_MorphToPlayOnce(&this->skelAnime, &gDekuNutsDamageAnim, -3.0f);
-    if ((this->collider.info.acHitInfo->toucher.dmgFlags & 0x1F824) != 0) {
+    // #135 / log 431 audit — cross-machine sync sets AC_HIT synthetically
+    // without populating acHitInfo / base.ac. Null-guard both derefs.
+    // When attacker is null (sync-only damage), flip facing 180° as the
+    // conservative fallback (matches the "non-arrow hit from behind"
+    // default that the yawToward + 0x8000 branch produces vs a real
+    // attacker actor).
+    if (this->collider.info.acHitInfo != NULL && this->collider.base.ac != NULL &&
+        ((this->collider.info.acHitInfo->toucher.dmgFlags & 0x1F824) != 0)) {
         this->actor.world.rot.y = this->collider.base.ac->world.rot.y;
-    } else {
+    } else if (this->collider.base.ac != NULL) {
         this->actor.world.rot.y = Actor_WorldYawTowardActor(&this->actor, this->collider.base.ac) + 0x8000;
+    } else {
+        this->actor.world.rot.y = this->actor.shape.rot.y + 0x8000;
     }
     this->collider.base.acFlags &= ~AC_ON;
     this->actionFunc = EnDekunuts_BeDamaged;
