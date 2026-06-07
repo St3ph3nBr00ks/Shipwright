@@ -10,6 +10,11 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Anchor multiplayer — nearest-of-all-players helper. Defined extern "C"
+// in HookHandlers.cpp; plain `extern` here per Pitfall 7 (extern "C" is
+// a C++ keyword and is not legal syntax in a .c file).
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_IGNORE_QUAKE | ACTOR_FLAG_CAN_ATTACH_TO_ARROW)
 
@@ -300,7 +305,10 @@ void EnFirefly_SetupDisturbDiveAttack(EnFirefly* this) {
 }
 
 s32 EnFirefly_ReturnToPerch(EnFirefly* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer — use nearest-of-all-players so a Keese doesn't
+    // drift away from its perch when only one player is far while a peer
+    // stands close. #47 / en_firefly_sync_plan.md §4 step 1.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     f32 distFromHome;
 
     if (this->actor.params != KEESE_NORMAL_PERCH) {
@@ -451,13 +459,23 @@ void EnFirefly_Die(EnFirefly* this, PlayState* play) {
     Math_StepToF(&this->actor.scale.x, 0.0f, 0.00034f);
     this->actor.scale.y = this->actor.scale.z = this->actor.scale.x;
     if (this->timer == 0) {
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xE0);
+        // Anchor multiplayer — suppress drop when the death cycle was
+        // network-driven (peer's ENEMY_DEFEATED arrived and we're
+        // replaying the fall → die sequence on this client). Host's
+        // local kill broadcasts ENEMY_DEFEATED + ITEM_DROP_SYNC
+        // separately; receiver mustn't double-drop. #47 /
+        // en_firefly_sync_plan.md §4 step 3.
+        if (!Anchor_ShouldSuppressEnFireflyDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xE0);
+        }
         Actor_Kill(&this->actor);
     }
 }
 
 void EnFirefly_DiveAttack(EnFirefly* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer — dive direction must follow the player the host
+    // is tracking, not each receiver's local Link. #47 / en_firefly_sync_plan.md §4 step 1.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     Vec3f preyPos;
 
     SkelAnime_Update(&this->skelAnime);
@@ -588,7 +606,9 @@ void EnFirefly_Perch(EnFirefly* this, PlayState* play) {
 }
 
 void EnFirefly_DisturbDiveAttack(EnFirefly* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer — same as DiveAttack; nearest player drives dive
+    // target. #47 / en_firefly_sync_plan.md §4 step 1.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     Vec3f preyPos;
 
     SkelAnime_Update(&this->skelAnime);
@@ -860,4 +880,58 @@ void EnFirefly_DrawInvisible(Actor* thisx, PlayState* play) {
     POLY_XLU_DISP = SkelAnime_DrawSkeleton2(play, &this->skelAnime, EnFirefly_OverrideLimbDraw, EnFirefly_PostLimbDraw,
                                             this, POLY_XLU_DISP);
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (#47 / en_firefly_sync_plan.md).
+// =============================================================================
+
+// Triggers EnFirefly's Fall → SetupDie → Die natural cycle on a non-host
+// receiver. Mirrors the body of EnFirefly_SetupFall (the natural damage
+// transition) but is invoked directly from HandlePacket_EnemyDefeated
+// instead of from EnFirefly_UpdateDamage's AC_HIT branch. The natural
+// `SetupDie` call inside `EnFirefly_Fall` DOES fire
+// GameInteractor_ExecuteOnEnemyDefeat, but the HostBookkeeping
+// HasDefeatBroadcast dedup guard at HookHandlers.cpp prevents the
+// receive-side fire from causing an echo back to host.
+void EnFirefly_SetupDyingNet(EnFirefly* this, PlayState* play) {
+    this->timer = 40;
+    this->actor.velocity.y = 0.0f;
+    Animation_Change(&this->skelAnime, &gKeeseFlyAnim, 0.5f, 0.0f, 0.0f, ANIMMODE_LOOP_INTERP, -3.0f);
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_FFLY_DEAD);
+    this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
+    Actor_SetColorFilter(&this->actor, 0x4000, 0xFF, 0, 40);
+    this->actionFunc = EnFirefly_Fall;
+}
+
+s16 EnFirefly_GetStateIndex(EnFirefly* this) {
+    if (this->actionFunc == EnFirefly_FlyIdle)            return 0;
+    if (this->actionFunc == EnFirefly_DiveAttack)         return 1;
+    if (this->actionFunc == EnFirefly_DisturbDiveAttack)  return 2;
+    if (this->actionFunc == EnFirefly_Rebound)            return 3;
+    if (this->actionFunc == EnFirefly_FlyAway)            return 4;
+    if (this->actionFunc == EnFirefly_Stunned)            return 5;
+    if (this->actionFunc == EnFirefly_Perch)              return 6;
+    if (this->actionFunc == EnFirefly_Fall)               return 7;
+    if (this->actionFunc == EnFirefly_FrozenFall)         return 8;
+    if (this->actionFunc == EnFirefly_Die)                return 9;
+    return -1;
+}
+
+void EnFirefly_ApplyNetState(EnFirefly* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0: EnFirefly_SetupFlyIdle(this);           break;
+        case 1: EnFirefly_SetupDiveAttack(this);        break;
+        case 2: EnFirefly_SetupDisturbDiveAttack(this); break;
+        case 3: EnFirefly_SetupRebound(this);           break;
+        case 4: EnFirefly_SetupFlyAway(this);           break;
+        case 5: EnFirefly_SetupStunned(this);           break;
+        case 6: EnFirefly_SetupPerch(this);             break;
+        // Death states 7-9 (Fall / FrozenFall / Die) are driven via
+        // SetupDyingNet from HandlePacket_EnemyDefeated. Skip silently
+        // here — the dormant-to-active filter + PhaseImpliesHasLocalDeath
+        // gate at the call site already block regression to these
+        // states from non-death paths.
+        default: break;
+    }
 }

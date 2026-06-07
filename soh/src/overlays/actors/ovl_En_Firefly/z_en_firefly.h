@@ -32,4 +32,25 @@ typedef enum {
     /* 4 */ KEESE_ICE_FLY
 } KeeseType;
 
+// Anchor multiplayer state-machine sync (#47 / en_firefly_sync_plan.md).
+// Despite the file name, this actor is the Keese (bat) — not a firefly.
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp etc.), so the param name in the declaration
+// uses `actor` instead. The implementations in z_en_firefly.c keep
+// `this` per OoT decomp convention.
+void EnFirefly_SetupDyingNet(struct EnFirefly* actor, PlayState* play);
+s16  EnFirefly_GetStateIndex(struct EnFirefly* actor);
+void EnFirefly_ApplyNetState(struct EnFirefly* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and we're replaying
+// the fall → die sequence). Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnFireflyDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif
