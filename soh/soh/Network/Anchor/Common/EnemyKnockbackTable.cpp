@@ -146,6 +146,18 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // unconditional re: GET_PLAYER, Bug 1 territory).
     { ACTOR_BG_YDAN_MARUTA, { 7.0f, 6.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Bg_Hidan_Fwbig (Fire Temple big fire wall) ──────────────
+    // z_bg_hidan_fwbig.c:228 — func_8002F71C(play, this, 5.0f, world.rot.y, 1.0f)
+    // Yaw is `world.rot.y` (computed from player projection at line 219;
+    // own facing — not affected by #153 overlay yaw cache). Same params
+    // as Bg_Hidan_Firewall (small variant). State-machine reaction
+    // (`actionFunc = BgHidanFwbig_Lower` at line 230) MUST fire regardless
+    // of Bug 1 gate so cross-machine state parity holds. Source-side
+    // linkInRange gate added at z_bg_hidan_fwbig.c:227 (wraps the
+    // func_8002F71C call only; state transition runs unconditionally).
+    // No per-actor tracker (BG-class hazard).
+    { ACTOR_BG_HIDAN_FWBIG, { 5.0f, 1.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)

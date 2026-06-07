@@ -225,7 +225,17 @@ void BgHidanFwbig_Update(Actor* thisx, PlayState* play) {
 
     if (this->collider.base.atFlags & AT_HIT) {
         this->collider.base.atFlags &= ~AT_HIT;
-        func_8002F71C(play, &this->actor, 5.0f, this->actor.world.rot.y, 1.0f);
+        // Pitfall 28 + Path A — gate local-Link knockback on live
+        // distance to GET_PLAYER. Cross-machine routing via
+        // DummyPlayer.cpp AC_HIT + EnemyKnockbackTable entry
+        // ACTOR_BG_HIDAN_FWBIG. State transition below runs
+        // unconditionally so cross-machine state parity holds.
+        // 150u = big fire wall spans a wide collider (CLAMP ±360u
+        // / ±500u per direction) — generous gate accounts for the
+        // extended geometry.
+        if (Anchor_DistXZToLocalLink(&this->actor, play) < 150.0f) {
+            func_8002F71C(play, &this->actor, 5.0f, this->actor.world.rot.y, 1.0f);
+        }
         if (this->direction != 0) {
             this->actionFunc = BgHidanFwbig_Lower;
         }
