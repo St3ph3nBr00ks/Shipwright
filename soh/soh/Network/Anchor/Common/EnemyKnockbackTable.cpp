@@ -85,6 +85,16 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // branch was unconditional re: GET_PLAYER, Bug 1 territory).
     { ACTOR_EN_HONOTRAP, { 5.0f, 0.0f, 2 /* LARGE */, 0 } },
 
+    // ─── En_Bx (water spike enemy) #134 ──────────────────────────
+    // z_en_bx.c:158 — func_8002F71C(play, this, 6.0f, tmp32, 6.0f)
+    // Yaw is variable per param bit 0x80 (world.rot.y vs yawTowardsPlayer).
+    // Existing complex multi-gate at z_en_bx.c:140-143 combines
+    // `xzDistToPlayer <= 70.0f` with three pointer-equality checks —
+    // mostly fails-closed when DummyPlayer is the .at-target. No
+    // per-actor source edit for this commit; flag risk in audit doc
+    // if field-test surfaces false-knockback on host.
+    { ACTOR_EN_BX, { 6.0f, 6.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)
