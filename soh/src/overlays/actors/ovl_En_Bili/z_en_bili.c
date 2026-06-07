@@ -208,8 +208,21 @@ void EnBili_SetupRecoil(EnBili* this) {
         Animation_PlayLoop(&this->skelAnime, &gBiriDefaultAnim);
     }
 
-    this->actor.world.rot.y = Actor_WorldYawTowardPoint(&this->actor, &this->collider.base.ac->prevPos) + 0x8000;
-    this->actor.world.rot.x = Actor_WorldPitchTowardPoint(&this->actor, &this->collider.base.ac->prevPos);
+    // Anchor — `collider.base.ac` may be NULL when peer's DAMAGE_ENEMY
+    // drives synthetic AC_HIT (ApplySyncAcHitToActor sets the flag bit
+    // only; only the real collision engine populates `ac` atomically
+    // with the flag — see Hintnut crash log 438 and the base-ac audit
+    // at Claude/Testing/ApplySyncAcHitToActor_BaseAcAudit_2026-06-07.md).
+    // Reached when peer hits Biri with slingshot (damageEffect ==
+    // BIRI_DMGEFF_SLINGSHOT routes through EnBili_UpdateDamage →
+    // EnBili_SetupRecoil at z_en_bili.c:599). When `ac` is NULL, skip
+    // the recoil-direction calc and let Biri recoil along its current
+    // facing — cosmetic divergence vs. vanilla (no recoil-away-from-
+    // attacker visual) but preserves liveness.
+    if (this->collider.base.ac != NULL) {
+        this->actor.world.rot.y = Actor_WorldYawTowardPoint(&this->actor, &this->collider.base.ac->prevPos) + 0x8000;
+        this->actor.world.rot.x = Actor_WorldPitchTowardPoint(&this->actor, &this->collider.base.ac->prevPos);
+    }
     this->actionFunc = EnBili_Recoil;
     this->actor.speedXZ = 5.0f;
 }
