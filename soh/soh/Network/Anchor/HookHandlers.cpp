@@ -59,6 +59,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
 #include "src/overlays/actors/ovl_En_St/z_en_st.h"
 #include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
+// #47 / en_firefly_sync_plan.md — Keese (En_Firefly) state-machine sync.
+#include "src/overlays/actors/ovl_En_Firefly/z_en_firefly.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
@@ -2346,6 +2348,37 @@ void Anchor::RegisterHooks() {
                                           (blockReason  ? blockReason          : "other");
                         SPDLOG_INFO("[EnSw] rx netId={} block net={} local={} swType={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, (int)swType, why);
+                    }
+                }
+            }
+
+            // #47 / en_firefly_sync_plan.md §4 — En_Firefly (Keese)
+            // state-machine sync. Dormant-to-active filter: state 6
+            // (Perch) shouldn't override active dive states 1/2
+            // (DiveAttack / DisturbDiveAttack). State 0 (FlyIdle) is
+            // NOT dormant — Keese spend most of their life there and
+            // we want it to propagate. Death states 7/8/9 (Fall /
+            // FrozenFall / Die) gated by PhaseImpliesHasLocalDeath.
+            if (actor->id == ACTOR_EN_FIREFLY && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnFirefly* ff = (EnFirefly*)actor;
+                s16 curState = EnFirefly_GetStateIndex(ff);
+                bool netIsDormant  = (ext->netStateIndex == 6);
+                bool localIsActive = (curState == 1 || curState == 2);
+                bool deathStateNet = (ext->netStateIndex >= 7);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnFirefly] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnFirefly_ApplyNetState(ff, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnFirefly] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }
             }

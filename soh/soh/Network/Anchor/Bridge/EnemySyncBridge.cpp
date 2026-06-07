@@ -70,6 +70,23 @@ extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// Receiver-side predicate -- true when an En_Firefly (Keese) death cycle
+// was network-driven (peer received ENEMY_DEFEATED and is replaying the
+// fall -> die sequence). EnFirefly_Die uses this to suppress the random-
+// drop call so host's authoritative ITEM_DROP_SYNC isn't double-applied.
+// The `|| ext->networkDriveDying` clause matches the Dekubaba race
+// mitigation -- closes a race when peer's vanilla EnFirefly_UpdateDamage
+// consumes the same ENEMY_STATE health<=0 read and transitions to
+// SetupFall before ENEMY_DEFEATED arrives.
+// See z_en_firefly.c EnFirefly_Die + Plans/en_firefly_sync_plan.md section 4 step 3+5.
+extern "C" bool Anchor_ShouldSuppressEnFireflyDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
+        || ext->networkDriveDying;
+}
+
 // C-callable: non-host tells host that its local Link was just hit by this enemy
 // so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
 // Phase 2). No-op when Anchor is disconnected, when this client is the room
