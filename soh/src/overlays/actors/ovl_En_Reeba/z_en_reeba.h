@@ -35,4 +35,24 @@ typedef enum {
     /* 1 */ LEEVER_BIG
 } LeeverParam;
 
+// Anchor multiplayer state-machine sync (#102 / en_reeba_sync_plan.md).
+// `this` is a C++ keyword — header decls use `actor`. Implementations in
+// z_en_reeba.c keep `this` per OoT decomp convention.
+void EnReeba_SetupDyingNet(struct EnReeba* actor, PlayState* play);
+s16  EnReeba_GetStateIndex(struct EnReeba* actor);
+void EnReeba_ApplyNetState(struct EnReeba* actor, PlayState* play, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death cycle was
+// network-driven (peer's ENEMY_DEFEATED arrived and we're replaying the
+// shrink → drop sequence). func_80AE5C38 (death cycle) uses this to skip
+// Item_DropCollectibleRandom so host's authoritative ITEM_DROP_SYNC isn't
+// double-applied. Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnReebaDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

@@ -90,6 +90,11 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
         case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
         case ACTOR_EN_DEKUNUTS: return true;  // #135 Mad Scrub (ITEMACTION projectile transition)
+        case ACTOR_EN_REEBA:    return true;  // #102 Leever — small variant
+                                              // stays ACTORCAT_MISC, big variant
+                                              // promotes to ACTORCAT_ENEMY at
+                                              // Init. Admit by id so both
+                                              // variants sync uniformly.
         case ACTOR_EN_MD:       return true;  // #184 Mido (Generic NPC State Sync Phase 1, Team scope)
         case ACTOR_BG_YDAN_HASI: return true;  // #185 Inside Deku Tree B1 floating platform (Phase 2, Global scope; HASI_WATER_BLOCK variant is the primary concern, but the actor-id allowlist also covers HASI_WATER + 2F blocks variants — flag-sync handles their state already, world.pos broadcast is additive smoothing).
         // ACTOR_BG_YDAN_MARUTA (rotating spike log + falling ladder) deliberately NOT in this allowlist. The spike log's damage volume is at world.pos which doesn't move; rotation phase is cosmetic. Falling ladder transitions on Flags_SetSwitch which already syncs. Add later if visible drift surfaces in field testing.
