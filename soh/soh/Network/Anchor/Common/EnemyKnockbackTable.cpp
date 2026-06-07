@@ -216,6 +216,13 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // z_en_ssh.c.
     { ACTOR_EN_SSH, { 4.0f, 6.0f, 2 /* LARGE */, 0 } },
 
+    // ─── En_Go (Goron NPC — rolling body shove, VMP Phase B) ─────
+    // z_en_go.c:719 — func_8002F71C(play, this, 4.0f, yawTowardsPlayer, 6.0f)
+    // Also calls play->damagePlayer(play, -4) directly when a rolling
+    // Goron's OC overlaps a Player-cat actor. Same VMP shape as En_St;
+    // broadcast helper + linkInRange gate at z_en_go.c.
+    { ACTOR_EN_GO, { 4.0f, 6.0f, 2 /* LARGE */, 0 } },
+
     // ─── Path A phase WRAPPED (2026-06-07) ──────────────────────
     // 20 entries above. The remaining ~11 vanilla actors that call
     // func_8002F* alongside the player-effect path are Vanilla
