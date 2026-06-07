@@ -66,6 +66,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
 // #102 / en_reeba_sync_plan.md — Leever (En_Reeba) state-machine sync.
 #include "src/overlays/actors/ovl_En_Reeba/z_en_reeba.h"
+// #128 / en_bili_sync_plan.md — Biri jellyfish (En_Bili) state-machine sync.
+#include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // Issue #153 — En_Goroiwa is ACTORCAT_PROP, the first non-ENEMY actor synced.
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
@@ -2473,6 +2475,37 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnReeba] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish)
+            // state-machine sync. Dormant-to-active filter: states 0/1
+            // (FloatIdle / SpawnedFlyApart) shouldn't override active
+            // combat states 2/3/4 (DischargeLightning / Climb /
+            // ApproachPlayer). Death states 7/8/10 (Burnt / Die / Frozen)
+            // gated by PhaseImpliesHasLocalDeath.
+            if (actor->id == ACTOR_EN_BILI && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnBili* bili = (EnBili*)actor;
+                s16 curState = EnBili_GetStateIndex(bili);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
+                bool localIsActive = (curState == 2 || curState == 3 || curState == 4);
+                bool deathStateNet = (ext->netStateIndex == 7 || ext->netStateIndex == 8 ||
+                                      ext->netStateIndex == 10);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnBili] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnBili_ApplyNetState(bili, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnBili] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }

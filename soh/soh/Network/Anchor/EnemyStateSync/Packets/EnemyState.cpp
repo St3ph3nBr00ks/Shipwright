@@ -57,6 +57,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Firefly/z_en_firefly.h"
 // #102 / en_reeba_sync_plan.md — Leever (En_Reeba) state-machine sync.
 #include "overlays/actors/ovl_En_Reeba/z_en_reeba.h"
+// #128 / en_bili_sync_plan.md — Biri jellyfish (En_Bili) state-machine sync.
+#include "overlays/actors/ovl_En_Bili/z_en_bili.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -165,6 +167,10 @@ struct EnemyUpdateExtras {
     // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
     bool hasEnReeba         = false;
     s16  enReebaActionState = 0;
+
+    // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
+    bool hasEnBili         = false;
+    s16  enBiliActionState = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
     // triggering the fight starts it on every client. Plus stunned/
@@ -397,6 +403,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnReeba* rb             = (EnReeba*)actor;
         e.hasEnReeba            = true;
         e.enReebaActionState    = EnReeba_GetStateIndex(rb);
+    } else if (actor->id == ACTOR_EN_BILI) {
+        EnBili* bili            = (EnBili*)actor;
+        e.hasEnBili             = true;
+        e.enBiliActionState     = EnBili_GetStateIndex(bili);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -495,6 +505,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnReeba != prev.hasEnReeba) return true;
     if (cur.hasEnReeba) {
         if (cur.enReebaActionState != prev.enReebaActionState) return true;
+    }
+    if (cur.hasEnBili != prev.hasEnBili) return true;
+    if (cur.hasEnBili) {
+        if (cur.enBiliActionState != prev.enBiliActionState) return true;
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
@@ -750,6 +764,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enReebaActionState);
             }
         }
+        if (extras.hasEnBili) {
+            s16 prev = prevExtras && prevExtras->hasEnBili ? prevExtras->enBiliActionState : -1;
+            if (prev != extras.enBiliActionState) {
+                SPDLOG_INFO("[EnBili] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enBiliActionState);
+            }
+        }
         if (extras.hasDekunuts) {
             s16 prev = prevExtras && prevExtras->hasDekunuts ? prevExtras->dekunutsActionState : -1;
             if (prev != extras.dekunutsActionState) {
@@ -898,6 +919,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
     if (extras.hasEnReeba) {
         payload["actionState"] = extras.enReebaActionState;
+    }
+
+    // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
+    if (extras.hasEnBili) {
+        payload["actionState"] = extras.enBiliActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1541,6 +1567,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_REEBA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // #128 / en_bili_sync_plan.md — cache En_Bili (Biri) actionState.
+        if (actor->id == ACTOR_EN_BILI && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // Boss_Goma — cache host actionState. Receive driver in
         // HookHandlers' OnActorUpdate non-host block invokes
         // BossGoma_BridgeToCombat when local Goma is in Encounter (0x00)
@@ -2143,6 +2173,30 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnReeba netId={} — triggering natural death cycle", netId);
                     EnReeba_SetupDyingNet((EnReeba*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Bili (Biri jellyfish): route through EnBili_SetupDyingNet
+                // so the burnt → die natural cycle plays on the receiver
+                // without echoing GameInteractor_ExecuteOnEnemyDefeat. Skips
+                // the electrical SetupDischargeLightning cluster animation
+                // (used by host's sword-kill path) because peer doesn't have
+                // host's damageEffect context — Burnt → Die is the cleaner
+                // shared path. The natural SetupDie call inside EnBili_Burnt
+                // DOES fire OnEnemyDefeat, but the HostBookkeeping
+                // HasDefeatBroadcast dedup guard prevents an echo back to
+                // host. Plan: Plans/en_bili_sync_plan.md §4 step 6 / #128.
+                if (actor->id == ACTOR_EN_BILI) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnBili.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnBili netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnBili netId={} — triggering natural death cycle", netId);
+                    EnBili_SetupDyingNet((EnBili*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;

@@ -125,6 +125,23 @@ extern "C" bool Anchor_ShouldSuppressEnFireflyDrop(Actor* actor) {
         || ext->networkDriveDying;
 }
 
+// Receiver-side predicate -- true when an En_Bili (Biri jellyfish) death
+// cycle was network-driven (peer received ENEMY_DEFEATED and is replaying
+// the burnt -> die sequence). EnBili_Die uses this to suppress the
+// random-drop call so host's authoritative ITEM_DROP_SYNC isn't
+// double-applied. The `|| ext->networkDriveDying` clause mirrors the
+// Dekubaba / Firefly race mitigation -- closes a race when peer's
+// vanilla EnBili_UpdateDamage consumes the same ENEMY_STATE health<=0
+// read and transitions to SetupBurnt before ENEMY_DEFEATED arrives.
+// See z_en_bili.c EnBili_Die + Plans/en_bili_sync_plan.md section 4 step 3+5.
+extern "C" bool Anchor_ShouldSuppressEnBiliDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
+        || ext->networkDriveDying;
+}
+
 // C-callable: non-host tells host that its local Link was just hit by this enemy
 // so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
 // Phase 2). No-op when Anchor is disconnected, when this client is the room
@@ -137,4 +154,23 @@ extern "C" void Anchor_NotifyEnemyHitPlayer(Actor* actor) {
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     if (ext == nullptr) return;
     Anchor::Instance->SendPacket_EnemyHitPlayer(ext->netId);
+}
+
+// Receiver-side predicate -- true when an En_Peehat (Peahat) death cycle
+// was network-driven. Three actor-side sites use this to suppress
+// Item_DropCollectibleRandom so host's authoritative ITEM_DROP_SYNC isn't
+// double-applied:
+//   - EnPeehat_StateExplode (adult death, 3 x 0x40 drops + 1 bomb spawn;
+//     bomb spawn is unsuppressed pending EXPLOSIVE_SPAWN packet family).
+//   - EnPeehat_HitWhenGrounded (periodic hit-reward drops every 16 frames
+//     while grounded adult takes damage; only suppressed while dying so
+//     pre-death hit-reward drops still emit on both clients as today).
+//   - EnPeehat_Larva_StateSeekPlayer (larva self-kill on collision,
+//     0x20 drop).
+// See z_en_peehat.c + Plans/en_peehat_sync_plan.md section 6 step 3+5 / #107.
+extern "C" bool Anchor_ShouldSuppressEnPeehatDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
