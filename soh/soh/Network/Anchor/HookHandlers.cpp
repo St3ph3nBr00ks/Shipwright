@@ -2350,6 +2350,41 @@ void Anchor::RegisterHooks() {
                 }
             }
 
+            // Plans/en_wf_sync_plan.md §3 step 7 — En_Wf (Wolfos) state-
+            // machine sync. Dormant-to-active filter: states WAIT_TO_APPEAR
+            // (0) and WAIT (6) shouldn't override active combat (SLASH 8,
+            // RUN_AT_PLAYER 9, SEARCH 10, RUN_AROUND 11, SIDESTEP 14). Death
+            // state DIE (2) gated by PhaseImpliesHasLocalDeath.
+            if (actor->id == ACTOR_EN_WF && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnWf* wf = (EnWf*)actor;
+                s16 curState = EnWf_GetStateIndex(wf);
+                bool netIsDormant  = (ext->netStateIndex == WOLFOS_ACTION_WAIT_TO_APPEAR ||
+                                      ext->netStateIndex == WOLFOS_ACTION_WAIT);
+                bool localIsActive = (curState == WOLFOS_ACTION_SLASH ||
+                                      curState == WOLFOS_ACTION_RUN_AT_PLAYER ||
+                                      curState == WOLFOS_ACTION_SEARCH_FOR_PLAYER ||
+                                      curState == WOLFOS_ACTION_RUN_AROUND_PLAYER ||
+                                      curState == WOLFOS_ACTION_SIDESTEP);
+                bool deathStateNet = (ext->netStateIndex == WOLFOS_ACTION_DIE);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnWf] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnWf_ApplyNetState(wf, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated"
+                                                        : "dormant-active filter";
+                        SPDLOG_INFO("[EnWf] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
             // Boss_Goma — Encounter -> combat bridge + per-actionFunc
             // dispatch. Encounter (0x00) → combat (0x01..0x10) calls the
             // cutscene-teardown bridge once, then dispatches to the

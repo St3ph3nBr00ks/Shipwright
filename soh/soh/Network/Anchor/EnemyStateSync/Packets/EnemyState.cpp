@@ -49,6 +49,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_St/z_en_st.h"
 // #148 / en_sw_sync_plan.md — Skullwalltula state-machine sync.
 #include "overlays/actors/ovl_En_Sw/z_en_sw.h"
+// Plans/en_wf_sync_plan.md — Wolfos state-machine sync.
+#include "overlays/actors/ovl_En_Wf/z_en_wf.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -141,6 +143,10 @@ struct EnemyUpdateExtras {
     // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
     bool hasEnSw         = false;
     s16  enSwActionState = 0;
+
+    // Plans/en_wf_sync_plan.md §3 — En_Wf (Wolfos) state-machine sync.
+    bool hasEnWf         = false;
+    s16  enWfActionState = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
     // triggering the fight starts it on every client. Plus stunned/
@@ -357,6 +363,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnSw* sw            = (EnSw*)actor;
         e.hasEnSw           = true;
         e.enSwActionState   = EnSw_GetStateIndex(sw);
+    } else if (actor->id == ACTOR_EN_WF) {
+        EnWf* wf            = (EnWf*)actor;
+        e.hasEnWf           = true;
+        e.enWfActionState   = EnWf_GetStateIndex(wf);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -435,6 +445,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnSt != prev.hasEnSt) return true;
     if (cur.hasEnSt) {
         if (cur.enStActionState != prev.enStActionState) return true;
+    }
+    if (cur.hasEnWf != prev.hasEnWf) return true;
+    if (cur.hasEnWf) {
+        if (cur.enWfActionState != prev.enWfActionState) return true;
     }
     if (cur.hasEnSw != prev.hasEnSw) return true;
     if (cur.hasEnSw) {
@@ -659,6 +673,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enSwActionState);
             }
         }
+        if (extras.hasEnWf) {
+            s16 prev = prevExtras && prevExtras->hasEnWf ? prevExtras->enWfActionState : -1;
+            if (prev != extras.enWfActionState) {
+                SPDLOG_INFO("[EnWf] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enWfActionState);
+            }
+        }
         if (extras.hasEnSt) {
             s16 prev = prevExtras && prevExtras->hasEnSt ? prevExtras->enStActionState : -1;
             if (prev != extras.enStActionState) {
@@ -794,6 +815,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
     if (extras.hasEnSw) {
         payload["actionState"] = extras.enSwActionState;
+    }
+
+    // Plans/en_wf_sync_plan.md §3 — En_Wf (Wolfos) state-machine sync.
+    if (extras.hasEnWf) {
+        payload["actionState"] = extras.enWfActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1421,6 +1447,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_SW && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // Plans/en_wf_sync_plan.md — cache En_Wf (Wolfos) actionState.
+        if (actor->id == ACTOR_EN_WF && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // Boss_Goma — cache host actionState. Receive driver in
         // HookHandlers' OnActorUpdate non-host block invokes
         // BossGoma_BridgeToCombat when local Goma is in Encounter (0x00)
@@ -1950,6 +1980,24 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnSw netId={} — triggering natural death cycle", netId);
                     EnSw_SetupDyingNet((EnSw*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Wf (Wolfos): route through EnWf_SetupDyingNet so the
+                // rear-up-and-fall death animation plays on the receiver
+                // without echoing GameInteractor_ExecuteOnEnemyDefeat.
+                // Plan: Plans/en_wf_sync_plan.md §3 step 6.
+                if (actor->id == ACTOR_EN_WF) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnWf.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnWf netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnWf netId={} — triggering natural death cycle", netId);
+                    EnWf_SetupDyingNet((EnWf*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
