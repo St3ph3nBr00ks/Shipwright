@@ -57,6 +57,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Firefly/z_en_firefly.h"
 // #102 / en_reeba_sync_plan.md — Leever (En_Reeba) state-machine sync.
 #include "overlays/actors/ovl_En_Reeba/z_en_reeba.h"
+// #107 / en_peehat_sync_plan.md - Peahat (En_Peehat) state-machine sync.
+#include "overlays/actors/ovl_En_Peehat/z_en_peehat.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -165,6 +167,10 @@ struct EnemyUpdateExtras {
     // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
     bool hasEnReeba         = false;
     s16  enReebaActionState = 0;
+
+    // #107 / en_peehat_sync_plan.md - En_Peehat (Peahat) state-machine sync.
+    bool hasEnPeehat         = false;
+    s16  enPeehatActionState = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
     // triggering the fight starts it on every client. Plus stunned/
@@ -397,6 +403,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnReeba* rb             = (EnReeba*)actor;
         e.hasEnReeba            = true;
         e.enReebaActionState    = EnReeba_GetStateIndex(rb);
+    } else if (actor->id == ACTOR_EN_PEEHAT) {
+        EnPeehat* ph             = (EnPeehat*)actor;
+        e.hasEnPeehat            = true;
+        e.enPeehatActionState    = EnPeehat_GetStateIndex(ph);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -495,6 +505,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnReeba != prev.hasEnReeba) return true;
     if (cur.hasEnReeba) {
         if (cur.enReebaActionState != prev.enReebaActionState) return true;
+    }
+    if (cur.hasEnPeehat != prev.hasEnPeehat) return true;
+    if (cur.hasEnPeehat) {
+        if (cur.enPeehatActionState != prev.enPeehatActionState) return true;
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
@@ -750,6 +764,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enReebaActionState);
             }
         }
+        if (extras.hasEnPeehat) {
+            s16 prev = prevExtras && prevExtras->hasEnPeehat ? prevExtras->enPeehatActionState : -1;
+            if (prev != extras.enPeehatActionState) {
+                SPDLOG_INFO("[EnPeehat] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enPeehatActionState);
+            }
+        }
         if (extras.hasDekunuts) {
             s16 prev = prevExtras && prevExtras->hasDekunuts ? prevExtras->dekunutsActionState : -1;
             if (prev != extras.dekunutsActionState) {
@@ -898,6 +919,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
     if (extras.hasEnReeba) {
         payload["actionState"] = extras.enReebaActionState;
+    }
+
+    // #107 / en_peehat_sync_plan.md §3 — En_Peehat (Peahat) state-machine sync.
+    if (extras.hasEnPeehat) {
+        payload["actionState"] = extras.enPeehatActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1541,6 +1567,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_REEBA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // #107 / en_peehat_sync_plan.md — cache En_Peehat (Peahat) actionState.
+        if (actor->id == ACTOR_EN_PEEHAT && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // Boss_Goma — cache host actionState. Receive driver in
         // HookHandlers' OnActorUpdate non-host block invokes
         // BossGoma_BridgeToCombat when local Goma is in Encounter (0x00)
@@ -2146,6 +2176,30 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
+                }
+
+                // En_Peehat (Peahat): route adult variants through
+                // EnPeehat_SetupDyingNet so the Adult_StateDie -> StateExplode
+                // natural cycle plays on the receiver. Larva variants
+                // (params > 0) have no natural cycle -- they Actor_Kill
+                // instantly when caught; fall through to the default defeat
+                // path. Plan: Plans/en_peehat_sync_plan.md section 6 step 6 / #107.
+                if (actor->id == ACTOR_EN_PEEHAT) {
+                    if (actor->params <= 0) {
+                        EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnPeehat.dupDetect");
+                        if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                            SPDLOG_INFO("[EnemyDefeated] EnPeehat netId={} already dying — duplicate, dedup only", netId);
+                            EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                            return;
+                        }
+                        SPDLOG_INFO("[EnemyDefeated] EnPeehat netId={} (adult) — triggering natural death cycle", netId);
+                        EnPeehat_SetupDyingNet((EnPeehat*)actor, gPlayState);
+                        EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    // Larva variant (params > 0) -- fall through to default
+                    // Actor_Kill path below.
                 }
 
                 // Mad Scrub: route through EnDekunuts_SetupDyingNet so the

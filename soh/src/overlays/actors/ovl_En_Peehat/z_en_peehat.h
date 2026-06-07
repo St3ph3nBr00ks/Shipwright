@@ -44,4 +44,24 @@ typedef struct EnPeehat {
     /* 0x03AC */ ColliderQuad colQuad;
 } EnPeehat; // size = 0x042C
 
+// Anchor multiplayer state-machine sync (#107 / en_peehat_sync_plan.md).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp, etc.), so the param name in the declaration
+// uses `actor` instead. The implementations in z_en_peehat.c keep
+// `this` per OoT decomp convention.
+void EnPeehat_SetupDyingNet(struct EnPeehat* actor, PlayState* play);
+s16  EnPeehat_GetStateIndex(struct EnPeehat* actor);
+void EnPeehat_ApplyNetState(struct EnPeehat* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate -- true when the current death
+// cycle (or hit-reward cycle on a grounded adult while dying) was
+// network-driven. Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnPeehatDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

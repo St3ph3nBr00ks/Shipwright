@@ -5,6 +5,14 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Anchor multiplayer targeting fix (#107 / en_peehat_sync_plan.md).
+// Resolves to FindNearestPlayerActor in HookHandlers.cpp; returns the
+// closest synced player actor (local Link or peer DummyPlayer) for AI
+// targeting decisions. Plain `extern` (not `extern "C"`): this is a C
+// file; C-linkage is implicit. The definition has C linkage on the C++
+// side via `extern "C"`.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_SFX_FOR_PLAYER_BODY_HIT)
@@ -290,9 +298,14 @@ void EnPeehat_HitWhenGrounded(EnPeehat* this, PlayState* play) {
         Vec3f itemDropPos = this->actor.world.pos;
 
         itemDropPos.y += 70.0f;
-        Item_DropCollectibleRandom(play, &this->actor, &itemDropPos, 0x40);
-        Item_DropCollectibleRandom(play, &this->actor, &itemDropPos, 0x40);
-        Item_DropCollectibleRandom(play, &this->actor, &itemDropPos, 0x40);
+        // Anchor #107 -- suppress drops on receivers playing a network-
+        // driven death cycle; host's ITEM_DROP_SYNC carries the
+        // authoritative drop.
+        if (!Anchor_ShouldSuppressEnPeehatDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &itemDropPos, 0x40);
+            Item_DropCollectibleRandom(play, &this->actor, &itemDropPos, 0x40);
+            Item_DropCollectibleRandom(play, &this->actor, &itemDropPos, 0x40);
+        }
         this->unk_2D4 = 240;
     } else {
         s32 i;
@@ -503,7 +516,10 @@ void EnPeehat_Ground_SetStateSeekPlayer(EnPeehat* this) {
 }
 
 void EnPeehat_Ground_StateSeekPlayer(EnPeehat* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor #107 -- pursue nearest synced player (local Link OR peer
+    // DummyPlayer) rather than only the local player; matches the
+    // host's authoritative target so cycle gating agrees across clients.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     Math_SmoothStepToF(&this->actor.speedXZ, 3.0f, 1.0f, 0.25f, 0.0f);
     Math_SmoothStepToF(&this->actor.world.pos.y, this->actor.floorHeight + 80.0f, 1.0f, 3.0f, 0.0f);
@@ -593,7 +609,11 @@ void EnPeehat_Larva_StateSeekPlayer(EnPeehat* this, PlayState* play) {
             if (!(this->actor.bgCheckFlags & 1)) {
                 EffectSsDeadSound_SpawnStationary(play, &this->actor.projectedPos, NA_SE_EN_PIHAT_SM_DEAD, 1, 1, 40);
             }
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x20);
+            // Anchor #107 -- suppress drop on receivers playing a
+            // network-driven death; host's ITEM_DROP_SYNC carries it.
+            if (!Anchor_ShouldSuppressEnPeehatDrop(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x20);
+            }
             Actor_Kill(&this->actor);
             GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
         }
@@ -664,7 +684,9 @@ void EnPeehat_Ground_SetStateHover(EnPeehat* this) {
 
 void EnPeehat_Ground_StateHover(EnPeehat* this, PlayState* play) {
     f32 cos;
-    Player* player = GET_PLAYER(play);
+    // Anchor #107 -- pursue nearest synced player (local or peer
+    // DummyPlayer) so hover-to-seek transition fires consistently.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     // hover but don't gain altitude
     if (this->actor.world.pos.y - this->actor.floorHeight > 75.0f) {
@@ -713,7 +735,9 @@ void EnPeehat_Ground_StateReturnHome(EnPeehat* this, PlayState* play) {
     s16 yRot;
     Player* player;
 
-    player = GET_PLAYER(play);
+    // Anchor #107 -- pursue nearest synced player on return-home
+    // re-engage gate so peer entering home.pos radius restarts seek.
+    player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     if (this->actor.world.pos.y - this->actor.floorHeight > 75.0f) {
         this->actor.world.pos.y -= 1.0f;
     } else {
@@ -877,9 +901,14 @@ void EnPeehat_StateExplode(EnPeehat* this, PlayState* play) {
     }
     this->animTimer--;
     if (this->animTimer == 0) {
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x40);
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x40);
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x40);
+        // Anchor #107 -- suppress drops on receivers playing a
+        // network-driven death; host's ITEM_DROP_SYNC carries the
+        // authoritative drop.
+        if (!Anchor_ShouldSuppressEnPeehatDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x40);
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x40);
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x40);
+        }
         Actor_Kill(&this->actor);
         GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
     }
@@ -1083,5 +1112,65 @@ void EnPeehat_Draw(Actor* thisx, PlayState* play) {
         Matrix_MultVec3f(&D_80AD285C[3], &this->colQuad.dim.quad[2]);
         Collider_SetQuadVertices(&this->colQuad, &this->colQuad.dim.quad[0], &this->colQuad.dim.quad[1],
                                  &this->colQuad.dim.quad[2], &this->colQuad.dim.quad[3]);
+    }
+}
+
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (#107 / en_peehat_sync_plan.md).
+// =============================================================================
+
+// Triggers the Peahat's natural death cycle on a non-host receiver.
+// Adult variants (params <= 0) get Adult_SetStateDie which kicks off
+// the StateDying -> StateExplode sequence; on the next update with
+// health == 0 the actor advances to the explode setup automatically.
+// Larva variants (params > 0) have no natural cycle -- they Actor_Kill
+// instantly when caught and the receiver-side dispatch falls through
+// to the default defeat path, so this function is only invoked for
+// adults.
+void EnPeehat_SetupDyingNet(EnPeehat* this, PlayState* play) {
+    EnPeehat_Adult_SetStateDie(this);
+}
+
+s16 EnPeehat_GetStateIndex(EnPeehat* this) {
+    if (this->actionFunc == EnPeehat_Ground_StateGround)       return 0;
+    if (this->actionFunc == EnPeehat_Flying_StateGrounded)     return 1;
+    if (this->actionFunc == EnPeehat_Ground_StateRise)         return 2;
+    if (this->actionFunc == EnPeehat_Flying_StateRise)         return 3;
+    if (this->actionFunc == EnPeehat_Flying_StateFly)          return 4;
+    if (this->actionFunc == EnPeehat_Ground_StateSeekPlayer)   return 5;
+    if (this->actionFunc == EnPeehat_Larva_StateSeekPlayer)    return 6;
+    if (this->actionFunc == EnPeehat_Ground_StateLanding)      return 7;
+    if (this->actionFunc == EnPeehat_Flying_StateLanding)      return 8;
+    if (this->actionFunc == EnPeehat_Ground_StateHover)        return 9;
+    if (this->actionFunc == EnPeehat_Ground_StateReturnHome)   return 10;
+    if (this->actionFunc == EnPeehat_StateAttackRecoil)        return 11;
+    if (this->actionFunc == EnPeehat_StateBoomerangStunned)    return 12;
+    if (this->actionFunc == EnPeehat_Adult_StateDie)           return 13;
+    if (this->actionFunc == EnPeehat_StateExplode)             return 14;
+    return -1;
+}
+
+void EnPeehat_ApplyNetState(EnPeehat* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  EnPeehat_Ground_SetStateGround(this);       break;
+        case 1:  EnPeehat_Flying_SetStateGround(this);       break;
+        case 2:  EnPeehat_Ground_SetStateRise(this);         break;
+        case 3:  EnPeehat_Flying_SetStateRise(this);         break;
+        case 4:  EnPeehat_Flying_SetStateFly(this);          break;
+        case 5:  EnPeehat_Ground_SetStateSeekPlayer(this);   break;
+        case 6:  EnPeehat_Larva_SetStateSeekPlayer(this);    break;
+        case 7:  EnPeehat_Ground_SetStateLanding(this);      break;
+        case 8:  EnPeehat_Flying_SetStateLanding(this);      break;
+        case 9:  EnPeehat_Ground_SetStateHover(this);        break;
+        case 10: EnPeehat_Ground_SetStateReturnHome(this);   break;
+        case 11: EnPeehat_SetStateAttackRecoil(this);        break;
+        case 12: EnPeehat_SetStateBoomerangStunned(this);    break;
+        // Death states 13-14 driven via SetupDyingNet from
+        // HandlePacket_EnemyDefeated. Skip silently here -- the
+        // dormant-to-active filter + PhaseImpliesHasLocalDeath gate
+        // at the call site already block regression to these states
+        // from non-death paths.
+        default: break;
     }
 }
