@@ -1061,6 +1061,14 @@ class Anchor : public Network {
     // No drop, no break VFX. See Plans/carry_held_actor_sync.md follow-up.
     void SendPacket_EnemyRemovedFromScene(uint32_t netId, int16_t priorSceneNum); // phase=Removed phaseChanged=true
     void SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect);
+    // En_St armored-hit overload — schema 3. When isArmoredHit=true, the
+    // host applies the front-shield CheckHitFrontside reaction (swayTimer
+    // / playSwayFlag set, no Actor_ApplyDamage). Used when peer hits the
+    // Skulltula's invulnerable face — preserves cross-machine sway anim
+    // sync without erroneously killing the actor. Other actors: pass
+    // false (default behavior unchanged).
+    void SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect,
+                                u8 atHitEffect, bool isArmoredHit);
     void SendPacket_EnemyHitPlayer(uint32_t netId);
     void HandlePacket_EnemyHitPlayer(nlohmann::json payload);
 

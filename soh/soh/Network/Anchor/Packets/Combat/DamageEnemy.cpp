@@ -109,6 +109,10 @@ extern PlayState* gPlayState;
  */
 
 void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect) {
+    SendPacket_DamageEnemy(netId, damage, damageEffect, atHitEffect, false /* isArmoredHit */);
+}
+
+void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, u8 atHitEffect, bool isArmoredHit) {
     if (!IsSaveLoaded()) {
         return;
     }
@@ -121,6 +125,12 @@ void Anchor::SendPacket_DamageEnemy(uint32_t netId, u8 damage, u8 damageEffect, 
     // Schema 2 (#174/#175) — see comment block above for rationale.
     payload["damageEffect"] = (int)damageEffect;
     payload["atHitEffect"]  = (int)atHitEffect;
+    // Schema 3 (#90 / log 434) — armored-hit flag for En_St front-shield
+    // sync. Only emitted when true (false omits the field, preserving
+    // legacy behavior + smaller payload for common case).
+    if (isArmoredHit) {
+        payload["isArmoredHit"] = true;
+    }
     payload["quiet"]        = true;
     PacketTimeline::SetTimelineField(payload);
 
@@ -166,7 +176,11 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
 
     uint32_t netId = payload.value("netId", (uint32_t)0);
     u8       damage = (u8)payload.value("damage", 0);
-    if (damage == 0) {
+    // Schema 3 (#90 / log 434) — En_St front-shield (armored) hit.
+    // Peer sends this when they hit the Skulltula's invulnerable face;
+    // host plays the sway animation locally without applying damage.
+    bool isArmoredHit = payload.value("isArmoredHit", false);
+    if (damage == 0 && !isArmoredHit) {
         return;
     }
 
@@ -180,6 +194,20 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
     }
     // Skip dead actors — actor->update == NULL after Actor_Kill.
     if (actor->update == nullptr || actor->colChkInfo.health == 0) {
+        return;
+    }
+
+    // En_St armored-hit special path: peer hit the invulnerable front
+    // shield. Set AC_HIT on cyl [2] only so host's CheckHitFrontside
+    // fires the sway anim WITHOUT calling Actor_ApplyDamage. The
+    // resulting swayTimer / playSwayFlag changes are captured in
+    // host's joint table on the next ENEMY_STATE broadcast — sway
+    // animation now propagates cross-machine to all peers in scene.
+    if (isArmoredHit && actor->id == ACTOR_EN_ST) {
+        EnSt* st = (EnSt*)actor;
+        st->colCylinder[2].base.acFlags |= AC_HIT;
+        SPDLOG_INFO("[DamageEnemy] En_St armored-hit RECV netId={} — set cyl[2] AC_HIT "
+                    "(sway anim will propagate via ENEMY_STATE)", netId);
         return;
     }
 

@@ -1867,34 +1867,43 @@ void Anchor::RegisterHooks() {
                     ? ext->peerKillingBlowOriginalDamage
                     : (u8)actor->colChkInfo.damage;
 
-            // #90 / log 434 fix — En_St armored-hit broadcast suppression.
+            // #90 / log 434 fix — En_St armored-hit detection.
             //
             // CollisionCheck populates colChkInfo.damage for ANY peer hit
             // on the Skulltula regardless of which cylinder was struck.
             // Vanilla's EnSt_CheckHitFrontside (z_en_st.c:440) rejects
             // front-shield hits without calling Actor_ApplyDamage AND
-            // sets swayTimer to exactly 60. Without this gate, peer's
+            // sets swayTimer to exactly 60. Without detection here, peer's
             // front-shield hits would still broadcast colChkInfo.damage
             // to host — and after the AC_HIT routing fix in a5a940261,
             // host's back-cylinder application kills the Skulltula
-            // from peer's armored bounce. Bug observed in log 434.
+            // from peer's armored bounce.
             //
-            // Gate: when peer's local actor is En_St AND swayTimer
-            // is exactly 60 (just-set by CheckHitFrontside this frame),
-            // suppress the damage forward. CheckHitBackside resets
-            // swayTimer to 0 on legitimate back hits — the != 60
-            // case covers all back-hit scenarios cleanly.
+            // Detection: swayTimer == 60 (just-set by CheckHitFrontside
+            // this frame) is a robust signal. CheckHitBackside resets it
+            // to 0 on legitimate back hits.
+            //
+            // When detected, suppress the damage value but still send
+            // the wire packet with `isArmoredHit=true` so host fires the
+            // local sway animation. Sway anim cross-machine syncs via
+            // the resulting ENEMY_STATE joint-table broadcast.
+            bool isArmoredHit = false;
             if (actor->id == ACTOR_EN_ST) {
                 EnSt* st = (EnSt*)actor;
                 if (st->swayTimer == 60 && forwardDamage > 0) {
-                    SPDLOG_INFO("[DamageEnemy] En_St armored-hit suppress netId={} "
-                                "swayTimer=60 → not forwarding damage={} (front-shield bounce)",
-                                ext->netId, (int)forwardDamage);
+                    SPDLOG_INFO("[DamageEnemy] En_St armored-hit netId={} "
+                                "swayTimer=60 → forwarding damage=0 isArmoredHit=true "
+                                "(front-shield bounce + sway anim sync)",
+                                ext->netId);
                     forwardDamage = 0;
+                    isArmoredHit = true;
                 }
             }
 
-            if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) && forwardDamage > 0) {
+            const bool shouldSend =
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
+                (forwardDamage > 0 || isArmoredHit);
+            if (shouldSend) {
                 // #174/#175: forward damageEffect (set on enemy by collision damage-table
                 // lookup) and atHitEffect (set on the player by CollisionCheck_SetATvsAC
                 // when the player's AT element lands a hit). Many OoT enemies branch on
@@ -1903,7 +1912,7 @@ void Anchor::RegisterHooks() {
                 Player* localPlayer = GET_PLAYER(gPlayState);
                 u8 atHitEffect = (localPlayer != nullptr) ? localPlayer->actor.colChkInfo.atHitEffect : 0;
                 SendPacket_DamageEnemy(ext->netId, forwardDamage,
-                                       actor->colChkInfo.damageEffect, atHitEffect);
+                                       actor->colChkInfo.damageEffect, atHitEffect, isArmoredHit);
             }
             // Clear the killing-blow stash regardless of whether we
             // forwarded (forward gate could have been blocked by phase).
