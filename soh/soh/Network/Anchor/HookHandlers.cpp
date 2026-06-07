@@ -64,6 +64,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
+// #102 / en_reeba_sync_plan.md — Leever (En_Reeba) state-machine sync.
+#include "src/overlays/actors/ovl_En_Reeba/z_en_reeba.h"
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // Issue #153 — En_Goroiwa is ACTORCAT_PROP, the first non-ENEMY actor synced.
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
@@ -2439,6 +2441,38 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnFirefly] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // #102 / en_reeba_sync_plan.md §3 step 7 — En_Reeba (Leever)
+            // state-machine sync. Dormant filter is structural: states 0/1
+            // (emerge init / rising) are transient init states that
+            // shouldn't override active rolling states 2-7. Death-class
+            // states 8-15 (damaged / stunned / death / recovery) gated by
+            // PhaseImpliesHasLocalDeath. EnReeba_ApplyNetState takes a
+            // PlayState* because some setup funcs need it for sub-state
+            // dispatch.
+            if (actor->id == ACTOR_EN_REEBA && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnReeba* rb = (EnReeba*)actor;
+                s16 curState = EnReeba_GetStateIndex(rb);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
+                bool localIsActive = (curState >= 2 && curState <= 7);
+                bool deathStateNet = (ext->netStateIndex >= 8);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnReeba] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnReeba_ApplyNetState(rb, gPlayState, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnReeba] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }

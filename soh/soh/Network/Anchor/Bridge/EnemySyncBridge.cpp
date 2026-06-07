@@ -95,6 +95,19 @@ extern "C" bool Anchor_ShouldSuppressEnWfDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// Receiver-side predicate — true when an En_Reeba (Leever) death cycle
+// was network-driven. func_80AE5C38 (the shrink-and-drop death cycle) uses
+// this to suppress Item_DropCollectibleRandom so host's authoritative
+// ITEM_DROP_SYNC isn't double-applied. Both small and big variants
+// converge on this function — same predicate covers both.
+// See z_en_reeba.c + Plans/en_reeba_sync_plan.md §3 step 3+5.
+extern "C" bool Anchor_ShouldSuppressEnReebaDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // Receiver-side predicate -- true when an En_Firefly (Keese) death cycle
 // was network-driven (peer received ENEMY_DEFEATED and is replaying the
 // fall -> die sequence). EnFirefly_Die uses this to suppress the random-

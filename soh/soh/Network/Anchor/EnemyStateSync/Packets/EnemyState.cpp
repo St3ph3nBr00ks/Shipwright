@@ -55,6 +55,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Wf/z_en_wf.h"
 // #47 / en_firefly_sync_plan.md — Keese (En_Firefly) state-machine sync.
 #include "overlays/actors/ovl_En_Firefly/z_en_firefly.h"
+// #102 / en_reeba_sync_plan.md — Leever (En_Reeba) state-machine sync.
+#include "overlays/actors/ovl_En_Reeba/z_en_reeba.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -159,6 +161,10 @@ struct EnemyUpdateExtras {
     // #47 / en_firefly_sync_plan.md §4 — En_Firefly (Keese) state-machine sync.
     bool hasEnFirefly         = false;
     s16  enFireflyActionState = 0;
+
+    // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
+    bool hasEnReeba         = false;
+    s16  enReebaActionState = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
     // triggering the fight starts it on every client. Plus stunned/
@@ -387,6 +393,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnFirefly* ff             = (EnFirefly*)actor;
         e.hasEnFirefly            = true;
         e.enFireflyActionState    = EnFirefly_GetStateIndex(ff);
+    } else if (actor->id == ACTOR_EN_REEBA) {
+        EnReeba* rb             = (EnReeba*)actor;
+        e.hasEnReeba            = true;
+        e.enReebaActionState    = EnReeba_GetStateIndex(rb);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -481,6 +491,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnFirefly != prev.hasEnFirefly) return true;
     if (cur.hasEnFirefly) {
         if (cur.enFireflyActionState != prev.enFireflyActionState) return true;
+    }
+    if (cur.hasEnReeba != prev.hasEnReeba) return true;
+    if (cur.hasEnReeba) {
+        if (cur.enReebaActionState != prev.enReebaActionState) return true;
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
@@ -729,6 +743,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enFireflyActionState);
             }
         }
+        if (extras.hasEnReeba) {
+            s16 prev = prevExtras && prevExtras->hasEnReeba ? prevExtras->enReebaActionState : -1;
+            if (prev != extras.enReebaActionState) {
+                SPDLOG_INFO("[EnReeba] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enReebaActionState);
+            }
+        }
         if (extras.hasDekunuts) {
             s16 prev = prevExtras && prevExtras->hasDekunuts ? prevExtras->dekunutsActionState : -1;
             if (prev != extras.dekunutsActionState) {
@@ -872,6 +893,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #47 / en_firefly_sync_plan.md §4 — En_Firefly (Keese) state-machine sync.
     if (extras.hasEnFirefly) {
         payload["actionState"] = extras.enFireflyActionState;
+    }
+
+    // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
+    if (extras.hasEnReeba) {
+        payload["actionState"] = extras.enReebaActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1511,6 +1537,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_FIREFLY && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // #102 / en_reeba_sync_plan.md — cache En_Reeba (Leever) actionState.
+        if (actor->id == ACTOR_EN_REEBA && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // Boss_Goma — cache host actionState. Receive driver in
         // HookHandlers' OnActorUpdate non-host block invokes
         // BossGoma_BridgeToCombat when local Goma is in Encounter (0x00)
@@ -2095,6 +2125,24 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnFirefly netId={} — triggering natural death cycle", netId);
                     EnFirefly_SetupDyingNet((EnFirefly*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Reeba (Leever): route through EnReeba_SetupDyingNet so the
+                // shrink → drop natural cycle plays on the receiver. Both small
+                // and big variants converge on func_80AE5C38 — single dispatch
+                // covers both. Plan: Plans/en_reeba_sync_plan.md §3 step 6 / #102.
+                if (actor->id == ACTOR_EN_REEBA) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnReeba.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnReeba netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnReeba netId={} — triggering natural death cycle", netId);
+                    EnReeba_SetupDyingNet((EnReeba*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
