@@ -362,7 +362,13 @@ void EnAttackNiw_Update(Actor* thisx, PlayState* play) {
     }
 
     tmpf1 = 20.0f;
-    if (this->actor.xyzDistToPlayerSq < SQ(tmpf1)) {
+    // Pitfall 28 + Path A — gate local-Link knockback on live distance
+    // to GET_PLAYER. xyzDistToPlayerSq is overwritten by #153's
+    // nearest-player overlay; vanilla used it for the proximity gate
+    // here, so DummyPlayer-within-range would falsely dive at the
+    // local Link. Cross-machine routing via DummyPlayer.cpp AC_HIT +
+    // EnemyKnockbackTable entry ACTOR_EN_ATTACK_NIW. 20u matches vanilla.
+    if (Anchor_DistXZToLocalLink(&this->actor, play) < tmpf1) {
         cucco = (EnNiw*)this->actor.parent;
         if ((this->actor.parent->update != NULL) && (this->actor.parent != NULL) && (cucco != NULL) &&
             (cucco->timer9 == 0) && (player->invincibilityTimer == 0)) {

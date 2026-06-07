@@ -180,6 +180,14 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // is overwritten by #153's nearest-player overlay).
     { ACTOR_EN_NIW, { 2.0f, 0.0f, 2 /* LARGE */, 0x10 /* kbDmg */ } },
 
+    // ─── En_Attack_Niw (angry cucco — kamikaze dive) ─────────────
+    // z_en_attack_niw.c:369 — func_8002F6D4(play, this, 2.0f, world.rot.y, 0.0f, 0x10)
+    // Yaw is `world.rot.y` (own facing — not affected by #153 overlay).
+    // kbDmg=0x10. Same params as En_Niw (the angry cucco IS a swarm
+    // member spawned from En_Niw). Source-side linkInRange gate
+    // added at z_en_attack_niw.c:365 (xyzDistToPlayerSq gate, Bug 1).
+    { ACTOR_EN_ATTACK_NIW, { 2.0f, 0.0f, 2 /* LARGE */, 0x10 /* kbDmg */ } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)
