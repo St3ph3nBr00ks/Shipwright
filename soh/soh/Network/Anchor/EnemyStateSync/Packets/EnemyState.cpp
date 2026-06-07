@@ -64,6 +64,9 @@ extern "C" {
 
 // #107 / en_peehat_sync_plan.md - Peahat (En_Peehat) state-machine sync.
 #include "overlays/actors/ovl_En_Peehat/z_en_peehat.h"
+
+// #128 / en_bili_sync_plan.md — Biri jellyfish (En_Bili) state-machine sync.
+#include "overlays/actors/ovl_En_Bili/z_en_bili.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -184,6 +187,10 @@ struct EnemyUpdateExtras {
     // #107 / en_peehat_sync_plan.md - En_Peehat (Peahat) state-machine sync.
     bool hasEnPeehat         = false;
     s16  enPeehatActionState = 0;
+
+    // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
+    bool hasEnBili         = false;
+    s16  enBiliActionState = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
     // triggering the fight starts it on every client. Plus stunned/
@@ -429,6 +436,11 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnPeehat* ph             = (EnPeehat*)actor;
         e.hasEnPeehat            = true;
         e.enPeehatActionState    = EnPeehat_GetStateIndex(ph);
+
+    } else if (actor->id == ACTOR_EN_BILI) {
+        EnBili* bili            = (EnBili*)actor;
+        e.hasEnBili             = true;
+        e.enBiliActionState     = EnBili_GetStateIndex(bili);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -539,6 +551,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnPeehat != prev.hasEnPeehat) return true;
     if (cur.hasEnPeehat) {
         if (cur.enPeehatActionState != prev.enPeehatActionState) return true;
+
+    if (cur.hasEnBili != prev.hasEnBili) return true;
+    if (cur.hasEnBili) {
+        if (cur.enBiliActionState != prev.enBiliActionState) return true;
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
@@ -812,6 +828,12 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
             if (prev != extras.enPeehatActionState) {
                 SPDLOG_INFO("[EnPeehat] tx netId={} state={}→{}", netId,
                             (int)prev, (int)extras.enPeehatActionState);
+
+        if (extras.hasEnBili) {
+            s16 prev = prevExtras && prevExtras->hasEnBili ? prevExtras->enBiliActionState : -1;
+            if (prev != extras.enBiliActionState) {
+                SPDLOG_INFO("[EnBili] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enBiliActionState);
             }
         }
         if (extras.hasDekunuts) {
@@ -976,6 +998,10 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #107 / en_peehat_sync_plan.md §3 — En_Peehat (Peahat) state-machine sync.
     if (extras.hasEnPeehat) {
         payload["actionState"] = extras.enPeehatActionState;
+
+    // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
+    if (extras.hasEnBili) {
+        payload["actionState"] = extras.enBiliActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1628,6 +1654,9 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
 
         // #107 / en_peehat_sync_plan.md — cache En_Peehat (Peahat) actionState.
         if (actor->id == ACTOR_EN_PEEHAT && payload.contains("actionState")) {
+
+        // #128 / en_bili_sync_plan.md — cache En_Bili (Biri) actionState.
+        if (actor->id == ACTOR_EN_BILI && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // Boss_Goma — cache host actionState. Receive driver in
@@ -2255,6 +2284,26 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnIk netId={} — triggering natural death cycle", netId);
                     EnIk_SetupDyingNet((EnIk*)actor, gPlayState);
+
+                // En_Bili (Biri jellyfish): route through EnBili_SetupDyingNet
+                // so the burnt → die natural cycle plays on the receiver
+                // without echoing GameInteractor_ExecuteOnEnemyDefeat. Skips
+                // the electrical SetupDischargeLightning cluster animation
+                // (used by host's sword-kill path) because peer doesn't have
+                // host's damageEffect context — Burnt → Die is the cleaner
+                // shared path. The natural SetupDie call inside EnBili_Burnt
+                // DOES fire OnEnemyDefeat, but the HostBookkeeping
+                // HasDefeatBroadcast dedup guard prevents an echo back to
+                // host. Plan: Plans/en_bili_sync_plan.md §4 step 6 / #128.
+                if (actor->id == ACTOR_EN_BILI) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnBili.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnBili netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnBili netId={} — triggering natural death cycle", netId);
+                    EnBili_SetupDyingNet((EnBili*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;

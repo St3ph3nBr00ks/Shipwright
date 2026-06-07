@@ -487,7 +487,15 @@ void EnBili_Die(EnBili* this, PlayState* play) {
             return;
         }
         this->actor.draw = NULL;
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x50);
+        // Anchor multiplayer — suppress drop when the death cycle was
+        // network-driven (peer's ENEMY_DEFEATED arrived and we're
+        // replaying the burnt → die sequence on this client). Host's
+        // local kill broadcasts ENEMY_DEFEATED + ITEM_DROP_SYNC
+        // separately; receiver mustn't double-drop. #128 /
+        // en_bili_sync_plan.md §4 step 3.
+        if (!Anchor_ShouldSuppressEnBiliDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x50);
+        }
     }
 
     if (this->timer != 0) {
@@ -772,4 +780,66 @@ void EnBili_Draw(Actor* thisx, PlayState* play) {
 
     POLY_XLU_DISP = SkelAnime_DrawSkeleton2(play, &this->skelAnime, EnBili_OverrideLimbDraw, NULL, this, POLY_XLU_DISP);
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (#128 / en_bili_sync_plan.md).
+// =============================================================================
+
+// Triggers EnBili's burnt → die natural cycle on a non-host receiver.
+// Mirrors the body of EnBili_SetupBurnt (the natural damage transition
+// the vanilla path lands on for most damage classes — fire / generic).
+// Skips the SetupDischargeLightning electrical pre-cycle that vanilla
+// uses for sword damage; peer doesn't have host's damageEffect context
+// and Burnt → Die is the cleaner shared path. The natural `SetupDie`
+// call inside `EnBili_Burnt` fires GameInteractor_ExecuteOnEnemyDefeat,
+// but the HostBookkeeping HasDefeatBroadcast dedup guard at the send
+// site prevents the receive-side fire from causing an echo back to host.
+void EnBili_SetupDyingNet(EnBili* this, PlayState* play) {
+    if (this->actionFunc == EnBili_Climb) {
+        Animation_PlayLoop(&this->skelAnime, &gBiriDefaultAnim);
+    }
+    this->timer = 20;
+    this->collider.base.atFlags &= ~AT_ON;
+    this->collider.base.acFlags &= ~AC_ON;
+    this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
+    this->actor.speedXZ = 0.0f;
+    Actor_SetColorFilter(&this->actor, 0x4000, 0xC8, 0x2000, 0x14);
+    this->actionFunc = EnBili_Burnt;
+}
+
+s16 EnBili_GetStateIndex(EnBili* this) {
+    if (this->actionFunc == EnBili_FloatIdle)            return 0;
+    if (this->actionFunc == EnBili_SpawnedFlyApart)      return 1;
+    if (this->actionFunc == EnBili_DischargeLightning)   return 2;
+    if (this->actionFunc == EnBili_Climb)                return 3;
+    if (this->actionFunc == EnBili_ApproachPlayer)       return 4;
+    if (this->actionFunc == EnBili_SetNewHomeHeight)     return 5;
+    if (this->actionFunc == EnBili_Recoil)               return 6;
+    if (this->actionFunc == EnBili_Burnt)                return 7;
+    if (this->actionFunc == EnBili_Die)                  return 8;
+    if (this->actionFunc == EnBili_Stunned)              return 9;
+    if (this->actionFunc == EnBili_Frozen)               return 10;
+    return -1;
+}
+
+void EnBili_ApplyNetState(EnBili* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0: EnBili_SetupFloatIdle(this);          break;
+        case 1: EnBili_SetupSpawnedFlyApart(this);    break;
+        case 2: EnBili_SetupDischargeLightning(this); break;
+        case 3: EnBili_SetupClimb(this);              break;
+        case 4: EnBili_SetupApproachPlayer(this);     break;
+        case 5: EnBili_SetupSetNewHomeHeight(this);   break;
+        // case 6 Recoil — skipped; SetupRecoil reads collider.base.ac
+        //                which may be NULL on a non-host receiver. The
+        //                Recoil sequence is short; the next ENEMY_STATE
+        //                broadcast catches the receiver back up.
+        case 9: EnBili_SetupStunned(this);            break;
+        // Death states 7/8/10 (Burnt / Die / Frozen) driven via
+        // SetupDyingNet from HandlePacket_EnemyDefeated. Skip silently
+        // here — the dormant-to-active filter + PhaseImpliesHasLocalDeath
+        // gate at the call site already block regression to these states.
+        default: break;
+    }
 }

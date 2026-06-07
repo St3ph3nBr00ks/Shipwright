@@ -152,6 +152,22 @@ extern "C" bool Anchor_ShouldSuppressEnPohDrop(Actor* actor) {
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     if (ext == nullptr) return false;
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+
+// Receiver-side predicate -- true when an En_Bili (Biri jellyfish) death
+// cycle was network-driven (peer received ENEMY_DEFEATED and is replaying
+// the burnt -> die sequence). EnBili_Die uses this to suppress the
+// random-drop call so host's authoritative ITEM_DROP_SYNC isn't
+// double-applied. The `|| ext->networkDriveDying` clause mirrors the
+// Dekubaba / Firefly race mitigation -- closes a race when peer's
+// vanilla EnBili_UpdateDamage consumes the same ENEMY_STATE health<=0
+// read and transitions to SetupBurnt before ENEMY_DEFEATED arrives.
+// See z_en_bili.c EnBili_Die + Plans/en_bili_sync_plan.md section 4 step 3+5.
+extern "C" bool Anchor_ShouldSuppressEnBiliDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
+        || ext->networkDriveDying;
 }
 
 // C-callable: non-host tells host that its local Link was just hit by this enemy
