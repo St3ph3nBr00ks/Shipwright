@@ -119,6 +119,16 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // was Bug 1 territory).
     { ACTOR_BG_HIDAN_CURTAIN, { 5.0f, 1.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Bg_Hidan_Firewall (Fire Temple fire wall) ───────────────
+    // z_bg_hidan_firewall.c:137 (inside BgHidanFirewall_Collide) —
+    //   func_8002F71C(play, this, 5.0f, phi_a3, 1.0f)
+    // Yaw is `phi_a3` (computed locally as shape.rot.y or +0x8000
+    // based on Actor_IsFacingPlayer). Not affected by #153 overlay.
+    // No per-actor tracker (BG-class hazard). Source-side linkInRange
+    // gate added at z_bg_hidan_firewall.c:183 (the gate-site that
+    // calls Collide).
+    { ACTOR_BG_HIDAN_FIREWALL, { 5.0f, 1.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
     //  ACTOR_EN_BROB   — Coiled spike (DynaPolyActor_IsPlayerOnTop
     //    based — needs different cross-machine treatment, not Path A)

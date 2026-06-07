@@ -182,7 +182,16 @@ void BgHidanFirewall_Update(Actor* thisx, PlayState* play) {
 
     if (this->collider.base.atFlags & AT_HIT) {
         this->collider.base.atFlags &= ~AT_HIT;
-        BgHidanFirewall_Collide(this, play);
+        // Pitfall 28 + Path A — gate local-Link knockback on live
+        // distance to GET_PLAYER. BgHidanFirewall_Collide calls
+        // func_8002F71C unconditionally (line 137). Cross-machine
+        // routing via DummyPlayer.cpp AC_HIT + EnemyKnockbackTable
+        // entry ACTOR_BG_HIDAN_FIREWALL. 120u = fire wall is a long
+        // horizontal span; threshold accounts for the actor's extended
+        // collider geometry along the wall axis.
+        if (Anchor_DistXZToLocalLink(&this->actor, play) < 120.0f) {
+            BgHidanFirewall_Collide(this, play);
+        }
     }
 
     this->actionFunc(this, play);
