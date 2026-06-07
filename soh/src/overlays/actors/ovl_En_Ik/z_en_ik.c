@@ -606,7 +606,21 @@ void func_80A75790(EnIk* this) {
     s16 yaw;
     s16 yawDiff;
 
-    yaw = Math_Vec3f_Yaw(&this->actor.world.pos, &this->bodyCollider.base.ac->world.pos);
+    // Anchor — `bodyCollider.base.ac` may be NULL when peer's
+    // DAMAGE_ENEMY drives synthetic AC_HIT (ApplySyncAcHitToActor
+    // sets the flag bit only; only the real collision engine
+    // populates `ac` atomically with the flag — see Hintnut crash
+    // log 438 and the base-ac audit at
+    // Claude/Testing/ApplySyncAcHitToActor_BaseAcAudit_2026-06-07.md).
+    // Same crash class fires for peer-side ApplyNetState case 9
+    // (flinch) when peer's `ac` is NULL. Fall back to the actor's
+    // own facing — front/back flinch direction is then deterministic
+    // (cosmetic only; preserves liveness over vanilla parity).
+    if (this->bodyCollider.base.ac == NULL) {
+        yaw = this->actor.shape.rot.y;
+    } else {
+        yaw = Math_Vec3f_Yaw(&this->actor.world.pos, &this->bodyCollider.base.ac->world.pos);
+    }
     this->unk_2F8 = 0;
     yawDiff = yaw - this->actor.shape.rot.y;
     if (ABS(yawDiff) <= 0x4000) {
