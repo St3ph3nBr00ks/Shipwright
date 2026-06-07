@@ -547,11 +547,11 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnPoh != prev.hasEnPoh) return true;
     if (cur.hasEnPoh) {
         if (cur.enPohActionState != prev.enPohActionState) return true;
-
+    }
     if (cur.hasEnPeehat != prev.hasEnPeehat) return true;
     if (cur.hasEnPeehat) {
         if (cur.enPeehatActionState != prev.enPeehatActionState) return true;
-
+    }
     if (cur.hasEnBili != prev.hasEnBili) return true;
     if (cur.hasEnBili) {
         if (cur.enBiliActionState != prev.enBiliActionState) return true;
@@ -822,13 +822,15 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
             if (prev != extras.enPohActionState) {
                 SPDLOG_INFO("[EnPoh] tx netId={} state={}→{}", netId,
                             (int)prev, (int)extras.enPohActionState);
-
+            }
+        }
         if (extras.hasEnPeehat) {
             s16 prev = prevExtras && prevExtras->hasEnPeehat ? prevExtras->enPeehatActionState : -1;
             if (prev != extras.enPeehatActionState) {
                 SPDLOG_INFO("[EnPeehat] tx netId={} state={}→{}", netId,
                             (int)prev, (int)extras.enPeehatActionState);
-
+            }
+        }
         if (extras.hasEnBili) {
             s16 prev = prevExtras && prevExtras->hasEnBili ? prevExtras->enBiliActionState : -1;
             if (prev != extras.enBiliActionState) {
@@ -994,10 +996,12 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #99 / en_poh_sync_plan.md §4 — En_Poh (Poe) state-machine sync.
     if (extras.hasEnPoh) {
         payload["actionState"] = extras.enPohActionState;
+    }
 
     // #107 / en_peehat_sync_plan.md §3 — En_Peehat (Peahat) state-machine sync.
     if (extras.hasEnPeehat) {
         payload["actionState"] = extras.enPeehatActionState;
+    }
 
     // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
     if (extras.hasEnBili) {
@@ -1651,10 +1655,12 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // #99 / en_poh_sync_plan.md — cache En_Poh (Poe) actionState.
         if (actor->id == ACTOR_EN_POH && payload.contains("actionState")) {
-
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // #107 / en_peehat_sync_plan.md — cache En_Peehat (Peahat) actionState.
         if (actor->id == ACTOR_EN_PEEHAT && payload.contains("actionState")) {
-
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // #128 / en_bili_sync_plan.md — cache En_Bili (Biri) actionState.
         if (actor->id == ACTOR_EN_BILI && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
@@ -2284,6 +2290,10 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnIk netId={} — triggering natural death cycle", netId);
                     EnIk_SetupDyingNet((EnIk*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
 
                 // En_Bili (Biri jellyfish): route through EnBili_SetupDyingNet
                 // so the burnt → die natural cycle plays on the receiver

@@ -1,4 +1,5 @@
 #include "Anchor.h"
+#include "EnemyNetId.h"  // #243.7.2 — EnemyNetId no longer transitive via Anchor.h
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/SceneMultiplayerConfig.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"  // IsMyCurrentRoomHost — Bug B fix gate (2026-06-05)

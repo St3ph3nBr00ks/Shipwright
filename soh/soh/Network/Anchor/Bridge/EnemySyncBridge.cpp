@@ -152,6 +152,7 @@ extern "C" bool Anchor_ShouldSuppressEnPohDrop(Actor* actor) {
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     if (ext == nullptr) return false;
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
 
 // Receiver-side predicate -- true when an En_Bili (Biri jellyfish) death
 // cycle was network-driven (peer received ENEMY_DEFEATED and is replaying

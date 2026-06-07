@@ -1,4 +1,6 @@
 #include "Anchor.h"
+#include "EnemyNetId.h"        // #243.7.2 — explicit (was transitive via Anchor.h)
+#include "ItemDropNetId.h"     // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "AIDirector/Director.h"
 #include "Common/AnchorNavExt.h"  // B.4 — per-navigator nav state extension
 #include "Common/PacketSchemas.h"

@@ -1,4 +1,6 @@
 #include "Anchor.h"
+#include "EnemyNetId.h"        // #243.7.2 — explicit (was transitive via Anchor.h)
+#include "ItemDropNetId.h"     // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "AIDirector/Director.h"      // AnchorDirector::Director::Instance() (Director scaffold step 1)
 #include "AIPlayerFollower/Follower.h"      // FollowerFrameContext for the OnGameFrameUpdate wrapper (Phase 1 commit 4)
 #include "soh/cvar_prefixes.h"        // CVAR_REMOTE_ANCHOR / CVAR_ENHANCEMENT (Nav system commit 6c)
