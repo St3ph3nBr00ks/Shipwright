@@ -49,6 +49,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_St/z_en_st.h"
 // #148 / en_sw_sync_plan.md — Skullwalltula state-machine sync.
 #include "overlays/actors/ovl_En_Sw/z_en_sw.h"
+// en_test_sync_plan.md — Stalfos state-machine sync.
+#include "overlays/actors/ovl_En_Test/z_en_test.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -141,6 +143,10 @@ struct EnemyUpdateExtras {
     // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
     bool hasEnSw         = false;
     s16  enSwActionState = 0;
+
+    // en_test_sync_plan.md §3 — En_Test (Stalfos) state-machine sync.
+    bool hasEnTest         = false;
+    s16  enTestActionState = 0;
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge so any player
     // triggering the fight starts it on every client. Plus stunned/
@@ -357,6 +363,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnSw* sw            = (EnSw*)actor;
         e.hasEnSw           = true;
         e.enSwActionState   = EnSw_GetStateIndex(sw);
+    } else if (actor->id == ACTOR_EN_TEST) {
+        EnTest* tst         = (EnTest*)actor;
+        e.hasEnTest         = true;
+        e.enTestActionState = EnTest_GetStateIndex(tst);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -439,6 +449,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnSw != prev.hasEnSw) return true;
     if (cur.hasEnSw) {
         if (cur.enSwActionState != prev.enSwActionState) return true;
+    }
+    if (cur.hasEnTest != prev.hasEnTest) return true;
+    if (cur.hasEnTest) {
+        if (cur.enTestActionState != prev.enTestActionState) return true;
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
@@ -666,6 +680,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enStActionState);
             }
         }
+        if (extras.hasEnTest) {
+            s16 prev = prevExtras && prevExtras->hasEnTest ? prevExtras->enTestActionState : -1;
+            if (prev != extras.enTestActionState) {
+                SPDLOG_INFO("[EnTest] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enTestActionState);
+            }
+        }
         if (extras.hasDekunuts) {
             s16 prev = prevExtras && prevExtras->hasDekunuts ? prevExtras->dekunutsActionState : -1;
             if (prev != extras.dekunutsActionState) {
@@ -794,6 +815,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
     if (extras.hasEnSw) {
         payload["actionState"] = extras.enSwActionState;
+    }
+
+    // en_test_sync_plan.md §3 — En_Test (Stalfos) state-machine sync.
+    if (extras.hasEnTest) {
+        payload["actionState"] = extras.enTestActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1421,6 +1447,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_SW && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // en_test_sync_plan.md — cache En_Test actionState.
+        if (actor->id == ACTOR_EN_TEST && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // Boss_Goma — cache host actionState. Receive driver in
         // HookHandlers' OnActorUpdate non-host block invokes
         // BossGoma_BridgeToCombat when local Goma is in Encounter (0x00)
@@ -1950,6 +1980,24 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnSw netId={} — triggering natural death cycle", netId);
                     EnSw_SetupDyingNet((EnSw*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Test (Stalfos): route through EnTest_SetupDyingNet
+                // so the fall-over → body-break natural cycle plays on
+                // the receiver without echoing GameInteractor_ExecuteOnEnemyDefeat.
+                // See Plans/en_test_sync_plan.md §3 step 2.
+                if (actor->id == ACTOR_EN_TEST) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnTest.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnTest netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnTest netId={} — triggering natural death cycle", netId);
+                    EnTest_SetupDyingNet((EnTest*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;

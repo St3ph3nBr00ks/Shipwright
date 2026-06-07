@@ -70,6 +70,19 @@ extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// Receiver-side predicate — true when an En_Test (Stalfos) death cycle
+// was network-driven (peer received ENEMY_DEFEATED and is replaying the
+// fall-over → body-break sequence). func_80862E6C and func_808633E8 use
+// this to suppress Item_DropCollectibleRandom so host's authoritative
+// ITEM_DROP_SYNC isn't double-applied.
+// See z_en_test.c + Plans/en_test_sync_plan.md §3 step 3+5.
+extern "C" bool Anchor_ShouldSuppressEnTestDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // C-callable: non-host tells host that its local Link was just hit by this enemy
 // so the host can reverse/update its authoritative copy (En_Goroiwa, issue #153
 // Phase 2). No-op when Anchor is disconnected, when this client is the room

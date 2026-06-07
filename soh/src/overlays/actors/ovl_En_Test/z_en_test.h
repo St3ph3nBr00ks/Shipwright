@@ -111,4 +111,23 @@ typedef enum {
     /* 5 */ STALFOS_TYPE_5
 } StalfosType;
 
+// Anchor multiplayer state-machine sync (en_test_sync_plan.md).
+// `this` is a C++ keyword — header decls use `actor`. Implementations
+// in z_en_test.c keep `this` per OoT decomp convention.
+void EnTest_SetupDyingNet(struct EnTest* actor, PlayState* play);
+s16  EnTest_GetStateIndex(struct EnTest* actor);
+void EnTest_ApplyNetState(struct EnTest* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and we're replaying
+// the fall-over → body-break sequence). Defined extern "C" in
+// Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnTestDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

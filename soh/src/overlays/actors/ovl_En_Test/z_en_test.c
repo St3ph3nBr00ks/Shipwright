@@ -9,6 +9,10 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Multiplayer targeting (en_test_sync_plan.md §3 step 1).
+// Defined extern "C" in HookHandlers.cpp.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
 void EnTest_Init(Actor* thisx, PlayState* play);
@@ -364,7 +368,7 @@ void EnTest_ChooseRandomAction(EnTest* this, PlayState* play) {
 
 void EnTest_ChooseAction(EnTest* this, PlayState* play) {
     s32 pad;
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s16 yawDiff = player->actor.shape.rot.y - this->actor.shape.rot.y;
 
     yawDiff = ABS(yawDiff);
@@ -489,7 +493,7 @@ void EnTest_SetupIdle(EnTest* this) {
 }
 
 void EnTest_Idle(EnTest* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s16 yawDiff;
 
     SkelAnime_Update(&this->skelAnime);
@@ -576,7 +580,7 @@ void EnTest_WalkAndBlock(EnTest* this, PlayState* play) {
     s32 prevFrame;
     s32 temp_f16;
     f32 playSpeed;
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 absPlaySpeed;
     s16 yawDiff;
 
@@ -798,7 +802,7 @@ void func_80860F84(EnTest* this, PlayState* play) {
     s32 prevFrame;
     s32 temp_f16;
     s16 yawDiff;
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     f32 checkDist = 0.0f;
     s16 newYaw;
     s32 absPlaySpeed;
@@ -944,7 +948,7 @@ void EnTest_SetupSlashDownEnd(EnTest* this) {
 }
 
 void EnTest_SlashDownEnd(EnTest* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s16 yawDiff;
 
     if (SkelAnime_Update(&this->skelAnime)) {
@@ -1221,7 +1225,7 @@ void func_80862154(EnTest* this) {
 }
 
 void func_808621D4(EnTest* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     Math_SmoothStepToF(&this->actor.speedXZ, 0.0f, 1.0f, 0.1f, 0.0f);
 
@@ -1263,7 +1267,7 @@ void func_80862398(EnTest* this) {
 }
 
 void func_80862418(EnTest* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     Math_SmoothStepToF(&this->actor.speedXZ, 0.0f, 1.0f, 0.1f, 0.0f);
 
@@ -1316,7 +1320,7 @@ void EnTest_SetupStunned(EnTest* this) {
 }
 
 void EnTest_Stunned(EnTest* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     Math_SmoothStepToF(&this->actor.speedXZ, 0.0f, 1.0f, 1.0f, 0.0f);
 
@@ -1364,7 +1368,7 @@ void func_808627C4(EnTest* this, PlayState* play) {
 // a variation of sidestep
 void func_808628C8(EnTest* this, PlayState* play) {
     s32 pad;
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 pad1;
     s32 prevFrame;
     s32 temp_f16;
@@ -1523,7 +1527,14 @@ void func_80862E6C(EnTest* this, PlayState* play) {
             EnTest_SetupJumpBack(this);
         } else if ((this->actor.params == STALFOS_TYPE_5) &&
                    !Actor_FindNearby(play, &this->actor, ACTOR_EN_TEST, ACTORCAT_ENEMY, 8000.0f)) {
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+            // en_test_sync_plan.md §3 step 3 — suppress drop when the
+            // death cycle was network-driven (peer's ENEMY_DEFEATED
+            // arrived and we're replaying the body-break sequence on
+            // this client). Host's local kill broadcasts ENEMY_DEFEATED
+            // + ITEM_DROP_SYNC separately; receiver mustn't double-drop.
+            if (!Anchor_ShouldSuppressEnTestDrop(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+            }
 
             if (this->actor.parent != NULL) {
                 this->actor.parent->home.rot.z--;
@@ -1632,7 +1643,11 @@ void func_808633E8(EnTest* this, PlayState* play) {
     this->actor.params = STALFOS_TYPE_1;
 
     if (BodyBreak_SpawnParts(&this->actor, &this->bodyBreak, play, this->actor.params)) {
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        // en_test_sync_plan.md §3 step 3 — suppress drop on network-
+        // driven death cycle. See sibling site above for rationale.
+        if (!Anchor_ShouldSuppressEnTestDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        }
 
         if (this->actor.parent != NULL) {
             this->actor.parent->home.rot.z--;
@@ -1654,7 +1669,7 @@ void EnTest_UpdateHeadRot(EnTest* this, PlayState* play) {
 }
 
 void EnTest_UpdateDamage(EnTest* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     if (this->shieldCollider.base.acFlags & AC_BOUNCED) {
         this->shieldCollider.base.acFlags &= ~AC_BOUNCED;
@@ -2061,4 +2076,85 @@ s32 EnTest_ReactToProjectile(PlayState* play, EnTest* this) {
     }
 
     return false;
+}
+
+// =============================================================================
+// Anchor multiplayer sync — see Claude/Plans/en_test_sync_plan.md.
+// =============================================================================
+
+// Triggers EnTest's fall-over → body-break natural cycle on a non-host
+// receiver without firing GameInteractor_ExecuteOnEnemyDefeat.
+// Visual divergence: the receiver always plays the backwards-fall
+// animation regardless of where the host's killing blow landed
+// (front vs back). Functionally correct, visually divergent.
+void EnTest_SetupDyingNet(EnTest* this, PlayState* play) {
+    Enemy_StartFinishingBlow(play, &this->actor);
+    this->actor.colChkInfo.health = 0;
+    func_80862FA8(this, play);
+}
+
+s16 EnTest_GetStateIndex(EnTest* this) {
+    if (this->actionFunc == EnTest_WaitGround)      return 0;
+    if (this->actionFunc == EnTest_WaitAbove)       return 1;
+    if (this->actionFunc == EnTest_Fall)            return 2;
+    if (this->actionFunc == EnTest_Land)            return 3;
+    if (this->actionFunc == EnTest_Rise)            return 4;
+    if (this->actionFunc == EnTest_Idle)            return 5;
+    if (this->actionFunc == EnTest_WalkAndBlock)    return 6;
+    if (this->actionFunc == func_80860C24)          return 7;
+    if (this->actionFunc == func_80860F84)          return 8;
+    if (this->actionFunc == EnTest_SlashDown)       return 9;
+    if (this->actionFunc == EnTest_SlashDownEnd)    return 10;
+    if (this->actionFunc == EnTest_SlashUp)         return 11;
+    if (this->actionFunc == EnTest_JumpBack)        return 12;
+    if (this->actionFunc == EnTest_Jumpslash)       return 13;
+    if (this->actionFunc == EnTest_JumpUp)          return 14;
+    if (this->actionFunc == EnTest_StopAndBlock)    return 15;
+    if (this->actionFunc == EnTest_IdleFromBlock)   return 16;
+    if (this->actionFunc == func_808621D4)          return 17;
+    if (this->actionFunc == func_80862418)          return 18;
+    if (this->actionFunc == EnTest_Stunned)         return 19;
+    if (this->actionFunc == func_808628C8)          return 20;
+    if (this->actionFunc == func_80862E6C)          return 21;
+    if (this->actionFunc == func_80863044)          return 22;
+    if (this->actionFunc == func_8086318C)          return 23;
+    if (this->actionFunc == EnTest_Recoil)          return 24;
+    if (this->actionFunc == func_808633E8)          return 25;
+    return -1;
+}
+
+void EnTest_ApplyNetState(EnTest* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  EnTest_SetupWaitGround(this);     break;
+        case 1:  EnTest_SetupWaitAbove(this);      break;
+        // 2 (Fall) / 3 (Land) / 4 (Rise) — init transitions reached
+        //   from WaitAbove/WaitGround. Skip; dormant filter handles
+        //   regression and the local actor will fall/land naturally
+        //   off its own animation.
+        case 5:  EnTest_SetupIdle(this);           break;
+        case 6:  EnTest_SetupWalkAndBlock(this);   break;
+        case 7:  func_80860BDC(this);              break;
+        case 8:  func_80860EC0(this);              break;
+        case 9:  EnTest_SetupSlashDown(this);      break;
+        case 10: EnTest_SetupSlashDownEnd(this);   break;
+        case 11: EnTest_SetupSlashUp(this);        break;
+        case 12: EnTest_SetupJumpBack(this);       break;
+        case 13: EnTest_SetupJumpslash(this);      break;
+        case 14: EnTest_SetupJumpUp(this);         break;
+        case 15: EnTest_SetupStopAndBlock(this);   break;
+        case 16: EnTest_SetupIdleFromBlock(this);  break;
+        case 17: func_80862154(this);              break;
+        case 18: func_80862398(this);              break;
+        case 19: EnTest_SetupStunned(this);        break;
+        // 20 (func_808628C8 sidestep) — entry wrapper `func_808627C4`
+        //    takes (EnTest*, PlayState*); use the play-less variant
+        //    `func_80864158` which sets up the same action with a
+        //    fixed xzSpeed (matches host's typical sidestep speed).
+        case 20: func_80864158(this, 4.0f);        break;
+        // 21 / 22 / 23 / 25 — death class. Driven via SetupDyingNet
+        //    by HandlePacket_EnemyDefeated; skip silently here so a
+        //    stale alive-state packet doesn't override the death.
+        case 24: EnTest_SetupRecoil(this);         break;
+        default: break;
+    }
 }

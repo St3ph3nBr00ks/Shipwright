@@ -2350,6 +2350,32 @@ void Anchor::RegisterHooks() {
                 }
             }
 
+            // en_test_sync_plan.md §3 — En_Test (Stalfos) state-machine
+            // sync. Dormant-to-active filter: states 0/1 (WaitGround /
+            // WaitAbove) shouldn't override active states (>= 2 from the
+            // Fall/Land/Rise init transitions through to the combat
+            // decision loop). Death states 21/22/23/25 gated by
+            // PhaseImpliesHasLocalDeath.
+            if (actor->id == ACTOR_EN_TEST && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnTest* tst = (EnTest*)actor;
+                s16 curState = EnTest_GetStateIndex(tst);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
+                bool localIsActive = (curState >= 2);
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnTest] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnTest_ApplyNetState(tst, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnTest] rx netId={} block net={} local={} (dormant-active filter)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
+                    }
+                }
+            }
+
             // Boss_Goma — Encounter -> combat bridge + per-actionFunc
             // dispatch. Encounter (0x00) → combat (0x01..0x10) calls the
             // cutscene-teardown bridge once, then dispatches to the
