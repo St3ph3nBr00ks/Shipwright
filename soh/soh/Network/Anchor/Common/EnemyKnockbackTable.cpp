@@ -59,8 +59,15 @@ static const std::unordered_map<int16_t, KnockbackParams> sTable = {
     // Link). No per-actor source edit needed.
     { ACTOR_EN_BA, { 8.0f, 8.0f, 2 /* LARGE */, 0 } },
 
+    // ─── Gerudo (En_GeldB) #138 ──────────────────────────────────
+    // z_en_geldB.c:924 — func_8002F71C(play, this, 6.0f, yawTowardsPlayer, 6.0f)
+    // Existing pointer-equality gate at z_en_geldB.c:923
+    // (`&player->actor == swordCollider.base.at`) handles Bug 1 for
+    // the typical case (same shape as En_Ik / En_Ba). No per-actor
+    // source edit needed.
+    { ACTOR_EN_GELDB, { 6.0f, 6.0f, 2 /* LARGE */, 0 } },
+
     // Future entries (Pitfall 28 audit remaining queue):
-    //  ACTOR_EN_GELDB  — Gerudo (z_en_geldB.c:924 func_8002F71C 6.0/yaw/6.0)
     //  ACTOR_EN_BROB   — Coiled spike (z_en_brob.c func_8002F71C 5.0/yaw/1.0)
     //  ACTOR_EN_FD     — Flare Dancer (z_en_fd.c:315 func_8002F71C speed+2/yaw/6.0)
     //  ACTOR_EN_HONOTRAP — Fire trap (z_en_honotrap.c:324 func_8002F71C 5.0/yaw/0.0)
