@@ -83,6 +83,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Mb/z_en_mb.h"
 // En_Bigokuta — Big Octo miniboss state-machine sync (#130).
 #include "overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h"
+// En_Fd — Flare Dancer enflamed shell state-machine sync (#100).
+#include "overlays/actors/ovl_En_Fd/z_en_fd.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
@@ -241,6 +243,10 @@ struct EnemyUpdateExtras {
     // En_Bigokuta — Big Octo miniboss state-machine sync (#130).
     bool hasEnBigokuta         = false;
     s16  enBigokutaActionState = 0;
+
+    // En_Fd — Flare Dancer enflamed shell state-machine sync (#100).
+    bool hasEnFd         = false;
+    s16  enFdActionState = 0;
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
@@ -544,6 +550,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnBigokuta* big          = (EnBigokuta*)actor;
         e.hasEnBigokuta          = true;
         e.enBigokutaActionState  = EnBigokuta_GetStateIndex(big);
+    } else if (actor->id == ACTOR_EN_FD) {
+        EnFd* fd            = (EnFd*)actor;
+        e.hasEnFd           = true;
+        e.enFdActionState   = EnFd_GetStateIndex(fd);
     } else if (actor->id == ACTOR_EN_BB) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
@@ -706,6 +716,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnBigokuta != prev.hasEnBigokuta) return true;
     if (cur.hasEnBigokuta) {
         if (cur.enBigokutaActionState != prev.enBigokutaActionState) return true;
+    }
+    if (cur.hasEnFd != prev.hasEnFd) return true;
+    if (cur.hasEnFd) {
+        if (cur.enFdActionState != prev.enFdActionState) return true;
     }
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
@@ -1039,6 +1053,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enBigokutaActionState);
             }
         }
+        if (extras.hasEnFd) {
+            s16 prev = prevExtras && prevExtras->hasEnFd ? prevExtras->enFdActionState : -1;
+            if (prev != extras.enFdActionState) {
+                SPDLOG_INFO("[EnFd] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enFdActionState);
+            }
+        }
         if (extras.hasEnBb) {
             s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
             if (prev != extras.enBbActionState) {
@@ -1269,6 +1290,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // En_Bigokuta — Big Octo miniboss state-machine sync (#130).
     if (extras.hasEnBigokuta) {
         payload["actionState"] = extras.enBigokutaActionState;
+    }
+
+    // En_Fd — Flare Dancer enflamed shell state-machine sync (#100).
+    if (extras.hasEnFd) {
+        payload["actionState"] = extras.enFdActionState;
     }
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
@@ -1989,6 +2015,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // En_Bigokuta — cache Big Octo actionState (#130).
         if (actor->id == ACTOR_EN_BIGOKUTA && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // En_Fd — cache Flare Dancer enflamed shell actionState (#100).
+        if (actor->id == ACTOR_EN_FD && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
@@ -2782,6 +2812,30 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnBigokuta netId={} — triggering natural death cycle", netId);
                     EnBigokuta_SetupDyingNet((EnBigokuta*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Fd (Flare Dancer enflamed shell, #100): route through
+                // EnFd_SetupDyingNet so the receiver joins the spinTimer-
+                // prime / Actor_Kill-countdown chain (state 6 WaitForCore)
+                // without re-firing GameInteractor_ExecuteOnEnemyDefeat.
+                // En_Fd's actual loot drop is owned by ACTOR_EN_FW (the
+                // core/wisp spawned via EnFd_SpawnCore at z_en_fd.c:222);
+                // En_Fw is currently UNSYNCED so peer's local EnFd_SpawnCore
+                // is the only path that spawns En_Fw on either machine —
+                // sync of En_Fw + the isSpawningNetworkActor guard at
+                // EnFd_SpawnCore is a follow-up per-actor pass.
+                if (actor->id == ACTOR_EN_FD) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnFd.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnFd netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnFd netId={} — triggering natural death cycle", netId);
+                    EnFd_SetupDyingNet((EnFd*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;

@@ -51,4 +51,32 @@ typedef struct EnFd {
     /* 0x0620 */ EnFdEffect effects[200];
 } EnFd; // size = 0x31E0
 
+// Anchor multiplayer state-machine sync (En_Fd — Flare Dancer enflamed
+// shell). `this` is a C++ keyword. This header is transitively included
+// from C++ TUs (EnemyState.cpp / HookHandlers.cpp), so the param name
+// in the declaration uses `actor` instead. The implementations in
+// z_en_fd.c keep `this` per OoT decomp convention. See Pitfall 1.
+void EnFd_SetupDyingNet(struct EnFd* actor, PlayState* play);
+s16  EnFd_GetStateIndex(struct EnFd* actor);
+void EnFd_ApplyNetState(struct EnFd* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — reserved for API consistency
+// with sibling per-enemy sync plans. En_Fd itself does NOT call
+// Item_DropCollectibleRandom — the actual loot drop happens in
+// ACTOR_EN_FW (the Flare Dancer core/wisp child spawned via
+// EnFd_SpawnCore at z_en_fd.c:222). En_Fw's drop call at
+// z_en_fw.c:271 will gate via its own Anchor_ShouldSuppressEnFwDrop
+// in a follow-up per-actor sync pass when En_Fw is admitted.
+// This predicate is currently unused at the actor-side call sites
+// but is exposed for symmetry with sibling per-enemy sync plans and
+// as a future hook if a drop call is ever added to the En_Fd death
+// cycle. Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnFdDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

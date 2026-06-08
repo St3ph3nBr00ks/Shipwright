@@ -18,6 +18,12 @@
 #define FLG_COREDEAD (0x4000)
 #define FLG_COREDONE (0x8000)
 
+// Anchor multiplayer (En_Fd — Flare Dancer enflamed shell) — defined
+// in Bridge/EnemySyncBridge.cpp. Forward-declare here (plain `extern`,
+// NOT `extern "C"` — this is a .c file and C-linkage is implicit).
+// Per Pitfall 7.
+extern bool Anchor_ShouldSuppressEnFdDrop(Actor* actor);
+
 void EnFd_Init(Actor* thisx, PlayState* play);
 void EnFd_Destroy(Actor* thisx, PlayState* play);
 void EnFd_Update(Actor* thisx, PlayState* play);
@@ -960,4 +966,87 @@ void EnFd_DrawDots(EnFd* this, PlayState* play) {
     }
 
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Anchor multiplayer state-machine sync (En_Fd — Flare Dancer
+// enflamed shell).
+//
+// Routes a network-driven death cycle through `EnFd_WaitForCore` with
+// the death-countdown primed. The natural EnFd death flow is:
+//   1. En_Fw (core/wisp child spawned by EnFd_SpawnCore) sets
+//      FLG_COREDEAD on the parent En_Fd when its health hits zero.
+//   2. En_Fd's WaitForCore handler observes FLG_COREDEAD, clears
+//      params, primes spinTimer=30, and fires
+//      GameInteractor_ExecuteOnEnemyDefeat.
+//   3. spinTimer decrements over the next 30 ticks; at zero,
+//      Actor_Kill fires.
+//
+// SetupDyingNet jumps directly to step 2's terminal state — sets
+// actionFunc=WaitForCore, clears the FLG_* bits in params so the
+// branch can't re-enter Reappear, primes spinTimer=30 so the natural
+// countdown→Actor_Kill chain runs on the receiver, and clears
+// ACTOR_FLAG_ATTENTION_ENABLED so the shell is no longer Z-targetable.
+// This fires GameInteractor_ExecuteOnEnemyDefeat once on the receiver
+// (matching host's behaviour); the HostBookkeeping HasDefeatBroadcast
+// dedup guard at the send site prevents an echo back to host.
+//
+// Note: EnFd itself does NOT call Item_DropCollectible. The actual
+// drop is owned by En_Fw (z_en_fw.c:271). When En_Fw is admitted to
+// the sync pipeline in a follow-up pass, its drop call will be
+// gated by its own Anchor_ShouldSuppressEnFwDrop predicate.
+void EnFd_SetupDyingNet(EnFd* this, PlayState* play) {
+    this->actor.params = 0;
+    this->spinTimer = 30;
+    this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    this->actionFunc = EnFd_WaitForCore;
+}
+
+// Returns the state index of the current actionFunc, or -1 if the
+// actor is in a state we don't sync. State map matches the commit
+// message table.
+s16 EnFd_GetStateIndex(EnFd* this) {
+    if (this->actionFunc == EnFd_Reappear)          return 0;
+    if (this->actionFunc == EnFd_SpinAndGrow)       return 1;
+    if (this->actionFunc == EnFd_JumpToGround)      return 2;
+    if (this->actionFunc == EnFd_Land)              return 3;
+    if (this->actionFunc == EnFd_SpinAndSpawnFire)  return 4;
+    if (this->actionFunc == EnFd_Run)               return 5;
+    if (this->actionFunc == EnFd_WaitForCore)       return 6;
+    return -1;
+}
+
+// Apply a received state index by assigning the corresponding
+// actionFunc. EnFd doesn't have separate Setup* helpers — each
+// actionFunc's body handles its own first-tick entry conditions
+// (animation change, scale, velocity, etc.) within the handler.
+// Direct assignment is sufficient because the per-frame ENEMY_UPDATE
+// writeback re-syncs jointTable/morphTable/scale/world.pos every
+// tick, so any animation-phase drift across the assign-tick boundary
+// self-corrects within ~1 frame.
+//
+// State 6 (WaitForCore) intentionally NOT routed here — it's the
+// death-countdown state and is driven via SetupDyingNet from
+// HandlePacket_EnemyDefeated. The dormant-to-active filter at the
+// non-host driver block (Phase 2) should treat state 6 as "do not
+// regress to" so a stale host snapshot doesn't trigger a spurious
+// Actor_Kill on the peer.
+//
+// State 0 (Reappear) IS routed — Reappear is the spawn/respawn entry
+// state and runs every time the core (En_Fw) returns to the shell.
+// The dormant-to-active filter should treat state 0 the same way it
+// treats Karebaba's Idle (zero = neutral default that should not
+// overwrite a peer's locally-advanced state).
+void EnFd_ApplyNetState(EnFd* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0: this->actionFunc = EnFd_Reappear;         break;
+        case 1: this->actionFunc = EnFd_SpinAndGrow;      break;
+        case 2: this->actionFunc = EnFd_JumpToGround;     break;
+        case 3: this->actionFunc = EnFd_Land;             break;
+        case 4: this->actionFunc = EnFd_SpinAndSpawnFire; break;
+        case 5: this->actionFunc = EnFd_Run;              break;
+        // State 6 (WaitForCore) skipped — driven via SetupDyingNet
+        // from HandlePacket_EnemyDefeated. See header comment.
+        default: break;
+    }
 }
