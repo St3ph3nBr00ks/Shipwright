@@ -57,6 +57,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Test/z_en_test.h"
 // Plans/en_wf_sync_plan.md — Wolfos state-machine sync.
 #include "overlays/actors/ovl_En_Wf/z_en_wf.h"
+// feature/sync-en-tite — Tektite state-machine + animation sync.
+#include "overlays/actors/ovl_En_Tite/z_en_tite.h"
 // #47 / en_firefly_sync_plan.md — Keese (En_Firefly) state-machine sync.
 #include "overlays/actors/ovl_En_Firefly/z_en_firefly.h"
 // #102 / en_reeba_sync_plan.md — Leever (En_Reeba) state-machine sync.
@@ -177,6 +179,10 @@ struct EnemyUpdateExtras {
     // Plans/en_wf_sync_plan.md §3 — En_Wf (Wolfos) state-machine sync.
     bool hasEnWf         = false;
     s16  enWfActionState = 0;
+
+    // feature/sync-en-tite — En_Tite (Tektite) state-machine sync.
+    bool hasEnTite         = false;
+    s16  enTiteActionState = 0;
 
     // #47 / en_firefly_sync_plan.md §4 — En_Firefly (Keese) state-machine sync.
     bool hasEnFirefly         = false;
@@ -444,6 +450,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnWf* wf            = (EnWf*)actor;
         e.hasEnWf           = true;
         e.enWfActionState   = EnWf_GetStateIndex(wf);
+    } else if (actor->id == ACTOR_EN_TITE) {
+        EnTite* tite        = (EnTite*)actor;
+        e.hasEnTite         = true;
+        e.enTiteActionState = EnTite_GetStateIndex(tite);
     } else if (actor->id == ACTOR_EN_FIREFLY) {
         EnFirefly* ff             = (EnFirefly*)actor;
         e.hasEnFirefly            = true;
@@ -556,6 +566,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnWf != prev.hasEnWf) return true;
     if (cur.hasEnWf) {
         if (cur.enWfActionState != prev.enWfActionState) return true;
+    }
+    if (cur.hasEnTite != prev.hasEnTite) return true;
+    if (cur.hasEnTite) {
+        if (cur.enTiteActionState != prev.enTiteActionState) return true;
     }
     if (cur.hasEnSw != prev.hasEnSw) return true;
     if (cur.hasEnSw) {
@@ -1041,6 +1055,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // Plans/en_wf_sync_plan.md §3 — En_Wf (Wolfos) state-machine sync.
     if (extras.hasEnWf) {
         payload["actionState"] = extras.enWfActionState;
+    }
+
+    // feature/sync-en-tite — En_Tite (Tektite) state-machine sync.
+    if (extras.hasEnTite) {
+        payload["actionState"] = extras.enTiteActionState;
     }
 
     // #47 / en_firefly_sync_plan.md §4 — En_Firefly (Keese) state-machine sync.
@@ -1729,6 +1748,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_WF && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // feature/sync-en-tite — cache En_Tite (Tektite) actionState.
+        if (actor->id == ACTOR_EN_TITE && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // #47 / en_firefly_sync_plan.md — cache En_Firefly (Keese) actionState.
         if (actor->id == ACTOR_EN_FIREFLY && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
@@ -2318,6 +2341,29 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnWf netId={} — triggering natural death cycle", netId);
                     EnWf_SetupDyingNet((EnWf*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Tite (Tektite): route through EnTite_SetupDyingNet so
+                // the DeathCry → FallApart natural cycle (body-break +
+                // item drop) plays on the receiver. SetupDyingNet mirrors
+                // SetupDeathCry; the natural FallApart fires
+                // GameInteractor_ExecuteOnEnemyDefeat but the
+                // HostBookkeeping HasDefeatBroadcast dedup guard prevents
+                // the echo. Item_DropCollectibleRandom in FallApart is
+                // suppressed on peer via the ITEM_DROP_SYNC pipeline.
+                // Plan: feature/sync-en-tite.
+                if (actor->id == ACTOR_EN_TITE) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnTite.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnTite netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnTite netId={} — triggering natural death cycle", netId);
+                    EnTite_SetupDyingNet((EnTite*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;

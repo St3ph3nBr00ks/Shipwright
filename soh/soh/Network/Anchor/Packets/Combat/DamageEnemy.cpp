@@ -45,6 +45,12 @@ extern "C" {
 // En_Skb (Stalchild) — Hyrule Field at night spawner output. Damage gate
 // at z_en_skb.c:456 reads collider.base.acFlags & 2 (AC_HIT).
 #include "src/overlays/actors/ovl_En_Skb/z_en_skb.h"
+// En_Tite (Tektite) — feature/sync-en-tite. Single ColliderJntSph at
+// `collider`. Damage gate at z_en_tite.c:850 (EnTite_CheckDamage) reads
+// `collider.base.acFlags & AC_HIT`. No `base.ac->X` derefs in damage
+// path (verified per Plans/ApplySyncAcHitToActor_BaseAcAudit_2026-06-07.md
+// pattern). Safe direct AC_HIT bit-set.
+#include "src/overlays/actors/ovl_En_Tite/z_en_tite.h"
 // Boss_Goma — non-host damage requires synthesised acHitInfo + BUMP_HIT
 // because BossGoma_UpdateHit (z_boss_goma.c:1823) gates on bumperFlags &
 // BUMP_HIT (not AC_HIT) and dereferences acHitInfo->toucher.dmgFlags.
@@ -558,6 +564,16 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // collider. Fixes peer→host damage not registering when peer
             // hits a Stalchild on Hyrule Field at night.
             ((EnSkb*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_TITE:
+            // Tektite — z_en_tite.c:850 (EnTite_CheckDamage) reads
+            // `collider.base.acFlags & AC_HIT`. Single ColliderJntSph;
+            // colliderItem is the JntSph element (same physical collider
+            // — setting AC_HIT on the base flags is sufficient). No
+            // `base.ac->X` derefs in damage path. Covers both red
+            // (TEKTITE_RED, land+water) and blue (TEKTITE_BLUE,
+            // water-surface) variants uniformly.
+            ((EnTite*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         default:
             // No AC_HIT setter for this actor type. Damage is delivered via

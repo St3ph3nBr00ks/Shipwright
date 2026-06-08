@@ -62,7 +62,11 @@ void EnTite_Draw(Actor* thisx, PlayState* play);
 void EnTite_SetupIdle(EnTite* this);
 void EnTite_SetupTurnTowardPlayer(EnTite* this);
 void EnTite_SetupMoveTowardPlayer(EnTite* this);
+void EnTite_SetupAttack(EnTite* this);
+void EnTite_SetupRecoil(EnTite* this);
+void EnTite_SetupStunned(EnTite* this);
 void EnTite_SetupDeathCry(EnTite* this);
+void EnTite_SetupFlipOnBack(EnTite* this);
 void EnTite_SetupFlipUpright(EnTite* this);
 
 void EnTite_Idle(EnTite* this, PlayState* play);
@@ -1012,5 +1016,76 @@ void EnTite_Draw(Actor* thisx, PlayState* play) {
             iceChunk.z = thisx->world.pos.z + sIceChunks[idx].z;
             EffectSsEnIce_SpawnFlyingVec3f(play, &this->actor, &iceChunk, 150, 150, 150, 250, 235, 245, 255, 1.0f);
         }
+    }
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync.
+// Sibling pattern: EnFirefly / EnSt / EnWf (actionFunc-based GetStateIndex,
+// natural death cycle routed through SetupDyingNet, ClaimDefeatBroadcast
+// dedup guard prevents receive-side OnEnemyDefeat echo).
+// =============================================================================
+
+// Triggers EnTite's DeathCry → FallApart natural cycle on a non-host
+// receiver. Mirror of EnTite_SetupDeathCry. The natural cycle calls
+// GameInteractor_ExecuteOnEnemyDefeat at the end of FallApart, but the
+// HostBookkeeping HasDefeatBroadcast dedup guard at HookHandlers.cpp
+// prevents the receive-side fire from causing an echo back to host.
+//
+// Item_DropCollectibleRandom at the end of FallApart is routed through
+// Anchor's ITEM_DROP_SYNC pipeline (same pattern as EnFirefly / EnWf —
+// peer's local drop is suppressed; host's drop is broadcast).
+void EnTite_SetupDyingNet(EnTite* this, PlayState* play) {
+    Enemy_StartFinishingBlow(play, &this->actor);
+    this->action = TEKTITE_DEATH_CRY;
+    this->actor.colorFilterTimer = 0;
+    this->actor.speedXZ = 0.0f;
+    EnTite_SetupAction(this, EnTite_DeathCry);
+}
+
+// State-index derivation by actionFunc comparison (matches EnFirefly /
+// EnSt). Note: EnTite_FlipOnBack and EnTite_FlipUpright do NOT update
+// `this->action` (they're transitive states that retain the prior
+// action's enum value), so actionFunc comparison is the only reliable
+// way to distinguish them. Returns -1 for unmatched actionFuncs so
+// the rx driver's `ext->netStateIndex >= 0` gate skips uncertain states.
+s16 EnTite_GetStateIndex(EnTite* this) {
+    if (this->actionFunc == EnTite_Idle)              return 0;  // dormant
+    if (this->actionFunc == EnTite_TurnTowardPlayer)  return 1;
+    if (this->actionFunc == EnTite_MoveTowardPlayer)  return 2;
+    if (this->actionFunc == EnTite_Attack)            return 3;
+    if (this->actionFunc == EnTite_Recoil)            return 4;
+    if (this->actionFunc == EnTite_Stunned)           return 5;
+    if (this->actionFunc == EnTite_FlipOnBack)        return 6;
+    if (this->actionFunc == EnTite_FlipUpright)       return 7;
+    // 8 / 9 (DeathCry / FallApart) — death-class. Driven via
+    // SetupDyingNet from HandlePacket_EnemyDefeated. Returning the
+    // matching index keeps the wire informative; the receive driver
+    // gates death-class states with PhaseImpliesHasLocalDeath so
+    // they never reach ApplyNetState.
+    if (this->actionFunc == EnTite_DeathCry)          return 8;
+    if (this->actionFunc == EnTite_FallApart)         return 9;
+    return -1;
+}
+
+// Drive the receiver's local state machine to match the host's. Each case
+// invokes the matching Setup* helper. Death states (8 = DeathCry,
+// 9 = FallApart) are driven separately via SetupDyingNet from
+// HandlePacket_EnemyDefeated; the rx driver gates death-class states
+// with PhaseImpliesHasLocalDeath so they never reach this switch.
+void EnTite_ApplyNetState(EnTite* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0: EnTite_SetupIdle(this);             break;
+        case 1: EnTite_SetupTurnTowardPlayer(this); break;
+        case 2: EnTite_SetupMoveTowardPlayer(this); break;
+        case 3: EnTite_SetupAttack(this);           break;
+        case 4: EnTite_SetupRecoil(this);           break;
+        case 5: EnTite_SetupStunned(this);          break;
+        case 6: EnTite_SetupFlipOnBack(this);       break;
+        case 7: EnTite_SetupFlipUpright(this);      break;
+        // 8 / 9 (DeathCry / FallApart) — death-class. Driven via
+        // SetupDyingNet. Skip silently here.
+        default:
+            break;
     }
 }
