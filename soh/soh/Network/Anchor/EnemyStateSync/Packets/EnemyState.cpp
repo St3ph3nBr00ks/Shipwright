@@ -77,6 +77,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Bili/z_en_bili.h"
 // #126 — Bari big jellyfish (En_Vali) state-machine sync.
 #include "overlays/actors/ovl_En_Vali/z_en_vali.h"
+// En_Zf — Lizalfos + Dinolfos state-machine sync (Phase 2 wire-up).
+#include "overlays/actors/ovl_En_Zf/z_en_zf.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
@@ -223,6 +225,10 @@ struct EnemyUpdateExtras {
     // #126 — En_Vali (Bari big jellyfish) state-machine sync.
     bool hasEnVali         = false;
     s16  enValiActionState = 0;
+
+    // En_Zf — Lizalfos + Dinolfos state-machine sync.
+    bool hasEnZf         = false;
+    s16  enZfActionState = 0;
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
@@ -514,6 +520,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnVali* vali            = (EnVali*)actor;
         e.hasEnVali             = true;
         e.enValiActionState     = EnVali_GetStateIndex(vali);
+    } else if (actor->id == ACTOR_EN_ZF) {
+        EnZf* zf            = (EnZf*)actor;
+        e.hasEnZf           = true;
+        e.enZfActionState   = EnZf_GetStateIndex(zf);
     } else if (actor->id == ACTOR_EN_BB) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
@@ -664,6 +674,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnVali != prev.hasEnVali) return true;
     if (cur.hasEnVali) {
         if (cur.enValiActionState != prev.enValiActionState) return true;
+    }
+    if (cur.hasEnZf != prev.hasEnZf) return true;
+    if (cur.hasEnZf) {
+        if (cur.enZfActionState != prev.enZfActionState) return true;
     }
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
@@ -976,6 +990,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enValiActionState);
             }
         }
+        if (extras.hasEnZf) {
+            s16 prev = prevExtras && prevExtras->hasEnZf ? prevExtras->enZfActionState : -1;
+            if (prev != extras.enZfActionState) {
+                SPDLOG_INFO("[EnZf] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enZfActionState);
+            }
+        }
         if (extras.hasEnBb) {
             s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
             if (prev != extras.enBbActionState) {
@@ -1191,6 +1212,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #126 — En_Vali (Bari big jellyfish) state-machine sync.
     if (extras.hasEnVali) {
         payload["actionState"] = extras.enValiActionState;
+    }
+
+    // En_Zf — Lizalfos + Dinolfos state-machine sync.
+    if (extras.hasEnZf) {
+        payload["actionState"] = extras.enZfActionState;
     }
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
@@ -1899,6 +1925,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // #126 — cache En_Vali (Bari) actionState.
         if (actor->id == ACTOR_EN_VALI && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // En_Zf — cache Lizalfos/Dinolfos actionState.
+        if (actor->id == ACTOR_EN_ZF && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
@@ -2627,6 +2657,27 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnVali netId={} — triggering natural death cycle", netId);
                     EnVali_SetupDyingNet((EnVali*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Zf (Lizalfos / Dinolfos): route through EnZf_SetupDyingNet
+                // so the natural EnZf_Die cycle plays on the receiver. The
+                // death-anim's random item drop is gated by
+                // Anchor_ShouldSuppressEnZfDrop — host's authoritative
+                // ITEM_DROP_SYNC handles the drop. EnZf_Die fires OnEnemyDefeat,
+                // but the HostBookkeeping HasDefeatBroadcast dedup at the send
+                // site prevents an echo back to host.
+                if (actor->id == ACTOR_EN_ZF) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnZf.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnZf netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnZf netId={} — triggering natural death cycle", netId);
+                    EnZf_SetupDyingNet((EnZf*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
