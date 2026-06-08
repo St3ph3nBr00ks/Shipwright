@@ -196,6 +196,22 @@ extern "C" bool Anchor_ShouldSuppressEnIkDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// Receiver-side predicate — true when an En_GeldB (Gerudo Thief) death cycle
+// was network-driven (peer received ENEMY_DEFEATED and is replaying the
+// defeat → flee sequence). EnGeldB_CollisionCheck uses this to suppress
+// the small-key Item_DropCollectible call (gated on this->keyFlag) so
+// host's authoritative ITEM_DROP_SYNC isn't double-applied.
+// Mirror of Anchor_ShouldSuppressEnTestDrop. The arrest-on-defeat
+// "throw Link in jail" sequence is NOT inside z_en_geldb.c — that's
+// driven separately by entrance/scene logic. See z_en_geldb.c
+// EnGeldB_CollisionCheck + Phase 2 follow-up notes.
+extern "C" bool Anchor_ShouldSuppressEnGeldBDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // Receiver-side predicate -- reserved for API consistency. En_Poh's
 // death cycle (EnPoh_Death -> soul-talk states) does NOT call
 // Item_DropCollectibleRandom; Poe yields ITEM_POE via a per-client
