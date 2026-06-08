@@ -6,7 +6,10 @@
 
 struct EnFd;
 
-typedef void (*EnFdActionFunc)(struct EnFd* this, PlayState* play);
+// Param names omitted — `this` is a reserved keyword in C++ and this
+// header is transitively included from C++ TUs (DamageEnemy.cpp /
+// HookHandlers.cpp / EnemyState.cpp). Per Pitfall 1.
+typedef void (*EnFdActionFunc)(struct EnFd*, PlayState*);
 
 typedef enum {
     FD_EFFECT_NONE,
