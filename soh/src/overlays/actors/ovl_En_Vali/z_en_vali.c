@@ -22,6 +22,11 @@ void EnVali_Draw(Actor* thisx, PlayState* play);
 void EnVali_SetupLurk(EnVali* this);
 void EnVali_SetupDropAppear(EnVali* this);
 
+// Anchor multiplayer (#126) — defined in Bridge/EnemySyncBridge.cpp.
+// Forward-declare here (extern, NOT extern "C" — this is a .c file
+// and C-linkage is implicit). Per Pitfall 7.
+extern bool Anchor_ShouldSuppressEnValiDrop(Actor* actor);
+
 void EnVali_Lurk(EnVali* this, PlayState* play);
 void EnVali_DropAppear(EnVali* this, PlayState* play);
 void EnVali_FloatIdle(EnVali* this, PlayState* play);
@@ -244,8 +249,14 @@ void EnVali_SetupBurnt(EnVali* this) {
 
 void EnVali_SetupDivideAndDie(EnVali* this, PlayState* play) {
     s32 i;
+    // Anchor multiplayer (#126): suppress BOTH the Biri children spawn
+    // AND the random item drop when the death cycle is network-driven.
+    // Host's authoritative ENEMY_SPAWN broadcasts handle the cluster
+    // spawn; host's authoritative ITEM_DROP_SYNC handles the drop.
+    // OnEnemyDefeat broadcast is dedup'd by HostBookkeeping.
+    bool suppressed = Anchor_ShouldSuppressEnValiDrop(&this->actor);
 
-    if (GameInteractor_Should(VB_BIRI_SPAWN_JELLYFISH_UPON_DEATH, true, this, play)) {
+    if (!suppressed && GameInteractor_Should(VB_BIRI_SPAWN_JELLYFISH_UPON_DEATH, true, this, play)) {
         for (i = 0; i < 3; i++) {
             Actor_Spawn(&play->actorCtx, play, ACTOR_EN_BILI, this->actor.world.pos.x, this->actor.world.pos.y,
                         this->actor.world.pos.z, 0, this->actor.world.rot.y, 0, 0);
@@ -254,7 +265,9 @@ void EnVali_SetupDivideAndDie(EnVali* this, PlayState* play) {
         }
     }
 
-    Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x50);
+    if (!suppressed) {
+        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x50);
+    }
     this->timer = Rand_S16Offset(10, 10);
     this->bodyCollider.base.acFlags &= ~AC_ON;
     SoundSource_PlaySfxAtFixedWorldPos(play, &this->actor.world.pos, 40, NA_SE_EN_BARI_SPLIT);
@@ -811,4 +824,55 @@ void EnVali_Draw(Actor* thisx, PlayState* play) {
                                             POLY_XLU_DISP);
 
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Anchor multiplayer state-machine sync (#126).
+//
+// Routes a network-driven death cycle through `EnVali_SetupBurnt` —
+// the 2-frame fade transitions naturally to `SetupDivideAndDie`,
+// whose Biri spawn + item drop are gated by `Anchor_ShouldSuppressEnValiDrop`.
+// Host's authoritative ENEMY_SPAWN packets handle the cluster spawn;
+// host's authoritative ITEM_DROP_SYNC handles the drop. The natural
+// `SetupDivideAndDie` call fires GameInteractor_ExecuteOnEnemyDefeat,
+// but the HostBookkeeping HasDefeatBroadcast dedup guard at the send
+// site prevents an echo back to host.
+void EnVali_SetupDyingNet(EnVali* this, PlayState* play) {
+    this->timer = 2;
+    this->bodyCollider.base.acFlags &= ~AC_ON;
+    Actor_SetColorFilter(&this->actor, 0x4000, 150, 0x2000, 30);
+    this->actionFunc = EnVali_Burnt;
+}
+
+s16 EnVali_GetStateIndex(EnVali* this) {
+    if (this->actionFunc == EnVali_Lurk)            return 0;
+    if (this->actionFunc == EnVali_DropAppear)      return 1;
+    if (this->actionFunc == EnVali_FloatIdle)       return 2;
+    if (this->actionFunc == EnVali_Attacked)        return 3;
+    if (this->actionFunc == EnVali_Retaliate)       return 4;
+    if (this->actionFunc == EnVali_MoveArmsDown)    return 5;
+    if (this->actionFunc == EnVali_Burnt)           return 6;
+    if (this->actionFunc == EnVali_DivideAndDie)    return 7;
+    if (this->actionFunc == EnVali_Stunned)         return 8;
+    if (this->actionFunc == EnVali_Frozen)          return 9;
+    if (this->actionFunc == EnVali_ReturnToLurk)    return 10;
+    return -1;
+}
+
+void EnVali_ApplyNetState(EnVali* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0: EnVali_SetupLurk(this);          break;
+        case 1: EnVali_SetupDropAppear(this);    break;
+        case 2: EnVali_SetupFloatIdle(this);     break;
+        case 3: EnVali_SetupAttacked(this);      break;
+        case 4: EnVali_SetupRetaliate(this);     break;
+        case 5: EnVali_SetupMoveArmsDown(this);  break;
+        case 8: EnVali_SetupStunned(this);       break;
+        case 10: EnVali_SetupReturnToLurk(this); break;
+        // Death states 6/7/9 (Burnt / DivideAndDie / Frozen) driven via
+        // SetupDyingNet from HandlePacket_EnemyDefeated. Skip silently
+        // here — the dormant-to-active filter + PhaseImpliesHasLocalDeath
+        // gate at the call site already block regression to these states.
+        default: break;
+    }
 }

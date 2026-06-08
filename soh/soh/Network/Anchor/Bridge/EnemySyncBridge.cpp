@@ -260,3 +260,25 @@ extern "C" bool Anchor_ShouldSuppressEnBbDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
         || ext->networkDriveDying;
 }
+
+// Receiver-side predicate -- true when an En_Vali (Bari big jellyfish)
+// death cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the burnt -> divide-and-die sequence). EnVali_SetupDivideAndDie
+// uses this to suppress BOTH the random 0x50 drop call AND the spawn of
+// 3x En_Bili (Biri jellyfish) children so:
+//   - Host's authoritative ITEM_DROP_SYNC isn't double-applied.
+//   - Host's authoritative ENEMY_SPAWN broadcasts for the Biri cluster
+//     aren't competing with peer-local non-synced spawns (which would
+//     mismatch netIds).
+// The `|| ext->networkDriveDying` clause mirrors the Bili / Bb race
+// mitigation -- closes a race when peer's vanilla EnVali_UpdateDamage
+// consumes the same ENEMY_STATE health<=0 read and transitions to
+// SetupBurnt before ENEMY_DEFEATED arrives. See z_en_vali.c
+// EnVali_SetupDivideAndDie + Plans/en_bili_sync_plan.md / #126.
+extern "C" bool Anchor_ShouldSuppressEnValiDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
+        || ext->networkDriveDying;
+}

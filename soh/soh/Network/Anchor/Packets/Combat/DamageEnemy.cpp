@@ -35,6 +35,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Peehat/z_en_peehat.h"
 #include "src/overlays/actors/ovl_En_Poh/z_en_poh.h"
 #include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
+// #126 — Bari big jellyfish (En_Vali) AC_HIT routing.
+#include "src/overlays/actors/ovl_En_Vali/z_en_vali.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
@@ -434,6 +436,14 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // inside EnBili_UpdateDamage. Null-guard landed in the same
             // commit as this case addition.
             ((EnBili*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_VALI:
+            // Bari big jellyfish (#126) — EnVali_UpdateDamage at
+            // z_en_vali.c:508 reads ONLY bodyCollider.base.acFlags +
+            // colChkInfo.damageEffect/damage. NO base.ac-> pointer
+            // derefs (audit in ad01a739b commit body). Synthetic
+            // AC_HIT is safe — no null-guard needed.
+            ((EnVali*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_BB:
             // Bubble (flame skull) — z_en_bb.c:1164 and :1173 deref

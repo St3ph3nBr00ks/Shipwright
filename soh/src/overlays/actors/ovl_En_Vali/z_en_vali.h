@@ -62,4 +62,27 @@ typedef enum {
     /* 1 */ BARI_TYPE_SWORD_DAMAGE
 } EnValiType;
 
+// Anchor multiplayer state-machine sync (#126 / en_vali sync work).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp / HookHandlers.cpp), so the param name in
+// the declaration uses `actor` instead. The implementations in
+// z_en_vali.c keep `this` per OoT decomp convention.
+void EnVali_SetupDyingNet(struct EnVali* actor, PlayState* play);
+s16  EnVali_GetStateIndex(struct EnVali* actor);
+void EnVali_ApplyNetState(struct EnVali* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and we're replaying
+// the burnt → divide-and-die sequence). Used by EnVali_SetupDivideAndDie
+// to skip BOTH the random item drop AND the cluster-spawn of En_Bili
+// children (host's authoritative ENEMY_SPAWN packets handle those).
+// Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnValiDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif
