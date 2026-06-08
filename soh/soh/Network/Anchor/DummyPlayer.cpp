@@ -707,7 +707,13 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         (attackerIdNow == ACTOR_EN_ANUBICE_FIRE)  ||  // Anubis (Spirit Temple)
         (attackerIdNow == ACTOR_EN_FD_FIRE)       ||  // Flare Dancer (Fire Temple)
         (attackerIdNow == ACTOR_EN_FIRE_ROCK)     ||  // King Dodongo / Volvagia fire pillar rocks
-        (attackerIdNow == ACTOR_EN_OKUTA);            // Octorok rock spit (parent AT_NONE; safe)
+        (attackerIdNow == ACTOR_EN_OKUTA)         ||  // Octorok rock spit (parent AT_NONE; safe)
+        (attackerIdNow == ACTOR_EN_HONOTRAP);         // Honotrap flame children (FLAME_MOVE/_DROP).
+                                                       // Eye variant has AT_NONE (tris collider
+                                                       // line 91 of z_en_honotrap.c), so the
+                                                       // attacker form is only the flame.
+                                                       // Blanket-include by id is safe — the
+                                                       // eye can't trigger this AC_HIT gate.
 
     const bool gateOpen         = acHitForGate && peerIframesOpen
                                && localGuardOpen && authoritative

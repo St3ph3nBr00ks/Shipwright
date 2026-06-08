@@ -81,6 +81,9 @@ extern "C" {
 
 // #128 / en_bili_sync_plan.md — Biri jellyfish (En_Bili) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
+
+// en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
+#include "src/overlays/actors/ovl_En_Honotrap/z_en_honotrap.h"
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // Issue #153 — En_Goroiwa is ACTORCAT_PROP, the first non-ENEMY actor synced.
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
@@ -760,6 +763,24 @@ void Anchor::RegisterHooks() {
         // for the flower so parent owns the netId. Without this skip,
         // logs show the same netId assigned twice — collision.
         if (actor->id == ACTOR_EN_HINTNUTS && (actor->params & 0xFF) == 0xA) {
+            return;
+        }
+
+        // en_honotrap_sync — skip the flame projectile variants entirely.
+        // Both clients' local Eye / Dampe spawner run their own
+        // `Actor_SpawnAsChild(ACTOR_EN_HONOTRAP, ..., HONOTRAP_FLAME_*)`
+        // independently, so each client gets one local flame per attack
+        // event. Allowing ENEMY_SPAWN to broadcast the dynamic flame
+        // spawn would double-spawn on peer (one local + one wire). The
+        // flame is fully per-client-local-AI (aim, chase, shield reflect,
+        // damage application — none cross-broadcast). Filtering here
+        // skips netId assignment, the non-host kill branch, and the
+        // host's ENEMY_SPAWN broadcast in one shot. The eye variant
+        // (params == HONOTRAP_EYE) is the only thing that gets a netId
+        // and sync — its state machine sync drives the Open/Close
+        // visual + lets ENEMY_DEFEATED replicate the eye's destruction
+        // via Actor_Kill when one client destroys it locally.
+        if (actor->id == ACTOR_EN_HONOTRAP && actor->params != HONOTRAP_EYE) {
             return;
         }
 
@@ -2463,6 +2484,37 @@ void Anchor::RegisterHooks() {
                 } else if (curState != ext->netStateIndex) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         SPDLOG_INFO("[EnSsh] rx netId={} block net={} local={} (filter)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
+                    }
+                }
+            }
+
+            // en_honotrap_sync — Fake-eye fire/ice trap state-machine sync.
+            // Only the EYE variant carries a netId (flame variants filtered
+            // at OnActorSpawn). Dormant-to-active filter: state 0 (EyeIdle —
+            // shut/sleeping) doesn't override active states 1/2/3 (Open /
+            // Attack / Close). Each client's local eye independently opens
+            // against its nearest local Link (per-client-local-AI), so wire
+            // sync is defense-in-depth — both clients typically converge on
+            // the same state via local AI within a few frames. No death
+            // gating — peer destruction is driven by ENEMY_DEFEATED +
+            // Actor_Kill from whichever client first hit the eye locally.
+            if (actor->id == ACTOR_EN_HONOTRAP &&
+                actor->params == HONOTRAP_EYE &&
+                ext->netStateIndex >= 0) {
+                EnHonotrap* eye = (EnHonotrap*)actor;
+                s16 curState = EnHonotrap_GetStateIndex(eye);
+                bool netIsDormant  = (ext->netStateIndex == 0);
+                bool localIsActive = (curState >= 1 && curState <= 3);
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnHonotrap] rx netId={} apply {}->{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnHonotrap_ApplyNetState(eye, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnHonotrap] rx netId={} block net={} local={} (dormant-active filter)",
                                     ext->netId, (int)ext->netStateIndex, (int)curState);
                     }
                 }
