@@ -9,6 +9,11 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
 
+// Anchor multiplayer — defined in Bridge/EnemySyncBridge.cpp.
+// Forward-declare here (extern, NOT extern "C" — this is a .c file
+// and C-linkage is implicit). Per Pitfall 7.
+extern bool Anchor_ShouldSuppressEnMbDrop(Actor* actor);
+
 /*
  * This actor can have three behaviors:
  * - "Spear Guard" (variable -1): uses a spear, walks around home point, charges player if too close
@@ -1131,7 +1136,12 @@ void EnMb_ClubDead(EnMb* this, PlayState* play) {
                                      9, true);
             }
         } else {
-            Item_DropCollectibleRandom(play, &this->actor, &effPos, 0xC0);
+            // Anchor — suppress local drop when this death cycle was
+            // network-driven; host's authoritative ITEM_DROP_SYNC carries
+            // the drop.
+            if (!Anchor_ShouldSuppressEnMbDrop(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &effPos, 0xC0);
+            }
             Actor_Kill(&this->actor);
         }
     } else if ((s32)this->skelAnime.curFrame == 15 || (s32)this->skelAnime.curFrame == 22) {
@@ -1367,7 +1377,12 @@ void EnMb_SpearDead(EnMb* this, PlayState* play) {
                                      true);
             }
         } else {
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xE0);
+            // Anchor — suppress local drop when this death cycle was
+            // network-driven; host's authoritative ITEM_DROP_SYNC carries
+            // the drop.
+            if (!Anchor_ShouldSuppressEnMbDrop(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xE0);
+            }
             Actor_Kill(&this->actor);
         }
     }
@@ -1602,5 +1617,88 @@ void EnMb_Draw(Actor* thisx, PlayState* play) {
             EffectSsEnIce_SpawnFlyingVec3s(play, thisx, &this->bodyPartsPos[bodyPartIdx], 150, 150, 150, 250, 235, 245,
                                            255, scale);
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Anchor multiplayer state-machine sync.
+//
+// SetupDyingNet routes a network-driven death cycle through the
+// natural EnMb_SetupClubDead / EnMb_SetupSpearDead path (selected by
+// actor.params variant: Club vs Spear). Both Setup* functions set the
+// fall-on-back animation, clear ACTOR_FLAG_ATTENTION_ENABLED, queue a
+// 30-tick dust/effect cycle, and then call Item_DropCollectibleRandom
+// + Actor_Kill — the drop is gated by Anchor_ShouldSuppressEnMbDrop so
+// host's authoritative ITEM_DROP_SYNC handles it instead. The natural
+// SetupClubDead / SetupSpearDead path fires GameInteractor_Execute-
+// OnEnemyDefeat upstream in EnMb_CheckColliding, but the
+// HostBookkeeping HasDefeatBroadcast dedup guard at the send site
+// prevents an echo back to host.
+void EnMb_SetupDyingNet(EnMb* this, PlayState* play) {
+    (void)play;
+    if (this->actor.params == ENMB_TYPE_CLUB) {
+        EnMb_SetupClubDead(this);
+    } else {
+        EnMb_SetupSpearDead(this);
+    }
+}
+
+// Maps actionFunc -> stable state index for ENEMY_STATE wire sync.
+// Death states 16 (SpearDead) and 17 (ClubDead) are driven via
+// SetupDyingNet from HandlePacket_EnemyDefeated; skipped in
+// ApplyNetState below.
+s16 EnMb_GetStateIndex(EnMb* this) {
+    if (this->actionFunc == EnMb_SpearGuardLookAround)             return 0;
+    if (this->actionFunc == EnMb_SpearPatrolTurnTowardsWaypoint)   return 1;
+    if (this->actionFunc == EnMb_ClubWaitPlayerNear)               return 2;
+    if (this->actionFunc == EnMb_SpearGuardWalk)                   return 3;
+    if (this->actionFunc == EnMb_SpearPatrolWalkTowardsWaypoint)   return 4;
+    if (this->actionFunc == EnMb_SpearGuardPrepareAndCharge)       return 5;
+    if (this->actionFunc == EnMb_SpearPatrolPrepareAndCharge)      return 6;
+    if (this->actionFunc == EnMb_SpearPatrolImmediateCharge)       return 7;
+    if (this->actionFunc == EnMb_ClubAttack)                       return 8;
+    if (this->actionFunc == EnMb_SpearEndChargeQuick)              return 9;
+    if (this->actionFunc == EnMb_SpearPatrolEndCharge)             return 10;
+    if (this->actionFunc == EnMb_ClubWaitAfterAttack)              return 11;
+    if (this->actionFunc == EnMb_Stunned)                          return 12;
+    if (this->actionFunc == EnMb_SpearDamaged)                     return 13;
+    if (this->actionFunc == EnMb_ClubDamaged)                      return 14;
+    if (this->actionFunc == EnMb_ClubDamagedWhileKneeling)         return 15;
+    if (this->actionFunc == EnMb_SpearDead)                        return 16;
+    if (this->actionFunc == EnMb_ClubDead)                         return 17;
+    return -1;
+}
+
+void EnMb_ApplyNetState(EnMb* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  EnMb_SetupSpearGuardLookAround(this);              break;
+        // Case 1 (EnMb_SetupSpearPatrolTurnTowardsWaypoint) requires
+        // PlayState* for EnMb_NextWaypoint; skipped here to keep the
+        // (EnMb*, s16) signature mirroring Vali. The dormant-to-active
+        // filter + natural state evolution handle this transition on
+        // peer within one tick.
+        case 2:  EnMb_SetupClubWaitPlayerNear(this);                break;
+        case 3:  EnMb_SetupSpearGuardWalk(this);                    break;
+        case 4:  EnMb_SetupSpearPatrolWalkTowardsWaypoint(this);    break;
+        // Cases 5/6: EnMb_SetupSpearPrepareAndCharge internally
+        // dispatches to GuardPrepareAndCharge vs PatrolPrepareAndCharge
+        // by actor.params, so both states route through the same
+        // setup function (variant correctness preserved).
+        case 5:
+        case 6:  EnMb_SetupSpearPrepareAndCharge(this);             break;
+        case 7:  EnMb_SetupSpearPatrolImmediateCharge(this);        break;
+        case 8:  EnMb_SetupClubAttack(this);                        break;
+        case 9:  EnMb_SetupSpearEndChargeQuick(this);               break;
+        case 10: EnMb_SetupSpearPatrolEndCharge(this);              break;
+        case 11: EnMb_SetupClubWaitAfterAttack(this);               break;
+        case 12: EnMb_SetupStunned(this);                           break;
+        case 13: EnMb_SetupSpearDamaged(this);                      break;
+        case 14: EnMb_SetupClubDamaged(this);                       break;
+        case 15: EnMb_SetupClubDamagedWhileKneeling(this);          break;
+        // Death states 16 (SpearDead) / 17 (ClubDead) driven via
+        // SetupDyingNet from HandlePacket_EnemyDefeated. Skip silently
+        // here — the dormant-to-active filter + PhaseImpliesHasLocalDeath
+        // gate at the call site already block regression to these states.
+        default: break;
     }
 }
