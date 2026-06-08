@@ -43,6 +43,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // En_Bigokuta — Big Octo miniboss AC_HIT routing (#130).
 #include "src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h"
+// En_Fd — Flare Dancer enflamed shell AC_HIT routing (#100).
+#include "src/overlays/actors/ovl_En_Fd/z_en_fd.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
@@ -731,6 +733,33 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // Big Octo uses a ColliderJntSph; setting AC_HIT on the
             // shared base header covers all elements.
             ((EnBigokuta*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_FD:
+            // Audit: ONE pre-existing acHitInfo-> deref in damage path,
+            //   already null-guarded.
+            //   Verified by agent `feature/sync-en-fd` Phase 1
+            //   (commit 3a60cf5ea): `grep -nE "base\.ac->|acHitInfo->"
+            //   z_en_fd.c` → 1 match at line 298 inside `EnFd_ColliderCheck`,
+            //   PRE-EXISTING `acHitInfo != NULL` guard precedes the deref.
+            //   No new null-guard required for synthetic AC_HIT.
+            //
+            // Acks: collider.elements[*].base.acFlags & AC_HIT,
+            //   colChkInfo.damage, colChkInfo.damageEffect.
+            //
+            // Skips: collider.base.ac per-element acHitInfo — read only
+            //   inside the pre-existing null-guarded site at
+            //   z_en_fd.c:298; safe under the guard.
+            //
+            // Sibling actor note: En_Fd_Fire (the flame projectile cluster
+            //   spawned by EnFd_SpinAndSpawnFire) is short-lived and not
+            //   admitted to this switch — it self-kills via Actor_Kill in
+            //   EnFdFire_Disappear (Type 8 projectile class). En_Fw (the
+            //   Flare Dancer core/wisp child) owns the actual loot drop
+            //   and is currently UNSYNCED; admit En_Fw when synced.
+            //
+            // ColliderJntSph; setting AC_HIT on shared base covers all
+            // elements.
+            ((EnFd*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_BB:
             // Bubble (flame skull) — z_en_bb.c:1164 and :1173 deref

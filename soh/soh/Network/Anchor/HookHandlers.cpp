@@ -93,6 +93,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // En_Bigokuta — Big Octo miniboss state-machine sync (#130).
 #include "src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h"
+// En_Fd — Flare Dancer enflamed shell state-machine sync (#100).
+#include "src/overlays/actors/ovl_En_Fd/z_en_fd.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 
@@ -3117,6 +3119,52 @@ void Anchor::RegisterHooks() {
                                         : unapplicableNet       ? "unapplicable-net"
                                         : "dormant-active filter";
                         SPDLOG_INFO("[EnBigokuta] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Fd (Flare Dancer enflamed shell, #100) — state-machine sync.
+            // 7-state map:
+            //   0 Reappear       — spawn/respawn entry (dormant; mirror Karebaba Idle)
+            //   1 SpinAndGrow    — spin while growing scale.y
+            //   2 JumpToGround   — airborne descent
+            //   3 Land           — landing anim
+            //   4 SpinAndSpawnFire — spin + spawn 8-cluster En_Fd_Fire (per-client
+            //                       projectiles; not synced)
+            //   5 Run            — run in circle around home pos
+            //   6 WaitForCore    — death countdown (skipped in ApplyNetState;
+            //                       driven via SetupDyingNet from
+            //                       HandlePacket_EnemyDefeated, OR set locally
+            //                       when En_Fw signals FLG_COREDEAD)
+            //
+            // Dormant-to-active filter: state 0 (Reappear) is dormant.
+            // States 1-5 are active combat phases. Death state 6 gated by
+            // PhaseImpliesHasLocalDeath.
+            //
+            // En_Fw sibling note: En_Fw (Flare Dancer core/wisp) is unsynced
+            // in v1. When En_Fw is admitted, the FLG_COREDEAD/FLG_COREDONE
+            // signal chain feeds back into En_Fd_WaitForCore on each client
+            // independently — peer observes the signal once En_Fw is synced.
+            if (actor->id == ACTOR_EN_FD && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnFd* fd = (EnFd*)actor;
+                s16 curState = EnFd_GetStateIndex(fd);
+                bool netIsDormant  = (ext->netStateIndex == 0);
+                bool localIsActive = (curState >= 1 && curState <= 5);
+                bool deathStateNet = (ext->netStateIndex == 6);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnFd] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnFd_ApplyNetState(fd, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnFd] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }
