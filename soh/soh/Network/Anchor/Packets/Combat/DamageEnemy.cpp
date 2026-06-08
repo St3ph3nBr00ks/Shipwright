@@ -18,6 +18,7 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Dekubaba/z_en_dekubaba.h"
 #include "src/overlays/actors/ovl_En_Karebaba/z_en_karebaba.h"
 #include "src/overlays/actors/ovl_En_Firefly/z_en_firefly.h"
+#include "src/overlays/actors/ovl_En_Crow/z_en_crow.h"
 #include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
 #include "src/overlays/actors/ovl_En_St/z_en_st.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
@@ -305,6 +306,13 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             break;
         case ACTOR_EN_FIREFLY:
             ((EnFirefly*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_CROW:
+            // Guay — z_en_crow.c:424 reads `collider.base.acFlags & AC_HIT`
+            // in EnCrow_UpdateDamage. No `base.ac->` deref in damage path
+            // (verified by source read 2026-06-07 — only reads damageEffect
+            // / damage / colorFilterParams). Single JntSph collider.
+            ((EnCrow*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_SW:
             ((EnSw*)actor)->collider.base.acFlags |= AC_HIT;

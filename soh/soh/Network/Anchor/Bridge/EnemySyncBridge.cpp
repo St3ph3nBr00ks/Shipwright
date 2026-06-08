@@ -151,6 +151,19 @@ extern "C" bool Anchor_ShouldSuppressEnFireflyDrop(Actor* actor) {
         || ext->networkDriveDying;
 }
 
+// Receiver-side predicate — true when an En_Crow (Guay) death cycle
+// was network-driven (peer received ENEMY_DEFEATED and is replaying the
+// Damaged -> Die sequence). EnCrow_Die uses this to suppress the random-
+// drop call so host's authoritative ITEM_DROP_SYNC isn't double-applied.
+// See z_en_crow.c EnCrow_Die + Plans/en_crow_sync_plan.md.
+extern "C" bool Anchor_ShouldSuppressEnCrowDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
+        || ext->networkDriveDying;
+}
+
 // Receiver-side predicate — true when an En_Ik (Iron Knuckle) death cycle
 // was network-driven (peer received ENEMY_DEFEATED and is replaying the
 // death anim -> 24-tick countdown -> drop sequence). func_80A75A38 uses

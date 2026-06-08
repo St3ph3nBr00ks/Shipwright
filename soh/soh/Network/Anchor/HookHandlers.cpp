@@ -64,6 +64,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
 // #47 / en_firefly_sync_plan.md — Keese (En_Firefly) state-machine sync.
 #include "src/overlays/actors/ovl_En_Firefly/z_en_firefly.h"
+// en_crow_sync_plan.md — Guay (En_Crow) state-machine sync.
+#include "src/overlays/actors/ovl_En_Crow/z_en_crow.h"
 #include "src/overlays/actors/ovl_En_Test/z_en_test.h"
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
@@ -2578,6 +2580,36 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnFirefly] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // en_crow_sync_plan.md — En_Crow (Guay) state-machine sync.
+            // Dormant-to-active filter: state 5 (Respawn — invisible, growing
+            // back after death) shouldn't override active dive states. State 0
+            // (FlyIdle) is NOT dormant — Guay spend most of their life there
+            // and we want it to propagate (mirror of En_Firefly's choice).
+            // Death states 3/4 (Damaged / Die) gated by PhaseImpliesHasLocalDeath.
+            if (actor->id == ACTOR_EN_CROW && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnCrow* cw = (EnCrow*)actor;
+                s16 curState = EnCrow_GetStateIndex(cw);
+                bool netIsDormant  = (ext->netStateIndex == 5);
+                bool localIsActive = (curState == 1 || curState == 2);
+                bool deathStateNet = (ext->netStateIndex == 3 || ext->netStateIndex == 4);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnCrow] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnCrow_ApplyNetState(cw, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnCrow] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }
