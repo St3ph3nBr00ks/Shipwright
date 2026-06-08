@@ -2,6 +2,7 @@
 #include "objects/object_st/object_st.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
+#include <libultraship/log/luslog.h>  // #148 diag — log 445 follow-up
 
 // Multiplayer targeting (#148 / en_sw_sync_plan.md §3 step 1).
 // Defined extern "C" in HookHandlers.cpp:83.
@@ -765,23 +766,60 @@ static Player* EnSw_PickLungeTarget(EnSw* this, PlayState* play, s32 arg2) {
     s32 sp54;
     Vec3f sp48;
 
+    // #148 follow-up diag — log 445 showed P1 climbed 21s without any
+    // lunge attempt. User reports P1 was within arc + within 60u. Rate-
+    // limited (once per 60 frames per actor) per-candidate rejection log
+    // pinpoints which gate fails. Remove after the cause is identified.
+    s32 emitDiag = (arg2 == 1) && ((play->state.frames % 60) == 0);
+    if (emitDiag) {
+        LUSLOG_INFO("[EnSw.diag] pick enter pos=(%.0f,%.0f,%.0f) rot.z=%d wallYaw=%d n=%d unk_442=%d",
+                    this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z,
+                    this->actor.shape.rot.z, this->actor.wallYaw, n, this->unk_442);
+    }
+
     for (int i = 0; i < n; i++) {
         Player* p = (Player*)candidates[i];
-        if (p == NULL) continue;
-        // DummyPlayer at out-of-scene sentinel (-9999, -9999, -9999)
-        // would otherwise satisfy the 130u distance check on actors
-        // at very negative coords — skip defensively.
-        if (p->actor.world.pos.y <= -9000.0f) continue;
-        if (!(p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) continue;
-        if (func_8002DDF4(play) && arg2) continue;
-        if (ABS(func_80B0DE34(this, &p->actor.world.pos) - this->actor.shape.rot.z) >= 0x1FC2) continue;
-        if (Math_Vec3f_DistXYZ(&this->actor.world.pos, &p->actor.world.pos) >= 130.0f) continue;
+        if (p == NULL) {
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] NULL", i);
+            continue;
+        }
+        if (p->actor.world.pos.y <= -9000.0f) {
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] sentinel pos=(%.0f,%.0f,%.0f)",
+                                       i, p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z);
+            continue;
+        }
+        if (!(p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) {
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL climb sf1=0x%08X pos=(%.0f,%.0f,%.0f)",
+                                       i, p->stateFlags1, p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z);
+            continue;
+        }
+        if (func_8002DDF4(play) && arg2) {
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL cutscene", i);
+            continue;
+        }
+        s16 arc = func_80B0DE34(this, &p->actor.world.pos);
+        s16 arcDelta = ABS(arc - this->actor.shape.rot.z);
+        if (arcDelta >= 0x1FC2) {
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL arc arc=%d rot.z=%d delta=%d",
+                                       i, arc, this->actor.shape.rot.z, arcDelta);
+            continue;
+        }
+        f32 dist = Math_Vec3f_DistXYZ(&this->actor.world.pos, &p->actor.world.pos);
+        if (dist >= 130.0f) {
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL dist=%.1f", i, dist);
+            continue;
+        }
         if (BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &p->actor.world.pos,
                                     &sp48, &sp58, true, false, false, true, &sp54)) {
-            continue;  // line blocked → try next candidate
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL LoS pos=(%.0f,%.0f,%.0f) dist=%.1f",
+                                       i, p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z, dist);
+            continue;
         }
+        if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] PASS pos=(%.0f,%.0f,%.0f) dist=%.1f arcDelta=%d",
+                                   i, p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z, dist, arcDelta);
         return p;
     }
+    if (emitDiag) LUSLOG_INFO("[EnSw.diag] pick returns NULL (n=%d)", n);
     return NULL;
 }
 
