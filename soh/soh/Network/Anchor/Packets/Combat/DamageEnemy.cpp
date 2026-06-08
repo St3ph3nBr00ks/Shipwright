@@ -293,6 +293,45 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
 // checks. For Boss_Goma (which reads BUMP_HIT not AC_HIT) we set bumperFlags
 // + synthesise a static ColliderInfo with sword dmgFlags so Goma's stun /
 // patience / sword-damage paths register the synthetic hit.
+//
+// ============================================================================
+// FREEZE NOTICE (2026-06-08) — DO NOT ADMIT NEW ACTORS WITHOUT AN AUDIT.
+// ============================================================================
+//
+// The synthetic AC_HIT bit-set causes a class of crashes for any actor whose
+// damage code derefs `collider.base.ac->X` (typically `->toucher.dmgFlags`
+// for weapon-type branching). The synthetic path sets only the bit; the AC
+// pointer remains whatever it was last frame, often NULL. Crash class
+// surfaced as En_St / En_Ssh / En_Ik / En_Bili / En_Hintnuts regressions
+// over the past 2 weeks (~12 reactive fix commits — see git log).
+//
+// Before adding ANY new actor case below:
+//
+//   1. Read the actor's damage path (typically inside its Update or a
+//      dedicated UpdateDamage / CheckHitFront helper).
+//   2. Grep for `base.ac->` and `acHitInfo->` derefs WITHIN that damage
+//      path's reach. Any such site must be null-guarded in the actor's
+//      `.c` file IN THE SAME COMMIT that adds the case here, OR the case
+//      must be omitted.
+//   3. Document the audit result in the case-comment (see existing
+//      examples: En_Tite at L51-56 cites the audit doc; En_Goma at L43-46
+//      explicitly cites the null-guard landed alongside).
+//   4. Cross-check against `Testing/ApplySyncAcHitToActor_BaseAcAudit_2026-
+//      06-07.md` for the canonical audit pattern + existing per-actor
+//      verdicts.
+//
+// The freeze applies until a retrospective audit pass covers every existing
+// case in this switch (some early admissions predate the audit doc — they
+// need to be back-fitted to the same pattern). After retro-audit completes
+// and the alpha-demo regression pass (`Testing/AlphaDemo_Regression_Plan_
+// 2026-06-08.md`) reports clean, the freeze can be lifted with a
+// pre-condition: every new admission must ship the audit-result comment.
+//
+// Architectural alternative if the freeze becomes permanent: an explicit
+// `Anchor_ApplyExternalDamage(actor, damage, dmgFlags)` entry point per
+// admitted actor instead of synthesising collider state. Higher per-actor
+// authoring cost, zero null-deref crash class.
+// ============================================================================
 static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
     // NPC Invader uses a runtime-allocated actor id (gEnInvaderId), so we
     // can't put it in the switch's case labels. Check up-front. EnInvader's
@@ -308,13 +347,24 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
     }
     switch (actor->id) {
         case ACTOR_EN_DEKUBABA:
+            // Deku Baba — pre-audit admission back-fitted 2026-06-08.
+            // `grep -nE "base\.ac->|acHitInfo->" z_en_dekubaba.c` → 0
+            // matches. Damage path reads `colChkInfo.damage` /
+            // `damageEffect` only. Safe synthetic AC_HIT bit-set.
             ((EnDekubaba*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_KAREBABA:
-            // bodyCollider — z_en_karebaba.c:369/419 read AC_HIT here.
+            // Karebaba — bodyCollider. z_en_karebaba.c:369/419 read
+            // `acFlags & AC_HIT`. Pre-audit admission back-fitted
+            // 2026-06-08. `grep -nE "base\.ac->|acHitInfo->"
+            // z_en_karebaba.c` → 0 matches. Safe synthetic AC_HIT bit-set.
             ((EnKarebaba*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_FIREFLY:
+            // Keese — pre-audit admission back-fitted 2026-06-08.
+            // `grep -nE "base\.ac->|acHitInfo->" z_en_firefly.c` → 0
+            // matches. Damage path reads `acFlags & AC_HIT` +
+            // `colChkInfo.damage`. Safe synthetic AC_HIT bit-set.
             ((EnFirefly*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_CROW:
@@ -325,6 +375,11 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             ((EnCrow*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_SW:
+            // Skullwalltula — pre-audit admission back-fitted 2026-06-08.
+            // `grep -nE "base\.ac->|acHitInfo->" z_en_sw.c` → 0 matches.
+            // Damage path reads `acFlags & AC_HIT` + `colChkInfo.damage`
+            // / `damageEffect` only. Single JntSph collider. Safe
+            // synthetic AC_HIT bit-set.
             ((EnSw*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_ST: {
