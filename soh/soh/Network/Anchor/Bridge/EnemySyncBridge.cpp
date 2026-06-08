@@ -15,6 +15,9 @@
 #include "soh/Network/Anchor/EnemyStateSync/EnemyLifecycle.h"  // #90 — PhaseImpliesPendingNaturalDeath
 #include "soh/ObjectExtension/ObjectExtension.h"
 
+#include <chrono>
+#include <unordered_map>
+
 extern "C" {
 #include "z64.h"
 extern PlayState* gPlayState;
@@ -50,11 +53,34 @@ extern "C" void Anchor_NotifyTalkRequest(Actor* targetActor) {
 // broadcasts state=Leave back via ENEMY_STATE so peer's rx-driver
 // applies it (instead of peer's local SetupLeave running and
 // spawning hearts every 50ms). See Packets/DialogEnd.cpp.
+//
+// Rate-limited at 250ms per-netId (log 442 P2.2 — TEXT_STATE_EVENT
+// is a sustained state, not an edge, so vanilla code path fires this
+// every actor-update tick while the textbox is in the event state →
+// 5 packets in 200ms). Edge-trigger was considered but rejected:
+// edge-state on the sender is lost on reconnect or Pillar A
+// migration, which would prevent re-fire when the dialog-end
+// notification is actually needed. Rate-limit preserves
+// re-send-on-condition-still-true robustness while cutting ~80% of
+// redundant packets. Host's receive-side already idempotently
+// rejects re-sends as "already in state=8" so the throttle is
+// purely a bandwidth optimisation.
 extern "C" void Anchor_NotifyDialogEnd(Actor* targetActor) {
     if (targetActor == nullptr) return;
     if (!Anchor::Instance || !Anchor::Instance->isConnected) return;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(targetActor);
     if (ext == nullptr) return;
+
+    static std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> sLastSendByNetId;
+    constexpr auto kMinInterval = std::chrono::milliseconds(250);
+    const auto now = std::chrono::steady_clock::now();
+    auto& lastSend = sLastSendByNetId[ext->netId];
+    if (lastSend.time_since_epoch().count() != 0 &&
+        (now - lastSend) < kMinInterval) {
+        return;  // throttled — receiver already has the prior packet or will via TCP retransmit
+    }
+    lastSend = now;
+
     Anchor::Instance->SendPacket_DialogEnd(ext->netId);
 }
 
