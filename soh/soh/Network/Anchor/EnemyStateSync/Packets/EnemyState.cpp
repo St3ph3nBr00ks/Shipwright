@@ -85,6 +85,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h"
 // En_Fd — Flare Dancer enflamed shell state-machine sync (#100).
 #include "overlays/actors/ovl_En_Fd/z_en_fd.h"
+// En_GeldB — Gerudo Thief state-machine sync.
+#include "overlays/actors/ovl_En_GeldB/z_en_geldb.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
@@ -247,6 +249,10 @@ struct EnemyUpdateExtras {
     // En_Fd — Flare Dancer enflamed shell state-machine sync (#100).
     bool hasEnFd         = false;
     s16  enFdActionState = 0;
+
+    // En_GeldB — Gerudo Thief state-machine sync.
+    bool hasEnGeldB         = false;
+    s16  enGeldBActionState = 0;
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
@@ -554,6 +560,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnFd* fd            = (EnFd*)actor;
         e.hasEnFd           = true;
         e.enFdActionState   = EnFd_GetStateIndex(fd);
+    } else if (actor->id == ACTOR_EN_GELDB) {
+        EnGeldB* geldb          = (EnGeldB*)actor;
+        e.hasEnGeldB            = true;
+        e.enGeldBActionState    = EnGeldB_GetStateIndex(geldb);
     } else if (actor->id == ACTOR_EN_BB) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
@@ -720,6 +730,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnFd != prev.hasEnFd) return true;
     if (cur.hasEnFd) {
         if (cur.enFdActionState != prev.enFdActionState) return true;
+    }
+    if (cur.hasEnGeldB != prev.hasEnGeldB) return true;
+    if (cur.hasEnGeldB) {
+        if (cur.enGeldBActionState != prev.enGeldBActionState) return true;
     }
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
@@ -1060,6 +1074,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enFdActionState);
             }
         }
+        if (extras.hasEnGeldB) {
+            s16 prev = prevExtras && prevExtras->hasEnGeldB ? prevExtras->enGeldBActionState : -1;
+            if (prev != extras.enGeldBActionState) {
+                SPDLOG_INFO("[EnGeldB] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enGeldBActionState);
+            }
+        }
         if (extras.hasEnBb) {
             s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
             if (prev != extras.enBbActionState) {
@@ -1295,6 +1316,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // En_Fd — Flare Dancer enflamed shell state-machine sync (#100).
     if (extras.hasEnFd) {
         payload["actionState"] = extras.enFdActionState;
+    }
+
+    // En_GeldB — Gerudo Thief state-machine sync.
+    if (extras.hasEnGeldB) {
+        payload["actionState"] = extras.enGeldBActionState;
     }
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
@@ -2019,6 +2045,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // En_Fd — cache Flare Dancer enflamed shell actionState (#100).
         if (actor->id == ACTOR_EN_FD && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // En_GeldB — cache Gerudo Thief actionState.
+        if (actor->id == ACTOR_EN_GELDB && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
@@ -2836,6 +2866,28 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnFd netId={} — triggering natural death cycle", netId);
                     EnFd_SetupDyingNet((EnFd*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_GeldB (Gerudo Thief): route through EnGeldB_SetupDyingNet
+                // so the natural Defeated state (state 16) plays on the
+                // receiver. The conditional small-key drop (gated on
+                // this->keyFlag) is gated by Anchor_ShouldSuppressEnGeldBDrop.
+                // The arrest-cutscene (Link warped to jail) is driven by
+                // scene/entrance logic OUTSIDE this actor — no wire-format
+                // extras needed here (agent's Phase 1 grep confirmed: zero
+                // Arrest/jail/teleport/grabPlayer matches in z_en_geldb.c).
+                if (actor->id == ACTOR_EN_GELDB) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnGeldB.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnGeldB netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnGeldB netId={} — triggering natural death cycle", netId);
+                    EnGeldB_SetupDyingNet((EnGeldB*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
