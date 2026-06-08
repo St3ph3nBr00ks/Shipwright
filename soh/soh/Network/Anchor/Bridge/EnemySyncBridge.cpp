@@ -301,3 +301,23 @@ extern "C" bool Anchor_ShouldSuppressEnValiDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
         || ext->networkDriveDying;
 }
+
+// Receiver-side predicate — reserved for API consistency with sibling
+// per-enemy sync plans. En_Fd (Flare Dancer enflamed shell) does NOT
+// itself call Item_DropCollectibleRandom — the actual loot drop is
+// owned by ACTOR_EN_FW (the Flare Dancer core/wisp child spawned via
+// EnFd_SpawnCore at z_en_fd.c:222). En_Fw's drop call at
+// z_en_fw.c:271 will gate via its own Anchor_ShouldSuppressEnFwDrop
+// in a follow-up per-actor sync pass when En_Fw is admitted.
+// This predicate is currently unused at the actor-side call sites
+// but is exposed for symmetry with sibling per-enemy sync plans and
+// as a future hook if a drop call is ever added to the En_Fd death
+// cycle. Mirrors Anchor_ShouldSuppressEnPohDrop's "reserved for
+// symmetry" rationale.
+// See z_en_fd.c + #100.
+extern "C" bool Anchor_ShouldSuppressEnFdDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
