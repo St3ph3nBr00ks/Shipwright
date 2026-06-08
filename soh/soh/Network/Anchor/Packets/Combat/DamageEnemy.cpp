@@ -332,7 +332,147 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
 // admitted actor instead of synthesising collider state. Higher per-actor
 // authoring cost, zero null-deref crash class.
 // ============================================================================
+//
+// ============================================================================
+// SYNTHESIS CONTRACT — what this function lies about vs. tells the truth
+// ============================================================================
+//
+// This function is the boundary between the network-driven external damage
+// pipeline (DAMAGE_ENEMY packets from peers) and the vanilla OoT damage
+// pipeline. It synthesises some collider state to make the actor's own
+// damage code "think" a real vanilla collision happened. That synthesis is
+// incomplete by design — populating every field a real vanilla collision
+// would populate is too expensive. The fields BELOW are explicitly NOT
+// populated; any actor's damage path that reads them needs a null-guard
+// (or the actor must be omitted from this switch entirely).
+//
+// POPULATED before / by this function:
+//
+//   actor->colChkInfo.damage          — set by HandlePacket_DamageEnemy
+//                                       caller from the wire payload's
+//                                       "damage" field.
+//   actor->colChkInfo.damageEffect    — set from the wire payload's
+//                                       "damageEffect" field (schema 2,
+//                                       per #174/#175).
+//   actor->colChkInfo.atHitEffect     — set from the wire payload's
+//                                       "atHitEffect" field (schema 2).
+//   actor->collider.base.acFlags
+//       & AC_HIT                       — set by this function per case.
+//   actor->collider.base.bumperFlags
+//       & BUMP_HIT                     — set ONLY for Boss_Goma (special
+//                                       case; reads BUMP_HIT not AC_HIT).
+//   static fake ColliderInfo + sword
+//   dmgFlags                           — set ONLY for Boss_Goma so its
+//                                       acHitInfo->toucher.dmgFlags
+//                                       deref doesn't crash and resolves
+//                                       to "sword damage."
+//
+// NOT POPULATED (NULL or stale from last frame's vanilla collision pass):
+//
+//   actor->collider.base.ac            — pointer to the AT collider that
+//                                       "hit" us. Vanilla actors may
+//                                       deref `->toucher.dmgFlags` to
+//                                       branch on weapon type, or
+//                                       `->world.rot.y` for knockback
+//                                       direction. Per-actor null-guards
+//                                       in the actor's `.c` file are
+//                                       required for any deref.
+//   actor->collider.info.acHitInfo     — alias of `.base.ac` for older
+//                                       decomp style. Same null-deref
+//                                       crash shape. Same per-actor
+//                                       null-guard required.
+//   ColliderJntSph / ColliderQuad
+//   per-element ac / acHitInfo         — for multi-element colliders, the
+//                                       per-element pointers are NULL on
+//                                       this path. Actors that index by
+//                                       element (En_St / En_Ssh front-
+//                                       shield cyl [2]) must either
+//                                       explicitly OMIT specific elements
+//                                       from this function's bit-set OR
+//                                       null-guard the per-element deref
+//                                       in the actor's `.c`.
+//   collider.base.acFlags & AC_BOUNCED — set by vanilla CollisionCheck
+//                                       when an AT bounces off a hard
+//                                       AC. Not set here. Actors that
+//                                       branch on AC_BOUNCED for shield-
+//                                       hit response are not synced via
+//                                       this path; the SHIELD_BOUNCE_
+//                                       PLAYER pipeline handles that
+//                                       slice (see Packets/Player/).
+//   collider.base.acFlags & AC_TYPE_*  — vanilla collision sets the AC
+//                                       TYPE bits from the AT collider's
+//                                       TYPE field (PLAYER / ENEMY /
+//                                       OTHER). Not set here. Actors
+//                                       that branch on AC_TYPE_PLAYER
+//                                       vs. AC_TYPE_ENEMY (typically
+//                                       for friendly-fire vs. hostile
+//                                       differentiation) MUST be
+//                                       audited; consider whether the
+//                                       wire schema should carry the
+//                                       attacker type.
+//   colChkInfo.damageReaction          — reaction-type byte resolved
+//                                       from the AC's damage table by
+//                                       vanilla `CollisionCheck_SetAT
+//                                       vsACDamage`. The wire payload
+//                                       doesn't carry it. Actors that
+//                                       branch on damageReaction for
+//                                       vanilla hit-anim selection MUST
+//                                       be audited.
+//
+// DIAGNOSTIC: every call to this function emits a SPDLOG_DEBUG line at
+// the entry point with the actorId + damage. Filter `[DamageEnemy.synth]`
+// in dev builds to observe synthesis events. Compiles out in Release.
+// ============================================================================
+//
+// ============================================================================
+// CASE COMMENT FORMAT — required for every new case below
+// ============================================================================
+//
+// Every new `case ACTOR_EN_XXX:` MUST carry a comment with these three tags
+// (in this order) so a future agent can audit the synthesis at a glance.
+// Existing cases predating this standard may use prose-equivalent format;
+// they cover the same information in narrative form. New cases follow the
+// structured tags.
+//
+//   case ACTOR_EN_XXX:
+//       // Audit: <verdict>
+//       //   <commit-or-doc citation>
+//       //
+//       // Acks: <list of fields the damage path reads that this synthesis
+//       //   populates — e.g. "acFlags & AC_HIT", "colChkInfo.damage",
+//       //   "colChkInfo.damageEffect">
+//       //
+//       // Skips: <fields the damage path reads that this synthesis does
+//       //   NOT populate, with how each is handled — null-guarded inline,
+//       //   protected by upstream branch, etc. "none" if the damage path
+//       //   only reads Acks-listed fields>
+//       ((EnXxx*)actor)->collider.base.acFlags |= AC_HIT;
+//       break;
+//
+// Audit verdict canonical strings:
+//
+//   "no base.ac / acHitInfo derefs in damage path; safe synthetic bit-set"
+//   "base.ac->X deref at <file>:<line>; null-guard landed in <commit>"
+//   "acHitInfo->Y deref at <file>:<line>; null-guard landed in <commit>"
+//   "INTENTIONALLY EXCLUDED: see body comment for why" (case body is empty;
+//   leaves the explicit case label so future readers see this was
+//   considered, e.g. ACTOR_EN_HINTNUTS at L539)
+//
+// Examples of cases that already match (or approximate) this format:
+//   ACTOR_EN_TITE   (around L748) — cites the audit doc + grep verdict
+//   ACTOR_EN_CROW   (around L465) — cites the source read + grep verdict
+//   ACTOR_EN_VALI   (around L590) — cites the audit commit + grep verdict
+//
+// The CASE COMMENT FORMAT is enforceable at code-review time: any new
+// case missing one of the three tags is rejected. Combined with the
+// FREEZE NOTICE above, future admissions become mechanical — the case-
+// comment IS the audit deliverable.
+// ============================================================================
 static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
+    SPDLOG_DEBUG("[DamageEnemy.synth] synthetic AC_HIT actorId=0x{:04X} damage={} "
+                 "(see helper header for what is/isn't populated)",
+                 actor->id, damage);
+
     // NPC Invader uses a runtime-allocated actor id (gEnInvaderId), so we
     // can't put it in the switch's case labels. Check up-front. EnInvader's
     // body collider gates its health drain on AC_HIT (z_en_invader.c:152
