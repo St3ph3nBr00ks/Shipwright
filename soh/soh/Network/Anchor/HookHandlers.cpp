@@ -87,6 +87,12 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
 // #126 — Bari big jellyfish (En_Vali) state-machine sync.
 #include "src/overlays/actors/ovl_En_Vali/z_en_vali.h"
+// En_Zf — Lizalfos + Dinolfos state-machine sync.
+#include "src/overlays/actors/ovl_En_Zf/z_en_zf.h"
+// En_Mb — Moblin (Club / SpearGuard / SpearPatrol) state-machine sync.
+#include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
+// En_Bigokuta — Big Octo miniboss state-machine sync (#130).
+#include "src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 
@@ -2936,6 +2942,181 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnVali] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Zf (Lizalfos / Dinolfos) — state-machine sync.
+            // 18-state map:
+            //   0  DropIn        — pre-spawn animation (dormant)
+            //   1  Stop/Look     — idle scan
+            //   2  ApproachPlayer
+            //   3  Walking
+            //   4  Sidestep
+            //   5  Slash
+            //   6  RecoilFromBlockedSlash
+            //   7  JumpBack
+            //   8  Stunned (post-damage / ice)
+            //   9  SheatheSword  — post-victory idle (dormant)
+            //   10 HopAndTaunt   — quasi-idle taunt (dormant)
+            //   11 HopAway
+            //   12 DrawSword (re-engage)
+            //   13 Damaged hit-react
+            //   14 JumpUp (hop-over wall)
+            //   15 CircleAroundPlayer
+            //   16 JumpForward (forward lunge)
+            //   17 Die (skipped from ApplyNetState; SetupDyingNet drives)
+            // Dormant-to-active filter: states 0/9/10 (DropIn / Sheathed / Taunt)
+            // must not override active local combat states 5/6/8/13/16 (active
+            // attack / recoil / stunned / damaged / lunge). Death state 17 is
+            // gated by PhaseImpliesHasLocalDeath and driven via SetupDyingNet
+            // from HandlePacket_EnemyDefeated.
+            if (actor->id == ACTOR_EN_ZF && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnZf* zf = (EnZf*)actor;
+                s16 curState = EnZf_GetStateIndex(zf);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 9 ||
+                                      ext->netStateIndex == 10);
+                bool localIsActive = (curState == 5 || curState == 6 || curState == 8 ||
+                                      curState == 13 || curState == 16);
+                bool deathStateNet = (ext->netStateIndex == 17);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnZf] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnZf_ApplyNetState(zf, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnZf] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Mb (Moblin) — state-machine sync. 18-state map covers
+            // Club + SpearGuard + SpearPatrol variants. See agent's
+            // Phase 1 report (commit 7f210411a) for full table.
+            //   0  SpearGuardLookAround       — strongly dormant (idle)
+            //   1  SpearPatrolTurnTowardsWP   — strongly dormant (idle)
+            //   2  ClubWaitPlayerNear         — strongly dormant (idle)
+            //   3  SpearGuardWalk             — dormant-ish (walking)
+            //   4  SpearPatrolWalkTowardsWP   — dormant-ish (walking)
+            //   5..11  Attack/charge/recovery — active
+            //   12 Stunned                    — active
+            //   13 SpearDamaged               — active
+            //   14 ClubDamaged                — active
+            //   15 ClubDamagedWhileKneeling   — active (mid-sequence; see agent note)
+            //   16 SpearDead                  — skipped (SetupDyingNet drives)
+            //   17 ClubDead                   — skipped (SetupDyingNet drives)
+            //
+            // Dormant-to-active filter: states 0/1/2/3/4 (idle + walking)
+            // must not override active local combat states 5-15. Death
+            // states 16/17 gated by PhaseImpliesHasLocalDeath and driven
+            // via EnMb_SetupDyingNet from HandlePacket_EnemyDefeated.
+            //
+            // Agent's animation-quality note (Phase 2 follow-up if field
+            // test reveals desync): state 12 (Stunned) interrupting an
+            // in-progress club kneeling sequence (states 14/15) may
+            // cause animation desync. Not currently special-cased here;
+            // the dormant-to-active filter doesn't catch active→active
+            // transitions. Revisit if observed.
+            if (actor->id == ACTOR_EN_MB && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnMb* mb = (EnMb*)actor;
+                s16 curState = EnMb_GetStateIndex(mb);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1 ||
+                                      ext->netStateIndex == 2 || ext->netStateIndex == 3 ||
+                                      ext->netStateIndex == 4);
+                bool localIsActive = (curState >= 5 && curState <= 15);
+                bool deathStateNet = (ext->netStateIndex == 16 || ext->netStateIndex == 17);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnMb] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnMb_ApplyNetState(mb, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnMb] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Bigokuta (Big Octo miniboss, #130) — state-machine sync.
+            // 13-state map:
+            //   0  EmergeWait (params==0 only; pre-fight voice / BGM cue)
+            //   1  EmergeJump (sin-wave arc into water)
+            //   2  Land+Rotate — calls Actor_ChangeCategory(PROP → ENEMY)
+            //   3  Pre-fight 40-frame delay
+            //   4  Main combat (rotates around home, chases player)
+            //   5  Spin-block / direction-flip (player on wrong side)
+            //   6  Rotate-toward-player after spin-block
+            //   7  Stunned (deku-nut hit)
+            //   8  Hit-stun (sinusoidal after explosive damage)
+            //   9  Post-damage spin-up
+            //   10 Sink (lost interest)
+            //   11 Re-emerge (skipped in ApplyNetState — needs PlayState*)
+            //   12 Dying (skipped in ApplyNetState; SetupDyingNet drives)
+            //
+            // Filter: combined emerge-boundary + dormant-to-active.
+            //
+            // EMERGE-BOUNDARY PROTECTION (the unusual part for this actor):
+            // states 0/1/2/3 are the emerge sequence; state 2 specifically
+            // calls Actor_ChangeCategory(PROP → ENEMY) at the land-and-rotate
+            // completion. The LOCAL emerge sequence MUST run to completion
+            // on every client; otherwise the local actor stays in PROP
+            // category and exits the sync pipeline. So we BLOCK any
+            // cross-boundary transition (peer mid-emerge ↔ host mid-combat
+            // both directions) until the local actor has its own foot on
+            // the same side of the boundary. Once both sides are past
+            // emerge (>= 4), normal dormant-to-active filter applies.
+            //
+            // Standard dormant-active filter (post-emerge):
+            //   net state 10 (Sink, post-combat) treated as dormant.
+            //   Local active states 4-9 protected from regressing to Sink.
+            //
+            // SKIPS in ApplyNetState:
+            //   11 (Re-emerge) — requires PlayState arg; let it self-
+            //                    reassign via per-frame ENEMY_UPDATE.
+            //   12 (Dying)     — driven via EnBigokuta_SetupDyingNet from
+            //                    HandlePacket_EnemyDefeated.
+            if (actor->id == ACTOR_EN_BIGOKUTA && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnBigokuta* big = (EnBigokuta*)actor;
+                s16 curState = EnBigokuta_GetStateIndex(big);
+                bool localIsEmerging = (curState >= 0 && curState <= 3);
+                bool netIsEmerging   = (ext->netStateIndex >= 0 && ext->netStateIndex <= 3);
+                bool crossesEmergeBoundary = (localIsEmerging != netIsEmerging);
+                bool netIsDormant  = (ext->netStateIndex == 10);
+                bool localIsActive = (curState >= 4 && curState <= 9);
+                bool unapplicableNet = (ext->netStateIndex == 11);
+                bool deathStateNet   = (ext->netStateIndex == 12);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !crossesEmergeBoundary &&
+                    !unapplicableNet &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnBigokuta] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnBigokuta_ApplyNetState(big, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = crossesEmergeBoundary ? "emerge-boundary"
+                                        : deathStateNet         ? "death-state-gated"
+                                        : unapplicableNet       ? "unapplicable-net"
+                                        : "dormant-active filter";
+                        SPDLOG_INFO("[EnBigokuta] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }

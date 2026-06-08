@@ -302,6 +302,57 @@ extern "C" bool Anchor_ShouldSuppressEnValiDrop(Actor* actor) {
         || ext->networkDriveDying;
 }
 
+// Receiver-side predicate — true when an En_Zf (Lizalfos / Dinolfos)
+// death cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the dying-anim → drop sequence). EnZf_UpdateDamage uses
+// this to suppress the random drop call (0x40 for Lizalfos / 0xE0 for
+// Dinolfos) so host's authoritative ITEM_DROP_SYNC isn't double-applied.
+// The `|| ext->networkDriveDying` clause mirrors the
+// Dekubaba / Firefly / Bili / Bb / Vali race mitigation — closes a
+// race when peer's vanilla EnZf_UpdateDamage consumes the same
+// ENEMY_STATE health<=0 read and calls SetupDie + the drop in the
+// same tick before ENEMY_DEFEATED arrives.
+// See z_en_zf.c EnZf_UpdateDamage.
+extern "C" bool Anchor_ShouldSuppressEnZfDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
+        || ext->networkDriveDying;
+}
+
+// Receiver-side predicate — true when an En_Mb (Moblin) death cycle was
+// network-driven (peer received ENEMY_DEFEATED and is replaying the
+// fall-on-back sequence via EnMb_SetupClubDead / EnMb_SetupSpearDead).
+// EnMb_ClubDead and EnMb_SpearDead each call Item_DropCollectibleRandom
+// at the end of their dust/effect countdown; this predicate gates both
+// so host's authoritative ITEM_DROP_SYNC isn't double-applied. Mirrors
+// Anchor_ShouldSuppressEnTestDrop / EnWfDrop / EnIkDrop — combat-melee
+// enemies whose vanilla death cycle drops once at the end of an
+// extended fall animation.
+// See z_en_mb.c EnMb_ClubDead / EnMb_SpearDead.
+extern "C" bool Anchor_ShouldSuppressEnMbDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// Receiver-side predicate — true when an En_Bigokuta (Big Octo miniboss)
+// death cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the death-anim -> shrink -> heart-container-reveal sequence).
+// func_809BE26C uses this to suppress the random 0xB0 drop call so host's
+// authoritative ITEM_DROP_SYNC isn't double-applied. Flags_SetClear (room-
+// clear flag) is NOT gated — it fires per-client so the heart container
+// reveal stays cooperative across both clients.
+// See z_en_bigokuta.c func_809BE26C + #130.
+extern "C" bool Anchor_ShouldSuppressEnBigokutaDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // Receiver-side predicate — reserved for API consistency with sibling
 // per-enemy sync plans. En_Fd (Flare Dancer enflamed shell) does NOT
 // itself call Item_DropCollectibleRandom — the actual loot drop is

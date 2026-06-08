@@ -11,6 +11,17 @@
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
+// Anchor multiplayer (En_Zf — Lizalfos / Dinolfos) — defined in
+// Bridge/EnemySyncBridge.cpp. Forward-declare here (plain `extern`,
+// NOT `extern "C"` — this is a .c file and C-linkage is implicit).
+// Per Pitfall 7.
+extern bool Anchor_ShouldSuppressEnZfDrop(Actor* actor);
+
+// EnZf_ApplyNetState (defined at the bottom of this TU) calls
+// Setup* helpers that need a PlayState pointer. gPlayState is the
+// active scene's PlayState; defined in z_play.c.
+extern PlayState* gPlayState;
+
 void EnZf_Init(Actor* thisx, PlayState* play);
 void EnZf_Destroy(Actor* thisx, PlayState* play);
 void EnZf_Update(Actor* thisx, PlayState* play);
@@ -2012,7 +2023,12 @@ void EnZf_UpdateDamage(EnZf* this, PlayState* play) {
                         dropParams = 0xE0;
                     }
 
-                    Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, dropParams);
+                    // Anchor multiplayer: suppress random drop when
+                    // the death cycle is network-driven. Host's
+                    // authoritative ITEM_DROP_SYNC handles the drop.
+                    if (!Anchor_ShouldSuppressEnZfDrop(&this->actor)) {
+                        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, dropParams);
+                    }
                     Enemy_StartFinishingBlow(play, &this->actor);
                 } else {
                     if ((D_80B4A1B4 != -1) && ((this->actor.colChkInfo.health + this->actor.colChkInfo.damage) >= 4) &&
@@ -2431,4 +2447,93 @@ s32 EnZf_DodgeRangedWaiting(PlayState* play, EnZf* this) {
 void EnZf_Reset(void) {
     D_80B4A1B0 = 0;
     D_80B4A1B4 = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Anchor multiplayer state-machine sync (En_Zf — Lizalfos / Dinolfos).
+//
+// Routes a network-driven death cycle through `EnZf_SetupDie` — the
+// dying anim transitions naturally to alpha fade-out and Actor_Kill,
+// with the random drop gated by `Anchor_ShouldSuppressEnZfDrop` at
+// the drop site in EnZf_UpdateDamage. Host's authoritative
+// ITEM_DROP_SYNC handles the drop. The natural SetupDie call fires
+// GameInteractor_ExecuteOnEnemyDefeat, but the HostBookkeeping
+// HasDefeatBroadcast dedup guard at the send site prevents an echo
+// back to host.
+//
+// Note on miniboss state: the Lizalfos miniboss arena coordinates the
+// pair via the file-static `D_80B4A1B4` (active miniboss params) and
+// `D_80B4A1B0` (clearFlag countdown). SetupDie's pair-handoff block
+// (z_en_zf.c:1909-1923) hands off authority to the surviving sibling
+// for the second miniboss's spawn. This block runs on every client
+// that processes SetupDie, so the bookkeeping stays in sync even for
+// network-driven deaths. No additional sync needed for the
+// file-statics in Phase 1.
+void EnZf_SetupDyingNet(EnZf* this, PlayState* play) {
+    EnZf_SetupDie(this);
+}
+
+// Returns the state index of the current actionFunc, or -1 if the
+// actor is in a state we don't sync. See state map table in the
+// commit message for this change.
+s16 EnZf_GetStateIndex(EnZf* this) {
+    if (this->actionFunc == EnZf_DropIn)                   return 0;
+    if (this->actionFunc == func_80B4543C)                 return 1;
+    if (this->actionFunc == EnZf_ApproachPlayer)           return 2;
+    if (this->actionFunc == func_80B46098)                 return 3;
+    if (this->actionFunc == func_80B463E4)                 return 4;
+    if (this->actionFunc == EnZf_Slash)                    return 5;
+    if (this->actionFunc == EnZf_RecoilFromBlockedSlash)   return 6;
+    if (this->actionFunc == EnZf_JumpBack)                 return 7;
+    if (this->actionFunc == EnZf_Stunned)                  return 8;
+    if (this->actionFunc == EnZf_SheatheSword)             return 9;
+    if (this->actionFunc == EnZf_HopAndTaunt)              return 10;
+    if (this->actionFunc == EnZf_HopAway)                  return 11;
+    if (this->actionFunc == EnZf_DrawSword)                return 12;
+    if (this->actionFunc == EnZf_Damaged)                  return 13;
+    if (this->actionFunc == EnZf_JumpUp)                   return 14;
+    if (this->actionFunc == EnZf_CircleAroundPlayer)       return 15;
+    if (this->actionFunc == EnZf_JumpForward)              return 16;
+    if (this->actionFunc == EnZf_Die)                      return 17;
+    return -1;
+}
+
+// Apply a received state index by calling the corresponding Setup
+// function. Some Setup functions (Sheathe/HopAway/Damaged-via-Damage
+// path) take `play`; the non-host driver block passes gPlayState.
+// State 17 (Die) intentionally skipped — driven via SetupDyingNet
+// from HandlePacket_EnemyDefeated. The dormant-to-active filter +
+// PhaseImpliesHasLocalDeath gate at the call site already block
+// regression to a death state.
+void EnZf_ApplyNetState(EnZf* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  EnZf_SetupDropIn(this);                          break;
+        case 1:  func_80B45384(this);                             break;
+        case 2:  EnZf_SetupApproachPlayer(this, gPlayState);      break;
+        case 3:  func_80B4604C(this);                             break;
+        // State 4: func_80B463E4 has no direct setup — func_80B462E4
+        // is a conditional setup that may instead branch to
+        // SetupApproachPlayer. Calling it is the canonical Setup
+        // entry; if it branches, peer will land in state 2 (approach)
+        // and re-converge once the host sends the next ENEMY_STATE.
+        case 4:  func_80B462E4(this, gPlayState);                 break;
+        case 5:  EnZf_SetupSlash(this);                           break;
+        case 6:  EnZf_SetupRecoilFromBlockedSlash(this);          break;
+        case 7:  EnZf_SetupJumpBack(this);                        break;
+        case 8:  EnZf_SetupStunned(this);                         break;
+        case 9:  EnZf_SetupSheatheSword(this, gPlayState);        break;
+        case 10: EnZf_SetupHopAndTaunt(this);                     break;
+        case 11: EnZf_SetupHopAway(this, gPlayState);             break;
+        case 12: EnZf_SetupDrawSword(this, gPlayState);           break;
+        case 13: EnZf_SetupDamaged(this);                         break;
+        case 14: EnZf_SetupJumpUp(this);                          break;
+        // State 15: SetupCircleAroundPlayer takes a speed; use 4.0f
+        // as a neutral default — next ENEMY_STATE will resync motion
+        // via Anchor's per-frame world.pos / rot writeback.
+        case 15: EnZf_SetupCircleAroundPlayer(this, 4.0f);        break;
+        case 16: EnZf_SetupJumpForward(this);                     break;
+        // State 17 (Die) intentionally skipped — driven via
+        // SetupDyingNet from HandlePacket_EnemyDefeated.
+        default: break;
+    }
 }
