@@ -96,6 +96,25 @@ extern "C" bool Anchor_ShouldSuppressEnStDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// Receiver-side predicate — true when an En_Sw (Skullwalltula combat
+// variant) death cycle was network-driven. The combat death-state at
+// z_en_sw.c:690 calls Item_DropCollectibleRandom(drop=0x30) on every
+// client that runs the death cycle, including peer. Without this gate,
+// peer rolls a LOCAL EN_ITEM00 that isn't bracketed by
+// g_isSpawningNetworkItemDrop — it enters Race-A Pending state on the
+// host-arbitration path and blocks pickup of the EN_ITEM00 spawned by
+// host's authoritative ITEM_DROP_SYNC packet. Mirror of
+// Anchor_ShouldSuppressEnStDrop.
+// Gold variants (swType=1..4) do NOT use this — they spawn ACTOR_EN_SI
+// per-client (cooperative collectible Design A); pickup is per-client.
+// See z_en_sw.c:690 + Plans/en_sw_sync_plan.md §3 step 3.
+extern "C" bool Anchor_ShouldSuppressEnSwDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // Receiver-side predicate — true when an En_Test (Stalfos) death cycle
 // was network-driven (peer received ENEMY_DEFEATED and is replaying the
 // fall-over → body-break sequence). func_80862E6C and func_808633E8 use

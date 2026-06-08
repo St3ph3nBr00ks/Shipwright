@@ -61,5 +61,26 @@ void EnSw_SetupDyingNet(struct EnSw* actor, PlayState* play);
 s16  EnSw_GetStateIndex(struct EnSw* actor);
 void EnSw_ApplyNetState(struct EnSw* actor, s16 stateIndex);
 
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the ghost-FX → drop-and-die sequence). Used by the
+// combat-variant death path at z_en_sw.c:690 to skip the local
+// Item_DropCollectibleRandom call. Host's authoritative
+// ITEM_DROP_SYNC packet handles the drop instead; without this gate
+// the peer-rolled EN_ITEM00 enters Race-A Pending state and blocks
+// pickup of the host-broadcast drop.
+//
+// Gold variants (swType=1..4) do NOT use this predicate — each client
+// legitimately spawns its own ACTOR_EN_SI token (cooperative
+// collectible Design A) and pickup is per-client.
+//
+// Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnSwDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
 
 #endif
