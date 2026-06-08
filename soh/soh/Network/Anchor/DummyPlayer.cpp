@@ -658,9 +658,36 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     // authority: the room host owns BOTH the per-room hostile NPCs
     // (Invader) AND the synced vanilla enemies in that room.
     const bool authoritative    = ::SceneAuthority::IsMyCurrentRoomHost();
+
+    // Per-client-local projectile attackers — actors whose damage outcome
+    // is authoritatively decided on each client independently. Each
+    // client's local-AI runs its own instance of the projectile aimed
+    // at that client's local nearest player; the reflect-vs-damage
+    // outcome is determined by THAT client's vanilla collision pass.
+    // Host must NOT broadcast DAMAGE_PLAYER (or SHIELD_BOUNCE_PLAYER)
+    // when host's own local projectile happens to also hit peer's
+    // DummyPlayer body — peer's local instance already delivered the
+    // correct outcome via vanilla collision (reflect if shield up, damage
+    // if not). Cross-machine broadcast duplicates the outcome: log 441
+    // showed P2 taking damage from host's wire packet ~30ms BEFORE P2's
+    // local nutball even reached the shield, even though P2's local
+    // reflect succeeded. Same architectural reason `shape.rot` is excluded
+    // from sync for ACTOR_EN_HINTNUTS at HookHandlers.cpp:2066
+    // (commit 52bb02634): per-client-local-AI semantics extend from aim
+    // through damage application.
+    //
+    // Add an entry here when adding any future per-client-local-AI
+    // projectile actor. Sibling concept: shape.rot exclusion in
+    // HookHandlers.cpp's isAnimationDrivenPos.
+    const u16 attackerIdNow = (player->cylinder.base.ac != nullptr)
+                              ? player->cylinder.base.ac->id : 0;
+    const bool attackerIsPerClientProjectile =
+        (attackerIdNow == ACTOR_EN_NUTSBALL);
+
     const bool gateOpen         = acHitForGate && peerIframesOpen
                                && localGuardOpen && authoritative
-                               && shieldBlockOpen;
+                               && shieldBlockOpen
+                               && !attackerIsPerClientProjectile;
 
     // Shield-block side effects on host + notification to peer. Triggers
     // when the shieldQuad's AC_BOUNCED is set this frame AND the body
@@ -694,7 +721,12 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     const bool shieldBouncedEdge = shieldBouncedNow && !sLastShieldBouncedHit[clientId];
     sLastShieldBouncedHit[clientId] = shieldBouncedNow;
 
-    if (shieldBouncedEdge && authoritative) {
+    // Per-client-local-AI projectile attackers also skip the wire
+    // SHIELD_BOUNCE_PLAYER broadcast — peer's vanilla local collision
+    // already produced the shield-bounce particle + sfx on peer's
+    // machine via CollisionCheck_HitSolid. A wire packet would duplicate
+    // the visual. Same gate as DAMAGE_PLAYER above.
+    if (shieldBouncedEdge && authoritative && !attackerIsPerClientProjectile) {
         const u16 blockedAttackerId = (player->cylinder.base.ac != nullptr)
                                       ? player->cylinder.base.ac->id : 0;
         // bumper.hitPos is Vec3s set by CollisionCheck when AC_BOUNCED
