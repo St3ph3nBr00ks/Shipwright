@@ -89,6 +89,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_GeldB/z_en_geldb.h"
 // En_Po_Field — Field Poe (Hyrule Field night) state-machine sync.
 #include "overlays/actors/ovl_En_Po_Field/z_en_po_field.h"
+// En_Vm — Beamos turret state-machine sync.
+#include "overlays/actors/ovl_En_Vm/z_en_vm.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
@@ -259,6 +261,10 @@ struct EnemyUpdateExtras {
     // En_Po_Field — Field Poe (Hyrule Field night) state-machine sync.
     bool hasEnPoField         = false;
     s16  enPoFieldActionState = 0;
+
+    // En_Vm — Beamos turret state-machine sync (Wait / Attack / Stun / Die).
+    bool hasEnVm         = false;
+    s16  enVmActionState = 0;
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
@@ -574,6 +580,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnPoField* pof          = (EnPoField*)actor;
         e.hasEnPoField          = true;
         e.enPoFieldActionState  = EnPoField_GetStateIndex(pof);
+    } else if (actor->id == ACTOR_EN_VM) {
+        EnVm* vm           = (EnVm*)actor;
+        e.hasEnVm          = true;
+        e.enVmActionState  = EnVm_GetStateIndex(vm);
     } else if (actor->id == ACTOR_EN_BB) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
@@ -748,6 +758,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnPoField != prev.hasEnPoField) return true;
     if (cur.hasEnPoField) {
         if (cur.enPoFieldActionState != prev.enPoFieldActionState) return true;
+    }
+    if (cur.hasEnVm != prev.hasEnVm) return true;
+    if (cur.hasEnVm) {
+        if (cur.enVmActionState != prev.enVmActionState) return true;
     }
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
@@ -1102,6 +1116,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enPoFieldActionState);
             }
         }
+        if (extras.hasEnVm) {
+            s16 prev = prevExtras && prevExtras->hasEnVm ? prevExtras->enVmActionState : -1;
+            if (prev != extras.enVmActionState) {
+                SPDLOG_INFO("[EnVm] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enVmActionState);
+            }
+        }
         if (extras.hasEnBb) {
             s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
             if (prev != extras.enBbActionState) {
@@ -1347,6 +1368,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // En_Po_Field — Field Poe (Hyrule Field night) state-machine sync.
     if (extras.hasEnPoField) {
         payload["actionState"] = extras.enPoFieldActionState;
+    }
+
+    // En_Vm — Beamos turret state-machine sync.
+    if (extras.hasEnVm) {
+        payload["actionState"] = extras.enVmActionState;
     }
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
@@ -2079,6 +2105,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // En_Po_Field — cache Field Poe actionState.
         if (actor->id == ACTOR_EN_PO_FIELD && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // En_Vm — cache Beamos actionState.
+        if (actor->id == ACTOR_EN_VM && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
@@ -2938,6 +2968,26 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnPoField netId={} — triggering natural death cycle", netId);
                     EnPoField_SetupDyingNet((EnPoField*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Vm (Beamos): route through EnVm_SetupDyingNet so the die
+                // countdown animation plays naturally on peer. The random item
+                // drop in EnVm_Die is gated by Anchor_ShouldSuppressEnVmDrop.
+                // The 2x EN_BOM death-cluster spawns continue per-client until
+                // EXPLOSIVE_SPAWN packet family lands (Phase 3 / Type 6
+                // Category B follow-up).
+                if (actor->id == ACTOR_EN_VM) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnVm.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnVm netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnVm netId={} — triggering natural death cycle", netId);
+                    EnVm_SetupDyingNet((EnVm*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
