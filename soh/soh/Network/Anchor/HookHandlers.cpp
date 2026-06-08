@@ -95,6 +95,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h"
 // En_Fd — Flare Dancer enflamed shell state-machine sync (#100).
 #include "src/overlays/actors/ovl_En_Fd/z_en_fd.h"
+// En_GeldB — Gerudo Thief state-machine sync.
+#include "src/overlays/actors/ovl_En_GeldB/z_en_geldb.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 
@@ -3165,6 +3167,60 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnFd] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_GeldB (Gerudo Thief) — state-machine sync. 17-state map:
+            //   0  Wait     — patrol idle (dormant)
+            //   1  Flee     — jump-away post-defeat (death-class; SetupDyingNet)
+            //   2  Ready    — combat stance
+            //   3  Advance  — Setup needs PlayState; OMITTED from ApplyNetState
+            //   4  RollForward
+            //   5  Pivot
+            //   6  Circle
+            //   7  SpinDodge — Setup needs PlayState; OMITTED from ApplyNetState
+            //   8  Slash
+            //   9  SpinAttack
+            //   10 RollBack
+            //   11 Stunned  — ice/freeze (dormant-with-effect)
+            //   12 Damaged
+            //   13 Jump
+            //   14 Block
+            //   15 Sidestep — Setup needs PlayState; OMITTED from ApplyNetState
+            //   16 Defeated — death-class; SetupDyingNet drives
+            //
+            // Dormant-to-active filter: state 0 (Wait patrol) treated as
+            // dormant. State 11 (Stunned) is dormant-with-effect — the
+            // color filter is active but the actor is locally frozen, so
+            // a stale net Wait/Stunned should NOT reset an active local
+            // combat state. Combat-active states 2/4/5/6/8/9/10/12/13/14
+            // protected from regressing to Wait. Unapplicable states
+            // 3/7/15 are silently skipped by EnGeldB_ApplyNetState's
+            // default branch.
+            if (actor->id == ACTOR_EN_GELDB && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnGeldB* geldb = (EnGeldB*)actor;
+                s16 curState = EnGeldB_GetStateIndex(geldb);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 11);
+                bool localIsActive = (curState == 2 || curState == 4 || curState == 5 ||
+                                      curState == 6 || curState == 8 || curState == 9 ||
+                                      curState == 10 || curState == 12 || curState == 13 ||
+                                      curState == 14);
+                bool deathStateNet = (ext->netStateIndex == 1 || ext->netStateIndex == 16);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnGeldB] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnGeldB_ApplyNetState(geldb, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnGeldB] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }
