@@ -19,6 +19,10 @@ void EnCrow_Die(EnCrow* this, PlayState* play);
 void EnCrow_TurnAway(EnCrow* this, PlayState* play);
 void EnCrow_Damaged(EnCrow* this, PlayState* play);
 
+// Anchor multiplayer (en_crow_sync_plan.md). Per Pitfall 7 — plain `extern`
+// (NOT `extern "C"`) for C-linkage helpers defined in C++ files.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 static Vec3f sZeroVecAccel = { 0.0f, 0.0f, 0.0f };
 
 const ActorInit En_Crow_InitVars = {
@@ -233,7 +237,12 @@ void EnCrow_SetupRespawn(EnCrow* this) {
 // Action functions
 
 void EnCrow_FlyIdle(EnCrow* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer — the dive-trigger gate at the bottom of this
+    // function reads player->stateFlags1 (PLAYER_STATE1_ON_HORSE) and
+    // pairs with the cached `xzDistToPlayer` which is field-patched to
+    // nearest peer in ShouldActorUpdate. Reading nearest's stateFlags
+    // keeps the on-horse skip consistent with the distance check.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 skelanimeUpdated;
     s16 var;
 
@@ -291,7 +300,11 @@ void EnCrow_FlyIdle(EnCrow* this, PlayState* play) {
 }
 
 void EnCrow_DiveAttack(EnCrow* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer — dive target must follow the player the host is
+    // tracking (cached fields are field-patched in ShouldActorUpdate), not
+    // each receiver's local Link. The Player_GetMask read below stays local
+    // (per-client mask state — acceptable cosmetic divergence).
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 facingPlayer;
     Vec3f pos;
     s16 target;
@@ -359,11 +372,23 @@ void EnCrow_Die(EnCrow* this, PlayState* play) {
     }
 
     if (Math_StepToF(&this->actor.scale.x, 0.0f, step)) {
-        if (this->actor.params == 0) {
+        // Anchor multiplayer — suppress drop when the death cycle was
+        // network-driven (peer's ENEMY_DEFEATED arrived and we're
+        // replaying the Damaged -> Die sequence on this client). Host's
+        // local kill broadcasts ENEMY_DEFEATED + ITEM_DROP_SYNC
+        // separately; receiver mustn't double-drop.
+        if (!Anchor_ShouldSuppressEnCrowDrop(&this->actor)) {
+            if (this->actor.params == 0) {
+                sDeathCount++;
+                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0);
+            } else {
+                Item_DropCollectible(play, &this->actor.world.pos, ITEM00_RUPEE_RED);
+            }
+        } else if (this->actor.params == 0) {
+            // Even when drop is suppressed, keep sDeathCount in lock-step
+            // with the host so the every-10-deaths Big-Poe-summoned-crow
+            // variant (params=1, red rupee) cadence matches across clients.
             sDeathCount++;
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0);
-        } else {
-            Item_DropCollectible(play, &this->actor.world.pos, ITEM00_RUPEE_RED);
         }
         if (!Anchor_GetEnforcedInt(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
             EnCrow_SetupRespawn(this);
@@ -517,4 +542,61 @@ void EnCrow_Draw(Actor* thisx, PlayState* play) {
 
     Gfx_SetupDL_25Opa(play->state.gfxCtx);
     SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnCrow_OverrideLimbDraw, EnCrow_PostLimbDraw, this);
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (en_crow_sync_plan.md).
+// =============================================================================
+
+// Triggers EnCrow's Damaged -> Die natural cycle on a non-host receiver.
+// Mirrors the no-damage-effect branch of EnCrow_SetupDamaged (the natural
+// damage transition) but is invoked directly from HandlePacket_EnemyDefeated.
+// The natural SetupDie call inside EnCrow_Damaged DOES fire
+// GameInteractor_ExecuteOnEnemyDefeat, but the HostBookkeeping
+// HasDefeatBroadcast dedup guard at HookHandlers.cpp prevents the
+// receive-side fire from causing an echo back to host.
+void EnCrow_SetupDyingNet(EnCrow* this, PlayState* play) {
+    f32 scale;
+
+    this->actor.speedXZ *= Math_CosS(this->actor.world.rot.x);
+    this->actor.velocity.y = 0.0f;
+    Animation_Change(&this->skelAnime, &gGuayFlyAnim, 0.4f, 0.0f, 0.0f, ANIMMODE_LOOP_INTERP, -3.0f);
+    scale = this->actor.scale.x * 100.0f;
+    this->actor.world.pos.y += 20.0f * scale;
+    this->actor.bgCheckFlags &= ~1;
+    this->actor.shape.yOffset = 0.0f;
+    this->actor.targetArrowOffset = 0.0f;
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_KAICHO_DEAD);
+    Actor_SetColorFilter(&this->actor, 0x4000, 255, 0, 40);
+    if (this->actor.flags & ACTOR_FLAG_ATTACHED_TO_ARROW) {
+        this->actor.speedXZ = 0.0f;
+    }
+    this->collider.base.acFlags &= ~AC_ON;
+    this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
+    this->actionFunc = EnCrow_Damaged;
+}
+
+s16 EnCrow_GetStateIndex(EnCrow* this) {
+    if (this->actionFunc == EnCrow_FlyIdle)    return 0;
+    if (this->actionFunc == EnCrow_DiveAttack) return 1;
+    if (this->actionFunc == EnCrow_TurnAway)   return 2;
+    if (this->actionFunc == EnCrow_Damaged)    return 3;
+    if (this->actionFunc == EnCrow_Die)        return 4;
+    if (this->actionFunc == EnCrow_Respawn)    return 5;
+    return -1;
+}
+
+void EnCrow_ApplyNetState(EnCrow* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0: EnCrow_SetupFlyIdle(this);    break;
+        case 1: EnCrow_SetupDiveAttack(this); break;
+        case 2: EnCrow_SetupTurnAway(this);   break;
+        case 5: EnCrow_SetupRespawn(this);    break;
+        // Death states 3 (Damaged) and 4 (Die) are driven via SetupDyingNet
+        // from HandlePacket_EnemyDefeated. Skip silently here — the
+        // dormant-to-active filter + PhaseImpliesHasLocalDeath gate at
+        // the call site already block regression to these states from
+        // non-death paths.
+        default: break;
+    }
 }

@@ -61,6 +61,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Tite/z_en_tite.h"
 // #47 / en_firefly_sync_plan.md — Keese (En_Firefly) state-machine sync.
 #include "overlays/actors/ovl_En_Firefly/z_en_firefly.h"
+// en_crow_sync_plan.md — Guay (En_Crow) state-machine sync.
+#include "overlays/actors/ovl_En_Crow/z_en_crow.h"
 // #102 / en_reeba_sync_plan.md — Leever (En_Reeba) state-machine sync.
 #include "overlays/actors/ovl_En_Reeba/z_en_reeba.h"
 // en_ik_sync_plan.md — Iron Knuckle (En_Ik) state-machine sync.
@@ -189,6 +191,10 @@ struct EnemyUpdateExtras {
     // #47 / en_firefly_sync_plan.md §4 — En_Firefly (Keese) state-machine sync.
     bool hasEnFirefly         = false;
     s16  enFireflyActionState = 0;
+
+    // en_crow_sync_plan.md — En_Crow (Guay) state-machine sync.
+    bool hasEnCrow         = false;
+    s16  enCrowActionState = 0;
 
     // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
     bool hasEnReeba         = false;
@@ -464,6 +470,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnFirefly* ff             = (EnFirefly*)actor;
         e.hasEnFirefly            = true;
         e.enFireflyActionState    = EnFirefly_GetStateIndex(ff);
+    } else if (actor->id == ACTOR_EN_CROW) {
+        EnCrow* cw          = (EnCrow*)actor;
+        e.hasEnCrow         = true;
+        e.enCrowActionState = EnCrow_GetStateIndex(cw);
     } else if (actor->id == ACTOR_EN_REEBA) {
         EnReeba* rb             = (EnReeba*)actor;
         e.hasEnReeba            = true;
@@ -599,6 +609,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnFirefly != prev.hasEnFirefly) return true;
     if (cur.hasEnFirefly) {
         if (cur.enFireflyActionState != prev.enFireflyActionState) return true;
+    }
+    if (cur.hasEnCrow != prev.hasEnCrow) return true;
+    if (cur.hasEnCrow) {
+        if (cur.enCrowActionState != prev.enCrowActionState) return true;
     }
     if (cur.hasEnReeba != prev.hasEnReeba) return true;
     if (cur.hasEnReeba) {
@@ -878,6 +892,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enFireflyActionState);
             }
         }
+        if (extras.hasEnCrow) {
+            s16 prev = prevExtras && prevExtras->hasEnCrow ? prevExtras->enCrowActionState : -1;
+            if (prev != extras.enCrowActionState) {
+                SPDLOG_INFO("[EnCrow] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enCrowActionState);
+            }
+        }
         if (extras.hasEnReeba) {
             s16 prev = prevExtras && prevExtras->hasEnReeba ? prevExtras->enReebaActionState : -1;
             if (prev != extras.enReebaActionState) {
@@ -1086,6 +1107,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #47 / en_firefly_sync_plan.md §4 — En_Firefly (Keese) state-machine sync.
     if (extras.hasEnFirefly) {
         payload["actionState"] = extras.enFireflyActionState;
+    }
+
+    // en_crow_sync_plan.md — En_Crow (Guay) state-machine sync.
+    if (extras.hasEnCrow) {
+        payload["actionState"] = extras.enCrowActionState;
     }
 
     // #102 / en_reeba_sync_plan.md §3 — En_Reeba (Leever) state-machine sync.
@@ -1788,6 +1814,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_FIREFLY && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // en_crow_sync_plan.md — cache En_Crow (Guay) actionState.
+        if (actor->id == ACTOR_EN_CROW && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // #102 / en_reeba_sync_plan.md — cache En_Reeba (Leever) actionState.
         if (actor->id == ACTOR_EN_REEBA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
@@ -2419,6 +2449,26 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnFirefly netId={} — triggering natural death cycle", netId);
                     EnFirefly_SetupDyingNet((EnFirefly*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Crow (Guay): route through EnCrow_SetupDyingNet so the
+                // Damaged -> Die natural cycle plays on the receiver.
+                // EnCrow_Damaged transitions to SetupDie when the body hits
+                // the floor; SetupDie fires GameInteractor_ExecuteOnEnemyDefeat
+                // which the HostBookkeeping HasDefeatBroadcast dedup guard
+                // suppresses from echoing back to host. Plan: en_crow_sync_plan.md.
+                if (actor->id == ACTOR_EN_CROW) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnCrow.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnCrow netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnCrow netId={} — triggering natural death cycle", netId);
+                    EnCrow_SetupDyingNet((EnCrow*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
