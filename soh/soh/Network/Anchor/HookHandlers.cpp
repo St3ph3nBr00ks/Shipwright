@@ -60,6 +60,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h"
 #include "src/overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
 #include "src/overlays/actors/ovl_En_St/z_en_st.h"
+// en_skb_sync_plan — Stalchild (En_Skb) state-machine sync.
+#include "src/overlays/actors/ovl_En_Skb/z_en_skb.h"
 #include "src/overlays/actors/ovl_En_Ssh/z_en_ssh.h"
 #include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
 // #47 / en_firefly_sync_plan.md — Keese (En_Firefly) state-machine sync.
@@ -2395,6 +2397,42 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         SPDLOG_INFO("[EnSt] rx netId={} block net={} local={} (dormant-active filter)",
                                     ext->netId, (int)ext->netStateIndex, (int)curState);
+                    }
+                }
+            }
+
+            // en_skb_sync_plan — En_Skb (Stalchild) state-machine sync.
+            // Dormant-to-active filter: state 0 (Emerge from ground)
+            // shouldn't override active states 2/3/4/5/6 (Advance/Attack/
+            // Recovery/Stunned/Damaged). State 1 (Burrow) is a terminal
+            // hide animation — NOT dormant; host's burrow at dawn or
+            // out-of-leash should propagate. Death state 7 (body break +
+            // drops) gated by PhaseImpliesHasLocalDeath — peer's
+            // termination is driven by ENEMY_DEFEATED + Actor_Kill;
+            // drops route through ITEM_DROP_SYNC. Without the death
+            // gate, peer's local body-break path would call
+            // Item_DropCollectible{,Random} and double-spawn drops.
+            if (actor->id == ACTOR_EN_SKB && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnSkb* skb = (EnSkb*)actor;
+                s16 curState = EnSkb_GetStateIndex(skb);
+                bool netIsDormant  = (ext->netStateIndex == 0);
+                bool localIsActive = (curState >= 2 && curState <= 6);
+                bool deathStateNet = (ext->netStateIndex == 7);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnSkb] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnSkb_ApplyNetState(skb, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated"
+                                                        : "dormant-active filter";
+                        SPDLOG_INFO("[EnSkb] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }
             }
