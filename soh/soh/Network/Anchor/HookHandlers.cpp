@@ -99,6 +99,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_GeldB/z_en_geldb.h"
 // En_Po_Field — Field Poe (Hyrule Field night) state-machine sync.
 #include "src/overlays/actors/ovl_En_Po_Field/z_en_po_field.h"
+// En_Vm — Beamos turret state-machine sync.
+#include "src/overlays/actors/ovl_En_Vm/z_en_vm.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 
@@ -3281,6 +3283,37 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnPoField] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Vm (Beamos): Wait=0 / Attack=1 / Stun=2 / Die=3.
+            // Dormant-to-active filter: don't roll the peer's Stun (locally
+            // applied via vanilla sleep-on-deku-nut + Race-B-routed damage)
+            // back to Wait when host's net value is dormant. Death state Die
+            // is gated separately by PhaseImpliesHasLocalDeath; the receive
+            // path routes through EnVm_SetupDyingNet in HandlePacket_-
+            // EnemyDefeated.
+            if (actor->id == ACTOR_EN_VM && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnVm* vm = (EnVm*)actor;
+                s16 curState = EnVm_GetStateIndex(vm);
+                bool netIsDormant  = (ext->netStateIndex == 0);
+                bool localIsActive = (curState == 1 || curState == 2);
+                bool deathStateNet = (ext->netStateIndex == 3);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnVm] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnVm_ApplyNetState(vm, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnVm] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }
