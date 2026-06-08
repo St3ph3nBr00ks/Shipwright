@@ -7,6 +7,13 @@
 // Defined extern "C" in HookHandlers.cpp:83.
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 
+// Multiplayer multi-player iteration — returns all in-timeline player
+// actor candidates (local Link + same-timeline DummyPlayers + NPC
+// follower if targetable). Used by func_80B0DEA8 to search for any
+// climbing target rather than only the nearest. Defined extern "C" in
+// Common/PlayerLookup.cpp.
+extern int  Anchor_GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount);
+
 // Multiplayer drop-suppression (#148 / en_sw_sync_plan.md §3 step 3).
 // Defined extern "C" in Bridge/EnemySyncBridge.cpp. Pitfall 7 — plain
 // `extern` in .c, not `extern "C"` (C-linkage is implicit in C).
@@ -717,44 +724,69 @@ s16 func_80B0DE34(EnSw* this, Vec3f* arg1) {
     return pitch * (yaw >= 0 ? -1 : 1);
 }
 
-s32 func_80B0DEA8(EnSw* this, PlayState* play, s32 arg2) {
-    // #148 / en_sw_sync_plan.md §3 step 1 — read targeting fields from
-    // the host-picked NEAREST player (local or DummyPlayer).
-    //
-    // Original split (single-commit predecessor) read stateFlags1 from
-    // the LOCAL Link only. That broke multiplayer when a peer was the
-    // climber: host's localPlayer wasn't climbing → climbing gate
-    // blocked → Skullwalltula never lunged at the climbing peer.
-    //
-    // Fix: read stateFlags1 from `nearestActor`. DummyPlayers are
-    // allocated as ACTOR_PLAYER (see ShouldActorInit override in
-    // HookHandlers.cpp) so the underlying memory IS a Player struct,
-    // and DummyPlayer_Update at DummyPlayer.cpp:219 copies the peer's
-    // stateFlags1 into ((Player*)actor)->stateFlags1 every frame. So
-    // the cast is safe and the field is current for both targets.
-    //
-    // Vanilla single-player parity preserved: when there's no peer,
-    // nearestActor == &localPlayer->actor and the read is identical
-    // to the original GET_PLAYER read.
-    Player* nearestPlayer = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
+// #148 follow-up — log 444 field test surfaced a lunge-flicker bug.
+// During P1's climb in Deku Tree basement, host's En_Sw at netId
+// 2147521870 entered state 7 (lunge wind-up) twice (00:37:15.732 +
+// 00:37:16.731) but aborted both times (within 33 ms and 834 ms) —
+// state 7 re-evaluates `func_80B0DEA8` every frame during its
+// 20-frame wind-up and falls back to state 6 on any one failure.
+// The flicker had two known causes both rooted in the same
+// "single-nearest-player" decision shape:
+//
+//   (1) Anchor_GetNearestPlayerActor's pick can flip frame-to-frame
+//       when a DummyPlayer's PLAYER_UPDATE arrival changes its
+//       distance relative to the local Link. The new pick may be a
+//       non-climbing player, failing the predicate immediately.
+//   (2) Even with a stable pick, line-of-sight against a single
+//       player can flicker as the climbing actor's world.pos
+//       animates past wall-geometry edges.
+//
+// Fix: search ALL synced players for a candidate that passes the
+// full 5-condition gate (climb / cutscene / angle / distance / LoS),
+// not just the nearest. Returns the first valid candidate or NULL.
+// State 7 uses the SAME pick for its lunge-target position so the
+// predicate's "yes" maps to a concrete target (previously state 7
+// validated nearest-A and lunged at the nearest, which could be B).
+//
+// arg2 mirrors the legacy signature: 1 = enforce CLIMBING_LADDER
+// gate + cutscene check; 0 = skip those two (currently every caller
+// uses 1, but kept for binary-compat with the original func).
+static Player* EnSw_PickLungeTarget(EnSw* this, PlayState* play, s32 arg2) {
+    Actor* candidates[8];
+    int n = Anchor_GetSyncedPlayerActors(play, candidates, 8);
+    if (n <= 0) {
+        // Anchor disabled / pre-handshake — fall back to vanilla
+        // local-Link semantics.
+        candidates[0] = &GET_PLAYER(play)->actor;
+        n = 1;
+    }
+
     CollisionPoly* sp58;
     s32 sp54;
     Vec3f sp48;
 
-    if (!(nearestPlayer->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) {
-        return false;
-    } else if (func_8002DDF4(play) && arg2) {
-        return false;
-    } else if (ABS(func_80B0DE34(this, &nearestPlayer->actor.world.pos) - this->actor.shape.rot.z) >= 0x1FC2) {
-        return false;
-    } else if (Math_Vec3f_DistXYZ(&this->actor.world.pos, &nearestPlayer->actor.world.pos) >= 130.0f) {
-        return false;
-    } else if (!BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &nearestPlayer->actor.world.pos,
-                                        &sp48, &sp58, true, false, false, true, &sp54)) {
-        return true;
-    } else {
-        return false;
+    for (int i = 0; i < n; i++) {
+        Player* p = (Player*)candidates[i];
+        if (p == NULL) continue;
+        // DummyPlayer at out-of-scene sentinel (-9999, -9999, -9999)
+        // would otherwise satisfy the 130u distance check on actors
+        // at very negative coords — skip defensively.
+        if (p->actor.world.pos.y <= -9000.0f) continue;
+        if (!(p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) continue;
+        if (func_8002DDF4(play) && arg2) continue;
+        if (ABS(func_80B0DE34(this, &p->actor.world.pos) - this->actor.shape.rot.z) >= 0x1FC2) continue;
+        if (Math_Vec3f_DistXYZ(&this->actor.world.pos, &p->actor.world.pos) >= 130.0f) continue;
+        if (BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &p->actor.world.pos,
+                                    &sp48, &sp58, true, false, false, true, &sp54)) {
+            continue;  // line blocked → try next candidate
+        }
+        return p;
     }
+    return NULL;
+}
+
+s32 func_80B0DEA8(EnSw* this, PlayState* play, s32 arg2) {
+    return EnSw_PickLungeTarget(this, play, arg2) != NULL;
 }
 
 s32 func_80B0DFFC(EnSw* this, PlayState* play) {
@@ -880,16 +912,21 @@ void func_80B0E5E0(EnSw* this, PlayState* play) {
 }
 
 void func_80B0E728(EnSw* this, PlayState* play) {
-    // #148 / en_sw_sync_plan.md §3 step 1 — replace GET_PLAYER with
-    // Anchor_GetNearestPlayerActor for waypoint storage. Only
-    // actor.world.pos is read; safe to use Actor* directly without
-    // DummyPlayer guard.
-    Actor* nearestActor = Anchor_GetNearestPlayerActor(&this->actor, play);
+    // #148 follow-up — use EnSw_PickLungeTarget so the predicate's
+    // chosen candidate IS the lunge waypoint source. Pre-fix this
+    // function called Anchor_GetNearestPlayerActor independently of
+    // the predicate, so when the predicate validated player A but
+    // nearest was player B, the lunge would aim at B (and a B-state
+    // change could then fail the next-frame re-check, aborting back
+    // to state 6 — the log-444 flicker). PickLungeTarget returns
+    // NULL when no candidate passes, equivalent to the old
+    // !func_80B0DEA8 fall-through.
     s32 pad;
 
     if (DECR(this->unk_442) != 0) {
-        if (func_80B0DEA8(this, play, 1)) {
-            this->unk_448 = nearestActor->world.pos;
+        Player* target = EnSw_PickLungeTarget(this, play, 1);
+        if (target != NULL) {
+            this->unk_448 = target->actor.world.pos;
             this->unk_448.y += 30.0f;
             this->unk_444 = func_80B0DE34(this, &this->unk_448);
             func_80B0E430(this, 6.0f, (u16)0xFA0, 0, play);
