@@ -24,6 +24,15 @@
 // Per Pitfall 7.
 extern bool Anchor_ShouldSuppressEnFdDrop(Actor* actor);
 
+// Anchor multiplayer (En_Fw spawn-host gate, #100 follow-up) — defined
+// in Bridge/AnchorCoreBridge.cpp. Returns true when this client is the
+// authoritative host for the current (sceneNum, roomNum, timeline)
+// per Pillar A Phase 2. Falls back to true when Anchor is disconnected
+// or gPlayState is null, so single-player + pre-handshake behaviour
+// matches vanilla. See z_en_encount1.c:18 for the same forward-decl
+// pattern.
+extern bool Anchor_IsCurrentRoomHost(void);
+
 void EnFd_Init(Actor* thisx, PlayState* play);
 void EnFd_Destroy(Actor* thisx, PlayState* play);
 void EnFd_Update(Actor* thisx, PlayState* play);
@@ -221,6 +230,39 @@ static AnimationInfo sAnimationInfo[] = {
 };
 
 s32 EnFd_SpawnCore(EnFd* this, PlayState* play) {
+    // Anchor multiplayer (#100 En_Fw Phase 1 follow-up): only the room
+    // host spawns the En_Fw core/wisp child. Peer receives host's
+    // authoritative ENEMY_SPAWN broadcast for the En_Fw via the
+    // standard sync pipeline. This prevents duplicate per-client
+    // spawns at slightly different positions / scales / health
+    // values that would diverge over the En_Fw's lifetime.
+    //
+    // Falls back to vanilla behaviour when Anchor is disconnected or
+    // gPlayState is null (Anchor_IsCurrentRoomHost returns true).
+    //
+    // OPEN QUESTION for Phase 2 (parent-pointer hazard):
+    // Actor_SpawnAsChild sets the spawned En_Fw's `actor.parent` to
+    // this En_Fd. HandlePacket_EnemySpawn uses plain Actor_Spawn (not
+    // Actor_SpawnAsChild), so peer's En_Fw arrives with
+    // `actor.parent = NULL`. En_Fw heavily derefs `actor.parent->...`
+    // at z_en_fw.c:135, 157, 234, 241, 269, 343, 358, 361, 362
+    // (positioning around parent's home, health-back-write, FLG_COREDEAD
+    // signal-back). Peer's En_Fw will survive EnFw_Bounce (first ~30
+    // frames; no parent deref) but crash in EnFw_Run on first parent
+    // deref. Phase 2 implementation needs ONE of:
+    //   (a) Extend ENEMY_SPAWN payload with `parentNetId`; receiver
+    //       looks up the matching En_Fd via FindActorByNetId and
+    //       assigns `spawned->parent = matchedEnFd`.
+    //   (b) Peer's `EnFw_Init` does a nearest-En_Fd-by-position
+    //       lookup and sets parent locally.
+    //   (c) Add a dedicated FW_SPAWN packet (variant of ENEMY_SPAWN)
+    //       that carries `parentNetId` and uses Actor_SpawnAsChild
+    //       against the matched parent.
+    // Option (a) is cleanest — uniform with existing infrastructure.
+    if (!Anchor_IsCurrentRoomHost()) {
+        return false;
+    }
+
     if (this->invincibilityTimer != 0) {
         return false;
     }
