@@ -501,170 +501,223 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
                  actor->id, damage);
 
     // NPC Invader uses a runtime-allocated actor id (gEnInvaderId), so we
-    // can't put it in the switch's case labels. Check up-front. EnInvader's
-    // body collider gates its health drain on AC_HIT (z_en_invader.c:152
-    // tests `(acFlags & AC_HIT) && colChkInfo.damage > 0`); setting the
-    // bit here is sufficient. No acHitInfo deref in EnInvader_Update —
-    // bit-set is safe without a fake AT collider (same shape as
-    // ACTOR_EN_SKB). The gEnInvaderId != 0 guard is defensive in case the
-    // dynamic-actor registration hasn't completed yet.
+    // can't put it in the switch's case labels. Check up-front.
+    //
+    // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe synthetic
+    //   AC_HIT bit-set. EnInvader's body collider gates its health drain on
+    //   AC_HIT (z_en_invader.c:152 tests `(acFlags & AC_HIT) &&
+    //   colChkInfo.damage > 0`).
+    // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage.
+    // Skips: none — damage path reads only Acks-listed fields. Same shape
+    //   as ACTOR_EN_SKB. The gEnInvaderId != 0 guard is defensive in case
+    //   the dynamic-actor registration hasn't completed yet.
     if (gEnInvaderId != 0 && actor->id == gEnInvaderId) {
         ((EnInvader*)actor)->collider.base.acFlags |= AC_HIT;
         return;
     }
     switch (actor->id) {
         case ACTOR_EN_DEKUBABA:
-            // Deku Baba — pre-audit admission back-fitted 2026-06-08.
-            // `grep -nE "base\.ac->|acHitInfo->" z_en_dekubaba.c` → 0
-            // matches. Damage path reads `colChkInfo.damage` /
-            // `damageEffect` only. Safe synthetic AC_HIT bit-set.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Back-fitted 2026-06-08 via
+            //   `grep -nE "base\.ac->|acHitInfo->" z_en_dekubaba.c` → 0
+            //   matches.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
             ((EnDekubaba*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_KAREBABA:
-            // Karebaba — bodyCollider. z_en_karebaba.c:369/419 read
-            // `acFlags & AC_HIT`. Pre-audit admission back-fitted
-            // 2026-06-08. `grep -nE "base\.ac->|acHitInfo->"
-            // z_en_karebaba.c` → 0 matches. Safe synthetic AC_HIT bit-set.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Back-fitted 2026-06-08 via
+            //   `grep -nE "base\.ac->|acHitInfo->" z_en_karebaba.c` → 0
+            //   matches. Damage gates read bodyCollider AC_HIT at
+            //   z_en_karebaba.c:369 and :419.
+            // Acks: bodyCollider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
             ((EnKarebaba*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_FIREFLY:
-            // Keese — pre-audit admission back-fitted 2026-06-08.
-            // `grep -nE "base\.ac->|acHitInfo->" z_en_firefly.c` → 0
-            // matches. Damage path reads `acFlags & AC_HIT` +
-            // `colChkInfo.damage`. Safe synthetic AC_HIT bit-set.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Back-fitted 2026-06-08 via
+            //   `grep -nE "base\.ac->|acHitInfo->" z_en_firefly.c` → 0
+            //   matches.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
             ((EnFirefly*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_CROW:
-            // Guay — z_en_crow.c:424 reads `collider.base.acFlags & AC_HIT`
-            // in EnCrow_UpdateDamage. No `base.ac->` deref in damage path
-            // (verified by source read 2026-06-07 — only reads damageEffect
-            // / damage / colorFilterParams). Single JntSph collider.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Verified 2026-06-07 via source
+            //   read of EnCrow_UpdateDamage (z_en_crow.c:424) — reads only
+            //   damageEffect / damage / colorFilterParams.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Single JntSph collider.
             ((EnCrow*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_SW:
-            // Skullwalltula — pre-audit admission back-fitted 2026-06-08.
-            // `grep -nE "base\.ac->|acHitInfo->" z_en_sw.c` → 0 matches.
-            // Damage path reads `acFlags & AC_HIT` + `colChkInfo.damage`
-            // / `damageEffect` only. Single JntSph collider. Safe
-            // synthetic AC_HIT bit-set.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Back-fitted 2026-06-08 via
+            //   `grep -nE "base\.ac->|acHitInfo->" z_en_sw.c` → 0 matches.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Single JntSph collider.
             ((EnSw*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_ST: {
-            // #90 / log 431+433 fix — host applies peer's damage via the
-            // back-side body+legs cylinders ONLY ([0] and [1]).
+            // Audit: ONE acHitInfo-> deref in EnSt_CheckHitBackside,
+            //   null-guarded at z_en_st.c:460+ (predates the standard).
+            //   Safe synthetic AC_HIT on cyl [0]/[1]; flags |= 0 falls
+            //   through to standard melee → BounceAround. #90 / log 431+
+            //   433 fix.
+            // Acks: colCylinder[0].base.acFlags & AC_HIT (body),
+            //   colCylinder[1].base.acFlags & AC_HIT (legs),
+            //   colChkInfo.damage, colChkInfo.damageEffect.
+            // Skips: colCylinder[2] (front shield) INTENTIONALLY EXCLUDED
+            //   from base bit-set. EnSt_CheckColliders (z_en_st.c:519)
+            //   calls EnSt_CheckHitFrontside FIRST and returns "armored
+            //   reaction" (sway anim, no damage) when [2]'s AC_HIT is set.
+            //   Setting [2] here would make EVERY peer hit register as
+            //   armored bounce — damage never applies, HP never decrements,
+            //   Skulltula stays alive forever (log 433 regression). Front-
+            //   shield AC_HIT is set ONLY by the armored-hit receiver
+            //   branch above (handles isArmoredHit=true wire flag).
             //
-            // Cylinder [2] (front shield) is INTENTIONALLY EXCLUDED.
-            // EnSt_CheckColliders (z_en_st.c:519) calls
-            // EnSt_CheckHitFrontside FIRST and returns "armored reaction"
-            // (sway anim, no damage) when [2]'s AC_HIT is set. Setting
-            // [2] here makes EVERY peer hit register as an armored
-            // bounce — damage never applies, HP never decrements,
-            // Skulltula stays alive forever (regression observed in
-            // log 433: drains showed preHp=2 on every hit, no kill).
-            //
-            // The acHitInfo deref in EnSt_CheckHitBackside is null-
-            // guarded (z_en_st.c:460+) so synthetic bit-set on [0]/[1]
-            // without a real AT collider is safe — flags |= 0 falls
-            // through to the standard melee → BounceAround death path.
-            // The earlier crash documented historically (log 115 —
-            // 0xC0000005 on Skulltula damage receive) is resolved by
-            // the null-guard.
-            //
-            // Sway anim cross-machine sync for peer's armored-side
-            // hits (log 433 bug 2) is NOT solved by this fix — peer's
-            // local Skulltula fires sway locally, but host's local
-            // copy doesn't. Would need either wire-side info about
-            // which cylinder was hit OR ENEMY_STATE broadcasting
-            // swayTimer / playSwayFlag / swayAngle fields. Acceptable
-            // cosmetic gap until a follow-up sync pass.
+            // Sway anim cross-machine sync for peer's armored-side hits
+            // (log 433 bug 2) is NOT solved by this fix — peer's local
+            // Skulltula fires sway locally, but host's local copy
+            // doesn't. Would need wire-side info about which cylinder
+            // was hit OR ENEMY_STATE broadcasting swayTimer /
+            // playSwayFlag / swayAngle fields. Acceptable cosmetic gap
+            // until a follow-up sync pass.
             EnSt* st = (EnSt*)actor;
             st->colCylinder[0].base.acFlags |= AC_HIT;
             st->colCylinder[1].base.acFlags |= AC_HIT;
             break;
         }
-        // 2026-06-07 wave — same audit pass that fixed En_St (log 431).
-        // The following actors all gate damage on `acFlags & AC_HIT` but
-        // were missing from this switch — peer's DAMAGE_ENEMY arrived,
-        // host's colChkInfo.damage incremented, but host's update path
-        // never saw AC_HIT and so never called Actor_ApplyDamage. Each
-        // case below either has NO acHitInfo deref in damage code
-        // (safe direct add) or its deref is null-guarded in the same
-        // commit landing this case.
         case ACTOR_EN_WF: {
-            // Wolfos — z_en_wf.c:1287 checks body + tail cyl AC_HIT.
-            // No acHitInfo deref in damage path; safe-easy add.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Verified 2026-06-07 via source
+            //   read — damage gate at z_en_wf.c:1287 reads body + tail
+            //   cylinder AC_HIT only.
+            // Acks: colliderCylinderBody.base.acFlags & AC_HIT,
+            //   colliderCylinderTail.base.acFlags & AC_HIT,
+            //   colChkInfo.damage, colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Multi-collider: body + tail cylinders. Set AC_HIT on both
+            // so peer damage routes correctly regardless of which segment
+            // was hit on peer's side.
             EnWf* wf = (EnWf*)actor;
             wf->colliderCylinderBody.base.acFlags |= AC_HIT;
             wf->colliderCylinderTail.base.acFlags |= AC_HIT;
             break;
         }
         case ACTOR_EN_REEBA:
-            // Leever — z_en_reeba.c:545. No acHitInfo deref. Single cyl.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Verified 2026-06-07 via source
+            //   read — z_en_reeba.c:545.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Single cylinder collider.
             ((EnReeba*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_IK:
-            // Iron Knuckle — z_en_ik.c:301/710 reads bodyCollider AC_HIT.
-            // No acHitInfo deref in damage path. AT colliders for axe are
-            // host-authoritative (separate codepath).
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Verified 2026-06-07 via source
+            //   read — z_en_ik.c:301 and :710 read bodyCollider AC_HIT.
+            // Acks: bodyCollider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Multi-collider: bodyCollider (AC) + axe AT colliders. AT
+            // colliders are host-authoritative for outgoing axe hits and
+            // are not touched by this path.
             ((EnIk*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_HINTNUTS:
-            // INTENTIONALLY EXCLUDED — log 438 P1 crash.
+            // Audit: INTENTIONALLY EXCLUDED — log 438 P1 crash. Case body
+            //   is a no-op. EnHintnuts_ColliderCheck (z_en_hintnuts.c:536)
+            //   derefs `this->collider.base.ac->id` to discriminate nutball
+            //   vs. weapon hits — synthetic AC_HIT without a valid `.ac`
+            //   pointer crashes with 0xC0000005. Hintnut sync does NOT need
+            //   this drain (see Skips for the alternative paths).
+            // Acks: none.
+            // Skips: ALL fields — case body is empty by design.
             //
-            // `EnHintnuts_ColliderCheck` (z_en_hintnuts.c:536) derefs
-            // `this->collider.base.ac->id` to discriminate nutball vs.
-            // weapon hits. Setting AC_HIT WITHOUT populating
-            // `collider.base.ac` (which only the real collision engine
-            // does — z_collision_check.c:1739-1740 sets `ac->ac =
-            // at->actor` atomically with the flag bit) leaves `ac` at
-            // NULL → 0xC0000005 access violation when the actor's own
-            // ColliderCheck runs on the next tick.
-            //
-            // Hintnut sync does NOT need this drain. Two reasons:
+            // Two reasons Hintnut sync works without this drain:
             //  1. PROJECTILE_HIT_ENEMY is the canonical host-authoritative
-            //     path for Hintnut state transitions (it calls
+            //     path for Hintnut state transitions (calls
             //     HitByScrubProjectile1/2 directly on host, then
             //     broadcasts the resulting state via ENEMY_STATE).
             //  2. Race-B clamp neutralises the damage value to 0 by the
-            //     time the peer's DAMAGE_ENEMY wire packet arrives, so
-            //     no health decrement is intended here anyway.
+            //     time the peer's DAMAGE_ENEMY wire packet arrives, so no
+            //     health decrement is intended here anyway.
             //
-            // Case body is a no-op. Leave the explicit case in place so
-            // a future reader sees "yes this was considered, and yes
-            // it's deliberately empty" rather than the default fall-
-            // through being mistaken for an oversight.
+            // Leave the explicit case label in place so a future reader
+            // sees "yes this was considered, and yes it's deliberately
+            // empty" rather than the default fall-through being mistaken
+            // for an oversight.
             break;
         case ACTOR_EN_PEEHAT: {
-            // Peahat — z_en_peehat.c checks colCylinder (grounded variant)
-            // and colJntSph (flying variant) for AC_HIT in different
-            // state branches. Set both so peer damage routes correctly
-            // regardless of variant / state. No acHitInfo deref in
-            // damage path.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Verified 2026-06-07 via source
+            //   read — z_en_peehat.c checks colCylinder (grounded) and
+            //   colJntSph (flying) for AC_HIT in different state branches.
+            // Acks: colCylinder.base.acFlags & AC_HIT (grounded variant),
+            //   colJntSph.base.acFlags & AC_HIT (flying variant),
+            //   colChkInfo.damage, colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Multi-collider: variant-dependent. Set AC_HIT on both so
+            // peer damage routes correctly regardless of variant/state at
+            // wire-receive time.
             EnPeehat* ph = (EnPeehat*)actor;
             ph->colCylinder.base.acFlags |= AC_HIT;
             ph->colJntSph.base.acFlags |= AC_HIT;
             break;
         }
         case ACTOR_EN_POH:
-            // Poe — z_en_poh.c:308 derefs `colliderCyl.info.acHitInfo
-            // ->toucher.dmgFlags` AND `colliderCyl.base.ac->world.rot.y`
-            // unconditionally inside func_80ADE28C. Null-guards landed in
-            // the same commit as this case addition. Safe to set AC_HIT.
+            // Audit: TWO derefs at z_en_poh.c:308 inside func_80ADE28C —
+            //   `colliderCyl.info.acHitInfo->toucher.dmgFlags` AND
+            //   `colliderCyl.base.ac->world.rot.y`. Null-guards landed in
+            //   the same commit as this case addition.
+            // Acks: colliderCyl.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: colliderCyl.info.acHitInfo + colliderCyl.base.ac —
+            //   read only inside the null-guarded site at z_en_poh.c:308;
+            //   safe under the guard (returns early on NULL).
             ((EnPoh*)actor)->colliderCyl.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_BILI:
-            // Biri jellyfish — z_en_bili.c:604 derefs
-            // `collider.info.acHitInfo->toucher.dmgFlags` unconditionally
-            // inside EnBili_UpdateDamage. Null-guard landed in the same
-            // commit as this case addition.
+            // Audit: ONE acHitInfo-> deref at z_en_bili.c:604 inside
+            //   EnBili_UpdateDamage —
+            //   `collider.info.acHitInfo->toucher.dmgFlags`. Null-guard
+            //   landed in the same commit as this case addition.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: collider.info.acHitInfo — read only inside the
+            //   null-guarded site at z_en_bili.c:604; safe under the
+            //   guard.
             ((EnBili*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_VALI:
-            // Bari big jellyfish (#126) — EnVali_UpdateDamage at
-            // z_en_vali.c:508 reads ONLY bodyCollider.base.acFlags +
-            // colChkInfo.damageEffect/damage. NO base.ac-> pointer
-            // derefs (audit in ad01a739b commit body). Synthetic
-            // AC_HIT is safe — no null-guard needed.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. EnVali_UpdateDamage at
+            //   z_en_vali.c:508 reads ONLY bodyCollider.base.acFlags +
+            //   colChkInfo.damageEffect/damage (audit in ad01a739b
+            //   commit body). #126.
+            // Acks: bodyCollider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
             ((EnVali*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_ZF:
@@ -762,59 +815,101 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             ((EnFd*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_BB:
-            // Bubble (flame skull) — z_en_bb.c:1164 and :1173 deref
-            // `collider.elements[0].info.acHitInfo->toucher.damage` in
-            // EnBb_CollisionCheck cases 7 (Fire arrow) and 6 (Ice arrow)
-            // to populate freezeTimer. Null-guards landed in the same
-            // commit as this case addition. ColliderJntSph collider —
-            // `base.acFlags` is the shared header so a single write
-            // covers all elements.
+            // Audit: TWO acHitInfo-> derefs at z_en_bb.c:1164 and :1173
+            //   inside EnBb_CollisionCheck cases 7 (Fire arrow) and 6
+            //   (Ice arrow) — `collider.elements[0].info.acHitInfo->
+            //   toucher.damage` populates freezeTimer. Null-guards landed
+            //   in the same commit as this case addition.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: collider.elements[0].info.acHitInfo — read only
+            //   inside the null-guarded sites at z_en_bb.c:1164/:1173;
+            //   safe under the guard.
+            //
+            // ColliderJntSph — `base.acFlags` is the shared header so a
+            // single write covers all elements.
             ((EnBb*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_DEKUNUTS:
-            // Mad Scrub — z_en_dekunuts.c:213 derefs
-            // `collider.info.acHitInfo->toucher.dmgFlags` unconditionally.
-            // Null-guard landed in the same commit as this case addition.
+            // Audit: ONE acHitInfo-> deref at z_en_dekunuts.c:213 —
+            //   `collider.info.acHitInfo->toucher.dmgFlags`
+            //   unconditionally. Null-guard landed in the same commit
+            //   as this case addition.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: collider.info.acHitInfo — read only inside the
+            //   null-guarded site at z_en_dekunuts.c:213; safe under
+            //   the guard.
             ((EnDekunuts*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_SSH: {
-            // En_Ssh — Skulltula sibling, identical multi-collider
-            // pattern to En_St. Same fix shape: AC_HIT on cyl [0] (body)
-            // and [1] (legs) ONLY — cyl [2] (front armor) is excluded
-            // because EnSsh_CollisionCheck calls EnSsh_CheckHitFront
-            // FIRST (z_en_ssh.c:543) and short-circuits when it fires.
-            // Front-shield AC_HIT is set ONLY by the armored-hit
-            // receiver branch above (handles isArmoredHit=true wire
-            // flag for sway anim sync).
-            //
-            // No acHitInfo deref in EnSsh_CheckHitBack or
-            // EnSsh_CheckHitFront — synthetic AC_HIT without real AT
-            // collider is safe (verified z_en_ssh.c:510-537 + 492-508).
+            // Audit: no acHitInfo deref in EnSsh_CheckHitBack or
+            //   EnSsh_CheckHitFront; safe synthetic AC_HIT bit-set on
+            //   cyl [0]/[1]. Verified z_en_ssh.c:510-537 and :492-508.
+            // Acks: colCylinder[0].base.acFlags & AC_HIT (body),
+            //   colCylinder[1].base.acFlags & AC_HIT (legs),
+            //   colChkInfo.damage, colChkInfo.damageEffect.
+            // Skips: colCylinder[2] (front shield) INTENTIONALLY EXCLUDED
+            //   from base bit-set — same shape as En_St. EnSsh_Collision
+            //   Check calls EnSsh_CheckHitFront FIRST (z_en_ssh.c:543) and
+            //   short-circuits when [2]'s AC_HIT is set. Front-shield
+            //   AC_HIT is set ONLY by the armored-hit receiver branch
+            //   above (handles isArmoredHit=true wire flag for sway anim
+            //   sync).
             //
             // Per user direction: EnSsh actors are intended as cursed-
             // human NPCs and shouldn't normally die. This fix ensures
             // damage/sway visual consistency between clients when they
-            // are hit; it doesn't change the gameplay design that
-            // these actors aren't part of the standard kill flow.
+            // are hit; doesn't change the gameplay design that these
+            // actors aren't part of the standard kill flow.
             EnSsh* ssh = (EnSsh*)actor;
             ssh->colCylinder[0].base.acFlags |= AC_HIT;
             ssh->colCylinder[1].base.acFlags |= AC_HIT;
             break;
         }
         case ACTOR_EN_TEST:
-            // bodyCollider — z_en_test.c:1666 reads AC_HIT here. swordCollider
-            // and shieldCollider are AT colliders (Stalfos hitting Link), not AC.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Verified 2026-06-07 via source
+            //   read — z_en_test.c:1666 reads bodyCollider AC_HIT.
+            // Acks: bodyCollider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Multi-collider: bodyCollider (AC) + swordCollider (AT) +
+            // shieldCollider (AT). The AT colliders are for Stalfos
+            // hitting Link and are not touched by this path.
             ((EnTest*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_GOMA:
-            // Bug B — Larva's damage block (z_en_goma.c:647) reads
-            // colCyl2.base.acFlags. acHitInfo is now NULL-guarded inside
-            // EnGoma_UpdateHit so the synthetic flag without an AT collider
-            // won't crash; the path falls through to the swordDamage branch
-            // and decrements health by 1.
+            // Audit: acHitInfo deref inside EnGoma_UpdateHit, now NULL-
+            //   guarded so the synthetic flag without an AT collider
+            //   won't crash. Larva's damage block at z_en_goma.c:647
+            //   reads colCyl2.base.acFlags. When acHitInfo is NULL the
+            //   path falls through to the swordDamage branch and
+            //   decrements health by 1.
+            // Acks: colCyl2.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: colCyl2 acHitInfo — read inside null-guarded site
+            //   in EnGoma_UpdateHit; safe under the guard.
             ((EnGoma*)actor)->colCyl2.base.acFlags |= AC_HIT;
             break;
         case ACTOR_BOSS_GOMA: {
+            // Audit: SPECIAL CASE — synthesises BOTH BUMP_HIT AND a static
+            //   acHitInfo with sword dmgFlags for the ceiling-state branch
+            //   (BossGoma_UpdateHit at z_boss_goma.c:1823 reads
+            //   acHitInfo->toucher.dmgFlags); floor-state branch bypasses
+            //   the vanilla collision pipeline entirely and writes
+            //   `boss->actor.colChkInfo.health` directly.
+            // Acks: collider.elements[0].info.bumperFlags & BUMP_HIT
+            //   (ceiling-state path), static fake ColliderInfo with sword
+            //   dmgFlags (ceiling-state path), boss->actor.colChkInfo
+            //   .health (floor-state direct write).
+            // Skips: standard collider.base.acFlags & AC_HIT path NOT
+            //   used — Boss Goma reads BUMP_HIT not AC_HIT in its damage
+            //   handler. The synthetic acHitInfo IS populated (only
+            //   admission that does so) so the deref at z_boss_goma.c:
+            //   1823 sees a valid ColliderInfo with sword damage flags.
+            //
             // Boss Gohma damage from non-host (#67 follow-up, log 299).
             //
             // Hybrid approach split by Goma's actionFunc state:
@@ -903,22 +998,32 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             break;
         }
         case ACTOR_EN_SKB:
-            // Stalchild damage block (z_en_skb.c:456) reads
-            // `collider.base.acFlags & 2` (AC_HIT). No acHitInfo->toucher
-            // deref — the actor branches on colChkInfo.damageEffect only,
-            // so the synthetic AC_HIT bit is safe without a fake AT
-            // collider. Fixes peer→host damage not registering when peer
-            // hits a Stalchild on Hyrule Field at night.
+            // Audit: no acHitInfo->toucher deref in damage path; safe
+            //   synthetic AC_HIT bit-set. Stalchild damage block
+            //   (z_en_skb.c:456) branches on colChkInfo.damageEffect
+            //   only.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Fixes peer→host damage not registering when peer hits a
+            // Stalchild on Hyrule Field at night.
             ((EnSkb*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_TITE:
-            // Tektite — z_en_tite.c:850 (EnTite_CheckDamage) reads
-            // `collider.base.acFlags & AC_HIT`. Single ColliderJntSph;
-            // colliderItem is the JntSph element (same physical collider
-            // — setting AC_HIT on the base flags is sufficient). No
-            // `base.ac->X` derefs in damage path. Covers both red
-            // (TEKTITE_RED, land+water) and blue (TEKTITE_BLUE,
-            // water-surface) variants uniformly.
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Verified per
+            //   `Plans/ApplySyncAcHitToActor_BaseAcAudit_2026-06-07.md`
+            //   pattern. EnTite_CheckDamage at z_en_tite.c:850 reads
+            //   collider.base.acFlags & AC_HIT.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Single ColliderJntSph; colliderItem is the JntSph element
+            // (same physical collider — setting AC_HIT on the base flags
+            // is sufficient). Covers both red (TEKTITE_RED, land+water)
+            // and blue (TEKTITE_BLUE, water-surface) variants uniformly.
             ((EnTite*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         default:
