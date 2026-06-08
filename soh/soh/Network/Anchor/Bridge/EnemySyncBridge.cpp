@@ -302,6 +302,25 @@ extern "C" bool Anchor_ShouldSuppressEnValiDrop(Actor* actor) {
         || ext->networkDriveDying;
 }
 
+// Receiver-side predicate — true when an En_Zf (Lizalfos / Dinolfos)
+// death cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the dying-anim → drop sequence). EnZf_UpdateDamage uses
+// this to suppress the random drop call (0x40 for Lizalfos / 0xE0 for
+// Dinolfos) so host's authoritative ITEM_DROP_SYNC isn't double-applied.
+// The `|| ext->networkDriveDying` clause mirrors the
+// Dekubaba / Firefly / Bili / Bb / Vali race mitigation — closes a
+// race when peer's vanilla EnZf_UpdateDamage consumes the same
+// ENEMY_STATE health<=0 read and calls SetupDie + the drop in the
+// same tick before ENEMY_DEFEATED arrives.
+// See z_en_zf.c EnZf_UpdateDamage.
+extern "C" bool Anchor_ShouldSuppressEnZfDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
+        || ext->networkDriveDying;
+}
+
 // Receiver-side predicate — true when an En_Mb (Moblin) death cycle was
 // network-driven (peer received ENEMY_DEFEATED and is replaying the
 // fall-on-back sequence via EnMb_SetupClubDead / EnMb_SetupSpearDead).

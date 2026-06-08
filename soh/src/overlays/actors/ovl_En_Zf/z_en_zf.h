@@ -121,4 +121,27 @@ typedef struct EnZf {
     /* 0x04FC */ Vec3f bodyPartsPos[9];
 } EnZf; // size = 0x0568
 
+// Anchor multiplayer state-machine sync (En_Zf — Lizalfos & Dinolfos).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp / HookHandlers.cpp), so the param name in
+// the declaration uses `actor` instead. The implementations in
+// z_en_zf.c keep `this` per OoT decomp convention. See Pitfall 1.
+void EnZf_SetupDyingNet(struct EnZf* actor, PlayState* play);
+s16  EnZf_GetStateIndex(struct EnZf* actor);
+void EnZf_ApplyNetState(struct EnZf* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the dying-anim → drop sequence). EnZf_UpdateDamage uses
+// this to skip Item_DropCollectibleRandom so host's authoritative
+// ITEM_DROP_SYNC isn't double-applied. Defined extern "C" in
+// Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnZfDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif
