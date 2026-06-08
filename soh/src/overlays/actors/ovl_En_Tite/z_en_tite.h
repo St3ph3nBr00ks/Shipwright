@@ -35,4 +35,13 @@ typedef struct EnTite {
     /* 0x036C */ Vec3f backLeftFootPos;
 } EnTite; // size = 0x0378
 
+// Anchor multiplayer state-machine sync.
+// Header decls use `actor` instead of `this` — Pitfall 1: `this` is a
+// C++ reserved keyword and z_en_tite.h is included from C++ TUs
+// (EnemyState.cpp, HookHandlers.cpp). The .c implementations keep the
+// `this` param name per OoT decomp convention.
+s16  EnTite_GetStateIndex(struct EnTite* actor);
+void EnTite_ApplyNetState(struct EnTite* actor, s16 stateIndex);
+void EnTite_SetupDyingNet(struct EnTite* actor, PlayState* play);
+
 #endif
