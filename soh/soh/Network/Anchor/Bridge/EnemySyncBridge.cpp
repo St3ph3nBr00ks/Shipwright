@@ -320,3 +320,20 @@ extern "C" bool Anchor_ShouldSuppressEnZfDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
         || ext->networkDriveDying;
 }
+
+// Receiver-side predicate — true when an En_Mb (Moblin) death cycle was
+// network-driven (peer received ENEMY_DEFEATED and is replaying the
+// fall-on-back sequence via EnMb_SetupClubDead / EnMb_SetupSpearDead).
+// EnMb_ClubDead and EnMb_SpearDead each call Item_DropCollectibleRandom
+// at the end of their dust/effect countdown; this predicate gates both
+// so host's authoritative ITEM_DROP_SYNC isn't double-applied. Mirrors
+// Anchor_ShouldSuppressEnTestDrop / EnWfDrop / EnIkDrop — combat-melee
+// enemies whose vanilla death cycle drops once at the end of an
+// extended fall animation.
+// See z_en_mb.c EnMb_ClubDead / EnMb_SpearDead.
+extern "C" bool Anchor_ShouldSuppressEnMbDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}

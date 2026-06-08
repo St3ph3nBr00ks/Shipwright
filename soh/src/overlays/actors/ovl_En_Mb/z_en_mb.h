@@ -50,4 +50,27 @@ typedef struct EnMb {
     /* 0x0454 */ ColliderTrisElement frontShieldingTris[2];
 } EnMb; // size = 0x050C
 
+// Anchor multiplayer state-machine sync (Moblin / en_mb sync work).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp / HookHandlers.cpp), so the param name in
+// the declaration uses `actor` instead. The implementations in
+// z_en_mb.c keep `this` per OoT decomp convention. (Pitfall 1.)
+void EnMb_SetupDyingNet(struct EnMb* actor, PlayState* play);
+s16  EnMb_GetStateIndex(struct EnMb* actor);
+void EnMb_ApplyNetState(struct EnMb* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and we're replaying
+// the natural fall sequence). Used by EnMb_ClubDead / EnMb_SpearDead
+// to skip Item_DropCollectibleRandom so host's authoritative
+// ITEM_DROP_SYNC isn't double-applied. Defined extern "C" in
+// Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnMbDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

@@ -79,6 +79,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Vali/z_en_vali.h"
 // En_Zf — Lizalfos + Dinolfos state-machine sync (Phase 2 wire-up).
 #include "overlays/actors/ovl_En_Zf/z_en_zf.h"
+// En_Mb — Moblin (Club / SpearGuard / SpearPatrol variants) state-machine sync.
+#include "overlays/actors/ovl_En_Mb/z_en_mb.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
@@ -229,6 +231,10 @@ struct EnemyUpdateExtras {
     // En_Zf — Lizalfos + Dinolfos state-machine sync.
     bool hasEnZf         = false;
     s16  enZfActionState = 0;
+
+    // En_Mb — Moblin (Club / SpearGuard / SpearPatrol variants) state-machine sync.
+    bool hasEnMb         = false;
+    s16  enMbActionState = 0;
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
@@ -524,6 +530,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnZf* zf            = (EnZf*)actor;
         e.hasEnZf           = true;
         e.enZfActionState   = EnZf_GetStateIndex(zf);
+    } else if (actor->id == ACTOR_EN_MB) {
+        EnMb* mb            = (EnMb*)actor;
+        e.hasEnMb           = true;
+        e.enMbActionState   = EnMb_GetStateIndex(mb);
     } else if (actor->id == ACTOR_EN_BB) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
@@ -678,6 +688,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnZf != prev.hasEnZf) return true;
     if (cur.hasEnZf) {
         if (cur.enZfActionState != prev.enZfActionState) return true;
+    }
+    if (cur.hasEnMb != prev.hasEnMb) return true;
+    if (cur.hasEnMb) {
+        if (cur.enMbActionState != prev.enMbActionState) return true;
     }
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
@@ -997,6 +1011,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enZfActionState);
             }
         }
+        if (extras.hasEnMb) {
+            s16 prev = prevExtras && prevExtras->hasEnMb ? prevExtras->enMbActionState : -1;
+            if (prev != extras.enMbActionState) {
+                SPDLOG_INFO("[EnMb] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enMbActionState);
+            }
+        }
         if (extras.hasEnBb) {
             s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
             if (prev != extras.enBbActionState) {
@@ -1217,6 +1238,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // En_Zf — Lizalfos + Dinolfos state-machine sync.
     if (extras.hasEnZf) {
         payload["actionState"] = extras.enZfActionState;
+    }
+
+    // En_Mb — Moblin (Club / SpearGuard / SpearPatrol) state-machine sync.
+    if (extras.hasEnMb) {
+        payload["actionState"] = extras.enMbActionState;
     }
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
@@ -1929,6 +1955,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // En_Zf — cache Lizalfos/Dinolfos actionState.
         if (actor->id == ACTOR_EN_ZF && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // En_Mb — cache Moblin actionState.
+        if (actor->id == ACTOR_EN_MB && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
@@ -2678,6 +2708,28 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnZf netId={} — triggering natural death cycle", netId);
                     EnZf_SetupDyingNet((EnZf*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Mb (Moblin — Club / SpearGuard / SpearPatrol): route
+                // through EnMb_SetupDyingNet so the variant-correct
+                // SetupClubDead vs SetupSpearDead branch fires on the
+                // receiver. The fall-on-back drop is gated by
+                // Anchor_ShouldSuppressEnMbDrop — host's authoritative
+                // ITEM_DROP_SYNC handles the drop. EnMb_*Dead fires
+                // OnEnemyDefeat, but the HostBookkeeping HasDefeatBroadcast
+                // dedup at the send site prevents an echo back to host.
+                if (actor->id == ACTOR_EN_MB) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnMb.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnMb netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnMb netId={} — triggering natural death cycle", netId);
+                    EnMb_SetupDyingNet((EnMb*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
