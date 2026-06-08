@@ -91,6 +91,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Po_Field/z_en_po_field.h"
 // En_Vm — Beamos turret state-machine sync.
 #include "overlays/actors/ovl_En_Vm/z_en_vm.h"
+// En_Fw — Flare Dancer core/wisp state-machine sync (child of En_Fd, #100).
+#include "overlays/actors/ovl_En_Fw/z_en_fw.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
@@ -265,6 +267,11 @@ struct EnemyUpdateExtras {
     // En_Vm — Beamos turret state-machine sync (Wait / Attack / Stun / Die).
     bool hasEnVm         = false;
     s16  enVmActionState = 0;
+
+    // En_Fw — Flare Dancer core/wisp state-machine sync
+    // (Bounce / Run / TurnToParentInitPos / JumpToParentInitPos), #100.
+    bool hasEnFw         = false;
+    s16  enFwActionState = 0;
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
@@ -584,6 +591,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnVm* vm           = (EnVm*)actor;
         e.hasEnVm          = true;
         e.enVmActionState  = EnVm_GetStateIndex(vm);
+    } else if (actor->id == ACTOR_EN_FW) {
+        EnFw* fw           = (EnFw*)actor;
+        e.hasEnFw          = true;
+        e.enFwActionState  = EnFw_GetStateIndex(fw);
     } else if (actor->id == ACTOR_EN_BB) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
@@ -762,6 +773,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnVm != prev.hasEnVm) return true;
     if (cur.hasEnVm) {
         if (cur.enVmActionState != prev.enVmActionState) return true;
+    }
+    if (cur.hasEnFw != prev.hasEnFw) return true;
+    if (cur.hasEnFw) {
+        if (cur.enFwActionState != prev.enFwActionState) return true;
     }
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
@@ -1123,6 +1138,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enVmActionState);
             }
         }
+        if (extras.hasEnFw) {
+            s16 prev = prevExtras && prevExtras->hasEnFw ? prevExtras->enFwActionState : -1;
+            if (prev != extras.enFwActionState) {
+                SPDLOG_INFO("[EnFw] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enFwActionState);
+            }
+        }
         if (extras.hasEnBb) {
             s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
             if (prev != extras.enBbActionState) {
@@ -1373,6 +1395,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // En_Vm — Beamos turret state-machine sync.
     if (extras.hasEnVm) {
         payload["actionState"] = extras.enVmActionState;
+    }
+
+    // En_Fw — Flare Dancer core/wisp state-machine sync (#100).
+    if (extras.hasEnFw) {
+        payload["actionState"] = extras.enFwActionState;
     }
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
@@ -2109,6 +2136,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // En_Vm — cache Beamos actionState.
         if (actor->id == ACTOR_EN_VM && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // En_Fw — cache Flare Dancer core/wisp actionState (#100).
+        if (actor->id == ACTOR_EN_FW && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
@@ -2988,6 +3019,30 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnVm netId={} — triggering natural death cycle", netId);
                     EnVm_SetupDyingNet((EnVm*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Fw (Flare Dancer core/wisp): route through
+                // EnFw_SetupDyingNet so the explosion-countdown sequence
+                // inside EnFw_Run plays naturally on peer (bomb spawn +
+                // FLG_COREDEAD signal-back + Actor_Kill). The 0xA0 random
+                // drop in that sequence is gated by
+                // Anchor_ShouldSuppressEnFwDrop; the bomb spawn is
+                // intentionally NOT gated (per-client; future
+                // EXPLOSIVE_SPAWN family). The FLG_COREDEAD bit-set on
+                // parent En_Fd fires locally on each client (peer's En_Fd
+                // parent receives signal from peer's local En_Fw mirror).
+                if (actor->id == ACTOR_EN_FW) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnFw.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnFw netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnFw netId={} — triggering natural death cycle", netId);
+                    EnFw_SetupDyingNet((EnFw*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;

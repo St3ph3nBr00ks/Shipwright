@@ -51,6 +51,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Po_Field/z_en_po_field.h"
 // En_Vm — Beamos AC_HIT routing (synthetic injection on quad2 reflection).
 #include "src/overlays/actors/ovl_En_Vm/z_en_vm.h"
+// En_Fw — Flare Dancer core/wisp AC_HIT routing (#100).
+#include "src/overlays/actors/ovl_En_Fw/z_en_fw.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
@@ -834,6 +836,29 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // is host-authoritative for outgoing AT hits; blockCollider
             // is shield-deflection only. Set AC_HIT on bodyCollider only.
             ((EnGeldB*)actor)->bodyCollider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_FW:
+            // Audit: ONE acHitInfo-> deref at z_en_fw.c:214 inside
+            //   EnFw_CheckCollider — `info->acHitInfo->toucher.dmgFlags &
+            //   0x80` reads the hookshot-damage bit to set lastDmgHook.
+            //   Null-guard landed in the agent's Phase 1 commit
+            //   (`e9d600f59`) at the same line.
+            // Acks: collider.base.acFlags & AC_HIT (consumed by
+            //   EnFw_CheckCollider at z_en_fw.c:209), colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: collider.elements[0].info.acHitInfo — read only
+            //   inside the null-guarded site at z_en_fw.c:214; safe under
+            //   the guard. The `lastDmgHook` flag falls back to false
+            //   when acHitInfo is NULL (synthetic AC_HIT path), which
+            //   means a Race-B-applied hit is treated as a non-hookshot
+            //   hit even if the original peer-side hit was hookshot.
+            //   Hookshot pulls En_Fw via ACTOR_FLAG_HOOKSHOT_PULLS_ACTOR;
+            //   that flag fires locally on peer's machine via the
+            //   hookshot's own collision, independent of Race-B.
+            //
+            // ColliderJntSph — base.acFlags is the shared header so a
+            // single write covers all elements.
+            ((EnFw*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_VM:
             // Audit: no base.ac->/acHitInfo-> derefs in damage path. Verified
