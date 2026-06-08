@@ -766,13 +766,32 @@ static Player* EnSw_PickLungeTarget(EnSw* this, PlayState* play, s32 arg2) {
     s32 sp54;
     Vec3f sp48;
 
-    // #148 follow-up diag — log 445 showed P1 climbed 21s without any
+    // #148 follow-up diag v2 — log 445 showed P1 climbed 21s without any
     // lunge attempt. User reports P1 was within arc + within 60u. Rate-
     // limited (once per 60 frames per actor) per-candidate rejection log
-    // pinpoints which gate fails. Remove after the cause is identified.
+    // pinpoints which gate fails. v2 enhancements:
+    //   1. home.pos prefix on every line (correlate to SceneLog [Spawn]
+    //      lines so we know WHICH of the 3 En_Sw instances we're seeing).
+    //   2. State-6 entry log (separate, in func_80B0E5E0) — confirms the
+    //      predicate is even being invoked from that state on a given
+    //      frame.
+    //   3. Climb-state breakdown: log CLIMBING_LADDER + HANGING_OFF_LEDGE
+    //      + CLIMBING_LEDGE bits separately on every iteration so we can
+    //      tell if Follower's "climbing" log fires while En_Sw correctly
+    //      rejects a ledge-class climb.
+    //   4. Arc-math decomposition: raw Math_Vec3f_Yaw, raw Math_Vec3f_
+    //      Pitch, the intermediates (wallRelYaw, pitchOffset), and final
+    //      arc value — lets us trace WHY the angle math gives whatever
+    //      it gives for a "visually in front" player.
+    //   5. stateFlags1 always logged (not just on climb-fail), so we
+    //      see it for PASS cases too.
     s32 emitDiag = (arg2 == 1) && ((play->state.frames % 60) == 0);
+    int hx = (int)this->actor.home.pos.x;
+    int hy = (int)this->actor.home.pos.y;
+    int hz = (int)this->actor.home.pos.z;
     if (emitDiag) {
-        LUSLOG_INFO("[EnSw.diag] pick enter pos=(%.0f,%.0f,%.0f) rot.z=%d wallYaw=%d n=%d unk_442=%d",
+        LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) pick pos=(%.0f,%.0f,%.0f) rot.z=%d wallYaw=%d n=%d unk_442=%d",
+                    hx, hy, hz,
                     this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z,
                     this->actor.shape.rot.z, this->actor.wallYaw, n, this->unk_442);
     }
@@ -780,46 +799,64 @@ static Player* EnSw_PickLungeTarget(EnSw* this, PlayState* play, s32 arg2) {
     for (int i = 0; i < n; i++) {
         Player* p = (Player*)candidates[i];
         if (p == NULL) {
-            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] NULL", i);
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] NULL", hx, hy, hz, i);
             continue;
         }
         if (p->actor.world.pos.y <= -9000.0f) {
-            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] sentinel pos=(%.0f,%.0f,%.0f)",
-                                       i, p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z);
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] SKIP sentinel pos=(%.0f,%.0f,%.0f)",
+                                       hx, hy, hz, i,
+                                       p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z);
             continue;
         }
-        if (!(p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) {
-            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL climb sf1=0x%08X pos=(%.0f,%.0f,%.0f)",
-                                       i, p->stateFlags1, p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z);
+
+        // Compute every gate's input up-front so the per-iteration diag
+        // can log them regardless of which gate fails first.
+        s32 climbLadder = (p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER)   != 0 ? 1 : 0;
+        s32 hangLedge   = (p->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) != 0 ? 1 : 0;
+        s32 climbLedge  = (p->stateFlags1 & PLAYER_STATE1_CLIMBING_LEDGE)    != 0 ? 1 : 0;
+        s16 rawYaw      = Math_Vec3f_Yaw(&this->actor.world.pos, &p->actor.world.pos);
+        s16 rawPitch    = Math_Vec3f_Pitch(&this->actor.world.pos, &p->actor.world.pos);
+        s16 wallRelYaw  = rawYaw - this->actor.wallYaw;
+        s16 pitchOffset = rawPitch - 0x4000;
+        s16 arc         = pitchOffset * (wallRelYaw >= 0 ? -1 : 1);
+        s16 arcDelta    = ABS(arc - this->actor.shape.rot.z);
+        f32 dist        = Math_Vec3f_DistXYZ(&this->actor.world.pos, &p->actor.world.pos);
+
+        if (emitDiag) {
+            LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] pos=(%.0f,%.0f,%.0f) sf1=0x%08X climb(L=%d H=%d E=%d) dist=%.1f",
+                        hx, hy, hz, i,
+                        p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z,
+                        p->stateFlags1, climbLadder, hangLedge, climbLedge, dist);
+            LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] arc rawYaw=%d rawPitch=%d wallRelYaw=%d pitchOff=%d arc=%d arcDelta=%d",
+                        hx, hy, hz, i,
+                        rawYaw, rawPitch, wallRelYaw, pitchOffset, arc, arcDelta);
+        }
+
+        if (!climbLadder && arg2) {
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] FAIL climb", hx, hy, hz, i);
             continue;
         }
         if (func_8002DDF4(play) && arg2) {
-            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL cutscene", i);
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] FAIL cutscene", hx, hy, hz, i);
             continue;
         }
-        s16 arc = func_80B0DE34(this, &p->actor.world.pos);
-        s16 arcDelta = ABS(arc - this->actor.shape.rot.z);
         if (arcDelta >= 0x1FC2) {
-            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL arc arc=%d rot.z=%d delta=%d",
-                                       i, arc, this->actor.shape.rot.z, arcDelta);
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] FAIL arc", hx, hy, hz, i);
             continue;
         }
-        f32 dist = Math_Vec3f_DistXYZ(&this->actor.world.pos, &p->actor.world.pos);
         if (dist >= 130.0f) {
-            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL dist=%.1f", i, dist);
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] FAIL dist", hx, hy, hz, i);
             continue;
         }
         if (BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &p->actor.world.pos,
                                     &sp48, &sp58, true, false, false, true, &sp54)) {
-            if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] FAIL LoS pos=(%.0f,%.0f,%.0f) dist=%.1f",
-                                       i, p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z, dist);
+            if (emitDiag) LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] FAIL LoS", hx, hy, hz, i);
             continue;
         }
-        if (emitDiag) LUSLOG_INFO("[EnSw.diag] cand[%d] PASS pos=(%.0f,%.0f,%.0f) dist=%.1f arcDelta=%d",
-                                   i, p->actor.world.pos.x, p->actor.world.pos.y, p->actor.world.pos.z, dist, arcDelta);
+        if (emitDiag) LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) cand[%d] PASS", hx, hy, hz, i);
         return p;
     }
-    if (emitDiag) LUSLOG_INFO("[EnSw.diag] pick returns NULL (n=%d)", n);
+    if (emitDiag) LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) pick returns NULL (n=%d)", hx, hy, hz, n);
     return NULL;
 }
 
@@ -934,6 +971,20 @@ s32 func_80B0E430(EnSw* this, f32 arg1, s16 arg2, s32 arg3, PlayState* play) {
 void func_80B0E5E0(EnSw* this, PlayState* play) {
     s32 pad[2];
     f32 rand;
+
+    // #148 follow-up diag v2 — state-6 entry log. Fires once per 60
+    // frames per actor independent of unk_442. Confirms whether state 6
+    // is currently the actionFunc (vs the predicate-call log inside
+    // EnSw_PickLungeTarget, which only fires when the predicate is
+    // actually invoked). If state-6 entry logs appear but no pick logs,
+    // unk_442 is gating the predicate. If neither appear, the actor is
+    // in a non-combat state.
+    if ((play->state.frames % 60) == 0) {
+        LUSLOG_INFO("[EnSw.diag] home=(%d,%d,%d) state6 entry unk_442=%d unk_388=%d rot.z=%d wallYaw=%d (predicate fires when unk_442<=1)",
+                    (int)this->actor.home.pos.x, (int)this->actor.home.pos.y, (int)this->actor.home.pos.z,
+                    this->unk_442, this->unk_388,
+                    this->actor.shape.rot.z, this->actor.wallYaw);
+    }
 
     if (func_80B0E430(this, 6.0f, 0x3E8, 1, play)) {
         rand = Rand_ZeroOne();
