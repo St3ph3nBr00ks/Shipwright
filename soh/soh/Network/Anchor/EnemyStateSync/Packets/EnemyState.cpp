@@ -73,6 +73,13 @@ extern "C" {
 // #107 / en_peehat_sync_plan.md - Peahat (En_Peehat) state-machine sync.
 #include "overlays/actors/ovl_En_Peehat/z_en_peehat.h"
 
+// #137 / en_eiyer_sync_plan — Stinger (En_Eiyer) state-machine sync.
+// Split-axis world.pos handling: states 4/5/9 (Ambush/Glide/Hurt) write
+// `world.pos.y = basePos.y +/- cos/sin offset`. Skipping Y overwrite +
+// syncing basePos.y over the wire keeps the local Y bob math in lockstep
+// with the host without per-frame Y-jitter overwriting peer's cos curve.
+#include "overlays/actors/ovl_En_Eiyer/z_en_eiyer.h"
+
 // #128 / en_bili_sync_plan.md — Biri jellyfish (En_Bili) state-machine sync.
 #include "overlays/actors/ovl_En_Bili/z_en_bili.h"
 // #126 — Bari big jellyfish (En_Vali) state-machine sync.
@@ -231,6 +238,15 @@ struct EnemyUpdateExtras {
     // #107 / en_peehat_sync_plan.md - En_Peehat (Peahat) state-machine sync.
     bool hasEnPeehat         = false;
     s16  enPeehatActionState = 0;
+
+    // #137 / en_eiyer_sync_plan — En_Eiyer (Stinger) state-machine sync.
+    // Plus `basePos.y` (f32) — drives the local Y-bob cos curve in
+    // Glide (state 5) + Hurt (state 9). Without this, peer's local
+    // EnEiyer_Glide computes a different floor-relative hover height
+    // than host and the actor's apparent altitude drifts ~5u.
+    bool hasEnEiyer         = false;
+    s16  enEiyerActionState = 0;
+    f32  enEiyerBasePosY    = 0.0f;
 
     // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
     bool hasEnBili         = false;
@@ -555,6 +571,11 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.hasEnPeehat            = true;
         e.enPeehatActionState    = EnPeehat_GetStateIndex(ph);
 
+    } else if (actor->id == ACTOR_EN_EIYER) {
+        EnEiyer* ei             = (EnEiyer*)actor;
+        e.hasEnEiyer            = true;
+        e.enEiyerActionState    = EnEiyer_GetStateIndex(ei);
+        e.enEiyerBasePosY       = ei->basePos.y;
     } else if (actor->id == ACTOR_EN_BILI) {
         EnBili* bili            = (EnBili*)actor;
         e.hasEnBili             = true;
@@ -737,6 +758,15 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnPeehat != prev.hasEnPeehat) return true;
     if (cur.hasEnPeehat) {
         if (cur.enPeehatActionState != prev.enPeehatActionState) return true;
+    }
+    if (cur.hasEnEiyer != prev.hasEnEiyer) return true;
+    if (cur.hasEnEiyer) {
+        if (cur.enEiyerActionState != prev.enEiyerActionState) return true;
+        // basePos.y drifts smoothly via Math_ApproachF in Glide; use a
+        // 1.0u epsilon so micro-fluctuations don't dominate the wire.
+        // State 4/5/9 are the only states that actually consume basePos.y,
+        // but cheap diff trumps state-gating here.
+        if (fabsf(cur.enEiyerBasePosY - prev.enEiyerBasePosY) >= 1.0f) return true;
     }
     if (cur.hasEnBili != prev.hasEnBili) return true;
     if (cur.hasEnBili) {
@@ -1075,6 +1105,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enPeehatActionState);
             }
         }
+        if (extras.hasEnEiyer) {
+            s16 prev = prevExtras && prevExtras->hasEnEiyer ? prevExtras->enEiyerActionState : -1;
+            if (prev != extras.enEiyerActionState) {
+                SPDLOG_INFO("[EnEiyer] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enEiyerActionState);
+            }
+        }
         if (extras.hasEnBili) {
             s16 prev = prevExtras && prevExtras->hasEnBili ? prevExtras->enBiliActionState : -1;
             if (prev != extras.enBiliActionState) {
@@ -1350,6 +1387,15 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #107 / en_peehat_sync_plan.md §3 — En_Peehat (Peahat) state-machine sync.
     if (extras.hasEnPeehat) {
         payload["actionState"] = extras.enPeehatActionState;
+    }
+
+    // #137 / en_eiyer_sync_plan — En_Eiyer (Stinger) state-machine sync.
+    // basePos.y is sent alongside actionState — small (4 bytes) and the
+    // receiver applies it directly to ei->basePos.y so the local cos-curve
+    // hover math in Glide / Hurt matches the host's authoritative ceiling.
+    if (extras.hasEnEiyer) {
+        payload["actionState"]    = extras.enEiyerActionState;
+        payload["enEiyerBasePosY"] = extras.enEiyerBasePosY;
     }
 
     // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
@@ -2101,6 +2147,18 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         // #107 / en_peehat_sync_plan.md — cache En_Peehat (Peahat) actionState.
         if (actor->id == ACTOR_EN_PEEHAT && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // #137 / en_eiyer_sync_plan — cache En_Eiyer (Stinger) actionState
+        // + apply basePos.y directly to the local actor so the Glide /
+        // Hurt cos-curve hover math tracks host's authoritative ceiling.
+        if (actor->id == ACTOR_EN_EIYER) {
+            if (payload.contains("actionState")) {
+                ext->netStateIndex = (s16)payload["actionState"].get<int>();
+            }
+            if (payload.contains("enEiyerBasePosY")) {
+                EnEiyer* ei = (EnEiyer*)actor;
+                ei->basePos.y = payload["enEiyerBasePosY"].get<float>();
+            }
         }
         // #128 / en_bili_sync_plan.md — cache En_Bili (Biri) actionState.
         if (actor->id == ACTOR_EN_BILI && payload.contains("actionState")) {

@@ -72,6 +72,13 @@ extern "C" {
 // path (verified per Plans/ApplySyncAcHitToActor_BaseAcAudit_2026-06-07.md
 // pattern). Safe direct AC_HIT bit-set.
 #include "src/overlays/actors/ovl_En_Tite/z_en_tite.h"
+// #137 / en_eiyer_sync_plan — En_Eiyer (Stinger, flying jellyfish in
+// Jabu-Jabu's Belly + Water Temple). Single ColliderCylinder at `collider`.
+// Damage gate at z_en_eiyer.c:608 (EnEiyer_UpdateDamage) reads
+// `collider.base.acFlags & AC_HIT`. No `base.ac->X` derefs in damage
+// path — branches on colChkInfo.damageEffect / damage / bumper.dmgFlags
+// only. Safe direct AC_HIT bit-set.
+#include "src/overlays/actors/ovl_En_Eiyer/z_en_eiyer.h"
 // Boss_Goma — non-host damage requires synthesised acHitInfo + BUMP_HIT
 // because BossGoma_UpdateHit (z_boss_goma.c:1823) gates on bumperFlags &
 // BUMP_HIT (not AC_HIT) and dereferences acHitInfo->toucher.dmgFlags.
@@ -1164,6 +1171,17 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // is sufficient). Covers both red (TEKTITE_RED, land+water)
             // and blue (TEKTITE_BLUE, water-surface) variants uniformly.
             ((EnTite*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_EIYER:
+            // Stinger — z_en_eiyer.c:608 (EnEiyer_UpdateDamage) reads
+            // `collider.base.acFlags & AC_HIT`. Single ColliderCylinder.
+            // No `base.ac->X` derefs in damage path — branches on
+            // colChkInfo.damageEffect / damage / bumper.dmgFlags only
+            // (verified by source grep). Safe direct AC_HIT bit-set.
+            // Note: the underground variant (bumper.dmgFlags == 0x19)
+            // is one-hit-kill from any non-deku-nut hit, including 0
+            // damage — vanilla intentional.
+            ((EnEiyer*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         default:
             // No AC_HIT setter for this actor type. Damage is delivered via

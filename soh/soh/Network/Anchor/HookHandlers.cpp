@@ -84,6 +84,9 @@ extern "C" {
 // #107 / en_peehat_sync_plan.md - Peahat (En_Peehat) state-machine sync.
 #include "src/overlays/actors/ovl_En_Peehat/z_en_peehat.h"
 
+// #137 / en_eiyer_sync_plan — Stinger (En_Eiyer) state-machine sync.
+#include "src/overlays/actors/ovl_En_Eiyer/z_en_eiyer.h"
+
 // #128 / en_bili_sync_plan.md — Biri jellyfish (En_Bili) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
 // #126 — Bari big jellyfish (En_Vali) state-machine sync.
@@ -2325,8 +2328,30 @@ void Anchor::RegisterHooks() {
                                                    actor->id == ACTOR_EN_NUTSBALL ||
                                                    actor->id == ACTOR_EN_HINTNUTS ||
                                                    actor->id == ACTOR_EN_BB);
+                // #137 — En_Eiyer is split-axis (XZ host-authoritative; Y
+                // is locally computed each frame as basePos.y +/- cos/sin
+                // offset in states 4 Ambush / 5 Glide / 9 Hurt). basePos.y
+                // itself ships in ENEMY_STATE extras and is applied
+                // directly to ei->basePos.y in the receiver — see
+                // EnemyState.cpp's ACTOR_EN_EIYER receive block. Outside
+                // those three states the Eiyer either rotates around
+                // home.pos (states 0-3 dormant) or moves via Actor_MoveXYZ
+                // and standard `world.pos` overwrite is fine.
+                bool eiyerSkipPosY = false;
+                if (actor->id == ACTOR_EN_EIYER && ext->netStateIndex >= 0) {
+                    s16 s = ext->netStateIndex;
+                    eiyerSkipPosY = (s == 4 || s == 5 || s == 9);
+                }
                 if (!isAnimationDrivenPos && !arrowPinned) {
-                    actor->world.pos = ext->netPos;
+                    if (eiyerSkipPosY) {
+                        // Sync XZ from host; preserve local Y (the
+                        // actor's own update() rewrites it from the
+                        // synced basePos.y on the next tick).
+                        actor->world.pos.x = ext->netPos.x;
+                        actor->world.pos.z = ext->netPos.z;
+                    } else {
+                        actor->world.pos = ext->netPos;
+                    }
                     actor->shape.rot = ext->netShapeRot;
                 }
                 actor->world.rot = ext->netRot;
@@ -3070,6 +3095,44 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnPeehat] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // #137 / en_eiyer_sync_plan — En_Eiyer (Stinger) state-machine
+            // sync. Dormant filter: states 0-3 (AppearFromGround /
+            // underground patrol / Inactive) shouldn't override active
+            // states 4-9 (Ambush / Glide / StartAttack / DiveAttack /
+            // Land / Hurt) or Stunned (12). Death states 10 (Die) /
+            // 11 (Dead) gated by PhaseImpliesHasLocalDeath — peer's
+            // termination is driven by ENEMY_DEFEATED + Actor_Kill;
+            // ITEM_DROP_SYNC handles drops. ApplyNetState's death case
+            // is also a no-op for those states so the call is defensive.
+            //
+            // Note: world.pos.y is skipped for states 4/5/9 above (see
+            // the eiyerSkipPosY branch in the re-apply block). basePos.y
+            // is applied directly in EnemyState.cpp's receive block so
+            // the local Glide / Hurt cos hover math tracks host.
+            if (actor->id == ACTOR_EN_EIYER && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnEiyer* ei = (EnEiyer*)actor;
+                s16 curState = EnEiyer_GetStateIndex(ei);
+                bool netIsDormant  = (ext->netStateIndex >= 0 && ext->netStateIndex <= 3);
+                bool localIsActive = (curState >= 4 && curState <= 9) || curState == 12;
+                bool deathStateNet = (ext->netStateIndex == 10 || ext->netStateIndex == 11);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnEiyer] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnEiyer_ApplyNetState(ei, gPlayState, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnEiyer] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }

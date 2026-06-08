@@ -720,3 +720,65 @@ void EnEiyer_Draw(Actor* thisx, PlayState* play) {
     }
     CLOSE_DISPS(play->state.gfxCtx);
 }
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (#137 / en_eiyer_sync_plan).
+//
+// State map — order of declaration in z_en_eiyer.c lines 26-38:
+//   0  AppearFromGround      dormant transit (hover-up from underground)
+//   1  WanderUnderground     dormant patrol (params == 0xA, single Eiyer)
+//   2  CircleUnderground     dormant patrol (params 0-3, clone formation)
+//   3  Inactive              dormant idle (clones when main is killed)
+//   4  Ambush                ACTIVE — leap from underground (split-axis Y)
+//   5  Glide                 ACTIVE — flying over track (split-axis Y, bob)
+//   6  StartAttack           ACTIVE — pitch toward player
+//   7  DiveAttack            ACTIVE — diving lunge
+//   8  Land                  ACTIVE — touchdown after dive
+//   9  Hurt                  ACTIVE — knockback recovery (split-axis Y)
+//  10  Die                   death — spin + fall
+//  11  Dead                  death — fade + drop collectible + Actor_Kill
+//  12  Stunned               status — boomerang/deku stun
+//
+// Split-axis states (4, 5, 9) skip world.pos.y overwrite on non-host;
+// `basePos.y` is wired through ENEMY_STATE so each client's local Y bob
+// math (cos / SmoothStepTo) tracks the same authoritative ceiling.
+// =============================================================================
+
+s16 EnEiyer_GetStateIndex(EnEiyer* this) {
+    if (this->actionFunc == EnEiyer_AppearFromGround)   return 0;
+    if (this->actionFunc == EnEiyer_WanderUnderground)  return 1;
+    if (this->actionFunc == EnEiyer_CircleUnderground)  return 2;
+    if (this->actionFunc == EnEiyer_Inactive)           return 3;
+    if (this->actionFunc == EnEiyer_Ambush)             return 4;
+    if (this->actionFunc == EnEiyer_Glide)              return 5;
+    if (this->actionFunc == EnEiyer_StartAttack)        return 6;
+    if (this->actionFunc == EnEiyer_DiveAttack)         return 7;
+    if (this->actionFunc == EnEiyer_Land)               return 8;
+    if (this->actionFunc == EnEiyer_Hurt)               return 9;
+    if (this->actionFunc == EnEiyer_Die)                return 10;
+    if (this->actionFunc == EnEiyer_Dead)               return 11;
+    if (this->actionFunc == EnEiyer_Stunned)            return 12;
+    return -1;
+}
+
+void EnEiyer_ApplyNetState(EnEiyer* this, PlayState* play, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  EnEiyer_SetupAppearFromGround(this);    break;
+        case 1:
+        case 2:  EnEiyer_SetupUnderground(this);         break;
+        case 3:  EnEiyer_SetupInactive(this);            break;
+        case 4:  EnEiyer_SetupAmbush(this, play);        break;
+        case 5:  EnEiyer_SetupGlide(this);               break;
+        case 6:  EnEiyer_SetupStartAttack(this);         break;
+        case 7:  EnEiyer_SetupDiveAttack(this, play);    break;
+        case 8:  EnEiyer_SetupLand(this);                break;
+        case 9:  EnEiyer_SetupHurt(this);                break;
+        case 12: EnEiyer_SetupStunned(this);             break;
+        // Death states 10 (Die) / 11 (Dead) intentionally skipped — peer's
+        // termination is driven by ENEMY_DEFEATED + Actor_Kill; the natural
+        // Die→Dead cycle locally calls Item_DropCollectibleRandom which
+        // would double-spawn drops if invoked here. ITEM_DROP_SYNC handles
+        // drop replication. Mirrors En_Skb / En_Sw treatment.
+        default: break;
+    }
+}

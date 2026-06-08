@@ -20,4 +20,12 @@ typedef struct EnEiyer {
     /* 0x0288 */ ColliderCylinder collider;
 } EnEiyer; // size = 0x02D4
 
+// Anchor multiplayer state-machine sync (#137 / en_eiyer_sync_plan).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp, HookHandlers.cpp), so the param name in the
+// declaration uses `actor`. Implementations in z_en_eiyer.c keep `this`
+// per OoT decomp convention.
+s16  EnEiyer_GetStateIndex(struct EnEiyer* actor);
+void EnEiyer_ApplyNetState(struct EnEiyer* actor, PlayState* play, s16 stateIndex);
+
 #endif
