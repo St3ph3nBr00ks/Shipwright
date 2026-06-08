@@ -2063,9 +2063,31 @@ void Anchor::RegisterHooks() {
                 // En_Nutsball is excluded so peer's local trajectory toward
                 // peer's local Link's shield isn't overridden by host's
                 // (different) nut path — see EnemyState.cpp companion comment.
+                //
+                // En_Hintnuts is excluded for a SIBLING reason (log 439):
+                // shape.rot.y drives the nutball aim at Animation_OnFrame(6.0f).
+                // Each client's local EnHintnuts_ThrowNut runs
+                // Math_ApproachS(shape.rot.y, yawToNearest, 2, 0xE38), where
+                // yawToNearest is computed against `Anchor_GetNearestPlayerActor`
+                // — which returns DIFFERENT players on each client (host's view
+                // sees P1+P2-DummyPlayer; peer's view sees P2+P1-DummyPlayer).
+                // Without this exclusion the ~20pps ENEMY_STATE broadcast stomps
+                // peer's local Math_ApproachS progress every frame, so peer's
+                // hintnut ends up facing host's chosen target every Animation
+                // frame 6 → peer's nutball flies at where P1 DummyPlayer is on
+                // peer's machine instead of at P2's own Link. Even with P2
+                // standing still + shield up, the projectile flies past.
+                // Excluding shape.rot lets each client's local aim run
+                // unimpeded. world.pos exclusion is also safe — Hintnut only
+                // writes world.pos = home.pos at SetupWait (z_en_hintnuts.c:141),
+                // identical on both clients. Visual divergence (host sees its
+                // hintnut facing host's nearest; peer sees its hintnut facing
+                // peer's nearest) is the INTENDED gameplay shape — "the scrub
+                // is aiming at YOU" matches the per-player single-player feel.
                 const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
                                                    actor->id == ACTOR_EN_KAREBABA ||
-                                                   actor->id == ACTOR_EN_NUTSBALL);
+                                                   actor->id == ACTOR_EN_NUTSBALL ||
+                                                   actor->id == ACTOR_EN_HINTNUTS);
                 if (!isAnimationDrivenPos && !arrowPinned) {
                     actor->world.pos = ext->netPos;
                     actor->shape.rot = ext->netShapeRot;
