@@ -15,6 +15,58 @@
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_HOOKSHOT_PULLS_ACTOR)
 
+// Anchor multiplayer (En_Fw — Flare Dancer core/wisp) — defined in
+// Bridge/EnemySyncBridge.cpp. Forward-declare here (plain `extern`,
+// NOT `extern "C"` — this is a .c file and C-linkage is implicit).
+// Per Pitfall 7.
+extern bool Anchor_ShouldSuppressEnFwDrop(Actor* actor);
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
+// Anchor multiplayer — peer-side parent-pointer reconciliation.
+// Host's EnFd_SpawnCore (gated by Anchor_IsCurrentRoomHost) calls
+// Actor_SpawnAsChild(ACTOR_EN_FW, ...), so the host's En_Fw has a
+// correct local parent En_Fd. Peer's En_Fw arrives via the standard
+// ENEMY_SPAWN broadcast which uses Actor_Spawn (not Actor_SpawnAsChild),
+// so peer's actor.parent = NULL at Init time. En_Fw heavily derefs
+// actor.parent->{home.pos,colChkInfo.health,params,world.pos} at
+// z_en_fw.c:135, 151-153, 157, 176-180, 234, 241, 269-270, 288, 343,
+// 358, 361, 362, 371, 386, 389-390. Surviving EnFw_Bounce (~30 frames)
+// then crashing in EnFw_Run on the first parent deref is the failure
+// mode the En_Fw Phase 1 commit body called out.
+//
+// Reconciliation strategy: at the top of EnFw_Update, if actor.parent
+// is NULL, walk ACTORCAT_ENEMY for the closest ACTOR_EN_FD. Designer-
+// placed En_Fd / En_Fw pairs are spatially co-located, so closest-by-
+// position gives the deterministic match between host and peer.
+//
+// Why a defensive per-frame check instead of one-shot at Init: peer's
+// En_Fd may not be present yet at the exact frame ENEMY_SPAWN spawns
+// En_Fw (load order between dynamic spawn replay and static scene
+// actor init can vary). The cost is negligible (a handful of actor-
+// list walks during the brief NULL window).
+static void EnFw_ReconcileParentPointer(EnFw* this, PlayState* play) {
+    if (this->actor.parent != NULL) return;
+    Actor* it = play->actorCtx.actorLists[ACTORCAT_ENEMY].head;
+    Actor* best = NULL;
+    f32 bestDistSq = 1e9f;
+    while (it != NULL) {
+        if (it->id == ACTOR_EN_FD) {
+            f32 dx = it->world.pos.x - this->actor.world.pos.x;
+            f32 dy = it->world.pos.y - this->actor.world.pos.y;
+            f32 dz = it->world.pos.z - this->actor.world.pos.z;
+            f32 distSq = dx*dx + dy*dy + dz*dz;
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                best = it;
+            }
+        }
+        it = it->next;
+    }
+    if (best != NULL) {
+        this->actor.parent = best;
+    }
+}
+
 void EnFw_Init(Actor* thisx, PlayState* play);
 void EnFw_Destroy(Actor* thisx, PlayState* play);
 void EnFw_Update(Actor* thisx, PlayState* play);
@@ -106,7 +158,16 @@ s32 EnFw_DoBounce(EnFw* this, s32 totalBounces, f32 yVelocity) {
 }
 
 s32 EnFw_PlayerInRange(EnFw* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer (#100 En_Fw Phase 1 targeting hygiene):
+    // use nearest-player helper so peer detection works against the
+    // closest player rather than local Link. xzDistToPlayer /
+    // yawTowardsPlayer are already #153-patched cached fields toward
+    // the nearest player; this aligns the linetest endpoint with them
+    // so the slide-skid trigger fires consistently across all clients.
+    Actor* targetActor = Anchor_GetNearestPlayerActor(&this->actor, play);
+    if (targetActor == NULL) {
+        return false;
+    }
     CollisionPoly* poly;
     s32 bgId;
     Vec3f collisionPos;
@@ -119,7 +180,7 @@ s32 EnFw_PlayerInRange(EnFw* this, PlayState* play) {
         return false;
     }
 
-    if (BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &player->actor.world.pos, &collisionPos, &poly,
+    if (BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &targetActor->world.pos, &collisionPos, &poly,
                                 true, false, false, true, &bgId)) {
         return false;
     }
@@ -147,7 +208,10 @@ s32 EnFw_CheckCollider(EnFw* this, PlayState* play) {
 
     if (this->collider.base.acFlags & AC_HIT) {
         info = &this->collider.elements[0].info;
-        if (info->acHitInfo->toucher.dmgFlags & 0x80) {
+        // Anchor multiplayer (#100 En_Fw Phase 1 audit): null-guard
+        // acHitInfo. Phase 2 may synthesize AC_HIT bits via
+        // ApplySyncAcHitToActor where acHitInfo can be NULL.
+        if (info->acHitInfo != NULL && (info->acHitInfo->toucher.dmgFlags & 0x80)) {
             this->lastDmgHook = true;
         } else {
             this->lastDmgHook = false;
@@ -268,7 +332,16 @@ void EnFw_Run(EnFw* this, PlayState* play) {
             }
             flareDancer = this->actor.parent;
             flareDancer->params |= 0x4000;
-            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xA0);
+            // Anchor multiplayer (#100 En_Fw Phase 1): suppress the
+            // random 0xA0 drop on the receiver when the death cycle is
+            // network-driven. Host's authoritative ITEM_DROP_SYNC handles
+            // the drop. The bomb spawn above is NOT gated (per-client;
+            // En_Bom has its own sync) and the FLG_COREDEAD bit-set on
+            // the parent En_Fd above is NOT gated (signal-back fires on
+            // each client's local En_Fd parent independently).
+            if (!Anchor_ShouldSuppressEnFwDrop(&this->actor)) {
+                Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xA0);
+            }
             Actor_Kill(&this->actor);
             return;
         }
@@ -365,6 +438,20 @@ void EnFw_JumpToParentInitPos(EnFw* this, PlayState* play) {
 
 void EnFw_Update(Actor* thisx, PlayState* play) {
     EnFw* this = (EnFw*)thisx;
+    // Anchor MP: peer's En_Fw arrives from ENEMY_SPAWN with parent=NULL.
+    // Reconcile to nearest local En_Fd (deterministic; designer-placed
+    // pairs are co-located on both clients). Defensive per-frame check.
+    EnFw_ReconcileParentPointer(this, play);
+    // Defense-in-depth: if no En_Fd was found (e.g., parent En_Fd died
+    // and was Actor_Killed before our reconcile pass), skip the rest of
+    // the update tick to avoid the parent->{...} deref crash. The
+    // explosion-countdown / signal-back chain will resume next tick if
+    // the parent is restored, or the actor will be cleaned up by the
+    // host via ENEMY_DEFEATED. Without this guard, peer dies cleanly
+    // (no crash) when the parent En_Fd dies mid-cycle.
+    if (this->actor.parent == NULL) {
+        return;
+    }
     SkelAnime_Update(&this->skelAnime);
     if (!CHECK_FLAG_ALL(this->actor.flags, ACTOR_FLAG_HOOKSHOT_ATTACHED)) {
         // not attached to hookshot.
@@ -494,4 +581,74 @@ void EnFw_DrawDust(EnFw* this, PlayState* play) {
     }
 
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Anchor multiplayer state-machine sync (En_Fw — Flare Dancer core/wisp,
+// child of En_Fd / #100).
+//
+// Routes a network-driven death cycle through the explosion-countdown
+// path inside EnFw_Run. The path's terminal step (line 264-280) spawns
+// a bomb, sets FLG_COREDEAD on the parent En_Fd, fires the random
+// 0xA0 drop (gated by Anchor_ShouldSuppressEnFwDrop), and calls
+// Actor_Kill. The HostBookkeeping HasDefeatBroadcast dedup guard at
+// the send site prevents an echo back to host when the receiver runs
+// GameInteractor_ExecuteOnEnemyDefeat as part of the natural Actor_Kill
+// chain.
+//
+// State map (4 action functions):
+//   0 Bounce              — entry-state immediately post-spawn from
+//                            EnFd_SpawnCore (dormant-to-active filter
+//                            treats this as dormant, mirror of
+//                            Karebaba Idle / EnFd Reappear).
+//   1 Run                 — patrol-and-combat phase (run in circle
+//                            around parent home, slide-and-skid on
+//                            player approach, take damage, drop bomb
+//                            on death).
+//   2 TurnToParentInitPos — transitional: turn back toward parent's
+//                            home position (when returnToParentTimer
+//                            expires).
+//   3 JumpToParentInitPos — terminal "return to parent" jump; on
+//                            landing sets FLG_COREDONE on parent and
+//                            Actor_Kills self.
+//
+// Direct actionFunc assignment is sufficient because the per-frame
+// ENEMY_UPDATE writeback re-syncs jointTable/morphTable/scale/world.pos
+// every tick, so any animation-phase drift across the assign-tick
+// boundary self-corrects within ~1 frame. EnFw doesn't have separate
+// Setup* helpers — each actionFunc's body handles its own first-tick
+// entry conditions (animation change, scale, velocity) within the
+// handler.
+void EnFw_SetupDyingNet(EnFw* this, PlayState* play) {
+    // Prime the EnFw_Run explosion-countdown path. Setting
+    // explosionTimer = 6 + actionFunc = EnFw_Run drops the actor onto
+    // the dying chain: the next 6 ticks count down the timer, fire
+    // SFX, set the color filter, and on tick 0 spawn the bomb + drop
+    // (drop is suppressed via Anchor_ShouldSuppressEnFwDrop on the
+    // receiver) + Actor_Kill. The host's authoritative final-blow
+    // sequence is replayed locally; receiver does not also broadcast
+    // ENEMY_DEFEATED (dedup guard).
+    this->explosionTimer = 6;
+    this->damageTimer = 0;
+    this->actor.speedXZ = 0.0f;
+    this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    this->actionFunc = EnFw_Run;
+}
+
+s16 EnFw_GetStateIndex(EnFw* this) {
+    if (this->actionFunc == EnFw_Bounce)              return 0;
+    if (this->actionFunc == EnFw_Run)                 return 1;
+    if (this->actionFunc == EnFw_TurnToParentInitPos) return 2;
+    if (this->actionFunc == EnFw_JumpToParentInitPos) return 3;
+    return -1;
+}
+
+void EnFw_ApplyNetState(EnFw* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0: this->actionFunc = EnFw_Bounce;              break;
+        case 1: this->actionFunc = EnFw_Run;                 break;
+        case 2: this->actionFunc = EnFw_TurnToParentInitPos; break;
+        case 3: this->actionFunc = EnFw_JumpToParentInitPos; break;
+        default: break;
+    }
 }

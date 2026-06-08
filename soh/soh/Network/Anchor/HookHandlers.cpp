@@ -101,6 +101,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Po_Field/z_en_po_field.h"
 // En_Vm — Beamos turret state-machine sync.
 #include "src/overlays/actors/ovl_En_Vm/z_en_vm.h"
+// En_Fw — Flare Dancer core/wisp state-machine sync (#100).
+#include "src/overlays/actors/ovl_En_Fw/z_en_fw.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 
@@ -3315,6 +3317,37 @@ void Anchor::RegisterHooks() {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnVm] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Fw (Flare Dancer core/wisp #100): Bounce=0 / Run=1 /
+            // TurnToParentInitPos=2 / JumpToParentInitPos=3.
+            // No discrete death state — death happens INSIDE Run via the
+            // explosionTimer countdown. EnFw_SetupDyingNet (called from
+            // HandlePacket_EnemyDefeated) primes that countdown and resumes
+            // Run, so a "death" appears as netStateIndex=1 (Run) while
+            // phase=DyingByNetwork. The PhaseImpliesHasLocalDeath gate at
+            // the top of this block prevents the regression case.
+            // Dormant-to-active filter: net=Bounce (entry-dormant) must not
+            // roll the peer's locally-advanced Run/Turn/Jump back to Bounce.
+            if (actor->id == ACTOR_EN_FW && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnFw* fw = (EnFw*)actor;
+                s16 curState = EnFw_GetStateIndex(fw);
+                bool netIsDormant  = (ext->netStateIndex == 0);
+                bool localIsActive = (curState == 1 || curState == 2 || curState == 3);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive)) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnFw] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnFw_ApplyNetState(fw, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnFw] rx netId={} block net={} local={} (dormant-active filter)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
                     }
                 }
             }

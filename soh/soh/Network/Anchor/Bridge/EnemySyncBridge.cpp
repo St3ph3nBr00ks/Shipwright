@@ -390,13 +390,13 @@ extern "C" bool Anchor_ShouldSuppressEnBigokutaDrop(Actor* actor) {
 // itself call Item_DropCollectibleRandom — the actual loot drop is
 // owned by ACTOR_EN_FW (the Flare Dancer core/wisp child spawned via
 // EnFd_SpawnCore at z_en_fd.c:222). En_Fw's drop call at
-// z_en_fw.c:271 will gate via its own Anchor_ShouldSuppressEnFwDrop
-// in a follow-up per-actor sync pass when En_Fw is admitted.
-// This predicate is currently unused at the actor-side call sites
-// but is exposed for symmetry with sibling per-enemy sync plans and
-// as a future hook if a drop call is ever added to the En_Fd death
-// cycle. Mirrors Anchor_ShouldSuppressEnPohDrop's "reserved for
-// symmetry" rationale.
+// z_en_fw.c:271 is gated via its own Anchor_ShouldSuppressEnFwDrop
+// (below) per the #100 follow-up Phase 1 admission of En_Fw to the
+// sync pipeline. This predicate is currently unused at the actor-side
+// call sites but is exposed for symmetry with sibling per-enemy sync
+// plans and as a future hook if a drop call is ever added to the
+// En_Fd death cycle. Mirrors Anchor_ShouldSuppressEnPohDrop's
+// "reserved for symmetry" rationale.
 // See z_en_fd.c + #100.
 extern "C" bool Anchor_ShouldSuppressEnFdDrop(Actor* actor) {
     if (actor == nullptr) return false;
@@ -419,6 +419,30 @@ extern "C" bool Anchor_ShouldSuppressEnFdDrop(Actor* actor) {
 // Category B (alongside En_Am / En_Dodongo baby / En_Peehat).
 // See z_en_vm.c EnVm_Die + Plans/en_vm_sync_plan.md (TBD).
 extern "C" bool Anchor_ShouldSuppressEnVmDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
+// Receiver-side predicate — true when an En_Fw (Flare Dancer core/wisp)
+// death cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the explosion-countdown sequence inside EnFw_Run). EnFw_Run's
+// terminal step at z_en_fw.c:271 calls Item_DropCollectibleRandom(0xA0);
+// this predicate gates that drop so host's authoritative ITEM_DROP_SYNC
+// isn't double-applied. Mirrors Anchor_ShouldSuppressEnStDrop.
+//
+// Not gated by this predicate:
+//   - The bomb spawn at z_en_fw.c:264 (Actor_Spawn ACTOR_EN_BOM) —
+//     per-client; En_Bom has its own sync surface. The deferred
+//     EXPLOSIVE_SPAWN packet family per task_checklist.md Phase 3 →
+//     Type 6 Category B would eventually gate this.
+//   - The FLG_COREDEAD bit-set on parent En_Fd at z_en_fw.c:270 —
+//     each client's local En_Fd parent receives the signal from its
+//     own local En_Fw, so the signal-back chain runs independently
+//     on both machines.
+// See z_en_fw.c EnFw_Run + #100.
+extern "C" bool Anchor_ShouldSuppressEnFwDrop(Actor* actor) {
     if (actor == nullptr) return false;
     const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
     if (ext == nullptr) return false;

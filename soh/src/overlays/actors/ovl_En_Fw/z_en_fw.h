@@ -46,4 +46,31 @@ typedef struct EnFw {
     /* 0x02A0 */ EnFwEffect effects[20];
 } EnFw; // size = 0x0700
 
+// Anchor multiplayer state-machine sync (En_Fw — Flare Dancer core/wisp
+// child of En_Fd). `this` is a C++ keyword. This header is transitively
+// included from C++ TUs (EnemyState.cpp / HookHandlers.cpp), so the
+// param name in the declaration uses `actor` instead. The implementations
+// in z_en_fw.c keep `this` per OoT decomp convention. See Pitfall 1.
+void EnFw_SetupDyingNet(struct EnFw* actor, PlayState* play);
+s16  EnFw_GetStateIndex(struct EnFw* actor);
+void EnFw_ApplyNetState(struct EnFw* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current En_Fw
+// death cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the explosion-countdown sequence inside EnFw_Run). The
+// random 0xA0 drop call at z_en_fw.c:271 is gated by this so host's
+// authoritative ITEM_DROP_SYNC isn't double-applied. Mirrors
+// Anchor_ShouldSuppressEnStDrop. Defined extern "C" in
+// Bridge/EnemySyncBridge.cpp. The bomb spawn at line 264 and the
+// FLG_COREDEAD bit-set at line 270 (signal-back to local En_Fd parent)
+// are intentionally NOT gated — bombs are per-client (En_Bom has its
+// own sync) and FLG_COREDEAD fires on each client's local En_Fd parent.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnFwDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif
