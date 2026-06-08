@@ -7,6 +7,11 @@
 // Defined extern "C" in HookHandlers.cpp:83.
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 
+// Multiplayer drop-suppression (#148 / en_sw_sync_plan.md §3 step 3).
+// Defined extern "C" in Bridge/EnemySyncBridge.cpp. Pitfall 7 — plain
+// `extern` in .c, not `extern "C"` (C-linkage is implicit in C).
+extern bool Anchor_ShouldSuppressEnSwDrop(Actor* actor);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
 void EnSw_Init(Actor* thisx, PlayState* play);
@@ -687,7 +692,18 @@ void func_80B0DC7C(EnSw* this, PlayState* play) {
         this->actor.shape.rot.x += 0x1000;
         this->actor.shape.rot.z += 0x1000;
     } else {
-        Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0x30);
+        // #148 / en_sw_sync_plan.md §3 step 3 — suppress drop when the
+        // death cycle was network-driven (peer's ENEMY_DEFEATED arrived
+        // and we're replaying the ghost-FX → drop-and-die sequence on
+        // this client). Host's local kill broadcasts ENEMY_DEFEATED +
+        // ITEM_DROP_SYNC separately; receiver mustn't roll a local
+        // drop. The peer-rolled EN_ITEM00 isn't bracketed by
+        // g_isSpawningNetworkItemDrop, so without this gate it enters
+        // Race-A Pending state on the host-arbitration path and blocks
+        // pickup of the host-broadcast drop.
+        if (!Anchor_ShouldSuppressEnSwDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0x30);
+        }
         Actor_Kill(&this->actor);
     }
 }
