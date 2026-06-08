@@ -39,6 +39,11 @@ void EnGeldB_Draw(Actor* thisx, PlayState* play);
 
 s32 EnGeldB_DodgeRanged(PlayState* play, EnGeldB* this);
 
+// Anchor multiplayer (Phase 1 En_GeldB) — defined in Bridge/EnemySyncBridge.cpp.
+// Forward-declare here (extern, NOT extern "C" — this is a .c file
+// and C-linkage is implicit). Per Pitfall 7.
+extern bool Anchor_ShouldSuppressEnGeldBDrop(Actor* actor);
+
 void EnGeldB_SetupWait(EnGeldB* this);
 void EnGeldB_SetupReady(EnGeldB* this);
 void EnGeldB_SetupAdvance(EnGeldB* this, PlayState* play);
@@ -1383,7 +1388,12 @@ void EnGeldB_CollisionCheck(EnGeldB* this, PlayState* play) {
             } else {
                 Actor_SetColorFilter(&this->actor, 0x4000, 0xFF, 0, 8);
                 if (Actor_ApplyDamage(&this->actor) == 0) {
-                    if (this->keyFlag != 0) {
+                    // Anchor multiplayer (Phase 1 En_GeldB): suppress the
+                    // small-key drop on receivers replaying a network-driven
+                    // death cycle. Host's authoritative ITEM_DROP_SYNC
+                    // packet handles the cross-machine drop. Per
+                    // en_test/en_vali precedent.
+                    if (this->keyFlag != 0 && !Anchor_ShouldSuppressEnGeldBDrop(&this->actor)) {
                         key = Item_DropCollectible(play, &this->actor.world.pos, this->keyFlag | ITEM00_SMALL_KEY);
                         if (key != NULL) {
                             key->actor.world.rot.y = Math_Vec3f_Yaw(&key->actor.world.pos, &this->actor.home.pos);
@@ -1655,4 +1665,78 @@ s32 EnGeldB_DodgeRanged(PlayState* play, EnGeldB* this) {
         return true;
     }
     return false;
+}
+
+// =============================================================================
+// Anchor multiplayer sync — Phase 1 (En_GeldB / Gerudo Thief).
+// =============================================================================
+
+// Routes a network-driven death cycle through EnGeldB_SetupDefeated —
+// the defeat animation naturally transitions to EnGeldB_SetupFlee,
+// whose jump-away countdown ends in Actor_Kill. The natural
+// `EnGeldB_SetupDefeated` call fires GameInteractor_ExecuteOnEnemyDefeat,
+// but the HostBookkeeping HasDefeatBroadcast dedup guard at the send
+// site prevents an echo back to host. Drop suppression is handled at
+// the EnGeldB_CollisionCheck call site (host's authoritative
+// ITEM_DROP_SYNC drives the small-key drop cross-machine).
+void EnGeldB_SetupDyingNet(EnGeldB* this, PlayState* play) {
+    this->actor.colChkInfo.health = 0;
+    // Clear any in-flight stun/freeze state so the defeat sequence
+    // doesn't get gated by the iceTimer/colorFilter checks.
+    this->iceTimer = 0;
+    this->bodyCollider.base.acFlags &= ~AC_HIT;
+    EnGeldB_SetupDefeated(this);
+    Enemy_StartFinishingBlow(play, &this->actor);
+}
+
+s16 EnGeldB_GetStateIndex(EnGeldB* this) {
+    if (this->actionFunc == EnGeldB_Wait)         return 0;
+    if (this->actionFunc == EnGeldB_Flee)         return 1;
+    if (this->actionFunc == EnGeldB_Ready)        return 2;
+    if (this->actionFunc == EnGeldB_Advance)      return 3;
+    if (this->actionFunc == EnGeldB_RollForward)  return 4;
+    if (this->actionFunc == EnGeldB_Pivot)        return 5;
+    if (this->actionFunc == EnGeldB_Circle)       return 6;
+    if (this->actionFunc == EnGeldB_SpinDodge)    return 7;
+    if (this->actionFunc == EnGeldB_Slash)        return 8;
+    if (this->actionFunc == EnGeldB_SpinAttack)   return 9;
+    if (this->actionFunc == EnGeldB_RollBack)     return 10;
+    if (this->actionFunc == EnGeldB_Stunned)      return 11;
+    if (this->actionFunc == EnGeldB_Damaged)      return 12;
+    if (this->actionFunc == EnGeldB_Jump)         return 13;
+    if (this->actionFunc == EnGeldB_Block)        return 14;
+    if (this->actionFunc == EnGeldB_Sidestep)     return 15;
+    if (this->actionFunc == EnGeldB_Defeated)     return 16;
+    return -1;
+}
+
+void EnGeldB_ApplyNetState(EnGeldB* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  EnGeldB_SetupWait(this);         break;
+        // 1 (Flee) — reached from Defeated. Skip; dormant-to-active
+        //   filter handles regression and the local actor will
+        //   transition naturally off its own anim.
+        case 2:  EnGeldB_SetupReady(this);        break;
+        // 3 (Advance) / 7 (SpinDodge) / 15 (Sidestep) — Setup takes
+        //   a PlayState* (queries GET_PLAYER for stick/target math).
+        //   ApplyNetState has no PlayState available; skip. The
+        //   dormant-to-active filter blocks regression and the
+        //   non-host's local AI converges to the same state on its
+        //   next decision tick (Advance/Sidestep/SpinDodge are short
+        //   transient states reached from Ready/Pivot/Damaged).
+        case 4:  EnGeldB_SetupRollForward(this);  break;
+        case 5:  EnGeldB_SetupPivot(this);        break;
+        case 6:  EnGeldB_SetupCircle(this);       break;
+        case 8:  EnGeldB_SetupSlash(this);        break;
+        case 9:  EnGeldB_SetupSpinAttack(this);   break;
+        case 10: EnGeldB_SetupRollBack(this);     break;
+        case 11: EnGeldB_SetupStunned(this);      break;
+        case 12: EnGeldB_SetupDamaged(this);      break;
+        case 13: EnGeldB_SetupJump(this);         break;
+        case 14: EnGeldB_SetupBlock(this);        break;
+        // 16 (Defeated) — death class. Driven via SetupDyingNet by
+        //   HandlePacket_EnemyDefeated; skip silently here so a stale
+        //   alive-state packet doesn't override the death.
+        default: break;
+    }
 }

@@ -45,6 +45,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h"
 // En_Fd — Flare Dancer enflamed shell AC_HIT routing (#100).
 #include "src/overlays/actors/ovl_En_Fd/z_en_fd.h"
+// En_GeldB — Gerudo Thief AC_HIT routing.
+#include "src/overlays/actors/ovl_En_GeldB/z_en_geldb.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
@@ -813,6 +815,21 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // ColliderJntSph; setting AC_HIT on shared base covers all
             // elements.
             ((EnFd*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_GELDB:
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path; safe
+            //   synthetic AC_HIT bit-set. Verified by agent
+            //   `feature/sync-en-geldb` Phase 1 (commit 0455ca871):
+            //   `grep -nE "base\.ac->|acHitInfo->" z_en_geldb.c` → 0 matches.
+            // Acks: bodyCollider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: none.
+            //
+            // Multi-collider: bodyCollider (AC, cyl) + swordCollider (AT,
+            // quad) + blockCollider (deflection, tris). The swordCollider
+            // is host-authoritative for outgoing AT hits; blockCollider
+            // is shield-deflection only. Set AC_HIT on bodyCollider only.
+            ((EnGeldB*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_BB:
             // Audit: TWO acHitInfo-> derefs at z_en_bb.c:1164 and :1173

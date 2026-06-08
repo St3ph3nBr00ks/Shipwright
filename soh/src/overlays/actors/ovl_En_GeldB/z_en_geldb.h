@@ -69,4 +69,28 @@ typedef struct EnGeldB {
     /* 0x04DC */ Vec3s headRot;
 } EnGeldB; // size = 0x04E4
 
+// Anchor multiplayer state-machine sync (Phase 1 — En_GeldB).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp / HookHandlers.cpp), so the param name in
+// the declaration uses `actor` instead. The implementations in
+// z_en_geldb.c keep `this` per OoT decomp convention. Per Pitfall 1.
+void EnGeldB_SetupDyingNet(struct EnGeldB* actor, PlayState* play);
+s16  EnGeldB_GetStateIndex(struct EnGeldB* actor);
+void EnGeldB_ApplyNetState(struct EnGeldB* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and the local
+// actor is replaying the defeat → flee sequence). Used at the
+// `Item_DropCollectible(... ITEM00_SMALL_KEY)` site in
+// EnGeldB_CollisionCheck so host's authoritative ITEM_DROP_SYNC
+// isn't double-applied. Defined extern "C" in
+// Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnGeldBDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif
