@@ -2927,7 +2927,22 @@ void Anchor::RegisterHooks() {
             SPDLOG_INFO("[EnemyDefeated] OnEnemyDefeat: netId={} already sent this scene visit — skipping duplicate",
                         ext->netId);
             EnemyStateSync::AuditBooleansVsPhase(*ext, "OnEnemyDefeat.dedup");
-            EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
+            // Avoid Dead→DyingByLocal phase regression — En_Hintnuts'
+            // puzzle-solve flow calls Actor_Kill BEFORE
+            // GameInteractor_ExecuteOnEnemyDefeat (z_en_hintnuts.c:499-500),
+            // so by the time we land here the OnActorKill path has already
+            // transitioned the actor to Dead. Re-running
+            // TransitionTo(DyingByLocal) regresses the phase and trips
+            // ValidatePhaseTransition's "Unrecognised lifecycle transition
+            // Dead -> DyingByLocal" warning. Both phases evaluate
+            // identically on PhaseImplies* predicates so the regression
+            // is benign in practice, but the warning is log noise. Only
+            // transition if the actor is still in a pre-Dead phase
+            // (legitimate dup cases — Karebaba killed-again-mid-respawn
+            // cycle — still benefit from the DyingByLocal write).
+            if (ext->phase != EnemyStateSync::LifecyclePhase::Dead) {
+                EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
+            }
             return;
         }
         EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByLocal);
