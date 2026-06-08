@@ -681,8 +681,33 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     // HookHandlers.cpp's isAnimationDrivenPos.
     const u16 attackerIdNow = (player->cylinder.base.ac != nullptr)
                               ? player->cylinder.base.ac->id : 0;
+    // Preemptive list — every confirmed AT_TYPE_ENEMY projectile actor
+    // whose parent is currently in the sync pipeline (ACTORCAT_ENEMY
+    // auto-admit). Each one is structurally susceptible to the log 441
+    // wire-duplicate-damage bug if/when its parent fires at a player.
+    //
+    // Octorok: blanket-include ACTOR_EN_OKUTA is safe — parent
+    // (params=0) has AT_NONE per z_en_okuta.c:61, only the projectile
+    // form (params!=0, recategorised to PROP via Actor_ChangeCategory)
+    // carries AT_TYPE_ENEMY (z_en_okuta.c:41). Parent never triggers
+    // this gate even if included.
+    //
+    // Boss-spawned projectiles (En_Fhg_Fire, En_Vb_Ball, En_Bdfire)
+    // are deliberately NOT added today — their parent bosses are NOT
+    // in IsSyncedBossActor yet (only Boss_Goma is), so the bug can't
+    // manifest. Add each to this list in the SAME PR that admits its
+    // parent boss to IsSyncedBossActor.
+    //
+    // Sibling concept: shape.rot exclusion at HookHandlers.cpp:2066
+    // (`isAnimationDrivenPos`). The two lists target different effects
+    // (aim-direction vs damage-application) of the same per-client-
+    // local-AI design principle. They don't have to match 1:1.
     const bool attackerIsPerClientProjectile =
-        (attackerIdNow == ACTOR_EN_NUTSBALL);
+        (attackerIdNow == ACTOR_EN_NUTSBALL)      ||
+        (attackerIdNow == ACTOR_EN_ANUBICE_FIRE)  ||  // Anubis (Spirit Temple)
+        (attackerIdNow == ACTOR_EN_FD_FIRE)       ||  // Flare Dancer (Fire Temple)
+        (attackerIdNow == ACTOR_EN_FIRE_ROCK)     ||  // King Dodongo / Volvagia fire pillar rocks
+        (attackerIdNow == ACTOR_EN_OKUTA);            // Octorok rock spit (parent AT_NONE; safe)
 
     const bool gateOpen         = acHitForGate && peerIframesOpen
                                && localGuardOpen && authoritative
