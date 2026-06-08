@@ -87,6 +87,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
 // #126 — Bari big jellyfish (En_Vali) state-machine sync.
 #include "src/overlays/actors/ovl_En_Vali/z_en_vali.h"
+// En_Zf — Lizalfos + Dinolfos state-machine sync.
+#include "src/overlays/actors/ovl_En_Zf/z_en_zf.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 
@@ -2936,6 +2938,57 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnVali] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Zf (Lizalfos / Dinolfos) — state-machine sync.
+            // 18-state map:
+            //   0  DropIn        — pre-spawn animation (dormant)
+            //   1  Stop/Look     — idle scan
+            //   2  ApproachPlayer
+            //   3  Walking
+            //   4  Sidestep
+            //   5  Slash
+            //   6  RecoilFromBlockedSlash
+            //   7  JumpBack
+            //   8  Stunned (post-damage / ice)
+            //   9  SheatheSword  — post-victory idle (dormant)
+            //   10 HopAndTaunt   — quasi-idle taunt (dormant)
+            //   11 HopAway
+            //   12 DrawSword (re-engage)
+            //   13 Damaged hit-react
+            //   14 JumpUp (hop-over wall)
+            //   15 CircleAroundPlayer
+            //   16 JumpForward (forward lunge)
+            //   17 Die (skipped from ApplyNetState; SetupDyingNet drives)
+            // Dormant-to-active filter: states 0/9/10 (DropIn / Sheathed / Taunt)
+            // must not override active local combat states 5/6/8/13/16 (active
+            // attack / recoil / stunned / damaged / lunge). Death state 17 is
+            // gated by PhaseImpliesHasLocalDeath and driven via SetupDyingNet
+            // from HandlePacket_EnemyDefeated.
+            if (actor->id == ACTOR_EN_ZF && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnZf* zf = (EnZf*)actor;
+                s16 curState = EnZf_GetStateIndex(zf);
+                bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 9 ||
+                                      ext->netStateIndex == 10);
+                bool localIsActive = (curState == 5 || curState == 6 || curState == 8 ||
+                                      curState == 13 || curState == 16);
+                bool deathStateNet = (ext->netStateIndex == 17);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnZf] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnZf_ApplyNetState(zf, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnZf] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }

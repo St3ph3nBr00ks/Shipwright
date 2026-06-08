@@ -37,6 +37,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
 // #126 — Bari big jellyfish (En_Vali) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Vali/z_en_vali.h"
+// En_Zf — Lizalfos + Dinolfos AC_HIT routing.
+#include "src/overlays/actors/ovl_En_Zf/z_en_zf.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
@@ -658,6 +660,26 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // derefs (audit in ad01a739b commit body). Synthetic
             // AC_HIT is safe — no null-guard needed.
             ((EnVali*)actor)->bodyCollider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_ZF:
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path;
+            //   safe synthetic AC_HIT bit-set. Verified by agent
+            //   `feature/sync-en-zf` Phase 1 (commit ad065c183):
+            //   `grep -nE "base\.ac->|acHitInfo->" z_en_zf.c` → 0 matches.
+            //   Damage path reads `bodyCollider.base.acFlags & AC_HIT` +
+            //   `colChkInfo.damage` / `colChkInfo.damageEffect` only.
+            //
+            // Acks: bodyCollider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            //
+            // Skips: none — damage path does not read any field listed in
+            //   the SYNTHESIS CONTRACT "NOT POPULATED" section.
+            //
+            // Multi-collider note: En_Zf has bodyCollider (cyl) + swordCollider
+            //   (quad AT). Only bodyCollider receives damage; the sword AT
+            //   collider is host-authoritative for its own AT hits. Set
+            //   AC_HIT on bodyCollider only.
+            ((EnZf*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_BB:
             // Bubble (flame skull) — z_en_bb.c:1164 and :1173 deref
