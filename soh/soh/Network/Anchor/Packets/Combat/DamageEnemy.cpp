@@ -41,6 +41,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Zf/z_en_zf.h"
 // En_Mb — Moblin (Club / SpearGuard / SpearPatrol) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
+// En_Bigokuta — Big Octo miniboss AC_HIT routing (#130).
+#include "src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
@@ -704,6 +706,31 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             //   front-side deflection collider; AC_HIT on it would not
             //   register damage anyway. Set AC_HIT on hitbox only.
             ((EnMb*)actor)->hitbox.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_BIGOKUTA:
+            // Audit: ONE acHitInfo-> deref found and null-guarded same-commit.
+            //   Verified by agent `feature/sync-en-bigokuta` Phase 1
+            //   (commit 14ad5a154):
+            //   `grep -nE "base\.ac->|acHitInfo->" z_en_bigokuta.c` → 1 match
+            //   at line 343 (now 354 post-edit) inside `func_809BD524`
+            //   (Stunned deku-nut setup) — derefs
+            //   `this->collider.elements->info.acHitInfo->toucher.dmgFlags & 1`.
+            //   Null-guarded in same commit (z_en_bigokuta.c:354) following
+            //   the z_en_bili.c:621 pattern. When acHitInfo is NULL
+            //   (synthetic cross-machine AC_HIT path), the guarded branch
+            //   falls through to the long-stun behavior — matches vanilla
+            //   "no DMG_DEKU_NUT toucher" path.
+            //
+            // Acks: collider.elements[*].base.acFlags & AC_HIT,
+            //   colChkInfo.damage, colChkInfo.damageEffect.
+            //
+            // Skips: collider.base.ac (or per-element acHitInfo) — read
+            //   only inside the null-guarded site at z_en_bigokuta.c:354;
+            //   safe under the guard.
+            //
+            // Big Octo uses a ColliderJntSph; setting AC_HIT on the
+            // shared base header covers all elements.
+            ((EnBigokuta*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_BB:
             // Bubble (flame skull) — z_en_bb.c:1164 and :1173 deref
