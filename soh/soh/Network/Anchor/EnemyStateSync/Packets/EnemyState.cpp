@@ -47,6 +47,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Hintnuts/z_en_hintnuts.h"
 // #90 / en_st_sync_plan_v2.md — Skulltula state-machine sync.
 #include "overlays/actors/ovl_En_St/z_en_st.h"
+// en_skb_sync_plan — Stalchild (En_Skb) state-machine sync.
+#include "overlays/actors/ovl_En_Skb/z_en_skb.h"
 // #148 / en_sw_sync_plan.md — Skullwalltula state-machine sync.
 #include "overlays/actors/ovl_En_Sw/z_en_sw.h"
 // en_ssh_sync_plan.md — Cursed Skulltula people state-machine sync.
@@ -157,6 +159,12 @@ struct EnemyUpdateExtras {
     // #90 / en_st_sync_plan_v2.md §3 — En_St state-machine sync.
     bool hasEnSt         = false;
     s16  enStActionState = 0;
+
+    // en_skb_sync_plan — En_Skb (Stalchild) state-machine sync.
+    // No SetupDyingNet — peer's death is driven by ENEMY_DEFEATED +
+    // Actor_Kill; ITEM_DROP_SYNC handles drops.
+    bool hasEnSkb         = false;
+    s16  enSkbActionState = 0;
 
     // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
     bool hasEnSw         = false;
@@ -413,6 +421,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnSt* st            = (EnSt*)actor;
         e.hasEnSt           = true;
         e.enStActionState   = EnSt_GetStateIndex(st);
+    } else if (actor->id == ACTOR_EN_SKB) {
+        EnSkb* skb           = (EnSkb*)actor;
+        e.hasEnSkb           = true;
+        e.enSkbActionState   = EnSkb_GetStateIndex(skb);
     } else if (actor->id == ACTOR_EN_SW) {
         EnSw* sw            = (EnSw*)actor;
         e.hasEnSw           = true;
@@ -536,6 +548,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnSt != prev.hasEnSt) return true;
     if (cur.hasEnSt) {
         if (cur.enStActionState != prev.enStActionState) return true;
+    }
+    if (cur.hasEnSkb != prev.hasEnSkb) return true;
+    if (cur.hasEnSkb) {
+        if (cur.enSkbActionState != prev.enSkbActionState) return true;
     }
     if (cur.hasEnWf != prev.hasEnWf) return true;
     if (cur.hasEnWf) {
@@ -813,6 +829,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enStActionState);
             }
         }
+        if (extras.hasEnSkb) {
+            s16 prev = prevExtras && prevExtras->hasEnSkb ? prevExtras->enSkbActionState : -1;
+            if (prev != extras.enSkbActionState) {
+                SPDLOG_INFO("[EnSkb] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enSkbActionState);
+            }
+        }
         if (extras.hasEnTest) {
             s16 prev = prevExtras && prevExtras->hasEnTest ? prevExtras->enTestActionState : -1;
             if (prev != extras.enTestActionState) {
@@ -985,6 +1008,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #90 / en_st_sync_plan_v2.md §3 — En_St state-machine sync.
     if (extras.hasEnSt) {
         payload["actionState"] = extras.enStActionState;
+    }
+
+    // en_skb_sync_plan — En_Skb (Stalchild) state-machine sync.
+    if (extras.hasEnSkb) {
+        payload["actionState"] = extras.enSkbActionState;
     }
 
     // #148 / en_sw_sync_plan.md §3 — En_Sw state-machine sync.
@@ -1664,6 +1692,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
 
         // #90 / en_st_sync_plan_v2.md — cache En_St actionState.
         if (actor->id == ACTOR_EN_ST && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // en_skb_sync_plan — cache En_Skb actionState.
+        if (actor->id == ACTOR_EN_SKB && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // #148 / en_sw_sync_plan.md — cache En_Sw actionState.

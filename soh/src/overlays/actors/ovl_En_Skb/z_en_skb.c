@@ -582,3 +582,81 @@ void EnSkb_Draw(Actor* thisx, PlayState* play) {
     Gfx_SetupDL_25Opa(play->state.gfxCtx);
     SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnSkb_OverrideLimbDraw, EnSkb_PostLimbDraw, &this->actor);
 }
+
+// =============================================================================
+// Anchor multiplayer state-machine sync.
+// Mirror of EnSt's pattern (en_st_sync_plan_v2.md §3 / z_en_st.c §1153+).
+// State map (sequential indices, NOT the actor's internal actionState):
+//   0 = func_80AFCE5C       Emerge from ground (uncurling anim)   [dormant]
+//   1 = func_80AFCFF0       Burrow / hide (anim + Actor_Kill end)
+//   2 = EnSkb_Advance       Walk / chase nearest player
+//   3 = EnSkb_SetupAttack   Attack swing (atFlags set, anim plays)
+//   4 = func_80AFD508       Attack recovery (post-swing settle)
+//   5 = func_80AFD59C       Stunned (deku-nut hit, colorFilter wait)
+//   6 = func_80AFD6CC       Damaged / knockback (body-break setup +
+//                                                 settle on ground)
+//   7 = func_80AFD880       Dying body break + drop spawn
+//
+// No SetupDyingNet — combat-death cycle is gated at the driver site via
+// PhaseImpliesHasLocalDeath(phase). Peer's termination is driven by the
+// network ENEMY_DEFEATED handler (Actor_Kill); drops route through the
+// existing ITEM_DROP_SYNC pipeline.
+// =============================================================================
+
+s16 EnSkb_GetStateIndex(EnSkb* this) {
+    if (this->actionFunc == func_80AFCE5C)     return 0;
+    if (this->actionFunc == func_80AFCFF0)     return 1;
+    if (this->actionFunc == EnSkb_Advance)     return 2;
+    if (this->actionFunc == EnSkb_SetupAttack) return 3;
+    if (this->actionFunc == func_80AFD508)     return 4;
+    if (this->actionFunc == func_80AFD59C)     return 5;
+    if (this->actionFunc == func_80AFD6CC)     return 6;
+    if (this->actionFunc == func_80AFD880)     return 7;
+    return -1;
+}
+
+void EnSkb_ApplyNetState(EnSkb* this, s16 stateIndex) {
+    switch (stateIndex) {
+        // 0 (Emerge) — init transient. Driver site's dormant-to-active
+        //    filter blocks regression from active states. Local Emerge
+        //    completes naturally on Init.
+        case 0:
+            // No re-apply — skip silently. Init paths run locally.
+            break;
+        case 1:
+            // Burrow / hide. Public setup func plays anim, sets sound,
+            // clears flags. Terminal: ends in Actor_Kill once anim done.
+            func_80AFCF48(this);
+            break;
+        case 2:
+            // Walk / chase. Public setup func plays walk anim + sets speed.
+            func_80AFD0A4(this);
+            break;
+        case 3:
+            // Attack swing. Public setup func plays attack anim + arms AT.
+            func_80AFD33C(this);
+            break;
+        case 4:
+            // Attack recovery (post-swing reverse-play). Public setup func
+            // plays the reverse animation; needed to mirror host's swing
+            // wind-down cleanly.
+            func_80AFD47C(this);
+            break;
+        case 5:
+            // Stunned. Public setup func zeros speed + plays freeze SFX.
+            EnSkb_SetupStunned(this);
+            break;
+        case 6:
+            // Damaged / knockback. Public setup func plays damaged anim +
+            // applies recoil speed.
+            func_80AFD644(this);
+            break;
+        // 7 (Dying body break) — gated by PhaseImpliesHasLocalDeath at the
+        //    driver site. ENEMY_DEFEATED + Actor_Kill drives peer's
+        //    termination; drops route through ITEM_DROP_SYNC. Avoid
+        //    re-firing the local death anim (would spawn duplicate drops
+        //    on peer before Actor_Kill).
+        default:
+            break;
+    }
+}
