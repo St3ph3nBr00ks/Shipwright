@@ -12,6 +12,19 @@
 
 #include <string.h>
 
+// Anchor multiplayer — nearest-player helper for targeting fixes.
+// Implementation lives in HookHandlers.cpp as extern "C". Plain
+// `extern` here (not `extern "C"`, which is a C++ keyword — see
+// session_state.md Pitfall 7). Mirror of En_Poh's targeting helper.
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
+// Anchor multiplayer — defined in Bridge/EnemySyncBridge.cpp.
+// Forward-declare here (extern, NOT extern "C" — this is a .c file
+// and C-linkage is implicit). Per Pitfall 7. Reserved for symmetry
+// with sibling per-enemy plans; en_po_field has no Item_DropCollectible
+// call sites today (audit verified — only Item_Give for soul talk).
+extern bool Anchor_ShouldSuppressEnPoFieldDrop(Actor* actor);
+
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_DRAW_CULLING_DISABLED | ACTOR_FLAG_IGNORE_QUAKE)
@@ -243,7 +256,9 @@ void EnPoField_SetupAppear(EnPoField* this) {
 }
 
 void EnPoField_SetupCirclePlayer(EnPoField* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer — target the nearest synced player for the orbit
+    // center. Falls back to local Link when offline. Pattern from En_Poh.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     Animation_PlayLoop(&this->skelAnime, &gPoeFieldFloatAnim);
     this->collider.base.acFlags |= AC_ON;
@@ -273,10 +288,22 @@ void EnPoField_SetupFlee(EnPoField* this) {
 
 void EnPoField_SetupDamage(EnPoField* this) {
     Animation_MorphToPlayOnce(&this->skelAnime, &gPoeFieldDamagedAnim, -6.0f);
-    if (this->collider.info.acHitInfo->toucher.dmgFlags & 0x1F824) {
+    // Anchor multiplayer — cross-machine sync may set AC_HIT synthetically
+    // without populating acHitInfo / base.ac (no real AT collider arrived).
+    // Null-guard both derefs; when null, fall back to facing-flip via the
+    // existing shape.rot.y + 0x8000 path. The 0x1F824 dmgFlags branch is
+    // the "arrow / shock-style" knockback direction; not having an
+    // attacker actor means we can't read the arrow's facing — using the
+    // default yawTowardsAttacker branch is the conservative fallback.
+    // Mirror of En_Poh's func_80ADE28C null-guard.
+    if (this->collider.info.acHitInfo != NULL && this->collider.base.ac != NULL &&
+        (this->collider.info.acHitInfo->toucher.dmgFlags & 0x1F824)) {
         this->actor.world.rot.y = this->collider.base.ac->world.rot.y;
-    } else {
+    } else if (this->collider.base.ac != NULL) {
         this->actor.world.rot.y = Actor_WorldYawTowardActor(&this->actor, this->collider.base.ac) + 0x8000;
+    } else {
+        // No attacker reference (sync-only damage). Flip facing 180°.
+        this->actor.world.rot.y = this->actor.shape.rot.y + 0x8000;
     }
     this->collider.base.acFlags &= ~(AC_HIT | AC_ON);
     this->actor.speedXZ = 5.0f;
@@ -366,7 +393,9 @@ void EnPoField_SetupInteractWithSoul(EnPoField* this) {
 }
 
 void EnPoField_CorrectYPos(EnPoField* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer — Y-track the nearest synced player so the Poe
+    // hovers around peer DummyPlayers, not only the local Link.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
 
     if (this->unk_194 == 0) {
         this->unk_194 = 32;
@@ -473,7 +502,8 @@ void EnPoField_Appear(EnPoField* this, PlayState* play) {
 }
 
 void EnPoField_CirclePlayer(EnPoField* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor multiplayer — orbit center tracks the nearest synced player.
+    Player* player = (Player*)Anchor_GetNearestPlayerActor(&this->actor, play);
     s32 temp_v1 = 16 - this->unk_194;
 
     SkelAnime_Update(&this->skelAnime);
@@ -1003,6 +1033,90 @@ void EnPoField_DrawSoul(Actor* thisx, PlayState* play) {
     }
     CLOSE_DISPS(play->state.gfxCtx);
     EnPoField_DrawFlame(this, play);
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync.
+// =============================================================================
+
+// Drives the natural death cycle on a non-host receiver when an
+// ENEMY_DEFEATED packet arrives. Mirror of `EnPoField_SetupDeath`
+// (the local "transition to death-particle cycle" setup called when
+// damaged-anim completes with health==0) without firing
+// GameInteractor_ExecuteOnEnemyDefeat — that fires naturally one
+// frame into EnPoField_Death (actionTimer==1, z_en_po_field.c:583);
+// HostBookkeeping::HasDefeatBroadcast dedup guard at the send site
+// prevents an echo back to host. EnPoField_Death then transitions to
+// EnPoField_SetupSoulIdle at actionTimer==28 — the soul-fragment
+// state, where the Big-Poe / regular-Poe bottle interaction lives
+// (per-client by design; each peer can capture their own soul if
+// they have an empty bottle).
+void EnPoField_SetupDyingNet(EnPoField* this, PlayState* play) {
+    this->actionTimer = 0;
+    this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    this->actor.speedXZ = 0.0f;
+    this->actor.world.rot.y = this->actor.shape.rot.y;
+    this->actor.naviEnemyId = 0xFF;
+    if (this->flameTimer >= 20) {
+        this->flameTimer = 19;
+    }
+    this->actionFunc = EnPoField_Death;
+}
+
+// Returns the index matching the current actionFunc per the state
+// machine table in the En_Po_Field sync plan. Returns -1 if no match
+// (shouldn't happen).
+s16 EnPoField_GetStateIndex(EnPoField* this) {
+    if (this->actionFunc == EnPoField_WaitForSpawn)  return 0;
+    if (this->actionFunc == EnPoField_Appear)        return 1;
+    if (this->actionFunc == EnPoField_CirclePlayer)  return 2;
+    if (this->actionFunc == EnPoField_Flee)          return 3;
+    if (this->actionFunc == EnPoField_Damage)        return 4;
+    if (this->actionFunc == EnPoField_Death)         return 5;
+    if (this->actionFunc == EnPoField_Disappear)     return 6;
+    if (this->actionFunc == EnPoField_SoulIdle)      return 7;
+    if (this->actionFunc == func_80AD587C)           return 8;
+    if (this->actionFunc == func_80AD58D4)           return 9;
+    if (this->actionFunc == EnPoField_SoulDisappear) return 10;
+    if (this->actionFunc == EnPoField_SoulInteract)  return 11;
+    return -1;
+}
+
+// Applies a remote state-index by invoking the matching setup helper.
+// State 0 (WaitForSpawn) is skipped — each client runs
+// EnPoField_SetupWaitForSpawn autonomously at Init time, and the
+// spawn-proximity / on-horse / Big-vs-Small-Poe params decision is
+// host-local (different player positions on different clients).
+// State 2 (CirclePlayer) is skipped — EnPoField_SetupCirclePlayer
+// requires a PlayState* parameter (not in the ApplyNetState signature),
+// and the orbit center is driven from local target tracking each tick
+// via Anchor_GetNearestPlayerActor. Peer's local CirclePlayer state
+// engages naturally when EnPoField_Appear finishes its anim with
+// params == EN_PO_FIELD_SMALL (z_en_po_field.c:458). Wire-driven
+// transition into state 2 isn't needed because state 1 (Appear)
+// transitions to state 2 deterministically.
+// State 4 (Damage) is skipped because EnPoField_SetupDamage reads
+// `collider.info.acHitInfo->toucher.dmgFlags` + `collider.base.ac`,
+// which would be stale/invalid on a receive-side replay — peer's
+// local AC_HIT will trigger this state naturally if applicable.
+// State 5 (Death) is skipped — driven via SetupDyingNet from the
+// defeat handler; the dormant filter at the call site also blocks.
+// States 7-11 are soul-talk states; the Big-Poe / regular-Poe bottle
+// interaction is per-client by design (each player can independently
+// capture their own soul fragment), so we let each client drive
+// these autonomously after the Death cycle transitions to SoulIdle.
+void EnPoField_ApplyNetState(EnPoField* this, s16 stateIndex) {
+    switch (stateIndex) {
+        // Case 0 skipped — autonomous on each client.
+        case 1:  EnPoField_SetupAppear(this);              break;
+        // Case 2 skipped — see comment above.
+        case 3:  EnPoField_SetupFlee(this);                break;
+        // Case 4 skipped — see comment above.
+        // Case 5 skipped — driven via SetupDyingNet.
+        case 6:  EnPoField_SetupDisappear(this);           break;
+        // Cases 7-11 skipped — soul-talk states are per-client.
+        default: break;
+    }
 }
 
 void EnPoField_Reset(void) {

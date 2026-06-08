@@ -196,6 +196,22 @@ extern "C" bool Anchor_ShouldSuppressEnIkDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// Receiver-side predicate -- reserved for API consistency. En_Po_Field's
+// death cycle (EnPoField_Death -> EnPoField_SoulIdle -> soul-talk states)
+// does NOT call Item_DropCollectibleRandom; the Big-Poe / regular-Poe
+// soul is awarded via per-client Item_Give(ITEM_POE / ITEM_BIG_POE)
+// during the soul-talk bottle interaction (z_en_po_field.c:713,717),
+// not via the EN_ITEM00 drop chain. This predicate is currently unused
+// at the actor-side call sites but is exposed for symmetry with sibling
+// per-enemy sync plans (En_Poh is the closest analog) and as a future
+// hook if a drop call is ever added to the death cycle.
+extern "C" bool Anchor_ShouldSuppressEnPoFieldDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // Receiver-side predicate -- reserved for API consistency. En_Poh's
 // death cycle (EnPoh_Death -> soul-talk states) does NOT call
 // Item_DropCollectibleRandom; Poe yields ITEM_POE via a per-client
