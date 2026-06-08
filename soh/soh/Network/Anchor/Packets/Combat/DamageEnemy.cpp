@@ -47,6 +47,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Fd/z_en_fd.h"
 // En_GeldB — Gerudo Thief AC_HIT routing.
 #include "src/overlays/actors/ovl_En_GeldB/z_en_geldb.h"
+// En_Po_Field — Field Poe (Hyrule Field night) AC_HIT routing.
+#include "src/overlays/actors/ovl_En_Po_Field/z_en_po_field.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
@@ -830,6 +832,24 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // is host-authoritative for outgoing AT hits; blockCollider
             // is shield-deflection only. Set AC_HIT on bodyCollider only.
             ((EnGeldB*)actor)->bodyCollider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_PO_FIELD:
+            // Audit: TWO acHitInfo->/base.ac-> derefs at z_en_po_field.c:
+            //   276/277 inside EnPoField_SetupDamage. Null-guards landed in
+            //   the same commit as Phase 1 (3805a6281) — mirror of En_Poh's
+            //   func_80ADE28C pattern at z_en_poh.c:315-323. Three-branch
+            //   flow: dual-null-check + flag, single-null-check fallback,
+            //   no-attacker fallback uses `shape.rot.y + 0x8000` facing flip.
+            // Acks: collider.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            // Skips: collider.info.acHitInfo + collider.base.ac — read only
+            //   inside the null-guarded site at z_en_po_field.c:276-277;
+            //   safe under the guard.
+            //
+            // Multi-collider: collider (AC) + flameCollider (AT, separate
+            // small flame projectile). AC_HIT on collider only; flame is
+            // host-side outgoing AT.
+            ((EnPoField*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_BB:
             // Audit: TWO acHitInfo-> derefs at z_en_bb.c:1164 and :1173

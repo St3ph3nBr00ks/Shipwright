@@ -97,6 +97,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Fd/z_en_fd.h"
 // En_GeldB — Gerudo Thief state-machine sync.
 #include "src/overlays/actors/ovl_En_GeldB/z_en_geldb.h"
+// En_Po_Field — Field Poe (Hyrule Field night) state-machine sync.
+#include "src/overlays/actors/ovl_En_Po_Field/z_en_po_field.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 
@@ -3221,6 +3223,64 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnGeldB] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // En_Po_Field (Field Poe — Hyrule Field night) — state-machine
+            // sync. 12-state map:
+            //   0  WaitForSpawn (dormant — autonomous; rolls Big/Small variant
+            //                   via Rand_ZeroOne — see KNOWN LIMITATION below)
+            //   1  Appear       — one-shot rise anim
+            //   2  CirclePlayer — Setup needs PlayState; OMITTED
+            //   3  Flee         — Big-Poe behavior
+            //   4  Damage       — Setup signature reads acHitInfo/ac; OMITTED
+            //                     (vanilla hit-reaction will fire locally
+            //                     when host's ENEMY_STATE health drops)
+            //   5  Death        — driven via SetupDyingNet
+            //   6  Disappear    — fade-out
+            //   7-11 SoulIdle / soul-talk / SoulInteract — per-client soul-
+            //                    talk states; OMITTED (each player who has a
+            //                    bottle captures their own Poe via per-client
+            //                    Item_Give; matches En_Poh pattern)
+            //
+            // Dormant-to-active filter: state 0 (WaitForSpawn) treated as
+            // dormant. Active states 1, 3, 6 (Appear/Flee/Disappear) are
+            // the only states this driver applies. Death state 5 gated
+            // by PhaseImpliesHasLocalDeath.
+            //
+            // KNOWN LIMITATION — Big-Poe variant divergence: actor->params
+            // is rolled independently per client at WaitForSpawn via
+            // Rand_ZeroOne() (z_en_po_field.c:427-432, gated on Flags_
+            // GetSwitch + PLAYER_STATE1_ON_HORSE). Without explicit params
+            // sync, P1 may see a Big Poe at netId X while P2 sees a Small
+            // Poe at the same netId — different animations, colors, scale,
+            // collider dimensions, AND bottle-capture rewards. A clean
+            // fix shape exists (Karebaba's `netActorParams` per-actor
+            // extension at PerActor/EnKarebabaState.h pattern) but requires
+            // either ENEMY_SPAWN-time params broadcast or a sub-struct on
+            // EnemyNetId. Deferred to a Phase 3 follow-up; field test will
+            // reveal whether the divergence is user-visible.
+            if (actor->id == ACTOR_EN_PO_FIELD && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnPoField* pof = (EnPoField*)actor;
+                s16 curState = EnPoField_GetStateIndex(pof);
+                bool netIsDormant  = (ext->netStateIndex == 0);
+                bool localIsActive = (curState == 1 || curState == 3 || curState == 6);
+                bool deathStateNet = (ext->netStateIndex == 5);
+                if (curState != ext->netStateIndex &&
+                    !(netIsDormant && localIsActive) &&
+                    !deathStateNet) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnPoField] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnPoField_ApplyNetState(pof, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
+                        SPDLOG_INFO("[EnPoField] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }

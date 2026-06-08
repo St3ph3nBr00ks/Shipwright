@@ -87,6 +87,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Fd/z_en_fd.h"
 // En_GeldB — Gerudo Thief state-machine sync.
 #include "overlays/actors/ovl_En_GeldB/z_en_geldb.h"
+// En_Po_Field — Field Poe (Hyrule Field night) state-machine sync.
+#include "overlays/actors/ovl_En_Po_Field/z_en_po_field.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
@@ -253,6 +255,10 @@ struct EnemyUpdateExtras {
     // En_GeldB — Gerudo Thief state-machine sync.
     bool hasEnGeldB         = false;
     s16  enGeldBActionState = 0;
+
+    // En_Po_Field — Field Poe (Hyrule Field night) state-machine sync.
+    bool hasEnPoField         = false;
+    s16  enPoFieldActionState = 0;
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
@@ -564,6 +570,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnGeldB* geldb          = (EnGeldB*)actor;
         e.hasEnGeldB            = true;
         e.enGeldBActionState    = EnGeldB_GetStateIndex(geldb);
+    } else if (actor->id == ACTOR_EN_PO_FIELD) {
+        EnPoField* pof          = (EnPoField*)actor;
+        e.hasEnPoField          = true;
+        e.enPoFieldActionState  = EnPoField_GetStateIndex(pof);
     } else if (actor->id == ACTOR_EN_BB) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
@@ -734,6 +744,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnGeldB != prev.hasEnGeldB) return true;
     if (cur.hasEnGeldB) {
         if (cur.enGeldBActionState != prev.enGeldBActionState) return true;
+    }
+    if (cur.hasEnPoField != prev.hasEnPoField) return true;
+    if (cur.hasEnPoField) {
+        if (cur.enPoFieldActionState != prev.enPoFieldActionState) return true;
     }
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
@@ -1081,6 +1095,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enGeldBActionState);
             }
         }
+        if (extras.hasEnPoField) {
+            s16 prev = prevExtras && prevExtras->hasEnPoField ? prevExtras->enPoFieldActionState : -1;
+            if (prev != extras.enPoFieldActionState) {
+                SPDLOG_INFO("[EnPoField] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enPoFieldActionState);
+            }
+        }
         if (extras.hasEnBb) {
             s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
             if (prev != extras.enBbActionState) {
@@ -1321,6 +1342,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // En_GeldB — Gerudo Thief state-machine sync.
     if (extras.hasEnGeldB) {
         payload["actionState"] = extras.enGeldBActionState;
+    }
+
+    // En_Po_Field — Field Poe (Hyrule Field night) state-machine sync.
+    if (extras.hasEnPoField) {
+        payload["actionState"] = extras.enPoFieldActionState;
     }
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
@@ -2049,6 +2075,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // En_GeldB — cache Gerudo Thief actionState.
         if (actor->id == ACTOR_EN_GELDB && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // En_Po_Field — cache Field Poe actionState.
+        if (actor->id == ACTOR_EN_PO_FIELD && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
@@ -2888,6 +2918,26 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnGeldB netId={} — triggering natural death cycle", netId);
                     EnGeldB_SetupDyingNet((EnGeldB*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Po_Field (Field Poe — Hyrule Field night): route through
+                // EnPoField_SetupDyingNet so the natural Death → SoulIdle →
+                // soul-talk sequence plays on the receiver. The soul-talk
+                // states 7-11 are per-client by design (each player who has
+                // a bottle captures their own Poe soul via per-client
+                // Item_Give); peer's local soul state runs independently.
+                if (actor->id == ACTOR_EN_PO_FIELD) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnPoField.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnPoField netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnPoField netId={} — triggering natural death cycle", netId);
+                    EnPoField_SetupDyingNet((EnPoField*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
