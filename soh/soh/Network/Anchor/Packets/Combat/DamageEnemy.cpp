@@ -34,6 +34,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Peehat/z_en_peehat.h"
 #include "src/overlays/actors/ovl_En_Poh/z_en_poh.h"
 #include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
+// #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
+#include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
 // as En_St. Added 2026-06-07 after audit triggered by En_St fixes.
 #include "src/overlays/actors/ovl_En_Ssh/z_en_ssh.h"
@@ -424,6 +426,16 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // inside EnBili_UpdateDamage. Null-guard landed in the same
             // commit as this case addition.
             ((EnBili*)actor)->collider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_BB:
+            // Bubble (flame skull) — z_en_bb.c:1164 and :1173 deref
+            // `collider.elements[0].info.acHitInfo->toucher.damage` in
+            // EnBb_CollisionCheck cases 7 (Fire arrow) and 6 (Ice arrow)
+            // to populate freezeTimer. Null-guards landed in the same
+            // commit as this case addition. ColliderJntSph collider —
+            // `base.acFlags` is the shared header so a single write
+            // covers all elements.
+            ((EnBb*)actor)->collider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_DEKUNUTS:
             // Mad Scrub — z_en_dekunuts.c:213 derefs

@@ -56,4 +56,24 @@ typedef enum {
     ENBB_KILL_TRAIL = 11
 } EnBbType;
 
+// Anchor multiplayer state-machine sync (#129 / en_bb_sync_plan.md).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp etc.), so the param name in the declaration
+// uses `actor` instead. The implementations in z_en_bb.c keep
+// `this` per OoT decomp convention.
+void EnBb_SetupDyingNet(struct EnBb* actor, PlayState* play);
+s16  EnBb_GetStateIndex(struct EnBb* actor);
+void EnBb_ApplyNetState(struct EnBb* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and we're replaying
+// the death sequence). Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnBbDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

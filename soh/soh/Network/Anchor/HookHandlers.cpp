@@ -83,6 +83,8 @@ extern "C" {
 
 // #128 / en_bili_sync_plan.md — Biri jellyfish (En_Bili) state-machine sync.
 #include "src/overlays/actors/ovl_En_Bili/z_en_bili.h"
+// #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
+#include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // Issue #153 — En_Goroiwa is ACTORCAT_PROP, the first non-ENEMY actor synced.
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
@@ -2088,10 +2090,17 @@ void Anchor::RegisterHooks() {
                 // hintnut facing host's nearest; peer sees its hintnut facing
                 // peer's nearest) is the INTENDED gameplay shape — "the scrub
                 // is aiming at YOU" matches the per-player single-player feel.
+                // #129 — En_Bb's Green variant orbits the player via matrix-
+                // rotated home.pos with continuous Math_SmoothStepToF tracking,
+                // and the killer variants add a Math_CosF(bobPhase) Y bob to
+                // world.pos each frame. Both shapes diverge from host's
+                // per-frame state, so position sync is intentionally skipped
+                // and each client runs its own actor->update() to derive pos.
                 const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
                                                    actor->id == ACTOR_EN_KAREBABA ||
                                                    actor->id == ACTOR_EN_NUTSBALL ||
-                                                   actor->id == ACTOR_EN_HINTNUTS);
+                                                   actor->id == ACTOR_EN_HINTNUTS ||
+                                                   actor->id == ACTOR_EN_BB);
                 if (!isAnimationDrivenPos && !arrowPinned) {
                     actor->world.pos = ext->netPos;
                     actor->shape.rot = ext->netShapeRot;
@@ -2807,6 +2816,47 @@ void Anchor::RegisterHooks() {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         const char* why = deathStateNet ? "death-state-gated" : "dormant-active filter";
                         SPDLOG_INFO("[EnBili] rx netId={} block net={} local={} ({})",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState, why);
+                    }
+                }
+            }
+
+            // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull)
+            // state-machine sync. Only damage-class transitions are
+            // synced via ApplyNetState (BB_DAMAGE=0 / BB_DOWN=3 /
+            // BB_STUNNED=4). Variant-spawn states (BB_BLUE=6 / BB_RED=7
+            // / BB_WHITE=8 / BB_GREEN=9) are set locally at Init from
+            // params and are treated as "dormant" net values that
+            // shouldn't override an active damage state on a peer who
+            // already locally took a hit. Death state BB_KILL=1 is
+            // gated by PhaseImpliesHasLocalDeath and driven via
+            // SetupDyingNet from HandlePacket_EnemyDefeated.
+            if (actor->id == ACTOR_EN_BB && ext->netStateIndex >= 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                EnBb* bb = (EnBb*)actor;
+                s16 curState = EnBb_GetStateIndex(bb);
+                // Variant-spawn states (6/7/8/9) — don't override an
+                // active damage state on the receiver.
+                bool netIsVariantSpawn = (ext->netStateIndex == 6 || ext->netStateIndex == 7 ||
+                                          ext->netStateIndex == 8 || ext->netStateIndex == 9);
+                bool localIsDamageActive = (curState == 0 || curState == 3 || curState == 4);
+                // BB_KILL (1) routed via SetupDyingNet — never apply here.
+                // BB_FLAME_TRAIL (2) is a child trail, not synced.
+                // BB_UNUSED (5) is unused in vanilla.
+                bool blockedState = (ext->netStateIndex == 1 || ext->netStateIndex == 2 ||
+                                     ext->netStateIndex == 5);
+                if (curState != ext->netStateIndex &&
+                    !(netIsVariantSpawn && localIsDamageActive) &&
+                    !blockedState) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
+                        SPDLOG_INFO("[EnBb] rx netId={} apply {}→{}",
+                                    ext->netId, (int)curState, (int)ext->netStateIndex);
+                    }
+                    EnBb_ApplyNetState(bb, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        const char* why = blockedState ? "blocked-state" : "variant-spawn vs damage-active";
+                        SPDLOG_INFO("[EnBb] rx netId={} block net={} local={} ({})",
                                     ext->netId, (int)ext->netStateIndex, (int)curState, why);
                     }
                 }
