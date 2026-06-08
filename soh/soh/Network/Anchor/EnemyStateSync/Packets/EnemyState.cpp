@@ -81,6 +81,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Zf/z_en_zf.h"
 // En_Mb — Moblin (Club / SpearGuard / SpearPatrol variants) state-machine sync.
 #include "overlays/actors/ovl_En_Mb/z_en_mb.h"
+// En_Bigokuta — Big Octo miniboss state-machine sync (#130).
+#include "overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
@@ -235,6 +237,10 @@ struct EnemyUpdateExtras {
     // En_Mb — Moblin (Club / SpearGuard / SpearPatrol variants) state-machine sync.
     bool hasEnMb         = false;
     s16  enMbActionState = 0;
+
+    // En_Bigokuta — Big Octo miniboss state-machine sync (#130).
+    bool hasEnBigokuta         = false;
+    s16  enBigokutaActionState = 0;
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
@@ -534,6 +540,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnMb* mb            = (EnMb*)actor;
         e.hasEnMb           = true;
         e.enMbActionState   = EnMb_GetStateIndex(mb);
+    } else if (actor->id == ACTOR_EN_BIGOKUTA) {
+        EnBigokuta* big          = (EnBigokuta*)actor;
+        e.hasEnBigokuta          = true;
+        e.enBigokutaActionState  = EnBigokuta_GetStateIndex(big);
     } else if (actor->id == ACTOR_EN_BB) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
@@ -692,6 +702,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnMb != prev.hasEnMb) return true;
     if (cur.hasEnMb) {
         if (cur.enMbActionState != prev.enMbActionState) return true;
+    }
+    if (cur.hasEnBigokuta != prev.hasEnBigokuta) return true;
+    if (cur.hasEnBigokuta) {
+        if (cur.enBigokutaActionState != prev.enBigokutaActionState) return true;
     }
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
@@ -1018,6 +1032,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enMbActionState);
             }
         }
+        if (extras.hasEnBigokuta) {
+            s16 prev = prevExtras && prevExtras->hasEnBigokuta ? prevExtras->enBigokutaActionState : -1;
+            if (prev != extras.enBigokutaActionState) {
+                SPDLOG_INFO("[EnBigokuta] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enBigokutaActionState);
+            }
+        }
         if (extras.hasEnBb) {
             s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
             if (prev != extras.enBbActionState) {
@@ -1243,6 +1264,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // En_Mb — Moblin (Club / SpearGuard / SpearPatrol) state-machine sync.
     if (extras.hasEnMb) {
         payload["actionState"] = extras.enMbActionState;
+    }
+
+    // En_Bigokuta — Big Octo miniboss state-machine sync (#130).
+    if (extras.hasEnBigokuta) {
+        payload["actionState"] = extras.enBigokutaActionState;
     }
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
@@ -1959,6 +1985,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // En_Mb — cache Moblin actionState.
         if (actor->id == ACTOR_EN_MB && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // En_Bigokuta — cache Big Octo actionState (#130).
+        if (actor->id == ACTOR_EN_BIGOKUTA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
@@ -2730,6 +2760,28 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnMb netId={} — triggering natural death cycle", netId);
                     EnMb_SetupDyingNet((EnMb*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Bigokuta (Big Octo miniboss): route through
+                // EnBigokuta_SetupDyingNet so the natural death-anim +
+                // shrink + heart-container-reveal sequence plays on the
+                // receiver. The 0xB0 random drop is gated by
+                // Anchor_ShouldSuppressEnBigokutaDrop — host's authoritative
+                // ITEM_DROP_SYNC handles it. The heart container reveal
+                // (Flags_SetClear at z_en_bigokuta.c:649) is NOT gated —
+                // it fires per-client for cooperative reveal. Plan: #130.
+                if (actor->id == ACTOR_EN_BIGOKUTA) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnBigokuta.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnBigokuta netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnBigokuta netId={} — triggering natural death cycle", netId);
+                    EnBigokuta_SetupDyingNet((EnBigokuta*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;

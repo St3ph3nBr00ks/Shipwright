@@ -87,6 +87,23 @@ SkelAnime* GetEnemySkelAnime(Actor* actor) {
 
 bool IsSyncedWorldActor(int16_t actorId) {
     switch (actorId) {
+        case ACTOR_EN_BIGOKUTA: return true;  // #130 — Big Octo miniboss.
+                                              // params == 0 variant calls
+                                              // Actor_ChangeCategory(ACTORCAT_PROP)
+                                              // inside EnBigokuta_Init (z_en_bigokuta.c:185),
+                                              // so it SPAWNS as PROP for the first ~131
+                                              // frames (emerge sequence states 0→1→2)
+                                              // before being promoted back to ENEMY at
+                                              // state 2's land-and-rotate completion
+                                              // (z_en_bigokuta.c:463). Without this
+                                              // allowlist entry the spawn-time admission
+                                              // gate (which keys on ACTORCAT_ENEMY) would
+                                              // never admit the params=0 variant into
+                                              // the sync pipeline. params != 0 variants
+                                              // spawn directly as ACTORCAT_ENEMY and
+                                              // would be admitted by the default gate;
+                                              // this entry catches the params==0 case
+                                              // as well.
         case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
         case ACTOR_EN_HONOTRAP: return true;  // en_honotrap_sync — Fake-eye fire/ice
                                               // traps (Fire/Ice/Shadow Temples). PROP.
