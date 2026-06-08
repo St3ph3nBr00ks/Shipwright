@@ -39,6 +39,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Vali/z_en_vali.h"
 // En_Zf — Lizalfos + Dinolfos AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Zf/z_en_zf.h"
+// En_Mb — Moblin (Club / SpearGuard / SpearPatrol) AC_HIT routing.
+#include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
@@ -680,6 +682,28 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             //   collider is host-authoritative for its own AT hits. Set
             //   AC_HIT on bodyCollider only.
             ((EnZf*)actor)->bodyCollider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_MB:
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path;
+            //   safe synthetic AC_HIT bit-set. Verified by agent
+            //   `feature/sync-en-mb` Phase 1 (commit 7f210411a):
+            //   `grep -nE "base\.ac->|acHitInfo->" z_en_mb.c` → 0 matches.
+            //   Damage path reads `hitbox.base.acFlags & AC_HIT` +
+            //   `colChkInfo.damageEffect` / `colChkInfo.damage` only.
+            //
+            // Acks: hitbox.base.acFlags & AC_HIT, colChkInfo.damage,
+            //   colChkInfo.damageEffect.
+            //
+            // Skips: none — damage path does not read any field listed in
+            //   the SYNTHESIS CONTRACT "NOT POPULATED" section.
+            //
+            // Multi-collider note: En_Mb has hitbox (cyl, AC) + attackCollider
+            //   (quad, AT) + frontShielding (tris, deflection). Only hitbox
+            //   receives damage cross-machine. The attackCollider is host-
+            //   authoritative for outgoing AT hits. frontShielding is a
+            //   front-side deflection collider; AC_HIT on it would not
+            //   register damage anyway. Set AC_HIT on hitbox only.
+            ((EnMb*)actor)->hitbox.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_BB:
             // Bubble (flame skull) — z_en_bb.c:1164 and :1173 deref
