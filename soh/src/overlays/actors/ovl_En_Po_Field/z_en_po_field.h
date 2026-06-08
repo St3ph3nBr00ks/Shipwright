@@ -43,4 +43,31 @@ typedef struct EnPoField {
     /* 0x0290 */ ColliderCylinder flameCollider;
 } EnPoField; // size = 0x02DC
 
+// Anchor multiplayer state-machine sync (Field Poe).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp / HookHandlers.cpp), so the param name in
+// the declaration uses `actor` instead. The implementations in
+// z_en_po_field.c keep `this` per OoT decomp convention.
+void EnPoField_SetupDyingNet(struct EnPoField* actor, PlayState* play);
+s16  EnPoField_GetStateIndex(struct EnPoField* actor);
+void EnPoField_ApplyNetState(struct EnPoField* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate — reserved for symmetry with
+// other per-enemy sync plans. En_Po_Field's death cycle does NOT call
+// Item_DropCollectibleRandom; the Big-Poe / regular-Poe soul is
+// awarded via per-client `Item_Give(ITEM_POE / ITEM_BIG_POE)` during
+// the soul-talk bottle interaction (z_en_po_field.c:713,717) rather
+// than the EN_ITEM00 drop chain. This predicate is currently unused
+// at the actor-side call sites but is exposed for symmetry with
+// sibling per-enemy sync plans and as a future hook if a drop call
+// is ever added to the death cycle.
+// Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnPoFieldDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif
