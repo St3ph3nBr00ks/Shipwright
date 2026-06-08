@@ -229,3 +229,21 @@ extern "C" bool Anchor_ShouldSuppressEnPeehatDrop(Actor* actor) {
     if (ext == nullptr) return false;
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
+
+// Receiver-side predicate -- true when an En_Bb (Bubble / flame skull)
+// death cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the SetupDeath -> EnBb_Death sequence). EnBb_Death uses this
+// to suppress the random 0xD0 drop call so host's authoritative
+// ITEM_DROP_SYNC isn't double-applied. The `|| ext->networkDriveDying`
+// clause mirrors the Dekubaba / Firefly / Bili race mitigation -- closes
+// a race when peer's vanilla EnBb_CollisionCheck consumes the same
+// ENEMY_STATE health<=0 read and transitions to SetupDeath before
+// ENEMY_DEFEATED arrives. See z_en_bb.c EnBb_Death +
+// Plans/en_bb_sync_plan.md / #129.
+extern "C" bool Anchor_ShouldSuppressEnBbDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
+        || ext->networkDriveDying;
+}

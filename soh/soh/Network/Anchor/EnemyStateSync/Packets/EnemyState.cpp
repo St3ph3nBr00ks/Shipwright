@@ -69,6 +69,8 @@ extern "C" {
 
 // #128 / en_bili_sync_plan.md — Biri jellyfish (En_Bili) state-machine sync.
 #include "overlays/actors/ovl_En_Bili/z_en_bili.h"
+// #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
+#include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -193,6 +195,10 @@ struct EnemyUpdateExtras {
     // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
     bool hasEnBili         = false;
     s16  enBiliActionState = 0;
+
+    // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
+    bool hasEnBb         = false;
+    s16  enBbActionState = 0;
 
     // en_ssh_sync_plan.md — Cursed Skulltula people. State-machine +
     // stun + hitCount + stateFlags sync per OQ B/C/D resolutions.
@@ -458,6 +464,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnBili* bili            = (EnBili*)actor;
         e.hasEnBili             = true;
         e.enBiliActionState     = EnBili_GetStateIndex(bili);
+    } else if (actor->id == ACTOR_EN_BB) {
+        EnBb* bb            = (EnBb*)actor;
+        e.hasEnBb           = true;
+        e.enBbActionState   = EnBb_GetStateIndex(bb);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -579,6 +589,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnBili != prev.hasEnBili) return true;
     if (cur.hasEnBili) {
         if (cur.enBiliActionState != prev.enBiliActionState) return true;
+    }
+    if (cur.hasEnBb != prev.hasEnBb) return true;
+    if (cur.hasEnBb) {
+        if (cur.enBbActionState != prev.enBbActionState) return true;
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
@@ -862,6 +876,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enBiliActionState);
             }
         }
+        if (extras.hasEnBb) {
+            s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
+            if (prev != extras.enBbActionState) {
+                SPDLOG_INFO("[EnBb] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enBbActionState);
+            }
+        }
         if (extras.hasDekunuts) {
             s16 prev = prevExtras && prevExtras->hasDekunuts ? prevExtras->dekunutsActionState : -1;
             if (prev != extras.dekunutsActionState) {
@@ -1043,6 +1064,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
     if (extras.hasEnBili) {
         payload["actionState"] = extras.enBiliActionState;
+    }
+
+    // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
+    if (extras.hasEnBb) {
+        payload["actionState"] = extras.enBbActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1529,9 +1555,15 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         // but world.pos is left to local physics. (Targeting fix for
         // EnHintnuts_ThrowNut at z_en_hintnuts.c spawns the nut toward
         // the local player so each client's reflect window is real.)
+        // #129 — En_Bb's Green variant orbits the player via matrix-rotated
+        // home.pos with continuous Math_SmoothStepToF tracking, and the
+        // killer variants add a Math_CosF(bobPhase) Y bob each frame;
+        // both shapes diverge from host's per-frame world.pos. Each client
+        // runs its own actor->update() to derive pos; sync is skipped.
         const bool isAnimationDrivenPos = (actor->id == ACTOR_EN_DEKUBABA ||
                                            actor->id == ACTOR_EN_KAREBABA ||
-                                           actor->id == ACTOR_EN_NUTSBALL);
+                                           actor->id == ACTOR_EN_NUTSBALL ||
+                                           actor->id == ACTOR_EN_BB);
         if (!isAnimationDrivenPos && !arrowPinned) {
             actor->world.pos = pos;
         }
@@ -1719,6 +1751,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // #128 / en_bili_sync_plan.md — cache En_Bili (Biri) actionState.
         if (actor->id == ACTOR_EN_BILI && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
+        if (actor->id == ACTOR_EN_BB && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // Boss_Goma — cache host actionState. Receive driver in
@@ -2370,6 +2406,28 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnBili netId={} — triggering natural death cycle", netId);
                     EnBili_SetupDyingNet((EnBili*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Bb (Bubble / flame skull): route through EnBb_SetupDyingNet
+                // so the natural SetupDeath → EnBb_Death cycle plays on the
+                // receiver (knockback + body-break + drop) without echoing
+                // GameInteractor_ExecuteOnEnemyDefeat. Death cycle drops are
+                // gated by Anchor_ShouldSuppressEnBbDrop. SetupDeath does
+                // fire OnEnemyDefeat, but the HostBookkeeping
+                // HasDefeatBroadcast dedup guard at the send site prevents
+                // an echo back to host. Plan: Plans/en_bb_sync_plan.md / #129.
+                if (actor->id == ACTOR_EN_BB) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnBb.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnBb netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnBb netId={} — triggering natural death cycle", netId);
+                    EnBb_SetupDyingNet((EnBb*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;

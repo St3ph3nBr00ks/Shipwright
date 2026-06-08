@@ -497,7 +497,14 @@ void EnBb_Death(EnBb* this, PlayState* play) {
         if (!BodyBreak_SpawnParts(&this->actor, &this->bodyBreak, play, enpartType)) {
             return;
         }
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        // Anchor multiplayer — suppress drop when the death cycle was
+        // network-driven (peer's ENEMY_DEFEATED arrived and we're
+        // replaying the death sequence on this client). Host's local
+        // kill broadcasts ENEMY_DEFEATED + ITEM_DROP_SYNC separately;
+        // receiver mustn't double-drop. #129 / en_bb_sync_plan.md.
+        if (!Anchor_ShouldSuppressEnBbDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        }
     } else {
         if (this->flamePrimAlpha) {
             if (this->flamePrimAlpha <= 20) {
@@ -1161,7 +1168,12 @@ void EnBb_CollisionCheck(EnBb* this, PlayState* play) {
         Actor_SetDropFlag(&this->actor, &this->collider.elements[0].info, 0);
         switch (this->dmgEffect) {
             case 7:
-                this->actor.freezeTimer = this->collider.elements[0].info.acHitInfo->toucher.damage;
+                // #129 / log audit — cross-machine sync sets AC_HIT
+                // synthetically without populating acHitInfo. Null-guard
+                // the deref; when null, fall back to dmg=0 (no freeze).
+                if (this->collider.elements[0].info.acHitInfo != NULL) {
+                    this->actor.freezeTimer = this->collider.elements[0].info.acHitInfo->toucher.damage;
+                }
             case 5:
                 this->fireIceTimer = 0x30;
                 //! @bug
@@ -1170,7 +1182,10 @@ void EnBb_CollisionCheck(EnBb* this, PlayState* play) {
                 //! Din's Fire on a white bubble will do just that. The mechanism is complex and described below.
                 goto block_15;
             case 6:
-                this->actor.freezeTimer = this->collider.elements[0].info.acHitInfo->toucher.damage;
+                // #129 / log audit — same null-guard as case 7 above.
+                if (this->collider.elements[0].info.acHitInfo != NULL) {
+                    this->actor.freezeTimer = this->collider.elements[0].info.acHitInfo->toucher.damage;
+                }
                 break;
             case 8:
             case 9:
@@ -1354,4 +1369,65 @@ void EnBb_Draw(Actor* thisx, PlayState* play) {
         }
     }
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (#129 / en_bb_sync_plan.md).
+// =============================================================================
+
+// Triggers EnBb's natural death cycle on a non-host receiver. Routes via
+// EnBb_SetupDeath, which sets action=BB_KILL + handles per-variant
+// initial state (yaw flip, knockback, sound). The natural EnBb_Death
+// runs BodyBreak_SpawnParts + Item_DropCollectibleRandom (gated by
+// Anchor_ShouldSuppressEnBbDrop) over the next ~12 frames before
+// Actor_Kill. EnBb_SetupDeath also fires GameInteractor_ExecuteOn-
+// EnemyDefeat, but the HostBookkeeping HasDefeatBroadcast dedup guard
+// at the send site prevents the receive-side fire from echoing back
+// to host.
+void EnBb_SetupDyingNet(EnBb* this, PlayState* play) {
+    // Variant-driven cleanup mirrors the EnBb_CollisionCheck death path:
+    // red bubble's flame trail children are dismissed; the natural
+    // SetupDeath body handles knockback / yaw flip / sfx for killer
+    // variants (params <= ENBB_BLUE) and a fade-out for non-killer
+    // variants. Setting BB_KILL action + transition via SetupDeath keeps
+    // the receiver's animation cycle aligned with what host's local
+    // EnBb_Death is doing.
+    this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    if (this->actor.params == ENBB_RED) {
+        EnBb_KillFlameTrail(this);
+    }
+    EnBb_SetupDeath(this, play);
+}
+
+s16 EnBb_GetStateIndex(EnBb* this) {
+    // `this->action` already holds the EnBbAction enum (0..9). Returning
+    // it directly tracks the active state cleanly; the receive driver's
+    // dormant-to-active filter discriminates which transitions to apply.
+    return (s16)this->action;
+}
+
+void EnBb_ApplyNetState(EnBb* this, s16 stateIndex) {
+    // Only the damage-class transitions are synced. Variant-spawn
+    // states (BB_BLUE / BB_RED / BB_WHITE / BB_GREEN) are determined by
+    // params at Init and don't need cross-machine sync — each client
+    // spawns the same variant locally. The natural setup helpers for
+    // those variants also have host-specific side effects (path lookups,
+    // flame-trail children, ACTOR_FLAG_CAN_ATTACH_TO_ARROW writes) that
+    // shouldn't fire on the receiver. The damage-class states (DAMAGE /
+    // DOWN / STUNNED) are the cross-machine transitions worth driving.
+    switch (stateIndex) {
+        case BB_DAMAGE:  EnBb_SetupDamage(this);   break;
+        case BB_DOWN:    EnBb_SetupDown(this);     break;
+        case BB_STUNNED: EnBb_SetupStunned(this);  break;
+        // BB_KILL (1) — driven via SetupDyingNet from
+        //               HandlePacket_EnemyDefeated. Skip silently here.
+        // BB_FLAME_TRAIL (2) — only set on child-spawned trail actors;
+        //                     these have params > ENBB_BLUE and never
+        //                     enter the sync pipeline as parents.
+        // BB_UNUSED (5) — unused in vanilla.
+        // BB_BLUE / BB_RED / BB_WHITE / BB_GREEN — variant-spawn states
+        //   set at Init from params; not synced (each client spawns the
+        //   correct variant locally).
+        default: break;
+    }
 }
