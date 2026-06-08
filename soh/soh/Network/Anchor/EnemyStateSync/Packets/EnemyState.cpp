@@ -77,6 +77,8 @@ extern "C" {
 #include "overlays/actors/ovl_En_Bili/z_en_bili.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
+// en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
+#include "overlays/actors/ovl_En_Honotrap/z_en_honotrap.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — host needs to apply received pos when peer
@@ -219,6 +221,12 @@ struct EnemyUpdateExtras {
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
     s16  enBbActionState = 0;
+
+    // en_honotrap_sync — Fake-eye fire/ice trap state-machine sync.
+    // Eye variant only (params == HONOTRAP_EYE); flame variants are
+    // per-client-local and filtered at HookHandlers.cpp OnActorSpawn.
+    bool hasEnHonotrap         = false;
+    s16  enHonotrapActionState = 0;
 
     // en_ssh_sync_plan.md — Cursed Skulltula people. State-machine +
     // stun + hitCount + stateFlags sync per OQ B/C/D resolutions.
@@ -500,6 +508,15 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
         e.enBbActionState   = EnBb_GetStateIndex(bb);
+    } else if (actor->id == ACTOR_EN_HONOTRAP && actor->params == HONOTRAP_EYE) {
+        // Eye variant only — flame variants are per-client-local and
+        // filtered at OnActorSpawn so they never carry an EnemyNetId
+        // extension. The gate here is defense-in-depth; if a flame ever
+        // sneaked through it would early-return -1 from GetStateIndex
+        // and the consumer would treat that as "no sync available".
+        EnHonotrap* honotrap        = (EnHonotrap*)actor;
+        e.hasEnHonotrap             = true;
+        e.enHonotrapActionState     = EnHonotrap_GetStateIndex(honotrap);
     } else if (actor->id == ACTOR_BOSS_GOMA) {
         BossGoma* bg                      = (BossGoma*)actor;
         e.hasBossGoma                     = true;
@@ -637,6 +654,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
         if (cur.enBbActionState != prev.enBbActionState) return true;
+    }
+    if (cur.hasEnHonotrap != prev.hasEnHonotrap) return true;
+    if (cur.hasEnHonotrap) {
+        if (cur.enHonotrapActionState != prev.enHonotrapActionState) return true;
     }
     if (cur.hasBossGoma != prev.hasBossGoma) return true;
     if (cur.hasBossGoma) {
@@ -941,6 +962,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enBbActionState);
             }
         }
+        if (extras.hasEnHonotrap) {
+            s16 prev = prevExtras && prevExtras->hasEnHonotrap ? prevExtras->enHonotrapActionState : -1;
+            if (prev != extras.enHonotrapActionState) {
+                SPDLOG_INFO("[EnHonotrap] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enHonotrapActionState);
+            }
+        }
         if (extras.hasDekunuts) {
             s16 prev = prevExtras && prevExtras->hasDekunuts ? prevExtras->dekunutsActionState : -1;
             if (prev != extras.dekunutsActionState) {
@@ -1142,6 +1170,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     if (extras.hasEnBb) {
         payload["actionState"] = extras.enBbActionState;
+    }
+
+    // en_honotrap_sync — Fake-eye fire/ice trap state-machine sync.
+    if (extras.hasEnHonotrap) {
+        payload["actionState"] = extras.enHonotrapActionState;
     }
 
     // Boss_Goma — minimal Encounter -> FloorMain bridge (any player can
@@ -1840,6 +1873,12 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
         if (actor->id == ACTOR_EN_BB && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
+        // en_honotrap_sync — cache En_Honotrap eye actionState. Flame
+        // variants are filtered at OnActorSpawn and never get an
+        // extension here.
+        if (actor->id == ACTOR_EN_HONOTRAP && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
         // Boss_Goma — cache host actionState. Receive driver in

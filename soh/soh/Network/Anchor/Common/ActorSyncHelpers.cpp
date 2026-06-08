@@ -88,6 +88,19 @@ SkelAnime* GetEnemySkelAnime(Actor* actor) {
 bool IsSyncedWorldActor(int16_t actorId) {
     switch (actorId) {
         case ACTOR_EN_GOROIWA:  return true;  // #153 (PROP)
+        case ACTOR_EN_HONOTRAP: return true;  // en_honotrap_sync — Fake-eye fire/ice
+                                              // traps (Fire/Ice/Shadow Temples). PROP.
+                                              // Only the eye variant (params == HONOTRAP_EYE)
+                                              // is admitted for state-machine sync; the two
+                                              // flame variants (HONOTRAP_FLAME_MOVE, _DROP)
+                                              // are per-client-local-AI projectiles filtered
+                                              // at HookHandlers.cpp OnActorSpawn so each
+                                              // client owns its own copy without ENEMY_SPAWN
+                                              // duplication. Also listed in DummyPlayer.cpp's
+                                              // attackerIsPerClientProjectile so flame hits
+                                              // on peer's DummyPlayer don't broadcast
+                                              // DAMAGE_PLAYER (Projectile_DamageBroadcast_Audit
+                                              // _2026-06-07.md follow-up).
         case ACTOR_EN_SW:       return true;  // #148 Skullwalltula (gold variant → NPC)
         case ACTOR_EN_SSH:      return true;  // en_ssh_sync_plan.md — Cursed Skulltula
                                               // people (Skulltula House NPCs).

@@ -35,4 +35,11 @@ typedef enum {
     HONOTRAP_FLAME_DROP
 } EnHonotrapType;
 
+// Anchor multiplayer state-machine sync (en_honotrap_sync — eye variant only).
+// Param renamed `this` -> `actor` so this header can be included from C++ TUs
+// (Pitfall 1 — `this` is reserved in C++). The .c definitions use `this` per
+// OoT decomp convention; mismatched parameter names are legal C/C++.
+s16  EnHonotrap_GetStateIndex(struct EnHonotrap* actor);
+void EnHonotrap_ApplyNetState(struct EnHonotrap* actor, s16 stateIndex);
+
 #endif

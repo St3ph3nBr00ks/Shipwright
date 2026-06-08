@@ -546,3 +546,62 @@ void EnHonotrap_Draw(Actor* thisx, PlayState* play) {
             break;
     }
 }
+
+// =============================================================================
+// Anchor multiplayer state-machine sync (en_honotrap_sync).
+//
+// Only the EYE variant (params == HONOTRAP_EYE) carries a state machine worth
+// syncing. The two flame variants (HONOTRAP_FLAME_MOVE / HONOTRAP_FLAME_DROP)
+// are intrinsically per-client-local-AI projectiles:
+//   - Each client's local eye / Dampe spawner runs its own Actor_SpawnAsChild
+//     locally, producing one flame per client per attack event.
+//   - Flame trajectory is computed from `GET_PLAYER(play)->actor.world.pos`
+//     (local Link only); chase / shield-reflect physics are local-AI.
+//   - Anchor filtering at OnActorSpawn (HookHandlers.cpp en_honotrap_sync
+//     params filter) skips netId + ENEMY_SPAWN for the flame variants so
+//     each client owns its own copy without duplicating via wire.
+// Therefore GetStateIndex / ApplyNetState are EYE-only. Callers (the producer
+// in EnemyState.cpp + the driver in HookHandlers.cpp) gate on the params /
+// the cached state. Non-eye variants returning -1 here is defensive but
+// shouldn't fire — the producer never builds extras for them.
+// =============================================================================
+s16 EnHonotrap_GetStateIndex(EnHonotrap* this) {
+    if (this->actor.params != HONOTRAP_EYE) return -1;
+    if (this->actionFunc == EnHonotrap_EyeIdle)   return 0;
+    if (this->actionFunc == EnHonotrap_EyeOpen)   return 1;
+    if (this->actionFunc == EnHonotrap_EyeAttack) return 2;
+    if (this->actionFunc == EnHonotrap_EyeClose)  return 3;
+    return -1;
+}
+
+void EnHonotrap_ApplyNetState(EnHonotrap* this, s16 stateIndex) {
+    if (this->actor.params != HONOTRAP_EYE) return;
+    switch (stateIndex) {
+        // 0 (EyeIdle) — dormant; receive driver filters it out when the
+        //               local eye is already in an active state. Apply
+        //               here lets the eye return to dormant after a
+        //               natural cycle completes on the host first.
+        case 0: EnHonotrap_SetupEyeIdle(this); break;
+        // 1 (EyeOpen) — Anchor sync deliberately does NOT call
+        //               EnHonotrap_SetupEyeOpen here because that helper
+        //               spawns no child actor itself; the child flame is
+        //               spawned at the EyeOpen -> EyeAttack transition
+        //               inside EnHonotrap_EyeOpen() running locally. Each
+        //               client's local AI handles its own flame spawn at
+        //               the natural eyeState countdown. We still apply
+        //               the action func so the eye visual (color filter,
+        //               sfx) plays on a host-only first opening.
+        case 1: EnHonotrap_SetupEyeOpen(this); break;
+        // 2 (EyeAttack) — Skip the actionFunc swap entirely. Setting it
+        //                 directly would bypass the natural countdown
+        //                 (`EnHonotrap_EyeOpen` decrements eyeState and
+        //                 spawns the child flame on its local transition).
+        //                 The dormant-to-active filter handles the case
+        //                 where local is still at 1 (Open) while host has
+        //                 already advanced to 2 — the local countdown
+        //                 catches up within ~30 frames.
+        case 2: break;
+        case 3: EnHonotrap_SetupEyeClose(this); break;
+        default: break;
+    }
+}
