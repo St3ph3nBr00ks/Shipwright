@@ -75,6 +75,8 @@ extern "C" {
 
 // #128 / en_bili_sync_plan.md — Biri jellyfish (En_Bili) state-machine sync.
 #include "overlays/actors/ovl_En_Bili/z_en_bili.h"
+// #126 — Bari big jellyfish (En_Vali) state-machine sync.
+#include "overlays/actors/ovl_En_Vali/z_en_vali.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) state-machine sync.
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 // en_honotrap_sync — Fake-eye fire/ice traps (Fire/Ice/Shadow Temples).
@@ -217,6 +219,10 @@ struct EnemyUpdateExtras {
     // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
     bool hasEnBili         = false;
     s16  enBiliActionState = 0;
+
+    // #126 — En_Vali (Bari big jellyfish) state-machine sync.
+    bool hasEnVali         = false;
+    s16  enValiActionState = 0;
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
     bool hasEnBb         = false;
@@ -504,6 +510,10 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnBili* bili            = (EnBili*)actor;
         e.hasEnBili             = true;
         e.enBiliActionState     = EnBili_GetStateIndex(bili);
+    } else if (actor->id == ACTOR_EN_VALI) {
+        EnVali* vali            = (EnVali*)actor;
+        e.hasEnVali             = true;
+        e.enValiActionState     = EnVali_GetStateIndex(vali);
     } else if (actor->id == ACTOR_EN_BB) {
         EnBb* bb            = (EnBb*)actor;
         e.hasEnBb           = true;
@@ -650,6 +660,10 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnBili != prev.hasEnBili) return true;
     if (cur.hasEnBili) {
         if (cur.enBiliActionState != prev.enBiliActionState) return true;
+    }
+    if (cur.hasEnVali != prev.hasEnVali) return true;
+    if (cur.hasEnVali) {
+        if (cur.enValiActionState != prev.enValiActionState) return true;
     }
     if (cur.hasEnBb != prev.hasEnBb) return true;
     if (cur.hasEnBb) {
@@ -955,6 +969,13 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
                             (int)prev, (int)extras.enBiliActionState);
             }
         }
+        if (extras.hasEnVali) {
+            s16 prev = prevExtras && prevExtras->hasEnVali ? prevExtras->enValiActionState : -1;
+            if (prev != extras.enValiActionState) {
+                SPDLOG_INFO("[EnVali] tx netId={} state={}→{}", netId,
+                            (int)prev, (int)extras.enValiActionState);
+            }
+        }
         if (extras.hasEnBb) {
             s16 prev = prevExtras && prevExtras->hasEnBb ? prevExtras->enBbActionState : -1;
             if (prev != extras.enBbActionState) {
@@ -1165,6 +1186,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // #128 / en_bili_sync_plan.md §4 — En_Bili (Biri jellyfish) state-machine sync.
     if (extras.hasEnBili) {
         payload["actionState"] = extras.enBiliActionState;
+    }
+
+    // #126 — En_Vali (Bari big jellyfish) state-machine sync.
+    if (extras.hasEnVali) {
+        payload["actionState"] = extras.enValiActionState;
     }
 
     // #129 / en_bb_sync_plan.md — En_Bb (Bubble / flame skull) state-machine sync.
@@ -1871,6 +1897,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_BILI && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
+        // #126 — cache En_Vali (Bari) actionState.
+        if (actor->id == ACTOR_EN_VALI && payload.contains("actionState")) {
+            ext->netStateIndex = (s16)payload["actionState"].get<int>();
+        }
         // #129 / en_bb_sync_plan.md — cache En_Bb (Bubble) actionState.
         if (actor->id == ACTOR_EN_BB && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
@@ -2573,6 +2603,30 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
                     }
                     SPDLOG_INFO("[EnemyDefeated] EnBili netId={} — triggering natural death cycle", netId);
                     EnBili_SetupDyingNet((EnBili*)actor, gPlayState);
+                    EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
+                    EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                    return;
+                }
+
+                // En_Vali (Bari big jellyfish): route through EnVali_SetupDyingNet
+                // so the burnt -> divide-and-die natural cycle plays on the
+                // receiver. The SetupBurnt 2-frame fade transitions to
+                // SetupDivideAndDie whose Biri children Actor_Spawn AND
+                // random 0x50 Item_DropCollectibleRandom are BOTH gated by
+                // Anchor_ShouldSuppressEnValiDrop -- host's authoritative
+                // ENEMY_SPAWN handles the cluster, ITEM_DROP_SYNC handles
+                // the drop. SetupDivideAndDie does fire OnEnemyDefeat, but
+                // HostBookkeeping HasDefeatBroadcast dedup at the send
+                // site prevents an echo back to host. Plan: #126.
+                if (actor->id == ACTOR_EN_VALI) {
+                    EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyDefeated.EnVali.dupDetect");
+                    if (EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                        SPDLOG_INFO("[EnemyDefeated] EnVali netId={} already dying — duplicate, dedup only", netId);
+                        EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
+                        return;
+                    }
+                    SPDLOG_INFO("[EnemyDefeated] EnVali netId={} — triggering natural death cycle", netId);
+                    EnVali_SetupDyingNet((EnVali*)actor, gPlayState);
                     EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::DyingByNetwork);
                     EnemyStateSync::HostBookkeeping::Instance().RecordPendingKill(netId);
                     return;
