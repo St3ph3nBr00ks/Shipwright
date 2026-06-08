@@ -295,17 +295,25 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
 // patience / sword-damage paths register the synthetic hit.
 //
 // ============================================================================
-// FREEZE NOTICE (2026-06-08) — DO NOT ADMIT NEW ACTORS WITHOUT AN AUDIT.
+// ADMISSION REQUIREMENTS (freeze lifted 2026-06-08; audit discipline retained)
 // ============================================================================
 //
-// The synthetic AC_HIT bit-set causes a class of crashes for any actor whose
-// damage code derefs `collider.base.ac->X` (typically `->toucher.dmgFlags`
-// for weapon-type branching). The synthetic path sets only the bit; the AC
-// pointer remains whatever it was last frame, often NULL. Crash class
-// surfaced as En_St / En_Ssh / En_Ik / En_Bili / En_Hintnuts regressions
-// over the past 2 weeks (~12 reactive fix commits — see git log).
+// The 2026-06-08 freeze on new admissions to this switch is LIFTED. The audit
+// discipline that motivated the freeze is now structurally enforced via the
+// SYNTHESIS CONTRACT and CASE COMMENT FORMAT blocks below, so the procedural
+// freeze is no longer needed to back it.
 //
-// Before adding ANY new actor case below:
+// Background: the synthetic AC_HIT bit-set causes a class of crashes for any
+// actor whose damage code derefs `collider.base.ac->X` (typically
+// `->toucher.dmgFlags` for weapon-type branching). The synthetic path sets
+// only the bit; the AC pointer remains whatever it was last frame, often
+// NULL. Crash class surfaced as En_St / En_Ssh / En_Ik / En_Bili / En_Hintnuts
+// regressions over a 2-week window in 2026-05/06 (~12 reactive fix commits).
+// The audit-before-admit discipline was added in response and is now the
+// canonical pattern; the freeze that bought time to write the discipline is
+// no longer load-bearing.
+//
+// Before adding ANY new actor case below, the following are REQUIRED:
 //
 //   1. Read the actor's damage path (typically inside its Update or a
 //      dedicated UpdateDamage / CheckHitFront helper).
@@ -313,24 +321,35 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
 //      path's reach. Any such site must be null-guarded in the actor's
 //      `.c` file IN THE SAME COMMIT that adds the case here, OR the case
 //      must be omitted.
-//   3. Document the audit result in the case-comment (see existing
-//      examples: En_Tite at L51-56 cites the audit doc; En_Goma at L43-46
-//      explicitly cites the null-guard landed alongside).
-//   4. Cross-check against `Testing/ApplySyncAcHitToActor_BaseAcAudit_2026-
-//      06-07.md` for the canonical audit pattern + existing per-actor
-//      verdicts.
+//   3. Verify the actor's damage code only reads fields listed in the
+//      SYNTHESIS CONTRACT's "POPULATED" section. If it reads any field
+//      from the "NOT POPULATED" section without a null-guard, the case
+//      must not be admitted (or the actor's code must be modified to
+//      tolerate the missing field).
+//   4. Document the audit result in the case-comment per CASE COMMENT
+//      FORMAT below.
+//   5. Cross-check against
+//      `Testing/ApplySyncAcHitToActor_BaseAcAudit_2026-06-07.md` for
+//      existing per-actor verdicts and the canonical audit pattern.
 //
-// The freeze applies until a retrospective audit pass covers every existing
-// case in this switch (some early admissions predate the audit doc — they
-// need to be back-fitted to the same pattern). After retro-audit completes
-// and the alpha-demo regression pass (`Testing/AlphaDemo_Regression_Plan_
-// 2026-06-08.md`) reports clean, the freeze can be lifted with a
-// pre-condition: every new admission must ship the audit-result comment.
+// RECOMMENDED before a large batch of admissions: run the alpha-demo
+// regression pass per `Testing/AlphaDemo_Regression_Plan_2026-06-08.md` to
+// verify existing admissions stay stable. Not a hard blocker for individual
+// admissions that follow the audit format — single new actors can land
+// independently if they comply with steps 1-5.
 //
-// Architectural alternative if the freeze becomes permanent: an explicit
-// `Anchor_ApplyExternalDamage(actor, damage, dmgFlags)` entry point per
-// admitted actor instead of synthesising collider state. Higher per-actor
-// authoring cost, zero null-deref crash class.
+// Pre-audit cases that predate the format standard remain in their
+// prose-equivalent comments; back-fitting them to the structured tags can
+// happen opportunistically when those cases are next touched, or as a
+// dedicated cleanup chore. Not a blocker for new admissions.
+//
+// Architectural alternative if this mechanism ever needs to be retired:
+// an explicit `Anchor_ApplyExternalDamage(actor, damage, dmgFlags)` entry
+// point per admitted actor instead of synthesising collider state. Higher
+// per-actor authoring cost, zero null-deref crash class. Not the current
+// direction — consistency of this established pattern was chosen as the
+// more important property (see #205 + the conversation thread that landed
+// 4b845c58a / 1772be0d1).
 // ============================================================================
 //
 // ============================================================================
