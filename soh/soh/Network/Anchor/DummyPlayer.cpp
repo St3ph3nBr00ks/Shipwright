@@ -867,6 +867,33 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     // Custom actors that intentionally don't use Path A:
                     //   (none today — placeholder. Invader DOES want
                     //    Path A eventually; track separately.)
+
+                    // ─── ACTOR_EN_GOMA (Boss_Goma larva, 0x002B) ──────
+                    // Vanilla En_Goma has NO func_8002F6D4/_71C/_758/_7A0
+                    // call (verified by grep across ovl_En_Goma + ovl_Boss_
+                    // Goma — zero matches). Damage to Link flows through
+                    // the AT collider's toucher.damage field (8 HP per
+                    // hit, set in D_80A4B7A0 at z_en_goma.c:81) consumed
+                    // by Player_Update's auto-knockback handler. There
+                    // are no fixed knockback params to extract, so Path A
+                    // admission isn't applicable.
+                    //
+                    // Cross-machine sync still works via the legacy
+                    // func_80837C0C path in Packets/Player/DamagePlayer.cpp
+                    // (hardcoded speed=4.0 / yVel=5.0 / 20-frame iframes).
+                    // Cosmetic deviation from vanilla (which would route
+                    // through Player_GetDamageReaction's table lookup),
+                    // but damage + iframe behavior is correct.
+                    //
+                    // Bug 1 (host's local Link false-knockback) is also
+                    // N/A: EnGoma_UpdateHit's only GET_PLAYER read at
+                    // line 634 is for shield-bounce direction (AC_HIT,
+                    // not AT_HIT), so the Pitfall 28 hazard class doesn't
+                    // apply. EnGoma_Update's GET_PLAYER at line 737 is
+                    // visual-only (eye pitch/yaw).
+                    //
+                    // Source-of-truth audit: 2026-06-08 (log 448).
+                    ACTOR_EN_GOMA,
                 };
                 static std::unordered_set<u16> sLoggedBypass;
                 const u16 attackerId = player->cylinder.base.ac->id;

@@ -81,9 +81,21 @@ bool IsRecognisedTransition(LifecyclePhase from, LifecyclePhase to) {
             // on every network-killed enemy whose anim finished locally.
             // Mirrors DyingByLocal → Dead (line 58) which has been
             // allowed since the table was first written.
+            //
+            // DyingByNetwork → DyingByLocal (2026-06-08 log 448 fix —
+            // Boss_Goma larva). After SetupDyingNet primes the peer's
+            // natural death cycle, the actor's own update body advances
+            // through SetupDamage → SetupDeath etc., which fires
+            // GameInteractor_ExecuteOnEnemyDefeat AGAIN locally. The
+            // hook's TransitionTo(DyingByLocal) call lands here.
+            // Mirror of the existing DyingByLocal → DyingByNetwork edge
+            // (line 70) for the reverse-order race; benign, the actor
+            // dies cleanly either way. Caught on every Goma larva kill
+            // in log 448 (~8 occurrences across a 7-minute session).
             return to == LifecyclePhase::Regrowing ||
                    to == LifecyclePhase::Alive ||
-                   to == LifecyclePhase::Dead;
+                   to == LifecyclePhase::Dead ||
+                   to == LifecyclePhase::DyingByLocal;
         case LifecyclePhase::Dead:
             // Scene re-init produces a fresh actor → reset to Alive.
             return to == LifecyclePhase::Alive;
