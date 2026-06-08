@@ -301,3 +301,18 @@ extern "C" bool Anchor_ShouldSuppressEnValiDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)
         || ext->networkDriveDying;
 }
+
+// Receiver-side predicate — true when an En_Bigokuta (Big Octo miniboss)
+// death cycle was network-driven (peer received ENEMY_DEFEATED and is
+// replaying the death-anim -> shrink -> heart-container-reveal sequence).
+// func_809BE26C uses this to suppress the random 0xB0 drop call so host's
+// authoritative ITEM_DROP_SYNC isn't double-applied. Flags_SetClear (room-
+// clear flag) is NOT gated — it fires per-client so the heart container
+// reveal stays cooperative across both clients.
+// See z_en_bigokuta.c func_809BE26C + #130.
+extern "C" bool Anchor_ShouldSuppressEnBigokutaDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}

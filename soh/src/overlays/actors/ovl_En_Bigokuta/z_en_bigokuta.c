@@ -7,6 +7,11 @@
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
+// Anchor multiplayer (#130) — defined in Bridge/EnemySyncBridge.cpp.
+// Forward-declare here (extern, NOT extern "C" — this is a .c file
+// and C-linkage is implicit). Per Pitfall 7.
+extern bool Anchor_ShouldSuppressEnBigokutaDrop(Actor* actor);
+
 void EnBigokuta_Init(Actor* thisx, PlayState* play);
 void EnBigokuta_Destroy(Actor* thisx, PlayState* play);
 void EnBigokuta_Update(Actor* thisx, PlayState* play);
@@ -340,7 +345,13 @@ void func_809BD524(EnBigokuta* this) {
     this->unk_19A = 0;
     this->cylinder[0].base.atFlags |= AT_ON;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_DAIOCTA_MAHI);
-    if (this->collider.elements->info.acHitInfo->toucher.dmgFlags & 1) {
+    // #130 / Anchor cross-machine AC_HIT — synthetic AC_HIT bit-set
+    // (no acHitInfo populated) routes through this Setup when peer
+    // applies the deku-nut stun via ENEMY_STATE state-machine sync.
+    // Null-guard the deref; when null, fall through to the long-stun
+    // branch (matches vanilla "no DMG_DEKU_NUT toucher" behaviour).
+    if (this->collider.elements->info.acHitInfo != NULL &&
+        (this->collider.elements->info.acHitInfo->toucher.dmgFlags & 1)) {
         this->unk_195 = true;
         this->unk_196 = 20;
     } else {
@@ -650,7 +661,14 @@ void func_809BE26C(EnBigokuta* this, PlayState* play) {
             Camera_ChangeSetting(play->cameraPtrs[MAIN_CAM], CAM_SET_DUNGEON0);
             func_8005ACFC(play->cameraPtrs[MAIN_CAM], 4);
             SoundSource_PlaySfxAtFixedWorldPos(play, &this->actor.world.pos, 50, NA_SE_EN_OCTAROCK_BUBLE);
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xB0);
+            // Anchor multiplayer (#130): suppress the random item drop when the
+            // death cycle is network-driven. Host's authoritative ITEM_DROP_SYNC
+            // handles the drop on all clients. Flags_SetClear (room-clear flag)
+            // still fires per-client so the heart-container reveal stays
+            // cooperative. OnEnemyDefeat broadcast is dedup'd by HostBookkeeping.
+            if (!Anchor_ShouldSuppressEnBigokutaDrop(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xB0);
+            }
             Actor_Kill(&this->actor);
             GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
         }
@@ -915,3 +933,79 @@ void EnBigokuta_Draw(Actor* thisx, PlayState* play) {
     }
     CLOSE_DISPS(play->state.gfxCtx);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Anchor multiplayer state-machine sync (#130).
+//
+// Routes a network-driven death cycle through `func_809BD658` (the
+// vanilla death-anim Setup) → `func_809BE26C` (the dying actionFunc).
+// The death actionFunc runs the death anim, then shrinks the actor
+// (unk_198 countdown), then triggers Flags_SetClear + camera change
+// + Item_DropCollectibleRandom + Actor_Kill. The drop is gated by
+// `Anchor_ShouldSuppressEnBigokutaDrop` so host's authoritative
+// ITEM_DROP_SYNC isn't double-applied; Flags_SetClear still fires
+// per-client so the room-clear flag (and the resulting heart
+// container spawn) stays cooperative. OnEnemyDefeat broadcast is
+// dedup'd by HostBookkeeping.
+void EnBigokuta_SetupDyingNet(EnBigokuta* this, PlayState* play) {
+    func_809BD658(this);
+}
+
+// State index mapping for ENEMY_STATE sync. Each actionFunc gets a
+// stable index that the host broadcasts and the peer applies. The
+// 13 indices cover the full Big Octo lifecycle:
+//   0  func_809BD84C — Emerge wait/voice (params==0 only; mini-boss BGM cue)
+//   1  func_809BD8DC — Emerge jump (sin-wave arc into water)
+//   2  func_809BDAE8 — Land + rotate, then promote ACTORCAT_PROP → ENEMY
+//   3  func_809BDB90 — Pre-fight 40-frame delay
+//   4  func_809BDC08 — Main combat (rotates around home, chases player)
+//   5  func_809BE3E4 — Spin-block / direction-flip (player on wrong side)
+//   6  func_809BDFC8 — Rotate-toward-player after spin-block
+//   7  func_809BE058 — Stunned (deku-nut hit, AT-collider off, OC pushes player)
+//   8  func_809BDF34 — Hit-stun (sinusoidal up/down after explosive damage)
+//   9  func_809BE180 — Post-damage spin-up (returns to combat or death)
+//  10  func_809BE4A4 — Sink (lost interest, falls below floor)
+//  11  func_809BE518 — Re-emerge from sink
+//  12  func_809BE26C — Dying (death-anim → shrink → heart-container reveal)
+s16 EnBigokuta_GetStateIndex(EnBigokuta* this) {
+    if (this->actionFunc == func_809BD84C) return 0;
+    if (this->actionFunc == func_809BD8DC) return 1;
+    if (this->actionFunc == func_809BDAE8) return 2;
+    if (this->actionFunc == func_809BDB90) return 3;
+    if (this->actionFunc == func_809BDC08) return 4;
+    if (this->actionFunc == func_809BE3E4) return 5;
+    if (this->actionFunc == func_809BDFC8) return 6;
+    if (this->actionFunc == func_809BE058) return 7;
+    if (this->actionFunc == func_809BDF34) return 8;
+    if (this->actionFunc == func_809BE180) return 9;
+    if (this->actionFunc == func_809BE4A4) return 10;
+    if (this->actionFunc == func_809BE518) return 11;
+    if (this->actionFunc == func_809BE26C) return 12;
+    return -1;
+}
+
+void EnBigokuta_ApplyNetState(EnBigokuta* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0:  func_809BD318(this);          break;  // Emerge wait/voice
+        case 1:  func_809BD370(this);          break;  // Emerge jump
+        case 2:  func_809BD3AC(this);          break;  // Land + rotate
+        case 3:  func_809BD3E0(this);          break;  // Pre-fight delay
+        case 4:  func_809BD3F8(this);          break;  // Main combat
+        case 5:  func_809BD6B8(this);          break;  // Spin-block / direction-flip
+        case 6:  func_809BD4A4(this);          break;  // Rotate-toward-player
+        case 7:  func_809BD524(this);          break;  // Stunned (deku nut)
+        case 8:  func_809BD47C(this);          break;  // Hit-stun (explosive)
+        case 9:  func_809BD5E0(this);          break;  // Post-damage spin-up
+        case 10: func_809BD768(this);          break;  // Sink
+        // Re-emerge (case 11) requires a PlayState* arg (computes yaw from
+        // player position). Skip — receiver will pick up via per-frame
+        // ENEMY_UPDATE pos/rot sync; the actionFunc will reassign itself
+        // naturally when sink->emerge transitions on host.
+        // Death (case 12) driven via SetupDyingNet from
+        // HandlePacket_EnemyDefeated. Skip silently here — the
+        // dormant-to-active filter + PhaseImpliesHasLocalDeath gate at the
+        // call site already block regression into the death state.
+        default: break;
+    }
+}
+
