@@ -405,6 +405,26 @@ extern "C" bool Anchor_ShouldSuppressEnFdDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// Receiver-side predicate — true when an En_Vm (Beamos) death cycle was
+// network-driven (peer received ENEMY_DEFEATED and is replaying the
+// die-countdown sequence). EnVm_Die uses this to suppress the random
+// 0xA0 drop call so host's authoritative ITEM_DROP_SYNC isn't
+// double-applied. Mirror of Anchor_ShouldSuppressEnTestDrop / EnWfDrop.
+//
+// PHASE 2 NOTE: Beamos's death cycle also spawns 2x ACTOR_EN_BOM (one
+// at health-zero trigger in EnVm_CheckHealth, one at countdown expiry
+// in EnVm_Die). These are currently NOT gated by this predicate -- they
+// spawn per-client as cosmetic noise. The proper fix is the deferred
+// EXPLOSIVE_SPAWN packet family per task_checklist.md Phase 3 -> Type 6
+// Category B (alongside En_Am / En_Dodongo baby / En_Peehat).
+// See z_en_vm.c EnVm_Die + Plans/en_vm_sync_plan.md (TBD).
+extern "C" bool Anchor_ShouldSuppressEnVmDrop(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // Receiver-side predicate — true when an En_Fw (Flare Dancer core/wisp)
 // death cycle was network-driven (peer received ENEMY_DEFEATED and is
 // replaying the explosion-countdown sequence inside EnFw_Run). EnFw_Run's

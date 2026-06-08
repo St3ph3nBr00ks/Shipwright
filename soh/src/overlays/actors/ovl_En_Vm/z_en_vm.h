@@ -37,4 +37,28 @@ typedef enum {
     /* 0x01 */ BEAMOS_SMALL
 } BeamosType;
 
+// Anchor multiplayer state-machine sync (En_Vm / Beamos Phase 1).
+// `this` is a C++ keyword. This header is transitively included from
+// C++ TUs (EnemyState.cpp / HookHandlers.cpp), so the param name in
+// the declaration uses `actor` instead. The implementations in
+// z_en_vm.c keep `this` per OoT decomp convention.
+void EnVm_SetupDyingNet(struct EnVm* actor, PlayState* play);
+s16  EnVm_GetStateIndex(struct EnVm* actor);
+void EnVm_ApplyNetState(struct EnVm* actor, s16 stateIndex);
+
+// Receiver-side suppression predicate -- true when the current death
+// cycle was network-driven (ENEMY_DEFEATED received and we're replaying
+// the die sequence). Used by EnVm_Die to skip the random item drop
+// (host's authoritative ITEM_DROP_SYNC handles it). The death-cycle
+// bomb spawns (EN_BOM) are deferred to Phase 2 EXPLOSIVE_SPAWN; see
+// the implementation comments in z_en_vm.c.
+// Defined extern "C" in Bridge/EnemySyncBridge.cpp.
+#ifdef __cplusplus
+extern "C" {
+#endif
+bool Anchor_ShouldSuppressEnVmDrop(struct Actor* actor);
+#ifdef __cplusplus
+}
+#endif
+
 #endif

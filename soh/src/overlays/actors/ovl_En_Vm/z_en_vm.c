@@ -13,6 +13,23 @@
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
+// Anchor multiplayer (En_Vm Phase 1) -- defined in Bridge/EnemySyncBridge.cpp.
+// Forward-declare here (extern, NOT extern "C" -- this is a .c file
+// and C-linkage is implicit). Per Pitfall 7.
+extern bool Anchor_ShouldSuppressEnVmDrop(Actor* actor);
+
+// Anchor multiplayer (En_Vm Phase 1) -- nearest-player targeting helper.
+// Routes laser-aim pitch + yaw computation through whichever player is
+// closest, so Beamos turret correctly tracks whichever player is in
+// range (rather than always tracking the local Link). The cached
+// xzDistToPlayer / yawTowardsPlayer / yDistToPlayer fields are already
+// patched by HookHandlers.cpp::ShouldActorUpdate, but the direct
+// GET_PLAYER reads of player->actor.world.pos for pitch raycast bypass
+// that overlay. Replacing GET_PLAYER -> Anchor_GetNearestPlayerActor
+// here is the standard AI-decision-gate fix (see Pitfall 28's
+// "AI-decision gates" lane -- not Bug 1 / Bug 2 effect-gate territory).
+extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+
 void EnVm_Init(Actor* thisx, PlayState* play);
 void EnVm_Destroy(Actor* thisx, PlayState* play);
 void EnVm_Update(Actor* thisx, PlayState* play);
@@ -179,7 +196,11 @@ void EnVm_SetupWait(EnVm* this) {
 }
 
 void EnVm_Wait(EnVm* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor MP: aim at whichever player is closest, not just the local Link.
+    // Reads only player->actor.world.pos here -- AI-decision input, not a
+    // local-Link-effect gate (per Pitfall 28's classification).
+    Actor* targetActor = Anchor_GetNearestPlayerActor(&this->actor, play);
+    Player* player = (Player*)targetActor;
     f32 dist;
     s16 headRot;
     s16 pad;
@@ -263,7 +284,10 @@ void EnVm_SetupAttack(EnVm* this) {
 }
 
 void EnVm_Attack(EnVm* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    // Anchor MP: track whichever player is closest during the beam sweep.
+    // See header comment on extern Anchor_GetNearestPlayerActor above.
+    Actor* targetActor = Anchor_GetNearestPlayerActor(&this->actor, play);
+    Player* player = (Player*)targetActor;
     s16 pitch = Math_Vec3f_Pitch(&this->beamPos1, &player->actor.world.pos);
     f32 dist;
     Vec3f playerPos;
@@ -381,6 +405,12 @@ void EnVm_Die(EnVm* this, PlayState* play) {
     Actor_MoveXZGravity(&this->actor);
 
     if (--this->timer == 0) {
+        // PHASE 2 DEFERRAL: This bomb spawn (plus the trigger bomb in
+        // EnVm_CheckHealth) is the En_Vm 2x EN_BOM death-cluster.
+        // Currently spawns on every client. Needs EXPLOSIVE_SPAWN packet
+        // family per task_checklist.md Phase 3 -> Type 6 Category B.
+        // For Phase 1, leave unsuppressed -- duplicate bombs are cosmetic
+        // noise during death anim, not a correctness failure.
         bomb = (EnBom*)Actor_Spawn(&play->actorCtx, play, ACTOR_EN_BOM, this->actor.world.pos.x,
                                    this->actor.world.pos.y, this->actor.world.pos.z, 0, 0, 0x6FF, BOMB_BODY);
 
@@ -388,7 +418,13 @@ void EnVm_Die(EnVm* this, PlayState* play) {
             bomb->timer = 0;
         }
 
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xA0);
+        // Anchor MP (En_Vm Phase 1): suppress the random item drop when
+        // the death cycle is network-driven. Host's authoritative
+        // ITEM_DROP_SYNC handles the drop. OnEnemyDefeat broadcast is
+        // dedup'd by HostBookkeeping at the send site.
+        if (!Anchor_ShouldSuppressEnVmDrop(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xA0);
+        }
         Actor_Kill(&this->actor);
     }
 }
@@ -555,4 +591,48 @@ void EnVm_Draw(Actor* thisx, PlayState* play2) {
     gSPDisplayList(POLY_OPA_DISP++, gBeamosLaserDL);
 
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Anchor multiplayer state-machine sync (En_Vm / Beamos Phase 1).
+//
+// Routes a network-driven death cycle straight through EnVm_SetupDie --
+// the die countdown animation plays naturally on peer; the random item
+// drop call inside EnVm_Die is gated by Anchor_ShouldSuppressEnVmDrop.
+// Host's authoritative ITEM_DROP_SYNC handles the drop. The natural
+// EnVm_SetupDie call fires GameInteractor_ExecuteOnEnemyDefeat, but the
+// HostBookkeeping HasDefeatBroadcast dedup guard at the send site
+// prevents an echo back to host.
+//
+// PHASE 2 NOTE: Beamos spawns 2x EN_BOM at death (one in EnVm_CheckHealth
+// when health hits zero, one in EnVm_Die when the countdown expires).
+// Both are currently un-gated -- they spawn on every client. The Phase 2
+// EXPLOSIVE_SPAWN packet family (per task_checklist.md Type 6 Category B)
+// is the proper fix. Until then, expect 2-4 bombs visible at death
+// (depending on client count) but only the host's count as "real" for
+// chain reactions.
+void EnVm_SetupDyingNet(EnVm* this, PlayState* play) {
+    (void)play;
+    EnVm_SetupDie(this);
+}
+
+s16 EnVm_GetStateIndex(EnVm* this) {
+    if (this->actionFunc == EnVm_Wait)   return 0;
+    if (this->actionFunc == EnVm_Attack) return 1;
+    if (this->actionFunc == EnVm_Stun)   return 2;
+    if (this->actionFunc == EnVm_Die)    return 3;
+    return -1;
+}
+
+void EnVm_ApplyNetState(EnVm* this, s16 stateIndex) {
+    switch (stateIndex) {
+        case 0: EnVm_SetupWait(this);   break;
+        case 1: EnVm_SetupAttack(this); break;
+        case 2: EnVm_SetupStun(this);   break;
+        // Death state 3 (Die) driven via SetupDyingNet from
+        // HandlePacket_EnemyDefeated. Skip silently here -- the
+        // dormant-to-active filter + PhaseImpliesHasLocalDeath gate at
+        // the call site already block regression to this state.
+        default: break;
+    }
 }

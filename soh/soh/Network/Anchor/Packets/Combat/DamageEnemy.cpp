@@ -49,6 +49,8 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_GeldB/z_en_geldb.h"
 // En_Po_Field — Field Poe (Hyrule Field night) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Po_Field/z_en_po_field.h"
+// En_Vm — Beamos AC_HIT routing (synthetic injection on quad2 reflection).
+#include "src/overlays/actors/ovl_En_Vm/z_en_vm.h"
 // #129 / en_bb_sync_plan.md — Bubble (En_Bb) AC_HIT routing.
 #include "src/overlays/actors/ovl_En_Bb/z_en_bb.h"
 // En_Ssh — Skulltula sibling, same multi-collider front-shield pattern
@@ -832,6 +834,35 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             // is host-authoritative for outgoing AT hits; blockCollider
             // is shield-deflection only. Set AC_HIT on bodyCollider only.
             ((EnGeldB*)actor)->bodyCollider.base.acFlags |= AC_HIT;
+            break;
+        case ACTOR_EN_VM:
+            // Audit: no base.ac->/acHitInfo-> derefs in damage path. Verified
+            //   by `grep -nE "base\.ac->|acHitInfo->" z_en_vm.c` → 0 matches.
+            //   En_Vm has a hard-coded health-decrement damage model
+            //   (CheckHealth at z_en_vm.c:432-443) that does NOT consult
+            //   colChkInfo.damage; it just decrements health by 1 per hit.
+            // Acks: colliderQuad2.base.acFlags & AC_HIT (the read EnVm_Check-
+            //   Health actually consumes at line 439-442), colChkInfo.damage
+            //   (set defensively even though unused by EnVm), colChkInfo.
+            //   damageEffect (set defensively).
+            // Skips: colliderCylinder (body AC, only checked via
+            //   Actor_GetCollidedExplosive for bomb damage — separate path
+            //   that doesn't consult AC_HIT bit; bomb sync routes through
+            //   per-client explosive actors, not Race-B).
+            //
+            // Multi-collider: colliderCylinder (body OC/AC, bomb damage) +
+            // colliderQuad1 (beam emit — outgoing AT) + colliderQuad2 (beam
+            // reflection — the only AC_HIT path that decrements HP).
+            // Synthetic injection targets colliderQuad2 because vanilla's
+            // CheckHealth() only reads AC_HIT there. Setting it on the body
+            // cylinder would be inert (vanilla wouldn't consume it).
+            //
+            // PHASE 2 NOTE: Realistic Race-B firing on En_Vm is rare. Bomb
+            // damage flows per-client through Actor_GetCollidedExplosive (no
+            // wire path). Mirror-shield beam reflection is per-client local.
+            // This case is admitted defensively + for future EXPLOSIVE_SPAWN
+            // coordination per task_checklist.md Phase 3 / Type 6 Cat B.
+            ((EnVm*)actor)->colliderQuad2.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_PO_FIELD:
             // Audit: TWO acHitInfo->/base.ac-> derefs at z_en_po_field.c:
