@@ -480,6 +480,23 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                                     anim = (AnimationHeader*)&gEponaIdleAnim; break;
                             }
                             Animation_PlayLoop(&peer->skin.skelAnime, anim);
+                            // Apply per-peer phase offset so peers don't
+                            // strike the same gallop frame in unison.
+                            // Computed in TitlePeerFormation as a hash
+                            // of clientId+formationIdx, range 0-31
+                            // frames — covers the gallop cycle's
+                            // primary cadence without overflowing
+                            // shorter idle/walk loops. Animation_PlayLoop
+                            // resets curFrame to 0; seeding after the
+                            // call gives each peer its own starting
+                            // phase that the natural advance then
+                            // preserves.
+                            const AnchorTitlePeer::TitlePeerFormation
+                                phaseFormation =
+                                AnchorTitlePeer::MakeTitlePeerFormation(
+                                    clientId, formationIdx);
+                            peer->skin.skelAnime.curFrame =
+                                (f32)phaseFormation.animPhaseOffset;
                             peer->animationIdx = localHorse->animationIdx;
                         }
                         // Mirror playSpeed every frame, not just on state

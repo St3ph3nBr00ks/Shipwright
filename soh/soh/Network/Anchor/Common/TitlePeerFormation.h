@@ -83,14 +83,16 @@ inline TitlePeerFormation MakeTitlePeerFormation(uint32_t clientId,
 
     TitlePeerFormation f;
 
-    // Lateral stagger ±40u in X (relative to peer's facing direction;
-    // for our v3 spawn site, the formation is rotated to face Link's
-    // heading, so X is left/right relative to the gallop). Z (forward/
-    // back of slot) intentionally zero — staggering in Z would shift
-    // peers into each other's formation slots.
-    f.posOffset.x = (((float)((h >> 0) & 0xFF) / 255.0f) - 0.5f) * 80.0f;
+    // Hash-derived perturbation overlaid on top of the slot-index-
+    // dependent base stagger in ComputeBaseFormationSlot. The base
+    // pattern picks left/right + distance per slot to spread the
+    // formation; hash perturbs ±30u laterally and ±40u along the
+    // gallop axis to break the strict pattern. Y stays zero —
+    // ground snap in DummyPlayer_Update would override any Y
+    // perturbation anyway.
+    f.posOffset.x = (((float)((h >> 0) & 0xFF) / 255.0f) - 0.5f) * 60.0f;
     f.posOffset.y = 0.0f;
-    f.posOffset.z = 0.0f;
+    f.posOffset.z = (((float)((h >> 8) & 0xFF) / 255.0f) - 0.5f) * 80.0f;
 
     // Yaw divergence — kept at zero. Phase 3 originally introduced
     // ±~5.6° per-peer hash-derived yaw stagger for visual variety,
@@ -106,43 +108,96 @@ inline TitlePeerFormation MakeTitlePeerFormation(uint32_t clientId,
     // strict single-file column without redirecting any peer's gaze.
     f.yawOffset = 0;
 
-    // animPhaseOffset: deferred. Local-Link skelAnime alias gives all
-    // peers the same animation frame as local Link — phase offset
-    // requires switching to manual animation playback (task #28).
-    f.animPhaseOffset = 0;
+    // Per-peer horse animation phase offset (frames). Used by
+    // DummyPlayer_Update's title-mode horse-anim-mirror block —
+    // when a state change re-calls Animation_PlayLoop on the peer
+    // horse's skelAnime, we seed curFrame to this offset so hooves
+    // don't strike in unison across peers. Range 0-30: covers the
+    // gallop loop's primary cadence (~16 frames per stride pair)
+    // and the slower idle/walk loops without overflowing.
+    //
+    // Peer Link's animation phase is NOT yet offset — peer's
+    // skelAnime currently aliases local Link's jointTable pointer
+    // (DummyPlayer.cpp title-mode block), so all peer Links share
+    // local Link's exact frame. Decoupling Link's phase requires
+    // per-peer skelAnime tick + jointTable copy + identifying
+    // which Link anim is active — deferred to a future commit.
+    f.animPhaseOffset = (int16_t)((h >> 16) & 0x1F);  // 0..31
 
     return f;
 }
 
-// Compute the base (un-perturbed) formation slot. Single-file column
-// behind local Link, 250u spacing per formation index, matching Link's
-// ground Y. Pure function of local Link state + index — independent
-// of clientId.
+// Compute the base (un-perturbed) formation slot. Staggered V/diamond
+// shape behind local Link — alternates left/right with growing
+// distance, matching Link's ground Y. Pure function of local Link
+// state + index — independent of clientId.
 //
-// Spacing chosen to keep peer Eponas clear of local Link's vanilla
-// Epona — EnHorse cylinder colliders are ~60u radius each, and the
-// per-shot camera path can sweep across the peer formation. 250u
-// gives ~125u clearance between horse cylinders even at the closest
-// formation slot (formationIdx=0). Phase 1 used 40u which was fine
-// for on-foot peers but caused collision-and-slide bugs once Phase 2
-// added peer horses (field test 2026-06-09).
+// Formation layout (forward = local Link's facing direction):
 //
-// Title-cutscene camera audit (see Plans/title_screen_peer_actors.md
-// §"Camera audit"): wide shots (1, 2, 4, 6-9) have Link at small visual
-// scale so 250u-back peers remain in-frame. Close shots (3, 5) have
-// peers fully behind the camera so they don't crowd the rider — minor
-// trade-off vs. the closer 40u formation.
+//       Local Link (origin)
+//
+//          slot 0          slot 1     ← 220u back, ±130u laterally
+//       (left, near)    (right, near)
+//
+//      slot 2                   slot 3   ← 400u back, ±200u laterally
+//   (left, mid)              (right, mid)
+//
+//          slot 4                       ← 600u back, centered
+//       (deep center)
+//
+//   ...further slots single-file at 250u increments behind slot 4.
+//
+// Per-slot tables tuned against Plans/title_screen_peer_actors.md
+// §"Camera audit":
+//   - Wide shots (1, 2, 4, 6-9): Link is at small visual scale, so
+//     220-600u back + ±200u lateral remains in-frame.
+//   - Close shots (3, 5): peers fully behind the camera — lateral
+//     spread doesn't matter.
+// Collider clearance: EnHorse cylinder colliders are ~60u radius.
+// Closest pair (slots 0 + 1) is 260u apart laterally → ~140u
+// clearance between cylinders. Closest to local Link is 220u
+// straight-back → ~160u clearance.
+struct SlotEntry {
+    float distance;
+    float lateral;
+};
+
+inline SlotEntry GetBaseSlotEntry(uint8_t formationIdx) {
+    // Hand-tuned layout for the typical 2-5 peer count. Slots 5+
+    // fall through to single-file at 250u increments behind slot 4.
+    switch (formationIdx) {
+        case 0:  return { 220.0f, -130.0f };  // near left
+        case 1:  return { 220.0f, +130.0f };  // near right
+        case 2:  return { 400.0f, -200.0f };  // mid left
+        case 3:  return { 400.0f, +200.0f };  // mid right
+        case 4:  return { 600.0f,    0.0f };  // deep center
+        default: {
+            const float distance =
+                600.0f + 250.0f * (float)(formationIdx - 4);
+            // Alternating ±100u for slots 5+ so the trailing
+            // formation doesn't collapse to a column.
+            const float lateral =
+                ((formationIdx - 5) % 2 == 0) ? -100.0f : +100.0f;
+            return { distance, lateral };
+        }
+    }
+}
+
 inline Vec3f ComputeBaseFormationSlot(Vec3f linkPos, int16_t linkRotY,
                                         uint8_t formationIdx) {
-    constexpr float kSpacingPerSlot = 250.0f;
-    const float distance =
-        kSpacingPerSlot * (float)(formationIdx + 1);
+    const SlotEntry entry = GetBaseSlotEntry(formationIdx);
     const float heading =
         (float)linkRotY / 32768.0f * 3.14159265358979323846f;
+    const float fwdX = sinf(heading);
+    const float fwdZ = cosf(heading);
+    // Right-perpendicular to forward (in screen-relative left-handed
+    // coords where +X right, +Z forward): rotate forward -90°.
+    const float rightX =  fwdZ;
+    const float rightZ = -fwdX;
     return Vec3f{
-        linkPos.x - distance * sinf(heading),
+        linkPos.x - entry.distance * fwdX + entry.lateral * rightX,
         linkPos.y,
-        linkPos.z - distance * cosf(heading),
+        linkPos.z - entry.distance * fwdZ + entry.lateral * rightZ,
     };
 }
 
