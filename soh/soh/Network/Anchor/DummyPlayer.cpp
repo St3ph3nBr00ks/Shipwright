@@ -452,6 +452,20 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                             Animation_PlayLoop(&peer->skin.skelAnime, anim);
                             peer->animationIdx = localHorse->animationIdx;
                         }
+                        // Mirror playSpeed every frame, not just on state
+                        // change. Vanilla horse code modulates playSpeed
+                        // from speedXZ within the WALK / TROT / GALLOP /
+                        // STOPPING / JUMP action bodies (z_en_horse.c
+                        // :1267, :1314, :1382, :1567, :1633, :1709), so
+                        // the value drifts continuously during locomotion
+                        // — not just at anim-change time. IDLE / WHINNEY
+                        // / REARING / REFUSE never touch playSpeed so the
+                        // local stays at 1.0f and the peer matches for
+                        // free. At cutscene gallop speedXZ ~13-15 the
+                        // local plays at ~4×; default 1.0 made the peer
+                        // crawl.
+                        peer->skin.skelAnime.playSpeed =
+                            localHorse->skin.skelAnime.playSpeed;
                     }
                 }
 
