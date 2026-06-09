@@ -20,6 +20,8 @@
 extern "C" {
 #include "variables.h"
 #include "functions.h"
+#include "overlays/actors/ovl_En_Horse/z_en_horse.h"  // EnHorse + ENHORSE_ANIM_* (Phase 3 horse animation)
+#include "objects/object_horse/object_horse.h"        // gEponaGallopingAnim (Phase 3)
 extern PlayState* gPlayState;
 // Phase 2 horse integration — primitive lives in HorseSync/HorseSpawnHelpers.cpp.
 // No header exists yet for the HorseSync module so we forward-declare here
@@ -721,6 +723,23 @@ void Anchor::SpawnTitlePeerLink(uint32_t clientId, uint8_t formationIndex) {
                 gPlayState, horseNetId, clientId, /*variantParams=*/0,
                 spawnPos, spawnRotY);
             if (horse != nullptr) {
+                // Phase 3 — switch horse to looping gallop animation
+                // post-spawn. Vanilla EnHorse_Init sets up an IDLE
+                // animation; we want gallop (matches vanilla local
+                // Link's Epona during the title cutscene). EnHorse_Idle
+                // action calls SkelAnime_Update each frame
+                // (z_en_horse.c:1842), so a LOOP-mode animation set
+                // here keeps ticking forever — the
+                //   SkelAnime_Update returns true → transition to idle
+                // path (z_en_horse.c:1842-1850) never fires for looping
+                // animations. Combined with the horse-sync gate skip
+                // (HorseHooks.cpp), the horse stays in IDLE action but
+                // its skel data is the GALLOP animation, so legs cycle.
+                EnHorse* horseAsHorse = (EnHorse*)horse;
+                Animation_PlayLoop(&horseAsHorse->skin.skelAnime,
+                                    (AnimationHeader*)&gEponaGallopingAnim);
+                horseAsHorse->animationIdx = ENHORSE_ANIM_GALLOP;
+
                 // Path A — vanilla EnHorse_Update stays enabled so the
                 // Skin maintains its per-frame matrix state (required
                 // for the draw function to render limbs at valid
