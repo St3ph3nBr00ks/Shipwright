@@ -4,6 +4,7 @@
 #include "AIDirector/Director.h"
 #include "Common/AnchorNavExt.h"  // B.4 — per-navigator nav state extension
 #include "Common/PacketSchemas.h"
+#include "Common/TitlePeerFormation.h"  // SpawnTitlePeerLink formation math
 #include "WorldStateSync/WorldStateSync.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
@@ -657,12 +658,19 @@ void Anchor::SpawnTitlePeerLink(uint32_t clientId, uint8_t formationIndex) {
     Vec3f spawnPos = { 0.0f, 0.0f, 0.0f };
     s16 spawnRotY = 0;
     if (localLink != nullptr) {
-        const float spacing = 40.0f * (float)(formationIndex + 1);
-        const float heading = (float)localLink->actor.world.rot.y / 32768.0f * (float)M_PI;
-        spawnPos.x = localLink->actor.world.pos.x - spacing * sinf(heading);
-        spawnPos.y = localLink->actor.world.pos.y;
-        spawnPos.z = localLink->actor.world.pos.z - spacing * cosf(heading);
-        spawnRotY = localLink->actor.world.rot.y;
+        // Formation derivation lives in Common/TitlePeerFormation.h —
+        // single source of truth shared with DummyPlayer_Update's
+        // title-mode per-tick path. To tune the formation in v3+
+        // (stagger / yaw divergence / animation phase), modify only
+        // MakeTitlePeerFormation in that header; this call site needs
+        // no changes.
+        const AnchorTitlePeer::TitlePeerSlot slot =
+            AnchorTitlePeer::ComputeTitlePeerSlot(
+                localLink->actor.world.pos,
+                localLink->actor.world.rot.y,
+                clientId, formationIndex);
+        spawnPos  = slot.pos;
+        spawnRotY = slot.rotY;
     }
 
     // Reuse the existing spawningDummyPlayerForClientId pathway so
