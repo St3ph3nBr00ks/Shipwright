@@ -260,6 +260,42 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
 
     AnchorClient& client = Anchor::Instance->clients[clientId];
 
+    // Title-screen peer branch (Phase 1 — Plans/title_screen_peer_actors.md).
+    // Bypasses the gameplay-time isSaveLoaded gate below and drives position
+    // from local Link's pos+rot + formation offset instead of client.posRot
+    // (peer's gameplay-time wire data is invalid pre-save-load anyway).
+    // Single-file formation behind local Link along his facing direction;
+    // spacing 40u per formation index. Rationale: see camera audit Shot 5
+    // analysis in the plan doc — only single-file is invariant across all
+    // camera angles in the title cutscene.
+    if (Anchor::Instance->IsDummyPlayerTitleMode(actor)) {
+        if (client.online) {
+            Player* localLink = GET_PLAYER(gPlayState);
+            if (localLink != nullptr) {
+                const uint8_t formationIdx =
+                    Anchor::Instance->GetTitlePeerFormationIndex(actor);
+                const float spacing = 40.0f * (float)(formationIdx + 1);
+                const float heading =
+                    (float)localLink->actor.world.rot.y / 32768.0f * (float)M_PI;
+                actor->world.pos.x =
+                    localLink->actor.world.pos.x - spacing * sinf(heading);
+                actor->world.pos.y = localLink->actor.world.pos.y;
+                actor->world.pos.z =
+                    localLink->actor.world.pos.z - spacing * cosf(heading);
+                actor->world.rot.y = localLink->actor.world.rot.y;
+                actor->shape.rot.y = localLink->actor.world.rot.y;
+                actor->shape.shadowAlpha = 255;
+            }
+        } else {
+            // Peer went offline mid-title-cycle — hide until cleanup fires.
+            actor->world.pos.x = -9999.0f;
+            actor->world.pos.y = -9999.0f;
+            actor->world.pos.z = -9999.0f;
+            actor->shape.shadowAlpha = 0;
+        }
+        return;
+    }
+
     if (client.sceneNum != gPlayState->sceneNum || !client.online || !client.isSaveLoaded) {
         // Phase 2 follow-up — if we were carrying an actor on behalf of
         // this client and they just left our scene (or went offline),
@@ -1012,8 +1048,22 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
 
     AnchorClient& client = Anchor::Instance->clients[clientId];
 
-    if (client.sceneNum != gPlayState->sceneNum || !client.online || !client.isSaveLoaded) {
-        return;
+    // Title-screen peer branch (Phase 1 — Plans/title_screen_peer_actors.md).
+    // Bypasses the gameplay-time scene/online/isSaveLoaded gate below since
+    // title-screen peers have client.isSaveLoaded=false by construction and
+    // client.sceneNum is irrelevant — we render based on the local Link's
+    // scene context, not the peer's. The linkAge gate at line ~1066 is
+    // retained: title screen forces adult Link (linkAge=0) on both sides
+    // per Opening_SetupTitleScreen, so a matched-age peer renders normally
+    // and a mismatched-age peer falls through to nametag-only (same as
+    // the cross-timeline gameplay case).
+    const bool titleMode = Anchor::Instance->IsDummyPlayerTitleMode(actor);
+    if (!titleMode) {
+        if (client.sceneNum != gPlayState->sceneNum || !client.online || !client.isSaveLoaded) {
+            return;
+        }
+    } else {
+        if (!client.online) return;
     }
 
     // Pillar B Phase 4 — cross-timeline render gate (Q 4.B.1 = ethereal).

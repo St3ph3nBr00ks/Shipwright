@@ -439,5 +439,13 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                             gSaveContext.dayTime, gSaveContext.nightFlag);
             }
         }
+
+        // Title-screen peers (Plans/title_screen_peer_actors.md) — secondary
+        // spawn trigger. The OnSceneSpawnActors hook fires at scene-init time
+        // which can precede the Anchor handshake on a joining client (clients
+        // map is empty at that moment). When peer state finally arrives via
+        // this packet, re-run the spawn logic. Idempotent + reentrancy-guarded
+        // inside MaybeRebuildTitlePeers — no-op when the gate fails.
+        MaybeRebuildTitlePeers();
     }
 }
