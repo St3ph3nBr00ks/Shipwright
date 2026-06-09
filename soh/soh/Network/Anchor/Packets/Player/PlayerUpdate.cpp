@@ -1,5 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
+#include "soh/Network/Anchor/HorseNetId.h"
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include <nlohmann/json.hpp>
@@ -50,6 +51,7 @@ struct PlayerUpdateCriticalSnapshot {
     int32_t  entranceIndex      = 0;
     int32_t  linkAge            = -1;
     uint32_t heldActorNetId     = 0;
+    uint32_t mountedHorseNetId  = 0;
     int8_t   currentBoots       = -1;
     int8_t   currentShield      = -1;
     int8_t   currentTunic       = -1;
@@ -165,6 +167,17 @@ void Anchor::SendPacket_PlayerUpdate() {
     curCritical.entranceIndex  = (int32_t)gSaveContext.entranceIndex;
     curCritical.linkAge        = (int32_t)gSaveContext.linkAge;
     curCritical.heldActorNetId = currentHeldActorNetId;
+    // Mounted-horse netId — read from Player.rideActor if present.
+    // Horse-sync plan §"PLAYER_UPDATE schema 2 → 3": mount-transition
+    // is a critical-edge field so dismount + scene-transition pairings
+    // reach receivers without throttle delay.
+    uint32_t currentMountedHorseNetId = 0;
+    if (player->rideActor != nullptr) {
+        const HorseNetId* hext =
+            ObjectExtension::GetInstance().Get<HorseNetId>(player->rideActor);
+        if (hext != nullptr) currentMountedHorseNetId = hext->netId;
+    }
+    curCritical.mountedHorseNetId = currentMountedHorseNetId;
     curCritical.currentBoots   = (int8_t)player->currentBoots;
     curCritical.currentShield  = (int8_t)player->currentShield;
     curCritical.currentTunic   = (int8_t)player->currentTunic;
@@ -189,6 +202,7 @@ void Anchor::SendPacket_PlayerUpdate() {
         if (a.entranceIndex  != b.entranceIndex)            return true;
         if (a.linkAge        != b.linkAge)                  return true;
         if (a.heldActorNetId != b.heldActorNetId)           return true;
+        if (a.mountedHorseNetId != b.mountedHorseNetId)     return true;
         if (a.currentBoots   != b.currentBoots)             return true;
         if (a.currentShield  != b.currentShield)            return true;
         if (a.currentTunic   != b.currentTunic)             return true;
@@ -299,6 +313,13 @@ void Anchor::SendPacket_PlayerUpdate() {
     // detection; broadcast it here too so observers' DummyPlayer attach
     // edge-trigger has the value.
     payload["heldActorNetId"] = currentHeldActorNetId;
+
+    // Horse-sync mount linkage (Plans/horse_sync_plan.md). 0 = dismounted.
+    // Receivers' DummyPlayer_Update uses this to look up the local horse
+    // replica by netId (mPeerHorses or FindActorByNetId) and snap the
+    // DummyPlayer to horse.world.pos + horse.riderPos — replicating
+    // vanilla parent-child mount linkage on every machine.
+    payload["mountedHorseNetId"] = currentMountedHorseNetId;
 
     // Throw release-edge: actor still alive in current scene; ship throw
     // velocity so observer's local copy starts the same trajectory.
@@ -418,6 +439,13 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
         // performs the actual attach / detach edge-trigger using this
         // value (it has the Player* + can write player->heldActor).
         client.heldActorNetId = payload.value("heldActorNetId", (uint32_t)0);
+
+        // Horse-sync mount linkage. DummyPlayer_Update reconciles each
+        // frame: looks up local horse replica by netId and snaps the
+        // DummyPlayer to horse.world.pos + horse.riderPos. Default 0 is
+        // a safe dismount-everything value if an older peer is sending
+        // schema 2 (no field).
+        client.mountedHorseNetId = payload.value("mountedHorseNetId", (uint32_t)0);
 
         // Release-edge throw velocity. When the owner just released a
         // held actor, the payload carries the speedXZ / velocity.y / yaw

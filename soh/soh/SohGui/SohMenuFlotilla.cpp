@@ -838,6 +838,35 @@ void SohMenu::AddMenuFlotilla() {
             "Max HP mirrors Link's heart capacity (clamped to 3..20)."));
 
     // -----------------------------------------------------------------
+    // Horse Sync (Plans/horse_sync_plan.md)
+    // -----------------------------------------------------------------
+    path.sidebarName = "Horse Sync";
+    path.column = SECTION_COLUMN_1;
+    AddSidebarEntry("Flotilla", path.sidebarName, 1);
+
+    AddWidget(path, "Bidirectional sync for mounted Epona across connected players.",
+              WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Enable Horse Sync##HorseSync", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.HorseSyncEnabled"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Owner-authoritative bidirectional sync for mounted ACTOR_EN_HORSE "
+            "(Epona) instances. Each player owns the Epona they're mounted on; "
+            "peers see a synced replica with derived rider position.\n\n"
+            "v1 scope: mounted Epona only. Cutscene horses, Ingo race minigame, "
+            "Horseback Archery, and the five sibling horse actors (En_Horse_Ganon "
+            "et al.) are intentionally NOT synced — see Plans/horse_sync_plan.md "
+            "for the per-actor policy table.\n\n"
+            "No horse-side color identification in v1 — peer riders are "
+            "identified by tunic color + cosmetic model + nametag. v2 polish "
+            "will add saddle tint or custom textures after the runtime probe "
+            "resolves the saddle DList combiner question.\n\n"
+            "Default OFF per the project 'vanilla-altering features ship "
+            "default-off' convention. Both players must enable to see each "
+            "other's horses."));
+
+    // -----------------------------------------------------------------
     // Diagnostics
     // -----------------------------------------------------------------
     path.sidebarName = "Diagnostics";

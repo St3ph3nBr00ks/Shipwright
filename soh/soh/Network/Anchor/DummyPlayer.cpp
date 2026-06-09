@@ -15,6 +15,7 @@ extern "C" {
 #include "variables.h"
 #include "functions.h"
 #include "overlays/effects/ovl_Effect_Ss_HitMark/z_eff_ss_hitmark.h"  // EFFECT_HITMARK_METAL
+#include "overlays/actors/ovl_En_Horse/z_en_horse.h"  // mounted-pose reconciliation
 extern PlayState* gPlayState;
 
 void Player_UseItem(PlayState* play, Player* player, s32 item);
@@ -386,6 +387,47 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 }
             }
         }
+    }
+
+    // Horse-sync mounted-pose reconciliation (Plans/horse_sync_plan.md
+    // §"DummyPlayer mounted pose integration"). Sibling to the held-
+    // actor block above. Per-frame state-driven check (not edge-trigger)
+    // so late-join races, scene transitions, and reconnect/disconnect
+    // all self-heal. When client.mountedHorseNetId is set, snap the
+    // DummyPlayer to horse.world.pos + horse.riderPos — replicating
+    // vanilla parent-child mount linkage on every receiver. When the
+    // peer's mountedHorseNetId is 0 (dismounted) or the local horse
+    // replica hasn't been spawned yet, this branch is a no-op and the
+    // DummyPlayer falls through to standard ground-position handling.
+    if (client.mountedHorseNetId != 0) {
+        Actor* peerHorse = nullptr;
+        if (Anchor::Instance != nullptr) {
+            auto it = Anchor::Instance->mPeerHorses.find(client.mountedHorseNetId);
+            if (it != Anchor::Instance->mPeerHorses.end() &&
+                it->second != nullptr && it->second->update != nullptr) {
+                peerHorse = it->second;
+            }
+        }
+        if (peerHorse == nullptr) {
+            peerHorse = FindActorByNetId(gPlayState, client.mountedHorseNetId);
+        }
+        if (peerHorse != nullptr && peerHorse->id == ACTOR_EN_HORSE) {
+            EnHorse* horseAsHorse = (EnHorse*)peerHorse;
+            actor->world.pos.x = peerHorse->world.pos.x + horseAsHorse->riderPos.x;
+            actor->world.pos.y = peerHorse->world.pos.y + horseAsHorse->riderPos.y;
+            actor->world.pos.z = peerHorse->world.pos.z + horseAsHorse->riderPos.z;
+            actor->shape.rot.y = peerHorse->shape.rot.y;
+            // Mark PLAYER_STATE1_ON_HORSE on the DummyPlayer's Player
+            // struct so other systems that read it (collision skip at
+            // DummyPlayer.cpp:1020, animation overlays) behave correctly
+            // mid-ride. Cleared automatically next frame when peer
+            // dismounts (mountedHorseNetId == 0 takes the else branch
+            // below). (player and actor are the same struct via the
+            // Player* cast at line 253; no need to write fields twice.)
+            player->stateFlags1 |= PLAYER_STATE1_ON_HORSE;
+        }
+    } else {
+        player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
     }
     player->currentBoots = client.currentBoots;
     player->currentShield = client.currentShield;
