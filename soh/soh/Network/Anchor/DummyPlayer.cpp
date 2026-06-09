@@ -705,36 +705,19 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 player->skelAnime.playSpeed = localLink->skelAnime.playSpeed;
                 LinkAnimation_Update(gPlayState, &player->skelAnime);
 
-                // Lock root limb XZ to the skel's baseTransl after the
-                // anim tick. Link animations carry root motion in
-                // jointTable[0] — vanilla Player_UpdateCommon /
-                // SkelAnime_UpdateTranslation consumes the per-frame
-                // delta into actor.world.pos and snaps jointTable[0]
-                // back to baseTransl each frame (z_skelanime.c:
-                // 1899-1902). We don't run that unrolling path on
-                // DummyPlayer (DummyPlayer_Update bypasses
-                // Player_Update), so without the snap, the gallop
-                // animation's accumulating root translation moves the
-                // rendered model forward relative to the saddle every
-                // frame — peer Link visually flings ahead, snaps back
-                // when we reassign world.pos at the top of this
-                // block, and the cycle repeats. Result is the
-                // "flopping violently" symptom previously seen on
-                // NPC Follower / NPC Invader Link-skel renders.
-                //
-                // Y is intentionally NOT snapped. The gallop loop's
-                // vertical body bob lives in jointTable[0].y and we
-                // want it visible — vanilla snaps Y only when
-                // ANIM_FLAG_UPDATEY is set (the actor consumes
-                // vertical motion into world.pos.y as well).
-                player->skelAnime.jointTable[0].x =
-                    player->skelAnime.baseTransl.x;
-                player->skelAnime.jointTable[0].z =
-                    player->skelAnime.baseTransl.z;
-                player->skelAnime.prevTransl.x =
-                    player->skelAnime.baseTransl.x;
-                player->skelAnime.prevTransl.z =
-                    player->skelAnime.baseTransl.z;
+                // NOTE: jointTable root-motion snap CANNOT happen here.
+                // LinkAnimation_Update only QUEUES a deferred LOADFRAME
+                // entry into play->animationCtx — the actual joint data
+                // isn't written until AnimationContext_Update flushes
+                // the queue later in Play_Update (z_play.c:644). If we
+                // snapped jointTable[0].xz here, we'd be snapping stale
+                // data; the deferred load then overwrites with new
+                // root motion and peer Link drifts forward across
+                // frames until reset, producing the "violent flopping"
+                // symptom. The snap is moved to DummyPlayer_Draw —
+                // which runs DURING Play_Draw, after the flush — so
+                // we operate on the real per-frame joint values. See
+                // DummyPlayer_Draw title-mode root-snap block.
 
                 player->skelAnime.movementFlags = 0;
                 // Intentionally NOT copying upperLimbRot from local Link.
@@ -1667,6 +1650,30 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
             }
         }
         swappedFace = true;
+    }
+
+    // Title-mode root-motion snap. Pairs with the per-peer animation
+    // playback in DummyPlayer_Update (title branch). Vanilla
+    // SkelAnime_UpdateTranslation snaps jointTable[0].xz back to
+    // baseTransl every frame so the gallop's accumulating root
+    // translation can't drift the rendered model relative to the
+    // actor. We bypass Player_UpdateCommon's call to that helper, so
+    // we have to apply the snap manually — but the snap must run
+    // AFTER AnimationContext_Update has flushed the deferred
+    // LOADFRAME queued by LinkAnimation_Update in our title-mode
+    // update body. Play_Draw is the next phase after the flush, and
+    // DummyPlayer_Draw is on its path, so the snap lands here just
+    // before Player_Draw consumes the joints.
+    //
+    // jointTable buffer is always our per-peer sTitlePeerJointTable
+    // slot (assigned each frame in the update body), so we don't
+    // have to re-derive it. Y is left alone so the gallop's vertical
+    // body bob stays visible.
+    if (titleMode && player->skelAnime.jointTable != nullptr) {
+        player->skelAnime.jointTable[0].x =
+            player->skelAnime.baseTransl.x;
+        player->skelAnime.jointTable[0].z =
+            player->skelAnime.baseTransl.z;
     }
 
     Player_Draw((Actor*)player, play);
