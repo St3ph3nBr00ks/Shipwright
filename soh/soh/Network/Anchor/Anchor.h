@@ -213,6 +213,17 @@ class Anchor : public Network {
     // one window.
     uint64_t mFollowerNpcStateLastFrame = 0;
 
+    // Horse sync (Plans/horse_sync_plan.md). Receivers cache peer-owned
+    // horse replicas by netId so HORSE_STATE updates land on the correct
+    // local instance without a per-packet category walk. Cleared on
+    // scene transitions + per-netId on HORSE_DESPAWN.
+    std::unordered_map<uint32_t, Actor*> mPeerHorses;
+
+    // Throttle counter for HORSE_STATE broadcasts. Owner emits at
+    // roughly 10 Hz (MsToGameTicks(100)) for in-scope horses; critical-
+    // edge transitions on actionState bypass the throttle.
+    uint64_t mHorseStateLastFrame = 0;
+
     // AI follower state machine (runs each frame when followerActive is true).
     // IDLE     — at leader's side; scans for nearby enemies.
     // FOLLOW   — stick-driven movement toward leader's side. Used for ALL
@@ -1263,6 +1274,23 @@ class Anchor : public Network {
     void HandlePacket_FollowerNpcState(nlohmann::json payload);
     void SendPacket_FollowerNpcDespawn(uint32_t netId, uint8_t reason);
     void HandlePacket_FollowerNpcDespawn(nlohmann::json payload);
+
+    // HORSE_* — Flotilla horse / Epona sync (Plans/horse_sync_plan.md).
+    // Owner-authoritative bidirectional sync for mounted ACTOR_EN_HORSE
+    // instances. Spawn primitive Anchor_SpawnPeerHorse (declared as
+    // extern "C" in HorseSync/HorseSpawnHelpers.cpp) materialises peer
+    // replicas; HorseNetId extension carries owner + action state.
+    static bool IsHorseSyncEnabled();
+    static uint32_t MakeHorseNetId(uint32_t ownerClientId, int16_t sceneNum,
+                                    int16_t variantParams);
+    void SendPacket_HorseSpawn(uint32_t netId, int16_t variantParams,
+                                int16_t sceneNum, const Vec3f& pos,
+                                int16_t rotY);
+    void HandlePacket_HorseSpawn(nlohmann::json payload);
+    void SendPacket_HorseState(Actor* horse);
+    void HandlePacket_HorseState(nlohmann::json payload);
+    void SendPacket_HorseDespawn(uint32_t netId, uint8_t reason);
+    void HandlePacket_HorseDespawn(nlohmann::json payload);
 
     // NAV_TEST_DIRECTIVE — Navigation Test Harness coordination packet.
     // Plan: Claude/Plans/ai_nav_test_harness_plan.md §4.2.
