@@ -64,20 +64,46 @@ struct TitlePeerFormation {
 // formationIdx — same inputs always produce the same outputs, so
 // peers retain their formation slot across rejoins.
 //
-// v2 stub: returns all-zero defaults. To enable v3 polish, replace
-// the body with hash-derived values. NO OTHER SITE needs changes.
+// v3 (Phase 3) — hash-derived stagger + yaw divergence populated.
+// animPhaseOffset stays zero until the horse-animation work lands
+// (the consumer site — local Link skelAnime alias — doesn't admit
+// per-peer phase yet).
+//
+// Hash derivation: bit-mixing of clientId via xor-shift. clientIds
+// are typically incremental small numbers (117381, 119901, ...) —
+// direct values give correlated offsets; the mix diffuses them.
 inline TitlePeerFormation MakeTitlePeerFormation(uint32_t clientId,
                                                   uint8_t formationIdx) {
-    (void)clientId;
-    (void)formationIdx;
-    // v3+ implementation sketch — uncomment and tune when ready:
-    //   const uint32_t h = std::hash<uint32_t>{}(clientId);
-    //   TitlePeerFormation f;
-    //   f.posOffset.x       = (((h >>  0) & 0xFF) / 255.0f - 0.5f) * 80.0f;
-    //   f.yawOffset         = (int16_t)((((h >>  8) & 0xFF) / 255.0f - 0.5f) * 0x1000);
-    //   f.animPhaseOffset   = (int16_t)((h >> 16) & 0x1F);  // 0..31 frames
-    //   return f;
-    return TitlePeerFormation{};
+    uint32_t h = clientId ^ ((uint32_t)formationIdx * 0x9E3779B9u);
+    h ^= h >> 16;
+    h *= 0x85EBCA6Bu;
+    h ^= h >> 13;
+    h *= 0xC2B2AE35u;
+    h ^= h >> 16;
+
+    TitlePeerFormation f;
+
+    // Lateral stagger ±40u in X (relative to peer's facing direction;
+    // for our v3 spawn site, the formation is rotated to face Link's
+    // heading, so X is left/right relative to the gallop). Z (forward/
+    // back of slot) intentionally zero — staggering in Z would shift
+    // peers into each other's formation slots.
+    f.posOffset.x = (((float)((h >> 0) & 0xFF) / 255.0f) - 0.5f) * 80.0f;
+    f.posOffset.y = 0.0f;
+    f.posOffset.z = 0.0f;
+
+    // Yaw divergence ±~4° in Q1.15 s16 fixed-point. 0x1000 ≈ 11.25°,
+    // so ±0x0800 ≈ ±5.6°. Pulled from a byte, normalised to ±0.5,
+    // scaled to ±0x0800.
+    f.yawOffset = (int16_t)(
+        (((int32_t)((h >> 8) & 0xFF) - 128) * 0x1000) / 256);
+
+    // animPhaseOffset: deferred. Local-Link skelAnime alias gives all
+    // peers the same animation frame as local Link — phase offset
+    // requires switching to manual animation playback (task #28).
+    f.animPhaseOffset = 0;
+
+    return f;
 }
 
 // Compute the base (un-perturbed) formation slot. Single-file column

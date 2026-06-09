@@ -227,6 +227,24 @@ void SohMenu::AddMenuFlotilla() {
             "them (e.g., slingshot/bow for ranged combat against targets out of sword reach). "
             "The original loadout is restored when the follower finishes or deactivates."));
 
+    // Title-screen peers — Phase 1+2 feature. Spawns same-team peers as
+    // additional Link+Epona pairs behind the local player during the
+    // Hyrule Field title-cutscene gallop. Cosmetic-only; does not affect
+    // gameplay. See Plans/title_screen_peer_actors.md.
+    AddWidget(path, "Title Screen", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Show team-mates on title screen", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.TitleScreenPeers"))
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Spawn same-team peers as visible Link+Epona pairs behind the local "
+            "player during the Hyrule Field title-cutscene gallop. Peers ride "
+            "alongside the local player in formation, in their selected cosmetic "
+            "model + colour.\n\n"
+            "Cosmetic only — no gameplay effect. The horse render uses the existing "
+            "horse-sync infrastructure; if Anchor → Horse Sync is off, peers appear "
+            "on foot instead of mounted.\n\n"
+            "Cap of 3 visible peers (alphabetical by name). Default: on."));
+
     AddWidget(path, "Recording", WIDGET_SEPARATOR_TEXT);
 
     AddWidget(path, "Player Recorder Enabled", WIDGET_CVAR_CHECKBOX)
