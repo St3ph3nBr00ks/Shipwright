@@ -337,10 +337,40 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 // (stagger / yaw divergence / animation phase), modify only
                 // MakeTitlePeerFormation in that header; this call site
                 // needs no changes.
+                // Rotation source — prefer the local cutscene Epona's
+                // shape.rot.y over local Link's world.rot.y. The title
+                // cutscene's actor cue can rotate Link to face the
+                // camera during close-up shots (e.g., shot transitions
+                // where Link's body turns to be visible in the frame),
+                // but the horse's facing direction is always the
+                // gallop heading toward the next waypoint. Using the
+                // horse's rotation makes peers face the actual gallop
+                // direction at all times, not whatever momentary pose
+                // local Link is in. Falls back to local Link's
+                // world.rot.y when no cutscene Epona is present
+                // (e.g., CVar gate off → foot peers, or non-Hyrule-
+                // Field title shots).
+                //
+                // Local cutscene Epona identification matches the
+                // animation-mirror walk below: ACTOR_EN_HORSE with
+                // params=7 in ACTORCAT_BG (z_horse.c:190 — the title-
+                // cutscene spawn variant).
+                int16_t lookYaw = localLink->actor.world.rot.y;
+                {
+                    Actor* a =
+                        gPlayState->actorCtx.actorLists[ACTORCAT_BG].head;
+                    while (a != nullptr) {
+                        if (a->id == ACTOR_EN_HORSE && a->params == 7) {
+                            lookYaw = a->shape.rot.y;
+                            break;
+                        }
+                        a = a->next;
+                    }
+                }
                 AnchorTitlePeer::TitlePeerSlot slot =
                     AnchorTitlePeer::ComputeTitlePeerSlot(
                         localLink->actor.world.pos,
-                        localLink->actor.world.rot.y,
+                        lookYaw,
                         clientId, formationIdx);
 
                 // Path A — ground snap via raycast from above the slot
