@@ -501,21 +501,41 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                             Animation_PlayLoop(&peer->skin.skelAnime, anim);
                             // Apply per-peer phase offset so peers don't
                             // strike the same gallop frame in unison.
-                            // Computed in TitlePeerFormation as a hash
-                            // of clientId+formationIdx, range 0-31
-                            // frames — covers the gallop cycle's
-                            // primary cadence without overflowing
-                            // shorter idle/walk loops. Animation_PlayLoop
-                            // resets curFrame to 0; seeding after the
-                            // call gives each peer its own starting
-                            // phase that the natural advance then
-                            // preserves.
+                            // animPhaseOffset is 0..31 in
+                            // TitlePeerFormation; modulo the actual loop
+                            // length so values larger than the loop wrap
+                            // cleanly (gallop is ~16 frames; idle is
+                            // ~30-40 frames). Animation_PlayLoop resets
+                            // curFrame to 0; seeding after the call
+                            // gives each peer its own starting phase
+                            // that the natural advance preserves.
                             const AnchorTitlePeer::TitlePeerFormation
                                 phaseFormation =
                                 AnchorTitlePeer::MakeTitlePeerFormation(
                                     clientId, formationIdx);
-                            peer->skin.skelAnime.curFrame =
+                            const f32 horseLoopFrames =
+                                (f32)Animation_GetLastFrame((void*)anim);
+                            f32 horseStart =
                                 (f32)phaseFormation.animPhaseOffset;
+                            if (horseLoopFrames > 0.0f &&
+                                horseStart > horseLoopFrames) {
+                                horseStart = fmodf(horseStart, horseLoopFrames);
+                            }
+                            peer->skin.skelAnime.curFrame = horseStart;
+                            // Diagnostic — log actual loop length per
+                            // anim per peer once. Pairs with the peer-
+                            // Link anim length log below so we can size
+                            // the offset range correctly against real
+                            // values rather than estimates.
+                            SPDLOG_INFO(
+                                "[TitlePeer] horse anim change clientId={} "
+                                "formationIdx={} animIdx={} loopFrames={:.1f} "
+                                "offset={:.1f} start={:.1f}",
+                                clientId, (int)formationIdx,
+                                (int)localHorse->animationIdx,
+                                horseLoopFrames,
+                                (f32)phaseFormation.animPhaseOffset,
+                                horseStart);
                             peer->animationIdx = localHorse->animationIdx;
                         }
                         // Mirror playSpeed every frame, not just on state
@@ -701,6 +721,14 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                         localLink->skelAnime.playSpeed,
                         startFrame, endFrame,
                         ANIMMODE_LOOP, 0.0f);
+                    SPDLOG_INFO(
+                        "[TitlePeer] link anim change clientId={} "
+                        "formationIdx={} loopFrames={:.1f} offset={:.1f} "
+                        "start={:.1f}",
+                        clientId, (int)formationIdx,
+                        endFrame,
+                        (f32)animForm.animPhaseOffset,
+                        startFrame);
                 }
                 player->skelAnime.playSpeed = localLink->skelAnime.playSpeed;
                 LinkAnimation_Update(gPlayState, &player->skelAnime);
