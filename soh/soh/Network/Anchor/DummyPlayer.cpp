@@ -415,6 +415,25 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 actor->shape.rot.y = slot.rotY;
                 actor->shape.shadowAlpha = 255;
 
+                // Mirror the horse's pitch + roll onto the rider. Vanilla
+                // EnHorse_Update writes horse->shape.rot.x/z based on the
+                // floor poly normal (slope adaptation). The skelAnime
+                // alias's joint table carries gallop's forward body lean
+                // relative to the actor's shape.rot — without this mirror,
+                // peer's lean is relative to a level pitch while the horse
+                // tilts with the terrain, so peer's head intersects the
+                // horse's neck on uphill slopes (field test 2026-06-09).
+                // Copying horse pitch + roll to the rider keeps the gallop
+                // lean relative to the horse's tilted body, matching
+                // vanilla parent-child mount behaviour.
+                if (peerHorse != nullptr) {
+                    actor->shape.rot.x = peerHorse->shape.rot.x;
+                    actor->shape.rot.z = peerHorse->shape.rot.z;
+                } else {
+                    actor->shape.rot.x = 0;
+                    actor->shape.rot.z = 0;
+                }
+
                 // Mark mounted state so any rendering code path that
                 // checks PLAYER_STATE1_ON_HORSE (animation overlays,
                 // collision skip) sees the peer as mounted. Cleared
