@@ -395,13 +395,17 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 }
 
                 // Rider position — slot.pos when on foot, slot.pos +
-                // saddle-height when mounted. The 60u offset is a fixed
-                // saddle approximation (Path A trades vanilla riderPos
-                // — which has a complex update cadence and produced the
-                // floating-rider bug surfaced in the 2026-06-09 field
-                // tests — for a hardcoded constant that lands the rider
-                // visually on the saddle across the gallop animation).
-                constexpr f32 kSaddleHeightAboveHorse = 60.0f;
+                // saddle-height when mounted. The 30u offset puts the
+                // rider's feet at the stirrups (approximately mid-horse-
+                // body height) rather than on top of the saddle. Tuned
+                // from field test log 470 — the prior 60u offset put
+                // the rider visually 30u above the saddle, as if
+                // standing on the horse's back rather than sitting in
+                // the saddle. (Path A trades vanilla riderPos — which
+                // has a complex update cadence — for a hardcoded
+                // constant that approximates vanilla's mounted feet-
+                // in-stirrups offset.)
+                constexpr f32 kSaddleHeightAboveHorse = 30.0f;
                 actor->world.pos.x = slot.pos.x;
                 actor->world.pos.y = (peerHorse != nullptr)
                     ? slot.pos.y + kSaddleHeightAboveHorse
