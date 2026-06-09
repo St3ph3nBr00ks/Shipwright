@@ -441,8 +441,22 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 if (useVanillaRiderPos) {
                     // Vanilla path — precise saddle bone tracking,
                     // follows gallop animation cycle.
+                    //
+                    // Exact mirror of vanilla mounted Player_Action
+                    // position write at z_player.c:13840-13842. The
+                    // -27.0f Y offset is vanilla's stirrup-level
+                    // adjustment: riderPos points to the saddle BONE's
+                    // world position (top of the saddle), but Player's
+                    // world.pos represents his FEET, which in vanilla
+                    // are seated 27u below the saddle bone in the
+                    // stirrups. Without this offset, the rider stands
+                    // ~27u above the saddle (field test 2026-06-09,
+                    // log 472 — user reported ~60u too high, of which
+                    // 27u is this missing offset; the remainder is
+                    // visual estimation imprecision).
                     actor->world.pos.x = peerHorse->world.pos.x + riderOffset.x;
-                    actor->world.pos.y = peerHorse->world.pos.y + riderOffset.y;
+                    actor->world.pos.y =
+                        (peerHorse->world.pos.y + riderOffset.y) - 27.0f;
                     actor->world.pos.z = peerHorse->world.pos.z + riderOffset.z;
                 } else if (peerHorse != nullptr) {
                     // Frame 0 fallback — riderPos hasn't been
