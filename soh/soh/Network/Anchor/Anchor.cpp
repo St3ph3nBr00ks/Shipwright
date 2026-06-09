@@ -721,18 +721,27 @@ void Anchor::SpawnTitlePeerLink(uint32_t clientId, uint8_t formationIndex) {
                 gPlayState, horseNetId, clientId, /*variantParams=*/0,
                 spawnPos, spawnRotY);
             if (horse != nullptr) {
-                // Path A — completely disable vanilla EnHorse_Update.
-                // The horse becomes a passive render-only prop: draw
-                // function still runs (renders the model) but no AI,
-                // no freeze cycle, no speedXZ integration, no drift.
-                // DummyPlayer_Update title-mode branch owns the per-tick
-                // position + rotation writes. Trade-off: built-in skel
-                // animation is frozen at the spawn-time pose; that's
-                // acceptable for v1 (peers visibly ride along; v3 polish
-                // can drive per-peer Skin animation manually).
-                horse->update = nullptr;
+                // Path A — vanilla EnHorse_Update stays enabled so the
+                // Skin maintains its per-frame matrix state (required
+                // for the draw function to render limbs at valid
+                // positions). An earlier attempt to NULL the update
+                // function froze the pose AND broke rendering entirely
+                // because the Skin's per-limb matrices went uninitialised
+                // — field test log 468 surfaced this (rider lifted to
+                // saddle height, horse invisible).
+                //
+                // We rely on Actor_UpdateAll's fixed category order:
+                // BG (cat 1) runs before NPC (cat 4). So EnHorse_Update
+                // fires first, then DummyPlayer_Update's title-mode
+                // branch fires and writes the horse's position fresh
+                // from the formation slot. Any AI-driven movement
+                // during EnHorse_Update gets overridden by our write
+                // the same frame. Combined with horse-sync's
+                // playerControlled=1 gate (which suppresses most AI on
+                // peer-owned horses), the horse stays anchored at the
+                // formation slot while its animation still ticks.
                 RegisterTitlePeerHorse(clientId, horseNetId, horse);
-                SPDLOG_INFO("[TitlePeer] Spawned horse for clientId={} netId=0x{:08X} (update disabled — Path A)",
+                SPDLOG_INFO("[TitlePeer] Spawned horse for clientId={} netId=0x{:08X} (vanilla update + per-tick position override)",
                             clientId, horseNetId);
             } else {
                 SPDLOG_WARN("[TitlePeer] Anchor_SpawnHorseForTitleScreen returned null "
