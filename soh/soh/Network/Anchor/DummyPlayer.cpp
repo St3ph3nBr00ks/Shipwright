@@ -342,21 +342,25 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                         localLink->actor.world.rot.y,
                         clientId, formationIdx);
 
-                // Default (unmounted): rider rides at the formation slot.
-                // If mounted, the inverse-position math below writes the
-                // horse to (slot - riderPos) and the reconciliation snap
-                // below writes the rider to (horse + riderPos) — which
-                // round-trips back to the formation slot (1-tick lag
-                // first frame, exact match thereafter).
+                // Default (unmounted): rider stands at the formation slot
+                // (ground level). When mounted, the horse stands at the
+                // slot and the reconciliation snap below lifts the rider
+                // to the saddle (horse.pos + riderPos.y ≈ +70u above
+                // horse ground).
                 actor->world.pos = slot.pos;
                 actor->world.rot.y = slot.rotY;
                 actor->shape.rot.y = slot.rotY;
                 actor->shape.shadowAlpha = 255;
 
-                // Phase 2 horse integration. If mounted, derive the horse
-                // position so the reconciliation snap below lands the
-                // rider at the formation slot. Plans/title_screen_peer_
-                // actors.md §"Phase 2 horse integration".
+                // Phase 2 horse integration. Place the horse on the
+                // formation slot's ground; the reconciliation block
+                // below snaps the rider to horse + riderPos (saddle).
+                // Earlier inverse-math (horse = slot - riderPos) failed
+                // because riderPos is "saddle is +70u above horse" — not
+                // a centering offset — so subtracting put the horse
+                // 70u below ground, invisible (log 463 regression).
+                // Plans/title_screen_peer_actors.md §"Phase 2 horse
+                // integration".
                 if (client.mountedHorseNetId != 0 && Anchor::Instance != nullptr) {
                     auto it = Anchor::Instance->mPeerHorses.find(
                                   client.mountedHorseNetId);
@@ -364,10 +368,7 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                         it->second != nullptr &&
                         it->second->id == ACTOR_EN_HORSE) {
                         Actor* horse = it->second;
-                        EnHorse* en = (EnHorse*)horse;
-                        horse->world.pos.x = slot.pos.x - en->riderPos.x;
-                        horse->world.pos.y = slot.pos.y - en->riderPos.y;
-                        horse->world.pos.z = slot.pos.z - en->riderPos.z;
+                        horse->world.pos = slot.pos;
                         horse->shape.rot.y = slot.rotY;
                     }
                 }
@@ -376,6 +377,31 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 // path uses. Handles both mounted (snap to horse +
                 // riderPos) and dismounted (clear PLAYER_STATE1_ON_HORSE).
                 ApplyMountedPoseReconciliation(actor, client);
+
+                // Drive the peer's skelAnime from local Link's
+                // animation state. Title-screen peers have no incoming
+                // wire animation (peer is also at title screen — their
+                // client.jointTable is gameplay-time data and invalid),
+                // so without this alias, peer renders in default idle
+                // pose. We share local Link's jointTable + morphTable
+                // pointers — safe because both sides use the same
+                // Link skeleton (22 limbs, PLAYER_LIMB_MAX). Aliasing
+                // pattern is the same shape as the gameplay-time
+                // path above (line ~278 — `player->skelAnime.jointTable
+                // = client.jointTable`).
+                //
+                // Result: peer gallops in lockstep with local Link
+                // when mounted, idles when local Link idles. Slight
+                // hive-mind look at the formation level (broken in
+                // v3 polish via animPhaseOffset per Common/
+                // TitlePeerFormation.h).
+                player->skelAnime.jointTable    = localLink->skelAnime.jointTable;
+                player->skelAnime.morphTable    = localLink->skelAnime.morphTable;
+                player->skelAnime.movementFlags = localLink->skelAnime.movementFlags;
+                Math_Vec3s_Copy(&player->skelAnime.prevTransl,
+                                &localLink->skelAnime.prevTransl);
+                Math_Vec3s_Copy(&player->upperLimbRot,
+                                &localLink->upperLimbRot);
             }
         } else {
             // Peer went offline mid-title-cycle — hide until cleanup fires.

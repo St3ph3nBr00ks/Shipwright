@@ -38,6 +38,16 @@ extern PlayState* gPlayState;
 // CVar gate
 // ---------------------------------------------------------------------------
 
+// Fix A (2026-06-09): register HorseNetId as an ObjectExtension type so
+// Get/Set are usable on it. Without this, ObjectExtension::Register<HorseNetId>::Id
+// stays at InvalidId — Get/Set assert in debug and silently fail in release
+// (Get returns null, Set is a no-op). Discovered via the title-screen Phase 2
+// field test (log 461 showed `[HorseSpawn] ObjectExtension::Get<HorseNetId>()
+// returned null` warnings on every spawn). Sibling to the existing
+// DummyPlayerClientIdRegister / EnemyNetIdRegister / ItemDropNetIdRegister /
+// AnchorNavExtRegister at Anchor.cpp:603-619.
+static ObjectExtension::Register<HorseNetId> HorseNetIdRegister;
+
 bool Anchor::IsHorseSyncEnabled() {
     return CVarGetInteger(CVAR_ENHANCEMENT("Anchor.HorseSyncEnabled"), 0) != 0;
 }
@@ -79,16 +89,18 @@ Actor* Anchor::SpawnHorseInternal(PlayState* play,
     // this point (Actor_Spawn is synchronous through Init). We're
     // tagging post-Init so the next OnActorUpdate / OnActorKill / draw
     // pass sees the extension and routes through peer-owned semantics.
-    HorseNetId* ext = ObjectExtension::GetInstance().Get<HorseNetId>(horse);
-    if (ext != nullptr) {
-        ext->netId         = netId;
-        ext->ownerClientId = ownerClientId;
-        ext->isPeerOwned   = (ownerClientId != ownClientId);
-    } else {
-        SPDLOG_WARN("[HorseSpawn] ObjectExtension::Get<HorseNetId>() returned null for "
-                    "netId={} owner={}",
-                    netId, ownerClientId);
-    }
+    //
+    // Fix B (2026-06-09): use Set instead of Get-then-write. The original
+    // pattern assumed Get would auto-create on first access; it does not
+    // (ObjectExtension.h:49 — Get returns nullptr when no Set has run).
+    // Without Set, every horse spawn left isPeerOwned unset → vanilla
+    // EnHorse AI ran on peer replicas → collision and slide bugs at title
+    // screen. Discovered via log 461 field test.
+    ObjectExtension::GetInstance().Set<HorseNetId>(horse, HorseNetId{
+        netId,
+        ownerClientId,
+        /*isPeerOwned=*/ (ownerClientId != ownClientId),
+    });
 
     return horse;
 }
