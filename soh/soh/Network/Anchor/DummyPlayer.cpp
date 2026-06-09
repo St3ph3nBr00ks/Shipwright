@@ -32,6 +32,25 @@ extern void* sEyeTextures[2][8];
 extern void* sMouthTextures[2][4];
 }
 
+namespace {
+
+// Title-mode per-peer skelAnime buffers. Decouples each peer Link's
+// animation phase from local Link's so peers don't share the same
+// gallop frame frame-for-frame. Index 0..kMaxTitlePeerBuffers-1 keyed
+// on formationIdx (stable per clientId per session). Slots beyond the
+// max share buffer kMaxTitlePeerBuffers-1 — they desync into each
+// other slightly (different starting phase will be lost) but visually
+// still differ from local Link, which is the primary goal.
+//
+// Sized for Link's 22-limb skel + LinkAnimation_Update's
+// 2-Vec3s padding requirement = 24 slots.
+constexpr int kMaxTitlePeerBuffers = 8;
+constexpr int kLinkJointTableLen   = 24;
+Vec3s sTitlePeerJointTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
+Vec3s sTitlePeerMorphTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
+
+}  // namespace
+
 // KB-19 diagnostic CVars — see DummyPlayer_Draw / DummyPlayer_Init / DummyPlayer_Update.
 //   gAnchor.Debug.SkipDummyDraw   (default 0): when 1, DummyPlayer_Draw returns
 //                                  after the gSaveContext.linkAge swap-set/restore
@@ -632,28 +651,61 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
                 }
 
-                // Drive the peer's skelAnime from local Link's
-                // animation state. Title-screen peers have no incoming
-                // wire animation (peer is also at title screen — their
-                // client.jointTable is gameplay-time data and invalid),
-                // so without this alias, peer renders in default idle
-                // pose. We share local Link's jointTable + morphTable
-                // pointers — safe because both sides use the same
-                // Link skeleton (22 limbs, PLAYER_LIMB_MAX). Aliasing
-                // pattern is the same shape as the gameplay-time
-                // path above (line ~278 — `player->skelAnime.jointTable
-                // = client.jointTable`).
+                // Decoupled per-peer animation playback. Replaces the
+                // earlier jointTable-alias approach (peer shared local
+                // Link's exact frame, so all peers struck their gallop
+                // phase in unison). Each peer now owns its own
+                // jointTable + morphTable buffers in
+                // sTitlePeerJointTable / sTitlePeerMorphTable indexed
+                // by formationIdx, drives the SAME animation local
+                // Link is playing (read via skelAnime.animation), but
+                // starts each cycle offset by
+                // TitlePeerFormation::animPhaseOffset frames so
+                // strides desync naturally.
                 //
-                // At title screen, local Link is in mounted gallop pose
-                // (cutscene actor cue drives him), so this alias makes
-                // peers visually ride in lockstep with local Link. v3+
-                // polish: replace alias with manual SkelAnime tick using
-                // TitlePeerFormation::animPhaseOffset.
-                player->skelAnime.jointTable    = localLink->skelAnime.jointTable;
-                player->skelAnime.morphTable    = localLink->skelAnime.morphTable;
-                player->skelAnime.movementFlags = localLink->skelAnime.movementFlags;
-                Math_Vec3s_Copy(&player->skelAnime.prevTransl,
-                                &localLink->skelAnime.prevTransl);
+                // Mechanism:
+                //   1. Repoint skelAnime to the per-peer buffer slot.
+                //      Idempotent — safe to set every frame; the
+                //      pointer is stable per (clientId, session).
+                //   2. Detect local Link's anim change. On change,
+                //      LinkAnimation_Change with startFrame =
+                //      animPhaseOffset (mod loop length). Peer then
+                //      advances independently from there.
+                //   3. Mirror playSpeed every frame (vanilla Link's
+                //      gallop playback is constant 1.0, but mirroring
+                //      handles any cutscene-driven speed change).
+                //   4. LinkAnimation_Update advances the peer's frame.
+                //      DummyPlayer_Update isn't called from
+                //      Player_Update so vanilla's SkelAnime tick
+                //      doesn't happen for us automatically.
+                const uint8_t bufferIdx = (formationIdx < kMaxTitlePeerBuffers)
+                    ? formationIdx : (kMaxTitlePeerBuffers - 1);
+                player->skelAnime.jointTable = sTitlePeerJointTable[bufferIdx];
+                player->skelAnime.morphTable = sTitlePeerMorphTable[bufferIdx];
+
+                LinkAnimationHeader* localAnim =
+                    (LinkAnimationHeader*)localLink->skelAnime.animation;
+                if (localAnim != nullptr &&
+                    localAnim != (LinkAnimationHeader*)player->skelAnime.animation) {
+                    const AnchorTitlePeer::TitlePeerFormation animForm =
+                        AnchorTitlePeer::MakeTitlePeerFormation(
+                            clientId, formationIdx);
+                    const f32 endFrame =
+                        (f32)Animation_GetLastFrame((void*)localAnim);
+                    f32 startFrame = (f32)animForm.animPhaseOffset;
+                    if (endFrame > 0.0f && startFrame > endFrame) {
+                        startFrame = fmodf(startFrame, endFrame);
+                    }
+                    LinkAnimation_Change(
+                        gPlayState, &player->skelAnime, localAnim,
+                        localLink->skelAnime.playSpeed,
+                        startFrame, endFrame,
+                        ANIMMODE_LOOP, 0.0f);
+                }
+                player->skelAnime.playSpeed = localLink->skelAnime.playSpeed;
+                LinkAnimation_Update(gPlayState, &player->skelAnime);
+
+                player->skelAnime.movementFlags = 0;
                 // Intentionally NOT copying upperLimbRot from local Link.
                 // At the title cutscene, vanilla code can apply yaw to
                 // local Link's upper-body rotation (e.g., to face the
