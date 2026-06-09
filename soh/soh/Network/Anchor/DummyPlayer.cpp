@@ -447,8 +447,18 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 player->skelAnime.movementFlags = localLink->skelAnime.movementFlags;
                 Math_Vec3s_Copy(&player->skelAnime.prevTransl,
                                 &localLink->skelAnime.prevTransl);
-                Math_Vec3s_Copy(&player->upperLimbRot,
-                                &localLink->upperLimbRot);
+                // Intentionally NOT copying upperLimbRot from local Link.
+                // At the title cutscene, vanilla code can apply yaw to
+                // local Link's upper-body rotation (e.g., to face the
+                // camera) — copying that to peer twisted the peer's torso
+                // out of alignment with the horse it sits on. Field test
+                // 2026-06-09: peer rider's body was rotated independently
+                // from the horse's facing direction. With this copy
+                // dropped, peer's upper body stays aligned with its
+                // shape.rot.y (= slot.rotY = same as the horse).
+                player->upperLimbRot.x = 0;
+                player->upperLimbRot.y = 0;
+                player->upperLimbRot.z = 0;
             }
         } else {
             // Peer went offline mid-title-cycle — hide until cleanup fires.
