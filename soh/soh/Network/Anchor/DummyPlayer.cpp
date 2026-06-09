@@ -5,6 +5,7 @@
 #include "soh/Network/Anchor/Common/SceneAuthority.h"  // IsMyCurrentRoomHost — Bug B fix gate (2026-06-05)
 #include "soh/Network/Anchor/Common/EnemyKnockbackTable.h"  // Path A vanilla knockback lookup (2026-06-05)
 #include "soh/Network/Anchor/Common/GameTimeControllerBridge.h"
+#include "soh/Network/Anchor/Common/TitlePeerFormation.h"  // title-mode formation math
 #include "soh/Enhancements/nametag.h"
 #include <unordered_map>
 #include <unordered_set>
@@ -274,16 +275,20 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
             if (localLink != nullptr) {
                 const uint8_t formationIdx =
                     Anchor::Instance->GetTitlePeerFormationIndex(actor);
-                const float spacing = 40.0f * (float)(formationIdx + 1);
-                const float heading =
-                    (float)localLink->actor.world.rot.y / 32768.0f * (float)M_PI;
-                actor->world.pos.x =
-                    localLink->actor.world.pos.x - spacing * sinf(heading);
-                actor->world.pos.y = localLink->actor.world.pos.y;
-                actor->world.pos.z =
-                    localLink->actor.world.pos.z - spacing * cosf(heading);
-                actor->world.rot.y = localLink->actor.world.rot.y;
-                actor->shape.rot.y = localLink->actor.world.rot.y;
+                // Formation derivation lives in Common/TitlePeerFormation.h
+                // — single source of truth shared with SpawnTitlePeerLink's
+                // initial-spawn path. To tune the formation in v3+
+                // (stagger / yaw divergence / animation phase), modify only
+                // MakeTitlePeerFormation in that header; this call site
+                // needs no changes.
+                const AnchorTitlePeer::TitlePeerSlot slot =
+                    AnchorTitlePeer::ComputeTitlePeerSlot(
+                        localLink->actor.world.pos,
+                        localLink->actor.world.rot.y,
+                        clientId, formationIdx);
+                actor->world.pos = slot.pos;
+                actor->world.rot.y = slot.rotY;
+                actor->shape.rot.y = slot.rotY;
                 actor->shape.shadowAlpha = 255;
             }
         } else {
