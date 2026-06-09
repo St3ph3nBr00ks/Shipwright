@@ -394,46 +394,75 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     peerHorse->shape.rot.y = slot.rotY;
                 }
 
-                // Rider position — Path A hardcoded saddle offsets. Vanilla
-                // would use horse->riderPos (the saddle bone offset
-                // computed by EnHorse_Draw via Skin_GetLimbPos), but
-                // that field has a complex lifecycle (absolute world pos
-                // out of Init, becomes an offset only after first
-                // EnHorse_Draw) that's fragile to read from outside the
-                // vanilla mount pipeline. The two constants below
-                // approximate what vanilla computes:
+                // Rider position — vanilla-parity via horse->riderPos.
                 //
-                //   kSaddleHeightAboveHorse — Y component. 30u places
-                //     the rider's feet at the stirrups (approximately
-                //     mid-horse-body height). Tuned from log 470 — the
-                //     prior 60u put the rider on top of the saddle as if
-                //     standing.
+                // EnHorse_Draw computes riderPos by reading the saddle
+                // bone's world position via Skin_GetLimbPos(skin, 30, ...)
+                // then subtracting horse.world.pos to leave a relative
+                // offset (z_en_horse.c:3699-3702). Vanilla mounted
+                // Player_Update then does:
+                //   player->world.pos = horse->world.pos + horse->riderPos
+                // which tracks the saddle bone EXACTLY, including the
+                // animation cycle's saddle bob during gallop.
                 //
-                //   kSaddleBackwardFromHorseOrigin — backward along the
-                //     horse's facing direction. OoT horses have their
-                //     actor.world.pos near the front of the model (neck/
-                //     withers area), not the center, so the saddle is
-                //     offset BACKWARDS. Without this offset, the rider
-                //     lands on the neck instead of the saddle (field
-                //     test 2026-06-09, log 472). 40u places the rider
-                //     visually on the saddle for a standard Epona model.
-                //
-                // Both are applied only when mounted. On foot, the peer
-                // stands at slot.pos directly (Phase 1 behaviour).
+                // The field has a lifecycle wrinkle: EnHorse_Init seeds
+                // riderPos as an ABSOLUTE world position (line 756 +
+                // 759: riderPos = actor.world.pos with +70 Y), and it
+                // only becomes a usable offset after EnHorse_Draw has
+                // run once. So on Frame 0 (spawn frame), the value is
+                // garbage for our purposes. We detect "this looks like
+                // an offset" via a magnitude check — true offsets have
+                // small components (saddle ~30u back, ~50u up, ~30u to
+                // either side), while absolute values include
+                // horse.world.pos.z which is typically large (Hyrule
+                // Field's title spawn is z=1867). When the heuristic
+                // fails, we fall back to hardcoded approximations
+                // (the same constants from the prior Path A approach).
                 constexpr f32 kSaddleHeightAboveHorse        = 30.0f;
                 constexpr f32 kSaddleBackwardFromHorseOrigin = 40.0f;
-                const f32 yawRad =
-                    (f32)slot.rotY / 32768.0f * (f32)M_PI;
-                const f32 forwardX = sinf(yawRad);
-                const f32 forwardZ = cosf(yawRad);
-                const f32 backOffset = (peerHorse != nullptr)
-                    ? kSaddleBackwardFromHorseOrigin
-                    : 0.0f;
-                actor->world.pos.x = slot.pos.x - backOffset * forwardX;
-                actor->world.pos.y = (peerHorse != nullptr)
-                    ? slot.pos.y + kSaddleHeightAboveHorse
-                    : slot.pos.y;
-                actor->world.pos.z = slot.pos.z - backOffset * forwardZ;
+
+                bool useVanillaRiderPos = false;
+                Vec3f riderOffset = { 0.0f, 0.0f, 0.0f };
+                if (peerHorse != nullptr) {
+                    EnHorse* horseAsHorse = (EnHorse*)peerHorse;
+                    const f32 rx = horseAsHorse->riderPos.x;
+                    const f32 ry = horseAsHorse->riderPos.y;
+                    const f32 rz = horseAsHorse->riderPos.z;
+                    if (fabsf(rx) < 80.0f &&
+                        fabsf(ry) < 150.0f &&
+                        fabsf(rz) < 80.0f) {
+                        useVanillaRiderPos = true;
+                        riderOffset.x = rx;
+                        riderOffset.y = ry;
+                        riderOffset.z = rz;
+                    }
+                }
+
+                if (useVanillaRiderPos) {
+                    // Vanilla path — precise saddle bone tracking,
+                    // follows gallop animation cycle.
+                    actor->world.pos.x = peerHorse->world.pos.x + riderOffset.x;
+                    actor->world.pos.y = peerHorse->world.pos.y + riderOffset.y;
+                    actor->world.pos.z = peerHorse->world.pos.z + riderOffset.z;
+                } else if (peerHorse != nullptr) {
+                    // Frame 0 fallback — riderPos hasn't been
+                    // normalised yet. Hardcoded constants approximate
+                    // the saddle position until EnHorse_Draw runs and
+                    // converts riderPos to an offset.
+                    const f32 yawRad =
+                        (f32)slot.rotY / 32768.0f * (f32)M_PI;
+                    const f32 forwardX = sinf(yawRad);
+                    const f32 forwardZ = cosf(yawRad);
+                    actor->world.pos.x = slot.pos.x -
+                        kSaddleBackwardFromHorseOrigin * forwardX;
+                    actor->world.pos.y = slot.pos.y + kSaddleHeightAboveHorse;
+                    actor->world.pos.z = slot.pos.z -
+                        kSaddleBackwardFromHorseOrigin * forwardZ;
+                } else {
+                    // Unmounted — peer stands on the formation slot
+                    // ground (Phase 1 behaviour, no horse spawned).
+                    actor->world.pos = slot.pos;
+                }
                 actor->world.rot.y = slot.rotY;
                 actor->shape.rot.y = slot.rotY;
                 actor->shape.shadowAlpha = 255;
