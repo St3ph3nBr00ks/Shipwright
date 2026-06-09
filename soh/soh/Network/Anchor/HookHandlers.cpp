@@ -18,6 +18,7 @@
 #include "Common/DropAdapters/ModalOfferAdapter.h"  // MODAL_OFFER_CLAIMED match — adapter-identity check
 #include "Common/DropAdapters/ModalPhantomAdapter.h"  // Plan B step 5 — modal-phantom adapter (Bug B fix)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
+#include <algorithm>  // std::sort, std::min — title-screen peer formation
 #include <chrono>
 #include <libultraship/libultraship.h>
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
@@ -471,6 +472,24 @@ void Anchor::RegisterHooks() {
                 (uint8_t)gSaveContext.linkAge);
 
         }
+    });
+
+    // Title-screen peer actors (Phase 1 — Plans/title_screen_peer_actors.md).
+    // Unconditional registration (NOT gated on isConnected) — title-screen
+    // runs before any Anchor session is established and the gate inside the
+    // lambda still requires connected peers, so no spurious spawns when
+    // disconnected.
+    //
+    // Lifecycle: fires on every scene init. Always clears the cached map
+    // first (cached pointers may be dangling after scene reload — per the
+    // session_state.md "Scene-transition pointer cleanup" rule). Then if
+    // gate (gameMode == TITLE_SCREEN && sceneNum == SCENE_HYRULE_FIELD &&
+    // CVar on), spawns fresh peer actors for same-team connected peers,
+    // capped at 3, alphabetical-by-name selection (Q1 locked recommendation).
+    // Empty-team behaviour is strict — render nobody (Q3 locked).
+    // CVar defaults on (Q2 locked).
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneSpawnActors>([]() {
+        Anchor::Instance->MaybeRebuildTitlePeers();
     });
 
     // Pillar C v1 — local FLAG_SCENE_SWITCH set fires this hook from

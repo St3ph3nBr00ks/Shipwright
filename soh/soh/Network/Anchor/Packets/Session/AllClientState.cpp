@@ -101,4 +101,13 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
     RecomputeEffectiveHost();
 
     shouldRefreshActors = true;
+
+    // Title-screen peers (Plans/title_screen_peer_actors.md) — peer state
+    // arrives from the relay via ALL_CLIENT_STATE aggregates, not per-peer
+    // UPDATE_CLIENT_STATE forwards (verified via AnchorProfile bandwidth
+    // log: rx UPDATE_CLIENT_STATE=0.0 pps for the whole session). This is
+    // the correct trigger for join/disconnect/online-flag transitions.
+    // MaybeRebuildTitlePeers is idempotent + reentrancy-guarded — no-op
+    // when the title-screen gate fails.
+    MaybeRebuildTitlePeers();
 }

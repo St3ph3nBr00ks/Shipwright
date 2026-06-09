@@ -119,6 +119,15 @@ class Anchor : public Network {
     // SECTION — Connection state + packet queues
     // ========================================================================
     uint32_t spawningDummyPlayerForClientId = 0;
+    // Title-screen peer cache. Keyed by clientId. Cleared+rebuilt on every
+    // OnSceneSpawnActors fire (cycle-out, gameMode change, save load) and
+    // on HandlePacket_UpdateClientState (joining-peer late-arrival path).
+    // See Plans/title_screen_peer_actors.md "Lifecycle" section.
+    std::unordered_map<uint32_t, Actor*> mTitlePeerActors;
+    // Reentrancy guard for MaybeRebuildTitlePeers — prevents recursion when
+    // SpawnTitlePeerLink's Actor_Spawn → DummyPlayer_Init → packet pump path
+    // re-enters the rebuild logic.
+    bool mIsRebuildingTitlePeers = false;
     // Local monotonic counter sent in UPDATE_CLIENT_STATE so the host can detect
     // same-scene reloads (Game Over continue, void-out) in addition to scene
     // changes and save loads. Incremented at the top of the OnSceneSpawnActors
@@ -551,6 +560,13 @@ class Anchor : public Network {
     void BackfillEnemyNetIds();
     void SetDummyPlayerClientId(const Actor* actor, uint32_t clientId);
 
+    // Title-screen peer actors — internal setter. The corresponding
+    // SpawnTitlePeerLink / ClearTitlePeerActors / IsDummyPlayerTitleMode /
+    // GetTitlePeerFormationIndex live in the public block below alongside
+    // GetDummyPlayerClientId (their callers are external Flotilla code).
+    // Plans/title_screen_peer_actors.md.
+    void SetDummyPlayerTitleMode(const Actor* actor, uint8_t formationIndex);
+
     // ========================================================================
     // SECTION — HandlePacket_* (receive-side dispatch table, private)
     // Dispatch routes are wired up via the packet-handler registry
@@ -806,6 +822,29 @@ class Anchor : public Network {
     bool IsSaveLoaded();
     bool CanTeleportTo(uint32_t clientId);
     uint32_t GetDummyPlayerClientId(const Actor* actor);
+
+    // Title-screen peer actors (Phase 1 — Plans/title_screen_peer_actors.md).
+    // Spawned during the Hyrule Field title gallop demo to render same-team
+    // peers riding alongside the local player. Pre-save-load lifecycle —
+    // distinct from gameplay-time DummyPlayer spawn path which gates on
+    // IsSaveLoaded. Phase 1 ships peers on foot; Phase 2 wires the
+    // horse-sync agent's spawn primitive to mount them on tinted Eponas.
+    // Called from external plain lambdas (HookHandlers.cpp) and from
+    // DummyPlayer.cpp — must be public (Pitfall 16).
+    void SpawnTitlePeerLink(uint32_t clientId, uint8_t formationIndex);
+    void ClearTitlePeerActors();
+    bool IsDummyPlayerTitleMode(const Actor* actor) const;
+    uint8_t GetTitlePeerFormationIndex(const Actor* actor) const;
+    // Idempotent gate-check + rebuild. Called from both OnSceneSpawnActors
+    // (scene-init trigger, handles the host case where state is already
+    // known) and HandlePacket_UpdateClientState (state-arrival trigger,
+    // handles the joining-client case where peer state lands after scene
+    // init). Mirrors RefreshClientActors's "called from multiple naturally-
+    // arising trigger points" pattern. Internally clears the cache first,
+    // then re-runs the gate check + formation rebuild, so duplicate calls
+    // produce duplicate work but no duplicate actors. Reentrancy-guarded
+    // via mIsRebuildingTitlePeers.
+    void MaybeRebuildTitlePeers();
     bool IsFollowerActive() const { return followerActive; }
     void SetFollowerActive(bool active);
 

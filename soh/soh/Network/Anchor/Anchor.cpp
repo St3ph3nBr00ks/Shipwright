@@ -591,6 +591,17 @@ struct DummyPlayerClientId {
     uint32_t clientId = 0;
 };
 static ObjectExtension::Register<DummyPlayerClientId> DummyPlayerClientIdRegister;
+
+// Title-screen peer marker (Phase 1 — Plans/title_screen_peer_actors.md).
+// Tagged at SpawnTitlePeerLink time on the spawned DummyPlayer so
+// DummyPlayer_Update can branch into title-mode position math instead of
+// the gameplay-time PLAYER_UPDATE-driven path. Phase 2 will also drive
+// horse-mount linkage via the formation index.
+struct DummyPlayerTitleMode {
+    bool    isTitleMode      = false;
+    uint8_t formationIndex   = 0;
+};
+static ObjectExtension::Register<DummyPlayerTitleMode> DummyPlayerTitleModeRegister;
 ObjectExtension::Register<EnemyNetId> EnemyNetIdRegister;
 ObjectExtension::Register<ItemDropNetId> ItemDropNetIdRegister;
 // B.4 — per-navigator nav-substrate state lifted off EnemyNetId.
@@ -604,6 +615,176 @@ uint32_t Anchor::GetDummyPlayerClientId(const Actor* actor) {
 
 void Anchor::SetDummyPlayerClientId(const Actor* actor, uint32_t clientId) {
     ObjectExtension::GetInstance().Set<DummyPlayerClientId>(actor, DummyPlayerClientId{ clientId });
+}
+
+// ============================================================================
+// Title-screen peer actors — Phase 1
+// Plans/title_screen_peer_actors.md.
+// Phase 1 ships peers on foot behind the local Link during the Hyrule Field
+// title gallop. Phase 2 wires the horse-sync agent's spawn primitive to
+// mount them on tinted Eponas. Empty-team / cap-3 / alphabetical-selection
+// policy locked in the plan doc (Q1/Q2/Q3 recommendations).
+// ============================================================================
+
+void Anchor::SetDummyPlayerTitleMode(const Actor* actor, uint8_t formationIndex) {
+    ObjectExtension::GetInstance().Set<DummyPlayerTitleMode>(
+        actor, DummyPlayerTitleMode{ /*isTitleMode=*/ true, formationIndex });
+}
+
+bool Anchor::IsDummyPlayerTitleMode(const Actor* actor) const {
+    const DummyPlayerTitleMode* ext =
+        ObjectExtension::GetInstance().Get<DummyPlayerTitleMode>(actor);
+    return ext != nullptr && ext->isTitleMode;
+}
+
+uint8_t Anchor::GetTitlePeerFormationIndex(const Actor* actor) const {
+    const DummyPlayerTitleMode* ext =
+        ObjectExtension::GetInstance().Get<DummyPlayerTitleMode>(actor);
+    return ext != nullptr ? ext->formationIndex : 0;
+}
+
+void Anchor::SpawnTitlePeerLink(uint32_t clientId, uint8_t formationIndex) {
+    if (gPlayState == nullptr) return;
+    auto it = clients.find(clientId);
+    if (it == clients.end() || !it->second.online || it->second.self) return;
+
+    // Initial spawn position: derived from local Link's current pos+rot.
+    // DummyPlayer_Update will recompute this every frame from the same source.
+    Player* localLink = GET_PLAYER(gPlayState);
+    Vec3f spawnPos = { 0.0f, 0.0f, 0.0f };
+    s16 spawnRotY = 0;
+    if (localLink != nullptr) {
+        const float spacing = 40.0f * (float)(formationIndex + 1);
+        const float heading = (float)localLink->actor.world.rot.y / 32768.0f * (float)M_PI;
+        spawnPos.x = localLink->actor.world.pos.x - spacing * sinf(heading);
+        spawnPos.y = localLink->actor.world.pos.y;
+        spawnPos.z = localLink->actor.world.pos.z - spacing * cosf(heading);
+        spawnRotY = localLink->actor.world.rot.y;
+    }
+
+    // Reuse the existing spawningDummyPlayerForClientId pathway so
+    // ShouldActorInit / DummyPlayer_Init / cosmetic bake all run identically
+    // to the gameplay-time path. We tag the actor as title-mode AFTER
+    // Actor_Spawn returns so DummyPlayer_Update sees the flag on its first
+    // tick (next frame).
+    spawningDummyPlayerForClientId = clientId;
+    Actor* dummy = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_PLAYER,
+                               spawnPos.x, spawnPos.y, spawnPos.z,
+                               0, spawnRotY, 0, 0);
+    spawningDummyPlayerForClientId = 0;
+
+    if (dummy != nullptr) {
+        SetDummyPlayerTitleMode(dummy, formationIndex);
+        // Title-screen peers don't show nametags — DummyPlayer_Init registered
+        // one during Actor_Spawn (mirroring the gameplay-time path), so we
+        // remove it here. Rationale (per user 2026-06-08): title screen
+        // is a cosmetic preview, and with both peers often sharing a
+        // nickname the tag was ambiguous and visually noisy. Bypassing
+        // the nametag at Init time would require a parallel "spawning
+        // title peer" flag the Init hook checks; this post-spawn remove
+        // achieves the same outcome with less surface area.
+        NameTag_RemoveAllForActor(dummy);
+        mTitlePeerActors[clientId] = dummy;
+        it->second.player = (Player*)dummy;
+        SPDLOG_INFO("[TitlePeer] Spawned clientId={} formationIdx={} pos=({:.1f},{:.1f},{:.1f}) rotY={}",
+                    clientId, (int)formationIndex,
+                    spawnPos.x, spawnPos.y, spawnPos.z, (int)spawnRotY);
+    } else {
+        SPDLOG_WARN("[TitlePeer] Actor_Spawn returned null for clientId={}", clientId);
+    }
+}
+
+void Anchor::MaybeRebuildTitlePeers() {
+    // Reentrancy guard — Actor_Spawn's init path can pump packet handlers
+    // synchronously (HandlePacket_UpdateClientState in particular) which
+    // would re-enter this function and double-rebuild.
+    if (mIsRebuildingTitlePeers) return;
+    mIsRebuildingTitlePeers = true;
+
+    // Always clear cached pointers first — they may be dangling after a
+    // scene reload, and a stale formation may be incomplete after a
+    // peer arrival.
+    ClearTitlePeerActors();
+
+    auto bail = [this]() { mIsRebuildingTitlePeers = false; };
+
+    if (gPlayState == nullptr)                                                  { bail(); return; }
+    if (gSaveContext.gameMode != GAMEMODE_TITLE_SCREEN)                         { bail(); return; }
+    if (gPlayState->sceneNum != SCENE_HYRULE_FIELD)                             { bail(); return; }
+    if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.TitleScreenPeers"), 1) == 0)    { bail(); return; }
+
+    // Build candidate list: online, not-self, same teamId as local.
+    // Local team comes from the self-entry in clients map.
+    std::string localTeamId;
+    for (auto& [id, c] : clients) {
+        if (c.self) { localTeamId = c.teamId; break; }
+    }
+
+    struct Candidate { uint32_t clientId; std::string name; };
+    std::vector<Candidate> candidates;
+    for (auto& [id, c] : clients) {
+        if (c.self || !c.online) continue;
+        if (c.teamId != localTeamId) continue;
+        candidates.push_back({ id, c.name });
+    }
+
+    if (candidates.empty()) { bail(); return; }
+
+    // Q1 locked — alphabetical by name (stable across rejoins, predictable).
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) { return a.name < b.name; });
+
+    // Q1 locked — cap at 3 visible peers.
+    constexpr size_t kMaxVisiblePeers = 3;
+    const size_t count = std::min(candidates.size(), kMaxVisiblePeers);
+    SPDLOG_INFO("[TitlePeer] Spawning {} peer(s) for title gallop (team='{}', {} candidates)",
+                count, localTeamId, candidates.size());
+    for (size_t i = 0; i < count; i++) {
+        SpawnTitlePeerLink(candidates[i].clientId, (uint8_t)i);
+    }
+
+    mIsRebuildingTitlePeers = false;
+}
+
+void Anchor::ClearTitlePeerActors() {
+    if (mTitlePeerActors.empty()) return;
+    const size_t prevCount = mTitlePeerActors.size();
+
+    // Don't dereference cached pointers — they may be dangling after a
+    // scene reload (per session_state.md "Scene-transition pointer cleanup"
+    // — reading actor->update on a freed pointer is UB). The scene
+    // transition's actor-list destruction has already killed the actors
+    // we cached. For intra-scene cleanup (rare in Phase 1), the actors
+    // will remain alive but invisible (DummyPlayer_Update's offline branch
+    // hides them at -9999) until the next OnSceneSpawnActors fires.
+    //
+    // We also walk the live ACTORCAT_NPC list and Actor_Kill any surviving
+    // title-mode peer actor. This handles the same-scene cleanup case
+    // (peer disconnect mid-title-cycle) safely because we're using fresh
+    // actor-list traversal, not cached pointers.
+    if (gPlayState != nullptr) {
+        Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
+        while (a != nullptr) {
+            Actor* next = a->next;
+            if (a->id == ACTOR_EN_OE2 && a->update == DummyPlayer_Update &&
+                IsDummyPlayerTitleMode(a)) {
+                KillNetworkActorSilently(a);
+            }
+            a = next;
+        }
+    }
+
+    // Clear per-client cached player pointers that point into our (possibly
+    // dangling) actor cache, so RefreshClientActors doesn't reuse a dead
+    // pointer after save load.
+    for (auto& [clientId, cachedActor] : mTitlePeerActors) {
+        auto it = clients.find(clientId);
+        if (it != clients.end() && it->second.player == (Player*)cachedActor) {
+            it->second.player = nullptr;
+        }
+    }
+    mTitlePeerActors.clear();
+    SPDLOG_INFO("[TitlePeer] Cleared {} peer actor cache entries", prevCount);
 }
 
 bool Anchor::GetClientIsClimbing(uint32_t clientId) const {
