@@ -218,21 +218,10 @@ class Anchor : public Network {
     // below, mirroring the `clients` map placement at the head of the
     // post-Pillar-F public section — external consumers (DummyPlayer
     // mounted-pose reconciliation, HorseSync hooks lambdas) need
-    // direct map access. See public block near line 781 / Pitfall 16.
-
-    // SpawnHorseInternal — single private gateway through which the
-    // two public extern "C" entry points (Anchor_SpawnPeerHorse +
-    // Anchor_SpawnHorseForTitleScreen, both file-scope free functions
-    // declared in HorseSync/HorseSpawnHelpers.cpp) materialise a peer
-    // horse replica. Lives in the private block so isSpawningNetworkActor
-    // bracketing can use implicit `this`; file-scope helpers can't
-    // touch the private flag directly.
-    Actor* SpawnHorseInternal(PlayState* play,
-                               uint32_t netId,
-                               uint32_t ownerClientId,
-                               int16_t variantParams,
-                               Vec3f pos,
-                               int16_t rotY);
+    // direct map access. SpawnHorseInternal declared in the public
+    // block too — the two extern "C" wrappers in HorseSpawnHelpers.cpp
+    // are file-scope free functions and need public callable access.
+    // See public block near line 781 / Pitfall 16.
 
     // AI follower state machine (runs each frame when followerActive is true).
     // IDLE     — at leader's side; scans for nearby enemies.
@@ -818,6 +807,20 @@ class Anchor : public Network {
     // MsToGameTicks(100) ≈ 10 Hz with critical-edge bypass on
     // EnHorse::action change. Reset on scene transitions.
     uint64_t mHorseStateLastFrame = 0;
+
+    // SpawnHorseInternal — single member-function gateway to the only
+    // Actor_Spawn(ACTOR_EN_HORSE) site for peer-owned horses. Public
+    // so the two extern "C" wrappers in HorseSpawnHelpers.cpp can
+    // dispatch through it. Member function so isSpawningNetworkActor
+    // (private) is reachable via implicit `this` — access modifiers
+    // gate the call site, not the body, so the impl keeps full
+    // private-member access.
+    Actor* SpawnHorseInternal(PlayState* play,
+                               uint32_t netId,
+                               uint32_t ownerClientId,
+                               int16_t variantParams,
+                               Vec3f pos,
+                               int16_t rotY);
 
     // Disable-time graveyard for BakedPlayerModel and customSkeleton.
     // KB-15 / issue #110: clients.clear() in Disable() destroys baked Gfx
