@@ -92,11 +92,19 @@ inline TitlePeerFormation MakeTitlePeerFormation(uint32_t clientId,
     f.posOffset.y = 0.0f;
     f.posOffset.z = 0.0f;
 
-    // Yaw divergence ±~4° in Q1.15 s16 fixed-point. 0x1000 ≈ 11.25°,
-    // so ±0x0800 ≈ ±5.6°. Pulled from a byte, normalised to ±0.5,
-    // scaled to ±0x0800.
-    f.yawOffset = (int16_t)(
-        (((int32_t)((h >> 8) & 0xFF) - 128) * 0x1000) / 256);
+    // Yaw divergence — kept at zero. Phase 3 originally introduced
+    // ±~5.6° per-peer hash-derived yaw stagger for visual variety,
+    // but with peers positioned 250u behind + ±40u laterally from
+    // local Link, even a small yaw turn lands the peer's gaze line
+    // close to local Link's position. Field test 2026-06-09 — user
+    // perceived peers as "turning to look at the local player" with
+    // any non-zero yaw stagger. Intent: peers should look at the
+    // same waypoint the local Link is galloping toward. Solution:
+    // all peers face EXACTLY local Link's facing direction.
+    //
+    // posOffset is retained — lateral position stagger breaks up the
+    // strict single-file column without redirecting any peer's gaze.
+    f.yawOffset = 0;
 
     // animPhaseOffset: deferred. Local-Link skelAnime alias gives all
     // peers the same animation frame as local Link — phase offset
