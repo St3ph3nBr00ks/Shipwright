@@ -21,6 +21,12 @@ extern "C" {
 #include "variables.h"
 #include "functions.h"
 extern PlayState* gPlayState;
+// Phase 2 horse integration — primitive lives in HorseSync/HorseSpawnHelpers.cpp.
+// No header exists yet for the HorseSync module so we forward-declare here
+// (project pattern — same shape as the existing extern PlayState* above).
+Actor* Anchor_SpawnHorseForTitleScreen(PlayState* play, uint32_t netId,
+                                        uint32_t ownerClientId, int16_t variantParams,
+                                        Vec3f pos, int16_t rotY);
 }
 
 // MARK: - AnchorClient helpers
@@ -700,6 +706,49 @@ void Anchor::SpawnTitlePeerLink(uint32_t clientId, uint8_t formationIndex) {
         SPDLOG_INFO("[TitlePeer] Spawned clientId={} formationIdx={} pos=({:.1f},{:.1f},{:.1f}) rotY={}",
                     clientId, (int)formationIndex,
                     spawnPos.x, spawnPos.y, spawnPos.z, (int)spawnRotY);
+
+        // Phase 2 horse integration. Spawn paired with the rider so the
+        // Link+Horse pair has a consistent lifetime. Gated on
+        // IsHorseSyncEnabled CVar — when off, Phase 1 behavior preserved
+        // (peers on foot, no horse). The first-frame rider/horse positions
+        // overlap; the per-tick title-mode branch in DummyPlayer_Update
+        // converges them to (rider = formation slot, horse = slot - riderPos)
+        // on the second frame via the inverse-position math + reconciliation.
+        if (Anchor::IsHorseSyncEnabled()) {
+            const uint32_t horseNetId =
+                Anchor::MakeHorseNetId(clientId, SCENE_HYRULE_FIELD, 0);
+            Actor* horse = Anchor_SpawnHorseForTitleScreen(
+                gPlayState, horseNetId, clientId, /*variantParams=*/0,
+                spawnPos, spawnRotY);
+            if (horse != nullptr) {
+                // Path A — vanilla EnHorse_Update stays enabled so the
+                // Skin maintains its per-frame matrix state (required
+                // for the draw function to render limbs at valid
+                // positions). An earlier attempt to NULL the update
+                // function froze the pose AND broke rendering entirely
+                // because the Skin's per-limb matrices went uninitialised
+                // — field test log 468 surfaced this (rider lifted to
+                // saddle height, horse invisible).
+                //
+                // We rely on Actor_UpdateAll's fixed category order:
+                // BG (cat 1) runs before NPC (cat 4). So EnHorse_Update
+                // fires first, then DummyPlayer_Update's title-mode
+                // branch fires and writes the horse's position fresh
+                // from the formation slot. Any AI-driven movement
+                // during EnHorse_Update gets overridden by our write
+                // the same frame. Combined with horse-sync's
+                // playerControlled=1 gate (which suppresses most AI on
+                // peer-owned horses), the horse stays anchored at the
+                // formation slot while its animation still ticks.
+                RegisterTitlePeerHorse(clientId, horseNetId, horse);
+                SPDLOG_INFO("[TitlePeer] Spawned horse for clientId={} netId=0x{:08X} (vanilla update + per-tick position override)",
+                            clientId, horseNetId);
+            } else {
+                SPDLOG_WARN("[TitlePeer] Anchor_SpawnHorseForTitleScreen returned null "
+                            "for clientId={} netId=0x{:08X}",
+                            clientId, horseNetId);
+            }
+        }
     } else {
         SPDLOG_WARN("[TitlePeer] Actor_Spawn returned null for clientId={}", clientId);
     }
@@ -757,9 +806,85 @@ void Anchor::MaybeRebuildTitlePeers() {
     mIsRebuildingTitlePeers = false;
 }
 
+// ============================================================================
+// Title-screen peer horses — Phase 2 dual-map helpers (Fix A).
+//
+// The gameplay horse cache (mPeerHorses, keyed by netId) is the lookup the
+// existing DummyPlayer mounted-pose reconciliation reads. The title-cleanup
+// path needs clientId-keyed access (we walk Anchor::clients during rebuild,
+// no netId in hand). Since MakeHorseNetId encodes only the bottom 8 bits of
+// clientId, we can't derive full clientId from netId — so two maps coexist.
+//
+// To prevent write-skew + cleanup-skew bugs, all map manipulation goes
+// through these three helpers. Direct mTitlePeerHorses / mPeerHorses writes
+// outside these methods should be a code-review red flag.
+//
+// See Plans/title_screen_peer_actors.md §"Dual-map fix A (helper-wrapped)".
+// ============================================================================
+
+void Anchor::RegisterTitlePeerHorse(uint32_t clientId, uint32_t horseNetId,
+                                      Actor* horse) {
+    if (horse == nullptr || horseNetId == 0) return;
+    mTitlePeerHorses[clientId] = horse;
+    mPeerHorses[horseNetId]    = horse;
+    // Set client.mountedHorseNetId so the existing mounted-pose
+    // reconciliation (used by both gameplay and title paths) snaps the
+    // rider DummyPlayer onto this horse on its next tick.
+    auto it = clients.find(clientId);
+    if (it != clients.end()) {
+        it->second.mountedHorseNetId = horseNetId;
+    }
+}
+
+void Anchor::UnregisterTitlePeerHorse(uint32_t clientId) {
+    auto titleIt = mTitlePeerHorses.find(clientId);
+    if (titleIt == mTitlePeerHorses.end()) return;
+    Actor* horse = titleIt->second;
+
+    // Recover the netId from the client entry so we can erase from
+    // mPeerHorses too. (We can't derive it from clientId alone — only
+    // the bottom 8 bits make it into the netId encoding.)
+    auto clientIt = clients.find(clientId);
+    if (clientIt != clients.end()) {
+        const uint32_t horseNetId = clientIt->second.mountedHorseNetId;
+        if (horseNetId != 0) {
+            mPeerHorses.erase(horseNetId);
+        }
+        clientIt->second.mountedHorseNetId = 0;
+    }
+
+    mTitlePeerHorses.erase(titleIt);
+
+    // KillNetworkActorSilently is defensive — early-returns on null or
+    // already-killed actors (Anchor.cpp:43). Safe to call on cached
+    // pointers within the current scene's actor list lifetime.
+    KillNetworkActorSilently(horse);
+}
+
+Actor* Anchor::FindTitlePeerHorse(uint32_t clientId) const {
+    auto it = mTitlePeerHorses.find(clientId);
+    return (it != mTitlePeerHorses.end()) ? it->second : nullptr;
+}
+
 void Anchor::ClearTitlePeerActors() {
-    if (mTitlePeerActors.empty()) return;
+    if (mTitlePeerActors.empty() && mTitlePeerHorses.empty()) return;
     const size_t prevCount = mTitlePeerActors.size();
+    const size_t prevHorseCount = mTitlePeerHorses.size();
+
+    // Phase 2 horse cleanup. Collect keys first so we can call
+    // UnregisterTitlePeerHorse without iterator invalidation
+    // (UnregisterTitlePeerHorse erases from mTitlePeerHorses).
+    if (!mTitlePeerHorses.empty()) {
+        std::vector<uint32_t> horseClientIds;
+        horseClientIds.reserve(mTitlePeerHorses.size());
+        for (auto& [clientId, _] : mTitlePeerHorses) {
+            horseClientIds.push_back(clientId);
+        }
+        for (uint32_t clientId : horseClientIds) {
+            UnregisterTitlePeerHorse(clientId);
+        }
+        SPDLOG_INFO("[TitlePeer] Cleared {} peer horse cache entries", prevHorseCount);
+    }
 
     // Don't dereference cached pointers — they may be dangling after a
     // scene reload (per session_state.md "Scene-transition pointer cleanup"

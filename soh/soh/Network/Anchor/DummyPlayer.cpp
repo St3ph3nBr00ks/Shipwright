@@ -114,6 +114,60 @@ static DamageTable DummyPlayerDamageTable = {
     /* Unknown 2     */ DMG_ENTRY(0, PLAYER_HIT_RESPONSE_NONE),
 };
 
+// Horse-sync mounted-pose reconciliation — single source of truth.
+// Used by BOTH gameplay-time DummyPlayer_Update (below) AND the
+// title-mode branch's horse integration (Plans/title_screen_peer_
+// actors.md Phase 2). Per-frame state-driven check (not edge-trigger)
+// so late-join races, scene transitions, reconnect/disconnect all
+// self-heal.
+//
+// Mounted (client.mountedHorseNetId != 0): find the horse via
+//   Anchor::mPeerHorses fast-path, falling back to FindActorByNetId.
+//   Snap DummyPlayer.world.pos to peerHorse.world.pos + horse.riderPos
+//   — replicating vanilla parent-child mount linkage on every receiver.
+//   Mark PLAYER_STATE1_ON_HORSE so collision skip + animation overlays
+//   behave correctly mid-ride.
+// Dismounted (mountedHorseNetId == 0): clear PLAYER_STATE1_ON_HORSE so
+//   the next frame's standard ground-position handling kicks in.
+//
+// Extraction history: lifted from inline block in DummyPlayer_Update
+// 2026-06-09 as part of Phase 2 horse integration (clean-extraction
+// option per user's "fix not workaround" guidance).
+static void ApplyMountedPoseReconciliation(Actor* actor,
+                                             const AnchorClient& client) {
+    Player* player = (Player*)actor;
+
+    if (client.mountedHorseNetId == 0) {
+        player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
+        return;
+    }
+
+    Actor* peerHorse = nullptr;
+    if (Anchor::Instance != nullptr) {
+        auto it = Anchor::Instance->mPeerHorses.find(client.mountedHorseNetId);
+        if (it != Anchor::Instance->mPeerHorses.end() &&
+            it->second != nullptr && it->second->update != nullptr) {
+            peerHorse = it->second;
+        }
+    }
+    if (peerHorse == nullptr) {
+        peerHorse = FindActorByNetId(gPlayState, client.mountedHorseNetId);
+    }
+    if (peerHorse == nullptr || peerHorse->id != ACTOR_EN_HORSE) {
+        // Horse not yet spawned or wrong-type — leave stateFlags1 alone
+        // (don't clear; rider will land at standard pos this tick and
+        // self-heal once the horse replica arrives).
+        return;
+    }
+
+    EnHorse* horseAsHorse = (EnHorse*)peerHorse;
+    actor->world.pos.x = peerHorse->world.pos.x + horseAsHorse->riderPos.x;
+    actor->world.pos.y = peerHorse->world.pos.y + horseAsHorse->riderPos.y;
+    actor->world.pos.z = peerHorse->world.pos.z + horseAsHorse->riderPos.z;
+    actor->shape.rot.y = peerHorse->shape.rot.y;
+    player->stateFlags1 |= PLAYER_STATE1_ON_HORSE;
+}
+
 void DummyPlayer_Init(Actor* actor, PlayState* play) {
     Player* player = (Player*)actor;
 
@@ -282,15 +336,214 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 // (stagger / yaw divergence / animation phase), modify only
                 // MakeTitlePeerFormation in that header; this call site
                 // needs no changes.
-                const AnchorTitlePeer::TitlePeerSlot slot =
+                AnchorTitlePeer::TitlePeerSlot slot =
                     AnchorTitlePeer::ComputeTitlePeerSlot(
                         localLink->actor.world.pos,
                         localLink->actor.world.rot.y,
                         clientId, formationIdx);
-                actor->world.pos = slot.pos;
+
+                // Path A — ground snap via raycast from above the slot
+                // position. Hyrule Field's terrain dips and rolls under
+                // the title-cutscene camera path, so a fixed Y from
+                // local Link's pos puts horses floating above (or below)
+                // the ground on slopes. We raycast from slot.y + 200u
+                // (well above any reasonable terrain) downward; whatever
+                // floor poly we hit is the ground level for this slot.
+                // BgCheck functions are available at title screen — the
+                // colCtx is initialised by Play_Init regardless of
+                // gameMode. Returns BGCHECK_Y_MIN (-32000) if no floor;
+                // we treat that as "no snap" and keep slot.y as-is.
+                {
+                    Vec3f probe = { slot.pos.x, slot.pos.y + 200.0f, slot.pos.z };
+                    CollisionPoly* outPoly = nullptr;
+                    f32 groundY = BgCheck_EntityRaycastFloor1(
+                        &gPlayState->colCtx, &outPoly, &probe);
+                    if (groundY > BGCHECK_Y_MIN) {
+                        slot.pos.y = groundY;
+                    }
+                }
+
+                // Path A horse position write — horse stands on the
+                // ground at the formation slot, rider sits above the
+                // horse at saddle height. No reconciliation, no
+                // riderPos lookup. We own position, vanilla EnHorse
+                // can't drift the horse because its update function
+                // is NULL'd at spawn time (Anchor.cpp SpawnTitlePeerLink).
+                //
+                // Lookup via FindTitlePeerHorse (mTitlePeerHorses,
+                // clientId-keyed) instead of mPeerHorses (netId-keyed)
+                // because horse-sync v1's own OnSceneSpawnActors hook
+                // clears mPeerHorses on every scene init. If horse-sync's
+                // hook fires AFTER ours on the same scene-init event
+                // (registration order — we don't control it), our just-
+                // written mPeerHorses entry gets wiped and the horse
+                // becomes orphaned (still alive at spawn position, no
+                // longer position-driven). mTitlePeerHorses is owned by
+                // the title-screen path, never touched by horse-sync.
+                // See log 467 — horse "Spawned ... Path A" lines fire
+                // but lookups failed every tick.
+                //
+                // Spawned horse may not exist (CVar gate off; spawn
+                // failure). When absent, the rider stands on the ground
+                // at the slot — Phase 1 behaviour preserved.
+                Actor* peerHorse = (Anchor::Instance != nullptr)
+                    ? Anchor::Instance->FindTitlePeerHorse(clientId)
+                    : nullptr;
+                if (peerHorse != nullptr && peerHorse->id == ACTOR_EN_HORSE) {
+                    peerHorse->world.pos = slot.pos;
+                    peerHorse->shape.rot.y = slot.rotY;
+                }
+
+                // Rider position — vanilla-parity via horse->riderPos.
+                //
+                // EnHorse_Draw computes riderPos by reading the saddle
+                // bone's world position via Skin_GetLimbPos(skin, 30, ...)
+                // then subtracting horse.world.pos to leave a relative
+                // offset (z_en_horse.c:3699-3702). Vanilla mounted
+                // Player_Update then does:
+                //   player->world.pos = horse->world.pos + horse->riderPos
+                // which tracks the saddle bone EXACTLY, including the
+                // animation cycle's saddle bob during gallop.
+                //
+                // The field has a lifecycle wrinkle: EnHorse_Init seeds
+                // riderPos as an ABSOLUTE world position (line 756 +
+                // 759: riderPos = actor.world.pos with +70 Y), and it
+                // only becomes a usable offset after EnHorse_Draw has
+                // run once. So on Frame 0 (spawn frame), the value is
+                // garbage for our purposes. We detect "this looks like
+                // an offset" via a magnitude check — true offsets have
+                // small components (saddle ~30u back, ~50u up, ~30u to
+                // either side), while absolute values include
+                // horse.world.pos.z which is typically large (Hyrule
+                // Field's title spawn is z=1867). When the heuristic
+                // fails, we fall back to hardcoded approximations
+                // (the same constants from the prior Path A approach).
+                constexpr f32 kSaddleHeightAboveHorse        = 30.0f;
+                constexpr f32 kSaddleBackwardFromHorseOrigin = 40.0f;
+
+                bool useVanillaRiderPos = false;
+                Vec3f riderOffset = { 0.0f, 0.0f, 0.0f };
+                if (peerHorse != nullptr) {
+                    EnHorse* horseAsHorse = (EnHorse*)peerHorse;
+                    const f32 rx = horseAsHorse->riderPos.x;
+                    const f32 ry = horseAsHorse->riderPos.y;
+                    const f32 rz = horseAsHorse->riderPos.z;
+                    if (fabsf(rx) < 80.0f &&
+                        fabsf(ry) < 150.0f &&
+                        fabsf(rz) < 80.0f) {
+                        useVanillaRiderPos = true;
+                        riderOffset.x = rx;
+                        riderOffset.y = ry;
+                        riderOffset.z = rz;
+                    }
+                }
+
+                if (useVanillaRiderPos) {
+                    // Vanilla path — precise saddle bone tracking,
+                    // follows gallop animation cycle.
+                    //
+                    // Exact mirror of vanilla mounted Player_Action
+                    // position write at z_player.c:13840-13842. The
+                    // -27.0f Y offset is vanilla's stirrup-level
+                    // adjustment: riderPos points to the saddle BONE's
+                    // world position (top of the saddle), but Player's
+                    // world.pos represents his FEET, which in vanilla
+                    // are seated 27u below the saddle bone in the
+                    // stirrups. Without this offset, the rider stands
+                    // ~27u above the saddle (field test 2026-06-09,
+                    // log 472 — user reported ~60u too high, of which
+                    // 27u is this missing offset; the remainder is
+                    // visual estimation imprecision).
+                    actor->world.pos.x = peerHorse->world.pos.x + riderOffset.x;
+                    actor->world.pos.y =
+                        (peerHorse->world.pos.y + riderOffset.y) - 27.0f;
+                    actor->world.pos.z = peerHorse->world.pos.z + riderOffset.z;
+                } else if (peerHorse != nullptr) {
+                    // Frame 0 fallback — riderPos hasn't been
+                    // normalised yet. Hardcoded constants approximate
+                    // the saddle position until EnHorse_Draw runs and
+                    // converts riderPos to an offset.
+                    const f32 yawRad =
+                        (f32)slot.rotY / 32768.0f * (f32)M_PI;
+                    const f32 forwardX = sinf(yawRad);
+                    const f32 forwardZ = cosf(yawRad);
+                    actor->world.pos.x = slot.pos.x -
+                        kSaddleBackwardFromHorseOrigin * forwardX;
+                    actor->world.pos.y = slot.pos.y + kSaddleHeightAboveHorse;
+                    actor->world.pos.z = slot.pos.z -
+                        kSaddleBackwardFromHorseOrigin * forwardZ;
+                } else {
+                    // Unmounted — peer stands on the formation slot
+                    // ground (Phase 1 behaviour, no horse spawned).
+                    actor->world.pos = slot.pos;
+                }
                 actor->world.rot.y = slot.rotY;
                 actor->shape.rot.y = slot.rotY;
                 actor->shape.shadowAlpha = 255;
+
+                // Mirror the horse's pitch + roll onto the rider. Vanilla
+                // EnHorse_Update writes horse->shape.rot.x/z based on the
+                // floor poly normal (slope adaptation). The skelAnime
+                // alias's joint table carries gallop's forward body lean
+                // relative to the actor's shape.rot — without this mirror,
+                // peer's lean is relative to a level pitch while the horse
+                // tilts with the terrain, so peer's head intersects the
+                // horse's neck on uphill slopes (field test 2026-06-09).
+                // Copying horse pitch + roll to the rider keeps the gallop
+                // lean relative to the horse's tilted body, matching
+                // vanilla parent-child mount behaviour.
+                if (peerHorse != nullptr) {
+                    actor->shape.rot.x = peerHorse->shape.rot.x;
+                    actor->shape.rot.z = peerHorse->shape.rot.z;
+                } else {
+                    actor->shape.rot.x = 0;
+                    actor->shape.rot.z = 0;
+                }
+
+                // Mark mounted state so any rendering code path that
+                // checks PLAYER_STATE1_ON_HORSE (animation overlays,
+                // collision skip) sees the peer as mounted. Cleared
+                // when no horse spawned (CVar off → foot peer).
+                if (peerHorse != nullptr) {
+                    player->stateFlags1 |= PLAYER_STATE1_ON_HORSE;
+                } else {
+                    player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
+                }
+
+                // Drive the peer's skelAnime from local Link's
+                // animation state. Title-screen peers have no incoming
+                // wire animation (peer is also at title screen — their
+                // client.jointTable is gameplay-time data and invalid),
+                // so without this alias, peer renders in default idle
+                // pose. We share local Link's jointTable + morphTable
+                // pointers — safe because both sides use the same
+                // Link skeleton (22 limbs, PLAYER_LIMB_MAX). Aliasing
+                // pattern is the same shape as the gameplay-time
+                // path above (line ~278 — `player->skelAnime.jointTable
+                // = client.jointTable`).
+                //
+                // At title screen, local Link is in mounted gallop pose
+                // (cutscene actor cue drives him), so this alias makes
+                // peers visually ride in lockstep with local Link. v3+
+                // polish: replace alias with manual SkelAnime tick using
+                // TitlePeerFormation::animPhaseOffset.
+                player->skelAnime.jointTable    = localLink->skelAnime.jointTable;
+                player->skelAnime.morphTable    = localLink->skelAnime.morphTable;
+                player->skelAnime.movementFlags = localLink->skelAnime.movementFlags;
+                Math_Vec3s_Copy(&player->skelAnime.prevTransl,
+                                &localLink->skelAnime.prevTransl);
+                // Intentionally NOT copying upperLimbRot from local Link.
+                // At the title cutscene, vanilla code can apply yaw to
+                // local Link's upper-body rotation (e.g., to face the
+                // camera) — copying that to peer twisted the peer's torso
+                // out of alignment with the horse it sits on. Field test
+                // 2026-06-09: peer rider's body was rotated independently
+                // from the horse's facing direction. With this copy
+                // dropped, peer's upper body stays aligned with its
+                // shape.rot.y (= slot.rotY = same as the horse).
+                player->upperLimbRot.x = 0;
+                player->upperLimbRot.y = 0;
+                player->upperLimbRot.z = 0;
             }
         } else {
             // Peer went offline mid-title-cycle — hide until cleanup fires.
@@ -394,46 +647,12 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         }
     }
 
-    // Horse-sync mounted-pose reconciliation (Plans/horse_sync_plan.md
-    // §"DummyPlayer mounted pose integration"). Sibling to the held-
-    // actor block above. Per-frame state-driven check (not edge-trigger)
-    // so late-join races, scene transitions, and reconnect/disconnect
-    // all self-heal. When client.mountedHorseNetId is set, snap the
-    // DummyPlayer to horse.world.pos + horse.riderPos — replicating
-    // vanilla parent-child mount linkage on every receiver. When the
-    // peer's mountedHorseNetId is 0 (dismounted) or the local horse
-    // replica hasn't been spawned yet, this branch is a no-op and the
-    // DummyPlayer falls through to standard ground-position handling.
-    if (client.mountedHorseNetId != 0) {
-        Actor* peerHorse = nullptr;
-        if (Anchor::Instance != nullptr) {
-            auto it = Anchor::Instance->mPeerHorses.find(client.mountedHorseNetId);
-            if (it != Anchor::Instance->mPeerHorses.end() &&
-                it->second != nullptr && it->second->update != nullptr) {
-                peerHorse = it->second;
-            }
-        }
-        if (peerHorse == nullptr) {
-            peerHorse = FindActorByNetId(gPlayState, client.mountedHorseNetId);
-        }
-        if (peerHorse != nullptr && peerHorse->id == ACTOR_EN_HORSE) {
-            EnHorse* horseAsHorse = (EnHorse*)peerHorse;
-            actor->world.pos.x = peerHorse->world.pos.x + horseAsHorse->riderPos.x;
-            actor->world.pos.y = peerHorse->world.pos.y + horseAsHorse->riderPos.y;
-            actor->world.pos.z = peerHorse->world.pos.z + horseAsHorse->riderPos.z;
-            actor->shape.rot.y = peerHorse->shape.rot.y;
-            // Mark PLAYER_STATE1_ON_HORSE on the DummyPlayer's Player
-            // struct so other systems that read it (collision skip at
-            // DummyPlayer.cpp:1020, animation overlays) behave correctly
-            // mid-ride. Cleared automatically next frame when peer
-            // dismounts (mountedHorseNetId == 0 takes the else branch
-            // below). (player and actor are the same struct via the
-            // Player* cast at line 253; no need to write fields twice.)
-            player->stateFlags1 |= PLAYER_STATE1_ON_HORSE;
-        }
-    } else {
-        player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
-    }
+    // Horse-sync mounted-pose reconciliation. Body extracted to file-scope
+    // helper ApplyMountedPoseReconciliation (declared near the top of this
+    // file) so the title-screen peer path (DummyPlayer_Update's title-mode
+    // branch above) can share the exact same math — single source of truth.
+    // See Plans/title_screen_peer_actors.md §"Phase 2 horse integration".
+    ApplyMountedPoseReconciliation(actor, client);
     player->currentBoots = client.currentBoots;
     player->currentShield = client.currentShield;
     uint8_t prevTunic = player->currentTunic; // capture before overwrite for change detection

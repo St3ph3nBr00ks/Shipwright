@@ -124,6 +124,13 @@ class Anchor : public Network {
     // on HandlePacket_UpdateClientState (joining-peer late-arrival path).
     // See Plans/title_screen_peer_actors.md "Lifecycle" section.
     std::unordered_map<uint32_t, Actor*> mTitlePeerActors;
+    // Phase 2 — title-screen peer horse cache. Keyed by clientId, paired
+    // with mTitlePeerActors. Wrapped behind Register/Unregister/Find
+    // helpers (Anchor.cpp) so call sites don't manipulate this map AND
+    // the gameplay mPeerHorses map independently — both move in lockstep
+    // through the helpers. See Plans/title_screen_peer_actors.md
+    // §"Dual-map fix A (helper-wrapped)".
+    std::unordered_map<uint32_t, Actor*> mTitlePeerHorses;
     // Reentrancy guard for MaybeRebuildTitlePeers — prevents recursion when
     // SpawnTitlePeerLink's Actor_Spawn → DummyPlayer_Init → packet pump path
     // re-enters the rebuild logic.
@@ -874,6 +881,15 @@ class Anchor : public Network {
     // DummyPlayer.cpp — must be public (Pitfall 16).
     void SpawnTitlePeerLink(uint32_t clientId, uint8_t formationIndex);
     void ClearTitlePeerActors();
+    // Phase 2 — dual-map helpers for title-screen peer horses. Direct
+    // mTitlePeerHorses + mPeerHorses manipulation is forbidden outside
+    // these methods (Fix A — see plan doc). Register writes BOTH maps
+    // and sets client.mountedHorseNetId so the existing mounted-pose
+    // reconciliation kicks in. Unregister clears all three and calls
+    // KillNetworkActorSilently.
+    void RegisterTitlePeerHorse(uint32_t clientId, uint32_t horseNetId, Actor* horse);
+    void UnregisterTitlePeerHorse(uint32_t clientId);
+    Actor* FindTitlePeerHorse(uint32_t clientId) const;
     bool IsDummyPlayerTitleMode(const Actor* actor) const;
     uint8_t GetTitlePeerFormationIndex(const Actor* actor) const;
     // Idempotent gate-check + rebuild. Called from both OnSceneSpawnActors

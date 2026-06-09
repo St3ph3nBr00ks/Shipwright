@@ -80,18 +80,34 @@ void Anchor::RegisterHorseHooks() {
             if (gPlayState == nullptr) return;
 
             // Tag the freshly-spawned horse as owner-local.
-            HorseNetId* ext = ObjectExtension::GetInstance().Get<HorseNetId>(actor);
-            if (ext == nullptr) return;
-            if (ext->netId != 0) return;  // already tagged; skip
+            //
+            // Fix C (2026-06-09): the original code did `Get` + early-
+            // return on null. But Get returns null until something has
+            // called Set (ObjectExtension.h:49) — and nothing ever does
+            // for owner-spawned vanilla horses. So this hook silently
+            // bailed for every vanilla Epona, HORSE_SPAWN never fired,
+            // peers never saw the owner's mount. Discovered via the
+            // title-screen Phase 2 field test (log 461 — P2 didn't see
+            // P1's vanilla title-cutscene Epona). Fixed by skipping only
+            // when the extension is already tagged (re-spawn case);
+            // otherwise create + tag via Set.
+            HorseNetId* existing =
+                ObjectExtension::GetInstance().Get<HorseNetId>(actor);
+            if (existing != nullptr && existing->netId != 0) return;  // already tagged
 
             const uint32_t owner   = ownClientId;
             const int16_t  sceneId = (int16_t)gPlayState->sceneNum;
             const int16_t  params  = (int16_t)actor->params;
-            ext->netId         = Anchor::MakeHorseNetId(owner, sceneId, params);
-            ext->ownerClientId = owner;
-            ext->isPeerOwned   = false;
+            const uint32_t netId =
+                Anchor::MakeHorseNetId(owner, sceneId, params);
 
-            SendPacket_HorseSpawn(ext->netId, params, sceneId,
+            ObjectExtension::GetInstance().Set<HorseNetId>(actor, HorseNetId{
+                netId,
+                owner,
+                /*isPeerOwned=*/ false,
+            });
+
+            SendPacket_HorseSpawn(netId, params, sceneId,
                                    actor->world.pos, actor->shape.rot.y);
         });
 
