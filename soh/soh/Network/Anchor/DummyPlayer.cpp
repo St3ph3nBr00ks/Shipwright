@@ -114,6 +114,60 @@ static DamageTable DummyPlayerDamageTable = {
     /* Unknown 2     */ DMG_ENTRY(0, PLAYER_HIT_RESPONSE_NONE),
 };
 
+// Horse-sync mounted-pose reconciliation — single source of truth.
+// Used by BOTH gameplay-time DummyPlayer_Update (below) AND the
+// title-mode branch's horse integration (Plans/title_screen_peer_
+// actors.md Phase 2). Per-frame state-driven check (not edge-trigger)
+// so late-join races, scene transitions, reconnect/disconnect all
+// self-heal.
+//
+// Mounted (client.mountedHorseNetId != 0): find the horse via
+//   Anchor::mPeerHorses fast-path, falling back to FindActorByNetId.
+//   Snap DummyPlayer.world.pos to peerHorse.world.pos + horse.riderPos
+//   — replicating vanilla parent-child mount linkage on every receiver.
+//   Mark PLAYER_STATE1_ON_HORSE so collision skip + animation overlays
+//   behave correctly mid-ride.
+// Dismounted (mountedHorseNetId == 0): clear PLAYER_STATE1_ON_HORSE so
+//   the next frame's standard ground-position handling kicks in.
+//
+// Extraction history: lifted from inline block in DummyPlayer_Update
+// 2026-06-09 as part of Phase 2 horse integration (clean-extraction
+// option per user's "fix not workaround" guidance).
+static void ApplyMountedPoseReconciliation(Actor* actor,
+                                             const AnchorClient& client) {
+    Player* player = (Player*)actor;
+
+    if (client.mountedHorseNetId == 0) {
+        player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
+        return;
+    }
+
+    Actor* peerHorse = nullptr;
+    if (Anchor::Instance != nullptr) {
+        auto it = Anchor::Instance->mPeerHorses.find(client.mountedHorseNetId);
+        if (it != Anchor::Instance->mPeerHorses.end() &&
+            it->second != nullptr && it->second->update != nullptr) {
+            peerHorse = it->second;
+        }
+    }
+    if (peerHorse == nullptr) {
+        peerHorse = FindActorByNetId(gPlayState, client.mountedHorseNetId);
+    }
+    if (peerHorse == nullptr || peerHorse->id != ACTOR_EN_HORSE) {
+        // Horse not yet spawned or wrong-type — leave stateFlags1 alone
+        // (don't clear; rider will land at standard pos this tick and
+        // self-heal once the horse replica arrives).
+        return;
+    }
+
+    EnHorse* horseAsHorse = (EnHorse*)peerHorse;
+    actor->world.pos.x = peerHorse->world.pos.x + horseAsHorse->riderPos.x;
+    actor->world.pos.y = peerHorse->world.pos.y + horseAsHorse->riderPos.y;
+    actor->world.pos.z = peerHorse->world.pos.z + horseAsHorse->riderPos.z;
+    actor->shape.rot.y = peerHorse->shape.rot.y;
+    player->stateFlags1 |= PLAYER_STATE1_ON_HORSE;
+}
+
 void DummyPlayer_Init(Actor* actor, PlayState* play) {
     Player* player = (Player*)actor;
 
@@ -287,10 +341,41 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                         localLink->actor.world.pos,
                         localLink->actor.world.rot.y,
                         clientId, formationIdx);
+
+                // Default (unmounted): rider rides at the formation slot.
+                // If mounted, the inverse-position math below writes the
+                // horse to (slot - riderPos) and the reconciliation snap
+                // below writes the rider to (horse + riderPos) — which
+                // round-trips back to the formation slot (1-tick lag
+                // first frame, exact match thereafter).
                 actor->world.pos = slot.pos;
                 actor->world.rot.y = slot.rotY;
                 actor->shape.rot.y = slot.rotY;
                 actor->shape.shadowAlpha = 255;
+
+                // Phase 2 horse integration. If mounted, derive the horse
+                // position so the reconciliation snap below lands the
+                // rider at the formation slot. Plans/title_screen_peer_
+                // actors.md §"Phase 2 horse integration".
+                if (client.mountedHorseNetId != 0 && Anchor::Instance != nullptr) {
+                    auto it = Anchor::Instance->mPeerHorses.find(
+                                  client.mountedHorseNetId);
+                    if (it != Anchor::Instance->mPeerHorses.end() &&
+                        it->second != nullptr &&
+                        it->second->id == ACTOR_EN_HORSE) {
+                        Actor* horse = it->second;
+                        EnHorse* en = (EnHorse*)horse;
+                        horse->world.pos.x = slot.pos.x - en->riderPos.x;
+                        horse->world.pos.y = slot.pos.y - en->riderPos.y;
+                        horse->world.pos.z = slot.pos.z - en->riderPos.z;
+                        horse->shape.rot.y = slot.rotY;
+                    }
+                }
+
+                // Single source of truth — same helper the gameplay-time
+                // path uses. Handles both mounted (snap to horse +
+                // riderPos) and dismounted (clear PLAYER_STATE1_ON_HORSE).
+                ApplyMountedPoseReconciliation(actor, client);
             }
         } else {
             // Peer went offline mid-title-cycle — hide until cleanup fires.
@@ -394,46 +479,12 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         }
     }
 
-    // Horse-sync mounted-pose reconciliation (Plans/horse_sync_plan.md
-    // §"DummyPlayer mounted pose integration"). Sibling to the held-
-    // actor block above. Per-frame state-driven check (not edge-trigger)
-    // so late-join races, scene transitions, and reconnect/disconnect
-    // all self-heal. When client.mountedHorseNetId is set, snap the
-    // DummyPlayer to horse.world.pos + horse.riderPos — replicating
-    // vanilla parent-child mount linkage on every receiver. When the
-    // peer's mountedHorseNetId is 0 (dismounted) or the local horse
-    // replica hasn't been spawned yet, this branch is a no-op and the
-    // DummyPlayer falls through to standard ground-position handling.
-    if (client.mountedHorseNetId != 0) {
-        Actor* peerHorse = nullptr;
-        if (Anchor::Instance != nullptr) {
-            auto it = Anchor::Instance->mPeerHorses.find(client.mountedHorseNetId);
-            if (it != Anchor::Instance->mPeerHorses.end() &&
-                it->second != nullptr && it->second->update != nullptr) {
-                peerHorse = it->second;
-            }
-        }
-        if (peerHorse == nullptr) {
-            peerHorse = FindActorByNetId(gPlayState, client.mountedHorseNetId);
-        }
-        if (peerHorse != nullptr && peerHorse->id == ACTOR_EN_HORSE) {
-            EnHorse* horseAsHorse = (EnHorse*)peerHorse;
-            actor->world.pos.x = peerHorse->world.pos.x + horseAsHorse->riderPos.x;
-            actor->world.pos.y = peerHorse->world.pos.y + horseAsHorse->riderPos.y;
-            actor->world.pos.z = peerHorse->world.pos.z + horseAsHorse->riderPos.z;
-            actor->shape.rot.y = peerHorse->shape.rot.y;
-            // Mark PLAYER_STATE1_ON_HORSE on the DummyPlayer's Player
-            // struct so other systems that read it (collision skip at
-            // DummyPlayer.cpp:1020, animation overlays) behave correctly
-            // mid-ride. Cleared automatically next frame when peer
-            // dismounts (mountedHorseNetId == 0 takes the else branch
-            // below). (player and actor are the same struct via the
-            // Player* cast at line 253; no need to write fields twice.)
-            player->stateFlags1 |= PLAYER_STATE1_ON_HORSE;
-        }
-    } else {
-        player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
-    }
+    // Horse-sync mounted-pose reconciliation. Body extracted to file-scope
+    // helper ApplyMountedPoseReconciliation (declared near the top of this
+    // file) so the title-screen peer path (DummyPlayer_Update's title-mode
+    // branch above) can share the exact same math — single source of truth.
+    // See Plans/title_screen_peer_actors.md §"Phase 2 horse integration".
+    ApplyMountedPoseReconciliation(actor, client);
     player->currentBoots = client.currentBoots;
     player->currentShield = client.currentShield;
     uint8_t prevTunic = player->currentTunic; // capture before overwrite for change detection
