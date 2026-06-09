@@ -133,7 +133,24 @@ void Anchor::RegisterHorseHooks() {
                 // Mount-side gate — peer horses are unmountable by the
                 // local player. Setting playerControlled forces
                 // EnHorse_GetMountSide to return 0 at z_en_horse.c:3643+.
-                ((EnHorse*)actor)->playerControlled = 1;
+                //
+                // Phase 3 exception (2026-06-09): title-screen peer
+                // horses skip this gate. With playerControlled=1 +
+                // Actor_NotMounted=true, vanilla EnHorse_Update enters
+                // the freeze cycle at z_en_horse.c:3034-3039
+                // (action -> ENHORSE_ACT_FROZEN -> animationIdx = IDLE),
+                // suppressing gallop animation entirely. The title-
+                // screen consumer wants the horse to animate so peers
+                // look like they're actually riding. At the title
+                // cutscene the local Link can't mount anything anyway
+                // (cutscene actor cues drive him), so the mount-side
+                // protection has no practical effect there. The
+                // IsTitlePeerHorse walk is O(n) with n ≤ 3 (formation
+                // cap), so the per-frame cost is negligible.
+                if (Anchor::Instance == nullptr ||
+                    !Anchor::Instance->IsTitlePeerHorse(actor)) {
+                    ((EnHorse*)actor)->playerControlled = 1;
+                }
                 return;
             }
 

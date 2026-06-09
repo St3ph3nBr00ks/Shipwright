@@ -866,6 +866,14 @@ Actor* Anchor::FindTitlePeerHorse(uint32_t clientId) const {
     return (it != mTitlePeerHorses.end()) ? it->second : nullptr;
 }
 
+bool Anchor::IsTitlePeerHorse(const Actor* actor) const {
+    if (actor == nullptr) return false;
+    for (const auto& [clientId, horse] : mTitlePeerHorses) {
+        if (horse == actor) return true;
+    }
+    return false;
+}
+
 void Anchor::ClearTitlePeerActors() {
     if (mTitlePeerActors.empty() && mTitlePeerHorses.empty()) return;
     const size_t prevCount = mTitlePeerActors.size();
