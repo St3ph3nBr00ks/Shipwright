@@ -16,7 +16,8 @@ extern "C" {
 #include "variables.h"
 #include "functions.h"
 #include "overlays/effects/ovl_Effect_Ss_HitMark/z_eff_ss_hitmark.h"  // EFFECT_HITMARK_METAL
-#include "overlays/actors/ovl_En_Horse/z_en_horse.h"  // mounted-pose reconciliation
+#include "overlays/actors/ovl_En_Horse/z_en_horse.h"  // mounted-pose reconciliation + ENHORSE_ANIM_*
+#include "objects/object_horse/object_horse.h"        // gEpona*Anim (Phase 3 state mirror)
 extern PlayState* gPlayState;
 
 void Player_UseItem(PlayState* play, Player* player, s32 item);
@@ -392,6 +393,63 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 if (peerHorse != nullptr && peerHorse->id == ACTOR_EN_HORSE) {
                     peerHorse->world.pos = slot.pos;
                     peerHorse->shape.rot.y = slot.rotY;
+
+                    // Phase 3 horse animation state mirror — match local
+                    // cutscene Epona's animation. When the cutscene
+                    // transitions local Link's horse between gallop /
+                    // idle / walk / rear / etc., peer horses follow.
+                    // We only re-call Animation_PlayLoop on state CHANGE
+                    // (not every frame) — once an animation is loaded,
+                    // vanilla EnHorse_Idle's SkelAnime_Update keeps
+                    // ticking it.
+                    //
+                    // Local cutscene Epona is identified by params=7 in
+                    // ACTORCAT_BG (z_horse.c:190 — the title-cutscene
+                    // spawn variant). Peer title horses spawn with
+                    // params=0 so they're distinguishable. Walk is O(n)
+                    // with n = BG actor count in scene (small).
+                    EnHorse* localHorse = nullptr;
+                    {
+                        Actor* a =
+                            gPlayState->actorCtx.actorLists[ACTORCAT_BG].head;
+                        while (a != nullptr) {
+                            if (a->id == ACTOR_EN_HORSE && a->params == 7) {
+                                localHorse = (EnHorse*)a;
+                                break;
+                            }
+                            a = a->next;
+                        }
+                    }
+                    if (localHorse != nullptr) {
+                        EnHorse* peer = (EnHorse*)peerHorse;
+                        if (peer->animationIdx != localHorse->animationIdx) {
+                            AnimationHeader* anim = nullptr;
+                            switch (localHorse->animationIdx) {
+                                case ENHORSE_ANIM_IDLE:
+                                    anim = (AnimationHeader*)&gEponaIdleAnim; break;
+                                case ENHORSE_ANIM_WHINNEY:
+                                    anim = (AnimationHeader*)&gEponaWhinnyAnim; break;
+                                case ENHORSE_ANIM_REFUSE:
+                                    anim = (AnimationHeader*)&gEponaRefuseAnim; break;
+                                case ENHORSE_ANIM_REARING:
+                                    anim = (AnimationHeader*)&gEponaRearingAnim; break;
+                                case ENHORSE_ANIM_WALK:
+                                    anim = (AnimationHeader*)&gEponaWalkingAnim; break;
+                                case ENHORSE_ANIM_TROT:
+                                    anim = (AnimationHeader*)&gEponaTrottingAnim; break;
+                                case ENHORSE_ANIM_GALLOP:
+                                    anim = (AnimationHeader*)&gEponaGallopingAnim; break;
+                                case ENHORSE_ANIM_LOW_JUMP:
+                                    anim = (AnimationHeader*)&gEponaJumpingAnim; break;
+                                case ENHORSE_ANIM_HIGH_JUMP:
+                                    anim = (AnimationHeader*)&gEponaJumpingHighAnim; break;
+                                default:
+                                    anim = (AnimationHeader*)&gEponaIdleAnim; break;
+                            }
+                            Animation_PlayLoop(&peer->skin.skelAnime, anim);
+                            peer->animationIdx = localHorse->animationIdx;
+                        }
+                    }
                 }
 
                 // Rider position — vanilla-parity via horse->riderPos.
