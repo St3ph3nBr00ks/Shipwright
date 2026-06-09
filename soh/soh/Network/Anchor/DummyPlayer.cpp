@@ -394,23 +394,46 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     peerHorse->shape.rot.y = slot.rotY;
                 }
 
-                // Rider position — slot.pos when on foot, slot.pos +
-                // saddle-height when mounted. The 30u offset puts the
-                // rider's feet at the stirrups (approximately mid-horse-
-                // body height) rather than on top of the saddle. Tuned
-                // from field test log 470 — the prior 60u offset put
-                // the rider visually 30u above the saddle, as if
-                // standing on the horse's back rather than sitting in
-                // the saddle. (Path A trades vanilla riderPos — which
-                // has a complex update cadence — for a hardcoded
-                // constant that approximates vanilla's mounted feet-
-                // in-stirrups offset.)
-                constexpr f32 kSaddleHeightAboveHorse = 30.0f;
-                actor->world.pos.x = slot.pos.x;
+                // Rider position — Path A hardcoded saddle offsets. Vanilla
+                // would use horse->riderPos (the saddle bone offset
+                // computed by EnHorse_Draw via Skin_GetLimbPos), but
+                // that field has a complex lifecycle (absolute world pos
+                // out of Init, becomes an offset only after first
+                // EnHorse_Draw) that's fragile to read from outside the
+                // vanilla mount pipeline. The two constants below
+                // approximate what vanilla computes:
+                //
+                //   kSaddleHeightAboveHorse — Y component. 30u places
+                //     the rider's feet at the stirrups (approximately
+                //     mid-horse-body height). Tuned from log 470 — the
+                //     prior 60u put the rider on top of the saddle as if
+                //     standing.
+                //
+                //   kSaddleBackwardFromHorseOrigin — backward along the
+                //     horse's facing direction. OoT horses have their
+                //     actor.world.pos near the front of the model (neck/
+                //     withers area), not the center, so the saddle is
+                //     offset BACKWARDS. Without this offset, the rider
+                //     lands on the neck instead of the saddle (field
+                //     test 2026-06-09, log 472). 40u places the rider
+                //     visually on the saddle for a standard Epona model.
+                //
+                // Both are applied only when mounted. On foot, the peer
+                // stands at slot.pos directly (Phase 1 behaviour).
+                constexpr f32 kSaddleHeightAboveHorse        = 30.0f;
+                constexpr f32 kSaddleBackwardFromHorseOrigin = 40.0f;
+                const f32 yawRad =
+                    (f32)slot.rotY / 32768.0f * (f32)M_PI;
+                const f32 forwardX = sinf(yawRad);
+                const f32 forwardZ = cosf(yawRad);
+                const f32 backOffset = (peerHorse != nullptr)
+                    ? kSaddleBackwardFromHorseOrigin
+                    : 0.0f;
+                actor->world.pos.x = slot.pos.x - backOffset * forwardX;
                 actor->world.pos.y = (peerHorse != nullptr)
                     ? slot.pos.y + kSaddleHeightAboveHorse
                     : slot.pos.y;
-                actor->world.pos.z = slot.pos.z;
+                actor->world.pos.z = slot.pos.z - backOffset * forwardZ;
                 actor->world.rot.y = slot.rotY;
                 actor->shape.rot.y = slot.rotY;
                 actor->shape.shadowAlpha = 255;
