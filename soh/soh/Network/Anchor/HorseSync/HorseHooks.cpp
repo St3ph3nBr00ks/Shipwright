@@ -144,11 +144,24 @@ void Anchor::RegisterHorseHooks() {
                 // look like they're actually riding. At the title
                 // cutscene the local Link can't mount anything anyway
                 // (cutscene actor cues drive him), so the mount-side
-                // protection has no practical effect there. The
-                // IsTitlePeerHorse walk is O(n) with n ≤ 3 (formation
-                // cap), so the per-frame cost is negligible.
-                if (Anchor::Instance == nullptr ||
-                    !Anchor::Instance->IsTitlePeerHorse(actor)) {
+                // protection has no practical effect there.
+                //
+                // Active clear (=0) rather than just skipping the
+                // write: vanilla EnHorse_Frozen action body sets
+                // playerControlled = 1 from inside its own update
+                // (z_en_horse.c:2384). Once the horse enters Frozen
+                // state, it'd self-perpetuate the freeze even with
+                // our hook gate skip in place. Actively clearing each
+                // frame ensures the next vanilla update sees
+                // playerControlled=0, doesn't re-freeze, and the horse
+                // can transition out (z_en_horse.c:3038-3039 →
+                // playerControlled=0 path → grounded idle).
+                //
+                // IsTitlePeerHorse walk is O(n) with n ≤ 3.
+                if (Anchor::Instance != nullptr &&
+                    Anchor::Instance->IsTitlePeerHorse(actor)) {
+                    ((EnHorse*)actor)->playerControlled = 0;
+                } else {
                     ((EnHorse*)actor)->playerControlled = 1;
                 }
                 return;
