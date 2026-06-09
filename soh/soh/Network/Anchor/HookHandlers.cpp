@@ -318,6 +318,9 @@ void Anchor::RegisterHooks() {
     // ship default-off, permanently.
     AINavTest::ClearOnStartup();
 
+    // Horse-sync hook registrations live in HorseSync/HorseHooks.cpp.
+    RegisterHorseHooks();
+
     // #region Hooks that are required for basic Anchor functionality
 
     // Defensive scene-transition draw-state reset (2026-05-20, log 66

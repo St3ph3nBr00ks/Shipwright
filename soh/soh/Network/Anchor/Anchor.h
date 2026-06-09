@@ -1292,6 +1292,12 @@ class Anchor : public Network {
     void SendPacket_HorseDespawn(uint32_t netId, uint8_t reason);
     void HandlePacket_HorseDespawn(nlohmann::json payload);
 
+    // Registers the three horse-sync hooks (OnActorSpawn / OnActorUpdate
+    // / OnActorKill / OnSceneSpawnActors) — kept in HorseSync/HorseHooks
+    // .cpp so HookHandlers.cpp stays small. Called once from
+    // Anchor::RegisterHooks.
+    void RegisterHorseHooks();
+
     // NAV_TEST_DIRECTIVE — Navigation Test Harness coordination packet.
     // Plan: Claude/Plans/ai_nav_test_harness_plan.md §4.2.
     // Single send method handles both "RUN" (P1→P2) and "REACHED"
