@@ -721,8 +721,18 @@ void Anchor::SpawnTitlePeerLink(uint32_t clientId, uint8_t formationIndex) {
                 gPlayState, horseNetId, clientId, /*variantParams=*/0,
                 spawnPos, spawnRotY);
             if (horse != nullptr) {
+                // Path A — completely disable vanilla EnHorse_Update.
+                // The horse becomes a passive render-only prop: draw
+                // function still runs (renders the model) but no AI,
+                // no freeze cycle, no speedXZ integration, no drift.
+                // DummyPlayer_Update title-mode branch owns the per-tick
+                // position + rotation writes. Trade-off: built-in skel
+                // animation is frozen at the spawn-time pose; that's
+                // acceptable for v1 (peers visibly ride along; v3 polish
+                // can drive per-peer Skin animation manually).
+                horse->update = nullptr;
                 RegisterTitlePeerHorse(clientId, horseNetId, horse);
-                SPDLOG_INFO("[TitlePeer] Spawned horse for clientId={} netId=0x{:08X}",
+                SPDLOG_INFO("[TitlePeer] Spawned horse for clientId={} netId=0x{:08X} (update disabled — Path A)",
                             clientId, horseNetId);
             } else {
                 SPDLOG_WARN("[TitlePeer] Anchor_SpawnHorseForTitleScreen returned null "

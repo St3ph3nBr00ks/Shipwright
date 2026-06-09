@@ -81,18 +81,26 @@ inline TitlePeerFormation MakeTitlePeerFormation(uint32_t clientId,
 }
 
 // Compute the base (un-perturbed) formation slot. Single-file column
-// behind local Link, 40u spacing per formation index, matching Link's
+// behind local Link, 250u spacing per formation index, matching Link's
 // ground Y. Pure function of local Link state + index — independent
 // of clientId.
 //
-// Spacing chosen from the title-cutscene camera audit (see plan §
-// "Camera audit"): Shot 5 (`-120u` camera distance to Link) is the
-// tightest. 40u behind Link keeps each peer within Link's silhouette
-// projection across all 9 cutscene shots, so the formation never
-// clips the camera regardless of which shot is active.
+// Spacing chosen to keep peer Eponas clear of local Link's vanilla
+// Epona — EnHorse cylinder colliders are ~60u radius each, and the
+// per-shot camera path can sweep across the peer formation. 250u
+// gives ~125u clearance between horse cylinders even at the closest
+// formation slot (formationIdx=0). Phase 1 used 40u which was fine
+// for on-foot peers but caused collision-and-slide bugs once Phase 2
+// added peer horses (field test 2026-06-09).
+//
+// Title-cutscene camera audit (see Plans/title_screen_peer_actors.md
+// §"Camera audit"): wide shots (1, 2, 4, 6-9) have Link at small visual
+// scale so 250u-back peers remain in-frame. Close shots (3, 5) have
+// peers fully behind the camera so they don't crowd the rider — minor
+// trade-off vs. the closer 40u formation.
 inline Vec3f ComputeBaseFormationSlot(Vec3f linkPos, int16_t linkRotY,
                                         uint8_t formationIdx) {
-    constexpr float kSpacingPerSlot = 40.0f;
+    constexpr float kSpacingPerSlot = 250.0f;
     const float distance =
         kSpacingPerSlot * (float)(formationIdx + 1);
     const float heading =
