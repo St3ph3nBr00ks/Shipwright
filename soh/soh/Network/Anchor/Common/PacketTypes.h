@@ -71,6 +71,17 @@ inline const std::string PROJECTILE_HIT_ENEMY = "PROJECTILE_HIT_ENEMY";
 inline const std::string ENEMY_STATE          = "ENEMY_STATE";
 
 // ---------------------------------------------------------------------------
+// Horse / mount sync (Plans/horse_sync_plan.md)
+// ---------------------------------------------------------------------------
+// Owner-authoritative bidirectional sync for mounted ACTOR_EN_HORSE
+// instances (Epona variant; params 0-9 except 7 cutscene + 8 HBA).
+// Wire payloads documented in Packets/World/HorseSpawn.cpp /
+// HorseState.cpp / HorseDespawn.cpp.
+inline const std::string HORSE_SPAWN          = "HORSE_SPAWN";
+inline const std::string HORSE_STATE          = "HORSE_STATE";
+inline const std::string HORSE_DESPAWN        = "HORSE_DESPAWN";
+
+// ---------------------------------------------------------------------------
 // World state + flags
 // ---------------------------------------------------------------------------
 inline const std::string ENTRANCE_DISCOVERED  = "ENTRANCE_DISCOVERED";

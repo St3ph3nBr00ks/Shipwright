@@ -744,6 +744,9 @@ class Anchor : public Network {
     inline static const std::string& GIVE_ITEM                = PacketTypes::GIVE_ITEM;
     inline static const std::string& HANDSHAKE                = PacketTypes::HANDSHAKE;
     inline static const std::string& HEARTBEAT                = PacketTypes::HEARTBEAT;
+    inline static const std::string& HORSE_DESPAWN            = PacketTypes::HORSE_DESPAWN;
+    inline static const std::string& HORSE_SPAWN              = PacketTypes::HORSE_SPAWN;
+    inline static const std::string& HORSE_STATE              = PacketTypes::HORSE_STATE;
     inline static const std::string& ITEM_COLLECTED           = PacketTypes::ITEM_COLLECTED;
     inline static const std::string& ITEM_DROP_SNAPSHOT       = PacketTypes::ITEM_DROP_SNAPSHOT;
     inline static const std::string& ITEM_DROP_SYNC           = PacketTypes::ITEM_DROP_SYNC;

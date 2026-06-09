@@ -93,6 +93,16 @@ typedef struct AnchorClient {
     // additionally sends the throw velocity / yaw so the observer's local
     // rock starts its arc on its own physics.
     uint32_t heldActorNetId = 0;
+
+    // Mounted-horse sync (Plans/horse_sync_plan.md). HorseNetId of the
+    // ACTOR_EN_HORSE this client is currently riding, or 0 if dismounted.
+    // Observer's DummyPlayer_Update uses this to look up the local horse
+    // instance (via FindActorByNetId) and snap the DummyPlayer to
+    // horse.world.pos + horse.riderPos every frame — replicating the
+    // vanilla parent-child mount linkage on every receiver. Critical-
+    // edge: mount/dismount transition bypasses PLAYER_UPDATE distance
+    // throttle so state flips reach peers without throttle delay.
+    uint32_t mountedHorseNetId = 0;
     s8 currentBoots;
     s8 currentShield;
     s8 currentTunic;
