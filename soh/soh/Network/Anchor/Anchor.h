@@ -213,16 +213,26 @@ class Anchor : public Network {
     // one window.
     uint64_t mFollowerNpcStateLastFrame = 0;
 
-    // Horse sync (Plans/horse_sync_plan.md). Receivers cache peer-owned
-    // horse replicas by netId so HORSE_STATE updates land on the correct
-    // local instance without a per-packet category walk. Cleared on
-    // scene transitions + per-netId on HORSE_DESPAWN.
-    std::unordered_map<uint32_t, Actor*> mPeerHorses;
+    // Horse sync (Plans/horse_sync_plan.md). The bookkeeping fields
+    // (mPeerHorses + mHorseStateLastFrame) live in the public block
+    // below, mirroring the `clients` map placement at the head of the
+    // post-Pillar-F public section — external consumers (DummyPlayer
+    // mounted-pose reconciliation, HorseSync hooks lambdas) need
+    // direct map access. See public block near line 781 / Pitfall 16.
 
-    // Throttle counter for HORSE_STATE broadcasts. Owner emits at
-    // roughly 10 Hz (MsToGameTicks(100)) for in-scope horses; critical-
-    // edge transitions on actionState bypass the throttle.
-    uint64_t mHorseStateLastFrame = 0;
+    // SpawnHorseInternal — single private gateway through which the
+    // two public extern "C" entry points (Anchor_SpawnPeerHorse +
+    // Anchor_SpawnHorseForTitleScreen, both file-scope free functions
+    // declared in HorseSync/HorseSpawnHelpers.cpp) materialise a peer
+    // horse replica. Lives in the private block so isSpawningNetworkActor
+    // bracketing can use implicit `this`; file-scope helpers can't
+    // touch the private flag directly.
+    Actor* SpawnHorseInternal(PlayState* play,
+                               uint32_t netId,
+                               uint32_t ownerClientId,
+                               int16_t variantParams,
+                               Vec3f pos,
+                               int16_t rotY);
 
     // AI follower state machine (runs each frame when followerActive is true).
     // IDLE     — at leader's side; scans for nearby enemies.
@@ -794,6 +804,20 @@ class Anchor : public Network {
     static Anchor* Instance;
     std::map<uint32_t, AnchorClient> clients;
     RoomState roomState;
+
+    // Horse-sync receive-side bookkeeping (Plans/horse_sync_plan.md).
+    // Cache from netId → peer-owned ACTOR_EN_HORSE replica. Populated by
+    // HandlePacket_HorseSpawn, drained by HandlePacket_HorseDespawn +
+    // the HorseSync OnSceneSpawnActors lambda. External consumers
+    // (DummyPlayer mounted-pose reconciliation; HorseSync hooks) need
+    // direct read/write access — Pitfall 16 makes this public sibling
+    // to `clients`.
+    std::unordered_map<uint32_t, Actor*> mPeerHorses;
+
+    // Per-owner HORSE_STATE throttle counter. Owner emits at
+    // MsToGameTicks(100) ≈ 10 Hz with critical-edge bypass on
+    // EnHorse::action change. Reset on scene transitions.
+    uint64_t mHorseStateLastFrame = 0;
 
     // Disable-time graveyard for BakedPlayerModel and customSkeleton.
     // KB-15 / issue #110: clients.clear() in Disable() destroys baked Gfx

@@ -57,6 +57,13 @@ int32_t sLastSentOwnerActionState = -1;
 
 void Anchor::RegisterHorseHooks() {
 
+    // Lambdas use [this] capture so the body has implicit member-access
+    // through `this` — required for isSpawningNetworkActor and
+    // isKillingNetworkActor which live in the private block (Pitfall 16).
+    // `this` is a copy of the singleton pointer at registration time and
+    // stays valid for the program lifetime (Anchor::Instance is never
+    // re-assigned after first construction).
+
     // -----------------------------------------------------------------
     // OnActorSpawn — owner-side: tag the actor + broadcast HORSE_SPAWN.
     // Receiver-side (peer horse coming through Anchor_SpawnPeerHorse) is
@@ -65,12 +72,11 @@ void Anchor::RegisterHorseHooks() {
     // horse path independent.
     // -----------------------------------------------------------------
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnActorSpawn>(
-        [](void* refActor) {
+        [this](void* refActor) {
             Actor* actor = static_cast<Actor*>(refActor);
             if (!IsHorseSyncCandidate(actor)) return;
-            if (Anchor::Instance == nullptr) return;
-            if (!Anchor::Instance->isConnected) return;
-            if (Anchor::Instance->isSpawningNetworkActor) return;
+            if (!isConnected) return;
+            if (isSpawningNetworkActor) return;
             if (gPlayState == nullptr) return;
 
             // Tag the freshly-spawned horse as owner-local.
@@ -78,16 +84,15 @@ void Anchor::RegisterHorseHooks() {
             if (ext == nullptr) return;
             if (ext->netId != 0) return;  // already tagged; skip
 
-            const uint32_t owner   = Anchor::Instance->ownClientId;
+            const uint32_t owner   = ownClientId;
             const int16_t  sceneId = (int16_t)gPlayState->sceneNum;
             const int16_t  params  = (int16_t)actor->params;
             ext->netId         = Anchor::MakeHorseNetId(owner, sceneId, params);
             ext->ownerClientId = owner;
             ext->isPeerOwned   = false;
 
-            Anchor::Instance->SendPacket_HorseSpawn(
-                ext->netId, params, sceneId, actor->world.pos,
-                actor->shape.rot.y);
+            SendPacket_HorseSpawn(ext->netId, params, sceneId,
+                                   actor->world.pos, actor->shape.rot.y);
         });
 
     // -----------------------------------------------------------------
@@ -99,11 +104,10 @@ void Anchor::RegisterHorseHooks() {
     // synced actionState immediately re-overrides any local choice.
     // -----------------------------------------------------------------
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnActorUpdate>(
-        [](void* refActor) {
+        [this](void* refActor) {
             Actor* actor = static_cast<Actor*>(refActor);
             if (actor == nullptr || actor->id != ACTOR_EN_HORSE) return;
-            if (Anchor::Instance == nullptr) return;
-            if (!Anchor::Instance->isConnected) return;
+            if (!isConnected) return;
             if (!Anchor::IsHorseSyncEnabled()) return;
 
             HorseNetId* ext = ObjectExtension::GetInstance().Get<HorseNetId>(actor);
@@ -122,17 +126,16 @@ void Anchor::RegisterHorseHooks() {
             constexpr int kHorseStateMs = 100;
             const int32_t currentAction = (int32_t)((EnHorse*)actor)->action;
             const uint64_t now =
-                Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
-            const int      intervalTicks =
-                Anchor::Instance->MsToGameTicks(kHorseStateMs);
+                gameFrameCounter.load(std::memory_order_relaxed);
+            const int      intervalTicks = MsToGameTicks(kHorseStateMs);
             if (intervalTicks <= 0) return;
             const bool actionEdge = (currentAction != sLastSentOwnerActionState);
             const bool intervalElapsed =
-                now >= Anchor::Instance->mHorseStateLastFrame + (uint64_t)intervalTicks;
+                now >= mHorseStateLastFrame + (uint64_t)intervalTicks;
 
             if (actionEdge || intervalElapsed) {
-                Anchor::Instance->SendPacket_HorseState(actor);
-                Anchor::Instance->mHorseStateLastFrame = now;
+                SendPacket_HorseState(actor);
+                mHorseStateLastFrame = now;
                 sLastSentOwnerActionState = currentAction;
             }
         });
@@ -144,12 +147,11 @@ void Anchor::RegisterHorseHooks() {
     // bracket pattern — see Anchor.cpp KillNetworkActorSilently impl).
     // -----------------------------------------------------------------
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnActorKill>(
-        [](void* refActor) {
+        [this](void* refActor) {
             Actor* actor = static_cast<Actor*>(refActor);
             if (actor == nullptr || actor->id != ACTOR_EN_HORSE) return;
-            if (Anchor::Instance == nullptr) return;
-            if (!Anchor::Instance->isConnected) return;
-            if (Anchor::Instance->isKillingNetworkActor) return;
+            if (!isConnected) return;
+            if (isKillingNetworkActor) return;
             if (!Anchor::IsHorseSyncEnabled()) return;
 
             HorseNetId* ext = ObjectExtension::GetInstance().Get<HorseNetId>(actor);
@@ -157,7 +159,7 @@ void Anchor::RegisterHorseHooks() {
             if (ext->isPeerOwned) return;  // peer horse cleanup happens via packet
 
             constexpr uint8_t kReasonNaturalDespawn = 0;
-            Anchor::Instance->SendPacket_HorseDespawn(ext->netId, kReasonNaturalDespawn);
+            SendPacket_HorseDespawn(ext->netId, kReasonNaturalDespawn);
         });
 
     // -----------------------------------------------------------------
@@ -167,10 +169,9 @@ void Anchor::RegisterHorseHooks() {
     // dangling->update is UB.
     // -----------------------------------------------------------------
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneSpawnActors>(
-        []() {
-            if (Anchor::Instance == nullptr) return;
-            Anchor::Instance->mPeerHorses.clear();
+        [this]() {
+            mPeerHorses.clear();
             sLastSentOwnerActionState = -1;
-            Anchor::Instance->mHorseStateLastFrame = 0;
+            mHorseStateLastFrame = 0;
         });
 }

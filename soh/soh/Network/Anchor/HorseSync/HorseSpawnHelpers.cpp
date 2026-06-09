@@ -43,27 +43,30 @@ bool Anchor::IsHorseSyncEnabled() {
 }
 
 // ---------------------------------------------------------------------------
-// Private helper — the single Actor_Spawn site for peer-owned horses
+// Private gateway — single Actor_Spawn site for peer-owned horses.
+// Member function so isSpawningNetworkActor (private) is reachable via
+// implicit this. The two public extern "C" entry points below dispatch
+// here.
 // ---------------------------------------------------------------------------
 
-static Actor* Anchor_SpawnHorseInternal(PlayState* play,
-                                         uint32_t netId,
-                                         uint32_t ownerClientId,
-                                         int16_t variantParams,
-                                         Vec3f pos,
-                                         int16_t rotY) {
-    if (play == nullptr || Anchor::Instance == nullptr) return nullptr;
+Actor* Anchor::SpawnHorseInternal(PlayState* play,
+                                    uint32_t netId,
+                                    uint32_t ownerClientId,
+                                    int16_t variantParams,
+                                    Vec3f pos,
+                                    int16_t rotY) {
+    if (play == nullptr) return nullptr;
 
     // Bracket the spawn so OnActorSpawn's host-broadcast path treats this
     // as a network-driven spawn and skips re-broadcasting. Pattern mirrors
     // EnemyStateSync (Anchor.h:171 / EnemyState.cpp:2437).
-    Anchor::Instance->isSpawningNetworkActor = true;
+    isSpawningNetworkActor = true;
     Actor* horse = Actor_Spawn(&play->actorCtx, play,
                                 ACTOR_EN_HORSE,
                                 pos.x, pos.y, pos.z,
                                 0 /*rotX*/, rotY, 0 /*rotZ*/,
                                 variantParams);
-    Anchor::Instance->isSpawningNetworkActor = false;
+    isSpawningNetworkActor = false;
 
     if (horse == nullptr) {
         SPDLOG_WARN("[HorseSpawn] Actor_Spawn(ACTOR_EN_HORSE, params={}) returned null "
@@ -80,7 +83,7 @@ static Actor* Anchor_SpawnHorseInternal(PlayState* play,
     if (ext != nullptr) {
         ext->netId         = netId;
         ext->ownerClientId = ownerClientId;
-        ext->isPeerOwned   = (ownerClientId != Anchor::Instance->ownClientId);
+        ext->isPeerOwned   = (ownerClientId != ownClientId);
     } else {
         SPDLOG_WARN("[HorseSpawn] ObjectExtension::Get<HorseNetId>() returned null for "
                     "netId={} owner={}",
@@ -92,7 +95,8 @@ static Actor* Anchor_SpawnHorseInternal(PlayState* play,
 
 // ---------------------------------------------------------------------------
 // Public entry points (extern "C" for C-side decomp callers + title-screen
-// agent)
+// agent). Both dispatch to Anchor::SpawnHorseInternal — the private member
+// function holds the only Actor_Spawn site for peer horses.
 // ---------------------------------------------------------------------------
 
 extern "C" Actor* Anchor_SpawnPeerHorse(uint32_t netId,
@@ -100,8 +104,9 @@ extern "C" Actor* Anchor_SpawnPeerHorse(uint32_t netId,
                                          int16_t variantParams,
                                          Vec3f pos,
                                          int16_t rotY) {
-    return Anchor_SpawnHorseInternal(gPlayState, netId, ownerClientId,
-                                      variantParams, pos, rotY);
+    if (Anchor::Instance == nullptr) return nullptr;
+    return Anchor::Instance->SpawnHorseInternal(gPlayState, netId, ownerClientId,
+                                                  variantParams, pos, rotY);
 }
 
 extern "C" Actor* Anchor_SpawnHorseForTitleScreen(PlayState* play,
@@ -110,8 +115,9 @@ extern "C" Actor* Anchor_SpawnHorseForTitleScreen(PlayState* play,
                                                    int16_t variantParams,
                                                    Vec3f pos,
                                                    int16_t rotY) {
-    return Anchor_SpawnHorseInternal(play, netId, ownerClientId,
-                                      variantParams, pos, rotY);
+    if (Anchor::Instance == nullptr) return nullptr;
+    return Anchor::Instance->SpawnHorseInternal(play, netId, ownerClientId,
+                                                  variantParams, pos, rotY);
 }
 
 // ---------------------------------------------------------------------------
