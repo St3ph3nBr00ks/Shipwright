@@ -429,7 +429,10 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                                     anim = (AnimationHeader*)&gEponaIdleAnim; break;
                                 case ENHORSE_ANIM_WHINNEY:
                                     anim = (AnimationHeader*)&gEponaWhinnyAnim; break;
-                                case ENHORSE_ANIM_REFUSE:
+                                case ENHORSE_ANIM_STOPPING:
+                                    // Asset name is "Refuse" but the runtime
+                                    // enum index 2 is "STOPPING" (per
+                                    // z_en_horse.h).
                                     anim = (AnimationHeader*)&gEponaRefuseAnim; break;
                                 case ENHORSE_ANIM_REARING:
                                     anim = (AnimationHeader*)&gEponaRearingAnim; break;
