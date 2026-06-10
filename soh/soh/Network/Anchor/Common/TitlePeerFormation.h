@@ -195,17 +195,21 @@ inline SlotEntry GetBaseSlotEntry(uint8_t formationIdx) {
     }
 }
 
-// Left-side-only slot table for title cutscene Shot 8 (Link rides
-// along a fence with the river on his right at world `+X`). The
-// default slot table places half the peers on Link's right which
-// puts them in the water during this shot. Single-file column at
-// lateral=-150u keeps every peer safely on Link's left.
+// Left-side-only slot table for title cutscene's south-east river
+// region (Shots 7-8 per Plans/title_screen_peer_actors.md). Link
+// rides along a fence with the river on his right at world +X.
+// Default slot table places half the peers on Link's right which
+// puts them in the water during these shots. Single-file column
+// at lateral=+150u keeps every peer safely on Link's left.
 //
-// Plans/title_screen_peer_actors.md §"Per-shot Link position":
-// Shot 8 starts at csFrame 1355 (Link at (3687, 194, 1568)) and
-// runs until Shot 9 starts at csFrame 1505.
+// Sign note: lateral is in the "right perpendicular to forward"
+// direction (see ComputeBaseFormationSlot). For Link's facing
+// during Shot 8 (verified by field test 2026-06-10), positive
+// lateral resolves to his LEFT side in world coords. Initial
+// implementation used negative which produced the inverse — peers
+// ended up on Link's right, still in the river.
 inline SlotEntry GetBaseSlotEntryLeftSide(uint8_t formationIdx) {
-    constexpr float kLeftLateral  = -150.0f;
+    constexpr float kLeftLateral  = +150.0f;
     constexpr float kBaseDistance =  220.0f;
     constexpr float kSpacing      =  130.0f;
     return SlotEntry{
