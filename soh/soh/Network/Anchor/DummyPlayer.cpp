@@ -1704,8 +1704,19 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
         const Vec3f preWorld  = actor->world.pos;
         Player* dbgLocalLink  = GET_PLAYER(gPlayState);
 
+        // Snap all three root axes to baseTransl. Earlier guess that
+        // jointTable[0].y carried only a small "body bob" was wrong
+        // (field-test log 485): loaded values swing -19487..+22904
+        // in model space, scaled by Player's ~0.01 → ±200u world-
+        // space vertical flop per frame. The body bob must live in
+        // non-root joints (spine limb). Snapping all three matches
+        // vanilla SkelAnime_UpdateTranslation's behaviour when both
+        // movementFlags ANIM_FLAG_UPDATEY and the XZ snap branch are
+        // active.
         player->skelAnime.jointTable[0].x =
             player->skelAnime.baseTransl.x;
+        player->skelAnime.jointTable[0].y =
+            player->skelAnime.baseTransl.y;
         player->skelAnime.jointTable[0].z =
             player->skelAnime.baseTransl.z;
 
