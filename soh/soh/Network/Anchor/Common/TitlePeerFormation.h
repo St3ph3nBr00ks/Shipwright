@@ -195,9 +195,31 @@ inline SlotEntry GetBaseSlotEntry(uint8_t formationIdx) {
     }
 }
 
+// Left-side-only slot table for title cutscene Shot 8 (Link rides
+// along a fence with the river on his right at world `+X`). The
+// default slot table places half the peers on Link's right which
+// puts them in the water during this shot. Single-file column at
+// lateral=-150u keeps every peer safely on Link's left.
+//
+// Plans/title_screen_peer_actors.md §"Per-shot Link position":
+// Shot 8 starts at csFrame 1355 (Link at (3687, 194, 1568)) and
+// runs until Shot 9 starts at csFrame 1505.
+inline SlotEntry GetBaseSlotEntryLeftSide(uint8_t formationIdx) {
+    constexpr float kLeftLateral  = -150.0f;
+    constexpr float kBaseDistance =  220.0f;
+    constexpr float kSpacing      =  130.0f;
+    return SlotEntry{
+        kBaseDistance + kSpacing * (float)formationIdx,
+        kLeftLateral,
+    };
+}
+
 inline Vec3f ComputeBaseFormationSlot(Vec3f linkPos, int16_t linkRotY,
-                                        uint8_t formationIdx) {
-    const SlotEntry entry = GetBaseSlotEntry(formationIdx);
+                                        uint8_t formationIdx,
+                                        bool useLeftSideFormation = false) {
+    const SlotEntry entry = useLeftSideFormation
+        ? GetBaseSlotEntryLeftSide(formationIdx)
+        : GetBaseSlotEntry(formationIdx);
     const float heading =
         (float)linkRotY / 32768.0f * 3.14159265358979323846f;
     const float fwdX = sinf(heading);
@@ -222,11 +244,13 @@ struct TitlePeerSlot {
 
 inline TitlePeerSlot ComputeTitlePeerSlot(Vec3f linkPos, int16_t linkRotY,
                                             uint32_t clientId,
-                                            uint8_t formationIdx) {
+                                            uint8_t formationIdx,
+                                            bool useLeftSideFormation = false) {
     const TitlePeerFormation f =
         MakeTitlePeerFormation(clientId, formationIdx);
     Vec3f basePos =
-        ComputeBaseFormationSlot(linkPos, linkRotY, formationIdx);
+        ComputeBaseFormationSlot(linkPos, linkRotY, formationIdx,
+                                 useLeftSideFormation);
     basePos.x += f.posOffset.x;
     basePos.y += f.posOffset.y;
     basePos.z += f.posOffset.z;

@@ -385,11 +385,28 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                         a = a->next;
                     }
                 }
+                // Shot 8 left-side override. Shot 8 (per camera audit
+                // in Plans/title_screen_peer_actors.md) has Link
+                // riding along a fence with the river on his right
+                // at world +X. Default formation places half the
+                // peers on Link's right which puts them in the
+                // water during this shot. Switch to a single-file
+                // left-side column for the duration of Shot 8 only.
+                // csFrame range comes from the audit table —
+                // Shot 8 starts at 1355, Shot 9 starts at 1505.
+                constexpr int32_t kShot8StartFrame = 1355;
+                constexpr int32_t kShot8EndFrame   = 1504;
+                const bool useLeftSideFormation =
+                    (gPlayState->csCtx.state != CS_STATE_IDLE &&
+                     gPlayState->csCtx.frames >= kShot8StartFrame &&
+                     gPlayState->csCtx.frames <= kShot8EndFrame);
+
                 AnchorTitlePeer::TitlePeerSlot slot =
                     AnchorTitlePeer::ComputeTitlePeerSlot(
                         localLink->actor.world.pos,
                         lookYaw,
-                        clientId, formationIdx);
+                        clientId, formationIdx,
+                        useLeftSideFormation);
 
                 // Path A — ground snap via raycast from above the slot
                 // position. Hyrule Field's terrain dips and rolls under
