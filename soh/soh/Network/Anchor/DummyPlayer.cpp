@@ -658,70 +658,106 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
                 }
 
-                // Freeze-at-frame per-peer Link pose. Each peer owns
-                // a slot in sTitlePeerJointTable/sTitlePeerMorphTable
-                // and is locked to a single chosen frame of local
-                // Link's current animation. Mechanism: when local
-                // Link's animation pointer changes, call
-                // LinkAnimation_Change with startFrame = loopFrames
-                // × peer's phase fraction. The Change queues a
-                // single LOADFRAME via AnimationContext; once it
-                // flushes (later in Play_Update), the per-peer
-                // jointTable holds that one frame. We never call
-                // LinkAnimation_Update, so no further LOADFRAMEs
-                // queue and the pose stays frozen until local's
-                // anim pointer changes again.
+                // Hybrid peer Link pose: alias local when local is
+                // cue-driven (joints static), freeze each peer at a
+                // distinct phase when local is anim-driven (joints
+                // changing). The two title-cutscene cases:
                 //
-                // Why freeze and not animate: when peer's
-                // LinkAnimation_Update was active (decouple attempt,
-                // field test log 487), peer played the animation
-                // through all frames — but during the title gallop
-                // segment local Link's pose isn't actually driven by
-                // his skelAnime.animation (held static by the actor
-                // cue). Playing through the foot-locomotion frames
-                // on a seated Link showed wild flopping. Freezing
-                // each peer at one frame keeps them visually still
-                // and per-peer distinct via formation phase
-                // fractions (25%/50%/75% per user request, slots
-                // 3-7 fill in the other 1/8ths). Trade-off: during
-                // the gallop segment peers may freeze on a foot-
-                // locomotion pose; during the river-idle segment
-                // where local Link runs the idle anim through update,
-                // peers freeze on different idle-pose frames — the
-                // intended use case.
+                //   - Gallop segment: cutscene cue holds local Link
+                //     in a calm seated pose; local's skelAnime
+                //     joints don't advance frame-to-frame even
+                //     though skelAnime.animation points at some
+                //     foot-locomotion anim. Playing that anim on a
+                //     peer produces the violent body flopping seen
+                //     in log 487. Alias local's jointTable so peers
+                //     mirror local's actual seated pose.
+                //
+                //   - River-idle segment: local Link's idle
+                //     animation actually advances through
+                //     LinkAnimation_Update — joints visibly change
+                //     per frame. Aliasing here means all peers
+                //     animate in lockstep with local; user wants
+                //     per-peer variety. Switch to freeze-at-offset:
+                //     each peer holds a different idle frame.
+                //
+                // Detection: track local Link's jointTable[5] across
+                // frames. If it's been stable for >= kAnimStableFrames
+                // ticks, local is cue-driven → alias. Otherwise local
+                // is animating → freeze. State is global (one local
+                // Link, all peers share it) and sampled once per
+                // game frame (formationIdx == 0 peer is the sentinel).
+                constexpr uint32_t kAnimStableFrames = 10;
+                static Vec3s    sLastLocalJoint5    = {0, 0, 0};
+                static uint32_t sLocalJointStable   = 0;
+                static uint64_t sLastSampleFrame    = 0;
+                static bool     sLocalIsAnimating   = false;
+
+                if (formationIdx == 0 && Anchor::Instance != nullptr) {
+                    const uint64_t curFrame =
+                        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+                    if (curFrame != sLastSampleFrame) {
+                        sLastSampleFrame = curFrame;
+                        Vec3s cur = (localLink->skelAnime.jointTable != nullptr)
+                            ? localLink->skelAnime.jointTable[5]
+                            : Vec3s{0, 0, 0};
+                        const bool changed =
+                            (cur.x != sLastLocalJoint5.x ||
+                             cur.y != sLastLocalJoint5.y ||
+                             cur.z != sLastLocalJoint5.z);
+                        sLastLocalJoint5 = cur;
+                        if (changed) {
+                            sLocalJointStable = 0;
+                        } else if (sLocalJointStable < 0x7FFFFFFF) {
+                            sLocalJointStable++;
+                        }
+                        sLocalIsAnimating =
+                            (sLocalJointStable < kAnimStableFrames);
+                    }
+                }
+
                 const uint8_t bufferIdx = (formationIdx < kMaxTitlePeerBuffers)
                     ? formationIdx : (kMaxTitlePeerBuffers - 1);
-                player->skelAnime.jointTable = sTitlePeerJointTable[bufferIdx];
-                player->skelAnime.morphTable = sTitlePeerMorphTable[bufferIdx];
 
-                LinkAnimationHeader* localLinkAnim =
-                    (LinkAnimationHeader*)localLink->skelAnime.animation;
-                if (localLinkAnim != nullptr &&
-                    localLinkAnim != (LinkAnimationHeader*)player->skelAnime.animation) {
-                    const AnchorTitlePeer::TitlePeerFormation linkPhase =
-                        AnchorTitlePeer::MakeTitlePeerFormation(
-                            clientId, formationIdx);
-                    const f32 linkLoopFrames =
-                        (f32)Animation_GetLastFrame((void*)localLinkAnim);
-                    const f32 linkPhaseFrac =
-                        (f32)linkPhase.animPhaseOffset / 256.0f;
-                    const f32 linkStartFrame =
-                        linkLoopFrames * linkPhaseFrac;
-                    // playSpeed=0 + we never call LinkAnimation_Update,
-                    // so the LOADFRAME from this Change is the only
-                    // animation work that runs on the peer's buffer.
-                    // Mode is irrelevant (we don't advance) but
-                    // ANIMMODE_LOOP keeps SkelAnime state coherent.
-                    LinkAnimation_Change(
-                        gPlayState, &player->skelAnime, localLinkAnim,
-                        0.0f, linkStartFrame, linkLoopFrames,
-                        ANIMMODE_LOOP, 0.0f);
-                    SPDLOG_INFO(
-                        "[TitlePeer] link anim freeze clientId={} "
-                        "formationIdx={} loopFrames={:.1f} "
-                        "phaseFrac={:.3f} start={:.2f}",
-                        clientId, (int)formationIdx,
-                        linkLoopFrames, linkPhaseFrac, linkStartFrame);
+                if (sLocalIsAnimating) {
+                    // Freeze mode — per-peer buffer, single LOADFRAME
+                    // on local anim-pointer change.
+                    player->skelAnime.jointTable = sTitlePeerJointTable[bufferIdx];
+                    player->skelAnime.morphTable = sTitlePeerMorphTable[bufferIdx];
+
+                    LinkAnimationHeader* localLinkAnim =
+                        (LinkAnimationHeader*)localLink->skelAnime.animation;
+                    if (localLinkAnim != nullptr &&
+                        localLinkAnim != (LinkAnimationHeader*)player->skelAnime.animation) {
+                        const AnchorTitlePeer::TitlePeerFormation linkPhase =
+                            AnchorTitlePeer::MakeTitlePeerFormation(
+                                clientId, formationIdx);
+                        const f32 linkLoopFrames =
+                            (f32)Animation_GetLastFrame((void*)localLinkAnim);
+                        const f32 linkPhaseFrac =
+                            (f32)linkPhase.animPhaseOffset / 256.0f;
+                        const f32 linkStartFrame =
+                            linkLoopFrames * linkPhaseFrac;
+                        LinkAnimation_Change(
+                            gPlayState, &player->skelAnime, localLinkAnim,
+                            0.0f, linkStartFrame, linkLoopFrames,
+                            ANIMMODE_LOOP, 0.0f);
+                        SPDLOG_INFO(
+                            "[TitlePeer] link anim freeze clientId={} "
+                            "formationIdx={} loopFrames={:.1f} "
+                            "phaseFrac={:.3f} start={:.2f}",
+                            clientId, (int)formationIdx,
+                            linkLoopFrames, linkPhaseFrac, linkStartFrame);
+                    }
+                } else {
+                    // Alias mode — peer mirrors local's current pose.
+                    // Reset peer's animation pointer so a re-entry
+                    // into freeze mode picks up the next anim change
+                    // via the pointer-mismatch check above.
+                    player->skelAnime.jointTable = localLink->skelAnime.jointTable;
+                    player->skelAnime.morphTable = localLink->skelAnime.morphTable;
+                    player->skelAnime.animation  = nullptr;
+                    Math_Vec3s_Copy(&player->skelAnime.prevTransl,
+                                    &localLink->skelAnime.prevTransl);
                 }
                 player->skelAnime.movementFlags = 0;
                 // Intentionally NOT copying upperLimbRot from local Link.
@@ -1656,24 +1692,31 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
         swappedFace = true;
     }
 
-    // Title-mode root-motion snap. The freeze-at-frame mechanism in
-    // DummyPlayer_Update queues a single LinkAnimation_Change LOAD-
-    // FRAME that fills the peer's jointTable with one frozen pose;
-    // that pose's jointTable[0] carries the animation's root
-    // translation for that frame. Without snapping, the rendered
-    // model would sit at world.pos + frozen_root_translation, which
-    // can be hundreds of world units off-saddle. baseTransl is the
-    // model's resting root position; snapping all three axes locks
-    // the rendered model to actor.world.pos exactly. Body pose
-    // (spine / arms / legs) comes from non-root joints and is
-    // untouched.
+    // Title-mode root-motion snap, gated on freeze mode.
+    //   - Freeze mode (peer uses its own jointTable buffer): the
+    //     loaded frame's jointTable[0] carries the animation's
+    //     root translation, which must be clamped to baseTransl
+    //     to keep the rendered model on the saddle.
+    //   - Alias mode (peer's jointTable points at local Link's
+    //     buffer): local Link is held by the cutscene cue; his
+    //     vanilla skelAnime path either already snapped root or
+    //     never touched it. Snapping here would overwrite local's
+    //     joint[0] mid-render, affecting local Link's draw too
+    //     (we'd be writing into local's own buffer).
+    // Detect mode by comparing jointTable pointer to GET_PLAYER's.
     if (titleMode && player->skelAnime.jointTable != nullptr) {
-        player->skelAnime.jointTable[0].x =
-            player->skelAnime.baseTransl.x;
-        player->skelAnime.jointTable[0].y =
-            player->skelAnime.baseTransl.y;
-        player->skelAnime.jointTable[0].z =
-            player->skelAnime.baseTransl.z;
+        Player* localLinkForGate = GET_PLAYER(gPlayState);
+        const bool aliasMode =
+            (localLinkForGate != nullptr &&
+             player->skelAnime.jointTable == localLinkForGate->skelAnime.jointTable);
+        if (!aliasMode) {
+            player->skelAnime.jointTable[0].x =
+                player->skelAnime.baseTransl.x;
+            player->skelAnime.jointTable[0].y =
+                player->skelAnime.baseTransl.y;
+            player->skelAnime.jointTable[0].z =
+                player->skelAnime.baseTransl.z;
+        }
     }
 
     Player_Draw((Actor*)player, play);
