@@ -32,25 +32,6 @@ extern void* sEyeTextures[2][8];
 extern void* sMouthTextures[2][4];
 }
 
-namespace {
-
-// Title-mode per-peer skelAnime buffers. Decouples each peer Link's
-// animation phase from local Link's so peers don't share the same
-// gallop frame frame-for-frame. Index 0..kMaxTitlePeerBuffers-1 keyed
-// on formationIdx (stable per clientId per session). Slots beyond the
-// max share buffer kMaxTitlePeerBuffers-1 — they desync into each
-// other slightly (different starting phase will be lost) but visually
-// still differ from local Link, which is the primary goal.
-//
-// Sized for Link's 22-limb skel + LinkAnimation_Update's
-// 2-Vec3s padding requirement = 24 slots.
-constexpr int kMaxTitlePeerBuffers = 8;
-constexpr int kLinkJointTableLen   = 24;
-Vec3s sTitlePeerJointTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
-Vec3s sTitlePeerMorphTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
-
-}  // namespace
-
 // KB-19 diagnostic CVars — see DummyPlayer_Draw / DummyPlayer_Init / DummyPlayer_Update.
 //   gAnchor.Debug.SkipDummyDraw   (default 0): when 1, DummyPlayer_Draw returns
 //                                  after the gSaveContext.linkAge swap-set/restore
@@ -671,83 +652,30 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
                 }
 
-                // Decoupled per-peer animation playback. Replaces the
-                // earlier jointTable-alias approach (peer shared local
-                // Link's exact frame, so all peers struck their gallop
-                // phase in unison). Each peer now owns its own
-                // jointTable + morphTable buffers in
-                // sTitlePeerJointTable / sTitlePeerMorphTable indexed
-                // by formationIdx, drives the SAME animation local
-                // Link is playing (read via skelAnime.animation), but
-                // starts each cycle offset by
-                // TitlePeerFormation::animPhaseOffset frames so
-                // strides desync naturally.
+                // Alias local Link's jointTable + morphTable pointers
+                // for peer Link's pose. Local Link is held in a
+                // STATIC mounted pose by the title cutscene's
+                // scripted actor cue — his joints don't advance
+                // frame-to-frame (verified field test log 487:
+                // localLink->skelAnime.jointTable[5] held exactly
+                // (-8741, -5247, 10172) across the entire gallop
+                // stretch). Driving peer's LinkAnimation_Update on
+                // the gallop animation pointer plays the FOOT-gallop
+                // pose (arms swinging, legs running) on a seated
+                // Link, which presents as violent body flopping.
                 //
-                // Mechanism:
-                //   1. Repoint skelAnime to the per-peer buffer slot.
-                //      Idempotent — safe to set every frame; the
-                //      pointer is stable per (clientId, session).
-                //   2. Detect local Link's anim change. On change,
-                //      LinkAnimation_Change with startFrame =
-                //      animPhaseOffset (mod loop length). Peer then
-                //      advances independently from there.
-                //   3. Mirror playSpeed every frame (vanilla Link's
-                //      gallop playback is constant 1.0, but mirroring
-                //      handles any cutscene-driven speed change).
-                //   4. LinkAnimation_Update advances the peer's frame.
-                //      DummyPlayer_Update isn't called from
-                //      Player_Update so vanilla's SkelAnime tick
-                //      doesn't happen for us automatically.
-                const uint8_t bufferIdx = (formationIdx < kMaxTitlePeerBuffers)
-                    ? formationIdx : (kMaxTitlePeerBuffers - 1);
-                player->skelAnime.jointTable = sTitlePeerJointTable[bufferIdx];
-                player->skelAnime.morphTable = sTitlePeerMorphTable[bufferIdx];
-
-                LinkAnimationHeader* localAnim =
-                    (LinkAnimationHeader*)localLink->skelAnime.animation;
-                if (localAnim != nullptr &&
-                    localAnim != (LinkAnimationHeader*)player->skelAnime.animation) {
-                    const AnchorTitlePeer::TitlePeerFormation animForm =
-                        AnchorTitlePeer::MakeTitlePeerFormation(
-                            clientId, formationIdx);
-                    const f32 endFrame =
-                        (f32)Animation_GetLastFrame((void*)localAnim);
-                    f32 startFrame = (f32)animForm.animPhaseOffset;
-                    if (endFrame > 0.0f && startFrame > endFrame) {
-                        startFrame = fmodf(startFrame, endFrame);
-                    }
-                    LinkAnimation_Change(
-                        gPlayState, &player->skelAnime, localAnim,
-                        localLink->skelAnime.playSpeed,
-                        startFrame, endFrame,
-                        ANIMMODE_LOOP, 0.0f);
-                    SPDLOG_INFO(
-                        "[TitlePeer] link anim change clientId={} "
-                        "formationIdx={} loopFrames={:.1f} offset={:.1f} "
-                        "start={:.1f}",
-                        clientId, (int)formationIdx,
-                        endFrame,
-                        (f32)animForm.animPhaseOffset,
-                        startFrame);
-                }
-                player->skelAnime.playSpeed = localLink->skelAnime.playSpeed;
-                LinkAnimation_Update(gPlayState, &player->skelAnime);
-
-                // NOTE: jointTable root-motion snap CANNOT happen here.
-                // LinkAnimation_Update only QUEUES a deferred LOADFRAME
-                // entry into play->animationCtx — the actual joint data
-                // isn't written until AnimationContext_Update flushes
-                // the queue later in Play_Update (z_play.c:644). If we
-                // snapped jointTable[0].xz here, we'd be snapping stale
-                // data; the deferred load then overwrites with new
-                // root motion and peer Link drifts forward across
-                // frames until reset, producing the "violent flopping"
-                // symptom. The snap is moved to DummyPlayer_Draw —
-                // which runs DURING Play_Draw, after the flush — so
-                // we operate on the real per-frame joint values. See
-                // DummyPlayer_Draw title-mode root-snap block.
-
+                // Aliasing matches what local Link is showing — a
+                // calm seated rider pose. No per-peer phase offset
+                // for Link is needed: nothing is animating, so
+                // there's nothing to phase. The per-peer horse
+                // animation phase offset (see horse block above)
+                // continues to provide the visual variety in the
+                // formation.
+                player->skelAnime.jointTable    = localLink->skelAnime.jointTable;
+                player->skelAnime.morphTable    = localLink->skelAnime.morphTable;
                 player->skelAnime.movementFlags = 0;
+                Math_Vec3s_Copy(&player->skelAnime.prevTransl,
+                                &localLink->skelAnime.prevTransl);
                 // Intentionally NOT copying upperLimbRot from local Link.
                 // At the title cutscene, vanilla code can apply yaw to
                 // local Link's upper-body rotation (e.g., to face the
@@ -1678,94 +1606,6 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
             }
         }
         swappedFace = true;
-    }
-
-    // Title-mode root-motion snap. Pairs with the per-peer animation
-    // playback in DummyPlayer_Update (title branch). Vanilla
-    // SkelAnime_UpdateTranslation snaps jointTable[0].xz back to
-    // baseTransl every frame so the gallop's accumulating root
-    // translation can't drift the rendered model relative to the
-    // actor. We bypass Player_UpdateCommon's call to that helper, so
-    // we have to apply the snap manually — but the snap must run
-    // AFTER AnimationContext_Update has flushed the deferred
-    // LOADFRAME queued by LinkAnimation_Update in our title-mode
-    // update body. Play_Draw is the next phase after the flush, and
-    // DummyPlayer_Draw is on its path, so the snap lands here just
-    // before Player_Draw consumes the joints.
-    //
-    // jointTable buffer is always our per-peer sTitlePeerJointTable
-    // slot (assigned each frame in the update body), so we don't
-    // have to re-derive it. Y is left alone so the gallop's vertical
-    // body bob stays visible.
-    if (titleMode && player->skelAnime.jointTable != nullptr) {
-        // Capture pre-snap state for diagnostic.
-        const Vec3s preJoint0 = player->skelAnime.jointTable[0];
-        const Vec3s baseT     = player->skelAnime.baseTransl;
-        const Vec3f preWorld  = actor->world.pos;
-        Player* dbgLocalLink  = GET_PLAYER(gPlayState);
-
-        // Snap all three root axes to baseTransl. Earlier guess that
-        // jointTable[0].y carried only a small "body bob" was wrong
-        // (field-test log 485): loaded values swing -19487..+22904
-        // in model space, scaled by Player's ~0.01 → ±200u world-
-        // space vertical flop per frame. The body bob must live in
-        // non-root joints (spine limb). Snapping all three matches
-        // vanilla SkelAnime_UpdateTranslation's behaviour when both
-        // movementFlags ANIM_FLAG_UPDATEY and the XZ snap branch are
-        // active.
-        player->skelAnime.jointTable[0].x =
-            player->skelAnime.baseTransl.x;
-        player->skelAnime.jointTable[0].y =
-            player->skelAnime.baseTransl.y;
-        player->skelAnime.jointTable[0].z =
-            player->skelAnime.baseTransl.z;
-
-        // Rate-limit to every ~30 frames per peer so we get a few
-        // samples across the gallop loop without flooding.
-        static std::unordered_map<uint32_t, uint32_t> sFrameCounter;
-        uint32_t& fc = sFrameCounter[clientId];
-        if ((fc++ % 30) == 0) {
-            // Sample non-root joints to find out whether the body
-            // flop is from peer's animation playback diverging from
-            // local's. If peer's joints[5,10,15] roughly match
-            // local's (modulo phase offset), animation playback is
-            // correct and the flop is from something else. If they
-            // diverge wildly (random values), animation is broken
-            // (wrong limb indexing, wrong buffer, etc.).
-            Vec3s peer5  = player->skelAnime.jointTable[5];
-            Vec3s peer10 = player->skelAnime.jointTable[10];
-            Vec3s peer15 = player->skelAnime.jointTable[15];
-            Vec3s local5 = (dbgLocalLink != nullptr && dbgLocalLink->skelAnime.jointTable != nullptr)
-                            ? dbgLocalLink->skelAnime.jointTable[5]  : Vec3s{0,0,0};
-            Vec3s local10= (dbgLocalLink != nullptr && dbgLocalLink->skelAnime.jointTable != nullptr)
-                            ? dbgLocalLink->skelAnime.jointTable[10] : Vec3s{0,0,0};
-            Vec3s local15= (dbgLocalLink != nullptr && dbgLocalLink->skelAnime.jointTable != nullptr)
-                            ? dbgLocalLink->skelAnime.jointTable[15] : Vec3s{0,0,0};
-            SPDLOG_INFO(
-                "[TitlePeer.diag] clientId={} jt0_post=({},{},{}) baseT=({},{},{}) "
-                "peer5=({},{},{}) local5=({},{},{}) "
-                "peer10=({},{},{}) local10=({},{},{}) "
-                "peer15=({},{},{}) local15=({},{},{}) "
-                "limbCount={} animCur={:.1f} animEnd={:.1f} playSpeed={:.2f} "
-                "peerAnim={} localAnim={}",
-                clientId,
-                player->skelAnime.jointTable[0].x,
-                player->skelAnime.jointTable[0].y,
-                player->skelAnime.jointTable[0].z,
-                baseT.x, baseT.y, baseT.z,
-                peer5.x,  peer5.y,  peer5.z,
-                local5.x, local5.y, local5.z,
-                peer10.x, peer10.y, peer10.z,
-                local10.x,local10.y,local10.z,
-                peer15.x, peer15.y, peer15.z,
-                local15.x,local15.y,local15.z,
-                (int)player->skelAnime.limbCount,
-                player->skelAnime.curFrame,
-                player->skelAnime.endFrame,
-                player->skelAnime.playSpeed,
-                (const void*)player->skelAnime.animation,
-                dbgLocalLink ? (const void*)dbgLocalLink->skelAnime.animation : (const void*)nullptr);
-        }
     }
 
     Player_Draw((Actor*)player, play);
