@@ -1698,10 +1698,41 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     // have to re-derive it. Y is left alone so the gallop's vertical
     // body bob stays visible.
     if (titleMode && player->skelAnime.jointTable != nullptr) {
+        // Capture pre-snap state for diagnostic.
+        const Vec3s preJoint0 = player->skelAnime.jointTable[0];
+        const Vec3s baseT     = player->skelAnime.baseTransl;
+        const Vec3f preWorld  = actor->world.pos;
+        Player* dbgLocalLink  = GET_PLAYER(gPlayState);
+
         player->skelAnime.jointTable[0].x =
             player->skelAnime.baseTransl.x;
         player->skelAnime.jointTable[0].z =
             player->skelAnime.baseTransl.z;
+
+        // Rate-limit to every ~30 frames per peer so we get a few
+        // samples across the gallop loop without flooding. Pairs
+        // with the [TitlePeer] anim-change diagnostics so we can
+        // correlate position+joint motion against the active anim.
+        static std::unordered_map<uint32_t, uint32_t> sFrameCounter;
+        uint32_t& fc = sFrameCounter[clientId];
+        if ((fc++ % 30) == 0) {
+            SPDLOG_INFO(
+                "[TitlePeer.diag] clientId={} jt={} world=({:.1f},{:.1f},{:.1f}) "
+                "jt0_pre=({},{},{}) baseT=({},{},{}) jt0_post=({},{},{}) "
+                "localLinkPos=({:.1f},{:.1f},{:.1f}) skel={}",
+                clientId,
+                (const void*)player->skelAnime.jointTable,
+                preWorld.x, preWorld.y, preWorld.z,
+                preJoint0.x, preJoint0.y, preJoint0.z,
+                baseT.x, baseT.y, baseT.z,
+                player->skelAnime.jointTable[0].x,
+                player->skelAnime.jointTable[0].y,
+                player->skelAnime.jointTable[0].z,
+                dbgLocalLink ? dbgLocalLink->actor.world.pos.x : 0.0f,
+                dbgLocalLink ? dbgLocalLink->actor.world.pos.y : 0.0f,
+                dbgLocalLink ? dbgLocalLink->actor.world.pos.z : 0.0f,
+                (const void*)player->skelAnime.skeleton);
+        }
     }
 
     Player_Draw((Actor*)player, play);
