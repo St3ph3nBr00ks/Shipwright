@@ -386,29 +386,30 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     }
                 }
                 // South-east river formation override. Title cutscene
-                // shots 7-9 (per camera audit in
+                // Shots 6-9 (per camera audit in
                 // Plans/title_screen_peer_actors.md) have Link riding
                 // through the south-east region of Hyrule Field where
-                // a river and fence run along his right at world +X.
-                // Default formation places half the peers on Link's
-                // right which puts them in the water. Switch to a
-                // single-file left-side column whenever Link is in
-                // that region.
+                // a river runs along his right at world +X. Default
+                // formation places half the peers on Link's right
+                // which puts them in the water. Switch to a single-
+                // file left-side column for the whole sequence.
                 //
-                // Gate is position-based instead of csFrame-based
-                // because Link enters the river region (at Shot 7's
-                // position around csFrame 1265) before Shot 8's
-                // csFrame 1355 boundary — verified via the
-                // [TitlePeer.cs] diagnostic in log 495 sample
-                // csFrames 1265-1505. Position gate captures the
-                // hazard region directly: pos.z < 2500 (south of
-                // mid-field) + pos.x > 0 (east half). All other
-                // shots (north, west, central) fall outside.
-                constexpr float kRiverRegionMaxZ =  2500.0f;
-                constexpr float kRiverRegionMinX =     0.0f;
+                // Gate is csFrame-based — Shot 5 (csFrame 1080-1104)
+                // is the idle/look-around at the river bank and
+                // shares Link's exact position with Shot 6 (csFrame
+                // 1105-1204, low dramatic camera), so position
+                // alone can't distinguish them. The audit's csFrame
+                // numbers align 1:1 with gPlayState->csCtx.frames
+                // (verified via [TitlePeer.cs] log 495). Range
+                // covers Shot 6 start (1105) through Shot 9 end
+                // (~1605); after Shot 9 the cutscene transitions
+                // out of Hyrule Field.
+                constexpr int32_t kRiverSequenceStartFrame = 1105;
+                constexpr int32_t kRiverSequenceEndFrame   = 1605;
                 const bool useLeftSideFormation =
-                    (localLink->actor.world.pos.z < kRiverRegionMaxZ &&
-                     localLink->actor.world.pos.x > kRiverRegionMinX);
+                    (gPlayState->csCtx.state != CS_STATE_IDLE &&
+                     gPlayState->csCtx.frames >= kRiverSequenceStartFrame &&
+                     gPlayState->csCtx.frames <= kRiverSequenceEndFrame);
 
                 AnchorTitlePeer::TitlePeerSlot slot =
                     AnchorTitlePeer::ComputeTitlePeerSlot(
