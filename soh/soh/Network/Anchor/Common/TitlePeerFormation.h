@@ -195,34 +195,36 @@ inline SlotEntry GetBaseSlotEntry(uint8_t formationIdx) {
     }
 }
 
-// Left-side-only slot table for title cutscene's south-east river
-// region (Shots 7-8 per Plans/title_screen_peer_actors.md). Link
-// rides along a fence with the river on his right at world +X.
-// Default slot table places half the peers on Link's right which
-// puts them in the water during these shots. Single-file column
-// at lateral=+150u keeps every peer safely on Link's left.
+// Left-side single-file slot table for title cutscene's south-east
+// river sequence (Shots 6-9 per Plans/title_screen_peer_actors.md).
+// Link rides along a fence with the river on his right at world +X.
+// Default V/diamond table places half the peers on Link's right
+// which puts them in the water. Single-file column with a positive
+// lateral magnitude keeps every peer on Link's left.
+//
+// Magnitude varies by shot (Shot 6 = 150u, Shots 7-9 = 75u) per
+// field-test tuning, so the value is passed in by the consumer
+// instead of hard-coded here.
 //
 // Sign note: lateral is in the "right perpendicular to forward"
 // direction (see ComputeBaseFormationSlot). For Link's facing
-// during Shot 8 (verified by field test 2026-06-10), positive
-// lateral resolves to his LEFT side in world coords. Initial
-// implementation used negative which produced the inverse — peers
-// ended up on Link's right, still in the river.
-inline SlotEntry GetBaseSlotEntryLeftSide(uint8_t formationIdx) {
-    constexpr float kLeftLateral  = +150.0f;
+// during the river sequence (verified by field test 2026-06-10),
+// positive lateral resolves to his LEFT side in world coords.
+inline SlotEntry GetBaseSlotEntryLeftSide(uint8_t formationIdx,
+                                            float leftLateralMagnitude) {
     constexpr float kBaseDistance =  220.0f;
     constexpr float kSpacing      =  130.0f;
     return SlotEntry{
         kBaseDistance + kSpacing * (float)formationIdx,
-        kLeftLateral,
+        leftLateralMagnitude,
     };
 }
 
 inline Vec3f ComputeBaseFormationSlot(Vec3f linkPos, int16_t linkRotY,
                                         uint8_t formationIdx,
-                                        bool useLeftSideFormation = false) {
-    const SlotEntry entry = useLeftSideFormation
-        ? GetBaseSlotEntryLeftSide(formationIdx)
+                                        float leftLateralMagnitude = 0.0f) {
+    const SlotEntry entry = (leftLateralMagnitude > 0.0f)
+        ? GetBaseSlotEntryLeftSide(formationIdx, leftLateralMagnitude)
         : GetBaseSlotEntry(formationIdx);
     const float heading =
         (float)linkRotY / 32768.0f * 3.14159265358979323846f;
@@ -249,12 +251,12 @@ struct TitlePeerSlot {
 inline TitlePeerSlot ComputeTitlePeerSlot(Vec3f linkPos, int16_t linkRotY,
                                             uint32_t clientId,
                                             uint8_t formationIdx,
-                                            bool useLeftSideFormation = false) {
+                                            float leftLateralMagnitude = 0.0f) {
     const TitlePeerFormation f =
         MakeTitlePeerFormation(clientId, formationIdx);
     Vec3f basePos =
         ComputeBaseFormationSlot(linkPos, linkRotY, formationIdx,
-                                 useLeftSideFormation);
+                                 leftLateralMagnitude);
     basePos.x += f.posOffset.x;
     basePos.y += f.posOffset.y;
     basePos.z += f.posOffset.z;

@@ -48,6 +48,26 @@ constexpr int kLinkJointTableLen   = 24;
 Vec3s sTitlePeerJointTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
 Vec3s sTitlePeerMorphTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
 
+// Title-mode Link-delta tracking. Peer horses translate by local
+// Link's per-frame position delta instead of being re-derived from
+// Link's pos+rot each frame. This eliminates the lateral "slide"
+// that the previous full-recompute approach produced when local
+// Link rotates — formation offsets used to rotate with Link, so
+// peers visibly slid across the ground during turns. With delta
+// motion, peers maintain their world-space position and only
+// translate when Link translates.
+//
+// Sampled once per game frame from the formationIdx == 0 peer
+// (sentinel — multiple peers tick per game frame, all sampling
+// would over-count). Snap-to-target threshold below catches
+// large jumps (scene cuts, formation override transitions) by
+// forcing peer to the current target slot when distance exceeds
+// the threshold.
+Vec3f    sTitlePeerLastLinkPos    = {0, 0, 0};
+uint64_t sTitlePeerLastDeltaFrame = 0;
+Vec3f    sTitlePeerLinkDelta      = {0, 0, 0};
+bool     sTitlePeerDeltaPrimed    = false;
+
 }  // namespace
 
 // KB-19 diagnostic CVars — see DummyPlayer_Draw / DummyPlayer_Init / DummyPlayer_Update.
@@ -385,38 +405,28 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                         a = a->next;
                     }
                 }
-                // South-east river formation override. Title cutscene
-                // Shots 6-9 (per camera audit in
-                // Plans/title_screen_peer_actors.md) have Link riding
-                // through the south-east region of Hyrule Field where
-                // a river runs along his right at world +X. Default
-                // formation places half the peers on Link's right
-                // which puts them in the water. Switch to a single-
-                // file left-side column for the whole sequence.
-                //
-                // Gate is csFrame-based — Shot 5 (csFrame 1080-1104)
-                // is the idle/look-around at the river bank and
-                // shares Link's exact position with Shot 6 (csFrame
-                // 1105-1204, low dramatic camera), so position
-                // alone can't distinguish them. The audit's csFrame
-                // numbers align 1:1 with gPlayState->csCtx.frames
-                // (verified via [TitlePeer.cs] log 495). Range
-                // covers Shot 6 start (1105) through Shot 9 end
-                // (~1605); after Shot 9 the cutscene transitions
-                // out of Hyrule Field.
-                constexpr int32_t kRiverSequenceStartFrame = 1105;
-                constexpr int32_t kRiverSequenceEndFrame   = 1605;
-                const bool useLeftSideFormation =
-                    (gPlayState->csCtx.state != CS_STATE_IDLE &&
-                     gPlayState->csCtx.frames >= kRiverSequenceStartFrame &&
-                     gPlayState->csCtx.frames <= kRiverSequenceEndFrame);
+                // Per-shot left-side formation magnitude.
+                // Shot 5 (csFrame 1080-1104): idle by river, default
+                //   formation (peers absent during close-up anyway).
+                // Shot 6 (csFrame 1105-1204): low dramatic camera —
+                //   river hazard, full 150u left-side offset.
+                // Shots 7-9 (csFrame 1205-1605): riding alongside the
+                //   river, reduced 75u left-side offset (field-test
+                //   tuning — the wider shots make 150u look cramped).
+                // All other shots: default V/diamond formation.
+                float leftLateral = 0.0f;
+                if (gPlayState->csCtx.state != CS_STATE_IDLE) {
+                    const int32_t cf = gPlayState->csCtx.frames;
+                    if      (cf >= 1105 && cf <= 1204) leftLateral = 150.0f;
+                    else if (cf >= 1205 && cf <= 1605) leftLateral =  75.0f;
+                }
 
                 AnchorTitlePeer::TitlePeerSlot slot =
                     AnchorTitlePeer::ComputeTitlePeerSlot(
                         localLink->actor.world.pos,
                         lookYaw,
                         clientId, formationIdx,
-                        useLeftSideFormation);
+                        leftLateral);
 
                 // Path A — ground snap via raycast from above the slot
                 // position. Hyrule Field's terrain dips and rolls under
@@ -474,7 +484,85 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     ? Anchor::Instance->FindTitlePeerHorse(clientId)
                     : nullptr;
                 if (peerHorse != nullptr && peerHorse->id == ACTOR_EN_HORSE) {
-                    peerHorse->world.pos = slot.pos;
+                    // Sample local Link's per-frame position delta
+                    // once per game frame (formationIdx == 0 peer is
+                    // the sentinel — multiple peers run per game
+                    // frame). Used below to translate peer horse
+                    // position instead of re-deriving it from Link's
+                    // current pos+rot. Eliminates the lateral slide
+                    // when Link rotates.
+                    if (formationIdx == 0 && Anchor::Instance != nullptr) {
+                        const uint64_t curFrame =
+                            Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+                        if (curFrame != sTitlePeerLastDeltaFrame) {
+                            if (sTitlePeerDeltaPrimed) {
+                                const float ddx =
+                                    localLink->actor.world.pos.x - sTitlePeerLastLinkPos.x;
+                                const float ddy =
+                                    localLink->actor.world.pos.y - sTitlePeerLastLinkPos.y;
+                                const float ddz =
+                                    localLink->actor.world.pos.z - sTitlePeerLastLinkPos.z;
+                                // Detect scene-cut teleport — cutscene
+                                // jumps Link hundreds of units between
+                                // shots / scenes. Translating peers by
+                                // that delta would fling them. Treat
+                                // large jumps as a "no advance" frame
+                                // and rely on the snap-on-far path to
+                                // realign peers via slot.pos.
+                                constexpr float kSceneCutThresholdSq =
+                                    1000.0f * 1000.0f;
+                                if (ddx * ddx + ddy * ddy + ddz * ddz >
+                                    kSceneCutThresholdSq) {
+                                    sTitlePeerLinkDelta = {0.0f, 0.0f, 0.0f};
+                                } else {
+                                    sTitlePeerLinkDelta.x = ddx;
+                                    sTitlePeerLinkDelta.y = ddy;
+                                    sTitlePeerLinkDelta.z = ddz;
+                                }
+                            } else {
+                                sTitlePeerLinkDelta = {0.0f, 0.0f, 0.0f};
+                                sTitlePeerDeltaPrimed = true;
+                            }
+                            sTitlePeerLastLinkPos    = localLink->actor.world.pos;
+                            sTitlePeerLastDeltaFrame = curFrame;
+                        }
+                    }
+
+                    // Snap-or-delta motion. When peer's current
+                    // position is close to the target formation slot
+                    // (within kSnapThreshold), advance by Link's
+                    // delta — preserves world-space position so
+                    // peers don't slide when Link rotates. When far
+                    // (scene cuts, formation-mode transitions like
+                    // entering the river-shot left-side override),
+                    // snap to the target slot so peers stay roughly
+                    // in formation. 250u threshold catches the
+                    // river-override step (150u lateral magnitude)
+                    // while tolerating normal cutscene shot turns
+                    // (~120u drift from a 90° formation rotation).
+                    constexpr float kSnapThresholdSq = 250.0f * 250.0f;
+                    const float dx = slot.pos.x - peerHorse->world.pos.x;
+                    const float dz = slot.pos.z - peerHorse->world.pos.z;
+                    const float distSq = dx * dx + dz * dz;
+                    if (distSq > kSnapThresholdSq) {
+                        peerHorse->world.pos = slot.pos;
+                    } else {
+                        peerHorse->world.pos.x += sTitlePeerLinkDelta.x;
+                        peerHorse->world.pos.y += sTitlePeerLinkDelta.y;
+                        peerHorse->world.pos.z += sTitlePeerLinkDelta.z;
+                        // Re-snap Y to ground so peer doesn't drift
+                        // above/below terrain when local Link's Y
+                        // delta crosses terrain elevation changes.
+                        Vec3f probe = { peerHorse->world.pos.x,
+                                        peerHorse->world.pos.y + 200.0f,
+                                        peerHorse->world.pos.z };
+                        CollisionPoly* outPoly = nullptr;
+                        f32 groundY = BgCheck_EntityRaycastFloor1(
+                            &gPlayState->colCtx, &outPoly, &probe);
+                        if (groundY > BGCHECK_Y_MIN) {
+                            peerHorse->world.pos.y = groundY;
+                        }
+                    }
                     peerHorse->shape.rot.y = slot.rotY;
 
                     // Phase 3 horse animation state mirror — match local
