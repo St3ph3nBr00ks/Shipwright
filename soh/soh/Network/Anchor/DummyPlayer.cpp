@@ -401,6 +401,33 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                      gPlayState->csCtx.frames >= kShot8StartFrame &&
                      gPlayState->csCtx.frames <= kShot8EndFrame);
 
+                // Diagnostic — rate-limited per peer (~once per
+                // second on a fresh game frame). Logs csCtx state +
+                // frames + local Link position so we can see what
+                // the title cutscene actually reports for the
+                // Shot 8 gate. Field test log 494 reported the
+                // left-side override didn't fire even during the
+                // ride-along-river shot, so the audit's csFrame
+                // numbers may not align with gPlayState->csCtx.
+                if (formationIdx == 0 && Anchor::Instance != nullptr) {
+                    static uint64_t sLastDiagFrame = 0;
+                    const uint64_t curGameFrame =
+                        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+                    if (curGameFrame - sLastDiagFrame >= 60) {
+                        sLastDiagFrame = curGameFrame;
+                        SPDLOG_INFO(
+                            "[TitlePeer.cs] state={} frames={} "
+                            "linkPos=({:.1f},{:.1f},{:.1f}) "
+                            "shot8gate={}",
+                            (int)gPlayState->csCtx.state,
+                            (int)gPlayState->csCtx.frames,
+                            localLink->actor.world.pos.x,
+                            localLink->actor.world.pos.y,
+                            localLink->actor.world.pos.z,
+                            useLeftSideFormation ? 1 : 0);
+                    }
+                }
+
                 AnchorTitlePeer::TitlePeerSlot slot =
                     AnchorTitlePeer::ComputeTitlePeerSlot(
                         localLink->actor.world.pos,
