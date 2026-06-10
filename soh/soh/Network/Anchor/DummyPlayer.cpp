@@ -1721,28 +1721,50 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
             player->skelAnime.baseTransl.z;
 
         // Rate-limit to every ~30 frames per peer so we get a few
-        // samples across the gallop loop without flooding. Pairs
-        // with the [TitlePeer] anim-change diagnostics so we can
-        // correlate position+joint motion against the active anim.
+        // samples across the gallop loop without flooding.
         static std::unordered_map<uint32_t, uint32_t> sFrameCounter;
         uint32_t& fc = sFrameCounter[clientId];
         if ((fc++ % 30) == 0) {
+            // Sample non-root joints to find out whether the body
+            // flop is from peer's animation playback diverging from
+            // local's. If peer's joints[5,10,15] roughly match
+            // local's (modulo phase offset), animation playback is
+            // correct and the flop is from something else. If they
+            // diverge wildly (random values), animation is broken
+            // (wrong limb indexing, wrong buffer, etc.).
+            Vec3s peer5  = player->skelAnime.jointTable[5];
+            Vec3s peer10 = player->skelAnime.jointTable[10];
+            Vec3s peer15 = player->skelAnime.jointTable[15];
+            Vec3s local5 = (dbgLocalLink != nullptr && dbgLocalLink->skelAnime.jointTable != nullptr)
+                            ? dbgLocalLink->skelAnime.jointTable[5]  : Vec3s{0,0,0};
+            Vec3s local10= (dbgLocalLink != nullptr && dbgLocalLink->skelAnime.jointTable != nullptr)
+                            ? dbgLocalLink->skelAnime.jointTable[10] : Vec3s{0,0,0};
+            Vec3s local15= (dbgLocalLink != nullptr && dbgLocalLink->skelAnime.jointTable != nullptr)
+                            ? dbgLocalLink->skelAnime.jointTable[15] : Vec3s{0,0,0};
             SPDLOG_INFO(
-                "[TitlePeer.diag] clientId={} jt={} world=({:.1f},{:.1f},{:.1f}) "
-                "jt0_pre=({},{},{}) baseT=({},{},{}) jt0_post=({},{},{}) "
-                "localLinkPos=({:.1f},{:.1f},{:.1f}) skel={}",
+                "[TitlePeer.diag] clientId={} jt0_post=({},{},{}) baseT=({},{},{}) "
+                "peer5=({},{},{}) local5=({},{},{}) "
+                "peer10=({},{},{}) local10=({},{},{}) "
+                "peer15=({},{},{}) local15=({},{},{}) "
+                "limbCount={} animCur={:.1f} animEnd={:.1f} playSpeed={:.2f} "
+                "peerAnim={} localAnim={}",
                 clientId,
-                (const void*)player->skelAnime.jointTable,
-                preWorld.x, preWorld.y, preWorld.z,
-                preJoint0.x, preJoint0.y, preJoint0.z,
-                baseT.x, baseT.y, baseT.z,
                 player->skelAnime.jointTable[0].x,
                 player->skelAnime.jointTable[0].y,
                 player->skelAnime.jointTable[0].z,
-                dbgLocalLink ? dbgLocalLink->actor.world.pos.x : 0.0f,
-                dbgLocalLink ? dbgLocalLink->actor.world.pos.y : 0.0f,
-                dbgLocalLink ? dbgLocalLink->actor.world.pos.z : 0.0f,
-                (const void*)player->skelAnime.skeleton);
+                baseT.x, baseT.y, baseT.z,
+                peer5.x,  peer5.y,  peer5.z,
+                local5.x, local5.y, local5.z,
+                peer10.x, peer10.y, peer10.z,
+                local10.x,local10.y,local10.z,
+                peer15.x, peer15.y, peer15.z,
+                local15.x,local15.y,local15.z,
+                (int)player->skelAnime.limbCount,
+                player->skelAnime.curFrame,
+                player->skelAnime.endFrame,
+                player->skelAnime.playSpeed,
+                (const void*)player->skelAnime.animation,
+                dbgLocalLink ? (const void*)dbgLocalLink->skelAnime.animation : (const void*)nullptr);
         }
     }
 
