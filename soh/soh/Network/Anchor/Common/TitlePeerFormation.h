@@ -108,21 +108,33 @@ inline TitlePeerFormation MakeTitlePeerFormation(uint32_t clientId,
     // strict single-file column without redirecting any peer's gaze.
     f.yawOffset = 0;
 
-    // Per-peer horse animation phase offset (frames). Used by
-    // DummyPlayer_Update's title-mode horse-anim-mirror block —
-    // when a state change re-calls Animation_PlayLoop on the peer
-    // horse's skelAnime, we seed curFrame to this offset so hooves
-    // don't strike in unison across peers. Range 0-30: covers the
-    // gallop loop's primary cadence (~16 frames per stride pair)
-    // and the slower idle/walk loops without overflowing.
+    // Per-peer animation phase as a fraction of loop length [0..1).
+    // Consumer sites multiply by the actual animation's loopFrames
+    // (read via Animation_GetLastFrame at runtime) to get the
+    // start-frame offset. Encoded as a fraction (not a frame count)
+    // because different animations have different loop lengths
+    // (Epona gallop 23 frames, Epona idle 119 frames, Link mounted-
+    // idle 29 frames — see field-test log 487 measurements). A
+    // fixed frame-count would overshoot short loops and under-
+    // shoot long ones.
     //
-    // Peer Link's animation phase is NOT yet offset — peer's
-    // skelAnime currently aliases local Link's jointTable pointer
-    // (DummyPlayer.cpp title-mode block), so all peer Links share
-    // local Link's exact frame. Decoupling Link's phase requires
-    // per-peer skelAnime tick + jointTable copy + identifying
-    // which Link anim is active — deferred to a future commit.
-    f.animPhaseOffset = (int16_t)((h >> 16) & 0x1F);  // 0..31
+    // Slot-deterministic 8-step table: slots 0/1/2 → 25%/50%/75%
+    // (the user-requested values for a 3-peer formation), slots
+    // 3-7 fill in the remaining 1/8ths so no two formation slots
+    // share an identical phase. animPhaseOffset retains its
+    // historic name for compatibility with consumer code; the
+    // semantic is now "fraction × 256" (s16, range 0..255).
+    static constexpr int16_t kPhaseTable[8] = {
+        64,   // 0 →  25.0%
+        128,  // 1 →  50.0%
+        192,  // 2 →  75.0%
+        32,   // 3 →  12.5%
+        96,   // 4 →  37.5%
+        160,  // 5 →  62.5%
+        224,  // 6 →  87.5%
+        0,    // 7 →   0.0%
+    };
+    f.animPhaseOffset = kPhaseTable[formationIdx & 7];
 
     return f;
 }

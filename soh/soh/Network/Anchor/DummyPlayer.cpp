@@ -32,6 +32,23 @@ extern void* sEyeTextures[2][8];
 extern void* sMouthTextures[2][4];
 }
 
+namespace {
+
+// Title-mode per-peer Link skelAnime buffers. Decoupled from local
+// Link via the "freeze at offset frame" mechanism — LinkAnimation_
+// Change loads ONE frame into the buffer, no further ticks happen,
+// each peer holds a different static pose of local Link's current
+// animation. Avoids the LinkAnimation_Update foot-gallop-flopping
+// pitfall (field test log 487) by never running the per-frame
+// animation tick. Sized for Link's max 22-limb skel + 2-Vec3s
+// padding = 24 slots.
+constexpr int kMaxTitlePeerBuffers = 8;
+constexpr int kLinkJointTableLen   = 24;
+Vec3s sTitlePeerJointTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
+Vec3s sTitlePeerMorphTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
+
+}  // namespace
+
 // KB-19 diagnostic CVars — see DummyPlayer_Draw / DummyPlayer_Init / DummyPlayer_Update.
 //   gAnchor.Debug.SkipDummyDraw   (default 0): when 1, DummyPlayer_Draw returns
 //                                  after the gSaveContext.linkAge swap-set/restore
@@ -480,43 +497,32 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                                     anim = (AnimationHeader*)&gEponaIdleAnim; break;
                             }
                             Animation_PlayLoop(&peer->skin.skelAnime, anim);
-                            // Apply per-peer phase offset so peers don't
-                            // strike the same gallop frame in unison.
-                            // animPhaseOffset is 0..31 in
-                            // TitlePeerFormation; modulo the actual loop
-                            // length so values larger than the loop wrap
-                            // cleanly (gallop is ~16 frames; idle is
-                            // ~30-40 frames). Animation_PlayLoop resets
-                            // curFrame to 0; seeding after the call
-                            // gives each peer its own starting phase
-                            // that the natural advance preserves.
+                            // Per-peer phase as fraction of loop length.
+                            // TitlePeerFormation stores fraction × 256
+                            // (slot-deterministic table — slots 0/1/2 →
+                            // 25%/50%/75%, slots 3-7 fill in the other
+                            // 1/8ths). Multiplying by the real loop
+                            // length gives the right start frame for
+                            // any animation (gallop 23, idle 119,
+                            // rearing 32 etc. — measured in log 487).
                             const AnchorTitlePeer::TitlePeerFormation
                                 phaseFormation =
                                 AnchorTitlePeer::MakeTitlePeerFormation(
                                     clientId, formationIdx);
                             const f32 horseLoopFrames =
                                 (f32)Animation_GetLastFrame((void*)anim);
-                            f32 horseStart =
-                                (f32)phaseFormation.animPhaseOffset;
-                            if (horseLoopFrames > 0.0f &&
-                                horseStart > horseLoopFrames) {
-                                horseStart = fmodf(horseStart, horseLoopFrames);
-                            }
+                            const f32 horsePhaseFrac =
+                                (f32)phaseFormation.animPhaseOffset / 256.0f;
+                            const f32 horseStart =
+                                horseLoopFrames * horsePhaseFrac;
                             peer->skin.skelAnime.curFrame = horseStart;
-                            // Diagnostic — log actual loop length per
-                            // anim per peer once. Pairs with the peer-
-                            // Link anim length log below so we can size
-                            // the offset range correctly against real
-                            // values rather than estimates.
                             SPDLOG_INFO(
                                 "[TitlePeer] horse anim change clientId={} "
                                 "formationIdx={} animIdx={} loopFrames={:.1f} "
-                                "offset={:.1f} start={:.1f}",
+                                "phaseFrac={:.3f} start={:.2f}",
                                 clientId, (int)formationIdx,
                                 (int)localHorse->animationIdx,
-                                horseLoopFrames,
-                                (f32)phaseFormation.animPhaseOffset,
-                                horseStart);
+                                horseLoopFrames, horsePhaseFrac, horseStart);
                             peer->animationIdx = localHorse->animationIdx;
                         }
                         // Mirror playSpeed every frame, not just on state
@@ -652,30 +658,72 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
                 }
 
-                // Alias local Link's jointTable + morphTable pointers
-                // for peer Link's pose. Local Link is held in a
-                // STATIC mounted pose by the title cutscene's
-                // scripted actor cue — his joints don't advance
-                // frame-to-frame (verified field test log 487:
-                // localLink->skelAnime.jointTable[5] held exactly
-                // (-8741, -5247, 10172) across the entire gallop
-                // stretch). Driving peer's LinkAnimation_Update on
-                // the gallop animation pointer plays the FOOT-gallop
-                // pose (arms swinging, legs running) on a seated
-                // Link, which presents as violent body flopping.
+                // Freeze-at-frame per-peer Link pose. Each peer owns
+                // a slot in sTitlePeerJointTable/sTitlePeerMorphTable
+                // and is locked to a single chosen frame of local
+                // Link's current animation. Mechanism: when local
+                // Link's animation pointer changes, call
+                // LinkAnimation_Change with startFrame = loopFrames
+                // × peer's phase fraction. The Change queues a
+                // single LOADFRAME via AnimationContext; once it
+                // flushes (later in Play_Update), the per-peer
+                // jointTable holds that one frame. We never call
+                // LinkAnimation_Update, so no further LOADFRAMEs
+                // queue and the pose stays frozen until local's
+                // anim pointer changes again.
                 //
-                // Aliasing matches what local Link is showing — a
-                // calm seated rider pose. No per-peer phase offset
-                // for Link is needed: nothing is animating, so
-                // there's nothing to phase. The per-peer horse
-                // animation phase offset (see horse block above)
-                // continues to provide the visual variety in the
-                // formation.
-                player->skelAnime.jointTable    = localLink->skelAnime.jointTable;
-                player->skelAnime.morphTable    = localLink->skelAnime.morphTable;
+                // Why freeze and not animate: when peer's
+                // LinkAnimation_Update was active (decouple attempt,
+                // field test log 487), peer played the animation
+                // through all frames — but during the title gallop
+                // segment local Link's pose isn't actually driven by
+                // his skelAnime.animation (held static by the actor
+                // cue). Playing through the foot-locomotion frames
+                // on a seated Link showed wild flopping. Freezing
+                // each peer at one frame keeps them visually still
+                // and per-peer distinct via formation phase
+                // fractions (25%/50%/75% per user request, slots
+                // 3-7 fill in the other 1/8ths). Trade-off: during
+                // the gallop segment peers may freeze on a foot-
+                // locomotion pose; during the river-idle segment
+                // where local Link runs the idle anim through update,
+                // peers freeze on different idle-pose frames — the
+                // intended use case.
+                const uint8_t bufferIdx = (formationIdx < kMaxTitlePeerBuffers)
+                    ? formationIdx : (kMaxTitlePeerBuffers - 1);
+                player->skelAnime.jointTable = sTitlePeerJointTable[bufferIdx];
+                player->skelAnime.morphTable = sTitlePeerMorphTable[bufferIdx];
+
+                LinkAnimationHeader* localLinkAnim =
+                    (LinkAnimationHeader*)localLink->skelAnime.animation;
+                if (localLinkAnim != nullptr &&
+                    localLinkAnim != (LinkAnimationHeader*)player->skelAnime.animation) {
+                    const AnchorTitlePeer::TitlePeerFormation linkPhase =
+                        AnchorTitlePeer::MakeTitlePeerFormation(
+                            clientId, formationIdx);
+                    const f32 linkLoopFrames =
+                        (f32)Animation_GetLastFrame((void*)localLinkAnim);
+                    const f32 linkPhaseFrac =
+                        (f32)linkPhase.animPhaseOffset / 256.0f;
+                    const f32 linkStartFrame =
+                        linkLoopFrames * linkPhaseFrac;
+                    // playSpeed=0 + we never call LinkAnimation_Update,
+                    // so the LOADFRAME from this Change is the only
+                    // animation work that runs on the peer's buffer.
+                    // Mode is irrelevant (we don't advance) but
+                    // ANIMMODE_LOOP keeps SkelAnime state coherent.
+                    LinkAnimation_Change(
+                        gPlayState, &player->skelAnime, localLinkAnim,
+                        0.0f, linkStartFrame, linkLoopFrames,
+                        ANIMMODE_LOOP, 0.0f);
+                    SPDLOG_INFO(
+                        "[TitlePeer] link anim freeze clientId={} "
+                        "formationIdx={} loopFrames={:.1f} "
+                        "phaseFrac={:.3f} start={:.2f}",
+                        clientId, (int)formationIdx,
+                        linkLoopFrames, linkPhaseFrac, linkStartFrame);
+                }
                 player->skelAnime.movementFlags = 0;
-                Math_Vec3s_Copy(&player->skelAnime.prevTransl,
-                                &localLink->skelAnime.prevTransl);
                 // Intentionally NOT copying upperLimbRot from local Link.
                 // At the title cutscene, vanilla code can apply yaw to
                 // local Link's upper-body rotation (e.g., to face the
@@ -1606,6 +1654,26 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
             }
         }
         swappedFace = true;
+    }
+
+    // Title-mode root-motion snap. The freeze-at-frame mechanism in
+    // DummyPlayer_Update queues a single LinkAnimation_Change LOAD-
+    // FRAME that fills the peer's jointTable with one frozen pose;
+    // that pose's jointTable[0] carries the animation's root
+    // translation for that frame. Without snapping, the rendered
+    // model would sit at world.pos + frozen_root_translation, which
+    // can be hundreds of world units off-saddle. baseTransl is the
+    // model's resting root position; snapping all three axes locks
+    // the rendered model to actor.world.pos exactly. Body pose
+    // (spine / arms / legs) comes from non-root joints and is
+    // untouched.
+    if (titleMode && player->skelAnime.jointTable != nullptr) {
+        player->skelAnime.jointTable[0].x =
+            player->skelAnime.baseTransl.x;
+        player->skelAnime.jointTable[0].y =
+            player->skelAnime.baseTransl.y;
+        player->skelAnime.jointTable[0].z =
+            player->skelAnime.baseTransl.z;
     }
 
     Player_Draw((Actor*)player, play);
