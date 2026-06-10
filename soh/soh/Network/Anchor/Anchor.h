@@ -890,6 +890,12 @@ class Anchor : public Network {
     void RegisterTitlePeerHorse(uint32_t clientId, uint32_t horseNetId, Actor* horse);
     void UnregisterTitlePeerHorse(uint32_t clientId);
     Actor* FindTitlePeerHorse(uint32_t clientId) const;
+    // Phase 3 — reverse lookup. Used by HorseSync/HorseHooks.cpp to
+    // skip the playerControlled=1 mount-side gate for title-screen
+    // horses (which would otherwise put them into vanilla's freeze
+    // cycle and suppress gallop animation). Walks mTitlePeerHorses
+    // (n ≤ 3 — the visible-peer cap), so the cost is negligible.
+    bool IsTitlePeerHorse(const Actor* actor) const;
     bool IsDummyPlayerTitleMode(const Actor* actor) const;
     uint8_t GetTitlePeerFormationIndex(const Actor* actor) const;
     // Idempotent gate-check + rebuild. Called from both OnSceneSpawnActors

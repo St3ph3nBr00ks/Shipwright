@@ -16,7 +16,9 @@ extern "C" {
 #include "variables.h"
 #include "functions.h"
 #include "overlays/effects/ovl_Effect_Ss_HitMark/z_eff_ss_hitmark.h"  // EFFECT_HITMARK_METAL
-#include "overlays/actors/ovl_En_Horse/z_en_horse.h"  // mounted-pose reconciliation
+#include "overlays/actors/ovl_En_Horse/z_en_horse.h"  // mounted-pose reconciliation + ENHORSE_ANIM_*
+#include "objects/object_horse/object_horse.h"        // gEpona*Anim (Phase 3 state mirror)
+#include "objects/gameplay_keep/gameplay_keep.h"      // gPlayerAnim_link_uma_anim_stand (title-peer freeze pose)
 extern PlayState* gPlayState;
 
 void Player_UseItem(PlayState* play, Player* player, s32 item);
@@ -30,6 +32,43 @@ void Player_Draw(Actor* actor, PlayState* play);
 extern void* sEyeTextures[2][8];
 extern void* sMouthTextures[2][4];
 }
+
+namespace {
+
+// Title-mode per-peer Link skelAnime buffers. Decoupled from local
+// Link via the "freeze at offset frame" mechanism — LinkAnimation_
+// Change loads ONE frame into the buffer, no further ticks happen,
+// each peer holds a different static pose of local Link's current
+// animation. Avoids the LinkAnimation_Update foot-gallop-flopping
+// pitfall (field test log 487) by never running the per-frame
+// animation tick. Sized for Link's max 22-limb skel + 2-Vec3s
+// padding = 24 slots.
+constexpr int kMaxTitlePeerBuffers = 8;
+constexpr int kLinkJointTableLen   = 24;
+Vec3s sTitlePeerJointTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
+Vec3s sTitlePeerMorphTable[kMaxTitlePeerBuffers][kLinkJointTableLen];
+
+// Title-mode Link-delta tracking. Peer horses translate by local
+// Link's per-frame position delta instead of being re-derived from
+// Link's pos+rot each frame. This eliminates the lateral "slide"
+// that the previous full-recompute approach produced when local
+// Link rotates — formation offsets used to rotate with Link, so
+// peers visibly slid across the ground during turns. With delta
+// motion, peers maintain their world-space position and only
+// translate when Link translates.
+//
+// Sampled once per game frame from the formationIdx == 0 peer
+// (sentinel — multiple peers tick per game frame, all sampling
+// would over-count). Snap-to-target threshold below catches
+// large jumps (scene cuts, formation override transitions) by
+// forcing peer to the current target slot when distance exceeds
+// the threshold.
+Vec3f    sTitlePeerLastLinkPos    = {0, 0, 0};
+uint64_t sTitlePeerLastDeltaFrame = 0;
+Vec3f    sTitlePeerLinkDelta      = {0, 0, 0};
+bool     sTitlePeerDeltaPrimed    = false;
+
+}  // namespace
 
 // KB-19 diagnostic CVars — see DummyPlayer_Draw / DummyPlayer_Init / DummyPlayer_Update.
 //   gAnchor.Debug.SkipDummyDraw   (default 0): when 1, DummyPlayer_Draw returns
@@ -336,11 +375,58 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 // (stagger / yaw divergence / animation phase), modify only
                 // MakeTitlePeerFormation in that header; this call site
                 // needs no changes.
+                // Rotation source — prefer the local cutscene Epona's
+                // shape.rot.y over local Link's world.rot.y. The title
+                // cutscene's actor cue can rotate Link to face the
+                // camera during close-up shots (e.g., shot transitions
+                // where Link's body turns to be visible in the frame),
+                // but the horse's facing direction is always the
+                // gallop heading toward the next waypoint. Using the
+                // horse's rotation makes peers face the actual gallop
+                // direction at all times, not whatever momentary pose
+                // local Link is in. Falls back to local Link's
+                // world.rot.y when no cutscene Epona is present
+                // (e.g., CVar gate off → foot peers, or non-Hyrule-
+                // Field title shots).
+                //
+                // Local cutscene Epona identification matches the
+                // animation-mirror walk below: ACTOR_EN_HORSE with
+                // params=7 in ACTORCAT_BG (z_horse.c:190 — the title-
+                // cutscene spawn variant).
+                int16_t lookYaw = localLink->actor.world.rot.y;
+                {
+                    Actor* a =
+                        gPlayState->actorCtx.actorLists[ACTORCAT_BG].head;
+                    while (a != nullptr) {
+                        if (a->id == ACTOR_EN_HORSE && a->params == 7) {
+                            lookYaw = a->shape.rot.y;
+                            break;
+                        }
+                        a = a->next;
+                    }
+                }
+                // Per-shot left-side formation magnitude.
+                // Shot 5 (csFrame 1080-1104): idle by river, default
+                //   formation (peers absent during close-up anyway).
+                // Shot 6 (csFrame 1105-1204): low dramatic camera —
+                //   river hazard, full 150u left-side offset.
+                // Shots 7-9 (csFrame 1205-1605): riding alongside the
+                //   river, reduced 75u left-side offset (field-test
+                //   tuning — the wider shots make 150u look cramped).
+                // All other shots: default V/diamond formation.
+                float leftLateral = 0.0f;
+                if (gPlayState->csCtx.state != CS_STATE_IDLE) {
+                    const int32_t cf = gPlayState->csCtx.frames;
+                    if      (cf >= 1105 && cf <= 1204) leftLateral = 150.0f;
+                    else if (cf >= 1205 && cf <= 1605) leftLateral =  75.0f;
+                }
+
                 AnchorTitlePeer::TitlePeerSlot slot =
                     AnchorTitlePeer::ComputeTitlePeerSlot(
                         localLink->actor.world.pos,
-                        localLink->actor.world.rot.y,
-                        clientId, formationIdx);
+                        lookYaw,
+                        clientId, formationIdx,
+                        leftLateral);
 
                 // Path A — ground snap via raycast from above the slot
                 // position. Hyrule Field's terrain dips and rolls under
@@ -383,6 +469,14 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                 // See log 467 — horse "Spawned ... Path A" lines fire
                 // but lookups failed every tick.
                 //
+                // Local cutscene horse's current animationIdx, captured
+                // during the horse-anim-mirror walk below and read by
+                // the peer Link pose block. -1 = no local horse found
+                // (e.g. CVar off → no peer horse spawned, or pre-gallop
+                // setup frames). Used to choose alias vs freeze mode
+                // for peer Link.
+                int32_t localHorseAnimIdx = -1;
+
                 // Spawned horse may not exist (CVar gate off; spawn
                 // failure). When absent, the rider stands on the ground
                 // at the slot — Phase 1 behaviour preserved.
@@ -390,8 +484,180 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     ? Anchor::Instance->FindTitlePeerHorse(clientId)
                     : nullptr;
                 if (peerHorse != nullptr && peerHorse->id == ACTOR_EN_HORSE) {
-                    peerHorse->world.pos = slot.pos;
+                    // Sample local Link's per-frame position delta
+                    // once per game frame (formationIdx == 0 peer is
+                    // the sentinel — multiple peers run per game
+                    // frame). Used below to translate peer horse
+                    // position instead of re-deriving it from Link's
+                    // current pos+rot. Eliminates the lateral slide
+                    // when Link rotates.
+                    if (formationIdx == 0 && Anchor::Instance != nullptr) {
+                        const uint64_t curFrame =
+                            Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
+                        if (curFrame != sTitlePeerLastDeltaFrame) {
+                            if (sTitlePeerDeltaPrimed) {
+                                const float ddx =
+                                    localLink->actor.world.pos.x - sTitlePeerLastLinkPos.x;
+                                const float ddy =
+                                    localLink->actor.world.pos.y - sTitlePeerLastLinkPos.y;
+                                const float ddz =
+                                    localLink->actor.world.pos.z - sTitlePeerLastLinkPos.z;
+                                // Detect scene-cut teleport — cutscene
+                                // jumps Link hundreds of units between
+                                // shots / scenes. Translating peers by
+                                // that delta would fling them. Treat
+                                // large jumps as a "no advance" frame
+                                // and rely on the snap-on-far path to
+                                // realign peers via slot.pos.
+                                constexpr float kSceneCutThresholdSq =
+                                    1000.0f * 1000.0f;
+                                if (ddx * ddx + ddy * ddy + ddz * ddz >
+                                    kSceneCutThresholdSq) {
+                                    sTitlePeerLinkDelta = {0.0f, 0.0f, 0.0f};
+                                } else {
+                                    sTitlePeerLinkDelta.x = ddx;
+                                    sTitlePeerLinkDelta.y = ddy;
+                                    sTitlePeerLinkDelta.z = ddz;
+                                }
+                            } else {
+                                sTitlePeerLinkDelta = {0.0f, 0.0f, 0.0f};
+                                sTitlePeerDeltaPrimed = true;
+                            }
+                            sTitlePeerLastLinkPos    = localLink->actor.world.pos;
+                            sTitlePeerLastDeltaFrame = curFrame;
+                        }
+                    }
+
+                    // Snap-or-delta motion. When peer's current
+                    // position is close to the target formation slot
+                    // (within kSnapThreshold), advance by Link's
+                    // delta — preserves world-space position so
+                    // peers don't slide when Link rotates. When far
+                    // (scene cuts, formation-mode transitions like
+                    // entering the river-shot left-side override),
+                    // snap to the target slot so peers stay roughly
+                    // in formation. 250u threshold catches the
+                    // river-override step (150u lateral magnitude)
+                    // while tolerating normal cutscene shot turns
+                    // (~120u drift from a 90° formation rotation).
+                    constexpr float kSnapThresholdSq = 250.0f * 250.0f;
+                    const float dx = slot.pos.x - peerHorse->world.pos.x;
+                    const float dz = slot.pos.z - peerHorse->world.pos.z;
+                    const float distSq = dx * dx + dz * dz;
+                    if (distSq > kSnapThresholdSq) {
+                        peerHorse->world.pos = slot.pos;
+                    } else {
+                        peerHorse->world.pos.x += sTitlePeerLinkDelta.x;
+                        peerHorse->world.pos.y += sTitlePeerLinkDelta.y;
+                        peerHorse->world.pos.z += sTitlePeerLinkDelta.z;
+                        // Re-snap Y to ground so peer doesn't drift
+                        // above/below terrain when local Link's Y
+                        // delta crosses terrain elevation changes.
+                        Vec3f probe = { peerHorse->world.pos.x,
+                                        peerHorse->world.pos.y + 200.0f,
+                                        peerHorse->world.pos.z };
+                        CollisionPoly* outPoly = nullptr;
+                        f32 groundY = BgCheck_EntityRaycastFloor1(
+                            &gPlayState->colCtx, &outPoly, &probe);
+                        if (groundY > BGCHECK_Y_MIN) {
+                            peerHorse->world.pos.y = groundY;
+                        }
+                    }
                     peerHorse->shape.rot.y = slot.rotY;
+
+                    // Phase 3 horse animation state mirror — match local
+                    // cutscene Epona's animation. When the cutscene
+                    // transitions local Link's horse between gallop /
+                    // idle / walk / rear / etc., peer horses follow.
+                    // We only re-call Animation_PlayLoop on state CHANGE
+                    // (not every frame) — once an animation is loaded,
+                    // vanilla EnHorse_Idle's SkelAnime_Update keeps
+                    // ticking it.
+                    //
+                    // Local cutscene Epona is identified by params=7 in
+                    // ACTORCAT_BG (z_horse.c:190 — the title-cutscene
+                    // spawn variant). Peer title horses spawn with
+                    // params=0 so they're distinguishable. Walk is O(n)
+                    // with n = BG actor count in scene (small).
+                    EnHorse* localHorse = nullptr;
+                    {
+                        Actor* a =
+                            gPlayState->actorCtx.actorLists[ACTORCAT_BG].head;
+                        while (a != nullptr) {
+                            if (a->id == ACTOR_EN_HORSE && a->params == 7) {
+                                localHorse = (EnHorse*)a;
+                                break;
+                            }
+                            a = a->next;
+                        }
+                    }
+                    if (localHorse != nullptr) {
+                        localHorseAnimIdx = localHorse->animationIdx;
+                        EnHorse* peer = (EnHorse*)peerHorse;
+                        if (peer->animationIdx != localHorse->animationIdx) {
+                            AnimationHeader* anim = nullptr;
+                            switch (localHorse->animationIdx) {
+                                case ENHORSE_ANIM_IDLE:
+                                    anim = (AnimationHeader*)&gEponaIdleAnim; break;
+                                case ENHORSE_ANIM_WHINNEY:
+                                    anim = (AnimationHeader*)&gEponaWhinnyAnim; break;
+                                case ENHORSE_ANIM_STOPPING:
+                                    // Asset name is "Refuse" but the runtime
+                                    // enum index 2 is "STOPPING" (per
+                                    // z_en_horse.h).
+                                    anim = (AnimationHeader*)&gEponaRefuseAnim; break;
+                                case ENHORSE_ANIM_REARING:
+                                    anim = (AnimationHeader*)&gEponaRearingAnim; break;
+                                case ENHORSE_ANIM_WALK:
+                                    anim = (AnimationHeader*)&gEponaWalkingAnim; break;
+                                case ENHORSE_ANIM_TROT:
+                                    anim = (AnimationHeader*)&gEponaTrottingAnim; break;
+                                case ENHORSE_ANIM_GALLOP:
+                                    anim = (AnimationHeader*)&gEponaGallopingAnim; break;
+                                case ENHORSE_ANIM_LOW_JUMP:
+                                    anim = (AnimationHeader*)&gEponaJumpingAnim; break;
+                                case ENHORSE_ANIM_HIGH_JUMP:
+                                    anim = (AnimationHeader*)&gEponaJumpingHighAnim; break;
+                                default:
+                                    anim = (AnimationHeader*)&gEponaIdleAnim; break;
+                            }
+                            Animation_PlayLoop(&peer->skin.skelAnime, anim);
+                            // Per-peer phase as fraction of loop length.
+                            // TitlePeerFormation stores fraction × 256
+                            // (slot-deterministic table — slots 0/1/2 →
+                            // 25%/50%/75%, slots 3-7 fill in the other
+                            // 1/8ths). Multiplying by the real loop
+                            // length gives the right start frame for
+                            // any animation (gallop 23, idle 119,
+                            // rearing 32 etc. — measured in log 487).
+                            const AnchorTitlePeer::TitlePeerFormation
+                                phaseFormation =
+                                AnchorTitlePeer::MakeTitlePeerFormation(
+                                    clientId, formationIdx);
+                            const f32 horseLoopFrames =
+                                (f32)Animation_GetLastFrame((void*)anim);
+                            const f32 horsePhaseFrac =
+                                (f32)phaseFormation.animPhaseOffset / 256.0f;
+                            const f32 horseStart =
+                                horseLoopFrames * horsePhaseFrac;
+                            peer->skin.skelAnime.curFrame = horseStart;
+                            peer->animationIdx = localHorse->animationIdx;
+                        }
+                        // Mirror playSpeed every frame, not just on state
+                        // change. Vanilla horse code modulates playSpeed
+                        // from speedXZ within the WALK / TROT / GALLOP /
+                        // STOPPING / JUMP action bodies (z_en_horse.c
+                        // :1267, :1314, :1382, :1567, :1633, :1709), so
+                        // the value drifts continuously during locomotion
+                        // — not just at anim-change time. IDLE / WHINNEY
+                        // / REARING / REFUSE never touch playSpeed so the
+                        // local stays at 1.0f and the peer matches for
+                        // free. At cutscene gallop speedXZ ~13-15 the
+                        // local plays at ~4×; default 1.0 made the peer
+                        // crawl.
+                        peer->skin.skelAnime.playSpeed =
+                            localHorse->skin.skelAnime.playSpeed;
+                    }
                 }
 
                 // Rider position — vanilla-parity via horse->riderPos.
@@ -510,28 +776,70 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
                 }
 
-                // Drive the peer's skelAnime from local Link's
-                // animation state. Title-screen peers have no incoming
-                // wire animation (peer is also at title screen — their
-                // client.jointTable is gameplay-time data and invalid),
-                // so without this alias, peer renders in default idle
-                // pose. We share local Link's jointTable + morphTable
-                // pointers — safe because both sides use the same
-                // Link skeleton (22 limbs, PLAYER_LIMB_MAX). Aliasing
-                // pattern is the same shape as the gameplay-time
-                // path above (line ~278 — `player->skelAnime.jointTable
-                // = client.jointTable`).
+                // Peer Link pose: alias when local Epona is in
+                // gallop, freeze on uma_stand frame 0 otherwise.
                 //
-                // At title screen, local Link is in mounted gallop pose
-                // (cutscene actor cue drives him), so this alias makes
-                // peers visually ride in lockstep with local Link. v3+
-                // polish: replace alias with manual SkelAnime tick using
-                // TitlePeerFormation::animPhaseOffset.
-                player->skelAnime.jointTable    = localLink->skelAnime.jointTable;
-                player->skelAnime.morphTable    = localLink->skelAnime.morphTable;
-                player->skelAnime.movementFlags = localLink->skelAnime.movementFlags;
-                Math_Vec3s_Copy(&player->skelAnime.prevTransl,
-                                &localLink->skelAnime.prevTransl);
+                //   - GALLOP mode (alias): local Link is actively
+                //     riding/swaying with the gallop cutscene cue;
+                //     peer mirrors local exactly. This was the
+                //     pre-decouple state that worked well during
+                //     the gallop segment (log 487 — peer Link
+                //     looked correct mounted on a galloping Epona
+                //     when its jointTable pointer aliased local's).
+                //
+                //   - NON-GALLOP mode (freeze): river idle, scene
+                //     stops, rearing, etc. Lock peer to frame 0 of
+                //     gPlayerAnim_link_uma_anim_stand (the "sitting
+                //     idle on horse" pose). This avoids the freeze-
+                //     on-wrong-anim distortion seen during the
+                //     river idle in log 488 (peer froze on a foot-
+                //     locomotion pose) and the alias-during-static
+                //     issue (peer mirrors local's cue-driven static
+                //     pose, which is also OK but the explicit
+                //     idle-anim pose is the user-preferred fallback).
+                //
+                // Switch is keyed on the local cutscene horse's
+                // animationIdx (captured in the horse-anim-mirror
+                // block above). When no local horse is found
+                // (localHorseAnimIdx == -1, CVar off → no
+                // mounted-peer setup), fall back to freeze mode.
+                const bool aliasMode =
+                    (localHorseAnimIdx == ENHORSE_ANIM_GALLOP);
+
+                const uint8_t bufferIdx = (formationIdx < kMaxTitlePeerBuffers)
+                    ? formationIdx : (kMaxTitlePeerBuffers - 1);
+
+                if (aliasMode) {
+                    // Alias local Link's jointTable + morphTable
+                    // pointers. Peer mirrors local's gallop pose.
+                    // Reset peer's own skelAnime.animation so the
+                    // next freeze-mode entry's pointer-mismatch
+                    // check re-fires the LinkAnimation_Change.
+                    player->skelAnime.jointTable = localLink->skelAnime.jointTable;
+                    player->skelAnime.morphTable = localLink->skelAnime.morphTable;
+                    player->skelAnime.animation  = nullptr;
+                    Math_Vec3s_Copy(&player->skelAnime.prevTransl,
+                                    &localLink->skelAnime.prevTransl);
+                } else {
+                    // Freeze mode: per-peer buffer, locked to
+                    // uma_stand frame 0. Single LinkAnimation_Change
+                    // when peer's anim ptr drifts off target; no
+                    // LinkAnimation_Update calls.
+                    player->skelAnime.jointTable = sTitlePeerJointTable[bufferIdx];
+                    player->skelAnime.morphTable = sTitlePeerMorphTable[bufferIdx];
+
+                    LinkAnimationHeader* targetAnim =
+                        (LinkAnimationHeader*)&gPlayerAnim_link_uma_anim_stand;
+                    if (targetAnim != (LinkAnimationHeader*)player->skelAnime.animation) {
+                        const f32 targetEndFrame =
+                            (f32)Animation_GetLastFrame((void*)targetAnim);
+                        LinkAnimation_Change(
+                            gPlayState, &player->skelAnime, targetAnim,
+                            0.0f, 0.0f, targetEndFrame,
+                            ANIMMODE_LOOP, 0.0f);
+                    }
+                }
+                player->skelAnime.movementFlags = 0;
                 // Intentionally NOT copying upperLimbRot from local Link.
                 // At the title cutscene, vanilla code can apply yaw to
                 // local Link's upper-body rotation (e.g., to face the
@@ -1343,7 +1651,16 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     // + RM_AA_ZB_XLU_SURF (sibling of the existing
     // Anchor_LocalPlayerFaceSwapBegin/End hooks). Tracked in the Pillar B
     // implementation plan as a Phase 4 polish item.
-    if (client.linkAge != gSaveContext.linkAge) {
+    //
+    // Title-mode exempt: title screen forces adult Link locally
+    // (Opening_SetupTitleScreen), so a peer's gameplay-time linkAge from
+    // their last save (could be child) would otherwise dim them out
+    // here. The title-cutscene shots all show adult Link riding Epona,
+    // so we want to render the peer as adult regardless of their save
+    // file. linkAge is swapped to client.linkAge later in this function
+    // anyway, so the Player_Draw call still renders the correct model
+    // for the cosmetic-sync pack.
+    if (!titleMode && client.linkAge != gSaveContext.linkAge) {
         return;
     }
 
@@ -1385,9 +1702,12 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
         sLoggedSkeletons[clientId] = curSkel;
     }
 
-    // Hack to account for usage of gSaveContext in Player_Draw
+    // Hack to account for usage of gSaveContext in Player_Draw.
+    // Title-mode peers always render as adult Link — the title
+    // cutscene shows adult Epona-mounted Link, and peer's broadcast
+    // linkAge may be stale child from their last gameplay session.
     s32 originalAge = gSaveContext.linkAge;
-    gSaveContext.linkAge = client.linkAge;
+    gSaveContext.linkAge = titleMode ? LINK_AGE_ADULT : client.linkAge;
     u8 originalButtonItem0 = gSaveContext.equips.buttonItems[0];
     gSaveContext.equips.buttonItems[0] = client.buttonItem0;
     if (DebugLogSwapWindows()) {
@@ -1462,6 +1782,30 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
             }
         }
         swappedFace = true;
+    }
+
+    // Title-mode root-motion snap, gated on freeze mode. Peer's
+    // jointTable is either:
+    //   - per-peer buffer (freeze mode): root carries the frozen
+    //     uma_stand frame's root translation, which must be clamped
+    //     to baseTransl to keep the rendered model on the saddle.
+    //   - aliased to local Link's jointTable (alias / gallop mode):
+    //     local Link's vanilla SkelAnime path already handles root.
+    //     Snapping here would write into local Link's own buffer,
+    //     disturbing local's draw too. Skip the snap.
+    if (titleMode && player->skelAnime.jointTable != nullptr) {
+        Player* localLinkForGate = GET_PLAYER(gPlayState);
+        const bool aliasMode =
+            (localLinkForGate != nullptr &&
+             player->skelAnime.jointTable == localLinkForGate->skelAnime.jointTable);
+        if (!aliasMode) {
+            player->skelAnime.jointTable[0].x =
+                player->skelAnime.baseTransl.x;
+            player->skelAnime.jointTable[0].y =
+                player->skelAnime.baseTransl.y;
+            player->skelAnime.jointTable[0].z =
+                player->skelAnime.baseTransl.z;
+        }
     }
 
     Player_Draw((Actor*)player, play);

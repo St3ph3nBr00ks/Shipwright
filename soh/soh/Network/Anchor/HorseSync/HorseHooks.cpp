@@ -133,7 +133,37 @@ void Anchor::RegisterHorseHooks() {
                 // Mount-side gate — peer horses are unmountable by the
                 // local player. Setting playerControlled forces
                 // EnHorse_GetMountSide to return 0 at z_en_horse.c:3643+.
-                ((EnHorse*)actor)->playerControlled = 1;
+                //
+                // Phase 3 exception (2026-06-09): title-screen peer
+                // horses skip this gate. With playerControlled=1 +
+                // Actor_NotMounted=true, vanilla EnHorse_Update enters
+                // the freeze cycle at z_en_horse.c:3034-3039
+                // (action -> ENHORSE_ACT_FROZEN -> animationIdx = IDLE),
+                // suppressing gallop animation entirely. The title-
+                // screen consumer wants the horse to animate so peers
+                // look like they're actually riding. At the title
+                // cutscene the local Link can't mount anything anyway
+                // (cutscene actor cues drive him), so the mount-side
+                // protection has no practical effect there.
+                //
+                // Active clear (=0) rather than just skipping the
+                // write: vanilla EnHorse_Frozen action body sets
+                // playerControlled = 1 from inside its own update
+                // (z_en_horse.c:2384). Once the horse enters Frozen
+                // state, it'd self-perpetuate the freeze even with
+                // our hook gate skip in place. Actively clearing each
+                // frame ensures the next vanilla update sees
+                // playerControlled=0, doesn't re-freeze, and the horse
+                // can transition out (z_en_horse.c:3038-3039 →
+                // playerControlled=0 path → grounded idle).
+                //
+                // IsTitlePeerHorse walk is O(n) with n ≤ 3.
+                if (Anchor::Instance != nullptr &&
+                    Anchor::Instance->IsTitlePeerHorse(actor)) {
+                    ((EnHorse*)actor)->playerControlled = 0;
+                } else {
+                    ((EnHorse*)actor)->playerControlled = 1;
+                }
                 return;
             }
 
