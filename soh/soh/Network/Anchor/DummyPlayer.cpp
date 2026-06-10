@@ -18,6 +18,7 @@ extern "C" {
 #include "overlays/effects/ovl_Effect_Ss_HitMark/z_eff_ss_hitmark.h"  // EFFECT_HITMARK_METAL
 #include "overlays/actors/ovl_En_Horse/z_en_horse.h"  // mounted-pose reconciliation + ENHORSE_ANIM_*
 #include "objects/object_horse/object_horse.h"        // gEpona*Anim (Phase 3 state mirror)
+#include "objects/gameplay_keep/gameplay_keep.h"      // gPlayerAnim_link_uma_anim_stand (title-peer freeze pose)
 extern PlayState* gPlayState;
 
 void Player_UseItem(PlayState* play, Player* player, s32 item);
@@ -658,106 +659,50 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     player->stateFlags1 &= ~PLAYER_STATE1_ON_HORSE;
                 }
 
-                // Hybrid peer Link pose: alias local when local is
-                // cue-driven (joints static), freeze each peer at a
-                // distinct phase when local is anim-driven (joints
-                // changing). The two title-cutscene cases:
+                // Lock peer Link to frame 0 of
+                // gPlayerAnim_link_uma_anim_stand — the "sitting
+                // idle on horse" pose. Deterministic regardless of
+                // what animation local Link is on; eliminates both
+                // failure modes seen on field test:
+                //   - Hybrid detect freezing on a gallop anim (foot
+                //     locomotion pose on a seated rider — visibly
+                //     distorted, log 488 river-idle reports).
+                //   - Alias mode making peer move when local moved
+                //     (peer cosmetically tracking local during
+                //     gallop, log 488 gallop reports — user wants
+                //     peers calm regardless).
                 //
-                //   - Gallop segment: cutscene cue holds local Link
-                //     in a calm seated pose; local's skelAnime
-                //     joints don't advance frame-to-frame even
-                //     though skelAnime.animation points at some
-                //     foot-locomotion anim. Playing that anim on a
-                //     peer produces the violent body flopping seen
-                //     in log 487. Alias local's jointTable so peers
-                //     mirror local's actual seated pose.
+                // Mechanism: own per-peer jointTable buffer +
+                // LinkAnimation_Change with startFrame=0 once per
+                // peer (when its skelAnime.animation doesn't match
+                // our target). Single LOADFRAME via AnimationContext
+                // fills the buffer with the seated pose; no further
+                // animation ticks happen.
                 //
-                //   - River-idle segment: local Link's idle
-                //     animation actually advances through
-                //     LinkAnimation_Update — joints visibly change
-                //     per frame. Aliasing here means all peers
-                //     animate in lockstep with local; user wants
-                //     per-peer variety. Switch to freeze-at-offset:
-                //     each peer holds a different idle frame.
-                //
-                // Detection: track local Link's jointTable[5] across
-                // frames. If it's been stable for >= kAnimStableFrames
-                // ticks, local is cue-driven → alias. Otherwise local
-                // is animating → freeze. State is global (one local
-                // Link, all peers share it) and sampled once per
-                // game frame (formationIdx == 0 peer is the sentinel).
-                constexpr uint32_t kAnimStableFrames = 10;
-                static Vec3s    sLastLocalJoint5    = {0, 0, 0};
-                static uint32_t sLocalJointStable   = 0;
-                static uint64_t sLastSampleFrame    = 0;
-                static bool     sLocalIsAnimating   = false;
-
-                if (formationIdx == 0 && Anchor::Instance != nullptr) {
-                    const uint64_t curFrame =
-                        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
-                    if (curFrame != sLastSampleFrame) {
-                        sLastSampleFrame = curFrame;
-                        Vec3s cur = (localLink->skelAnime.jointTable != nullptr)
-                            ? localLink->skelAnime.jointTable[5]
-                            : Vec3s{0, 0, 0};
-                        const bool changed =
-                            (cur.x != sLastLocalJoint5.x ||
-                             cur.y != sLastLocalJoint5.y ||
-                             cur.z != sLastLocalJoint5.z);
-                        sLastLocalJoint5 = cur;
-                        if (changed) {
-                            sLocalJointStable = 0;
-                        } else if (sLocalJointStable < 0x7FFFFFFF) {
-                            sLocalJointStable++;
-                        }
-                        sLocalIsAnimating =
-                            (sLocalJointStable < kAnimStableFrames);
-                    }
-                }
-
+                // Per-peer phase offset doesn't apply here — all
+                // peers hold the same seated pose. Formation visual
+                // variety comes from per-peer position stagger
+                // (slot table in TitlePeerFormation.h) and per-peer
+                // horse anim phase offset (horse block above).
                 const uint8_t bufferIdx = (formationIdx < kMaxTitlePeerBuffers)
                     ? formationIdx : (kMaxTitlePeerBuffers - 1);
+                player->skelAnime.jointTable = sTitlePeerJointTable[bufferIdx];
+                player->skelAnime.morphTable = sTitlePeerMorphTable[bufferIdx];
 
-                if (sLocalIsAnimating) {
-                    // Freeze mode — per-peer buffer, single LOADFRAME
-                    // on local anim-pointer change.
-                    player->skelAnime.jointTable = sTitlePeerJointTable[bufferIdx];
-                    player->skelAnime.morphTable = sTitlePeerMorphTable[bufferIdx];
-
-                    LinkAnimationHeader* localLinkAnim =
-                        (LinkAnimationHeader*)localLink->skelAnime.animation;
-                    if (localLinkAnim != nullptr &&
-                        localLinkAnim != (LinkAnimationHeader*)player->skelAnime.animation) {
-                        const AnchorTitlePeer::TitlePeerFormation linkPhase =
-                            AnchorTitlePeer::MakeTitlePeerFormation(
-                                clientId, formationIdx);
-                        const f32 linkLoopFrames =
-                            (f32)Animation_GetLastFrame((void*)localLinkAnim);
-                        const f32 linkPhaseFrac =
-                            (f32)linkPhase.animPhaseOffset / 256.0f;
-                        const f32 linkStartFrame =
-                            linkLoopFrames * linkPhaseFrac;
-                        LinkAnimation_Change(
-                            gPlayState, &player->skelAnime, localLinkAnim,
-                            0.0f, linkStartFrame, linkLoopFrames,
-                            ANIMMODE_LOOP, 0.0f);
-                        SPDLOG_INFO(
-                            "[TitlePeer] link anim freeze clientId={} "
-                            "formationIdx={} loopFrames={:.1f} "
-                            "phaseFrac={:.3f} start={:.2f}",
-                            clientId, (int)formationIdx,
-                            linkLoopFrames, linkPhaseFrac, linkStartFrame);
-                    }
-                } else {
-                    // Alias mode — peer mirrors local's current pose.
-                    // Reset peer's animation pointer so a re-entry
-                    // into freeze mode picks up the next anim change
-                    // via the pointer-mismatch check above.
-                    player->skelAnime.jointTable = localLink->skelAnime.jointTable;
-                    player->skelAnime.morphTable = localLink->skelAnime.morphTable;
-                    player->skelAnime.animation  = nullptr;
-                    Math_Vec3s_Copy(&player->skelAnime.prevTransl,
-                                    &localLink->skelAnime.prevTransl);
+                LinkAnimationHeader* targetAnim =
+                    (LinkAnimationHeader*)&gPlayerAnim_link_uma_anim_stand;
+                if (targetAnim != (LinkAnimationHeader*)player->skelAnime.animation) {
+                    const f32 targetEndFrame =
+                        (f32)Animation_GetLastFrame((void*)targetAnim);
+                    LinkAnimation_Change(
+                        gPlayState, &player->skelAnime, targetAnim,
+                        0.0f, 0.0f, targetEndFrame,
+                        ANIMMODE_LOOP, 0.0f);
+                    SPDLOG_INFO(
+                        "[TitlePeer] link anim lock clientId={} "
+                        "formationIdx={} anim=uma_stand loopFrames={:.1f} "
+                        "start=0.0",
+                        clientId, (int)formationIdx, targetEndFrame);
                 }
                 player->skelAnime.movementFlags = 0;
                 // Intentionally NOT copying upperLimbRot from local Link.
@@ -1692,31 +1637,20 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
         swappedFace = true;
     }
 
-    // Title-mode root-motion snap, gated on freeze mode.
-    //   - Freeze mode (peer uses its own jointTable buffer): the
-    //     loaded frame's jointTable[0] carries the animation's
-    //     root translation, which must be clamped to baseTransl
-    //     to keep the rendered model on the saddle.
-    //   - Alias mode (peer's jointTable points at local Link's
-    //     buffer): local Link is held by the cutscene cue; his
-    //     vanilla skelAnime path either already snapped root or
-    //     never touched it. Snapping here would overwrite local's
-    //     joint[0] mid-render, affecting local Link's draw too
-    //     (we'd be writing into local's own buffer).
-    // Detect mode by comparing jointTable pointer to GET_PLAYER's.
+    // Title-mode root-motion snap. Peer always uses its own per-peer
+    // jointTable buffer in title mode (locked to frame 0 of the
+    // uma_stand idle anim by DummyPlayer_Update). That frame's
+    // jointTable[0] still carries the animation's root translation,
+    // so we clamp xyz to baseTransl to keep the rendered model on
+    // the saddle. Body pose (spine/arms/legs) comes from non-root
+    // joints and is untouched.
     if (titleMode && player->skelAnime.jointTable != nullptr) {
-        Player* localLinkForGate = GET_PLAYER(gPlayState);
-        const bool aliasMode =
-            (localLinkForGate != nullptr &&
-             player->skelAnime.jointTable == localLinkForGate->skelAnime.jointTable);
-        if (!aliasMode) {
-            player->skelAnime.jointTable[0].x =
-                player->skelAnime.baseTransl.x;
-            player->skelAnime.jointTable[0].y =
-                player->skelAnime.baseTransl.y;
-            player->skelAnime.jointTable[0].z =
-                player->skelAnime.baseTransl.z;
-        }
+        player->skelAnime.jointTable[0].x =
+            player->skelAnime.baseTransl.x;
+        player->skelAnime.jointTable[0].y =
+            player->skelAnime.baseTransl.y;
+        player->skelAnime.jointTable[0].z =
+            player->skelAnime.baseTransl.z;
     }
 
     Player_Draw((Actor*)player, play);
