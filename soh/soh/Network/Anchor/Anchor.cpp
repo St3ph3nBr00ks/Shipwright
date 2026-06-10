@@ -790,7 +790,7 @@ void Anchor::MaybeRebuildTitlePeers() {
     if (gPlayState == nullptr)                                                  { bail(); return; }
     if (gSaveContext.gameMode != GAMEMODE_TITLE_SCREEN)                         { bail(); return; }
     if (gPlayState->sceneNum != SCENE_HYRULE_FIELD)                             { bail(); return; }
-    if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.TitleScreenPeers"), 1) == 0)    { bail(); return; }
+    if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.TitleScreenPeers"), 0) == 0)    { bail(); return; }
 
     // Build candidate list: online, not-self, same teamId as local.
     // Local team comes from the self-entry in clients map.
@@ -809,9 +809,12 @@ void Anchor::MaybeRebuildTitlePeers() {
 
     if (candidates.empty()) { bail(); return; }
 
-    // Q1 locked — alphabetical by name (stable across rejoins, predictable).
+    // Selection criterion — first-N by clientId, which reflects join
+    // order (lower id = earlier connect; assigned by the relay). Matches
+    // the Anchor menu's player-list ordering. Stable across rejoins for
+    // the duration of any one session since clientIds don't reshuffle.
     std::sort(candidates.begin(), candidates.end(),
-              [](const Candidate& a, const Candidate& b) { return a.name < b.name; });
+              [](const Candidate& a, const Candidate& b) { return a.clientId < b.clientId; });
 
     // Q1 locked — cap at 3 visible peers.
     constexpr size_t kMaxVisiblePeers = 3;

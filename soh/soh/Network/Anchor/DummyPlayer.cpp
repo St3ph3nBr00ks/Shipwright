@@ -526,13 +526,6 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                             const f32 horseStart =
                                 horseLoopFrames * horsePhaseFrac;
                             peer->skin.skelAnime.curFrame = horseStart;
-                            SPDLOG_INFO(
-                                "[TitlePeer] horse anim change clientId={} "
-                                "formationIdx={} animIdx={} loopFrames={:.1f} "
-                                "phaseFrac={:.3f} start={:.2f}",
-                                clientId, (int)formationIdx,
-                                (int)localHorse->animationIdx,
-                                horseLoopFrames, horsePhaseFrac, horseStart);
                             peer->animationIdx = localHorse->animationIdx;
                         }
                         // Mirror playSpeed every frame, not just on state
@@ -729,12 +722,6 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                             gPlayState, &player->skelAnime, targetAnim,
                             0.0f, 0.0f, targetEndFrame,
                             ANIMMODE_LOOP, 0.0f);
-                        SPDLOG_INFO(
-                            "[TitlePeer] link anim lock clientId={} "
-                            "formationIdx={} anim=uma_stand loopFrames={:.1f} "
-                            "start=0.0 horseAnimIdx={}",
-                            clientId, (int)formationIdx,
-                            targetEndFrame, localHorseAnimIdx);
                     }
                 }
                 player->skelAnime.movementFlags = 0;
@@ -1549,7 +1536,16 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     // + RM_AA_ZB_XLU_SURF (sibling of the existing
     // Anchor_LocalPlayerFaceSwapBegin/End hooks). Tracked in the Pillar B
     // implementation plan as a Phase 4 polish item.
-    if (client.linkAge != gSaveContext.linkAge) {
+    //
+    // Title-mode exempt: title screen forces adult Link locally
+    // (Opening_SetupTitleScreen), so a peer's gameplay-time linkAge from
+    // their last save (could be child) would otherwise dim them out
+    // here. The title-cutscene shots all show adult Link riding Epona,
+    // so we want to render the peer as adult regardless of their save
+    // file. linkAge is swapped to client.linkAge later in this function
+    // anyway, so the Player_Draw call still renders the correct model
+    // for the cosmetic-sync pack.
+    if (!titleMode && client.linkAge != gSaveContext.linkAge) {
         return;
     }
 
@@ -1591,9 +1587,12 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
         sLoggedSkeletons[clientId] = curSkel;
     }
 
-    // Hack to account for usage of gSaveContext in Player_Draw
+    // Hack to account for usage of gSaveContext in Player_Draw.
+    // Title-mode peers always render as adult Link — the title
+    // cutscene shows adult Epona-mounted Link, and peer's broadcast
+    // linkAge may be stale child from their last gameplay session.
     s32 originalAge = gSaveContext.linkAge;
-    gSaveContext.linkAge = client.linkAge;
+    gSaveContext.linkAge = titleMode ? LINK_AGE_ADULT : client.linkAge;
     u8 originalButtonItem0 = gSaveContext.equips.buttonItems[0];
     gSaveContext.equips.buttonItems[0] = client.buttonItem0;
     if (DebugLogSwapWindows()) {

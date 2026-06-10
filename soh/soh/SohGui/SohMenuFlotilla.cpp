@@ -235,7 +235,7 @@ void SohMenu::AddMenuFlotilla() {
 
     AddWidget(path, "Show team-mates on title screen", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("Anchor.TitleScreenPeers"))
-        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
             "Spawn same-team peers as visible Link+Epona pairs behind the local "
             "player during the Hyrule Field title-cutscene gallop. Peers ride "
             "alongside the local player in formation, in their selected cosmetic "
@@ -243,7 +243,7 @@ void SohMenu::AddMenuFlotilla() {
             "Cosmetic only — no gameplay effect. The horse render uses the existing "
             "horse-sync infrastructure; if Anchor → Horse Sync is off, peers appear "
             "on foot instead of mounted.\n\n"
-            "Cap of 3 visible peers (alphabetical by name). Default: on."));
+            "Cap of 3 visible peers (first to join the room). Default: off."));
 
     AddWidget(path, "Recording", WIDGET_SEPARATOR_TEXT);
 
