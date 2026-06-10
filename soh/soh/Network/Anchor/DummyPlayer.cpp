@@ -385,48 +385,30 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                         a = a->next;
                     }
                 }
-                // Shot 8 left-side override. Shot 8 (per camera audit
-                // in Plans/title_screen_peer_actors.md) has Link
-                // riding along a fence with the river on his right
-                // at world +X. Default formation places half the
-                // peers on Link's right which puts them in the
-                // water during this shot. Switch to a single-file
-                // left-side column for the duration of Shot 8 only.
-                // csFrame range comes from the audit table —
-                // Shot 8 starts at 1355, Shot 9 starts at 1505.
-                constexpr int32_t kShot8StartFrame = 1355;
-                constexpr int32_t kShot8EndFrame   = 1504;
+                // South-east river formation override. Title cutscene
+                // shots 7-9 (per camera audit in
+                // Plans/title_screen_peer_actors.md) have Link riding
+                // through the south-east region of Hyrule Field where
+                // a river and fence run along his right at world +X.
+                // Default formation places half the peers on Link's
+                // right which puts them in the water. Switch to a
+                // single-file left-side column whenever Link is in
+                // that region.
+                //
+                // Gate is position-based instead of csFrame-based
+                // because Link enters the river region (at Shot 7's
+                // position around csFrame 1265) before Shot 8's
+                // csFrame 1355 boundary — verified via the
+                // [TitlePeer.cs] diagnostic in log 495 sample
+                // csFrames 1265-1505. Position gate captures the
+                // hazard region directly: pos.z < 2500 (south of
+                // mid-field) + pos.x > 0 (east half). All other
+                // shots (north, west, central) fall outside.
+                constexpr float kRiverRegionMaxZ =  2500.0f;
+                constexpr float kRiverRegionMinX =     0.0f;
                 const bool useLeftSideFormation =
-                    (gPlayState->csCtx.state != CS_STATE_IDLE &&
-                     gPlayState->csCtx.frames >= kShot8StartFrame &&
-                     gPlayState->csCtx.frames <= kShot8EndFrame);
-
-                // Diagnostic — rate-limited per peer (~once per
-                // second on a fresh game frame). Logs csCtx state +
-                // frames + local Link position so we can see what
-                // the title cutscene actually reports for the
-                // Shot 8 gate. Field test log 494 reported the
-                // left-side override didn't fire even during the
-                // ride-along-river shot, so the audit's csFrame
-                // numbers may not align with gPlayState->csCtx.
-                if (formationIdx == 0 && Anchor::Instance != nullptr) {
-                    static uint64_t sLastDiagFrame = 0;
-                    const uint64_t curGameFrame =
-                        Anchor::Instance->gameFrameCounter.load(std::memory_order_relaxed);
-                    if (curGameFrame - sLastDiagFrame >= 60) {
-                        sLastDiagFrame = curGameFrame;
-                        SPDLOG_INFO(
-                            "[TitlePeer.cs] state={} frames={} "
-                            "linkPos=({:.1f},{:.1f},{:.1f}) "
-                            "shot8gate={}",
-                            (int)gPlayState->csCtx.state,
-                            (int)gPlayState->csCtx.frames,
-                            localLink->actor.world.pos.x,
-                            localLink->actor.world.pos.y,
-                            localLink->actor.world.pos.z,
-                            useLeftSideFormation ? 1 : 0);
-                    }
-                }
+                    (localLink->actor.world.pos.z < kRiverRegionMaxZ &&
+                     localLink->actor.world.pos.x > kRiverRegionMinX);
 
                 AnchorTitlePeer::TitlePeerSlot slot =
                     AnchorTitlePeer::ComputeTitlePeerSlot(
