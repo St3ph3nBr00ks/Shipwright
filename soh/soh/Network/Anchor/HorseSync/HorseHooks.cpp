@@ -22,6 +22,7 @@
 #include "soh/Network/Anchor/HorseNetId.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/cvar_prefixes.h"  // CVAR_ENHANCEMENT — #262 diagnostic gate
 
 #include <libultraship/libultraship.h>
 
@@ -192,12 +193,22 @@ void Anchor::RegisterHorseHooks() {
         });
 
     // -----------------------------------------------------------------
-    // OnActorKill — owner emits HORSE_DESPAWN. Peer-side Actor_Kill
-    // routed through KillNetworkActorSilently in HorseDespawn handler
-    // suppresses this hook from re-broadcasting (isKillingNetworkActor
-    // bracket pattern — see Anchor.cpp KillNetworkActorSilently impl).
+    // OnActorDestroy — owner emits HORSE_DESPAWN. #262 — was previously
+    // OnActorKill which never fires for scene-cleanup despawns: vanilla
+    // scene cleanup calls Actor_Delete (z_actor.c:3505), which fires
+    // OnActorDestroy at z_actor.c:3513. Actor_Kill is reserved for
+    // explicit in-actor kill paths (z_actor.c:1202) and is NOT what
+    // scene transitions use. OnActorDestroy is the FIRST line of
+    // Actor_Delete body so it fires for every actor destruction
+    // regardless of trigger (scene cleanup, explicit Actor_Kill +
+    // delete cascade, etc.).
+    //
+    // Peer-side cleanup still routes through HandlePacket_HorseDespawn's
+    // KillNetworkActorSilently call which brackets isKillingNetworkActor;
+    // this hook bails on that flag to avoid echo-broadcasting peer
+    // despawns we triggered ourselves.
     // -----------------------------------------------------------------
-    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnActorKill>(
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnActorDestroy>(
         [this](void* refActor) {
             Actor* actor = static_cast<Actor*>(refActor);
             if (actor == nullptr || actor->id != ACTOR_EN_HORSE) return;
@@ -211,6 +222,12 @@ void Anchor::RegisterHorseHooks() {
 
             constexpr uint8_t kReasonNaturalDespawn = 0;
             SendPacket_HorseDespawn(ext->netId, kReasonNaturalDespawn);
+
+            if (CVarGetInteger(CVAR_ENHANCEMENT("DebugHorseSyncDiag"), 0) != 0) {
+                SPDLOG_INFO("[HorseHooks.diag] OnActorDestroy fired HORSE_DESPAWN "
+                            "netId={} ownerClientId={} (scene transition or actor delete)",
+                            ext->netId, ext->ownerClientId);
+            }
         });
 
     // -----------------------------------------------------------------
