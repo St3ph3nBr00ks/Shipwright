@@ -1,5 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
+#include "soh/Network/Anchor/HorseNetId.h"  // #264 horse re-emit on scene change
 #include "soh/Network/Anchor/AIDirector/Director.h"  // step 6: forward reactive events
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/ItemEligibility.h"  // Phase 2 — eligibility bitmap
@@ -437,6 +438,47 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                 gSaveContext.nightFlag = receivedNightFlag;
                 SPDLOG_INFO("[UpdateClientState] Synced time: dayTime={} nightFlag={}",
                             gSaveContext.dayTime, gSaveContext.nightFlag);
+            }
+        }
+
+        // #264 — duplicate the #259 detect-and-re-emit logic from
+        // HandlePacket_AllClientState. Scene transitions mid-session
+        // (including Anchor's teleport-to-peer feature) flow via
+        // UPDATE_CLIENT_STATE, NOT ALL_CLIENT_STATE (which the relay
+        // only broadcasts on join/disconnect). The original #259 fix
+        // only fired for reconnects; the teleport scenario never
+        // triggered. Mirror the logic here so peer teleports into our
+        // scene cause us to re-broadcast our owner-local horses.
+        //
+        // Receiver-side already dedups duplicate HORSE_SPAWN (the
+        // mPeerHorses cache check in HandlePacket_HorseSpawn). Safe to
+        // duplicate the trigger — worst case: brief redundant emission
+        // during a reconnect-then-scene-change corner case.
+        if (gPlayState != nullptr && clientId != ownClientId) {
+            const bool isNowOnline = clients[clientId].online;
+            const int16_t nowScene = (int16_t)clients[clientId].sceneNum;
+            const bool nowSameScene = isNowOnline && nowScene == (int16_t)gPlayState->sceneNum;
+            const bool wasSameScene = wasOnline && prevSceneNum == (int16_t)gPlayState->sceneNum;
+            if (nowSameScene && !wasSameScene && isConnected && IsHorseSyncEnabled()) {
+                int reemitCount = 0;
+                Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_BG].head;
+                while (a != nullptr) {
+                    if (a->id == ACTOR_EN_HORSE) {
+                        const HorseNetId* hext =
+                            ObjectExtension::GetInstance().Get<HorseNetId>(a);
+                        if (hext != nullptr && hext->netId != 0 && !hext->isPeerOwned) {
+                            SendPacket_HorseSpawn(hext->netId, (int16_t)a->params,
+                                                   (int16_t)gPlayState->sceneNum,
+                                                   a->world.pos, a->shape.rot.y);
+                            reemitCount++;
+                        }
+                    }
+                    a = a->next;
+                }
+                if (reemitCount > 0) {
+                    SPDLOG_INFO("[UpdateClientState] #264 re-emitted {} HORSE_SPAWN(s) "
+                                "for peer scene transition to our scene", reemitCount);
+                }
             }
         }
 
