@@ -130,40 +130,45 @@ void Anchor::RegisterHorseHooks() {
             if (ext == nullptr || ext->netId == 0) return;
 
             if (ext->isPeerOwned) {
-                // Mount-side gate — peer horses are unmountable by the
-                // local player. Setting playerControlled forces
-                // EnHorse_GetMountSide to return 0 at z_en_horse.c:3643+.
+                // Mount-side gate + animation enablement.
                 //
-                // Phase 3 exception (2026-06-09): title-screen peer
-                // horses skip this gate. With playerControlled=1 +
-                // Actor_NotMounted=true, vanilla EnHorse_Update enters
-                // the freeze cycle at z_en_horse.c:3034-3039
-                // (action -> ENHORSE_ACT_FROZEN -> animationIdx = IDLE),
-                // suppressing gallop animation entirely. The title-
-                // screen consumer wants the horse to animate so peers
-                // look like they're actually riding. At the title
-                // cutscene the local Link can't mount anything anyway
-                // (cutscene actor cues drive him), so the mount-side
-                // protection has no practical effect there.
+                // Original v1 design used `playerControlled = 1` here to
+                // make vanilla EnHorse_GetMountSide return 0 (mount
+                // blocked). Field test 2026-06-11 (log 507, issue #257)
+                // revealed this triggers EnHorse_MountDismount's freeze
+                // branch at z_en_horse.c:3034-3039 (when playerControlled
+                // becomes true while Actor_NotMounted is also true —
+                // always true on a peer-owned horse because no local
+                // Player is actually mounted), which sets action=FROZEN
+                // and animationIdx=IDLE. Once frozen, the freeze
+                // self-perpetuates and the horse never animates +
+                // riderPos never updates → peer Link sat frozen at frame
+                // 0 of gallop, Y oscillated as riderPos stayed at the
+                // saddle limb pose.
                 //
-                // Active clear (=0) rather than just skipping the
-                // write: vanilla EnHorse_Frozen action body sets
-                // playerControlled = 1 from inside its own update
-                // (z_en_horse.c:2384). Once the horse enters Frozen
-                // state, it'd self-perpetuate the freeze even with
-                // our hook gate skip in place. Actively clearing each
-                // frame ensures the next vanilla update sees
-                // playerControlled=0, doesn't re-freeze, and the horse
-                // can transition out (z_en_horse.c:3038-3039 →
-                // playerControlled=0 path → grounded idle).
+                // Title-screen Phase 3 hit the same wall and solved it
+                // by clearing playerControlled = 0 so vanilla state
+                // machine ticks SkelAnime normally. We mirror that here
+                // for the gameplay path, and use the ENHORSE_UNRIDEABLE
+                // flag instead for mount-side gating — see
+                // EnHorse_MountDismount at z_en_horse.c:3025:
                 //
-                // IsTitlePeerHorse walk is O(n) with n ≤ 3.
-                if (Anchor::Instance != nullptr &&
-                    Anchor::Instance->IsTitlePeerHorse(actor)) {
-                    ((EnHorse*)actor)->playerControlled = 0;
-                } else {
-                    ((EnHorse*)actor)->playerControlled = 1;
-                }
+                //   if (mountSide != 0 && !(stateFlags & ENHORSE_UNRIDEABLE)
+                //       && player->rideActor == NULL) {
+                //       Actor_SetRideActor(...);
+                //   }
+                //
+                // The flag short-circuits the mount before SetRideActor,
+                // without poisoning the action state. Set every tick
+                // because vanilla state setup helpers clear it in some
+                // transitions (e.g., EnHorse_Idle clear at line 1813).
+                //
+                // Title-screen branch retained — its tighter behaviour
+                // (playerControlled=0 only) was tuned to its cutscene
+                // animation requirements; gameplay now matches.
+                EnHorse* en = (EnHorse*)actor;
+                en->playerControlled = 0;
+                en->stateFlags |= ENHORSE_UNRIDEABLE;
                 return;
             }
 

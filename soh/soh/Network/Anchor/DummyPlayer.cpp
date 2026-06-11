@@ -200,9 +200,55 @@ static void ApplyMountedPoseReconciliation(Actor* actor,
     }
 
     EnHorse* horseAsHorse = (EnHorse*)peerHorse;
-    actor->world.pos.x = peerHorse->world.pos.x + horseAsHorse->riderPos.x;
-    actor->world.pos.y = peerHorse->world.pos.y + horseAsHorse->riderPos.y;
-    actor->world.pos.z = peerHorse->world.pos.z + horseAsHorse->riderPos.z;
+
+    // Field-test 2026-06-11 (log 507): peer Link Y oscillated between
+    // "correctly seated" and "floating ~27u above" the saddle. Two root
+    // causes (title-screen agent at DummyPlayer.cpp:685-740 had already
+    // solved both):
+    //
+    // 1. Missing -27.0f stirrup offset — vanilla z_player.c:13840-13842
+    //    applies riderPos.y - 27.0f when positioning the mounted Player.
+    //    riderPos.y points to the SADDLE BONE (top of saddle), Player's
+    //    world.pos.y represents his FEET in the stirrups (27u below).
+    //
+    // 2. riderPos lifecycle race — EnHorse_Init seeds riderPos with
+    //    ABSOLUTE world position (actor.world.pos + Vec3f{0, 70, 0}).
+    //    Vanilla Skin_GetLimbPos call inside EnHorse_Draw converts it to
+    //    a relative offset (~30u back, ~50u up, ~30u laterally). On the
+    //    first frame after spawn, before any Draw has run, riderPos is
+    //    still in absolute form → reading it as an offset flings the
+    //    DummyPlayer to crazy world coords.
+    //
+    // Mitigation (mirror of title-screen agent's pattern): magnitude
+    // check distinguishes relative offset (small absolute values) from
+    // absolute world position (large values). Fall back to a static
+    // approximation while the absolute seed is in play; switch to the
+    // vanilla riderPos once it normalises.
+    constexpr f32 kSaddleHeightAboveHorse        = 30.0f;
+    constexpr f32 kSaddleBackwardFromHorseOrigin = 40.0f;
+
+    const f32 rx = horseAsHorse->riderPos.x;
+    const f32 ry = horseAsHorse->riderPos.y;
+    const f32 rz = horseAsHorse->riderPos.z;
+    const bool useVanillaRiderPos =
+        (fabsf(rx) < 80.0f) && (fabsf(ry) < 150.0f) && (fabsf(rz) < 80.0f);
+
+    if (useVanillaRiderPos) {
+        actor->world.pos.x = peerHorse->world.pos.x + rx;
+        actor->world.pos.y = (peerHorse->world.pos.y + ry) - 27.0f;  // stirrup offset
+        actor->world.pos.z = peerHorse->world.pos.z + rz;
+    } else {
+        // First-frame fallback. Hardcoded approximation until
+        // EnHorse_Draw normalises riderPos to a relative offset.
+        const f32 yawRad = (f32)peerHorse->shape.rot.y / 32768.0f * (f32)M_PI;
+        const f32 forwardX = sinf(yawRad);
+        const f32 forwardZ = cosf(yawRad);
+        actor->world.pos.x = peerHorse->world.pos.x -
+            kSaddleBackwardFromHorseOrigin * forwardX;
+        actor->world.pos.y = peerHorse->world.pos.y + kSaddleHeightAboveHorse;
+        actor->world.pos.z = peerHorse->world.pos.z -
+            kSaddleBackwardFromHorseOrigin * forwardZ;
+    }
     actor->shape.rot.y = peerHorse->shape.rot.y;
     player->stateFlags1 |= PLAYER_STATE1_ON_HORSE;
 }
