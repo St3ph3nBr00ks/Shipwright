@@ -31,7 +31,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"HANDSHAKE", 3},  // bump-history: 2 (settings-sync v1 cvars block); 3 (settings-sync v2 — wire-format break to dictionary keyed by full CVar macro expansion; mirrors UPDATE_ROOM_STATE schema 3).
     {"HEARTBEAT", 1},  // #194 follow-up — every-client liveness signal sent from network thread.
     {"HORSE_SPAWN", 1},    // Plans/horse_sync_plan.md — peer Epona materialise.
-    {"HORSE_STATE", 1},    // Plans/horse_sync_plan.md — owner-authoritative per-tick stream.
+    {"HORSE_STATE", 2},    // bump-history: 1 (initial owner-authoritative stream); 2 (#257 added animationIdx — gameplay peer Epona was visually frozen in ENHORSE_ANIM_IDLE because playerControlled lock triggered FROZEN cycle).
     {"HORSE_DESPAWN", 1},  // Plans/horse_sync_plan.md — peer Epona cleanup.
     {"ITEM_DROP_SYNC", 1},  // #193 Phase 1 — host-fanout of EnItem00 drops with killer attribution.
     {"ITEM_COLLECTED", 1},  // #193 Phase 1 / race A — host arbitration broadcast; receivers Actor_Kill or apply pickup based on winner clientId.

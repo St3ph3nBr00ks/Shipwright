@@ -30,6 +30,7 @@ extern "C" {
 #include "z64.h"
 #include "macros.h"
 #include "overlays/actors/ovl_En_Horse/z_en_horse.h"
+#include "objects/object_horse/object_horse.h"  // gEpona*Anim — #257 animationIdx fix
 extern PlayState* gPlayState;
 }
 
@@ -44,21 +45,23 @@ void Anchor::SendPacket_HorseState(Actor* horse) {
     // they don't own.
     if (ext->isPeerOwned) return;
 
-    EnHorse* en          = (EnHorse*)horse;
-    int32_t  actionState = (int32_t)en->action;
-    uint8_t  numBoosts   = en->numBoosts;
+    EnHorse* en            = (EnHorse*)horse;
+    int32_t  actionState   = (int32_t)en->action;
+    int32_t  animationIdx  = (int32_t)en->animationIdx;  // #257 — drives peer-side anim
+    uint8_t  numBoosts     = en->numBoosts;
 
     nlohmann::json payload;
-    payload["type"]        = HORSE_STATE;
-    payload["netId"]       = ext->netId;
-    payload["actionState"] = actionState;
-    payload["speedXZ"]     = horse->speedXZ;
-    payload["pos"]         = { horse->world.pos.x, horse->world.pos.y, horse->world.pos.z };
-    payload["shapeRot"]    = { (int)horse->shape.rot.x,
-                                (int)horse->shape.rot.y,
-                                (int)horse->shape.rot.z };
-    payload["numBoosts"]   = (int)numBoosts;
-    payload["quiet"]       = true;  // suppress relay-side logging for high-rate packet
+    payload["type"]         = HORSE_STATE;
+    payload["netId"]        = ext->netId;
+    payload["actionState"]  = actionState;
+    payload["animationIdx"] = animationIdx;
+    payload["speedXZ"]      = horse->speedXZ;
+    payload["pos"]          = { horse->world.pos.x, horse->world.pos.y, horse->world.pos.z };
+    payload["shapeRot"]     = { (int)horse->shape.rot.x,
+                                 (int)horse->shape.rot.y,
+                                 (int)horse->shape.rot.z };
+    payload["numBoosts"]    = (int)numBoosts;
+    payload["quiet"]        = true;  // suppress relay-side logging for high-rate packet
     PacketTimeline::SetTimelineField(payload);
 
     SendJsonToRemote(payload);
@@ -112,4 +115,47 @@ void Anchor::HandlePacket_HorseState(nlohmann::json payload) {
 
     EnHorse* en = (EnHorse*)horse;
     en->numBoosts = (uint8_t)payload.value("numBoosts", 0);
+
+    // #257 — apply animation from synced animationIdx so the peer-owned
+    // horse animates instead of freezing in ENHORSE_ANIM_IDLE. The
+    // playerControlled = 1 mount-side gate (HorseHooks.cpp) keeps
+    // EnHorse_Update in ENHORSE_ACT_FROZEN which never advances the
+    // animation; we drive it manually here. Switch table mirrors the
+    // title-screen mapping at DummyPlayer.cpp ~600 (gallop / walk /
+    // trot / rear / jump / etc.). Owner's animationIdx is the
+    // ENHORSE_ANIM_* enum index — apply only when it changes to avoid
+    // resetting the loop phase every packet.
+    const int32_t syncedAnimIdx = payload.value("animationIdx", (int32_t)-1);
+    if (syncedAnimIdx >= 0 && syncedAnimIdx != en->animationIdx) {
+        AnimationHeader* anim = nullptr;
+        switch (syncedAnimIdx) {
+            case ENHORSE_ANIM_IDLE:
+                anim = (AnimationHeader*)&gEponaIdleAnim; break;
+            case ENHORSE_ANIM_WHINNEY:
+                anim = (AnimationHeader*)&gEponaWhinnyAnim; break;
+            case ENHORSE_ANIM_STOPPING:
+                // Asset name is "Refuse" but the runtime enum index 2 is
+                // STOPPING (per z_en_horse.h). Same surprise documented
+                // in DummyPlayer.cpp:605 — preserved for consistency.
+                anim = (AnimationHeader*)&gEponaRefuseAnim; break;
+            case ENHORSE_ANIM_REARING:
+                anim = (AnimationHeader*)&gEponaRearingAnim; break;
+            case ENHORSE_ANIM_WALK:
+                anim = (AnimationHeader*)&gEponaWalkingAnim; break;
+            case ENHORSE_ANIM_TROT:
+                anim = (AnimationHeader*)&gEponaTrottingAnim; break;
+            case ENHORSE_ANIM_GALLOP:
+                anim = (AnimationHeader*)&gEponaGallopingAnim; break;
+            case ENHORSE_ANIM_LOW_JUMP:
+                anim = (AnimationHeader*)&gEponaJumpingAnim; break;
+            case ENHORSE_ANIM_HIGH_JUMP:
+                anim = (AnimationHeader*)&gEponaJumpingHighAnim; break;
+            default:
+                anim = (AnimationHeader*)&gEponaIdleAnim; break;
+        }
+        Animation_PlayLoop(&en->skin.skelAnime, anim);
+        // Cache the synced index so the next packet only re-plays the
+        // anim on transitions (same shape as the title-screen path).
+        en->animationIdx = (s32)syncedAnimIdx;
+    }
 }
