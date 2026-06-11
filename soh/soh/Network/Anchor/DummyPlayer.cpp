@@ -1106,18 +1106,6 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         }
     }
 
-    // #261 diagnostic — gated behind a CVar to keep prod logs quiet.
-    // Verifies Y reconciliation is stable across frames during mount.
-    // Disable after field-test confirmation.
-    if ((player->stateFlags1 & PLAYER_STATE1_ON_HORSE) &&
-        CVarGetInteger(CVAR_ENHANCEMENT("DebugHorseSyncDiag"), 0) != 0) {
-        SPDLOG_INFO("[DummyPlayer.diag] mounted Y={:.2f} movementFlags=0x{:02x} "
-                    "diff.y={:.3f}",
-                    player->actor.world.pos.y,
-                    (uint32_t)player->skelAnime.movementFlags,
-                    diff.y);
-    }
-
     if (player->modelGroup != client.modelGroup) {
         // Hack to account for usage of gSaveContext
         s32 originalAge = gSaveContext.linkAge;

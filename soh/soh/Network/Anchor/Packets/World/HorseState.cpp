@@ -20,7 +20,6 @@
 #include "soh/Network/Anchor/HorseNetId.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
-#include "soh/cvar_prefixes.h"  // CVAR_ENHANCEMENT — #260 diagnostic gate
 
 #include <libultraship/libultraship.h>
 #include <nlohmann/json.hpp>
@@ -185,17 +184,4 @@ void Anchor::HandlePacket_HorseState(nlohmann::json payload) {
     // schema-1 senders fall back to a still pose, matching pre-fix
     // behaviour).
     en->skin.skelAnime.playSpeed = payload.value("playSpeed", 1.0f);
-
-    // Diagnostic — gated behind a CVar to keep prod logs quiet.
-    // Verifies the wire carries the right magnitude + sign for both
-    // bug A (gallop speed) and bug B (reverse direction). Disable
-    // after field-test confirmation.
-    if (CVarGetInteger(CVAR_ENHANCEMENT("DebugHorseSyncDiag"), 0) != 0) {
-        SPDLOG_INFO("[HorseState.diag] applied netId={} actionState={} "
-                    "animationIdx={} playSpeed={:.3f} speedXZ={:.3f}",
-                    netId, payload.value("actionState", -1),
-                    payload.value("animationIdx", -1),
-                    en->skin.skelAnime.playSpeed,
-                    en->actor.speedXZ);
-    }
 }
