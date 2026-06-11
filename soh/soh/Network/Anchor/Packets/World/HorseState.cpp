@@ -20,6 +20,7 @@
 #include "soh/Network/Anchor/HorseNetId.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
+#include "soh/cvar_prefixes.h"  // CVAR_ENHANCEMENT — #260 diagnostic gate
 
 #include <libultraship/libultraship.h>
 #include <nlohmann/json.hpp>
@@ -48,6 +49,7 @@ void Anchor::SendPacket_HorseState(Actor* horse) {
     EnHorse* en            = (EnHorse*)horse;
     int32_t  actionState   = (int32_t)en->action;
     int32_t  animationIdx  = (int32_t)en->animationIdx;  // #257 — drives peer-side anim
+    float    playSpeed     = en->skin.skelAnime.playSpeed;  // #260 — drives anim magnitude + sign
     uint8_t  numBoosts     = en->numBoosts;
 
     nlohmann::json payload;
@@ -55,6 +57,7 @@ void Anchor::SendPacket_HorseState(Actor* horse) {
     payload["netId"]        = ext->netId;
     payload["actionState"]  = actionState;
     payload["animationIdx"] = animationIdx;
+    payload["playSpeed"]    = playSpeed;
     payload["speedXZ"]      = horse->speedXZ;
     payload["pos"]          = { horse->world.pos.x, horse->world.pos.y, horse->world.pos.z };
     payload["shapeRot"]     = { (int)horse->shape.rot.x,
@@ -157,5 +160,42 @@ void Anchor::HandlePacket_HorseState(nlohmann::json payload) {
         // Cache the synced index so the next packet only re-plays the
         // anim on transitions (same shape as the title-screen path).
         en->animationIdx = (s32)syncedAnimIdx;
+    }
+
+    // #260 — apply owner's playSpeed every packet. Animation_PlayLoop
+    // hard-codes playSpeed = 1.0f (z_skelanime.c:1801-1803), so the
+    // anim-transition path above resets it. Vanilla EnHorse_Mounted*
+    // action handlers (z_en_horse.c:1267 walk / :1314 trot / :1382
+    // gallop / :1567 rearing+reverse) re-compute playSpeed every frame
+    // from speedXZ × per-action coefficient. Peer-owned horses are
+    // locked in ENHORSE_ACT_IDLE (commit 4e1d76763) so none of those
+    // action handlers run on receivers — playSpeed stays at 1.0f
+    // forever without this write.
+    //
+    // Owner-authoritative: receiver mirrors owner's playSpeed
+    // directly. Carries:
+    //   - magnitude (gallop ~3.6 vs idle 1.0 — fixes #260 slow gallop)
+    //   - sign (reverse is negative — fixes #260 backward-walk bug:
+    //     vanilla encodes direction in playSpeed sign, not via a
+    //     separate reverse animation)
+    //
+    // Apply each packet (not just on anim change) because owner's
+    // playSpeed drifts continuously during locomotion as stick input
+    // / speedXZ change. Default 1.0f if field is absent (legacy
+    // schema-1 senders fall back to a still pose, matching pre-fix
+    // behaviour).
+    en->skin.skelAnime.playSpeed = payload.value("playSpeed", 1.0f);
+
+    // Diagnostic — gated behind a CVar to keep prod logs quiet.
+    // Verifies the wire carries the right magnitude + sign for both
+    // bug A (gallop speed) and bug B (reverse direction). Disable
+    // after field-test confirmation.
+    if (CVarGetInteger(CVAR_ENHANCEMENT("DebugHorseSyncDiag"), 0) != 0) {
+        SPDLOG_INFO("[HorseState.diag] applied netId={} actionState={} "
+                    "animationIdx={} playSpeed={:.3f} speedXZ={:.3f}",
+                    netId, payload.value("actionState", -1),
+                    payload.value("animationIdx", -1),
+                    en->skin.skelAnime.playSpeed,
+                    en->actor.speedXZ);
     }
 }
