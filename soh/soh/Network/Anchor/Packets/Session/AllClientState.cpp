@@ -93,6 +93,35 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
             SPDLOG_INFO("[AllClientState] Despawned NPC replica for "
                         "disconnected client {}", clientId);
         }
+
+        // #258 — Despawn peer Epona replicas owned by the disconnected
+        // client. MakeHorseNetId encodes ownerClientId in the high byte
+        // of the netId, so we can match by `(netId >> 24) ==
+        // (clientId & 0xFF)`. Without this cleanup, peer Eponas stay
+        // alive in the receiver's actor list (mPeerHorses still points
+        // at a now-orphaned horse with playerControlled=1 lock — it
+        // freezes in place and never gets removed until scene
+        // transition clears the cache). Mirror of the NPC follower
+        // cleanup above; same disconnect-lifecycle semantics.
+        int horseRemoved = 0;
+        for (auto hit = mPeerHorses.begin(); hit != mPeerHorses.end(); ) {
+            const uint32_t owner = (hit->first >> 24) & 0xFFu;
+            if (owner == (clientId & 0xFFu)) {
+                Actor* horseReplica = hit->second;
+                if (horseReplica != nullptr && horseReplica->update != nullptr) {
+                    KillNetworkActorSilently(horseReplica);
+                }
+                hit = mPeerHorses.erase(hit);
+                horseRemoved++;
+            } else {
+                ++hit;
+            }
+        }
+        if (horseRemoved > 0) {
+            SPDLOG_INFO("[AllClientState] Despawned {} horse replica(s) for "
+                        "disconnected client {}", horseRemoved, clientId);
+        }
+
         clients.erase(clientId);
     }
 
