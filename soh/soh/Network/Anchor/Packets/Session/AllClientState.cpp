@@ -50,11 +50,67 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
         } else {
             clients[client.clientId].self = false;
             if (clients.contains(client.clientId)) {
-                if (clients[client.clientId].online != client.online && !isGlobalRoom) {
+                const bool wasOnline = clients[client.clientId].online;
+                const bool isNowOnline = client.online;
+                if (wasOnline != isNowOnline && !isGlobalRoom) {
                     Notification::Emit({
                         .prefix = client.name,
-                        .message = client.online ? "Connected" : "Disconnected",
+                        .message = isNowOnline ? "Connected" : "Disconnected",
                     });
+                }
+
+                // #263 — peer-state-driven cleanup. The relay marks
+                // disconnected clients online=false but keeps them in the
+                // newClients list for reconnect continuity (verified at
+                // Anchor/anchor_git/client.go:166-172). The pre-existing
+                // clientsToRemove loop below only fires for clients
+                // ACTUALLY removed (rare admin-kick path). The genuine
+                // disconnect path is the online=true → false transition
+                // detected here. Move both NPC Follower cleanup (was
+                // previously buried in clientsToRemove; same architectural
+                // bug — never fired) and horse cleanup (#258 → fixed at
+                // #263) here.
+                if (wasOnline && !isNowOnline) {
+                    // NPC Follower cleanup (was incorrectly in
+                    // clientsToRemove loop; moved here per #263).
+                    auto npcIt = mPeerFollowerNpcs.find(client.clientId);
+                    if (npcIt != mPeerFollowerNpcs.end()) {
+                        Actor* replica = npcIt->second;
+                        if (replica != nullptr && replica->update != nullptr) {
+                            Actor_Kill(replica);
+                        }
+                        mPeerFollowerNpcs.erase(npcIt);
+                        SPDLOG_INFO("[AllClientState] #263 Despawned NPC replica "
+                                    "for disconnected client {}", client.clientId);
+                    }
+
+                    // Horse cleanup (#258 → fixed at #263). Use
+                    // HorseNetId::ownerClientId field directly — full
+                    // uint32 compare. The original cleanup used
+                    // `(netId >> 24) & 0xFF` which truncated to 8 bits,
+                    // self-consistent for current session sizes but
+                    // fragile (Anchor's nextClientId is atomic.Uint64).
+                    int horseRemoved = 0;
+                    for (auto hit = mPeerHorses.begin();
+                         hit != mPeerHorses.end(); ) {
+                        const HorseNetId* hext =
+                            ObjectExtension::GetInstance().Get<HorseNetId>(hit->second);
+                        if (hext != nullptr &&
+                            hext->ownerClientId == client.clientId &&
+                            hit->second != nullptr &&
+                            hit->second->update != nullptr) {
+                            KillNetworkActorSilently(hit->second);
+                            hit = mPeerHorses.erase(hit);
+                            horseRemoved++;
+                        } else {
+                            ++hit;
+                        }
+                    }
+                    if (horseRemoved > 0) {
+                        SPDLOG_INFO("[AllClientState] #263 Despawned {} horse "
+                                    "replica(s) for disconnected client {}",
+                                    horseRemoved, client.clientId);
+                    }
                 }
             } else if (client.online && !isGlobalRoom) {
                 Notification::Emit({
@@ -134,18 +190,16 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
         }
     }
     // (separate loop to avoid iterator invalidation)
+    //
+    // NOTE (#263): the normal disconnect path now handles NPC + horse
+    // cleanup at the online=true→false transition detection above
+    // (lines ~52-90). This block fires only for the rare case where a
+    // client is genuinely REMOVED from the relay's newClients list (e.g.
+    // admin kick of an online client). When that's the only path that
+    // triggered cleanup (the client was online, never went through
+    // online=false transition first), this block needs the same logic.
+    // Idempotent when the new path already fired — find returns nothing.
     for (auto& clientId : clientsToRemove) {
-        // Despawn the peer's NPC Follower replica (Bug 5, log 67
-        // 2026-05-20). Without this, when P1 disconnects (crash /
-        // quit / connection drop), P2 retains P1's NPC follower
-        // forever — the replica was spawned via SPAWN packet on P2's
-        // side but only the matching DESPAWN packet would clean it
-        // up. Disconnect doesn't send DESPAWN. Mirror of the
-        // HandlePacket_FollowerNpcDespawn cleanup body.
-        //
-        // Future: if NPCs are ever meant to PERSIST after the owner
-        // leaves, gate this on a per-NPC-class policy. v1 follower
-        // NPCs are owner-anchored; disconnect = despawn.
         auto npcIt = mPeerFollowerNpcs.find(clientId);
         if (npcIt != mPeerFollowerNpcs.end()) {
             Actor* replica = npcIt->second;
@@ -154,26 +208,19 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
             }
             mPeerFollowerNpcs.erase(npcIt);
             SPDLOG_INFO("[AllClientState] Despawned NPC replica for "
-                        "disconnected client {}", clientId);
+                        "removed client {} (admin-kick path)", clientId);
         }
 
-        // #258 — Despawn peer Epona replicas owned by the disconnected
-        // client. MakeHorseNetId encodes ownerClientId in the high byte
-        // of the netId, so we can match by `(netId >> 24) ==
-        // (clientId & 0xFF)`. Without this cleanup, peer Eponas stay
-        // alive in the receiver's actor list (mPeerHorses still points
-        // at a now-orphaned horse with playerControlled=1 lock — it
-        // freezes in place and never gets removed until scene
-        // transition clears the cache). Mirror of the NPC follower
-        // cleanup above; same disconnect-lifecycle semantics.
+        // Horse cleanup (#263 fix). Use HorseNetId::ownerClientId field
+        // directly for full uint32 compare (the previous bit-shift
+        // truncation truncated to 8 bits — see #263 for details).
         int horseRemoved = 0;
         for (auto hit = mPeerHorses.begin(); hit != mPeerHorses.end(); ) {
-            const uint32_t owner = (hit->first >> 24) & 0xFFu;
-            if (owner == (clientId & 0xFFu)) {
-                Actor* horseReplica = hit->second;
-                if (horseReplica != nullptr && horseReplica->update != nullptr) {
-                    KillNetworkActorSilently(horseReplica);
-                }
+            const HorseNetId* hext =
+                ObjectExtension::GetInstance().Get<HorseNetId>(hit->second);
+            if (hext != nullptr && hext->ownerClientId == clientId &&
+                hit->second != nullptr && hit->second->update != nullptr) {
+                KillNetworkActorSilently(hit->second);
                 hit = mPeerHorses.erase(hit);
                 horseRemoved++;
             } else {
@@ -182,7 +229,8 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
         }
         if (horseRemoved > 0) {
             SPDLOG_INFO("[AllClientState] Despawned {} horse replica(s) for "
-                        "disconnected client {}", horseRemoved, clientId);
+                        "removed client {} (admin-kick path)",
+                        horseRemoved, clientId);
         }
 
         clients.erase(clientId);
