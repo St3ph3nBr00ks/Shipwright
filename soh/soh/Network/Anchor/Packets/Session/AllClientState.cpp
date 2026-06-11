@@ -5,8 +5,14 @@
 #include "soh/OTRGlobals.h"
 #include "soh/Notification/Notification.h"
 
+#include "soh/Network/Anchor/HorseNetId.h"  // #259 late-join re-emit
+
 extern "C" {
 #include "functions.h"  // Actor_Kill — used by peer-NPC despawn on disconnect
+#include "z64.h"
+#include "macros.h"
+#include "overlays/actors/ovl_En_Horse/z_en_horse.h"
+extern PlayState* gPlayState;
 }
 
 /**
@@ -20,6 +26,19 @@ extern "C" {
 void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
     std::vector<AnchorClient> newClients = payload["state"].get<std::vector<AnchorClient>>();
     bool isGlobalRoom = (std::string("soh-global") == CVarGetString(CVAR_REMOTE_ANCHOR("RoomId"), ""));
+
+    // #259 — track which peers transitioned into a state where we should
+    // re-emit HORSE_SPAWN for our owner-local horses. Two trigger
+    // conditions: (a) peer flipped online=false → true (fresh join or
+    // reconnect — their mPeerHorses cache is empty), (b) peer's sceneNum
+    // changed to our sceneNum (they entered our scene mid-ride — their
+    // OnSceneSpawnActors cleared their mPeerHorses cache). In either
+    // case, the receiver wouldn't otherwise see our currently-mounted
+    // Epona until our next OnActorSpawn fires (which is rare during a
+    // continuous ride). Owner-side re-emit fills the gap. Cheap — one
+    // HORSE_SPAWN per local horse per peer-state-change. Receiver's
+    // HandlePacket_HorseSpawn already ignores duplicates safely.
+    bool shouldReemitOwnerHorses = false;
 
     // add new clients
     for (auto& client : newClients) {
@@ -45,6 +64,22 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
             }
         }
 
+        // #259 — detect transitions BEFORE writing through. Only peers
+        // (not self) matter; only online + same-scene-as-us peers care.
+        if (!client.self && gPlayState != nullptr) {
+            const bool hadEntry = clients.contains(client.clientId);
+            const bool wasOnline = hadEntry ? clients[client.clientId].online : false;
+            const int16_t oldScene = hadEntry
+                ? (int16_t)clients[client.clientId].sceneNum : (int16_t)-1;
+            const bool nowSameScene =
+                client.online && client.sceneNum == gPlayState->sceneNum;
+            const bool wasSameScene =
+                wasOnline && oldScene == gPlayState->sceneNum;
+            if (nowSameScene && !wasSameScene) {
+                shouldReemitOwnerHorses = true;
+            }
+        }
+
         clients[client.clientId].clientId = client.clientId;
         clients[client.clientId].name = client.name;
         clients[client.clientId].color = client.color;
@@ -60,6 +95,34 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
         clients[client.clientId].followerActive = client.followerActive;
         clients[client.clientId].isClimbing = client.isClimbing;
         clients[client.clientId].isCrawling = client.isCrawling;
+    }
+
+    // #259 — re-emit HORSE_SPAWN for any owner-local horses now that a
+    // peer has joined our scene. Walks ACTORCAT_BG (Epona's category)
+    // and re-broadcasts for each in-scope ACTOR_EN_HORSE tagged with a
+    // HorseNetId owned by us. Receivers ignore duplicates; this is
+    // safe to over-emit.
+    if (shouldReemitOwnerHorses && isConnected && IsHorseSyncEnabled() &&
+        gPlayState != nullptr) {
+        int reemitCount = 0;
+        Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_BG].head;
+        while (a != nullptr) {
+            if (a->id == ACTOR_EN_HORSE) {
+                const HorseNetId* hext =
+                    ObjectExtension::GetInstance().Get<HorseNetId>(a);
+                if (hext != nullptr && hext->netId != 0 && !hext->isPeerOwned) {
+                    SendPacket_HorseSpawn(hext->netId, (int16_t)a->params,
+                                           (int16_t)gPlayState->sceneNum,
+                                           a->world.pos, a->shape.rot.y);
+                    reemitCount++;
+                }
+            }
+            a = a->next;
+        }
+        if (reemitCount > 0) {
+            SPDLOG_INFO("[AllClientState] #259 re-emitted {} HORSE_SPAWN(s) "
+                        "for peer join/scene-transition", reemitCount);
+        }
     }
 
     // remove clients that are no longer in the list
