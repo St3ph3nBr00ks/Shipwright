@@ -1080,7 +1080,42 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
             diff.y *= player->ageProperties->unk_08;
         }
 
-        player->actor.world.pos.y += diff.y * player->actor.scale.y;
+        // #261 — mounted-state gate. ApplyMountedPoseReconciliation
+        // (called earlier in DummyPlayer_Update via the mountedHorseNetId
+        // branch) writes actor.world.pos to horse.world.pos + horse.
+        // riderPos - (0,27,0), and sets PLAYER_STATE1_ON_HORSE. If we
+        // also apply the animation Y-delta here, the saddle-bob
+        // component of the owner's mounted-pose Player anim
+        // (movementFlags & 2 is set on gPlayerAnim_link_ride_* family)
+        // perturbs the reconciled position every frame → user-visible
+        // Y oscillation in the saddle.
+        //
+        // Title-screen path solved the same problem by explicitly
+        // clearing movementFlags = 0 at DummyPlayer.cpp:888 for
+        // mounted title peers. Gameplay path uses the same principle
+        // via state-flag check (cleaner — preserves movementFlags for
+        // any future consumer that reads it, suppresses only the Y
+        // write).
+        //
+        // XZ translation block above (movementFlags & 1) is intentionally
+        // left ungated — XZ deltas in mounted poses are negligible and
+        // ApplyMountedPoseReconciliation overwrites XZ anyway when it
+        // fires on the next frame.
+        if (!(player->stateFlags1 & PLAYER_STATE1_ON_HORSE)) {
+            player->actor.world.pos.y += diff.y * player->actor.scale.y;
+        }
+    }
+
+    // #261 diagnostic — gated behind a CVar to keep prod logs quiet.
+    // Verifies Y reconciliation is stable across frames during mount.
+    // Disable after field-test confirmation.
+    if ((player->stateFlags1 & PLAYER_STATE1_ON_HORSE) &&
+        CVarGetInteger(CVAR_ENHANCEMENT("DebugHorseSyncDiag"), 0) != 0) {
+        SPDLOG_INFO("[DummyPlayer.diag] mounted Y={:.2f} movementFlags=0x{:02x} "
+                    "diff.y={:.3f}",
+                    player->actor.world.pos.y,
+                    (uint32_t)player->skelAnime.movementFlags,
+                    diff.y);
     }
 
     if (player->modelGroup != client.modelGroup) {
