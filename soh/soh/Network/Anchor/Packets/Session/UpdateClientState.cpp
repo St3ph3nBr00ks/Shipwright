@@ -1,6 +1,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/Network/Anchor/HorseNetId.h"  // #264 horse re-emit on scene change
+#include "soh/cvar_prefixes.h"  // CVAR_ENHANCEMENT — #264 diagnostic gate
 #include "soh/Network/Anchor/AIDirector/Director.h"  // step 6: forward reactive events
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/ItemEligibility.h"  // Phase 2 — eligibility bitmap
@@ -459,6 +460,25 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
             const int16_t nowScene = (int16_t)clients[clientId].sceneNum;
             const bool nowSameScene = isNowOnline && nowScene == (int16_t)gPlayState->sceneNum;
             const bool wasSameScene = wasOnline && prevSceneNum == (int16_t)gPlayState->sceneNum;
+
+            // #264 diag — log trigger inputs unconditionally for the peer
+            // teleport scenario so we can see whether the gate fires or
+            // why it doesn't, even when reemitCount=0. Gated on CVar to
+            // avoid log spam.
+            const bool diagOn =
+                CVarGetInteger(CVAR_ENHANCEMENT("DebugHorseSyncDiag"), 0) != 0;
+            if (diagOn) {
+                SPDLOG_INFO("[UpdateClientState.diag] #264 trigger inputs: "
+                            "ownClientId={} peerClientId={} prevSceneNum={} "
+                            "nowScene={} ourScene={} wasOnline={} isNowOnline={} "
+                            "wasSameScene={} nowSameScene={} isConnected={} "
+                            "horseSyncOn={}",
+                            ownClientId, clientId, prevSceneNum, nowScene,
+                            (int16_t)gPlayState->sceneNum, wasOnline, isNowOnline,
+                            wasSameScene, nowSameScene, isConnected,
+                            IsHorseSyncEnabled());
+            }
+
             if (nowSameScene && !wasSameScene && isConnected && IsHorseSyncEnabled()) {
                 int reemitCount = 0;
                 Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_BG].head;
@@ -467,6 +487,22 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                         const HorseNetId* hext =
                             ObjectExtension::GetInstance().Get<HorseNetId>(a);
                         if (hext != nullptr && hext->netId != 0 && !hext->isPeerOwned) {
+                            // #264 diag — per-actor pos info BEFORE the send.
+                            // Hypothesis A (stale world.pos) is confirmed if
+                            // world.pos is from a different scene than our
+                            // current sceneNum.
+                            if (diagOn) {
+                                SPDLOG_INFO("[UpdateClientState.diag] #264 re-emit actor: "
+                                            "netId={} ownerClientId={} ourScene={} "
+                                            "world.pos=({:.1f},{:.1f},{:.1f}) "
+                                            "home.pos=({:.1f},{:.1f},{:.1f}) "
+                                            "shape.rot.y={} params={}",
+                                            hext->netId, hext->ownerClientId,
+                                            (int16_t)gPlayState->sceneNum,
+                                            a->world.pos.x, a->world.pos.y, a->world.pos.z,
+                                            a->home.pos.x, a->home.pos.y, a->home.pos.z,
+                                            a->shape.rot.y, (int16_t)a->params);
+                            }
                             SendPacket_HorseSpawn(hext->netId, (int16_t)a->params,
                                                    (int16_t)gPlayState->sceneNum,
                                                    a->world.pos, a->shape.rot.y);

@@ -108,6 +108,22 @@ void Anchor::RegisterHorseHooks() {
                 /*isPeerOwned=*/ false,
             });
 
+            // #264 diag — log the actor's pos at the moment of tag/spawn
+            // broadcast. Pair this with the [UpdateClientState.diag]
+            // re-emit log to detect if world.pos drifted between tag
+            // time and re-emit time (Hypothesis A — stale world.pos).
+            if (CVarGetInteger(CVAR_ENHANCEMENT("DebugHorseSyncDiag"), 0) != 0) {
+                SPDLOG_INFO("[HorseHooks.diag] OnActorSpawn tagged horse: "
+                            "netId={} owner={} scene={} params={} "
+                            "world.pos=({:.1f},{:.1f},{:.1f}) "
+                            "home.pos=({:.1f},{:.1f},{:.1f}) "
+                            "shape.rot.y={}",
+                            netId, owner, (int)sceneId, (int)params,
+                            actor->world.pos.x, actor->world.pos.y, actor->world.pos.z,
+                            actor->home.pos.x, actor->home.pos.y, actor->home.pos.z,
+                            (int)actor->shape.rot.y);
+            }
+
             SendPacket_HorseSpawn(netId, params, sceneId,
                                    actor->world.pos, actor->shape.rot.y);
         });

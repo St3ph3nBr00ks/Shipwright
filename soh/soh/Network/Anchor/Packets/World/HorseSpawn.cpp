@@ -18,6 +18,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/HorseNetId.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
+#include "soh/cvar_prefixes.h"  // CVAR_ENHANCEMENT — #264 diagnostic gate
 
 #include <libultraship/libultraship.h>
 #include <nlohmann/json.hpp>
@@ -50,19 +51,37 @@ void Anchor::SendPacket_HorseSpawn(uint32_t netId, int16_t variantParams,
     payload["rotY"]          = (int)rotY;
     PacketTimeline::SetTimelineField(payload);
 
-    SPDLOG_INFO("[HorseSpawn] Broadcasting netId={} owner={} params={} scene={} "
-                "pos=({:.0f},{:.0f},{:.0f}) rotY={}",
-                netId, ownClientId, (int)variantParams, (int)sceneNum,
+    // #264 diag — explicit `senderProcessOwn` tag so the SOURCE client is
+    // unambiguous even when logs are cross-read. In owner-authoritative
+    // model, `owner` field IS `ownClientId` of the sender, so they will
+    // always match; the redundancy makes log forensics easier.
+    SPDLOG_INFO("[HorseSpawn] Broadcasting netId={} owner={} senderProcessOwn={} "
+                "params={} scene={} pos=({:.0f},{:.0f},{:.0f}) rotY={}",
+                netId, ownClientId, ownClientId, (int)variantParams, (int)sceneNum,
                 pos.x, pos.y, pos.z, (int)rotY);
     SendJsonToRemote(payload);
 }
 
 void Anchor::HandlePacket_HorseSpawn(nlohmann::json payload) {
+    const bool diagOn =
+        CVarGetInteger(CVAR_ENHANCEMENT("DebugHorseSyncDiag"), 0) != 0;
+
     if (!IsHorseSyncEnabled()) return;
     if (gPlayState == nullptr) return;
     if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
 
     uint32_t ownerClientId = payload.value("ownerClientId", (uint32_t)0);
+
+    // #264 diag — log the receive event with explicit receiver identity
+    // BEFORE any of the gates fire. Authority gate skip is logged so we
+    // can tell from logs whether the packet arrived and was self-rejected
+    // vs. never arrived.
+    if (diagOn) {
+        SPDLOG_INFO("[HorseSpawn.diag] HandlePacket received: receiver={} "
+                    "ownerClientId={} authoritySelf={}",
+                    ownClientId, ownerClientId,
+                    ownerClientId == ownClientId);
+    }
     if (ownerClientId == ownClientId) return;  // authority gate
 
     uint32_t netId         = payload.value("netId", (uint32_t)0);
@@ -76,6 +95,12 @@ void Anchor::HandlePacket_HorseSpawn(nlohmann::json payload) {
     // HORSE_SPAWN re-establishes the replica. Owner re-sends on their
     // OnSceneSpawnActors so this is reliable.
     if (gPlayState->sceneNum != sceneNum) {
+        if (diagOn) {
+            SPDLOG_INFO("[HorseSpawn.diag] receiver={} netId={} "
+                        "REJECTED scene-mismatch (their scene={} != our scene={})",
+                        ownClientId, netId,
+                        (int)sceneNum, (int)gPlayState->sceneNum);
+        }
         SPDLOG_DEBUG("[HorseSpawn] ignoring (their scene={} != our scene={})",
                      (int)sceneNum, (int)gPlayState->sceneNum);
         return;
@@ -85,6 +110,12 @@ void Anchor::HandlePacket_HorseSpawn(nlohmann::json payload) {
     auto it = mPeerHorses.find(netId);
     if (it != mPeerHorses.end() && it->second != nullptr &&
         it->second->update != nullptr) {
+        if (diagOn) {
+            SPDLOG_INFO("[HorseSpawn.diag] receiver={} netId={} "
+                        "REJECTED already-tracked-dedup (existing actor at {:p})",
+                        ownClientId, netId,
+                        (void*)it->second);
+        }
         SPDLOG_DEBUG("[HorseSpawn] netId={} already has a tracked replica; "
                      "ignoring duplicate spawn",
                      netId);
@@ -104,6 +135,21 @@ void Anchor::HandlePacket_HorseSpawn(nlohmann::json payload) {
     }
 
     mPeerHorses[netId] = horse;
+    // #264 diag — confirm the post-spawn world.pos on the receiver to
+    // detect if Anchor_SpawnPeerHorse mutated coords or if a follow-up
+    // tick relocated the actor (would point at Hypothesis A — receiver-
+    // side culling rather than sender-side stale pos).
+    if (diagOn) {
+        SPDLOG_INFO("[HorseSpawn.diag] receiver={} netId={} owner={} "
+                    "spawn-applied: requested pos=({:.0f},{:.0f},{:.0f}) "
+                    "actor->world.pos=({:.0f},{:.0f},{:.0f}) "
+                    "actor->home.pos=({:.0f},{:.0f},{:.0f}) ourScene={}",
+                    ownClientId, netId, ownerClientId,
+                    pos.x, pos.y, pos.z,
+                    horse->world.pos.x, horse->world.pos.y, horse->world.pos.z,
+                    horse->home.pos.x, horse->home.pos.y, horse->home.pos.z,
+                    (int)gPlayState->sceneNum);
+    }
     SPDLOG_INFO("[HorseSpawn] Spawned replica netId={} owner={} at "
                 "({:.0f},{:.0f},{:.0f})",
                 netId, ownerClientId, pos.x, pos.y, pos.z);
