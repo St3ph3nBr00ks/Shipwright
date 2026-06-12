@@ -451,6 +451,18 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         // triggered. Mirror the logic here so peer teleports into our
         // scene cause us to re-broadcast our owner-local horses.
         //
+        // Field test 512 / Hypothesis F: the original `!wasSameScene`
+        // gate misses same-scene reloads (Anchor teleport from Hyrule
+        // Field → Hyrule Field at peer's location). Peer's sceneNum
+        // doesn't change, so wasSameScene == nowSameScene == true and
+        // the gate skips. Reuse the `sceneSpawned` boolean computed
+        // above (line ~195 — `prevSceneSpawnEpoch != newSceneSpawnEpoch`)
+        // which catches every OnSceneSpawnActors fire on the peer:
+        // cross-scene transitions, same-scene reloads, Game Over →
+        // Continue, void-out, Farore's Wind. Trigger fires when peer
+        // is in our scene AND either just transitioned into it OR
+        // re-initialised it.
+        //
         // Receiver-side already dedups duplicate HORSE_SPAWN (the
         // mPeerHorses cache check in HandlePacket_HorseSpawn). Safe to
         // duplicate the trigger — worst case: brief redundant emission
@@ -460,6 +472,12 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
             const int16_t nowScene = (int16_t)clients[clientId].sceneNum;
             const bool nowSameScene = isNowOnline && nowScene == (int16_t)gPlayState->sceneNum;
             const bool wasSameScene = wasOnline && prevSceneNum == (int16_t)gPlayState->sceneNum;
+            // freshlyInOurScene = peer is now in our scene AND something
+            // changed that warrants a fresh HORSE_SPAWN: either a scene
+            // transition (!wasSameScene) or a peer-side scene re-init
+            // (sceneSpawned — epoch bumped without sceneNum change).
+            const bool freshlyInOurScene =
+                nowSameScene && (!wasSameScene || sceneSpawned);
 
             // #264 diag — log trigger inputs unconditionally for the peer
             // teleport scenario so we can see whether the gate fires or
@@ -471,15 +489,18 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                 SPDLOG_INFO("[UpdateClientState.diag] #264 trigger inputs: "
                             "ownClientId={} peerClientId={} prevSceneNum={} "
                             "nowScene={} ourScene={} wasOnline={} isNowOnline={} "
-                            "wasSameScene={} nowSameScene={} isConnected={} "
-                            "horseSyncOn={}",
+                            "wasSameScene={} nowSameScene={} prevEpoch={} "
+                            "newEpoch={} sceneSpawned={} freshlyInOurScene={} "
+                            "isConnected={} horseSyncOn={}",
                             ownClientId, clientId, prevSceneNum, nowScene,
                             (int16_t)gPlayState->sceneNum, wasOnline, isNowOnline,
-                            wasSameScene, nowSameScene, isConnected,
-                            IsHorseSyncEnabled());
+                            wasSameScene, nowSameScene,
+                            prevSceneSpawnEpoch, newSceneSpawnEpoch,
+                            sceneSpawned, freshlyInOurScene,
+                            isConnected, IsHorseSyncEnabled());
             }
 
-            if (nowSameScene && !wasSameScene && isConnected && IsHorseSyncEnabled()) {
+            if (freshlyInOurScene && isConnected && IsHorseSyncEnabled()) {
                 int reemitCount = 0;
                 Actor* a = gPlayState->actorCtx.actorLists[ACTORCAT_BG].head;
                 while (a != nullptr) {
@@ -513,7 +534,9 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                 }
                 if (reemitCount > 0) {
                     SPDLOG_INFO("[UpdateClientState] #264 re-emitted {} HORSE_SPAWN(s) "
-                                "for peer scene transition to our scene", reemitCount);
+                                "for peer scene transition/reload to our scene "
+                                "(wasSameScene={} sceneSpawned={})",
+                                reemitCount, wasSameScene, sceneSpawned);
                 }
             }
         }
