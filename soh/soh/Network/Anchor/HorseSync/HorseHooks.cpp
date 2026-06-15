@@ -237,12 +237,25 @@ void Anchor::RegisterHorseHooks() {
             if (ext->isPeerOwned) return;  // peer horse cleanup happens via packet
 
             constexpr uint8_t kReasonNaturalDespawn = 0;
-            SendPacket_HorseDespawn(ext->netId, kReasonNaturalDespawn);
+            const uint32_t broadcastNetId = ext->netId;
+
+            // #266 — edge-trigger HORSE_DESPAWN. Zero ext->netId before
+            // the broadcast so any subsequent OnActorDestroy fire for the
+            // same actor pointer (Actor_Delete cascade, vanilla cleanup
+            // re-fire, etc.) hits the `ext->netId == 0` early-return above
+            // and skips re-broadcasting. Field logs 511 (6× fire) and 513
+            // (3× fire) showed the multi-fire pattern; receiver dedups via
+            // mPeerHorses.find but the wire-noise and log-noise are cleaned
+            // up here at source. ObjectExtension::Free wipes the ext shortly
+            // after at the shared OnActorDestroy hook in HookHandlers.cpp.
+            ext->netId = 0;
+
+            SendPacket_HorseDespawn(broadcastNetId, kReasonNaturalDespawn);
 
             if (CVarGetInteger(CVAR_ENHANCEMENT("DebugHorseSyncDiag"), 0) != 0) {
                 SPDLOG_INFO("[HorseHooks.diag] OnActorDestroy fired HORSE_DESPAWN "
                             "netId={} ownerClientId={} (scene transition or actor delete)",
-                            ext->netId, ext->ownerClientId);
+                            broadcastNetId, ext->ownerClientId);
             }
         });
 
