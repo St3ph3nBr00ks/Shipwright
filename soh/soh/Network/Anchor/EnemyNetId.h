@@ -63,6 +63,19 @@ struct EnemyNetId {
     // Re-applied each frame in OnActorUpdate so the enemy update() can run (enabling
     // collision registration) without drifting from the authoritative host position.
     bool hasNetState = false;
+
+    // #265 — set true at the first OnActorUpdate fire for this actor.
+    // Actors that conditionally Actor_Kill themselves inside _Init
+    // (En_Po_Field's 10→2 candidate pruning at z_en_po_field.c:180-184,
+    // and potentially other admitted-but-conditionally-rejected actors
+    // in IsSyncedWorldActor) are spawned + reaped within a single frame;
+    // OnActorUpdate never fires. Used by OnActorKill to suppress
+    // ENEMY_DEFEATED broadcasts for these "never-existed" actors —
+    // peers' deterministic Init makes the same decision so they have
+    // nothing to clean up. Field log showed ~45 spurious broadcasts per
+    // Hyrule Field scene entry (9 × En_Po_Field + 12 × Obj_Mure2
+    // candidates × 4 transitions) without this gate.
+    bool hasEverUpdated = false;
     Vec3f netPos = { 0.0f, 0.0f, 0.0f };
     Vec3s netRot = { 0, 0, 0 };
     Vec3s netShapeRot = { 0, 0, 0 };

@@ -1688,6 +1688,23 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // #265 — mark the actor as having reached at least one OnActorUpdate
+        // tick. The OnActorKill broadcast path reads this to suppress wire
+        // traffic for actors that conditionally Actor_Kill themselves inside
+        // _Init before any update could fire (En_Po_Field 8-of-10 candidate
+        // cull at z_en_po_field.c:180-184, Obj_Mure2 conditional culls).
+        // Cheap: write a bool every frame for every synced actor. Placed
+        // BEFORE the EnGoma debris filter below so debris fragments are
+        // also marked — preserves their current ENEMY_DEFEATED behaviour
+        // (still emits at end of fragment lifetime).
+        {
+            EnemyNetId* updExt = const_cast<EnemyNetId*>(
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+            if (updExt != nullptr) {
+                updExt->hasEverUpdated = true;
+            }
+        }
+
         // EnGoma debris filter (#67 follow-up, log 299 bandwidth audit).
         //
         // Vanilla EnGoma_SpawnHatchDebris spawns ~16-20 EnGoma actors as
@@ -3784,6 +3801,24 @@ void Anchor::RegisterHooks() {
         // same actor, or multiple actors sharing a netId via posHash
         // collision) do not emit duplicate packets.
         EnemyStateSync::TransitionTo(*ext, EnemyStateSync::LifecyclePhase::Dead);
+
+        // #265 — suppress broadcast for actors that conditionally Actor_Kill
+        // themselves inside _Init before OnActorUpdate ever fires
+        // (En_Po_Field 8-of-10 cull, Obj_Mure2 per-flag culls, ...).
+        // Peers' deterministic Init makes the same decision so they have
+        // no live actor to clean up. ClaimDefeatBroadcast already claimed
+        // above (line 3775) so the dedup ledger still stands; RecordSceneDeath
+        // and Director::OnEnemyRemoved are also skipped because peers'
+        // dead-enemy replay shouldn't include actors peers never saw, and
+        // mNetIdToDescriptor only populates via RecordSpawn for director-
+        // spawned actors (vanilla rejected-at-Init actors are never tracked).
+        if (!ext->hasEverUpdated) {
+            SPDLOG_DEBUG("[EnemyDefeated] Actor_Kill suppressed (never updated) "
+                         "for actor id={} netId={}",
+                         actor->id, ext->netId);
+            return;
+        }
+
         SPDLOG_INFO("[EnemyDefeated] Actor_Kill path: sending defeat for actor id={} netId={}",
                     actor->id, ext->netId);
         if (::SceneAuthority::IsMyCurrentRoomHost()) {
