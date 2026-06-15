@@ -1054,6 +1054,32 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             const bool inCeilingState = (stateIdx == 0x0B || stateIdx == 0x0C ||
                                          stateIdx == 0x0D);
             const bool inSpawnGohmas  = (stateIdx == 0x0E);
+            // Non-grounded states. SetupFloorDamaged silently preserves
+            // velocity/gravity inherited from the prior state — fine for
+            // grounded entry (FloorMain etc.) but catastrophic for these:
+            //
+            //   - 0x0A WallClimb: SetupWallClimb sets velocity.y → 5,
+            //     gravity = 0. Damage during climb → SetupFloorDamaged
+            //     keeps the upward velocity → Actor_MoveXZGravity
+            //     launches boss off the wall into the pit. She survives
+            //     at HP > 0 below the arena floor; ENEMY_STATE keepalive
+            //     keeps broadcasting but she's invisible. Reported via
+            //     log 519 (slingshot during WallClimb).
+            //   - 0x0F FallJump / 0x10 FallStruckDown: gravity = -2.0,
+            //     velocity.y accumulating. SetupFloorDamaged preserves
+            //     mid-fall state without a land handler, leaving boss
+            //     either embedded in the floor or sliding through it.
+            //
+            // Fix: use SetupFallStruckDown (which explicitly zeros
+            // speedXZ / velocity.y and sets gravity = -2.0), then
+            // BossGoma_FallStruckDown lands cleanly via bgCheckFlags & 1
+            // → SetupFloorLandStruckDown → SetupFloorStunned →
+            // SetupFloorMain. Mirrors vanilla's ceiling-state slingshot
+            // path (z_boss_goma.c:1869). Full why-chain at
+            // Claude/Analysis/boss_goma_wallclimb_damage_2026-06-15.md.
+            const bool inAerialState  = (stateIdx == 0x0A ||
+                                         stateIdx == 0x0F ||
+                                         stateIdx == 0x10);
 
             if (inSpawnGohmas) {
                 break;  // intentionally invulnerable; matches vanilla
@@ -1066,6 +1092,26 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
                 sBossGomaSynthAcHitInfo.toucher.damage   = (u8)damage;
                 boss->collider.elements[0].info.acHitInfo    = &sBossGomaSynthAcHitInfo;
                 boss->collider.elements[0].info.bumperFlags |= BUMP_HIT;
+                break;
+            }
+
+            if (inAerialState) {
+                if (boss->invincibilityFrames > 0) {
+                    break;
+                }
+                s8 newHp = (s8)boss->actor.colChkInfo.health - (s8)damage;
+                boss->invincibilityFrames = 10;
+                if (newHp > 0) {
+                    boss->actor.colChkInfo.health = newHp;
+                    BossGoma_SetupFallStruckDown(boss);
+                } else {
+                    boss->actor.colChkInfo.health = 0;
+                    BossGoma_SetupDefeated(boss, gPlayState);
+                    Enemy_StartFinishingBlow(gPlayState, &boss->actor);
+                    GameInteractor_ExecuteOnBossDefeat(&boss->actor);
+                }
+                SPDLOG_INFO("[DamageEnemy] Boss_Goma aerial HP {}→{} (state=0x{:02X}, damage={})",
+                            (int)(newHp + (s8)damage), (int)newHp, (int)stateIdx, (int)damage);
                 break;
             }
 

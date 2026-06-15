@@ -201,7 +201,17 @@ void BossGoma_SetupEncounterState4(struct BossGoma* actor, PlayState* play);
 // gate (which races with network latency and silently drops sword
 // damage in MP — see #67 follow-up). Setups are file-static in
 // z_boss_goma.c by default; declared here for cross-TU use.
+//
+// SetupFallStruckDown is the canonical "fell from wall/ceiling"
+// recovery — explicitly resets speedXZ / velocity.y / gravity to
+// safe in-air values, then BossGoma_FallStruckDown lands cleanly via
+// bgCheckFlags & 1. Required for peer-damage during non-grounded
+// states (WallClimb 0x0A / FallJump 0x0F / FallStruckDown 0x10),
+// where SetupFloorDamaged's implicit grounded-entry invariant is
+// violated and the boss flies off into the pit. See Pillar G.ii /
+// #67 follow-up + `Claude/Analysis/boss_goma_wallclimb_damage_2026-06-15.md`.
 void BossGoma_SetupFloorDamaged(struct BossGoma* actor);
+void BossGoma_SetupFallStruckDown(struct BossGoma* actor);
 void BossGoma_SetupDefeated(struct BossGoma* actor, PlayState* play);
 
 // Ceiling-phase actionFuncs exposed so HookHandlers.cpp's host-side
