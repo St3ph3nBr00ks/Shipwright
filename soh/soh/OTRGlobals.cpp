@@ -307,7 +307,7 @@ OTRGlobals::OTRGlobals() {
 
     if (sohArchiveVersionMatch) {
 
-        auto overlay = context->GetInstance()->GetWindow()->GetGui()->GetGameOverlay();
+        auto overlay = context->GetWindow()->GetGui()->GetGameOverlay();
         overlay->LoadFont("Press Start 2P", 12.0f, "fonts/PressStart2P-Regular.ttf");
         overlay->LoadFont("Fipps", 32.0f, "fonts/Fipps-Regular.otf");
         overlay->SetCurrentFont(CVarGetString(CVAR_GAME_OVERLAY_FONT, "Press Start 2P"));
@@ -1628,6 +1628,9 @@ extern "C" void DeinitOTR() {
     SohGui::Destroy();
     sohFast3dWindow = nullptr;
 
+    // port-maintenance: tear down libultraship's static Context storage
+    // explicitly before nulling our non-owning pointer.
+    Ship::Context::DestroyInstance();
     OTRGlobals::Instance->context = nullptr;
 }
 

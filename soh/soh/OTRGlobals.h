@@ -49,7 +49,10 @@ class OTRGlobals {
   public:
     static OTRGlobals* Instance;
 
-    std::shared_ptr<Ship::Context> context;
+    // port-maintenance: Context lifecycle is now owned by libultraship's
+    // static singleton storage. We hold a non-owning raw pointer; cleanup
+    // happens via Ship::Context::DestroyInstance() in ~OTRGlobals().
+    Ship::Context* context = nullptr;
     std::shared_ptr<SaveStateMgr> gSaveStateMgr;
     std::shared_ptr<Randomizer> gRandomizer;
     std::shared_ptr<Rando::Context> gRandoContext;
