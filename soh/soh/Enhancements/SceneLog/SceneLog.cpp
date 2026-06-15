@@ -512,7 +512,7 @@ static void AppendCutsceneObservation(int16_t sceneNum, int16_t roomNum,
 // Returns 0 if the resource isn't found (or the resource manager isn't
 // available); caller skips that entry rather than emitting a bogus hash.
 static uint64_t ComputeResourceCrc64(const std::string& resourcePath) {
-    auto ctx = Ship::Context::GetInstance();
+    auto ctx = Ship::Context::GetRawInstance();
     if (ctx == nullptr) return 0;
     auto rm = ctx->GetResourceManager();
     if (rm == nullptr) return 0;

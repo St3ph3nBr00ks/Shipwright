@@ -162,7 +162,7 @@ void SohMenu::AddMenuFlotilla() {
                 autoPopulateDone = true;
                 currentModel = mods[1];
                 CVarSetString(CVAR_REMOTE_ANCHOR("CharacterModel"), currentModel.c_str());
-                Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+                Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
             }
             if (!currentModel.empty()) {
                 autoPopulateDone = true;
@@ -180,7 +180,7 @@ void SohMenu::AddMenuFlotilla() {
             if (ImGui::Combo("##CharacterModel", &currentIdx,
                              (const char* const*)displayNames.data(), (int)displayNames.size())) {
                 CVarSetString(CVAR_REMOTE_ANCHOR("CharacterModel"), mods[currentIdx].c_str());
-                Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+                Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
                 SOH::SkeletonPatcher::UpdateCustomSkeletons();
                 if (anchor && anchor->isConnected) {
                     anchor->SendPacket_UpdateClientState();
@@ -583,7 +583,7 @@ void SohMenu::AddMenuFlotilla() {
             } else {
                 CVarSetInteger(CVAR_DEVELOPER_TOOLS("SceneLog.AutoTraverse.Mode"), 0);
             }
-            Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+            Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
         })
         .Options(CheckboxOptions().DefaultValue(false).Tooltip(
             "One-click toggle for the auto-traverse data-capture pass. When ON: forces "

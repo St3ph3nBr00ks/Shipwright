@@ -7,7 +7,7 @@
 #include "soh/Enhancements/randomizer/randomizerTypes.h"
 
 Fast::Fast3dGui* GetFast3dGui() {
-    return static_cast<Fast::Fast3dGui*>(Ship::Context::GetInstance()->GetWindow()->GetGui().get());
+    return static_cast<Fast::Fast3dGui*>(Ship::Context::GetRawInstance()->GetWindow()->GetGui().get());
 }
 
 std::map<uint32_t, ItemMapEntry> itemMapping = {

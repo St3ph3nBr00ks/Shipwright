@@ -303,7 +303,7 @@ void SkeletonPatcher::ClearSkeletons() {
 }
 
 void SkeletonPatcher::UpdateSkeletons() {
-    auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+    auto resourceMgr = Ship::Context::GetRawInstance()->GetResourceManager();
     bool isAlt = resourceMgr->IsAltAssetsEnabled();
     for (auto& skel : skeletons) {
         Skeleton* newSkel =
@@ -532,7 +532,7 @@ static bool BakeLocalVanillaFallback(SkeletonPatchInfo& skel,
 // global alt-asset lookup.
 void SkeletonPatcher::UpdateCustomSkeletonFromFolder(const std::string& skeletonPath, const std::string& folder,
                                                       SkeletonPatchInfo& skel) {
-    auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+    auto resourceMgr = Ship::Context::GetRawInstance()->GetResourceManager();
 
     if (folder.empty()) {
         // Revert to system default (vanilla or user's non-coop alt mod).
@@ -807,7 +807,7 @@ static CoopPackArchives OpenCoopPackArchives(const std::string& folder,
     // log 40 (archive->LoadFile returned nullptr on a previously-working archive)
     // and the white-tunic regression on Default Link.  The shared_ptr from
     // ArchiveManager lives as long as the manager holds it, so we just ride along.
-    auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+    auto resourceMgr = Ship::Context::GetRawInstance()->GetResourceManager();
     auto archiveManager = resourceMgr->GetArchiveManager();
     auto getExistingArchive = [&](const std::string& archivePath) -> std::shared_ptr<Ship::Archive> {
         auto loaded = archiveManager->GetArchives();
@@ -933,7 +933,7 @@ static Gfx* BakeDL(
     // finds it.  Without this, loader->LoadResource only transforms the raw bytes
     // into a resource object without populating the cache, and render-time lookup
     // falls through to archive search → NotFound → null (Coop Test 15 symptom).
-    Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(cacheKey, resource);
+    Ship::Context::GetRawInstance()->GetResourceManager()->SetCachedResource(cacheKey, resource);
     auto dl = std::dynamic_pointer_cast<Fast::DisplayList>(resource);
     if (!dl) {
         SPDLOG_WARN("[CoopModel][Bake] BakeDL: not a DisplayList: \"{}\"", dlPath);
@@ -971,7 +971,7 @@ static Gfx* BakeDL(
             if (texFile) {
                 const std::string uniqueKey = "coopchar/" + folder + "/" + resolvedPath;
                 auto texRes = loader->LoadResource(uniqueKey, texFile);
-                Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(uniqueKey, texRes);
+                Ship::Context::GetRawInstance()->GetResourceManager()->SetCachedResource(uniqueKey, texRes);
                 model.pathStrings.push_back(uniqueKey);
                 stats.texPack++;
             } else {
@@ -1008,7 +1008,7 @@ static Gfx* BakeDL(
                 if (texFile) {
                     const std::string uniqueKey = "coopchar/" + folder + "/" + pathStr;
                     auto texRes = loader->LoadResource(uniqueKey, texFile);
-                    Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(uniqueKey, texRes);
+                    Ship::Context::GetRawInstance()->GetResourceManager()->SetCachedResource(uniqueKey, texRes);
                     pathStr = uniqueKey;
                     stats.texPack++;
                 } else {
@@ -1019,7 +1019,7 @@ static Gfx* BakeDL(
                 // ArchiveManager for the path so the FILEPATH handler can try
                 // vanilla / other-pack resolution at render time.
                 auto archiveMgr =
-                    Ship::Context::GetInstance()->GetResourceManager()->GetArchiveManager();
+                    Ship::Context::GetRawInstance()->GetResourceManager()->GetArchiveManager();
                 const char* globalPath = archiveMgr->HashToCString(hash);
                 if (globalPath != nullptr) {
                     pathStr = globalPath;
@@ -1074,7 +1074,7 @@ static Gfx* BakeDL(
             if (vtxFile) {
                 const std::string uniqueKey = "coopchar/" + folder + "/" + resolvedPath;
                 auto vtxRes = loader->LoadResource(uniqueKey, vtxFile);
-                Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(uniqueKey, vtxRes);
+                Ship::Context::GetRawInstance()->GetResourceManager()->SetCachedResource(uniqueKey, vtxRes);
                 model.pathStrings.push_back(uniqueKey);
                 stats.vtxPack++;
             } else {
@@ -1098,7 +1098,7 @@ static Gfx* BakeDL(
                 if (vtxFile) {
                     const std::string uniqueKey = "coopchar/" + folder + "/" + hashIt->second;
                     auto vtxRes = loader->LoadResource(uniqueKey, vtxFile);
-                    Ship::Context::GetInstance()->GetResourceManager()->SetCachedResource(uniqueKey, vtxRes);
+                    Ship::Context::GetRawInstance()->GetResourceManager()->SetCachedResource(uniqueKey, vtxRes);
                     model.pathStrings.push_back(uniqueKey);
                     // Convert HASH → FILEPATH (vtxDataOff is byteOffset / sizeof F3DVtx)
                     baked[i].words.w0 = (uintptr_t)(uint8_t)Fast::OTR_G_VTX_OTR_FILEPATH << 24;
@@ -1233,7 +1233,7 @@ static void BakeFaceTextures(
         },
     };
 
-    auto resMgr = Ship::Context::GetInstance()->GetResourceManager();
+    auto resMgr = Ship::Context::GetRawInstance()->GetResourceManager();
     int ageHits[2] = { 0, 0 };   // adult / child total hits (eye + mouth)
     int eyeHits[2] = { 0, 0 };
     int mouthHits[2] = { 0, 0 };
@@ -1580,7 +1580,7 @@ static bool BuildBakedPlayerModel(
     // mismatch) — render-time null errors would follow and we already know
     // why without waiting.
     {
-        auto resMgr = Ship::Context::GetInstance()->GetResourceManager();
+        auto resMgr = Ship::Context::GetRawInstance()->GetResourceManager();
         int probed = 0, resolved = 0;
         std::string firstMiss;
         for (const auto& pathStr : outModel.pathStrings) {
@@ -1929,7 +1929,7 @@ static bool BuildVanillaDummyPlayerModel(
 static bool BakeDummyPlayerVanillaFallback(SkelAnime* skelAnime, bool isAdult,
                                             std::shared_ptr<Skeleton>& outSkeleton,
                                             BakedPlayerModel& outBakedModel) {
-    auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+    auto resourceMgr = Ship::Context::GetRawInstance()->GetResourceManager();
     // "__OTR__" prefix length (7). Matches SkeletonPatcher::sOtr which is private.
     constexpr size_t kOtrPrefixLen = 7;
     const std::string vanillaPath = isAdult
@@ -1993,7 +1993,7 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
         }
     }
 
-    auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+    auto resourceMgr = Ship::Context::GetRawInstance()->GetResourceManager();
     const std::string altPath = Ship::IResource::gAltAssetPrefix + skeletonPath;
     SPDLOG_INFO("[CoopModel] ApplyCustomSkeletonToDummyPlayer: folder=\"{}\" altPath=\"{}\" isAdult={} tunic={}",
                 characterFolder, altPath, isAdult, tunic);
@@ -2170,7 +2170,7 @@ void SkeletonPatcher::ApplyCustomSkeletonToDummyPlayer(SkelAnime* skelAnime, boo
 void SkeletonPatcher::UpdateCustomSkeletonFromPath(const std::string& skeletonPath, SkeletonPatchInfo& skel) {
     Skeleton* newSkel = nullptr;
     Skeleton* altSkel = nullptr;
-    auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+    auto resourceMgr = Ship::Context::GetRawInstance()->GetResourceManager();
     bool isAlt = resourceMgr->IsAltAssetsEnabled();
 
     SPDLOG_WARN("[CoopModel] UpdateCustomSkeletonFromPath FALLBACK: skeletonPath=\"{}\" isAlt={} skelAnime={}",
@@ -2179,7 +2179,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromPath(const std::string& skeletonPa
     // If alt assets are on, look for alt tagged skeletons
     if (isAlt) {
         const std::string altLookupPath = Ship::IResource::gAltAssetPrefix + skeletonPath;
-        altSkel = (Skeleton*)Ship::Context::GetInstance()
+        altSkel = (Skeleton*)Ship::Context::GetRawInstance()
                       ->GetResourceManager()
                       ->LoadResource(altLookupPath, true)
                       .get();
@@ -2195,7 +2195,7 @@ void SkeletonPatcher::UpdateCustomSkeletonFromPath(const std::string& skeletonPa
 
     // Load new skeleton based on the custom model if it exists
     if (altSkel == nullptr) {
-        newSkel = (Skeleton*)Ship::Context::GetInstance()->GetResourceManager()->LoadResource(skeletonPath, true).get();
+        newSkel = (Skeleton*)Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(skeletonPath, true).get();
         SPDLOG_WARN("[CoopModel]   vanilla lookup \"{}\" -> {} (ptr={})",
                     skeletonPath, newSkel != nullptr ? "FOUND" : "not found", (void*)newSkel);
     }
