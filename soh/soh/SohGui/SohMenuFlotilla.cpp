@@ -600,6 +600,52 @@ void SohMenu::AddMenuFlotilla() {
             "select). The state machine will wait silently until gameplay begins."));
 
     // -----------------------------------------------------------------
+    // Time-of-day sync (issue #63) — periodic + edge-triggered broadcasts.
+    //
+    // Existing UPDATE_CLIENT_STATE carries dayTime+nightFlag on scene/room
+    // change, climbing edge, etc. — but no periodic baseline. Without
+    // periodic, drift accumulates when one client is in a dungeon (time
+    // frozen) while another is in overworld (time advancing). The new
+    // TIME_SYNC packet adds a 5s baseline + cutscene-start/end edges +
+    // scene-transition (TRANS_TRIGGER_START) edge.
+    //
+    // The Enabled toggle gates the periodic timer only. Edge sends
+    // (cutscene-start / cutscene-end / scene_transition) always fire when
+    // connected + save loaded + gameMode==NORMAL — they're correctness-
+    // critical for boundary smoothness and can't be disabled here.
+    // -----------------------------------------------------------------
+    AddWidget(path, "Time-of-Day Sync", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Periodic Time Sync Enabled", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_REMOTE_ANCHOR("TimeSync.Enabled"))
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "When ON, broadcasts the time-of-day (dayTime + nightFlag) every "
+            "few seconds to keep all clients' clocks aligned. Edge sends "
+            "(cutscene start/end, scene transition) always fire regardless "
+            "of this setting — turning this off only suppresses the periodic "
+            "baseline.\n\n"
+            "Without periodic sync, drift accumulates over minutes when one "
+            "player is in a dungeon (time frozen) while another is in "
+            "overworld (time advancing). Default: ON."));
+
+    AddWidget(path, "Time Sync Interval: %ds", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_REMOTE_ANCHOR("TimeSync.IntervalSeconds"))
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = !CVarGetInteger(CVAR_REMOTE_ANCHOR("TimeSync.Enabled"), 1);
+        })
+        .Options(IntSliderOptions()
+                     .Min(1)
+                     .Max(60)
+                     .DefaultValue(5)
+                     .Format("%ds")
+                     .Tooltip(
+            "Periodic time-sync broadcast interval. Shorter = clocks stay "
+            "tighter across clients, slightly more bandwidth. Longer = more "
+            "drift between syncs, less bandwidth. Default 5s gives ~5 in-game "
+            "minutes max drift at the receive side. Range 1-60s; clamped on "
+            "read."));
+
+    // -----------------------------------------------------------------
     // Nav System
     //
     // Consolidated: removed pure-diagnostic toggles + advanced tuning sliders.

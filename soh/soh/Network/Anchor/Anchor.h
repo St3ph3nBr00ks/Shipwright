@@ -550,6 +550,21 @@ class Anchor : public Network {
     // the handoff on the rising edge (OFF→START).
     s32             prevTransitionTrigger       = 0;
 
+    // Issue #63 — previous frame's csCtx.state value for TIME_SYNC
+    // cutscene-edge detection. Reset to CS_STATE_IDLE (0) on
+    // OnSceneSpawnActors so the file-scope persistence across scene
+    // transitions doesn't yield a false cs_end edge on every scene
+    // load (vanilla resets csCtx.state to IDLE on scene init, but
+    // this member would otherwise hold the prior scene's last value).
+    // Init to 0 (CS_STATE_IDLE) because that's the first-frame value
+    // before any cutscene has fired.
+    u8              prevCsState                 = 0;
+
+    // Issue #63 — pendingTimeSync members live in the public block
+    // below (Pitfall 16). TimeOfDayReconcile.cpp accesses them via
+    // Anchor::Instance-> (external to class Anchor), so they cannot
+    // be private.
+
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();
     void RegisterHooks();
@@ -628,6 +643,7 @@ class Anchor : public Network {
     void HandlePacket_SetCheckStatus(nlohmann::json payload);
     void HandlePacket_SetFlag(nlohmann::json payload);
     void HandlePacket_TeleportTo(nlohmann::json payload);
+    void HandlePacket_TimeSync(nlohmann::json payload);
     void HandlePacket_UnsetFlag(nlohmann::json payload);
     void HandlePacket_UpdateBeansCount(nlohmann::json payload);
     void HandlePacket_UpdateClientState(nlohmann::json payload);
@@ -673,6 +689,28 @@ class Anchor : public Network {
     // intended for cross-module access land here per Pitfall 16.
     // ========================================================================
     uint32_t ownClientId;
+
+    // Issue #63 — pending-time-sync flag for frozen→advancing scene
+    // transitions (log 538 fix). MUST be public (Pitfall 16):
+    // TimeOfDayReconcile.cpp accesses these via Anchor::Instance->.
+    //
+    // Set on the rising edge of gTimeIncrement (0 → non-zero), i.e.,
+    // when a player exits a vanilla time-frozen scene (LLR / dungeons /
+    // boss rooms) into a time-advancing scene. While set:
+    //   - SendPacket_TimeSync early-returns (don't broadcast stale
+    //     LLR-entry-time value).
+    //   - PrepClientState omits dayTime/nightFlag (same).
+    //   - The next incoming TIME_SYNC or UPDATE_CLIENT_STATE with
+    //     dayTime is applied UNCONDITIONALLY (bypassing modular check),
+    //     then the flag clears.
+    //   - 15s timeout in OnGameFrameUpdate clears the flag if no
+    //     incoming sync arrives (matches single-player solo behavior).
+    //
+    // lastSceneTimeIncrement is the previous OnSceneSpawnActors-
+    // observed value of gTimeIncrement, used for rising-edge detection.
+    bool            pendingTimeSync             = false;
+    int             pendingTimeSyncFrames       = 0;
+    u16             lastSceneTimeIncrement      = 0;
 
     // Set to true for the duration of AnchorDirector::Director::ExecuteSpawn's
     // Actor_Spawn call so the OnActorSpawn auto-broadcast does NOT fire
@@ -786,6 +824,7 @@ class Anchor : public Network {
     inline static const std::string& SHIELD_BOUNCE_PLAYER     = PacketTypes::SHIELD_BOUNCE_PLAYER;
     inline static const std::string& TALK_REQUEST             = PacketTypes::TALK_REQUEST;
     inline static const std::string& TELEPORT_TO              = PacketTypes::TELEPORT_TO;
+    inline static const std::string& TIME_SYNC                = PacketTypes::TIME_SYNC;
     inline static const std::string& UNSET_FLAG               = PacketTypes::UNSET_FLAG;
     inline static const std::string& UPDATE_BEANS_COUNT       = PacketTypes::UPDATE_BEANS_COUNT;
     inline static const std::string& UPDATE_CLIENT_STATE      = PacketTypes::UPDATE_CLIENT_STATE;
@@ -1615,6 +1654,12 @@ class Anchor : public Network {
     void SendPacket_SetCheckStatus(RandomizerCheck rc);
     void SendPacket_SetFlag(s16 sceneNum, s16 flagType, s16 flag);
     void SendPacket_TeleportTo(u32 clientId);
+    // issue #63 — periodic + edge-triggered time-of-day sync. reason is a
+    // diagnostic tag ("periodic", "cs_start", "cs_end", "scene_transition").
+    // Caller chooses when to call; this method does NO gating (callers are
+    // responsible for honoring CVAR_REMOTE_ANCHOR("TimeSync.Enabled") for the
+    // periodic path; edge sends fire unconditionally).
+    void SendPacket_TimeSync(const char* reason);
     void SendPacket_UnsetFlag(s16 sceneNum, s16 flagType, s16 flag);
     void SendPacket_UpdateBeansCount();
     void SendPacket_UpdateClientState();

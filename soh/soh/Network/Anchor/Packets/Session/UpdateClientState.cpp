@@ -8,6 +8,7 @@
 #include "soh/Network/Anchor/Common/PacketSchemas.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/Common/TimeOfDayReconcile.h"  // issue #63 — shared forward-only reconcile
 #include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/ObjectExtension/ObjectExtension.h"
@@ -75,8 +76,41 @@ nlohmann::json Anchor::PrepClientState() {
         payload["sceneNum"] = gPlayState->sceneNum;
         payload["curRoomNum"] = gPlayState->roomCtx.curRoom.num;
         payload["entranceIndex"] = gSaveContext.entranceIndex;
-        payload["dayTime"]   = (u16)gSaveContext.dayTime;
-        payload["nightFlag"] = gSaveContext.nightFlag;
+        // #63 — conditionally omit dayTime / nightFlag when our local
+        // clock is frozen (gTimeIncrement == 0). Vanilla freezes dayTime
+        // in dungeons / boss rooms / Lon Lon Ranch via the scene header
+        // (z_scene.c:354-368). Without this gate, frozen-scene clients
+        // continue broadcasting their stuck values via UPDATE_CLIENT_STATE
+        // (which fires on room change, climbing edge, eligibility-bitmap
+        // change, reconnect, etc.); advancing-clock receivers accept the
+        // stuck value once per day cycle via the modular-distance check
+        // and yank their clock forward, skipping morning + noon + most
+        // of the day cycle. Field test log 537 confirmed the bug — the
+        // single apply line "dayTime 14098 -> 44794 forwardDist=30696"
+        // showed P1 in HF being yanked from 0x3712 (night, near morning)
+        // to 0x AEFA (late afternoon) by P2's frozen LLR broadcast.
+        //
+        // Receivers' existing `if (payload.contains("dayTime"))` check
+        // at UpdateClientState.cpp:439 naturally handles absence — no
+        // receive-side change needed.
+        //
+        // Companion gate at TimeSync.cpp:38 short-circuits SendPacket_
+        // TimeSync the same way. Together these cover every dayTime
+        // broadcast source (TIME_SYNC + UPDATE_CLIENT_STATE +
+        // HANDSHAKE which inherits PrepClientState via Handshake.cpp:19).
+        // ALL_CLIENT_STATE never carried time fields (AnchorClient
+        // struct schema omits them per JsonConversions.hpp:54-75).
+        //
+        // #63 (log 538) — also omit when pendingTimeSync is set. Player
+        // just exited a frozen scene; their dayTime is stale (the
+        // frozen-scene entry-time value); they should accept incoming
+        // syncs instead of broadcasting. pendingTimeSync clears on
+        // first incoming apply (see TimeOfDayReconcile.cpp) or on
+        // 15s timeout (see HookHandlers.cpp).
+        if (gTimeIncrement != 0 && !pendingTimeSync) {
+            payload["dayTime"]   = (u16)gSaveContext.dayTime;
+            payload["nightFlag"] = gSaveContext.nightFlag;
+        }
         // Phase 2 (#193 spec §4 Phase 2) — broadcast per-client
         // eligibility bitmap so other clients' Layer 2 pickup gates
         // can defer to us when we're eligible for a drop they aren't.
@@ -429,17 +463,17 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         // is the host and enters Hyrule Field they would otherwise broadcast stale
         // time to the non-host. With forward-only bidirectional sync the more
         // advanced time always wins regardless of host assignment.
+        //
+        // Reconcile logic extracted to AnchorTimeOfDay::ApplyIfAhead (issue #63
+        // / 2026-06-16) — shared with the new TIME_SYNC packet handler so both
+        // call sites stay in lockstep. The helper additionally writes
+        // gSaveContext.skyboxTime so the visual sky snaps to the new time without
+        // the 1-2 frame catch-up lag (see helper header for rationale).
         if (IsSaveLoaded() && payload["state"].contains("dayTime")) {
             s32 receivedNightFlag = payload["state"]["nightFlag"].get<s32>();
             u16 receivedDayTime   = payload["state"]["dayTime"].get<u16>();
-            bool timeIsAhead = (receivedNightFlag != gSaveContext.nightFlag) ||
-                               (receivedDayTime > (u16)gSaveContext.dayTime);
-            if (timeIsAhead) {
-                gSaveContext.dayTime   = receivedDayTime;
-                gSaveContext.nightFlag = receivedNightFlag;
-                SPDLOG_INFO("[UpdateClientState] Synced time: dayTime={} nightFlag={}",
-                            gSaveContext.dayTime, gSaveContext.nightFlag);
-            }
+            AnchorTimeOfDay::ApplyIfAhead(
+                receivedDayTime, receivedNightFlag, "UpdateClientState");
         }
 
         // #264 — duplicate the #259 detect-and-re-emit logic from

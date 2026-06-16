@@ -392,6 +392,43 @@ void Anchor::RegisterHooks() {
         });
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {
+        // #63 — detect frozen→advancing scene transition for
+        // pendingTimeSync. MUST run BEFORE SendPacket_UpdateClientState
+        // (next statement) so PrepClientState sees the flag set and
+        // omits stale dayTime carried from the just-exited frozen scene.
+        //
+        // Vanilla freezes dayTime in dungeons / boss rooms / Lon Lon
+        // Ranch via envCtx.timeIncrement = 0 (z_scene.c:354-368). When
+        // exiting one of those scenes into a time-advancing scene
+        // (Hyrule Field etc.), Play_Init's CommandTimeSettings has
+        // already set gTimeIncrement to the new scene's non-zero
+        // value by the time this hook fires — but our local dayTime
+        // is still the stale LLR-entry-time value. Without this
+        // detection, the immediate SendPacket_UpdateClientState below
+        // broadcasts the stale value; receivers in the destination
+        // scene apply it via modular distance, yanking THEIR clocks
+        // backward in time. Log 538 captured this: P1 in HF was
+        // yanked from morning 0x5E40 to late-afternoon 0xB1A2 by
+        // P2's exit-LLR UPDATE_CLIENT_STATE.
+        //
+        // Setting pendingTimeSync here:
+        //   - PrepClientState below this point omits dayTime/nightFlag.
+        //   - SendPacket_TimeSync would also short-circuit.
+        //   - The first incoming TIME_SYNC or UPDATE_CLIENT_STATE with
+        //     dayTime is applied unconditionally (bypassing modular
+        //     check), then the flag clears.
+        //   - 15s timeout (managed in OnGameFrameUpdate below) prevents
+        //     permanent deadlock if no peer broadcasts.
+        if (gPlayState != nullptr && gTimeIncrement != 0 &&
+            lastSceneTimeIncrement == 0) {
+            pendingTimeSync = true;
+            pendingTimeSyncFrames = 0;
+            SPDLOG_INFO("[TimeSync] pending sync flagged "
+                        "(scene transition unfroze clock: was 0, now {})",
+                        gTimeIncrement);
+        }
+        lastSceneTimeIncrement = gTimeIncrement;
+
         // Bump before sending so the host's HandlePacket_UpdateClientState sees the
         // new epoch and fires the dead-enemy replay even when sceneNum and isSaveLoaded
         // are both unchanged (Game Over continue, void-out in the same scene).
@@ -499,6 +536,13 @@ void Anchor::RegisterHooks() {
     // CVar defaults on (Q2 locked).
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneSpawnActors>([]() {
         Anchor::Instance->MaybeRebuildTitlePeers();
+        // Issue #63 — reset the TIME_SYNC cutscene-edge detector's previous
+        // state to CS_STATE_IDLE (0) on every scene load. Vanilla resets
+        // csCtx.state to IDLE during Play_Init for the new scene; without
+        // this matching reset on our tracker, a scene transitioned out of
+        // mid-cutscene would leave prevCsState non-IDLE and produce a
+        // spurious cs_end edge on the new scene's first frame.
+        Anchor::Instance->prevCsState = 0;  // CS_STATE_IDLE
     });
 
     // Pillar C v1 — local FLAG_SCENE_SWITCH set fires this hook from
@@ -590,6 +634,25 @@ void Anchor::RegisterHooks() {
 
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
         ProcessIncomingPacketQueue();
+
+        // #63 — pendingTimeSync timeout. Counter increments each frame
+        // while the flag is set. If no incoming TIME_SYNC or
+        // UPDATE_CLIENT_STATE with dayTime arrives within 15s, clear
+        // the flag and resume normal behavior. Matches single-player
+        // solo behavior (clock resumes from frozen-entry value).
+        // Periodic TIME_SYNC fires every 5s default, so 15s = 3
+        // expected intervals — generous slack for packet loss.
+        if (pendingTimeSync) {
+            pendingTimeSyncFrames++;
+            static constexpr int kPendingTimeSyncTimeoutMs = 15000;
+            const int timeoutTicks = MsToGameTicks(kPendingTimeSyncTimeoutMs);
+            if (timeoutTicks > 0 && pendingTimeSyncFrames > timeoutTicks) {
+                pendingTimeSync = false;
+                pendingTimeSyncFrames = 0;
+                SPDLOG_INFO("[TimeSync] pending sync timeout "
+                            "(15s no incoming sync, resuming local)");
+            }
+        }
 
         // Game-tick interval measurement (2026-05-15 log 118 followup).
         // Sample wall-clock delta since the previous tick and EWMA-smooth
@@ -705,6 +768,69 @@ void Anchor::RegisterHooks() {
             }
         }
 
+        // ---------------------------------------------------------------
+        // Issue #63 — TIME_SYNC periodic + cutscene-edge sends.
+        //
+        // Design: forward-only bidirectional reconcile (no host authority).
+        // Periodic broadcasts cap the dungeon-vs-overworld desync gap.
+        // Cutscene edges ensure both clients enter and leave each cutscene
+        // with synchronized clocks (otherwise the off-leader's local time
+        // keeps advancing during the leader's frozen cutscene). The
+        // scene-transition edge below (in the SCENE_TRANSITION_HANDOFF
+        // block) covers the third boundary.
+        //
+        // Periodic respects CVAR_REMOTE_ANCHOR("TimeSync.Enabled") (default
+        // 1); edges always fire. Both gated on save loaded + normal
+        // gameplay (excludes file-select / name-entry / end-credits).
+        //
+        // Anchor::prevCsState is reset on the OnSceneSpawnActors handler
+        // above (line ~503) to prevent a false cs_end edge on every scene
+        // transition: vanilla resets csCtx.state to IDLE on scene load,
+        // but our cross-frame tracker would otherwise hold the prior
+        // scene's last non-IDLE value.
+        // See Claude/Analysis/time_of_day_sync_implementation_analysis_2026-06-16.md.
+        if (IsSaveLoaded() && gPlayState != nullptr &&
+            gSaveContext.gameMode == GAMEMODE_NORMAL) {
+            // Periodic tick — read interval CVar each frame so menu/console
+            // changes take effect immediately. Clamp defends against
+            // malformed values.
+            const bool periodicEnabled =
+                CVarGetInteger(CVAR_REMOTE_ANCHOR("TimeSync.Enabled"), 1) != 0;
+            if (periodicEnabled) {
+                static int sTimeSyncTickCounter = 0;
+                const int intervalSec = std::clamp(
+                    CVarGetInteger(
+                        CVAR_REMOTE_ANCHOR("TimeSync.IntervalSeconds"), 5),
+                    1, 60);
+                const int intervalTicks = MsToGameTicks(intervalSec * 1000);
+                if (intervalTicks > 0 &&
+                    ++sTimeSyncTickCounter >= intervalTicks) {
+                    sTimeSyncTickCounter = 0;
+                    SendPacket_TimeSync("periodic");
+                }
+            }
+
+            // Cutscene-edge detector — fires once per cutscene boundary.
+            // csCtx.state values: CS_STATE_IDLE (0), SKIPPABLE_INIT (1),
+            // SKIPPABLE_EXEC (2), UNSKIPPABLE_INIT (3), UNSKIPPABLE_EXEC (4).
+            // Any non-IDLE means "in cutscene". Edges bypass the .Enabled
+            // CVar — they're correctness-critical for boundary alignment.
+            //
+            // prevCsState is a file-static that persists across scene
+            // transitions; the OnSceneSpawnActors hook below resets it to
+            // CS_STATE_IDLE so the first cutscene of each new scene gets
+            // a clean start edge rather than a false cs_end inheriting
+            // the prior scene's state.
+            const u8 curCsState = gPlayState->csCtx.state;
+            if (prevCsState == CS_STATE_IDLE && curCsState != CS_STATE_IDLE) {
+                SendPacket_TimeSync("cs_start");
+            } else if (prevCsState != CS_STATE_IDLE &&
+                       curCsState == CS_STATE_IDLE) {
+                SendPacket_TimeSync("cs_end");
+            }
+            prevCsState = curCsState;
+        }
+
         // Phase C — SCENE_TRANSITION_HANDOFF leader-side broadcast.
         // Every client runs this: on the rising edge of transitionTrigger
         // (OFF → START), capture our current position and destination
@@ -717,6 +843,11 @@ void Anchor::RegisterHooks() {
         // destEntrance) is a synced-boss-exit pair. That packet pulls
         // teammates currently in the same boss room through the same warp
         // so post-fight exits stay grouped (post-Goma cutscene chain).
+        //
+        // Issue #63 piggyback — also fire TIME_SYNC("scene_transition") on
+        // the same edge so the receiving client's first frame in the new
+        // scene loads with synchronized time. Bypasses the .Enabled CVar
+        // (edge sends always fire when connected + save loaded + NORMAL).
         if (IsSaveLoaded() && gPlayState != nullptr) {
             s32 curTrigger = gPlayState->transitionTrigger;
             if (curTrigger == TRANS_TRIGGER_START &&
@@ -736,6 +867,13 @@ void Anchor::RegisterHooks() {
                         (u16)gSaveContext.nextCutsceneIndex,
                         (s8)gPlayState->transitionType,
                         (s8)gSaveContext.nextTransitionType);
+                }
+                // Issue #63 — TIME_SYNC on the same rising edge. Fires
+                // BEFORE the new scene loads so the receiver's first
+                // frame in the new scene has the synced time. Same
+                // gameMode gate as the periodic tick above.
+                if (gSaveContext.gameMode == GAMEMODE_NORMAL) {
+                    SendPacket_TimeSync("scene_transition");
                 }
             }
             prevTransitionTrigger = curTrigger;
