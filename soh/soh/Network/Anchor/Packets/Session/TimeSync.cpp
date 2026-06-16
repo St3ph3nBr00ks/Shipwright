@@ -38,6 +38,36 @@ extern "C" {
 void Anchor::SendPacket_TimeSync(const char* reason) {
     if (!isConnected) return;
 
+    // #63 — frozen-scene broadcast suppression (added 2026-06-16 after
+    // log 537 field test surfaced day-cycle-skipping behavior).
+    //
+    // Vanilla freezes dayTime in dungeons / boss rooms / Lon Lon Ranch
+    // via envCtx.timeIncrement = 0 (z_scene.c:354-368). Option A
+    // (commit c1d1d77f8) gated the RECEIVE side so the frozen-scene
+    // player wouldn't accept incoming syncs — but frozen-scene clients
+    // kept BROADCASTING their stuck values. Advancing-clock receivers
+    // (gTimeIncrement != 0) eventually accept those broadcasts via the
+    // modular-distance check: as the receiver's clock sweeps the
+    // circular day, it MUST land within forwardDist < 0x8000 of any
+    // frozen peer once per cycle, at which point the apply yanks the
+    // receiver's clock forward — skipping morning / noon / afternoon.
+    //
+    // Field test log 537 captured this in a single apply line:
+    //   dayTime 14098 (0x3712, night) -> 44794 (0xAEFA, late afternoon)
+    //   forwardDist=30696 (just under 0x8000 = 32768)
+    //
+    // Suppress all TIME_SYNC sends when local clock is frozen. Frozen
+    // clients stop polluting the network; advancing clients' clocks
+    // evolve naturally. On scene exit, gTimeIncrement becomes non-zero
+    // and broadcasts resume.
+    //
+    // gTimeIncrement is declared in z_kankyo.c:61, exposed via
+    // soh/include/variables.h:80 (extern). Already in scope through
+    // the extern "C" #include "variables.h" at file top.
+    if (gTimeIncrement == 0) {
+        return;
+    }
+
     nlohmann::json payload;
     payload["type"]      = TIME_SYNC;
     // Schema field enables Pillar F bypass of the clientVersion check

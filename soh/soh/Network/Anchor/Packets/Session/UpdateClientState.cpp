@@ -76,8 +76,34 @@ nlohmann::json Anchor::PrepClientState() {
         payload["sceneNum"] = gPlayState->sceneNum;
         payload["curRoomNum"] = gPlayState->roomCtx.curRoom.num;
         payload["entranceIndex"] = gSaveContext.entranceIndex;
-        payload["dayTime"]   = (u16)gSaveContext.dayTime;
-        payload["nightFlag"] = gSaveContext.nightFlag;
+        // #63 — conditionally omit dayTime / nightFlag when our local
+        // clock is frozen (gTimeIncrement == 0). Vanilla freezes dayTime
+        // in dungeons / boss rooms / Lon Lon Ranch via the scene header
+        // (z_scene.c:354-368). Without this gate, frozen-scene clients
+        // continue broadcasting their stuck values via UPDATE_CLIENT_STATE
+        // (which fires on room change, climbing edge, eligibility-bitmap
+        // change, reconnect, etc.); advancing-clock receivers accept the
+        // stuck value once per day cycle via the modular-distance check
+        // and yank their clock forward, skipping morning + noon + most
+        // of the day cycle. Field test log 537 confirmed the bug — the
+        // single apply line "dayTime 14098 -> 44794 forwardDist=30696"
+        // showed P1 in HF being yanked from 0x3712 (night, near morning)
+        // to 0x AEFA (late afternoon) by P2's frozen LLR broadcast.
+        //
+        // Receivers' existing `if (payload.contains("dayTime"))` check
+        // at UpdateClientState.cpp:439 naturally handles absence — no
+        // receive-side change needed.
+        //
+        // Companion gate at TimeSync.cpp:38 short-circuits SendPacket_
+        // TimeSync the same way. Together these cover every dayTime
+        // broadcast source (TIME_SYNC + UPDATE_CLIENT_STATE +
+        // HANDSHAKE which inherits PrepClientState via Handshake.cpp:19).
+        // ALL_CLIENT_STATE never carried time fields (AnchorClient
+        // struct schema omits them per JsonConversions.hpp:54-75).
+        if (gTimeIncrement != 0) {
+            payload["dayTime"]   = (u16)gSaveContext.dayTime;
+            payload["nightFlag"] = gSaveContext.nightFlag;
+        }
         // Phase 2 (#193 spec §4 Phase 2) — broadcast per-client
         // eligibility bitmap so other clients' Layer 2 pickup gates
         // can defer to us when we're eligible for a drop they aren't.
