@@ -1928,49 +1928,99 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     // from there). When further than 30u, leave Link
                     // alone — stick injection has time to walk him in
                     // without falling.
+                    // #236 v5 (log 533) — order-of-operations:
+                    // Populate reachable climb cells BEFORE the snap so
+                    // the descent branch can pick a real climb cell
+                    // (guaranteed inside the vine grab volume) instead
+                    // of computing from anchorTop.y - small_offset
+                    // (which v4 showed lands inside the platform floor
+                    // poly on flush-edge geometries — Pitfall 36).
+                    //
+                    // The lookup-by-basePos pattern is unchanged from
+                    // v4; only its position moved.
+                    followerClimbAnchorIdx = UINT16_MAX;
+                    followerClimbReachableNodes.clear();
+                    for (size_t a = 0; a < navData->climbAnchors.size(); a++) {
+                        const auto& anc = navData->climbAnchors[a];
+                        if (std::fabs(anc.basePos.x - anchorBase.x) < 1.0f &&
+                            std::fabs(anc.basePos.z - anchorBase.z) < 1.0f) {
+                            followerClimbAnchorIdx = (uint16_t)a;
+                            PopulateClimbReachableNodes(navData, (uint16_t)a);
+                            break;
+                        }
+                    }
+
                     constexpr f32 kAnchorSnapRadius = 30.0f;
                     f32 anchorDxSq = AnchorDist::DistXZSq(anchorBase, p2Pos);
                     if (anchorDxSq <= kAnchorSnapRadius * kAnchorSnapRadius) {
-                        // #236 v4 (log 531) — descent-vs-ascent branch.
-                        // When the leader is climbing DOWN AND Link is
-                        // at-or-above the anchor's top (typical "on
-                        // platform" position), snap to a point just
-                        // below the vine lip on the vine itself —
-                        // mirrors the substrate engagement descent snap.
-                        // Y moves down by 5u so vanilla detects Link
-                        // inside the vine grab volume and sets
-                        // CLIMBING_LADDER; existing descent stick takes
-                        // over.
+                        // #236 v5 (log 533) — descent-vs-ascent branch
+                        // with cell-based snap.
                         //
-                        // For ascent (leader climbing UP, or Link below
-                        // the anchor top), use the original snap to
-                        // anchorBase.xz with Y preserved (Link is
-                        // already at ladder altitude; the autonomous
-                        // pipeline drives the ascent from there).
+                        // Descent (leader climbing DOWN, Link at-or-
+                        // above anchor top): pick the TOPMOST climb cell
+                        // whose Y is ≤ anchorTop.y - 15. This is
+                        // guaranteed below the platform floor poly (floor
+                        // collision Pitfall 36) AND inside the vine grab
+                        // volume (cells exist where the vine collider
+                        // exists by construction).
+                        //
+                        // Ascent (leader climbing UP, or Link below
+                        // anchor top): snap to anchorBase.xz with Y
+                        // preserved — original v4/pre-v4 behavior. The
+                        // ascent pipeline drives Link up from there.
+                        //
+                        // Fallback (descent intent but no suitable cell
+                        // found, e.g., very short vines or cell-less
+                        // Path-B ladders): snap to anchorTop with Y
+                        // offset of 25u — larger than v4's 5u so it
+                        // clears typical platform floor thickness, but
+                        // still subject to Pitfall 36 on very thick
+                        // floors. The cell-based path is preferred.
                         static constexpr f32 kDescentIntentMinDeltaY = 16.0f;
                         static constexpr f32 kAtAnchorTopTolerance   = 24.0f;
-                        static constexpr f32 kBelowLipOffset         = 5.0f;
+                        static constexpr f32 kBelowAnchorTopMin      = 15.0f;
+                        static constexpr f32 kBelowLipFallback       = 25.0f;
                         const bool descentIntent =
                             (leaderPos.y < p2Pos.y - kDescentIntentMinDeltaY);
                         const bool atOrAboveAnchorTop =
                             (p2Pos.y >= anchorTop.y - kAtAnchorTopTolerance);
                         if (descentIntent && atOrAboveAnchorTop) {
-                            Vec3f vinePos = {
-                                anchorTop.x,
-                                anchorTop.y - kBelowLipOffset,
-                                anchorTop.z
-                            };
+                            // Pick topmost reachable cell with
+                            // Y ≤ anchorTop.y - 15.
+                            const Vec3f* bestCell = nullptr;
+                            for (const Vec3f& cell : followerClimbReachableNodes) {
+                                if (cell.y > anchorTop.y - kBelowAnchorTopMin) continue;
+                                if (bestCell == nullptr || cell.y > bestCell->y) {
+                                    bestCell = &cell;
+                                }
+                            }
+                            Vec3f vinePos;
+                            const char* snapKind;
+                            if (bestCell != nullptr) {
+                                vinePos = *bestCell;
+                                snapKind = "cell";
+                            } else {
+                                vinePos = {
+                                    anchorTop.x,
+                                    anchorTop.y - kBelowLipFallback,
+                                    anchorTop.z
+                                };
+                                snapKind = "anchor-fallback";
+                            }
                             player->actor.world.pos = vinePos;
                             player->actor.prevPos   = vinePos;
                             p2Pos = vinePos;
                             followerPostTeleportFrames = kPostTeleportHoldFrames;
-                            SPDLOG_INFO("[Follower] Leader-climbing engagement (descent): "
-                                        "XZ-snap to vine ({:.0f},{:.0f},{:.0f}) "
+                            SPDLOG_INFO("[Follower] Leader-climbing engagement (descent v5): "
+                                        "snap to {} ({:.0f},{:.0f},{:.0f}) "
                                         "— was {:.1f}u from anchor base "
-                                        "(anchorTop=({:.0f},{:.0f},{:.0f}))",
+                                        "(anchorTop=({:.0f},{:.0f},{:.0f}) "
+                                        "cellPoolSize={})",
+                                        snapKind,
                                         vinePos.x, vinePos.y, vinePos.z,
                                         sqrtf(anchorDxSq),
-                                        anchorTop.x, anchorTop.y, anchorTop.z);
+                                        anchorTop.x, anchorTop.y, anchorTop.z,
+                                        (int)followerClimbReachableNodes.size());
                         } else {
                             Vec3f anchorXz = { anchorBase.x, p2Pos.y, anchorBase.z };
                             player->actor.world.pos = anchorXz;
@@ -1991,21 +2041,6 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                         f32 fdz = anchorBase.z - p2Pos.z;
                         if (fdx * fdx + fdz * fdz > 1.0f) {
                             player->actor.shape.rot.y = Math_Atan2S(fdz, fdx);
-                        }
-                    }
-
-                    // Edge-prediction setup — find which anchor the
-                    // top-target belongs to. Same logic as the Stage 6
-                    // engagement in HandleStateFollow.
-                    followerClimbAnchorIdx = UINT16_MAX;
-                    followerClimbReachableNodes.clear();
-                    for (size_t a = 0; a < navData->climbAnchors.size(); a++) {
-                        const auto& anc = navData->climbAnchors[a];
-                        if (std::fabs(anc.basePos.x - anchorBase.x) < 1.0f &&
-                            std::fabs(anc.basePos.z - anchorBase.z) < 1.0f) {
-                            followerClimbAnchorIdx = (uint16_t)a;
-                            PopulateClimbReachableNodes(navData, (uint16_t)a);
-                            break;
                         }
                     }
 
@@ -4532,56 +4567,49 @@ Vec3f Anchor::ComputePursuitSubgoal(Player* player,
                     (int)followerClimbAnchorIdx,
                     (int)followerClimbReachableNodes.size());
 
-        // #236 v4 (log 531) — descent engagement-edge XZ-snap. When the
-        // engagement target is meaningfully below Link AND Link is at-or-
-        // above the anchor's top (typical "Link on platform top, vine
-        // going down" scenario), snap Link to a position just below the
-        // vine lip on the vine itself. Vanilla collision detects Link
-        // inside the vine grab volume next frame and sets
-        // PLAYER_STATE1_CLIMBING_LADDER; then the existing nowOnLadder=true
-        // branch in TickFollowerInput injects negative stick_y (ladderY =
-        // -127) and Link descends naturally.
+        // #236 v5-E (log 533) — descent engagement-edge snap to substrate
+        // climb cell. When the engagement target is meaningfully below
+        // Link (descent intent) AND Link is at-or-above the anchor's top
+        // (typical "Link on platform top, vine going down" scenario),
+        // snap Link directly to resolvedTarget — the substrate path's
+        // chosen climb-surface cell.
         //
-        // This is the symmetric counterpart to the ascent XZ-snap at the
-        // leader-following engagement (Follower.cpp:1933-1942), which
-        // snaps to anchorBase.xz so vanilla collision attaches Link to
-        // the ladder. The ascent snap preserves Y (Link is already at
-        // ladder altitude); the descent snap moves Y down by a small
-        // amount so Link is inside the grab volume rather than at the
-        // lip edge.
+        // Why resolvedTarget: it IS a climb-surface node, placed by the
+        // nav-grid generator at a position where the vine collider
+        // exists. By construction, snapping Link there puts him inside
+        // the vine grab volume. Vanilla collision sets CLIMBING_LADDER
+        // on the next frame; the existing nowOnLadder=true branch in
+        // TickFollowerInput injects negative stick_y (ladderY = -127)
+        // and Link descends naturally.
         //
-        // Replaces the v3 step-off approach (camera-relative walk toward
-        // a point past the cliff edge), which was unreliable across
-        // platform geometries and camera orientations — log 532+ would
-        // have shown the same run-in-place if the bgCheck timing didn't
-        // happen to project Link off the edge at exactly the right angle.
+        // v4 → v5-E rationale (Pitfall 36 / log 533 finding): the v4
+        // snap target (anc.topPos.y - 5u) put Link at platform.floor.y -
+        // 5u, which on flush-vine geometries (vine top at platform top)
+        // is INSIDE the platform floor poly. Vanilla floor collision in
+        // Player_Update pushed Link OUT (UP) to platform.floor.y + small,
+        // effectively undoing the snap within 1 tick. resolvedTarget's
+        // Y is typically tens of units below anc.topPos.y (it's a
+        // mid-vine cell on the substrate path), so it's well below the
+        // floor poly and not subject to floor-resolution rebound.
         //
-        // Gating:
+        // Gating (unchanged from v4):
         //   - Substrate path entered a climb-anchor node (this code path
         //     already filters out drop / jump / crawlspace anchors —
         //     those don't trigger Pursuit→CLIMBING).
-        //   - Anchor resolution succeeded (anc.topPos / planeNormal valid).
-        //   - Descent intent: resolvedTarget.y < pos.y - 16 (the substrate
-        //     subgoal is meaningfully below Link).
-        //   - Link is at-or-above the anchor's top (atOrAboveAnchorTop):
-        //     filters mid-vine engagements where Link is already on the
-        //     vine and just needs to keep descending.
+        //   - Anchor resolution succeeded.
+        //   - Descent intent: resolvedTarget.y < pos.y - 16.
+        //   - Link is at-or-above the anchor's top.
         if (followerClimbAnchorIdx != UINT16_MAX && navData != nullptr) {
             const auto& anc = navData->climbAnchors[followerClimbAnchorIdx];
             const Vec3f preSnapPos = player->actor.world.pos;
             static constexpr float kDescentIntentMinDeltaY = 16.0f;
             static constexpr float kAtAnchorTopTolerance   = 24.0f;
-            static constexpr float kBelowLipOffset         = 5.0f;
             const bool descentIntent =
                 (resolvedTarget.y < preSnapPos.y - kDescentIntentMinDeltaY);
             const bool atOrAboveAnchorTop =
                 (preSnapPos.y >= anc.topPos.y - kAtAnchorTopTolerance);
             if (descentIntent && atOrAboveAnchorTop) {
-                Vec3f vinePos = {
-                    anc.topPos.x,
-                    anc.topPos.y - kBelowLipOffset,
-                    anc.topPos.z
-                };
+                const Vec3f vinePos = resolvedTarget;
                 player->actor.world.pos = vinePos;
                 player->actor.prevPos   = vinePos;
                 followerClimbStuckCheckPos = vinePos;
@@ -4590,8 +4618,9 @@ Vec3f Anchor::ComputePursuitSubgoal(Player* player,
                 // nowOnLadder=true branch's negative stick_y takes over
                 // once vanilla sets CLIMBING_LADDER.
                 followerPostTeleportFrames = kPostTeleportHoldFrames;
-                SPDLOG_INFO("[Follower] Descent engagement: XZ-snap to vine "
-                            "({:.0f},{:.0f},{:.0f}) was ({:.0f},{:.0f},{:.0f}) "
+                SPDLOG_INFO("[Follower] Descent engagement v5-E: snap to "
+                            "substrate climb cell ({:.0f},{:.0f},{:.0f}) "
+                            "was ({:.0f},{:.0f},{:.0f}) "
                             "(anchor.topPos=({:.0f},{:.0f},{:.0f}))",
                             vinePos.x, vinePos.y, vinePos.z,
                             preSnapPos.x, preSnapPos.y, preSnapPos.z,
