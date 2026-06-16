@@ -2259,6 +2259,39 @@ void Anchor::TickFollowerInput(Actor* actor) {
         // magnitude so Link walks briskly inward past the
         // ledge rim. Counter decrements every frame; when it
         // reaches zero, the normal move logic resumes.
+        //
+        // #236 — descent regression gate. The AI Follower's CLIMBING
+        // state can exit while vanilla Link is still in HANGING /
+        // CLIMBING_LADDER / CLIMBING_LEDGE (the AI hop doesn't write
+        // vanilla stateFlags1; vanilla state machine resolves on its
+        // own schedule). If the dismount hold injects a positive
+        // camera-relative stick_y in that window, vanilla CLIMBING_LADDER
+        // reads it as raw stick UP and fires the mantle-up animation
+        // (z_player.c:13435 predicate, ~29u Y overshoot). Suppress the
+        // injection during the vanilla-still-on-wall window — decrement
+        // the counter so the hold expires on schedule, but emit zero
+        // input so vanilla state machine resolves first. See
+        // Claude/Analysis/follower_climbing_descent_regression_2026-06-15.md
+        // for the full why-chain.
+        const u32 vanillaWallState =
+            (PLAYER_STATE1_HANGING_OFF_LEDGE |
+             PLAYER_STATE1_CLIMBING_LEDGE |
+             PLAYER_STATE1_CLIMBING_LADDER);
+        if (player->stateFlags1 & vanillaWallState) {
+            SPDLOG_INFO("[Follower] Dismount forward-hold deferred — "
+                        "vanilla still on wall (sf1=0x{:X})",
+                        player->stateFlags1);
+            input.cur.stick_x = 0;
+            input.cur.stick_y = 0;
+            input.rel.stick_x = 0;
+            input.rel.stick_y = 0;
+            followerClimbDismountFrames--;
+            if (followerClimbDismountFrames == 0) {
+                SPDLOG_INFO("[Follower] Dismount forward-hold complete (deferred)");
+            }
+            return;
+        }
+
         Camera* cam = GET_ACTIVE_CAM(gPlayState);
         s16 inputDirYaw = Camera_GetInputDirYaw(cam);
         s16 stickAngle  = followerClimbDismountYaw - inputDirYaw;
@@ -2615,6 +2648,29 @@ void Anchor::TickFollowerInput(Actor* actor) {
 
             SPDLOG_INFO("[ClimbDiag] TFI-8 after prediction gate ladderX={} ladderY={}",
                         ladderX, ladderY);
+
+            // #236 — descent-context stick_y clamp. Vanilla CLIMBING_LADDER
+            // mantle predicate (z_player.c:13435) fires when stick_y > 0.
+            // For a descent scenario (pathRequestsDescent + vanilla on
+            // wall), positive stick_y is ALWAYS wrong — it would inject
+            // the up-climb signal vanilla reads as "Link wants to mantle
+            // off the top of the vine onto the platform" → 29u Y overshoot,
+            // gravity fall, detach-detect, re-engagement, yo-yo cycle.
+            // Belt-and-suspenders against any code path that synthesised
+            // a positive ladderY (camera-relative inversion bugs,
+            // prediction-gate fallthroughs, future regressions). The
+            // dyL-driven path above already produces -127 for descent;
+            // this clamp catches anomalies.
+            if (pathRequestsDescent &&
+                (sf1 & (PLAYER_STATE1_HANGING_OFF_LEDGE |
+                        PLAYER_STATE1_CLIMBING_LEDGE |
+                        PLAYER_STATE1_CLIMBING_LADDER)) &&
+                ladderY > 0) {
+                SPDLOG_INFO("[Follower] CLIMBING descent stick_y clamped "
+                            "(was {}u; sf1=0x{:X})",
+                            (int)ladderY, sf1);
+                ladderY = 0;
+            }
             input.cur.stick_x = ladderX;
             input.cur.stick_y = ladderY;
             input.rel.stick_x = ladderX;
