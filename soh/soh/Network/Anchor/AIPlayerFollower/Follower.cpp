@@ -2760,6 +2760,32 @@ void Anchor::TickFollowerInput(Actor* actor) {
                 s16 stickAngle  = worldYaw - inputDirYaw;
                 s8  stickY = (s8)( Math_CosS(stickAngle) * 127.0f);
                 s8  stickX = (s8)(-Math_SinS(stickAngle) * 127.0f);
+                // #236 v2 (log 530) — descent-context Phase A stick_y clamp.
+                // The previous fix only clamped in the nowOnLadder=true branch,
+                // but log 530 showed the yo-yo fires BEFORE Link reaches
+                // CLIMBING_LADDER state: vanilla auto-grab puts him in
+                // HANGING_OFF_LEDGE while this Phase A approach injection is
+                // still firing camera-relative stick toward anc.topPos. If
+                // the camera angle projects to positive stickY, vanilla's
+                // mantle predicate (z_player.c:13435) reads it as "mantle up
+                // onto the ledge" and the upward overshoot fires before the
+                // BTN_A descent-grab at L2340 can convert HANG→CLIMBING_LADDER.
+                // Result: no nowOnLadder=true transition, no Candidate D
+                // clamp, yo-yo cycle.
+                //
+                // Clamp positive stickY → 0 when pathRequestsDescent AND
+                // vanilla is already on the wall. Stick_x is preserved so
+                // lateral alignment with the vine still works.
+                if (pathRequestsDescent &&
+                    (sf1 & (PLAYER_STATE1_HANGING_OFF_LEDGE |
+                            PLAYER_STATE1_CLIMBING_LEDGE |
+                            PLAYER_STATE1_CLIMBING_LADDER)) &&
+                    stickY > 0) {
+                    SPDLOG_INFO("[Follower] Phase A descent stick_y clamped "
+                                "(was {}u; sf1=0x{:X})",
+                                (int)stickY, sf1);
+                    stickY = 0;
+                }
                 input.cur.stick_x = stickX;
                 input.cur.stick_y = stickY;
                 input.rel.stick_x = stickX;
