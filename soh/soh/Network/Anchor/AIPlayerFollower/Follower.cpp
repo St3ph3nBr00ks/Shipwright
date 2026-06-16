@@ -2686,8 +2686,21 @@ void Anchor::TickFollowerInput(Actor* actor) {
             // with the actor-positioned anchor centroid (matches the
             // pre-Stage-7 legacy snap behaviour, restored for v7
             // anchors too).
+            //
+            // #236 v3 (log 531) — descent skip. For a vertical vine
+            // whose top is flush with a platform top (basePos.xz ==
+            // topPos.xz), this snap pins Link's XZ to basePos.xz
+            // every frame when Link is on the platform top — the
+            // 30u radius captures the at-top scenario indistinguishably
+            // from the at-base scenario. Vanilla auto-ledge-grab
+            // requires Link to walk OFF the edge with forward velocity
+            // (z_player.c:5745, 9783), which the snap zeros every
+            // frame. Result: Link "runs in place" indefinitely. Skip
+            // the snap when pathRequestsDescent — the snap's only
+            // purpose is ascent-engagement alignment.
             constexpr f32 kClimbBaseSnapRadiusXZ = 30.0f;
-            if (followerClimbAnchorIdx != UINT16_MAX) {
+            if (!pathRequestsDescent &&
+                followerClimbAnchorIdx != UINT16_MAX) {
                 const ::AnchorNavRoom::RoomNavData* navData =
                     ::AnchorNavRoom::GetForRoom(
                         gPlayState->sceneNum,
@@ -2706,6 +2719,11 @@ void Anchor::TickFollowerInput(Actor* actor) {
                         p2w = actor->world.pos;
                     }
                 }
+            } else if (pathRequestsDescent &&
+                       followerClimbAnchorIdx != UINT16_MAX) {
+                SPDLOG_INFO("[Follower] Phase A descent: snap-to-basePos skipped "
+                            "(pos=({:.0f},{:.0f},{:.0f}))",
+                            p2w.x, p2w.y, p2w.z);
             }
             // Bug A fix (user 2026-05-12 log 29): Phase A approach
             // target is the ANCHOR's basePos, not followerMoveTarget
@@ -2744,7 +2762,46 @@ void Anchor::TickFollowerInput(Actor* actor) {
                     static constexpr float kAboveAnchorTolerance = 16.0f;
                     const bool aboveAnchorTop =
                         (p2w.y > anc.topPos.y + kAboveAnchorTolerance);
-                    approachTarget = aboveAnchorTop ? anc.topPos : anc.basePos;
+                    // #236 v3 (log 531) — descent step-off target. When
+                    // Link has descent intent AND he's at-or-above the
+                    // vine top (typical "on the platform" position), target
+                    // a point ~25u past the cliff edge in the +planeNormal
+                    // direction (outward from the wall, off the cliff).
+                    // The walk-to-target branch below then computes a
+                    // non-zero (dx,dz) heading toward the edge, vanilla
+                    // bgCheck transitions Link's floor poly to void,
+                    // auto-ledge-grab triggers HANGING_OFF_LEDGE, and the
+                    // existing BTN_A descent grab at L2340 converts to
+                    // CLIMBING_LADDER.
+                    //
+                    // planeNormal is the OUTWARD wall normal (verified
+                    // 2026-06-16 from RoomNavData.cpp:2433-2436 "outward
+                    // normal" + line 1828-1829 "outward normal"). For a
+                    // platform-top scenario, +planeNormal points off the
+                    // cliff edge. Without this override, approachTarget =
+                    // basePos which for a vertical vine has the same XZ
+                    // as Link's snapped position → dx=dz=0 → fallthrough
+                    // to press-into-wall branch which (pre-fix) walked
+                    // -planeNormal = INTO the platform interior. v3
+                    // resolves both: target shifts off the edge AND the
+                    // walk-to-target branch fires (no fallthrough).
+                    static constexpr float kDescentStepOffOutset = 25.0f;
+                    if (pathRequestsDescent) {
+                        approachTarget.x = anc.topPos.x +
+                            kDescentStepOffOutset * anc.planeNormal.x;
+                        approachTarget.y = anc.topPos.y;
+                        approachTarget.z = anc.topPos.z +
+                            kDescentStepOffOutset * anc.planeNormal.z;
+                        SPDLOG_INFO("[Follower] Phase A descent: approachTarget=step-off "
+                                    "({:.0f},{:.0f},{:.0f}) "
+                                    "(topPos=({:.0f},{:.0f},{:.0f}) "
+                                    "planeN=({:.2f},{:.2f},{:.2f}))",
+                                    approachTarget.x, approachTarget.y, approachTarget.z,
+                                    anc.topPos.x, anc.topPos.y, anc.topPos.z,
+                                    anc.planeNormal.x, anc.planeNormal.y, anc.planeNormal.z);
+                    } else {
+                        approachTarget = aboveAnchorTop ? anc.topPos : anc.basePos;
+                    }
                 }
             }
             // Walk toward ladder. Reuse the standard
@@ -2805,6 +2862,19 @@ void Anchor::TickFollowerInput(Actor* actor) {
                 // forward press and triggers PLAYER_STATE1_CLIMBING_
                 // LADDER, advancing the phase to Phase B (vertical
                 // climb injection).
+                //
+                // #236 v3 (log 531) — descent direction flip. For Link
+                // ON the platform top, -planeNormal points INTO the
+                // platform interior (the wall geometry is below his
+                // floor, so INWARD from outside-the-wall is "into the
+                // floor poly" — which projects to "into the platform
+                // interior" at his current Y). Walking that direction
+                // drives Link AWAY from the cliff edge. Flip to
+                // +planeNormal (OUTWARD, off the cliff) when descent
+                // intent. With the v3 approachTarget override above,
+                // this fallback should rarely fire — Link's XZ is no
+                // longer pinned at basePos so dx,dz are typically
+                // non-zero. Kept as a last-resort safety net.
                 const ::AnchorNavRoom::RoomNavData* navData =
                     ::AnchorNavRoom::GetForRoom(
                         gPlayState->sceneNum,
@@ -2815,8 +2885,19 @@ void Anchor::TickFollowerInput(Actor* actor) {
                         navData->climbAnchors[followerClimbAnchorIdx];
                     Camera* cam = GET_ACTIVE_CAM(gPlayState);
                     s16 inputDirYaw = Camera_GetInputDirYaw(cam);
-                    s16 worldYaw    = Math_Atan2S(-anc.planeNormal.z,
-                                                   -anc.planeNormal.x);
+                    s16 worldYaw;
+                    if (pathRequestsDescent) {
+                        // +planeNormal points off the platform / off
+                        // the cliff edge (outward).
+                        worldYaw = Math_Atan2S(anc.planeNormal.z,
+                                                anc.planeNormal.x);
+                        SPDLOG_INFO("[Follower] Phase A descent press-into-OPEN-AIR fallback "
+                                    "(planeN=({:.2f},{:.2f},{:.2f}))",
+                                    anc.planeNormal.x, anc.planeNormal.y, anc.planeNormal.z);
+                    } else {
+                        worldYaw = Math_Atan2S(-anc.planeNormal.z,
+                                                -anc.planeNormal.x);
+                    }
                     s16 stickAngle  = worldYaw - inputDirYaw;
                     s8  stickY = (s8)( Math_CosS(stickAngle) * 127.0f);
                     s8  stickX = (s8)(-Math_SinS(stickAngle) * 127.0f);
