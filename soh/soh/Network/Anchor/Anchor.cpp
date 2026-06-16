@@ -402,6 +402,7 @@ Anchor::GetPacketHandlerRegistry() {
         { SET_CHECK_STATUS,        &Anchor::HandlePacket_SetCheckStatus        },
         { SET_FLAG,                &Anchor::HandlePacket_SetFlag               },
         { TELEPORT_TO,             &Anchor::HandlePacket_TeleportTo            },
+        { TIME_SYNC,               &Anchor::HandlePacket_TimeSync              },
         { UNSET_FLAG,              &Anchor::HandlePacket_UnsetFlag             },
         { UPDATE_BEANS_COUNT,      &Anchor::HandlePacket_UpdateBeansCount      },
         { UPDATE_CLIENT_STATE,     &Anchor::HandlePacket_UpdateClientState     },

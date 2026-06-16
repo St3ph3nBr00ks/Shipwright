@@ -55,6 +55,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"SET_CHECK_STATUS", 1},
     {"SET_FLAG", 1},
     {"TELEPORT_TO", 2},  // bumped 2026-04-27 (Pillar B Phase 5): linkAge + sceneNum for cross-timeline teleport.
+    {"TIME_SYNC", 1},  // issue #63 — periodic + edge-triggered time-of-day broadcast.
     {"UNSET_FLAG", 1},
     {"UPDATE_BEANS_COUNT", 1},
     {"UPDATE_CLIENT_STATE", 1},

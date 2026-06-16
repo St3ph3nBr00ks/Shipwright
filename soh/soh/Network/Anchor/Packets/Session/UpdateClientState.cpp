@@ -8,6 +8,7 @@
 #include "soh/Network/Anchor/Common/PacketSchemas.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/Common/TimeOfDayReconcile.h"  // issue #63 — shared forward-only reconcile
 #include "soh/Network/Anchor/EnemyStateSync/EnemyHostBookkeeping.h"
 #include "soh/Network/Anchor/JsonConversions.hpp"
 #include "soh/ObjectExtension/ObjectExtension.h"
@@ -429,17 +430,17 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
         // is the host and enters Hyrule Field they would otherwise broadcast stale
         // time to the non-host. With forward-only bidirectional sync the more
         // advanced time always wins regardless of host assignment.
+        //
+        // Reconcile logic extracted to AnchorTimeOfDay::ApplyIfAhead (issue #63
+        // / 2026-06-16) — shared with the new TIME_SYNC packet handler so both
+        // call sites stay in lockstep. The helper additionally writes
+        // gSaveContext.skyboxTime so the visual sky snaps to the new time without
+        // the 1-2 frame catch-up lag (see helper header for rationale).
         if (IsSaveLoaded() && payload["state"].contains("dayTime")) {
             s32 receivedNightFlag = payload["state"]["nightFlag"].get<s32>();
             u16 receivedDayTime   = payload["state"]["dayTime"].get<u16>();
-            bool timeIsAhead = (receivedNightFlag != gSaveContext.nightFlag) ||
-                               (receivedDayTime > (u16)gSaveContext.dayTime);
-            if (timeIsAhead) {
-                gSaveContext.dayTime   = receivedDayTime;
-                gSaveContext.nightFlag = receivedNightFlag;
-                SPDLOG_INFO("[UpdateClientState] Synced time: dayTime={} nightFlag={}",
-                            gSaveContext.dayTime, gSaveContext.nightFlag);
-            }
+            AnchorTimeOfDay::ApplyIfAhead(
+                receivedDayTime, receivedNightFlag, "UpdateClientState");
         }
 
         // #264 — duplicate the #259 detect-and-re-emit logic from

@@ -33,6 +33,19 @@ inline const std::string SERVER_MESSAGE       = "SERVER_MESSAGE";
 inline const std::string UPDATE_CLIENT_STATE  = "UPDATE_CLIENT_STATE";
 inline const std::string UPDATE_ROOM_STATE    = "UPDATE_ROOM_STATE";
 
+// TIME_SYNC (issue #63) — lightweight time-of-day broadcast carrying just
+// dayTime + nightFlag + a reason tag for diagnostics. Sent on:
+//   - Periodic timer (5s default, CVar-configurable 1-60s, gated by
+//     CVAR_REMOTE_ANCHOR("TimeSync.Enabled"))
+//   - Cutscene-start edge (csCtx.state IDLE -> non-IDLE)
+//   - Cutscene-end edge (csCtx.state non-IDLE -> IDLE)
+//   - Scene-transition edge (transitionTrigger OFF -> TRANS_TRIGGER_START)
+// Edge sends always fire when connected + save loaded + gameMode==NORMAL;
+// only the periodic timer respects the .Enabled CVar. Forward-only
+// bidirectional reconcile on receive (no host authority). See
+// Claude/Plans/time_of_day_periodic_sync_plan_2026-06-16.md.
+inline const std::string TIME_SYNC            = "TIME_SYNC";
+
 // HEARTBEAT — every client → all clients. Sent every ~2s from the
 // network thread (NOT the game thread) so it survives game-thread
 // freezes (textbox stuck, cutscene gate, pause). Carries:
