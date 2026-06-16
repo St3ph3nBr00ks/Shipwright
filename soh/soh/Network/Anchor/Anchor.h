@@ -560,28 +560,10 @@ class Anchor : public Network {
     // before any cutscene has fired.
     u8              prevCsState                 = 0;
 
-    // Issue #63 — pending-time-sync flag for frozen→advancing scene
-    // transitions (log 538 fix).
-    //
-    // Set on the rising edge of gTimeIncrement (0 → non-zero) which
-    // happens when a player exits a vanilla time-frozen scene (LLR /
-    // dungeons / boss rooms) into a time-advancing scene. While set:
-    //   - SendPacket_TimeSync early-returns (don't broadcast stale
-    //     LLR-entry-time value).
-    //   - PrepClientState omits dayTime/nightFlag (same).
-    //   - The next incoming TIME_SYNC or UPDATE_CLIENT_STATE with
-    //     dayTime is applied UNCONDITIONALLY (bypassing modular
-    //     distance check), then the flag clears.
-    //   - Timeout after kPendingTimeSyncTimeoutMs (15s) without
-    //     incoming sync — flag clears, normal behavior resumes
-    //     (matches single-player solo behavior).
-    //
-    // lastSceneTimeIncrement is the previous OnSceneSpawnActors-
-    // observed value of gTimeIncrement, used for rising-edge
-    // detection. Init to 0 because that's the pre-game state.
-    bool            pendingTimeSync             = false;
-    int             pendingTimeSyncFrames       = 0;
-    u16             lastSceneTimeIncrement      = 0;
+    // Issue #63 — pendingTimeSync members live in the public block
+    // below (Pitfall 16). TimeOfDayReconcile.cpp accesses them via
+    // Anchor::Instance-> (external to class Anchor), so they cannot
+    // be private.
 
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();
@@ -707,6 +689,28 @@ class Anchor : public Network {
     // intended for cross-module access land here per Pitfall 16.
     // ========================================================================
     uint32_t ownClientId;
+
+    // Issue #63 — pending-time-sync flag for frozen→advancing scene
+    // transitions (log 538 fix). MUST be public (Pitfall 16):
+    // TimeOfDayReconcile.cpp accesses these via Anchor::Instance->.
+    //
+    // Set on the rising edge of gTimeIncrement (0 → non-zero), i.e.,
+    // when a player exits a vanilla time-frozen scene (LLR / dungeons /
+    // boss rooms) into a time-advancing scene. While set:
+    //   - SendPacket_TimeSync early-returns (don't broadcast stale
+    //     LLR-entry-time value).
+    //   - PrepClientState omits dayTime/nightFlag (same).
+    //   - The next incoming TIME_SYNC or UPDATE_CLIENT_STATE with
+    //     dayTime is applied UNCONDITIONALLY (bypassing modular check),
+    //     then the flag clears.
+    //   - 15s timeout in OnGameFrameUpdate clears the flag if no
+    //     incoming sync arrives (matches single-player solo behavior).
+    //
+    // lastSceneTimeIncrement is the previous OnSceneSpawnActors-
+    // observed value of gTimeIncrement, used for rising-edge detection.
+    bool            pendingTimeSync             = false;
+    int             pendingTimeSyncFrames       = 0;
+    u16             lastSceneTimeIncrement      = 0;
 
     // Set to true for the duration of AnchorDirector::Director::ExecuteSpawn's
     // Actor_Spawn call so the OnActorSpawn auto-broadcast does NOT fire
