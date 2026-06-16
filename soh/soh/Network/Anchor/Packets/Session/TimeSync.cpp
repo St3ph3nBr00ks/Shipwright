@@ -64,7 +64,13 @@ void Anchor::SendPacket_TimeSync(const char* reason) {
     // gTimeIncrement is declared in z_kankyo.c:61, exposed via
     // soh/include/variables.h:80 (extern). Already in scope through
     // the extern "C" #include "variables.h" at file top.
-    if (gTimeIncrement == 0) {
+    //
+    // #63 (log 538) — also short-circuit while pendingTimeSync is set
+    // (player just exited a frozen scene; their clock is stale and
+    // they should accept incoming syncs instead of broadcasting).
+    // pendingTimeSync clears on first incoming apply OR on 15s timeout
+    // (see HookHandlers.cpp).
+    if (gTimeIncrement == 0 || pendingTimeSync) {
         return;
     }
 

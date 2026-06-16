@@ -560,6 +560,29 @@ class Anchor : public Network {
     // before any cutscene has fired.
     u8              prevCsState                 = 0;
 
+    // Issue #63 — pending-time-sync flag for frozen→advancing scene
+    // transitions (log 538 fix).
+    //
+    // Set on the rising edge of gTimeIncrement (0 → non-zero) which
+    // happens when a player exits a vanilla time-frozen scene (LLR /
+    // dungeons / boss rooms) into a time-advancing scene. While set:
+    //   - SendPacket_TimeSync early-returns (don't broadcast stale
+    //     LLR-entry-time value).
+    //   - PrepClientState omits dayTime/nightFlag (same).
+    //   - The next incoming TIME_SYNC or UPDATE_CLIENT_STATE with
+    //     dayTime is applied UNCONDITIONALLY (bypassing modular
+    //     distance check), then the flag clears.
+    //   - Timeout after kPendingTimeSyncTimeoutMs (15s) without
+    //     incoming sync — flag clears, normal behavior resumes
+    //     (matches single-player solo behavior).
+    //
+    // lastSceneTimeIncrement is the previous OnSceneSpawnActors-
+    // observed value of gTimeIncrement, used for rising-edge
+    // detection. Init to 0 because that's the pre-game state.
+    bool            pendingTimeSync             = false;
+    int             pendingTimeSyncFrames       = 0;
+    u16             lastSceneTimeIncrement      = 0;
+
     nlohmann::json PrepClientState();
     nlohmann::json PrepRoomState();
     void RegisterHooks();

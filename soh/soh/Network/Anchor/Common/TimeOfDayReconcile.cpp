@@ -1,5 +1,6 @@
 #include "TimeOfDayReconcile.h"
 
+#include "soh/Network/Anchor/Anchor.h"  // Anchor::Instance->pendingTimeSync (#63 log 538 fix)
 #include <spdlog/spdlog.h>
 
 extern "C" {
@@ -50,6 +51,51 @@ bool ApplyIfAhead(u16 receivedDayTime, s32 receivedNightFlag,
     // through the extern "C" #include "variables.h" at file top.
     if (gTimeIncrement == 0) {
         return false;
+    }
+
+    // #63 (log 538) — pending-sync bypass.
+    //
+    // After a player exits a vanilla time-frozen scene (LLR / dungeons /
+    // boss rooms) into a time-advancing scene, Anchor::pendingTimeSync
+    // is set by the rising-edge detector in OnSceneSpawnActors (see
+    // HookHandlers.cpp). While set, the modular distance check would
+    // INCORRECTLY accept the player's own stale clock from any peer
+    // who happens to be at a value within < 0x8000 forward — and would
+    // reject the actual "current network time" if the peer's value is
+    // more than 0x8000 forward (which a frozen-then-advancing client
+    // can absolutely be).
+    //
+    // Solution: accept the FIRST received broadcast unconditionally
+    // (bypass modular check), then clear the flag. This implements the
+    // user's design intent — "when entering an advancing scene from a
+    // frozen scene, sync to the active host's time."
+    //
+    // The flag clears here on apply; 15s timeout in OnGameFrameUpdate
+    // catches the case where no peer broadcasts (solo, or all peers in
+    // frozen scenes too — pendingTimeSync simply expires and normal
+    // modular behavior resumes).
+    if (::Anchor::Instance != nullptr &&
+        ::Anchor::Instance->pendingTimeSync) {
+        ::Anchor::Instance->pendingTimeSync       = false;
+        ::Anchor::Instance->pendingTimeSyncFrames = 0;
+
+        const u16 prevDayTime   = (u16)gSaveContext.dayTime;
+        const s32 prevNightFlag = gSaveContext.nightFlag;
+
+        gSaveContext.dayTime    = receivedDayTime;
+        gSaveContext.nightFlag  = receivedNightFlag;
+        // Same skyboxTime write as the normal path — eliminates the
+        // 1-2 frame visual lag through vanilla z_kankyo.c:966-970.
+        gSaveContext.skyboxTime = receivedDayTime;
+
+        if (logTag != nullptr && logTag[0] != '\0') {
+            SPDLOG_INFO("[TimeSync] apply (pending-sync bypass {}) "
+                        "dayTime {}->{} nightFlag {}->{} "
+                        "(skyboxTime forced to match)",
+                        logTag, prevDayTime, (u16)gSaveContext.dayTime,
+                        prevNightFlag, gSaveContext.nightFlag);
+        }
+        return true;
     }
 
     // Modular forward distance on the circular u16 clock.

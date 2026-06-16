@@ -392,6 +392,43 @@ void Anchor::RegisterHooks() {
         });
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {
+        // #63 — detect frozen→advancing scene transition for
+        // pendingTimeSync. MUST run BEFORE SendPacket_UpdateClientState
+        // (next statement) so PrepClientState sees the flag set and
+        // omits stale dayTime carried from the just-exited frozen scene.
+        //
+        // Vanilla freezes dayTime in dungeons / boss rooms / Lon Lon
+        // Ranch via envCtx.timeIncrement = 0 (z_scene.c:354-368). When
+        // exiting one of those scenes into a time-advancing scene
+        // (Hyrule Field etc.), Play_Init's CommandTimeSettings has
+        // already set gTimeIncrement to the new scene's non-zero
+        // value by the time this hook fires — but our local dayTime
+        // is still the stale LLR-entry-time value. Without this
+        // detection, the immediate SendPacket_UpdateClientState below
+        // broadcasts the stale value; receivers in the destination
+        // scene apply it via modular distance, yanking THEIR clocks
+        // backward in time. Log 538 captured this: P1 in HF was
+        // yanked from morning 0x5E40 to late-afternoon 0xB1A2 by
+        // P2's exit-LLR UPDATE_CLIENT_STATE.
+        //
+        // Setting pendingTimeSync here:
+        //   - PrepClientState below this point omits dayTime/nightFlag.
+        //   - SendPacket_TimeSync would also short-circuit.
+        //   - The first incoming TIME_SYNC or UPDATE_CLIENT_STATE with
+        //     dayTime is applied unconditionally (bypassing modular
+        //     check), then the flag clears.
+        //   - 15s timeout (managed in OnGameFrameUpdate below) prevents
+        //     permanent deadlock if no peer broadcasts.
+        if (gPlayState != nullptr && gTimeIncrement != 0 &&
+            lastSceneTimeIncrement == 0) {
+            pendingTimeSync = true;
+            pendingTimeSyncFrames = 0;
+            SPDLOG_INFO("[TimeSync] pending sync flagged "
+                        "(scene transition unfroze clock: was 0, now {})",
+                        gTimeIncrement);
+        }
+        lastSceneTimeIncrement = gTimeIncrement;
+
         // Bump before sending so the host's HandlePacket_UpdateClientState sees the
         // new epoch and fires the dead-enemy replay even when sceneNum and isSaveLoaded
         // are both unchanged (Game Over continue, void-out in the same scene).
@@ -597,6 +634,25 @@ void Anchor::RegisterHooks() {
 
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
         ProcessIncomingPacketQueue();
+
+        // #63 — pendingTimeSync timeout. Counter increments each frame
+        // while the flag is set. If no incoming TIME_SYNC or
+        // UPDATE_CLIENT_STATE with dayTime arrives within 15s, clear
+        // the flag and resume normal behavior. Matches single-player
+        // solo behavior (clock resumes from frozen-entry value).
+        // Periodic TIME_SYNC fires every 5s default, so 15s = 3
+        // expected intervals — generous slack for packet loss.
+        if (pendingTimeSync) {
+            pendingTimeSyncFrames++;
+            static constexpr int kPendingTimeSyncTimeoutMs = 15000;
+            const int timeoutTicks = MsToGameTicks(kPendingTimeSyncTimeoutMs);
+            if (timeoutTicks > 0 && pendingTimeSyncFrames > timeoutTicks) {
+                pendingTimeSync = false;
+                pendingTimeSyncFrames = 0;
+                SPDLOG_INFO("[TimeSync] pending sync timeout "
+                            "(15s no incoming sync, resuming local)");
+            }
+        }
 
         // Game-tick interval measurement (2026-05-15 log 118 followup).
         // Sample wall-clock delta since the previous tick and EWMA-smooth

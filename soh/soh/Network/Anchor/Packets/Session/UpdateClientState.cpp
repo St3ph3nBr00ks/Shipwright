@@ -100,7 +100,14 @@ nlohmann::json Anchor::PrepClientState() {
         // HANDSHAKE which inherits PrepClientState via Handshake.cpp:19).
         // ALL_CLIENT_STATE never carried time fields (AnchorClient
         // struct schema omits them per JsonConversions.hpp:54-75).
-        if (gTimeIncrement != 0) {
+        //
+        // #63 (log 538) — also omit when pendingTimeSync is set. Player
+        // just exited a frozen scene; their dayTime is stale (the
+        // frozen-scene entry-time value); they should accept incoming
+        // syncs instead of broadcasting. pendingTimeSync clears on
+        // first incoming apply (see TimeOfDayReconcile.cpp) or on
+        // 15s timeout (see HookHandlers.cpp).
+        if (gTimeIncrement != 0 && !pendingTimeSync) {
             payload["dayTime"]   = (u16)gSaveContext.dayTime;
             payload["nightFlag"] = gSaveContext.nightFlag;
         }
