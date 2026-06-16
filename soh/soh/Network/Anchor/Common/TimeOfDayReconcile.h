@@ -6,18 +6,37 @@
 // both HandlePacket_UpdateClientState (existing scene-change-driven sync)
 // and HandlePacket_TimeSync (issue #63 — periodic + edge-triggered sync).
 //
-// Single source of truth for the reconcile rule. If the rule needs to
-// change (e.g., add wraparound handling), it changes in one place.
+// Single source of truth for the reconcile rule.
 //
-// See Claude/Analysis/time_of_day_sync_implementation_analysis_2026-06-16.md
-// for the full design rationale including:
-//   - Why forward-only bidirectional (no host authority)
-//   - Why both dayTime AND skyboxTime get written on apply (skybox visual
-//     immediacy — Pitfall: vanilla auto-catch-up at z_kankyo.c:967-969 only
-//     fires when dayTime > skyboxTime, so setting them equal is safe)
-//   - Why wraparound (u16 0xFFFF -> 0x0000) is out of scope (vanilla never
-//     wraps in normal play; existing UpdateClientState sync has lived in
-//     production without wrap-related reports)
+// SEMANTIC MODEL: vanilla dayTime is a circular u16 clock (z_kankyo.c
+// :957-959 natural overflow at 0xFFFF -> 0x0000; nightFlag thresholds
+// at z_kankyo.c:974-978 span the wrap boundary). "Ahead" means "forward
+// on the circular clock by < half a day" — NOT "numerically greater".
+//
+// Implemented via MODULAR FORWARD DISTANCE: received is ahead iff
+// (received - local) & 0xFFFF is in (0, 0x8000). This treats the
+// wraparound correctly:
+//
+//   local = 0xFF80 (pre-wrap, late evening), received = 0x0064 (post-
+//   wrap, early morning). Linear comparison 0x0064 > 0xFF80 = false
+//   would wrongly suppress the apply. Modular: (0x0064 - 0xFF80) &
+//   0xFFFF = 0x00E4 (228 forward) < 0x8000 -> apply. Correct.
+//
+//   local = 0x1700 (post-wrap, early morning), received = 0xFE3C
+//   (pre-wrap, late evening, e.g. from a peer frozen in Lon Lon
+//   Ranch). Linear 0xFE3C > 0x1700 = true would yank local backwards
+//   ~15 hours. Modular: (0xFE3C - 0x1700) & 0xFFFF = 0xE73C (~59196
+//   forward) > 0x8000 -> don't apply. Correct.
+//
+// See Claude/Analysis/time_sync_wraparound_bug_analysis_2026-06-16.md
+// for the full why-chain (log 535 field-test revealed the linear-
+// comparison bug — P1 in Hyrule Field wrapped, P2 frozen in Lon Lon
+// Ranch kept yanking P1 back; morning never arrived for ~3 minutes).
+//
+// On apply, also writes gSaveContext.skyboxTime so the visual sky
+// snaps to the synced time without the 1-2 frame catch-up lag through
+// vanilla z_kankyo.c:967-969 (which only fires when dayTime > skyboxTime,
+// so an equal write is a next-frame no-op).
 
 namespace AnchorTimeOfDay {
 

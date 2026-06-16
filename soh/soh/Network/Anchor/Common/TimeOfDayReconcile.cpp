@@ -10,22 +10,41 @@ namespace AnchorTimeOfDay {
 
 bool ApplyIfAhead(u16 receivedDayTime, s32 receivedNightFlag,
                   const char* logTag) {
-    // Forward-only check. Lifted verbatim from the original inline block at
-    // UpdateClientState.cpp:432-443 (the receive-side reconcile that has
-    // shipped since the early Anchor implementation). Two clauses ensure
-    // the apply happens on either a nightFlag transition (day<->night flip)
-    // OR a strictly-greater dayTime. The OR-of-clauses naturally handles
-    // wrap-around at the day-night boundary even though dayTime itself
-    // never wraps in normal vanilla gameplay.
-    const bool timeIsAhead =
-        (receivedNightFlag != gSaveContext.nightFlag) ||
-        (receivedDayTime   >  (u16)gSaveContext.dayTime);
+    // Modular forward distance on the circular u16 clock.
+    //
+    // Wraparound-aware semantics (see TimeOfDayReconcile.h for full
+    // rationale): received is "ahead" iff the forward distance on the
+    // circular clock is in (0, 0x8000). 0x8000 = half-day = 32768 units
+    // = the boundary at which a value > half forward is treated as
+    // behind (the shorter circular path is backward).
+    //
+    // u16 unsigned subtraction handles wrap naturally:
+    //   - Same-side: (30100 - 30000) = 100 -> apply.
+    //   - Reversed: (30000 - 30100) & 0xFFFF = 65436 -> not ahead.
+    //   - Through-wrap forward: (0x0100 - 0xFF80) & 0xFFFF = 0x0180 (384
+    //     forward) -> apply. Correct catch-up after sender wrapped.
+    //   - Through-wrap backward: (0xFF80 - 0x0100) & 0xFFFF = 0xFE80
+    //     (~65152 forward) > 0x8000 -> not ahead. Correctly rejects
+    //     stale-high broadcasts from frozen-time-scene peers post-wrap.
+    //
+    // NIGHTFLAG-MISMATCH CLAUSE REMOVED (was in pre-fix logic). The OR-
+    // with-nightFlag-mismatch was a partial workaround for the same wrap
+    // problem; modular distance handles wrap cleanly, and keeping the
+    // nightFlag OR clause introduces a NEW spurious-apply hazard at the
+    // day<->night transition boundary (a 1-frame lag in vanilla's
+    // auto-recompute could yank Link backwards across the boundary).
+    // nightFlag is still written on apply for visual immediacy (vanilla
+    // recomputes from dayTime each frame anyway per z_kankyo.c:974-978).
+    const u16 localDayTime    = (u16)gSaveContext.dayTime;
+    const u16 forwardDistance = (u16)(receivedDayTime - localDayTime);
+    const bool timeIsAhead    = (forwardDistance != 0) &&
+                                (forwardDistance < 0x8000);
 
     if (!timeIsAhead) {
         return false;
     }
 
-    const u16 prevDayTime   = (u16)gSaveContext.dayTime;
+    const u16 prevDayTime   = localDayTime;
     const s32 prevNightFlag = gSaveContext.nightFlag;
 
     gSaveContext.dayTime   = receivedDayTime;
@@ -40,9 +59,10 @@ bool ApplyIfAhead(u16 receivedDayTime, s32 receivedNightFlag,
 
     if (logTag != nullptr && logTag[0] != '\0') {
         SPDLOG_INFO("[TimeSync] apply ({}) dayTime {}->{} nightFlag {}->{} "
-                    "(skyboxTime forced to match)",
+                    "forwardDist={} (skyboxTime forced to match)",
                     logTag, prevDayTime, (u16)gSaveContext.dayTime,
-                    prevNightFlag, gSaveContext.nightFlag);
+                    prevNightFlag, gSaveContext.nightFlag,
+                    forwardDistance);
     }
 
     return true;
