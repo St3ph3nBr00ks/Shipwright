@@ -62,6 +62,28 @@ static bool g_isHostingPeerEnvActorDrop = false;
 // bidirectional sync for cyclic env actors; thread-local replaces).
 static thread_local bool g_isApplyingNetworkEnvActorDestroy = false;
 
+// #276 — thread-local parent-cull-context flag. Set by Obj_Mure2's
+// distance-cull state (func_80B9A6F8 → ObjMure2_CleanupAndDie at
+// z_obj_mure2.c:200-213) immediately before its Actor_Kill loop
+// over actorSpawnPtrList children. The OnActorKill hook in
+// HookHandlers.cpp reads this flag via Anchor_IsObjMure2CullingChildren
+// and suppresses the ENEMY_DEFEATED broadcast for the cull-class kills.
+//
+// Each peer's local Obj_Mure2 makes the same distance-based cull
+// decision INDEPENDENTLY (vanilla state machine fires on local
+// player's distance, not host's). So host's broadcast of these cull
+// kills arrives at peer as 12 pendingKill WARN lines (log 524
+// 19:17:33.187 / 19:17:49.247) — peer has no live actors to clean up.
+//
+// IMPORTANT — distinct from En_Kusa's cut-state sync path. The legit
+// "player chopped grass" case routes through EnKusa_SetupCut (line 455-
+// 473 in z_en_kusa.c), which fires Anchor_BroadcastEnvActorDestroy
+// via the ENV_ACTOR_DESTROY packet family. TYPE_0 grass (params&3 == 0)
+// uses Actor_Kill directly at z_en_kusa.c:347 WITHOUT this thread-local
+// being set, so its ENEMY_DEFEATED broadcast still fires correctly.
+// Only the parent-driven cull burst is suppressed.
+static thread_local bool g_isObjMure2CullingChildren = false;
+
 // Accessor for the ItemDropBridge domain's IsReceivingNetworkItemDrop
 // shim, which ORs this flag with its own g_isSpawningNetworkItemDrop.
 // Kept as a function rather than `extern` linkage so the underlying
@@ -69,6 +91,21 @@ static thread_local bool g_isApplyingNetworkEnvActorDestroy = false;
 // single named call.
 extern "C" bool Anchor_IsHostingPeerEnvActorDrop(void) {
     return g_isHostingPeerEnvActorDrop;
+}
+
+// #276 — Obj_Mure2 cull-context bracket helpers, called from vanilla
+// z_obj_mure2.c around the Actor_Kill loop in ObjMure2_CleanupAndDie.
+// Begin/End must be balanced (single-threaded; vanilla actor update
+// runs on the game thread). HookHandlers.cpp OnActorKill checks the
+// flag via Anchor_IsObjMure2CullingChildren below.
+extern "C" void Anchor_BeginObjMure2Cull(void) {
+    g_isObjMure2CullingChildren = true;
+}
+extern "C" void Anchor_EndObjMure2Cull(void) {
+    g_isObjMure2CullingChildren = false;
+}
+extern "C" bool Anchor_IsObjMure2CullingChildren(void) {
+    return g_isObjMure2CullingChildren;
 }
 
 // ============================================================================

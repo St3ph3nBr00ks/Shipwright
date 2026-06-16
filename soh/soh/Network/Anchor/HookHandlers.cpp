@@ -120,6 +120,12 @@ extern "C" {
 extern PlayState* gPlayState;
 extern MapData* gMapData;
 
+// #276 — read by OnActorKill broadcast site to suppress ENEMY_DEFEATED
+// for Obj_Mure2's distance-cull of grass-cluster children. Defined in
+// Bridge/EnvActorBridge.cpp; set/cleared from z_obj_mure2.c's
+// ObjMure2_CleanupAndDie via Anchor_BeginObjMure2Cull / End.
+extern "C" bool Anchor_IsObjMure2CullingChildren(void);
+
 void func_8086ED70(BgBombwall* bgBombwall, PlayState* play);
 void BgBreakwall_Wait(BgBreakwall* bgBreakwall, PlayState* play);
 void func_80883000(BgHakaZou* bgHakaZou, PlayState* play);
@@ -3780,6 +3786,34 @@ void Anchor::RegisterHooks() {
         // to ACTORCAT_ENEMY/BOSS actors, so its presence is sufficient proof.
         EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
         if (ext == nullptr || ext->netId == 0) {
+            return;
+        }
+        // #276 — suppress broadcast for Obj_Mure2 distance-cull of grass-
+        // cluster children. Set by Obj_Mure2_CleanupAndDie at
+        // z_obj_mure2.c:132-150 immediately before its Actor_Kill loop.
+        // Each peer's local Obj_Mure2 makes the same distance-based cull
+        // decision INDEPENDENTLY (vanilla state machine fires on local
+        // player's projected distance, not host's), so peer has nothing
+        // to clean up; host's broadcasts would arrive as 12 pendingKill
+        // WARN lines per cluster cull (log 524 19:17:33.187 / 19:17:49.247).
+        //
+        // Placed BEFORE ClaimDefeatBroadcast intentionally — this is not
+        // a "death" event but a "go to sleep, will respawn on approach"
+        // event. Claiming the dedup ledger would block legitimate future
+        // ENEMY_DEFEATED for the same netId within the scene visit
+        // (e.g., the same grass actually getting cut by the player after
+        // re-spawn). TransitionTo(Dead) is also skipped because the FSM
+        // dies with the actor (per-Actor extension); next-respawn assigns
+        // a fresh EnemyNetId.
+        //
+        // En_Kusa cut path is unaffected — EnKusa_SetupCut (TYPE_1/TYPE_2)
+        // fires Anchor_BroadcastEnvActorDestroy directly, and TYPE_0's
+        // Actor_Kill happens outside the Obj_Mure2 cull-context, so the
+        // ENEMY_DEFEATED broadcast still fires for player-driven cuts.
+        if (Anchor_IsObjMure2CullingChildren()) {
+            SPDLOG_DEBUG("[EnemyDefeated] Actor_Kill suppressed (Obj_Mure2 distance cull) "
+                         "for actor id={} netId={}",
+                         actor->id, ext->netId);
             return;
         }
         // Single dedup gate via HostBookkeeping. ClaimDefeatBroadcast is

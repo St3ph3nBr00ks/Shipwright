@@ -7,6 +7,17 @@
 #include "z_obj_mure2.h"
 #include "soh/OTRGlobals.h"
 
+// #276 — Flotilla MP. Distance-cull of grass-cluster children calls
+// Actor_Kill on every actorSpawnPtrList entry, which the OnActorKill
+// hook would otherwise broadcast as 12 spurious ENEMY_DEFEATED packets
+// (peer's local Obj_Mure2 makes the same cull decision independently
+// so peer has nothing to clean up). Bracketing the loop with these
+// thread-local helpers tells the hook to suppress the broadcasts for
+// this kill class. Definitions in soh/soh/Network/Anchor/Bridge/
+// EnvActorBridge.cpp.
+extern void Anchor_BeginObjMure2Cull(void);
+extern void Anchor_EndObjMure2Cull(void);
+
 #define FLAGS 0
 
 typedef void (*ObjMure2SetPosFunc)(Vec3f* vec, ObjMure2* this);
@@ -132,6 +143,10 @@ void ObjMure2_SpawnActors(ObjMure2* this, PlayState* play) {
 void ObjMure2_CleanupAndDie(ObjMure2* this, PlayState* play) {
     s32 i;
 
+    // #276 — bracket the cull loop with the Flotilla MP cull-context
+    // helpers so OnActorKill suppresses ENEMY_DEFEATED broadcasts for
+    // these kills (peer's local Obj_Mure2 makes the same decision).
+    Anchor_BeginObjMure2Cull();
     for (i = 0; i < D_80B9A818[this->actor.params & 3]; i++) {
         if (((this->currentActorNum >> i) & 1) == 0) {
             if (this->actorSpawnPtrList[i] != NULL) {
@@ -146,6 +161,7 @@ void ObjMure2_CleanupAndDie(ObjMure2* this, PlayState* play) {
             this->actorSpawnPtrList[i] = NULL;
         }
     }
+    Anchor_EndObjMure2Cull();
 }
 
 void func_80B9A534(ObjMure2* this) {
