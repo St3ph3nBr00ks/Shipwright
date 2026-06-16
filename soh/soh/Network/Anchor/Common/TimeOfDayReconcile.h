@@ -37,6 +37,25 @@
 // snaps to the synced time without the 1-2 frame catch-up lag through
 // vanilla z_kankyo.c:967-969 (which only fires when dayTime > skyboxTime,
 // so an equal write is a next-frame no-op).
+//
+// OPTION A — vanilla time-frozen-island respect:
+// When the LOCAL scene's gTimeIncrement == 0 (vanilla freeze in all
+// 10 dungeons + all boss rooms + Lon Lon Ranch), ApplyIfAhead
+// short-circuits and returns false without writing. This preserves
+// the vanilla design contract that gSaveContext.sceneSetupIndex
+// (picked once at scene entry per z_play.c:470-478) stays valid for
+// the entire visit. Without this gate, our MP sync forces dayTime
+// past the night threshold while the actor list / music / lighting
+// remain in the day setup chosen at entry — a state vanilla never
+// anticipated since vanilla relies on timeIncrement=0 to ensure
+// nightFlag never changes mid-visit.
+//
+// SIDE EFFECT: the LLR-side player's sky doesn't visibly change
+// while their teammate's clock advances. This may be revisited
+// later via per-actor day/night state re-evaluation (without a
+// full scene reload, which would be jarring). See GitHub #63 +
+// Claude/Analysis/time_sync_wraparound_bug_analysis_2026-06-16.md
+// for the design discussion.
 
 namespace AnchorTimeOfDay {
 

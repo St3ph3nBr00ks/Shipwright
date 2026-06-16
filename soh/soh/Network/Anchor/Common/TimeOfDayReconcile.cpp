@@ -10,6 +10,48 @@ namespace AnchorTimeOfDay {
 
 bool ApplyIfAhead(u16 receivedDayTime, s32 receivedNightFlag,
                   const char* logTag) {
+    // OPTION A — respect vanilla's "time-frozen island" scene design
+    // (added 2026-06-16 after log 535 field test surfaced day/night
+    // setup desync in Lon Lon Ranch).
+    //
+    // Vanilla freezes dayTime in certain scenes by setting envCtx.
+    // timeIncrement = 0 from the scene header (z_scene.c:354-368):
+    // all 10 dungeons, all boss rooms, and Lon Lon Ranch. The design
+    // contract is that gSaveContext.sceneSetupIndex — picked exactly
+    // ONCE at scene entry from LINK_IS_ADULT x IS_DAY (z_play.c:470-
+    // 478) — stays valid for the entire visit. Vanilla has NO logic
+    // anywhere to re-pick the setup or reload the scene on a mid-
+    // visit nightFlag transition; it relies on the timeIncrement=0
+    // freeze to guarantee the day/night setup is never wrong.
+    //
+    // Without this gate, our TIME_SYNC packet would force dayTime
+    // forward on the LLR-side player; nightFlag auto-recomputes (z_
+    // kankyo.c:974-978) but the actor list, music, and lighting all
+    // stay in the day setup. Result: visible day actors at night,
+    // wrong ambience, etc. — a state vanilla never anticipated.
+    //
+    // Suppressing the apply when gTimeIncrement == 0 preserves the
+    // vanilla invariant: LLR-side player experiences single-player
+    // vanilla LLR (frozen at entry time). The local clock catches
+    // up on scene exit via the existing UPDATE_CLIENT_STATE
+    // handshake (which uses this same helper but fires AFTER
+    // Play_Init sets the new scene's gTimeIncrement to a non-zero
+    // value — so the apply succeeds on the new scene).
+    //
+    // KNOWN LIMITATION + MAY BE REVISITED: the LLR-side player's
+    // sky doesn't change while their HF teammate's does. If we
+    // later add per-actor day/night state re-evaluation (option C
+    // partial — without a full scene reload), this gate can be
+    // removed. See Claude/Analysis/time_sync_wraparound_bug_analysis_
+    // 2026-06-16.md §"Option A — LLR follow-up" and GitHub #63.
+    //
+    // gTimeIncrement is declared in z_kankyo.c:61 and exposed via
+    // soh/include/variables.h:80 (extern). Already in scope here
+    // through the extern "C" #include "variables.h" at file top.
+    if (gTimeIncrement == 0) {
+        return false;
+    }
+
     // Modular forward distance on the circular u16 clock.
     //
     // Wraparound-aware semantics (see TimeOfDayReconcile.h for full
