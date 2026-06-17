@@ -96,10 +96,14 @@ void Anchor::HandlePacket_TalonCastleState(nlohmann::json payload) {
 
     // Walk ACTORCAT_NPC. Talon's castle variant is unique per scene
     // (one EnTa actor in Hyrule Castle child) — same lookup shape as
-    // MidoPostDekuLeave.cpp:99-111.
+    // MidoPostDekuLeave.cpp:99-111. Note: vanilla castle Talon's
+    // placement params is 0xFFFF (-1 as s16), not 0. Receivers gate
+    // on the senderscene match above (Pillar E ValidateSameScene)
+    // and on actorId match here; EnTa_NetSync_ApplyState's own scene
+    // check is the final safety net against cross-variant pollution.
     Actor* actor = gPlayState->actorCtx.actorLists[ACTORCAT_NPC].head;
     while (actor != nullptr) {
-        if (actor->id == ACTOR_EN_TA && actor->params == 0) {
+        if (actor->id == ACTOR_EN_TA) {
             EnTa* ta = (EnTa*)actor;
 
             uint8_t currentIdx = EnTa_NetSync_GetStateIndex(ta);

@@ -1295,10 +1295,12 @@ void EnTa_NetSync_ApplyState(EnTa* actor, PlayState* play, unsigned char stateIn
     if (actor == NULL || play == NULL) {
         return;
     }
-    // Refuse non-castle variants — the indices are castle-specific.
-    if (actor->actor.params != 0) {
-        return;
-    }
+    // Castle Talon's vanilla placement uses params 0xFFFF (-1 as s16),
+    // NOT 0 — Init dispatches by switch default-fallthrough into the
+    // sceneNum check at line 161, not by params == 0. Gate on the scene
+    // alone; Kakariko (params=1) and Ranch (params=2) variants live in
+    // their own scenes so won't conflict. Caught via field-test log 552
+    // where the params == 0 gate dropped every apply attempt.
     if (play->sceneNum != SCENE_HYRULE_CASTLE) {
         return;
     }

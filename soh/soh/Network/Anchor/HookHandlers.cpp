@@ -1970,7 +1970,14 @@ void Anchor::RegisterHooks() {
         // sequence and needs host-authoritative pos updates).
         //
         // See Claude/Analysis/talon_castle_wake_sync_2026-06-17.md.
-        if (actor->id == ACTOR_EN_TA && actor->params == 0 &&
+        // Gate on scene only — vanilla places the castle Talon with params
+        // 0xFFFF (-1 as s16), not 0. EnTa_Init discriminates by switch
+        // default-fallthrough into the scene check at z_en_ta.c:161,
+        // NOT by params == 0. Kakariko (params=1) and Ranch (params=2)
+        // variants live in their own scenes so the scene check alone is
+        // sufficient. Found via field-test log 552: gate was missing
+        // every transition because params=0xFFFF != 0.
+        if (actor->id == ACTOR_EN_TA &&
             gPlayState->sceneNum == SCENE_HYRULE_CASTLE) {
             EnemyNetId* extTalon = const_cast<EnemyNetId*>(
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
