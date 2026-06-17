@@ -79,7 +79,17 @@ SkelAnime* GetEnemySkelAnime(Actor* actor) {
 
     // Validate before trusting it — for the ~39 non-default enemies whose data
     // at this offset is NOT a SkelAnime, limbCount is typically 0 or out of range.
-    if (ska->limbCount == 0 || ska->limbCount > 30 || ska->jointTable == nullptr) {
+    //
+    // #274 high-limb-count allowlist (2026-06-16): EnZf (Lizalfos, 49 limbs)
+    // and EnOkuta (Octorok, 38 limbs) have verified generic-layout structs
+    // whose true limb counts exceed the > 30 false-positive guard. Raise the
+    // ceiling for those two only — the guard stays at 30 for the other ~37
+    // generic-case actors. The Layer 3 limbCount registry in SkelAnimeWire.h
+    // will WARN if either's runtime limbCount diverges from the expected
+    // 49 / 38.
+    const uint8_t limbCeil =
+        (actor->id == ACTOR_EN_ZF || actor->id == ACTOR_EN_OKUTA) ? 64 : 30;
+    if (ska->limbCount == 0 || ska->limbCount > limbCeil || ska->jointTable == nullptr) {
         return nullptr;
     }
     return ska;

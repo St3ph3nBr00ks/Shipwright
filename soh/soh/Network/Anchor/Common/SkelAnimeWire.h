@@ -28,8 +28,17 @@
 
 namespace SkelAnimeWire {
 
-// No vanilla OoT actor exceeds this. Loud red flag if anything does.
-constexpr uint8_t kHardCap = 32;
+// Wire-layer pose-table size ceiling. Bumped 32 -> 64 (2026-06-16, #274)
+// after source-verifying that Stalfos's struct declares
+// jointTable[STALFOS_LIMB_MAX = 61] (z_en_test.h:73,80). Prior cap of 32
+// was silently truncating Stalfos pose updates by 29 limbs. All three
+// callers (SerializePoseTable, DeserializePoseTable, EnemyState.cpp:453)
+// use std::min for clamping; no fixed-size buffers sized to kHardCap.
+// Bumping to 64 also leaves headroom for Lizalfos (49) and Octorok (38)
+// once they're admitted via GetEnemySkelAnime's per-actor ceiling allow-
+// list. The Layer 3 limbCount registry below will WARN if any actor's
+// observed limbCount exceeds its registered value.
+constexpr uint8_t kHardCap = 64;
 
 // Per-actor expected SkelAnime->limbCount registry.
 //
@@ -54,17 +63,19 @@ constexpr uint8_t kHardCap = 32;
 //     switch (no SkelAnime substruct).
 //   - EnBom / EnBombf — explosive category, not ACTORCAT_ENEMY.
 //
-// Entries that EXCEED kHardCap=32 (require special handling — see #274):
-//   - EnTest (Stalfos)  : 61 limbs — skel-exception, wire clamps to 32.
-//   - EnZf   (Lizalfos) : 49 limbs — generic-cast path REJECTS at >30
-//     heuristic; effectively never sync'd via this path.
-//   - EnOkuta (Octorok) : 38 limbs — same reject-via-heuristic as EnZf.
+// Entries with high limb counts (handled via #274 fix, this commit):
+//   - EnTest (Stalfos)  : 61 limbs — skel-exception path; fits under
+//     bumped kHardCap=64.
+//   - EnZf   (Lizalfos) : 49 limbs — generic-cast path; admitted via
+//     per-actor ceiling allowlist in GetEnemySkelAnime (raises >30
+//     guard to >64 for this actor only).
+//   - EnOkuta (Octorok) : 38 limbs — same per-actor allowlist as EnZf.
 //
 // Audit lineage: Plans/skelanime_expected_limbcount_registry_2026-06-15.md
 inline const std::unordered_map<s16, uint8_t> kExpectedLimbCount = {
     // ----- Skel-exception group (explicit cast in GetEnemySkelAnime) -----
     { ACTOR_EN_DEKUBABA,  8  },  // z_en_dekubaba.h:25
-    { ACTOR_EN_TEST,      61 },  // z_en_test.h:73,80 (STALFOS_LIMB_MAX) — EXCEEDS kHardCap
+    { ACTOR_EN_TEST,      61 },  // z_en_test.h:73,80 (STALFOS_LIMB_MAX) — within kHardCap=64
     { ACTOR_EN_RD,        26 },  // z_en_rd.h:9
     { ACTOR_EN_WF,        22 },  // z_en_wf.h:34,58 (WOLFOS_LIMB_MAX)
     { ACTOR_EN_MB,        28 },  // z_en_mb.h:14
@@ -95,7 +106,7 @@ inline const std::unordered_map<s16, uint8_t> kExpectedLimbCount = {
     { ACTOR_EN_GOMA,       24 },  // z_en_goma.h:49
     { ACTOR_EN_HINTNUTS,   10 },  // z_en_hintnuts.h:18
     { ACTOR_EN_IK,         30 },  // z_en_ik.h:14 — AT kHardCap-2
-    { ACTOR_EN_OKUTA,      38 },  // z_en_okuta.h:17 — EXCEEDS heuristic > 30
+    { ACTOR_EN_OKUTA,      38 },  // z_en_okuta.h:17 — admitted via per-actor ceiling allowlist
     { ACTOR_EN_PEEHAT,     24 },  // z_en_peehat.h:20
     { ACTOR_EN_PO_SISTERS, 12 },  // z_en_po_sisters.h:23
     { ACTOR_EN_POH,        21 },  // z_en_poh.h:49
@@ -112,7 +123,7 @@ inline const std::unordered_map<s16, uint8_t> kExpectedLimbCount = {
     { ACTOR_EN_VM,         11 },  // z_en_vm.h:14
     { ACTOR_EN_WALLMAS,    25 },  // z_en_wallmas.h:24
     { ACTOR_EN_WEIYER,     19 },  // z_en_weiyer.h:17
-    { ACTOR_EN_ZF,         49 },  // ENZF_LIMB_MAX — EXCEEDS heuristic > 30
+    { ACTOR_EN_ZF,         49 },  // ENZF_LIMB_MAX — admitted via per-actor ceiling allowlist
 
     // ----- Boss admission (IsSyncedBossActor) -----
     { ACTOR_BOSS_GOMA,     24 },  // z_en_goma.h:49 (shared struct family)
