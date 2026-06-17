@@ -28,6 +28,14 @@ extern "C" {
 #include "macros.h"
 extern PlayState* gPlayState;
 
+// Object_Spawn has no public header — defined only in src/code/z_scene.c.
+// Forward-decl here so the Spawn / Spawn in Front of Link buttons can pre-load
+// the actor's required object before Actor_Spawn. Mirrors AIDirector's
+// ExecuteSpawn pattern at Director.cpp:425-426. Object_Spawn is idempotent for
+// already-loaded objects; for new objects it queues an async DMA load, so the
+// actor appears one or two frames late instead of failing to render entirely.
+s32 Object_Spawn(ObjectContext* objectCtx, s16 objectId);
+
 #include "textures/icon_item_static/icon_item_static.h"
 #include "textures/icon_item_24_static/icon_item_24_static.h"
 }
@@ -1158,9 +1166,36 @@ void ActorViewerWindow::DrawElement() {
             }
 
             if (Button("Spawn", ButtonOptions().Color(THEME_COLOR))) {
-                if (ActorDB::Instance->RetrieveEntry(newActor.id).entry.valid) {
+                const auto& dbEntry = ActorDB::Instance->RetrieveEntry(newActor.id);
+                if (dbEntry.entry.valid) {
+                    if (dbEntry.entry.objectId > 0) {
+                        Object_Spawn(&gPlayState->objectCtx, (s16)dbEntry.entry.objectId);
+                    }
                     Actor_Spawn(&gPlayState->actorCtx, gPlayState, newActor.id, newActor.pos.x, newActor.pos.y,
                                 newActor.pos.z, newActor.rot.x, newActor.rot.y, newActor.rot.z, newActor.params);
+                } else {
+                    Sfx_PlaySfxCentered(NA_SE_SY_ERROR);
+                }
+            }
+
+            // Spawn the actor 80u in front of Link, facing Link. Useful when
+            // testing actors that aren't natively in the current scene — the
+            // Object_Spawn call above queues the required object DMA so the
+            // model appears within a frame or two.
+            if (Button("Spawn in Front of Link", ButtonOptions().Color(THEME_COLOR))) {
+                const auto& dbEntry = ActorDB::Instance->RetrieveEntry(newActor.id);
+                if (dbEntry.entry.valid) {
+                    if (dbEntry.entry.objectId > 0) {
+                        Object_Spawn(&gPlayState->objectCtx, (s16)dbEntry.entry.objectId);
+                    }
+                    Player* player = GET_PLAYER(gPlayState);
+                    s16 yaw = player->actor.shape.rot.y;
+                    f32 spawnX = player->actor.world.pos.x + 80.0f * Math_SinS(yaw);
+                    f32 spawnZ = player->actor.world.pos.z + 80.0f * Math_CosS(yaw);
+                    // yaw + 0x8000 = 180° — the spawned actor faces Link.
+                    Actor_Spawn(&gPlayState->actorCtx, gPlayState, newActor.id,
+                                spawnX, player->actor.world.pos.y, spawnZ,
+                                0, (s16)(yaw + 0x8000), 0, newActor.params);
                 } else {
                     Sfx_PlaySfxCentered(NA_SE_SY_ERROR);
                 }
@@ -1169,11 +1204,18 @@ void ActorViewerWindow::DrawElement() {
             if (Button("Spawn as Child", ButtonOptions().Color(THEME_COLOR))) {
                 Actor* parent = display;
                 if (parent != NULL) {
-                    if (newActor.id >= 0 && newActor.id < ACTOR_ID_MAX &&
-                        ActorDB::Instance->RetrieveEntry(newActor.id).entry.valid) {
-                        Actor_SpawnAsChild(&gPlayState->actorCtx, parent, gPlayState, newActor.id, newActor.pos.x,
-                                           newActor.pos.y, newActor.pos.z, newActor.rot.x, newActor.rot.y,
-                                           newActor.rot.z, newActor.params);
+                    if (newActor.id >= 0 && newActor.id < ACTOR_ID_MAX) {
+                        const auto& dbEntry = ActorDB::Instance->RetrieveEntry(newActor.id);
+                        if (dbEntry.entry.valid) {
+                            if (dbEntry.entry.objectId > 0) {
+                                Object_Spawn(&gPlayState->objectCtx, (s16)dbEntry.entry.objectId);
+                            }
+                            Actor_SpawnAsChild(&gPlayState->actorCtx, parent, gPlayState, newActor.id, newActor.pos.x,
+                                               newActor.pos.y, newActor.pos.z, newActor.rot.x, newActor.rot.y,
+                                               newActor.rot.z, newActor.params);
+                        } else {
+                            Sfx_PlaySfxCentered(NA_SE_SY_ERROR);
+                        }
                     } else {
                         Sfx_PlaySfxCentered(NA_SE_SY_ERROR);
                     }
