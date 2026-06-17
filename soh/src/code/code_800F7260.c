@@ -307,6 +307,12 @@ void Audio_ProcessSoundRequest(void) {
                     gSoundBanks[bankId][index].reverbAdd = req->reverbAdd;
                     gSoundBanks[bankId][index].sfxParams = soundParams->params;
                     gSoundBanks[bankId][index].sfxImportance = soundParams->importance;
+                    gSoundBanks[bankId][index].emitterClientId = req->emitterClientId; // Flotilla #83/#84 α.2
+                    if ((req->sfxId & 0xF000) == 0x6000 &&
+                        CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
+                        LUSLOG_INFO("[VoicePackBank] refresh sfxId=0x%04X bank=%d entry=%d emitterClientId=%u",
+                                    req->sfxId, bankId, index, req->emitterClientId);
+                    }
                 } else if (gSoundBanks[bankId][index].state == SFX_STATE_PLAYING_2) {
                     gSoundBanks[bankId][index].state = SFX_STATE_PLAYING_1;
                 }
@@ -333,12 +339,18 @@ void Audio_ProcessSoundRequest(void) {
         entry->sfxId = req->sfxId;
         entry->state = SFX_STATE_QUEUED;
         entry->freshness = 2;
+        entry->emitterClientId = req->emitterClientId; // Flotilla #83/#84 α.2
         entry->prev = sSoundBankListEnd[bankId];
         gSoundBanks[bankId][sSoundBankListEnd[bankId]].next = sSoundBankFreeListStart[bankId];
         sSoundBankListEnd[bankId] = sSoundBankFreeListStart[bankId];
         sSoundBankFreeListStart[bankId] = gSoundBanks[bankId][sSoundBankFreeListStart[bankId]].next;
         gSoundBanks[bankId][sSoundBankFreeListStart[bankId]].prev = 0xFF;
         entry->next = 0xFF;
+        if ((req->sfxId & 0xF000) == 0x6000 &&
+            CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
+            LUSLOG_INFO("[VoicePackBank] alloc sfxId=0x%04X bank=%d entry=%d emitterClientId=%u",
+                        req->sfxId, bankId, index, req->emitterClientId);
+        }
     }
 }
 

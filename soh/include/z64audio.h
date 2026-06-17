@@ -1054,7 +1054,8 @@ typedef struct {
     /* 0x2D */ u8       next;
     /* 0x2E */ u8       channelIdx;
     /* 0x2F */ u8       unk_2F;
-} SoundBankEntry; // size = 0x30
+    /* 0x30 */ u32      emitterClientId; // Flotilla #83/#84 — copied from SoundRequest at enqueue; threaded to audio thread in Phase α.3
+} SoundBankEntry; // size = 0x34
 
 /*
  * SFX IDs
