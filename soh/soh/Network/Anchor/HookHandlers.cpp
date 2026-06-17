@@ -5,6 +5,7 @@
 #include "AIPlayerFollower/Follower.h"      // FollowerFrameContext for the OnGameFrameUpdate wrapper (Phase 1 commit 4)
 #include "soh/cvar_prefixes.h"        // CVAR_REMOTE_ANCHOR / CVAR_ENHANCEMENT (Nav system commit 6c)
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
+#include "Common/SkelAnimeWire.h"     // kExpectedLimbCount (#154 — defense-in-depth limb-count registry)
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
 #include "Common/ItemEligibility.h"   // CanPlayerCollectItem00 (#193 Phase 0)
@@ -975,6 +976,27 @@ void Anchor::RegisterHooks() {
         // via Actor_Kill when one client destroys it locally.
         if (actor->id == ACTOR_EN_HONOTRAP && actor->params != HONOTRAP_EYE) {
             return;
+        }
+
+        // Defense-in-depth Layer 3: per-actor expected-limbCount registry.
+        // Soft warning when local actor's skelAnime->limbCount diverges from
+        // the registered value. Surfaces ROM variants, tampered asset packs,
+        // or sync admissions that landed without a registry entry. The wire
+        // layer's kHardCap=32 clamp continues to protect runtime regardless.
+        // Audit: Plans/skelanime_expected_limbcount_registry_2026-06-15.md.
+        {
+            auto regIt = SkelAnimeWire::kExpectedLimbCount.find(actor->id);
+            if (regIt != SkelAnimeWire::kExpectedLimbCount.end()) {
+                SkelAnime* skel = GetEnemySkelAnime(actor);
+                if (skel != nullptr && skel->limbCount != regIt->second) {
+                    SPDLOG_WARN(
+                        "[LimbCountRegistry] actor id=0x{:04X} limbCount={} expected={} (scene={} room={}) "
+                        "— possible ROM variant or sync admission gap",
+                        (int)actor->id, (int)skel->limbCount, (int)regIt->second,
+                        gPlayState ? (int)gPlayState->sceneNum : -1,
+                        gPlayState ? (int)gPlayState->roomCtx.curRoom.num : -1);
+                }
+            }
         }
 
         // TEMP DIAGNOSTIC (log 195 freeze investigation): Hintnut slot-reuse
