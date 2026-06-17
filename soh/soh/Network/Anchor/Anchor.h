@@ -807,6 +807,7 @@ class Anchor : public Network {
     inline static const std::string& ITEM_DROP_SYNC           = PacketTypes::ITEM_DROP_SYNC;
     inline static const std::string& ITEM_PICKUP_REQUEST      = PacketTypes::ITEM_PICKUP_REQUEST;
     inline static const std::string& MIDO_POST_DEKU_LEAVE     = PacketTypes::MIDO_POST_DEKU_LEAVE;
+    inline static const std::string& TALON_CASTLE_STATE       = PacketTypes::TALON_CASTLE_STATE;
     inline static const std::string& MODAL_OFFER_CLAIMED      = PacketTypes::MODAL_OFFER_CLAIMED;
     inline static const std::string& NAV_TEST_DIRECTIVE       = PacketTypes::NAV_TEST_DIRECTIVE;
     inline static const std::string& OCARINA_SFX              = PacketTypes::OCARINA_SFX;
@@ -1265,6 +1266,20 @@ class Anchor : public Network {
     // SetFlag(SPOKE) sync arrives. See #184 follow-up.
     void SendPacket_MidoPostDekuLeave();
     void HandlePacket_MidoPostDekuLeave(nlohmann::json payload);
+
+    // TALON_CASTLE_STATE — any-client→all broadcast for the Hyrule Castle
+    // child-timeline Talon (sleeping under tree, woken by Cucco) state-
+    // machine transitions. Mirrors MidoPostDekuLeave but parameterised
+    // over an opaque state index (§3 of
+    // Claude/Analysis/talon_castle_wake_sync_2026-06-17.md). Any client
+    // whose local EnTa actionFunc transitions emits via the HookHandlers
+    // OnActorUpdate poll driver; receivers forward-only-apply via
+    // EnTa_NetSync_ApplyState. Echo prevention: HandlePacket sets
+    // EnemyNetId.netStateIndex = newIdx BEFORE invoking the apply path
+    // so the poll driver's "currentIdx == netStateIndex" guard skips a
+    // re-broadcast on the next OnActorUpdate tick.
+    void SendPacket_TalonCastleState(uint8_t stateIndex);
+    void HandlePacket_TalonCastleState(nlohmann::json payload);
 
     // ITEM_DROP_SYNC (#193 Phase 1) — host fans out the authoritative
     // drop after its local Item_DropCollectible* call site spawns the

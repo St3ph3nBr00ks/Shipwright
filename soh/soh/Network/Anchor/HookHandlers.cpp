@@ -120,6 +120,9 @@ extern "C" {
 #include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
 // Push-block bidirectional sync — stateFlags & PUSHBLOCK_PUSH detects local push.
 #include "src/overlays/actors/ovl_Obj_Oshihiki/z_obj_oshihiki.h"
+// Hyrule Castle Talon any-client wake state sync. EnTa_NetSync_GetStateIndex /
+// EnTa_NetSync_ApplyState are C-linkage helpers. See Claude/Analysis/talon_castle_wake_sync_2026-06-17.md.
+#include "src/overlays/actors/ovl_En_Ta/z_en_ta.h"
 
 extern PlayState* gPlayState;
 extern MapData* gMapData;
@@ -1949,6 +1952,43 @@ void Anchor::RegisterHooks() {
             // actor->world.pos directly when packets arrive (now
             // unconditionally for push blocks, including on the host).
             return;
+        }
+
+        // Hyrule Castle child-timeline Talon — any-client state-machine
+        // sync. The cucco-thrower (who could be the non-host) is the
+        // only client whose local Actor_ProcessTalkRequest fires for
+        // EXCH_ITEM_CHICKEN (z_en_ta.c:331-354), so the standard
+        // host-only ENEMY_STATE actionState pipeline cannot drive the
+        // wake transition. Whoever's local Talon transitions emits a
+        // TALON_CASTLE_STATE packet; receivers forward-only-apply via
+        // EnTa_NetSync_ApplyState. Mirrors MidoPostDekuLeave and the
+        // ObjOshihiki any-client push pattern above.
+        //
+        // We DO NOT return after broadcasting — the standard
+        // ENEMY_STATE pipeline below still runs for position / joints
+        // / scale sync (Talon physically walks during the run-off
+        // sequence and needs host-authoritative pos updates).
+        //
+        // See Claude/Analysis/talon_castle_wake_sync_2026-06-17.md.
+        if (actor->id == ACTOR_EN_TA && actor->params == 0 &&
+            gPlayState->sceneNum == SCENE_HYRULE_CASTLE) {
+            EnemyNetId* extTalon = const_cast<EnemyNetId*>(
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+            if (extTalon != nullptr) {
+                uint8_t currentIdx = EnTa_NetSync_GetStateIndex((EnTa*)actor);
+                // 0xFF = sentinel for "unsupported state" (transient
+                // failure-wake func_80B145F8, non-castle variant
+                // helpers, etc.). Skip.
+                if (currentIdx != 0xFF &&
+                    (s16)currentIdx != extTalon->netStateIndex) {
+                    SPDLOG_INFO("[TalonCastleState] Local transition {} → {} — broadcasting",
+                                (int)extTalon->netStateIndex, (int)currentIdx);
+                    extTalon->netStateIndex = (s16)currentIdx;
+                    SendPacket_TalonCastleState(currentIdx);
+                }
+            }
+            // Fall through to the standard ENEMY_STATE pipeline for
+            // position / joints sync.
         }
 
         // Per-torch lit-state sync (Obj_Syokudai) — bidirectional. Either

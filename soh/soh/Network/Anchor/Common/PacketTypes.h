@@ -143,6 +143,7 @@ inline const std::string CUTSCENE_TEXT_ADVANCE     = "CUTSCENE_TEXT_ADVANCE";
 inline const std::string CUTSCENE_TEXT_ADVANCED    = "CUTSCENE_TEXT_ADVANCED";
 inline const std::string BOSS_GOMA_LOOKED_AT       = "BOSS_GOMA_LOOKED_AT";
 inline const std::string MIDO_POST_DEKU_LEAVE      = "MIDO_POST_DEKU_LEAVE";
+inline const std::string TALON_CASTLE_STATE        = "TALON_CASTLE_STATE";
 
 // BOSS_EXIT_TEAM_WARP — team-routed scene transition for synced boss
 // exits. When a team member enters the dungeon-clear blue warp, all

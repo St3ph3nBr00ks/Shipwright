@@ -372,6 +372,7 @@ Anchor::GetPacketHandlerRegistry() {
         { DIALOG_END,              &Anchor::HandlePacket_DialogEnd             },
         { BOSS_GOMA_LOOKED_AT,     &Anchor::HandlePacket_BossGomaLookedAt      },
         { MIDO_POST_DEKU_LEAVE,    &Anchor::HandlePacket_MidoPostDekuLeave     },
+        { TALON_CASTLE_STATE,      &Anchor::HandlePacket_TalonCastleState      },
         { ITEM_DROP_SYNC,          &Anchor::HandlePacket_ItemDropSync          },
         { ITEM_COLLECTED,          &Anchor::HandlePacket_ItemCollected         },
         { ITEM_DROP_SNAPSHOT,      &Anchor::HandlePacket_ItemDropSnapshot      },
