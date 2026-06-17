@@ -2,6 +2,7 @@
 #include "SohGui.hpp"
 #include "soh/OTRGlobals.h"
 #include "soh/Enhancements/enhancementTypes.h"
+#include "soh/Enhancements/audio/VoicePack.h"
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/Network/Anchor/Common/NavCVars.h"
@@ -30,6 +31,25 @@ static std::vector<std::string> GetInstalledCoopModelMods_Flotilla() {
         }
     }
     return mods;
+}
+
+// Voice-pack analog of GetInstalledCoopModelMods_Flotilla.  Returns {"",
+// <FolderA>, ...} where "" represents Default Voices.  Each entry is the
+// name of a subdirectory of player-voices/ (a sibling of coopplayercharacters/
+// and mods/).  Issues #83 / #84.
+static std::vector<std::string> GetInstalledVoicePacks_Flotilla() {
+    std::vector<std::string> packs;
+    packs.push_back("");
+    std::string voicePath = Ship::Context::LocateFileAcrossAppDirs("player-voices", appShortName);
+    std::filesystem::path voiceDir(voicePath);
+    if (std::filesystem::exists(voiceDir) && std::filesystem::is_directory(voiceDir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(voiceDir)) {
+            if (entry.is_directory()) {
+                packs.push_back(entry.path().filename().string());
+            }
+        }
+    }
+    return packs;
 }
 
 // AI Diagnostics — Navigation Test Harness statistics widget. Custom
@@ -188,9 +208,43 @@ void SohMenu::AddMenuFlotilla() {
             }
         });
 
-    // Voice Pack and Player Pronouns slots reserved here; backend code in
-    // SohMenuSettings.cpp is still #if 0'd pending the audio routing and
-    // verb-agreement work. Re-enable here when those land.
+    // Voice Pack — picked from player-voices/ (sibling of coopplayercharacters/).
+    // Pack swap triggers loader reload via VoicePack_OnAudioModChanged and
+    // broadcasts the selection over UPDATE_CLIENT_STATE so peers can apply
+    // per-emitter routing when their B3 receive lands.  Issues #83 / #84.
+    AddWidget(path, "Voice Pack", WIDGET_CUSTOM)
+        .HideInSearch(true)
+        .CustomFunction([](WidgetInfo& info) {
+            auto anchor = Anchor::Instance;
+            static std::vector<std::string> packs;
+            if (packs.empty()) {
+                packs = GetInstalledVoicePacks_Flotilla();
+            }
+            std::string currentPack = CVarGetString(CVAR_REMOTE_ANCHOR("AudioMod"), "");
+
+            std::vector<const char*> displayNames;
+            int currentIdx = 0;
+            for (int i = 0; i < (int)packs.size(); i++) {
+                displayNames.push_back(packs[i].empty() ? "Default Voices" : packs[i].c_str());
+                if (packs[i] == currentPack) currentIdx = i;
+            }
+
+            ImGui::Text("Voice Pack");
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            if (ImGui::Combo("##VoicePack", &currentIdx,
+                             (const char* const*)displayNames.data(), (int)displayNames.size())) {
+                CVarSetString(CVAR_REMOTE_ANCHOR("AudioMod"), packs[currentIdx].c_str());
+                Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+                // Loader reload for local pack: scans player-voices/<folder>/
+                // and registers samples in the resource cache + sequenceMap.
+                VoicePack_OnAudioModChanged(packs[currentIdx].c_str());
+                // Broadcast selection so peers' B3 receive layer (when wired)
+                // can resolve (senderClientId → audioModFilename → pack samples).
+                if (anchor && anchor->isConnected) {
+                    anchor->SendPacket_UpdateClientState();
+                }
+            }
+        });
 
     AddWidget(path, "AI Player Follower (non-host only)", WIDGET_SEPARATOR_TEXT);
 

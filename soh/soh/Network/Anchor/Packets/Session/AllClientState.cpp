@@ -148,6 +148,7 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
         clients[client.clientId].sceneNum = client.sceneNum;
         clients[client.clientId].entranceIndex = client.entranceIndex;
         clients[client.clientId].customModelFilename = client.customModelFilename;
+        clients[client.clientId].audioModFilename    = client.audioModFilename;
         clients[client.clientId].followerActive = client.followerActive;
         clients[client.clientId].isClimbing = client.isClimbing;
         clients[client.clientId].isCrawling = client.isCrawling;

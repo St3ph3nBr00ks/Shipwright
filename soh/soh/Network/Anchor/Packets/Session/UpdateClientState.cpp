@@ -34,6 +34,19 @@ static std::string GetLocalModelFilename() {
     return std::string(chosen);
 }
 
+// B1 — voice-pack folder name the local player selected, or "" for
+// default vanilla voices. Same no-existence-check rationale as
+// GetLocalModelFilename above (VirtualBox shared-folder edge case).
+// Consumers (B2 preload, B3 PLAYER_SFX routing) read this from
+// AnchorClient on the remote side.
+static std::string GetLocalAudioModFilename() {
+    const char* chosen = CVarGetString(CVAR_REMOTE_ANCHOR("AudioMod"), "");
+    if (chosen == nullptr || chosen[0] == '\0') {
+        return "";
+    }
+    return std::string(chosen);
+}
+
 /**
  * UPDATE_CLIENT_STATE
  *
@@ -56,6 +69,13 @@ nlohmann::json Anchor::PrepClientState() {
     std::string localModel = GetLocalModelFilename();
     SPDLOG_INFO("[CoopModel] PrepClientState: customModelFilename=\"{}\"", localModel);
     payload["customModelFilename"] = localModel;
+
+    // B1 — broadcast the selected voice pack. Data plumbing only; no
+    // audio side-effect yet. B2 wires the local substitution; B3 the
+    // remote PLAYER_SFX routing.
+    std::string localAudio = GetLocalAudioModFilename();
+    SPDLOG_INFO("[CoopVoice] PrepClientState: audioModFilename=\"{}\"", localAudio);
+    payload["audioModFilename"] = localAudio;
     payload["followerActive"] = IsFollowerActive();
     payload["sceneSpawnEpoch"] = sceneSpawnEpoch;
     payload["isClimbing"] = IsLocalPlayerClimbing();
@@ -181,6 +201,20 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
                 if (schemaVal.is_number_integer()) {
                     clients[clientId].peerMaxSchema[type] = schemaVal.get<int>();
                 }
+            }
+        }
+
+        // B1 — record remote player's voice-pack selection. Data plumbing
+        // only: no audio path consumes this yet (B2 preloads the pack's
+        // samples + game-thread substitution; B3 remaps cross-client
+        // emissions). Logging the transition makes B2/B3 integration
+        // diagnosable later.
+        if (payload["state"].contains("audioModFilename")) {
+            std::string newAudio = payload["state"]["audioModFilename"].get<std::string>();
+            if (clients[clientId].audioModFilename != newAudio) {
+                SPDLOG_INFO("[CoopVoice] UpdateClientState clientId={}: audio \"{}\" -> \"{}\"",
+                            clientId, clients[clientId].audioModFilename, newAudio);
+                clients[clientId].audioModFilename = newAudio;
             }
         }
 

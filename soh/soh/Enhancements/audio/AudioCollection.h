@@ -68,6 +68,24 @@ class AudioCollection {
     size_t SequenceMapSize();
     std::string GetCvarKey(std::string sfxKey);
     std::string GetCvarLockKey(std::string sfxKey);
+
+    // --- VoicePack (issue #83, #84) support ---
+    // Reverse lookup: given an sfxKey like "NA_SE_VO_LI_SWORD_N", returns the
+    // matching seqId.  Returns 0 if not found.
+    uint16_t FindSeqIdBySfxKey(const std::string& sfxKey) const;
+
+    // Registers a custom voice entry not tied to a music-pack filename scheme.
+    // Used by VoicePack when loading VRP-style samples for Audio Editor
+    // visibility (the SEQ_VOICE entry shows up in the editor's Voices tab).
+    // canBeUsedAsReplacement=false because the actual playback substitution
+    // is wired via the D4+D7 hybrid path (see Plans / Analysis docs), not
+    // via GetReplacementSequence.
+    void AddCustomVoiceEntry(uint16_t seqNum, const std::string& label,
+                              const std::string& sfxKey);
+
+    // Removes a custom entry previously added via AddCustomVoiceEntry.
+    // No-op if the entry does not exist.
+    void RemoveCustomEntry(uint16_t seqNum);
 };
 #else
 void AudioCollection_AddToCollection(char* otrPath, uint16_t seqNum);
