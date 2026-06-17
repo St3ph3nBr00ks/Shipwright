@@ -570,6 +570,22 @@ void Audio_PlayActiveSounds(u8 bankId) {
                     }
                 }
                 Audio_SetSoundProperties(bankId, entryIndex, sCurSfxPlayerChannelIdx);
+                // Flotilla #83/#84 Phase α.3 — set the audio-thread channel's
+                // emitterClientId BEFORE the playback start command. Audio
+                // thread processes commands in queue order; the channel field
+                // is in place when Audio_GetSfx fires for this emission. Sent
+                // for every SFX dispatch (not just voice) so the channel's
+                // emitter state never holds stale value from a prior bank
+                // entry on the same round-robin channel slot.
+                Audio_QueueCmd(((u32)CHAN_UPD_ANCHOR_EMITTER << 24) |
+                                ((u32)SEQ_PLAYER_SFX << 16) |
+                                (((u32)sCurSfxPlayerChannelIdx & 0xFF) << 8),
+                                entry->emitterClientId);
+                if ((entry->sfxId & 0xF000) == 0x6000 &&
+                    CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
+                    LUSLOG_INFO("[VoicePackChan] queued sfxId=0x%04X channel=%d emitterClientId=%u",
+                                entry->sfxId, sCurSfxPlayerChannelIdx, entry->emitterClientId);
+                }
                 Audio_QueueCmdS8(0x6 << 24 | SEQ_PLAYER_SFX << 16 | ((sCurSfxPlayerChannelIdx & 0xFF) << 8), 1);
                 Audio_QueueCmdS8(0x6 << 24 | SEQ_PLAYER_SFX << 16 | ((sCurSfxPlayerChannelIdx & 0xFF) << 8) | 4,
                                  entry->sfxId & 0xFF);

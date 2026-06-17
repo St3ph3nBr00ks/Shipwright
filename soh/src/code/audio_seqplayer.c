@@ -167,6 +167,7 @@ void AudioSeq_InitSequenceChannel(SequenceChannel* channel) {
     }
 
     channel->unused = false;
+    channel->emitterClientId = 0; // Flotilla #83/#84 — reset to no-Anchor default; CHAN_UPD_ANCHOR_EMITTER overwrites per emission.
     Audio_InitNoteLists(&channel->notePool);
 }
 

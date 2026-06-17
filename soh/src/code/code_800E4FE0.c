@@ -20,6 +20,9 @@ typedef enum {
     CHAN_UPD_UNK_20,          // 13
     CHAN_UPD_STEREO           // 14
 } ChannelUpdateType;
+// CHAN_UPD_ANCHOR_EMITTER (15) is defined in z64audio.h so code_800F7260.c
+// (the game-thread queuer) and this file (the audio-thread dispatcher) share
+// the constant. See z64audio.h for the comment.
 
 void func_800E6300(SequenceChannel* channel, AudioCmd* arg1);
 void func_800E59AC(s32 playerIdx, s32 fadeTimer);
@@ -741,6 +744,13 @@ void func_800E6300(SequenceChannel* channel, AudioCmd* cmd) {
             return;
         case CHAN_UPD_STEREO:
             channel->stereo.asByte = cmd->asUbyte;
+            return;
+        case CHAN_UPD_ANCHOR_EMITTER:
+            // Flotilla #83/#84 — game thread queues this before each SFX
+            // playback command in Audio_PlayActiveSounds. Audio thread reads
+            // channel->emitterClientId at Audio_GetSfx interception (Phase
+            // α.4) to drive per-emitter voice-sample substitution.
+            channel->emitterClientId = cmd->data;
             return;
     }
 }

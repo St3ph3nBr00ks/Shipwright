@@ -417,7 +417,18 @@ typedef struct SequenceChannel {
     /* 0xC4 */ s8 soundScriptIO[8]; // bridge between sound script and audio lib, "io ports"
     /* 0xCC */ s16* filter;
     /* 0xD0 */ Stereo stereo;
-} SequenceChannel; // size = 0xD4
+    /* 0xD4 */ u32 emitterClientId; // Flotilla #83/#84 — set by CHAN_UPD_ANCHOR_EMITTER from the game thread before each SFX dispatch; read on the audio thread at Audio_GetSfx interception (Phase α.4) to drive per-emitter sample substitution. 0 = no Anchor context / use vanilla.
+} SequenceChannel; // size = 0xD8
+
+// Flotilla #83/#84 voice substitution (Phase α.3) channel-update opcode.
+// Game-thread call site: code_800F7260.c::Audio_PlayActiveSounds queues this
+// just before the SFX playback start cmd so the audio thread has set
+// channel->emitterClientId by the time Audio_GetSfx fires for this
+// emission. cmd->data carries the u32 emitterClientId.
+//
+// Defined outside the file-local ChannelUpdateType enum in code_800E4FE0.c
+// so the queue site (code_800F7260.c) can reference the same constant.
+#define CHAN_UPD_ANCHOR_EMITTER 15
 
 // Might also be known as a Track, according to sm64 debug strings (?).
 typedef struct SequenceLayer {
