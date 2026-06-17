@@ -19,54 +19,65 @@
 #include <vector>
 
 #include "soh/OTRGlobals.h"  // appShortName
+#include "soh/resource/type/AudioSample.h"  // SOH::AudioSample + SOH::Sample
 
-// Voice-pack loader (B2).  See VoicePack.h for the high-level architecture.
+// Voice-pack loader (B2) — Phase α.4a/b — multi-pack + lookup.
 //
-// PHASE 0 (THIS FILE): single-pack model ported from the WIP scaffolding.
-// Loads samples into the ResourceManager cache under per-pack unique keys
-// — that's the D7 cache-isolation layer of the D4+D7 hybrid, already
-// working.  Phase 1 will:
-//   - Replace the single ActivePack with `(clientId → LoadedPack)` map.
-//   - Wire peer-pack load/unload from the UPDATE_CLIENT_STATE handler.
-//   - Add the per-emitter sample lookup table (D4 layer).
+// Phase α.1-α.3 (already shipped) threaded emitterClientId from emission
+// site → SoundRequest → SoundBankEntry → audio-thread SequenceChannel.
+// Phase α.4 (this file) populates the substitution table that the audio
+// thread will consult at Audio_GetSfx interception (Phase α.4c).
 //
-// PHASE 4 will add the Audio_GetSfx interception that consults the lookup
-// and substitutes the cached SoundFontSample* when an override exists.
+// Multi-pack: gLocalPack (single, tied to the local CVar) and
+// gPeerPacks[clientId] (one per remote player). Local pack loads from the
+// dropdown change handler; peer packs load from the UPDATE_CLIENT_STATE
+// receive handler.
 //
-// Until Phase 4 lands, voice emissions still play the vanilla samples.  The
-// pack's samples sit in the resource cache, registered with AudioCollection
-// for Audio Editor visibility, but not yet substituted at playback time.
+// Sample lifetime: each LoadedSample owns a shared_ptr<SOH::AudioSample>
+// returned by the resource loader. The raw SOH::Sample* (used for the
+// audio-thread lookup) is stable as long as the shared_ptr is held.
+// Unloading a pack drops the shared_ptrs (after also dropping the lookup
+// entries) — no dangling pointers.
+
+extern "C" uint32_t Anchor_GetLocalEmitterClientId(void);
 
 namespace {
 
 struct LoadedSample {
-    std::string label;             // VRP sample name (e.g. "Adult Link - Attack 3")
-    std::string sfxKey;            // resolved SoH sfxKey (e.g. "NA_SE_VO_LI_SWORD_N")
-    std::string cacheKey;          // ResourceManager key (player-voices/<folder>/<path>)
-    uint16_t    vanillaSeqId;      // resolved vanilla voice id we're overriding
-    uint16_t    displayOnlySeqNum; // pack-assigned seqNum (Audio Editor display only)
+    std::string                      vrpLabel;             // VRP sample name
+    std::string                      sfxKey;               // resolved SoH sfxKey (e.g. NA_SE_VO_LI_SWORD_N)
+    std::string                      cacheKey;             // ResourceManager key (D7 isolation)
+    uint16_t                         vanillaSeqId;         // vanilla voice id being overridden
+    uint16_t                         displayOnlySeqNum;    // Audio Editor display registration id
+    std::shared_ptr<SOH::AudioSample> resource;            // lifetime owner — keeps Sample* alive
+    SOH::Sample*                     samplePtr;            // stable pointer into resource->sample
 };
 
 struct LoadedPack {
-    std::string folderName;
-    // For the D4 substitution layer (Phase 1+ wiring):
-    // vanilla sfxId → resource cache key of the override sample.
-    std::unordered_map<uint16_t, std::string> sampleOverridesByVanillaSfxId;
-    // Full record of what we registered — used on unload.
-    std::vector<LoadedSample> loadedSamples;
+    std::string                                   folderName;
+    std::vector<LoadedSample>                     loadedSamples;
+    // Lookup: vanilla sfxId → Sample*. Populated at load time, consumed by
+    // GetSampleOverride. Phase α.5 (variant pools) will switch this to
+    // unordered_map<uint16_t, std::vector<SOH::Sample*>>.
+    std::unordered_map<uint16_t, SOH::Sample*>    sampleByVanillaSfxId;
 };
 
-// Audio-Editor-display-only seqNum allocator.  These seqNums are NOT used
-// for playback substitution (that path crashed — see analysis doc §2 root
-// cause).  They exist solely so AudioCollection's sequenceMap has an entry
-// for each loaded pack sample (informational; aids Audio Editor diagnostics).
+// Opaque type for the public API. Currently equals LoadedSample::samplePtr;
+// Phase α.5 will turn this into a small wrapper that also carries variant-
+// pool selection state. For now, just an alias — but kept as a separate
+// type so the header doesn't leak SOH::Sample.
+struct SampleOverrideImpl {
+    SOH::Sample* sample;
+};
+
 constexpr uint16_t kVoicePackDisplaySeqNumBase = 0xF000;
 
-std::mutex                                   gStateMutex;
-std::unique_ptr<LoadedPack>                  gActivePack;                 // local pack (null = Default Voices)
-std::unordered_map<std::string, std::string> gDefaultTranslation;         // VRP label → SoH sfxKey
-bool                                         gDefaultTranslationLoaded = false;
-uint16_t                                     gNextDisplaySeqNum = kVoicePackDisplaySeqNumBase;
+std::recursive_mutex                                       gStateMutex;
+std::unique_ptr<LoadedPack>                                gLocalPack;
+std::unordered_map<uint32_t, std::unique_ptr<LoadedPack>>  gPeerPacks;
+std::unordered_map<std::string, std::string>               gDefaultTranslation;
+bool                                                       gDefaultTranslationLoaded = false;
+uint16_t                                                   gNextDisplaySeqNum        = kVoicePackDisplaySeqNumBase;
 
 // ---------------------------------------------------------------------------
 // Translation table I/O
@@ -90,7 +101,7 @@ void ParseTranslationJson(const nlohmann::json& j,
 
 void LoadDefaultTranslationIfNeeded() {
     if (gDefaultTranslationLoaded) return;
-    gDefaultTranslationLoaded = true;  // always flip even on failure so we don't retry
+    gDefaultTranslationLoaded = true;
 
     const std::string voiceRoot =
         Ship::Context::LocateFileAcrossAppDirs("player-voices", appShortName);
@@ -140,19 +151,13 @@ ReadPackManifest(const std::shared_ptr<Ship::Archive>& archive) {
 // Sample registration
 // ---------------------------------------------------------------------------
 
-// Preloads the sample into the ResourceManager cache under a per-pack-unique
-// key (D7 cache-isolation discipline; mirror of BakedPlayerModel's
-// `coopchar/<folder>/<altPath>` pattern).  Also registers a SequenceInfo
-// for Audio Editor display visibility.
-//
-// Returns true on success.  Caller updates pack-level bookkeeping.
 bool RegisterSample(const std::string& packFolder,
                     const std::string& archiveEntryPath,
                     const std::string& vrpLabel,
                     const std::string& sfxKey,
                     uint16_t displaySeqNum,
                     const std::shared_ptr<Ship::Archive>& archive,
-                    std::string& outCacheKey) {
+                    LoadedSample& outSample) {
     auto file = archive->LoadFile(archiveEntryPath);
     if (!file || !file->Buffer) {
         SPDLOG_WARN("[VoicePack]   sample file not readable: \"{}\"", archiveEntryPath);
@@ -162,38 +167,50 @@ bool RegisterSample(const std::string& packFolder,
     auto resourceMgr = Ship::Context::GetRawInstance()->GetResourceManager();
     auto loader      = resourceMgr->GetResourceLoader();
 
-    // Unique cache key — switching packs that share archive paths cannot
-    // collide.  This is the D7 cache-isolation layer of the D4+D7 hybrid.
-    outCacheKey = "player-voices/" + packFolder + "/" + archiveEntryPath;
-    auto resource = loader->LoadResource(outCacheKey, file);
-    if (!resource) {
-        SPDLOG_WARN("[VoicePack]   LoadResource failed for \"{}\"", outCacheKey);
+    // D7 cache-isolation key: each pack's sample under a unique path so
+    // simultaneously-loaded peer packs can't collide.
+    const std::string cacheKey =
+        "player-voices/" + packFolder + "/" + archiveEntryPath;
+    auto rawResource = loader->LoadResource(cacheKey, file);
+    if (!rawResource) {
+        SPDLOG_WARN("[VoicePack]   LoadResource failed for \"{}\"", cacheKey);
         return false;
     }
-    resourceMgr->SetCachedResource(outCacheKey, resource);
+    resourceMgr->SetCachedResource(cacheKey, rawResource);
 
-    // Audio Editor display registration (informational only — the playback
-    // substitution path is D4 via per-emitter table consulted at
-    // Audio_GetSfx, NOT this seqNum).
+    // The audio sample factory (AudioSampleFactory.cpp) creates AudioSample
+    // resources for VRP-format files. static_pointer_cast pattern mirrors
+    // AudioSoundFontFactory.cpp:310-315.
+    auto audioSample = std::static_pointer_cast<SOH::AudioSample>(rawResource);
+    if (!audioSample) {
+        SPDLOG_WARN("[VoicePack]   resource for \"{}\" is not AudioSample-typed", cacheKey);
+        return false;
+    }
+    SOH::Sample* samplePtr =
+        static_cast<SOH::Sample*>(audioSample->GetRawPointer());
+    if (samplePtr == nullptr) {
+        SPDLOG_WARN("[VoicePack]   AudioSample for \"{}\" has null GetRawPointer", cacheKey);
+        return false;
+    }
+
+    // Audio Editor display registration (informational; canBeUsedAsReplacement
+    // is false so users don't see them in the substitution dropdown — the
+    // playback path is the per-emitter table, not GetReplacementSequence).
     std::string label = "[" + packFolder + "] " + vrpLabel + " -> " + sfxKey;
     AudioCollection::Instance->AddCustomVoiceEntry(displaySeqNum, label, sfxKey);
+
+    outSample.vrpLabel          = vrpLabel;
+    outSample.sfxKey            = sfxKey;
+    outSample.cacheKey          = cacheKey;
+    outSample.displayOnlySeqNum = displaySeqNum;
+    outSample.resource          = audioSample;  // shared_ptr keeps lifetime
+    outSample.samplePtr         = samplePtr;
     return true;
 }
 
 // ---------------------------------------------------------------------------
 // Pack lifecycle
 // ---------------------------------------------------------------------------
-
-void UnloadCurrentPack_Locked() {
-    if (!gActivePack) return;
-    for (const auto& s : gActivePack->loadedSamples) {
-        AudioCollection::Instance->RemoveCustomEntry(s.displayOnlySeqNum);
-    }
-    SPDLOG_INFO("[VoicePack] unloaded pack \"{}\" ({} samples)",
-                gActivePack->folderName, gActivePack->loadedSamples.size());
-    gActivePack.reset();
-    gNextDisplaySeqNum = kVoicePackDisplaySeqNumBase;
-}
 
 std::shared_ptr<Ship::Archive> OpenTransient(const std::string& archivePath,
                                               const std::string& ext) {
@@ -249,15 +266,15 @@ void LoadPackArchive(const std::string& packFolder,
         }
 
         const uint16_t displaySeqNum = gNextDisplaySeqNum++;
-        std::string cacheKey;
+        LoadedSample loaded_sample;
         if (!RegisterSample(packFolder, path, vrpLabel, sfxKey,
-                            displaySeqNum, archive, cacheKey)) {
+                            displaySeqNum, archive, loaded_sample)) {
             continue;
         }
+        loaded_sample.vanillaSeqId = vanillaSeqId;
 
-        pack.loadedSamples.push_back({ vrpLabel, sfxKey, cacheKey,
-                                        vanillaSeqId, displaySeqNum });
-        pack.sampleOverridesByVanillaSfxId[vanillaSeqId] = cacheKey;
+        pack.sampleByVanillaSfxId[vanillaSeqId] = loaded_sample.samplePtr;
+        pack.loadedSamples.push_back(std::move(loaded_sample));
         loaded++;
     }
 
@@ -265,7 +282,10 @@ void LoadPackArchive(const std::string& packFolder,
                 archive->GetPath(), loaded, skippedUnmapped, skippedUnresolvedKey);
 }
 
-void LoadPack_Locked(const std::string& folder) {
+// Loads a fresh LoadedPack from disk. Caller is responsible for installing
+// the resulting unique_ptr into the right slot (gLocalPack or gPeerPacks).
+// Returns nullptr if the folder doesn't exist or contains no usable archives.
+std::unique_ptr<LoadedPack> LoadPackFromFolder(const std::string& folder) {
     LoadDefaultTranslationIfNeeded();
 
     const std::string voiceRoot =
@@ -274,7 +294,7 @@ void LoadPack_Locked(const std::string& folder) {
     if (!std::filesystem::exists(charDir) || !std::filesystem::is_directory(charDir)) {
         SPDLOG_WARN("[VoicePack] folder \"{}\" does not exist under \"{}\"",
                     folder, voiceRoot);
-        return;
+        return nullptr;
     }
 
     auto pack = std::make_unique<LoadedPack>();
@@ -291,8 +311,6 @@ void LoadPack_Locked(const std::string& folder) {
             continue;
         }
 
-        // Per-pack manifest overlays the default translation.  Pack's keys
-        // win on collision.
         auto translation = gDefaultTranslation;
         auto packManifest = ReadPackManifest(archive);
         for (auto& [k, v] : packManifest) translation[k] = v;
@@ -300,10 +318,21 @@ void LoadPack_Locked(const std::string& folder) {
         LoadPackArchive(folder, archive, translation, *pack);
     }
 
-    SPDLOG_INFO("[VoicePack] loaded pack \"{}\": {} samples, {} vanilla ids overridden",
-                folder, pack->loadedSamples.size(), pack->sampleOverridesByVanillaSfxId.size());
+    return pack;
+}
 
-    gActivePack = std::move(pack);
+// Unload helper — drops Audio Editor display registrations + releases
+// shared_ptr<AudioSample> references. The resource cache still holds them
+// (via SetCachedResource); they'll be evicted on natural cache pressure.
+// IMPORTANT: clear the sampleByVanillaSfxId lookup BEFORE the shared_ptrs
+// drop so the audio thread can't observe a dangling Sample* through a
+// concurrent lookup.
+void UnloadPack_Locked(LoadedPack& pack) {
+    pack.sampleByVanillaSfxId.clear();
+    for (const auto& s : pack.loadedSamples) {
+        AudioCollection::Instance->RemoveCustomEntry(s.displayOnlySeqNum);
+    }
+    pack.loadedSamples.clear();  // drops shared_ptrs
 }
 
 } // namespace
@@ -315,29 +344,76 @@ void LoadPack_Locked(const std::string& folder) {
 namespace SOH {
 namespace VoicePack {
 
+struct SampleOverride {
+    SOH::Sample* sample;
+};
+static thread_local SampleOverride sLookupResult;
+
 void OnAudioModChanged(const std::string& folder) {
     std::scoped_lock lock(gStateMutex);
-    UnloadCurrentPack_Locked();
+    if (gLocalPack) {
+        SPDLOG_INFO("[VoicePack] unloading local pack \"{}\" ({} samples)",
+                    gLocalPack->folderName, gLocalPack->loadedSamples.size());
+        UnloadPack_Locked(*gLocalPack);
+        gLocalPack.reset();
+    }
     if (folder.empty()) {
-        SPDLOG_INFO("[VoicePack] Default Voices selected");
+        SPDLOG_INFO("[VoicePack] Default Voices selected (local)");
         return;
     }
-    LoadPack_Locked(folder);
+    auto pack = LoadPackFromFolder(folder);
+    if (!pack) return;
+    SPDLOG_INFO("[VoicePack] loaded LOCAL pack \"{}\": {} samples, {} vanilla ids overridden",
+                folder, pack->loadedSamples.size(), pack->sampleByVanillaSfxId.size());
+    gLocalPack = std::move(pack);
+}
+
+void OnPeerAudioModChanged(uint32_t clientId, const std::string& folder) {
+    std::scoped_lock lock(gStateMutex);
+    auto it = gPeerPacks.find(clientId);
+    if (it != gPeerPacks.end() && it->second) {
+        SPDLOG_INFO("[VoicePack] unloading peer pack clientId={} \"{}\" ({} samples)",
+                    clientId, it->second->folderName, it->second->loadedSamples.size());
+        UnloadPack_Locked(*it->second);
+        gPeerPacks.erase(it);
+    }
+    if (folder.empty()) {
+        SPDLOG_INFO("[VoicePack] Default Voices selected (peer clientId={})", clientId);
+        return;
+    }
+    auto pack = LoadPackFromFolder(folder);
+    if (!pack) return;
+    SPDLOG_INFO("[VoicePack] loaded PEER pack clientId={} \"{}\": {} samples, {} vanilla ids overridden",
+                clientId, folder, pack->loadedSamples.size(), pack->sampleByVanillaSfxId.size());
+    gPeerPacks[clientId] = std::move(pack);
+}
+
+SampleOverride* GetSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClientId) {
+    std::scoped_lock lock(gStateMutex);
+
+    auto lookupInPack = [vanillaSfxId](const LoadedPack* pack) -> SOH::Sample* {
+        if (!pack) return nullptr;
+        auto it = pack->sampleByVanillaSfxId.find(vanillaSfxId);
+        return (it != pack->sampleByVanillaSfxId.end()) ? it->second : nullptr;
+    };
+
+    const uint32_t ownId = Anchor_GetLocalEmitterClientId();
+    SOH::Sample* hit = nullptr;
+    if (emitterClientId == 0 || emitterClientId == ownId) {
+        hit = lookupInPack(gLocalPack.get());
+    } else {
+        auto it = gPeerPacks.find(emitterClientId);
+        hit = lookupInPack(it != gPeerPacks.end() ? it->second.get() : nullptr);
+    }
+
+    if (hit == nullptr) return nullptr;
+    sLookupResult.sample = hit;
+    return &sLookupResult;
 }
 
 uint16_t GetReplacement(uint16_t seqId) {
-    // LEGACY — see header.  The original WIP wired this into
-    // AudioCollection::GetReplacementSequence; that direction crashed for
-    // 0xF000+ custom seqNums because the SFX dispatch path indexes the
-    // fixed-size compile-time gSoundParams[7] table (audio_sound_params.c:238).
-    //
-    // The D4+D7 substitution path consults a per-emitter sample lookup at
-    // Audio_GetSfx time on the game thread, not via this function.  Always
-    // returns 0 here; the call site in GetReplacementSequence is NOT ported
-    // from the WIP either, so nothing depends on this.  Symbol remains for
-    // ABI/link compatibility during the Phase 1–4 wire-in.
     (void)seqId;
-    return 0;
+    return 0;  // legacy stub
 }
 
 } // namespace VoicePack
@@ -345,6 +421,11 @@ uint16_t GetReplacement(uint16_t seqId) {
 
 extern "C" void VoicePack_OnAudioModChanged(const char* folder) {
     SOH::VoicePack::OnAudioModChanged(folder ? std::string(folder) : std::string());
+}
+
+extern "C" void* Anchor_GetVoiceSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClientId) {
+    auto* override = SOH::VoicePack::GetSampleOverride(vanillaSfxId, emitterClientId);
+    return override ? override->sample : nullptr;
 }
 
 extern "C" uint16_t VoicePack_GetReplacement(uint16_t seqId) {

@@ -2,6 +2,7 @@
 #include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/Network/Anchor/HorseNetId.h"  // #264 horse re-emit on scene change
 #include "soh/cvar_prefixes.h"  // CVAR_ENHANCEMENT — #264 diagnostic gate
+#include "soh/Enhancements/audio/VoicePack.h"  // #83/#84 Phase α.4 — peer pack load/unload
 #include "soh/Network/Anchor/AIDirector/Director.h"  // step 6: forward reactive events
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/ItemEligibility.h"  // Phase 2 — eligibility bitmap
@@ -204,17 +205,25 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
             }
         }
 
-        // B1 — record remote player's voice-pack selection. Data plumbing
-        // only: no audio path consumes this yet (B2 preloads the pack's
-        // samples + game-thread substitution; B3 remaps cross-client
-        // emissions). Logging the transition makes B2/B3 integration
-        // diagnosable later.
+        // Voice-pack peer lifecycle (#83/#84 Phase α.4). Local mirror of
+        // the peer's audioModFilename selection. On transition: load the
+        // peer's pack into gPeerPacks[clientId] (D7 cache-isolation + D4
+        // substitution-table population) so this client's audio thread can
+        // play remote voices using the sender's pack samples once Phase
+        // α.4c wires the Audio_GetSfx interception.
         if (payload["state"].contains("audioModFilename")) {
             std::string newAudio = payload["state"]["audioModFilename"].get<std::string>();
             if (clients[clientId].audioModFilename != newAudio) {
                 SPDLOG_INFO("[CoopVoice] UpdateClientState clientId={}: audio \"{}\" -> \"{}\"",
                             clientId, clients[clientId].audioModFilename, newAudio);
                 clients[clientId].audioModFilename = newAudio;
+                // Trigger peer-pack load/unload. Skip self — local pack is
+                // managed by the dropdown handler. clientId == ownClientId
+                // shouldn't happen for incoming packets in practice but
+                // guard defensively.
+                if (clientId != ownClientId) {
+                    SOH::VoicePack::OnPeerAudioModChanged(clientId, newAudio);
+                }
             }
         }
 

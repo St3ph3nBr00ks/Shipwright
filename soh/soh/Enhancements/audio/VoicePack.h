@@ -18,18 +18,22 @@
 //   - D7 cache isolation: each pack's samples land under unique resource
 //     keys, mirroring BakedPlayerModel's `coopchar/<folder>/<altPath>`
 //     discipline (issue #82).
-//   - D4 substitution layer: per-emitter sample lookup table consulted at
-//     `Audio_GetSfx` time on the game thread.  Wired in Phases 1–4 of the
-//     implementation plan.
+//   - D4 substitution layer: per-emitter (clientId, vanillaSfxId) → Sample*
+//     lookup populated by the loader; consulted by the audio thread via
+//     Anchor_GetVoiceSampleOverride() at the Audio_GetSfx interception
+//     site (Phase α.4c).
 //
-// Multi-pack lifecycle (Phase 1):
-//   - Local player: load when CVAR_REMOTE_ANCHOR("AudioMod") changes.
-//   - Peer players: load when their `audioModFilename` arrives via
-//     `UPDATE_CLIENT_STATE`.
-//   - Pack swap: previous pack's resources retire via a delayed-destroy
-//     slot (mirror of BakedPlayerModel retire-slot, issue #110 / KB-15).
+// Multi-pack lifecycle:
+//   - Local player (gLocalPack): load/unload via OnAudioModChanged when
+//     CVAR_REMOTE_ANCHOR("AudioMod") changes from the dropdown.
+//   - Peer players (gPeerPacks[clientId]): load/unload via
+//     OnPeerAudioModChanged from the UPDATE_CLIENT_STATE receive handler
+//     when audioModFilename changes.
 
-#include <cstdint>
+// C-callable section below uses uint16_t / uint32_t — pull from stdint.h
+// (works in both C and C++). <cstdint> would break the C compilation of
+// code_800F7260.c which includes this header for the lookup diagnostic.
+#include <stdint.h>
 
 #ifdef __cplusplus
 #include <string>
@@ -37,20 +41,30 @@
 namespace SOH {
 namespace VoicePack {
 
-// Called from the voice-pack dropdown when CVAR_REMOTE_ANCHOR("AudioMod")
-// changes.  folder="" deselects the current local pack (Default Voices).
-//
-// Phase 0 (this commit): single-pack model inherited from the WIP scaffolding.
-// Phase 1 will introduce the (clientId → pack) map so peer packs and the
-// local pack coexist.
+// Local-player pack lifecycle. folder="" deselects (Default Voices).
+// Called from the Flotilla → Player → Voice Pack dropdown change handler.
 void OnAudioModChanged(const std::string& folder);
 
-// LEGACY / STUB — do not consume.  The original WIP wired this into
-// AudioCollection::GetReplacementSequence, which crashed for custom seqNums
-// past the 7-bank limit (see analysis doc §2).  Always returns 0 now.  Kept
-// as a named symbol only to preserve link-compatibility with code that may
-// still reference it during the D4+D7 wire-in.  Will be removed at end of
-// Phase 4 once the new substitution layer fully replaces it.
+// Peer pack lifecycle. folder="" unloads peer's pack. Called from the
+// UPDATE_CLIENT_STATE receive handler when a remote client's
+// audioModFilename changes.
+void OnPeerAudioModChanged(uint32_t clientId, const std::string& folder);
+
+// Game-thread lookup (mutex-protected). Returns the pack's Sample* for
+// the given (emitterClientId, vanillaSfxId) or nullptr if no override.
+//   - emitterClientId == 0 → no Anchor context; falls back to gLocalPack
+//     (single-player default-voice swap still works).
+//   - emitterClientId == ownClientId → gLocalPack
+//   - emitterClientId != ownClientId → gPeerPacks[emitterClientId]
+//
+// Audio-thread callers must go through Anchor_GetVoiceSampleOverride
+// below (the void* C-linkage shim) to avoid pulling SOH::Sample into the
+// C decomp side.
+struct SampleOverride;  // forward — opaque to the audio thread.
+SampleOverride* GetSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClientId);
+
+// LEGACY / STUB — kept for ABI compat during Phase α wire-in. See header.
+// Always returns 0; the new substitution path is GetSampleOverride above.
 uint16_t GetReplacement(uint16_t seqId);
 
 } // namespace VoicePack
@@ -61,9 +75,18 @@ uint16_t GetReplacement(uint16_t seqId);
 extern "C" {
 #endif
 
-// C-callable façade.  Used by the SohMenu dropdown change handler.
-void     VoicePack_OnAudioModChanged(const char* folder);
-// LEGACY — see SOH::VoicePack::GetReplacement above.  Always returns 0.
+// C-callable: voice-pack dropdown change handler.
+void VoicePack_OnAudioModChanged(const char* folder);
+
+// C-callable: returns the override SoundFontSample* (as void*) for the
+// given vanilla sfxId + emitter, or NULL for vanilla fallback. Game-thread
+// safe; audio thread can also call but acquires the substitution-table
+// mutex. The audio-thread caller casts the returned void* to
+// SoundFontSample* — same memory layout as SOH::Sample (verified via
+// AudioSample.h:22 + z64audio.h:140 cross-reference).
+void* Anchor_GetVoiceSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClientId);
+
+// LEGACY — see SOH::VoicePack::GetReplacement above. Always returns 0.
 uint16_t VoicePack_GetReplacement(uint16_t seqId);
 
 #ifdef __cplusplus

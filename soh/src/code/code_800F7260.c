@@ -3,6 +3,7 @@
 #include "vt.h"
 
 #include "soh/Enhancements/audio/AudioEditor.h"
+#include "soh/Enhancements/audio/VoicePack.h"  // Anchor_GetVoiceSampleOverride (#83/#84 α.4)
 
 typedef struct {
     /* 0x00 */ u16 sfxId;
@@ -350,6 +351,13 @@ void Audio_ProcessSoundRequest(void) {
             CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
             LUSLOG_INFO("[VoicePackBank] alloc sfxId=0x%04X bank=%d entry=%d emitterClientId=%u",
                         req->sfxId, bankId, index, req->emitterClientId);
+            // Phase α.4a/b — diagnostic: confirm the substitution table
+            // would return a hit for this emission. Tests the lookup path
+            // independent of the audio-thread interception (α.4c) which
+            // is the actual playback consumer.
+            void* override = Anchor_GetVoiceSampleOverride(req->sfxId, req->emitterClientId);
+            LUSLOG_INFO("[VoicePackLookup] sfxId=0x%04X emitter=%u override=%s",
+                        req->sfxId, req->emitterClientId, override ? "FOUND" : "none");
         }
     }
 }
