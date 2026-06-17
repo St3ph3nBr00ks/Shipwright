@@ -208,6 +208,17 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_BG_HEAVY_BLOCK: return true;  // Death Mountain large block
                                                  // (Golden Gauntlets,
                                                  // ACTORCAT_BG).
+        case ACTOR_BG_SPOT15_RRBOX: return true; // Lon Lon milk crate
+                                                 // (DynaPoly push, same
+                                                 // mechanic as OBJ_OSHIHIKI;
+                                                 // ACTORCAT_BG). Spawns in
+                                                 // SCENE_HYRULE_CASTLE (Talon
+                                                 // descent path) and
+                                                 // SCENE_LON_LON_BUILDINGS.
+                                                 // See
+                                                 // Common/PushableActorState.cpp
+                                                 // for the receive-side
+                                                 // mid-push guard.
         case ACTOR_EN_ISHI:        return true;  // Small/large gray rocks
                                                  // (lift + throw,
                                                  // ACTORCAT_PROP).

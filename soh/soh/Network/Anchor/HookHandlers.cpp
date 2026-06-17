@@ -118,8 +118,9 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
 // Boss_Goma — minimal Encounter -> FloorMain bridge (boss-fight trigger sync).
 #include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
-// Push-block bidirectional sync — stateFlags & PUSHBLOCK_PUSH detects local push.
-#include "src/overlays/actors/ovl_Obj_Oshihiki/z_obj_oshihiki.h"
+// Push-block bidirectional sync — `Anchor_IsActorMidPush` detects local push
+// across all supported pushable actors. See Common/PushableActorState.cpp.
+#include "soh/Network/Anchor/Common/PushableActorState.h"
 
 extern PlayState* gPlayState;
 extern MapData* gMapData;
@@ -1916,11 +1917,13 @@ void Anchor::RegisterHooks() {
         // invisible to other clients — every client (host included) sees
         // the block stay put when a non-local player is the one pushing.
         //
-        // Detection uses ObjOshihiki's stateFlags rather than motion-delta
-        // so we never falsely classify network-applied position writes as
-        // "local motion" (which would echo). PUSHBLOCK_PUSH is set every
-        // frame in ObjOshihiki_Push (z_obj_oshihiki.c:564); PUSHBLOCK_FALL
-        // covers the post-edge fall case where the block tips off a ledge.
+        // Detection uses each actor's own "active push" state field
+        // (delegated to Anchor_IsActorMidPush) rather than motion-delta so
+        // we never falsely classify network-applied position writes as
+        // "local motion" (which would echo). Active-push semantics for the
+        // supported actors:
+        //   OBJ_OSHIHIKI  — stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)
+        //   BG_SPOT15_RRBOX — unk_178 > 0 (push slide) or gravity < 0 (fall)
         //
         // Bg_Heavy_Block (Golden Gauntlets pillar) and En_Ishi (lift/throw
         // rocks) remain in IsSyncedWorldActor and ride the standard host-
@@ -1928,21 +1931,20 @@ void Anchor::RegisterHooks() {
         // motion-detection because their action funcs are static and
         // there's no public state flag — deferred until those actors
         // appear on the demo path.
-        if (actor->id == ACTOR_OBJ_OSHIHIKI) {
+        if (actor->id == ACTOR_OBJ_OSHIHIKI ||
+            actor->id == ACTOR_BG_SPOT15_RRBOX) {
             EnemyNetId* ext = const_cast<EnemyNetId*>(
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
             if (ext == nullptr) {
                 return;
             }
-            ObjOshihiki* block = (ObjOshihiki*)actor;
-            const bool isLocallyMoving =
-                (block->stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)) != 0;
-            if (isLocallyMoving) {
-                // Local actor is the pusher — broadcast to all peers.
-                // ObjOshihiki_Push fires NA_SE_EV_ROCK_SLIDE-SFX_FLAG every
-                // frame locally (z_obj_oshihiki.c:598), so the local audio
-                // is already correct. Receivers play it via
-                // HandlePacket_EnemyUpdate's pos-delta detector.
+            if (Anchor_IsActorMidPush(actor)) {
+                // Local actor is the pusher — broadcast to all peers. Both
+                // supported actors fire NA_SE_EV_ROCK_SLIDE-SFX_FLAG every
+                // frame locally (Oshihiki at z_obj_oshihiki.c:598, Rrbox at
+                // z_bg_spot15_rrbox.c:300), so the local audio is already
+                // correct. Receivers play it via HandlePacket_EnemyUpdate's
+                // pos-delta detector.
                 SendPacket_EnemyUpdate(ext->netId, actor);
             }
             // No re-apply path here — HandlePacket_EnemyUpdate writes

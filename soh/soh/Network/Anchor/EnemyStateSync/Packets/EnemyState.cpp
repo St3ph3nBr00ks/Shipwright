@@ -5,6 +5,7 @@
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/ReceiveValidator.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/Common/PushableActorState.h"
 #include "soh/Network/Anchor/Common/SkelAnimeWire.h"
 #include "soh/Network/Anchor/Common/SyncedClaimableDrop.h"  // Plan B step 6
 #include "soh/Network/Anchor/Common/DropAdapters/DropAdapter.h"  // Plan B step 6
@@ -106,10 +107,11 @@ extern "C" {
 #include "overlays/actors/ovl_En_Honotrap/z_en_honotrap.h"
 // Boss-fight trigger sync — minimal Encounter -> FloorMain bridge.
 #include "overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
-// Push-block bidirectional sync — host needs to apply received pos when peer
-// is the local pusher, and peers need to suppress apply when they're the
-// local pusher (so received echoes don't overwrite their own progress).
-#include "overlays/actors/ovl_Obj_Oshihiki/z_obj_oshihiki.h"
+// Push-block bidirectional sync — receive-side skip when the local actor is
+// mid-push (active slide or fall) so peer echoes don't overwrite our own
+// progress. Helper is actor-agnostic; covers OBJ_OSHIHIKI (dungeon push
+// blocks) and BG_SPOT15_RRBOX (Lon Lon milk crate near Talon). The struct
+// includes live inside PushableActorState.cpp.
 // Per-torch lit-state sync — host-authoritative `litTimer` so partial
 // multi-torch puzzle progress is visible across clients.
 #include "overlays/actors/ovl_Obj_Syokudai/z_obj_syokudai.h"
@@ -1842,14 +1844,16 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     }
 
     // Push-block bidirectional sync: HandlePacket_EnemyUpdate runs on host
-    // too for ACTOR_OBJ_OSHIHIKI so peer's pushes reach all clients. We
-    // skip the apply when our local actor is currently in a push state —
-    // otherwise a peer's stale echo would overwrite our in-progress local
-    // push.
-    const bool isPushBlock = (actor->id == ACTOR_OBJ_OSHIHIKI);
+    // too for pushable actors so peer's pushes reach all clients. We skip
+    // the apply when our local actor is currently in a push state — otherwise
+    // a peer's stale echo would overwrite our in-progress local push. Same
+    // semantics across OBJ_OSHIHIKI and BG_SPOT15_RRBOX; mid-push detection
+    // is delegated to Common/PushableActorState.cpp so adding a new pushable
+    // actor is one switch-case addition.
+    const bool isPushBlock = (actor->id == ACTOR_OBJ_OSHIHIKI ||
+                              actor->id == ACTOR_BG_SPOT15_RRBOX);
     if (isPushBlock) {
-        ObjOshihiki* block = (ObjOshihiki*)actor;
-        if ((block->stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)) != 0) {
+        if (Anchor_IsActorMidPush(actor)) {
             return;
         }
     } else {
@@ -1871,20 +1875,26 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     }
 
     // Receiver audio cue: when a remote pusher's ENEMY_STATE arrives and the
-    // local actor isn't running its own ObjOshihiki_Push (which would emit
+    // local actor isn't running its own Push action func (which would emit
     // the rock-slide sound natively), play the same SFX so peer pushes
     // sound the same as local ones. Lower threshold rejects idle keepalives;
     // upper threshold rejects first-packet teleports (e.g. peer enters scene
     // and applies host's authoritative position which may differ from the
     // initial spawn pos by tens of units).
     //
-    // Also keep home.pos tracking world.pos. ObjOshihiki_Push uses
-    // home.pos as the base for the next 20-unit slide (z_obj_oshihiki.c:568)
-    // and only commits home.pos = world.pos at push-complete. Without this
-    // sync, a peer-pushed block that the local player later tries to push
-    // would compute world.pos = stale_home.pos + smallOffset and visibly
-    // snap backwards. Skipped during local push so we don't clobber the
-    // local push baseline (concurrent-push degenerate case).
+    // Both supported pushable actors (OBJ_OSHIHIKI z_obj_oshihiki.c push
+    // path and BG_SPOT15_RRBOX z_bg_spot15_rrbox.c:300) play
+    // NA_SE_EV_ROCK_SLIDE during their local push, so the same SFX matches
+    // both.
+    //
+    // Also keep home.pos tracking world.pos. Both push actors use home.pos
+    // as the base for the next slide (Oshihiki at z_obj_oshihiki.c:568,
+    // Rrbox at z_bg_spot15_rrbox.c:272-273) and only commit
+    // home.pos = world.pos at push-complete. Without this sync, a
+    // peer-pushed block that the local player later tries to push would
+    // compute world.pos = stale_home.pos + smallOffset and visibly snap
+    // backwards. Skipped during local push so we don't clobber the local
+    // push baseline (concurrent-push degenerate case).
     if (isPushBlock) {
         const f32 dx = pos.x - actor->world.pos.x;
         const f32 dy = pos.y - actor->world.pos.y;
