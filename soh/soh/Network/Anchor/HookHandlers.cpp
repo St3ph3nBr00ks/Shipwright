@@ -118,8 +118,12 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Goroiwa/z_en_goroiwa.h"
 // Boss_Goma — minimal Encounter -> FloorMain bridge (boss-fight trigger sync).
 #include "src/overlays/actors/ovl_Boss_Goma/z_boss_goma.h"
-// Push-block bidirectional sync — stateFlags & PUSHBLOCK_PUSH detects local push.
-#include "src/overlays/actors/ovl_Obj_Oshihiki/z_obj_oshihiki.h"
+// Push-block bidirectional sync — `Anchor_IsActorMidPush` detects local push
+// across all supported pushable actors. See Common/PushableActorState.cpp.
+#include "soh/Network/Anchor/Common/PushableActorState.h"
+// Hyrule Castle Talon any-client wake state sync. EnTa_NetSync_GetStateIndex /
+// EnTa_NetSync_ApplyState are C-linkage helpers. See Claude/Analysis/talon_castle_wake_sync_2026-06-17.md.
+#include "src/overlays/actors/ovl_En_Ta/z_en_ta.h"
 
 extern PlayState* gPlayState;
 extern MapData* gMapData;
@@ -1916,11 +1920,13 @@ void Anchor::RegisterHooks() {
         // invisible to other clients — every client (host included) sees
         // the block stay put when a non-local player is the one pushing.
         //
-        // Detection uses ObjOshihiki's stateFlags rather than motion-delta
-        // so we never falsely classify network-applied position writes as
-        // "local motion" (which would echo). PUSHBLOCK_PUSH is set every
-        // frame in ObjOshihiki_Push (z_obj_oshihiki.c:564); PUSHBLOCK_FALL
-        // covers the post-edge fall case where the block tips off a ledge.
+        // Detection uses each actor's own "active push" state field
+        // (delegated to Anchor_IsActorMidPush) rather than motion-delta so
+        // we never falsely classify network-applied position writes as
+        // "local motion" (which would echo). Active-push semantics for the
+        // supported actors:
+        //   OBJ_OSHIHIKI  — stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)
+        //   BG_SPOT15_RRBOX — unk_178 > 0 (push slide) or gravity < 0 (fall)
         //
         // Bg_Heavy_Block (Golden Gauntlets pillar) and En_Ishi (lift/throw
         // rocks) remain in IsSyncedWorldActor and ride the standard host-
@@ -1928,27 +1934,70 @@ void Anchor::RegisterHooks() {
         // motion-detection because their action funcs are static and
         // there's no public state flag — deferred until those actors
         // appear on the demo path.
-        if (actor->id == ACTOR_OBJ_OSHIHIKI) {
+        if (actor->id == ACTOR_OBJ_OSHIHIKI ||
+            actor->id == ACTOR_BG_SPOT15_RRBOX) {
             EnemyNetId* ext = const_cast<EnemyNetId*>(
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
             if (ext == nullptr) {
                 return;
             }
-            ObjOshihiki* block = (ObjOshihiki*)actor;
-            const bool isLocallyMoving =
-                (block->stateFlags & (PUSHBLOCK_PUSH | PUSHBLOCK_FALL)) != 0;
-            if (isLocallyMoving) {
-                // Local actor is the pusher — broadcast to all peers.
-                // ObjOshihiki_Push fires NA_SE_EV_ROCK_SLIDE-SFX_FLAG every
-                // frame locally (z_obj_oshihiki.c:598), so the local audio
-                // is already correct. Receivers play it via
-                // HandlePacket_EnemyUpdate's pos-delta detector.
+            if (Anchor_IsActorMidPush(actor)) {
+                // Local actor is the pusher — broadcast to all peers. Both
+                // supported actors fire NA_SE_EV_ROCK_SLIDE-SFX_FLAG every
+                // frame locally (Oshihiki at z_obj_oshihiki.c:598, Rrbox at
+                // z_bg_spot15_rrbox.c:300), so the local audio is already
+                // correct. Receivers play it via HandlePacket_EnemyUpdate's
+                // pos-delta detector.
                 SendPacket_EnemyUpdate(ext->netId, actor);
             }
             // No re-apply path here — HandlePacket_EnemyUpdate writes
             // actor->world.pos directly when packets arrive (now
             // unconditionally for push blocks, including on the host).
             return;
+        }
+
+        // Hyrule Castle child-timeline Talon — any-client state-machine
+        // sync. The cucco-thrower (who could be the non-host) is the
+        // only client whose local Actor_ProcessTalkRequest fires for
+        // EXCH_ITEM_CHICKEN (z_en_ta.c:331-354), so the standard
+        // host-only ENEMY_STATE actionState pipeline cannot drive the
+        // wake transition. Whoever's local Talon transitions emits a
+        // TALON_CASTLE_STATE packet; receivers forward-only-apply via
+        // EnTa_NetSync_ApplyState. Mirrors MidoPostDekuLeave and the
+        // ObjOshihiki any-client push pattern above.
+        //
+        // We DO NOT return after broadcasting — the standard
+        // ENEMY_STATE pipeline below still runs for position / joints
+        // / scale sync (Talon physically walks during the run-off
+        // sequence and needs host-authoritative pos updates).
+        //
+        // See Claude/Analysis/talon_castle_wake_sync_2026-06-17.md.
+        // Gate on scene only — vanilla places the castle Talon with params
+        // 0xFFFF (-1 as s16), not 0. EnTa_Init discriminates by switch
+        // default-fallthrough into the scene check at z_en_ta.c:161,
+        // NOT by params == 0. Kakariko (params=1) and Ranch (params=2)
+        // variants live in their own scenes so the scene check alone is
+        // sufficient. Found via field-test log 552: gate was missing
+        // every transition because params=0xFFFF != 0.
+        if (actor->id == ACTOR_EN_TA &&
+            gPlayState->sceneNum == SCENE_HYRULE_CASTLE) {
+            EnemyNetId* extTalon = const_cast<EnemyNetId*>(
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+            if (extTalon != nullptr) {
+                uint8_t currentIdx = EnTa_NetSync_GetStateIndex((EnTa*)actor);
+                // 0xFF = sentinel for "unsupported state" (transient
+                // failure-wake func_80B145F8, non-castle variant
+                // helpers, etc.). Skip.
+                if (currentIdx != 0xFF &&
+                    (s16)currentIdx != extTalon->netStateIndex) {
+                    SPDLOG_INFO("[TalonCastleState] Local transition {} → {} — broadcasting",
+                                (int)extTalon->netStateIndex, (int)currentIdx);
+                    extTalon->netStateIndex = (s16)currentIdx;
+                    SendPacket_TalonCastleState(currentIdx);
+                }
+            }
+            // Fall through to the standard ENEMY_STATE pipeline for
+            // position / joints sync.
         }
 
         // Per-torch lit-state sync (Obj_Syokudai) — bidirectional. Either

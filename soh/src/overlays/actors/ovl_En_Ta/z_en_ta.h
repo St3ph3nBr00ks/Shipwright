@@ -36,4 +36,12 @@ typedef struct EnTa {
     /* 0x02E4 */ AnimationHeader* currentAnimation;
 } EnTa; // size = 0x02E8
 
+// Flotilla MP — Hyrule Castle Talon wake state-sync helpers.
+// See Claude/Analysis/talon_castle_wake_sync_2026-06-17.md §3 for the
+// stateIndex → actionFunc mapping. Sentinel 0xFF = "not a castle
+// variant state we sync". Callers MUST gate on params == 0 +
+// sceneNum == SCENE_HYRULE_CASTLE before relying on these.
+unsigned char EnTa_NetSync_GetStateIndex(EnTa* actor);
+void          EnTa_NetSync_ApplyState(EnTa* actor, PlayState* play, unsigned char stateIndex);
+
 #endif

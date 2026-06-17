@@ -1237,3 +1237,153 @@ void EnTa_Draw(Actor* thisx, PlayState* play) {
 
     CLOSE_DISPS(play->state.gfxCtx);
 }
+
+// ---------------------------------------------------------------------------
+// Flotilla MP — Hyrule Castle Talon wake state sync helpers.
+//
+// State index <-> actionFunc map (see
+// Claude/Analysis/talon_castle_wake_sync_2026-06-17.md §3 for full
+// rationale, audio cues, and timer values).
+//
+//   0x00 — EnTa_IdleAsleepInCastle      (sleeping under tree)
+//   0x01 — func_80B14570                 (40-frame wake delay)
+//   0x02 — func_80B144D8                 (wake anim + surprise audio + talk text)
+//   0x03 — func_80B1448C                 (post-talk wait for textbox close)
+//   0x04 — EnTa_IdleAwakeInCastle        (standing awake; WOKEN flag set)
+//   0x05 — func_80B14B6C                 (run-off dialog)
+//   0x06 — func_80B14AF4                 (5-tick turn before cry)
+//   0x07 — func_80B14A54                 (walking + cry audio)
+//   0x08 — func_80B149F4                 (brief 5-tick turn)
+//   0x09 — func_80B1496C                 (continued walking)
+//   0x0A — func_80B1490C                 (final turn before despawn)
+//   0x0B — func_80B14898                 (despawn timer → Actor_Kill)
+//
+// Sentinel 0xFF = state not synced (different variant — Kakariko /
+// Ranch / Lon Lon house — or transient failure state). Callers must
+// also gate on params == 0 + sceneNum == SCENE_HYRULE_CASTLE so a
+// stale state index from a different variant doesn't bleed across.
+//
+// EnTa_NetSync_ApplyState replays each setup body EXCLUDING the
+// Flags_SetEventChkInf calls — those flags propagate independently
+// via the SET_FLAG packet (z_actor.c:4955 fires the OnFlagSet hook
+// for FLAG_EVENT_CHECK_INF). Also skips OnePointCutscene_Init for
+// state 0x06 — that's a camera transition the peer (who isn't the
+// talker) doesn't have framing for.
+// ---------------------------------------------------------------------------
+
+unsigned char EnTa_NetSync_GetStateIndex(EnTa* actor) {
+    if (actor == NULL) {
+        return 0xFF;
+    }
+    EnTaActionFunc f = actor->actionFunc;
+    if (f == EnTa_IdleAsleepInCastle) return 0x00;
+    if (f == func_80B14570)           return 0x01;
+    if (f == func_80B144D8)           return 0x02;
+    if (f == func_80B1448C)           return 0x03;
+    if (f == EnTa_IdleAwakeInCastle)  return 0x04;
+    if (f == func_80B14B6C)           return 0x05;
+    if (f == func_80B14AF4)           return 0x06;
+    if (f == func_80B14A54)           return 0x07;
+    if (f == func_80B149F4)           return 0x08;
+    if (f == func_80B1496C)           return 0x09;
+    if (f == func_80B1490C)           return 0x0A;
+    if (f == func_80B14898)           return 0x0B;
+    return 0xFF;
+}
+
+void EnTa_NetSync_ApplyState(EnTa* actor, PlayState* play, unsigned char stateIndex) {
+    if (actor == NULL || play == NULL) {
+        return;
+    }
+    // Castle Talon's vanilla placement uses params 0xFFFF (-1 as s16),
+    // NOT 0 — Init dispatches by switch default-fallthrough into the
+    // sceneNum check at line 161, not by params == 0. Gate on the scene
+    // alone; Kakariko (params=1) and Ranch (params=2) variants live in
+    // their own scenes so won't conflict. Caught via field-test log 552
+    // where the params == 0 gate dropped every apply attempt.
+    if (play->sceneNum != SCENE_HYRULE_CASTLE) {
+        return;
+    }
+    // No-op when already at the requested state — avoids replaying
+    // the same audio / animation cues a second time when the local
+    // state machine has tick-advanced to match before the network
+    // packet arrived.
+    if (EnTa_NetSync_GetStateIndex(actor) == stateIndex) {
+        return;
+    }
+
+    switch (stateIndex) {
+        case 0x00:  // sleeping (rarely applied — would only fire on a forced reset)
+            EnTa_SetupAction(actor, EnTa_IdleAsleepInCastle, EnTa_AnimSleeping);
+            actor->eyeIndex = 2;
+            break;
+
+        case 0x01:  // wake timer — mirrors EnTa_IdleAsleepInCastle EXCH_ITEM_CHICKEN branch
+            EnTa_SetupAction(actor, func_80B14570, EnTa_AnimRepeatCurrent);
+            actor->timer = 40;
+            break;
+
+        case 0x02:  // wake anim + surprise audio — mirrors func_80B14570 timer==0 body
+            EnTa_SetupAction(actor, func_80B144D8, EnTa_AnimRepeatCurrent);
+            actor->rapidBlinks = 3;
+            actor->timer = 60;
+            Animation_PlayOnce(&actor->skelAnime, &gTalonWakeUpAnim);
+            actor->currentAnimation = &gTalonStandAnim;
+            Audio_PlayActorSound2(&actor->actor, NA_SE_VO_TA_SURPRISE);
+            break;
+
+        case 0x03:  // post-talk wait — mirrors func_80B144D8 TEXT_STATE_DONE branch
+            actor->eyeIndex = 1;
+            EnTa_SetupAction(actor, func_80B1448C, EnTa_AnimRepeatCurrent);
+            break;
+
+        case 0x04:  // idle awake — mirrors func_80B14410 castle branch
+                    // (WITHOUT the Flags_SetEventChkInf call; SET_FLAG handles it)
+            EnTa_SetupAction(actor, EnTa_IdleAwakeInCastle, EnTa_AnimRepeatCurrent);
+            break;
+
+        case 0x05:  // run-off dialog — mirrors EnTa_IdleAwakeInCastle talk branch
+            EnTa_SetupAction(actor, func_80B14B6C, EnTa_AnimRepeatCurrent);
+            break;
+
+        case 0x06:  // turn before cry — mirrors func_80B14B6C TEXT_STATE_EVENT body
+                    // (WITHOUT Flags_SetEventChkInf + WITHOUT OnePointCutscene —
+                    // peer isn't the talker, doesn't have the cutscene framing).
+            EnTa_SetupAction(actor, func_80B14AF4, EnTa_AnimRepeatCurrent);
+            actor->timer = 5;
+            Animation_PlayOnce(&actor->skelAnime, &gTalonRunTransitionAnim);
+            actor->currentAnimation = &gTalonRunAnim;
+            break;
+
+        case 0x07:  // walking + cry — mirrors func_80B14AF4 timer==0 body
+            Audio_PlayActorSound2(&actor->actor, NA_SE_VO_TA_CRY_1);
+            EnTa_SetupAction(actor, func_80B14A54, EnTa_AnimRepeatCurrent);
+            actor->timer = 65;
+            actor->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
+            break;
+
+        case 0x08:  // brief turn — mirrors func_80B14A54 timer==0 body
+            actor->timer = 5;
+            EnTa_SetupAction(actor, func_80B149F4, EnTa_AnimRepeatCurrent);
+            break;
+
+        case 0x09:  // continued walking — mirrors func_80B149F4 timer==0 body
+            EnTa_SetupAction(actor, func_80B1496C, EnTa_AnimRepeatCurrent);
+            actor->timer = 65;
+            break;
+
+        case 0x0A:  // final turn — mirrors func_80B1496C timer==0 body
+            EnTa_SetupAction(actor, func_80B1490C, EnTa_AnimRepeatCurrent);
+            actor->timer = 5;
+            break;
+
+        case 0x0B:  // despawn-imminent — mirrors func_80B1490C timer==0 body
+            EnTa_SetupAction(actor, func_80B14898, EnTa_AnimRepeatCurrent);
+            actor->timer = 60;
+            break;
+
+        default:
+            // Unknown / non-castle index — leave the actor alone.
+            break;
+    }
+}
