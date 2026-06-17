@@ -982,13 +982,21 @@ void Anchor::RegisterHooks() {
         // Soft warning when local actor's skelAnime->limbCount diverges from
         // the registered value. Surfaces ROM variants, tampered asset packs,
         // or sync admissions that landed without a registry entry. The wire
-        // layer's kHardCap=32 clamp continues to protect runtime regardless.
+        // layer's kHardCap=64 clamp continues to protect runtime regardless.
         // Audit: Plans/skelanime_expected_limbcount_registry_2026-06-15.md.
+        //
+        // Defer-init false-positive guard (#154 follow-up, log 547):
+        // For static actors whose object isn't loaded at scene-load time,
+        // `actor->init` is deferred (see comment at line ~1286 below). At
+        // OnActorSpawn time their skelAnime is zero-init (limbCount=0).
+        // The registry check should skip this transient state. Genuine
+        // mismatches surface once init runs and limbCount becomes non-zero.
         {
             auto regIt = SkelAnimeWire::kExpectedLimbCount.find(actor->id);
             if (regIt != SkelAnimeWire::kExpectedLimbCount.end()) {
                 SkelAnime* skel = GetEnemySkelAnime(actor);
-                if (skel != nullptr && skel->limbCount != regIt->second) {
+                if (skel != nullptr && skel->limbCount != 0 &&
+                    skel->limbCount != regIt->second) {
                     SPDLOG_WARN(
                         "[LimbCountRegistry] actor id=0x{:04X} limbCount={} expected={} (scene={} room={}) "
                         "— possible ROM variant or sync admission gap",
