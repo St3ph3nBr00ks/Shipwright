@@ -417,8 +417,10 @@ typedef struct SequenceChannel {
     /* 0xC4 */ s8 soundScriptIO[8]; // bridge between sound script and audio lib, "io ports"
     /* 0xCC */ s16* filter;
     /* 0xD0 */ Stereo stereo;
-    /* 0xD4 */ u32 emitterClientId; // Flotilla #83/#84 — set by CHAN_UPD_ANCHOR_EMITTER from the game thread before each SFX dispatch; read on the audio thread at Audio_GetSfx interception (Phase α.4) to drive per-emitter sample substitution. 0 = no Anchor context / use vanilla.
-} SequenceChannel; // size = 0xD8
+    /* 0xD4 */ u32 emitterClientId; // Flotilla #83/#84 — set by CHAN_UPD_ANCHOR_EMITTER from the game thread before each SFX dispatch; read on the audio thread at Audio_GetSfxOverride interception (Phase α.4c) to drive per-emitter sample substitution. 0 = no Anchor context / use vanilla.
+    /* 0xD8 */ u8  emitterSfxBank;  // Flotilla #83/#84 — bank index 0-6 of the in-flight SFX; 0xFF means "no Anchor context" (BGM channels, or pre-emission). Gate for the voice substitution (only bank=6=BANK_VOICE substitutes).
+    /* 0xDC */ SoundFontSound emitterOverrideSlot; // Per-channel scratch SoundFontSound returned by Audio_GetSfxOverride when a sample substitution hits. Holds {customSample*, vanillaTuning} for the in-flight emission.
+} SequenceChannel; // size grows by emitterSfxBank + alignment + SoundFontSound; depends on platform pointer width
 
 // Flotilla #83/#84 voice substitution (Phase α.3) channel-update opcode.
 // Game-thread call site: code_800F7260.c::Audio_PlayActiveSounds queues this

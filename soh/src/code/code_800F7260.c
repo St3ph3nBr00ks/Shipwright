@@ -587,7 +587,8 @@ void Audio_PlayActiveSounds(u8 bankId) {
                 // entry on the same round-robin channel slot.
                 Audio_QueueCmd(((u32)CHAN_UPD_ANCHOR_EMITTER << 24) |
                                 ((u32)SEQ_PLAYER_SFX << 16) |
-                                (((u32)sCurSfxPlayerChannelIdx & 0xFF) << 8),
+                                (((u32)sCurSfxPlayerChannelIdx & 0xFF) << 8) |
+                                ((u32)bankId & 0xFF),
                                 entry->emitterClientId);
                 if ((entry->sfxId & 0xF000) == 0x6000 &&
                     CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {

@@ -748,9 +748,15 @@ void func_800E6300(SequenceChannel* channel, AudioCmd* cmd) {
         case CHAN_UPD_ANCHOR_EMITTER:
             // Flotilla #83/#84 — game thread queues this before each SFX
             // playback command in Audio_PlayActiveSounds. Audio thread reads
-            // channel->emitterClientId at Audio_GetSfx interception (Phase
-            // α.4) to drive per-emitter voice-sample substitution.
+            // channel->emitterClientId + channel->emitterSfxBank at
+            // Audio_GetSfxOverride interception (Phase α.4c) to drive per-
+            // emitter voice-sample substitution.
+            //
+            // - cmd->data: u32 emitter clientId
+            // - cmd->arg2: u8 bank index (0-6 for valid SFX banks; 0xFF
+            //              means "no Anchor context").
             channel->emitterClientId = cmd->data;
+            channel->emitterSfxBank  = cmd->arg2;
             return;
     }
 }

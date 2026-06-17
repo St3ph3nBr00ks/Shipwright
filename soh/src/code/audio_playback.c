@@ -1,5 +1,6 @@
 #include "global.h"
 #include "soh/ResourceManagerHelpers.h"
+#include "soh/Enhancements/audio/VoicePack.h"  // Anchor_GetVoiceSampleOverride (#83/#84 α.4c)
 #include <libultraship/bridge.h>
 
 extern bool gUseLegacySD;
@@ -398,6 +399,69 @@ SoundFontSound* Audio_GetSfx(s32 fontId, s32 sfxId) {
     }
 
     return sfx;
+}
+
+// Flotilla custom voice (#83/#84) — Phase α.4c — per-emitter sample
+// substitution wrapper around Audio_GetSfx.
+//
+// Called on the AUDIO THREAD from audio_seqplayer.c (the only consumer of
+// Audio_GetSfx for SFX dispatch). Gate sequence:
+//
+//   1. Resolve vanilla SoundFontSound — fail fast on null (keeps vanilla
+//      error semantics; we don't substitute samples for missing sounds).
+//   2. Check channel->emitterSfxBank — 0xFF means no Anchor context (BGM
+//      channels, pre-emission state) → skip substitution.
+//   3. Voice substitution is bank-6-only (BANK_VOICE). Other banks have
+//      their own dispatch paths we don't touch.
+//   4. Reconstruct the vanilla 16-bit sfxId from (bank << 12) | localIdx.
+//      Voice vanilla sfxIds span 0x6000-0x61FF; local index is 0-0x1FF.
+//      All vanilla voice ids have bit 8 of index clear, so sfxId arg
+//      (which carries the local index) captures the full address.
+//   5. Anchor_GetVoiceSampleOverride consults the per-(emitter, vanilla
+//      sfxId) lookup table populated by VoicePack at pack load. Returns
+//      NULL if no override.
+//   6. On hit, populate the per-channel emitterOverrideSlot with the
+//      custom sample pointer + the vanilla tuning, return its address.
+//      The audio synth path reads from layer->sound = <return> just like
+//      a regular SoundFontSound — same call site, transparent swap.
+//
+// Tuning: uses vanilla sfx->tuning for the override slot. Phase α.7 will
+// honor SOH::AudioSample::tuning when the resource specifies its own
+// (per AudioSoundFontFactory.cpp:310-315 pattern). For now, custom
+// packs SHOULD ship samples with matching sample rates to vanilla
+// (32 kHz typical for OoT voice) to avoid pitch artifacts.
+SoundFontSound* Audio_GetSfxOverride(struct SequenceChannel* channel, s32 fontId, s32 sfxId) {
+    SoundFontSound* vanilla = Audio_GetSfx(fontId, sfxId);
+    if (vanilla == NULL) {
+        return NULL;
+    }
+    // Channel context guard (sentinel = no Anchor context).
+    if (channel == NULL || channel->emitterSfxBank == 0xFF) {
+        return vanilla;
+    }
+    // Phase α.4c scope: voice substitution only (BANK_VOICE == 6).
+    if (channel->emitterSfxBank != 6 /* BANK_VOICE */) {
+        return vanilla;
+    }
+    // Reconstruct the vanilla 16-bit sfxId. Voice sfxIds use the 0x6800-0x68XX
+    // family — bank bits = 6 (0x6000) AND subfamily bits = 4 (0x0800) are both
+    // implicit on the audio thread; the cmd queue only carries the low byte
+    // (entry->sfxId & 0xFF at code_800F7260.c:575). The local sfxId arg here
+    // is therefore the index portion only. All vanilla voice ids confirmed
+    // to share the 0x6800 prefix: 0x6800-0x6831 (Link) + 0x685F (Navi) per
+    // R1 enumeration. Add 0x0800 explicitly so the reconstructed value
+    // matches the substitution table's key (which was populated from
+    // FindSeqIdBySfxKey returning the full vanilla sfxId like 0x6820).
+    u16 vanillaSfxId = ((u16)channel->emitterSfxBank << 12) | 0x0800 | (sfxId & 0xFF);
+    void* customSamplePtr =
+        Anchor_GetVoiceSampleOverride(vanillaSfxId, channel->emitterClientId);
+    if (customSamplePtr == NULL) {
+        return vanilla;
+    }
+    // Hit. Populate the per-channel override slot and return its address.
+    channel->emitterOverrideSlot.sample = (SoundFontSample*)customSamplePtr;
+    channel->emitterOverrideSlot.tuning = vanilla->tuning;
+    return &channel->emitterOverrideSlot;
 }
 
 s32 Audio_SetFontInstrument(s32 instrumentType, s32 fontId, s32 index, void* value) {

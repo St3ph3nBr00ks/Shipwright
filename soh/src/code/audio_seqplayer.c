@@ -167,7 +167,15 @@ void AudioSeq_InitSequenceChannel(SequenceChannel* channel) {
     }
 
     channel->unused = false;
-    channel->emitterClientId = 0; // Flotilla #83/#84 — reset to no-Anchor default; CHAN_UPD_ANCHOR_EMITTER overwrites per emission.
+    // Flotilla #83/#84 — reset Anchor emitter state. CHAN_UPD_ANCHOR_EMITTER
+    // overwrites both fields per SFX dispatch from Audio_PlayActiveSounds;
+    // emitterSfxBank = 0xFF is the sentinel for "no Anchor context" (BGM
+    // channels never receive the cmd; this protects the substitution gate
+    // at Audio_GetSfxOverride from firing on uninitialized state).
+    channel->emitterClientId = 0;
+    channel->emitterSfxBank  = 0xFF;
+    channel->emitterOverrideSlot.sample = NULL;
+    channel->emitterOverrideSlot.tuningAsU32 = 0;
     Audio_InitNoteLists(&channel->notePool);
 }
 
@@ -683,7 +691,11 @@ s32 AudioSeq_SeqLayerProcessScriptStep4(SequenceLayer* layer, s32 cmd) {
         case 1:
             layer->semitone = semitone;
             sfxId = (layer->transposition << 6) + semitone;
-            sound = Audio_GetSfx(channel->fontId, sfxId);
+            // Flotilla #83/#84 α.4c — voice-substitution wrapper. Returns
+            // vanilla when channel has no Anchor emitter context (bank=0xFF)
+            // or when the substitution table has no override for the
+            // (emitterClientId, vanillaSfxId) pair. See audio_playback.c.
+            sound = Audio_GetSfxOverride(channel, channel->fontId, sfxId);
             if (sound == NULL) {
                 layer->stopSomething = true;
                 layer->delay2 = layer->delay + 1;
