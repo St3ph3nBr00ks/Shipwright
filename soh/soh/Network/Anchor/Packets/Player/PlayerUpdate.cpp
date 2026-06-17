@@ -351,6 +351,27 @@ void Anchor::SendPacket_PlayerUpdate() {
     payload["unk_85C"] = player->unk_85C;
     payload["unk_860"] = player->unk_860;  // Deku-Stick burning timer
     payload["actionVar1"] = player->av1.actionVar1;
+
+    // Pattern 4 / #277 — peer's melee swing state, consumed by enemy AI
+    // via (Player*)nearestPlayer->meleeWeaponState etc. when peer is the
+    // nearest player. See AnchorClient.h field comments + Plans/
+    // peer_player_state_sync_2026-06-16.md.
+    payload["meleeWeaponState"]     = player->meleeWeaponState;
+    payload["meleeWeaponAnimation"] = player->meleeWeaponAnimation;
+    payload["unk_845"]              = player->unk_845;
+
+    // Pattern 4 / #277 — peer's Z-target as a netId. Resolves to 0
+    // when peer is not Z-locked, OR when peer's focus actor is not a
+    // synced actor (NPC, chest, etc.). The receiver consumes via
+    // Anchor_IsActorTargetedByAnyPlayer; it is NOT written to a
+    // DummyPlayer Player field.
+    uint32_t focusActorNetId = 0;
+    if (player->focusActor != nullptr) {
+        const EnemyNetId* fext =
+            ObjectExtension::GetInstance().Get<EnemyNetId>(player->focusActor);
+        if (fext != nullptr) focusActorNetId = fext->netId;
+    }
+    payload["focusActorNetId"] = focusActorNetId;
     // Multi-player dialogue redesign (#191 follow-up) — peer's csCtx.state
     // for "alone in cutscene" detection in Anchor_ShouldAdvanceCutsceneTextLocal.
     payload["csCtxState"] = (int)gPlayState->csCtx.state;
@@ -431,6 +452,15 @@ void Anchor::HandlePacket_PlayerUpdate(nlohmann::json payload) {
         client.unk_85C = payload.value("unk_85C", (f32)0);
         client.unk_860 = payload.value("unk_860", (s16)0);
         client.actionVar1 = payload.value("actionVar1", (s8)0);
+        // Pattern 4 / #277 — peer's melee swing state. Defaults to 0 for
+        // pre-bump peers; matches Player_Init values, so reads via
+        // (Player*)dummy->meleeWeaponState degrade to current behaviour.
+        client.meleeWeaponState     = payload.value("meleeWeaponState",     (s8)0);
+        client.meleeWeaponAnimation = payload.value("meleeWeaponAnimation", (s8)0);
+        client.unk_845              = payload.value("unk_845",              (u8)0);
+        // Pattern 4 / #277 — peer's Z-target netId. 0 == "not locked /
+        // locked on non-synced actor".
+        client.focusActorNetId      = payload.value("focusActorNetId",      (uint32_t)0);
         // Pre-update peers default to CS_STATE_IDLE (0) — treated as
         // out-of-cutscene for the multi-player dialogue detection.
         client.csCtxState = (s8)payload.value("csCtxState", 0);

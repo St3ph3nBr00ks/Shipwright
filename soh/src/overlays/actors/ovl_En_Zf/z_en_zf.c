@@ -16,6 +16,9 @@
 // NOT `extern "C"` — this is a .c file and C-linkage is implicit).
 // Per Pitfall 7.
 extern bool Anchor_ShouldSuppressEnZfDrop(Actor* actor);
+// Pattern 4 / #277 — multi-player Z-target query (peer Z-target aware).
+// Drop-in replacement for `Actor_IsTargeted` at AI-decision gates.
+extern bool Anchor_IsActorTargetedByAnyPlayer(Actor* actor, PlayState* play);
 
 // EnZf_ApplyNetState (defined at the bottom of this TU) calls
 // Setup* helpers that need a PlayState pointer. gPlayState is the
@@ -897,7 +900,7 @@ void EnZf_ApproachPlayer(EnZf* this, PlayState* play) {
 
             if ((this->actor.xzDistToPlayer < 180.0f) && (this->actor.xzDistToPlayer > 160.0f) &&
                 Actor_IsFacingPlayer(&this->actor, 0x71C)) {
-                if (Actor_IsTargeted(play, &this->actor)) {
+                if (Anchor_IsActorTargetedByAnyPlayer(&this->actor, play)) {
                     if (Rand_ZeroOne() < 0.1f) {
                         this->actor.world.rot.y = this->actor.shape.rot.y = this->actor.yawTowardsPlayer;
                         EnZf_SetupJumpForward(this);

@@ -16,6 +16,9 @@
 // agree on the player Wolfos is targeting for damage/dodge/circle
 // decisions. Defined extern "C" in soh/soh/Network/Anchor/HookHandlers.cpp.
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+// Pattern 4 / #277 — multi-player Z-target query (peer Z-target aware).
+// Drop-in replacement for `Actor_IsTargeted` at AI-decision gates.
+extern bool Anchor_IsActorTargetedByAnyPlayer(Actor* actor, PlayState* play);
 
 // EnWf_ApplyNetState (defined at the bottom of this TU) calls
 // EnWf_SetupRunAtPlayer / EnWf_SetupSidestep which take a PlayState arg —
@@ -775,7 +778,7 @@ void EnWf_Slash(EnWf* this, PlayState* play) {
         this->slashStatus = 0;
     }
 
-    if (((curFrame == 15) && !Actor_IsTargeted(play, &this->actor) &&
+    if (((curFrame == 15) && !Anchor_IsActorTargetedByAnyPlayer(&this->actor, play) &&
          (!Actor_IsFacingPlayer(&this->actor, 0x2000) || (this->actor.xzDistToPlayer >= 100.0f))) ||
         SkelAnime_Update(&this->skelAnime)) {
         if ((curFrame != 15) && (this->actionTimer != 0)) {

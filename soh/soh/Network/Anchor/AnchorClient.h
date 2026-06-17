@@ -121,6 +121,26 @@ typedef struct AnchorClient {
     s16 unk_860;
     s16 unk_862;
     s8 actionVar1;
+    // Pattern 4 / #277 — peer's melee swing state, mirrored on the
+    // DummyPlayer's underlying Player struct so vanilla enemy AI that
+    // reads `(Player*)nearestPlayer->meleeWeaponState` / `meleeWeaponAnimation`
+    // / `unk_845` sees peer's correct values when peer is the nearest
+    // player. See Plans/peer_player_state_sync_2026-06-16.md +
+    // Analysis/peer_player_state_deep_analysis_2026-06-16.md §8 Option A.
+    // Defaults to 0 (Player_Init value) for pre-bump peers — matches the
+    // pre-fix behaviour where `(Player*)dummy->meleeWeaponState` read
+    // whatever Player_Init left there (typically 0).
+    s8 meleeWeaponState = 0;
+    s8 meleeWeaponAnimation = 0;
+    u8 unk_845 = 0;
+    // Pattern 4 / #277 Z-target sync — netId of the actor peer is
+    // Z-locked onto, or 0 if peer is not Z-locked / locked on a
+    // non-synced actor. Consumed by `Anchor_IsActorTargetedByAnyPlayer`
+    // (Common/ZTargetSync.h), NOT written to a Player field on
+    // DummyPlayer — it's a peer-relationship query, not a Player
+    // attribute. Defaults to 0 for pre-bump peers (== "not targeting
+    // any synced actor", safe).
+    uint32_t focusActorNetId = 0;
     u8 ocarinaNote;
     f32 ocarinaModulator;
     s8 ocarinaBend;

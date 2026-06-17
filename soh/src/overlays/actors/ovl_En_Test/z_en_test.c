@@ -12,6 +12,10 @@
 // Multiplayer targeting (en_test_sync_plan.md §3 step 1).
 // Defined extern "C" in HookHandlers.cpp.
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
+// Pattern 4 / #277 — multi-player Z-target query. Drop-in replacement
+// for `Actor_IsTargeted` at AI-decision gates that should respect peer
+// targeting. Defined in soh/Network/Anchor/Common/ZTargetSync.cpp.
+extern bool Anchor_IsActorTargetedByAnyPlayer(Actor* actor, PlayState* play);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
@@ -343,7 +347,7 @@ void EnTest_ChooseRandomAction(EnTest* this, PlayState* play) {
         case 5:
         case 6:
             if ((this->actor.xzDistToPlayer < 220.0f) && (this->actor.xzDistToPlayer > 170.0f) &&
-                Actor_IsFacingPlayer(&this->actor, 0x71C) && Actor_IsTargeted(play, &this->actor)) {
+                Actor_IsFacingPlayer(&this->actor, 0x71C) && Anchor_IsActorTargetedByAnyPlayer(&this->actor, play)) {
                 EnTest_SetupJumpslash(this);
                 break;
             }
@@ -403,7 +407,7 @@ void EnTest_ChooseAction(EnTest* this, PlayState* play) {
                 this->actor.world.rot.y = this->actor.yawTowardsPlayer;
                 EnTest_SetupJumpBack(this);
             } else if ((this->actor.xzDistToPlayer < 220.0f) && (this->actor.xzDistToPlayer > 170.0f)) {
-                if (Actor_IsFacingPlayer(&this->actor, 0x71C) && !Actor_IsTargeted(play, &this->actor)) {
+                if (Actor_IsFacingPlayer(&this->actor, 0x71C) && !Anchor_IsActorTargetedByAnyPlayer(&this->actor, play)) {
                     EnTest_SetupJumpslash(this);
                 }
             } else {
@@ -520,7 +524,7 @@ void EnTest_Idle(EnTest* this, PlayState* play) {
             if (Actor_IsFacingPlayer(&this->actor, 0x1555)) {
                 if ((this->actor.xzDistToPlayer < 220.0f) && (this->actor.xzDistToPlayer > 160.0f) &&
                     (Rand_ZeroOne() < 0.3f)) {
-                    if (Actor_IsTargeted(play, &this->actor)) {
+                    if (Anchor_IsActorTargetedByAnyPlayer(&this->actor, play)) {
                         EnTest_SetupJumpslash(this);
                     } else {
                         func_808627C4(this, play);
@@ -667,7 +671,7 @@ void EnTest_WalkAndBlock(EnTest* this, PlayState* play) {
 
         if ((this->actor.xzDistToPlayer < 220.0f) && (this->actor.xzDistToPlayer > 160.0f) &&
             (Actor_IsFacingPlayer(&this->actor, 0x71C))) {
-            if (Actor_IsTargeted(play, &this->actor)) {
+            if (Anchor_IsActorTargetedByAnyPlayer(&this->actor, play)) {
                 if (Rand_ZeroOne() < 0.1f) {
                     EnTest_SetupJumpslash(this);
                     return;
@@ -1464,7 +1468,7 @@ void func_808628C8(EnTest* this, PlayState* play) {
     if (this->timer == 0) {
         if (Actor_OtherIsTargeted(play, &this->actor)) {
             EnTest_SetupIdle(this);
-        } else if (Actor_IsTargeted(play, &this->actor)) {
+        } else if (Anchor_IsActorTargetedByAnyPlayer(&this->actor, play)) {
             if (!EnTest_ReactToProjectile(play, this)) {
                 EnTest_ChooseAction(this, play);
             }
@@ -2024,7 +2028,7 @@ s32 EnTest_ReactToProjectile(PlayState* play, EnTest* this) {
         }
 
         if (Math_Vec3f_DistXYZ(&this->actor.world.pos, &projectileActor->world.pos) < 200.0f) {
-            if (Actor_IsTargeted(play, &this->actor) && (projectileActor->id == ACTOR_ARMS_HOOK)) {
+            if (Anchor_IsActorTargetedByAnyPlayer(&this->actor, play) && (projectileActor->id == ACTOR_ARMS_HOOK)) {
                 EnTest_SetupJumpUp(this);
             } else if (ABS(yawToProjectile) < 0x2000) {
                 EnTest_SetupStopAndBlock(this);
@@ -2037,7 +2041,7 @@ s32 EnTest_ReactToProjectile(PlayState* play, EnTest* this) {
             return true;
         }
 
-        if (Actor_IsTargeted(play, &this->actor) && (projectileActor->id == ACTOR_ARMS_HOOK)) {
+        if (Anchor_IsActorTargetedByAnyPlayer(&this->actor, play) && (projectileActor->id == ACTOR_ARMS_HOOK)) {
             EnTest_SetupJumpUp(this);
             return true;
         }

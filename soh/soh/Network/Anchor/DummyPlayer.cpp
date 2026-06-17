@@ -1045,6 +1045,17 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     player->unk_85C = client.unk_85C;
     player->unk_860 = client.unk_860;
     player->av1.actionVar1 = client.actionVar1;
+    // Pattern 4 / #277 — peer's melee swing state. Mirroring these into
+    // the underlying Player struct of the DummyPlayer makes the existing
+    // `(Player*)Anchor_GetNearestPlayerActor(...)->meleeWeaponState`
+    // reads in vanilla enemy AI transparently return peer state when
+    // peer is the nearest player. No per-enemy refactor needed for
+    // field reads — same pattern as the unk_860 sync.
+    // See Plans/peer_player_state_sync_2026-06-16.md +
+    // Analysis/peer_player_state_deep_analysis_2026-06-16.md §8 Option A.
+    player->meleeWeaponState     = client.meleeWeaponState;
+    player->meleeWeaponAnimation = client.meleeWeaponAnimation;
+    player->unk_845              = client.unk_845;
 
     // Mirror the remote player's shield-hold pose. Sets rightHandType to
     // PLAYER_MODELTYPE_RH_SHIELD when stateFlags1 carries

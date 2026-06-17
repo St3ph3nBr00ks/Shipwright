@@ -43,6 +43,9 @@ s32 EnGeldB_DodgeRanged(PlayState* play, EnGeldB* this);
 // Forward-declare here (extern, NOT extern "C" — this is a .c file
 // and C-linkage is implicit). Per Pitfall 7.
 extern bool Anchor_ShouldSuppressEnGeldBDrop(Actor* actor);
+// Pattern 4 / #277 — multi-player Z-target query (peer Z-target aware).
+// Drop-in replacement for `Actor_IsTargeted` at AI-decision gates.
+extern bool Anchor_IsActorTargetedByAnyPlayer(Actor* actor, PlayState* play);
 
 void EnGeldB_SetupWait(EnGeldB* this);
 void EnGeldB_SetupReady(EnGeldB* this);
@@ -544,7 +547,7 @@ void EnGeldB_Advance(EnGeldB* this, PlayState* play) {
         if (!EnGeldB_ReactToPlayer(play, this, 0)) {
             if ((210.0f > this->actor.xzDistToPlayer) && (this->actor.xzDistToPlayer > 150.0f) &&
                 Actor_IsFacingPlayer(&this->actor, 0x71C)) {
-                if (Actor_IsTargeted(play, &this->actor)) {
+                if (Anchor_IsActorTargetedByAnyPlayer(&this->actor, play)) {
                     if (Rand_ZeroOne() > 0.5f) {
                         EnGeldB_SetupRollForward(this);
                     } else {

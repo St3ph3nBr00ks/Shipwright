@@ -40,7 +40,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"ENV_ACTOR_DROP", 1},      // #193 Phase 4 v2 — peer→host env-actor cut drop request.
     {"OCARINA_SFX", 1},
     {"PLAYER_SFX", 1},
-    {"PLAYER_UPDATE", 3},  // bump-history: 2 (unk_860 Deku-Stick burning timer); 3 (mountedHorseNetId — drives DummyPlayer mounted-pose reconciliation, Plans/horse_sync_plan.md).
+    {"PLAYER_UPDATE", 4},  // bump-history: 2 (unk_860 Deku-Stick burning timer); 3 (mountedHorseNetId — drives DummyPlayer mounted-pose reconciliation, Plans/horse_sync_plan.md); 4 (Pattern 4 / #277 — meleeWeaponState + meleeWeaponAnimation + unk_845 + focusActorNetId, Plans/peer_player_state_sync_2026-06-16.md).
     {"REQUEST_TEAM_STATE", 1},
     {"REQUEST_TELEPORT", 1},
     {"SCENE_ACTOR_NETIDS", 1},  // KB-18 (#177) Option 4 — host-authoritative netId snapshot.
