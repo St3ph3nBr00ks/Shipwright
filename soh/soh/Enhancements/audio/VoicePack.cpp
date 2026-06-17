@@ -159,7 +159,7 @@ bool RegisterSample(const std::string& packFolder,
         return false;
     }
 
-    auto resourceMgr = Ship::Context::GetInstance()->GetResourceManager();
+    auto resourceMgr = Ship::Context::GetRawInstance()->GetResourceManager();
     auto loader      = resourceMgr->GetResourceLoader();
 
     // Unique cache key — switching packs that share archive paths cannot
