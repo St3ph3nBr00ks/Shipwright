@@ -11,7 +11,8 @@ typedef struct {
     /* 0x0C */ f32* freqScale;
     /* 0x10 */ f32* vol;
     /* 0x14 */ s8* reverbAdd;
-} SoundRequest; // size = 0x18
+    /* 0x18 */ u32 emitterClientId;  // Flotilla #83/#84 voice routing — owner of this emission, or 0 if vanilla / no Anchor context.
+} SoundRequest; // size = 0x1C
 
 typedef struct {
     /* 0x00 */ f32 value;
@@ -56,6 +57,22 @@ u8 gAudioSfxSwapMode[10];
 // sSoundRequests ring buffer endpoints. read index <= write index, wrapping around mod 256.
 u8 sSoundRequestWriteIndex = 0;
 u8 sSoundRequestReadIndex = 0;
+
+// Flotilla custom voice routing (#83/#84) — game-thread context carrying the
+// clientId of whoever's emitting the next Audio_PlaySoundGeneral. Set by
+// Player_PlaySfx (and any other voice-emission wrapper) before the call;
+// reset to 0 after. Read by Audio_PlaySoundGeneral when populating
+// SoundRequest::emitterClientId. Threaded through the audio cmd queue in
+// later phases so the audio-thread Audio_GetSfx can consult the per-emitter
+// override table.
+//
+// Plain global (not thread_local): SoH game logic is single-threaded — the
+// only other thread is the audio thread, which never reads or writes this
+// variable. Audio thread sees the value only via SoundRequest after the
+// ring-buffer enqueue happens on the game thread.
+//
+// 0 = no Anchor context / use vanilla.
+u32 gAnchorCurrentEmitterClientId = 0;
 
 /**
  * Array of pointers to arrays of SoundBankEntry of sizes: 9, 12, 22, 20, 8, 3, 5
@@ -142,6 +159,7 @@ void Audio_PlaySoundGeneral(u16 sfxId, Vec3f* pos, u8 token, f32* freqScale, f32
                         req->freqScale = freqScale;
                         req->vol = vol;
                         req->reverbAdd = reverbAdd;
+                        req->emitterClientId = gAnchorCurrentEmitterClientId; // Flotilla #83/#84
                         sSoundRequestWriteIndex++;
                         req = &sSoundRequests[sSoundRequestWriteIndex];
                     }
@@ -155,7 +173,19 @@ void Audio_PlaySoundGeneral(u16 sfxId, Vec3f* pos, u8 token, f32* freqScale, f32
         req->freqScale = freqScale;
         req->vol = vol;
         req->reverbAdd = reverbAdd;
+        req->emitterClientId = gAnchorCurrentEmitterClientId; // Flotilla #83/#84
         sSoundRequestWriteIndex++;
+
+        // Flotilla #83/#84 Phase α.1 diagnostic — log voice-bank emissions
+        // and their captured emitter context. Gated on
+        // gEnhancements.VoicePackDebugLog so it's silent in normal play.
+        // Removed when Phase α.4 substitution lands + ships clean (Phase 7
+        // cleanup pass).
+        if ((sfxId & 0xF000) == 0x6000 &&
+            CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
+            LUSLOG_INFO("[VoicePackEmit] sfxId=0x%04X emitterClientId=%u",
+                        sfxId, req->emitterClientId);
+        }
     }
 }
 

@@ -2239,7 +2239,22 @@ void func_8002F7A0(PlayState* play, Actor* actor, f32 arg2, s16 arg3, f32 arg4) 
     func_8002F758(play, actor, arg2, arg3, arg4, 0);
 }
 
+// Flotilla #83/#84 — Anchor-side resolver returning the clientId of whoever
+// owns this emission for voice substitution routing. Returns ownClientId for
+// local Link, 0 for non-Anchor / non-Player actors. Cross-client DummyPlayer
+// voice routing is wired in Phase α.6 (PLAYER_SFX packet).
+extern uint32_t Anchor_GetLocalEmitterClientId(void);
+
 void Player_PlaySfx(Actor* actor, u16 sfxId) {
+    // Flotilla #83/#84 — capture local-Link emitter for the SFX about to fire.
+    // Audio_PlaySoundGeneral reads gAnchorCurrentEmitterClientId into the
+    // SoundRequest; reset after the call so non-voice paths and non-Player
+    // emissions don't inherit stale emitter context. Only ACTOR_PLAYER
+    // captures non-zero; DummyPlayer / peer routing is Phase α.6 (B3).
+    if (actor->id == ACTOR_PLAYER) {
+        gAnchorCurrentEmitterClientId = Anchor_GetLocalEmitterClientId();
+    }
+
     if (actor->id != ACTOR_PLAYER || sfxId < NA_SE_VO_LI_SWORD_N || sfxId > NA_SE_VO_LI_ELECTRIC_SHOCK_LV_KID) {
         Audio_PlaySoundGeneral(sfxId, &actor->projectedPos, 4, &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale,
                                &gSfxDefaultReverb);
@@ -2253,6 +2268,10 @@ void Player_PlaySfx(Actor* actor, u16 sfxId) {
         Audio_PlaySoundGeneral(sfxId, &actor->projectedPos, 4, &freqMultiplier, &gSfxDefaultFreqAndVolScale,
                                &gSfxDefaultReverb);
     }
+
+    // Reset emitter context unconditionally so subsequent unrelated emissions
+    // (no matter which code path queues them) start from 0.
+    gAnchorCurrentEmitterClientId = 0;
 
     if (actor->id == ACTOR_PLAYER) {
         GameInteractor_ExecuteOnPlayerSfx(sfxId);

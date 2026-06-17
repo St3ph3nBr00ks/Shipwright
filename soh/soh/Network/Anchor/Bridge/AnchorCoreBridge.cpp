@@ -59,6 +59,21 @@ extern "C" bool Anchor_IsCurrentRoomHost(void) {
     return ::SceneAuthority::IsMyCurrentRoomHost();
 }
 
+// Flotilla custom voice (#83/#84) — returns local player's clientId for the
+// voice-emission emitter capture in Player_PlaySfx (z_actor.c:2242). The
+// caller writes the return value into gAnchorCurrentEmitterClientId (a
+// game-thread thread-local declared in code_800F7260.c) right before
+// Audio_PlaySoundGeneral; the SoundRequest captures it; later phases thread
+// it through the audio cmd queue to drive the per-emitter sample
+// substitution lookup at the audio-thread Audio_GetSfx call site.
+//
+// Returns 0 when Anchor is not connected — preserves the vanilla code path
+// (no substitution, no overhead).
+extern "C" uint32_t Anchor_GetLocalEmitterClientId(void) {
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) return 0;
+    return Anchor::Instance->ownClientId;
+}
+
 // C-callable: returns true if any DummyPlayer (remote player) is currently
 // standing on top of the given DynaPolyActor's footprint. Used by
 // `DynaPolyActor_IsPlayerOnTop` callers (Obj_Lift, etc.) to make
