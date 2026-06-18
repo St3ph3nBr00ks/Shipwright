@@ -593,6 +593,16 @@ void Audio_PlayActiveSounds(u8 bankId) {
                                 (((u32)sCurSfxPlayerChannelIdx & 0xFF) << 8) |
                                 ((u32)bankId & 0xFF),
                                 entry->emitterClientId);
+                // Flotilla #83/#84 root-cause fix (2026-06-17) — also queue
+                // the FULL vanilla sfxId so the audio thread can look up the
+                // substitution table directly, without arithmetic recon-
+                // struction from the soundFont's local index (which doesn't
+                // work — verified empirically log 567: vanilla 0x6820 →
+                // audio-thread local 0x1C, not 0x20).
+                Audio_QueueCmd(((u32)CHAN_UPD_ANCHOR_VSFXID << 24) |
+                                ((u32)SEQ_PLAYER_SFX << 16) |
+                                (((u32)sCurSfxPlayerChannelIdx & 0xFF) << 8),
+                                (u32)entry->sfxId);
                 if ((entry->sfxId & 0xF000) == 0x6000 &&
                     CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
                     LUSLOG_INFO("[VoicePackChan] queued sfxId=0x%04X channel=%d emitterClientId=%u",

@@ -758,6 +758,16 @@ void func_800E6300(SequenceChannel* channel, AudioCmd* cmd) {
             channel->emitterClientId = cmd->data;
             channel->emitterSfxBank  = cmd->arg2;
             return;
+        case CHAN_UPD_ANCHOR_VSFXID:
+            // Flotilla #83/#84 — see z64audio.h CHAN_UPD_ANCHOR_VSFXID
+            // comment. Carries the full vanilla sfxId so the audio-thread
+            // substitution lookup can use it directly instead of
+            // arithmetic reconstruction from the soundFont local index
+            // (which doesn't work — verified log 567).
+            //
+            // - cmd->data: u32 (u16 used) vanilla sfxId
+            channel->emitterVanillaSfxId = (u16)cmd->data;
+            return;
     }
 }
 

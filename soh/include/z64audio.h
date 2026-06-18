@@ -419,8 +419,9 @@ typedef struct SequenceChannel {
     /* 0xD0 */ Stereo stereo;
     /* 0xD4 */ u32 emitterClientId; // Flotilla #83/#84 — set by CHAN_UPD_ANCHOR_EMITTER from the game thread before each SFX dispatch; read on the audio thread at Audio_GetSfxOverride interception (Phase α.4c) to drive per-emitter sample substitution. 0 = no Anchor context / use vanilla.
     /* 0xD8 */ u8  emitterSfxBank;  // Flotilla #83/#84 — bank index 0-6 of the in-flight SFX; 0xFF means "no Anchor context" (BGM channels, or pre-emission). Gate for the voice substitution (only bank=6=BANK_VOICE substitutes).
+    /* 0xDA */ u16 emitterVanillaSfxId;  // Flotilla #83/#84 — full vanilla sfxId (e.g. 0x6820 NA_SE_VO_LI_SWORD_N_KID) of the in-flight emission. Set by CHAN_UPD_ANCHOR_VSFXID from the game thread. The audio-thread sfxId argument at audio_seqplayer.c is the SOUNDFONT LOCAL INDEX (NOT the vanilla sfxId's low byte — verified empirically log 567: vanilla 0x6820 → audio local 0x1C). Substitution lookup MUST use this field, not arithmetic reconstruction. 0xFFFF = no Anchor context / no override.
     /* 0xDC */ SoundFontSound emitterOverrideSlot; // Per-channel scratch SoundFontSound returned by Audio_GetSfxOverride when a sample substitution hits. Holds {customSample*, vanillaTuning} for the in-flight emission.
-} SequenceChannel; // size grows by emitterSfxBank + alignment + SoundFontSound; depends on platform pointer width
+} SequenceChannel; // size grows by emitterSfxBank + emitterVanillaSfxId + alignment + SoundFontSound; depends on platform pointer width
 
 // Flotilla #83/#84 voice substitution (Phase α.3) channel-update opcode.
 // Game-thread call site: code_800F7260.c::Audio_PlayActiveSounds queues this
@@ -431,6 +432,20 @@ typedef struct SequenceChannel {
 // Defined outside the file-local ChannelUpdateType enum in code_800E4FE0.c
 // so the queue site (code_800F7260.c) can reference the same constant.
 #define CHAN_UPD_ANCHOR_EMITTER 15
+
+// Flotilla #83/#84 voice substitution (Phase α.4c root-cause fix —
+// 2026-06-17). Carries the FULL vanilla sfxId (e.g. 0x6820) for the
+// in-flight emission so the audio thread can look it up directly
+// against the pack substitution table. Necessary because the audio-
+// thread `sfxId` arg at audio_seqplayer.c:686 is the soundFont's
+// local sample index (verified empirically: vanilla 0x6820 →
+// audio local 0x1C), which is NOT the vanilla sfxId's low byte
+// and CANNOT be converted via arithmetic reconstruction.
+//
+// Queued in Audio_PlayActiveSounds alongside CHAN_UPD_ANCHOR_EMITTER
+// BEFORE the playback start cmds. cmd->data carries the u32 vanilla
+// sfxId (only u16 used).
+#define CHAN_UPD_ANCHOR_VSFXID  16
 
 // Might also be known as a Track, according to sm64 debug strings (?).
 typedef struct SequenceLayer {

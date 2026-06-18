@@ -168,12 +168,14 @@ void AudioSeq_InitSequenceChannel(SequenceChannel* channel) {
 
     channel->unused = false;
     // Flotilla #83/#84 — reset Anchor emitter state. CHAN_UPD_ANCHOR_EMITTER
-    // overwrites both fields per SFX dispatch from Audio_PlayActiveSounds;
-    // emitterSfxBank = 0xFF is the sentinel for "no Anchor context" (BGM
-    // channels never receive the cmd; this protects the substitution gate
-    // at Audio_GetSfxOverride from firing on uninitialized state).
-    channel->emitterClientId = 0;
-    channel->emitterSfxBank  = 0xFF;
+    // and CHAN_UPD_ANCHOR_VSFXID overwrite these fields per SFX dispatch
+    // from Audio_PlayActiveSounds; the sentinels (0xFF / 0xFFFF) mean
+    // "no Anchor context" for BGM channels that never receive the cmds.
+    // Protects the substitution gate at Audio_GetSfxOverride from firing
+    // on uninitialized state.
+    channel->emitterClientId       = 0;
+    channel->emitterSfxBank        = 0xFF;
+    channel->emitterVanillaSfxId   = 0xFFFF;
     channel->emitterOverrideSlot.sample = NULL;
     channel->emitterOverrideSlot.tuningAsU32 = 0;
     Audio_InitNoteLists(&channel->notePool);

@@ -463,16 +463,20 @@ SoundFontSound* Audio_GetSfxOverride(struct SequenceChannel* channel, s32 fontId
     if (channel->emitterSfxBank != 6 /* BANK_VOICE */) {
         return vanilla;
     }
-    // Reconstruct the vanilla 16-bit sfxId. Voice sfxIds use the 0x6800-0x68XX
-    // family — bank bits = 6 (0x6000) AND subfamily bits = 4 (0x0800) are both
-    // implicit on the audio thread; the cmd queue only carries the low byte
-    // (entry->sfxId & 0xFF at code_800F7260.c:575). The local sfxId arg here
-    // is therefore the index portion only. All vanilla voice ids confirmed
-    // to share the 0x6800 prefix: 0x6800-0x6831 (Link) + 0x685F (Navi) per
-    // R1 enumeration. Add 0x0800 explicitly so the reconstructed value
-    // matches the substitution table's key (which was populated from
-    // FindSeqIdBySfxKey returning the full vanilla sfxId like 0x6820).
-    u16 vanillaSfxId = ((u16)channel->emitterSfxBank << 12) | 0x0800 | (sfxId & 0xFF);
+    // Flotilla #83/#84 root-cause fix (2026-06-17). The audio-thread `sfxId`
+    // arg here is the SOUNDFONT'S LOCAL SAMPLE INDEX (e.g. 0x1C for a sword-
+    // swing variant), NOT the vanilla sfxId's low byte (0x20 for vanilla
+    // SWORD_N_KID 0x6820). The mapping is set by vanilla's soundfont layout
+    // and isn't recoverable arithmetically — verified empirically (log 567:
+    // game-thread emit of 0x6820 dispatched audio-thread sfxId=0x1C).
+    //
+    // The full vanilla sfxId arrives via the CHAN_UPD_ANCHOR_VSFXID cmd
+    // queued alongside CHAN_UPD_ANCHOR_EMITTER. Sentinel 0xFFFF means "no
+    // Anchor context" — fall back to vanilla.
+    if (channel->emitterVanillaSfxId == 0xFFFF) {
+        return vanilla;
+    }
+    u16 vanillaSfxId = channel->emitterVanillaSfxId;
     // Phase α.7 — request pack's tuning out-param. -1.0f signals "use
     // vanilla tuning"; any other value is the pack-author-specified
     // tuning (typically for non-vanilla sample rates).
