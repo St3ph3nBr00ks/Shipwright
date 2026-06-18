@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 
+#include <cstdlib>  // std::rand for variant pool (Phase α.5)
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -43,6 +44,14 @@ extern "C" uint32_t Anchor_GetLocalEmitterClientId(void);
 
 namespace {
 
+// Phase α.5/α.7 — sample + per-sample tuning bundled. Multiple LoadedSamples
+// can share the same vanilla sfxId (variant pool); the variant picker at
+// lookup time chooses one per emission.
+struct PackedSample {
+    SOH::Sample* samplePtr;  // stable pointer (resource->sample)
+    float        tuning;     // SOH::AudioSample::tuning, or -1.0f for "inherit vanilla"
+};
+
 struct LoadedSample {
     std::string                      vrpLabel;             // VRP sample name
     std::string                      sfxKey;               // resolved SoH sfxKey (e.g. NA_SE_VO_LI_SWORD_N)
@@ -50,24 +59,17 @@ struct LoadedSample {
     uint16_t                         vanillaSeqId;         // vanilla voice id being overridden
     uint16_t                         displayOnlySeqNum;    // Audio Editor display registration id
     std::shared_ptr<SOH::AudioSample> resource;            // lifetime owner — keeps Sample* alive
-    SOH::Sample*                     samplePtr;            // stable pointer into resource->sample
+    PackedSample                     packed;               // {samplePtr, tuning} for the lookup table
 };
 
 struct LoadedPack {
-    std::string                                   folderName;
-    std::vector<LoadedSample>                     loadedSamples;
-    // Lookup: vanilla sfxId → Sample*. Populated at load time, consumed by
-    // GetSampleOverride. Phase α.5 (variant pools) will switch this to
-    // unordered_map<uint16_t, std::vector<SOH::Sample*>>.
-    std::unordered_map<uint16_t, SOH::Sample*>    sampleByVanillaSfxId;
-};
-
-// Opaque type for the public API. Currently equals LoadedSample::samplePtr;
-// Phase α.5 will turn this into a small wrapper that also carries variant-
-// pool selection state. For now, just an alias — but kept as a separate
-// type so the header doesn't leak SOH::Sample.
-struct SampleOverrideImpl {
-    SOH::Sample* sample;
+    std::string                                       folderName;
+    std::vector<LoadedSample>                         loadedSamples;
+    // Phase α.5 variant-pool lookup: vanilla sfxId → vector of variants.
+    // Vanilla picks a random variant per emission from fontMap[0]'s
+    // soundEffects pool when multiple localIds share an sfxKey; we mirror
+    // the random-pick behaviour at GetSampleOverride.
+    std::unordered_map<uint16_t, std::vector<PackedSample>> samplesByVanillaSfxId;
 };
 
 constexpr uint16_t kVoicePackDisplaySeqNumBase = 0xF000;
@@ -204,7 +206,31 @@ bool RegisterSample(const std::string& packFolder,
     outSample.cacheKey          = cacheKey;
     outSample.displayOnlySeqNum = displaySeqNum;
     outSample.resource          = audioSample;  // shared_ptr keeps lifetime
-    outSample.samplePtr         = samplePtr;
+    outSample.packed.samplePtr  = samplePtr;
+    // Phase α.7 — honor the resource's tuning when it was specified by the
+    // pack (sample-rate-aware authoring). When SOH::AudioSample default-
+    // constructs it leaves tuning = -1.0f, signaling "inherit vanilla". The
+    // audio thread reads this and only overrides the SoundFontSound's
+    // tuning when the value != -1.0f. Mirrors the AudioSoundFontFactory
+    // pattern at lines 310-315 / 322-327 / 336-341.
+    outSample.packed.tuning     = audioSample->tuning;
+
+    // Diagnostic D1 (per
+    // Claude/Analysis/voice_substitution_intermittent_bug_2026-06-17.md
+    // §"Diagnostic instrumentation plan"). Dumps full SOH::Sample field
+    // contents per loaded sample. Fires once at pack-load time — bounded
+    // log volume (~80 lines per Femme Link pack). Pinpoints the codec /
+    // medium / loop / book / sampleAddr values that the audio synth path
+    // demands at audio_synthesis.c:759-790. SPDLOG game-thread context is
+    // safe (no audio-thread access).
+    SPDLOG_INFO("[VoicePackFmt] \"{}\" -> {}: codec={} medium={} size={} fileSize={} "
+                "sampleAddr={} loop={} book={} tuning={:.4f} isRelocated={}",
+                vrpLabel, sfxKey,
+                (unsigned)samplePtr->codec, (unsigned)samplePtr->medium,
+                samplePtr->size, samplePtr->fileSize,
+                (void*)samplePtr->sampleAddr,
+                (void*)samplePtr->loop, (void*)samplePtr->book,
+                audioSample->tuning, (unsigned)samplePtr->isRelocated);
     return true;
 }
 
@@ -273,7 +299,14 @@ void LoadPackArchive(const std::string& packFolder,
         }
         loaded_sample.vanillaSeqId = vanillaSeqId;
 
-        pack.sampleByVanillaSfxId[vanillaSeqId] = loaded_sample.samplePtr;
+        // Phase α.5 — append-to-vector instead of overwrite, so multiple
+        // VRP samples that translate to the same vanilla sfxId all become
+        // selectable variants (vanilla picks a random variant per emission;
+        // we mirror that in GetSampleOverride). Without this, only the
+        // last-loaded variant gets the override and gameplay falls back to
+        // vanilla for all the others — manifests as intermittent
+        // "sometimes custom, sometimes default" substitution.
+        pack.samplesByVanillaSfxId[vanillaSeqId].push_back(loaded_sample.packed);
         pack.loadedSamples.push_back(std::move(loaded_sample));
         loaded++;
     }
@@ -328,7 +361,7 @@ std::unique_ptr<LoadedPack> LoadPackFromFolder(const std::string& folder) {
 // drop so the audio thread can't observe a dangling Sample* through a
 // concurrent lookup.
 void UnloadPack_Locked(LoadedPack& pack) {
-    pack.sampleByVanillaSfxId.clear();
+    pack.samplesByVanillaSfxId.clear();
     for (const auto& s : pack.loadedSamples) {
         AudioCollection::Instance->RemoveCustomEntry(s.displayOnlySeqNum);
     }
@@ -344,8 +377,14 @@ void UnloadPack_Locked(LoadedPack& pack) {
 namespace SOH {
 namespace VoicePack {
 
+// Phase α.5/α.7 — opaque lookup result carrying sample + tuning. Thread-
+// local storage keeps the returned pointer valid for the calling thread
+// up to the next GetSampleOverride call on that thread (audio thread
+// reads it once per Audio_GetSfxOverride invocation; no cross-call
+// retention needed).
 struct SampleOverride {
     SOH::Sample* sample;
+    float        tuning;
 };
 static thread_local SampleOverride sLookupResult;
 
@@ -364,7 +403,7 @@ void OnAudioModChanged(const std::string& folder) {
     auto pack = LoadPackFromFolder(folder);
     if (!pack) return;
     SPDLOG_INFO("[VoicePack] loaded LOCAL pack \"{}\": {} samples, {} vanilla ids overridden",
-                folder, pack->loadedSamples.size(), pack->sampleByVanillaSfxId.size());
+                folder, pack->loadedSamples.size(), pack->samplesByVanillaSfxId.size());
     gLocalPack = std::move(pack);
 }
 
@@ -384,30 +423,44 @@ void OnPeerAudioModChanged(uint32_t clientId, const std::string& folder) {
     auto pack = LoadPackFromFolder(folder);
     if (!pack) return;
     SPDLOG_INFO("[VoicePack] loaded PEER pack clientId={} \"{}\": {} samples, {} vanilla ids overridden",
-                clientId, folder, pack->loadedSamples.size(), pack->sampleByVanillaSfxId.size());
+                clientId, folder, pack->loadedSamples.size(), pack->samplesByVanillaSfxId.size());
     gPeerPacks[clientId] = std::move(pack);
 }
 
 SampleOverride* GetSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClientId) {
     std::scoped_lock lock(gStateMutex);
 
-    auto lookupInPack = [vanillaSfxId](const LoadedPack* pack) -> SOH::Sample* {
+    // Phase α.5 — variant picker: when the pack has multiple samples for
+    // one vanilla sfxId, pick a pseudo-random variant. Vanilla picks
+    // randomly from fontMap[0]'s soundEffects pool when an sfxKey has
+    // multiple localId variants; this mirrors that behavior so combat
+    // voice doesn't sound monotone. rand() is acceptable here — we hold
+    // gStateMutex and aren't in a tight loop. Future α.7 cleanup may
+    // switch to per-emitter RNG state for reproducibility.
+    auto pickVariant = [vanillaSfxId](const LoadedPack* pack) -> const PackedSample* {
         if (!pack) return nullptr;
-        auto it = pack->sampleByVanillaSfxId.find(vanillaSfxId);
-        return (it != pack->sampleByVanillaSfxId.end()) ? it->second : nullptr;
+        auto it = pack->samplesByVanillaSfxId.find(vanillaSfxId);
+        if (it == pack->samplesByVanillaSfxId.end() || it->second.empty()) {
+            return nullptr;
+        }
+        const auto& variants = it->second;
+        size_t idx = (variants.size() == 1) ? 0
+                     : static_cast<size_t>(std::rand()) % variants.size();
+        return &variants[idx];
     };
 
     const uint32_t ownId = Anchor_GetLocalEmitterClientId();
-    SOH::Sample* hit = nullptr;
+    const PackedSample* hit = nullptr;
     if (emitterClientId == 0 || emitterClientId == ownId) {
-        hit = lookupInPack(gLocalPack.get());
+        hit = pickVariant(gLocalPack.get());
     } else {
         auto it = gPeerPacks.find(emitterClientId);
-        hit = lookupInPack(it != gPeerPacks.end() ? it->second.get() : nullptr);
+        hit = pickVariant(it != gPeerPacks.end() ? it->second.get() : nullptr);
     }
 
     if (hit == nullptr) return nullptr;
-    sLookupResult.sample = hit;
+    sLookupResult.sample = hit->samplePtr;
+    sLookupResult.tuning = hit->tuning;
     return &sLookupResult;
 }
 
@@ -423,9 +476,15 @@ extern "C" void VoicePack_OnAudioModChanged(const char* folder) {
     SOH::VoicePack::OnAudioModChanged(folder ? std::string(folder) : std::string());
 }
 
-extern "C" void* Anchor_GetVoiceSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClientId) {
+extern "C" void* Anchor_GetVoiceSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClientId,
+                                                float* outTuning) {
     auto* override = SOH::VoicePack::GetSampleOverride(vanillaSfxId, emitterClientId);
-    return override ? override->sample : nullptr;
+    if (override == nullptr) {
+        if (outTuning) *outTuning = -1.0f;
+        return nullptr;
+    }
+    if (outTuning) *outTuning = override->tuning;
+    return override->sample;
 }
 
 extern "C" uint16_t VoicePack_GetReplacement(uint16_t seqId) {

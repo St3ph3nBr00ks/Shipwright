@@ -354,10 +354,13 @@ void Audio_ProcessSoundRequest(void) {
             // Phase α.4a/b — diagnostic: confirm the substitution table
             // would return a hit for this emission. Tests the lookup path
             // independent of the audio-thread interception (α.4c) which
-            // is the actual playback consumer.
-            void* override = Anchor_GetVoiceSampleOverride(req->sfxId, req->emitterClientId);
-            LUSLOG_INFO("[VoicePackLookup] sfxId=0x%04X emitter=%u override=%s",
-                        req->sfxId, req->emitterClientId, override ? "FOUND" : "none");
+            // is the actual playback consumer. Phase α.5 variant-pool
+            // call site: each lookup may return a different sample variant
+            // for the same (sfxId, emitter) pair.
+            float diagTuning = -1.0f;
+            void* override = Anchor_GetVoiceSampleOverride(req->sfxId, req->emitterClientId, &diagTuning);
+            LUSLOG_INFO("[VoicePackLookup] sfxId=0x%04X emitter=%u override=%s tuning=%.4f",
+                        req->sfxId, req->emitterClientId, override ? "FOUND" : "none", diagTuning);
         }
     }
 }

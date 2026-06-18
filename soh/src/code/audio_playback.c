@@ -453,14 +453,55 @@ SoundFontSound* Audio_GetSfxOverride(struct SequenceChannel* channel, s32 fontId
     // matches the substitution table's key (which was populated from
     // FindSeqIdBySfxKey returning the full vanilla sfxId like 0x6820).
     u16 vanillaSfxId = ((u16)channel->emitterSfxBank << 12) | 0x0800 | (sfxId & 0xFF);
+    // Phase α.7 — request pack's tuning out-param. -1.0f signals "use
+    // vanilla tuning"; any other value is the pack-author-specified
+    // tuning (typically for non-vanilla sample rates).
+    float packTuning = -1.0f;
     void* customSamplePtr =
-        Anchor_GetVoiceSampleOverride(vanillaSfxId, channel->emitterClientId);
+        Anchor_GetVoiceSampleOverride(vanillaSfxId, channel->emitterClientId, &packTuning);
+
+    // Diagnostic D2 (per
+    // Claude/Analysis/voice_substitution_intermittent_bug_2026-06-17.md
+    // §"Diagnostic instrumentation plan"). One-shot per unique (channel,
+    // sfxId, emitter) tuple via a 32-entry static ring buffer of hashes.
+    // Bounded log volume (≤32 lines per session). Audio-thread-safe — no
+    // CVar lookup, no allocation, no mutex; LUSLOG_INFO uses spdlog
+    // which is thread-safe by default. Confirms: (a) audio thread reaches
+    // this site for voice emissions, (b) override gate result, (c) actual
+    // codec value the synth will see at audio_synthesis.c:830.
+    {
+        static u32 sSeenHashes[32];
+        static u8  sSeenWrPos = 0;
+        u32 hash = ((u32)(uintptr_t)channel >> 4) ^ ((u32)sfxId * 31u) ^
+                   (channel->emitterClientId * 17u);
+        bool already = false;
+        for (int i = 0; i < 32; i++) {
+            if (sSeenHashes[i] == hash) { already = true; break; }
+        }
+        if (!already) {
+            sSeenHashes[sSeenWrPos++ & 31] = hash;
+            SoundFontSample* cs = (SoundFontSample*)customSamplePtr;
+            LUSLOG_INFO("[VoicePackPlay] sfxId=0x%X chBank=%u override=%s sample=%p "
+                        "codec=%u medium=%u sampleAddr=%p loop=%p book=%p packTuning=%.4f vanillaTuning=%.4f",
+                        sfxId, (unsigned)channel->emitterSfxBank,
+                        customSamplePtr ? "FOUND" : "none",
+                        customSamplePtr,
+                        cs ? (unsigned)cs->codec : 99u,
+                        cs ? (unsigned)cs->medium : 99u,
+                        cs ? (void*)cs->sampleAddr : NULL,
+                        cs ? (void*)cs->loop : NULL,
+                        cs ? (void*)cs->book : NULL,
+                        packTuning,
+                        vanilla->tuning);
+        }
+    }
+
     if (customSamplePtr == NULL) {
         return vanilla;
     }
     // Hit. Populate the per-channel override slot and return its address.
     channel->emitterOverrideSlot.sample = (SoundFontSample*)customSamplePtr;
-    channel->emitterOverrideSlot.tuning = vanilla->tuning;
+    channel->emitterOverrideSlot.tuning = (packTuning != -1.0f) ? packTuning : vanilla->tuning;
     return &channel->emitterOverrideSlot;
 }
 

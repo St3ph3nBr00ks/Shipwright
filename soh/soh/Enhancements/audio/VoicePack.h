@@ -84,7 +84,20 @@ void VoicePack_OnAudioModChanged(const char* folder);
 // mutex. The audio-thread caller casts the returned void* to
 // SoundFontSample* — same memory layout as SOH::Sample (verified via
 // AudioSample.h:22 + z64audio.h:140 cross-reference).
-void* Anchor_GetVoiceSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClientId);
+//
+// Phase α.5 — when multiple sample variants share the same vanilla sfxId
+// (vanilla emits these via random pick in fontMap[0]'s soundEffects pool),
+// the override picks a variant pseudo-randomly per call. Matches vanilla's
+// random-variant cadence (see SOH::AudioSample sample-rate handling).
+//
+// Phase α.7 — outTuning receives the sample's tuning if specified by the
+// resource (SOH::AudioSample::tuning != -1.0f), else -1.0f signaling
+// "inherit vanilla tuning". Callers should default to vanilla tuning when
+// outTuning is -1.0f or NULL. Honoring the pack's own tuning is critical
+// for samples with non-vanilla sample rates — otherwise playback is at
+// the wrong pitch.
+void* Anchor_GetVoiceSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClientId,
+                                     float* outTuning);
 
 // LEGACY — see SOH::VoicePack::GetReplacement above. Always returns 0.
 uint16_t VoicePack_GetReplacement(uint16_t seqId);
