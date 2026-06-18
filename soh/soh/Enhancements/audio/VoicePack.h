@@ -102,6 +102,33 @@ void* Anchor_GetVoiceSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClien
 // LEGACY — see SOH::VoicePack::GetReplacement above. Always returns 0.
 uint16_t VoicePack_GetReplacement(uint16_t seqId);
 
+// Per-pack tuning override (#83/#84). Game-thread refresh writes the
+// current CVAR_AUDIO("VoicePackTuningMultiplier") value into a cached
+// atomic; audio-thread Anchor_GetVoicePackTuningMultiplier reads it.
+//
+// Multiplier is applied at Audio_GetSfxOverride substitution time to the
+// final tuning (baseTuning * multiplier). 1.0f = identity (no change);
+// 0.85 = ~15% lower pitch; 1.15 = ~15% higher. Useful when the pack's
+// samples are at a non-vanilla sample rate and the binary VRP format
+// doesn't carry per-sample tuning metadata (Phase α.7 limitation).
+//
+// Cached value is float-aligned, so write/read is atomic on x86-64 even
+// without explicit atomics (we use std::atomic<float> for portability).
+// Worst-case tearing manifests as one frame of slightly wrong pitch.
+void  Anchor_RefreshVoicePackTuningMultiplier(void);
+float Anchor_GetVoicePackTuningMultiplier(void);
+
+// Game-thread reconciliation: ensures gLocalPack matches
+// CVAR_REMOTE_ANCHOR("AudioMod"). Cheap no-op when already in sync;
+// triggers OnAudioModChanged when divergent. Called from
+// OnGameFrameUpdate to cover startup-load (CVar restored from
+// shipofharkinian.json but UI dropdown hasn't fired) and console-set
+// paths that bypass the dropdown callback.
+//
+// See Claude/Analysis/voice_pack_startup_reconcile_2026-06-18.md for
+// the full root-cause analysis (log 571 P2 startup gap).
+void Anchor_ReconcileLocalVoicePack(void);
+
 // Audio-thread dedup reset hook (#83/#84 diagnostic improvement).
 // Audio_GetSfxOverride keeps a 32-entry static ring buffer of "seen"
 // (channel, sfxId, emitter) hashes to bound diagnostic log volume.

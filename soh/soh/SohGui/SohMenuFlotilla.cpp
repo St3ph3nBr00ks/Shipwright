@@ -246,6 +246,29 @@ void SohMenu::AddMenuFlotilla() {
             }
         });
 
+    // Phase α.7+ — per-pack tuning multiplier. Applied at substitution
+    // time to the final sample tuning. 1.0 = identity. Useful when a
+    // voice pack's samples are at a non-vanilla sample rate (the binary
+    // VRP _META format doesn't carry per-sample tuning metadata, so by
+    // default the pack inherits vanilla tuning at substitution time).
+    // Applies to BOTH local and cross-client substitution (this client's
+    // listener-side adjustment, not broadcast over the wire).
+    AddWidget(path, "Voice Pack Pitch: %.2fx##Flotilla", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar(CVAR_AUDIO("VoicePackTuningMultiplier"))
+        .Options(FloatSliderOptions()
+                     .Format("%.2f")
+                     .Min(0.4f)
+                     .Max(2.5f)
+                     .DefaultValue(1.0f)
+                     .Tooltip(
+                         "Tunes voice-pack sample playback by multiplying the "
+                         "tuning ratio. 1.0x = identity (pack plays as authored). "
+                         "Lower values slow down + lower pitch; higher values "
+                         "speed up + raise pitch. Useful when a pack's samples "
+                         "are at a non-vanilla sample rate. Adjustment is "
+                         "listener-side only (not synced over the wire); each "
+                         "player can tune to their preference."));
+
     AddWidget(path, "AI Player Follower (non-host only)", WIDGET_SEPARATOR_TEXT);
 
     // AI Player Follower — dev testing tool, non-host only. Activates the P2

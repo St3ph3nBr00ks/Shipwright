@@ -552,7 +552,13 @@ SoundFontSound* Audio_GetSfxOverride(struct SequenceChannel* channel, s32 fontId
     }
     // Hit. Populate the per-channel override slot and return its address.
     channel->emitterOverrideSlot.sample = (SoundFontSample*)customSamplePtr;
-    channel->emitterOverrideSlot.tuning = (packTuning != -1.0f) ? packTuning : vanilla->tuning;
+    // Phase α.7+ — per-pack tuning multiplier. Applied at substitution
+    // time: final tuning = base * multiplier. Multiplier is cached on the
+    // game thread (Anchor_RefreshVoicePackTuningMultiplier) and read here
+    // via atomic load (audio-thread safe). Default 1.0 = identity, so
+    // unconditional multiply is a no-op when the user hasn't tuned.
+    float baseTuning = (packTuning != -1.0f) ? packTuning : vanilla->tuning;
+    channel->emitterOverrideSlot.tuning = baseTuning * Anchor_GetVoicePackTuningMultiplier();
     return &channel->emitterOverrideSlot;
 }
 

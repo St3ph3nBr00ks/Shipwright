@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 
+#include <atomic>   // Anchor_GetVoicePackTuningMultiplier audio-thread read
 #include <cstdlib>  // std::rand for variant pool (Phase α.5)
 #include <cstring>
 #include <filesystem>
@@ -20,6 +21,7 @@
 #include <vector>
 
 #include "soh/OTRGlobals.h"  // appShortName
+#include "soh/cvar_prefixes.h"  // CVAR_AUDIO
 #include "soh/resource/type/AudioSample.h"  // SOH::AudioSample + SOH::Sample
 
 // Voice-pack loader (B2) — Phase α.4a/b — multi-pack + lookup.
@@ -81,6 +83,13 @@ std::unordered_map<uint32_t, std::unique_ptr<LoadedPack>>  gPeerPacks;
 std::unordered_map<std::string, std::string>               gDefaultTranslation;
 bool                                                       gDefaultTranslationLoaded = false;
 uint16_t                                                   gNextDisplaySeqNum        = kVoicePackDisplaySeqNumBase;
+
+// Phase α.7+ — per-pack tuning override. Game thread polls the CVar each
+// frame into this cached atomic; audio thread reads via the C-callable
+// shim Anchor_GetVoicePackTuningMultiplier. Multiplier is applied at
+// substitution time to (packTuning != -1 ? packTuning : vanilla->tuning).
+// 1.0 = identity. See VoicePack.h for rationale.
+std::atomic<float>                                         gVoicePackTuningMultiplier{1.0f};
 
 // ---------------------------------------------------------------------------
 // Translation table I/O
@@ -495,4 +504,51 @@ extern "C" void* Anchor_GetVoiceSampleOverride(uint16_t vanillaSfxId, uint32_t e
 
 extern "C" uint16_t VoicePack_GetReplacement(uint16_t seqId) {
     return SOH::VoicePack::GetReplacement(seqId);
+}
+
+// Phase α.7+ — game-thread poll. Reads CVAR_AUDIO("VoicePackTuningMultiplier")
+// and caches into the atomic. Called from the OnGameFrameUpdate hook in
+// HookHandlers.cpp (works in single-player and multiplayer; unconditional).
+// Cost: one CVarGetFloat + one atomic store per frame — negligible.
+//
+// Range guard: a multiplier <= 0 would make samples freeze or play at
+// negative rate; clamp to 1.0 (identity) defensively. The UI slider's
+// .Min bound also enforces this on the user-facing side.
+extern "C" void Anchor_RefreshVoicePackTuningMultiplier(void) {
+    float v = CVarGetFloat(CVAR_AUDIO("VoicePackTuningMultiplier"), 1.0f);
+    if (v <= 0.0f) {
+        v = 1.0f;
+    }
+    gVoicePackTuningMultiplier.store(v, std::memory_order_relaxed);
+}
+
+// Audio-thread read. Called from Audio_GetSfxOverride at substitution
+// time. Returns 1.0 if never refreshed (cache default), so the audio
+// thread can multiply unconditionally without an explicit "is enabled"
+// branch (1.0 is identity).
+extern "C" float Anchor_GetVoicePackTuningMultiplier(void) {
+    return gVoicePackTuningMultiplier.load(std::memory_order_relaxed);
+}
+
+// Phase α.7+ — game-thread reconciliation: ensures gLocalPack matches
+// CVAR_REMOTE_ANCHOR("AudioMod"). Cheap no-op when already in sync;
+// triggers OnAudioModChanged when divergent. Called from
+// OnGameFrameUpdate to cover startup-load (CVar restored from
+// shipofharkinian.json but UI dropdown hasn't fired) and console-set
+// paths that bypass the dropdown callback.
+//
+// See Claude/Analysis/voice_pack_startup_reconcile_2026-06-18.md for
+// the full root-cause analysis (log 571 P2 startup gap).
+extern "C" void Anchor_ReconcileLocalVoicePack(void) {
+    const char* cvarFolder = CVarGetString(CVAR_REMOTE_ANCHOR("AudioMod"), "");
+    std::string desired = cvarFolder ? cvarFolder : "";
+    std::string current;
+    {
+        std::lock_guard<std::recursive_mutex> lock(gStateMutex);
+        current = gLocalPack ? gLocalPack->folderName : "";
+    }
+    if (desired == current) {
+        return;  // already in sync — common path, microseconds
+    }
+    SOH::VoicePack::OnAudioModChanged(desired);
 }
