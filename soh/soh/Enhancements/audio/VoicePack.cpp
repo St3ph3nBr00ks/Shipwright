@@ -41,6 +41,7 @@
 // entries) — no dangling pointers.
 
 extern "C" uint32_t Anchor_GetLocalEmitterClientId(void);
+extern "C" void     Anchor_ResetVoicePackPlayDedup(void);  // Defined in audio_playback.c
 
 namespace {
 
@@ -396,6 +397,10 @@ void OnAudioModChanged(const std::string& folder) {
         UnloadPack_Locked(*gLocalPack);
         gLocalPack.reset();
     }
+    // Fix 2 (Claude/Analysis/voice_substitution_root_cause_2026-06-17.md)
+    // — clear the audio-thread [VoicePackPlay] dedup buffer so post-load
+    // emissions log fresh, not "I've seen this hash pre-load" suppressed.
+    Anchor_ResetVoicePackPlayDedup();
     if (folder.empty()) {
         SPDLOG_INFO("[VoicePack] Default Voices selected (local)");
         return;
@@ -416,6 +421,7 @@ void OnPeerAudioModChanged(uint32_t clientId, const std::string& folder) {
         UnloadPack_Locked(*it->second);
         gPeerPacks.erase(it);
     }
+    Anchor_ResetVoicePackPlayDedup();  // Fix 2 — see OnAudioModChanged
     if (folder.empty()) {
         SPDLOG_INFO("[VoicePack] Default Voices selected (peer clientId={})", clientId);
         return;

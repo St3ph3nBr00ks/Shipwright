@@ -102,6 +102,21 @@ void* Anchor_GetVoiceSampleOverride(uint16_t vanillaSfxId, uint32_t emitterClien
 // LEGACY — see SOH::VoicePack::GetReplacement above. Always returns 0.
 uint16_t VoicePack_GetReplacement(uint16_t seqId);
 
+// Audio-thread dedup reset hook (#83/#84 diagnostic improvement).
+// Audio_GetSfxOverride keeps a 32-entry static ring buffer of "seen"
+// (channel, sfxId, emitter) hashes to bound diagnostic log volume.
+// On pack load / unload, every prior dedup answer is stale: a sfxId
+// that previously logged override=none might now hit, and vice
+// versa. VoicePack::OnAudioModChanged / OnPeerAudioModChanged call
+// this to clear the buffer so post-pack-load emissions log fresh.
+//
+// Race-safety: only writes to the audio thread's file-static array.
+// Game thread invokes; audio thread reads. The race window is bounded
+// to one emission per channel; worst case a single stale log line.
+// No correctness impact on audio playback (the dedup affects logging
+// only, not substitution).
+void Anchor_ResetVoicePackPlayDedup(void);
+
 #ifdef __cplusplus
 }
 #endif

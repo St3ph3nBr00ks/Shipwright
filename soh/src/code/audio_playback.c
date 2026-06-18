@@ -373,6 +373,26 @@ Drum* Audio_GetDrum(s32 fontId, s32 drumId) {
     return drum;
 }
 
+// Flotilla #83/#84 — file-static dedup ring buffer for the audio-thread
+// [VoicePackPlay] diagnostic log. Cleared by Anchor_ResetVoicePackPlayDedup
+// when VoicePack lifecycle changes (pack load/unload) so post-load
+// emissions log fresh values instead of being suppressed by pre-load
+// "I've seen this hash" entries.
+//
+// Audio thread reads/writes (under no lock); game thread can clear via
+// the reset hook. The race window is bounded to one in-flight emission
+// log; worst case is one stale or missing log line. No correctness
+// impact on audio substitution (the dedup affects logging only).
+static u32 sVoicePackPlaySeenHashes[32];
+static u8  sVoicePackPlaySeenWrPos  = 0;
+
+void Anchor_ResetVoicePackPlayDedup(void) {
+    for (int i = 0; i < 32; i++) {
+        sVoicePackPlaySeenHashes[i] = 0;
+    }
+    sVoicePackPlaySeenWrPos = 0;
+}
+
 SoundFontSound* Audio_GetSfx(s32 fontId, s32 sfxId) {
     SoundFontSound* sfx = NULL;
 
@@ -461,36 +481,63 @@ SoundFontSound* Audio_GetSfxOverride(struct SequenceChannel* channel, s32 fontId
         Anchor_GetVoiceSampleOverride(vanillaSfxId, channel->emitterClientId, &packTuning);
 
     // Diagnostic D2 (per
-    // Claude/Analysis/voice_substitution_intermittent_bug_2026-06-17.md
-    // §"Diagnostic instrumentation plan"). One-shot per unique (channel,
-    // sfxId, emitter) tuple via a 32-entry static ring buffer of hashes.
-    // Bounded log volume (≤32 lines per session). Audio-thread-safe — no
-    // CVar lookup, no allocation, no mutex; LUSLOG_INFO uses spdlog
-    // which is thread-safe by default. Confirms: (a) audio thread reaches
-    // this site for voice emissions, (b) override gate result, (c) actual
-    // codec value the synth will see at audio_synthesis.c:830.
+    // Claude/Analysis/voice_substitution_root_cause_2026-06-17.md).
+    // One-shot per unique (channel, sfxId, emitter) tuple via a 32-entry
+    // static ring buffer of hashes. Bounded log volume (≤32 lines per
+    // session). Audio-thread-safe — no CVar lookup, no allocation, no
+    // mutex; LUSLOG_INFO uses spdlog which is thread-safe by default.
+    //
+    // Fix 2 (this iteration) — ring buffer state can be cleared by
+    // calling Anchor_ResetVoicePackPlayDedup() from the game thread
+    // (VoicePack does so on pack load/unload). Without that, every
+    // sfxId emitted pre-pack-load gets a stale "I've seen this"
+    // entry that suppresses post-load logging.
+    //
+    // Fix 3 (this iteration) — log line also dumps loop / book content
+    // snapshot so we can validate ADPCM metadata is plausible
+    // (loop.count <= 1 typical; book predictor coefficients fit in
+    // s16 signed range). Garbage values here would explain
+    // garbled-audio playback.
     {
-        static u32 sSeenHashes[32];
-        static u8  sSeenWrPos = 0;
+        // Use the file-static ring buffer (see top of file) so it can be
+        // cleared by Anchor_ResetVoicePackPlayDedup on pack lifecycle
+        // events.
         u32 hash = ((u32)(uintptr_t)channel >> 4) ^ ((u32)sfxId * 31u) ^
                    (channel->emitterClientId * 17u);
         bool already = false;
         for (int i = 0; i < 32; i++) {
-            if (sSeenHashes[i] == hash) { already = true; break; }
+            if (sVoicePackPlaySeenHashes[i] == hash) { already = true; break; }
         }
         if (!already) {
-            sSeenHashes[sSeenWrPos++ & 31] = hash;
+            sVoicePackPlaySeenHashes[sVoicePackPlaySeenWrPos++ & 31] = hash;
             SoundFontSample* cs = (SoundFontSample*)customSamplePtr;
+            // Loop / book content snapshot — read defensively since
+            // some samples may have NULL loop/book even with codec=0
+            // (factory bug class). If pointers are non-NULL, read the
+            // first few fields; otherwise show zeros.
+            u32 loopStart  = (cs && cs->loop) ? cs->loop->start    : 0;
+            u32 loopEnd    = (cs && cs->loop) ? cs->loop->loopEnd  : 0;
+            u32 loopCount  = (cs && cs->loop) ? cs->loop->count    : 0;
+            s32 bookOrder  = (cs && cs->book) ? cs->book->order  : 0;
+            s32 bookNumPred= (cs && cs->book) ? cs->book->npredictors : 0;
+            s16 book0      = (cs && cs->book && cs->book->book) ? cs->book->book[0] : 0;
+            s16 book1      = (cs && cs->book && cs->book->book) ? cs->book->book[1] : 0;
             LUSLOG_INFO("[VoicePackPlay] sfxId=0x%X chBank=%u override=%s sample=%p "
-                        "codec=%u medium=%u sampleAddr=%p loop=%p book=%p packTuning=%.4f vanillaTuning=%.4f",
+                        "codec=%u medium=%u size=%u sampleAddr=%p loop=%p book=%p "
+                        "loop.start=%u loop.end=%u loop.count=%u "
+                        "book.order=%d book.npred=%d book[0,1]={%d,%d} "
+                        "packTuning=%.4f vanillaTuning=%.4f",
                         sfxId, (unsigned)channel->emitterSfxBank,
                         customSamplePtr ? "FOUND" : "none",
                         customSamplePtr,
                         cs ? (unsigned)cs->codec : 99u,
                         cs ? (unsigned)cs->medium : 99u,
+                        cs ? cs->size : 0u,
                         cs ? (void*)cs->sampleAddr : NULL,
                         cs ? (void*)cs->loop : NULL,
                         cs ? (void*)cs->book : NULL,
+                        loopStart, loopEnd, loopCount,
+                        bookOrder, bookNumPred, (int)book0, (int)book1,
                         packTuning,
                         vanilla->tuning);
         }
