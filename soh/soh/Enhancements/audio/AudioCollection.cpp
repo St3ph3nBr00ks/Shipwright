@@ -347,6 +347,38 @@ std::string AudioCollection::GetCvarLockKey(std::string sfxKey) {
     return prefix + sfxKey + ".locked";
 }
 
+// --- VoicePack (issue #83, #84) helpers -----------------------------------
+
+uint16_t AudioCollection::FindSeqIdBySfxKey(const std::string& sfxKey) const {
+    for (const auto& [seqId, info] : sequenceMap) {
+        if (info.sfxKey == sfxKey) {
+            return seqId;
+        }
+    }
+    return 0;
+}
+
+void AudioCollection::AddCustomVoiceEntry(uint16_t seqNum, const std::string& label,
+                                           const std::string& sfxKey) {
+    // canBeUsedAsReplacement=false hides these entries from the Audio Editor's
+    // Voices tab dropdown.  The actual playback substitution path is the
+    // D4+D7 hybrid (per-emitter sample override at Audio_GetSfx interception),
+    // not GetReplacementSequence — so users selecting these entries via the
+    // editor would be a dead end (and previously crashed the SFX dispatch
+    // for 0xF000+ seqNums).  Registration here keeps the sequenceMap honest
+    // for any future read-side consumers (Audio Editor diagnostic display,
+    // log inspection, debug tools).
+    SequenceInfo info = { seqNum, label, sfxKey, SEQ_VOICE,
+                          /*canBeReplaced=*/false, /*canBeUsedAsReplacement=*/false };
+    sequenceMap[seqNum] = info;  // insert_or_assign semantics
+}
+
+void AudioCollection::RemoveCustomEntry(uint16_t seqNum) {
+    sequenceMap.erase(seqNum);
+}
+
+// --------------------------------------------------------------------------
+
 void AudioCollection::AddToCollection(char* otrPath, uint16_t seqNum) {
     std::string fileName = std::filesystem::path(otrPath).filename().string();
     std::vector<std::string> splitFileName = StringHelper::Split(fileName, "_");

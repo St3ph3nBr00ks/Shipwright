@@ -19,6 +19,7 @@
 #include "Common/DropAdapters/ModalOfferAdapter.h"  // MODAL_OFFER_CLAIMED match — adapter-identity check
 #include "Common/DropAdapters/ModalPhantomAdapter.h"  // Plan B step 5 — modal-phantom adapter (Bug B fix)
 #include "WorldStateSync/WorldStateSync.h"  // Pillar C v1
+#include "soh/Enhancements/audio/VoicePack.h"  // Anchor_RefreshVoicePackTuningMultiplier (#83/#84 α.7+)
 #include <algorithm>  // std::sort, std::min — title-screen peer formation
 #include <chrono>
 #include <libultraship/libultraship.h>
@@ -397,6 +398,22 @@ void Anchor::RegisterHooks() {
                 Anchor_InvaderDrawStateResetOnSceneTransition();
             }
             sLastPauseState = curr;
+        });
+
+    // Phase α.7+ — voice-pack game-thread polls (unconditional; work
+    // offline + multiplayer). Both calls are cheap no-ops in the steady
+    // state:
+    //   - RefreshVoicePackTuningMultiplier: one CVarGetFloat + atomic
+    //     store; cached value drives the audio-thread multiply.
+    //   - ReconcileLocalVoicePack: one CVarGetString + mutex acquire +
+    //     string compare. Triggers OnAudioModChanged ONLY when divergent
+    //     (startup with non-empty CVar restored from disk, console set,
+    //     or any other path that bypasses the dropdown's CustomFunction).
+    // See Claude/Analysis/voice_pack_startup_reconcile_2026-06-18.md.
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(
+        []() {
+            Anchor_RefreshVoicePackTuningMultiplier();
+            Anchor_ReconcileLocalVoicePack();
         });
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {

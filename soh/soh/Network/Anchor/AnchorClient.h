@@ -190,6 +190,11 @@ typedef struct AnchorClient {
 
     // Multiplayer cosmetic sync
     std::string customModelFilename;                    // folder name of remote client's coop pack, or ""
+    // Voice pack selection (B1 plumbing — issue #83, #84). Folder name of
+    // remote client's voice pack under player-voices/, or "" for vanilla.
+    // B2 (local preload + per-emitter substitution) and B3 (PLAYER_SFX
+    // remote routing) layer on top of this field.
+    std::string audioModFilename;
     std::shared_ptr<SOH::Skeleton> customSkeleton;      // keeps loaded skeleton alive; nullptr = vanilla
     std::string lastAppliedModelFilename;               // folder that was last passed to ApplyCustomSkeletonToDummyPlayer;
                                                         // suppresses per-frame retries when the lookup fails

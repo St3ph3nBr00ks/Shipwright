@@ -7,6 +7,7 @@
 #include <ship/Context.h>
 #include <ship/resource/archive/Archive.h>
 #include <ship/resource/ResourceManager.h>
+#include <cstring>  // std::memset (zero-init guard in V2 binary factory)
 #define DR_WAV_IMPLEMENTATION
 #include <dr_wav.h>
 
@@ -198,6 +199,23 @@ ResourceFactoryBinaryAudioSampleV2::ReadResource(std::shared_ptr<Ship::File> fil
     }
 
     auto audioSample = std::make_shared<AudioSample>(initData);
+
+    // Flotilla #83/#84 voice-pack diagnostics turned up `fileSize=garbage`
+    // in pack-loaded samples (log 566). The V2 binary format does NOT
+    // serialize `fileSize` (only the XML+WAV factory at line ~294 sets
+    // it), so the field was reading whatever heap data happened to land
+    // in that struct member after std::make_shared.
+    //
+    // Zero-init the Sample POD before populating from the stream so
+    // every field the V2 format omits (currently `fileSize`) defaults
+    // to 0 instead of stale memory. This also matches the XML factory's
+    // existing memset at line ~252. Safe for vanilla — every field V2
+    // does populate gets overwritten below; vanilla never reads
+    // fileSize for ADPCM playback (only for OPUS, which is not used by
+    // vanilla samples). Future V3+ schema additions safely default to
+    // 0 too.
+    std::memset(&audioSample->sample, 0, sizeof(audioSample->sample));
+
     auto reader = std::get<std::shared_ptr<Ship::BinaryReader>>(file->Reader);
 
     audioSample->sample.codec = reader->ReadUByte();

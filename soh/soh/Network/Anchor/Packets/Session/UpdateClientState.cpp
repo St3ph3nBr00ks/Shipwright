@@ -2,6 +2,7 @@
 #include "soh/Network/Anchor/EnemyNetId.h"  // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "soh/Network/Anchor/HorseNetId.h"  // #264 horse re-emit on scene change
 #include "soh/cvar_prefixes.h"  // CVAR_ENHANCEMENT — #264 diagnostic gate
+#include "soh/Enhancements/audio/VoicePack.h"  // #83/#84 Phase α.4 — peer pack load/unload
 #include "soh/Network/Anchor/AIDirector/Director.h"  // step 6: forward reactive events
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 #include "soh/Network/Anchor/Common/ItemEligibility.h"  // Phase 2 — eligibility bitmap
@@ -34,6 +35,19 @@ static std::string GetLocalModelFilename() {
     return std::string(chosen);
 }
 
+// B1 — voice-pack folder name the local player selected, or "" for
+// default vanilla voices. Same no-existence-check rationale as
+// GetLocalModelFilename above (VirtualBox shared-folder edge case).
+// Consumers (B2 preload, B3 PLAYER_SFX routing) read this from
+// AnchorClient on the remote side.
+static std::string GetLocalAudioModFilename() {
+    const char* chosen = CVarGetString(CVAR_REMOTE_ANCHOR("AudioMod"), "");
+    if (chosen == nullptr || chosen[0] == '\0') {
+        return "";
+    }
+    return std::string(chosen);
+}
+
 /**
  * UPDATE_CLIENT_STATE
  *
@@ -56,6 +70,13 @@ nlohmann::json Anchor::PrepClientState() {
     std::string localModel = GetLocalModelFilename();
     SPDLOG_INFO("[CoopModel] PrepClientState: customModelFilename=\"{}\"", localModel);
     payload["customModelFilename"] = localModel;
+
+    // B1 — broadcast the selected voice pack. Data plumbing only; no
+    // audio side-effect yet. B2 wires the local substitution; B3 the
+    // remote PLAYER_SFX routing.
+    std::string localAudio = GetLocalAudioModFilename();
+    SPDLOG_INFO("[CoopVoice] PrepClientState: audioModFilename=\"{}\"", localAudio);
+    payload["audioModFilename"] = localAudio;
     payload["followerActive"] = IsFollowerActive();
     payload["sceneSpawnEpoch"] = sceneSpawnEpoch;
     payload["isClimbing"] = IsLocalPlayerClimbing();
@@ -180,6 +201,28 @@ void Anchor::HandlePacket_UpdateClientState(nlohmann::json payload) {
             for (auto& [type, schemaVal] : payload["state"]["maxSchema"].items()) {
                 if (schemaVal.is_number_integer()) {
                     clients[clientId].peerMaxSchema[type] = schemaVal.get<int>();
+                }
+            }
+        }
+
+        // Voice-pack peer lifecycle (#83/#84 Phase α.4). Local mirror of
+        // the peer's audioModFilename selection. On transition: load the
+        // peer's pack into gPeerPacks[clientId] (D7 cache-isolation + D4
+        // substitution-table population) so this client's audio thread can
+        // play remote voices using the sender's pack samples once Phase
+        // α.4c wires the Audio_GetSfx interception.
+        if (payload["state"].contains("audioModFilename")) {
+            std::string newAudio = payload["state"]["audioModFilename"].get<std::string>();
+            if (clients[clientId].audioModFilename != newAudio) {
+                SPDLOG_INFO("[CoopVoice] UpdateClientState clientId={}: audio \"{}\" -> \"{}\"",
+                            clientId, clients[clientId].audioModFilename, newAudio);
+                clients[clientId].audioModFilename = newAudio;
+                // Trigger peer-pack load/unload. Skip self — local pack is
+                // managed by the dropdown handler. clientId == ownClientId
+                // shouldn't happen for incoming packets in practice but
+                // guard defensively.
+                if (clientId != ownClientId) {
+                    SOH::VoicePack::OnPeerAudioModChanged(clientId, newAudio);
                 }
             }
         }

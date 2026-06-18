@@ -43,5 +43,13 @@ void Anchor::HandlePacket_PlayerSfx(nlohmann::json payload) {
         return;
     }
 
+    // Phase α.6 — propagate sending peer's clientId into the emitter-context
+    // global before Player_PlaySfx so Audio_PlaySoundGeneral captures it into
+    // the SoundRequest. DummyPlayer.actor->id != ACTOR_PLAYER, so Player_PlaySfx's
+    // own ACTOR_PLAYER gate (z_actor.c:2254) won't overwrite this value.
+    // Player_PlaySfx resets the global to 0 unconditionally (z_actor.c:2274),
+    // so no leakage to subsequent unrelated emissions.
+    gAnchorCurrentEmitterClientId = clientId;
+
     Player_PlaySfx((Actor*)clients[clientId].player, sfxId);
 }

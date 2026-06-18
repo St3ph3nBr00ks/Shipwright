@@ -3,6 +3,7 @@
 #include "vt.h"
 
 #include "soh/Enhancements/audio/AudioEditor.h"
+#include "soh/Enhancements/audio/VoicePack.h"  // Anchor_GetVoiceSampleOverride (#83/#84 α.4)
 
 typedef struct {
     /* 0x00 */ u16 sfxId;
@@ -11,7 +12,8 @@ typedef struct {
     /* 0x0C */ f32* freqScale;
     /* 0x10 */ f32* vol;
     /* 0x14 */ s8* reverbAdd;
-} SoundRequest; // size = 0x18
+    /* 0x18 */ u32 emitterClientId;  // Flotilla #83/#84 voice routing — owner of this emission, or 0 if vanilla / no Anchor context.
+} SoundRequest; // size = 0x1C
 
 typedef struct {
     /* 0x00 */ f32 value;
@@ -56,6 +58,22 @@ u8 gAudioSfxSwapMode[10];
 // sSoundRequests ring buffer endpoints. read index <= write index, wrapping around mod 256.
 u8 sSoundRequestWriteIndex = 0;
 u8 sSoundRequestReadIndex = 0;
+
+// Flotilla custom voice routing (#83/#84) — game-thread context carrying the
+// clientId of whoever's emitting the next Audio_PlaySoundGeneral. Set by
+// Player_PlaySfx (and any other voice-emission wrapper) before the call;
+// reset to 0 after. Read by Audio_PlaySoundGeneral when populating
+// SoundRequest::emitterClientId. Threaded through the audio cmd queue in
+// later phases so the audio-thread Audio_GetSfx can consult the per-emitter
+// override table.
+//
+// Plain global (not thread_local): SoH game logic is single-threaded — the
+// only other thread is the audio thread, which never reads or writes this
+// variable. Audio thread sees the value only via SoundRequest after the
+// ring-buffer enqueue happens on the game thread.
+//
+// 0 = no Anchor context / use vanilla.
+u32 gAnchorCurrentEmitterClientId = 0;
 
 /**
  * Array of pointers to arrays of SoundBankEntry of sizes: 9, 12, 22, 20, 8, 3, 5
@@ -142,6 +160,7 @@ void Audio_PlaySoundGeneral(u16 sfxId, Vec3f* pos, u8 token, f32* freqScale, f32
                         req->freqScale = freqScale;
                         req->vol = vol;
                         req->reverbAdd = reverbAdd;
+                        req->emitterClientId = gAnchorCurrentEmitterClientId; // Flotilla #83/#84
                         sSoundRequestWriteIndex++;
                         req = &sSoundRequests[sSoundRequestWriteIndex];
                     }
@@ -155,7 +174,19 @@ void Audio_PlaySoundGeneral(u16 sfxId, Vec3f* pos, u8 token, f32* freqScale, f32
         req->freqScale = freqScale;
         req->vol = vol;
         req->reverbAdd = reverbAdd;
+        req->emitterClientId = gAnchorCurrentEmitterClientId; // Flotilla #83/#84
         sSoundRequestWriteIndex++;
+
+        // Flotilla #83/#84 Phase α.1 diagnostic — log voice-bank emissions
+        // and their captured emitter context. Gated on
+        // gEnhancements.VoicePackDebugLog so it's silent in normal play.
+        // Removed when Phase α.4 substitution lands + ships clean (Phase 7
+        // cleanup pass).
+        if ((sfxId & 0xF000) == 0x6000 &&
+            CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
+            LUSLOG_INFO("[VoicePackEmit] sfxId=0x%04X emitterClientId=%u",
+                        sfxId, req->emitterClientId);
+        }
     }
 }
 
@@ -277,6 +308,12 @@ void Audio_ProcessSoundRequest(void) {
                     gSoundBanks[bankId][index].reverbAdd = req->reverbAdd;
                     gSoundBanks[bankId][index].sfxParams = soundParams->params;
                     gSoundBanks[bankId][index].sfxImportance = soundParams->importance;
+                    gSoundBanks[bankId][index].emitterClientId = req->emitterClientId; // Flotilla #83/#84 α.2
+                    if ((req->sfxId & 0xF000) == 0x6000 &&
+                        CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
+                        LUSLOG_INFO("[VoicePackBank] refresh sfxId=0x%04X bank=%d entry=%d emitterClientId=%u",
+                                    req->sfxId, bankId, index, req->emitterClientId);
+                    }
                 } else if (gSoundBanks[bankId][index].state == SFX_STATE_PLAYING_2) {
                     gSoundBanks[bankId][index].state = SFX_STATE_PLAYING_1;
                 }
@@ -303,12 +340,28 @@ void Audio_ProcessSoundRequest(void) {
         entry->sfxId = req->sfxId;
         entry->state = SFX_STATE_QUEUED;
         entry->freshness = 2;
+        entry->emitterClientId = req->emitterClientId; // Flotilla #83/#84 α.2
         entry->prev = sSoundBankListEnd[bankId];
         gSoundBanks[bankId][sSoundBankListEnd[bankId]].next = sSoundBankFreeListStart[bankId];
         sSoundBankListEnd[bankId] = sSoundBankFreeListStart[bankId];
         sSoundBankFreeListStart[bankId] = gSoundBanks[bankId][sSoundBankFreeListStart[bankId]].next;
         gSoundBanks[bankId][sSoundBankFreeListStart[bankId]].prev = 0xFF;
         entry->next = 0xFF;
+        if ((req->sfxId & 0xF000) == 0x6000 &&
+            CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
+            LUSLOG_INFO("[VoicePackBank] alloc sfxId=0x%04X bank=%d entry=%d emitterClientId=%u",
+                        req->sfxId, bankId, index, req->emitterClientId);
+            // Phase α.4a/b — diagnostic: confirm the substitution table
+            // would return a hit for this emission. Tests the lookup path
+            // independent of the audio-thread interception (α.4c) which
+            // is the actual playback consumer. Phase α.5 variant-pool
+            // call site: each lookup may return a different sample variant
+            // for the same (sfxId, emitter) pair.
+            float diagTuning = -1.0f;
+            void* override = Anchor_GetVoiceSampleOverride(req->sfxId, req->emitterClientId, &diagTuning);
+            LUSLOG_INFO("[VoicePackLookup] sfxId=0x%04X emitter=%u override=%s tuning=%.4f",
+                        req->sfxId, req->emitterClientId, override ? "FOUND" : "none", diagTuning);
+        }
     }
 }
 
@@ -528,6 +581,33 @@ void Audio_PlayActiveSounds(u8 bankId) {
                     }
                 }
                 Audio_SetSoundProperties(bankId, entryIndex, sCurSfxPlayerChannelIdx);
+                // Flotilla #83/#84 Phase α.3 — set the audio-thread channel's
+                // emitterClientId BEFORE the playback start command. Audio
+                // thread processes commands in queue order; the channel field
+                // is in place when Audio_GetSfx fires for this emission. Sent
+                // for every SFX dispatch (not just voice) so the channel's
+                // emitter state never holds stale value from a prior bank
+                // entry on the same round-robin channel slot.
+                Audio_QueueCmd(((u32)CHAN_UPD_ANCHOR_EMITTER << 24) |
+                                ((u32)SEQ_PLAYER_SFX << 16) |
+                                (((u32)sCurSfxPlayerChannelIdx & 0xFF) << 8) |
+                                ((u32)bankId & 0xFF),
+                                entry->emitterClientId);
+                // Flotilla #83/#84 root-cause fix (2026-06-17) — also queue
+                // the FULL vanilla sfxId so the audio thread can look up the
+                // substitution table directly, without arithmetic recon-
+                // struction from the soundFont's local index (which doesn't
+                // work — verified empirically log 567: vanilla 0x6820 →
+                // audio-thread local 0x1C, not 0x20).
+                Audio_QueueCmd(((u32)CHAN_UPD_ANCHOR_VSFXID << 24) |
+                                ((u32)SEQ_PLAYER_SFX << 16) |
+                                (((u32)sCurSfxPlayerChannelIdx & 0xFF) << 8),
+                                (u32)entry->sfxId);
+                if ((entry->sfxId & 0xF000) == 0x6000 &&
+                    CVarGetInteger(CVAR_ENHANCEMENT("VoicePackDebugLog"), 0) != 0) {
+                    LUSLOG_INFO("[VoicePackChan] queued sfxId=0x%04X channel=%d emitterClientId=%u",
+                                entry->sfxId, sCurSfxPlayerChannelIdx, entry->emitterClientId);
+                }
                 Audio_QueueCmdS8(0x6 << 24 | SEQ_PLAYER_SFX << 16 | ((sCurSfxPlayerChannelIdx & 0xFF) << 8), 1);
                 Audio_QueueCmdS8(0x6 << 24 | SEQ_PLAYER_SFX << 16 | ((sCurSfxPlayerChannelIdx & 0xFF) << 8) | 4,
                                  entry->sfxId & 0xFF);

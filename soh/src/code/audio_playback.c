@@ -1,5 +1,6 @@
 #include "global.h"
 #include "soh/ResourceManagerHelpers.h"
+#include "soh/Enhancements/audio/VoicePack.h"  // Anchor_GetVoiceSampleOverride (#83/#84 α.4c)
 #include <libultraship/bridge.h>
 
 extern bool gUseLegacySD;
@@ -372,6 +373,26 @@ Drum* Audio_GetDrum(s32 fontId, s32 drumId) {
     return drum;
 }
 
+// Flotilla #83/#84 — file-static dedup ring buffer for the audio-thread
+// [VoicePackPlay] diagnostic log. Cleared by Anchor_ResetVoicePackPlayDedup
+// when VoicePack lifecycle changes (pack load/unload) so post-load
+// emissions log fresh values instead of being suppressed by pre-load
+// "I've seen this hash" entries.
+//
+// Audio thread reads/writes (under no lock); game thread can clear via
+// the reset hook. The race window is bounded to one in-flight emission
+// log; worst case is one stale or missing log line. No correctness
+// impact on audio substitution (the dedup affects logging only).
+static u32 sVoicePackPlaySeenHashes[32];
+static u8  sVoicePackPlaySeenWrPos  = 0;
+
+void Anchor_ResetVoicePackPlayDedup(void) {
+    for (int i = 0; i < 32; i++) {
+        sVoicePackPlaySeenHashes[i] = 0;
+    }
+    sVoicePackPlaySeenWrPos = 0;
+}
+
 SoundFontSound* Audio_GetSfx(s32 fontId, s32 sfxId) {
     SoundFontSound* sfx = NULL;
 
@@ -398,6 +419,147 @@ SoundFontSound* Audio_GetSfx(s32 fontId, s32 sfxId) {
     }
 
     return sfx;
+}
+
+// Flotilla custom voice (#83/#84) — Phase α.4c — per-emitter sample
+// substitution wrapper around Audio_GetSfx.
+//
+// Called on the AUDIO THREAD from audio_seqplayer.c (the only consumer of
+// Audio_GetSfx for SFX dispatch). Gate sequence:
+//
+//   1. Resolve vanilla SoundFontSound — fail fast on null (keeps vanilla
+//      error semantics; we don't substitute samples for missing sounds).
+//   2. Check channel->emitterSfxBank — 0xFF means no Anchor context (BGM
+//      channels, pre-emission state) → skip substitution.
+//   3. Voice substitution is bank-6-only (BANK_VOICE). Other banks have
+//      their own dispatch paths we don't touch.
+//   4. Reconstruct the vanilla 16-bit sfxId from (bank << 12) | localIdx.
+//      Voice vanilla sfxIds span 0x6000-0x61FF; local index is 0-0x1FF.
+//      All vanilla voice ids have bit 8 of index clear, so sfxId arg
+//      (which carries the local index) captures the full address.
+//   5. Anchor_GetVoiceSampleOverride consults the per-(emitter, vanilla
+//      sfxId) lookup table populated by VoicePack at pack load. Returns
+//      NULL if no override.
+//   6. On hit, populate the per-channel emitterOverrideSlot with the
+//      custom sample pointer + the vanilla tuning, return its address.
+//      The audio synth path reads from layer->sound = <return> just like
+//      a regular SoundFontSound — same call site, transparent swap.
+//
+// Tuning: uses vanilla sfx->tuning for the override slot. Phase α.7 will
+// honor SOH::AudioSample::tuning when the resource specifies its own
+// (per AudioSoundFontFactory.cpp:310-315 pattern). For now, custom
+// packs SHOULD ship samples with matching sample rates to vanilla
+// (32 kHz typical for OoT voice) to avoid pitch artifacts.
+SoundFontSound* Audio_GetSfxOverride(struct SequenceChannel* channel, s32 fontId, s32 sfxId) {
+    SoundFontSound* vanilla = Audio_GetSfx(fontId, sfxId);
+    if (vanilla == NULL) {
+        return NULL;
+    }
+    // Channel context guard (sentinel = no Anchor context).
+    if (channel == NULL || channel->emitterSfxBank == 0xFF) {
+        return vanilla;
+    }
+    // Phase α.4c scope: voice substitution only (BANK_VOICE == 6).
+    if (channel->emitterSfxBank != 6 /* BANK_VOICE */) {
+        return vanilla;
+    }
+    // Flotilla #83/#84 root-cause fix (2026-06-17). The audio-thread `sfxId`
+    // arg here is the SOUNDFONT'S LOCAL SAMPLE INDEX (e.g. 0x1C for a sword-
+    // swing variant), NOT the vanilla sfxId's low byte (0x20 for vanilla
+    // SWORD_N_KID 0x6820). The mapping is set by vanilla's soundfont layout
+    // and isn't recoverable arithmetically — verified empirically (log 567:
+    // game-thread emit of 0x6820 dispatched audio-thread sfxId=0x1C).
+    //
+    // The full vanilla sfxId arrives via the CHAN_UPD_ANCHOR_VSFXID cmd
+    // queued alongside CHAN_UPD_ANCHOR_EMITTER. Sentinel 0xFFFF means "no
+    // Anchor context" — fall back to vanilla.
+    if (channel->emitterVanillaSfxId == 0xFFFF) {
+        return vanilla;
+    }
+    u16 vanillaSfxId = channel->emitterVanillaSfxId;
+    // Phase α.7 — request pack's tuning out-param. -1.0f signals "use
+    // vanilla tuning"; any other value is the pack-author-specified
+    // tuning (typically for non-vanilla sample rates).
+    float packTuning = -1.0f;
+    void* customSamplePtr =
+        Anchor_GetVoiceSampleOverride(vanillaSfxId, channel->emitterClientId, &packTuning);
+
+    // Diagnostic D2 (per
+    // Claude/Analysis/voice_substitution_root_cause_2026-06-17.md).
+    // One-shot per unique (channel, sfxId, emitter) tuple via a 32-entry
+    // static ring buffer of hashes. Bounded log volume (≤32 lines per
+    // session). Audio-thread-safe — no CVar lookup, no allocation, no
+    // mutex; LUSLOG_INFO uses spdlog which is thread-safe by default.
+    //
+    // Fix 2 (this iteration) — ring buffer state can be cleared by
+    // calling Anchor_ResetVoicePackPlayDedup() from the game thread
+    // (VoicePack does so on pack load/unload). Without that, every
+    // sfxId emitted pre-pack-load gets a stale "I've seen this"
+    // entry that suppresses post-load logging.
+    //
+    // Fix 3 (this iteration) — log line also dumps loop / book content
+    // snapshot so we can validate ADPCM metadata is plausible
+    // (loop.count <= 1 typical; book predictor coefficients fit in
+    // s16 signed range). Garbage values here would explain
+    // garbled-audio playback.
+    {
+        // Use the file-static ring buffer (see top of file) so it can be
+        // cleared by Anchor_ResetVoicePackPlayDedup on pack lifecycle
+        // events.
+        u32 hash = ((u32)(uintptr_t)channel >> 4) ^ ((u32)sfxId * 31u) ^
+                   (channel->emitterClientId * 17u);
+        bool already = false;
+        for (int i = 0; i < 32; i++) {
+            if (sVoicePackPlaySeenHashes[i] == hash) { already = true; break; }
+        }
+        if (!already) {
+            sVoicePackPlaySeenHashes[sVoicePackPlaySeenWrPos++ & 31] = hash;
+            SoundFontSample* cs = (SoundFontSample*)customSamplePtr;
+            // Loop / book content snapshot — read defensively since
+            // some samples may have NULL loop/book even with codec=0
+            // (factory bug class). If pointers are non-NULL, read the
+            // first few fields; otherwise show zeros.
+            u32 loopStart  = (cs && cs->loop) ? cs->loop->start    : 0;
+            u32 loopEnd    = (cs && cs->loop) ? cs->loop->loopEnd  : 0;
+            u32 loopCount  = (cs && cs->loop) ? cs->loop->count    : 0;
+            s32 bookOrder  = (cs && cs->book) ? cs->book->order  : 0;
+            s32 bookNumPred= (cs && cs->book) ? cs->book->npredictors : 0;
+            s16 book0      = (cs && cs->book && cs->book->book) ? cs->book->book[0] : 0;
+            s16 book1      = (cs && cs->book && cs->book->book) ? cs->book->book[1] : 0;
+            LUSLOG_INFO("[VoicePackPlay] sfxId=0x%X chBank=%u override=%s sample=%p "
+                        "codec=%u medium=%u size=%u sampleAddr=%p loop=%p book=%p "
+                        "loop.start=%u loop.end=%u loop.count=%u "
+                        "book.order=%d book.npred=%d book[0,1]={%d,%d} "
+                        "packTuning=%.4f vanillaTuning=%.4f",
+                        sfxId, (unsigned)channel->emitterSfxBank,
+                        customSamplePtr ? "FOUND" : "none",
+                        customSamplePtr,
+                        cs ? (unsigned)cs->codec : 99u,
+                        cs ? (unsigned)cs->medium : 99u,
+                        cs ? cs->size : 0u,
+                        cs ? (void*)cs->sampleAddr : NULL,
+                        cs ? (void*)cs->loop : NULL,
+                        cs ? (void*)cs->book : NULL,
+                        loopStart, loopEnd, loopCount,
+                        bookOrder, bookNumPred, (int)book0, (int)book1,
+                        packTuning,
+                        vanilla->tuning);
+        }
+    }
+
+    if (customSamplePtr == NULL) {
+        return vanilla;
+    }
+    // Hit. Populate the per-channel override slot and return its address.
+    channel->emitterOverrideSlot.sample = (SoundFontSample*)customSamplePtr;
+    // Phase α.7+ — per-pack tuning multiplier. Applied at substitution
+    // time: final tuning = base * multiplier. Multiplier is cached on the
+    // game thread (Anchor_RefreshVoicePackTuningMultiplier) and read here
+    // via atomic load (audio-thread safe). Default 1.0 = identity, so
+    // unconditional multiply is a no-op when the user hasn't tuned.
+    float baseTuning = (packTuning != -1.0f) ? packTuning : vanilla->tuning;
+    channel->emitterOverrideSlot.tuning = baseTuning * Anchor_GetVoicePackTuningMultiplier();
+    return &channel->emitterOverrideSlot;
 }
 
 s32 Audio_SetFontInstrument(s32 instrumentType, s32 fontId, s32 index, void* value) {

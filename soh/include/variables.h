@@ -228,6 +228,12 @@ extern "C"
 	extern u16 gAudioSfxSwapSource[10];
 	extern u16 gAudioSfxSwapTarget[10];
 	extern u8 gAudioSfxSwapMode[10];
+	// Flotilla #83/#84 — current voice-emission emitter clientId (game-thread
+	// global). Set immediately before Audio_PlaySoundGeneral; the call captures
+	// it into SoundRequest::emitterClientId. Reset to 0 after. SoH game logic
+	// is single-threaded so a plain global is safe; the audio thread reads
+	// the captured value only via SoundRequest, never via this global.
+	extern u32 gAnchorCurrentEmitterClientId;
 	extern ActiveSequence gActiveSeqs[4];
 	extern AudioContext gAudioContext;
 	extern void(*D_801755D0)(void);
