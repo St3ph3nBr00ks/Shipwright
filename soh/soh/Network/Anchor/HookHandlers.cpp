@@ -3874,10 +3874,21 @@ void Anchor::RegisterHooks() {
         Player* localPlayer = GET_PLAYER(gPlayState);
         Actor* nearest = FindNearestPlayerActor(actor, gPlayState);
 
-        // Only overwrite when a DummyPlayer is closer. If the local player is
-        // nearest, the automatic calculation (z_actor.c:2665-2669) is already
-        // correct and we leave the fields untouched.
-        if (nearest != &localPlayer->actor) {
+        // Bug 1 fix (2026-06-17): FindNearestPlayerActor may now return nullptr
+        // when no valid player candidate exists (host's local Link is dead OR
+        // in cutscene, AND every in-scene DummyPlayer is also dead/cross-
+        // timeline). When that happens, leave vanilla cached fields alone —
+        // they still point at host's local Link (the corpse). The AI keeps
+        // swinging at the corpse, but with PLAYER_STATE1_DEAD the corpse has
+        // no AC, so the swings deal no damage. This is the conservative
+        // variant (per analysis §9 B1-A): pushing a sentinel like
+        // xzDistToPlayer=99999 is rejected because vanilla AI is not
+        // designed for "no target ever" and some branches may misbehave.
+        //
+        // Otherwise, only overwrite when a DummyPlayer (or NPC follower) is
+        // closer than local Link. If local is nearest, the vanilla
+        // calculation (z_actor.c:2665-2669) is already correct.
+        if (nearest != nullptr && nearest != &localPlayer->actor) {
             actor->xzDistToPlayer    = Actor_WorldDistXZToActor(actor, nearest);
             actor->yDistToPlayer     = Actor_HeightDiff(actor, nearest);
             actor->xyzDistToPlayerSq = SQ(actor->xzDistToPlayer) + SQ(actor->yDistToPlayer);

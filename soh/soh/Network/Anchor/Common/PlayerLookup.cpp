@@ -13,6 +13,23 @@ extern SaveContext gSaveContext;
 Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
     Player* localPlayer = GET_PLAYER(play);
 
+    // Bug 1 fix (Candidate B1-A, 2026-06-17) — gate the local-Player seed
+    // on liveness + cutscene state, mirroring PickHostileTargetForInvader
+    // (lines 209-210 in this file). Without these gates, when host's local
+    // Link dies in MP the host-side #153 nearest-player overlay
+    // (HookHandlers.cpp:3875) keeps pointing enemy targeting fields at
+    // the corpse — vanilla enemy AI then walks toward and swings at the
+    // dead body indefinitely instead of pivoting to the live peer's
+    // DummyPlayer. See
+    // Claude/Analysis/dead_player_targeting_and_final_blow_2026-06-17.md
+    // §3 + §9 B1-A. The function may now legitimately return nullptr
+    // when no valid candidate exists; the consumer at HookHandlers.cpp
+    // skips the patch in that case (vanilla cached fields stay pointing
+    // at host's corpse, harmlessly — corpse has no AC) and the C wrapper
+    // at AnchorCoreBridge.cpp falls back to local Link to preserve the
+    // never-NULL contract for vanilla actor `.c` consumers that
+    // immediately deref the returned pointer.
+    //
     // Compute the seed distance directly from positions rather than reading
     // `enemy->xzDistToPlayer` / `yDistToPlayer`. Those cached fields are
     // patched every frame by the host's `ShouldActorUpdate` hook
@@ -36,11 +53,18 @@ Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
     // Recomputing from positions removes the patched-seed dependency.
     // The arithmetic is two extra subtracts + three extra multiplies vs.
     // the field reads — negligible.
-    float dxL = enemy->world.pos.x - localPlayer->actor.world.pos.x;
-    float dyL = enemy->world.pos.y - localPlayer->actor.world.pos.y;
-    float dzL = enemy->world.pos.z - localPlayer->actor.world.pos.z;
-    float nearestDistSq = dxL * dxL + dyL * dyL + dzL * dzL;
-    Actor* nearest = &localPlayer->actor;
+    Actor* nearest = nullptr;
+    float  nearestDistSq = 0.0f;
+
+    const bool localAlive       = (gSaveContext.health > 0);
+    const bool localInCutscene  = (play->csCtx.state != CS_STATE_IDLE);
+    if (localPlayer != nullptr && localAlive && !localInCutscene) {
+        float dxL = enemy->world.pos.x - localPlayer->actor.world.pos.x;
+        float dyL = enemy->world.pos.y - localPlayer->actor.world.pos.y;
+        float dzL = enemy->world.pos.z - localPlayer->actor.world.pos.z;
+        nearestDistSq = dxL * dxL + dyL * dyL + dzL * dzL;
+        nearest = &localPlayer->actor;
+    }
 
     Actor* npc = play->actorCtx.actorLists[ACTORCAT_NPC].head;
     while (npc != nullptr) {
@@ -51,13 +75,26 @@ Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
             // aim at them either, otherwise child-timeline Deku Babas
             // would lunge at the position of an adult-timeline peer
             // (and vice versa).
+            //
+            // Bug 1 fix (2026-06-17) — additionally skip peers whose
+            // own Link is in the death cycle (PLAYER_STATE1_DEAD set).
+            // Mirror of PickHostileTargetForInvader:250. A dead peer's
+            // DummyPlayer position trails until the peer presses
+            // Continue; targeting it traps enemy AI at the corpse on
+            // the same shape as the local-Link bug above.
             if (Anchor::Instance != nullptr) {
                 uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(npc);
                 auto it = Anchor::Instance->clients.find(clientId);
-                if (it != Anchor::Instance->clients.end() &&
-                    it->second.linkAge != gSaveContext.linkAge) {
-                    npc = npc->next;
-                    continue;
+                if (it != Anchor::Instance->clients.end()) {
+                    const AnchorClient& c = it->second;
+                    if (c.linkAge != gSaveContext.linkAge) {
+                        npc = npc->next;
+                        continue;
+                    }
+                    if (c.stateFlags1 & PLAYER_STATE1_DEAD) {
+                        npc = npc->next;
+                        continue;
+                    }
                 }
             }
 
@@ -65,7 +102,7 @@ Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
             float dy = enemy->world.pos.y - npc->world.pos.y;
             float dz = enemy->world.pos.z - npc->world.pos.z;
             float distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq < nearestDistSq) {
+            if (nearest == nullptr || distSq < nearestDistSq) {
                 nearestDistSq = distSq;
                 nearest = npc;
             }
@@ -87,14 +124,14 @@ Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play) {
             float dy = enemy->world.pos.y - npcFollower->world.pos.y;
             float dz = enemy->world.pos.z - npcFollower->world.pos.z;
             float distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq < nearestDistSq) {
+            if (nearest == nullptr || distSq < nearestDistSq) {
                 nearestDistSq = distSq;
                 nearest = npcFollower;
             }
         }
     }
 
-    return nearest;
+    return nearest;  // may be nullptr if no valid target exists
 }
 
 int GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount) {

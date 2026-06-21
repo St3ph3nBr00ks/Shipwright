@@ -14,6 +14,7 @@
 
 extern "C" {
 #include "z64.h"
+#include "macros.h"  // GET_PLAYER (Pitfall 15)
 extern PlayState* gPlayState;
 }
 
@@ -21,8 +22,29 @@ extern PlayState* gPlayState;
 // nearest player actor without pulling in C++ headers. Returns the nearest
 // player-type Actor* (local player or closest DummyPlayer). Safe to call any time
 // gPlayState is valid; falls back to local player when Anchor is not active.
+//
+// Bug 1 fix (2026-06-17): FindNearestPlayerActor now gates the local-Player seed
+// on liveness + cutscene state and may return nullptr when no valid candidate
+// exists (all players dead / in cutscene). The vast majority of vanilla actor
+// `.c` consumers immediately dereference the returned pointer
+// (e.g. `(Player*)Anchor_GetNearestPlayerActor(...)->meleeWeaponState`), so the
+// wrapper preserves the pre-existing never-NULL contract by falling back to the
+// local Link's actor. The fallback to host's dead Link is acceptable for these
+// consumers because:
+//   - They read position / animation / equipment data, not combat-engagement
+//     decisions. The corpse's world.pos is valid; reading from it is harmless.
+//   - The host-side #153 enemy-AI overlay (HookHandlers.cpp) does its own
+//     nullptr handling and skips the cached-field patch when nullptr surfaces.
+// See Claude/Analysis/dead_player_targeting_and_final_blow_2026-06-17.md §9.
 extern "C" Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play) {
-    return FindNearestPlayerActor(enemy, play);
+    Actor* nearest = FindNearestPlayerActor(enemy, play);
+    if (nearest == nullptr && play != nullptr) {
+        Player* localPlayer = GET_PLAYER(play);
+        if (localPlayer != nullptr) {
+            nearest = &localPlayer->actor;
+        }
+    }
+    return nearest;
 }
 
 // Hyrule Field Stalchild spawner (En_Encount1, ACTORCAT_PROP) needs to

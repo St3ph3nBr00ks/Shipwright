@@ -17,6 +17,20 @@ extern "C" {
 // Considers the local player and all live DummyPlayer actors.
 // DummyPlayers that are out-of-scene are already at (-9999,-9999,-9999) by
 // DummyPlayer_Update, so they are naturally excluded by the distance comparison.
+//
+// Per-candidate liveness gates (Bug 1 fix, 2026-06-17 — mirrors
+// PickHostileTargetForInvader):
+//   - Local Player skipped when gSaveContext.health <= 0 or
+//     play->csCtx.state != CS_STATE_IDLE.
+//   - DummyPlayer skipped when peer's client.stateFlags1 has
+//     PLAYER_STATE1_DEAD set (peer is in death cycle).
+//
+// May return nullptr when no valid candidate exists (all players
+// dead / in cutscene). Direct C++ consumers MUST defend against
+// nullptr; the C wrapper `Anchor_GetNearestPlayerActor` falls back
+// to the local Link so vanilla actor `.c` consumers retain the
+// pre-existing "never-NULL" contract they assume when immediately
+// dereferencing the returned pointer.
 Actor* FindNearestPlayerActor(Actor* enemy, PlayState* play);
 
 // Fills `outActors[0..min(maxCount, returned)-1]` with the local Link's
