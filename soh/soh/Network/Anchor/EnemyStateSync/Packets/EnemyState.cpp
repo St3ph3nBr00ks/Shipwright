@@ -1709,8 +1709,12 @@ void Anchor::SendPacket_EnemyRemovedFromScene(uint32_t netId, int16_t priorScene
 
 // Phase=DyingByLocal, phaseChanged=true — defeat broadcast with attribution.
 // Sent by any client when an enemy fires OnEnemyDefeat or Actor_Kill.
-// Q I Tier 2: host attributes locally; non-host route-to-host with relay-
-// enriched sender field for tamper-proof attribution.
+// Hub refactor (2026-06-17): host attributes via LookupDamager and
+// broadcasts directly to all scene peers; non-host self-attributes via
+// ownClientId and broadcasts directly to all scene peers. Removes the
+// host re-broadcast hop and the associated failure mode (host frozen /
+// stalled). Trade-off: trusts each client to self-attribute honestly —
+// acceptable in the friend-session trust model.
 void Anchor::SendPacket_EnemyDefeated(uint32_t netId, int16_t shapeRotY, bool includeShapeRotY) {
     if (!IsSaveLoaded()) {
         return;
@@ -1741,16 +1745,18 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId, int16_t shapeRotY, bool in
             payload["killerTeamId"] = clients[killerId].teamId;
         }
         // NOTE: do NOT ClearDamager(netId) here. The damager record is also
-        // consumed by the killer-attribution correction in
-        // OnActorSpawn(EN_ITEM00) (HookHandlers.cpp ~line 2080) which runs
-        // ~1 s later when SetupDeadStickDrop → Item_DropCollectible spawns
-        // the drop. Clearing here was correct in the "host received
-        // unattributed defeat from peer" code path (where this branch never
-        // runs), but masked the attribution in the Race-B path where host's
-        // own OnEnemyDefeat fires after applying peer-routed damage — drops
-        // ended up tagged with the host's clientId instead of the peer's.
-        // Damager cleanup is now deferred to OnActorDestroy (per-actor
-        // lifetime) + ClearStaleDamagers (per-scene transitions).
+        // consumed ~1 s later by the killer-attribution correction in
+        // OnActorSpawn(EN_ITEM00) (HookHandlers.cpp ~line 2080) and by
+        // Anchor_BeginItemDrop (ItemDropBridge.cpp:169) when
+        // SetupDeadStickDrop → Item_DropCollectible spawns the drop. The
+        // damager map is fed by DAMAGE_ENEMY (independent of which client
+        // ultimately broadcasts the defeat) and consumed locally on host
+        // during the deferred drop spawn. Damager cleanup is deferred to
+        // OnActorDestroy (per-actor lifetime) + ClearStaleDamagers
+        // (per-scene transitions). Hub refactor (2026-06-17) removed the
+        // host re-broadcast path that this note originally referenced —
+        // the deferred-cleanup design is independent of which client
+        // broadcasts the defeat.
 
         SPDLOG_INFO("[EnemyDefeated] Host send for netId={} killerClientId={} killerTeamId={}",
                     netId,
@@ -1759,10 +1765,22 @@ void Anchor::SendPacket_EnemyDefeated(uint32_t netId, int16_t shapeRotY, bool in
 
         BroadcastJsonToScenePeers(payload);
     } else {
-        SPDLOG_INFO("[EnemyDefeated] Non-host route-to-host for netId={} (host will attribute and re-broadcast)",
-                    netId);
-        payload["targetClientId"] = effectiveHostClientId;
-        SendJsonToRemote(payload);
+        // Hub refactor (2026-06-17): non-host self-attributes and broadcasts
+        // directly to all scene peers instead of routing through host. Removes
+        // a hop, removes a failure mode (host frozen on Game Over / cutscene
+        // / stalled network), and gives Director correct attribution from the
+        // first receive (pre-refactor: host's Director event fired with
+        // killerClientId=0 because the re-broadcast block attributed AFTER
+        // the Director event fired).
+        payload["killerClientId"] = ownClientId;
+        payload["killerTeamId"]   = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+
+        SPDLOG_INFO("[EnemyDefeated] Non-host send for netId={} killerClientId={} killerTeamId={}",
+                    netId,
+                    payload.value("killerClientId", (uint32_t)0),
+                    payload.value("killerTeamId", std::string("(unattributed)")));
+
+        BroadcastJsonToScenePeers(payload);
     }
 }
 
@@ -2534,8 +2552,10 @@ void Anchor::HandlePacket_EnemySpawn(nlohmann::json payload) {
 }
 
 // Phase=DyingByLocal, phaseChanged=true — defeat broadcast.
-// Host re-broadcast (Q I Tier 2 attribution), Karebaba natural-cycle
-// trigger, dedup, and pendingKill bookkeeping all live here.
+// Karebaba natural-cycle trigger, dedup, and pendingKill bookkeeping
+// all live here. Hub refactor (2026-06-17) removed the host re-broadcast
+// path — peers now self-attribute and broadcast directly to all scene
+// peers, so receivers always see killerClientId != 0 from the wire.
 void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     if (!IsSaveLoaded()) {
         return;
@@ -2579,49 +2599,43 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
     // attribution from the wire. BossDefeated is fired later (where the
     // actor walk has resolved actor->id and IsSyncedBossActor check is
     // available); see the per-category walk below.
-    if (::SceneAuthority::IsEffectiveHost() && netId != 0) {
+    //
+    // Q2 dedup (2026-06-17 hub refactor): gate on !HasDefeatBroadcast BEFORE
+    // claiming below. Simultaneous peer kills (P1 + P2 both swing within
+    // RTT) post-hub-refactor produce TWO ENEMY_DEFEATED packets at host.
+    // Without this gate, Director's PlayerKilledEnemy would fire twice with
+    // different killer attributions and a descriptor with kill-counted
+    // spawn rules ("after N kills spawn an invader") would count both.
+    // The first-arrival attribution wins; second arrival is dropped at the
+    // Director event surface. The actor-walk dedup below (per-actor
+    // PhaseImpliesHasLocalDeath) handles the actor-kill side independently.
+    if (::SceneAuthority::IsEffectiveHost() && netId != 0 &&
+        !EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(netId)) {
         auto& director = AnchorDirector::Director::Instance();
         director.OnEnemyRemoved(netId, AnchorDirector::DefeatCause::Kill);
 
         AnchorDirector::DirectorEventPayload evt{};
         evt.type     = AnchorDirector::DirectorEvent::PlayerKilledEnemy;
-        evt.clientId = killerClientId;  // 0 if unattributed
+        evt.clientId = killerClientId;  // peer self-attributes post-hub-refactor
         evt.sceneNum = (gPlayState != nullptr) ? (s16)gPlayState->sceneNum : 0;
         evt.roomNum  = (gPlayState != nullptr) ? (s8)gPlayState->roomCtx.curRoom.num : 0;
         evt.data["netId"] = netId;
         director.NotifyEvent(evt);
     }
 
-    // Host-routed attribution: when host receives unattributed kill, fill
-    // in attribution from the relay-enriched sender field and re-broadcast.
-    if (::SceneAuthority::IsEffectiveHost() && killerClientId == 0 &&
-        !EnemyStateSync::HostBookkeeping::Instance().HasDefeatBroadcast(netId)) {
-        uint32_t senderId = payload.value("clientId", (uint32_t)0);
-        if (senderId != 0) {
-            EnemyStateSync::HostBookkeeping::Instance().ClaimDefeatBroadcast(netId);
-
-            nlohmann::json rebroadcast;
-            rebroadcast["type"]           = ENEMY_STATE;
-            rebroadcast["phase"]          = "DyingByLocal";
-            rebroadcast["phaseChanged"]   = true;
-            rebroadcast["netId"]          = netId;
-            rebroadcast["killerClientId"] = senderId;
-            PacketTimeline::SetTimelineField(rebroadcast);
-            if (clients.contains(senderId)) {
-                rebroadcast["killerTeamId"] = clients[senderId].teamId;
-            }
-
-            SPDLOG_INFO("[EnemyDefeated] Host re-broadcast for netId={} killerClientId={} (attributed from sender)",
-                        netId, senderId);
-
-            for (auto& [clientId, client] : clients) {
-                if (client.online && client.isSaveLoaded && !client.self &&
-                    clientId != senderId) {
-                    rebroadcast["targetClientId"] = clientId;
-                    SendJsonToRemote(rebroadcast);
-                }
-            }
-        }
+    // Q3 dedup mitigation (2026-06-17 hub refactor): claim the defeat
+    // ledger here so any subsequent host-local OnEnemyDefeat / OnActorKill /
+    // OnBossDefeat hook for this netId is dedup'd at its existing
+    // ClaimDefeatBroadcast guard (HookHandlers.cpp:3931 / :4134 / :4320).
+    // Pre-refactor this was implicit via the host re-broadcast block's
+    // ClaimDefeatBroadcast call (now removed). Without this, Scenario B
+    // (peer broadcasts kill → host's state-machine sync drives HP to 0 →
+    // host's OnEnemyDefeat fires later) produces a duplicate broadcast
+    // attributed to host. Claim is idempotent if the ledger was already
+    // claimed (e.g. by a hook that fired before the peer's broadcast
+    // arrived); benign no-op in that case.
+    if (netId != 0) {
+        EnemyStateSync::HostBookkeeping::Instance().ClaimDefeatBroadcast(netId);
     }
 
     // Walk every syncable actor category looking for the netId match.
