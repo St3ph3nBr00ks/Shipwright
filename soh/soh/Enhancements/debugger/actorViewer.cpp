@@ -1102,9 +1102,16 @@ void ActorViewerWindow::DrawElement() {
             }
 
             ImGui::Text("%s", GetActorDescription(newActor.id).c_str());
-            if (ImGui::InputScalar("ID", ImGuiDataType_S16, &newActor.id, &one)) {
+            // Display + accept hex matching the actor_table.h convention
+            // (e.g. type "0002" for En_Test). Without the hex flag the field
+            // was decimal-only, rejecting the natural "0x0002" copy-paste
+            // from the actor table and silently leaving the previous ID.
+            if (ImGui::InputScalar("ID (hex)", ImGuiDataType_S16, &newActor.id, &one, NULL, "%04X",
+                                   ImGuiInputTextFlags_CharsHexadecimal)) {
                 newActor.params = 0;
             }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(= %d decimal)", (int)newActor.id);
 
             CVarCheckbox("Advanced mode", CVAR_DEVELOPER_TOOLS("ActorViewer.AdvancedParams"),
                          CheckboxOptions().Tooltip("Changes the actor specific param menus with a direct input"));
