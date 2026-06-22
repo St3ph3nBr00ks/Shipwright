@@ -3876,6 +3876,17 @@ void Anchor::RegisterHooks() {
                     // OnEnemyDefeat broadcast hook (KillNetworkActorSilently
                     // brackets isKillingNetworkActor for that purpose).
                     KillNetworkActorSilently(actor);
+                    // CRITICAL: KillNetworkActorSilently nulls actor->update
+                    // (via Actor_Kill at z_actor.c:1205). Vanilla
+                    // Actor_UpdateAll at z_actor.c:2729 immediately calls
+                    // actor->update(actor, play) based on this hook's
+                    // `*should` return value. Leaving *should = true (the
+                    // default) makes vanilla dereference the now-NULL
+                    // function pointer → 0xC0000005 access violation.
+                    // Actor_Delete reaps the actor on the NEXT frame.
+                    if (should != nullptr) {
+                        *should = false;
+                    }
                     return;
                 }
             }
