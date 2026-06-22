@@ -2646,6 +2646,23 @@ void Anchor::HandlePacket_EnemyDefeated(nlohmann::json payload) {
         EnemyNetId* ext = (actor != nullptr)
             ? const_cast<EnemyNetId*>(ObjectExtension::GetInstance().Get<EnemyNetId>(actor))
             : nullptr;
+
+        // Candidate B2-D (#288, 2026-06-17) — happy path: host (or any
+        // peer) broadcast ENEMY_DEFEATED before our local fallback
+        // timer fired. Clear the armed timer so the per-frame check
+        // in ShouldActorUpdate doesn't fire a redundant peer-side
+        // kill broadcast. The actor walk below will Actor_Kill / run
+        // SetupDyingNet via the per-actor handlers as usual.
+        if (ext != nullptr && ext->peerKillingBlowClampedAtMs != 0) {
+            const uint64_t nowMs = (uint64_t)
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+            const uint64_t elapsed = nowMs - ext->peerKillingBlowClampedAtMs;
+            SPDLOG_INFO("[B2D] Timer cleared by host broadcast: netId={} elapsed={}ms (happy path)",
+                        netId, elapsed);
+            ext->peerKillingBlowClampedAtMs = 0;
+        }
+
         if (actor != nullptr) {
                 if (::SceneAuthority::IsMyCurrentRoomHost()) {
                     EnemyStateSync::HostBookkeeping::Instance().RecordSceneDeath(gPlayState->sceneNum, netId);

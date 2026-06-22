@@ -3831,9 +3831,56 @@ void Anchor::RegisterHooks() {
         // perceptible at network latencies expected for typical home
         // connections.
         if (!::SceneAuthority::IsMyCurrentRoomHost()) {
+            EnemyNetId* ext = const_cast<EnemyNetId*>(
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+
+            // Candidate B2-D (#288, 2026-06-17) — peer-side timeout
+            // fallback for the Race-B killing-blow clamp. If host
+            // hasn't broadcast ENEMY_DEFEATED within kFallbackTimeoutMs
+            // (1 s, user-specified) of the clamp first arming, assume
+            // host is incapacitated (Game Over, cutscene, network
+            // stall) and kill the actor locally + broadcast a peer-
+            // attributed ENEMY_DEFEATED. Commit A's hub refactor
+            // means the broadcast goes directly to all scene peers
+            // and that any subsequent host-side defeat is suppressed
+            // by ClaimDefeatBroadcast (set in HandlePacket_EnemyDefeated
+            // when the peer's broadcast arrives at host).
+            //
+            // Safe under jitter: false-fire on ~1100 ms lag still ends
+            // with a single applied kill — the dedup ledger
+            // collapses simultaneous host + peer broadcasts cleanly.
+            // Cosmetic cost: one extra packet on the wire per
+            // false-fire.
+            if (ext != nullptr &&
+                ext->peerKillingBlowClampedAtMs != 0 &&
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                static constexpr uint64_t kFallbackTimeoutMs = 1000;
+                const uint64_t nowMs = (uint64_t)
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                const uint64_t elapsed = nowMs - ext->peerKillingBlowClampedAtMs;
+                if (elapsed >= kFallbackTimeoutMs) {
+                    SPDLOG_INFO("[B2D] Timeout fired after {}ms: netId={} actorId={} — peer kill broadcast",
+                                elapsed, ext->netId, actor->id);
+                    const uint32_t netIdToBroadcast = ext->netId;
+                    // Clear the timer + stashed damage BEFORE the kill so
+                    // any re-entry can't double-fire.
+                    ext->peerKillingBlowClampedAtMs   = 0;
+                    ext->peerKillingBlowOriginalDamage = 0;
+                    // Broadcast first (Commit A hub-refactor: peer self-
+                    // attributes + sends directly to all scene peers).
+                    // Bare call is fine — RegisterHooks() is an Anchor
+                    // member fn so the lambda captures `this`.
+                    SendPacket_EnemyDefeated(netIdToBroadcast);
+                    // Then kill the local actor without re-firing the
+                    // OnEnemyDefeat broadcast hook (KillNetworkActorSilently
+                    // brackets isKillingNetworkActor for that purpose).
+                    KillNetworkActorSilently(actor);
+                    return;
+                }
+            }
+
             if (!IsSyncedBossActor(actor->id)) {
-                EnemyNetId* ext = const_cast<EnemyNetId*>(
-                    ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
                 if (ext != nullptr &&
                     !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
                     actor->colChkInfo.damage > 0 &&
@@ -3850,6 +3897,21 @@ void Anchor::RegisterHooks() {
                     // alive forever from peer's killing blows.
                     ext->peerKillingBlowOriginalDamage =
                         (u8)actor->colChkInfo.damage;
+                    // Candidate B2-D (#288): arm the timeout timer on
+                    // the first clamp for this actor (rising edge
+                    // only — subsequent clamps within the same arm
+                    // window keep the original timestamp so the
+                    // timeout is measured from the FIRST observed
+                    // killing-blow, not the most recent).
+                    if (ext->peerKillingBlowClampedAtMs == 0) {
+                        ext->peerKillingBlowClampedAtMs = (uint64_t)
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count();
+                        SPDLOG_INFO("[B2D] Clamp armed: netId={} actorId={} localHp={} dmg={} (will fallback in 1000ms if host doesn't broadcast first)",
+                                    ext->netId, actor->id,
+                                    (int)actor->colChkInfo.health,
+                                    (int)actor->colChkInfo.damage);
+                    }
                     SPDLOG_INFO("[RaceB] peer-killing-blow clamp actorId={} netId={} hp={} dmg={}→{} (deferring death to host)",
                                 actor->id, ext->netId,
                                 (int)actor->colChkInfo.health,

@@ -169,6 +169,27 @@ struct EnemyNetId {
     // broadcast.
     u8 peerKillingBlowOriginalDamage = 0;
 
+    // Candidate B2-D (#288, 2026-06-17) — peer-side timeout fallback
+    // timestamp. Stamped via std::chrono::steady_clock ms when the
+    // Race-B clamp first arms for this actor (transition from
+    // unarmed→armed). Cleared back to 0 when host's authoritative
+    // ENEMY_DEFEATED for the netId arrives (happy path) OR when the
+    // peer-side timeout fallback fires and broadcasts a peer-attributed
+    // ENEMY_DEFEATED (host-incapacitated path).
+    //
+    // Why this exists: the original Race-B design assumed host always
+    // catches up to peer's clamped HP within ~RTT. Field test 576
+    // surfaced the failure mode — host on Game Over / cutscene / TCP
+    // stall keeps peer's HP pinned at 1 forever (multi-hit guard at
+    // EnemyState.cpp blocks upward HP revival once clamped). The
+    // 1-second timeout (user-specified, NOT the 3 s suggested in the
+    // analysis doc) is tight enough that the visible UX delay is
+    // ~1 frame past noticeable, and Commit A's hub-refactor dedup
+    // (ClaimDefeatBroadcast on receive) suppresses duplicate
+    // broadcasts cleanly if a host-side defeat arrives slightly
+    // after the peer-side timeout fires.
+    uint64_t peerKillingBlowClampedAtMs = 0;
+
     // Boss_Goma — sticky "peer is signaling encounter advance" flag (#67).
     // Set true on receipt of any BOSS_GOMA_LOOKED_AT. Stays true until
     // case 3 of BossGoma_Encounter consumes-and-clears it via
