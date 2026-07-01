@@ -2262,6 +2262,36 @@ void Anchor::RegisterHooks() {
                     forwardDamage = 0;
                     isArmoredHit = true;
                 }
+            } else if (actor->id == ACTOR_EN_TEST) {
+                // (#290) Stalfos front-shield block. Vanilla setup at
+                // z_en_test.c:171-189: shieldCollider has AC_HARD flag;
+                // z_collision_check.c:1726 CollisionCheck_SetBounce sets
+                // AC_BOUNCED on shield when a Player sword AT contacts it.
+                // Vanilla EnTest_UpdateDamage (z_en_test.c:1678) then
+                // short-circuits — clears bodyCollider AC_HIT, no damage.
+                //
+                // But CollisionCheck still populates colChkInfo.damage on
+                // ANY AT/AC contact — including bounces — before the
+                // vanilla short-circuit clears the resulting AC_HIT. Peer's
+                // OnActorUpdate reads colChkInfo.damage AFTER vanilla
+                // resolution but before CollisionCheck_ResetDamage.
+                // Without this gate, peer would broadcast DAMAGE_ENEMY for
+                // its own blocked attack; host would apply body AC_HIT via
+                // ApplySyncAcHitToActor (DamageEnemy.cpp:970-982) — no
+                // shield-bounce check on host — and Stalfos would take
+                // damage from peer's blocked hit.
+                //
+                // Detection: shieldCollider AC_BOUNCED set THIS frame.
+                // Symmetric mirror of the En_St / En_Ssh pattern above.
+                EnTest* stalfos = (EnTest*)actor;
+                if ((stalfos->shieldCollider.base.acFlags & AC_BOUNCED) && forwardDamage > 0) {
+                    SPDLOG_INFO("[DamageEnemy] En_Test armored-hit netId={} "
+                                "shield AC_BOUNCED → forwarding damage=0 isArmoredHit=true "
+                                "(front-shield bounce)",
+                                ext->netId);
+                    forwardDamage = 0;
+                    isArmoredHit = true;
+                }
             }
 
             const bool shouldSend =
@@ -3872,18 +3902,43 @@ void Anchor::RegisterHooks() {
                     // Bare call is fine — RegisterHooks() is an Anchor
                     // member fn so the lambda captures `this`.
                     SendPacket_EnemyDefeated(netIdToBroadcast);
-                    // Then kill the local actor without re-firing the
-                    // OnEnemyDefeat broadcast hook (KillNetworkActorSilently
-                    // brackets isKillingNetworkActor for that purpose).
-                    KillNetworkActorSilently(actor);
-                    // CRITICAL: KillNetworkActorSilently nulls actor->update
-                    // (via Actor_Kill at z_actor.c:1205). Vanilla
-                    // Actor_UpdateAll at z_actor.c:2729 immediately calls
-                    // actor->update(actor, play) based on this hook's
-                    // `*should` return value. Leaving *should = true (the
-                    // default) makes vanilla dereference the now-NULL
-                    // function pointer → 0xC0000005 access violation.
-                    // Actor_Delete reaps the actor on the NEXT frame.
+                    // (#291) Apply the same natural death cycle locally
+                    // that receiving peers will apply upon ENEMY_DEFEATED
+                    // receipt. Prior code called KillNetworkActorSilently
+                    // which instantly disappeared the actor without
+                    // playing the death animation — asymmetric visual
+                    // experience across clients (killer saw instant
+                    // disappear; observers saw the full death anim).
+                    // Synthesizing a payload and invoking
+                    // HandlePacket_EnemyDefeated on ourselves reuses the
+                    // per-actor SetupDyingNet dispatch (EnTest_SetupDyingNet
+                    // etc.) so we see the same death animation as remote
+                    // peers.
+                    //
+                    // Safe:
+                    //   - Director event (EnemyState.cpp:2612) is gated on
+                    //     IsEffectiveHost() — peer isn't, won't fire.
+                    //   - ClaimDefeatBroadcast is idempotent.
+                    //   - RecordSceneDeath (EnemyState.cpp:2668) is gated
+                    //     on IsMyCurrentRoomHost() — peer isn't, won't fire.
+                    //   - PacketTimeline check defaults to "same timeline"
+                    //     when field missing.
+                    nlohmann::json localPayload;
+                    localPayload["netId"]          = netIdToBroadcast;
+                    localPayload["killerClientId"] = ownClientId;
+                    localPayload["killerTeamId"]   = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+                    HandlePacket_EnemyDefeated(localPayload);
+                    // Pitfall 41 (session_state.md): actors WITHOUT
+                    // SetupDyingNet fall through to Actor_Kill inside
+                    // HandlePacket_EnemyDefeated (EnemyState.cpp:3398),
+                    // which nulls actor->update. Guard against vanilla
+                    // Actor_UpdateAll (z_actor.c:2729) dispatching the
+                    // nulled function pointer this same frame → 0xC0000005
+                    // access violation. For actors WITH SetupDyingNet
+                    // the guard is defensively safe (the newly-set dying
+                    // actionFunc is fine to skip this frame; anim starts
+                    // next frame). Actor_Delete reaps on the NEXT frame
+                    // for the Actor_Kill case.
                     if (should != nullptr) {
                         *should = false;
                     }

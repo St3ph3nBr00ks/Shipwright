@@ -254,6 +254,24 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
                     "(sway anim will propagate via ENEMY_STATE)", netId);
         return;
     }
+    if (isArmoredHit && actor->id == ACTOR_EN_TEST) {
+        // (#290) Stalfos front-shield bounce. Set shieldCollider AC_BOUNCED
+        // to mirror what vanilla CollisionCheck_SetBounce would have set
+        // locally when peer's sword contacted the shield. Vanilla
+        // EnTest_UpdateDamage (z_en_test.c:1678) then short-circuits —
+        // clears bodyCollider AC_HIT (line 1680), no damage applied.
+        //
+        // Note: EnTest uses AC_BOUNCED (not AC_HIT like En_St/En_Ssh
+        // colCylinder[2]) because the two families check different flags
+        // in their damage-gate short-circuits — Stalfos reads AC_BOUNCED
+        // (line 1678), Skulltulas read AC_HIT on the front cylinder.
+        // Per-actor plumbing; not a generalisable single-flag pattern.
+        EnTest* stalfos = (EnTest*)actor;
+        stalfos->shieldCollider.base.acFlags |= AC_BOUNCED;
+        SPDLOG_INFO("[DamageEnemy] En_Test armored-hit RECV netId={} — set shield AC_BOUNCED "
+                    "(vanilla EnTest_UpdateDamage will clear body AC_HIT)", netId);
+        return;
+    }
 
     // #190 — queue damage onto the actor's EnemyNetId extension instead of
     // poking colChkInfo + AC_HIT directly. A new DrainPendingSyncDamage
@@ -973,11 +991,17 @@ static void ApplySyncAcHitToActor(Actor* actor, u8 damage) {
             //   read — z_en_test.c:1666 reads bodyCollider AC_HIT.
             // Acks: bodyCollider.base.acFlags & AC_HIT, colChkInfo.damage,
             //   colChkInfo.damageEffect.
-            // Skips: none.
+            // Skips: shieldCollider — this branch handles the non-armored
+            //   path only (body hit from front or back at unblocked state).
+            //   The armored-shield path is handled by the isArmoredHit
+            //   receiver branch above (~line 257) which sets
+            //   shieldCollider.acFlags |= AC_BOUNCED so vanilla
+            //   EnTest_UpdateDamage's short-circuit at z_en_test.c:1678
+            //   clears bodyCollider AC_HIT before damage applies. (#290)
             //
             // Multi-collider: bodyCollider (AC) + swordCollider (AT) +
-            // shieldCollider (AT). The AT colliders are for Stalfos
-            // hitting Link and are not touched by this path.
+            // shieldCollider (AC, AC_HARD). The swordCollider AT is for
+            // Stalfos hitting Link and is not touched by this path.
             ((EnTest*)actor)->bodyCollider.base.acFlags |= AC_HIT;
             break;
         case ACTOR_EN_GOMA:
