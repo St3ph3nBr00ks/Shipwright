@@ -190,6 +190,20 @@ struct EnemyNetId {
     // after the peer-side timeout fires.
     uint64_t peerKillingBlowClampedAtMs = 0;
 
+    // (#290) EnTest armored-hit capture. Snapshots
+    // shieldCollider.acFlags & AC_BOUNCED at ShouldActorUpdate time
+    // (pre-update) so the OnActorUpdate send-side gate can detect a
+    // shield-blocked sword hit. Vanilla EnTest_UpdateDamage
+    // (z_en_test.c:1679) clears AC_BOUNCED inside actor->update BEFORE
+    // OnActorUpdate fires, so reading the live flag from OnActorUpdate
+    // always sees 0. The En_St / En_Ssh armored-hit pattern uses
+    // swayTimer as the surviving signal because it's decremented (60→59)
+    // rather than cleared to 0 — but EnTest has no equivalent
+    // decrementing signal, so an explicit capture on the Flotilla-owned
+    // extension is required. Captured only for ACTOR_EN_TEST; cleared
+    // to false after each read.
+    bool preUpdateShieldBounced = false;
+
     // Boss_Goma — sticky "peer is signaling encounter advance" flag (#67).
     // Set true on receipt of any BOSS_GOMA_LOOKED_AT. Stays true until
     // case 3 of BossGoma_Encounter consumes-and-clears it via

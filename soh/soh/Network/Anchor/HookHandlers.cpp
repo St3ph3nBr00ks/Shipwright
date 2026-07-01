@@ -2281,17 +2281,25 @@ void Anchor::RegisterHooks() {
                 // shield-bounce check on host — and Stalfos would take
                 // damage from peer's blocked hit.
                 //
-                // Detection: shieldCollider AC_BOUNCED set THIS frame.
-                // Symmetric mirror of the En_St / En_Ssh pattern above.
-                EnTest* stalfos = (EnTest*)actor;
-                if ((stalfos->shieldCollider.base.acFlags & AC_BOUNCED) && forwardDamage > 0) {
+                // Detection: preUpdateShieldBounced captured at
+                // ShouldActorUpdate time (pre-update). We CANNOT read the
+                // live shieldCollider.acFlags here — EnTest_UpdateDamage
+                // (z_en_test.c:1679) already cleared AC_BOUNCED inside
+                // actor->update. Symmetric mirror of the En_St / En_Ssh
+                // pattern above (which uses swayTimer's decrementing
+                // signal that survives update()).
+                if (ext->preUpdateShieldBounced && forwardDamage > 0) {
                     SPDLOG_INFO("[DamageEnemy] En_Test armored-hit netId={} "
-                                "shield AC_BOUNCED → forwarding damage=0 isArmoredHit=true "
+                                "preUpdateShieldBounced → forwarding damage=0 isArmoredHit=true "
                                 "(front-shield bounce)",
                                 ext->netId);
                     forwardDamage = 0;
                     isArmoredHit = true;
                 }
+                // Clear the capture regardless of gate outcome, so a
+                // stale flag doesn't carry into a future frame's
+                // non-blocked hit.
+                ext->preUpdateShieldBounced = false;
             }
 
             const bool shouldSend =
@@ -3863,6 +3871,25 @@ void Anchor::RegisterHooks() {
         if (!::SceneAuthority::IsMyCurrentRoomHost()) {
             EnemyNetId* ext = const_cast<EnemyNetId*>(
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+
+            // (#290) EnTest armored-hit pre-update capture. Vanilla
+            // EnTest_UpdateDamage (z_en_test.c:1679) clears
+            // shieldCollider.AC_BOUNCED inside actor->update BEFORE
+            // OnActorUpdate fires — so the send-side gate at
+            // OnActorUpdate cannot read the live flag. Snapshot here
+            // (pre-update, in ShouldActorUpdate) so the OnActorUpdate
+            // gate can read the captured value. Cleared to false after
+            // the send-side gate reads it (see OnActorUpdate peer
+            // branch, ACTOR_EN_TEST case). Restricted to EnTest to
+            // minimise per-frame work on other actors — the En_St /
+            // En_Ssh pattern uses swayTimer as a decrementing signal
+            // that survives past actor->update, so no capture needed
+            // for those.
+            if (ext != nullptr && actor->id == ACTOR_EN_TEST) {
+                EnTest* stalfos = (EnTest*)actor;
+                ext->preUpdateShieldBounced =
+                    (stalfos->shieldCollider.base.acFlags & AC_BOUNCED) != 0;
+            }
 
             // Candidate B2-D (#288, 2026-06-17) — peer-side timeout
             // fallback for the Race-B killing-blow clamp. If host
