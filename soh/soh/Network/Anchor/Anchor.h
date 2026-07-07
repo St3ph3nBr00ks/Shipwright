@@ -1496,6 +1496,21 @@ class Anchor : public Network {
     };
     CutsceneTextAdvanceState cutsceneTextAdvanceState;
 
+    // Sequence numbers for CUTSCENE_TEXT_VOTE_STATE ordering.
+    // Root cause: Anchor relay spawns a goroutine per (broadcast × recipient)
+    // in room.go:56, so two broadcasts sent 1 ms apart on the host can race
+    // and arrive out-of-order on peers. Symptom: peer sees ADVANCED (which
+    // clears state.active) then a stale earlier state(active=true), leaving
+    // the vote-skip HUD stuck visible.
+    //
+    // Fix: host increments voteStateSequence on every send; peer drops any
+    // packet whose seq <= peerLastAppliedVoteStateSeq. Session-monotonic
+    // (not per-cycle) so cross-cycle reorders are also caught. Reset in
+    // OnSceneSpawnActors to keep small integers and prevent stale rejection
+    // after scene reload.
+    uint64_t voteStateSequence = 0;
+    uint64_t peerLastAppliedVoteStateSeq = 0;
+
     // Tick called from OnGameFrameUpdate (host only). Decrements
     // countdown; broadcasts CUTSCENE_TEXT_ADVANCED on timer-0.
     // Also resets state on textId-edge (new textbox).
