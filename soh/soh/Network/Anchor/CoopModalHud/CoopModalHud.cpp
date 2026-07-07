@@ -187,7 +187,10 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
         int wholeSec = (int)std::ceil(rem);
         if (wholeSec < 0) wholeSec = 0;
         char buf[16];
-        std::snprintf(buf, sizeof(buf), "%ds", wholeSec);
+        // Bare integer — no "s" suffix per user design direction
+        // 2026-07-07. Matches OoT's clean text-driven aesthetic
+        // (e.g. rupee counter, timer icons — no unit label).
+        std::snprintf(buf, sizeof(buf), "%d", wholeSec);
         rightLabel = buf;
         rightColor = TimerColorForInteger(wholeSec);
     } else {

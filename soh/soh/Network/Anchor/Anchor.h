@@ -811,6 +811,7 @@ class Anchor : public Network {
     inline static const std::string& HYRULE_CASTLE_GATE_OPEN  = PacketTypes::HYRULE_CASTLE_GATE_OPEN;
     inline static const std::string& CUTSCENE_START           = PacketTypes::CUTSCENE_START;
     inline static const std::string& CUTSCENE_END             = PacketTypes::CUTSCENE_END;
+    inline static const std::string& CUTSCENE_TEXT_VOTE_STATE = PacketTypes::CUTSCENE_TEXT_VOTE_STATE;
     inline static const std::string& MODAL_OFFER_CLAIMED      = PacketTypes::MODAL_OFFER_CLAIMED;
     inline static const std::string& NAV_TEST_DIRECTIVE       = PacketTypes::NAV_TEST_DIRECTIVE;
     inline static const std::string& OCARINA_SFX              = PacketTypes::OCARINA_SFX;
@@ -1417,6 +1418,18 @@ class Anchor : public Network {
     // Message_ShouldAdvance call returns true for. See #191.
     void SendPacket_CutsceneTextAdvanced(uint16_t textId, const char* reason);
     void HandlePacket_CutsceneTextAdvanced(nlohmann::json payload);
+
+    // CUTSCENE_TEXT_VOTE_STATE — host → all clients. Broadcast every
+    // time cutsceneTextAdvanceState mutates on the host (state
+    // activation, new vote received, or explicit clear). Peers apply
+    // the payload to their local cutsceneTextAdvanceState so
+    // CoopModalHud has consistent data on every client — previously
+    // the HUD only appeared on the host because the state field was
+    // never populated on peers (Plans/coop_modal_hud_plan.md §3.1
+    // assumption of "publicly readable state" was wire-scope; the
+    // struct is public C++ but its lifecycle events fired host-only).
+    void SendPacket_CutsceneTextVoteState();
+    void HandlePacket_CutsceneTextVoteState(nlohmann::json payload);
 
     // FOLLOWER_NPC_* — Flotilla NPC Follower companion (Plans/
     // npc_follower_plan.md §2.6 / §2.9). Single-owner authority:

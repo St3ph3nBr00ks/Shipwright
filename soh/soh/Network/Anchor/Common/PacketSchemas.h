@@ -53,6 +53,7 @@ inline const std::unordered_map<std::string, int> kPacketSchemas = {
     {"HYRULE_CASTLE_GATE_OPEN", 1},    // Any-client→all broadcast for the 10-rupee En_Heishi2 bribe gate (Bg_Spot15_Saku). Drives the opening ANIMATION on peers; flag write (INFTABLE_71) still syncs via SET_FLAG for late-joiners. #292.
     {"CUTSCENE_START", 1},             // Generic cutscene-start primitive (Plans/packet_family_cutscene_start_end.md). Two dispatch classes: `savecontext` via gSaveContext.cutsceneIndex edges, actor-driven kinds (e.g. `deku_tree_intro`) via explicit Anchor_NotifyCutsceneStart.
     {"CUTSCENE_END", 1},               // Sibling of CUTSCENE_START — brackets the cutscene close on all clients.
+    {"CUTSCENE_TEXT_VOTE_STATE", 1},   // Host → all-clients broadcast on cutsceneTextAdvanceState changes (activation, new vote, or clear). Peers mirror to their local state so CoopModalHud renders on every client, not just the host.
     {"CUTSCENE_TEXT_ADVANCE", 1},      // #191 Peer→host vote-skip for cutscene-internal textboxes.
     {"CUTSCENE_TEXT_ADVANCED", 1},     // #191 Host→all broadcast when textbox advance triggers.
     {"SERVER_MESSAGE", 1},
