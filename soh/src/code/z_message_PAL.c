@@ -202,7 +202,27 @@ u8 Message_ShouldAdvanceSilent(PlayState* play) {
     bool isB_Held = CVarGetInteger(CVAR_ENHANCEMENT("SkipText"), 0) != 0 ? CHECK_BTN_ALL(input->cur.button, BTN_B)
                                                                          : CHECK_BTN_ALL(input->press.button, BTN_B);
 
-    return CHECK_BTN_ALL(input->press.button, BTN_A) || isB_Held || CHECK_BTN_ALL(input->press.button, BTN_CUP);
+    bool localPress =
+        CHECK_BTN_ALL(input->press.button, BTN_A) || isB_Held || CHECK_BTN_ALL(input->press.button, BTN_CUP);
+
+    // Anchor multiplayer #294 — route through the vote-skip bridge
+    // during cutscene mode. Message_ShouldAdvance (the sibling above)
+    // already does this; the Silent variant was bypassing it, which
+    // let the first Deku Tree intro textboxes and other
+    // TEXTBOX_ENDTYPE_HAS_NEXT-chained cutscene text advance without
+    // ever hitting the vote-skip system. No SFX played here (Silent's
+    // caller at MSGMODE_TEXT_DONE picks the correct SFX after this
+    // returns true — NA_SE_SY_MESSAGE_PASS for HAS_NEXT chains,
+    // NA_SE_SY_DECIDE for close). Visual feedback for the local
+    // press is provided by the CoopModalHud's dot fill.
+    if (play->csCtx.state != CS_STATE_IDLE) {
+        return Anchor_ShouldAdvanceCutsceneTextLocal(localPress ? 1 : 0,
+                                                     (unsigned)play->msgCtx.textId)
+                   ? 1
+                   : 0;
+    }
+
+    return localPress;
 }
 
 /**
