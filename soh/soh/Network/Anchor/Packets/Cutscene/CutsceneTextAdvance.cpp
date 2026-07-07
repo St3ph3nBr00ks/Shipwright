@@ -317,8 +317,15 @@ void Anchor::SendPacket_CutsceneTextVoteState() {
         votedIds.push_back(cid);
     }
 
+    // Monotonic seq — increments on every send to defend against relay-
+    // side reordering (goroutine race in Anchor/anchor_git/room.go:56).
+    // Session-monotonic (not per-cycle) so cross-cycle stale packets are
+    // also rejected. Reset in OnSceneSpawnActors.
+    const uint64_t seq = ++voteStateSequence;
+
     nlohmann::json payload;
     payload["type"]              = CUTSCENE_TEXT_VOTE_STATE;
+    payload["seq"]               = seq;
     payload["sceneNum"]          = (int)state.sceneNum;
     payload["textId"]            = (int)state.textId;
     payload["active"]            = state.active;
@@ -328,6 +335,9 @@ void Anchor::SendPacket_CutsceneTextVoteState() {
     payload["targetTeamId"]      = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
     PacketTimeline::SetTimelineField(payload);
     payload["quiet"]             = true;  // relay logging noise-reducer
+
+    SPDLOG_INFO("[VoteState SEND] seq={} active={} textId={} votes={} msRemaining={}",
+                seq, state.active, state.textId, votedIds.size(), msRemaining);
 
     SendJsonToRemote(payload);
 }
@@ -345,6 +355,29 @@ void Anchor::HandlePacket_CutsceneTextVoteState(nlohmann::json payload) {
                                       (int8_t)gPlayState->roomCtx.curRoom.num,
                                       (uint8_t)(gSaveContext.linkAge & 0x1))) {
         return;
+    }
+
+    // Monotonic seq — reject packets older than the last one we applied.
+    // Defends against relay-side reordering (goroutine race in
+    // Anchor/anchor_git/room.go:56). Session-monotonic on the host, so
+    // any cross-cycle late arrivals are also caught. Missing/absent seq
+    // (e.g., older-build sender) applies without check for compat.
+    if (payload.contains("seq") && payload["seq"].is_number_unsigned()) {
+        const uint64_t seq = payload["seq"].get<uint64_t>();
+        if (seq <= peerLastAppliedVoteStateSeq) {
+            SPDLOG_INFO("[VoteState RECV] DROP stale seq={} lastApplied={} "
+                        "(active={} textId={})",
+                        seq, peerLastAppliedVoteStateSeq,
+                        payload.value("active", false),
+                        payload.value("textId", 0));
+            return;
+        }
+        peerLastAppliedVoteStateSeq = seq;
+        SPDLOG_INFO("[VoteState RECV] APPLY seq={} active={} textId={} votes={}",
+                    seq, payload.value("active", false),
+                    payload.value("textId", 0),
+                    payload.contains("pressedClientIds")
+                        ? payload["pressedClientIds"].size() : 0);
     }
 
     auto& state = cutsceneTextAdvanceState;

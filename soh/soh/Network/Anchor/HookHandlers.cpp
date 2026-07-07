@@ -542,6 +542,14 @@ void Anchor::RegisterHooks() {
                 (int16_t)gPlayState->sceneNum,
                 (uint8_t)gSaveContext.linkAge);
 
+            // #191 vote-state ordering — reset the monotonic sequence
+            // counters on scene load. Keeps the integers small and avoids
+            // stale-rejection after any scene reload (Game Over → Continue,
+            // void-out) that recycles a fresh vote-tally cycle. Both host
+            // and peer counters are reset unconditionally; only whichever
+            // role we're in reads its counter next.
+            Anchor::Instance->voteStateSequence           = 0;
+            Anchor::Instance->peerLastAppliedVoteStateSeq = 0;
         }
     });
 
