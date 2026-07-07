@@ -124,4 +124,30 @@ struct CutsceneCatchupEntry {
     std::vector<ActorStateSnapshot> actors;
 };
 
+// ---- Public API — Phase 2B (implementation in CutsceneCatchup.cpp) --
+
+// Leader-side capture. Each function is a no-op unless the local
+// client is (a) the room host and (b) inside a cutscene. Callers
+// don't need to gate; these gate internally for KISS at call sites.
+void RecordSpawnedActor(struct Actor* actor);
+void RecordFlagSet(int16_t flagType, int16_t flag, int16_t sceneOrRoomNum);
+void RecordItemGranted(int16_t itemId, int32_t amount);
+void RecordMusicStart(int32_t seqId);
+
+// Called at ~1Hz from TickCutsceneCatchup (Phase 3):
+void SnapshotCamera();
+void SnapshotActors();
+void UpdateFrameCounter();
+
+// Lifecycle. Ledger entries are reconciled against
+// Anchor::cutsceneStartActive each tick (ReconcileLifecycle), but
+// explicit clear is provided for CUTSCENE_END packet-receive paths.
+void ClearEntry(const std::string& kindKey);
+void ClearAll();
+void ReconcileLifecycle();
+
 }  // namespace CutsceneCatchup
+
+// z_demo.c calls this from Cutscene_Command_PlayBGM when the script
+// starts a music sequence. Phase 4 wires the call site.
+extern "C" void Anchor_NotifyCutsceneMusicStart(int seqId);
