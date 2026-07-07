@@ -147,6 +147,7 @@ inline const std::string TALON_CASTLE_STATE        = "TALON_CASTLE_STATE";
 inline const std::string HYRULE_CASTLE_GATE_OPEN   = "HYRULE_CASTLE_GATE_OPEN";
 inline const std::string CUTSCENE_START            = "CUTSCENE_START";
 inline const std::string CUTSCENE_END              = "CUTSCENE_END";
+inline const std::string CUTSCENE_TEXT_VOTE_STATE  = "CUTSCENE_TEXT_VOTE_STATE";
 
 // BOSS_EXIT_TEAM_WARP — team-routed scene transition for synced boss
 // exits. When a team member enters the dungeon-clear blue warp, all

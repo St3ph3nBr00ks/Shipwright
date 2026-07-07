@@ -37,8 +37,9 @@ constexpr ImVec4 kBgColor       = ImVec4(0.0f, 0.0f, 0.0f, 0.55f);
 constexpr ImVec4 kBorderColor   = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
 constexpr ImVec4 kPromptColor   = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
 constexpr ImVec4 kTimerNormal   = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-constexpr ImVec4 kTimerWarn     = ImVec4(1.0f, 0.85f, 0.35f, 1.0f);  // yellow < 1.5s
-constexpr ImVec4 kTimerCritical = ImVec4(1.0f, 0.35f, 0.35f, 1.0f);  // red < 0.5s
+// Integer-timer thresholds: yellow when display reads "1s", red at "0s".
+constexpr ImVec4 kTimerWarn     = ImVec4(1.0f, 0.85f, 0.35f, 1.0f);
+constexpr ImVec4 kTimerCritical = ImVec4(1.0f, 0.35f, 0.35f, 1.0f);
 
 // Dot geometry (plan §5.1: ~16px diameter, ~6px spacing).
 constexpr float kDotRadius     = 8.0f;
@@ -46,8 +47,15 @@ constexpr float kDotSpacing    = 22.0f;  // center-to-center
 constexpr float kDotToTextGap  = 20.0f;
 constexpr float kPadding       = 12.0f;
 
-// Y anchor: 25% up from bottom edge of viewport (plan §4.3(a)).
-constexpr float kBottomAnchorRatio = 0.25f;
+// Bottom-right anchor — fixed pixel margin from the viewport bottom-right
+// corner. Widget pivots at (1.0, 1.0) so its bottom-right sits at
+// (vp.right - margin, vp.bottom - margin). Works across all aspect
+// ratios; positions predictably regardless of the vanilla textbox
+// height/position. See §5.1 note in coop_modal_hud_plan.md — bottom-
+// right of viewport is the KISS approximation of "bottom-right of
+// dialogue box"; a future refinement can read msgCtx.textPosX/Y for
+// pixel-accurate dialog-box-relative placement.
+constexpr float kBottomRightMargin = 24.0f;
 
 // ---- Peer enumeration -----------------------------------------------
 
@@ -125,9 +133,16 @@ float RemainingSecondsFrom(
     return (float)ms / 1000.0f;
 }
 
-ImVec4 TimerColorFor(float remainingSec) {
-    if (remainingSec < 0.5f) return kTimerCritical;
-    if (remainingSec < 1.5f) return kTimerWarn;
+// Integer-timer color palette. The widget displays whole seconds only
+// (per user design direction 2026-07-07 — matches OoT's text-driven
+// aesthetic + gives players a precise integer countdown). Color cues:
+//   >= 2s remaining     → white  (kTimerNormal)
+//   1s remaining        → yellow (kTimerWarn)
+//   0s remaining (last  → red    (kTimerCritical)
+//     second before advance)
+ImVec4 TimerColorForInteger(int wholeSec) {
+    if (wholeSec <= 0) return kTimerCritical;
+    if (wholeSec <= 1) return kTimerWarn;
     return kTimerNormal;
 }
 
@@ -165,10 +180,19 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
     ImVec4 rightColor = kPromptColor;
     if (state.countdownStarted) {
         float rem = RemainingSecondsFrom(state.countdownEndsAt);
+        // Ceiling of remaining seconds so the display transitions
+        // 5→4→3→2→1→0 (users expect "1s" to mean "up to 1 second
+        // remaining"). Ceiling avoids the awkward case where the timer
+        // reads "0s" for a full second before the actual advance.
+        int wholeSec = (int)std::ceil(rem);
+        if (wholeSec < 0) wholeSec = 0;
         char buf[16];
-        std::snprintf(buf, sizeof(buf), "%.1fs", rem);
+        // Bare integer — no "s" suffix per user design direction
+        // 2026-07-07. Matches OoT's clean text-driven aesthetic
+        // (e.g. rupee counter, timer icons — no unit label).
+        std::snprintf(buf, sizeof(buf), "%d", wholeSec);
         rightLabel = buf;
-        rightColor = TimerColorFor(rem);
+        rightColor = TimerColorForInteger(wholeSec);
     } else {
         rightLabel = "Press A to skip";
     }
@@ -245,16 +269,16 @@ void Window::Draw() {
     // `else if` branches per plan §5.3 (priority: voting-skip wins
     // when multiple scenarios coexist).
     if (anchor.cutsceneTextAdvanceState.active) {
-        // Establish the fixed anchor position before Begin — ImGui
-        // will honor it on this frame's window layout.
+        // Bottom-right of viewport — pivot (1.0, 1.0) so the widget's
+        // bottom-right corner sits at (vp.right - margin, vp.bottom -
+        // margin). Position is aspect-ratio agnostic; approximates
+        // "bottom-right of dialogue box" in the common case where the
+        // vanilla textbox spans most of the bottom third of the frame.
         auto vp = ImGui::GetMainViewport();
-        const float anchorY =
-            vp->Pos.y + vp->Size.y * (1.0f - kBottomAnchorRatio);
-        const float anchorX = vp->Pos.x + vp->Size.x * 0.5f;
-        // Pivot (0.5, 1.0) centers horizontally, aligns bottom edge
-        // to anchorY — sits just above the vanilla lower-textbox area.
+        const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
+        const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
         ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
-                                ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+                                ImGuiCond_Always, ImVec2(1.0f, 1.0f));
         DrawVotingSkipWidget(anchor);
     }
 }

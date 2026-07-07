@@ -187,6 +187,11 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
                 (int)state.pressedClientIds.size(),
                 (int)CountInSceneTeamSize());
 
+    // Broadcast the new state to peers so their CoopModalHud renders
+    // the same dot row + countdown as the host. Fires on every vote-
+    // received edge so peers see other clients' dots fill in real time.
+    SendPacket_CutsceneTextVoteState();
+
     // All-pressed check (includes host, who votes via local press too).
     size_t teamSize = CountInSceneTeamSize();
     if (state.pressedClientIds.size() >= teamSize) {
@@ -196,6 +201,8 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
         cutsceneTextAdvanceConsumedTextId = textId;
         state.active = false;
         state.pressedClientIds.clear();
+        // Broadcast the cleared state so peers hide their HUD.
+        SendPacket_CutsceneTextVoteState();
     }
 }
 
@@ -240,5 +247,105 @@ void Anchor::TickCutsceneTextAdvance() {
         cutsceneTextAdvanceConsumedTextId = state.textId;
         state.active = false;
         state.pressedClientIds.clear();
+        // Broadcast the cleared state so peers hide their HUD.
+        SendPacket_CutsceneTextVoteState();
+    }
+}
+
+// ---------------------------------------------------------------------
+// CUTSCENE_TEXT_VOTE_STATE — host → all-clients state broadcast.
+//
+// Sent every time the host mutates its local cutsceneTextAdvanceState
+// (activation, new vote received, or explicit clear). Peers apply the
+// payload to their local state so CoopModalHud has the same data on
+// every client — filling dots as peers vote and displaying the same
+// countdown text.
+//
+// Wire fields:
+//   sceneNum         — scene scope
+//   textId           — active textbox id (0 when active=false)
+//   active           — host's state.active
+//   countdownStarted — host's state.countdownStarted
+//   msRemaining      — ms remaining on countdown at send time; peer
+//                      converts to its local endsAt = now + msRemaining
+//                      (small drift from packet latency acceptable at
+//                       ~5s countdown scale)
+//   pressedClientIds — array of client IDs that have voted
+// ---------------------------------------------------------------------
+
+void Anchor::SendPacket_CutsceneTextVoteState() {
+    if (!IsSaveLoaded() || gPlayState == nullptr) return;
+    if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.Enabled"), 1)) return;
+
+    auto& state = cutsceneTextAdvanceState;
+
+    // ms remaining as a signed clamp — 0 when countdown not started or
+    // has already elapsed. Peers use this to derive their own local
+    // endsAt so the display counts down in local time.
+    int64_t msRemaining = 0;
+    if (state.countdownStarted) {
+        auto now = std::chrono::steady_clock::now();
+        auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         state.countdownEndsAt - now).count();
+        msRemaining = delta > 0 ? delta : 0;
+    }
+
+    nlohmann::json votedIds = nlohmann::json::array();
+    for (uint32_t cid : state.pressedClientIds) {
+        votedIds.push_back(cid);
+    }
+
+    nlohmann::json payload;
+    payload["type"]              = CUTSCENE_TEXT_VOTE_STATE;
+    payload["sceneNum"]          = (int)state.sceneNum;
+    payload["textId"]            = (int)state.textId;
+    payload["active"]            = state.active;
+    payload["countdownStarted"]  = state.countdownStarted;
+    payload["msRemaining"]       = msRemaining;
+    payload["pressedClientIds"]  = votedIds;
+    payload["targetTeamId"]      = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    PacketTimeline::SetTimelineField(payload);
+    payload["quiet"]             = true;  // relay logging noise-reducer
+
+    SendJsonToRemote(payload);
+}
+
+void Anchor::HandlePacket_CutsceneTextVoteState(nlohmann::json payload) {
+    if (!IsSaveLoaded() || gPlayState == nullptr) return;
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
+    if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.Enabled"), 1)) return;
+
+    // Only peers apply — the host's authoritative state comes from its
+    // local vote-tally flow, not a wire echo. Belt-and-suspenders since
+    // the relay wouldn't route the packet back to sender in normal
+    // flow, but a self-broadcast bug would be silently absorbed.
+    if (::SceneAuthority::IsRoomHost((int16_t)gPlayState->sceneNum,
+                                      (int8_t)gPlayState->roomCtx.curRoom.num,
+                                      (uint8_t)(gSaveContext.linkAge & 0x1))) {
+        return;
+    }
+
+    auto& state = cutsceneTextAdvanceState;
+    state.sceneNum         = (int16_t)payload.value("sceneNum", -1);
+    state.textId           = (uint16_t)payload.value("textId", 0);
+    state.active           = payload.value("active", false);
+    state.countdownStarted = payload.value("countdownStarted", false);
+
+    // Convert wire msRemaining → local endsAt.
+    int64_t msRemaining = payload.value("msRemaining", (int64_t)0);
+    if (state.countdownStarted && msRemaining > 0) {
+        state.countdownEndsAt = std::chrono::steady_clock::now() +
+                                 std::chrono::milliseconds(msRemaining);
+    }
+
+    // Replace the voter set from the wire payload.
+    state.pressedClientIds.clear();
+    if (payload.contains("pressedClientIds") &&
+        payload["pressedClientIds"].is_array()) {
+        for (const auto& id : payload["pressedClientIds"]) {
+            if (id.is_number_unsigned()) {
+                state.pressedClientIds.insert(id.get<uint32_t>());
+            }
+        }
     }
 }

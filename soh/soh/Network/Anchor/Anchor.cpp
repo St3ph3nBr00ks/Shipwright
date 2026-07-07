@@ -376,6 +376,7 @@ Anchor::GetPacketHandlerRegistry() {
         { HYRULE_CASTLE_GATE_OPEN, &Anchor::HandlePacket_HyruleCastleGateOpen  },
         { CUTSCENE_START,          &Anchor::HandlePacket_CutsceneStart         },
         { CUTSCENE_END,            &Anchor::HandlePacket_CutsceneEnd           },
+        { CUTSCENE_TEXT_VOTE_STATE, &Anchor::HandlePacket_CutsceneTextVoteState },
         { ITEM_DROP_SYNC,          &Anchor::HandlePacket_ItemDropSync          },
         { ITEM_COLLECTED,          &Anchor::HandlePacket_ItemCollected         },
         { ITEM_DROP_SNAPSHOT,      &Anchor::HandlePacket_ItemDropSnapshot      },

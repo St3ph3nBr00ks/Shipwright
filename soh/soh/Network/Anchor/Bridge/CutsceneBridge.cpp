@@ -54,9 +54,47 @@ extern SaveContext gSaveContext;
 // unchanged — vanilla parity.
 extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
                                                      unsigned currentTextId) {
+    // Diagnostic (2026-07-07). Gated on gRemote.Anchor.CutsceneBridgeDiag
+    // (default 0). Answers the question "why did the first textbox in
+    // the DT intro not use vote-skip?" Three signatures to watch for:
+    //
+    //   1. `NEW textId` fires with wasLocalPress=0 for the first
+    //      textbox but the log NEVER shows a subsequent line for that
+    //      textId with wasLocalPress=1 → user pressed A but the vanilla
+    //      Message_ShouldAdvance path bypassed the bridge (Cause B/C:
+    //      cutscene script auto-advance or a different advance path).
+    //
+    //   2. `NEW textId` fires but `peerInCutscene=0` on the first
+    //      textbox → PLAYER_UPDATE hadn't propagated the peer's
+    //      csCtxState yet (Cause A: timing race). Subsequent textboxes
+    //      show peerInCutscene=1 as PLAYER_UPDATE catches up.
+    //
+    //   3. `NEW textId` never fires for the very first textbox in the
+    //      cutscene → the message system uses a different textId
+    //      encoding or the bridge invocation is guarded upstream in
+    //      z_message_PAL.c (Cause B/C, deeper investigation needed).
+    const bool diagEnabled =
+        CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneBridgeDiag"), 0) != 0;
+    static uint16_t s_diagLastTextId  = 0xFFFF;
+    static int      s_diagLastPressed = 0;
+    if (diagEnabled && (uint16_t)currentTextId != s_diagLastTextId) {
+        SPDLOG_INFO("[CutsceneBridge.diag] NEW textId=0x{:04X} wasLocalPress={} "
+                    "anchorConnected={}",
+                    (unsigned)currentTextId, wasLocalPressDetected,
+                    Anchor::Instance ? (int)Anchor::Instance->isConnected : -1);
+        s_diagLastTextId = (uint16_t)currentTextId;
+    }
+
     if (!Anchor::Instance || !Anchor::Instance->isConnected) {
+        if (diagEnabled && wasLocalPressDetected && !s_diagLastPressed) {
+            SPDLOG_INFO("[CutsceneBridge.diag] textId=0x{:04X} press: Anchor OFFLINE "
+                        "→ solo (vanilla)", (unsigned)currentTextId);
+        }
+        s_diagLastPressed = wasLocalPressDetected;
         return wasLocalPressDetected ? 1 : 0;
     }
+    // s_diagLastPressed used below at return points — track across the
+    // rest of the function.
 
     // Consume the broadcast flag if it matches the current textbox.
     // Edge case: matched broadcast for a previous textId stays
@@ -65,6 +103,12 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
     if (Anchor::Instance->cutsceneTextAdvanceConsumed &&
         Anchor::Instance->cutsceneTextAdvanceConsumedTextId == (uint16_t)currentTextId) {
         Anchor::Instance->cutsceneTextAdvanceConsumed = false;
+        if (diagEnabled) {
+            SPDLOG_INFO("[CutsceneBridge.diag] textId=0x{:04X} advance-broadcast "
+                        "consumed → local advance",
+                        (unsigned)currentTextId);
+        }
+        s_diagLastPressed = wasLocalPressDetected;
         return 1;
     }
     if (Anchor::Instance->cutsceneTextAdvanceConsumed &&
@@ -100,6 +144,8 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
         uint8_t myTimeline = (uint8_t)(gSaveContext.linkAge & 0x1);
         std::string myTeamId =
             CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+        int diagPeerCount = 0;
+        int diagPeerInCutsceneCount = 0;
         for (auto& [cid, client] : Anchor::Instance->clients) {
             if (client.self) continue;
             if (!client.online) continue;
@@ -107,9 +153,18 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
             if (client.sceneNum != myScene) continue;
             if ((uint8_t)(client.linkAge & 0x1) != myTimeline) continue;
             if (client.teamId != myTeamId) continue;
+            diagPeerCount++;
             if (client.csCtxState == 0 /* CS_STATE_IDLE */) continue;
+            diagPeerInCutsceneCount++;
             peerInCutscene = true;
             break;
+        }
+        if (diagEnabled && wasLocalPressDetected && !s_diagLastPressed) {
+            SPDLOG_INFO("[CutsceneBridge.diag] textId=0x{:04X} press: "
+                        "peersInScene={} peersInCutscene={} → branch={}",
+                        (unsigned)currentTextId, diagPeerCount,
+                        diagPeerInCutsceneCount,
+                        peerInCutscene ? "vote" : "solo");
         }
         if (!peerInCutscene) {
             // Solo cutscene — vanilla parity for input.
@@ -139,6 +194,7 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
             }
             if (wasLocalPressDetected) {
                 s_soloIdleStartMs = nowMs;
+                s_diagLastPressed = wasLocalPressDetected;
                 return 1;
             }
             if (idleThresholdMs > 0 &&
@@ -146,8 +202,10 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
                 SPDLOG_INFO("[CutsceneText] Solo idle auto-advance after {} ms (textId=0x{:04X})",
                             (long long)idleThresholdMs, (unsigned)currentTextId);
                 s_soloIdleStartMs = nowMs;  // prevent immediate re-fire next frame
+                s_diagLastPressed = wasLocalPressDetected;
                 return 1;
             }
+            s_diagLastPressed = wasLocalPressDetected;
             return 0;
         }
     }
@@ -156,6 +214,8 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
     if (wasLocalPressDetected) {
         Anchor::Instance->SendPacket_CutsceneTextAdvance((uint16_t)currentTextId);
     }
+
+    s_diagLastPressed = wasLocalPressDetected;
 
     // Don't immediately advance — wait for the host's broadcast.
     return 0;
