@@ -15,6 +15,12 @@
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// Anchor C-linkage helper — broadcast HYRULE_CASTLE_GATE_OPEN so
+// team peers in the same scene play the gate-opening animation.
+// Implementation in Packets/World/HyruleCastleGateOpen.cpp. NO-OP
+// in single-player. See #292.
+extern void Anchor_NotifyHyruleCastleGateOpen(void);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY)
 
 void EnHeishi2_Init(Actor* thisx, PlayState* play);
@@ -303,6 +309,13 @@ void func_80A53638(EnHeishi2* this, PlayState* play) {
             } else {
                 this->gate = &actor->dyna.actor;
                 actor->unk_168 = 1;
+                // #292 — sync the animation trigger to team peers in the
+                // same scene BEFORE the dialog closes and Flags_SetInfTable
+                // (INFTABLE_71) fires. The gate's `unk_168 && !INFTABLE_71`
+                // check gates the opening animation; if the flag arrived
+                // first on peers, the gate would silently skip animation
+                // and only pre-position open on the next scene load.
+                Anchor_NotifyHyruleCastleGateOpen();
                 break;
             }
         }
