@@ -10,6 +10,7 @@
 #include <atomic>
 #include <climits>
 #include <map>
+#include <memory>
 #include <queue>
 #include <mutex>
 #include <chrono>
@@ -55,6 +56,10 @@ extern "C" {
 // surface narrow while letting member function signatures
 // reference the type by pointer.
 namespace AnchorNavRoom { struct RoomNavData; }
+// Forward-decl for cutscene late-join ledger (Plans/cutscene_late_join_plan.md).
+// Full definition in Common/CutsceneCatchup.h; forward-decl keeps this
+// header light so most Anchor consumers don't pay the include cost.
+namespace CutsceneCatchup { struct CutsceneCatchupEntry; }
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
 void DummyPlayer_Update(Actor* actor, PlayState* play);
@@ -812,6 +817,9 @@ class Anchor : public Network {
     inline static const std::string& CUTSCENE_START           = PacketTypes::CUTSCENE_START;
     inline static const std::string& CUTSCENE_END             = PacketTypes::CUTSCENE_END;
     inline static const std::string& CUTSCENE_TEXT_VOTE_STATE = PacketTypes::CUTSCENE_TEXT_VOTE_STATE;
+    inline static const std::string& CUTSCENE_FRAME_SYNC      = PacketTypes::CUTSCENE_FRAME_SYNC;
+    inline static const std::string& CUTSCENE_CATCHUP_REQUEST = PacketTypes::CUTSCENE_CATCHUP_REQUEST;
+    inline static const std::string& CUTSCENE_CATCHUP_RESPONSE= PacketTypes::CUTSCENE_CATCHUP_RESPONSE;
     inline static const std::string& MODAL_OFFER_CLAIMED      = PacketTypes::MODAL_OFFER_CLAIMED;
     inline static const std::string& NAV_TEST_DIRECTIVE       = PacketTypes::NAV_TEST_DIRECTIVE;
     inline static const std::string& OCARINA_SFX              = PacketTypes::OCARINA_SFX;
@@ -1431,6 +1439,25 @@ class Anchor : public Network {
     void SendPacket_CutsceneTextVoteState();
     void HandlePacket_CutsceneTextVoteState(nlohmann::json payload);
 
+    // Cutscene late-join (Option B v1 — Plans/cutscene_late_join_plan.md).
+    // CUTSCENE_FRAME_SYNC: leader 1Hz broadcast of csCtx.frames + state.
+    // CUTSCENE_CATCHUP_REQUEST: late-joiner → leader, one-shot.
+    // CUTSCENE_CATCHUP_RESPONSE: leader → late-joiner, one-shot.
+    void SendPacket_CutsceneFrameSync();
+    void HandlePacket_CutsceneFrameSync(nlohmann::json payload);
+    void SendPacket_CutsceneCatchupRequest(uint32_t leaderClientId,
+                                            const std::string& csKind,
+                                            uint32_t csKey);
+    void HandlePacket_CutsceneCatchupRequest(nlohmann::json payload);
+    void SendPacket_CutsceneCatchupResponse(uint32_t requesterClientId,
+                                             const std::string& csKind,
+                                             uint32_t csKey);
+    void HandlePacket_CutsceneCatchupResponse(nlohmann::json payload);
+    // Per-frame tick from OnGameFrameUpdate. Emits FRAME_SYNC at 1Hz
+    // while local cutscene active; also decrements pendingCatchup
+    // deadline and triggers Skip-and-Apply fallback on timeout.
+    void TickCutsceneCatchup();
+
     // FOLLOWER_NPC_* — Flotilla NPC Follower companion (Plans/
     // npc_follower_plan.md §2.6 / §2.9). Single-owner authority:
     // owner sends, peers apply read-only. Phase 3 wiring.
@@ -1534,6 +1561,38 @@ class Anchor : public Network {
     // sent OR received a START for; used for both send-side dedup
     // and receive-side "already started" idempotency.
     std::set<std::string> cutsceneStartActive;
+
+    // ----- Cutscene late-join / catch-up (Option B v1) -----------------
+    // Plan: Claude/Plans/cutscene_late_join_plan.md.
+    //
+    // The ledger accumulates observable side effects on the LEADER's
+    // client while a cutscene is running. Populated by hooks gated on
+    // Play_InCsMode (OnActorSpawn / OnFlagSet / OnItemReceive / music
+    // command). Cleared on CUTSCENE_END for the same kind.
+    //
+    // On a late-joiner scene-entry, if we detect a peer mid-cutscene
+    // in our scene, we send CUTSCENE_CATCHUP_REQUEST; the leader
+    // replies with a CUTSCENE_CATCHUP_RESPONSE built from this ledger
+    // + snapshot data. Late-joiner applies the delta, seeks audio,
+    // jumps csCtx.frames to leader.frame, and resumes vanilla playback.
+    //
+    // Types are defined in Common/CutsceneCatchup.h to keep this header
+    // small (mirror of Common/EnforcedCVarRegistry pattern).
+    std::unordered_map<std::string /* csKind:csKey */,
+                       std::unique_ptr<::CutsceneCatchup::CutsceneCatchupEntry>>
+        cutsceneCatchupLedger;
+
+    // Late-joiner state: while pending, local vanilla cutscene entry
+    // is suppressed via Anchor_ShouldEnterCutsceneLocally() until the
+    // response arrives or the timeout deadline elapses.
+    bool     pendingCutsceneCatchup = false;
+    std::chrono::steady_clock::time_point pendingCutsceneCatchupDeadline;
+    std::string pendingCutsceneCatchupKindKey;  // "<csKind>:<csKey>"
+
+    // Sequence numbers for CUTSCENE_FRAME_SYNC ordering (Pitfall 43).
+    // Reset in OnSceneSpawnActors so both counters stay small.
+    uint64_t cutsceneFrameSyncSequence = 0;
+    uint64_t peerLastAppliedCutsceneFrameSeq = 0;
 
     // Heartbeat (#194 follow-up) — two-axis liveness signal.
     //

@@ -148,6 +148,23 @@ inline const std::string HYRULE_CASTLE_GATE_OPEN   = "HYRULE_CASTLE_GATE_OPEN";
 inline const std::string CUTSCENE_START            = "CUTSCENE_START";
 inline const std::string CUTSCENE_END              = "CUTSCENE_END";
 inline const std::string CUTSCENE_TEXT_VOTE_STATE  = "CUTSCENE_TEXT_VOTE_STATE";
+// Cutscene late-join (Option B — jump-and-catch-up + skip-and-apply
+// fallback). Plan: Claude/Plans/cutscene_late_join_plan.md.
+//
+// CUTSCENE_FRAME_SYNC — 1Hz periodic broadcast from the leader while
+// their local csCtx.state != CS_STATE_IDLE. Carries leader's current
+// csCtx.frames + state + monotonic seq (Pitfall 43 pattern). Peers use
+// it for ongoing drift correction after initial catch-up.
+inline const std::string CUTSCENE_FRAME_SYNC       = "CUTSCENE_FRAME_SYNC";
+// CUTSCENE_CATCHUP_REQUEST — targeted (late-joiner → leader) when a
+// scene-entry detects a peer mid-cutscene. Asks for the full state
+// snapshot (leader frame, delta ledger since frame 0, actor snapshots,
+// camera snapshot, music seek offset).
+inline const std::string CUTSCENE_CATCHUP_REQUEST  = "CUTSCENE_CATCHUP_REQUEST";
+// CUTSCENE_CATCHUP_RESPONSE — targeted (leader → late-joiner) reply
+// carrying the delta ledger + snapshots. Applied atomically; then
+// csCtx.frames jumps to leader.frame; vanilla playback resumes.
+inline const std::string CUTSCENE_CATCHUP_RESPONSE = "CUTSCENE_CATCHUP_RESPONSE";
 
 // BOSS_EXIT_TEAM_WARP — team-routed scene transition for synced boss
 // exits. When a team member enters the dungeon-clear blue warp, all
