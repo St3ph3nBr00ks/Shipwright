@@ -724,6 +724,14 @@ void Anchor::RegisterHooks() {
         // CUTSCENE_TEXT_ADVANCED on timer-0.
         Anchor::Instance->TickCutsceneTextAdvance();
 
+        // Generic CUTSCENE_START / CUTSCENE_END edge detector — watches
+        // gSaveContext.cutsceneIndex transitions for the `savecontext`
+        // dispatch class. Actor-driven kinds (deku_tree_intro etc.)
+        // fire independently from the actor's C-side Anchor_Notify call.
+        // Both paths share the same send-side dedup so double-fires are
+        // absorbed. Plans/packet_family_cutscene_start_end.md.
+        Anchor::Instance->TickCutsceneStartDetector();
+
         // KB-18 (#177) Option 4 — deferred host snapshot broadcast.
         // OnSceneSpawnActors host-path armed pendingSceneActorNetIdsBroadcast;
         // we drain it on the next frame so every static actor has completed

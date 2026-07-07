@@ -809,6 +809,8 @@ class Anchor : public Network {
     inline static const std::string& MIDO_POST_DEKU_LEAVE     = PacketTypes::MIDO_POST_DEKU_LEAVE;
     inline static const std::string& TALON_CASTLE_STATE       = PacketTypes::TALON_CASTLE_STATE;
     inline static const std::string& HYRULE_CASTLE_GATE_OPEN  = PacketTypes::HYRULE_CASTLE_GATE_OPEN;
+    inline static const std::string& CUTSCENE_START           = PacketTypes::CUTSCENE_START;
+    inline static const std::string& CUTSCENE_END             = PacketTypes::CUTSCENE_END;
     inline static const std::string& MODAL_OFFER_CLAIMED      = PacketTypes::MODAL_OFFER_CLAIMED;
     inline static const std::string& NAV_TEST_DIRECTIVE       = PacketTypes::NAV_TEST_DIRECTIVE;
     inline static const std::string& OCARINA_SFX              = PacketTypes::OCARINA_SFX;
@@ -1297,6 +1299,40 @@ class Anchor : public Network {
     void SendPacket_HyruleCastleGateOpen();
     void HandlePacket_HyruleCastleGateOpen(nlohmann::json payload);
 
+    // CUTSCENE_START / CUTSCENE_END — generic primitive that brackets a
+    // cutscene across all clients in the same scene + timeline (per
+    // Plans/packet_family_cutscene_start_end.md).
+    //
+    // Two dispatch classes on the send side:
+    //   1. `savecontext` — auto-detected via edge on gSaveContext.cutsceneIndex
+    //      (0 → non-zero fires START; non-zero → 0 fires END). Covers most
+    //      scripted engine cutscenes.
+    //   2. Actor-driven kinds (e.g. `deku_tree_intro`) — explicit
+    //      Anchor_NotifyCutsceneStart / _End calls from the actor's C-side
+    //      trigger site. Covers cutscenes where cutsceneIndex stays 0
+    //      but csCtx.state / .segment are written directly.
+    //
+    // Receive side dispatches by csKind — each kind has a dedicated
+    // handler that mirrors the vanilla local trigger on the receiving
+    // client (e.g. deku_tree_intro locates the local Bg_Treemouth and
+    // fires its intro trigger path bypassing the local-Link distance
+    // check that gates it in vanilla).
+    //
+    // Idempotency: `(sceneNum, csKind, csKey)` dedup — repeated STARTs
+    // for the same key are no-ops. Timeline: cross-timeline packets
+    // dropped via PacketTimeline::IsCrossTimelinePacket.
+    void SendPacket_CutsceneStart(const std::string& csKind, uint32_t csKey);
+    void HandlePacket_CutsceneStart(nlohmann::json payload);
+    void SendPacket_CutsceneEnd(const std::string& csKind, uint32_t csKey,
+                                const std::string& endReason);
+    void HandlePacket_CutsceneEnd(nlohmann::json payload);
+
+    // Edge-detector tick. Called from OnGameFrameUpdate. Detects
+    // (cutsceneIndex, csCtx.state) transitions for the `savecontext`
+    // kind and fires the appropriate SendPacket_CutsceneStart/_End.
+    // Also tracks the last-seen values so per-frame edges fire once.
+    void TickCutsceneStartDetector();
+
     // ITEM_DROP_SYNC (#193 Phase 1) — host fans out the authoritative
     // drop after its local Item_DropCollectible* call site spawns the
     // EnItem00 actor. Receivers spawn a matching local EnItem00 with
@@ -1458,6 +1494,18 @@ class Anchor : public Network {
     // consume the same advance signal.
     bool     cutsceneTextAdvanceConsumed = false;
     uint16_t cutsceneTextAdvanceConsumedTextId = 0;
+
+    // CUTSCENE_START / CUTSCENE_END edge-detector state. Tracks
+    // last-frame values so the detector fires once per transition.
+    // Idempotency dedup — active kinds we've broadcast a START for;
+    // cleared on the matching END. Prevents thrashing STARTs on
+    // csCtx.state internal transitions (SKIPPABLE_INIT → EXEC etc.).
+    uint16_t cutsceneStartDetectorPrevIndex = 0;
+    uint8_t  cutsceneStartDetectorPrevState = 0;  // CS_STATE_IDLE
+    // Kind key: `<csKind>:<csKey>` string. Set includes kinds we've
+    // sent OR received a START for; used for both send-side dedup
+    // and receive-side "already started" idempotency.
+    std::set<std::string> cutsceneStartActive;
 
     // Heartbeat (#194 follow-up) — two-axis liveness signal.
     //
