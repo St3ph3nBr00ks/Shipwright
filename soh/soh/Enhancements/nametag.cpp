@@ -83,6 +83,29 @@ void DrawNameTag(PlayState* play, const NameTag* nameTag) {
         textColor = CVarGetColor(CVAR_COSMETIC("HUD.NameTagActorText.Value"), textColor);
     }
 
+    // Brightness-adaptive background: when the tag carries a per-tag
+    // text-color override (alpha != 0 marks the override active), derive
+    // the background from the text color's perceived brightness (standard
+    // Rec. 601 luma: 0.299*R + 0.587*G + 0.114*B). Bright text -> dark
+    // background; dark text -> light background. Alpha is preserved from
+    // the current textboxColor so the user's HUD Cosmetic opacity CVar
+    // still applies. Tags that don't set a per-tag text color (empty
+    // NameTagOptions{}, the default for every legacy caller) are
+    // unaffected.
+    if (nameTag->textColor.a != 0) {
+        const int luma = (299 * nameTag->textColor.r + 587 * nameTag->textColor.g +
+                          114 * nameTag->textColor.b) / 1000;
+        if (luma > 127) {
+            textboxColor.r = 0;
+            textboxColor.g = 0;
+            textboxColor.b = 0;
+        } else {
+            textboxColor.r = 255;
+            textboxColor.g = 255;
+            textboxColor.b = 255;
+        }
+    }
+
     FrameInterpolation_RecordOpenChild(nameTag->actor, 0);
 
     // Prefer the highest between world position and focus position if targetable
