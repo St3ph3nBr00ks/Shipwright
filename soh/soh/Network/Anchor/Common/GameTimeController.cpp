@@ -14,6 +14,11 @@ extern "C" {
 #include "macros.h"
 #include "variables.h"  // gSaveContext (Pitfall 9): SceneTransition rule reads gameMode
 extern PlayState* gPlayState;
+// Pillar G.ii Cutscene routing — the legacy rule calls Player_InCsMode
+// directly (NOT Play_InCsMode) to avoid recursion, since Play_InCsMode
+// is the site being routed through the gate. Declared explicitly to
+// avoid a full functions.h include.
+extern s32 Player_InCsMode(PlayState* play);  // z_player_lib.c:510
 }
 
 namespace GameTimeController {
@@ -44,7 +49,16 @@ static bool LegacyAdvanceWorldTimeRule(TimeContext ctx) {
             return player == nullptr || !(player->stateFlags1 & PLAYER_STATE1_GETTING_ITEM);
         }
         case TimeContext::Cutscene:
-            return gPlayState->csCtx.state == CS_STATE_IDLE;
+            // Canonical predicate mirrors z_play.c:1811 Play_InCsMode, but
+            // calls Player_InCsMode DIRECTLY (NOT Play_InCsMode) to avoid
+            // recursion — Play_InCsMode's body is being routed through this
+            // gate below. The csCtx.state check is inlined here;
+            // Player_InCsMode's 7-way OR (Player_InBlockingCsMode +
+            // unk_6AD == 4 at z_player_lib.c:503-514) is preserved by the
+            // direct call. Returns true when time SHOULD advance — i.e. no
+            // cutscene active. R7 analysis: Plans/soh_cutscene_flow_analysis.md.
+            return gPlayState->csCtx.state == CS_STATE_IDLE &&
+                   !Player_InCsMode(gPlayState);
         case TimeContext::Ocarina:
             return gPlayState->msgCtx.ocarinaMode == OCARINA_MODE_00;
         case TimeContext::SceneTransition:

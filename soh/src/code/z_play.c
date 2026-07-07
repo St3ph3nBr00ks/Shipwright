@@ -1808,7 +1808,14 @@ u8 PlayerGrounded(Player* player) {
 
 // original name: "Game_play_demo_mode_check"
 s32 Play_InCsMode(PlayState* play) {
-    return (play->csCtx.state != CS_STATE_IDLE) || Player_InCsMode(play);
+    // Pillar G.ii Cutscene — routed through the single GameTimeController
+    // authority. Legacy predicate (csCtx.state != IDLE || Player_InCsMode)
+    // preserved inside the gate; behavior-preserving in every mode until
+    // a §4.G.ii Cutscene MP flip lands (design table says legacy in every
+    // mode). ~30 downstream Play_InCsMode consumers get MP-aware answers
+    // transitively via this routing. R7 doc: Plans/soh_cutscene_flow_analysis.md.
+    (void)play;  // global gPlayState is the source of truth inside the gate
+    return !Anchor_ShouldAdvanceWorldTime(ANCHOR_TIME_CTX_CUTSCENE);
 }
 
 f32 func_800BFCB8(PlayState* play, MtxF* mf, Vec3f* pos) {
