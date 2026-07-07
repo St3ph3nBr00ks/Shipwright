@@ -3,6 +3,7 @@
 #include "ItemDropNetId.h"     // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "AIDirector/Director.h"
 #include "Common/AnchorNavExt.h"  // B.4 — per-navigator nav state extension
+#include "Common/CutsceneCatchup.h"  // full type for out-of-line ~Anchor()
 #include "Common/PacketSchemas.h"
 #include "Common/TitlePeerFormation.h"  // SpawnTitlePeerLink formation math
 #include "WorldStateSync/WorldStateSync.h"
@@ -352,6 +353,14 @@ void Anchor::BroadcastJsonToScenePeers(nlohmann::json& payload) {
 // 51-entry std::unordered_map with string keys (the wire-format
 // constants from `Common/PacketSchemas.h`).
 //
+// Out-of-line destructor — required so the implicit dtor of
+// cutsceneCatchupLedger (unordered_map<string,
+// unique_ptr<CutsceneCatchupEntry>>) is instantiated in a TU where
+// CutsceneCatchupEntry is complete. Declared in Anchor.h public
+// section; defined here so `#include "Common/CutsceneCatchup.h"`
+// above provides the full type.
+Anchor::~Anchor() = default;
+
 // Per Plans/decoupling_gap_audit_2026-05-16.md §13.5 (filed as #198):
 // the registry's lookup-miss branch is the natural home for the
 // terminal "unknown packet type" warning. The previous 50-branch

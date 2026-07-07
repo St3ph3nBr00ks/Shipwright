@@ -695,6 +695,15 @@ class Anchor : public Network {
     // ========================================================================
     uint32_t ownClientId;
 
+    // Out-of-line destructor (defined = default in Anchor.cpp). Required
+    // because cutsceneCatchupLedger is std::unordered_map<string,
+    // unique_ptr<CutsceneCatchup::CutsceneCatchupEntry>> and the value
+    // type is only forward-declared in this header. Without an out-of-
+    // line dtor, every TU that includes Anchor.h and instantiates
+    // Anchor's implicit dtor (via ~unique_ptr → default_delete → sizeof)
+    // fails with "cannot delete incomplete type". See Pitfall 16 / SoC.
+    ~Anchor();
+
     // Issue #63 — pending-time-sync flag for frozen→advancing scene
     // transitions (log 538 fix). MUST be public (Pitfall 16):
     // TimeOfDayReconcile.cpp accesses these via Anchor::Instance->.
