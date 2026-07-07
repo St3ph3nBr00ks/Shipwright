@@ -30,7 +30,15 @@ static bool LegacyAdvanceWorldTimeRule(TimeContext ctx) {
             // uses the literal — there is no PAUSE_STATE_OFF macro).
             return gPlayState->pauseCtx.state == 0;
         case TimeContext::TextBox:
-            return gPlayState->msgCtx.msgMode == MSGMODE_NONE;
+            // Vanilla z_kankyo.c:945 dayTime gate accepts EITHER no textbox
+            // open (msgLength == 0 && msgMode == MSGMODE_NONE) OR
+            // gameMode == GAMEMODE_END_CREDITS (credits scroll may run with
+            // a text box on-screen). Bundle both clauses so consumers get
+            // the full behavior via single call — parallels the
+            // SceneTransition predicate's gameMode OR clause.
+            return (gPlayState->msgCtx.msgLength == 0 &&
+                    gPlayState->msgCtx.msgMode == MSGMODE_NONE) ||
+                   gSaveContext.gameMode == GAMEMODE_END_CREDITS;
         case TimeContext::ItemGet: {
             Player* player = GET_PLAYER(gPlayState);
             return player == nullptr || !(player->stateFlags1 & PLAYER_STATE1_GETTING_ITEM);
