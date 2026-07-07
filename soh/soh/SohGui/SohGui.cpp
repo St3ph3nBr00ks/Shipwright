@@ -27,6 +27,7 @@
 #include "soh/Enhancements/mod_menu.h"
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/AIDirector/DirectorDebugWindow.h"
+#include "soh/Network/Anchor/CoopModalHud/CoopModalHud.h"
 
 namespace SohGui {
 
@@ -93,6 +94,7 @@ std::shared_ptr<Notification::Window> mNotificationWindow;
 std::shared_ptr<TimeDisplayWindow> mTimeDisplayWindow;
 std::shared_ptr<AnchorRoomWindow> mAnchorRoomWindow;
 std::shared_ptr<AnchorDirector::DirectorDebugWindow> mAIDirectorDebugWindow;
+std::shared_ptr<CoopModalHud::Window> mCoopModalHudWindow;
 
 UIWidgets::Colors GetMenuThemeColor() {
     return mSohMenu->GetMenuThemeColor();
@@ -202,6 +204,10 @@ void SetupGuiElements() {
     mAIDirectorDebugWindow = std::make_shared<AnchorDirector::DirectorDebugWindow>(
         CVAR_WINDOW("AIDirectorDebug"), "AI Director Debug");
     gui->AddGuiWindow(mAIDirectorDebugWindow);
+    mCoopModalHudWindow = std::make_shared<CoopModalHud::Window>(
+        CVAR_WINDOW("CoopModalHud"), "Coop Modal HUD");
+    gui->AddGuiWindow(mCoopModalHudWindow);
+    mCoopModalHudWindow->Show();
 }
 
 void Destroy() {
@@ -237,6 +243,7 @@ void Destroy() {
     mTimeDisplayWindow = nullptr;
     mAnchorRoomWindow = nullptr;
     mAIDirectorDebugWindow = nullptr;
+    mCoopModalHudWindow = nullptr;
 }
 
 void RegisterPopup(std::string title, std::string message, std::string button1, std::string button2,
