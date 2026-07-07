@@ -256,6 +256,52 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
     ImGui::PopStyleColor(2);
 }
 
+// ---- Scenario 2: cutscene late-join catchup ------------------------
+//
+// Shown when the local client is a late-joiner awaiting a
+// CUTSCENE_CATCHUP_RESPONSE from a same-team peer. Renders a
+// short banner ("Catching up to peer's cutscene...") in the same
+// bottom-right slot the voting-skip widget uses; the two scenarios
+// are mutually exclusive (voting-skip requires csCtx.state != IDLE
+// on all voters; late-join catchup holds csCtx.state at IDLE) so
+// the priority rule from plan §5.3 doesn't apply in practice.
+//
+// Plan: Claude/Plans/cutscene_late_join_plan.md §3.4 (fallback UX
+// path for Skip-and-Apply timeout OR race-lost safety-net catches).
+void DrawCutsceneCatchupWidget(const Anchor& anchor) {
+    if (anchor.pendingCatchups.empty()) return;
+    if (gPlayState == nullptr) return;
+
+    auto vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowViewport(vp->ID);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, kBgColor);
+    ImGui::PushStyleColor(ImGuiCol_Border, kBorderColor);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                        ImVec2(kPadding, kPadding));
+
+    const float fontScale =
+        CVarGetFloat(CVAR_SETTING("Notifications.Size"), 1.8f);
+
+    ImGui::Begin(
+        "AnchorCoopHudCutsceneCatchup", nullptr,
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+            ImGuiWindowFlags_NoFocusOnAppearing |
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(fontScale);
+    ImGui::TextColored(kPromptColor, "Catching up to peer's cutscene...");
+    ImGui::End();
+
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+}
+
 }  // namespace
 
 void Window::Draw() {
@@ -287,18 +333,23 @@ void Window::Draw() {
     // Phase 1 dispatch. Phase 2/3/4 scenarios plug in as sibling
     // `else if` branches per plan §5.3 (priority: voting-skip wins
     // when multiple scenarios coexist).
+    //
+    // Bottom-right of viewport — pivot (1.0, 1.0) so the widget's
+    // bottom-right corner sits at (vp.right - margin, vp.bottom -
+    // margin). Position is aspect-ratio agnostic.
+    auto vp = ImGui::GetMainViewport();
+    const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
+    const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
+    ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
+                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+
     if (currActive) {
-        // Bottom-right of viewport — pivot (1.0, 1.0) so the widget's
-        // bottom-right corner sits at (vp.right - margin, vp.bottom -
-        // margin). Position is aspect-ratio agnostic; approximates
-        // "bottom-right of dialogue box" in the common case where the
-        // vanilla textbox spans most of the bottom third of the frame.
-        auto vp = ImGui::GetMainViewport();
-        const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
-        const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
-        ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
-                                ImGuiCond_Always, ImVec2(1.0f, 1.0f));
         DrawVotingSkipWidget(anchor);
+    } else if (!anchor.pendingCatchups.empty()) {
+        // Scenario 2 — cutscene late-join catchup pending. Renders
+        // "Catching up to peer's cutscene..." until pendingCatchups
+        // empties (response applied) or the deadline elapses.
+        DrawCutsceneCatchupWidget(anchor);
     }
 }
 

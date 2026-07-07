@@ -338,6 +338,26 @@ void SohMenu::AddMenuFlotilla() {
             "(based on Team ID). Suppressed during cutscenes.\n\n"
             "Default: on."));
 
+    // Cutscene late-join catchup (Plans/cutscene_late_join_plan.md).
+    // Local preference — each client independently decides whether to
+    // catch up to a peer's in-progress cutscene. Leader-side ledger
+    // + response are NOT gated on this CVar; only the receiving side is.
+    AddWidget(path, "Cutscene Late-Join", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Catch up to in-progress cutscenes", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoin"))
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "When you enter a scene where a same-team peer is already mid-cutscene, "
+            "your local vanilla cutscene entry is suppressed and you jump into the "
+            "cutscene at the peer's current frame (audio seeks to the leader's "
+            "position; delta state is applied atomically). Falls back to a 'waiting "
+            "for peer' banner if the catchup response doesn't arrive within 2 "
+            "seconds.\n\n"
+            "Same-team only. Local preference — turning this off makes late-joiners "
+            "play the cutscene independently from frame 0 (may leave you out of "
+            "sync with peers for the cutscene's duration).\n\n"
+            "Default: on."));
+
     AddWidget(path, "Recording", WIDGET_SEPARATOR_TEXT);
 
     AddWidget(path, "Player Recorder Enabled", WIDGET_CVAR_CHECKBOX)

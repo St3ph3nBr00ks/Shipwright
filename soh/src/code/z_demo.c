@@ -455,9 +455,16 @@ void Cutscene_Command_SetLighting(PlayState* play, CutsceneContext* csCtx, CsCmd
 }
 
 // Command 0x56: Play Background Music
+// Cutscene late-join: forward-declared shim. Fires when the cutscene
+// script starts a music sequence so the leader's ledger can capture
+// seqId + startedAt for later Anchor_SeekBGMToMs on late-joiner catchup.
+// Plan: Claude/Plans/cutscene_late_join_plan.md §3.4.
+extern void Anchor_NotifyCutsceneMusicStart(int seqId);
+
 void Cutscene_Command_PlayBGM(PlayState* play, CutsceneContext* csCtx, CsCmdMusicChange* cmd) {
     if (csCtx->frames == cmd->startFrame) {
         func_800F595C(cmd->sequence - 1);
+        Anchor_NotifyCutsceneMusicStart((int)(cmd->sequence - 1));
     }
 }
 
