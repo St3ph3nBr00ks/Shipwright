@@ -195,14 +195,19 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
     // All-pressed check (includes host, who votes via local press too).
     size_t teamSize = CountInSceneTeamSize();
     if (state.pressedClientIds.size() >= teamSize) {
-        SendPacket_CutsceneTextAdvanced(textId, "all_pressed");
-        // Also locally consume — host's own Message_ShouldAdvance picks it up.
+        // Clear state FIRST so the state-cleared broadcast goes out
+        // BEFORE CUTSCENE_TEXT_ADVANCED (TCP preserves send order →
+        // peers process the HUD-hide before the local textbox
+        // advance). Eliminates the visible-race window where peers'
+        // HUD stayed shown across the advance because the state clear
+        // arrived after ADVANCED.
         cutsceneTextAdvanceConsumed = true;
         cutsceneTextAdvanceConsumedTextId = textId;
         state.active = false;
         state.pressedClientIds.clear();
-        // Broadcast the cleared state so peers hide their HUD.
+        state.countdownStarted = false;
         SendPacket_CutsceneTextVoteState();
+        SendPacket_CutsceneTextAdvanced(textId, "all_pressed");
     }
 }
 
@@ -221,6 +226,18 @@ void Anchor::HandlePacket_CutsceneTextAdvanced(nlohmann::json payload) {
 
     cutsceneTextAdvanceConsumed = true;
     cutsceneTextAdvanceConsumedTextId = textId;
+
+    // Belt-and-suspenders — clear the local vote-state mirror so the
+    // HUD hides immediately when the advance fires. The host's send
+    // order (CUTSCENE_TEXT_VOTE_STATE cleared FIRST, then
+    // CUTSCENE_TEXT_ADVANCED) already handles this over the wire, but
+    // clearing here defends against packet reorder / drop scenarios
+    // and any future path that fires ADVANCED without a preceding
+    // state broadcast. Idempotent on the host — state is already
+    // false there when this runs.
+    cutsceneTextAdvanceState.active           = false;
+    cutsceneTextAdvanceState.pressedClientIds.clear();
+    cutsceneTextAdvanceState.countdownStarted = false;
 }
 
 void Anchor::TickCutsceneTextAdvance() {
@@ -242,13 +259,18 @@ void Anchor::TickCutsceneTextAdvance() {
     if (now >= state.countdownEndsAt) {
         SPDLOG_INFO("[CutsceneTextAdvance] Timer elapsed for textId=0x{:04X}, broadcasting",
                     (unsigned)state.textId);
-        SendPacket_CutsceneTextAdvanced(state.textId, "timer");
+        // Same order flip as the all-pressed branch above — state
+        // cleared broadcast goes out BEFORE CUTSCENE_TEXT_ADVANCED so
+        // peers hide their HUD in the same frame as the local advance
+        // instead of one packet-arrival later.
+        uint16_t clearedTextId = state.textId;
         cutsceneTextAdvanceConsumed = true;
         cutsceneTextAdvanceConsumedTextId = state.textId;
         state.active = false;
         state.pressedClientIds.clear();
-        // Broadcast the cleared state so peers hide their HUD.
+        state.countdownStarted = false;
         SendPacket_CutsceneTextVoteState();
+        SendPacket_CutsceneTextAdvanced(clearedTextId, "timer");
     }
 }
 
