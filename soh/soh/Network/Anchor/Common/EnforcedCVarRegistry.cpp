@@ -168,6 +168,16 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     // Trap) keep their vanilla cutscenes. Host-authoritative so all
     // clients in a session experience the same item-pickup cadence.
     { CVAR_ENHANCEMENT("Anchor.NonBlockingItemGet"), 1 },
+
+    // --- Pillar G.ii — non-blocking text-box world-time flip ---
+    // Default 1 (enabled). When on in MP, the day/night clock
+    // continues advancing on the reading client while an NPC dialog
+    // is open (Zora, Mido, shop dialog, etc.). Reader's own view of
+    // the actor freeze is unchanged — the reader is still locked in
+    // dialog locally; peers see the world keep moving. Sibling to
+    // NonBlockingItemGet; consumed via the ShouldAdvanceWorldTime
+    // TextBox context in GameTimeController.
+    { CVAR_ENHANCEMENT("Anchor.NonBlockingTextBox"), 1 },
 };
 
 const std::vector<FloatCVarEntry> kEnforcedFloats = {

@@ -87,14 +87,29 @@ bool ShouldAdvanceWorldTime(TimeContext context) {
     // the dying client's actor updates continue → host keeps
     // broadcasting → peers see normal sync throughout death.
     //
-    // All other contexts (text-box, item-get, cutscene, ocarina,
-    // scene-transition) continue returning the legacy answer until the
-    // §4.G.ii rules land.
+    // Pillar G.ii TextBox flip: in MP, when the non-blocking text-box
+    // path is enabled (default), the day/night clock keeps advancing
+    // even while an NPC dialog is on-screen. Reader stays paused
+    // locally via vanilla msgCtx state; peers see the world keep
+    // moving. Host-authoritative CVar so every session member gets
+    // the same behavior. Sibling to the item-get non-blocking path
+    // (which is realised at Player_ActionHandler_2, not via the
+    // gate flip — the two features are decoupled by design).
+    //
+    // Remaining contexts (item-get, cutscene, ocarina, scene-
+    // transition) continue returning the legacy answer until the
+    // §4.G.ii rules land for each.
     const bool multiplayerActive = (::Anchor::Instance != nullptr) &&
                                    ::Anchor::Instance->isEnabled;
-    if (multiplayerActive && (context == TimeContext::PauseMenu ||
-                              context == TimeContext::GameOver)) {
-        return true;
+    if (multiplayerActive) {
+        if (context == TimeContext::PauseMenu ||
+            context == TimeContext::GameOver) {
+            return true;
+        }
+        if (context == TimeContext::TextBox &&
+            IsNonBlockingTextBoxEnabled()) {
+            return true;
+        }
     }
     return LegacyAdvanceWorldTimeRule(context);
 }
@@ -120,6 +135,13 @@ bool IsNonBlockingItemGetEnabled() {
     // pre-connect MP. Registered in EnforcedCVarRegistry.cpp Class B.
     return AnchorCVarSync::GetEnforcedInt(
                CVAR_ENHANCEMENT("Anchor.NonBlockingItemGet"), 1) != 0;
+}
+
+bool IsNonBlockingTextBoxEnabled() {
+    // Same host-authoritative read pattern as its item-get sibling.
+    // Registered in EnforcedCVarRegistry.cpp Class B. Defaults to 1.
+    return AnchorCVarSync::GetEnforcedInt(
+               CVAR_ENHANCEMENT("Anchor.NonBlockingTextBox"), 1) != 0;
 }
 
 ItemPresentationMode GetItemPresentationMode(int16_t getItemId) {
