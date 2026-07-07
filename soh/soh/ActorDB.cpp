@@ -658,10 +658,30 @@ static ActorDBInit EnInvaderInit = {
 };
 extern "C" s16 gEnInvaderId;
 
+// SoH Team Marker — through-walls fairy indicator for same-team peers.
+// See Plans/team_marker_plan.md, tracker #219. v1 Phase 1 scaffold:
+// registers via ActorDB, renders vanilla Navi fairy DL at rest pose.
+#include "src/overlays/actors/ovl_En_TeamMarker/z_en_team_marker.h"
+static ActorDBInit EnTeamMarkerInit = {
+    "En_TeamMarker",
+    "Team Marker (Flotilla)",
+    ACTORCAT_MISC,
+    (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
+    OBJECT_GAMEPLAY_KEEP,
+    sizeof(EnTeamMarker),
+    (ActorFunc)EnTeamMarker_Init,
+    (ActorFunc)EnTeamMarker_Destroy,
+    (ActorFunc)EnTeamMarker_Update,
+    (ActorFunc)EnTeamMarker_Draw,
+    nullptr,
+};
+extern "C" s16 gEnTeamMarkerId;
+
 void ActorDB::AddBuiltInCustomActors() {
-    gEnPartnerId  = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
-    gEnFollowerId = ActorDB::Instance->AddEntry(EnFollowerInit).entry.id;
-    gEnInvaderId  = ActorDB::Instance->AddEntry(EnInvaderInit).entry.id;
+    gEnPartnerId     = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
+    gEnFollowerId    = ActorDB::Instance->AddEntry(EnFollowerInit).entry.id;
+    gEnInvaderId     = ActorDB::Instance->AddEntry(EnInvaderInit).entry.id;
+    gEnTeamMarkerId  = ActorDB::Instance->AddEntry(EnTeamMarkerInit).entry.id;
 }
 
 extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
