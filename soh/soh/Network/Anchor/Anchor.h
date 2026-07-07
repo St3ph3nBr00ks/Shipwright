@@ -808,6 +808,7 @@ class Anchor : public Network {
     inline static const std::string& ITEM_PICKUP_REQUEST      = PacketTypes::ITEM_PICKUP_REQUEST;
     inline static const std::string& MIDO_POST_DEKU_LEAVE     = PacketTypes::MIDO_POST_DEKU_LEAVE;
     inline static const std::string& TALON_CASTLE_STATE       = PacketTypes::TALON_CASTLE_STATE;
+    inline static const std::string& HYRULE_CASTLE_GATE_OPEN  = PacketTypes::HYRULE_CASTLE_GATE_OPEN;
     inline static const std::string& MODAL_OFFER_CLAIMED      = PacketTypes::MODAL_OFFER_CLAIMED;
     inline static const std::string& NAV_TEST_DIRECTIVE       = PacketTypes::NAV_TEST_DIRECTIVE;
     inline static const std::string& OCARINA_SFX              = PacketTypes::OCARINA_SFX;
@@ -1280,6 +1281,21 @@ class Anchor : public Network {
     // re-broadcast on the next OnActorUpdate tick.
     void SendPacket_TalonCastleState(uint8_t stateIndex);
     void HandlePacket_TalonCastleState(nlohmann::json payload);
+
+    // HYRULE_CASTLE_GATE_OPEN — any-client→all broadcast for the
+    // 10-rupee-bribe gate in SCENE_HYRULE_CASTLE (En_Heishi2 accepts
+    // payment, slams spear, sets Bg_Spot15_Saku.unk_168 = 1 to trigger
+    // the opening animation). The flag write (Flags_SetInfTable(INFTABLE_71))
+    // that lets the gate stay open across scene loads syncs via the
+    // existing FLAG_INF_TABLE / SET_FLAG pipeline; this packet solely
+    // drives the OPENING ANIMATION on peers in-scene, before the flag
+    // arrives. Order-sensitive: the animation trigger runs BEFORE the
+    // flag write on the payer's client, and receivers rely on the same
+    // ordering (`unk_168 && !INFTABLE_71` must be true at least one
+    // Update tick after receive). Late-joiners get the fully-open gate
+    // via BgSpot15Saku_Init reading the synced INFTABLE_71.
+    void SendPacket_HyruleCastleGateOpen();
+    void HandlePacket_HyruleCastleGateOpen(nlohmann::json payload);
 
     // ITEM_DROP_SYNC (#193 Phase 1) — host fans out the authoritative
     // drop after its local Item_DropCollectible* call site spawns the
