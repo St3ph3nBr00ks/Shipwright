@@ -942,8 +942,13 @@ void Environment_Update(PlayState* play, EnvironmentContext* envCtx, LightContex
         // semantics. The bridge header is already included for the
         // G.ii SceneTransition routing in the inner condition.
         if (!Anchor_PauseMenuFreezesWorld() && (gameOverCtx->state == GAMEOVER_INACTIVE)) {
-            if (((msgCtx->msgLength == 0) && (msgCtx->msgMode == 0)) ||
-                (((void)0, gSaveContext.gameMode) == GAMEMODE_END_CREDITS)) {
+            // Pillar G.ii — TextBox gate routed through the single
+            // GameTimeController authority. Legacy predicate
+            // (`(msgLength == 0 && msgMode == MSGMODE_NONE) || gameMode
+            // == GAMEMODE_END_CREDITS`) preserved inside the gate; this
+            // routing is behavior-preserving in every mode until the
+            // §4.G.ii TextBox MP flip lands.
+            if (Anchor_ShouldAdvanceWorldTime(ANCHOR_TIME_CTX_TEXT_BOX)) {
                 // Pillar G.ii — SceneTransition gate routed through the
                 // single GameTimeController authority. Legacy predicate
                 // (`transitionMode == TRANS_MODE_OFF || gameMode !=

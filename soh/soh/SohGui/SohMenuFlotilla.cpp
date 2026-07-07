@@ -533,6 +533,20 @@ void SohMenu::AddMenuFlotilla() {
             "host's value. Default: on. Disable to revert to the "
             "vanilla freeze behavior everywhere."));
 
+    AddWidget(path, "Non-Blocking Text Boxes##Flotilla", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.NonBlockingTextBox"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().Tooltip(
+            "Pillar G.ii — Keeps the day/night clock advancing on the "
+            "reading client while an NPC dialog is open (Zora, Mido, "
+            "shop dialog, etc.). Reader is still locked in dialog "
+            "locally; peers see the world keep moving instead of "
+            "freezing every time someone talks to an NPC.\n\n"
+            "Host-authoritative — every client in the session uses "
+            "host's value. Default: on. Disable to revert to vanilla "
+            "'text-box freezes world time' behavior."));
+
     AddWidget(path, "Unrestricted Items##Flotilla", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_CHEAT("NoRestrictItems"))
         .PreFunc(FlotillaHostSettingsPreFunc)

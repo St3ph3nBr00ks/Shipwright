@@ -74,4 +74,14 @@ ItemPresentationMode GetItemPresentationMode(int16_t getItemId);
 // CVar: gEnhancements.Anchor.NonBlockingItemGet (default 1).
 bool IsNonBlockingItemGetEnabled();
 
+// Master kill switch for the non-blocking text-box path. When true (the
+// default in MP), ShouldAdvanceWorldTime(TextBox) returns true even
+// while an NPC dialog is open — the day/night clock keeps advancing on
+// the reading client so peers don't see the world freeze whenever
+// someone talks to an NPC. Sibling to IsNonBlockingItemGetEnabled();
+// same host-authoritative read pattern via AnchorCVarSync.
+//
+// CVar: gEnhancements.Anchor.NonBlockingTextBox (default 1).
+bool IsNonBlockingTextBoxEnabled();
+
 }  // namespace GameTimeController
