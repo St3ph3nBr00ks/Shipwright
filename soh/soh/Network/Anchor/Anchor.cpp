@@ -377,6 +377,10 @@ Anchor::GetPacketHandlerRegistry() {
         { CUTSCENE_START,          &Anchor::HandlePacket_CutsceneStart         },
         { CUTSCENE_END,            &Anchor::HandlePacket_CutsceneEnd           },
         { CUTSCENE_TEXT_VOTE_STATE, &Anchor::HandlePacket_CutsceneTextVoteState },
+        // Late-join catchup — Plans/cutscene_late_join_plan.md.
+        { CUTSCENE_FRAME_SYNC,       &Anchor::HandlePacket_CutsceneFrameSync       },
+        { CUTSCENE_CATCHUP_REQUEST,  &Anchor::HandlePacket_CutsceneCatchupRequest  },
+        { CUTSCENE_CATCHUP_RESPONSE, &Anchor::HandlePacket_CutsceneCatchupResponse },
         { ITEM_DROP_SYNC,          &Anchor::HandlePacket_ItemDropSync          },
         { ITEM_COLLECTED,          &Anchor::HandlePacket_ItemCollected         },
         { ITEM_DROP_SNAPSHOT,      &Anchor::HandlePacket_ItemDropSnapshot      },

@@ -1457,6 +1457,13 @@ class Anchor : public Network {
     // while local cutscene active; also decrements pendingCatchup
     // deadline and triggers Skip-and-Apply fallback on timeout.
     void TickCutsceneCatchup();
+    // Called on scene entry (OnSceneSpawnActors). Scans same-team,
+    // same-scene, same-timeline peers whose csCtxState != IDLE and
+    // whose cutsceneStartActive we know about; issues one CUTSCENE_
+    // CATCHUP_REQUEST per detected peer + populates pendingCatchups.
+    void DetectAndRequestCutsceneCatchup();
+    // CVar gate — Plan default ON (Q2 resolved 2026-07-07).
+    bool CutsceneCatchupEnabled() const;
 
     // FOLLOWER_NPC_* — Flotilla NPC Follower companion (Plans/
     // npc_follower_plan.md §2.6 / §2.9). Single-owner authority:
@@ -1582,12 +1589,18 @@ class Anchor : public Network {
                        std::unique_ptr<::CutsceneCatchup::CutsceneCatchupEntry>>
         cutsceneCatchupLedger;
 
-    // Late-joiner state: while pending, local vanilla cutscene entry
-    // is suppressed via Anchor_ShouldEnterCutsceneLocally() until the
-    // response arrives or the timeout deadline elapses.
-    bool     pendingCutsceneCatchup = false;
-    std::chrono::steady_clock::time_point pendingCutsceneCatchupDeadline;
-    std::string pendingCutsceneCatchupKindKey;  // "<csKind>:<csKey>"
+    // Late-joiner state — one entry per pending catchup. Multiple
+    // concurrent catchups on the same client are rare but possible
+    // (peer A in cutscene X, peer B in cutscene Y, we scene-transition
+    // into a room where both are visible). Map keyed by "<csKind>:<csKey>"
+    // supports per-cutscene deadline tracking + independent completion.
+    // See Analysis/cutscene_entry_gate_design_2026-07-07.md §5.
+    struct PendingCatchup {
+        std::chrono::steady_clock::time_point deadline;
+        uint32_t leaderClientId = 0;  // who we sent the REQUEST to
+    };
+    std::unordered_map<std::string /* kindKey */, PendingCatchup>
+        pendingCatchups;
 
     // Sequence numbers for CUTSCENE_FRAME_SYNC ordering (Pitfall 43).
     // Reset in OnSceneSpawnActors so both counters stay small.

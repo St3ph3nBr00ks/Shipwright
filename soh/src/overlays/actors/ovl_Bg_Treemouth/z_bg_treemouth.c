@@ -182,10 +182,16 @@ void func_808BC8B8(BgTreemouth* this, PlayState* play) {
     }
 }
 
+// Cutscene late-join catchup gate — Plans/cutscene_late_join_plan.md §3.3.
+extern int Anchor_ShouldSuppressLocalCutsceneEntry(void);
+
 void func_808BC9EC(BgTreemouth* this, PlayState* play) {
     Player* player = GET_PLAYER(play);
 
     if (play->csCtx.state == CS_STATE_UNSKIPPABLE_INIT) {
+        if (Anchor_ShouldSuppressLocalCutsceneEntry()) {
+            return;  // Late-joiner catchup pending — hold IDLE.
+        }
         if (Actor_IsFacingAndNearPlayer(&this->dyna.actor, 350.0f, 0x7530)) {
             player->actor.world.pos.x = 3827.0f;
             player->actor.world.pos.y = -161.0f;

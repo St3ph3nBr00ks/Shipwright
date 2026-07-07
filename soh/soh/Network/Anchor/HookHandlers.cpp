@@ -550,6 +550,29 @@ void Anchor::RegisterHooks() {
             // role we're in reads its counter next.
             Anchor::Instance->voteStateSequence           = 0;
             Anchor::Instance->peerLastAppliedVoteStateSeq = 0;
+
+            // Cutscene late-join detection (Plans/cutscene_late_join_plan.md
+            // §3.3). Scan same-team peers for any who are mid-cutscene in
+            // our scene AND timeline. If found, request catchup and enter
+            // the pending state — the gate predicate
+            // Anchor_ShouldSuppressLocalCutsceneEntry() will suppress any
+            // local vanilla cutscene entry until the response arrives (or
+            // the 2s deadline elapses).
+            //
+            // Team gating: the relay routes CUTSCENE_START by targetTeamId,
+            // so we only see cutsceneStartActive entries broadcast by peers
+            // on our team. Combined with the client.teamId == myTeamId
+            // filter here, we never request catchup from a peer on a
+            // different quest branch.
+            if (Anchor::Instance->CutsceneCatchupEnabled()) {
+                Anchor::Instance->DetectAndRequestCutsceneCatchup();
+            }
+
+            // Also reset FRAME_SYNC seq counters on scene load — same
+            // rationale as vote-state (keep small, avoid cross-scene
+            // stale-rejection).
+            Anchor::Instance->cutsceneFrameSyncSequence      = 0;
+            Anchor::Instance->peerLastAppliedCutsceneFrameSeq = 0;
         }
     });
 
@@ -731,6 +754,12 @@ void Anchor::RegisterHooks() {
         // when no active textbox vote is in progress; broadcasts
         // CUTSCENE_TEXT_ADVANCED on timer-0.
         Anchor::Instance->TickCutsceneTextAdvance();
+
+        // Cutscene late-join catchup tick (Plans/cutscene_late_join_plan.md).
+        // 1Hz FRAME_SYNC emit (leader-only) + pending-catchup deadline
+        // enforcement (peer-only). Both are internal gates; safe to
+        // call every frame regardless of role.
+        Anchor::Instance->TickCutsceneCatchup();
 
         // Generic CUTSCENE_START / CUTSCENE_END edge detector — watches
         // gSaveContext.cutsceneIndex transitions for the `savecontext`

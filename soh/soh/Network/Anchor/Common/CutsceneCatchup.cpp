@@ -355,6 +355,35 @@ void OnItemReceiveCutsceneCatchup(GetItemEntry itemEntry) {
     CutsceneCatchup::RecordItemGranted((int16_t)itemEntry.itemId, 1);
 }
 
+// ---- Post-hoc safety net -------------------------------------------
+//
+// Catches any cutscene-entry site we haven't gated (SoH enhancements,
+// future upstream merges, or gate sites we missed in the audit). If
+// pendingCatchups is non-empty AND csCtx.state has left IDLE, we force
+// it back to IDLE. Logs at WARN so field-test surfaces which entry site
+// leaked past the gate.
+//
+// See Analysis/cutscene_entry_gate_design_2026-07-07.md §4.3.
+void OnGameFrameUpdate_CutsceneCatchupSafetyNet() {
+    if (::Anchor::Instance == nullptr) return;
+    if (::Anchor::Instance->pendingCatchups.empty()) return;
+    if (gPlayState == nullptr) return;
+    if (gPlayState->csCtx.state == CS_STATE_IDLE) return;
+
+    // Vanilla entered a cutscene despite our pendingCatchup — a gate
+    // was missed. Log the leaked state + force IDLE. The pending
+    // catchup response (when it arrives) will still apply the delta;
+    // in the meantime the local cutscene is suppressed. Race-lost
+    // cases fall through to Skip-and-Apply naturally.
+    SPDLOG_WARN("[CutsceneCatchup] Safety net fired — csCtx.state={} "
+                "frames={} despite pending catchup for '{}'; forcing IDLE",
+                (int)gPlayState->csCtx.state,
+                (int)gPlayState->csCtx.frames,
+                ::Anchor::Instance->pendingCatchups.begin()->first);
+    gPlayState->csCtx.state = CS_STATE_IDLE;
+    gPlayState->csCtx.frames = 0;
+}
+
 void RegisterCutsceneCatchup() {
     // OnActorSpawn matches the enemy-sync pattern (HookHandlers.cpp:963).
     // Fires before actor->init(), so pos/rot reflect the spawn call's
@@ -369,6 +398,9 @@ void RegisterCutsceneCatchup() {
     GameInteractor::Instance
         ->RegisterGameHook<GameInteractor::OnItemReceive>(
             OnItemReceiveCutsceneCatchup);
+    GameInteractor::Instance
+        ->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(
+            OnGameFrameUpdate_CutsceneCatchupSafetyNet);
 }
 
 static RegisterShipInitFunc initFunc(RegisterCutsceneCatchup, {});
