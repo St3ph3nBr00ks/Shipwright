@@ -56,10 +56,14 @@ extern "C" {
 // surface narrow while letting member function signatures
 // reference the type by pointer.
 namespace AnchorNavRoom { struct RoomNavData; }
-// Forward-decl for cutscene late-join ledger (Plans/cutscene_late_join_plan.md).
-// Full definition in Common/CutsceneCatchup.h; forward-decl keeps this
-// header light so most Anchor consumers don't pay the include cost.
-namespace CutsceneCatchup { struct CutsceneCatchupEntry; }
+// Cutscene late-join ledger types (Plans/cutscene_late_join_plan.md).
+// Full include needed here — MSVC's unordered_map<K, unique_ptr<T>>
+// eagerly instantiates template internals for size/layout, which
+// requires T to be complete at member-declaration time. Forward-decl
+// alone is not enough (unlike std::vector<T> which C++17 standardised
+// as incomplete-type friendly, std::unordered_map does not have that
+// guarantee and MSVC specifically rejects it).
+#include "soh/Network/Anchor/Common/CutsceneCatchup.h"
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
 void DummyPlayer_Update(Actor* actor, PlayState* play);
