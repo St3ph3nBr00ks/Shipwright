@@ -322,6 +322,22 @@ void SohMenu::AddMenuFlotilla() {
             "on foot instead of mounted.\n\n"
             "Cap of 3 visible peers (first to join the room). Default: off."));
 
+    // Team Marker (#219) — through-walls fairy indicator over each same-team
+    // peer's head, tinted to the peer's Anchor colour. Same-team only. See
+    // Plans/team_marker_plan.md.
+    AddWidget(path, "Team Marker", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Show teammate markers", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.TeamMarker.Enabled"))
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Draws a Navi-style fairy above each same-team teammate's head, tinted "
+            "with their Anchor colour. The marker renders on top of walls / geometry "
+            "and appears whenever the teammate is out of line-of-sight.\n\n"
+            "Auto-hides when the teammate is directly visible (a per-frame LOS "
+            "raycast from your camera to the teammate decides). Same-team only "
+            "(based on Team ID). Suppressed during cutscenes.\n\n"
+            "Default: on."));
+
     AddWidget(path, "Recording", WIDGET_SEPARATOR_TEXT);
 
     AddWidget(path, "Player Recorder Enabled", WIDGET_CVAR_CHECKBOX)

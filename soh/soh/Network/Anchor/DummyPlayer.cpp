@@ -299,7 +299,12 @@ void DummyPlayer_Init(Actor* actor, PlayState* play) {
     bool isGlobalRoom = (std::string("soh-global") == CVarGetString(CVAR_REMOTE_ANCHOR("RoomId"), ""));
 
     if (!isGlobalRoom) {
-        NameTag_RegisterForActorWithOptions(actor, client.name.c_str(), {});
+        // Color the peer's name in their Anchor color; alpha=255 marks
+        // the override active so the nametag system also derives a
+        // brightness-adaptive background (nametag.cpp DrawNameTag).
+        NameTagOptions opts = {};
+        opts.textColor = { client.color.r, client.color.g, client.color.b, 255 };
+        NameTag_RegisterForActorWithOptions(actor, client.name.c_str(), opts);
     }
 
     // Step 6 — apply the remote player's custom character model skeleton if they have one

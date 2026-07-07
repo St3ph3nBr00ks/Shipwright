@@ -39,6 +39,7 @@ s16 firstInit = 0;
 s16 gEnPartnerId;
 s16 gEnFollowerId;
 s16 gEnInvaderId;
+s16 gEnTeamMarkerId;
 
 void Play_SpawnScene(PlayState* play, s32 sceneId, s32 spawn);
 
