@@ -9,6 +9,13 @@
 #include "overlays/effects/ovl_Effect_Ss_Hahen/z_eff_ss_hahen.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// Anchor C-linkage helpers — declared here to keep the include set
+// minimal. Implementations in Network/Anchor/Packets/Cutscene/
+// CutsceneStart.cpp. NO-OP in single-player. See #292 follow-up +
+// Plans/packet_family_cutscene_start_end.md for the Deku Tree intro
+// sync design.
+extern void Anchor_NotifyCutsceneStart(const char* csKind, unsigned int csKey);
+
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
 void BgTreemouth_Init(Actor* thisx, PlayState* play);
@@ -158,6 +165,15 @@ void func_808BC8B8(BgTreemouth* this, PlayState* play) {
                     play->csCtx.segment = D_808BCE20;
                     gSaveContext.cutsceneTrigger = 1;
                     BgTreemouth_SetupAction(this, func_808BC9EC);
+                    // Sync the intro cutscene start to same-scene team
+                    // peers. Vanilla only fires on the local Link's
+                    // proximity to the tree; peers' Bg_Treemouth would
+                    // never trigger since (a) their local Link isn't
+                    // near, and (b) once EVENTCHKINF_MET_DEKU_TREE
+                    // syncs their outer guard fails. The receive side
+                    // mirrors this same trigger sequence via
+                    // BgTreemouth_ForceIntroCutscene.
+                    Anchor_NotifyCutsceneStart("deku_tree_intro", 0);
                 }
             }
         }
@@ -252,4 +268,42 @@ void BgTreemouth_Draw(Actor* thisx, PlayState* play) {
     gSPDisplayList(POLY_OPA_DISP++, gDekuTreeMouthDL);
 
     CLOSE_DISPS(play->state.gfxCtx);
+}
+
+// Anchor peer-side trigger. Called from CutsceneStart.cpp's
+// deku_tree_intro handler when a same-scene peer received the
+// CUTSCENE_START packet. Mirrors the vanilla trigger sequence in
+// func_808BC8B8 (the else-if branch at Actor_IsFacingAndNearPlayer)
+// but bypasses the local-Link proximity + facing check and the
+// !EVENTCHKINF_MET_DEKU_TREE outer guard (both of which vanilla would
+// evaluate against the local peer's Link, not the sending client's).
+//
+// Returns 1 when a local Bg_Treemouth was found + triggered, 0 when
+// no instance was present (peer is out-of-scene or the actor already
+// destroyed itself).
+int BgTreemouth_ForceIntroCutscene(PlayState* play) {
+    Actor* actor;
+    BgTreemouth* this;
+
+    if (play == NULL) {
+        return 0;
+    }
+    actor = play->actorCtx.actorLists[ACTORCAT_BG].head;
+    while (actor != NULL) {
+        if (actor->id == ACTOR_BG_TREEMOUTH) {
+            this = (BgTreemouth*)actor;
+            // Set the flag first — vanilla path does this on the
+            // triggering client via Flags_SetEventChkInf just before
+            // the segment write. If the SET_FLAG sync already
+            // propagated it, this is a no-op; either way peer's
+            // local branch matches vanilla.
+            Flags_SetEventChkInf(EVENTCHKINF_MET_DEKU_TREE);
+            play->csCtx.segment = D_808BCE20;
+            gSaveContext.cutsceneTrigger = 1;
+            BgTreemouth_SetupAction(this, func_808BC9EC);
+            return 1;
+        }
+        actor = actor->next;
+    }
+    return 0;
 }

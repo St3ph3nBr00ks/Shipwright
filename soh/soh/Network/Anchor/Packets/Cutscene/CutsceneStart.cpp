@@ -1,0 +1,309 @@
+#include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/PacketTimeline.h"
+#include "soh/cvar_prefixes.h"
+#include <nlohmann/json.hpp>
+#include <libultraship/libultraship.h>
+
+#include <string>
+
+extern "C" {
+#include "variables.h"
+#include "functions.h"
+#include "z64.h"
+#include "z64cutscene.h"
+#include "macros.h"
+#include "overlays/actors/ovl_Bg_Treemouth/z_bg_treemouth.h"
+extern PlayState* gPlayState;
+
+// Bg_Treemouth exports the peer-side trigger entry (defined in
+// z_bg_treemouth.c). Bypasses the local-Link proximity check and drives
+// the intro-cutscene state directly. Returns 1 on success, 0 if no
+// local instance was found in the current scene.
+int BgTreemouth_ForceIntroCutscene(PlayState* play);
+}
+
+/**
+ * CUTSCENE_START / CUTSCENE_END — generic cutscene bracket primitive.
+ *
+ * Plan reference:
+ *   Claude/Plans/packet_family_cutscene_start_end.md
+ *   Claude/Plans/cutscene_start_end_detector_spec.md
+ *
+ * ## Wire format
+ *
+ * ```json
+ * // CUTSCENE_START
+ * {
+ *   "type": "CUTSCENE_START",
+ *   "schema": 1,
+ *   "sceneNum": 85,
+ *   "csKind": "deku_tree_intro",  // savecontext | deku_tree_intro | ...
+ *   "csKey": 0,                    // savecontext: cutsceneIndex value;
+ *                                  // actor-internal: 0 today (per-actor
+ *                                  // singleton), room for actor netId later.
+ *   "timeline": 0,                 // via PacketTimeline
+ *   "targetTeamId": "default"
+ * }
+ *
+ * // CUTSCENE_END
+ * {
+ *   ... same fields ...
+ *   "endReason": "natural"         // natural | skipped | aborted
+ * }
+ * ```
+ *
+ * ## Send-side
+ *
+ * Two dispatch classes:
+ *
+ * 1. **savecontext** — auto-detected. TickCutsceneStartDetector fires
+ *    every OnGameFrameUpdate and watches gSaveContext.cutsceneIndex
+ *    edges (0 → non-zero fires START; non-zero → 0 fires END). csKey =
+ *    the cutsceneIndex value. Covers scripted engine cutscenes driven
+ *    through the standard cutsceneIndex mechanism (~150 sites in the
+ *    decomp; most are internal sub-CS chains that never trip the edge
+ *    detector because they go non-zero → non-zero).
+ *
+ * 2. **Actor-driven kinds** — explicit Anchor_NotifyCutsceneStart /
+ *    _End calls from the actor's C-side trigger site. Covers cutscenes
+ *    where cutsceneIndex stays 0 but csCtx.state / .segment are written
+ *    directly. Pilot consumer: Bg_Treemouth's "Deku Tree summons Link"
+ *    intro. Each new consumer adds one Anchor_Notify call at its
+ *    trigger site and one case in the receive-side switch here.
+ *
+ * ## Receive-side
+ *
+ * HandlePacket dispatches by csKind to a per-kind handler. Idempotency
+ * dedup via cutsceneStartActive set — repeated STARTs for the same
+ * (kind, key) tuple are no-ops. Same-scene + same-timeline gates drop
+ * packets that don't apply to the local client's state.
+ *
+ * ## Late-join
+ *
+ * Not covered by v1. A late-joiner who enters after a cutscene starts
+ * misses the cutscene entirely; they'll rejoin the world at the
+ * post-cutscene state whenever the current cutscene ends (or naturally,
+ * per their own scene-entry logic). Acceptable — most narrative
+ * cutscenes are <30 seconds.
+ */
+
+namespace {
+
+std::string MakeDedupKey(const std::string& csKind, uint32_t csKey) {
+    return csKind + ":" + std::to_string(csKey);
+}
+
+// Per-kind receive handler — locates the local trigger and fires it.
+// Returns true when the local mirror was fired; false when the peer
+// couldn't apply (missing actor, unknown kind, etc.).
+bool ApplyCutsceneStartByKind(const std::string& csKind, uint32_t csKey) {
+    if (csKind == "savecontext") {
+        // Save-context cutscene: write cutsceneIndex + let the engine
+        // pick it up on the next frame. Plan §Input-lock approach
+        // confirms Player_Update auto-halts when csCtx.state != IDLE,
+        // which the engine will drive from the cutsceneIndex trigger.
+        if (gPlayState == nullptr || gSaveContext.cutsceneIndex != 0) {
+            return false;  // already active locally, or no game state
+        }
+        gSaveContext.cutsceneIndex = (u16)csKey;
+        SPDLOG_INFO("[CutsceneStart] Applied savecontext csKey=0x{:04X}", (unsigned)csKey);
+        return true;
+    }
+
+    if (csKind == "deku_tree_intro") {
+        // Bg_Treemouth pilot. Peer locates its local Bg_Treemouth and
+        // fires the intro trigger path bypassing the local-Link
+        // Actor_IsFacingAndNearPlayer distance check that gates the
+        // vanilla trigger (z_bg_treemouth.c:155). The C-side helper
+        // also sets EVENTCHKINF_MET_DEKU_TREE — safe because that
+        // flag would have synced via SET_FLAG anyway.
+        if (gPlayState == nullptr) return false;
+        int fired = BgTreemouth_ForceIntroCutscene(gPlayState);
+        if (fired) {
+            SPDLOG_INFO("[CutsceneStart] Applied deku_tree_intro on peer");
+            return true;
+        }
+        SPDLOG_INFO("[CutsceneStart] deku_tree_intro peer had no local Bg_Treemouth");
+        return false;
+    }
+
+    SPDLOG_WARN("[CutsceneStart] Unknown csKind='{}' — packet ignored", csKind);
+    return false;
+}
+
+// Per-kind end handler. For savecontext this is a no-op — the local
+// engine will naturally clear cutsceneIndex when the CS state machine
+// completes. For actor-driven kinds each actor also drives its own
+// end path locally; the wire END is only a bookkeeping signal for
+// dedup + the plan §5.3 UI banner shutdown. Kept in place so the
+// send-side edge detector's END edges are echoed to peers.
+bool ApplyCutsceneEndByKind(const std::string& csKind, uint32_t csKey,
+                            const std::string& endReason) {
+    (void)csKey;
+    (void)endReason;
+    if (csKind == "savecontext" || csKind == "deku_tree_intro") {
+        // No teardown work required. Vanilla local state-machine
+        // cleanup fires naturally. Idempotency dedup key is cleared
+        // by the caller after this returns.
+        return true;
+    }
+    SPDLOG_WARN("[CutsceneStart] Unknown csKind='{}' on END — packet ignored", csKind);
+    return false;
+}
+
+}  // namespace
+
+void Anchor::SendPacket_CutsceneStart(const std::string& csKind, uint32_t csKey) {
+    if (!IsSaveLoaded() || gPlayState == nullptr) return;
+
+    // Send-side dedup: skip if we've already broadcast a START for this
+    // key without a matching END. Prevents repeated fires when both
+    // detector paths (savecontext edge + explicit Notify) trigger for
+    // the same cutscene.
+    std::string dedupKey = MakeDedupKey(csKind, csKey);
+    if (cutsceneStartActive.count(dedupKey) > 0) {
+        return;
+    }
+    cutsceneStartActive.insert(dedupKey);
+
+    nlohmann::json payload;
+    payload["type"]         = CUTSCENE_START;
+    payload["sceneNum"]     = (int)gPlayState->sceneNum;
+    payload["csKind"]       = csKind;
+    payload["csKey"]        = csKey;
+    payload["targetTeamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    PacketTimeline::SetTimelineField(payload);
+
+    SPDLOG_INFO("[CutsceneStart] Sending csKind={} csKey=0x{:X} sceneNum={}",
+                csKind, csKey, (int)gPlayState->sceneNum);
+
+    SendJsonToRemote(payload);
+}
+
+void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
+    if (!IsSaveLoaded() || gPlayState == nullptr) return;
+
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) {
+        SPDLOG_INFO("[CutsceneStart] Drop — cross-timeline packet");
+        return;
+    }
+
+    s16 sceneNum = (s16)payload.value("sceneNum", -1);
+    if (sceneNum != (s16)gPlayState->sceneNum) {
+        SPDLOG_INFO("[CutsceneStart] Drop — local scene {} != sender scene {}",
+                    (int)gPlayState->sceneNum, (int)sceneNum);
+        return;
+    }
+
+    std::string csKind = payload.value("csKind", std::string(""));
+    uint32_t    csKey  = payload.value("csKey", (uint32_t)0);
+    if (csKind.empty()) {
+        SPDLOG_WARN("[CutsceneStart] Packet missing csKind");
+        return;
+    }
+
+    // Receive-side idempotency — if we already saw a START for this key,
+    // drop. Prevents replay when a sender fires the same edge repeatedly
+    // (send-side dedup already prevents this, defense-in-depth here).
+    std::string dedupKey = MakeDedupKey(csKind, csKey);
+    if (cutsceneStartActive.count(dedupKey) > 0) {
+        return;
+    }
+    cutsceneStartActive.insert(dedupKey);
+
+    ApplyCutsceneStartByKind(csKind, csKey);
+}
+
+void Anchor::SendPacket_CutsceneEnd(const std::string& csKind, uint32_t csKey,
+                                     const std::string& endReason) {
+    if (!IsSaveLoaded() || gPlayState == nullptr) return;
+
+    std::string dedupKey = MakeDedupKey(csKind, csKey);
+    if (cutsceneStartActive.count(dedupKey) == 0) {
+        // No active START recorded — nothing to end. Prevents spurious
+        // ENDs from firing on cutsceneIndex edges we never broadcast a
+        // START for (e.g. cold-boot with a pre-existing non-zero index).
+        return;
+    }
+    cutsceneStartActive.erase(dedupKey);
+
+    nlohmann::json payload;
+    payload["type"]         = CUTSCENE_END;
+    payload["sceneNum"]     = (int)gPlayState->sceneNum;
+    payload["csKind"]       = csKind;
+    payload["csKey"]        = csKey;
+    payload["endReason"]    = endReason;
+    payload["targetTeamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    PacketTimeline::SetTimelineField(payload);
+
+    SPDLOG_INFO("[CutsceneEnd] Sending csKind={} csKey=0x{:X} reason={}",
+                csKind, csKey, endReason);
+
+    SendJsonToRemote(payload);
+}
+
+void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
+    if (!IsSaveLoaded() || gPlayState == nullptr) return;
+    if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
+
+    s16 sceneNum = (s16)payload.value("sceneNum", -1);
+    if (sceneNum != (s16)gPlayState->sceneNum) return;
+
+    std::string csKind    = payload.value("csKind", std::string(""));
+    uint32_t    csKey     = payload.value("csKey", (uint32_t)0);
+    std::string endReason = payload.value("endReason", std::string("natural"));
+    if (csKind.empty()) return;
+
+    std::string dedupKey = MakeDedupKey(csKind, csKey);
+    if (cutsceneStartActive.count(dedupKey) == 0) {
+        return;  // never saw the START — nothing to clean up
+    }
+    cutsceneStartActive.erase(dedupKey);
+
+    ApplyCutsceneEndByKind(csKind, csKey, endReason);
+}
+
+void Anchor::TickCutsceneStartDetector() {
+    if (!isConnected) return;
+    if (gPlayState == nullptr) return;
+
+    const uint16_t currIdx   = (uint16_t)gSaveContext.cutsceneIndex;
+    const uint8_t  currState = (uint8_t)gPlayState->csCtx.state;
+    const uint16_t prevIdx   = cutsceneStartDetectorPrevIndex;
+    (void)currState;  // reserved for actor-driven edge detection later
+
+    // savecontext START edge: cutsceneIndex went 0 → non-zero.
+    if (prevIdx == 0 && currIdx != 0) {
+        SendPacket_CutsceneStart("savecontext", (uint32_t)currIdx);
+    }
+
+    // savecontext END edge: cutsceneIndex went non-zero → 0.
+    if (prevIdx != 0 && currIdx == 0) {
+        SendPacket_CutsceneEnd("savecontext", (uint32_t)prevIdx, "natural");
+    }
+
+    cutsceneStartDetectorPrevIndex = currIdx;
+    cutsceneStartDetectorPrevState = currState;
+}
+
+// ---------------------------------------------------------------------
+// C bridge — actor-driven kinds fire via these entry points. Called
+// from actor .c files at the vanilla trigger site (see z_bg_treemouth.c
+// for the pilot). NO-OP in single-player or when Anchor is off.
+// ---------------------------------------------------------------------
+
+extern "C" void Anchor_NotifyCutsceneStart(const char* csKind, unsigned int csKey) {
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isEnabled) return;
+    if (csKind == nullptr) return;
+    Anchor::Instance->SendPacket_CutsceneStart(std::string(csKind),
+                                                (uint32_t)csKey);
+}
+
+extern "C" void Anchor_NotifyCutsceneEnd(const char* csKind, unsigned int csKey,
+                                          const char* endReason) {
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isEnabled) return;
+    if (csKind == nullptr) return;
+    Anchor::Instance->SendPacket_CutsceneEnd(
+        std::string(csKind), (uint32_t)csKey,
+        std::string(endReason ? endReason : "natural"));
+}
