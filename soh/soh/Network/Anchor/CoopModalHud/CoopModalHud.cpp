@@ -265,10 +265,29 @@ void Window::Draw() {
     }
     const auto& anchor = *::Anchor::Instance;
 
+    // Durable render-side observer for the vote-skip subsystem.
+    // Logs when the HUD's Draw observes `state.active` flipping. Paired
+    // with the `[VoteState SEND]` / `[VoteState RECV] APPLY|DROP` lines
+    // in Packets/Cutscene/CutsceneTextAdvance.cpp — together they
+    // reconstruct "packet sent → packet applied → HUD reacted" for any
+    // future field-test triage of the vote-skip system. Every-frame
+    // logging would spam; edge-triggered only.
+    const bool currActive = anchor.cutsceneTextAdvanceState.active;
+    static bool s_lastActiveLogged = false;
+    if (currActive != s_lastActiveLogged) {
+        SPDLOG_INFO("[CoopModalHud.Draw] state.active {}→{} textId=0x{:04X} "
+                    "votes={} countdownStarted={}",
+                    (int)s_lastActiveLogged, (int)currActive,
+                    (unsigned)anchor.cutsceneTextAdvanceState.textId,
+                    (int)anchor.cutsceneTextAdvanceState.pressedClientIds.size(),
+                    (int)anchor.cutsceneTextAdvanceState.countdownStarted);
+        s_lastActiveLogged = currActive;
+    }
+
     // Phase 1 dispatch. Phase 2/3/4 scenarios plug in as sibling
     // `else if` branches per plan §5.3 (priority: voting-skip wins
     // when multiple scenarios coexist).
-    if (anchor.cutsceneTextAdvanceState.active) {
+    if (currActive) {
         // Bottom-right of viewport — pivot (1.0, 1.0) so the widget's
         // bottom-right corner sits at (vp.right - margin, vp.bottom -
         // margin). Position is aspect-ratio agnostic; approximates
