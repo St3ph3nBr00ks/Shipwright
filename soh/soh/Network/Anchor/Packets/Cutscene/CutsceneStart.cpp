@@ -105,6 +105,31 @@ bool ApplyCutsceneStartByKind(const std::string& csKind, uint32_t csKey) {
         if (gPlayState == nullptr || gSaveContext.cutsceneIndex != 0) {
             return false;  // already active locally, or no game state
         }
+        // Fix I.2 — receiver-side defense-in-depth. Refuse the
+        // savecontext apply when a non-savecontext cutscene is
+        // already active (either originated locally or received
+        // from a peer). Applying savecontext by writing
+        // cutsceneIndex=csKey (typically 0xFFFD — the vanilla
+        // "trigger cutscene from cutsceneTrigger flag" magic
+        // sentinel per z_play.c:467-470 + z_demo.c:2145-2157)
+        // while an actor-driven cutscene is in flight overwrites
+        // the actor's own state and may trigger vanilla void /
+        // scene-reload on the peer. Sender-side Fix I.1 blocks
+        // most cases at the source; this guard defends against a
+        // peer whose sender is unpatched OR any race path we
+        // haven't traced. Log 630 root cause. See
+        // Analysis/cutscene_savecontext_double_broadcast_2026-07-08.md.
+        if (Anchor::Instance != nullptr) {
+            for (const auto& k : Anchor::Instance->cutsceneStartActive) {
+                if (k.compare(0, 12, "savecontext:") != 0) {
+                    SPDLOG_INFO("[CutsceneStart] Refused savecontext "
+                                "apply csKey=0x{:04X} — non-savecontext "
+                                "cutscene '{}' already active",
+                                (unsigned)csKey, k);
+                    return false;
+                }
+            }
+        }
         gSaveContext.cutsceneIndex = (u16)csKey;
         SPDLOG_INFO("[CutsceneStart] Applied savecontext csKey=0x{:04X}", (unsigned)csKey);
         return true;
@@ -284,11 +309,42 @@ void Anchor::TickCutsceneStartDetector() {
     (void)currState;  // reserved for actor-driven edge detection later
 
     // savecontext START edge: cutsceneIndex went 0 → non-zero.
+    // Fix I.1 — suppress the savecontext broadcast when an actor-
+    // driven cutscene is already active locally. The cutsceneIndex
+    // change to non-zero is frequently a downstream side effect of
+    // an actor-driven cutscene's own state machine (e.g., Bg_Treemouth
+    // deku_tree_intro sets cutsceneTrigger=1 in Init; vanilla
+    // func_80068ECC translates that on the next frame into
+    // cutsceneIndex=0xFFFD). Broadcasting an independent
+    // "savecontext, csKey=0xFFFD" packet causes peers to write
+    // cutsceneIndex=0xFFFD on THEIR game state, tripping vanilla's
+    // special-cutscene dispatch and triggering void/reload — the
+    // log 630 P2 crash chain. See Analysis/cutscene_savecontext_
+    // double_broadcast_2026-07-08.md for the full chain.
     if (prevIdx == 0 && currIdx != 0) {
-        SendPacket_CutsceneStart("savecontext", (uint32_t)currIdx);
+        bool actorDrivenActive = false;
+        for (const auto& k : cutsceneStartActiveLocalOrigin) {
+            if (k.compare(0, 12, "savecontext:") != 0) {
+                actorDrivenActive = true;
+                break;
+            }
+        }
+        if (!actorDrivenActive) {
+            SendPacket_CutsceneStart("savecontext", (uint32_t)currIdx);
+        } else {
+            SPDLOG_INFO("[CutsceneStart] Suppressed savecontext broadcast "
+                        "(cutsceneIndex 0x{:X}) — actor-driven cutscene "
+                        "already active", (unsigned)currIdx);
+        }
     }
 
     // savecontext END edge: cutsceneIndex went non-zero → 0.
+    // Fix I.1 (mirror) — when the START was suppressed above, no
+    // matching END was inserted into cutsceneStartActive, so the
+    // erase inside SendPacket_CutsceneEnd is a no-op. The
+    // downstream `cutsceneStartActive.count(dedupKey) == 0` early-
+    // return at CutsceneStart.cpp handles this cleanly. Kept
+    // unconditional for symmetry with legitimate savecontext ends.
     if (prevIdx != 0 && currIdx == 0) {
         SendPacket_CutsceneEnd("savecontext", (uint32_t)prevIdx, "natural");
     }
