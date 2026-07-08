@@ -163,38 +163,46 @@ void RenderDot(ImDrawList* dl, ImVec2 center, ImU32 color, bool voted) {
 }
 
 // ---- Voting-skip widget --------------------------------------------
+//
+// Fix H — always call ImGui::Begin/End every frame, regardless of
+// visibility, to prevent multi-viewport window promotion. When
+// state.active is false OR voters.size() < 2, the window is still
+// Begin/End'd but with alpha=0 and no content — it exists in ImGui's
+// window map with a valid position anchored to the main viewport, so
+// ImGui's viewport-selection logic does not promote it to its own
+// OS-level platform window (log 629 Bug 3 root cause). See
+// Analysis/cutscene_late_join_bugs_deep_analysis_2026-07-08.md Bug 3.
 
 void DrawVotingSkipWidget(const Anchor& anchor) {
     const auto& state = anchor.cutsceneTextAdvanceState;
 
     std::vector<DotEntry> voters = CollectVoters(anchor);
-    if (voters.size() < 2) {
-        // Solo — nothing to display (matches the "alone in cutscene"
-        // short-circuit in CutsceneBridge.cpp). Belt-and-suspenders vs.
-        // the plan §8.3 defensive check.
-        return;
-    }
+    // Fix H — visibility flag replaces early-return. Widget window is
+    // still created; only its content + alpha changes.
+    const bool showContent = state.active && voters.size() >= 2;
 
-    // Countdown / prompt string.
+    // Countdown / prompt string — only computed when we'll render.
     std::string rightLabel;
     ImVec4 rightColor = kPromptColor;
-    if (state.countdownStarted) {
-        float rem = RemainingSecondsFrom(state.countdownEndsAt);
-        // Ceiling of remaining seconds so the display transitions
-        // 5→4→3→2→1→0 (users expect "1s" to mean "up to 1 second
-        // remaining"). Ceiling avoids the awkward case where the timer
-        // reads "0s" for a full second before the actual advance.
-        int wholeSec = (int)std::ceil(rem);
-        if (wholeSec < 0) wholeSec = 0;
-        char buf[16];
-        // Bare integer — no "s" suffix per user design direction
-        // 2026-07-07. Matches OoT's clean text-driven aesthetic
-        // (e.g. rupee counter, timer icons — no unit label).
-        std::snprintf(buf, sizeof(buf), "%d", wholeSec);
-        rightLabel = buf;
-        rightColor = TimerColorForInteger(wholeSec);
-    } else {
-        rightLabel = "Press A to skip";
+    if (showContent) {
+        if (state.countdownStarted) {
+            float rem = RemainingSecondsFrom(state.countdownEndsAt);
+            // Ceiling of remaining seconds so the display transitions
+            // 5→4→3→2→1→0 (users expect "1s" to mean "up to 1 second
+            // remaining"). Ceiling avoids the awkward case where the timer
+            // reads "0s" for a full second before the actual advance.
+            int wholeSec = (int)std::ceil(rem);
+            if (wholeSec < 0) wholeSec = 0;
+            char buf[16];
+            // Bare integer — no "s" suffix per user design direction
+            // 2026-07-07. Matches OoT's clean text-driven aesthetic
+            // (e.g. rupee counter, timer icons — no unit label).
+            std::snprintf(buf, sizeof(buf), "%d", wholeSec);
+            rightLabel = buf;
+            rightColor = TimerColorForInteger(wholeSec);
+        } else {
+            rightLabel = "Press A to skip";
+        }
     }
 
     // ---- Position + geometry --------------------------------------
@@ -204,13 +212,28 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
             ? (kDotSpacing * (voters.size() - 1)) + (kDotRadius * 2.0f)
             : 0.0f;
 
+    // Fix H — pin the window to the main viewport EVERY frame so
+    // ImGui's multi-viewport WindowSelectViewport logic never
+    // promotes it. Position anchored bottom-right; pivot (1,1) means
+    // the anchor coord IS the widget's bottom-right corner.
     ImGui::SetNextWindowViewport(vp->ID);
+    const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
+    const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
+    ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
+                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, kBgColor);
-    ImGui::PushStyleColor(ImGuiCol_Border, kBorderColor);
+    // Fix H — alpha=0 hides the window fully when there's no content.
+    // Bg + border colors also drop to fully transparent so a
+    // 0-alpha window with zero content doesn't leave any visible
+    // artifact.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,
+                          showContent ? kBgColor : ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border,
+                          showContent ? kBorderColor : ImVec4(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                         ImVec2(kPadding, kPadding));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, showContent ? 1.0f : 0.0f);
 
     // Font scale — modest bump over default so text is legible over
     // vanilla dialogue. Reuses the same CVar as Notification so users
@@ -229,30 +252,32 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
             ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoSavedSettings);
 
-    ImGui::SetWindowFontScale(fontScale);
+    if (showContent) {
+        ImGui::SetWindowFontScale(fontScale);
 
-    // Layout row: dots on the left, label on the right, gap between.
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 cursor = ImGui::GetCursorScreenPos();
+        // Layout row: dots on the left, label on the right, gap between.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 cursor = ImGui::GetCursorScreenPos();
 
-    // Dot centers.
-    const float dotBaseY = cursor.y + kDotRadius;
-    for (size_t i = 0; i < voters.size(); i++) {
-        const auto& v = voters[i];
-        ImVec2 center(cursor.x + kDotRadius + i * kDotSpacing, dotBaseY);
-        RenderDot(dl, center, v.color, v.voted);
+        // Dot centers.
+        const float dotBaseY = cursor.y + kDotRadius;
+        for (size_t i = 0; i < voters.size(); i++) {
+            const auto& v = voters[i];
+            ImVec2 center(cursor.x + kDotRadius + i * kDotSpacing, dotBaseY);
+            RenderDot(dl, center, v.color, v.voted);
+        }
+
+        // Advance cursor past the dot row so the label sits to its right.
+        ImGui::Dummy(ImVec2(dotRowWidth, kDotRadius * 2.0f));
+        ImGui::SameLine(0.0f, kDotToTextGap);
+        // Nudge vertical to keep the text roughly baseline-aligned with
+        // dot centers.
+        ImGui::TextColored(rightColor, "%s", rightLabel.c_str());
     }
-
-    // Advance cursor past the dot row so the label sits to its right.
-    ImGui::Dummy(ImVec2(dotRowWidth, kDotRadius * 2.0f));
-    ImGui::SameLine(0.0f, kDotToTextGap);
-    // Nudge vertical to keep the text roughly baseline-aligned with
-    // dot centers.
-    ImGui::TextColored(rightColor, "%s", rightLabel.c_str());
 
     ImGui::End();
 
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(2);
 }
 
@@ -269,17 +294,27 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
 // Plan: Claude/Plans/cutscene_late_join_plan.md §3.4 (fallback UX
 // path for Skip-and-Apply timeout OR race-lost safety-net catches).
 void DrawCutsceneCatchupWidget(const Anchor& anchor) {
-    if (anchor.pendingCatchups.empty()) return;
-    if (gPlayState == nullptr) return;
+    // Fix H — always call Begin/End; visibility controlled via alpha.
+    // See DrawVotingSkipWidget's Fix H block for the multi-viewport
+    // rationale.
+    const bool showContent =
+        (!anchor.pendingCatchups.empty()) && (gPlayState != nullptr);
 
     auto vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowViewport(vp->ID);
+    const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
+    const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
+    ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
+                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, kBgColor);
-    ImGui::PushStyleColor(ImGuiCol_Border, kBorderColor);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,
+                          showContent ? kBgColor : ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border,
+                          showContent ? kBorderColor : ImVec4(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                         ImVec2(kPadding, kPadding));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, showContent ? 1.0f : 0.0f);
 
     const float fontScale =
         CVarGetFloat(CVAR_SETTING("Notifications.Size"), 1.8f);
@@ -294,11 +329,13 @@ void DrawCutsceneCatchupWidget(const Anchor& anchor) {
             ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoSavedSettings);
-    ImGui::SetWindowFontScale(fontScale);
-    ImGui::TextColored(kPromptColor, "Catching up to peer's cutscene...");
+    if (showContent) {
+        ImGui::SetWindowFontScale(fontScale);
+        ImGui::TextColored(kPromptColor, "Catching up to peer's cutscene...");
+    }
     ImGui::End();
 
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(2);
 }
 
@@ -327,44 +364,63 @@ void Window::Draw() {
                     (unsigned)anchor.cutsceneTextAdvanceState.textId,
                     (int)anchor.cutsceneTextAdvanceState.pressedClientIds.size(),
                     (int)anchor.cutsceneTextAdvanceState.countdownStarted);
+
+        // Diag 3 — ImGui viewport enumeration. On every state.active
+        // edge, dump the viewport count + main viewport size so the
+        // "two SoH windows" bug can be correlated with rapid state
+        // transitions. If Platform Viewports count grows past 1
+        // during a flicker sequence, that confirms the multi-viewport
+        // window-spawn theory. Gated on
+        // gEnhancements.Anchor.CutsceneLateJoinDiag.
+        // See Analysis/cutscene_ff_reset_and_mp_dialogue_deadline_2026-07-08.md
+        // Bug 3 hypothesis.
+        if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"), 0) != 0) {
+            ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+            ImGuiViewport* main = ImGui::GetMainViewport();
+            SPDLOG_INFO("[CoopModalHud.diag] viewport-count={} main "
+                        "pos=({:.0f},{:.0f}) size=({:.0f},{:.0f}) "
+                        "flags=0x{:X}",
+                        (int)pio.Viewports.Size,
+                        main ? main->Pos.x : -1.0f,
+                        main ? main->Pos.y : -1.0f,
+                        main ? main->Size.x : -1.0f,
+                        main ? main->Size.y : -1.0f,
+                        main ? (unsigned)main->Flags : 0u);
+            for (int i = 0; i < pio.Viewports.Size; i++) {
+                ImGuiViewport* vp = pio.Viewports[i];
+                if (vp == nullptr) continue;
+                SPDLOG_INFO("[CoopModalHud.diag]   viewport[{}] id=0x{:X} "
+                            "pos=({:.0f},{:.0f}) size=({:.0f},{:.0f}) "
+                            "flags=0x{:X}",
+                            i, (unsigned)vp->ID,
+                            vp->Pos.x, vp->Pos.y,
+                            vp->Size.x, vp->Size.y,
+                            (unsigned)vp->Flags);
+            }
+        }
+
         s_lastActiveLogged = currActive;
     }
 
-    // Phase 1 dispatch. Phase 2/3/4 scenarios plug in as sibling
-    // `else if` branches per plan §5.3 (priority: voting-skip wins
-    // when multiple scenarios coexist).
+    // Fix H — always call both widgets every frame. Visibility is
+    // controlled inside each widget via alpha=0 when its state is
+    // inactive. The prior design (conditional Begin/End dispatch)
+    // caused ImGui's WindowSelectViewport logic to promote the
+    // retained-but-not-drawn window to its own OS-level platform
+    // viewport, spawning a second SoH window at the first HUD close
+    // (log 629 Bug 3). Each widget now Begin/End's its own window
+    // unconditionally with ImGui::SetNextWindowViewport pinning to
+    // the main viewport, so promotion cannot occur. See
+    // Analysis/cutscene_late_join_bugs_deep_analysis_2026-07-08.md
+    // Bug 3.
     //
-    // Bottom-right of viewport — pivot (1.0, 1.0) so the widget's
-    // bottom-right corner sits at (vp.right - margin, vp.bottom -
-    // margin). Position is aspect-ratio agnostic.
-    //
-    // IMPORTANT: SetNextWindowPos MUST be scoped inside each branch
-    // that calls ImGui::Begin. Calling it unconditionally at
-    // dispatch time (when neither branch fires) leaks the queued
-    // position state to the next unrelated ImGui::Begin in the
-    // frame — with ImGui multi-viewport enabled, that can trigger
-    // OS-level window spawning at the anchor position. Symptom
-    // observed: two-window boot / grey+black windows / boot splash
-    // suppressed. Regressed in Phase 4 of cutscene late-join; fixed
-    // here by re-scoping.
-    if (currActive) {
-        auto vp = ImGui::GetMainViewport();
-        const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
-        const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
-        ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
-                                ImGuiCond_Always, ImVec2(1.0f, 1.0f));
-        DrawVotingSkipWidget(anchor);
-    } else if (!anchor.pendingCatchups.empty()) {
-        // Scenario 2 — cutscene late-join catchup pending. Renders
-        // "Catching up to peer's cutscene..." until pendingCatchups
-        // empties (response applied) or the deadline elapses.
-        auto vp = ImGui::GetMainViewport();
-        const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
-        const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
-        ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
-                                ImGuiCond_Always, ImVec2(1.0f, 1.0f));
-        DrawCutsceneCatchupWidget(anchor);
-    }
+    // The two widgets share the same bottom-right slot and are
+    // designed to be mutually exclusive by domain (voting-skip
+    // requires csCtx.state != IDLE; catchup pending holds
+    // csCtx.state at IDLE). If both accidentally activate at once,
+    // both render — user sees stacked HUD elements, not a crash.
+    DrawVotingSkipWidget(anchor);
+    DrawCutsceneCatchupWidget(anchor);
 }
 
 }  // namespace CoopModalHud

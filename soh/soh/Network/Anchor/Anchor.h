@@ -1582,6 +1582,19 @@ class Anchor : public Network {
     // and receive-side "already started" idempotency.
     std::set<std::string> cutsceneStartActive;
 
+    // Fix G — sibling set that ONLY tracks cutscenes THIS client
+    // originated (i.e., we called SendPacket_CutsceneStart for them).
+    // Peer-received CUTSCENE_START broadcasts + late-join FRAME_SYNC
+    // hydration insert into `cutsceneStartActive` but NOT into this
+    // set. The leader-identity gate in the catchup ledger uses this
+    // set to distinguish "I am the leader" from "I know a cutscene
+    // is running somewhere". Without this, a peer's stale
+    // Player_InCsMode + room-host status could make it a phantom
+    // leader for a cutscene it did not originate (log 629 P2 line
+    // 856). See Analysis/cutscene_late_join_bugs_deep_analysis_
+    // 2026-07-08.md Bug 2.
+    std::set<std::string> cutsceneStartActiveLocalOrigin;
+
     // ----- Cutscene late-join / catch-up (Option B v1) -----------------
     // Plan: Claude/Plans/cutscene_late_join_plan.md.
     //

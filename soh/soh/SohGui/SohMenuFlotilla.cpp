@@ -358,6 +358,22 @@ void SohMenu::AddMenuFlotilla() {
             "sync with peers for the cutscene's duration).\n\n"
             "Default: on."));
 
+    AddWidget(path, "Cutscene Late-Join diagnostics", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"))
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Enables detailed diagnostic logging for the cutscene late-join / vote-"
+            "skip subsystems (Bugs 1/2/3 from log 625):\n"
+            "  [VoteState.diag] — every state.active transition logs which branch "
+            "fired, plus msgCtx.msgMode / csCtx.state / csCtx.frames snapshot.\n"
+            "  [CutsceneCatchup.diag] — every ledger-entry creation logs which "
+            "Record* trigger fired, IsRoomHost, Play_InCsMode, and pendingCatchups "
+            "count.\n"
+            "  [CoopModalHud.diag] — every HUD state.active edge logs ImGui "
+            "viewport count + per-viewport pos/size/flags.\n\n"
+            "Off by default — logs are quiet in production. Turn on only when "
+            "field-testing cutscene sync.\n\n"
+            "Default: off."));
+
     AddWidget(path, "Recording", WIDGET_SEPARATOR_TEXT);
 
     AddWidget(path, "Player Recorder Enabled", WIDGET_CVAR_CHECKBOX)

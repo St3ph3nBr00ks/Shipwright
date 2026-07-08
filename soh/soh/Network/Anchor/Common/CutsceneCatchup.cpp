@@ -43,6 +43,7 @@
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/ShipInit.hpp"
+#include "soh/cvar_prefixes.h"
 
 #include <libultraship/libultraship.h>
 #include <spdlog/spdlog.h>
@@ -111,13 +112,52 @@ std::string ActiveKindKey() {
 // separate "cutscene started, initialise ledger" broadcast hook keeps
 // the coupling loose (either the leader is in a cutscene AND recording
 // side effects, or nobody cares).
-CutsceneCatchupEntry* GetOrCreateActiveEntry() {
+CutsceneCatchupEntry* GetOrCreateActiveEntry(const char* triggerContext = "unknown") {
     const std::string key = ActiveKindKey();
     if (key.empty()) return nullptr;
 
     auto& map = Anchor::Instance->cutsceneCatchupLedger;
     auto it = map.find(key);
     if (it != map.end()) return it->second.get();
+
+    // Fix G — refuse ledger creation unless this cutscene was
+    // originated locally by THIS client. `cutsceneStartActive` is
+    // populated symmetrically by SendPacket_CutsceneStart (we
+    // originated) AND HandlePacket_CutsceneStart (peer broadcast
+    // arrived) AND HandlePacket_CutsceneFrameSync late-join hydration
+    // (peer told us they're mid-cutscene). Only the first case
+    // qualifies as leader — the sibling set
+    // `cutsceneStartActiveLocalOrigin` records that origin.
+    //
+    // Without this gate, log 629 P2 became phantom leader for
+    // 'deku_tree_intro:0' via IsRoomHost=1 + stale Play_InCsMode=1
+    // (Player.stateFlags1 leftover from a prior savecontext
+    // cutscene) + cutsceneStartActive populated from P1's broadcast.
+    // See Analysis/cutscene_late_join_bugs_deep_analysis_2026-07-08.md
+    // Bug 2 root-cause chain.
+    if (Anchor::Instance->cutsceneStartActiveLocalOrigin.count(key) == 0) {
+        SPDLOG_INFO("[CutsceneCatchup] Ledger create refused — cutscene "
+                    "'{}' was not locally originated (peer-received START "
+                    "populates cutsceneStartActive but never the local-"
+                    "origin sibling set). trigger='{}'",
+                    key, triggerContext);
+        return nullptr;
+    }
+
+    // Fix F — refuse ledger creation while we have an outstanding
+    // catchup REQUEST for the same key. Retained as belt-and-
+    // suspenders — Fix G subsumes this in the common case, but Fix F
+    // guards against a hypothetical race where we simultaneously
+    // originate a local cutscene and REQUEST catchup for the same
+    // key. Log 628 line 814 was the original trigger for this guard.
+    if (Anchor::Instance->pendingCatchups.count(key) > 0) {
+        SPDLOG_INFO("[CutsceneCatchup] Ledger create refused — pending "
+                    "catchup REQUEST outstanding for key='{}' trigger='{}' "
+                    "(we are a peer awaiting a leader's response, not "
+                    "the leader ourselves)",
+                    key, triggerContext);
+        return nullptr;
+    }
 
     // Parse "<csKind>:<csKey>" back out.
     std::string csKind;
@@ -152,6 +192,33 @@ CutsceneCatchupEntry* GetOrCreateActiveEntry() {
                 "room={} linkAge={} startFrame={}",
                 key, raw->sceneNum, raw->roomNum, raw->linkAge,
                 raw->startFrame);
+
+    // Diag 2 — leader/ledger sanity. Log the exact preconditions that
+    // let this ledger entry be created, plus the caller context (which
+    // Record* trigger fired first). If P2 became its own leader while
+    // also holding a pending catchup request, this line makes the
+    // conflict visible. Gated on gEnhancements.Anchor.CutsceneLateJoinDiag.
+    // See Analysis/cutscene_ff_reset_and_mp_dialogue_deadline_2026-07-08.md
+    // Bug 2 hypothesis.
+    if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"), 0) != 0) {
+        const bool isRoomHost = ::SceneAuthority::IsRoomHost(
+            (int16_t)gPlayState->sceneNum,
+            (int8_t)gPlayState->roomCtx.curRoom.num,
+            (uint8_t)(gSaveContext.linkAge & 0x1));
+        const bool inCsMode = Play_InCsMode(gPlayState);
+        const int  csState  = (int)gPlayState->csCtx.state;
+        const int  csFrames = (int)gPlayState->csCtx.frames;
+        const size_t pendingCatchups =
+            Anchor::Instance ? Anchor::Instance->pendingCatchups.size() : 0;
+        const size_t peerCount =
+            Anchor::Instance ? Anchor::Instance->clients.size() : 0;
+        SPDLOG_INFO("[CutsceneCatchup.diag] Ledger create trigger='{}' key='{}' "
+                    "IsRoomHost={} Play_InCsMode={} csState={} csFrames={} "
+                    "pendingCatchups={} peerCount={}",
+                    triggerContext, key,
+                    (int)isRoomHost, (int)inCsMode, csState, csFrames,
+                    pendingCatchups, peerCount);
+    }
     return raw;
 }
 
@@ -162,7 +229,7 @@ CutsceneCatchupEntry* GetOrCreateActiveEntry() {
 void RecordSpawnedActor(Actor* actor) {
     if (actor == nullptr) return;
     if (!IsLeader() || !IsInCutscene()) return;
-    auto* entry = GetOrCreateActiveEntry();
+    auto* entry = GetOrCreateActiveEntry("RecordSpawnedActor");
     if (entry == nullptr) return;
 
     SpawnedActorRec rec{};
@@ -177,7 +244,7 @@ void RecordSpawnedActor(Actor* actor) {
 
 void RecordFlagSet(int16_t flagType, int16_t flag, int16_t sceneOrRoomNum) {
     if (!IsLeader() || !IsInCutscene()) return;
-    auto* entry = GetOrCreateActiveEntry();
+    auto* entry = GetOrCreateActiveEntry("RecordFlagSet");
     if (entry == nullptr) return;
 
     FlagSetRec rec{ flagType, flag, sceneOrRoomNum };
@@ -186,7 +253,7 @@ void RecordFlagSet(int16_t flagType, int16_t flag, int16_t sceneOrRoomNum) {
 
 void RecordItemGranted(int16_t itemId, int32_t amount) {
     if (!IsLeader() || !IsInCutscene()) return;
-    auto* entry = GetOrCreateActiveEntry();
+    auto* entry = GetOrCreateActiveEntry("RecordItemGranted");
     if (entry == nullptr) return;
 
     ItemGrantRec rec{ itemId, amount };
@@ -195,7 +262,7 @@ void RecordItemGranted(int16_t itemId, int32_t amount) {
 
 void RecordMusicStart(int32_t seqId) {
     if (!IsLeader() || !IsInCutscene()) return;
-    auto* entry = GetOrCreateActiveEntry();
+    auto* entry = GetOrCreateActiveEntry("RecordMusicStart");
     if (entry == nullptr) return;
 
     entry->music.seqId = seqId;
@@ -212,7 +279,7 @@ void RecordMusicStart(int32_t seqId) {
 // then interpolates the camera correctly from that starting position.
 void SnapshotCamera() {
     if (!IsLeader() || !IsInCutscene()) return;
-    auto* entry = GetOrCreateActiveEntry();
+    auto* entry = GetOrCreateActiveEntry("SnapshotCamera");
     if (entry == nullptr) return;
     if (gPlayState == nullptr) return;
 
@@ -244,7 +311,7 @@ void SnapshotCamera() {
 // world.pos + world.rot direct-write.
 void SnapshotActors() {
     if (!IsLeader() || !IsInCutscene()) return;
-    auto* entry = GetOrCreateActiveEntry();
+    auto* entry = GetOrCreateActiveEntry("SnapshotActors");
     if (entry == nullptr) return;
     if (gPlayState == nullptr) return;
 
@@ -275,7 +342,7 @@ void SnapshotActors() {
 
 void UpdateFrameCounter() {
     if (!IsLeader() || !IsInCutscene()) return;
-    auto* entry = GetOrCreateActiveEntry();
+    auto* entry = GetOrCreateActiveEntry("UpdateFrameCounter");
     if (entry == nullptr) return;
     if (gPlayState == nullptr) return;
     entry->currentLeaderFrame = (int32_t)gPlayState->csCtx.frames;

@@ -90,6 +90,35 @@ bool IsHostInCutsceneTextState() {
     return true;
 }
 
+// Diag 1 helper — snapshot the vanilla state that drives the vote-state
+// transition. Called from the host tick and from HandlePacket sites so
+// every state.active transition is paired with a "why" log line the log
+// 625 investigation identified as missing. Gated on
+// gEnhancements.Anchor.CutsceneLateJoinDiag so production logs stay clean.
+// See Analysis/cutscene_ff_reset_and_mp_dialogue_deadline_2026-07-08.md
+// Bug 1 "same textId reopen" hypothesis.
+void LogVoteStateTransitionReason(const char* reason,
+                                   bool priorActive, bool newActive,
+                                   uint16_t priorTextId, uint16_t newTextId) {
+    if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"), 0) == 0) {
+        return;
+    }
+    if (gPlayState == nullptr) return;
+    const int  msgMode      = (int)gPlayState->msgCtx.msgMode;
+    const unsigned msgTextId = (unsigned)gPlayState->msgCtx.textId;
+    const int  csState      = (int)gPlayState->csCtx.state;
+    const int  csFrames     = (int)gPlayState->csCtx.frames;
+    const bool inCsMode     = Play_InCsMode(gPlayState);
+    const bool inTextState  = IsHostInCutsceneTextState();
+    SPDLOG_INFO("[VoteState.diag] reason={} active {}→{} textId 0x{:04X}→0x{:04X} "
+                "| Play_InCsMode={} inTextState={} msgMode={} msgTextId=0x{:04X} "
+                "csState={} csFrames={}",
+                reason, (int)priorActive, (int)newActive,
+                (unsigned)priorTextId, (unsigned)newTextId,
+                (int)inCsMode, (int)inTextState, msgMode, msgTextId,
+                csState, csFrames);
+}
+
 // Count team members currently in the same scene + same timeline +
 // also in cutscene state as the local client. The all-pressed advance
 // condition needs the expected vote count — peers NOT in cutscene
@@ -127,6 +156,17 @@ size_t CountInSceneTeamSize() {
     }
     return count;
 }
+
+// Fix E — file-scope cooldown state shared between TickCutsceneTextAdvance
+// (timer-elapsed path) and HandlePacket_CutsceneTextAdvance (all-pressed
+// path). Both forced-advance paths arm this so the open-edge branch in
+// the tick suppresses reopen for the same textId during vanilla's
+// message-pipeline teardown window. See Fix E comment block in
+// TickCutsceneTextAdvance for full rationale.
+uint16_t sLastForcedAdvanceTextId = 0;
+std::chrono::steady_clock::time_point sLastForcedAdvanceAt =
+    std::chrono::steady_clock::time_point::min();
+constexpr int kForcedAdvanceCooldownMs = 750;
 
 }  // namespace
 
@@ -258,6 +298,13 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
+        // Fix E — arm the reopen-cooldown (see file-scope declaration
+        // and TickCutsceneTextAdvance's Fix E block for rationale).
+        sLastForcedAdvanceTextId = textId;
+        sLastForcedAdvanceAt     = std::chrono::steady_clock::now();
+        LogVoteStateTransitionReason(
+            "handle_all_pressed",
+            /*priorActive=*/true, /*newActive=*/false, textId, textId);
         SendPacket_CutsceneTextVoteState();
         SendPacket_CutsceneTextAdvanced(textId, "all_pressed");
     }
@@ -276,6 +323,8 @@ void Anchor::HandlePacket_CutsceneTextAdvanced(nlohmann::json payload) {
                 (unsigned)textId,
                 payload.value("reason", std::string("unknown")).c_str());
 
+    const bool priorActive = cutsceneTextAdvanceState.active;
+    const uint16_t priorTextId = cutsceneTextAdvanceState.textId;
     cutsceneTextAdvanceConsumed = true;
     cutsceneTextAdvanceConsumedTextId = textId;
 
@@ -290,6 +339,11 @@ void Anchor::HandlePacket_CutsceneTextAdvanced(nlohmann::json payload) {
     cutsceneTextAdvanceState.active           = false;
     cutsceneTextAdvanceState.pressedClientIds.clear();
     cutsceneTextAdvanceState.countdownStarted = false;
+    if (priorActive) {
+        LogVoteStateTransitionReason(
+            "peer_recv_advanced",
+            priorActive, /*newActive=*/false, priorTextId, textId);
+    }
 }
 
 void Anchor::TickCutsceneTextAdvance() {
@@ -324,8 +378,57 @@ void Anchor::TickCutsceneTextAdvance() {
     const uint16_t curTextId = inTextState
         ? (uint16_t)gPlayState->msgCtx.textId : (uint16_t)0;
 
-    if (inTextState && (!state.active || state.textId != curTextId)) {
+    // Fix B — debounce inTextState==false transitions. Vanilla msgMode
+    // briefly returns to MSGMODE_NONE for a frame or two between adjacent
+    // cutscene textboxes (post-textbox → next-textbox-load window). Without
+    // debounce, state.active rapidly toggles false → true on every gap,
+    // which triggers redundant CUTSCENE_TEXT_VOTE_STATE broadcasts and
+    // (per log 624) an ImGui multi-viewport quirk that spawns a second SoH
+    // window. Track when inTextState was last true; only close state.active
+    // if it's been continuously false for kInTextStateFalseDebounceMs.
+    // See Analysis/cutscene_ff_reset_and_mp_dialogue_deadline_2026-07-08.md
+    // Finding 2.
+    static std::chrono::steady_clock::time_point sLastInTextStateTrueAt =
+        std::chrono::steady_clock::time_point::min();
+    constexpr int kInTextStateFalseDebounceMs = 300;
+    if (inTextState) {
+        sLastInTextStateTrueAt = now;
+    }
+    const bool debouncedInTextState =
+        inTextState ||
+        (sLastInTextStateTrueAt != std::chrono::steady_clock::time_point::min() &&
+         std::chrono::duration_cast<std::chrono::milliseconds>(
+             now - sLastInTextStateTrueAt).count() < kInTextStateFalseDebounceMs);
+
+    // Fix E — post-advance reopen cooldown. When our timer-elapsed or
+    // all-pressed path fires an advance, vanilla takes ~60ms to consume
+    // the advance signal and several frames more to transition msgMode
+    // from DISPLAYING (53) through ADVANCING → CLOSING (54) → NONE (0).
+    // During that window, IsHostInCutsceneTextState() still returns true
+    // AND msgCtx.textId still holds the pre-advance textId — so the
+    // open-edge branch below would re-open state.active for the SAME
+    // textId we just advanced past, triggering a rapid on-off-on-off HUD
+    // flicker and (per log 628) an ImGui viewport-spawn that produces a
+    // second OS window.
+    //
+    // Cooldown state (sLastForcedAdvanceTextId / sLastForcedAdvanceAt)
+    // is file-scope so the all-pressed handler can arm it too. Suppress
+    // reopen for the SAME textId within kForcedAdvanceCooldownMs. A NEW
+    // textId (vanilla progressed to the next textbox) bypasses the
+    // cooldown so real progression stays responsive. See analysis
+    // Finding 1 + log 628.
+    const bool inForcedAdvanceCooldown =
+        sLastForcedAdvanceTextId == curTextId &&
+        sLastForcedAdvanceTextId != 0 &&
+        sLastForcedAdvanceAt != std::chrono::steady_clock::time_point::min() &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - sLastForcedAdvanceAt).count() < kForcedAdvanceCooldownMs;
+
+    if (inTextState && !inForcedAdvanceCooldown &&
+        (!state.active || state.textId != curTextId)) {
         // Textbox-open edge — new dialog just appeared on host.
+        const bool priorActive = state.active;
+        const uint16_t priorTextId = state.textId;
         state.active = true;
         state.textId = curTextId;
         state.sceneNum = mySceneNum;
@@ -336,13 +439,22 @@ void Anchor::TickCutsceneTextAdvance() {
         SPDLOG_INFO("[CutsceneTextAdvance] Textbox opened textId=0x{:04X} — "
                     "hard deadline {}ms",
                     (unsigned)curTextId, GetCutsceneHardDeadlineMs());
+        LogVoteStateTransitionReason(
+            (!priorActive) ? "tick_open_edge_from_inactive" : "tick_textid_change",
+            priorActive, /*newActive=*/true, priorTextId, curTextId);
         SendPacket_CutsceneTextVoteState();
-    } else if (!inTextState && state.active) {
+    } else if (!debouncedInTextState && state.active) {
         // Textbox-close edge — textbox was advanced or cutscene ended.
         // Clear state so HUD hides and the next open is a fresh cycle.
+        // Only fires after the debounce window elapses so brief msgMode
+        // gaps between adjacent textboxes don't trigger spurious closes.
+        const uint16_t priorTextId = state.textId;
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
+        LogVoteStateTransitionReason(
+            "tick_debounced_close",
+            /*priorActive=*/true, /*newActive=*/false, priorTextId, priorTextId);
         SendPacket_CutsceneTextVoteState();
     }
 
@@ -369,6 +481,14 @@ void Anchor::TickCutsceneTextAdvance() {
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
+        // Fix E — arm the reopen-cooldown so the next few ticks don't
+        // re-open state.active for the same textId while vanilla's
+        // message pipeline is still tearing down the advanced textbox.
+        sLastForcedAdvanceTextId = clearedTextId;
+        sLastForcedAdvanceAt     = now;
+        LogVoteStateTransitionReason(
+            wasVoteTimer ? "tick_timer_elapsed_vote" : "tick_timer_elapsed_hard_deadline",
+            /*priorActive=*/true, /*newActive=*/false, clearedTextId, clearedTextId);
         SendPacket_CutsceneTextVoteState();
         SendPacket_CutsceneTextAdvanced(clearedTextId,
                                         wasVoteTimer ? "timer" : "hard_deadline");
@@ -402,11 +522,21 @@ void Anchor::SendPacket_CutsceneTextVoteState() {
 
     auto& state = cutsceneTextAdvanceState;
 
-    // ms remaining as a signed clamp — 0 when countdown not started or
-    // has already elapsed. Peers use this to derive their own local
-    // endsAt so the display counts down in local time.
+    // ms remaining as a signed clamp — 0 only when the countdown has
+    // already elapsed. Peers use this to derive their own local endsAt
+    // so the display counts down in local time.
+    //
+    // Fix C — calculate whenever `active` is true, not just when
+    // `countdownStarted`. Both the hard-deadline countdown (started at
+    // textbox-open) and the vote-skip countdown (started at first press)
+    // write into state.countdownEndsAt, but only the vote-skip path sets
+    // countdownStarted=true. Gating on countdownStarted broadcast
+    // msRemaining=0 while the hard deadline was running, which peers
+    // interpreted as "no time left" (or ignored via
+    // countdownStarted=false), producing the log-624 flicker on peer HUDs.
+    // See analysis Finding 3.
     int64_t msRemaining = 0;
-    if (state.countdownStarted) {
+    if (state.active) {
         auto now = std::chrono::steady_clock::now();
         auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
                          state.countdownEndsAt - now).count();
@@ -482,14 +612,26 @@ void Anchor::HandlePacket_CutsceneTextVoteState(nlohmann::json payload) {
     }
 
     auto& state = cutsceneTextAdvanceState;
+    const bool priorActive = state.active;
+    const uint16_t priorTextId = state.textId;
     state.sceneNum         = (int16_t)payload.value("sceneNum", -1);
     state.textId           = (uint16_t)payload.value("textId", 0);
     state.active           = payload.value("active", false);
     state.countdownStarted = payload.value("countdownStarted", false);
+    if (priorActive != state.active || priorTextId != state.textId) {
+        LogVoteStateTransitionReason(
+            "peer_recv_vote_state",
+            priorActive, state.active, priorTextId, state.textId);
+    }
 
     // Convert wire msRemaining → local endsAt.
+    // Fix C — apply whenever active + msRemaining > 0. Sender's send-side
+    // Fix C already broadcasts msRemaining for the hard-deadline countdown
+    // (which has countdownStarted=false). Gating this on countdownStarted
+    // would drop the hard-deadline timer on peers → HUD countdown display
+    // never appears until first vote press.
     int64_t msRemaining = payload.value("msRemaining", (int64_t)0);
-    if (state.countdownStarted && msRemaining > 0) {
+    if (state.active && msRemaining > 0) {
         state.countdownEndsAt = std::chrono::steady_clock::now() +
                                  std::chrono::milliseconds(msRemaining);
     }

@@ -254,13 +254,30 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     //    (BgTreemouth_ForceIntroCutscene for deku_tree_intro) — sets
     //    csCtx.segment, cutsceneTrigger, actor action func.
     const std::string csKind = payload.value("csKind", std::string(""));
+    int setupRc = 1;   // default success (no-per-kind branch below sets 0)
     if (csKind == "deku_tree_intro") {
-        const int rc = BgTreemouth_ForceIntroCutscene(gPlayState);
-        SPDLOG_INFO("[CutsceneCatchup] Setup deku_tree_intro rc={}", rc);
+        setupRc = BgTreemouth_ForceIntroCutscene(gPlayState);
+        SPDLOG_INFO("[CutsceneCatchup] Setup deku_tree_intro rc={}", setupRc);
     } else {
+        setupRc = 0;
         SPDLOG_WARN("[CutsceneCatchup] No per-kind setup for csKind='{}' — "
                     "cutscene engine may lack script data",
                     csKind);
+    }
+
+    // If per-kind setup failed (e.g., BgTreemouth actor not loaded on this
+    // client because we're in the wrong room), abort BEFORE arming fast-
+    // forward. Without a successful setup, cutsceneTrigger is not set →
+    // func_800645A0's inner block (cutsceneIndex >= 0xFFF0 gate) never
+    // fires → csCtx.frames never advances → fast-forward loops infinitely
+    // with frames=0 (observed in log 624). See Analysis/cutscene_ff_
+    // reset_and_mp_dialogue_deadline_2026-07-08.md Finding 1.
+    if (setupRc == 0) {
+        SPDLOG_WARN("[CutsceneCatchup] Aborting fast-forward — per-kind "
+                    "setup failed. Client may be in wrong room / missing "
+                    "actor. Catchup will not run; local cutscene state "
+                    "left as-is.");
+        return;
     }
 
     // 8. Silent fast-forward (Option B) — NOT frame-jump.
@@ -711,18 +728,55 @@ void Anchor::TickCutsceneCatchup() {
     if (catchupFastForwardTarget > 0) {
         constexpr int kMaxTicksPerRealFrame = 10;
         int ticksFired = 0;
+        const int32_t framesBefore = (int32_t)gPlayState->csCtx.frames;
         for (int i = 0; i < kMaxTicksPerRealFrame; i++) {
             if (gPlayState->csCtx.frames >= catchupFastForwardTarget) break;
             func_800645A0(gPlayState, &gPlayState->csCtx);
             ticksFired++;
         }
+        const int32_t framesAfter = (int32_t)gPlayState->csCtx.frames;
+
+        // Fix D — fast-forward timeout defense-in-depth. If csCtx.frames
+        // stops advancing while catchupFastForwardTarget > 0, the cutscene
+        // engine is either not running (cutsceneTrigger not set, e.g. per-
+        // kind setup failed) or is stuck on an internal WAIT state we can't
+        // drive forward. Without this timeout, the loop pings func_800645A0
+        // forever with no progress, spamming per-frame log lines. Fix A
+        // (setup rc=0 bail-out) catches the main case at entry; this catches
+        // any residual runtime stall.
+        //
+        // Counter increments when a real-frame block of ticks made zero
+        // progress; resets on any progress. Threshold ~60 real frames
+        // (~1 second at 60fps) is generous — real fast-forward typically
+        // completes in <60 real frames total. See analysis Finding 4.
+        static int sConsecutiveNoProgressFrames = 0;
+        constexpr int kNoProgressThresholdFrames = 60;
+        if (framesAfter == framesBefore) {
+            sConsecutiveNoProgressFrames++;
+            if (sConsecutiveNoProgressFrames >= kNoProgressThresholdFrames) {
+                SPDLOG_WARN("[CutsceneCatchup] Fast-forward stalled — "
+                            "csCtx.frames={} target={} unchanged for {} "
+                            "real frames. Aborting fast-forward; local "
+                            "cutscene will proceed at normal rate if the "
+                            "engine is running, or remain frozen otherwise.",
+                            (int)gPlayState->csCtx.frames,
+                            catchupFastForwardTarget,
+                            sConsecutiveNoProgressFrames);
+                catchupFastForwardTarget = 0;
+                sConsecutiveNoProgressFrames = 0;
+            }
+        } else {
+            sConsecutiveNoProgressFrames = 0;
+        }
+
         if (gPlayState->csCtx.frames >= catchupFastForwardTarget) {
             SPDLOG_INFO("[CutsceneCatchup] Fast-forward complete — "
                         "csCtx.frames={} caught up to target={}",
                         (int)gPlayState->csCtx.frames,
                         catchupFastForwardTarget);
             catchupFastForwardTarget = 0;
-        } else if (ticksFired > 0) {
+            sConsecutiveNoProgressFrames = 0;
+        } else if (ticksFired > 0 && framesAfter != framesBefore) {
             SPDLOG_INFO("[CutsceneCatchup] Fast-forward progress: frames={} / "
                         "target={} (ticked {}x this frame)",
                         (int)gPlayState->csCtx.frames,

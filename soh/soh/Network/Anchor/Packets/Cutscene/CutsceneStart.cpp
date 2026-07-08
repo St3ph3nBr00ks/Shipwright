@@ -165,6 +165,12 @@ void Anchor::SendPacket_CutsceneStart(const std::string& csKind, uint32_t csKey)
         return;
     }
     cutsceneStartActive.insert(dedupKey);
+    // Fix G — mark this cutscene as locally-originated. Only entries
+    // in this sibling set can promote the local client to leader for
+    // the catchup ledger. Peer-received starts insert into
+    // cutsceneStartActive but NOT this set. See Analysis/cutscene_
+    // late_join_bugs_deep_analysis_2026-07-08.md Bug 2.
+    cutsceneStartActiveLocalOrigin.insert(dedupKey);
 
     nlohmann::json payload;
     payload["type"]         = CUTSCENE_START;
@@ -226,6 +232,8 @@ void Anchor::SendPacket_CutsceneEnd(const std::string& csKind, uint32_t csKey,
         return;
     }
     cutsceneStartActive.erase(dedupKey);
+    // Fix G — mirror erase of the local-origin sibling set.
+    cutsceneStartActiveLocalOrigin.erase(dedupKey);
 
     nlohmann::json payload;
     payload["type"]         = CUTSCENE_END;
@@ -259,6 +267,9 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
         return;  // never saw the START — nothing to clean up
     }
     cutsceneStartActive.erase(dedupKey);
+    // Fix G — mirror erase (idempotent — peer receives never inserted
+    // into the local-origin set, so erase is a no-op for those).
+    cutsceneStartActiveLocalOrigin.erase(dedupKey);
 
     ApplyCutsceneEndByKind(csKind, csKey, endReason);
 }
