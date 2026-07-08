@@ -284,8 +284,8 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     // D=hybrid). Option B chosen 2026-07-07 for natural coop UX.
     const int32_t leaderFrame = (int32_t)payload.value("leaderFrame",
                                                        (int32_t)0);
-    if (leaderFrame > 0) {
-        catchupFastForwardTarget = leaderFrame;
+    if (leaderFrame > 0 && ::Anchor::Instance != nullptr) {
+        ::Anchor::Instance->catchupFastForwardTarget = leaderFrame;
         SPDLOG_INFO("[CutsceneCatchup] Applied delta — silent fast-forward "
                     "target=frame {} (vanilla will drive state machine + "
                     "command dispatch; TickCutsceneCatchup accelerates)",
