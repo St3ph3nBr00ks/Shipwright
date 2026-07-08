@@ -1000,48 +1000,62 @@ void Anchor::TickCutsceneCatchup() {
                 SPDLOG_INFO("[CutsceneCatchup] Fix N — opened leader's "
                             "textbox 0x{:04X} on peer post-fast-forward",
                             (unsigned)catchupPendingMsgTextId);
-                // Design E — jump peer's message system directly to
-                // leader's sub-textbox position by force-writing
-                // msgCtx.msgBufPos + msgMode. Vanilla's next
-                // Message_Update dispatches the NEXT_MSG case (if we
-                // wrote MSGMODE_TEXT_NEXT_MSG), which calls
-                // Message_Decode(play). Message_Decode reads
-                // font->msgBuf from msgBufPos, populates msgBufDecoded,
-                // sets textboxEndType, and transitions msgMode to
-                // MSGMODE_TEXT_DISPLAYING for the correct sub-textbox
-                // — no need to loop or wait for real-time broadcasts.
+                // Design E v2 — jump peer's message system directly
+                // to leader's sub-textbox position by force-writing
+                // ONLY msgCtx.msgBufPos. Do NOT override msgMode.
+                // Message_StartTextbox above set msgMode=TEXT_START.
+                // Vanilla's next ~10 game frames flow through
+                // TEXT_START → BOX_GROWING (×8) → STARTING → NEXT_MSG
+                // naturally, setting up the visible textbox state
+                // (R_TEXTBOX_Y from R_TEXTBOX_Y_TARGET via
+                // Message_GrowTextbox; textboxColorAlphaCurrent grown
+                // to target so background fades in properly). When
+                // NEXT_MSG fires, Message_Decode reads from
+                // msgBufPos = leader's forced value and produces the
+                // correct sub-textbox content. See
+                // Analysis/design_e_rendering_side_effects_2026-07-08.md.
                 //
-                // Replaces the broken Bug 14 loop which called
-                // Message_ContinueTextbox N times (that primitive
-                // RESTARTS the message with msgBufPos=0, so the loop
-                // just re-opened sub 1 N times). See Analysis/
-                // cutscene_catchup_dialogue_chain_design_gap_2026-07-
-                // 08.md §4 for the Bug 14 misuse analysis and §7
-                // for Design E rationale + rejected alternatives.
+                // Log 641 v1 bugs (fixed here):
+                //   Bug 1: no dark background — bypassed Message_
+                //          GrowTextbox which grows textboxColorAlpha.
+                //   Bug 2: text on top half — bypassed TEXT_START
+                //          which sets R_TEXTBOX_Y_TARGET based on
+                //          textBoxType via sTextboxLowerYPositions[].
+                //
+                // Replaces the broken Bug 14 loop (Message_ContinueTextbox
+                // — that vanilla function restarts the message with
+                // msgBufPos=0, so calling it N times just re-opened
+                // sub 1 N times). See Analysis/cutscene_catchup_
+                // dialogue_chain_design_gap_2026-07-08.md §4.
                 //
                 // Only apply if msgBufPos > 0 — msgBufPos=0 is the
                 // fresh Message_StartTextbox state and needs no
-                // adjustment. Only override msgMode if leader was in
-                // a chain-progress state (AWAIT_NEXT / NEXT_MSG /
-                // DISPLAYING); other states (DONE, CLOSING, ocarina)
-                // are transient or leader-local and don't map cleanly
-                // to peer's post-load state.
+                // adjustment.
+                //
+                // Deferred (potential Bug 3): if leader's captured
+                // msgBufPos points AT a BOX_BREAK (the case when
+                // leader is in AWAIT_NEXT / DISPLAYING at snapshot),
+                // peer's Message_Decode from that position produces
+                // empty content. Peer would display correct visual
+                // chrome but no text. If field test confirms this,
+                // capture "start of current sub" via a shadow field
+                // updated at Fix S/T's msgBufPos++ transitions.
                 if (catchupPendingMsgBufPos > 0) {
                     const uint16_t priorPos =
                         (uint16_t)gPlayState->msgCtx.msgBufPos;
                     gPlayState->msgCtx.msgBufPos =
                         catchupPendingMsgBufPos;
-                    // Force NEXT_MSG so vanilla's next tick runs
-                    // Message_Decode from the new position. Ignore
-                    // leader's exact msgMode value here — DISPLAYING /
-                    // AWAIT_NEXT / NEXT_MSG all resolve into the
-                    // correct downstream state after Decode runs.
-                    gPlayState->msgCtx.msgMode = MSGMODE_TEXT_NEXT_MSG;
-                    SPDLOG_INFO("[CutsceneCatchup] Design E — jumped "
+                    // msgMode intentionally NOT overridden here —
+                    // Message_StartTextbox already set it to
+                    // MSGMODE_TEXT_START and vanilla's setup states
+                    // must run to establish R_TEXTBOX_Y +
+                    // textboxColorAlphaCurrent before Message_Decode.
+                    SPDLOG_INFO("[CutsceneCatchup] Design E v2 — jumped "
                                 "peer msgBufPos from {} to leader's {} "
                                 "(leaderMsgMode was {}) for textId 0x"
-                                "{:04X}; vanilla NEXT_MSG dispatch will "
-                                "Message_Decode the current sub-textbox",
+                                "{:04X}; msgMode preserved at TEXT_START "
+                                "so vanilla setup states run before "
+                                "Message_Decode",
                                 (int)priorPos,
                                 (int)catchupPendingMsgBufPos,
                                 (int)catchupPendingMsgMode,
