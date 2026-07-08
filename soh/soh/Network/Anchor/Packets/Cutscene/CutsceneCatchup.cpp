@@ -252,6 +252,11 @@ void Anchor::SendPacket_CutsceneFrameSync() {
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
     if (!isConnected) return;
     if (cutsceneStartActive.empty()) return;
+    // MUST be actually in a cutscene locally. Late-joiners hydrate
+    // cutsceneStartActive from received FRAME_SYNC (v1.1 late-connect
+    // support), which would otherwise make them broadcast junk
+    // FRAME_SYNC with leaderFrame=0 leaderState=IDLE.
+    if (gPlayState->csCtx.state == CS_STATE_IDLE) return;
     if (!::SceneAuthority::IsRoomHost(
             (int16_t)gPlayState->sceneNum,
             (int8_t)gPlayState->roomCtx.curRoom.num,
@@ -333,9 +338,18 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         // Sender identity: the relay stamps the sender's clientId as
         // `clientId` on incoming packets.
         const uint32_t senderClientId = payload.value("clientId", (uint32_t)0);
-        if (senderClientId != 0 && senderClientId != ownClientId &&
-            pendingCatchups.count(kindKey) == 0 &&
-            CutsceneCatchupEnabled()) {
+        const bool haveEnabled     = CutsceneCatchupEnabled();
+        const bool alreadyPending  = pendingCatchups.count(kindKey) > 0;
+        const bool selfBroadcast   = (senderClientId == ownClientId);
+        const bool validSender     = (senderClientId != 0);
+        SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC gates — sender={} own={} "
+                    "kindKey='{}' enabled={} alreadyPending={} selfBroadcast={} "
+                    "validSender={} — will{} fire",
+                    senderClientId, ownClientId, kindKey,
+                    haveEnabled, alreadyPending, selfBroadcast, validSender,
+                    (validSender && !selfBroadcast && !alreadyPending && haveEnabled)
+                        ? "" : " NOT");
+        if (validSender && !selfBroadcast && !alreadyPending && haveEnabled) {
             PendingCatchup p;
             p.deadline = std::chrono::steady_clock::now()
                          + std::chrono::milliseconds(kCatchupTimeoutMs);
