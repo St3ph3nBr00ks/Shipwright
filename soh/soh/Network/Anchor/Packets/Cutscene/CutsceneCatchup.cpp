@@ -25,6 +25,13 @@ extern PlayState* gPlayState;
 // and Player retains gameplay control.
 int BgTreemouth_ForceIntroCutscene(PlayState* play);
 }
+// func_800645A0 is the vanilla per-tick cutscene body (z_demo.c:170).
+// Normally called once per real frame from Play_Update (z_play.c:1239).
+// For Option B silent fast-forward, we call it up to N extra times
+// per real frame from TickCutsceneCatchup to accelerate playback
+// from frame 0 to the leader's current frame. Declared in functions.h
+// but re-declared here inside an extern "C" block for clarity.
+extern "C" void func_800645A0(PlayState* play, CutsceneContext* csCtx);
 
 // CUTSCENE_FRAME_SYNC / CUTSCENE_CATCHUP_REQUEST / CUTSCENE_CATCHUP_RESPONSE
 //
@@ -242,18 +249,10 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     //    dispatcher re-drives cutscene-controlled actors when we
     //    resume playback at leader.frame.
 
-    // 7. Set up cutscene state per-kind, THEN jump csCtx.frames.
-    //
-    // The setup step invokes the same actor-side cutscene entry the
-    // vanilla trigger would have hit (BgTreemouth_ForceIntroCutscene
-    // for deku_tree_intro, etc.) — this sets csCtx.segment (script
-    // data pointer), the D_8015FCC* skip flags, the actor's action
-    // func, and switches Player into cutscene action mode.
-    //
-    // Without this, my earlier apply only wrote csCtx.state (letterbox
-    // appears) but the cutscene engine had nothing to execute → P2
-    // saw black bars but retained gameplay control (regression
-    // observed in field-test 617 post-fix).
+    // 7. Set up cutscene state per-kind. This invokes the same actor-
+    //    side cutscene entry the vanilla trigger would have hit
+    //    (BgTreemouth_ForceIntroCutscene for deku_tree_intro) — sets
+    //    csCtx.segment, cutsceneTrigger, actor action func.
     const std::string csKind = payload.value("csKind", std::string(""));
     if (csKind == "deku_tree_intro") {
         const int rc = BgTreemouth_ForceIntroCutscene(gPlayState);
@@ -264,17 +263,37 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
                     csKind);
     }
 
-    // 8. Jump csCtx.frames to leader's frame and resume playback.
-    // Setup step above set csCtx.state and frames=0; this overrides
-    // both to the leader's mid-cutscene position.
+    // 8. Silent fast-forward (Option B) — NOT frame-jump.
+    //
+    // Field-test 622 confirmed that overwriting csCtx.frames/state
+    // directly skips the vanilla state-transition (func_80068ECC)
+    // AND every frame-0..N-1 command's side effects (camera cache,
+    // Player teleport, dialogue open/close, Player action lock,
+    // audio flag). Result: black bars but nothing functional.
+    //
+    // Fix: leave csCtx.frames = 0 and csCtx.state = IDLE. Vanilla's
+    // per-tick func_800645A0 will drive the state machine cleanly
+    // from IDLE → UNSKIPPABLE_INIT → SKIPPABLE_INIT → SKIPPABLE_EXEC
+    // → per-frame command dispatch. TickCutsceneCatchup then invokes
+    // func_800645A0 extra times per real frame until csCtx.frames
+    // reaches leaderFrame. Every intermediate frame's setup commands
+    // execute in-order — matching vanilla exactly.
+    //
+    // See Analysis/cutscene_catchup_p2_engagement_2026-07-07.md §3
+    // for the full option matrix (A=reset, B=silent-ff, C=partial,
+    // D=hybrid). Option B chosen 2026-07-07 for natural coop UX.
     const int32_t leaderFrame = (int32_t)payload.value("leaderFrame",
                                                        (int32_t)0);
-    const int leaderState = payload.value("leaderState",
-                                          (int)CS_STATE_UNSKIPPABLE_EXEC);
-    gPlayState->csCtx.frames = leaderFrame;
-    gPlayState->csCtx.state  = (u8)leaderState;
-    SPDLOG_INFO("[CutsceneCatchup] Applied delta — frames={} state={}",
-                leaderFrame, leaderState);
+    if (leaderFrame > 0) {
+        catchupFastForwardTarget = leaderFrame;
+        SPDLOG_INFO("[CutsceneCatchup] Applied delta — silent fast-forward "
+                    "target=frame {} (vanilla will drive state machine + "
+                    "command dispatch; TickCutsceneCatchup accelerates)",
+                    leaderFrame);
+    } else {
+        SPDLOG_INFO("[CutsceneCatchup] Applied delta — leaderFrame=0 "
+                    "(no fast-forward needed)");
+    }
 }
 
 }  // namespace
@@ -659,6 +678,40 @@ void Anchor::TickCutsceneCatchup() {
             it = pendingCatchups.erase(it);
         } else {
             ++it;
+        }
+    }
+
+    // Peer side — Option B silent fast-forward. When ApplyCatchupDelta
+    // set catchupFastForwardTarget to the leader's current frame, we
+    // accelerate vanilla's cutscene tick to reach that target quickly
+    // (visible as a ~1-second blur on the late-joiner's screen). Every
+    // frame's setup commands (camera cache, Player teleport, dialogue
+    // open/close, action locks) fire in-order via vanilla dispatch —
+    // matching the leader's mid-cutscene state exactly.
+    //
+    // kMaxTicksPerRealFrame = 10 → 500 frames catchup ≈ 50 real frames
+    // ≈ 0.8s at 60fps. Rate is empirically balanced: high enough to
+    // finish quickly, low enough to avoid audio-command reordering
+    // artifacts within a single real-frame audio window.
+    if (catchupFastForwardTarget > 0) {
+        constexpr int kMaxTicksPerRealFrame = 10;
+        int ticksFired = 0;
+        for (int i = 0; i < kMaxTicksPerRealFrame; i++) {
+            if (gPlayState->csCtx.frames >= catchupFastForwardTarget) break;
+            func_800645A0(gPlayState, &gPlayState->csCtx);
+            ticksFired++;
+        }
+        if (gPlayState->csCtx.frames >= catchupFastForwardTarget) {
+            SPDLOG_INFO("[CutsceneCatchup] Fast-forward complete — "
+                        "csCtx.frames={} caught up to target={}",
+                        (int)gPlayState->csCtx.frames,
+                        catchupFastForwardTarget);
+            catchupFastForwardTarget = 0;
+        } else if (ticksFired > 0) {
+            SPDLOG_INFO("[CutsceneCatchup] Fast-forward progress: frames={} / "
+                        "target={} (ticked {}x this frame)",
+                        (int)gPlayState->csCtx.frames,
+                        catchupFastForwardTarget, ticksFired);
         }
     }
 }

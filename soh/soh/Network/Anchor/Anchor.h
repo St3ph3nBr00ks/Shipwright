@@ -1620,6 +1620,20 @@ class Anchor : public Network {
     uint64_t cutsceneFrameSyncSequence = 0;
     uint64_t peerLastAppliedCutsceneFrameSeq = 0;
 
+    // Cutscene catchup silent fast-forward target (Option B v1).
+    // Analysis: Claude/Analysis/cutscene_catchup_p2_engagement_2026-07-07.md.
+    //
+    // When ApplyCatchupDelta receives a CATCHUP_RESPONSE, it sets this
+    // to the leader's current frame. TickCutsceneCatchup then invokes
+    // vanilla's cutscene tick (func_800645A0) up to kMaxTicksPerRealFrame
+    // extra times per game-thread tick until csCtx.frames catches up.
+    // Vanilla's frame-linear dispatch means each intermediate frame's
+    // setup commands fire correctly (camera cache, Player teleport,
+    // dialogue open/close, flag sets, item grants, actor spawns) —
+    // fixing the "black bars but nothing works" bug seen in field
+    // test 622. 0 = not fast-forwarding.
+    int32_t catchupFastForwardTarget = 0;
+
     // Heartbeat (#194 follow-up) — two-axis liveness signal.
     //
     // gameFrameCounter is incremented from OnGameFrameUpdate on the game
