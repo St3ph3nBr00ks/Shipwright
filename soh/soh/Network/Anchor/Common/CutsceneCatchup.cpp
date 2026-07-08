@@ -306,6 +306,12 @@ void SnapshotCamera() {
         entry->leaderPlayerYaw   = leaderLink->actor.shape.rot.y;
         entry->hasLeaderPlayerSnapshot = true;
     }
+    // Fix P.1 — capture leader's current room number so peer's Fix N.2
+    // teleport can gate on room match. Prevents peer from teleporting
+    // Link into a coordinate space whose geometry isn't loaded (log 634
+    // Bug 9). See Analysis/cutscene_room_desync_and_vote_scope_
+    // 2026-07-08.md.
+    entry->leaderRoomNum = (int8_t)gPlayState->roomCtx.curRoom.num;
 }
 
 // Actor snapshot — walks ACTORCAT_NPC / _PROP / _BOSS categories and

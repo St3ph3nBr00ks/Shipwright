@@ -181,6 +181,9 @@ nlohmann::json SerializeLedgerEntry(
             e.leaderPlayerPos.x, e.leaderPlayerPos.y, e.leaderPlayerPos.z });
         out["leaderPlayerYaw"] = (int)e.leaderPlayerYaw;
     }
+    // Fix P.1 — leader's roomNum. Peer gates Fix N.2 teleport on
+    // curRoom match to avoid placing Link in unloaded geometry.
+    out["leaderRoomNum"] = (int)e.leaderRoomNum;
 
     return out;
 }
@@ -317,6 +320,9 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     // and stash on the Anchor instance so TickCutsceneCatchup can apply
     // them the moment fast-forward completes. See Analysis/cutscene_
     // overshoot_and_teleport_2026-07-08.md.
+    // Fix P.1 — also extract leader's roomNum so the teleport gates
+    // on room match. See Analysis/cutscene_room_desync_and_vote_scope_
+    // 2026-07-08.md.
     if (::Anchor::Instance != nullptr) {
         ::Anchor::Instance->catchupPendingMsgTextId =
             (uint16_t)payload.value("leaderMsgTextId", 0);
@@ -335,12 +341,16 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
                 (int16_t)payload.value("leaderPlayerYaw", 0);
             ::Anchor::Instance->catchupPendingPlayerPosValid = true;
         }
+        ::Anchor::Instance->catchupPendingRoomNum =
+            (int8_t)payload.value("leaderRoomNum", -1);
         SPDLOG_INFO("[CutsceneCatchup] Applied delta — leader textbox=0x{:04X} "
-                    "playerPos={} yaw={} (queued for post-fast-forward apply)",
+                    "playerPos={} yaw={} roomNum={} (queued for post-fast-"
+                    "forward apply)",
                     (unsigned)::Anchor::Instance->catchupPendingMsgTextId,
                     ::Anchor::Instance->catchupPendingPlayerPosValid
                         ? "yes" : "absent",
-                    (int)::Anchor::Instance->catchupPendingPlayerYaw);
+                    (int)::Anchor::Instance->catchupPendingPlayerYaw,
+                    (int)::Anchor::Instance->catchupPendingRoomNum);
     }
     if (leaderFrame > 0 && ::Anchor::Instance != nullptr) {
         // Reset stale cutscene state before setting the fast-forward
@@ -478,9 +488,17 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
 
         if (cutsceneStartActive.count(kindKey) == 0) {
             cutsceneStartActive.insert(kindKey);
+            // Fix O — record the FRAME_SYNC sender as the cutscene
+            // originator on late-join. The sender is the leader by
+            // definition (they broadcast the FRAME_SYNC while running
+            // the cutscene). Enables vote-skip authority routing when
+            // the peer late-joined via FRAME_SYNC-driven request.
+            cutsceneOriginatorByKindKey[kindKey] =
+                payload.value("clientId", (uint32_t)0);
             SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC observed new kindKey='{}' — "
-                        "populating cutsceneStartActive for late-joiner mode",
-                        kindKey);
+                        "populating cutsceneStartActive for late-joiner mode "
+                        "(originator=clientId {})",
+                        kindKey, cutsceneOriginatorByKindKey[kindKey]);
         }
 
         // Direct-request path for late-joiners. FRAME_SYNC receipt is
@@ -900,22 +918,56 @@ void Anchor::TickCutsceneCatchup() {
             // to leader's pos gets Link visually into the correct
             // final position. Silent-fast-forward's design tradeoff:
             // the walk animation itself is a brief blur.
+            //
+            // Fix P.2 — gate the teleport on room match. Log 634 Bug 9
+            // showed that vanilla's mid-fast-forward Cutscene_Command_
+            // ChangeRoom put peer in room 0 while leader was in room 1
+            // at snapshot time. Teleporting Link to leader's coords
+            // placed him inside room 1's geometry (unloaded on peer)
+            // = void / pink fog. Safer to leave Link where the vanilla
+            // dispatch put him when rooms mismatch — the visual
+            // outcome will be "Link stops mid-walk" rather than
+            // "Link in unloaded geometry". Cannot verify: whether
+            // calling Play_ChangeSceneRoom to switch peer to the
+            // leader's room mid-cutscene is safe; deferred pending
+            // field-test signal.
             if (catchupPendingPlayerPosValid) {
-                Player* peerLink = GET_PLAYER(gPlayState);
-                if (peerLink != nullptr) {
-                    peerLink->actor.world.pos.x = catchupPendingPlayerPos.x;
-                    peerLink->actor.world.pos.y = catchupPendingPlayerPos.y;
-                    peerLink->actor.world.pos.z = catchupPendingPlayerPos.z;
-                    peerLink->actor.shape.rot.y = catchupPendingPlayerYaw;
-                    SPDLOG_INFO("[CutsceneCatchup] Fix N.2 — teleported peer "
-                                "Link to leader pos=({:.0f},{:.0f},{:.0f}) "
-                                "yaw={}",
+                const int8_t curRoom =
+                    (int8_t)gPlayState->roomCtx.curRoom.num;
+                if (catchupPendingRoomNum >= 0 &&
+                    curRoom != catchupPendingRoomNum) {
+                    SPDLOG_INFO("[CutsceneCatchup] Fix P.2 — skipping "
+                                "teleport to leader pos=({:.0f},{:.0f},"
+                                "{:.0f}) yaw={} because curRoom={} != "
+                                "leaderRoomNum={}. Link left at its "
+                                "current cutscene position.",
                                 catchupPendingPlayerPos.x,
                                 catchupPendingPlayerPos.y,
                                 catchupPendingPlayerPos.z,
-                                (int)catchupPendingPlayerYaw);
+                                (int)catchupPendingPlayerYaw,
+                                (int)curRoom,
+                                (int)catchupPendingRoomNum);
+                } else {
+                    Player* peerLink = GET_PLAYER(gPlayState);
+                    if (peerLink != nullptr) {
+                        peerLink->actor.world.pos.x = catchupPendingPlayerPos.x;
+                        peerLink->actor.world.pos.y = catchupPendingPlayerPos.y;
+                        peerLink->actor.world.pos.z = catchupPendingPlayerPos.z;
+                        peerLink->actor.shape.rot.y = catchupPendingPlayerYaw;
+                        SPDLOG_INFO("[CutsceneCatchup] Fix N.2 — teleported "
+                                    "peer Link to leader pos=({:.0f},{:.0f},"
+                                    "{:.0f}) yaw={} (curRoom={} matches "
+                                    "leaderRoomNum={})",
+                                    catchupPendingPlayerPos.x,
+                                    catchupPendingPlayerPos.y,
+                                    catchupPendingPlayerPos.z,
+                                    (int)catchupPendingPlayerYaw,
+                                    (int)curRoom,
+                                    (int)catchupPendingRoomNum);
+                    }
                 }
                 catchupPendingPlayerPosValid = false;
+                catchupPendingRoomNum = -1;
             }
         } else if (ticksFired > 0 && framesAfter != framesBefore) {
             SPDLOG_INFO("[CutsceneCatchup] Fast-forward progress: frames={} / "

@@ -1660,6 +1660,23 @@ class Anchor : public Network {
     struct { float x, y, z; } catchupPendingPlayerPos = { 0.0f, 0.0f, 0.0f };
     int16_t  catchupPendingPlayerYaw = 0;
     bool     catchupPendingPlayerPosValid = false;
+    // Fix P.1 — leader's roomNum at snapshot. Peer's Fix N.2
+    // teleport gates on curRoom == pending roomNum. -1 = absent
+    // (older-build leader or snapshot without room info).
+    int8_t   catchupPendingRoomNum = -1;
+
+    // Fix O — cutscene-originator clientId per active kindKey.
+    // Populated by SendPacket_CutsceneStart (self origin) and by
+    // HandlePacket_CutsceneStart / FRAME_SYNC hydration (peer
+    // origin via relay-stamped clientId). Cleared on
+    // Send/HandlePacket_CutsceneEnd. Vote-skip authority uses this
+    // instead of room-host when a cutscene is active so peers in
+    // different rooms during a shared cutscene still coordinate
+    // through a single authoritative host. See
+    // Analysis/cutscene_room_desync_and_vote_scope_2026-07-08.md
+    // Bug 10.
+    std::unordered_map<std::string /* kindKey */, uint32_t /* clientId */>
+        cutsceneOriginatorByKindKey;
 
     // Heartbeat (#194 follow-up) — two-axis liveness signal.
     //

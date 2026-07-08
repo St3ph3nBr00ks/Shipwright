@@ -195,6 +195,43 @@ std::chrono::steady_clock::time_point sLastForcedAdvanceAt =
     std::chrono::steady_clock::time_point::min();
 constexpr int kForcedAdvanceMaxWaitMs = 5000;
 
+// Fix O — resolve vote-skip authority host for the current state.
+// When a cutscene is active locally (any entry in cutsceneStartActive),
+// authority is the cutscene ORIGINATOR (client that broadcast
+// CUTSCENE_START). Otherwise fall back to room-host of local scene/
+// room. Log 634 Bug 10: P1 and P2 landed in different rooms during
+// deku_tree_intro; each became their own room-host, both broadcast
+// vote-state, both ignored each other's broadcasts — no sync. Using
+// the originator (a single clientId across all peers) collapses this
+// to a single authoritative host. See Analysis/cutscene_room_desync_
+// and_vote_scope_2026-07-08.md Bug 10.
+uint32_t ResolveVoteSkipHostClientId() {
+    if (Anchor::Instance == nullptr) return 0;
+    if (!Anchor::Instance->cutsceneStartActive.empty() &&
+        !Anchor::Instance->cutsceneOriginatorByKindKey.empty()) {
+        // v1 assumes single-cutscene sessions; use first entry.
+        const auto it = Anchor::Instance->cutsceneOriginatorByKindKey.begin();
+        if (it != Anchor::Instance->cutsceneOriginatorByKindKey.end() &&
+            it->second != 0) {
+            return it->second;
+        }
+    }
+    // No active cutscene (or originator unknown) — fall back to
+    // room-host authority for non-cutscene textboxes.
+    if (gPlayState == nullptr) return 0;
+    return ::SceneAuthority::GetRoomHostClientId(
+        (int16_t)gPlayState->sceneNum,
+        (int8_t)gPlayState->roomCtx.curRoom.num,
+        (uint8_t)(gSaveContext.linkAge & 0x1));
+}
+
+// Fix O — am I the vote-skip authority? Reuses ResolveVoteSkipHostClientId.
+bool AmVoteSkipHost() {
+    if (Anchor::Instance == nullptr) return false;
+    const uint32_t host = ResolveVoteSkipHostClientId();
+    return host != 0 && host == Anchor::Instance->ownClientId;
+}
+
 }  // namespace
 
 void Anchor::SendPacket_CutsceneTextAdvance(uint16_t textId) {
@@ -207,11 +244,11 @@ void Anchor::SendPacket_CutsceneTextAdvance(uint16_t textId) {
     payload["textId"]      = (int)textId;
     PacketTimeline::SetTimelineField(payload);
 
-    // Routed to the effective scene host of (sceneNum, my-roomNum, timeline).
-    const uint32_t target = ::SceneAuthority::GetRoomHostClientId(
-        (int16_t)gPlayState->sceneNum,
-        (int8_t)gPlayState->roomCtx.curRoom.num,
-        (uint8_t)(gSaveContext.linkAge & 0x1));
+    // Fix O.1 — route to the cutscene originator when a cutscene is
+    // active; otherwise room-host of local scene/room. Handles the
+    // case where peers landed in different rooms during a shared
+    // cutscene (log 634 Bug 10).
+    const uint32_t target = ResolveVoteSkipHostClientId();
     payload["targetClientId"] = target;
 
     SPDLOG_INFO("[CutsceneTextAdvance] Sending textId=0x{:04X} sceneNum={} target={}",
@@ -242,10 +279,10 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
     int16_t sceneNum = (int16_t)payload.value("sceneNum", -1);
     uint16_t textId  = (uint16_t)payload.value("textId", 0);
 
-    // Host-side gate. Only the room host accumulates votes.
-    if (!::SceneAuthority::IsRoomHost(sceneNum,
-                                       (int8_t)gPlayState->roomCtx.curRoom.num,
-                                       (uint8_t)(gSaveContext.linkAge & 0x1))) {
+    // Fix O.2 — host-side gate. Only the vote-skip authority
+    // accumulates votes: cutscene originator when a cutscene is
+    // active, room host otherwise.
+    if (!AmVoteSkipHost()) {
         return;
     }
 
@@ -385,13 +422,11 @@ void Anchor::TickCutsceneTextAdvance() {
     auto& state = cutsceneTextAdvanceState;
     auto now = std::chrono::steady_clock::now();
 
-    // Only the host tracks + broadcasts textbox state.
+    // Fix O.2 — only the vote-skip authority tracks + broadcasts
+    // textbox state. Cutscene originator when active, room host
+    // otherwise.
     const int16_t mySceneNum = (int16_t)gPlayState->sceneNum;
-    const bool amHost = ::SceneAuthority::IsRoomHost(
-        mySceneNum,
-        (int8_t)gPlayState->roomCtx.curRoom.num,
-        (uint8_t)(gSaveContext.linkAge & 0x1));
-    if (!amHost) return;
+    if (!AmVoteSkipHost()) return;
 
     // ---- Textbox open/close edge detection (MP hard deadline) -------
     //
@@ -634,13 +669,10 @@ void Anchor::HandlePacket_CutsceneTextVoteState(nlohmann::json payload) {
     if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
     if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.Enabled"), 1)) return;
 
-    // Only peers apply — the host's authoritative state comes from its
-    // local vote-tally flow, not a wire echo. Belt-and-suspenders since
-    // the relay wouldn't route the packet back to sender in normal
-    // flow, but a self-broadcast bug would be silently absorbed.
-    if (::SceneAuthority::IsRoomHost((int16_t)gPlayState->sceneNum,
-                                      (int8_t)gPlayState->roomCtx.curRoom.num,
-                                      (uint8_t)(gSaveContext.linkAge & 0x1))) {
+    // Fix O.2 — only peers apply. Vote-skip authority (cutscene
+    // originator when active, room host otherwise) owns its own state
+    // and does not consume its own broadcasts.
+    if (AmVoteSkipHost()) {
         return;
     }
 

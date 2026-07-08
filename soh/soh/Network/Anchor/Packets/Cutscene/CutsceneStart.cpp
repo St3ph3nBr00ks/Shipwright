@@ -196,6 +196,12 @@ void Anchor::SendPacket_CutsceneStart(const std::string& csKind, uint32_t csKey)
     // cutsceneStartActive but NOT this set. See Analysis/cutscene_
     // late_join_bugs_deep_analysis_2026-07-08.md Bug 2.
     cutsceneStartActiveLocalOrigin.insert(dedupKey);
+    // Fix O — record local client as the cutscene originator for this
+    // key. Peer-received starts populate this map with the sender's
+    // clientId in HandlePacket_CutsceneStart. Vote-skip authority
+    // routes through this instead of room-host during active cutscenes.
+    // See Analysis/cutscene_room_desync_and_vote_scope_2026-07-08.md.
+    cutsceneOriginatorByKindKey[dedupKey] = ownClientId;
 
     nlohmann::json payload;
     payload["type"]         = CUTSCENE_START;
@@ -241,6 +247,12 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
         return;
     }
     cutsceneStartActive.insert(dedupKey);
+    // Fix O — record sender clientId as the cutscene originator. The
+    // relay stamps `clientId` on incoming packets, so payload.value()
+    // returns the sender's client id. Falls back to 0 if absent
+    // (shouldn't happen but defensive).
+    cutsceneOriginatorByKindKey[dedupKey] =
+        payload.value("clientId", (uint32_t)0);
 
     ApplyCutsceneStartByKind(csKind, csKey);
 }
@@ -259,6 +271,8 @@ void Anchor::SendPacket_CutsceneEnd(const std::string& csKind, uint32_t csKey,
     cutsceneStartActive.erase(dedupKey);
     // Fix G — mirror erase of the local-origin sibling set.
     cutsceneStartActiveLocalOrigin.erase(dedupKey);
+    // Fix O — mirror erase of the originator map.
+    cutsceneOriginatorByKindKey.erase(dedupKey);
 
     nlohmann::json payload;
     payload["type"]         = CUTSCENE_END;
@@ -295,6 +309,8 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
     // Fix G — mirror erase (idempotent — peer receives never inserted
     // into the local-origin set, so erase is a no-op for those).
     cutsceneStartActiveLocalOrigin.erase(dedupKey);
+    // Fix O — mirror erase of the originator map.
+    cutsceneOriginatorByKindKey.erase(dedupKey);
 
     ApplyCutsceneEndByKind(csKind, csKey, endReason);
 }

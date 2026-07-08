@@ -133,6 +133,7 @@ struct CutsceneCatchupEntry {
     uint16_t leaderMsgTextId = 0;         // vanilla msgCtx.textId
     struct { float x, y, z; } leaderPlayerPos = { 0.0f, 0.0f, 0.0f };
     int16_t  leaderPlayerYaw = 0;         // shape.rot.y
+    int8_t   leaderRoomNum   = -1;        // Fix P.1 — leader's curRoom.num
     bool     hasLeaderPlayerSnapshot = false;
 };
 
