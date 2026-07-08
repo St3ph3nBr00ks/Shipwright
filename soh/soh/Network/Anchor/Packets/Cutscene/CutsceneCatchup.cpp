@@ -15,6 +15,15 @@ extern "C" {
 #include "z64.h"
 #include "macros.h"
 extern PlayState* gPlayState;
+
+// Per-kind setup entry points. These invoke the SAME actor-side
+// cutscene setup path that the vanilla trigger would have hit —
+// establishes csCtx.segment, cs-side D_8015FCC* skip flags, actor
+// action func, and Player cutscene action mode. Without this, my
+// catchup-apply only sets csCtx.state (letterbox appears) but the
+// cutscene engine has nothing to execute (script segment unset)
+// and Player retains gameplay control.
+int BgTreemouth_ForceIntroCutscene(PlayState* play);
 }
 
 // CUTSCENE_FRAME_SYNC / CUTSCENE_CATCHUP_REQUEST / CUTSCENE_CATCHUP_RESPONSE
@@ -233,7 +242,31 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     //    dispatcher re-drives cutscene-controlled actors when we
     //    resume playback at leader.frame.
 
-    // 7. Jump csCtx.frames to leader's frame and resume playback.
+    // 7. Set up cutscene state per-kind, THEN jump csCtx.frames.
+    //
+    // The setup step invokes the same actor-side cutscene entry the
+    // vanilla trigger would have hit (BgTreemouth_ForceIntroCutscene
+    // for deku_tree_intro, etc.) — this sets csCtx.segment (script
+    // data pointer), the D_8015FCC* skip flags, the actor's action
+    // func, and switches Player into cutscene action mode.
+    //
+    // Without this, my earlier apply only wrote csCtx.state (letterbox
+    // appears) but the cutscene engine had nothing to execute → P2
+    // saw black bars but retained gameplay control (regression
+    // observed in field-test 617 post-fix).
+    const std::string csKind = payload.value("csKind", std::string(""));
+    if (csKind == "deku_tree_intro") {
+        const int rc = BgTreemouth_ForceIntroCutscene(gPlayState);
+        SPDLOG_INFO("[CutsceneCatchup] Setup deku_tree_intro rc={}", rc);
+    } else {
+        SPDLOG_WARN("[CutsceneCatchup] No per-kind setup for csKind='{}' — "
+                    "cutscene engine may lack script data",
+                    csKind);
+    }
+
+    // 8. Jump csCtx.frames to leader's frame and resume playback.
+    // Setup step above set csCtx.state and frames=0; this overrides
+    // both to the leader's mid-cutscene position.
     const int32_t leaderFrame = (int32_t)payload.value("leaderFrame",
                                                        (int32_t)0);
     const int leaderState = payload.value("leaderState",
