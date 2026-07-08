@@ -312,14 +312,33 @@ void SnapshotCamera() {
     // Bug 9). See Analysis/cutscene_room_desync_and_vote_scope_
     // 2026-07-08.md.
     entry->leaderRoomNum = (int8_t)gPlayState->roomCtx.curRoom.num;
-    // Design E — capture leader's msgBufPos + msgMode. Supersedes the
-    // Bug 14 chain-depth approach, which used Message_ContinueTextbox
-    // (broken primitive — that vanilla function LOADS a new message
-    // with msgBufPos=0 rather than advancing the chain). Peer applies
-    // these fields directly after Message_StartTextbox to land at
-    // leader's exact sub-textbox position in one shot. See Analysis/
-    // cutscene_catchup_dialogue_chain_design_gap_2026-07-08.md.
-    entry->leaderMsgBufPos = (uint16_t)gPlayState->msgCtx.msgBufPos;
+    // Design E v3 — capture leader's msgBufPos shadow (start of current
+    // sub-textbox) + msgMode. Supersedes the Bug 14 chain-depth
+    // approach (Message_ContinueTextbox is a broken primitive — it
+    // loads a new message with msgBufPos=0 rather than advancing the
+    // chain). See Analysis/cutscene_catchup_dialogue_chain_design_gap_
+    // 2026-07-08.md for Design E rationale + rejected alternatives, and
+    // Analysis/design_e_rendering_side_effects_2026-07-08.md for the v2
+    // TEXT_START-preservation fix.
+    //
+    // WHY THE SHADOW instead of live msgBufPos: live msgCtx.msgBufPos
+    // captured while leader is in DISPLAYING or AWAIT_NEXT points AT a
+    // BOX_BREAK byte (Message_Decode's while loop exits on BOX_BREAK
+    // WITHOUT incrementing msgBufPos past it — see z_message_PAL.c:
+    // 2380-2412). Peer's Message_Decode from that position reads the
+    // BOX_BREAK, exits with empty msgBufDecoded, and shows no text.
+    //
+    // leaderMsgBufPosLastSubStart is updated by Fix S/T's helper
+    // (ApplyForcedSubTextAdvanceIfInAwaitNext) IMMEDIATELY AFTER the
+    // msgBufPos++ transition — capturing "start of the sub about to be
+    // decoded" (which is also start of the sub about to be displayed).
+    // Between transitions, the shadow retains that value across
+    // DISPLAYING → AWAIT_NEXT frames — always pointing at "start of
+    // current sub." Also reset to 0 when a new base textbox opens.
+    entry->leaderMsgBufPos =
+        Anchor::Instance != nullptr
+            ? Anchor::Instance->leaderMsgBufPosLastSubStart
+            : (uint16_t)gPlayState->msgCtx.msgBufPos;
     entry->leaderMsgMode   = (uint8_t)gPlayState->msgCtx.msgMode;
     // Retain the old leaderMsgChainDepth field zero-init for
     // backward-compat during rollout; not written, not read.

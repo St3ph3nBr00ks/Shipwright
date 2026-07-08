@@ -834,6 +834,12 @@ void Anchor::TickCutsceneCatchup() {
             leaderChainTrackerLastTextId = curTextId;
             leaderChainTrackerLastMsgLen = curMsgLen;
             leaderMsgChainDepthCurrent   = 0;
+            // Design E v3 shadow — reset "start of sub" to 0.
+            // Message_StartTextbox on the new textId has already
+            // reset msgBufPos to 0, so the first sub starts at
+            // position 0. Fix S/T's msgBufPos++ transitions will
+            // update the shadow going forward.
+            leaderMsgBufPosLastSubStart = 0;
         } else if (curTextId != 0 && curMsgLen != 0 &&
                    curMsgLen != leaderChainTrackerLastMsgLen) {
             // Same textId, msgLength changed → new sub-textbox.

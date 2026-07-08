@@ -124,6 +124,13 @@ void ApplyForcedSubTextAdvanceIfInAwaitNext(const char* siteTag) {
     gPlayState->msgCtx.msgMode = MSGMODE_TEXT_NEXT_MSG;
     gPlayState->msgCtx.textUnskippable = false;
     gPlayState->msgCtx.msgBufPos++;
+    // Design E v3 shadow — after msgBufPos++, this is the START of
+    // the sub-textbox that Message_Decode is about to process. Save
+    // it so the leader's SnapshotCamera captures a position peer's
+    // Decode can start from cleanly. See Anchor.h
+    // leaderMsgBufPosLastSubStart doc for full rationale.
+    anchor->leaderMsgBufPosLastSubStart =
+        (uint16_t)gPlayState->msgCtx.msgBufPos;
     anchor->cutsceneTextAdvanceConsumed = false;
 }
 

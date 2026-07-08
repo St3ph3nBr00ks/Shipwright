@@ -1687,6 +1687,35 @@ class Anchor : public Network {
     uint16_t leaderChainTrackerLastMsgLen = 0;
     uint16_t catchupPendingMsgChainDepth = 0;
 
+    // Design E v3 — shadow field tracking the msgBufPos value at the
+    // START of the current sub-textbox (i.e., the position Message_
+    // Decode last used as its starting read point). Used by
+    // SnapshotCamera in place of the live msgBufPos to ship a value
+    // peer can decode from cleanly.
+    //
+    // WHY THE SHADOW: live msgCtx.msgBufPos captured mid-DISPLAYING
+    // or during AWAIT_NEXT points AT the BOX_BREAK byte of the sub
+    // currently being displayed. Peer's Message_Decode from that
+    // position reads BOX_BREAK, exits with empty content (see
+    // z_message_PAL.c:2380-2412), and shows no text. The shadow
+    // instead tracks the "start of sub" position — updated at the
+    // moment Fix S/T (or vanilla's advance path via cutsceneText-
+    // AdvanceConsumed → CutsceneBridge → line 4655) increments
+    // msgBufPos past a BOX_BREAK.
+    //
+    // Updated in:
+    //   - Fix S/T helper ApplyForcedSubTextAdvanceIfInAwaitNext —
+    //     after msgBufPos++, save new msgBufPos as the shadow.
+    //   - TickCutsceneCatchup's chain-depth tracker — reset to 0
+    //     when leaderChainTrackerLastTextId transitions (new base
+    //     textbox opens, so Message_StartTextbox resets msgBufPos
+    //     to 0 and the first sub starts at 0).
+    //
+    // Snapshotted by:
+    //   - SnapshotCamera → entry->leaderMsgBufPos (Common/Cutscene-
+    //     Catchup.cpp).
+    uint16_t leaderMsgBufPosLastSubStart = 0;
+
     // Design E — peer-side landing state for leader's msgBufPos +
     // msgMode. Populated from CUTSCENE_CATCHUP_RESPONSE payload in
     // ApplyCatchupDelta. Consumed by TickCutsceneCatchup's Fix N block
