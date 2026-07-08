@@ -285,6 +285,21 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     const int32_t leaderFrame = (int32_t)payload.value("leaderFrame",
                                                        (int32_t)0);
     if (leaderFrame > 0 && ::Anchor::Instance != nullptr) {
+        // Reset stale cutscene state before setting the fast-forward
+        // target. csCtx.frames is a persistent PlayState field that
+        // vanilla only rewrites in func_80068ECC's SKIPPABLE_INIT
+        // branch (z_demo.c:2162). Without this reset, TickCutscene
+        // Catchup's exit condition (frames >= target) fires
+        // immediately on values left over from prior activity — false
+        // catchup completion, vanilla then plays at 1× from frame 0
+        // and P2 falls behind. Observed in log 623 (frames=159 stale).
+        //
+        // With state = IDLE + cutsceneTrigger=1 (set by
+        // BgTreemouth_ForceIntroCutscene), vanilla's next tick drives
+        // the transition IDLE → INIT → EXEC cleanly; fast-forward
+        // then accelerates frame-0 command dispatch as intended.
+        gPlayState->csCtx.frames = 0;
+        gPlayState->csCtx.state  = CS_STATE_IDLE;
         ::Anchor::Instance->catchupFastForwardTarget = leaderFrame;
         SPDLOG_INFO("[CutsceneCatchup] Applied delta — silent fast-forward "
                     "target=frame {} (vanilla will drive state machine + "
