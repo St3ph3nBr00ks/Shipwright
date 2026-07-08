@@ -3,6 +3,11 @@
 #include "soh/cvar_prefixes.h"
 
 #include <libultraship/libultraship.h>
+// Diag D3 uses ImGuiContext + ImGuiWindow (internal API) to
+// enumerate ALL live ImGui windows, not just those promoted to
+// platform viewports. Sibling usage in soh/soh/Enhancements/
+// debugconsole.cpp:23 confirms this include is available.
+#include <imgui_internal.h>
 
 #include <chrono>
 #include <cmath>
@@ -396,6 +401,42 @@ void Window::Draw() {
                             vp->Pos.x, vp->Pos.y,
                             vp->Size.x, vp->Size.y,
                             (unsigned)vp->Flags);
+            }
+            // Diag D3 — enumerate ALL currently-active ImGui windows.
+            // Log 632 P2 white-icon investigation: our own viewport
+            // enumeration only shows Windows that ImGui has promoted
+            // to their own platform viewport. A window that renders
+            // as a small icon inside the main viewport wouldn't show
+            // here. Walk the internal window list via ImGui's
+            // current-context. Filter to windows with Active=true so
+            // we only see what's actually rendering this frame.
+            // NOTE: uses ImGui internal API — may need adjustment on
+            // ImGui version upgrade.
+            ImGuiContext* ctx = ImGui::GetCurrentContext();
+            if (ctx != nullptr) {
+                int shown = 0;
+                for (int i = 0; i < ctx->Windows.Size; i++) {
+                    ImGuiWindow* w = ctx->Windows[i];
+                    if (w == nullptr) continue;
+                    if (!w->Active) continue;
+                    // Skip if window has no size (hidden / minimized).
+                    if (w->SizeFull.x <= 0.0f && w->SizeFull.y <= 0.0f) continue;
+                    SPDLOG_INFO("[CoopModalHud.diag]   window[{}] name='{}' "
+                                "pos=({:.0f},{:.0f}) size=({:.0f},{:.0f}) "
+                                "flags=0x{:X} viewport=0x{:X}",
+                                shown, w->Name ? w->Name : "?",
+                                w->Pos.x, w->Pos.y,
+                                w->SizeFull.x, w->SizeFull.y,
+                                (unsigned)w->Flags,
+                                w->Viewport ? (unsigned)w->Viewport->ID : 0u);
+                    shown++;
+                    if (shown >= 30) {
+                        SPDLOG_INFO("[CoopModalHud.diag]   (truncated at 30 windows)");
+                        break;
+                    }
+                }
+                SPDLOG_INFO("[CoopModalHud.diag] total-windows={} shown={}",
+                            (int)ctx->Windows.Size, shown);
             }
         }
 

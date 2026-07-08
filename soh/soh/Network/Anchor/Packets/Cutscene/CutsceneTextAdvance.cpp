@@ -110,13 +110,25 @@ void LogVoteStateTransitionReason(const char* reason,
     const int  csFrames     = (int)gPlayState->csCtx.frames;
     const bool inCsMode     = Play_InCsMode(gPlayState);
     const bool inTextState  = IsHostInCutsceneTextState();
+    // Diag D1 — msgLength + Message_GetState result. Vanilla's
+    // Message_GetState (z_message_PAL.c:3116-3149) checks msgLength
+    // FIRST for TEXT_STATE_NONE; if non-zero, msgMode determines the
+    // returned state. Includes both `msgLength` (raw field) and the
+    // computed `Message_GetState` result (which is what
+    // Cutscene_Command_Textbox reads at z_demo.c:1665). Distinguishes
+    // "message state fully clear (msgLength=0 → TEXT_STATE_NONE)"
+    // from "msgMode zeroed but msgLength retained → TEXT_STATE_DONE_
+    // FADING". Log 632 Fix L insufficiency was invisible without
+    // this diagnostic.
+    const int msgLength = (int)gPlayState->msgCtx.msgLength;
+    const int msgGetState = (int)Message_GetState(&gPlayState->msgCtx);
     SPDLOG_INFO("[VoteState.diag] reason={} active {}→{} textId 0x{:04X}→0x{:04X} "
                 "| Play_InCsMode={} inTextState={} msgMode={} msgTextId=0x{:04X} "
-                "csState={} csFrames={}",
+                "msgLen={} Message_GetState={} csState={} csFrames={}",
                 reason, (int)priorActive, (int)newActive,
                 (unsigned)priorTextId, (unsigned)newTextId,
                 (int)inCsMode, (int)inTextState, msgMode, msgTextId,
-                csState, csFrames);
+                msgLength, msgGetState, csState, csFrames);
 }
 
 // Count team members currently in the same scene + same timeline +

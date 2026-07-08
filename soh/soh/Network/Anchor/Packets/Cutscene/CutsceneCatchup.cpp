@@ -735,26 +735,61 @@ void Anchor::TickCutsceneCatchup() {
         constexpr int kMaxTicksPerRealFrame = 10;
         int ticksFired = 0;
         const int32_t framesBefore = (int32_t)gPlayState->csCtx.frames;
+        const bool ffDiagEnabled =
+            CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"), 0) != 0;
         for (int i = 0; i < kMaxTicksPerRealFrame; i++) {
             if (gPlayState->csCtx.frames >= catchupFastForwardTarget) break;
-            // Fix L — force message state terminal so vanilla's
+            // Diag D2 — fast-forward rewind detector. Vanilla
+            // Cutscene_Command_Textbox rewinds csCtx.frames when the
+            // message state is non-terminal (z_demo.c:1663-1669). Log
+            // this per-tick when we detect a decrement so we can trace
+            // exactly when + why Fix L.2's msgLength=0 write fails to
+            // pass Message_GetState's TEXT_STATE_NONE branch. Gated on
+            // gEnhancements.Anchor.CutsceneLateJoinDiag.
+            const int32_t framesPreTick = (int32_t)gPlayState->csCtx.frames;
+            const uint16_t msgLenPre    = (uint16_t)gPlayState->msgCtx.msgLength;
+            const uint8_t  msgModePre   = (uint8_t)gPlayState->msgCtx.msgMode;
+            const uint16_t textIdPre    = (uint16_t)gPlayState->msgCtx.textId;
+            // Fix L → L.2 — force message state terminal so vanilla's
             // Cutscene_Command_Textbox (z_demo.c:1663-1669) does NOT
             // rewind csFrames on textbox endFrame overrun. Fast-
             // forward has no user input to close textboxes; without
             // this the very first cutscene textbox stalls the loop.
-            // Log 631: fast-forward stalled at frame 59 with textbox
-            // 0x107D displayed; Fix D's 60-frame stall detector
-            // aborted before reaching target=169. After Fix L, vanilla
-            // treats each tick's message state as terminal → csFrames
-            // advances past all textbox endFrames → target reached.
-            // Vanilla's normal tick after loop exit re-opens the
-            // correct textbox for the target frame via the same
-            // command dispatch. See Analysis/cutscene_fast_forward_
-            // stall_and_race_2026-07-08.md.
-            gPlayState->msgCtx.msgMode = MSGMODE_NONE;
-            gPlayState->msgCtx.textId  = 0;
+            //
+            // Fix L (log 631, insufficient): wrote msgMode=NONE +
+            // textId=0. Vanilla's Message_GetState (z_message_PAL.c:
+            // 3116-3149) checks msgLength FIRST for TEXT_STATE_NONE,
+            // then falls through to TEXT_STATE_DONE_FADING when
+            // msgMode is anything unrecognized. TEXT_STATE_DONE_FADING
+            // is NOT in the rewind-exception list at z_demo.c:1667-
+            // 1668, so csFrames was still decremented. Log 632 showed
+            // the same frame-59 stall as log 631.
+            //
+            // Fix L.2 (log 632): also write msgLength=0. That triggers
+            // branch ① of Message_GetState → returns TEXT_STATE_NONE
+            // (in the rewind-exception list) → csFrames advances
+            // freely. See Analysis/cutscene_fix_l_insufficient_2026-
+            // 07-08.md.
+            gPlayState->msgCtx.msgMode   = MSGMODE_NONE;
+            gPlayState->msgCtx.textId    = 0;
+            gPlayState->msgCtx.msgLength = 0;
             func_800645A0(gPlayState, &gPlayState->csCtx);
             ticksFired++;
+            // Diag D2 — log rewind or stall on this tick. Post-tick
+            // msgCtx values reflect what vanilla wrote during the tick
+            // (typically Message_StartTextbox on an in-range command).
+            const int32_t framesPostTick = (int32_t)gPlayState->csCtx.frames;
+            if (ffDiagEnabled && framesPostTick <= framesPreTick) {
+                SPDLOG_INFO("[CutsceneCatchup.diag] Fast-forward tick "
+                            "pre.frames={} post.frames={} "
+                            "pre(msgMode={} msgLen={} textId=0x{:04X}) "
+                            "post(msgMode={} msgLen={} textId=0x{:04X})",
+                            framesPreTick, framesPostTick,
+                            msgModePre, msgLenPre, textIdPre,
+                            (int)gPlayState->msgCtx.msgMode,
+                            (int)gPlayState->msgCtx.msgLength,
+                            (unsigned)gPlayState->msgCtx.textId);
+            }
         }
         const int32_t framesAfter = (int32_t)gPlayState->csCtx.frames;
 
