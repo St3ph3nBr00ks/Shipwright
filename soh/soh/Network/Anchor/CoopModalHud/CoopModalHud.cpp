@@ -337,18 +337,32 @@ void Window::Draw() {
     // Bottom-right of viewport — pivot (1.0, 1.0) so the widget's
     // bottom-right corner sits at (vp.right - margin, vp.bottom -
     // margin). Position is aspect-ratio agnostic.
-    auto vp = ImGui::GetMainViewport();
-    const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
-    const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
-    ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
-                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
-
+    //
+    // IMPORTANT: SetNextWindowPos MUST be scoped inside each branch
+    // that calls ImGui::Begin. Calling it unconditionally at
+    // dispatch time (when neither branch fires) leaks the queued
+    // position state to the next unrelated ImGui::Begin in the
+    // frame — with ImGui multi-viewport enabled, that can trigger
+    // OS-level window spawning at the anchor position. Symptom
+    // observed: two-window boot / grey+black windows / boot splash
+    // suppressed. Regressed in Phase 4 of cutscene late-join; fixed
+    // here by re-scoping.
     if (currActive) {
+        auto vp = ImGui::GetMainViewport();
+        const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
+        const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
+        ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
+                                ImGuiCond_Always, ImVec2(1.0f, 1.0f));
         DrawVotingSkipWidget(anchor);
     } else if (!anchor.pendingCatchups.empty()) {
         // Scenario 2 — cutscene late-join catchup pending. Renders
         // "Catching up to peer's cutscene..." until pendingCatchups
         // empties (response applied) or the deadline elapses.
+        auto vp = ImGui::GetMainViewport();
+        const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
+        const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
+        ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
+                                ImGuiCond_Always, ImVec2(1.0f, 1.0f));
         DrawCutsceneCatchupWidget(anchor);
     }
 }
