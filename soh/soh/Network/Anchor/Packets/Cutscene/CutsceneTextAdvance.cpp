@@ -676,6 +676,16 @@ void Anchor::HandlePacket_CutsceneTextVoteState(nlohmann::json payload) {
         return;
     }
 
+    // Fix Q — receive-side gate. Peer applies VoteState only when
+    // locally participating in a cutscene. Otherwise the HUD would
+    // render "Press A to skip" for a cutscene the peer isn't in
+    // (log 635 Bug 11: peer received VoteState 17 s before joining
+    // the cutscene, HUD opened with Play_InCsMode=0 csState=0). See
+    // Analysis/cutscene_hud_leak_and_latency_2026-07-08.md.
+    if (!Play_InCsMode(gPlayState)) {
+        return;
+    }
+
     // Monotonic seq — reject packets older than the last one we applied.
     // Defends against relay-side reordering (goroutine race in
     // Anchor/anchor_git/room.go:56). Session-monotonic on the host, so

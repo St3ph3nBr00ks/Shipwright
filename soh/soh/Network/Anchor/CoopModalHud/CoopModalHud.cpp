@@ -17,6 +17,7 @@
 extern "C" {
 #include "z64.h"
 #include "variables.h"
+#include "functions.h"    // Play_InCsMode — Fix Q render-side gate
 extern PlayState* gPlayState;
 }
 
@@ -184,7 +185,16 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
     std::vector<DotEntry> voters = CollectVoters(anchor);
     // Fix H — visibility flag replaces early-return. Widget window is
     // still created; only its content + alpha changes.
-    const bool showContent = state.active && voters.size() >= 2;
+    // Fix Q — also require local Play_InCsMode. Belt-and-suspenders
+    // vs the receive-side Fix Q gate. Peer receiving a VoteState
+    // broadcast for a cutscene it isn't participating in (log 635
+    // Bug 11: broadcast arrived 17 s before peer late-joined)
+    // shouldn't render the "Press A to skip" HUD. See
+    // Analysis/cutscene_hud_leak_and_latency_2026-07-08.md.
+    const bool localInCutscene =
+        (gPlayState != nullptr) && Play_InCsMode(gPlayState);
+    const bool showContent =
+        state.active && voters.size() >= 2 && localInCutscene;
 
     // Countdown / prompt string — only computed when we'll render.
     std::string rightLabel;
