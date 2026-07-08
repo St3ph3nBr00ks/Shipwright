@@ -1101,4 +1101,100 @@ void Anchor::TickCutsceneCatchup() {
                         catchupFastForwardTarget, ticksFired);
         }
     }
+
+    // Fix R — continuous re-target on textId mismatch.
+    //
+    // After fast-forward completes, the peer's csCtx.frames matches the
+    // snapshot target, but by then the leader may have advanced through
+    // a camera pan into the next textbox. The peer resumes 1x playback
+    // and (from the user's view) "auto-advance stopped" because the next
+    // textbox arrives seconds later. Log 637 pattern: P2 loaded the
+    // correct room but stayed on the wrong dialogue after a mid-cutscene
+    // camera movement.
+    //
+    // Mechanism: leader's ongoing CUTSCENE_TEXT_VOTE_STATE broadcasts
+    // carry the leader's current msgTextId. When peer is in-cutscene,
+    // fast-forward is idle, no catchup is pending, and the leader's
+    // textId ≠ peer's local textId, issue a fresh CUTSCENE_CATCHUP_-
+    // REQUEST. The leader re-snapshots and re-sends the ledger; peer's
+    // ApplyCatchupDelta re-arms fast-forward to the new target.
+    //
+    // Self-limiting: stops firing once textIds match (or cutscene ends).
+    // Rate-limited: at most one re-target per kReTargetIntervalMs to
+    // avoid storming the leader when it legitimately holds on a long
+    // sub-textbox chain.
+    if (catchupFastForwardTarget == 0 &&
+        pendingCatchups.empty() &&
+        Play_InCsMode(gPlayState) &&
+        cutsceneTextAdvanceState.active &&
+        cutsceneTextAdvanceState.textId != 0 &&
+        cutsceneTextAdvanceState.textId !=
+            (uint16_t)gPlayState->msgCtx.textId) {
+
+        constexpr int kReTargetIntervalMs = 2000;
+        const auto sinceLast = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    now - catchupLastReTargetRequestAt).count();
+        if (catchupLastReTargetRequestAt ==
+                std::chrono::steady_clock::time_point::min() ||
+            sinceLast >= kReTargetIntervalMs) {
+
+            // Find the active cutscene we're catching up on. v1 assumes
+            // single-cutscene sessions — pick the first entry of
+            // cutsceneStartActive whose originator we know.
+            std::string csKindKey;
+            uint32_t leaderClientId = 0;
+            for (const auto& key : cutsceneStartActive) {
+                const auto it = cutsceneOriginatorByKindKey.find(key);
+                if (it != cutsceneOriginatorByKindKey.end() &&
+                    it->second != 0 && it->second != ownClientId) {
+                    csKindKey       = key;
+                    leaderClientId  = it->second;
+                    break;
+                }
+            }
+
+            if (!csKindKey.empty() && leaderClientId != 0) {
+                // Split "<csKind>:<csKey>" back into components. csKey
+                // is a uint32_t formatted as decimal in the key. Guard
+                // against malformed keys just in case.
+                const auto colonPos = csKindKey.rfind(':');
+                if (colonPos != std::string::npos) {
+                    const std::string csKind = csKindKey.substr(0, colonPos);
+                    uint32_t csKey = 0;
+                    try {
+                        csKey = (uint32_t)std::stoul(csKindKey.substr(colonPos + 1));
+                    } catch (...) {
+                        csKey = 0;
+                    }
+
+                    SPDLOG_INFO("[CutsceneCatchup] Fix R — re-target: peer "
+                                "textId=0x{:04X} lags leader textId=0x{:04X} "
+                                "(csFrames={}); requesting fresh catchup "
+                                "delta for '{}' from leader clientId={}",
+                                (unsigned)gPlayState->msgCtx.textId,
+                                (unsigned)cutsceneTextAdvanceState.textId,
+                                (int)gPlayState->csCtx.frames,
+                                csKindKey, leaderClientId);
+
+                    catchupLastReTargetRequestAt = now;
+                    SendPacket_CutsceneCatchupRequest(leaderClientId,
+                                                     csKind, csKey);
+                }
+            }
+        }
+    }
+
+    // Reset the re-target rate limiter whenever textIds match. Prevents
+    // the 2s cooldown from carrying across a legitimate advance (peer
+    // catches up naturally → user advances the dialogue → next mismatch
+    // should trigger immediately, not wait for the cooldown).
+    if (catchupFastForwardTarget == 0 &&
+        cutsceneTextAdvanceState.active &&
+        cutsceneTextAdvanceState.textId ==
+            (uint16_t)gPlayState->msgCtx.textId &&
+        catchupLastReTargetRequestAt !=
+            std::chrono::steady_clock::time_point::min()) {
+        catchupLastReTargetRequestAt =
+            std::chrono::steady_clock::time_point::min();
+    }
 }

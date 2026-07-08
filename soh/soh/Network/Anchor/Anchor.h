@@ -1687,6 +1687,19 @@ class Anchor : public Network {
     uint16_t leaderChainTrackerLastMsgLen = 0;
     uint16_t catchupPendingMsgChainDepth = 0;
 
+    // Fix R — continuous re-target on textId mismatch. After fast-forward
+    // completes on a peer, the leader may have already advanced past the
+    // snapshot frame (through a camera pan into the next textbox). Peer
+    // sits at the stale target; user perceives "auto-advance stopped."
+    // TickCutsceneCatchup polls: when peer is in-cutscene, fast-forward
+    // is idle, leader's ongoing CUTSCENE_TEXT_VOTE_STATE broadcasts carry
+    // a msgTextId ≠ peer's local msgCtx.textId, and the rate-limit has
+    // expired, fire a fresh CUTSCENE_CATCHUP_REQUEST. Self-limiting:
+    // stops once textIds match. Rate-limited to prevent request storms
+    // when the leader legitimately holds on a textbox for a long time.
+    std::chrono::steady_clock::time_point catchupLastReTargetRequestAt =
+        std::chrono::steady_clock::time_point::min();
+
     // Fix O — cutscene-originator clientId per active kindKey.
     // Populated by SendPacket_CutsceneStart (self origin) and by
     // HandlePacket_CutsceneStart / FRAME_SYNC hydration (peer
