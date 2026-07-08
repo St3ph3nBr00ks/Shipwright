@@ -103,6 +103,19 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
     if (Anchor::Instance->cutsceneTextAdvanceConsumed &&
         Anchor::Instance->cutsceneTextAdvanceConsumedTextId == (uint16_t)currentTextId) {
         Anchor::Instance->cutsceneTextAdvanceConsumed = false;
+        // Design E v4 — shadow update on the consumed-flag return-1
+        // path. Vanilla's AWAIT_NEXT case will do msgBufPos++ after
+        // this return. Capture the post-++ value now. Defense-in-
+        // depth: if Fix S/T helper already ran this frame (before
+        // Message_Update), it already updated shadow — this write
+        // is redundant but harmless. If helper did NOT run (rare
+        // hook-ordering path), this write is load-bearing. See
+        // Analysis/design_e_v3_shadow_alone_mode_gap_2026-07-08.md.
+        if (gPlayState != nullptr &&
+            gPlayState->msgCtx.msgMode == MSGMODE_TEXT_AWAIT_NEXT) {
+            Anchor::Instance->leaderMsgBufPosLastSubStart =
+                (uint16_t)(gPlayState->msgCtx.msgBufPos + 1);
+        }
         if (diagEnabled) {
             SPDLOG_INFO("[CutsceneBridge.diag] textId=0x{:04X} advance-broadcast "
                         "consumed → local advance",
@@ -194,6 +207,22 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
             }
             if (wasLocalPressDetected) {
                 s_soloIdleStartMs = nowMs;
+                // Design E v4 — shadow update on solo-mode local
+                // press return-1. Vanilla's AWAIT_NEXT case will do
+                // msgBufPos++ after this return. Without this, the
+                // shadow stays at its last-known value (typically 0
+                // for a fresh textbox) even though vanilla advances
+                // msgBufPos through multiple subs. Log 644 root
+                // cause: leader user pressed A four times in solo
+                // mode (peer late-joining but not yet in cs_state),
+                // shadow stayed at 0 for 10 s until first
+                // hard_deadline. See Analysis/design_e_v3_shadow_
+                // alone_mode_gap_2026-07-08.md.
+                if (gPlayState != nullptr &&
+                    gPlayState->msgCtx.msgMode == MSGMODE_TEXT_AWAIT_NEXT) {
+                    Anchor::Instance->leaderMsgBufPosLastSubStart =
+                        (uint16_t)(gPlayState->msgCtx.msgBufPos + 1);
+                }
                 s_diagLastPressed = wasLocalPressDetected;
                 return 1;
             }
@@ -202,6 +231,15 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
                 SPDLOG_INFO("[CutsceneText] Solo idle auto-advance after {} ms (textId=0x{:04X})",
                             (long long)idleThresholdMs, (unsigned)currentTextId);
                 s_soloIdleStartMs = nowMs;  // prevent immediate re-fire next frame
+                // Design E v4 — same shadow update as the solo-local
+                // press path above. Solo idle auto-advance also
+                // fires vanilla's msgBufPos++ via the AWAIT_NEXT
+                // case return.
+                if (gPlayState != nullptr &&
+                    gPlayState->msgCtx.msgMode == MSGMODE_TEXT_AWAIT_NEXT) {
+                    Anchor::Instance->leaderMsgBufPosLastSubStart =
+                        (uint16_t)(gPlayState->msgCtx.msgBufPos + 1);
+                }
                 s_diagLastPressed = wasLocalPressDetected;
                 return 1;
             }
