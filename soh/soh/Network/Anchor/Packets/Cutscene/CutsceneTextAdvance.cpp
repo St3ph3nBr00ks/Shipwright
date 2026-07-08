@@ -48,6 +48,12 @@ namespace {
 
 constexpr int kDefaultInitialDurationMs   = 5000;
 constexpr int kDefaultPerPressReductionMs = 1000;
+// MP dialogue hard deadline — matches solo vanilla auto-advance so
+// dialogue never stays open longer than the solo experience. Vote-
+// skip runs as an inner-bound (min against this) so late presses
+// don't extend the wait. Design: Claude/Analysis/cutscene_ff_reset_
+// and_mp_dialogue_deadline_2026-07-08.md §2.
+constexpr int kDefaultHardDeadlineMs      = 10000;
 
 int GetCutsceneInitialDurationMs() {
     return CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.InitialDurationMs"),
@@ -57,6 +63,31 @@ int GetCutsceneInitialDurationMs() {
 int GetCutscenePerPressReductionMs() {
     return CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.PerPressReductionMs"),
                           kDefaultPerPressReductionMs);
+}
+
+int GetCutsceneHardDeadlineMs() {
+    return CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.HardDeadlineMs"),
+                          kDefaultHardDeadlineMs);
+}
+
+// True when the local client is in a cutscene text state — the
+// vanilla textbox is loaded and displayed as part of an ongoing
+// cutscene. Used by the host to detect textbox-open edges and start
+// the hard deadline timer.
+//
+// Predicates:
+//   - Play_InCsMode: cutscene active (csCtx.state != IDLE OR
+//     player linkAction non-null).
+//   - msgCtx.msgMode != MSGMODE_NONE: message subsystem has an
+//     active textbox loaded / displaying.
+//   - msgCtx.textId != 0: sanity check that textId is a valid
+//     dialogue reference.
+bool IsHostInCutsceneTextState() {
+    if (gPlayState == nullptr) return false;
+    if (!Play_InCsMode(gPlayState)) return false;
+    if (gPlayState->msgCtx.msgMode == MSGMODE_NONE) return false;
+    if (gPlayState->msgCtx.textId == 0) return false;
+    return true;
 }
 
 // Count team members currently in the same scene + same timeline +
@@ -158,13 +189,20 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
 
     auto& state = cutsceneTextAdvanceState;
 
-    // New textbox edge — reset state.
+    // New textbox edge — reset state. Also seed the hard-deadline
+    // countdown here in case the vote packet arrives BEFORE
+    // TickCutsceneTextAdvance's textbox-open detection has run (rare
+    // race — peer presses within one game-thread tick of the textbox
+    // appearing). Idempotent with the tick's own activation.
+    auto nowForNewTextbox = std::chrono::steady_clock::now();
     if (!state.active || state.textId != textId || state.sceneNum != sceneNum) {
         state.active           = true;
         state.textId           = textId;
         state.sceneNum         = sceneNum;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
+        state.countdownEndsAt  = nowForNewTextbox + std::chrono::milliseconds(
+            GetCutsceneHardDeadlineMs());
     }
 
     // Multi-press dedup — same client tapping repeatedly only counts once.
@@ -176,9 +214,23 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
     auto now = std::chrono::steady_clock::now();
     if (!state.countdownStarted) {
         state.countdownStarted = true;
-        state.countdownEndsAt  = now + std::chrono::milliseconds(GetCutsceneInitialDurationMs());
+        // Vote-skip is an inner-bound clamped against the hard
+        // deadline. If the hard-deadline countdown already has less
+        // time left than the vote-skip default, keep the shorter
+        // value — vote-skip never extends the wait beyond the
+        // 10s auto-advance. See design analysis §2.4.
+        auto voteSkipEndsAt = now + std::chrono::milliseconds(
+            GetCutsceneInitialDurationMs());
+        if (state.countdownEndsAt > voteSkipEndsAt) {
+            state.countdownEndsAt = voteSkipEndsAt;
+        }
     } else {
         state.countdownEndsAt -= std::chrono::milliseconds(GetCutscenePerPressReductionMs());
+        // Never shrink below now — additional presses can't fire the
+        // advance retroactively.
+        if (state.countdownEndsAt < now) {
+            state.countdownEndsAt = now;
+        }
     }
 
     SPDLOG_INFO("[CutsceneTextAdvance] Vote received clientId={} textId=0x{:04X} "
@@ -246,31 +298,80 @@ void Anchor::TickCutsceneTextAdvance() {
     if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.Enabled"), 1)) return;
 
     auto& state = cutsceneTextAdvanceState;
-    if (!state.active || !state.countdownStarted) return;
+    auto now = std::chrono::steady_clock::now();
 
-    // Only the host runs the countdown.
-    if (!::SceneAuthority::IsRoomHost(state.sceneNum,
-                                       (int8_t)gPlayState->roomCtx.curRoom.num,
-                                       (uint8_t)(gSaveContext.linkAge & 0x1))) {
-        return;
+    // Only the host tracks + broadcasts textbox state.
+    const int16_t mySceneNum = (int16_t)gPlayState->sceneNum;
+    const bool amHost = ::SceneAuthority::IsRoomHost(
+        mySceneNum,
+        (int8_t)gPlayState->roomCtx.curRoom.num,
+        (uint8_t)(gSaveContext.linkAge & 0x1));
+    if (!amHost) return;
+
+    // ---- Textbox open/close edge detection (MP hard deadline) -------
+    //
+    // Detect when the host's local msgCtx transitions to a NEW
+    // cutscene textbox and start the 10s hard deadline. Also detect
+    // textbox-close so state deactivates cleanly. Peers see this via
+    // the CUTSCENE_TEXT_VOTE_STATE broadcast (state.countdownEndsAt is
+    // converted to msRemaining on wire, peer recomputes local endsAt).
+    //
+    // This runs on the same tick even when nobody has voted — the
+    // hard deadline is the auto-advance timer that MATCHES SOLO
+    // BEHAVIOR (10s per textbox). Vote-skip is an inner-bound that
+    // lets players advance faster.
+    const bool inTextState = IsHostInCutsceneTextState();
+    const uint16_t curTextId = inTextState
+        ? (uint16_t)gPlayState->msgCtx.textId : (uint16_t)0;
+
+    if (inTextState && (!state.active || state.textId != curTextId)) {
+        // Textbox-open edge — new dialog just appeared on host.
+        state.active = true;
+        state.textId = curTextId;
+        state.sceneNum = mySceneNum;
+        state.pressedClientIds.clear();
+        state.countdownStarted = false;
+        state.countdownEndsAt = now + std::chrono::milliseconds(
+            GetCutsceneHardDeadlineMs());
+        SPDLOG_INFO("[CutsceneTextAdvance] Textbox opened textId=0x{:04X} — "
+                    "hard deadline {}ms",
+                    (unsigned)curTextId, GetCutsceneHardDeadlineMs());
+        SendPacket_CutsceneTextVoteState();
+    } else if (!inTextState && state.active) {
+        // Textbox-close edge — textbox was advanced or cutscene ended.
+        // Clear state so HUD hides and the next open is a fresh cycle.
+        state.active = false;
+        state.pressedClientIds.clear();
+        state.countdownStarted = false;
+        SendPacket_CutsceneTextVoteState();
     }
 
-    auto now = std::chrono::steady_clock::now();
-    if (now >= state.countdownEndsAt) {
-        SPDLOG_INFO("[CutsceneTextAdvance] Timer elapsed for textId=0x{:04X}, broadcasting",
-                    (unsigned)state.textId);
-        // Same order flip as the all-pressed branch above — state
-        // cleared broadcast goes out BEFORE CUTSCENE_TEXT_ADVANCED so
-        // peers hide their HUD in the same frame as the local advance
+    // ---- Countdown expiry ------------------------------------------
+    //
+    // Fires whenever state.countdownEndsAt is reached, regardless of
+    // whether the countdown was started by a vote press or the hard
+    // deadline. Vote-press-triggered countdown is clamped against the
+    // hard deadline in HandlePacket_CutsceneTextAdvance so it can't
+    // extend past the hard limit.
+    if (state.active && now >= state.countdownEndsAt) {
+        SPDLOG_INFO("[CutsceneTextAdvance] Timer elapsed for textId=0x{:04X}, "
+                    "broadcasting (reason={})",
+                    (unsigned)state.textId,
+                    state.countdownStarted ? "vote_timer" : "hard_deadline");
+        // Same order flip as the all-pressed branch — state cleared
+        // broadcast goes out BEFORE CUTSCENE_TEXT_ADVANCED so peers
+        // hide their HUD in the same frame as the local advance
         // instead of one packet-arrival later.
         uint16_t clearedTextId = state.textId;
+        const bool wasVoteTimer = state.countdownStarted;
         cutsceneTextAdvanceConsumed = true;
         cutsceneTextAdvanceConsumedTextId = state.textId;
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
         SendPacket_CutsceneTextVoteState();
-        SendPacket_CutsceneTextAdvanced(clearedTextId, "timer");
+        SendPacket_CutsceneTextAdvanced(clearedTextId,
+                                        wasVoteTimer ? "timer" : "hard_deadline");
     }
 }
 
