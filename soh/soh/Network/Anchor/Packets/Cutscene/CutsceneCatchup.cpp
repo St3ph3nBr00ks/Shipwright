@@ -319,6 +319,10 @@ void Anchor::SendPacket_CutsceneFrameSync() {
     payload["csKind"]        = csKind;
     payload["csKey"]         = csKey;
     payload["sceneNum"]      = (int)gPlayState->sceneNum;
+    // Room scope — receiver gates on same-room match. Cutscene actors,
+    // camera, warp coordinates are all room-scoped; catchup in a
+    // different room within the same scene is not a valid scope.
+    payload["roomNum"]       = (int)gPlayState->roomCtx.curRoom.num;
     payload["leaderFrame"]   = (int)gPlayState->csCtx.frames;
     payload["leaderState"]   = (int)gPlayState->csCtx.state;
     payload["targetTeamId"]  = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"),
@@ -340,9 +344,19 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         peerLastAppliedCutsceneFrameSeq = seq;
     }
 
-    // Same scene?
+    // Same scene AND same room. Cutscene actors, camera cues, warp
+    // coordinates are all room-scoped; catchup in a different room
+    // within the same scene is not a valid scope. When P2 enters the
+    // leader's room later, OnSceneSpawnActors triggers detection.
+    // Field-test 621 exposed this: P1 in scene 85 room 1 broadcast to
+    // P2 in scene 85 room 0, causing phantom-broadcast and eventual
+    // circular catchup on P1's own cutscene.
     const int16_t sceneNum = (int16_t)payload.value("sceneNum", -1);
     if (sceneNum != (int16_t)gPlayState->sceneNum) return;
+    const int8_t roomNum = (int8_t)payload.value("roomNum", -1);
+    if (roomNum != -1 && roomNum != (int8_t)gPlayState->roomCtx.curRoom.num) {
+        return;
+    }
 
     // Extract csKind + csKey so we can hydrate cutsceneStartActive if
     // we're a late-joiner (connected AFTER the leader's CUTSCENE_START
