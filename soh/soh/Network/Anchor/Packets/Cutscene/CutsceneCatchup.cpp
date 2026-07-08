@@ -321,13 +321,31 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
             SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC observed new kindKey='{}' — "
                         "populating cutsceneStartActive for late-joiner mode",
                         kindKey);
-            // Trigger a fresh catchup-detection sweep. The peer who's
-            // broadcasting FRAME_SYNC is by construction same-scene
-            // (relay filtered), so DetectAndRequestCutsceneCatchup will
-            // now find them with a valid kindKey to request.
-            if (CutsceneCatchupEnabled()) {
-                DetectAndRequestCutsceneCatchup();
-            }
+        }
+
+        // Direct-request path for late-joiners. FRAME_SYNC receipt is
+        // itself proof the sender is mid-cutscene (only room-hosts
+        // broadcast, only while their csCtx.state != IDLE). Skip the
+        // clients-map scan (which requires csCtxState broadcast timing
+        // that may lag) and go straight to REQUEST if we don't already
+        // have one pending for this kindKey.
+        //
+        // Sender identity: the relay stamps the sender's clientId as
+        // `clientId` on incoming packets.
+        const uint32_t senderClientId = payload.value("clientId", (uint32_t)0);
+        if (senderClientId != 0 && senderClientId != ownClientId &&
+            pendingCatchups.count(kindKey) == 0 &&
+            CutsceneCatchupEnabled()) {
+            PendingCatchup p;
+            p.deadline = std::chrono::steady_clock::now()
+                         + std::chrono::milliseconds(kCatchupTimeoutMs);
+            p.leaderClientId = senderClientId;
+            pendingCatchups[kindKey] = p;
+
+            SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC direct-request from "
+                        "sender={} — requesting catchup for '{}'",
+                        senderClientId, kindKey);
+            SendPacket_CutsceneCatchupRequest(senderClientId, csKind, csKey);
         }
     }
 }
