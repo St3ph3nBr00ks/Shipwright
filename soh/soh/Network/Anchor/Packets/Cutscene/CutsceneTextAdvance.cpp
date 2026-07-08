@@ -70,6 +70,63 @@ int GetCutsceneHardDeadlineMs() {
                           kDefaultHardDeadlineMs);
 }
 
+// Fix S / Fix T helper — replicate vanilla's AWAIT_NEXT sub-textbox
+// advance transition directly. Called from top-of-tick (Fix S: catches
+// flags set from network-thread packet handlers) and inline from the
+// game-thread hard_deadline flag-setter (Fix T: same-tick race with
+// top-of-tick check because the setter runs AFTER the check).
+//
+// Vanilla's mechanism to advance a multi-part cutscene textbox
+// (delimited by MESSAGE_BOX_BREAK control codes) is
+// z_message_PAL.c:4651-4657 :
+//
+//   case MSGMODE_TEXT_AWAIT_NEXT:
+//       if (Message_ShouldAdvance(play)) {
+//           msgCtx->msgMode = MSGMODE_TEXT_NEXT_MSG;
+//           msgCtx->textUnskippable = false;
+//           msgCtx->msgBufPos++;
+//       }
+//       break;
+//
+// SoH routes Message_ShouldAdvance through
+// Anchor_ShouldAdvanceCutsceneTextLocal (CutsceneBridge.cpp), which
+// returns 1 when the vote-skip TEXT_ADVANCED broadcast has been
+// consumed. That should trigger the vanilla transition — but logs
+// 638 + 639 show the vanilla transition silently does not stick on
+// the host. This helper explicitly performs the transition when
+// msgMode is AWAIT_NEXT, then clears the consume flag so vanilla's
+// later Message_ShouldAdvance poll (if it fires) does not
+// double-advance msgBufPos.
+//
+// Race-safety: always called from the game thread (either at the top
+// of TickCutsceneTextAdvance, or inline from the hard_deadline
+// branch of the same tick). Message_Update also runs on the game
+// thread later in Play_Update (z_play.c:1295) — deterministic
+// ordering, no torn writes to msgCtx.
+//
+// Idempotent — msgMode moves out of AWAIT_NEXT after the first fire.
+// The clear of cutsceneTextAdvanceConsumed is what makes the helper
+// safe to call at multiple sites within the same tick; subsequent
+// calls no-op on the same broadcast.
+void ApplyForcedSubTextAdvanceIfInAwaitNext(const char* siteTag) {
+    if (gPlayState == nullptr) return;
+    auto* anchor = Anchor::Instance;
+    if (anchor == nullptr) return;
+    if (!anchor->cutsceneTextAdvanceConsumed) return;
+    if ((uint16_t)gPlayState->msgCtx.textId !=
+            anchor->cutsceneTextAdvanceConsumedTextId) return;
+    if (gPlayState->msgCtx.msgMode != MSGMODE_TEXT_AWAIT_NEXT) return;
+    SPDLOG_INFO("[CutsceneTextAdvance] Fix S/T ({}) — force AWAIT_NEXT→"
+                "NEXT_MSG for textId=0x{:04X} msgBufPos={}",
+                siteTag,
+                (unsigned)gPlayState->msgCtx.textId,
+                (int)gPlayState->msgCtx.msgBufPos);
+    gPlayState->msgCtx.msgMode = MSGMODE_TEXT_NEXT_MSG;
+    gPlayState->msgCtx.textUnskippable = false;
+    gPlayState->msgCtx.msgBufPos++;
+    anchor->cutsceneTextAdvanceConsumed = false;
+}
+
 // True when the local client is in a cutscene text state — the
 // vanilla textbox is loaded and displayed as part of an ongoing
 // cutscene. Used by the host to detect textbox-open edges and start
@@ -419,57 +476,18 @@ void Anchor::TickCutsceneTextAdvance() {
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
     if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.Enabled"), 1)) return;
 
-    // Fix S — force sub-textbox chain advance when TEXT_ADVANCED consumed.
-    //
-    // Vanilla's mechanism to advance a multi-part cutscene textbox
-    // (delimited by MESSAGE_BOX_BREAK control codes) is
-    // z_message_PAL.c:4651-4657 :
-    //
-    //   case MSGMODE_TEXT_AWAIT_NEXT:
-    //       if (Message_ShouldAdvance(play)) {
-    //           msgCtx->msgMode = MSGMODE_TEXT_NEXT_MSG;
-    //           msgCtx->textUnskippable = false;
-    //           msgCtx->msgBufPos++;
-    //       }
-    //       break;
-    //
-    // SoH routes Message_ShouldAdvance through
-    // Anchor_ShouldAdvanceCutsceneTextLocal (CutsceneBridge.cpp),
-    // which returns 1 when the vote-skip TEXT_ADVANCED broadcast has
-    // been consumed. That SHOULD trigger the vanilla transition — but
-    // log 638 shows it does not: both host + peer sat at msgMode=52
-    // (AWAIT_NEXT) for 20+ seconds even after CutsceneBridge fired
-    // "advance-broadcast consumed → local advance". The cutscene
-    // eventually escaped only via the 10s "Solo idle auto-advance"
-    // fallback which is not a graceful sub-textbox advance mechanism.
-    //
-    // Fix S bypass: when the consumed flag is set, textId matches, and
-    // local msgMode is AWAIT_NEXT, replicate vanilla's transition
-    // directly on the game thread. Clears the consume flag afterward
-    // so vanilla's later Message_ShouldAdvance poll (if it fires)
-    // doesn't double-advance msgBufPos.
-    //
-    // Race-safety: TickCutsceneTextAdvance runs on the game thread
-    // from OnGameFrameUpdate (HookHandlers.cpp:756). Message_Update
-    // also runs on the game thread later in Play_Update
-    // (z_play.c:1295). Deterministic ordering → no torn writes.
-    // Runs BEFORE the AmVoteSkipHost() gate so both host + peer
-    // apply the fix (peer's HandlePacket_CutsceneTextAdvanced also
-    // sets the consume flag).
-    if (cutsceneTextAdvanceConsumed &&
-        (uint16_t)gPlayState->msgCtx.textId == cutsceneTextAdvanceConsumedTextId &&
-        gPlayState->msgCtx.msgMode == MSGMODE_TEXT_AWAIT_NEXT) {
-        SPDLOG_INFO("[CutsceneTextAdvance] Fix S — force AWAIT_NEXT→"
-                    "NEXT_MSG for textId=0x{:04X} msgBufPos={} "
-                    "(vanilla Message_ShouldAdvance poll silently "
-                    "failed to consume)",
-                    (unsigned)gPlayState->msgCtx.textId,
-                    (int)gPlayState->msgCtx.msgBufPos);
-        gPlayState->msgCtx.msgMode = MSGMODE_TEXT_NEXT_MSG;
-        gPlayState->msgCtx.textUnskippable = false;
-        gPlayState->msgCtx.msgBufPos++;
-        cutsceneTextAdvanceConsumed = false;
-    }
+    // Fix S / Fix T — force sub-textbox chain advance when TEXT_ADVANCED
+    // consumed. Runs at top of tick for peer paths (network-thread flag
+    // set → picked up next game frame). Fix T ALSO invokes the same
+    // helper inline at the game-thread hard_deadline flag setter below,
+    // because within the same tick TickCutsceneTextAdvance's own
+    // hard_deadline branch sets the flag AFTER this top-of-tick check
+    // already ran → Message_Update fires later that same frame,
+    // CutsceneBridge consumes the flag first, and Fix S at next frame's
+    // top sees an empty flag. Log 639 showed P1 (host) stall + Solo idle
+    // fallback while P2 (peer) advanced correctly via this top-of-tick
+    // path. See detailed rationale on the helper below.
+    ApplyForcedSubTextAdvanceIfInAwaitNext("top_of_tick");
 
     auto& state = cutsceneTextAdvanceState;
     auto now = std::chrono::steady_clock::now();
@@ -635,6 +653,20 @@ void Anchor::TickCutsceneTextAdvance() {
         SendPacket_CutsceneTextVoteState();
         SendPacket_CutsceneTextAdvanced(clearedTextId,
                                         wasVoteTimer ? "timer" : "hard_deadline");
+        // Fix T — inline invocation of the sub-textbox force-advance
+        // helper for the host game-thread hard_deadline path. The
+        // top-of-tick Fix S check already ran earlier this tick with
+        // the flag still false; without this inline call the flag
+        // gets consumed by CutsceneBridge during Message_Update later
+        // this same frame, and the next tick's top-of-tick Fix S sees
+        // an empty flag. Log 639 P1 showed exactly this pattern:
+        // "advance-broadcast consumed → local advance" fired but the
+        // vanilla AWAIT_NEXT→NEXT_MSG transition never stuck,
+        // leaving P1 stalled until the 10 s "Solo idle auto-advance"
+        // fallback fired. See Analysis/cutscene_fix_t_host_timing_-
+        // 2026-07-08.md (to be written) if this pattern recurs.
+        ApplyForcedSubTextAdvanceIfInAwaitNext(
+            wasVoteTimer ? "hard_deadline_vote" : "hard_deadline_timer");
     }
 }
 
