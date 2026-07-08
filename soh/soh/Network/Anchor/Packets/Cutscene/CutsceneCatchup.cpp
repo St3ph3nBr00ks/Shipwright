@@ -453,17 +453,23 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         const bool selfBroadcast   = (senderClientId == ownClientId);
         const bool validSender     = (senderClientId != 0);
         const bool alreadyInCs     = (gPlayState->csCtx.state != CS_STATE_IDLE);
+        // Fix M — respect active fast-forward. If we're already
+        // catching up (RESPONSE received + fast-forward armed), a
+        // second FRAME_SYNC-driven REQUEST would trigger a duplicate
+        // RESPONSE from the leader and re-populate pendingCatchups,
+        // which caused the safety-net race in log 631 (Bug K).
+        const bool alreadyCatchingUp = (catchupFastForwardTarget > 0);
         SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC gates — sender={} own={} "
                     "kindKey='{}' enabled={} alreadyPending={} selfBroadcast={} "
-                    "validSender={} alreadyInCs={} — will{} fire",
+                    "validSender={} alreadyInCs={} alreadyCatchingUp={} — will{} fire",
                     senderClientId, ownClientId, kindKey,
                     haveEnabled, alreadyPending, selfBroadcast, validSender,
-                    alreadyInCs,
+                    alreadyInCs, alreadyCatchingUp,
                     (validSender && !selfBroadcast && !alreadyPending &&
-                     haveEnabled && !alreadyInCs)
+                     haveEnabled && !alreadyInCs && !alreadyCatchingUp)
                         ? "" : " NOT");
         if (validSender && !selfBroadcast && !alreadyPending && haveEnabled &&
-            !alreadyInCs) {
+            !alreadyInCs && !alreadyCatchingUp) {
             PendingCatchup p;
             p.deadline = std::chrono::steady_clock::now()
                          + std::chrono::milliseconds(kCatchupTimeoutMs);
@@ -731,6 +737,22 @@ void Anchor::TickCutsceneCatchup() {
         const int32_t framesBefore = (int32_t)gPlayState->csCtx.frames;
         for (int i = 0; i < kMaxTicksPerRealFrame; i++) {
             if (gPlayState->csCtx.frames >= catchupFastForwardTarget) break;
+            // Fix L — force message state terminal so vanilla's
+            // Cutscene_Command_Textbox (z_demo.c:1663-1669) does NOT
+            // rewind csFrames on textbox endFrame overrun. Fast-
+            // forward has no user input to close textboxes; without
+            // this the very first cutscene textbox stalls the loop.
+            // Log 631: fast-forward stalled at frame 59 with textbox
+            // 0x107D displayed; Fix D's 60-frame stall detector
+            // aborted before reaching target=169. After Fix L, vanilla
+            // treats each tick's message state as terminal → csFrames
+            // advances past all textbox endFrames → target reached.
+            // Vanilla's normal tick after loop exit re-opens the
+            // correct textbox for the target frame via the same
+            // command dispatch. See Analysis/cutscene_fast_forward_
+            // stall_and_race_2026-07-08.md.
+            gPlayState->msgCtx.msgMode = MSGMODE_NONE;
+            gPlayState->msgCtx.textId  = 0;
             func_800645A0(gPlayState, &gPlayState->csCtx);
             ticksFired++;
         }

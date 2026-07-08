@@ -436,6 +436,15 @@ void OnGameFrameUpdate_CutsceneCatchupSafetyNet() {
     if (::Anchor::Instance->pendingCatchups.empty()) return;
     if (gPlayState == nullptr) return;
     if (gPlayState->csCtx.state == CS_STATE_IDLE) return;
+    // Fix K — respect active fast-forward. When catchupFastForwardTarget
+    // > 0 we are DELIBERATELY driving vanilla forward toward the
+    // leader's frame via TickCutsceneCatchup's fast-forward loop; the
+    // safety net's "vanilla leaked past the entry gate" premise is
+    // inapplicable. Log 631 showed this race resetting csCtx.state to
+    // IDLE and destroying fast-forward's progress in a tight loop with
+    // the FRAME_SYNC direct-request path. See
+    // Analysis/cutscene_fast_forward_stall_and_race_2026-07-08.md.
+    if (::Anchor::Instance->catchupFastForwardTarget > 0) return;
 
     // Vanilla entered a cutscene despite our pendingCatchup — a gate
     // was missed. Log the leaked state + force IDLE. The pending
