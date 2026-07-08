@@ -134,6 +134,11 @@ struct CutsceneCatchupEntry {
     struct { float x, y, z; } leaderPlayerPos = { 0.0f, 0.0f, 0.0f };
     int16_t  leaderPlayerYaw = 0;         // shape.rot.y
     int8_t   leaderRoomNum   = -1;        // Fix P.1 — leader's curRoom.num
+    // Bug 14 fix — leader's sub-textbox chain depth for the current
+    // base textId. Peer catches up by calling Message_ContinueTextbox
+    // N times after Message_StartTextbox. Prevents peer from stalling
+    // at sub-textbox 1 while leader is on sub 2+.
+    uint16_t leaderMsgChainDepth = 0;
     bool     hasLeaderPlayerSnapshot = false;
 };
 

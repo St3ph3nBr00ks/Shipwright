@@ -1665,6 +1665,28 @@ class Anchor : public Network {
     // (older-build leader or snapshot without room info).
     int8_t   catchupPendingRoomNum = -1;
 
+    // Bug 13 fix — persisted teleport request. When Fix P.2 detects
+    // curRoom != leaderRoomNum, initiate a room load via
+    // func_8009728C and defer the teleport by up to a few frames.
+    // Applied by TickCutsceneCatchup once curRoom == pendingSwitchTarget.
+    // -1 = no pending switch.
+    int8_t   catchupPendingRoomSwitchTarget = -1;
+    struct { float x, y, z; } catchupDeferredTeleportPos = { 0.0f, 0.0f, 0.0f };
+    int16_t  catchupDeferredTeleportYaw = 0;
+    bool     catchupDeferredTeleportValid = false;
+
+    // Bug 14 fix — leader's per-frame chain-depth tracker. Increments
+    // when msgCtx.msgLength changes while msgCtx.textId stays the
+    // same (indicates vanilla loaded next sub-textbox via
+    // Message_ContinueTextbox). Reset when textId changes. Captured
+    // by SnapshotCamera and shipped as leaderMsgChainDepth. Peer
+    // stores in catchupPendingMsgChainDepth for post-fast-forward
+    // Message_ContinueTextbox loop.
+    uint16_t leaderMsgChainDepthCurrent = 0;
+    uint16_t leaderChainTrackerLastTextId = 0;
+    uint16_t leaderChainTrackerLastMsgLen = 0;
+    uint16_t catchupPendingMsgChainDepth = 0;
+
     // Fix O — cutscene-originator clientId per active kindKey.
     // Populated by SendPacket_CutsceneStart (self origin) and by
     // HandlePacket_CutsceneStart / FRAME_SYNC hydration (peer

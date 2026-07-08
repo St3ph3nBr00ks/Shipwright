@@ -184,6 +184,8 @@ nlohmann::json SerializeLedgerEntry(
     // Fix P.1 — leader's roomNum. Peer gates Fix N.2 teleport on
     // curRoom match to avoid placing Link in unloaded geometry.
     out["leaderRoomNum"] = (int)e.leaderRoomNum;
+    // Bug 14 fix — leader's sub-textbox chain depth.
+    out["leaderMsgChainDepth"] = (int)e.leaderMsgChainDepth;
 
     return out;
 }
@@ -343,14 +345,18 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
         }
         ::Anchor::Instance->catchupPendingRoomNum =
             (int8_t)payload.value("leaderRoomNum", -1);
+        // Bug 14 fix — read leader's chain depth so peer can catch up.
+        ::Anchor::Instance->catchupPendingMsgChainDepth =
+            (uint16_t)payload.value("leaderMsgChainDepth", 0);
         SPDLOG_INFO("[CutsceneCatchup] Applied delta — leader textbox=0x{:04X} "
-                    "playerPos={} yaw={} roomNum={} (queued for post-fast-"
-                    "forward apply)",
+                    "playerPos={} yaw={} roomNum={} chainDepth={} (queued "
+                    "for post-fast-forward apply)",
                     (unsigned)::Anchor::Instance->catchupPendingMsgTextId,
                     ::Anchor::Instance->catchupPendingPlayerPosValid
                         ? "yes" : "absent",
                     (int)::Anchor::Instance->catchupPendingPlayerYaw,
-                    (int)::Anchor::Instance->catchupPendingRoomNum);
+                    (int)::Anchor::Instance->catchupPendingRoomNum,
+                    (int)::Anchor::Instance->catchupPendingMsgChainDepth);
     }
     if (leaderFrame > 0 && ::Anchor::Instance != nullptr) {
         // Reset stale cutscene state before setting the fast-forward
@@ -751,6 +757,76 @@ void Anchor::TickCutsceneCatchup() {
 
     const auto now = std::chrono::steady_clock::now();
 
+    // Bug 13 fix — deferred teleport apply. When Fix P.2 detected a
+    // room mismatch and initiated a room load via func_8009728C, the
+    // teleport target was persisted here. Each subsequent frame we
+    // check whether the load has completed (curRoom now matches the
+    // pending target) and apply the teleport once ready. Safety net:
+    // if the load takes >2s, apply the teleport regardless — better
+    // to place Link at leader's coords with slightly wrong geometry
+    // than to never place him.
+    if (catchupDeferredTeleportValid && gPlayState != nullptr) {
+        static std::chrono::steady_clock::time_point sDeferredArmedAt =
+            std::chrono::steady_clock::time_point::min();
+        if (sDeferredArmedAt == std::chrono::steady_clock::time_point::min()) {
+            sDeferredArmedAt = now;
+        }
+        const int8_t curRoom = (int8_t)gPlayState->roomCtx.curRoom.num;
+        const bool roomMatches = (catchupPendingRoomSwitchTarget < 0) ||
+                                 (curRoom == catchupPendingRoomSwitchTarget);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - sDeferredArmedAt).count();
+        const bool safetyExpired = ms > 2000;
+        if (roomMatches || safetyExpired) {
+            Player* peerLink = GET_PLAYER(gPlayState);
+            if (peerLink != nullptr) {
+                peerLink->actor.world.pos.x = catchupDeferredTeleportPos.x;
+                peerLink->actor.world.pos.y = catchupDeferredTeleportPos.y;
+                peerLink->actor.world.pos.z = catchupDeferredTeleportPos.z;
+                peerLink->actor.shape.rot.y = catchupDeferredTeleportYaw;
+                SPDLOG_INFO("[CutsceneCatchup] Bug 13 fix — applied "
+                            "deferred teleport to ({:.0f},{:.0f},{:.0f}) "
+                            "yaw={} after room load (curRoom={} target={} "
+                            "matches={} safetyExpired={} elapsedMs={})",
+                            catchupDeferredTeleportPos.x,
+                            catchupDeferredTeleportPos.y,
+                            catchupDeferredTeleportPos.z,
+                            (int)catchupDeferredTeleportYaw,
+                            (int)curRoom,
+                            (int)catchupPendingRoomSwitchTarget,
+                            (int)roomMatches, (int)safetyExpired,
+                            (long long)ms);
+            }
+            catchupDeferredTeleportValid = false;
+            catchupPendingRoomSwitchTarget = -1;
+            sDeferredArmedAt =
+                std::chrono::steady_clock::time_point::min();
+        }
+    }
+
+    // Bug 14 fix — per-frame chain-depth tracker on leader side.
+    // Vanilla `Message_ContinueTextbox` loads next sub-textbox of the
+    // same base textId. Detected by observing msgLength change while
+    // textId is unchanged. Reset when textId changes or textId==0.
+    // Peer catches up post-fast-forward by calling
+    // Message_ContinueTextbox depth-many times. See Analysis/cutscene_
+    // room_reload_and_sub_textbox_2026-07-08.md Bug 14.
+    {
+        const uint16_t curTextId = (uint16_t)gPlayState->msgCtx.textId;
+        const uint16_t curMsgLen = (uint16_t)gPlayState->msgCtx.msgLength;
+        if (curTextId != leaderChainTrackerLastTextId) {
+            // textId changed — restart chain.
+            leaderChainTrackerLastTextId = curTextId;
+            leaderChainTrackerLastMsgLen = curMsgLen;
+            leaderMsgChainDepthCurrent   = 0;
+        } else if (curTextId != 0 && curMsgLen != 0 &&
+                   curMsgLen != leaderChainTrackerLastMsgLen) {
+            // Same textId, msgLength changed → new sub-textbox.
+            leaderChainTrackerLastMsgLen = curMsgLen;
+            leaderMsgChainDepthCurrent++;
+        }
+    }
+
     // Leader side — 1Hz FRAME_SYNC emit + snapshot refresh.
     if (!cutsceneStartActive.empty()) {
         const auto sinceLast = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -909,7 +985,27 @@ void Anchor::TickCutsceneCatchup() {
                 SPDLOG_INFO("[CutsceneCatchup] Fix N — opened leader's "
                             "textbox 0x{:04X} on peer post-fast-forward",
                             (unsigned)catchupPendingMsgTextId);
+                // Bug 14 fix — catch up to leader's sub-textbox position
+                // by calling Message_ContinueTextbox chain-depth times.
+                // Bounded at 20 to defend against a runaway counter
+                // (typical vanilla chains are 2-8 sub-textboxes).
+                const uint16_t rawDepth = catchupPendingMsgChainDepth;
+                const uint16_t depth = rawDepth > 20 ? 20 : rawDepth;
+                for (uint16_t i = 0; i < depth; i++) {
+                    Message_ContinueTextbox(gPlayState,
+                                            (u16)catchupPendingMsgTextId);
+                }
+                if (depth > 0) {
+                    SPDLOG_INFO("[CutsceneCatchup] Bug 14 fix — advanced "
+                                "peer through {} sub-textbox continuations "
+                                "of 0x{:04X} (clamped from {}) to match "
+                                "leader's chain position",
+                                (int)depth,
+                                (unsigned)catchupPendingMsgTextId,
+                                (int)rawDepth);
+                }
                 catchupPendingMsgTextId = 0;
+                catchupPendingMsgChainDepth = 0;
             }
             // Fix N.2 — teleport peer's Link to leader's world position.
             // Fast-forward's csCtx.frames advances 10x per real frame
@@ -936,17 +1032,46 @@ void Anchor::TickCutsceneCatchup() {
                     (int8_t)gPlayState->roomCtx.curRoom.num;
                 if (catchupPendingRoomNum >= 0 &&
                     curRoom != catchupPendingRoomNum) {
-                    SPDLOG_INFO("[CutsceneCatchup] Fix P.2 — skipping "
-                                "teleport to leader pos=({:.0f},{:.0f},"
-                                "{:.0f}) yaw={} because curRoom={} != "
-                                "leaderRoomNum={}. Link left at its "
-                                "current cutscene position.",
+                    // Bug 13 fix — load leader's room BEFORE the
+                    // teleport instead of skipping. Peer's fast-forward
+                    // drove vanilla's cutscene-layer dispatch which
+                    // reset curRoom to 0. Leader's snapshot roomNum
+                    // is authoritative for the current cutscene phase.
+                    // func_8009728C initiates the room DMA/OTR load
+                    // via the vanilla room-load pipeline. The teleport
+                    // is deferred to a later frame once curRoom
+                    // matches; see per-frame check below. See
+                    // Analysis/cutscene_room_reload_and_sub_textbox_
+                    // 2026-07-08.md Bug 13.
+                    const int32_t rc = func_8009728C(gPlayState,
+                                                     &gPlayState->roomCtx,
+                                                     (int32_t)catchupPendingRoomNum);
+                    SPDLOG_INFO("[CutsceneCatchup] Bug 13 fix — initiated "
+                                "room load: curRoom={} → leaderRoomNum={} "
+                                "(func_8009728C rc={}); teleport to "
+                                "({:.0f},{:.0f},{:.0f}) yaw={} deferred "
+                                "until load completes",
+                                (int)curRoom,
+                                (int)catchupPendingRoomNum,
+                                rc,
                                 catchupPendingPlayerPos.x,
                                 catchupPendingPlayerPos.y,
                                 catchupPendingPlayerPos.z,
-                                (int)catchupPendingPlayerYaw,
-                                (int)curRoom,
-                                (int)catchupPendingRoomNum);
+                                (int)catchupPendingPlayerYaw);
+                    // Persist the teleport target on Anchor state; the
+                    // per-frame poll further down runs each tick and
+                    // applies once curRoom == pendingSwitchTarget.
+                    catchupPendingRoomSwitchTarget =
+                        catchupPendingRoomNum;
+                    catchupDeferredTeleportPos.x =
+                        catchupPendingPlayerPos.x;
+                    catchupDeferredTeleportPos.y =
+                        catchupPendingPlayerPos.y;
+                    catchupDeferredTeleportPos.z =
+                        catchupPendingPlayerPos.z;
+                    catchupDeferredTeleportYaw =
+                        catchupPendingPlayerYaw;
+                    catchupDeferredTeleportValid = true;
                 } else {
                     Player* peerLink = GET_PLAYER(gPlayState);
                     if (peerLink != nullptr) {
