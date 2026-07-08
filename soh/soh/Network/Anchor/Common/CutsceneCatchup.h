@@ -135,10 +135,44 @@ struct CutsceneCatchupEntry {
     int16_t  leaderPlayerYaw = 0;         // shape.rot.y
     int8_t   leaderRoomNum   = -1;        // Fix P.1 — leader's curRoom.num
     // Bug 14 fix — leader's sub-textbox chain depth for the current
-    // base textId. Peer catches up by calling Message_ContinueTextbox
-    // N times after Message_StartTextbox. Prevents peer from stalling
-    // at sub-textbox 1 while leader is on sub 2+.
+    // base textId. RETIRED by Design E — Message_ContinueTextbox
+    // was a broken primitive (it re-opens the message with msgBufPos=0
+    // each call, so it does NOT advance the chain — see Analysis/
+    // cutscene_catchup_dialogue_chain_design_gap_2026-07-08.md §4.
+    // Field kept only for backward-compat during rollout; not written
+    // by leader, not read by peer.
     uint16_t leaderMsgChainDepth = 0;
+    // Design E — leader's msgBufPos + msgMode at snapshot time. Peer
+    // applies these AFTER Message_StartTextbox to jump the message
+    // system directly to leader's sub-textbox position instead of
+    // waiting for real-time vote-skip broadcasts to advance one sub
+    // at a time. See Analysis/cutscene_catchup_dialogue_chain_design_
+    // gap_2026-07-08.md §7 Design E for full rationale + candidates
+    // A/D/F/G considered but rejected.
+    //
+    // WHY msgBufPos + msgMode ARE SUFFICIENT:
+    //   - msgBufPos alone directs Message_Decode where to read next.
+    //   - Setting msgMode = MSGMODE_TEXT_NEXT_MSG triggers vanilla's
+    //     NEXT_MSG case (z_message_PAL.c:4616-4625) which calls
+    //     Message_Decode(play). Message_Decode reads msgBuf from
+    //     msgBufPos, populates msgBufDecoded, sets msgMode to
+    //     DISPLAYING, and populates textboxEndType/textDrawPos.
+    //   - textboxEndType, textDrawPos, decodedTextLen, etc. do NOT
+    //     need to ship — Message_Decode reconstructs them from
+    //     msgBuf content.
+    //
+    // CV-3 CAVEAT (from analysis): msgBuf content is loaded by
+    // Message_OpenText which has textId-substitution paths for a
+    // small set of NPC-dialog textIds (0xC2 heart-piece, 0xB
+    // Giant's Knife, 0xB4 Gold Skulltula) driven by inventory /
+    // save flags. Cutscene textIds (0x1000-0x1FFF range) are NOT
+    // in the substitution set — safe for the current pilot
+    // (deku_tree_intro uses 0x107D, 0x1015, 0x1016). If a future
+    // cutscene ever contains a substitution-prone textId, msgBuf
+    // could diverge between P1/P2 and peer's msgBufPos would land
+    // on wrong content.
+    uint16_t leaderMsgBufPos = 0;         // vanilla msgCtx.msgBufPos
+    uint8_t  leaderMsgMode   = 0;         // vanilla msgCtx.msgMode
     bool     hasLeaderPlayerSnapshot = false;
 };
 

@@ -312,14 +312,18 @@ void SnapshotCamera() {
     // Bug 9). See Analysis/cutscene_room_desync_and_vote_scope_
     // 2026-07-08.md.
     entry->leaderRoomNum = (int8_t)gPlayState->roomCtx.curRoom.num;
-    // Bug 14 fix — capture leader's sub-textbox chain depth. Peer
-    // uses this to loop Message_ContinueTextbox after
-    // Message_StartTextbox to catch up to leader's current sub-
-    // textbox (log 636 Bug 14: peer stuck at sub 1, leader on sub 2+).
-    if (Anchor::Instance != nullptr) {
-        entry->leaderMsgChainDepth =
-            Anchor::Instance->leaderMsgChainDepthCurrent;
-    }
+    // Design E — capture leader's msgBufPos + msgMode. Supersedes the
+    // Bug 14 chain-depth approach, which used Message_ContinueTextbox
+    // (broken primitive — that vanilla function LOADS a new message
+    // with msgBufPos=0 rather than advancing the chain). Peer applies
+    // these fields directly after Message_StartTextbox to land at
+    // leader's exact sub-textbox position in one shot. See Analysis/
+    // cutscene_catchup_dialogue_chain_design_gap_2026-07-08.md.
+    entry->leaderMsgBufPos = (uint16_t)gPlayState->msgCtx.msgBufPos;
+    entry->leaderMsgMode   = (uint8_t)gPlayState->msgCtx.msgMode;
+    // Retain the old leaderMsgChainDepth field zero-init for
+    // backward-compat during rollout; not written, not read.
+    entry->leaderMsgChainDepth = 0;
 }
 
 // Actor snapshot — walks ACTORCAT_NPC / _PROP / _BOSS categories and

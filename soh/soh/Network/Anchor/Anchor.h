@@ -1687,6 +1687,19 @@ class Anchor : public Network {
     uint16_t leaderChainTrackerLastMsgLen = 0;
     uint16_t catchupPendingMsgChainDepth = 0;
 
+    // Design E — peer-side landing state for leader's msgBufPos +
+    // msgMode. Populated from CUTSCENE_CATCHUP_RESPONSE payload in
+    // ApplyCatchupDelta. Consumed by TickCutsceneCatchup's Fix N block
+    // immediately after Message_StartTextbox(catchupPendingMsgTextId)
+    // — force-writes gPlayState->msgCtx.msgBufPos + msgMode so
+    // vanilla's next Message_Update dispatches NEXT_MSG case, calls
+    // Message_Decode from the new position, and lands peer at
+    // leader's sub-textbox. Retires the Bug 14 Message_ContinueTextbox
+    // loop which was a broken primitive. See Analysis/cutscene_
+    // catchup_dialogue_chain_design_gap_2026-07-08.md §7 Design E.
+    uint16_t catchupPendingMsgBufPos = 0;
+    uint8_t  catchupPendingMsgMode   = 0;
+
     // Fix R — continuous re-target on textId mismatch. After fast-forward
     // completes on a peer, the leader may have already advanced past the
     // snapshot frame (through a camera pan into the next textbox). Peer

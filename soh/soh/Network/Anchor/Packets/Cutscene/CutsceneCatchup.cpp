@@ -184,8 +184,14 @@ nlohmann::json SerializeLedgerEntry(
     // Fix P.1 — leader's roomNum. Peer gates Fix N.2 teleport on
     // curRoom match to avoid placing Link in unloaded geometry.
     out["leaderRoomNum"] = (int)e.leaderRoomNum;
-    // Bug 14 fix — leader's sub-textbox chain depth.
-    out["leaderMsgChainDepth"] = (int)e.leaderMsgChainDepth;
+    // Design E — leader's msgBufPos + msgMode for direct-jump to
+    // sub-textbox position on peer (retires Bug 14 chain-depth loop).
+    out["leaderMsgBufPos"] = (int)e.leaderMsgBufPos;
+    out["leaderMsgMode"]   = (int)e.leaderMsgMode;
+    // Backward-compat field: kept in wire format at zero during
+    // Design E rollout so older peer builds don't misapply. Retired
+    // by Design E — see Common/CutsceneCatchup.h comment.
+    out["leaderMsgChainDepth"] = 0;
 
     return out;
 }
@@ -345,18 +351,27 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
         }
         ::Anchor::Instance->catchupPendingRoomNum =
             (int8_t)payload.value("leaderRoomNum", -1);
-        // Bug 14 fix — read leader's chain depth so peer can catch up.
-        ::Anchor::Instance->catchupPendingMsgChainDepth =
-            (uint16_t)payload.value("leaderMsgChainDepth", 0);
+        // Design E — read leader's msgBufPos + msgMode so peer can
+        // jump directly to leader's sub-textbox position after
+        // Message_StartTextbox (retires Bug 14's broken chain-depth
+        // loop). See Analysis/cutscene_catchup_dialogue_chain_design_
+        // gap_2026-07-08.md §7 Design E.
+        ::Anchor::Instance->catchupPendingMsgBufPos =
+            (uint16_t)payload.value("leaderMsgBufPos", 0);
+        ::Anchor::Instance->catchupPendingMsgMode =
+            (uint8_t)payload.value("leaderMsgMode", 0);
+        // Retired Bug 14 field — read as zero for back-compat.
+        ::Anchor::Instance->catchupPendingMsgChainDepth = 0;
         SPDLOG_INFO("[CutsceneCatchup] Applied delta — leader textbox=0x{:04X} "
-                    "playerPos={} yaw={} roomNum={} chainDepth={} (queued "
-                    "for post-fast-forward apply)",
+                    "playerPos={} yaw={} roomNum={} msgBufPos={} msgMode={} "
+                    "(queued for post-fast-forward apply)",
                     (unsigned)::Anchor::Instance->catchupPendingMsgTextId,
                     ::Anchor::Instance->catchupPendingPlayerPosValid
                         ? "yes" : "absent",
                     (int)::Anchor::Instance->catchupPendingPlayerYaw,
                     (int)::Anchor::Instance->catchupPendingRoomNum,
-                    (int)::Anchor::Instance->catchupPendingMsgChainDepth);
+                    (int)::Anchor::Instance->catchupPendingMsgBufPos,
+                    (int)::Anchor::Instance->catchupPendingMsgMode);
     }
     if (leaderFrame > 0 && ::Anchor::Instance != nullptr) {
         // Reset stale cutscene state before setting the fast-forward
@@ -985,26 +1000,56 @@ void Anchor::TickCutsceneCatchup() {
                 SPDLOG_INFO("[CutsceneCatchup] Fix N — opened leader's "
                             "textbox 0x{:04X} on peer post-fast-forward",
                             (unsigned)catchupPendingMsgTextId);
-                // Bug 14 fix — catch up to leader's sub-textbox position
-                // by calling Message_ContinueTextbox chain-depth times.
-                // Bounded at 20 to defend against a runaway counter
-                // (typical vanilla chains are 2-8 sub-textboxes).
-                const uint16_t rawDepth = catchupPendingMsgChainDepth;
-                const uint16_t depth = rawDepth > 20 ? 20 : rawDepth;
-                for (uint16_t i = 0; i < depth; i++) {
-                    Message_ContinueTextbox(gPlayState,
-                                            (u16)catchupPendingMsgTextId);
-                }
-                if (depth > 0) {
-                    SPDLOG_INFO("[CutsceneCatchup] Bug 14 fix — advanced "
-                                "peer through {} sub-textbox continuations "
-                                "of 0x{:04X} (clamped from {}) to match "
-                                "leader's chain position",
-                                (int)depth,
-                                (unsigned)catchupPendingMsgTextId,
-                                (int)rawDepth);
+                // Design E — jump peer's message system directly to
+                // leader's sub-textbox position by force-writing
+                // msgCtx.msgBufPos + msgMode. Vanilla's next
+                // Message_Update dispatches the NEXT_MSG case (if we
+                // wrote MSGMODE_TEXT_NEXT_MSG), which calls
+                // Message_Decode(play). Message_Decode reads
+                // font->msgBuf from msgBufPos, populates msgBufDecoded,
+                // sets textboxEndType, and transitions msgMode to
+                // MSGMODE_TEXT_DISPLAYING for the correct sub-textbox
+                // — no need to loop or wait for real-time broadcasts.
+                //
+                // Replaces the broken Bug 14 loop which called
+                // Message_ContinueTextbox N times (that primitive
+                // RESTARTS the message with msgBufPos=0, so the loop
+                // just re-opened sub 1 N times). See Analysis/
+                // cutscene_catchup_dialogue_chain_design_gap_2026-07-
+                // 08.md §4 for the Bug 14 misuse analysis and §7
+                // for Design E rationale + rejected alternatives.
+                //
+                // Only apply if msgBufPos > 0 — msgBufPos=0 is the
+                // fresh Message_StartTextbox state and needs no
+                // adjustment. Only override msgMode if leader was in
+                // a chain-progress state (AWAIT_NEXT / NEXT_MSG /
+                // DISPLAYING); other states (DONE, CLOSING, ocarina)
+                // are transient or leader-local and don't map cleanly
+                // to peer's post-load state.
+                if (catchupPendingMsgBufPos > 0) {
+                    const uint16_t priorPos =
+                        (uint16_t)gPlayState->msgCtx.msgBufPos;
+                    gPlayState->msgCtx.msgBufPos =
+                        catchupPendingMsgBufPos;
+                    // Force NEXT_MSG so vanilla's next tick runs
+                    // Message_Decode from the new position. Ignore
+                    // leader's exact msgMode value here — DISPLAYING /
+                    // AWAIT_NEXT / NEXT_MSG all resolve into the
+                    // correct downstream state after Decode runs.
+                    gPlayState->msgCtx.msgMode = MSGMODE_TEXT_NEXT_MSG;
+                    SPDLOG_INFO("[CutsceneCatchup] Design E — jumped "
+                                "peer msgBufPos from {} to leader's {} "
+                                "(leaderMsgMode was {}) for textId 0x"
+                                "{:04X}; vanilla NEXT_MSG dispatch will "
+                                "Message_Decode the current sub-textbox",
+                                (int)priorPos,
+                                (int)catchupPendingMsgBufPos,
+                                (int)catchupPendingMsgMode,
+                                (unsigned)catchupPendingMsgTextId);
                 }
                 catchupPendingMsgTextId = 0;
+                catchupPendingMsgBufPos = 0;
+                catchupPendingMsgMode   = 0;
                 catchupPendingMsgChainDepth = 0;
             }
             // Fix N.2 — teleport peer's Link to leader's world position.
