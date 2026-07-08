@@ -303,13 +303,33 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
     const int16_t sceneNum = (int16_t)payload.value("sceneNum", -1);
     if (sceneNum != (int16_t)gPlayState->sceneNum) return;
 
-    // v1: FRAME_SYNC is currently a no-op consumer — the load-bearing
-    // sync happens via CATCHUP_REQUEST/_RESPONSE on scene-entry. Frame
-    // drift correction is a v2 concern once we validate the initial
-    // catchup path. Logging here confirms the packet is flowing.
+    // Extract csKind + csKey so we can hydrate cutsceneStartActive if
+    // we're a late-joiner (connected AFTER the leader's CUTSCENE_START
+    // broadcast). Without this, DetectAndRequestCutsceneCatchup skips
+    // because it can't build a kindKey — resulting in no catchup for
+    // late-connect scenarios.
+    const std::string csKind = payload.value("csKind", std::string(""));
+    const uint32_t    csKey  = payload.value("csKey", (uint32_t)0);
     const int32_t leaderFrame = (int32_t)payload.value("leaderFrame", 0);
     const int leaderState = payload.value("leaderState", 0);
     (void)leaderFrame; (void)leaderState;
+
+    if (!csKind.empty()) {
+        const std::string kindKey = csKind + ":" + std::to_string(csKey);
+        if (cutsceneStartActive.count(kindKey) == 0) {
+            cutsceneStartActive.insert(kindKey);
+            SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC observed new kindKey='{}' — "
+                        "populating cutsceneStartActive for late-joiner mode",
+                        kindKey);
+            // Trigger a fresh catchup-detection sweep. The peer who's
+            // broadcasting FRAME_SYNC is by construction same-scene
+            // (relay filtered), so DetectAndRequestCutsceneCatchup will
+            // now find them with a valid kindKey to request.
+            if (CutsceneCatchupEnabled()) {
+                DetectAndRequestCutsceneCatchup();
+            }
+        }
+    }
 }
 
 // ---- CUTSCENE_CATCHUP_REQUEST ---------------------------------------
@@ -492,6 +512,13 @@ void Anchor::DetectAndRequestCutsceneCatchup() {
         try {
             csKey = (uint32_t)std::stoul(kindKey.substr(sep + 1));
         } catch (...) { csKey = 0; }
+
+        // Skip if we already have a pending catchup for this kindKey —
+        // prevents REQUEST-spam when DetectAndRequestCutsceneCatchup
+        // is re-triggered by FRAME_SYNC arrival on late-joiner path.
+        if (pendingCatchups.count(kindKey) > 0) {
+            continue;
+        }
 
         // Register pending catchup + fire request.
         PendingCatchup p;
