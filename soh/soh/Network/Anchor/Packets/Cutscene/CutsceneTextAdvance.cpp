@@ -419,6 +419,58 @@ void Anchor::TickCutsceneTextAdvance() {
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
     if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.Enabled"), 1)) return;
 
+    // Fix S — force sub-textbox chain advance when TEXT_ADVANCED consumed.
+    //
+    // Vanilla's mechanism to advance a multi-part cutscene textbox
+    // (delimited by MESSAGE_BOX_BREAK control codes) is
+    // z_message_PAL.c:4651-4657 :
+    //
+    //   case MSGMODE_TEXT_AWAIT_NEXT:
+    //       if (Message_ShouldAdvance(play)) {
+    //           msgCtx->msgMode = MSGMODE_TEXT_NEXT_MSG;
+    //           msgCtx->textUnskippable = false;
+    //           msgCtx->msgBufPos++;
+    //       }
+    //       break;
+    //
+    // SoH routes Message_ShouldAdvance through
+    // Anchor_ShouldAdvanceCutsceneTextLocal (CutsceneBridge.cpp),
+    // which returns 1 when the vote-skip TEXT_ADVANCED broadcast has
+    // been consumed. That SHOULD trigger the vanilla transition — but
+    // log 638 shows it does not: both host + peer sat at msgMode=52
+    // (AWAIT_NEXT) for 20+ seconds even after CutsceneBridge fired
+    // "advance-broadcast consumed → local advance". The cutscene
+    // eventually escaped only via the 10s "Solo idle auto-advance"
+    // fallback which is not a graceful sub-textbox advance mechanism.
+    //
+    // Fix S bypass: when the consumed flag is set, textId matches, and
+    // local msgMode is AWAIT_NEXT, replicate vanilla's transition
+    // directly on the game thread. Clears the consume flag afterward
+    // so vanilla's later Message_ShouldAdvance poll (if it fires)
+    // doesn't double-advance msgBufPos.
+    //
+    // Race-safety: TickCutsceneTextAdvance runs on the game thread
+    // from OnGameFrameUpdate (HookHandlers.cpp:756). Message_Update
+    // also runs on the game thread later in Play_Update
+    // (z_play.c:1295). Deterministic ordering → no torn writes.
+    // Runs BEFORE the AmVoteSkipHost() gate so both host + peer
+    // apply the fix (peer's HandlePacket_CutsceneTextAdvanced also
+    // sets the consume flag).
+    if (cutsceneTextAdvanceConsumed &&
+        (uint16_t)gPlayState->msgCtx.textId == cutsceneTextAdvanceConsumedTextId &&
+        gPlayState->msgCtx.msgMode == MSGMODE_TEXT_AWAIT_NEXT) {
+        SPDLOG_INFO("[CutsceneTextAdvance] Fix S — force AWAIT_NEXT→"
+                    "NEXT_MSG for textId=0x{:04X} msgBufPos={} "
+                    "(vanilla Message_ShouldAdvance poll silently "
+                    "failed to consume)",
+                    (unsigned)gPlayState->msgCtx.textId,
+                    (int)gPlayState->msgCtx.msgBufPos);
+        gPlayState->msgCtx.msgMode = MSGMODE_TEXT_NEXT_MSG;
+        gPlayState->msgCtx.textUnskippable = false;
+        gPlayState->msgCtx.msgBufPos++;
+        cutsceneTextAdvanceConsumed = false;
+    }
+
     auto& state = cutsceneTextAdvanceState;
     auto now = std::chrono::steady_clock::now();
 
