@@ -284,17 +284,20 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
 void Anchor::SendPacket_CutsceneFrameSync() {
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
     if (!isConnected) return;
-    if (cutsceneStartActive.empty()) return;
-    // MUST be actually in a cutscene locally. Late-joiners hydrate
-    // cutsceneStartActive from received FRAME_SYNC (v1.1 late-connect
-    // support), which would otherwise make them broadcast junk
-    // FRAME_SYNC with leaderFrame=0 leaderState=IDLE.
+    // ONLY the leader broadcasts. Definitive signal: ledger ownership.
+    // The ledger is populated only by CutsceneCatchup::Record* functions
+    // which are gated by IsLeader() && IsInCutscene() on the game thread;
+    // peers who hydrated `cutsceneStartActive` from received FRAME_SYNC
+    // do NOT populate the ledger. Using ledger presence keeps the send
+    // path immune to the previous "hydrated peer becomes phantom leader"
+    // bug that caused restart loops in field-test 621.
+    if (cutsceneCatchupLedger.empty()) return;
     if (gPlayState->csCtx.state == CS_STATE_IDLE) return;
     if (!::SceneAuthority::IsRoomHost(
             (int16_t)gPlayState->sceneNum,
             (int8_t)gPlayState->roomCtx.curRoom.num,
             (uint8_t)(gSaveContext.linkAge & 0x1))) {
-        return;  // only the leader broadcasts
+        return;  // belt-and-suspenders — room-host + ledger-owner
     }
 
     // Broadcast the leader's frame for the one active cutscene.
@@ -354,6 +357,19 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
 
     if (!csKind.empty()) {
         const std::string kindKey = csKind + ":" + std::to_string(csKey);
+
+        // IMPORTANT: if we own this cutscene's ledger entry, WE are the
+        // leader. Ignore incoming FRAME_SYNC for this kindKey — accepting
+        // it would drive us to request catchup from a phantom broadcaster
+        // (typically a late-joiner peer whose own SendPacket_CutsceneFrameSync
+        // slipped through their gates), which would then loop-restart our
+        // own cutscene when the phantom RESPONSE arrives. Ledger ownership
+        // is the definitive "I am the leader" signal.
+        const bool iAmLeader = cutsceneCatchupLedger.count(kindKey) > 0;
+        if (iAmLeader) {
+            return;
+        }
+
         if (cutsceneStartActive.count(kindKey) == 0) {
             cutsceneStartActive.insert(kindKey);
             SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC observed new kindKey='{}' — "
@@ -362,27 +378,27 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         }
 
         // Direct-request path for late-joiners. FRAME_SYNC receipt is
-        // itself proof the sender is mid-cutscene (only room-hosts
-        // broadcast, only while their csCtx.state != IDLE). Skip the
-        // clients-map scan (which requires csCtxState broadcast timing
-        // that may lag) and go straight to REQUEST if we don't already
-        // have one pending for this kindKey.
-        //
-        // Sender identity: the relay stamps the sender's clientId as
+        // itself proof the sender is mid-cutscene. Skip the clients-map
+        // scan and go straight to REQUEST if we don't already have one
+        // pending for this kindKey. Sender identity: relay stamps
         // `clientId` on incoming packets.
         const uint32_t senderClientId = payload.value("clientId", (uint32_t)0);
         const bool haveEnabled     = CutsceneCatchupEnabled();
         const bool alreadyPending  = pendingCatchups.count(kindKey) > 0;
         const bool selfBroadcast   = (senderClientId == ownClientId);
         const bool validSender     = (senderClientId != 0);
+        const bool alreadyInCs     = (gPlayState->csCtx.state != CS_STATE_IDLE);
         SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC gates — sender={} own={} "
                     "kindKey='{}' enabled={} alreadyPending={} selfBroadcast={} "
-                    "validSender={} — will{} fire",
+                    "validSender={} alreadyInCs={} — will{} fire",
                     senderClientId, ownClientId, kindKey,
                     haveEnabled, alreadyPending, selfBroadcast, validSender,
-                    (validSender && !selfBroadcast && !alreadyPending && haveEnabled)
+                    alreadyInCs,
+                    (validSender && !selfBroadcast && !alreadyPending &&
+                     haveEnabled && !alreadyInCs)
                         ? "" : " NOT");
-        if (validSender && !selfBroadcast && !alreadyPending && haveEnabled) {
+        if (validSender && !selfBroadcast && !alreadyPending && haveEnabled &&
+            !alreadyInCs) {
             PendingCatchup p;
             p.deadline = std::chrono::steady_clock::now()
                          + std::chrono::milliseconds(kCatchupTimeoutMs);
