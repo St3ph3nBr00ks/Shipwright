@@ -1647,6 +1647,20 @@ class Anchor : public Network {
     // test 622. 0 = not fast-forwarding.
     int32_t catchupFastForwardTarget = 0;
 
+    // Fix N + N.2 — leader's textbox + Link position stashed by
+    // ApplyCatchupDelta from the CUTSCENE_CATCHUP_RESPONSE payload.
+    // Consumed by TickCutsceneCatchup the moment fast-forward
+    // reaches target (csCtx.frames >= catchupFastForwardTarget).
+    // Peer opens the matching textbox (Message_StartTextbox) so
+    // vanilla's rewind mechanism holds it there instead of
+    // advancing past leader; peer's Link is teleported to leader's
+    // world position. See Analysis/cutscene_overshoot_and_teleport_
+    // 2026-07-08.md.
+    uint16_t catchupPendingMsgTextId = 0;
+    struct { float x, y, z; } catchupPendingPlayerPos = { 0.0f, 0.0f, 0.0f };
+    int16_t  catchupPendingPlayerYaw = 0;
+    bool     catchupPendingPlayerPosValid = false;
+
     // Heartbeat (#194 follow-up) — two-axis liveness signal.
     //
     // gameFrameCounter is incremented from OnGameFrameUpdate on the game

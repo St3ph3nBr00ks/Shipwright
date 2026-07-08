@@ -122,6 +122,18 @@ struct CutsceneCatchupEntry {
     MusicSnapshot                   music;
     CameraSnapshot                  camera;
     std::vector<ActorStateSnapshot> actors;
+
+    // Fix N + N.2 — leader's current message + Link state at the
+    // moment of snapshot. Peer applies these AFTER fast-forward
+    // completes to (a) open the same textbox leader is displaying
+    // and (b) place Link at leader's world position. Prevents
+    // the log-633 overshoot where peer's csCtx.frames advanced
+    // past leader's frame because the Fix L.2 msgLength=0 write
+    // suppressed vanilla's textbox rewind mechanism.
+    uint16_t leaderMsgTextId = 0;         // vanilla msgCtx.textId
+    struct { float x, y, z; } leaderPlayerPos = { 0.0f, 0.0f, 0.0f };
+    int16_t  leaderPlayerYaw = 0;         // shape.rot.y
+    bool     hasLeaderPlayerSnapshot = false;
 };
 
 // ---- Public API — Phase 2B (implementation in CutsceneCatchup.cpp) --

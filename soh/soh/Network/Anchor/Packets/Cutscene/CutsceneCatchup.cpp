@@ -170,6 +170,18 @@ nlohmann::json SerializeLedgerEntry(
     }
     out["actors"] = actors;
 
+    // Fix N + N.2 — leader's current message textId + Link world state.
+    // Peer applies these AFTER fast-forward completes to (a) open the
+    // matching textbox and (b) teleport Link to leader's pos. Absence
+    // of the fields (older-build leader) is handled by receiver-side
+    // defaults. See Analysis/cutscene_overshoot_and_teleport_2026-07-08.md.
+    out["leaderMsgTextId"] = (int)e.leaderMsgTextId;
+    if (e.hasLeaderPlayerSnapshot) {
+        out["leaderPlayerPos"] = nlohmann::json::array({
+            e.leaderPlayerPos.x, e.leaderPlayerPos.y, e.leaderPlayerPos.z });
+        out["leaderPlayerYaw"] = (int)e.leaderPlayerYaw;
+    }
+
     return out;
 }
 
@@ -301,6 +313,35 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     // D=hybrid). Option B chosen 2026-07-07 for natural coop UX.
     const int32_t leaderFrame = (int32_t)payload.value("leaderFrame",
                                                        (int32_t)0);
+    // Fix N + N.2 — extract leader's textbox + Link position from payload
+    // and stash on the Anchor instance so TickCutsceneCatchup can apply
+    // them the moment fast-forward completes. See Analysis/cutscene_
+    // overshoot_and_teleport_2026-07-08.md.
+    if (::Anchor::Instance != nullptr) {
+        ::Anchor::Instance->catchupPendingMsgTextId =
+            (uint16_t)payload.value("leaderMsgTextId", 0);
+        ::Anchor::Instance->catchupPendingPlayerPosValid = false;
+        if (payload.contains("leaderPlayerPos") &&
+            payload["leaderPlayerPos"].is_array() &&
+            payload["leaderPlayerPos"].size() == 3) {
+            const auto& p = payload["leaderPlayerPos"];
+            ::Anchor::Instance->catchupPendingPlayerPos.x =
+                (float)p[0].get<float>();
+            ::Anchor::Instance->catchupPendingPlayerPos.y =
+                (float)p[1].get<float>();
+            ::Anchor::Instance->catchupPendingPlayerPos.z =
+                (float)p[2].get<float>();
+            ::Anchor::Instance->catchupPendingPlayerYaw =
+                (int16_t)payload.value("leaderPlayerYaw", 0);
+            ::Anchor::Instance->catchupPendingPlayerPosValid = true;
+        }
+        SPDLOG_INFO("[CutsceneCatchup] Applied delta — leader textbox=0x{:04X} "
+                    "playerPos={} yaw={} (queued for post-fast-forward apply)",
+                    (unsigned)::Anchor::Instance->catchupPendingMsgTextId,
+                    ::Anchor::Instance->catchupPendingPlayerPosValid
+                        ? "yes" : "absent",
+                    (int)::Anchor::Instance->catchupPendingPlayerYaw);
+    }
     if (leaderFrame > 0 && ::Anchor::Instance != nullptr) {
         // Reset stale cutscene state before setting the fast-forward
         // target. csCtx.frames is a persistent PlayState field that
@@ -833,6 +874,49 @@ void Anchor::TickCutsceneCatchup() {
                         catchupFastForwardTarget);
             catchupFastForwardTarget = 0;
             sConsecutiveNoProgressFrames = 0;
+            // Fix N — restore leader's textbox on peer. Fast-forward's
+            // Fix L.2 msgLength=0 write suppresses vanilla's textbox
+            // rewind mechanism; without restoration, vanilla's normal
+            // tick after loop exit advances csCtx.frames past leader's
+            // target and opens the NEXT textbox naturally (log 633
+            // overshoot to textbox 0x1017). Message_StartTextbox
+            // reloads the text data, sets msgLength to non-zero, and
+            // primes vanilla's rewind check at csFrames >= endFrame.
+            // Peer now holds at leader's textbox until vote-skip
+            // advance fires.
+            if (catchupPendingMsgTextId != 0) {
+                Message_StartTextbox(gPlayState,
+                                     (u16)catchupPendingMsgTextId,
+                                     nullptr);
+                SPDLOG_INFO("[CutsceneCatchup] Fix N — opened leader's "
+                            "textbox 0x{:04X} on peer post-fast-forward",
+                            (unsigned)catchupPendingMsgTextId);
+                catchupPendingMsgTextId = 0;
+            }
+            // Fix N.2 — teleport peer's Link to leader's world position.
+            // Fast-forward's csCtx.frames advances 10x per real frame
+            // while Player_Update runs 1x per real frame, so Link's
+            // cutscene walk animation is truncated. Explicit teleport
+            // to leader's pos gets Link visually into the correct
+            // final position. Silent-fast-forward's design tradeoff:
+            // the walk animation itself is a brief blur.
+            if (catchupPendingPlayerPosValid) {
+                Player* peerLink = GET_PLAYER(gPlayState);
+                if (peerLink != nullptr) {
+                    peerLink->actor.world.pos.x = catchupPendingPlayerPos.x;
+                    peerLink->actor.world.pos.y = catchupPendingPlayerPos.y;
+                    peerLink->actor.world.pos.z = catchupPendingPlayerPos.z;
+                    peerLink->actor.shape.rot.y = catchupPendingPlayerYaw;
+                    SPDLOG_INFO("[CutsceneCatchup] Fix N.2 — teleported peer "
+                                "Link to leader pos=({:.0f},{:.0f},{:.0f}) "
+                                "yaw={}",
+                                catchupPendingPlayerPos.x,
+                                catchupPendingPlayerPos.y,
+                                catchupPendingPlayerPos.z,
+                                (int)catchupPendingPlayerYaw);
+                }
+                catchupPendingPlayerPosValid = false;
+            }
         } else if (ticksFired > 0 && framesAfter != framesBefore) {
             SPDLOG_INFO("[CutsceneCatchup] Fast-forward progress: frames={} / "
                         "target={} (ticked {}x this frame)",

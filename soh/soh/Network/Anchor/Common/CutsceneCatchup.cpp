@@ -290,6 +290,22 @@ void SnapshotCamera() {
     entry->camera.at      = cam->at;
     entry->camera.fov     = cam->fov;
     entry->camera.validAt = (int32_t)gPlayState->csCtx.frames;
+
+    // Fix N + N.2 — capture the message textId + Link's world state at
+    // the same 1 Hz cadence. Peer applies these post-fast-forward to
+    // stop at exactly leader's textbox + place Link at leader's pos.
+    // Cheap direct reads; no allocation. Ships in
+    // CUTSCENE_CATCHUP_RESPONSE. See Analysis/cutscene_overshoot_and_
+    // teleport_2026-07-08.md.
+    entry->leaderMsgTextId = (uint16_t)gPlayState->msgCtx.textId;
+    Player* leaderLink = GET_PLAYER(gPlayState);
+    if (leaderLink != nullptr) {
+        entry->leaderPlayerPos.x = leaderLink->actor.world.pos.x;
+        entry->leaderPlayerPos.y = leaderLink->actor.world.pos.y;
+        entry->leaderPlayerPos.z = leaderLink->actor.world.pos.z;
+        entry->leaderPlayerYaw   = leaderLink->actor.shape.rot.y;
+        entry->hasLeaderPlayerSnapshot = true;
+    }
 }
 
 // Actor snapshot — walks ACTORCAT_NPC / _PROP / _BOSS categories and
