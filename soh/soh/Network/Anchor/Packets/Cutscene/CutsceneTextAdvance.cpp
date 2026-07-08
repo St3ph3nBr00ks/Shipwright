@@ -157,16 +157,31 @@ size_t CountInSceneTeamSize() {
     return count;
 }
 
-// Fix E — file-scope cooldown state shared between TickCutsceneTextAdvance
-// (timer-elapsed path) and HandlePacket_CutsceneTextAdvance (all-pressed
-// path). Both forced-advance paths arm this so the open-edge branch in
-// the tick suppresses reopen for the same textId during vanilla's
-// message-pipeline teardown window. See Fix E comment block in
-// TickCutsceneTextAdvance for full rationale.
+// Fix E → J.b — file-scope suppression state shared between
+// TickCutsceneTextAdvance (timer-elapsed path) and
+// HandlePacket_CutsceneTextAdvance (all-pressed path). Both forced-
+// advance paths arm this so the open-edge branch in the tick
+// suppresses reopen for the same textId during vanilla's message-
+// pipeline teardown window.
+//
+// Fix E (superseded by J.b): pure-time cooldown of 750 ms. Log 630
+// showed vanilla msgMode stuck at 52 for >800 ms, causing the reopen
+// to fire just past the cooldown (Bug 4). See
+// Analysis/cutscene_savecontext_double_broadcast_2026-07-08.md Bug 4.
+//
+// Fix J.b: semantic-gate replacement. Suppression is lifted only when
+// vanilla's `msgCtx.msgMode` has reached `MSGMODE_NONE` at least once
+// since the forced advance was armed (the semantic signal that vanilla
+// has actually processed the advance and closed its textbox), OR when
+// `curTextId` differs from the advanced textId (a genuinely new
+// textbox). A safety-net timeout of 5 s catches pathological cases
+// where vanilla never returns to NONE — well beyond any legitimate
+// vanilla close window (~30-100 ms in normal cutscenes).
 uint16_t sLastForcedAdvanceTextId = 0;
+bool sLastForcedAdvanceMsgModeReachedNone = false;
 std::chrono::steady_clock::time_point sLastForcedAdvanceAt =
     std::chrono::steady_clock::time_point::min();
-constexpr int kForcedAdvanceCooldownMs = 750;
+constexpr int kForcedAdvanceMaxWaitMs = 5000;
 
 }  // namespace
 
@@ -298,10 +313,14 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
-        // Fix E — arm the reopen-cooldown (see file-scope declaration
-        // and TickCutsceneTextAdvance's Fix E block for rationale).
-        sLastForcedAdvanceTextId = textId;
-        sLastForcedAdvanceAt     = std::chrono::steady_clock::now();
+        // Fix E → J.b — arm the reopen-suppression (see file-scope
+        // declaration and TickCutsceneTextAdvance's Fix J.b block for
+        // rationale). Reset the msgMode-reached-NONE flag so the tick
+        // detects vanilla actually closing the textbox before allowing
+        // any reopen for the same textId.
+        sLastForcedAdvanceTextId              = textId;
+        sLastForcedAdvanceAt                  = std::chrono::steady_clock::now();
+        sLastForcedAdvanceMsgModeReachedNone  = false;
         LogVoteStateTransitionReason(
             "handle_all_pressed",
             /*priorActive=*/true, /*newActive=*/false, textId, textId);
@@ -400,29 +419,50 @@ void Anchor::TickCutsceneTextAdvance() {
          std::chrono::duration_cast<std::chrono::milliseconds>(
              now - sLastInTextStateTrueAt).count() < kInTextStateFalseDebounceMs);
 
-    // Fix E — post-advance reopen cooldown. When our timer-elapsed or
-    // all-pressed path fires an advance, vanilla takes ~60ms to consume
-    // the advance signal and several frames more to transition msgMode
-    // from DISPLAYING (53) through ADVANCING → CLOSING (54) → NONE (0).
-    // During that window, IsHostInCutsceneTextState() still returns true
-    // AND msgCtx.textId still holds the pre-advance textId — so the
-    // open-edge branch below would re-open state.active for the SAME
-    // textId we just advanced past, triggering a rapid on-off-on-off HUD
-    // flicker and (per log 628) an ImGui viewport-spawn that produces a
-    // second OS window.
+    // Fix E → J.b — post-advance reopen suppression. When the timer-
+    // elapsed or all-pressed path fires an advance, vanilla takes
+    // several frames to transition `msgMode` from DISPLAYING (53) /
+    // stuck sub-states (e.g. 52 in log 630) through ADVANCING → CLOSING
+    // (54) → NONE (0). During that window, IsHostInCutsceneTextState()
+    // still returns true AND msgCtx.textId still holds the pre-
+    // advance textId — so the open-edge branch below would re-open
+    // state.active for the SAME textId we just advanced past.
     //
-    // Cooldown state (sLastForcedAdvanceTextId / sLastForcedAdvanceAt)
-    // is file-scope so the all-pressed handler can arm it too. Suppress
-    // reopen for the SAME textId within kForcedAdvanceCooldownMs. A NEW
-    // textId (vanilla progressed to the next textbox) bypasses the
-    // cooldown so real progression stays responsive. See analysis
-    // Finding 1 + log 628.
+    // Fix E (pure 750 ms cooldown, superseded): worked for the common
+    // case but log 630 revealed vanilla stuck at msgMode=52 for
+    // ~800 ms, so the reopen fired just past cooldown (Bug 4).
+    //
+    // Fix J.b: gate reopen on vanilla's ACTUAL state, not wall-clock:
+    //   - Suppress while sLastForcedAdvanceTextId == curTextId AND
+    //     vanilla has NOT yet reached MSGMODE_NONE since the arm.
+    //   - Different curTextId (vanilla progressed to next textbox) →
+    //     suppression lifted immediately.
+    //   - Safety-net timeout of kForcedAdvanceMaxWaitMs guards against
+    //     a pathological vanilla state where msgMode never returns to
+    //     NONE — otherwise the HUD would be locked out forever.
+    //
+    // The msgMode-reached-NONE flag is updated every tick below.
+    if (gPlayState != nullptr &&
+        gPlayState->msgCtx.msgMode == MSGMODE_NONE &&
+        !sLastForcedAdvanceMsgModeReachedNone &&
+        sLastForcedAdvanceTextId != 0) {
+        sLastForcedAdvanceMsgModeReachedNone = true;
+        if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"), 0) != 0) {
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                now - sLastForcedAdvanceAt).count();
+            SPDLOG_INFO("[VoteState.diag] msgMode reached NONE {}ms after "
+                        "forced advance of textId=0x{:04X} — reopen "
+                        "suppression lifted",
+                        (long long)ms, (unsigned)sLastForcedAdvanceTextId);
+        }
+    }
     const bool inForcedAdvanceCooldown =
         sLastForcedAdvanceTextId == curTextId &&
         sLastForcedAdvanceTextId != 0 &&
+        !sLastForcedAdvanceMsgModeReachedNone &&
         sLastForcedAdvanceAt != std::chrono::steady_clock::time_point::min() &&
         std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - sLastForcedAdvanceAt).count() < kForcedAdvanceCooldownMs;
+            now - sLastForcedAdvanceAt).count() < kForcedAdvanceMaxWaitMs;
 
     if (inTextState && !inForcedAdvanceCooldown &&
         (!state.active || state.textId != curTextId)) {
@@ -481,11 +521,15 @@ void Anchor::TickCutsceneTextAdvance() {
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
-        // Fix E — arm the reopen-cooldown so the next few ticks don't
-        // re-open state.active for the same textId while vanilla's
-        // message pipeline is still tearing down the advanced textbox.
-        sLastForcedAdvanceTextId = clearedTextId;
-        sLastForcedAdvanceAt     = now;
+        // Fix E → J.b — arm the reopen-suppression so the next few
+        // ticks don't re-open state.active for the same textId while
+        // vanilla's message pipeline is still tearing down the
+        // advanced textbox. Reset the msgMode-reached-NONE flag so
+        // the tick detects vanilla actually closing the textbox
+        // before allowing any reopen for the same textId.
+        sLastForcedAdvanceTextId              = clearedTextId;
+        sLastForcedAdvanceAt                  = now;
+        sLastForcedAdvanceMsgModeReachedNone  = false;
         LogVoteStateTransitionReason(
             wasVoteTimer ? "tick_timer_elapsed_vote" : "tick_timer_elapsed_hard_deadline",
             /*priorActive=*/true, /*newActive=*/false, clearedTextId, clearedTextId);
