@@ -400,6 +400,97 @@ void Anchor::RegisterHooks() {
             sLastPauseState = curr;
         });
 
+    // HeldActor diagnostic (Analysis/rock_over_head_after_teleport_
+    // 2026-07-09.md §6.1). Per-frame poll of the local player's
+    // heldActor pointer. On any transition (NULL→X, X→Y, X→NULL), logs
+    // a rich SPDLOG describing prior/new attachment, player state, and
+    // interactRangeActor at the moment of change — enough to pinpoint
+    // WHICH mechanism (vanilla Player_LiftActor, DummyPlayer sync,
+    // scene reload, teleport, etc.) drove the write.
+    //
+    // Gated on gEnhancements.Anchor.HeldActorDiag (default 0). Enable
+    // via console: `set gEnhancements.Anchor.HeldActorDiag 1`. Fires
+    // one line per transition, not per frame — no log spam when steady.
+    //
+    // Unconditional hook registration (not COND_HOOK) so the CVar can be
+    // toggled at runtime without reconnecting. Cheap when disabled:
+    // one CVarGetInteger + one pointer compare + early-out.
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(
+        []() {
+            if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.HeldActorDiag"), 0) == 0) {
+                return;
+            }
+            if (gPlayState == nullptr) return;
+            Player* player = GET_PLAYER(gPlayState);
+            if (player == nullptr) return;
+
+            static Actor* sLastHeldActor = nullptr;
+            Actor* curHeldActor = player->heldActor;
+            if (curHeldActor == sLastHeldActor) {
+                return;  // no change
+            }
+
+            // Log the transition. Each actor gets its own SPDLOG_INFO
+            // line so we can print the fields directly via SPDLOG's
+            // fmtlib backend without pre-formatting to std::string.
+            // Emit player context first, then prior, then current.
+            const Vec3f pPos = player->actor.world.pos;
+            SPDLOG_INFO("[HeldActorDiag] TRANSITION player.pos=({:.0f},{:.0f},{:.0f}) "
+                        "stateFlags1=0x{:08X} stateFlags2=0x{:08X}",
+                        pPos.x, pPos.y, pPos.z,
+                        (unsigned)player->stateFlags1,
+                        (unsigned)player->stateFlags2);
+            if (sLastHeldActor == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   prior=NULL");
+            } else if (sLastHeldActor->update == nullptr &&
+                       sLastHeldActor->draw == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   prior=(stale?) ptr={}",
+                            (const void*)sLastHeldActor);
+            } else {
+                SPDLOG_INFO("[HeldActorDiag]   prior id=0x{:04X} cat={} params=0x{:04X} "
+                            "pos=({:.0f},{:.0f},{:.0f}) parent={}",
+                            (unsigned)sLastHeldActor->id,
+                            (int)sLastHeldActor->category,
+                            (unsigned)sLastHeldActor->params,
+                            sLastHeldActor->world.pos.x,
+                            sLastHeldActor->world.pos.y,
+                            sLastHeldActor->world.pos.z,
+                            (const void*)sLastHeldActor->parent);
+            }
+            if (curHeldActor == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   current=NULL");
+            } else if (curHeldActor->update == nullptr &&
+                       curHeldActor->draw == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   current=(stale?) ptr={}",
+                            (const void*)curHeldActor);
+            } else {
+                SPDLOG_INFO("[HeldActorDiag]   current id=0x{:04X} cat={} params=0x{:04X} "
+                            "pos=({:.0f},{:.0f},{:.0f}) parent={}",
+                            (unsigned)curHeldActor->id,
+                            (int)curHeldActor->category,
+                            (unsigned)curHeldActor->params,
+                            curHeldActor->world.pos.x,
+                            curHeldActor->world.pos.y,
+                            curHeldActor->world.pos.z,
+                            (const void*)curHeldActor->parent);
+            }
+            Actor* ira = player->interactRangeActor;
+            if (ira == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   interactRangeActor=NULL");
+            } else {
+                SPDLOG_INFO("[HeldActorDiag]   interactRangeActor id=0x{:04X} cat={} "
+                            "params=0x{:04X} pos=({:.0f},{:.0f},{:.0f})",
+                            (unsigned)ira->id,
+                            (int)ira->category,
+                            (unsigned)ira->params,
+                            ira->world.pos.x,
+                            ira->world.pos.y,
+                            ira->world.pos.z);
+            }
+
+            sLastHeldActor = curHeldActor;
+        });
+
     // Phase α.7+ — voice-pack game-thread polls (unconditional; work
     // offline + multiplayer). Both calls are cheap no-ops in the steady
     // state:
