@@ -1768,6 +1768,33 @@ class Anchor : public Network {
     std::chrono::steady_clock::time_point catchupLastReTargetRequestAt =
         std::chrono::steady_clock::time_point::min();
 
+    // Variant C.2 (2026-07-09) — deferred RESPONSE application when the
+    // peer's local room isn't yet fully loaded at RESPONSE-arrival time.
+    // Extends Variant C's teleport-only gate to cover the entire delta
+    // apply pipeline: music seek, per-kind setup, fast-forward arm.
+    //
+    // Without this deferral, the catchup pipeline engages ~100-300 ms
+    // after peer walks through a doorway into a room where a same-team
+    // peer is mid-cutscene. During that window vanilla's scene-transition
+    // fade-in is still in flight; the user sees the completed catchup
+    // state (camera at leader's cutscene view, Link teleported) rather
+    // than their own room-entrance view. Deferring to
+    // IsCurrentRoomFullyLoaded()+stability lets the transition visually
+    // complete before catchup engages.
+    //
+    // Payload is stored verbatim as JSON to survive the deferral window
+    // without requiring the pendingCatchups entry to hold it. Kind-key
+    // is captured so TickCutsceneCatchup can erase the pendingCatchups
+    // entry when the deferred apply fires.
+    //
+    // 2 s safety timeout matches ApplyDeferredTeleportIfReady semantics
+    // (better a stale-context apply than an infinite hang).
+    bool catchupDeltaDeferred = false;
+    nlohmann::json catchupDeltaDeferredPayload;
+    std::string catchupDeltaDeferredKindKey;
+    std::chrono::steady_clock::time_point catchupDeltaDeferredArmedAt =
+        std::chrono::steady_clock::time_point::min();
+
     // Fix O — cutscene-originator clientId per active kindKey.
     // Populated by SendPacket_CutsceneStart (self origin) and by
     // HandlePacket_CutsceneStart / FRAME_SYNC hydration (peer

@@ -796,6 +796,46 @@ void Anchor::HandlePacket_CutsceneCatchupResponse(nlohmann::json payload) {
         return;
     }
 
+    // Variant C.2 (2026-07-09) — defer the entire delta apply pipeline
+    // (music seek, per-kind setup, fast-forward arm, teleport queueing)
+    // when the peer's room isn't fully loaded yet.
+    //
+    // Rationale (log 651 review): OnSceneSpawnActors nominally fires
+    // AFTER func_800973FC completes room DMA, so IsCurrentRoomFullyLoaded
+    // is typically true at RESPONSE-arrival time. But belt-and-suspenders
+    // is warranted because:
+    //   (a) FRAME_SYNC-driven late-join REQUEST path can fire without
+    //       a preceding OnSceneSpawnActors edge (peer already in scene,
+    //       receives FRAME_SYNC from mid-cutscene leader).
+    //   (b) Cutscene_Command_TransitionFX case 24 (z_demo.c:380) nulls
+    //       curRoom.segment mid-cutscene; a re-target RESPONSE (Fix R
+    //       or safety net path) arriving in that window would apply
+    //       against a null-segment room.
+    //   (c) Peer's own room state may transiently be `status=1` if a
+    //       concurrent Play_ChangeSceneRoom is in flight.
+    //
+    // In the common case (log 651 pattern), this gate lifts within one
+    // game tick (elapsedMs=0 semantics). It only introduces a visible
+    // wait in the pathological cases the belt-and-suspenders targets.
+    //
+    // Latest-RESPONSE-wins: if a second RESPONSE arrives while we're
+    // still deferred, overwrite the payload (matches idempotent apply
+    // semantics — Fix R's re-target flow relies on this).
+    if (!AnchorSceneBridge::IsCurrentRoomFullyLoaded()) {
+        const auto now = std::chrono::steady_clock::now();
+        catchupDeltaDeferred            = true;
+        catchupDeltaDeferredPayload     = payload;
+        catchupDeltaDeferredKindKey     = kindKey;
+        catchupDeltaDeferredArmedAt     = now;
+        SPDLOG_INFO("[CutsceneCatchup] Variant C.2 — RESPONSE for '{}' "
+                    "deferred until peer's room is fully loaded "
+                    "(status={} segment={})",
+                    kindKey,
+                    (int)gPlayState->roomCtx.status,
+                    (const void*)gPlayState->roomCtx.curRoom.segment);
+        return;
+    }
+
     SPDLOG_INFO("[CutsceneCatchup] RESPONSE received for '{}' — applying delta",
                 kindKey);
     ApplyCatchupDelta(payload);
@@ -892,6 +932,45 @@ void Anchor::TickCutsceneCatchup() {
     // implementation. Each corresponds to one concern of this tick.
     ApplyDeferredTeleportIfReady(now);
     UpdateLeaderChainDepthTracker();
+
+    // Variant C.2 (2026-07-09) — apply a deferred RESPONSE delta once
+    // the peer's room is fully loaded. Ordering intent:
+    //
+    //   1. This block runs BEFORE the fast-forward loop below, so a
+    //      RESPONSE that arrives on the same tick as the room becoming
+    //      ready applies + arms fast-forward all in this tick — no
+    //      wasted frame.
+    //   2. After apply, pendingCatchups is erased for this kindKey so
+    //      the deadline-enforcement loop below doesn't drop it.
+    //   3. 2 s safety timeout mirrors ApplyDeferredTeleportIfReady:
+    //      better a stale-context apply than an infinite hang if the
+    //      room load pathologically never completes.
+    //
+    // See Analysis/peer_room_load_vs_cutscene_catchup_2026-07-09.md.
+    if (catchupDeltaDeferred) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - catchupDeltaDeferredArmedAt).count();
+        const bool roomReady = AnchorSceneBridge::IsCurrentRoomFullyLoaded();
+        const bool safetyExpired = ms > 2000;
+        if (roomReady || safetyExpired) {
+            const std::string kindKey = catchupDeltaDeferredKindKey;
+            nlohmann::json payload = catchupDeltaDeferredPayload;
+            // Clear state BEFORE apply so any nested writes don't
+            // re-trigger this branch on the same tick.
+            catchupDeltaDeferred = false;
+            catchupDeltaDeferredPayload = nlohmann::json{};
+            catchupDeltaDeferredKindKey.clear();
+            catchupDeltaDeferredArmedAt =
+                std::chrono::steady_clock::time_point::min();
+            SPDLOG_INFO("[CutsceneCatchup] Variant C.2 — applying deferred "
+                        "RESPONSE for '{}' (roomReady={} safetyExpired={} "
+                        "elapsedMs={})",
+                        kindKey, (int)roomReady, (int)safetyExpired,
+                        (long long)ms);
+            ApplyCatchupDelta(payload);
+            pendingCatchups.erase(kindKey);
+        }
+    }
 
     // Leader side — 1Hz FRAME_SYNC emit + snapshot refresh.
     if (!cutsceneStartActive.empty()) {
