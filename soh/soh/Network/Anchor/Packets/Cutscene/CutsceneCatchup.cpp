@@ -1,5 +1,6 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Bridge/AnchorMessageBridge.h"
+#include "soh/Network/Anchor/Bridge/AnchorSceneBridge.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/Common/CutsceneCatchup.h"
@@ -94,10 +95,25 @@ void ApplyDeferredTeleportIfReady(std::chrono::steady_clock::time_point now) {
     const int8_t curRoom = (int8_t)gPlayState->roomCtx.curRoom.num;
     const bool roomMatches = (anchor->catchupPendingRoomSwitchTarget < 0) ||
                              (curRoom == anchor->catchupPendingRoomSwitchTarget);
+    // Variant C (2026-07-09) — require the room to be BOTH matched AND
+    // fully loaded before applying the teleport. `curRoom.num`
+    // transitions synchronously at func_8009728C call time (z_room.c:589)
+    // — well before the DMA completes and `curRoom.segment` is set by
+    // func_800973FC. Reading roomMatches alone would fire the teleport
+    // on the very next frame, potentially placing Link inside a room
+    // whose mesh pointer is still null. Downstream Player_Update /
+    // BgCheck reads then hit either a stale prior-room floor (wrong Y)
+    // or no floor (void-out fall state). See
+    // Analysis/peer_room_load_vs_cutscene_catchup_2026-07-09.md §4 R1/R2.
+    //
+    // The safetyExpired branch is retained unchanged so pathological
+    // load-hang cases still resolve — better a mis-teleport than an
+    // infinite hang.
+    const bool roomReady = AnchorSceneBridge::IsCurrentRoomFullyLoaded();
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now - sDeferredArmedAt).count();
     const bool safetyExpired = ms > 2000;
-    if (!(roomMatches || safetyExpired)) return;
+    if (!((roomMatches && roomReady) || safetyExpired)) return;
 
     Player* peerLink = GET_PLAYER(gPlayState);
     if (peerLink != nullptr) {
@@ -108,14 +124,15 @@ void ApplyDeferredTeleportIfReady(std::chrono::steady_clock::time_point now) {
         SPDLOG_INFO("[CutsceneCatchup] Bug 13 fix — applied deferred "
                     "teleport to ({:.0f},{:.0f},{:.0f}) yaw={} after "
                     "room load (curRoom={} target={} matches={} "
-                    "safetyExpired={} elapsedMs={})",
+                    "roomReady={} safetyExpired={} elapsedMs={})",
                     anchor->catchupDeferredTeleportPos.x,
                     anchor->catchupDeferredTeleportPos.y,
                     anchor->catchupDeferredTeleportPos.z,
                     (int)anchor->catchupDeferredTeleportYaw,
                     (int)curRoom,
                     (int)anchor->catchupPendingRoomSwitchTarget,
-                    (int)roomMatches, (int)safetyExpired,
+                    (int)roomMatches, (int)roomReady,
+                    (int)safetyExpired,
                     (long long)ms);
     }
     anchor->catchupDeferredTeleportValid = false;
@@ -1112,6 +1129,43 @@ void Anchor::TickCutsceneCatchup() {
                     catchupDeferredTeleportYaw =
                         catchupPendingPlayerYaw;
                     catchupDeferredTeleportValid = true;
+                } else if (!AnchorSceneBridge::IsCurrentRoomFullyLoaded()) {
+                    // Variant C (2026-07-09) — room number matches but
+                    // the mesh isn't live yet. Two ways this happens:
+                    //   (a) mid-DMA state (rare — post-fast-forward the
+                    //       load should be complete, but defense-in-depth).
+                    //   (b) Cutscene_Command_TransitionFX case 24 nulled
+                    //       curRoom.segment during fast-forward
+                    //       (z_demo.c:380). Segment stays null until a
+                    //       later cutscene script command restores it.
+                    // Route through the deferred-teleport path so
+                    // ApplyDeferredTeleportIfReady's per-tick gate can
+                    // apply once the segment is live (or the 2 s safety
+                    // fires). See Analysis §4 R4.
+                    catchupPendingRoomSwitchTarget = -1;  // no room-load
+                                                          // needed — num
+                                                          // already matches
+                    catchupDeferredTeleportPos.x =
+                        catchupPendingPlayerPos.x;
+                    catchupDeferredTeleportPos.y =
+                        catchupPendingPlayerPos.y;
+                    catchupDeferredTeleportPos.z =
+                        catchupPendingPlayerPos.z;
+                    catchupDeferredTeleportYaw =
+                        catchupPendingPlayerYaw;
+                    catchupDeferredTeleportValid = true;
+                    SPDLOG_INFO("[CutsceneCatchup] Variant C — curRoom={} "
+                                "matches leaderRoomNum={} but mesh not live "
+                                "(status={} segment={}); deferring teleport "
+                                "to ({:.0f},{:.0f},{:.0f}) yaw={}",
+                                (int)curRoom,
+                                (int)catchupPendingRoomNum,
+                                (int)gPlayState->roomCtx.status,
+                                (const void*)gPlayState->roomCtx.curRoom.segment,
+                                catchupPendingPlayerPos.x,
+                                catchupPendingPlayerPos.y,
+                                catchupPendingPlayerPos.z,
+                                (int)catchupPendingPlayerYaw);
                 } else {
                     Player* peerLink = GET_PLAYER(gPlayState);
                     if (peerLink != nullptr) {
@@ -1122,7 +1176,7 @@ void Anchor::TickCutsceneCatchup() {
                         SPDLOG_INFO("[CutsceneCatchup] Fix N.2 — teleported "
                                     "peer Link to leader pos=({:.0f},{:.0f},"
                                     "{:.0f}) yaw={} (curRoom={} matches "
-                                    "leaderRoomNum={})",
+                                    "leaderRoomNum={}, mesh live)",
                                     catchupPendingPlayerPos.x,
                                     catchupPendingPlayerPos.y,
                                     catchupPendingPlayerPos.z,
