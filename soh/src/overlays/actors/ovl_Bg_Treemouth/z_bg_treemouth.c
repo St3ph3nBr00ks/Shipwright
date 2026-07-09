@@ -298,13 +298,20 @@ int BgTreemouth_ForceIntroCutscene(PlayState* play) {
     while (actor != NULL) {
         if (actor->id == ACTOR_BG_TREEMOUTH) {
             this = (BgTreemouth*)actor;
-            // Set the flag first — vanilla path does this on the
-            // triggering client via Flags_SetEventChkInf just before
-            // the segment write. If the SET_FLAG sync already
-            // propagated it, this is a no-op; either way peer's
-            // local branch matches vanilla.
-            Flags_SetEventChkInf(EVENTCHKINF_MET_DEKU_TREE);
-            play->csCtx.segment = D_808BCE20;
+            // Flag-aware segment selection — mirror vanilla
+            // func_808BC8B8's dispatch table: come-back variant
+            // (D_808BD2A0) once EVENTCHKINF_MET_DEKU_TREE is set,
+            // otherwise the first-encounter variant (D_808BCE20).
+            // See Claude/Analysis/deku_tree_come_back_desync_2026-07-09.md
+            // §5 Fix A for full root-cause + dispatch table.
+            if (Flags_GetEventChkInf(EVENTCHKINF_MET_DEKU_TREE)) {
+                play->csCtx.segment = D_808BD2A0;
+            } else {
+                // First-encounter variant. Set the flag first —
+                // vanilla parity with func_808BC8B8 line 163.
+                Flags_SetEventChkInf(EVENTCHKINF_MET_DEKU_TREE);
+                play->csCtx.segment = D_808BCE20;
+            }
             gSaveContext.cutsceneTrigger = 1;
             BgTreemouth_SetupAction(this, func_808BC9EC);
             return 1;
