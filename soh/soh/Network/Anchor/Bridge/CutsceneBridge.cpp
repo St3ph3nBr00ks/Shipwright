@@ -100,9 +100,12 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
     // Edge case: matched broadcast for a previous textId stays
     // consumed when we move to a new textId — the new textId's
     // vote count starts fresh.
-    if (Anchor::Instance->cutsceneTextAdvanceConsumed &&
+    // Design E v5 — consumed-count decrement on return-1 path.
+    // Replaces the earlier boolean flag which lost broadcasts on
+    // back-to-back arrivals (log 646).
+    if (Anchor::Instance->cutsceneTextAdvancePendingCount > 0 &&
         Anchor::Instance->cutsceneTextAdvanceConsumedTextId == (uint16_t)currentTextId) {
-        Anchor::Instance->cutsceneTextAdvanceConsumed = false;
+        Anchor::Instance->cutsceneTextAdvancePendingCount--;
         // Design E v4 — shadow update on the consumed-flag return-1
         // path. Vanilla's AWAIT_NEXT case will do msgBufPos++ after
         // this return. Capture the post-++ value now. Defense-in-
@@ -118,16 +121,18 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
         }
         if (diagEnabled) {
             SPDLOG_INFO("[CutsceneBridge.diag] textId=0x{:04X} advance-broadcast "
-                        "consumed → local advance",
-                        (unsigned)currentTextId);
+                        "consumed → local advance (pending remaining={})",
+                        (unsigned)currentTextId,
+                        (int)Anchor::Instance->cutsceneTextAdvancePendingCount);
         }
         s_diagLastPressed = wasLocalPressDetected;
         return 1;
     }
-    if (Anchor::Instance->cutsceneTextAdvanceConsumed &&
+    // Stale-textId drop: pending count is for a prior textbox we've
+    // already moved past. Reset so it doesn't confuse the next open.
+    if (Anchor::Instance->cutsceneTextAdvancePendingCount > 0 &&
         Anchor::Instance->cutsceneTextAdvanceConsumedTextId != (uint16_t)currentTextId) {
-        // Stale broadcast for a different textbox — drop.
-        Anchor::Instance->cutsceneTextAdvanceConsumed = false;
+        Anchor::Instance->cutsceneTextAdvancePendingCount = 0;
     }
 
     // Multi-player dialogue redesign (#191 follow-up) —

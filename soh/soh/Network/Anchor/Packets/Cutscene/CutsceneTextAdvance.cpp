@@ -70,6 +70,32 @@ int GetCutsceneHardDeadlineMs() {
                           kDefaultHardDeadlineMs);
 }
 
+// Design E v5 helper — record a pending advance for a given textId.
+// If textId matches the current pending textId, increment the count
+// (clamped at 255 to prevent overflow). If it differs, reset count
+// to 1 and switch to the new textId (the prior count was stale —
+// msgMode has moved on). Called from every setter site: HandlePacket_
+// CutsceneTextAdvance all-pressed, HandlePacket_CutsceneTextAdvanced
+// (peer receive), TickCutsceneTextAdvance hard-deadline. See
+// Anchor.h cutsceneTextAdvancePendingCount doc for full rationale.
+void RecordPendingAdvance(uint16_t textId, const char* siteTag) {
+    if (Anchor::Instance == nullptr) return;
+    auto* anchor = Anchor::Instance;
+    if (anchor->cutsceneTextAdvanceConsumedTextId == textId &&
+        anchor->cutsceneTextAdvancePendingCount > 0) {
+        if (anchor->cutsceneTextAdvancePendingCount < 255) {
+            anchor->cutsceneTextAdvancePendingCount++;
+        }
+    } else {
+        anchor->cutsceneTextAdvancePendingCount = 1;
+        anchor->cutsceneTextAdvanceConsumedTextId = textId;
+    }
+    SPDLOG_INFO("[CutsceneTextAdvance] Design E v5 — pending advance "
+                "recorded ({}) for textId=0x{:04X} count={}",
+                siteTag, (unsigned)textId,
+                (int)anchor->cutsceneTextAdvancePendingCount);
+}
+
 // Fix S / Fix T helper — replicate vanilla's AWAIT_NEXT sub-textbox
 // advance transition directly. Called from top-of-tick (Fix S: catches
 // flags set from network-thread packet handlers) and inline from the
@@ -105,22 +131,26 @@ int GetCutsceneHardDeadlineMs() {
 // ordering, no torn writes to msgCtx.
 //
 // Idempotent — msgMode moves out of AWAIT_NEXT after the first fire.
-// The clear of cutsceneTextAdvanceConsumed is what makes the helper
+// The decrement of cutsceneTextAdvancePendingCount is what makes the helper
 // safe to call at multiple sites within the same tick; subsequent
 // calls no-op on the same broadcast.
 void ApplyForcedSubTextAdvanceIfInAwaitNext(const char* siteTag) {
     if (gPlayState == nullptr) return;
     auto* anchor = Anchor::Instance;
     if (anchor == nullptr) return;
-    if (!anchor->cutsceneTextAdvanceConsumed) return;
+    // Design E v5 — check pending count instead of boolean flag. See
+    // Anchor.h cutsceneTextAdvancePendingCount doc.
+    if (anchor->cutsceneTextAdvancePendingCount == 0) return;
     if ((uint16_t)gPlayState->msgCtx.textId !=
             anchor->cutsceneTextAdvanceConsumedTextId) return;
     if (gPlayState->msgCtx.msgMode != MSGMODE_TEXT_AWAIT_NEXT) return;
     SPDLOG_INFO("[CutsceneTextAdvance] Fix S/T ({}) — force AWAIT_NEXT→"
-                "NEXT_MSG for textId=0x{:04X} msgBufPos={}",
+                "NEXT_MSG for textId=0x{:04X} msgBufPos={} (pending "
+                "remaining after decrement={})",
                 siteTag,
                 (unsigned)gPlayState->msgCtx.textId,
-                (int)gPlayState->msgCtx.msgBufPos);
+                (int)gPlayState->msgCtx.msgBufPos,
+                (int)(anchor->cutsceneTextAdvancePendingCount - 1));
     gPlayState->msgCtx.msgMode = MSGMODE_TEXT_NEXT_MSG;
     gPlayState->msgCtx.textUnskippable = false;
     gPlayState->msgCtx.msgBufPos++;
@@ -131,7 +161,8 @@ void ApplyForcedSubTextAdvanceIfInAwaitNext(const char* siteTag) {
     // leaderMsgBufPosLastSubStart doc for full rationale.
     anchor->leaderMsgBufPosLastSubStart =
         (uint16_t)gPlayState->msgCtx.msgBufPos;
-    anchor->cutsceneTextAdvanceConsumed = false;
+    // Design E v5 — decrement pending count (consumer semantics).
+    anchor->cutsceneTextAdvancePendingCount--;
 }
 
 // True when the local client is in a cutscene text state — the
@@ -451,8 +482,8 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
         // advance). Eliminates the visible-race window where peers'
         // HUD stayed shown across the advance because the state clear
         // arrived after ADVANCED.
-        cutsceneTextAdvanceConsumed = true;
-        cutsceneTextAdvanceConsumedTextId = textId;
+        // Design E v5 — increment pending count (was: bool flag).
+        RecordPendingAdvance(textId, "handle_all_pressed");
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
@@ -487,8 +518,13 @@ void Anchor::HandlePacket_CutsceneTextAdvanced(nlohmann::json payload) {
 
     const bool priorActive = cutsceneTextAdvanceState.active;
     const uint16_t priorTextId = cutsceneTextAdvanceState.textId;
-    cutsceneTextAdvanceConsumed = true;
-    cutsceneTextAdvanceConsumedTextId = textId;
+    // Design E v5 — increment pending count (was: bool flag).
+    // Counter semantics prevent broadcast-collision: log 646 P2
+    // showed 5 back-to-back broadcasts collapse into 3 advances
+    // because setting the boolean flag was idempotent when peer's
+    // msgMode was still DISPLAYING → the "extra" flag writes were
+    // lost.
+    RecordPendingAdvance(textId, "peer_recv_advanced");
 
     // Belt-and-suspenders — clear the local vote-state mirror so the
     // HUD hides immediately when the advance fires. The host's send
@@ -670,8 +706,10 @@ void Anchor::TickCutsceneTextAdvance() {
         // instead of one packet-arrival later.
         uint16_t clearedTextId = state.textId;
         const bool wasVoteTimer = state.countdownStarted;
-        cutsceneTextAdvanceConsumed = true;
-        cutsceneTextAdvanceConsumedTextId = state.textId;
+        // Design E v5 — increment pending count (was: bool flag).
+        RecordPendingAdvance(clearedTextId,
+                             wasVoteTimer ? "hard_deadline_vote_tick"
+                                          : "hard_deadline_timer_tick");
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;

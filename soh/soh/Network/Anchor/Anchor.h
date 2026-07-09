@@ -1563,11 +1563,37 @@ class Anchor : public Network {
     // Also resets state on textId-edge (new textbox).
     void TickCutsceneTextAdvance();
 
-    // Receive-side flag — set by HandlePacket_CutsceneTextAdvanced,
-    // consumed by Anchor_ShouldAdvanceCutsceneTextLocal in z_message_PAL.c
-    // hook. Refreshes per textId so multi-page cutscenes don't double-
-    // consume the same advance signal.
-    bool     cutsceneTextAdvanceConsumed = false;
+    // Design E v5 — counter-based pending advances for cutscene
+    // textbox chain. Replaces the earlier boolean
+    // `cutsceneTextAdvanceConsumed` flag which lost broadcasts when
+    // back-to-back TEXT_ADVANCED packets arrived faster than the
+    // consumers (Fix S/T helper OR CutsceneBridge in AWAIT_NEXT case)
+    // could process them. Log 646 P2 showed 5 broadcasts collapse
+    // into only 3 advances because 2 broadcasts arrived while peer's
+    // msgMode was DISPLAYING (rendering) → flag re-set to true
+    // (no-op — was already true) → still only ONE advance when peer
+    // finally reached AWAIT_NEXT again.
+    //
+    // Semantics with counter:
+    //   Setter sites (HandlePacket_CutsceneTextAdvanced peer receive,
+    //   HandlePacket_CutsceneTextAdvance all-pressed, TickCutsceneText-
+    //   Advance hard-deadline):
+    //     - if textId matches cutsceneTextAdvanceConsumedTextId: count++
+    //     - else: reset count to 1 and update textId (stale count for
+    //       old textId is dropped — msgMode has moved on)
+    //     - clamp at UINT8_MAX (255) to prevent overflow; in practice
+    //       count rarely exceeds 3-5.
+    //
+    //   Consumer sites (Fix S/T helper's ApplyForcedSubTextAdvance-
+    //   IfInAwaitNext, CutsceneBridge consumed-flag return-1 path):
+    //     - when count > 0 AND textId matches: count--, treat as
+    //       "advance fired."
+    //
+    //   Stale-textId drop (CutsceneBridge line ~127-130):
+    //     - when count > 0 AND textId does NOT match current: reset
+    //       count to 0. The mismatched flag was for a prior textbox
+    //       already advanced past.
+    uint8_t  cutsceneTextAdvancePendingCount = 0;
     uint16_t cutsceneTextAdvanceConsumedTextId = 0;
 
     // CUTSCENE_START / CUTSCENE_END edge-detector state. Tracks
