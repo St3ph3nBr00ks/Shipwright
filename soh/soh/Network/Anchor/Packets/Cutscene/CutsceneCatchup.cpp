@@ -635,7 +635,15 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         // second FRAME_SYNC-driven REQUEST would trigger a duplicate
         // RESPONSE from the leader and re-populate pendingCatchups,
         // which caused the safety-net race in log 631 (Bug K).
-        const bool alreadyCatchingUp = (catchupFastForwardTarget > 0);
+        //
+        // Variant C.2.1 (2026-07-09) extension — also treat deferred-
+        // delta and deferred-teleport states as "catching up". Log 652
+        // showed spurious REQUESTs firing during these windows even
+        // though a catchup was clearly in progress.
+        const bool alreadyCatchingUp =
+            (catchupFastForwardTarget > 0) ||
+            catchupDeltaDeferred ||
+            catchupDeferredTeleportValid;
         SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC gates — sender={} own={} "
                     "kindKey='{}' enabled={} alreadyPending={} selfBroadcast={} "
                     "validSender={} alreadyInCs={} alreadyCatchingUp={} — will{} fire",
@@ -864,6 +872,45 @@ void Anchor::DetectAndRequestCutsceneCatchup() {
     if (!isConnected) return;
     if (gPlayState == nullptr) return;
     if (!IsSaveLoaded()) return;
+
+    // Variant C.2.1 (2026-07-09) — "already engaged" gate.
+    //
+    // Mirror of the FRAME_SYNC direct-request path's alreadyCatchingUp +
+    // alreadyInCs gates (HandlePacket_CutsceneFrameSync above). Without
+    // these here, cutscene-driven Cutscene_Command_ChangeRoom fired
+    // during peer's fast-forward triggers a fresh OnSceneSpawnActors
+    // edge → DetectAndRequestCutsceneCatchup fires → fresh REQUEST →
+    // fresh RESPONSE → fresh fast-forward → more cutscene commands.
+    //
+    // Log 652 pattern: peer walked into room 1 at 17.358 (REQUEST #1);
+    // fast-forward #1's ChangeRoom re-triggered SceneSpawnActors at
+    // 17.768 (REQUEST #2); Bug 13 room-load's ChangeRoom re-triggered
+    // again at 18.578 (REQUEST #3). Each RESPONSE armed a new fast-
+    // forward whose cutscene commands could null curRoom.segment
+    // (Cutscene_Command_TransitionFX case 24 in z_demo.c:380) AFTER
+    // Fix N.2 teleported Link into room 1 — user-visible "missing
+    // geometry after teleport".
+    //
+    // Gate covers all in-flight catchup states:
+    //   - catchupFastForwardTarget > 0: fast-forward loop is driving
+    //     the local cutscene from RESPONSE-armed target.
+    //   - catchupDeltaDeferred: RESPONSE arrived but is waiting for
+    //     roomReady before applying (Variant C.2).
+    //   - catchupDeferredTeleportValid: Bug 13 fix has queued a
+    //     post-fast-forward teleport pending room load (Variant C).
+    //   - pendingCatchups non-empty: REQUEST already sent, RESPONSE
+    //     not yet received (covered by the per-kindKey check below
+    //     too; belt-and-suspenders here).
+    //   - Play_InCsMode: peer is already locally in a cutscene state
+    //     (catchup would replay commands the local cutscene is
+    //     already running).
+    if (catchupFastForwardTarget > 0 ||
+        catchupDeltaDeferred ||
+        catchupDeferredTeleportValid ||
+        !pendingCatchups.empty() ||
+        Play_InCsMode(gPlayState)) {
+        return;
+    }
 
     const int16_t   myScene    = (int16_t)gPlayState->sceneNum;
     const uint8_t   myTimeline = (uint8_t)(gSaveContext.linkAge & 0x1);
