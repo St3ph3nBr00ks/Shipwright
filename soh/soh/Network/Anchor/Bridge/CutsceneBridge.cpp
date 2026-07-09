@@ -15,6 +15,7 @@
 // keeps the scope tighter.
 
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Bridge/AnchorMessageBridge.h"
 #include "soh/cvar_prefixes.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
@@ -26,9 +27,99 @@
 
 extern "C" {
 #include "z64.h"
+#include "functions.h"  // Message_GetState
 extern PlayState* gPlayState;
 extern SaveContext gSaveContext;
 }
+
+namespace {
+
+// Choice-vote branch (2026-07-09) — invoked at TOP of
+// Anchor_ShouldAdvanceCutsceneTextLocal when Message_GetState returns
+// TEXT_STATE_CHOICE. Handles all choice-textbox advance decisions
+// separately from the yes/no vote-skip logic below.
+//
+// Return values match the outer function:
+//   1 — local message system advances THIS frame (msgCtx.choiceIndex
+//       has been set to the winning value if applicable).
+//   0 — local press was captured as a vote (or peer is waiting for
+//       vote resolution). Do not advance.
+//
+// See Analysis/dialog_choice_vote_design_v2_2026-07-09.md §5 for the
+// decision tree.
+int HandleChoiceVoteAdvance(int wasLocalPressDetected,
+                             unsigned currentTextId) {
+    auto* anchor = Anchor::Instance;
+    if (anchor == nullptr) return wasLocalPressDetected ? 1 : 0;
+
+    const uint16_t textId = (uint16_t)currentTextId;
+
+    // (A) Late-join catchup replay: if the leader already resolved this
+    // textId's choice and shipped it in the catchup delta, apply
+    // immediately.
+    auto lateJoinIt = anchor->dialogChoiceLateJoinResolutions.find(textId);
+    if (lateJoinIt != anchor->dialogChoiceLateJoinResolutions.end()) {
+        AnchorMessageBridge::SetChoiceIndex(lateJoinIt->second);
+        SPDLOG_INFO("[DialogChoiceVote] Late-join replay: textId=0x{:04X} "
+                    "winner={} (from catchup ledger)",
+                    (unsigned)textId, (int)lateJoinIt->second);
+        anchor->dialogChoiceLateJoinResolutions.erase(lateJoinIt);
+        return 1;
+    }
+
+    // (B) Solo mode — no same-scene team peers to vote with, so
+    // vanilla behavior: local A press advances immediately.
+    // Same predicate as vote-skip's peer detection (checking same-
+    // scene same-timeline same-team peer count).
+    bool hasPeer = false;
+    if (gPlayState != nullptr) {
+        int16_t myScene = (int16_t)gPlayState->sceneNum;
+        uint8_t myTimeline = (uint8_t)(gSaveContext.linkAge & 0x1);
+        std::string myTeamId =
+            CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+        for (auto& [cid, client] : anchor->clients) {
+            if (client.self) continue;
+            if (!client.online) continue;
+            if (!client.isSaveLoaded) continue;
+            if (client.sceneNum != myScene) continue;
+            if ((uint8_t)(client.linkAge & 0x1) != myTimeline) continue;
+            if (client.teamId != myTeamId) continue;
+            hasPeer = true;
+            break;
+        }
+    }
+    if (!hasPeer) {
+        return wasLocalPressDetected ? 1 : 0;
+    }
+
+    // (C) Pending-apply from resolution broadcast — advance now.
+    if (anchor->dialogChoicePendingApplyTextId == textId) {
+        AnchorMessageBridge::SetChoiceIndex(
+            anchor->dialogChoicePendingApplyChoiceIndex);
+        SPDLOG_INFO("[DialogChoiceVote] Pending-apply consumed: textId=0x{:04X} "
+                    "winner={}",
+                    (unsigned)textId,
+                    (int)anchor->dialogChoicePendingApplyChoiceIndex);
+        anchor->dialogChoicePendingApplyTextId = 0;
+        anchor->dialogChoicePendingApplyChoiceIndex = 0;
+        return 1;
+    }
+
+    // (D) Local A press → send vote.
+    if (wasLocalPressDetected) {
+        const uint8_t localChoice = AnchorMessageBridge::GetChoiceIndex();
+        const uint8_t numChoices  = AnchorMessageBridge::GetChoiceNumOptions();
+        if (numChoices >= 2) {
+            anchor->SendPacket_DialogChoiceVote(textId, localChoice,
+                                                 numChoices);
+        }
+    }
+
+    // (E) Waiting for vote resolution — do not advance.
+    return 0;
+}
+
+}  // namespace
 
 // #191 — Anchor-aware override for Message_ShouldAdvance during a
 // cutscene-internal textbox. C-callable from z_message_PAL.c.
@@ -95,6 +186,18 @@ extern "C" int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected,
     }
     // s_diagLastPressed used below at return points — track across the
     // rest of the function.
+
+    // Choice-vote branch (2026-07-09) — takes priority over the
+    // yes/no advance-skip logic below when the local message system is
+    // at TEXT_STATE_CHOICE. Per §2.1 audit, all NPC + cutscene choice
+    // paths route through Message_ShouldAdvance/Silent, so this
+    // single-branch insertion covers all choice-textbox advance
+    // decisions.
+    if (gPlayState != nullptr &&
+        Message_GetState(&gPlayState->msgCtx) == TEXT_STATE_CHOICE) {
+        s_diagLastPressed = wasLocalPressDetected;
+        return HandleChoiceVoteAdvance(wasLocalPressDetected, currentTextId);
+    }
 
     // Consume the broadcast flag if it matches the current textbox.
     // Edge case: matched broadcast for a previous textId stays

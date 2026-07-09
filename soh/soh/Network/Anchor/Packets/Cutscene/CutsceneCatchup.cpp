@@ -433,6 +433,20 @@ nlohmann::json SerializeLedgerEntry(
     // by Design E — see Common/CutsceneCatchup.h comment.
     out["leaderMsgChainDepth"] = 0;
 
+    // Dialog-choice resolutions for late-join replay (2026-07-09,
+    // feature/dialog-choice-vote). See
+    // Analysis/dialog_choice_vote_design_v2_2026-07-09.md §5.3.
+    // Optional field — older leader builds omit it; older peer
+    // builds ignore it via payload.value default.
+    nlohmann::json choiceResolutions = nlohmann::json::array();
+    for (const auto& r : e.dialogChoiceResolutions) {
+        nlohmann::json entry;
+        entry["textId"]             = (int)r.textId;
+        entry["winningChoiceIndex"] = (int)r.winningChoiceIndex;
+        choiceResolutions.push_back(entry);
+    }
+    out["dialogChoiceResolutions"] = choiceResolutions;
+
     return out;
 }
 
@@ -602,6 +616,33 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
             (uint8_t)payload.value("leaderMsgMode", 0);
         // Retired Bug 14 field — read as zero for back-compat.
         ::Anchor::Instance->catchupPendingMsgChainDepth = 0;
+
+        // Dialog-choice late-join replay (2026-07-09). Populate the
+        // Anchor instance's dialogChoiceLateJoinResolutions map from
+        // the catchup delta's dialogChoiceResolutions array. When the
+        // peer's local dialog later reaches a resolved textId, the
+        // bridge's choice-vote branch auto-applies the winning
+        // choiceIndex (see HandleChoiceVoteAdvance branch A). Older
+        // leader builds omit the field — payload.contains defaults to
+        // no-op which is correct for backward compat.
+        ::Anchor::Instance->dialogChoiceLateJoinResolutions.clear();
+        if (payload.contains("dialogChoiceResolutions") &&
+            payload["dialogChoiceResolutions"].is_array()) {
+            for (const auto& r : payload["dialogChoiceResolutions"]) {
+                if (r.contains("textId") && r.contains("winningChoiceIndex")) {
+                    const uint16_t textId =
+                        (uint16_t)r["textId"].get<int>();
+                    const uint8_t  choice =
+                        (uint8_t)r["winningChoiceIndex"].get<int>();
+                    ::Anchor::Instance->dialogChoiceLateJoinResolutions[textId] =
+                        choice;
+                }
+            }
+            SPDLOG_INFO("[CutsceneCatchup] Late-join dialog-choice resolutions "
+                        "restored: count={}",
+                        (int)::Anchor::Instance->dialogChoiceLateJoinResolutions.size());
+        }
+
         SPDLOG_INFO("[CutsceneCatchup] Applied delta — leader textbox=0x{:04X} "
                     "playerPos={} yaw={} roomNum={} msgBufPos={} msgMode={} "
                     "(queued for post-fast-forward apply)",

@@ -120,4 +120,28 @@ void ResetShadowForNewTextbox();
 // peer to decode from.
 uint16_t GetLeaderMsgBufPosLastSubStart();
 
+// ---- Choice-index accessors (2026-07-09) ----------------------------
+//
+// Read/write msgCtx.choiceIndex behind a bridge boundary. Called from
+// the DIALOG_CHOICE_* system to:
+//   - Read the local player's current cursor position at vote time
+//     (SendPacket_DialogChoiceVote captures + broadcasts this).
+//   - Write the resolved winning choice at pending-apply consume time
+//     (Anchor_ShouldAdvanceCutsceneTextLocal sets msgCtx.choiceIndex
+//     before returning true so the actor's Talk handler dispatches on
+//     the plurality-voted choice).
+//
+// Only meaningful when Message_GetState() == TEXT_STATE_CHOICE. Reads
+// return 0 and writes are no-ops when gPlayState is null.
+uint8_t GetChoiceIndex();
+void    SetChoiceIndex(uint8_t choiceIndex);
+
+// Returns msgCtx.textboxEndType. Used by the bridge to compute
+// numChoices at vote time (endType 2_CHOICE → 2, 3_CHOICE → 3).
+uint8_t GetTextboxEndType();
+
+// Convenience — returns the number of choices in the current choice
+// textbox based on textboxEndType. Returns 0 if not a choice textbox.
+uint8_t GetChoiceNumOptions();
+
 }  // namespace AnchorMessageBridge

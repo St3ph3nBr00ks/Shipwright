@@ -80,4 +80,27 @@ uint16_t GetLeaderMsgBufPosLastSubStart() {
     return Anchor::Instance->leaderMsgBufPosLastSubStart;
 }
 
+uint8_t GetChoiceIndex() {
+    if (gPlayState == nullptr) return 0;
+    return (uint8_t)gPlayState->msgCtx.choiceIndex;
+}
+
+void SetChoiceIndex(uint8_t choiceIndex) {
+    if (gPlayState == nullptr) return;
+    gPlayState->msgCtx.choiceIndex = choiceIndex;
+}
+
+uint8_t GetTextboxEndType() {
+    if (gPlayState == nullptr) return 0;
+    return (uint8_t)gPlayState->msgCtx.textboxEndType;
+}
+
+uint8_t GetChoiceNumOptions() {
+    if (gPlayState == nullptr) return 0;
+    const uint8_t endType = (uint8_t)gPlayState->msgCtx.textboxEndType;
+    if (endType == TEXTBOX_ENDTYPE_2_CHOICE) return 2;
+    if (endType == TEXTBOX_ENDTYPE_3_CHOICE) return 3;
+    return 0;
+}
+
 }  // namespace AnchorMessageBridge

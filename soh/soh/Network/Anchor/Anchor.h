@@ -802,6 +802,9 @@ class Anchor : public Network {
     inline static const std::string& CUTSCENE_TEXT_ADVANCED   = PacketTypes::CUTSCENE_TEXT_ADVANCED;
     inline static const std::string& DAMAGE_ENEMY             = PacketTypes::DAMAGE_ENEMY;
     inline static const std::string& DAMAGE_PLAYER            = PacketTypes::DAMAGE_PLAYER;
+    inline static const std::string& DIALOG_CHOICE_APPLIED    = PacketTypes::DIALOG_CHOICE_APPLIED;
+    inline static const std::string& DIALOG_CHOICE_VOTE       = PacketTypes::DIALOG_CHOICE_VOTE;
+    inline static const std::string& DIALOG_CHOICE_VOTE_STATE = PacketTypes::DIALOG_CHOICE_VOTE_STATE;
     inline static const std::string& DIALOG_END               = PacketTypes::DIALOG_END;
     inline static const std::string& DIRECTOR_STATE_SYNC      = PacketTypes::DIRECTOR_STATE_SYNC;
     inline static const std::string& DISABLE_ANCHOR           = PacketTypes::DISABLE_ANCHOR;
@@ -1283,6 +1286,28 @@ class Anchor : public Network {
     void SendPacket_BossGomaLookedAt(uint32_t bossNetId);
     void HandlePacket_BossGomaLookedAt(nlohmann::json payload);
 
+    // DIALOG_CHOICE_* — MP choice-textbox vote system (2026-07-09).
+    // See PacketTypes.h + Analysis/dialog_choice_vote_design_v2_
+    // 2026-07-09.md for full design.
+    //
+    // Sends: peer-to-host vote packet; host-to-all state broadcast +
+    // resolution broadcast.
+    void SendPacket_DialogChoiceVote(uint16_t textId, uint8_t choiceIndex,
+                                      uint8_t numChoices);
+    void SendPacket_DialogChoiceVoteState();
+    void SendPacket_DialogChoiceApplied(uint16_t textId,
+                                         uint8_t winningChoiceIndex,
+                                         const char* reason);
+
+    // Receives.
+    void HandlePacket_DialogChoiceVote(nlohmann::json payload);
+    void HandlePacket_DialogChoiceVoteState(nlohmann::json payload);
+    void HandlePacket_DialogChoiceApplied(nlohmann::json payload);
+
+    // Host-side tick (called from TickCutsceneTextAdvance) — polls
+    // countdown expiry + resolves when due.
+    void TickDialogChoiceVote();
+
     // TELEPORT_EFFECT — team broadcast to trigger a sparkle-burst visual
     // at a specific world position + color. Landed 2026-07-09 for the
     // cutscene late-join UX (fires at departure + arrival positions
@@ -1580,6 +1605,55 @@ class Anchor : public Network {
         bool                   countdownStarted = false;
     };
     CutsceneTextAdvanceState cutsceneTextAdvanceState;
+
+    // Dialog choice-vote state (2026-07-09, feature/dialog-choice-vote).
+    // Host-side tally. Reset on new textId edge or resolution.
+    struct DialogChoiceVoteState {
+        bool     active = false;
+        uint16_t textId = 0;
+        int16_t  sceneNum = -1;
+        uint8_t  numChoices = 2;
+        // clientId → choiceIndex. Re-vote overwrites the previous value
+        // (allows changing mind before deadline).
+        std::unordered_map<uint32_t, uint8_t> votesByClient;
+        // Insertion order tracker for first-vote-wins tiebreaker. Only
+        // appended when a client votes for the FIRST time; subsequent
+        // re-votes do not re-order.
+        std::vector<uint32_t> voteOrderByClient;
+        // First voter's choice — pre-computed at the moment state
+        // becomes active. Used as the tiebreaker sentinel at resolve
+        // time (O(1) lookup vs walking voteOrderByClient's votes).
+        uint8_t firstVoteChoiceIndex = 0;
+        std::chrono::steady_clock::time_point countdownEndsAt;
+        bool countdownStarted = false;
+    };
+    DialogChoiceVoteState dialogChoiceVoteState;
+
+    // Cooldown after resolution — dropped-vote for stale votes that
+    // arrive after the choice has already been resolved for the same
+    // textId. Mirrors Fix J.b vote-skip reopen-suppression window.
+    uint16_t dialogChoiceLastResolvedTextId = 0;
+    std::chrono::steady_clock::time_point dialogChoiceLastResolvedAt =
+        std::chrono::steady_clock::time_point::min();
+
+    // Peer-side pending-apply — populated by HandlePacket_DialogChoice-
+    // Applied. Consumed by Anchor_ShouldAdvanceCutsceneTextLocal on the
+    // next TEXT_STATE_CHOICE call for the matching textId. Only holds
+    // a single pending resolution; new receipts overwrite.
+    uint16_t dialogChoicePendingApplyTextId = 0;
+    uint8_t  dialogChoicePendingApplyChoiceIndex = 0;
+
+    // Peer-side monotonic seq trackers (Pitfall 43 pattern).
+    uint64_t dialogChoiceVoteStateSequence = 0;
+    uint64_t peerLastAppliedDialogChoiceStateSeq = 0;
+    uint64_t dialogChoiceAppliedSequence = 0;
+    uint64_t peerLastAppliedDialogChoiceAppliedSeq = 0;
+
+    // Late-join catchup replay map — populated by ApplyCatchupDelta
+    // when the catchup snapshot carries dialogChoiceResolutions. When
+    // peer's local dialog reaches a resolved textId, auto-consume + set
+    // choiceIndex without waiting for a vote.
+    std::unordered_map<uint16_t, uint8_t> dialogChoiceLateJoinResolutions;
 
     // Sequence numbers for CUTSCENE_TEXT_VOTE_STATE ordering.
     // Root cause: Anchor relay spawns a goroutine per (broadcast × recipient)

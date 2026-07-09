@@ -263,6 +263,38 @@ void RecordMusicStart(int32_t seqId) {
     SPDLOG_INFO("[CutsceneCatchup] Music captured seqId=0x{:X}", seqId);
 }
 
+void RecordDialogChoiceResolution(uint16_t textId,
+                                   uint8_t winningChoiceIndex) {
+    // Same gates as other Record* functions — only meaningful within
+    // a cutscene where a late-joiner might arrive after resolution.
+    // Choice-votes outside cutscene mode are handled by the peer's
+    // natural dialog progression (they re-enter TEXT_STATE_CHOICE
+    // and receive the running DIALOG_CHOICE_VOTE_STATE via periodic
+    // broadcast).
+    if (!IsLeader() || !IsInCutscene()) return;
+    auto* entry = GetOrCreateActiveEntry("RecordDialogChoiceResolution");
+    if (entry == nullptr) return;
+
+    // Dedup — if we already have a resolution for this textId, overwrite
+    // (shouldn't happen in practice but defensive against re-resolve
+    // pathologies).
+    for (auto& r : entry->dialogChoiceResolutions) {
+        if (r.textId == textId) {
+            r.winningChoiceIndex = winningChoiceIndex;
+            SPDLOG_INFO("[CutsceneCatchup] Dialog-choice resolution updated: "
+                        "textId=0x{:04X} winner={} (overwrote existing)",
+                        (unsigned)textId, (int)winningChoiceIndex);
+            return;
+        }
+    }
+    entry->dialogChoiceResolutions.push_back(
+        CutsceneCatchupEntry::DialogChoiceResolution{textId, winningChoiceIndex});
+    SPDLOG_INFO("[CutsceneCatchup] Dialog-choice resolution recorded: "
+                "textId=0x{:04X} winner={} (total resolutions in entry={})",
+                (unsigned)textId, (int)winningChoiceIndex,
+                (int)entry->dialogChoiceResolutions.size());
+}
+
 // ---- Snapshot helpers (called from TickCutsceneCatchup at ~1Hz) -----
 
 // Camera snapshot — cheap; grab active camera eye/at/fov each tick.

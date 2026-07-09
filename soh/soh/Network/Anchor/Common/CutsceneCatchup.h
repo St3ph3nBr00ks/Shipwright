@@ -174,6 +174,23 @@ struct CutsceneCatchupEntry {
     uint16_t leaderMsgBufPos = 0;         // vanilla msgCtx.msgBufPos
     uint8_t  leaderMsgMode   = 0;         // vanilla msgCtx.msgMode
     bool     hasLeaderPlayerSnapshot = false;
+
+    // DIALOG_CHOICE_APPLIED replay for late-join catchup (2026-07-09,
+    // feature/dialog-choice-vote). Each time the leader-side host
+    // resolves a choice-vote via TickDialogChoiceVote, the winning
+    // (textId, winningChoiceIndex) is appended here. On catchup delta
+    // apply, the peer populates dialogChoiceLateJoinResolutions from
+    // this list, and the bridge's choice-vote branch consumes each
+    // entry when the peer's local dialog reaches the matching textId.
+    //
+    // Vector rather than map because (a) preserves order for possible
+    // future debugging, (b) small (~1-10 entries per cutscene), (c)
+    // JSON serialization is trivial.
+    struct DialogChoiceResolution {
+        uint16_t textId;
+        uint8_t  winningChoiceIndex;
+    };
+    std::vector<DialogChoiceResolution> dialogChoiceResolutions;
 };
 
 // ---- Public API — Phase 2B (implementation in CutsceneCatchup.cpp) --
@@ -185,6 +202,14 @@ void RecordSpawnedActor(struct Actor* actor);
 void RecordFlagSet(int16_t flagType, int16_t flag, int16_t sceneOrRoomNum);
 void RecordItemGranted(int16_t itemId, int32_t amount);
 void RecordMusicStart(int32_t seqId);
+
+// Records a resolved choice-vote into the ledger for late-join catchup
+// replay. Called from Anchor::TickDialogChoiceVote's resolve step. Gates
+// internally on IsLeader() + IsInCutscene() — no-op outside cutscene
+// context (choice-votes outside cutscenes are recovered by the peer's
+// natural dialog progression, not the catchup ledger).
+void RecordDialogChoiceResolution(uint16_t textId,
+                                   uint8_t winningChoiceIndex);
 
 // Called at ~1Hz from TickCutsceneCatchup (Phase 3):
 void SnapshotCamera();

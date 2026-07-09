@@ -382,6 +382,10 @@ Anchor::GetPacketHandlerRegistry() {
         { BOSS_GOMA_LOOKED_AT,     &Anchor::HandlePacket_BossGomaLookedAt      },
         { MIDO_POST_DEKU_LEAVE,    &Anchor::HandlePacket_MidoPostDekuLeave     },
         { TELEPORT_EFFECT,         &Anchor::HandlePacket_TeleportEffect        },
+        // DIALOG_CHOICE_* (2026-07-09) — MP choice-textbox vote system.
+        { DIALOG_CHOICE_VOTE,        &Anchor::HandlePacket_DialogChoiceVote        },
+        { DIALOG_CHOICE_VOTE_STATE,  &Anchor::HandlePacket_DialogChoiceVoteState   },
+        { DIALOG_CHOICE_APPLIED,     &Anchor::HandlePacket_DialogChoiceApplied     },
         { TALON_CASTLE_STATE,      &Anchor::HandlePacket_TalonCastleState      },
         { HYRULE_CASTLE_GATE_OPEN, &Anchor::HandlePacket_HyruleCastleGateOpen  },
         { CUTSCENE_START,          &Anchor::HandlePacket_CutsceneStart         },

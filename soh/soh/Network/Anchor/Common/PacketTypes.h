@@ -185,6 +185,31 @@ inline const std::string CUTSCENE_CATCHUP_RESPONSE = "CUTSCENE_CATCHUP_RESPONSE"
 // the sceneNum matches their local scene.
 inline const std::string TELEPORT_EFFECT           = "TELEPORT_EFFECT";
 
+// DIALOG_CHOICE_* — MP choice-textbox vote system (2026-07-09,
+// feature/dialog-choice-vote). Handles NPC-dialog + cutscene-mode
+// choice windows where the local player would otherwise be able to
+// unilaterally pick which option all peers proceed with. Plurality
+// vote with 10 s countdown starting on first vote; first-vote-wins
+// tiebreaker; early-exit when all voted. See
+// Analysis/dialog_choice_vote_design_v2_2026-07-09.md.
+//
+// DIALOG_CHOICE_VOTE — peer → vote-skip host (targeted). Fields:
+//   textId, choiceIndex, numChoices, sceneNum, targetClientId, timeline.
+inline const std::string DIALOG_CHOICE_VOTE        = "DIALOG_CHOICE_VOTE";
+// DIALOG_CHOICE_VOTE_STATE — vote-skip host → all-team broadcast.
+// Fires on every state mutation + periodic idle refresh for late-
+// joiners. Peers mirror local state for HUD rendering. Fields:
+//   seq (Pitfall 43 monotonic), sceneNum, textId, numChoices,
+//   active, countdownStarted, msRemaining, votes[{clientId,choiceIndex}],
+//   targetTeamId.
+inline const std::string DIALOG_CHOICE_VOTE_STATE  = "DIALOG_CHOICE_VOTE_STATE";
+// DIALOG_CHOICE_APPLIED — vote-skip host → all-team broadcast when a
+// choice-vote resolves. Peers consume on next Message_ShouldAdvance
+// call at TEXT_STATE_CHOICE for the matching textId. Fields:
+//   seq, sceneNum, textId, winningChoiceIndex, reason
+//   ("timer_expired" | "all_voted"), targetTeamId.
+inline const std::string DIALOG_CHOICE_APPLIED     = "DIALOG_CHOICE_APPLIED";
+
 // BOSS_EXIT_TEAM_WARP — team-routed scene transition for synced boss
 // exits. When a team member enters the dungeon-clear blue warp, all
 // teammates in the same boss room transition to the same destination

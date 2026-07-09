@@ -1,6 +1,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Bridge/AnchorMessageBridge.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
+#include "soh/Network/Anchor/Common/RecentlyConsumedVotes.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/cvar_prefixes.h"
 #include <algorithm>
@@ -277,30 +278,12 @@ std::chrono::steady_clock::time_point sLastForcedAdvanceAt =
     std::chrono::steady_clock::time_point::min();
 constexpr int kForcedAdvanceMaxWaitMs = 5000;
 
-// Straggler-vote dedup (log 655, 2026-07-09) — Fix V (host self-count)
-// combined with the relay's loopback-to-self behavior causes the host's
-// vote to arrive twice: once instantly via Fix V's HandlePacket self-
-// invoke, once ~50-150 ms later via TCP loopback. When the first arrival
-// triggers all-pressed and clears state, the second arrival re-activates
-// state and gets counted as a fresh vote for the same textId.
-//
-// In HAS_NEXT sub-textbox chains (same base textId across successive
-// subs), this leaks the host's vote into the NEXT sub's cycle — peers
-// then only need one press to hit all-pressed for the next sub.
-//
-// Fix: track a small time-bounded list of recently-consumed votes by
-// (textId, senderId). Drop any incoming vote whose (textId, senderId)
-// matches a recent entry within kStragglerDropWindowMs.
-//
-// See Analysis/vote_skip_straggler_bug_2026-07-09.md for full why-chain.
-struct RecentlyConsumedVote {
-    uint16_t textId;
-    uint32_t senderId;
-    std::chrono::steady_clock::time_point at;
-};
-std::vector<RecentlyConsumedVote> sRecentlyConsumedVotes;
-constexpr int kStragglerDropWindowMs = 500;
-constexpr int kStragglerPurgeWindowMs = 2000;
+// Straggler-vote dedup — shared with the choice-vote system via
+// Common/RecentlyConsumedVotes.h. Log 655 originally motivated the
+// pattern; the choice-vote system reuses the exact same mechanism.
+// See Analysis/vote_skip_straggler_bug_2026-07-09.md for the why-chain
+// and the shared header for the drop-window + purge-window defaults.
+RecentlyConsumedVotes::Buffer sRecentlyConsumedVotesBuffer;
 
 // Fix O — resolve vote-skip authority host for the current state.
 // When a cutscene is active locally (any entry in cutsceneStartActive),
@@ -449,27 +432,12 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
     // within a 500 ms window. See Analysis/vote_skip_straggler_bug_
     // 2026-07-09.md for full why-chain.
     const auto stragglerNow = std::chrono::steady_clock::now();
-    // Purge stale entries first so the linear check stays cheap.
-    sRecentlyConsumedVotes.erase(
-        std::remove_if(
-            sRecentlyConsumedVotes.begin(),
-            sRecentlyConsumedVotes.end(),
-            [stragglerNow](const RecentlyConsumedVote& r) {
-                return std::chrono::duration_cast<std::chrono::milliseconds>(
-                           stragglerNow - r.at).count() > kStragglerPurgeWindowMs;
-            }),
-        sRecentlyConsumedVotes.end());
-    for (const auto& r : sRecentlyConsumedVotes) {
-        if (r.textId != textId || r.senderId != senderId) continue;
-        const auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              stragglerNow - r.at).count();
-        if (ageMs < kStragglerDropWindowMs) {
-            SPDLOG_INFO("[CutsceneTextAdvance] Straggler-vote drop: sender={} "
-                        "textId=0x{:04X} arrived {} ms after prior consumption "
-                        "(Fix V self-invoke + relay loopback duplicate)",
-                        senderId, (unsigned)textId, (long long)ageMs);
-            return;
-        }
+    if (sRecentlyConsumedVotesBuffer.ShouldDrop(textId, senderId, stragglerNow)) {
+        SPDLOG_INFO("[CutsceneTextAdvance] Straggler-vote drop: sender={} "
+                    "textId=0x{:04X} (Fix V self-invoke + relay loopback "
+                    "duplicate)",
+                    senderId, (unsigned)textId);
+        return;
     }
 
     auto& state = cutsceneTextAdvanceState;
@@ -499,8 +467,7 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
     // Straggler-vote dedup (log 655, 2026-07-09) — record this
     // acceptance so a subsequent duplicate arrival (Fix V loopback
     // pattern) is dropped by the check earlier in this function.
-    sRecentlyConsumedVotes.push_back(
-        RecentlyConsumedVote{textId, senderId, stragglerNow});
+    sRecentlyConsumedVotesBuffer.Record(textId, senderId, stragglerNow);
 
     auto now = std::chrono::steady_clock::now();
     if (!state.countdownStarted) {
@@ -642,6 +609,14 @@ void Anchor::TickCutsceneTextAdvance() {
     if (!isConnected) return;
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
     if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.Enabled"), 1)) return;
+
+    // Dialog choice-vote timer poll (2026-07-09,
+    // feature/dialog-choice-vote). Host-only — TickDialogChoiceVote
+    // internally short-circuits when we're not the vote-skip authority
+    // or when no vote is active. Placed at top of tick before the
+    // Fix S/T consume so a choice-vote-driven advance can flow through
+    // the same downstream pending-apply consumption path.
+    TickDialogChoiceVote();
 
     // Fix S / Fix T — force sub-textbox chain advance when TEXT_ADVANCED
     // consumed. Runs at top of tick for peer paths (network-thread flag
