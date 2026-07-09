@@ -980,6 +980,34 @@ void Anchor::TickCutsceneCatchup() {
     ApplyDeferredTeleportIfReady(now);
     UpdateLeaderChainDepthTracker();
 
+    // Variant C.2.2 (2026-07-09) — scene-entry REQUEST delay.
+    //
+    // OnSceneSpawnActors arms catchupRequestGateArmedAt. This poll
+    // fires DetectAndRequestCutsceneCatchup once the configured delay
+    // has elapsed, then disarms so it fires exactly once per scene
+    // entry. Default 1000 ms; user-tuneable via
+    // gEnhancements.Anchor.CutsceneLateJoinRequestDelayMs
+    // (0 = fire immediately, matches pre-C.2.2 behavior).
+    //
+    // See Anchor.h catchupRequestGateArmedAt for full rationale.
+    if (catchupRequestGateArmedAt !=
+        std::chrono::steady_clock::time_point::min()) {
+        const int64_t delayMs = (int64_t)CVarGetInteger(
+            CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinRequestDelayMs"), 1000);
+        const auto elapsedMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - catchupRequestGateArmedAt).count();
+        if (elapsedMs >= delayMs) {
+            SPDLOG_INFO("[CutsceneCatchup] Variant C.2.2 — request delay "
+                        "elapsed ({} ms >= {} ms); firing "
+                        "DetectAndRequestCutsceneCatchup",
+                        (long long)elapsedMs, (long long)delayMs);
+            catchupRequestGateArmedAt =
+                std::chrono::steady_clock::time_point::min();
+            DetectAndRequestCutsceneCatchup();
+        }
+    }
+
     // Variant C.2 (2026-07-09) — apply a deferred RESPONSE delta once
     // the peer's room is fully loaded. Ordering intent:
     //

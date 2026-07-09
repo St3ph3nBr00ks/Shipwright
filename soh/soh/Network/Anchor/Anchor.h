@@ -1768,6 +1768,31 @@ class Anchor : public Network {
     std::chrono::steady_clock::time_point catchupLastReTargetRequestAt =
         std::chrono::steady_clock::time_point::min();
 
+    // Variant C.2.2 (2026-07-09) — scene-entry REQUEST delay.
+    //
+    // Log 653 review showed that even a clean single-cycle catchup
+    // (variant C.2.1) still teleports peer to leader's cutscene coords
+    // within ~1 s of scene entry. User feedback: this feels like an
+    // "instant teleport" through the scene-transition fade — peer never
+    // gets to see their own room-entrance view.
+    //
+    // Fix: after OnSceneSpawnActors fires, arm this timestamp. TickCutscene-
+    // Catchup polls each tick and only fires DetectAndRequestCutsceneCatchup
+    // once the configured delay (default 1000 ms) has elapsed. The
+    // network REQUEST/RESPONSE round-trip and fast-forward all happen
+    // AFTER the delay, giving the fade-in and initial room render time
+    // to complete before catchup engages.
+    //
+    // Only the OnSceneSpawnActors-triggered path is delayed. FRAME_SYNC
+    // direct-request (HandlePacket_CutsceneFrameSync) fires immediately
+    // because that path is for peers already in the scene when a
+    // cutscene starts — no fade-in / room-entrance window to preserve.
+    //
+    // time_point::min() = disarmed. Reset on TickCutsceneCatchup after
+    // the delayed call, and on OnSceneEnd (session teardown).
+    std::chrono::steady_clock::time_point catchupRequestGateArmedAt =
+        std::chrono::steady_clock::time_point::min();
+
     // Variant C.2 (2026-07-09) — deferred RESPONSE application when the
     // peer's local room isn't yet fully loaded at RESPONSE-arrival time.
     // Extends Variant C's teleport-only gate to cover the entire delta

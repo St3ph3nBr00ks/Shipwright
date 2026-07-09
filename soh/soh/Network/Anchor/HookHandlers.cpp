@@ -564,8 +564,18 @@ void Anchor::RegisterHooks() {
             // on our team. Combined with the client.teamId == myTeamId
             // filter here, we never request catchup from a peer on a
             // different quest branch.
+            //
+            // Variant C.2.2 (2026-07-09) — arm the scene-entry request
+            // delay gate instead of calling DetectAndRequestCutsceneCatchup
+            // immediately. TickCutsceneCatchup polls the gate and fires
+            // the detection scan once the configured delay (default
+            // 1000 ms) has elapsed. Gives peer's scene-transition fade-in
+            // + initial room render time to complete before catchup
+            // pipeline engages. See Anchor.h catchupRequestGateArmedAt
+            // for full rationale.
             if (Anchor::Instance->CutsceneCatchupEnabled()) {
-                Anchor::Instance->DetectAndRequestCutsceneCatchup();
+                Anchor::Instance->catchupRequestGateArmedAt =
+                    std::chrono::steady_clock::now();
             }
 
             // Also reset FRAME_SYNC seq counters on scene load — same
