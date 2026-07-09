@@ -369,15 +369,25 @@ void Anchor::SendPacket_CutsceneTextAdvance(uint16_t textId) {
 
 void Anchor::SendPacket_CutsceneTextAdvanced(uint16_t textId, const char* reason) {
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
+    // Option 3 part 2 (2026-07-09) — include leader's live msgBufPos
+    // (shadow value = start of current sub-textbox). Peers compare their
+    // own msgBufPos to this on receipt; if behind, they bump the pending
+    // count so drift converges within 1-2 broadcasts. See log 648
+    // analysis and HandlePacket_CutsceneTextAdvanced Option 3 block.
+    const uint16_t leaderMsgBufPos =
+        AnchorMessageBridge::GetLeaderMsgBufPosLastSubStart();
     nlohmann::json payload;
-    payload["type"]         = CUTSCENE_TEXT_ADVANCED;
-    payload["sceneNum"]     = (int)gPlayState->sceneNum;
-    payload["textId"]       = (int)textId;
-    payload["reason"]       = std::string(reason ? reason : "unknown");
-    payload["targetTeamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    payload["type"]             = CUTSCENE_TEXT_ADVANCED;
+    payload["sceneNum"]         = (int)gPlayState->sceneNum;
+    payload["textId"]           = (int)textId;
+    payload["reason"]           = std::string(reason ? reason : "unknown");
+    payload["targetTeamId"]     = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    payload["leaderMsgBufPos"]  = (int)leaderMsgBufPos;
     PacketTimeline::SetTimelineField(payload);
-    SPDLOG_INFO("[CutsceneTextAdvanced] Broadcasting textId=0x{:04X} reason={}",
-                (unsigned)textId, reason ? reason : "unknown");
+    SPDLOG_INFO("[CutsceneTextAdvanced] Broadcasting textId=0x{:04X} reason={} "
+                "leaderMsgBufPos={}",
+                (unsigned)textId, reason ? reason : "unknown",
+                (int)leaderMsgBufPos);
     SendJsonToRemote(payload);
 }
 
@@ -510,6 +520,38 @@ void Anchor::HandlePacket_CutsceneTextAdvanced(nlohmann::json payload) {
     // msgMode was still DISPLAYING → the "extra" flag writes were
     // lost.
     RecordPendingAdvance(textId, "peer_recv_advanced");
+
+    // Option 3 part 2 (2026-07-09) — ongoing-drift corrective. If the
+    // leader's live msgBufPos is strictly ahead of our own for the same
+    // textId, we're at least one sub behind (leader advanced during our
+    // catchup or a prior broadcast landed while we were still displaying).
+    // Bump the pending count by an extra unit so TryConsumePendingSub-
+    // TextAdvance fires one additional AWAIT_NEXT tick and converges the
+    // peer over the next 1-2 broadcasts. Only fires when textIds match —
+    // a textId mismatch is Fix R's continuous-re-target's responsibility
+    // (that path fires CATCHUP_REQUEST which yields a full delta apply).
+    // Log 648 pattern: peer perpetually one-sub-behind. Option 3 part 1
+    // (live-read at CATCHUP_RESPONSE) handles the initial drift; this
+    // block handles ongoing drift after peer's local msgMode reached
+    // AWAIT_NEXT but a race deposited a "leader ahead" state.
+    if (payload.contains("leaderMsgBufPos") &&
+        payload["leaderMsgBufPos"].is_number()) {
+        const uint16_t leaderMsgBufPos =
+            (uint16_t)payload["leaderMsgBufPos"].get<int>();
+        const uint16_t peerMsgBufPos =
+            (uint16_t)gPlayState->msgCtx.msgBufPos;
+        if ((uint16_t)gPlayState->msgCtx.textId == textId &&
+            leaderMsgBufPos > peerMsgBufPos &&
+            cutsceneTextAdvancePendingCount < 255) {
+            cutsceneTextAdvancePendingCount++;
+            SPDLOG_INFO("[CutsceneTextAdvanced] Option 3 — drift detected: "
+                        "peer msgBufPos={} < leader msgBufPos={} for "
+                        "textId=0x{:04X}; extra pending count bump (now={})",
+                        (int)peerMsgBufPos, (int)leaderMsgBufPos,
+                        (unsigned)textId,
+                        (int)cutsceneTextAdvancePendingCount);
+        }
+    }
 
     // Belt-and-suspenders — clear the local vote-state mirror so the
     // HUD hides immediately when the advance fires. The host's send

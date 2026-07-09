@@ -731,6 +731,25 @@ void Anchor::SendPacket_CutsceneCatchupResponse(uint32_t requesterClientId,
     // Field aliases the receiver reads directly (avoids nested dig).
     payload["leaderFrame"]     = it->second->currentLeaderFrame;
     payload["leaderState"]     = (int)gPlayState->csCtx.state;
+
+    // Option 3 part 1 (2026-07-09) — live-read leader's message state at
+    // RESPONSE send time. SerializeLedgerEntry copies the snapshot values
+    // (captured at 1 Hz by SnapshotCamera / SnapshotActors). If the
+    // leader advanced dialogue between the snapshot tick and the
+    // REQUEST arriving, the peer will land at a stale sub-textbox
+    // position and perpetually trail by one sub.
+    //
+    // Log 648 pattern: peer landed at msgBufPos=127 while leader was at
+    // msgBufPos=331 (11 subs ahead). Overriding with the live shadow +
+    // live msgCtx values here converges the peer to the leader's actual
+    // position in the response. Companion fix in
+    // SendPacket_CutsceneTextAdvanced covers ongoing drift; see
+    // Analysis/log_648_snapshot_staleness_2026-07-09.md.
+    payload["leaderMsgTextId"] = (int)gPlayState->msgCtx.textId;
+    payload["leaderMsgBufPos"] =
+        (int)AnchorMessageBridge::GetLeaderMsgBufPosLastSubStart();
+    payload["leaderMsgMode"]   = (int)gPlayState->msgCtx.msgMode;
+
     PacketTimeline::SetTimelineField(payload);
 
     SPDLOG_INFO("[CutsceneCatchup] RESPONSE → requester={} kindKey='{}' "
