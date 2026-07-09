@@ -140,6 +140,128 @@ void ApplyDeferredTeleportIfReady(std::chrono::steady_clock::time_point now) {
     sDeferredArmedAt = std::chrono::steady_clock::time_point::min();
 }
 
+// Variant C.2.3 (2026-07-09) — fade-to-white overlay driver.
+//
+// State machine documented on Anchor::catchupFadeState. Uses the vanilla
+// envCtx.fillScreen + screenFillColor mechanism (same as
+// Cutscene_Command_TransitionFX in z_demo.c:1349). We drive our own
+// alpha ramping over time rather than piggy-backing on cutscene-command
+// timing because the fade duration must correlate with catchup pipeline
+// state, not a fixed frame range.
+//
+// Called at the END of TickCutsceneCatchup so vanilla cutscene commands
+// during fast-forward don't clobber our writes (they run earlier via
+// func_800645A0 loop).
+void UpdateCatchupFadeOverlay(std::chrono::steady_clock::time_point now) {
+    auto* anchor = Anchor::Instance;
+    if (anchor == nullptr) return;
+    if (gPlayState == nullptr) return;
+    if (anchor->catchupFadeState == Anchor::CatchupFadeState::INACTIVE) return;
+
+    constexpr int kFadeToWhiteMs   = 300;
+    constexpr int kFadeFromWhiteMs = 500;
+    constexpr int kIdleDebounceMs  = 200;
+    constexpr int kSafetyTimeoutMs = 8000;
+
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              now - anchor->catchupFadeStateChangedAt).count();
+
+    // Safety timeout — force fade-in if stuck for too long in any state
+    // other than FADING_FROM_WHITE. Prevents a pathological stuck fade
+    // from freezing the screen forever. FADING_FROM_WHITE has its own
+    // bounded duration.
+    if (anchor->catchupFadeState != Anchor::CatchupFadeState::FADING_FROM_WHITE &&
+        elapsedMs > kSafetyTimeoutMs) {
+        SPDLOG_WARN("[CutsceneCatchup] Variant C.2.3 — fade overlay safety "
+                    "timeout after {} ms in state={}, forcing FADING_FROM_WHITE",
+                    (long long)elapsedMs,
+                    (int)anchor->catchupFadeState);
+        anchor->catchupFadeState = Anchor::CatchupFadeState::FADING_FROM_WHITE;
+        anchor->catchupFadeStateChangedAt = now;
+        anchor->catchupFadeHoldIdleSince =
+            std::chrono::steady_clock::time_point::min();
+        return;
+    }
+
+    uint8_t alpha = 0;
+    switch (anchor->catchupFadeState) {
+        case Anchor::CatchupFadeState::FADING_TO_WHITE: {
+            if (elapsedMs >= kFadeToWhiteMs) {
+                anchor->catchupFadeState = Anchor::CatchupFadeState::HOLDING_WHITE;
+                anchor->catchupFadeStateChangedAt = now;
+                SPDLOG_INFO("[CutsceneCatchup] Variant C.2.3 — fade reached "
+                            "HOLDING_WHITE");
+                alpha = 255;
+            } else {
+                alpha = (uint8_t)((elapsedMs * 255) / kFadeToWhiteMs);
+            }
+            break;
+        }
+        case Anchor::CatchupFadeState::HOLDING_WHITE: {
+            alpha = 255;
+            const bool pipelineIdle =
+                (anchor->catchupFastForwardTarget == 0) &&
+                !anchor->catchupDeferredTeleportValid &&
+                !anchor->catchupDeltaDeferred &&
+                (anchor->catchupRequestGateArmedAt ==
+                    std::chrono::steady_clock::time_point::min()) &&
+                anchor->pendingCatchups.empty();
+            if (pipelineIdle) {
+                if (anchor->catchupFadeHoldIdleSince ==
+                    std::chrono::steady_clock::time_point::min()) {
+                    anchor->catchupFadeHoldIdleSince = now;
+                }
+                const auto idleMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - anchor->catchupFadeHoldIdleSince).count();
+                if (idleMs >= kIdleDebounceMs) {
+                    anchor->catchupFadeState =
+                        Anchor::CatchupFadeState::FADING_FROM_WHITE;
+                    anchor->catchupFadeStateChangedAt = now;
+                    anchor->catchupFadeHoldIdleSince =
+                        std::chrono::steady_clock::time_point::min();
+                    SPDLOG_INFO("[CutsceneCatchup] Variant C.2.3 — pipeline "
+                                "idle for {} ms; entering FADING_FROM_WHITE",
+                                (long long)idleMs);
+                }
+            } else {
+                // Reset idle debounce on any pipeline activity.
+                anchor->catchupFadeHoldIdleSince =
+                    std::chrono::steady_clock::time_point::min();
+            }
+            break;
+        }
+        case Anchor::CatchupFadeState::FADING_FROM_WHITE: {
+            if (elapsedMs >= kFadeFromWhiteMs) {
+                anchor->catchupFadeState = Anchor::CatchupFadeState::INACTIVE;
+                anchor->catchupFadeStateChangedAt =
+                    std::chrono::steady_clock::time_point::min();
+                anchor->catchupFadeHoldIdleSince =
+                    std::chrono::steady_clock::time_point::min();
+                // Clear the fill so vanilla can reclaim the render.
+                gPlayState->envCtx.fillScreen = false;
+                gPlayState->envCtx.screenFillColor[3] = 0;
+                SPDLOG_INFO("[CutsceneCatchup] Variant C.2.3 — fade complete, "
+                            "INACTIVE");
+                return;
+            }
+            alpha = (uint8_t)(
+                ((kFadeFromWhiteMs - elapsedMs) * 255) / kFadeFromWhiteMs);
+            break;
+        }
+        default:
+            return;
+    }
+
+    // Write the vanilla fill-screen state. Rendering runs each frame in
+    // Play_Draw's post-envCtx path.
+    gPlayState->envCtx.fillScreen = true;
+    gPlayState->envCtx.screenFillColor[0] = 255;
+    gPlayState->envCtx.screenFillColor[1] = 255;
+    gPlayState->envCtx.screenFillColor[2] = 255;
+    gPlayState->envCtx.screenFillColor[3] = alpha;
+}
+
 // Per-frame leader-side chain-depth tracker. Detects msgCtx.msgLength
 // changes while textId stays the same (indicates vanilla loaded next
 // sub-textbox). Also detects textId changes → resets shadow via bridge.
@@ -868,6 +990,34 @@ bool Anchor::CutsceneCatchupEnabled() const {
 
 // ---- Late-joiner scene-entry detection ------------------------------
 
+bool Anchor::HasSameSceneMidCsPeer() const {
+    // Variant C.2.3 helper — extracted from DetectAndRequestCutsceneCatchup's
+    // peer scan loop. Returns true if there is at least one same-scene
+    // same-timeline same-team peer currently mid-cutscene. Called from
+    // OnSceneSpawnActors to decide whether to arm catchupRequestGateArmedAt
+    // + catchupFadeState. Without this pre-check, entering ANY scene while
+    // catchup is enabled would fire the 1 s delay + fade-to-white overlay
+    // even when no peer is actually mid-cutscene — visible glitch.
+    if (!isConnected) return false;
+    if (gPlayState == nullptr) return false;
+    const int16_t myScene = (int16_t)gPlayState->sceneNum;
+    const uint8_t myTimeline = (uint8_t)(gSaveContext.linkAge & 0x1);
+    const std::string myTeamId =
+        CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    for (const auto& [cid, client] : clients) {
+        if (cid == ownClientId) continue;
+        if (client.self) continue;
+        if (!client.online) continue;
+        if (!client.isSaveLoaded) continue;
+        if (client.sceneNum != myScene) continue;
+        if ((uint8_t)(client.linkAge & 0x1) != myTimeline) continue;
+        if (client.teamId != myTeamId) continue;
+        if (client.csCtxState == 0 /* CS_STATE_IDLE */) continue;
+        return true;
+    }
+    return false;
+}
+
 void Anchor::DetectAndRequestCutsceneCatchup() {
     if (!isConnected) return;
     if (gPlayState == nullptr) return;
@@ -1445,4 +1595,13 @@ void Anchor::TickCutsceneCatchup() {
         catchupLastReTargetRequestAt =
             std::chrono::steady_clock::time_point::min();
     }
+
+    // Variant C.2.3 (2026-07-09) — drive the fade-to-white overlay
+    // AFTER all pipeline work + fast-forward is complete for this tick.
+    // Placement ensures our envCtx.fillScreen + screenFillColor writes
+    // are the last for the frame; vanilla cutscene commands that ran
+    // during fast-forward (Cutscene_Command_TransitionFX) cannot
+    // subsequently clobber our overlay. See UpdateCatchupFadeOverlay
+    // in the anonymous namespace above.
+    UpdateCatchupFadeOverlay(now);
 }

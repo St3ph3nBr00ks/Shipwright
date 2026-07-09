@@ -1793,6 +1793,53 @@ class Anchor : public Network {
     std::chrono::steady_clock::time_point catchupRequestGateArmedAt =
         std::chrono::steady_clock::time_point::min();
 
+    // Variant C.2.3 (2026-07-09) — fade-to-white overlay driven by the
+    // catchup pipeline. Hides the fast-forward + teleport visual chaos
+    // behind a screen fill so the user doesn't see camera jumps, Link
+    // teleporting, or any transient curRoom.segment null-out.
+    //
+    // Lifecycle (transitions in TickCutsceneCatchup's UpdateCatchupFade-
+    // Overlay):
+    //   INACTIVE           → FADING_TO_WHITE at OnSceneSpawnActors when
+    //                        HasSameSceneMidCsPeer() is true (paired with
+    //                        catchupRequestGateArmedAt).
+    //   FADING_TO_WHITE    → HOLDING_WHITE after ~300 ms fade animation.
+    //   HOLDING_WHITE      → FADING_FROM_WHITE once the entire catchup
+    //                        pipeline is idle for ~200 ms (safety
+    //                        debounce so we don't fade in mid-fast-
+    //                        forward).
+    //   FADING_FROM_WHITE  → INACTIVE after ~500 ms fade animation.
+    //   Any state          → FADING_FROM_WHITE via 8 s safety timeout
+    //                        (prevents a stuck fade from freezing the
+    //                        screen forever).
+    //
+    // Rendering: envCtx.fillScreen + screenFillColor (native OoT
+    // mechanism, same as Cutscene_Command_TransitionFX). Update runs at
+    // END of TickCutsceneCatchup so it's the last write for the frame
+    // and vanilla cutscene-command fades don't clobber it during
+    // fast-forward.
+    //
+    // Gate CVar: gEnhancements.Anchor.CutsceneLateJoinFadeOverlay
+    // (default 1). Set to 0 to disable the fade entirely.
+    enum class CatchupFadeState : uint8_t {
+        INACTIVE = 0,
+        FADING_TO_WHITE,
+        HOLDING_WHITE,
+        FADING_FROM_WHITE,
+    };
+    CatchupFadeState catchupFadeState = CatchupFadeState::INACTIVE;
+    std::chrono::steady_clock::time_point catchupFadeStateChangedAt =
+        std::chrono::steady_clock::time_point::min();
+    std::chrono::steady_clock::time_point catchupFadeHoldIdleSince =
+        std::chrono::steady_clock::time_point::min();
+
+    // Cheap same-scene mid-cs peer scan. Returns true iff there is at
+    // least one online, save-loaded, same-scene, same-timeline, same-
+    // team peer whose csCtxState is non-IDLE. Used to gate arming of
+    // catchupRequestGateArmedAt + catchupFadeState so we don't run the
+    // 1 s delay + fade overlay when no peer is actually mid-cutscene.
+    bool HasSameSceneMidCsPeer() const;
+
     // Variant C.2 (2026-07-09) — deferred RESPONSE application when the
     // peer's local room isn't yet fully loaded at RESPONSE-arrival time.
     // Extends Variant C's teleport-only gate to cover the entire delta

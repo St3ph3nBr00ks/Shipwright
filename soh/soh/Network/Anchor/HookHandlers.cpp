@@ -573,9 +573,23 @@ void Anchor::RegisterHooks() {
             // + initial room render time to complete before catchup
             // pipeline engages. See Anchor.h catchupRequestGateArmedAt
             // for full rationale.
-            if (Anchor::Instance->CutsceneCatchupEnabled()) {
-                Anchor::Instance->catchupRequestGateArmedAt =
-                    std::chrono::steady_clock::now();
+            //
+            // Variant C.2.3 (2026-07-09) — also arm the fade-to-white
+            // overlay state machine. Gated on HasSameSceneMidCsPeer() so
+            // scenes without a mid-cutscene peer don't trigger a
+            // spurious 1 s white flash. See Anchor.h catchupFadeState.
+            if (Anchor::Instance->CutsceneCatchupEnabled() &&
+                Anchor::Instance->HasSameSceneMidCsPeer()) {
+                const auto now = std::chrono::steady_clock::now();
+                Anchor::Instance->catchupRequestGateArmedAt = now;
+                if (CVarGetInteger(CVAR_ENHANCEMENT(
+                        "Anchor.CutsceneLateJoinFadeOverlay"), 1) != 0) {
+                    Anchor::Instance->catchupFadeState =
+                        Anchor::CatchupFadeState::FADING_TO_WHITE;
+                    Anchor::Instance->catchupFadeStateChangedAt = now;
+                    Anchor::Instance->catchupFadeHoldIdleSince =
+                        std::chrono::steady_clock::time_point::min();
+                }
             }
 
             // Also reset FRAME_SYNC seq counters on scene load — same
