@@ -166,6 +166,25 @@ inline const std::string CUTSCENE_CATCHUP_REQUEST  = "CUTSCENE_CATCHUP_REQUEST";
 // csCtx.frames jumps to leader.frame; vanilla playback resumes.
 inline const std::string CUTSCENE_CATCHUP_RESPONSE = "CUTSCENE_CATCHUP_RESPONSE";
 
+// TELEPORT_EFFECT — team-scoped broadcast to trigger a sparkle-burst
+// visual at a specific world position. First landed 2026-07-09 for the
+// cutscene late-join UX (fires at both departure + arrival positions
+// when a peer teleports into a shared cutscene). Designed as a reusable
+// primitive for every teleport site — future consumers: Anchor player
+// teleport (REQUEST_TELEPORT), AI Player Follower G10/G12/G14, NPC
+// Follower stuck-recovery, AI Invader (with hostile color palette).
+//
+// Wire fields:
+//   sceneNum        — sender's scene at effect-fire time (same-scene gate)
+//   pos {x,y,z}     — world position for the sparkle center
+//   primR/G/B       — inner sparkle color (typically peer's Anchor color)
+//   envR/G/B        — outer glow color (typically 60% of primR/G/B)
+//   targetTeamId    — team-scoped routing
+//
+// Receivers spawn a burst via TeleportEffect::SpawnSparkleBurst when
+// the sceneNum matches their local scene.
+inline const std::string TELEPORT_EFFECT           = "TELEPORT_EFFECT";
+
 // BOSS_EXIT_TEAM_WARP — team-routed scene transition for synced boss
 // exits. When a team member enters the dungeon-clear blue warp, all
 // teammates in the same boss room transition to the same destination

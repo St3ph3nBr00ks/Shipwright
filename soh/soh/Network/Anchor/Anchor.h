@@ -849,6 +849,7 @@ class Anchor : public Network {
     inline static const std::string& SET_FLAG                 = PacketTypes::SET_FLAG;
     inline static const std::string& SHIELD_BOUNCE_PLAYER     = PacketTypes::SHIELD_BOUNCE_PLAYER;
     inline static const std::string& TALK_REQUEST             = PacketTypes::TALK_REQUEST;
+    inline static const std::string& TELEPORT_EFFECT          = PacketTypes::TELEPORT_EFFECT;
     inline static const std::string& TELEPORT_TO              = PacketTypes::TELEPORT_TO;
     inline static const std::string& TIME_SYNC                = PacketTypes::TIME_SYNC;
     inline static const std::string& UNSET_FLAG               = PacketTypes::UNSET_FLAG;
@@ -1281,6 +1282,18 @@ class Anchor : public Network {
     // either player's look triggers the boss-fall transition. See #67.
     void SendPacket_BossGomaLookedAt(uint32_t bossNetId);
     void HandlePacket_BossGomaLookedAt(nlohmann::json payload);
+
+    // TELEPORT_EFFECT — team broadcast to trigger a sparkle-burst visual
+    // at a specific world position + color. Landed 2026-07-09 for the
+    // cutscene late-join UX (fires at departure + arrival positions
+    // when a peer teleports into a shared cutscene). Designed as a
+    // reusable primitive for every teleport site — future consumers
+    // documented in PacketTypes.h header comment for TELEPORT_EFFECT.
+    // Sparkle burst rendered via TeleportEffect::SpawnSparkleBurst.
+    void SendPacket_TeleportEffect(float x, float y, float z,
+                                    uint8_t primR, uint8_t primG, uint8_t primB,
+                                    uint8_t envR, uint8_t envG, uint8_t envB);
+    void HandlePacket_TeleportEffect(nlohmann::json payload);
 
     // MIDO_POST_DEKU_LEAVE — team broadcast. Sent by the dialog client
     // when its local Mido transitions BlockPath → Walk for the post-

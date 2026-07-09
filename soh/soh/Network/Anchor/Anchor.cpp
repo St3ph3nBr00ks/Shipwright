@@ -381,6 +381,7 @@ Anchor::GetPacketHandlerRegistry() {
         { DIALOG_END,              &Anchor::HandlePacket_DialogEnd             },
         { BOSS_GOMA_LOOKED_AT,     &Anchor::HandlePacket_BossGomaLookedAt      },
         { MIDO_POST_DEKU_LEAVE,    &Anchor::HandlePacket_MidoPostDekuLeave     },
+        { TELEPORT_EFFECT,         &Anchor::HandlePacket_TeleportEffect        },
         { TALON_CASTLE_STATE,      &Anchor::HandlePacket_TalonCastleState      },
         { HYRULE_CASTLE_GATE_OPEN, &Anchor::HandlePacket_HyruleCastleGateOpen  },
         { CUTSCENE_START,          &Anchor::HandlePacket_CutsceneStart         },

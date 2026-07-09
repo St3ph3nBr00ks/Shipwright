@@ -4,6 +4,7 @@
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/Common/CutsceneCatchup.h"
+#include "soh/Network/Anchor/Common/TeleportEffect.h"
 #include "soh/Enhancements/audio/AnchorAudioSeek.h"
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
@@ -75,6 +76,27 @@ std::chrono::steady_clock::time_point sLastFrameSyncBroadcast;
 // Behavior-preserving refactor; each helper's semantics documented at
 // definition site in TickCutsceneCatchup.
 
+// Broadcast the sparkle burst effect at (x,y,z) using the local
+// player's own Anchor color. Fires both remotely (via SendPacket_
+// TeleportEffect) and locally (SendPacket wraps the local spawn too).
+// Called at BOTH departure and arrival positions of the teleport so
+// observers see sparkles on both sides of the pop-in. See
+// Common/TeleportEffect.h for the rendering primitive.
+void BroadcastSparklesForOwnColor(float x, float y, float z) {
+    auto* anchor = Anchor::Instance;
+    if (anchor == nullptr) return;
+    auto it = anchor->clients.find(anchor->ownClientId);
+    if (it == anchor->clients.end()) return;
+    const auto& color = it->second.color;
+    // env color = 60% intensity of prim for a subtle outer glow.
+    const uint8_t envR = (uint8_t)((int)color.r * 3 / 5);
+    const uint8_t envG = (uint8_t)((int)color.g * 3 / 5);
+    const uint8_t envB = (uint8_t)((int)color.b * 3 / 5);
+    anchor->SendPacket_TeleportEffect(x, y, z,
+                                       color.r, color.g, color.b,
+                                       envR, envG, envB);
+}
+
 // Bug 13 fix — deferred teleport apply. When Fix P.2 detected a room
 // mismatch and initiated a room load, the teleport target was persisted
 // on the Anchor instance. Each frame we check whether the load has
@@ -117,10 +139,26 @@ void ApplyDeferredTeleportIfReady(std::chrono::steady_clock::time_point now) {
 
     Player* peerLink = GET_PLAYER(gPlayState);
     if (peerLink != nullptr) {
+        // Broadcast DEPARTURE sparkles at OLD position before we write
+        // the new pos. Observers see the peer's DummyPlayer still at
+        // OLD position when the packet arrives; sparkles fire there and
+        // linger (30-frame particle life) after the DummyPlayer teleports
+        // away — matches the "left behind" visual language of Farore's
+        // Wind departures.
+        BroadcastSparklesForOwnColor(peerLink->actor.world.pos.x,
+                                     peerLink->actor.world.pos.y,
+                                     peerLink->actor.world.pos.z);
         peerLink->actor.world.pos.x = anchor->catchupDeferredTeleportPos.x;
         peerLink->actor.world.pos.y = anchor->catchupDeferredTeleportPos.y;
         peerLink->actor.world.pos.z = anchor->catchupDeferredTeleportPos.z;
         peerLink->actor.shape.rot.y = anchor->catchupDeferredTeleportYaw;
+        // Broadcast ARRIVAL sparkles at NEW position after write. Peer's
+        // DummyPlayer follows via PLAYER_UPDATE (~1 tick later) so
+        // observers see sparkles first, then the character resolves into
+        // them — sage-arrival visual sequence.
+        BroadcastSparklesForOwnColor(peerLink->actor.world.pos.x,
+                                     peerLink->actor.world.pos.y,
+                                     peerLink->actor.world.pos.z);
         SPDLOG_INFO("[CutsceneCatchup] Bug 13 fix — applied deferred "
                     "teleport to ({:.0f},{:.0f},{:.0f}) yaw={} after "
                     "room load (curRoom={} target={} matches={} "
@@ -1489,10 +1527,22 @@ void Anchor::TickCutsceneCatchup() {
                 } else {
                     Player* peerLink = GET_PLAYER(gPlayState);
                     if (peerLink != nullptr) {
+                        // Departure sparkles at OLD pos before overwrite.
+                        // See BroadcastSparklesForOwnColor comment above
+                        // for full rationale.
+                        BroadcastSparklesForOwnColor(
+                            peerLink->actor.world.pos.x,
+                            peerLink->actor.world.pos.y,
+                            peerLink->actor.world.pos.z);
                         peerLink->actor.world.pos.x = catchupPendingPlayerPos.x;
                         peerLink->actor.world.pos.y = catchupPendingPlayerPos.y;
                         peerLink->actor.world.pos.z = catchupPendingPlayerPos.z;
                         peerLink->actor.shape.rot.y = catchupPendingPlayerYaw;
+                        // Arrival sparkles at NEW pos after write.
+                        BroadcastSparklesForOwnColor(
+                            peerLink->actor.world.pos.x,
+                            peerLink->actor.world.pos.y,
+                            peerLink->actor.world.pos.z);
                         SPDLOG_INFO("[CutsceneCatchup] Fix N.2 — teleported "
                                     "peer Link to leader pos=({:.0f},{:.0f},"
                                     "{:.0f}) yaw={} (curRoom={} matches "
