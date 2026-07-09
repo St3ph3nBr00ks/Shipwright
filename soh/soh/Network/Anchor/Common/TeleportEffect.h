@@ -26,7 +26,11 @@
 
 #include <cstdint>
 
-struct Vec3f;
+// PlayState is a typedef-struct in z64.h; forward-decl as a struct tag
+// is safe because the tag name matches the typedef name. Vec3f can NOT
+// be forward-declared the same way (z64math.h uses `typedef struct
+// Vec3f_ { ... } Vec3f`, where the tag is `Vec3f_` not `Vec3f`) — but
+// we don't need it in these signatures, all coords are raw floats.
 struct PlayState;
 
 namespace TeleportEffect {
