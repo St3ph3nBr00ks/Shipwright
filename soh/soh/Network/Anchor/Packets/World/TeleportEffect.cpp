@@ -22,10 +22,19 @@ void Anchor::SendPacket_TeleportEffect(float x, float y, float z,
                                         uint8_t primR, uint8_t primG, uint8_t primB,
                                         uint8_t envR, uint8_t envG, uint8_t envB) {
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
+    SendPacket_TeleportEffect((int16_t)gPlayState->sceneNum, x, y, z,
+                               primR, primG, primB, envR, envG, envB);
+}
+
+void Anchor::SendPacket_TeleportEffect(int16_t sceneNum,
+                                        float x, float y, float z,
+                                        uint8_t primR, uint8_t primG, uint8_t primB,
+                                        uint8_t envR, uint8_t envG, uint8_t envB) {
+    if (!IsSaveLoaded() || gPlayState == nullptr) return;
 
     nlohmann::json payload;
     payload["type"]         = TELEPORT_EFFECT;
-    payload["sceneNum"]     = (int)gPlayState->sceneNum;
+    payload["sceneNum"]     = (int)sceneNum;
     payload["pos"]          = nlohmann::json::array({x, y, z});
     payload["primR"]        = (int)primR;
     payload["primG"]        = (int)primG;
@@ -39,18 +48,39 @@ void Anchor::SendPacket_TeleportEffect(float x, float y, float z,
     SPDLOG_INFO("[TeleportEffect] Broadcasting pos=({:.0f},{:.0f},{:.0f}) "
                 "primRGB=({},{},{}) sceneNum={}",
                 x, y, z, (int)primR, (int)primG, (int)primB,
-                (int)gPlayState->sceneNum);
+                (int)sceneNum);
 
     SendJsonToRemote(payload);
 
-    // Local spawn — the sender's own screen may be behind a fade overlay
-    // (cutscene late-join fade-to-white), but if the user has the fade
-    // disabled or the effect fires outside a fade window, they should
-    // see it locally too. Spawning locally also avoids one relay round-
-    // trip of latency.
-    TeleportEffect::SpawnSparkleBurst(gPlayState, x, y, z,
-                                       primR, primG, primB,
-                                       envR, envG, envB);
+    // Local spawn ONLY if the effect's scene matches our current scene.
+    // The Anchor player-teleport arrival case broadcasts sparkles for
+    // the TARGET scene (not sender's current scene) — the sender is
+    // still in the departure scene when this fires; local spawn at
+    // arrival pos would render in the wrong scene.
+    if (sceneNum == (int16_t)gPlayState->sceneNum) {
+        TeleportEffect::SpawnSparkleBurst(gPlayState, x, y, z,
+                                           primR, primG, primB,
+                                           envR, envG, envB);
+    }
+}
+
+void Anchor::BroadcastTeleportSparklesForOwnColor(float x, float y, float z) {
+    if (gPlayState == nullptr) return;
+    BroadcastTeleportSparklesForOwnColor((int16_t)gPlayState->sceneNum,
+                                          x, y, z);
+}
+
+void Anchor::BroadcastTeleportSparklesForOwnColor(int16_t sceneNum,
+                                                    float x, float y, float z) {
+    auto it = clients.find(ownClientId);
+    if (it == clients.end()) return;
+    const auto& color = it->second.color;
+    const uint8_t envR = (uint8_t)((int)color.r * 3 / 5);
+    const uint8_t envG = (uint8_t)((int)color.g * 3 / 5);
+    const uint8_t envB = (uint8_t)((int)color.b * 3 / 5);
+    SendPacket_TeleportEffect(sceneNum, x, y, z,
+                               color.r, color.g, color.b,
+                               envR, envG, envB);
 }
 
 void Anchor::HandlePacket_TeleportEffect(nlohmann::json payload) {

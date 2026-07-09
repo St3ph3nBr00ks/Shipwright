@@ -3351,8 +3351,22 @@ bool CheckEnvironmentalDeath(EnFollower* this_, PlayState* play) {
 // FOLLOW state, snap floor altitude. Caller logs the trigger.
 void TeleportNpcTo(EnFollower* this_, PlayState* play, const Vec3f& dest) {
     Actor* a = &this_->actor;
+    // Sparkle burst — DEPARTURE at OLD pos before overwrite, ARRIVAL at
+    // NEW pos after overwrite. Same-scene guarantee (NPC teleports don't
+    // change scene). Broadcast on the owning client (this function is
+    // only called on the locally-owned follower — remote followers are
+    // observer-only, driven by FOLLOWER_NPC_STATE). See Common/
+    // TeleportEffect.h for the rendering primitive.
+    if (Anchor::Instance != nullptr) {
+        Anchor::Instance->BroadcastTeleportSparklesForOwnColor(
+            a->world.pos.x, a->world.pos.y, a->world.pos.z);
+    }
     a->world.pos = dest;
     a->speedXZ   = 0.0f;
+    if (Anchor::Instance != nullptr) {
+        Anchor::Instance->BroadcastTeleportSparklesForOwnColor(
+            dest.x, dest.y, dest.z);
+    }
     // Reset all nav-state baselines so we don't immediately re-fire a
     // G-guard or STUCK detection at the new position.
     sLocalNav.navState.path.Reset();

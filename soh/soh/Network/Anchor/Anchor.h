@@ -1290,10 +1290,35 @@ class Anchor : public Network {
     // reusable primitive for every teleport site — future consumers
     // documented in PacketTypes.h header comment for TELEPORT_EFFECT.
     // Sparkle burst rendered via TeleportEffect::SpawnSparkleBurst.
+    // Two overloads:
+    //   - No sceneNum → uses gPlayState->sceneNum (current scene, common
+    //     case: burst fires where sender currently is).
+    //   - sceneNum given → burst fires in a specific target scene
+    //     (Anchor player teleport arrival case: sender is still in
+    //     departure scene at broadcast time, but wants sparkles in the
+    //     target scene where observers will see them).
+    //
+    // Local spawn on the sender only happens when sceneNum matches the
+    // sender's current scene (otherwise the burst would render in the
+    // wrong scene locally). Remote broadcast still goes out either way.
     void SendPacket_TeleportEffect(float x, float y, float z,
                                     uint8_t primR, uint8_t primG, uint8_t primB,
                                     uint8_t envR, uint8_t envG, uint8_t envB);
+    void SendPacket_TeleportEffect(int16_t sceneNum,
+                                    float x, float y, float z,
+                                    uint8_t primR, uint8_t primG, uint8_t primB,
+                                    uint8_t envR, uint8_t envG, uint8_t envB);
     void HandlePacket_TeleportEffect(nlohmann::json payload);
+
+    // Convenience wrapper — broadcast a sparkle burst using the local
+    // player's own Anchor color. Env color = 60% intensity of prim for
+    // a subtle outer glow. Common consumer pattern across all teleport
+    // sites (cutscene late-join, Anchor player teleport, AI Player
+    // Follower, NPC Follower, AI Invader). Extracted here after the
+    // third consumer per DRY.
+    void BroadcastTeleportSparklesForOwnColor(float x, float y, float z);
+    void BroadcastTeleportSparklesForOwnColor(int16_t sceneNum,
+                                                float x, float y, float z);
 
     // MIDO_POST_DEKU_LEAVE — team broadcast. Sent by the dialog client
     // when its local Mido transitions BlockPath → Walk for the post-

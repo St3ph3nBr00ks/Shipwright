@@ -76,27 +76,6 @@ std::chrono::steady_clock::time_point sLastFrameSyncBroadcast;
 // Behavior-preserving refactor; each helper's semantics documented at
 // definition site in TickCutsceneCatchup.
 
-// Broadcast the sparkle burst effect at (x,y,z) using the local
-// player's own Anchor color. Fires both remotely (via SendPacket_
-// TeleportEffect) and locally (SendPacket wraps the local spawn too).
-// Called at BOTH departure and arrival positions of the teleport so
-// observers see sparkles on both sides of the pop-in. See
-// Common/TeleportEffect.h for the rendering primitive.
-void BroadcastSparklesForOwnColor(float x, float y, float z) {
-    auto* anchor = Anchor::Instance;
-    if (anchor == nullptr) return;
-    auto it = anchor->clients.find(anchor->ownClientId);
-    if (it == anchor->clients.end()) return;
-    const auto& color = it->second.color;
-    // env color = 60% intensity of prim for a subtle outer glow.
-    const uint8_t envR = (uint8_t)((int)color.r * 3 / 5);
-    const uint8_t envG = (uint8_t)((int)color.g * 3 / 5);
-    const uint8_t envB = (uint8_t)((int)color.b * 3 / 5);
-    anchor->SendPacket_TeleportEffect(x, y, z,
-                                       color.r, color.g, color.b,
-                                       envR, envG, envB);
-}
-
 // Bug 13 fix — deferred teleport apply. When Fix P.2 detected a room
 // mismatch and initiated a room load, the teleport target was persisted
 // on the Anchor instance. Each frame we check whether the load has
@@ -145,7 +124,7 @@ void ApplyDeferredTeleportIfReady(std::chrono::steady_clock::time_point now) {
         // linger (30-frame particle life) after the DummyPlayer teleports
         // away — matches the "left behind" visual language of Farore's
         // Wind departures.
-        BroadcastSparklesForOwnColor(peerLink->actor.world.pos.x,
+        Anchor::Instance->BroadcastTeleportSparklesForOwnColor(peerLink->actor.world.pos.x,
                                      peerLink->actor.world.pos.y,
                                      peerLink->actor.world.pos.z);
         peerLink->actor.world.pos.x = anchor->catchupDeferredTeleportPos.x;
@@ -156,7 +135,7 @@ void ApplyDeferredTeleportIfReady(std::chrono::steady_clock::time_point now) {
         // DummyPlayer follows via PLAYER_UPDATE (~1 tick later) so
         // observers see sparkles first, then the character resolves into
         // them — sage-arrival visual sequence.
-        BroadcastSparklesForOwnColor(peerLink->actor.world.pos.x,
+        Anchor::Instance->BroadcastTeleportSparklesForOwnColor(peerLink->actor.world.pos.x,
                                      peerLink->actor.world.pos.y,
                                      peerLink->actor.world.pos.z);
         SPDLOG_INFO("[CutsceneCatchup] Bug 13 fix — applied deferred "
@@ -1530,7 +1509,7 @@ void Anchor::TickCutsceneCatchup() {
                         // Departure sparkles at OLD pos before overwrite.
                         // See BroadcastSparklesForOwnColor comment above
                         // for full rationale.
-                        BroadcastSparklesForOwnColor(
+                        Anchor::Instance->BroadcastTeleportSparklesForOwnColor(
                             peerLink->actor.world.pos.x,
                             peerLink->actor.world.pos.y,
                             peerLink->actor.world.pos.z);
@@ -1539,7 +1518,7 @@ void Anchor::TickCutsceneCatchup() {
                         peerLink->actor.world.pos.z = catchupPendingPlayerPos.z;
                         peerLink->actor.shape.rot.y = catchupPendingPlayerYaw;
                         // Arrival sparkles at NEW pos after write.
-                        BroadcastSparklesForOwnColor(
+                        Anchor::Instance->BroadcastTeleportSparklesForOwnColor(
                             peerLink->actor.world.pos.x,
                             peerLink->actor.world.pos.y,
                             peerLink->actor.world.pos.z);
