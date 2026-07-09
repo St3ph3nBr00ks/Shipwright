@@ -319,6 +319,36 @@ void Anchor::SendPacket_CutsceneTextAdvance(uint16_t textId) {
                 (unsigned)textId, (int)gPlayState->sceneNum, target);
 
     SendJsonToRemote(payload);
+
+    // Fix V — host self-counts its own vote without waiting for the
+    // relay loopback packet. When the local client IS the vote-skip
+    // host, the packet we just sent will be routed by the relay via
+    // targetClientId=self back to us. If the network is healthy, that
+    // packet arrives ~10-50ms later and HandlePacket_CutsceneText-
+    // Advance tallies our vote. But if the incoming TCP direction
+    // stalls (log 646: P1 rx dropped to 0.0 pps for 10s before formal
+    // TCP disconnect at 17:47:00.222), our own vote never comes back,
+    // vote-skip stalls until hard_deadline fires.
+    //
+    // Fix V: synthesize an equivalent payload representing "self
+    // voted" and invoke HandlePacket_CutsceneTextAdvance directly.
+    // HandlePacket's dedup (line 377: state.pressedClientIds.count
+    // (senderId)) makes this idempotent — when the actual loopback
+    // packet arrives later (if it ever does), the second call
+    // returns early without double-counting.
+    //
+    // Only fires when we are the vote-skip host; peer-side clients
+    // still rely on the host receiving their vote packet via the
+    // normal relay path. See Analysis/log_646_vote_skip_regression_
+    // 2026-07-08.md §7 Fix V.
+    if (AmVoteSkipHost()) {
+        nlohmann::json selfPayload = payload;
+        // HandlePacket reads clientId as the sender identifier. The
+        // relay stamps this on incoming packets, but for our direct
+        // self-invoke we must set it explicitly.
+        selfPayload["clientId"] = ownClientId;
+        HandlePacket_CutsceneTextAdvance(selfPayload);
+    }
 }
 
 void Anchor::SendPacket_CutsceneTextAdvanced(uint16_t textId, const char* reason) {
