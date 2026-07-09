@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Bridge/AnchorMessageBridge.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/Common/CutsceneCatchup.h"
@@ -67,6 +68,85 @@ constexpr int32_t kFrameSyncIntervalMs   = 1000;    // 1Hz per §3.1
 // process. TickCutsceneCatchup polls at 60 Hz; we only actually SEND
 // when the elapsed interval crosses the threshold.
 std::chrono::steady_clock::time_point sLastFrameSyncBroadcast;
+
+// R4 (2026-07-09) — Tick sub-helpers extracted from TickCutsceneCatchup
+// for readability. Each handles one concern of the ~350-line tick body.
+// Behavior-preserving refactor; each helper's semantics documented at
+// definition site in TickCutsceneCatchup.
+
+// Bug 13 fix — deferred teleport apply. When Fix P.2 detected a room
+// mismatch and initiated a room load, the teleport target was persisted
+// on the Anchor instance. Each frame we check whether the load has
+// completed (curRoom matches pending target) and apply once ready.
+// Safety net: after 2s, apply regardless (better to place Link at
+// leader coords with slightly wrong geometry than never place him).
+void ApplyDeferredTeleportIfReady(std::chrono::steady_clock::time_point now) {
+    auto* anchor = Anchor::Instance;
+    if (anchor == nullptr) return;
+    if (!anchor->catchupDeferredTeleportValid) return;
+    if (gPlayState == nullptr) return;
+
+    static std::chrono::steady_clock::time_point sDeferredArmedAt =
+        std::chrono::steady_clock::time_point::min();
+    if (sDeferredArmedAt == std::chrono::steady_clock::time_point::min()) {
+        sDeferredArmedAt = now;
+    }
+    const int8_t curRoom = (int8_t)gPlayState->roomCtx.curRoom.num;
+    const bool roomMatches = (anchor->catchupPendingRoomSwitchTarget < 0) ||
+                             (curRoom == anchor->catchupPendingRoomSwitchTarget);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - sDeferredArmedAt).count();
+    const bool safetyExpired = ms > 2000;
+    if (!(roomMatches || safetyExpired)) return;
+
+    Player* peerLink = GET_PLAYER(gPlayState);
+    if (peerLink != nullptr) {
+        peerLink->actor.world.pos.x = anchor->catchupDeferredTeleportPos.x;
+        peerLink->actor.world.pos.y = anchor->catchupDeferredTeleportPos.y;
+        peerLink->actor.world.pos.z = anchor->catchupDeferredTeleportPos.z;
+        peerLink->actor.shape.rot.y = anchor->catchupDeferredTeleportYaw;
+        SPDLOG_INFO("[CutsceneCatchup] Bug 13 fix — applied deferred "
+                    "teleport to ({:.0f},{:.0f},{:.0f}) yaw={} after "
+                    "room load (curRoom={} target={} matches={} "
+                    "safetyExpired={} elapsedMs={})",
+                    anchor->catchupDeferredTeleportPos.x,
+                    anchor->catchupDeferredTeleportPos.y,
+                    anchor->catchupDeferredTeleportPos.z,
+                    (int)anchor->catchupDeferredTeleportYaw,
+                    (int)curRoom,
+                    (int)anchor->catchupPendingRoomSwitchTarget,
+                    (int)roomMatches, (int)safetyExpired,
+                    (long long)ms);
+    }
+    anchor->catchupDeferredTeleportValid = false;
+    anchor->catchupPendingRoomSwitchTarget = -1;
+    sDeferredArmedAt = std::chrono::steady_clock::time_point::min();
+}
+
+// Per-frame leader-side chain-depth tracker. Detects msgCtx.msgLength
+// changes while textId stays the same (indicates vanilla loaded next
+// sub-textbox). Also detects textId changes → resets shadow via bridge.
+// The chain-depth counter is retained for backward-compat with the
+// (retired) Bug 14 mechanism; not currently consumed.
+void UpdateLeaderChainDepthTracker() {
+    auto* anchor = Anchor::Instance;
+    if (anchor == nullptr) return;
+    if (gPlayState == nullptr) return;
+
+    const uint16_t curTextId = (uint16_t)gPlayState->msgCtx.textId;
+    const uint16_t curMsgLen = (uint16_t)gPlayState->msgCtx.msgLength;
+    if (curTextId != anchor->leaderChainTrackerLastTextId) {
+        anchor->leaderChainTrackerLastTextId = curTextId;
+        anchor->leaderChainTrackerLastMsgLen = curMsgLen;
+        anchor->leaderMsgChainDepthCurrent   = 0;
+        // Shadow reset — Message_StartTextbox has reset msgBufPos=0.
+        AnchorMessageBridge::ResetShadowForNewTextbox();
+    } else if (curTextId != 0 && curMsgLen != 0 &&
+               curMsgLen != anchor->leaderChainTrackerLastMsgLen) {
+        anchor->leaderChainTrackerLastMsgLen = curMsgLen;
+        anchor->leaderMsgChainDepthCurrent++;
+    }
+}
 
 // Build the "<csKind>:<csKey>" key used across ledger + pendingCatchups
 // (mirror of MakeDedupKey in CutsceneStart.cpp — kept local to avoid
@@ -772,81 +852,10 @@ void Anchor::TickCutsceneCatchup() {
 
     const auto now = std::chrono::steady_clock::now();
 
-    // Bug 13 fix — deferred teleport apply. When Fix P.2 detected a
-    // room mismatch and initiated a room load via func_8009728C, the
-    // teleport target was persisted here. Each subsequent frame we
-    // check whether the load has completed (curRoom now matches the
-    // pending target) and apply the teleport once ready. Safety net:
-    // if the load takes >2s, apply the teleport regardless — better
-    // to place Link at leader's coords with slightly wrong geometry
-    // than to never place him.
-    if (catchupDeferredTeleportValid && gPlayState != nullptr) {
-        static std::chrono::steady_clock::time_point sDeferredArmedAt =
-            std::chrono::steady_clock::time_point::min();
-        if (sDeferredArmedAt == std::chrono::steady_clock::time_point::min()) {
-            sDeferredArmedAt = now;
-        }
-        const int8_t curRoom = (int8_t)gPlayState->roomCtx.curRoom.num;
-        const bool roomMatches = (catchupPendingRoomSwitchTarget < 0) ||
-                                 (curRoom == catchupPendingRoomSwitchTarget);
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            now - sDeferredArmedAt).count();
-        const bool safetyExpired = ms > 2000;
-        if (roomMatches || safetyExpired) {
-            Player* peerLink = GET_PLAYER(gPlayState);
-            if (peerLink != nullptr) {
-                peerLink->actor.world.pos.x = catchupDeferredTeleportPos.x;
-                peerLink->actor.world.pos.y = catchupDeferredTeleportPos.y;
-                peerLink->actor.world.pos.z = catchupDeferredTeleportPos.z;
-                peerLink->actor.shape.rot.y = catchupDeferredTeleportYaw;
-                SPDLOG_INFO("[CutsceneCatchup] Bug 13 fix — applied "
-                            "deferred teleport to ({:.0f},{:.0f},{:.0f}) "
-                            "yaw={} after room load (curRoom={} target={} "
-                            "matches={} safetyExpired={} elapsedMs={})",
-                            catchupDeferredTeleportPos.x,
-                            catchupDeferredTeleportPos.y,
-                            catchupDeferredTeleportPos.z,
-                            (int)catchupDeferredTeleportYaw,
-                            (int)curRoom,
-                            (int)catchupPendingRoomSwitchTarget,
-                            (int)roomMatches, (int)safetyExpired,
-                            (long long)ms);
-            }
-            catchupDeferredTeleportValid = false;
-            catchupPendingRoomSwitchTarget = -1;
-            sDeferredArmedAt =
-                std::chrono::steady_clock::time_point::min();
-        }
-    }
-
-    // Bug 14 fix — per-frame chain-depth tracker on leader side.
-    // Vanilla `Message_ContinueTextbox` loads next sub-textbox of the
-    // same base textId. Detected by observing msgLength change while
-    // textId is unchanged. Reset when textId changes or textId==0.
-    // Peer catches up post-fast-forward by calling
-    // Message_ContinueTextbox depth-many times. See Analysis/cutscene_
-    // room_reload_and_sub_textbox_2026-07-08.md Bug 14.
-    {
-        const uint16_t curTextId = (uint16_t)gPlayState->msgCtx.textId;
-        const uint16_t curMsgLen = (uint16_t)gPlayState->msgCtx.msgLength;
-        if (curTextId != leaderChainTrackerLastTextId) {
-            // textId changed — restart chain.
-            leaderChainTrackerLastTextId = curTextId;
-            leaderChainTrackerLastMsgLen = curMsgLen;
-            leaderMsgChainDepthCurrent   = 0;
-            // Design E v3 shadow — reset "start of sub" to 0.
-            // Message_StartTextbox on the new textId has already
-            // reset msgBufPos to 0, so the first sub starts at
-            // position 0. Fix S/T's msgBufPos++ transitions will
-            // update the shadow going forward.
-            leaderMsgBufPosLastSubStart = 0;
-        } else if (curTextId != 0 && curMsgLen != 0 &&
-                   curMsgLen != leaderChainTrackerLastMsgLen) {
-            // Same textId, msgLength changed → new sub-textbox.
-            leaderChainTrackerLastMsgLen = curMsgLen;
-            leaderMsgChainDepthCurrent++;
-        }
-    }
+    // R4-extracted helpers. See anonymous namespace above for
+    // implementation. Each corresponds to one concern of this tick.
+    ApplyDeferredTeleportIfReady(now);
+    UpdateLeaderChainDepthTracker();
 
     // Leader side — 1Hz FRAME_SYNC emit + snapshot refresh.
     if (!cutsceneStartActive.empty()) {
@@ -891,61 +900,15 @@ void Anchor::TickCutsceneCatchup() {
         constexpr int kMaxTicksPerRealFrame = 10;
         int ticksFired = 0;
         const int32_t framesBefore = (int32_t)gPlayState->csCtx.frames;
-        const bool ffDiagEnabled =
-            CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"), 0) != 0;
         for (int i = 0; i < kMaxTicksPerRealFrame; i++) {
             if (gPlayState->csCtx.frames >= catchupFastForwardTarget) break;
-            // Diag D2 — fast-forward rewind detector. Vanilla
-            // Cutscene_Command_Textbox rewinds csCtx.frames when the
-            // message state is non-terminal (z_demo.c:1663-1669). Log
-            // this per-tick when we detect a decrement so we can trace
-            // exactly when + why Fix L.2's msgLength=0 write fails to
-            // pass Message_GetState's TEXT_STATE_NONE branch. Gated on
-            // gEnhancements.Anchor.CutsceneLateJoinDiag.
-            const int32_t framesPreTick = (int32_t)gPlayState->csCtx.frames;
-            const uint16_t msgLenPre    = (uint16_t)gPlayState->msgCtx.msgLength;
-            const uint8_t  msgModePre   = (uint8_t)gPlayState->msgCtx.msgMode;
-            const uint16_t textIdPre    = (uint16_t)gPlayState->msgCtx.textId;
-            // Fix L → L.2 — force message state terminal so vanilla's
-            // Cutscene_Command_Textbox (z_demo.c:1663-1669) does NOT
-            // rewind csFrames on textbox endFrame overrun. Fast-
-            // forward has no user input to close textboxes; without
-            // this the very first cutscene textbox stalls the loop.
-            //
-            // Fix L (log 631, insufficient): wrote msgMode=NONE +
-            // textId=0. Vanilla's Message_GetState (z_message_PAL.c:
-            // 3116-3149) checks msgLength FIRST for TEXT_STATE_NONE,
-            // then falls through to TEXT_STATE_DONE_FADING when
-            // msgMode is anything unrecognized. TEXT_STATE_DONE_FADING
-            // is NOT in the rewind-exception list at z_demo.c:1667-
-            // 1668, so csFrames was still decremented. Log 632 showed
-            // the same frame-59 stall as log 631.
-            //
-            // Fix L.2 (log 632): also write msgLength=0. That triggers
-            // branch ① of Message_GetState → returns TEXT_STATE_NONE
-            // (in the rewind-exception list) → csFrames advances
-            // freely. See Analysis/cutscene_fix_l_insufficient_2026-
-            // 07-08.md.
-            gPlayState->msgCtx.msgMode   = MSGMODE_NONE;
-            gPlayState->msgCtx.textId    = 0;
-            gPlayState->msgCtx.msgLength = 0;
+            // Fix L.2 — clear message state via the bridge so
+            // vanilla's Cutscene_Command_Textbox rewind mechanism
+            // doesn't pin csFrames. See Analysis/cutscene_fix_l_-
+            // insufficient_2026-07-08.md and AnchorMessageBridge.h.
+            AnchorMessageBridge::ClearMessageStateForFastForwardTick();
             func_800645A0(gPlayState, &gPlayState->csCtx);
             ticksFired++;
-            // Diag D2 — log rewind or stall on this tick. Post-tick
-            // msgCtx values reflect what vanilla wrote during the tick
-            // (typically Message_StartTextbox on an in-range command).
-            const int32_t framesPostTick = (int32_t)gPlayState->csCtx.frames;
-            if (ffDiagEnabled && framesPostTick <= framesPreTick) {
-                SPDLOG_INFO("[CutsceneCatchup.diag] Fast-forward tick "
-                            "pre.frames={} post.frames={} "
-                            "pre(msgMode={} msgLen={} textId=0x{:04X}) "
-                            "post(msgMode={} msgLen={} textId=0x{:04X})",
-                            framesPreTick, framesPostTick,
-                            msgModePre, msgLenPre, textIdPre,
-                            (int)gPlayState->msgCtx.msgMode,
-                            (int)gPlayState->msgCtx.msgLength,
-                            (unsigned)gPlayState->msgCtx.textId);
-            }
         }
         const int32_t framesAfter = (int32_t)gPlayState->csCtx.frames;
 
@@ -1049,19 +1012,12 @@ void Anchor::TickCutsceneCatchup() {
                 if (catchupPendingMsgBufPos > 0) {
                     const uint16_t priorPos =
                         (uint16_t)gPlayState->msgCtx.msgBufPos;
-                    gPlayState->msgCtx.msgBufPos =
-                        catchupPendingMsgBufPos;
-                    // msgMode intentionally NOT overridden here —
-                    // Message_StartTextbox already set it to
-                    // MSGMODE_TEXT_START and vanilla's setup states
-                    // must run to establish R_TEXTBOX_Y +
-                    // textboxColorAlphaCurrent before Message_Decode.
+                    AnchorMessageBridge::JumpToLeaderSubTextboxPosition(
+                        catchupPendingMsgBufPos);
                     SPDLOG_INFO("[CutsceneCatchup] Design E v2 — jumped "
                                 "peer msgBufPos from {} to leader's {} "
                                 "(leaderMsgMode was {}) for textId 0x"
-                                "{:04X}; msgMode preserved at TEXT_START "
-                                "so vanilla setup states run before "
-                                "Message_Decode",
+                                "{:04X}",
                                 (int)priorPos,
                                 (int)catchupPendingMsgBufPos,
                                 (int)catchupPendingMsgMode,

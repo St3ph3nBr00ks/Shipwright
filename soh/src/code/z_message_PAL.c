@@ -165,6 +165,12 @@ void Message_UpdateOcarinaGame(PlayState* play) {
 // returns the input unchanged. Defined in HookHandlers.cpp.
 extern int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected, unsigned currentTextId);
 
+// R1 (2026-07-09) — Anchor shadow-tracking hook called after every
+// vanilla msgBufPos++ transition in the AWAIT_NEXT case. Consolidates
+// what were 3 scattered shadow-update sites in CutsceneBridge.cpp
+// into a single point. See AnchorMessageBridge.h for the design.
+extern void Anchor_OnMessageBufPosAdvanced(unsigned newMsgBufPos, unsigned currentTextId);
+
 u8 Message_ShouldAdvance(PlayState* play) {
     Input* input = &play->state.input[0];
 
@@ -4653,6 +4659,11 @@ void Message_Update(PlayState* play) {
                 msgCtx->msgMode = MSGMODE_TEXT_NEXT_MSG;
                 msgCtx->textUnskippable = false;
                 msgCtx->msgBufPos++;
+                // R1 — notify Anchor of the advance so the shadow
+                // field can track "start of current sub" for peer
+                // catchup. See AnchorMessageBridge.h.
+                Anchor_OnMessageBufPosAdvanced((unsigned)msgCtx->msgBufPos,
+                                                (unsigned)msgCtx->textId);
             }
             break;
         case MSGMODE_TEXT_DONE:

@@ -1578,7 +1578,7 @@ class Anchor : public Network {
     //   Setter sites (HandlePacket_CutsceneTextAdvanced peer receive,
     //   HandlePacket_CutsceneTextAdvance all-pressed, TickCutsceneText-
     //   Advance hard-deadline):
-    //     - if textId matches cutsceneTextAdvanceConsumedTextId: count++
+    //     - if textId matches cutsceneTextAdvancePendingTextId: count++
     //     - else: reset count to 1 and update textId (stale count for
     //       old textId is dropped — msgMode has moved on)
     //     - clamp at UINT8_MAX (255) to prevent overflow; in practice
@@ -1594,7 +1594,7 @@ class Anchor : public Network {
     //       count to 0. The mismatched flag was for a prior textbox
     //       already advanced past.
     uint8_t  cutsceneTextAdvancePendingCount = 0;
-    uint16_t cutsceneTextAdvanceConsumedTextId = 0;
+    uint16_t cutsceneTextAdvancePendingTextId = 0;
 
     // CUTSCENE_START / CUTSCENE_END edge-detector state. Tracks
     // last-frame values so the detector fires once per transition.
@@ -1730,7 +1730,7 @@ class Anchor : public Network {
     // msgBufPos past a BOX_BREAK.
     //
     // Updated in:
-    //   - Fix S/T helper ApplyForcedSubTextAdvanceIfInAwaitNext —
+    //   - Fix S/T helper TryConsumePendingSubTextAdvance —
     //     after msgBufPos++, save new msgBufPos as the shadow.
     //   - TickCutsceneCatchup's chain-depth tracker — reset to 0
     //     when leaderChainTrackerLastTextId transitions (new base

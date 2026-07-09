@@ -40,6 +40,7 @@
 #include "soh/Network/Anchor/Common/CutsceneCatchup.h"
 
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Bridge/AnchorMessageBridge.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/ShipInit.hpp"
@@ -120,42 +121,33 @@ CutsceneCatchupEntry* GetOrCreateActiveEntry(const char* triggerContext = "unkno
     auto it = map.find(key);
     if (it != map.end()) return it->second.get();
 
-    // Fix G — refuse ledger creation unless this cutscene was
-    // originated locally by THIS client. `cutsceneStartActive` is
-    // populated symmetrically by SendPacket_CutsceneStart (we
-    // originated) AND HandlePacket_CutsceneStart (peer broadcast
-    // arrived) AND HandlePacket_CutsceneFrameSync late-join hydration
-    // (peer told us they're mid-cutscene). Only the first case
-    // qualifies as leader — the sibling set
-    // `cutsceneStartActiveLocalOrigin` records that origin.
+    // Phantom-leader guard (Fix G + Fix F consolidated). Ledger
+    // creation requires that we are BOTH (a) the local originator of
+    // the cutscene AND (b) not currently awaiting a catchup response
+    // for it.
     //
-    // Without this gate, log 629 P2 became phantom leader for
-    // 'deku_tree_intro:0' via IsRoomHost=1 + stale Play_InCsMode=1
-    // (Player.stateFlags1 leftover from a prior savecontext
-    // cutscene) + cutsceneStartActive populated from P1's broadcast.
-    // See Analysis/cutscene_late_join_bugs_deep_analysis_2026-07-08.md
-    // Bug 2 root-cause chain.
-    if (Anchor::Instance->cutsceneStartActiveLocalOrigin.count(key) == 0) {
-        SPDLOG_INFO("[CutsceneCatchup] Ledger create refused — cutscene "
-                    "'{}' was not locally originated (peer-received START "
-                    "populates cutsceneStartActive but never the local-"
-                    "origin sibling set). trigger='{}'",
-                    key, triggerContext);
-        return nullptr;
-    }
-
-    // Fix F — refuse ledger creation while we have an outstanding
-    // catchup REQUEST for the same key. Retained as belt-and-
-    // suspenders — Fix G subsumes this in the common case, but Fix F
-    // guards against a hypothetical race where we simultaneously
-    // originate a local cutscene and REQUEST catchup for the same
-    // key. Log 628 line 814 was the original trigger for this guard.
-    if (Anchor::Instance->pendingCatchups.count(key) > 0) {
-        SPDLOG_INFO("[CutsceneCatchup] Ledger create refused — pending "
-                    "catchup REQUEST outstanding for key='{}' trigger='{}' "
-                    "(we are a peer awaiting a leader's response, not "
-                    "the leader ourselves)",
-                    key, triggerContext);
+    // (a) `cutsceneStartActive` is populated symmetrically by
+    // SendPacket_CutsceneStart (we originated), HandlePacket_
+    // CutsceneStart (peer broadcast arrived), and HandlePacket_
+    // CutsceneFrameSync late-join hydration. Only the origination
+    // path also populates the sibling set
+    // `cutsceneStartActiveLocalOrigin`. Without this gate, log 629 P2
+    // became phantom leader for 'deku_tree_intro:0' via IsRoomHost=1
+    // + stale Play_InCsMode=1 + peer's START broadcast. See
+    // Analysis/cutscene_late_join_bugs_deep_analysis_2026-07-08.md.
+    //
+    // (b) `pendingCatchups` non-empty for this key means we recently
+    // sent a REQUEST as a late-joiner — we're not the leader, we're
+    // awaiting the leader's response. Belt-and-suspenders against
+    // the race where we simultaneously originate a local cutscene
+    // and request catchup for the same key. Log 628 line 814 origin.
+    if (Anchor::Instance->cutsceneStartActiveLocalOrigin.count(key) == 0 ||
+        Anchor::Instance->pendingCatchups.count(key) > 0) {
+        SPDLOG_INFO("[CutsceneCatchup] Ledger create refused — key='{}' "
+                    "trigger='{}' localOrigin={} pendingCatchup={}",
+                    key, triggerContext,
+                    Anchor::Instance->cutsceneStartActiveLocalOrigin.count(key),
+                    Anchor::Instance->pendingCatchups.count(key));
         return nullptr;
     }
 
@@ -329,16 +321,13 @@ void SnapshotCamera() {
     // BOX_BREAK, exits with empty msgBufDecoded, and shows no text.
     //
     // leaderMsgBufPosLastSubStart is updated by Fix S/T's helper
-    // (ApplyForcedSubTextAdvanceIfInAwaitNext) IMMEDIATELY AFTER the
+    // (TryConsumePendingSubTextAdvance) IMMEDIATELY AFTER the
     // msgBufPos++ transition — capturing "start of the sub about to be
     // decoded" (which is also start of the sub about to be displayed).
     // Between transitions, the shadow retains that value across
     // DISPLAYING → AWAIT_NEXT frames — always pointing at "start of
     // current sub." Also reset to 0 when a new base textbox opens.
-    entry->leaderMsgBufPos =
-        Anchor::Instance != nullptr
-            ? Anchor::Instance->leaderMsgBufPosLastSubStart
-            : (uint16_t)gPlayState->msgCtx.msgBufPos;
+    entry->leaderMsgBufPos = AnchorMessageBridge::GetLeaderMsgBufPosLastSubStart();
     entry->leaderMsgMode   = (uint8_t)gPlayState->msgCtx.msgMode;
     // Retain the old leaderMsgChainDepth field zero-init for
     // backward-compat during rollout; not written, not read.

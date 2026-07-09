@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Bridge/AnchorMessageBridge.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/cvar_prefixes.h"
@@ -81,14 +82,14 @@ int GetCutsceneHardDeadlineMs() {
 void RecordPendingAdvance(uint16_t textId, const char* siteTag) {
     if (Anchor::Instance == nullptr) return;
     auto* anchor = Anchor::Instance;
-    if (anchor->cutsceneTextAdvanceConsumedTextId == textId &&
+    if (anchor->cutsceneTextAdvancePendingTextId == textId &&
         anchor->cutsceneTextAdvancePendingCount > 0) {
         if (anchor->cutsceneTextAdvancePendingCount < 255) {
             anchor->cutsceneTextAdvancePendingCount++;
         }
     } else {
         anchor->cutsceneTextAdvancePendingCount = 1;
-        anchor->cutsceneTextAdvanceConsumedTextId = textId;
+        anchor->cutsceneTextAdvancePendingTextId = textId;
     }
     SPDLOG_INFO("[CutsceneTextAdvance] Design E v5 — pending advance "
                 "recorded ({}) for textId=0x{:04X} count={}",
@@ -134,35 +135,27 @@ void RecordPendingAdvance(uint16_t textId, const char* siteTag) {
 // The decrement of cutsceneTextAdvancePendingCount is what makes the helper
 // safe to call at multiple sites within the same tick; subsequent
 // calls no-op on the same broadcast.
-void ApplyForcedSubTextAdvanceIfInAwaitNext(const char* siteTag) {
+void TryConsumePendingSubTextAdvance(const char* siteTag) {
     if (gPlayState == nullptr) return;
     auto* anchor = Anchor::Instance;
     if (anchor == nullptr) return;
-    // Design E v5 — check pending count instead of boolean flag. See
-    // Anchor.h cutsceneTextAdvancePendingCount doc.
     if (anchor->cutsceneTextAdvancePendingCount == 0) return;
-    if ((uint16_t)gPlayState->msgCtx.textId !=
-            anchor->cutsceneTextAdvanceConsumedTextId) return;
-    if (gPlayState->msgCtx.msgMode != MSGMODE_TEXT_AWAIT_NEXT) return;
-    SPDLOG_INFO("[CutsceneTextAdvance] Fix S/T ({}) — force AWAIT_NEXT→"
-                "NEXT_MSG for textId=0x{:04X} msgBufPos={} (pending "
-                "remaining after decrement={})",
-                siteTag,
-                (unsigned)gPlayState->msgCtx.textId,
-                (int)gPlayState->msgCtx.msgBufPos,
-                (int)(anchor->cutsceneTextAdvancePendingCount - 1));
-    gPlayState->msgCtx.msgMode = MSGMODE_TEXT_NEXT_MSG;
-    gPlayState->msgCtx.textUnskippable = false;
-    gPlayState->msgCtx.msgBufPos++;
-    // Design E v3 shadow — after msgBufPos++, this is the START of
-    // the sub-textbox that Message_Decode is about to process. Save
-    // it so the leader's SnapshotCamera captures a position peer's
-    // Decode can start from cleanly. See Anchor.h
-    // leaderMsgBufPosLastSubStart doc for full rationale.
-    anchor->leaderMsgBufPosLastSubStart =
-        (uint16_t)gPlayState->msgCtx.msgBufPos;
-    // Design E v5 — decrement pending count (consumer semantics).
+
+    const uint16_t textId = anchor->cutsceneTextAdvancePendingTextId;
+    const int priorMsgBufPos = (int)gPlayState->msgCtx.msgBufPos;
+
+    // Delegate the vanilla-mirror msgCtx write to the bridge. Returns
+    // false if msgMode isn't AWAIT_NEXT or textId doesn't match; we
+    // then leave the pending count alone and try again next tick.
+    if (!AnchorMessageBridge::TryForceSubTextboxAdvance(textId)) return;
+
     anchor->cutsceneTextAdvancePendingCount--;
+    SPDLOG_INFO("[CutsceneTextAdvance] Fix S/T ({}) — force AWAIT_NEXT→"
+                "NEXT_MSG for textId=0x{:04X} msgBufPos={} → {} "
+                "(pending remaining after decrement={})",
+                siteTag, (unsigned)textId, priorMsgBufPos,
+                (int)gPlayState->msgCtx.msgBufPos,
+                (int)anchor->cutsceneTextAdvancePendingCount);
 }
 
 // True when the local client is in a cutscene text state — the
@@ -205,16 +198,8 @@ void LogVoteStateTransitionReason(const char* reason,
     const int  csFrames     = (int)gPlayState->csCtx.frames;
     const bool inCsMode     = Play_InCsMode(gPlayState);
     const bool inTextState  = IsHostInCutsceneTextState();
-    // Diag D1 — msgLength + Message_GetState result. Vanilla's
-    // Message_GetState (z_message_PAL.c:3116-3149) checks msgLength
-    // FIRST for TEXT_STATE_NONE; if non-zero, msgMode determines the
-    // returned state. Includes both `msgLength` (raw field) and the
-    // computed `Message_GetState` result (which is what
-    // Cutscene_Command_Textbox reads at z_demo.c:1665). Distinguishes
-    // "message state fully clear (msgLength=0 → TEXT_STATE_NONE)"
-    // from "msgMode zeroed but msgLength retained → TEXT_STATE_DONE_
-    // FADING". Log 632 Fix L insufficiency was invisible without
-    // this diagnostic.
+    // msgLength + Message_GetState — needed to distinguish
+    // "cleared" from "stale" msgCtx states (Fix L.2 diagnosis).
     const int msgLength = (int)gPlayState->msgCtx.msgLength;
     const int msgGetState = (int)Message_GetState(&gPlayState->msgCtx);
     SPDLOG_INFO("[VoteState.diag] reason={} active {}→{} textId 0x{:04X}→0x{:04X} "
@@ -560,7 +545,7 @@ void Anchor::TickCutsceneTextAdvance() {
     // top sees an empty flag. Log 639 showed P1 (host) stall + Solo idle
     // fallback while P2 (peer) advanced correctly via this top-of-tick
     // path. See detailed rationale on the helper below.
-    ApplyForcedSubTextAdvanceIfInAwaitNext("top_of_tick");
+    TryConsumePendingSubTextAdvance("top_of_tick");
 
     auto& state = cutsceneTextAdvanceState;
     auto now = std::chrono::steady_clock::now();
@@ -740,7 +725,7 @@ void Anchor::TickCutsceneTextAdvance() {
         // leaving P1 stalled until the 10 s "Solo idle auto-advance"
         // fallback fired. See Analysis/cutscene_fix_t_host_timing_-
         // 2026-07-08.md (to be written) if this pattern recurs.
-        ApplyForcedSubTextAdvanceIfInAwaitNext(
+        TryConsumePendingSubTextAdvance(
             wasVoteTimer ? "hard_deadline_vote" : "hard_deadline_timer");
     }
 }
