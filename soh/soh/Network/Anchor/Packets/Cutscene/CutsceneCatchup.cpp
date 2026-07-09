@@ -158,8 +158,12 @@ void UpdateCatchupFadeOverlay(std::chrono::steady_clock::time_point now) {
     if (gPlayState == nullptr) return;
     if (anchor->catchupFadeState == Anchor::CatchupFadeState::INACTIVE) return;
 
-    constexpr int kFadeToWhiteMs   = 300;
-    constexpr int kFadeFromWhiteMs = 500;
+    // Vanilla parity — default scene-transition fade is 60 units ≈ 1 s
+    // (z_play.c:873; TRANS_TYPE_FADE_WHITE default). FAST=0.33s,
+    // SLOW=2.5s. Matching the vanilla default keeps the fade cadence
+    // familiar and non-jarring.
+    constexpr int kFadeToWhiteMs   = 1000;
+    constexpr int kFadeFromWhiteMs = 1000;
     constexpr int kIdleDebounceMs  = 200;
     constexpr int kSafetyTimeoutMs = 8000;
 
@@ -762,10 +766,22 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         // delta and deferred-teleport states as "catching up". Log 652
         // showed spurious REQUESTs firing during these windows even
         // though a catchup was clearly in progress.
+        //
+        // Variant C.2.3 (2026-07-09) extension — also treat the OnScene-
+        // SpawnActors delay window as "catching up". Log 654 showed
+        // FRAME_SYNC arriving ~400 ms after peer entered scene, bypassing
+        // the 1 s Variant C.2.2 delay entirely and running the entire
+        // fast-forward + teleport during the intended "peer sees room"
+        // window. Result: fade + catchup engagement felt jarring because
+        // there was no quiet moment before the catchup started. With
+        // this gate, FRAME_SYNC waits for the delay window to elapse
+        // before firing REQUEST — same UX as the OnSceneSpawnActors path.
         const bool alreadyCatchingUp =
             (catchupFastForwardTarget > 0) ||
             catchupDeltaDeferred ||
-            catchupDeferredTeleportValid;
+            catchupDeferredTeleportValid ||
+            (catchupRequestGateArmedAt !=
+                std::chrono::steady_clock::time_point::min());
         SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC gates — sender={} own={} "
                     "kindKey='{}' enabled={} alreadyPending={} selfBroadcast={} "
                     "validSender={} alreadyInCs={} alreadyCatchingUp={} — will{} fire",
