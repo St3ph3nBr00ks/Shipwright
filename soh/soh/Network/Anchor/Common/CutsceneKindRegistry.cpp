@@ -2,6 +2,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 
 #include <libultraship/libultraship.h>
+#include <chrono>
 #include <unordered_map>
 
 extern "C" {
@@ -71,6 +72,23 @@ extern "C" int Anchor_TryEngageOptInCatchup(const char* csKind, uint32_t csKey) 
         leaderClientId == Anchor::Instance->ownClientId) {
         return 0;
     }
+
+    // Fix K.2 (log 669) — register pendingCatchups[kindKey] BEFORE sending
+    // the REQUEST. Without this, HandlePacket_CutsceneCatchupResponse
+    // hits the "RESPONSE for '...' but not pending; drop" guard at
+    // CutsceneCatchup.cpp:1011 and discards our own RESPONSE. Matches the
+    // pattern used by DetectAndRequestCutsceneCatchup (CutsceneCatchup.cpp
+    // line ~1195) and the FRAME_SYNC direct-request path (line ~869).
+    //
+    // Timeout of 2000ms mirrors kCatchupTimeoutMs — hardcoded here to
+    // avoid pulling the file-static from CutsceneCatchup.cpp. If the
+    // shared constant needs to change, update both sites (audit via
+    // grep for "kCatchupTimeoutMs").
+    Anchor::PendingCatchup p;
+    p.deadline = std::chrono::steady_clock::now()
+                 + std::chrono::milliseconds(2000);
+    p.leaderClientId = leaderClientId;
+    Anchor::Instance->pendingCatchups[kindKey] = p;
 
     // Send the catchup REQUEST. The RESPONSE handler will invoke the
     // registered applyForce (via CutsceneCatchup Setup dispatch), which

@@ -63,17 +63,34 @@ namespace CutsceneCatchup {
 
 namespace {
 
-// Are we currently the room host for the local player's scene? Only
-// the room host builds ledgers — peers ignore all Record* calls.
-// Mirror of the gate used by other host-authoritative Anchor systems.
+// Are we a leader for any active cutscene? Only clients that originated
+// a cutscene (populating cutsceneStartActiveLocalOrigin via
+// SendPacket_CutsceneStart) can build ledgers for it.
+//
+// Fix K (log 669) — leadership is determined by LEDGER ORIGIN, NOT by
+// SceneAuthority room-host election. Room-host election uses
+// lowest-clientId-in-room semantics (SceneAuthority.cpp:44-93), which
+// flips whenever a peer with lower clientId joins the room. If the room
+// non-host originates a cutscene, they still own its ledger — they
+// broadcast the CUTSCENE_START, they hold the state, they should serve
+// catchup requests. Gating on room-host prevented the initiator from
+// creating the ledger at all when they weren't also the room host.
+//
+// Mirrors Fix I's change to SendPacket_CutsceneFrameSync (line 705) and
+// HandlePacket_CutsceneCatchupRequest (line 919-923). Together, the
+// three call sites use ledger presence / origin as the authoritative
+// "am I the cutscene leader?" signal — never room-host election, which
+// is orthogonal (room-scope admin: spawn authority, world state).
+//
+// See Analysis/isleader_gated_on_room_host_prevents_non_host_ledger_
+// 2026-07-10.md for the full analysis. The non-empty check is a proxy
+// for "we originated something"; downstream GetOrCreateActiveEntry
+// re-validates against the specific key at line 144.
 bool IsLeader() {
     if (Anchor::Instance == nullptr) return false;
     if (!Anchor::Instance->isConnected) return false;
     if (gPlayState == nullptr) return false;
-    return ::SceneAuthority::IsRoomHost(
-        (int16_t)gPlayState->sceneNum,
-        (int8_t)gPlayState->roomCtx.curRoom.num,
-        (uint8_t)(gSaveContext.linkAge & 0x1));
+    return !Anchor::Instance->cutsceneStartActiveLocalOrigin.empty();
 }
 
 // Vanilla `Play_InCsMode` gate. Cheap; safe to call every hook fire.
