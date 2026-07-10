@@ -1529,12 +1529,14 @@ void SohInputEditorWindow::DrawDeviceToggles(uint8_t portIndex) {
             // serial or name+occurrence-index). Persistence layer:
             // libultraship#2 / Plans/controller_port_persistence_plan.md.
             std::string deviceKey = connectedDeviceManager->GetDeviceKeyForInstanceId(instanceId);
+            const bool persistenceOn = CVarGetInteger("gControllers.PersistenceEnabled", 1) != 0;
             if (CVarGetInteger("gDeveloperTools.ControllerPersistenceDebug", 0) != 0) {
-                SPDLOG_INFO("[ControllerPersistence] toggle port={} instanceId={} notIgnored={} deviceKey=\"{}\"",
-                            portIndex, instanceId, notIgnored ? "true" : "false",
-                            deviceKey.empty() ? "(empty)" : deviceKey);
+                SPDLOG_INFO(
+                    "[ControllerPersistence] toggle port={} instanceId={} notIgnored={} persistenceOn={} deviceKey=\"{}\"",
+                    portIndex, instanceId, notIgnored ? "true" : "false", persistenceOn,
+                    deviceKey.empty() ? "(empty)" : deviceKey);
             }
-            if (!deviceKey.empty()) {
+            if (persistenceOn && !deviceKey.empty()) {
                 if (notIgnored) {
                     connectedDeviceManager->AssignDeviceKeyToPort(portIndex, deviceKey);
                 } else {
@@ -1542,8 +1544,10 @@ void SohInputEditorWindow::DrawDeviceToggles(uint8_t portIndex) {
                 }
                 connectedDeviceManager->SaveAssignmentsToConfig();
             } else {
-                // Fall back to session-only ignore semantics if the cache lookup
-                // failed (device just disconnected between check and toggle).
+                // Session-only ignore semantics — either persistence is turned off
+                // (users opting out of libultraship#2 behaviour), or the cache
+                // lookup failed (device just disconnected between check and
+                // toggle).
                 if (notIgnored) {
                     connectedDeviceManager->UnignoreInstanceIdForPort(portIndex, instanceId);
                 } else {

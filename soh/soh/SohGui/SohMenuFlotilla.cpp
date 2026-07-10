@@ -9,6 +9,8 @@
 #include "soh/Network/Anchor/Common/AINavTest.h"
 #include "soh/resource/type/Skeleton.h"
 #include <soh/Enhancements/RoomNavData/RoomNavData.h>
+#include <ship/controller/controldeck/ControlDeck.h>
+#include <ship/controller/physicaldevice/ConnectedPhysicalDeviceManager.h>
 #include <filesystem>
 #include <imgui.h>
 
@@ -269,7 +271,47 @@ void SohMenu::AddMenuFlotilla() {
                          "listener-side only (not synced over the wire); each "
                          "player can tune to their preference."));
 
-    AddWidget(path, "AI Player Follower (non-host only)", WIDGET_SEPARATOR_TEXT);
+    // Controller-to-port persistence master switch (libultraship#2, §3.11.3
+    // of FlotillaFeatures_for_Upstream_Discussion.md). When on (default),
+    // controller assignments made in the Input Editor's Devices tab persist
+    // across launches via a composite SDL device key. When off, the manager
+    // reverts to session-only behaviour (port 1 accepts every controller,
+    // ports 2..4 accept none) — matches SoH's pre-libultraship#2 UX for
+    // users who don't want persistence. Saved data on disk is preserved so
+    // toggling back on restores the previous assignments.
+    AddWidget(path, "Controllers", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Remember controller-to-port assignments across launches", WIDGET_CVAR_CHECKBOX)
+        .CVar("gControllers.PersistenceEnabled")
+        .Callback([](WidgetInfo&) {
+            auto* ctx = Ship::Context::GetRawInstance();
+            if (ctx == nullptr) {
+                return;
+            }
+            auto deck = ctx->GetControlDeck();
+            if (deck == nullptr) {
+                return;
+            }
+            auto mgr = deck->GetConnectedPhysicalDeviceManager();
+            if (mgr == nullptr) {
+                return;
+            }
+            // Re-scan connected devices + rebuild the ignore-list so the new
+            // CVar value takes effect immediately (rather than waiting for the
+            // next hotplug event).
+            mgr->RefreshConnectedSDLGamepads();
+        })
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "When ON (default): the Input Editor's Devices tab checkboxes are "
+            "persisted per SoH instance (via composite SDL device key — GUID "
+            "+ USB path). Two soh.exe instances running from separate folders "
+            "each remember their own controller assignments across launches.\n\n"
+            "When OFF: reverts to SoH's pre-persistence behaviour — port 1 "
+            "accepts every connected controller, ports 2-4 accept none, and "
+            "Input Editor toggles apply only to the current session.\n\n"
+            "Saved assignments on disk are preserved either way. Toggling "
+            "back on restores them.\n\n"
+            "Independent of Anchor multiplayer — works in solo mode too."));
 
     // AI Player Follower — dev testing tool, non-host only. Activates the P2
     // shadow-AI that auto-follows P1 and engages nearby enemies. Hidden
