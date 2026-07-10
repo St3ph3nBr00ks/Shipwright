@@ -5,6 +5,7 @@
 #include <libultraship/libultraship.h>
 
 #include <string>
+#include <vector>
 
 extern "C" {
 #include "variables.h"
@@ -192,6 +193,35 @@ void Anchor::SendPacket_CutsceneStart(const std::string& csKind, uint32_t csKey)
     if (cutsceneStartActive.count(dedupKey) > 0) {
         return;
     }
+
+    // Fix F (log 662) — one-actor-one-variant invariant. For actor-driven
+    // kinds, a fresh START with a different csKey supersedes any prior
+    // variant of the same csKind (BgTreemouth can only be in one cutscene
+    // at a time). Purge stale same-csKind entries by firing synthetic
+    // CUTSCENE_END packets before adding the new key. Prevents the log-662
+    // chain where ActiveKindKey() sees size=2 and returns empty, blocking
+    // ledger creation for the new variant. Skip for savecontext — its
+    // csKey is cutsceneIndex, which can legitimately have concurrent values
+    // in v1 (not enforced but harmless).
+    // See Analysis/deku_tree_stale_ledger_wins_race_2026-07-09.md Fix F.
+    if (csKind != "savecontext") {
+        const std::string prefix = csKind + ":";
+        std::vector<uint32_t> staleCsKeys;
+        for (const auto& activeKey : cutsceneStartActive) {
+            if (activeKey.size() > prefix.size() &&
+                activeKey.compare(0, prefix.size(), prefix) == 0 &&
+                activeKey != dedupKey) {
+                try {
+                    staleCsKeys.push_back((uint32_t)std::stoul(
+                        activeKey.substr(prefix.size())));
+                } catch (...) {}
+            }
+        }
+        for (uint32_t staleCsKey : staleCsKeys) {
+            SendPacket_CutsceneEnd(csKind, staleCsKey, "superseded");
+        }
+    }
+
     cutsceneStartActive.insert(dedupKey);
     // Fix G — mark this cutscene as locally-originated. Only entries
     // in this sibling set can promote the local client to leader for
@@ -249,6 +279,34 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
     if (cutsceneStartActive.count(dedupKey) > 0) {
         return;
     }
+
+    // Fix F (log 662) — same-csKind purge on the receiver side. Defends
+    // against Pitfall 43 goroutine reorder where the sender's synthetic
+    // CUTSCENE_END(superseded) may arrive AFTER this CUTSCENE_START. Erase
+    // stale same-csKind entries locally so the "one-actor-one-variant"
+    // invariant holds regardless of arrival order. No broadcast — the
+    // sender's synthetic END handles cross-client notification.
+    // See Analysis/deku_tree_stale_ledger_wins_race_2026-07-09.md Fix F.
+    if (csKind != "savecontext") {
+        const std::string prefix = csKind + ":";
+        std::vector<std::string> staleKeys;
+        for (const auto& activeKey : cutsceneStartActive) {
+            if (activeKey.size() > prefix.size() &&
+                activeKey.compare(0, prefix.size(), prefix) == 0 &&
+                activeKey != dedupKey) {
+                staleKeys.push_back(activeKey);
+            }
+        }
+        for (const auto& staleKey : staleKeys) {
+            cutsceneStartActive.erase(staleKey);
+            cutsceneStartActiveLocalOrigin.erase(staleKey);
+            cutsceneOriginatorByKindKey.erase(staleKey);
+            SPDLOG_INFO("[CutsceneStart] Fix F — purged stale same-csKind "
+                        "key='{}' on receive of fresh '{}'",
+                        staleKey, dedupKey);
+        }
+    }
+
     cutsceneStartActive.insert(dedupKey);
     // Fix O — record sender clientId as the cutscene originator. The
     // relay stamps `clientId` on incoming packets, so payload.value()
