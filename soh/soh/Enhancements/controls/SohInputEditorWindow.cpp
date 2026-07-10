@@ -1526,28 +1526,25 @@ void SohInputEditorWindow::DrawDeviceToggles(uint8_t portIndex) {
         auto notIgnored = !connectedDeviceManager->PortIsIgnoringInstanceId(portIndex, instanceId);
         ImGui::PopItemFlag();
         if (ImGui::Checkbox(StringHelper::Sprintf("###instanceId_%d", instanceId).c_str(), &notIgnored)) {
-            // Persist the assignment via SDL joystick GUID (stable across launches)
-            // so multi-instance / multi-controller users don't re-assign every launch.
+            // Persist the assignment via a composite device key that combines
+            // SDL joystick GUID with USB path (or serial or name+index fallback)
+            // so identical-model controllers plugged into different ports remain
+            // distinguishable across launches.
             // See Plans/controller_port_persistence_plan.md, libultraship#2.
-            // Uses the GUID cached during RefreshConnectedSDLGamepads, not a live
-            // SDL_JoystickFromInstanceID query — the latter has failed silently on
-            // some Windows/SDL2 configurations, sending the toggle down the
-            // session-only fallback which was wiped by the next hotplug refresh.
-            std::string guid = connectedDeviceManager->GetGuidForInstanceId(instanceId);
-            SPDLOG_INFO("[ControllerPersistence] toggle port={} instanceId={} notIgnored={} guid={}",
+            std::string deviceKey = connectedDeviceManager->GetDeviceKeyForInstanceId(instanceId);
+            SPDLOG_INFO("[ControllerPersistence] toggle port={} instanceId={} notIgnored={} deviceKey=\"{}\"",
                         portIndex, instanceId, notIgnored ? "true" : "false",
-                        guid.empty() ? "(empty)" : guid);
-            if (!guid.empty()) {
+                        deviceKey.empty() ? "(empty)" : deviceKey);
+            if (!deviceKey.empty()) {
                 if (notIgnored) {
-                    connectedDeviceManager->AssignGuidToPort(portIndex, guid);
+                    connectedDeviceManager->AssignGuidToPort(portIndex, deviceKey);
                 } else {
-                    connectedDeviceManager->UnassignGuidFromPort(portIndex, guid);
+                    connectedDeviceManager->UnassignGuidFromPort(portIndex, deviceKey);
                 }
                 connectedDeviceManager->SaveAssignmentsToConfig();
             } else {
-                // Fall back to session-only ignore semantics if the GUID cache
-                // lookup failed (device just disconnected between the check and
-                // the toggle, or Refresh hasn't populated the cache yet).
+                // Fall back to session-only ignore semantics if the cache lookup
+                // failed (device just disconnected between check and toggle).
                 if (notIgnored) {
                     connectedDeviceManager->UnignoreInstanceIdForPort(portIndex, instanceId);
                 } else {
