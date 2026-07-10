@@ -1525,10 +1525,30 @@ void SohInputEditorWindow::DrawDeviceToggles(uint8_t portIndex) {
         auto notIgnored = !connectedDeviceManager->PortIsIgnoringInstanceId(portIndex, instanceId);
         ImGui::PopItemFlag();
         if (ImGui::Checkbox(StringHelper::Sprintf("###instanceId_%d", instanceId).c_str(), &notIgnored)) {
-            if (notIgnored) {
-                connectedDeviceManager->UnignoreInstanceIdForPort(portIndex, instanceId);
+            // Persist the assignment via a composite device key (GUID + path or
+            // serial or name+occurrence-index). Persistence layer:
+            // libultraship#2 / Plans/controller_port_persistence_plan.md.
+            std::string deviceKey = connectedDeviceManager->GetDeviceKeyForInstanceId(instanceId);
+            if (CVarGetInteger("gDeveloperTools.ControllerPersistenceDebug", 0) != 0) {
+                SPDLOG_INFO("[ControllerPersistence] toggle port={} instanceId={} notIgnored={} deviceKey=\"{}\"",
+                            portIndex, instanceId, notIgnored ? "true" : "false",
+                            deviceKey.empty() ? "(empty)" : deviceKey);
+            }
+            if (!deviceKey.empty()) {
+                if (notIgnored) {
+                    connectedDeviceManager->AssignDeviceKeyToPort(portIndex, deviceKey);
+                } else {
+                    connectedDeviceManager->UnassignDeviceKeyFromPort(portIndex, deviceKey);
+                }
+                connectedDeviceManager->SaveAssignmentsToConfig();
             } else {
-                connectedDeviceManager->IgnoreInstanceIdForPort(portIndex, instanceId);
+                // Fall back to session-only ignore semantics if the cache lookup
+                // failed (device just disconnected between check and toggle).
+                if (notIgnored) {
+                    connectedDeviceManager->UnignoreInstanceIdForPort(portIndex, instanceId);
+                } else {
+                    connectedDeviceManager->IgnoreInstanceIdForPort(portIndex, instanceId);
+                }
             }
         };
         ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
@@ -1537,6 +1557,29 @@ void SohInputEditorWindow::DrawDeviceToggles(uint8_t portIndex) {
         ImGui::PopStyleColor();
         ImGui::PopStyleColor();
         ImGui::PopItemFlag();
+    }
+
+    // Reset controller-to-port assignments. Clears the persistent enable-list
+    // for every port and the "user has configured" sticky flag, restoring
+    // legacy default (port 1 accepts every controller; ports 2..4 accept none).
+    if (ImGui::Button("Reset controller port assignments##resetControllerAssignments")) {
+        ImGui::OpenPopup("Reset controller port assignments##resetControllerAssignmentsPopup");
+    }
+    if (ImGui::BeginPopupModal("Reset controller port assignments##resetControllerAssignmentsPopup", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("This will clear which controllers are assigned to which ports\n"
+                    "across every launch, restoring the default (port 1 uses every\n"
+                    "connected controller; ports 2-4 use none).\n\n"
+                    "Continue?");
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset")) {
+            connectedDeviceManager->ResetAllAssignments();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 }
 
