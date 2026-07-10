@@ -702,14 +702,18 @@ void Anchor::SendPacket_CutsceneFrameSync() {
     // do NOT populate the ledger. Using ledger presence keeps the send
     // path immune to the previous "hydrated peer becomes phantom leader"
     // bug that caused restart loops in field-test 621.
+    //
+    // Fix I (log 666) — IsRoomHost gate REMOVED. Room-host election
+    // flips when a peer with lower clientId joins the room, but ledger
+    // ownership stays with the initiator. Gating on IsRoomHost caused
+    // the ledger owner to stop broadcasting FRAME_SYNC the instant a
+    // late-joiner arrived — cutting off the very signal that drives
+    // late-join detection for any FUTURE joiners. Ledger presence is
+    // the definitive cutscene-leader signal; room-host is orthogonal
+    // (room-scope admin: spawn authority, world state). See
+    // Analysis/cutscene_room_host_flip_breaks_reverse_direction_2026-07-09.md.
     if (cutsceneCatchupLedger.empty()) return;
     if (gPlayState->csCtx.state == CS_STATE_IDLE) return;
-    if (!::SceneAuthority::IsRoomHost(
-            (int16_t)gPlayState->sceneNum,
-            (int8_t)gPlayState->roomCtx.curRoom.num,
-            (uint8_t)(gSaveContext.linkAge & 0x1))) {
-        return;  // belt-and-suspenders — room-host + ledger-owner
-    }
 
     // Broadcast the leader's frame for the one active cutscene.
     // v1 assumes single-cutscene sessions — pick first.
@@ -905,17 +909,14 @@ void Anchor::HandlePacket_CutsceneCatchupRequest(nlohmann::json payload) {
     const uint32_t    csKey  = payload.value("csKey", (uint32_t)0);
     if (csKind.empty()) return;
 
-    // Only respond if we're the leader (room host) AND have a ledger
-    // entry for this cutscene.
-    if (!::SceneAuthority::IsRoomHost(
-            (int16_t)gPlayState->sceneNum,
-            (int8_t)gPlayState->roomCtx.curRoom.num,
-            (uint8_t)(gSaveContext.linkAge & 0x1))) {
-        SPDLOG_INFO("[CutsceneCatchup] REQUEST for '{}' but I'm not room host; ignoring",
-                    csKind);
-        return;
-    }
-
+    // Fix I (log 666) — ledger presence is the definitive "I am the
+    // leader for THIS cutscene" signal. Room-host election flips when
+    // a peer with lower clientId joins the room; the ledger stays with
+    // the initiator. Gating on IsRoomHost caused the initiator to
+    // refuse legitimate catchup requests from the new room host.
+    // Ledger presence encompasses "I originated this cutscene and hold
+    // the delta the requester needs." Room-host is orthogonal.
+    // See Analysis/cutscene_room_host_flip_breaks_reverse_direction_2026-07-09.md.
     const std::string kindKey = MakeKindKey(csKind, csKey);
     auto it = cutsceneCatchupLedger.find(kindKey);
     if (it == cutsceneCatchupLedger.end()) {
