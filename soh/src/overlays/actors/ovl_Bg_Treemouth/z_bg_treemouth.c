@@ -157,16 +157,19 @@ void func_808BC8B8(BgTreemouth* this, PlayState* play) {
                         play->csCtx.segment = D_808BD2A0;
                         gSaveContext.cutsceneTrigger = 1;
                         BgTreemouth_SetupAction(this, func_808BC9EC);
-                        // Sync the come-back cutscene start to same-scene
-                        // team peers. csKey=1 distinguishes come-back from
-                        // the first-encounter broadcast (csKey=0 below).
-                        // Receiver routes csKey through
-                        // BgTreemouth_ForceIntroCutscene to pick D_808BD2A0
-                        // vs D_808BCE20 without relying on a receiver-side
-                        // flag read (which races SET_FLAG — see
-                        // Analysis/deku_tree_fix_a_wrong_variant_2026-07-09.md
-                        // Fix E).
-                        Anchor_NotifyCutsceneStart("deku_tree_intro", 1);
+                        // Fix H (log 664/665) — the come-back branch is
+                        // player-initiated dialog (gated on Z-target),
+                        // NOT an auto-cutscene like the first-encounter
+                        // branch below. Vanilla design intent: each
+                        // player triggers on their own Z-target choice.
+                        // Progression (EVENTCHKINF_DEKU_TREE_OPENED_MOUTH)
+                        // still syncs via the existing SET_FLAG pipeline
+                        // when a player answers "yes". Forcing MP sync
+                        // here would remove per-player autonomy and match
+                        // dialog UX poorly. See
+                        // Analysis/deku_tree_bidirectional_come_back_2026-07-09.md
+                        // Fix H for the full rationale.
+                        // Intentionally NO Anchor_NotifyCutsceneStart call.
                     }
                 }
             } else if (Actor_IsFacingAndNearPlayer(&this->dyna.actor, 1658.0f, 0x4E20)) {

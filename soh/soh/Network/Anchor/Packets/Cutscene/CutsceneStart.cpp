@@ -424,6 +424,41 @@ void Anchor::TickCutsceneStartDetector() {
     // unconditional for symmetry with legitimate savecontext ends.
     if (prevIdx != 0 && currIdx == 0) {
         SendPacket_CutsceneEnd("savecontext", (uint32_t)prevIdx, "natural");
+
+        // Fix G (log 664/665) — actor-driven cutscene end via the same
+        // falling edge. Vanilla drives cutsceneIndex back to 0 when
+        // ANY cutscene (savecontext or actor-driven via cutsceneTrigger
+        // + func_80068ECC) ends. There is no separate actor-driven end
+        // signal in vanilla. Piggyback on this edge to fire natural
+        // ENDs for any local-origin actor-driven kinds still in
+        // cutsceneStartActive — otherwise their dedup entries persist
+        // forever and block re-triggering (log 664 P2 second come-back
+        // was silently dropped by SendPacket_CutsceneStart's dedup
+        // check because 'deku_tree_intro:1' from the earlier applied
+        // start was never cleared).
+        //
+        // Only iterate cutsceneStartActiveLocalOrigin — we only own
+        // the end signal for cutscenes WE originated. Peer-originated
+        // starts will be ended by the peer's own edge detector, then
+        // propagated via CUTSCENE_END packet.
+        //
+        // See Analysis/deku_tree_bidirectional_come_back_2026-07-09.md
+        // Fix G.
+        std::vector<std::pair<std::string, uint32_t>> actorEnds;
+        for (const auto& key : cutsceneStartActiveLocalOrigin) {
+            auto sep = key.find(':');
+            if (sep == std::string::npos) continue;
+            std::string csKind = key.substr(0, sep);
+            if (csKind == "savecontext") continue;
+            uint32_t csKey = 0;
+            try {
+                csKey = (uint32_t)std::stoul(key.substr(sep + 1));
+            } catch (...) { continue; }
+            actorEnds.emplace_back(std::move(csKind), csKey);
+        }
+        for (const auto& [csKind, csKey] : actorEnds) {
+            SendPacket_CutsceneEnd(csKind, csKey, "natural");
+        }
     }
 
     cutsceneStartDetectorPrevIndex = currIdx;
