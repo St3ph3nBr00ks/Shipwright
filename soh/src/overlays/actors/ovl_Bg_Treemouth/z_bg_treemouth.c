@@ -157,6 +157,16 @@ void func_808BC8B8(BgTreemouth* this, PlayState* play) {
                         play->csCtx.segment = D_808BD2A0;
                         gSaveContext.cutsceneTrigger = 1;
                         BgTreemouth_SetupAction(this, func_808BC9EC);
+                        // Sync the come-back cutscene start to same-scene
+                        // team peers. csKey=1 distinguishes come-back from
+                        // the first-encounter broadcast (csKey=0 below).
+                        // Receiver routes csKey through
+                        // BgTreemouth_ForceIntroCutscene to pick D_808BD2A0
+                        // vs D_808BCE20 without relying on a receiver-side
+                        // flag read (which races SET_FLAG — see
+                        // Analysis/deku_tree_fix_a_wrong_variant_2026-07-09.md
+                        // Fix E).
+                        Anchor_NotifyCutsceneStart("deku_tree_intro", 1);
                     }
                 }
             } else if (Actor_IsFacingAndNearPlayer(&this->dyna.actor, 1658.0f, 0x4E20)) {
@@ -278,16 +288,24 @@ void BgTreemouth_Draw(Actor* thisx, PlayState* play) {
 
 // Anchor peer-side trigger. Called from CutsceneStart.cpp's
 // deku_tree_intro handler when a same-scene peer received the
-// CUTSCENE_START packet. Mirrors the vanilla trigger sequence in
-// func_808BC8B8 (the else-if branch at Actor_IsFacingAndNearPlayer)
-// but bypasses the local-Link proximity + facing check and the
-// !EVENTCHKINF_MET_DEKU_TREE outer guard (both of which vanilla would
-// evaluate against the local peer's Link, not the sending client's).
+// CUTSCENE_START packet, and from CutsceneCatchup.cpp during late-join
+// catchup. Mirrors the vanilla trigger sequence in func_808BC8B8 but
+// bypasses the local-Link proximity + facing check.
+//
+// csKey selects the vanilla dispatch-table variant WITHOUT reading
+// local save flags (which race SET_FLAG broadcasts — see
+// Analysis/deku_tree_fix_a_wrong_variant_2026-07-09.md Fix E):
+//   csKey == 0 → first-encounter (D_808BCE20). Sets EVENTCHKINF_MET_DEKU_TREE
+//                for vanilla parity with func_808BC8B8 line 163 (idempotent
+//                if SET_FLAG already applied via peer broadcast).
+//   csKey == 1 → come-back (D_808BD2A0). Flag was set by the earlier
+//                first-encounter trigger; no re-set here (mirrors vanilla
+//                come-back branch line 157 which doesn't touch the flag).
 //
 // Returns 1 when a local Bg_Treemouth was found + triggered, 0 when
 // no instance was present (peer is out-of-scene or the actor already
 // destroyed itself).
-int BgTreemouth_ForceIntroCutscene(PlayState* play) {
+int BgTreemouth_ForceIntroCutscene(PlayState* play, u32 csKey) {
     Actor* actor;
     BgTreemouth* this;
 
@@ -298,17 +316,9 @@ int BgTreemouth_ForceIntroCutscene(PlayState* play) {
     while (actor != NULL) {
         if (actor->id == ACTOR_BG_TREEMOUTH) {
             this = (BgTreemouth*)actor;
-            // Flag-aware segment selection — mirror vanilla
-            // func_808BC8B8's dispatch table: come-back variant
-            // (D_808BD2A0) once EVENTCHKINF_MET_DEKU_TREE is set,
-            // otherwise the first-encounter variant (D_808BCE20).
-            // See Claude/Analysis/deku_tree_come_back_desync_2026-07-09.md
-            // §5 Fix A for full root-cause + dispatch table.
-            if (Flags_GetEventChkInf(EVENTCHKINF_MET_DEKU_TREE)) {
+            if (csKey == 1) {
                 play->csCtx.segment = D_808BD2A0;
             } else {
-                // First-encounter variant. Set the flag first —
-                // vanilla parity with func_808BC8B8 line 163.
                 Flags_SetEventChkInf(EVENTCHKINF_MET_DEKU_TREE);
                 play->csCtx.segment = D_808BCE20;
             }

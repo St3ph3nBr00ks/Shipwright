@@ -26,7 +26,12 @@ extern PlayState* gPlayState;
 // catchup-apply only sets csCtx.state (letterbox appears) but the
 // cutscene engine has nothing to execute (script segment unset)
 // and Player retains gameplay control.
-int BgTreemouth_ForceIntroCutscene(PlayState* play);
+//
+// csKey selects the variant: 0 → first-encounter (D_808BCE20),
+// 1 → come-back (D_808BD2A0). See Analysis/deku_tree_fix_a_wrong_variant_
+// 2026-07-09.md Fix E for the rationale (receiver-side flag reads race
+// SET_FLAG broadcasts; wire-carried variant is authoritative).
+int BgTreemouth_ForceIntroCutscene(PlayState* play, uint32_t csKey);
 }
 // func_800645A0 is the vanilla per-tick cutscene body (z_demo.c:170).
 // Normally called once per real frame from Play_Update (z_play.c:1239).
@@ -531,10 +536,12 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     //    (BgTreemouth_ForceIntroCutscene for deku_tree_intro) — sets
     //    csCtx.segment, cutsceneTrigger, actor action func.
     const std::string csKind = payload.value("csKind", std::string(""));
+    const uint32_t    csKeyForSetup = payload.value("csKey", (uint32_t)0);
     int setupRc = 1;   // default success (no-per-kind branch below sets 0)
     if (csKind == "deku_tree_intro") {
-        setupRc = BgTreemouth_ForceIntroCutscene(gPlayState);
-        SPDLOG_INFO("[CutsceneCatchup] Setup deku_tree_intro rc={}", setupRc);
+        setupRc = BgTreemouth_ForceIntroCutscene(gPlayState, csKeyForSetup);
+        SPDLOG_INFO("[CutsceneCatchup] Setup deku_tree_intro csKey={} rc={}",
+                    csKeyForSetup, setupRc);
     } else {
         setupRc = 0;
         SPDLOG_WARN("[CutsceneCatchup] No per-kind setup for csKind='{}' — "

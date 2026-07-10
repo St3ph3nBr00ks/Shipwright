@@ -17,9 +17,11 @@ extern PlayState* gPlayState;
 
 // Bg_Treemouth exports the peer-side trigger entry (defined in
 // z_bg_treemouth.c). Bypasses the local-Link proximity check and drives
-// the intro-cutscene state directly. Returns 1 on success, 0 if no
-// local instance was found in the current scene.
-int BgTreemouth_ForceIntroCutscene(PlayState* play);
+// the intro-cutscene state directly. csKey selects the variant:
+//   csKey == 0 → first-encounter (D_808BCE20).
+//   csKey == 1 → come-back (D_808BD2A0).
+// Returns 1 on success, 0 if no local instance was found in the current scene.
+int BgTreemouth_ForceIntroCutscene(PlayState* play, uint32_t csKey);
 }
 
 /**
@@ -143,9 +145,10 @@ bool ApplyCutsceneStartByKind(const std::string& csKind, uint32_t csKey) {
         // also sets EVENTCHKINF_MET_DEKU_TREE — safe because that
         // flag would have synced via SET_FLAG anyway.
         if (gPlayState == nullptr) return false;
-        int fired = BgTreemouth_ForceIntroCutscene(gPlayState);
+        int fired = BgTreemouth_ForceIntroCutscene(gPlayState, csKey);
         if (fired) {
-            SPDLOG_INFO("[CutsceneStart] Applied deku_tree_intro on peer");
+            SPDLOG_INFO("[CutsceneStart] Applied deku_tree_intro csKey={} on peer",
+                        csKey);
             return true;
         }
         SPDLOG_INFO("[CutsceneStart] deku_tree_intro peer had no local Bg_Treemouth");
