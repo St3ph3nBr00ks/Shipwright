@@ -11,10 +11,22 @@
 
 // Anchor C-linkage helpers — declared here to keep the include set
 // minimal. Implementations in Network/Anchor/Packets/Cutscene/
-// CutsceneStart.cpp. NO-OP in single-player. See #292 follow-up +
-// Plans/packet_family_cutscene_start_end.md for the Deku Tree intro
-// sync design.
+// CutsceneStart.cpp + Network/Anchor/Common/CutsceneKindRegistry.cpp.
+// NO-OP in single-player.
 extern void Anchor_NotifyCutsceneStart(const char* csKind, unsigned int csKey);
+
+// Helper D — generic actor-side cutscene setup. Walks the actor list
+// in the given category for the specified actorId, writes csCtx.segment,
+// sets cutsceneTrigger, and invokes the actor's setup adapter. Returns 1
+// on success, 0 if the actor is not present locally. See
+// Common/CutsceneKindRegistry.h for full documentation.
+extern int Anchor_ForceCutsceneOnActor(
+    PlayState* play,
+    s16 actorId,
+    u8 actorCategory,
+    void* segment,
+    void (*setupAdapter)(Actor* actor, void* actionFunc),
+    void* actionFunc);
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
@@ -289,11 +301,17 @@ void BgTreemouth_Draw(Actor* thisx, PlayState* play) {
     CLOSE_DISPS(play->state.gfxCtx);
 }
 
-// Anchor peer-side trigger. Called from CutsceneStart.cpp's
-// deku_tree_intro handler when a same-scene peer received the
-// CUTSCENE_START packet, and from CutsceneCatchup.cpp during late-join
-// catchup. Mirrors the vanilla trigger sequence in func_808BC8B8 but
-// bypasses the local-Link proximity + facing check.
+// Thin adapter for Helper D — casts the untyped Actor* + actionFunc
+// pair into the actor's typed SetupAction signature. Kept next to the
+// setter so per-actor type knowledge stays local (Law of Demeter).
+static void BgTreemouth_SetupActionAdapter(Actor* thisx, void* actionFunc) {
+    BgTreemouth_SetupAction((BgTreemouth*)thisx, (BgTreemouthActionFunc)actionFunc);
+}
+
+// Anchor peer-side trigger. Called from the CutsceneKindRegistry
+// deku_tree_intro handler at both CUTSCENE_START receive and
+// CUTSCENE_CATCHUP setup points. Mirrors the vanilla trigger sequence
+// in func_808BC8B8 but bypasses the local-Link proximity + facing check.
 //
 // csKey selects the vanilla dispatch-table variant WITHOUT reading
 // local save flags (which race SET_FLAG broadcasts — see
@@ -305,31 +323,23 @@ void BgTreemouth_Draw(Actor* thisx, PlayState* play) {
 //                first-encounter trigger; no re-set here (mirrors vanilla
 //                come-back branch line 157 which doesn't touch the flag).
 //
+// Body delegates the mechanical parts (actor find, csCtx.segment write,
+// cutsceneTrigger set, actionFunc setup) to Anchor_ForceCutsceneOnActor
+// (Helper D). This function retains the variant-selection + flag-set
+// logic that is specific to Bg_Treemouth.
+//
 // Returns 1 when a local Bg_Treemouth was found + triggered, 0 when
 // no instance was present (peer is out-of-scene or the actor already
 // destroyed itself).
 int BgTreemouth_ForceIntroCutscene(PlayState* play, u32 csKey) {
-    Actor* actor;
-    BgTreemouth* this;
-
-    if (play == NULL) {
-        return 0;
+    void* segment;
+    if (csKey == 1) {
+        segment = D_808BD2A0;
+    } else {
+        Flags_SetEventChkInf(EVENTCHKINF_MET_DEKU_TREE);
+        segment = D_808BCE20;
     }
-    actor = play->actorCtx.actorLists[ACTORCAT_BG].head;
-    while (actor != NULL) {
-        if (actor->id == ACTOR_BG_TREEMOUTH) {
-            this = (BgTreemouth*)actor;
-            if (csKey == 1) {
-                play->csCtx.segment = D_808BD2A0;
-            } else {
-                Flags_SetEventChkInf(EVENTCHKINF_MET_DEKU_TREE);
-                play->csCtx.segment = D_808BCE20;
-            }
-            gSaveContext.cutsceneTrigger = 1;
-            BgTreemouth_SetupAction(this, func_808BC9EC);
-            return 1;
-        }
-        actor = actor->next;
-    }
-    return 0;
+    return Anchor_ForceCutsceneOnActor(play, ACTOR_BG_TREEMOUTH, ACTORCAT_BG,
+                                       segment, BgTreemouth_SetupActionAdapter,
+                                       (void*)func_808BC9EC);
 }

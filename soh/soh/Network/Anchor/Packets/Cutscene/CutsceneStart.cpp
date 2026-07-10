@@ -1,4 +1,5 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/CutsceneKindRegistry.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
@@ -13,16 +14,7 @@ extern "C" {
 #include "z64.h"
 #include "z64cutscene.h"
 #include "macros.h"
-#include "overlays/actors/ovl_Bg_Treemouth/z_bg_treemouth.h"
 extern PlayState* gPlayState;
-
-// Bg_Treemouth exports the peer-side trigger entry (defined in
-// z_bg_treemouth.c). Bypasses the local-Link proximity check and drives
-// the intro-cutscene state directly. csKey selects the variant:
-//   csKey == 0 → first-encounter (D_808BCE20).
-//   csKey == 1 → come-back (D_808BD2A0).
-// Returns 1 on success, 0 if no local instance was found in the current scene.
-int BgTreemouth_ForceIntroCutscene(PlayState* play, uint32_t csKey);
 }
 
 /**
@@ -138,21 +130,26 @@ bool ApplyCutsceneStartByKind(const std::string& csKind, uint32_t csKey) {
         return true;
     }
 
-    if (csKind == "deku_tree_intro") {
-        // Bg_Treemouth pilot. Peer locates its local Bg_Treemouth and
-        // fires the intro trigger path bypassing the local-Link
-        // Actor_IsFacingAndNearPlayer distance check that gates the
-        // vanilla trigger (z_bg_treemouth.c:155). The C-side helper
-        // also sets EVENTCHKINF_MET_DEKU_TREE — safe because that
-        // flag would have synced via SET_FLAG anyway.
-        if (gPlayState == nullptr) return false;
-        int fired = BgTreemouth_ForceIntroCutscene(gPlayState, csKey);
+    // Actor-driven kinds route through the CutsceneKindRegistry table.
+    // Adding a new customer = 1 registration line in
+    // Common/CutsceneKindRegistry.cpp + 1 Force helper in the actor's .c.
+    // Prior if/else-chain dispatch was replaced 2026-07-09 (see
+    // Analysis/generic_cutscene_dialog_sync_helpers_2026-07-09.md
+    // Helpers B + D).
+    if (const auto* handler = CutsceneKindRegistry::Find(csKind)) {
+        if (!handler->applyForce) {
+            SPDLOG_WARN("[CutsceneStart] csKind='{}' registered without applyForce; "
+                        "packet ignored", csKind);
+            return false;
+        }
+        const int fired = handler->applyForce(csKey);
         if (fired) {
-            SPDLOG_INFO("[CutsceneStart] Applied deku_tree_intro csKey={} on peer",
-                        csKey);
+            SPDLOG_INFO("[CutsceneStart] Applied csKind={} csKey={} on peer",
+                        csKind, csKey);
             return true;
         }
-        SPDLOG_INFO("[CutsceneStart] deku_tree_intro peer had no local Bg_Treemouth");
+        SPDLOG_INFO("[CutsceneStart] csKind={} apply failed (actor not local?)",
+                    csKind);
         return false;
     }
 
@@ -168,13 +165,20 @@ bool ApplyCutsceneStartByKind(const std::string& csKind, uint32_t csKey) {
 // send-side edge detector's END edges are echoed to peers.
 bool ApplyCutsceneEndByKind(const std::string& csKind, uint32_t csKey,
                             const std::string& endReason) {
-    (void)csKey;
-    (void)endReason;
-    if (csKind == "savecontext" || csKind == "deku_tree_intro") {
-        // No teardown work required. Vanilla local state-machine
-        // cleanup fires naturally. Idempotency dedup key is cleared
-        // by the caller after this returns.
+    if (csKind == "savecontext") {
+        // Vanilla self-teardown; no explicit end hook needed.
         return true;
+    }
+
+    // Actor-driven kinds route through the registry. Handler is optional
+    // (applyEnd may be nullptr) — most customers rely on vanilla self-
+    // teardown, so registered-but-null is the common shape and treated
+    // as a success no-op.
+    if (const auto* handler = CutsceneKindRegistry::Find(csKind)) {
+        if (handler->applyEnd) {
+            return handler->applyEnd(csKey, endReason);
+        }
+        return true;  // registered but no end hook — vanilla self-teardown
     }
     SPDLOG_WARN("[CutsceneStart] Unknown csKind='{}' on END — packet ignored", csKind);
     return false;

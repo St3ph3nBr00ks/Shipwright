@@ -1,6 +1,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 #include "soh/Network/Anchor/Bridge/AnchorMessageBridge.h"
 #include "soh/Network/Anchor/Bridge/AnchorSceneBridge.h"
+#include "soh/Network/Anchor/Common/CutsceneKindRegistry.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/Common/CutsceneCatchup.h"
@@ -18,20 +19,6 @@ extern "C" {
 #include "z64.h"
 #include "macros.h"
 extern PlayState* gPlayState;
-
-// Per-kind setup entry points. These invoke the SAME actor-side
-// cutscene setup path that the vanilla trigger would have hit —
-// establishes csCtx.segment, cs-side D_8015FCC* skip flags, actor
-// action func, and Player cutscene action mode. Without this, my
-// catchup-apply only sets csCtx.state (letterbox appears) but the
-// cutscene engine has nothing to execute (script segment unset)
-// and Player retains gameplay control.
-//
-// csKey selects the variant: 0 → first-encounter (D_808BCE20),
-// 1 → come-back (D_808BD2A0). See Analysis/deku_tree_fix_a_wrong_variant_
-// 2026-07-09.md Fix E for the rationale (receiver-side flag reads race
-// SET_FLAG broadcasts; wire-carried variant is authoritative).
-int BgTreemouth_ForceIntroCutscene(PlayState* play, uint32_t csKey);
 }
 // func_800645A0 is the vanilla per-tick cutscene body (z_demo.c:170).
 // Normally called once per real frame from Play_Update (z_play.c:1239).
@@ -531,19 +518,23 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     //    dispatcher re-drives cutscene-controlled actors when we
     //    resume playback at leader.frame.
 
-    // 7. Set up cutscene state per-kind. This invokes the same actor-
-    //    side cutscene entry the vanilla trigger would have hit
-    //    (BgTreemouth_ForceIntroCutscene for deku_tree_intro) — sets
-    //    csCtx.segment, cutsceneTrigger, actor action func.
+    // 7. Set up cutscene state per-kind. Routes through the
+    //    CutsceneKindRegistry table — same handler as the peer-side
+    //    CUTSCENE_START apply (both call sites drive the actor-side
+    //    trigger sequence). See Common/CutsceneKindRegistry.{h,cpp}.
     const std::string csKind = payload.value("csKind", std::string(""));
     const uint32_t    csKeyForSetup = payload.value("csKey", (uint32_t)0);
-    int setupRc = 1;   // default success (no-per-kind branch below sets 0)
-    if (csKind == "deku_tree_intro") {
-        setupRc = BgTreemouth_ForceIntroCutscene(gPlayState, csKeyForSetup);
-        SPDLOG_INFO("[CutsceneCatchup] Setup deku_tree_intro csKey={} rc={}",
-                    csKeyForSetup, setupRc);
+    int setupRc = 0;
+    if (const auto* handler = CutsceneKindRegistry::Find(csKind)) {
+        if (handler->applyForce) {
+            setupRc = handler->applyForce(csKeyForSetup);
+            SPDLOG_INFO("[CutsceneCatchup] Setup csKind={} csKey={} rc={}",
+                        csKind, csKeyForSetup, setupRc);
+        } else {
+            SPDLOG_WARN("[CutsceneCatchup] csKind='{}' registered without applyForce",
+                        csKind);
+        }
     } else {
-        setupRc = 0;
         SPDLOG_WARN("[CutsceneCatchup] No per-kind setup for csKind='{}' — "
                     "cutscene engine may lack script data",
                     csKind);
