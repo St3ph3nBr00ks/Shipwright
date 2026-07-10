@@ -9,6 +9,7 @@ extern "C" {
 #include "functions.h"
 #include "z64.h"
 #include "macros.h"
+extern PlayState* gPlayState;
 }
 
 // ---------------------------------------------------------------------
