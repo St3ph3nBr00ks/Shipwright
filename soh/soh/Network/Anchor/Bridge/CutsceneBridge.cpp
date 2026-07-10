@@ -67,10 +67,23 @@ int HandleChoiceVoteAdvance(int wasLocalPressDetected,
         return 1;
     }
 
-    // (B) Solo mode — no same-scene team peers to vote with, so
-    // vanilla behavior: local A press advances immediately.
-    // Same predicate as vote-skip's peer detection (checking same-
-    // scene same-timeline same-team peer count).
+    // (B) Solo mode — no same-scene team peers ALSO IN CUTSCENE STATE,
+    // so vanilla behavior: local A press advances immediately.
+    //
+    // Fix L.1 (2026-07-10) — filter also by client.csCtxState. Without
+    // this, when a peer is in the same scene but NOT in the same
+    // cutscene (e.g., Fix J-alt opt-in come-back: initiator in cutscene,
+    // peer in gameplay), the peer would incorrectly count as "someone
+    // to vote with" — the vote flow would then send DIALOG_CHOICE_VOTE
+    // packets that leak the vote UI onto the peer's screen AND make
+    // the initiator wait for a vote from a peer who can't cast one.
+    // See Analysis/dialog_choice_vote_scope_leaks_to_non_cutscene_peers_
+    // 2026-07-10.md Fix L.
+    //
+    // client.csCtxState is broadcast per PLAYER_UPDATE (~60Hz) per
+    // AnchorClient.h:148. Defaults to CS_STATE_IDLE (0) for pre-update
+    // peers — safe (treated as not-in-cutscene, matching design
+    // intent).
     bool hasPeer = false;
     if (gPlayState != nullptr) {
         int16_t myScene = (int16_t)gPlayState->sceneNum;
@@ -84,6 +97,7 @@ int HandleChoiceVoteAdvance(int wasLocalPressDetected,
             if (client.sceneNum != myScene) continue;
             if ((uint8_t)(client.linkAge & 0x1) != myTimeline) continue;
             if (client.teamId != myTeamId) continue;
+            if (client.csCtxState == 0 /* CS_STATE_IDLE */) continue;
             hasPeer = true;
             break;
         }

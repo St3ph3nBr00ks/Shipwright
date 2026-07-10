@@ -59,9 +59,18 @@ bool AmDialogChoiceHost() {
     return host != 0 && host == Anchor::Instance->ownClientId;
 }
 
-// Count same-scene same-timeline same-team peers who could vote (plus
-// self). Same logic as CountInSceneTeamSize in CutsceneTextAdvance.cpp.
-size_t CountInSceneTeamSize() {
+// Count same-scene same-timeline same-team peers WHO ARE IN CUTSCENE
+// STATE (plus self). Voting team size for the choice-vote resolution
+// gate.
+//
+// Fix L.2 (2026-07-10) — filter also by client.csCtxState. Fix L.2
+// parallels Fix L.1 in CutsceneBridge.cpp; without this filter,
+// initiator would tally votes against a teamSize inflated by peers
+// who are in the scene but not in the cutscene (e.g., Fix J-alt opt-in
+// come-back). All-voted early exit would never fire → user waits 10 s
+// for the countdown timer. See Analysis/dialog_choice_vote_scope_leaks_
+// to_non_cutscene_peers_2026-07-10.md Fix L.
+size_t CountInSceneCutsceneTeamSize() {
     if (gPlayState == nullptr) return 0;
     if (!Anchor::Instance) return 1;
     int16_t  scene    = (int16_t)gPlayState->sceneNum;
@@ -76,6 +85,7 @@ size_t CountInSceneTeamSize() {
         if (client.sceneNum != scene) continue;
         if ((uint8_t)(client.linkAge & 0x1) != timeline) continue;
         if (client.teamId != ownTeamId) continue;
+        if (client.csCtxState == 0 /* CS_STATE_IDLE */) continue;
         count++;
     }
     return count;
@@ -239,13 +249,13 @@ void Anchor::HandlePacket_DialogChoiceVote(nlohmann::json payload) {
                 "choice={} tally={} of {} team members",
                 senderId, (unsigned)textId, (int)choiceIndex,
                 (int)state.votesByClient.size(),
-                (int)CountInSceneTeamSize());
+                (int)CountInSceneCutsceneTeamSize());
 
     // Broadcast updated state.
     SendPacket_DialogChoiceVoteState();
 
     // All-voted early exit (§1 Q2 — user-locked yes).
-    const size_t teamSize = CountInSceneTeamSize();
+    const size_t teamSize = CountInSceneCutsceneTeamSize();
     if (state.votesByClient.size() >= teamSize) {
         // Resolve immediately via TickDialogChoiceVote's shared path.
         // Set countdown to now so the tick fires next call.
@@ -266,7 +276,7 @@ void Anchor::TickDialogChoiceVote() {
     if (now < state.countdownEndsAt) return;
 
     // Resolve.
-    const size_t teamSize = CountInSceneTeamSize();
+    const size_t teamSize = CountInSceneCutsceneTeamSize();
     const bool   allVoted = state.votesByClient.size() >= teamSize;
     const uint8_t winning = ComputeWinningChoice(
         state.votesByClient, state.numChoices, state.firstVoteChoiceIndex);
@@ -354,6 +364,25 @@ void Anchor::HandlePacket_DialogChoiceVoteState(nlohmann::json payload) {
 
     // Vote-skip host doesn't consume its own broadcast — it authored it.
     if (AmDialogChoiceHost()) return;
+
+    // Fix L.3 (2026-07-10) — receive-side gate. Only apply the state if
+    // THIS peer is actually in cutscene mode locally. Prevents the vote
+    // UI from appearing on players who are in the same scene but NOT
+    // in the same dialogue window (e.g., Fix J-alt opt-in come-back:
+    // initiator in cutscene, other peer still in gameplay). Belt-and-
+    // suspenders alongside Fix L.1's send-side scope tightening — if a
+    // stray state packet slips through (transient race, historical
+    // packet before csCtxState propagated), we drop it locally.
+    // See Analysis/dialog_choice_vote_scope_leaks_to_non_cutscene_peers_
+    // 2026-07-10.md Fix L.
+    if (gPlayState->csCtx.state == CS_STATE_IDLE) {
+        auto& state = dialogChoiceVoteState;
+        if (state.active) {
+            // Clear any stale local state so the HUD stops rendering.
+            state.active = false;
+        }
+        return;
+    }
 
     // Session-monotonic seq (Pitfall 43).
     if (payload.contains("seq") && payload["seq"].is_number_unsigned()) {
