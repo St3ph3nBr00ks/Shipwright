@@ -10,6 +10,7 @@
 extern "C" {
 #include "z64.h"
 #include "macros.h"
+#include "message_data_fmt.h"  // MESSAGE_BOX_BREAK / MESSAGE_TEXTID / etc.
 extern PlayState* gPlayState;
 }
 
@@ -63,9 +64,40 @@ extern "C" void Anchor_OnMessageBufPosAdvanced(unsigned newMsgBufPos,
     // is harmless (the field is only READ by SnapshotCamera during
     // leader-side cutscene state capture).
     if (Anchor::Instance == nullptr) return;
+    if (gPlayState == nullptr) return;
+    if (newMsgBufPos == 0) return;
     (void)currentTextId;  // unused — shadow is textId-agnostic; the
                           // textId-change detection in TickCutscene-
                           // Catchup resets it separately.
+
+    // Fix M (log 668) — validate that the msgBufPos++ that fired this
+    // hook was a SUB-BOUNDARY crossing (past a BOX_BREAK or
+    // BOX_BREAK_DELAYED control code). If it was a textbox-transition
+    // crossing (TEXTID / EVENT / END), the new msgBufPos lands in the
+    // MIDDLE of a multi-byte control structure — that position is
+    // garbage as a decode start point. Skip shadow update; the
+    // textId-change tracker in TickCutsceneCatchup will reset the
+    // shadow to 0 when the new textbox opens (typically within 1-2
+    // frames). Leaving the shadow at its previous value is a strict
+    // improvement over overwriting it with an interior byte position.
+    //
+    // Rationale: log 668 captured a snapshot mid-transition where
+    // shadow=209 pointed at a middle byte of a TEXTID → 0x1016
+    // structure. Peer's Message_Decode from position 209 read the
+    // interior byte as a control code, exited with empty/spurious
+    // content, and vanilla auto-advanced peer to textbox 0x1016 —
+    // running ahead of leader who was still on 0x1015. See
+    // Analysis/design_e_v2_msgbufpos_overshoot_2026-07-10.md.
+    const Font* font = &gPlayState->msgCtx.font;
+    const uint8_t justConsumed = font->msgBuf[newMsgBufPos - 1];
+    if (justConsumed != MESSAGE_BOX_BREAK &&
+        justConsumed != MESSAGE_BOX_BREAK_DELAYED) {
+        SPDLOG_DEBUG("[Anchor] Shadow update skipped — justConsumed=0x{:02X} "
+                     "at msgBufPos-1={} (not a sub-boundary control code)",
+                     (unsigned)justConsumed, newMsgBufPos - 1);
+        return;
+    }
+
     Anchor::Instance->leaderMsgBufPosLastSubStart =
         (uint16_t)newMsgBufPos;
 }
