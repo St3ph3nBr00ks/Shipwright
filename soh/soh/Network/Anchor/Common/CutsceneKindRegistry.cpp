@@ -61,6 +61,17 @@ extern "C" int Anchor_TryEngageOptInCatchup(const char* csKind, uint32_t csKey) 
         return 0;  // We're the originator — no catchup needed
     }
 
+    // Fix K.3 (log 670) — dedup while a catchup is already pending. Actor
+    // trigger sites (e.g. Bg_Treemouth come-back branch) may re-check
+    // isTargeted many frames per second while the user holds Z-target.
+    // Without this dedup, every frame would fire a fresh REQUEST + reset
+    // the pending deadline, spamming the network + the leader. Returning
+    // 1 (still engaged) tells the caller "catchup is in flight, don't
+    // fall through to fresh start" without re-sending.
+    if (Anchor::Instance->pendingCatchups.count(kindKey) > 0) {
+        return 1;
+    }
+
     // Look up the peer originator to route the REQUEST. Fix O tracks this.
     auto originatorIt =
         Anchor::Instance->cutsceneOriginatorByKindKey.find(kindKey);

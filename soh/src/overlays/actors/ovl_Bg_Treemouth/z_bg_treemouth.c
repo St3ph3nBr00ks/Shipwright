@@ -176,24 +176,35 @@ void func_808BC8B8(BgTreemouth* this, PlayState* play) {
                     if (this->dyna.actor.isTargeted) {
                         this->dyna.actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
 
-                        // Fix J-alt (log 667) — come-back is opt-in per
-                        // user design: player must intentionally Z-target
-                        // to enter. Local cutscene always fires so
-                        // vanilla enters cutscene mode reliably (safety
-                        // net against catchup timeout / peer disconnect).
-                        // See Analysis/deku_tree_come_back_sync_design_reversal_2026-07-09.md.
-                        play->csCtx.segment = D_808BD2A0;
-                        gSaveContext.cutsceneTrigger = 1;
-                        BgTreemouth_SetupAction(this, func_808BC9EC);
-
-                        // If a peer already owns this cutscene, engage
-                        // catchup — the incoming CATCHUP_RESPONSE will
-                        // fast-forward csCtx.frames to the leader's frame,
-                        // converging our shared state. Otherwise
-                        // broadcast our own fresh start; peers will
-                        // record but not force-apply (opt-in) unless
-                        // their own local trigger fires.
-                        if (!Anchor_TryEngageOptInCatchup("deku_tree_intro", 1)) {
+                        // Fix K.3 (log 670) — MUTUALLY EXCLUSIVE branches.
+                        // Prior Fix J-alt fired the local cutscene AND
+                        // engaged catchup, which set pendingCatchups AND
+                        // csCtx.state = UNSKIPPABLE_INIT — triggering the
+                        // safety net at Common/CutsceneCatchup.cpp:525
+                        // into a ~30Hz force-IDLE storm that stalled the
+                        // game thread, dropped the incoming RESPONSE, and
+                        // likely contributed to the log-670 P1 crash. See
+                        // Analysis/fix_jalt_fix_k2_safety_net_conflict_
+                        // 2026-07-10.md.
+                        if (Anchor_TryEngageOptInCatchup("deku_tree_intro", 1)) {
+                            // Catchup engaged. The incoming CATCHUP_RESPONSE
+                            // will apply state via the registered
+                            // applyForce → BgTreemouth_ForceIntroCutscene,
+                            // which sets segment + cutsceneTrigger + our
+                            // actionFunc. DO NOT set them here. Actor
+                            // stays in func_808BC8B8 (this function);
+                            // TryEngageOptInCatchup's own pendingCatchups
+                            // dedup prevents REQUEST spam if user holds
+                            // Z-target across multiple frames. If catchup
+                            // times out (2 s), user can Z-target again to
+                            // retry.
+                        } else {
+                            // No peer running come-back; fresh start
+                            // locally + broadcast. Peers receive as
+                            // opt-in (recorded but not force-applied).
+                            play->csCtx.segment = D_808BD2A0;
+                            gSaveContext.cutsceneTrigger = 1;
+                            BgTreemouth_SetupAction(this, func_808BC9EC);
                             Anchor_NotifyCutsceneStart("deku_tree_intro", 1);
                         }
                     }
