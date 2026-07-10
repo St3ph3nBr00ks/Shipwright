@@ -28,6 +28,15 @@ extern int Anchor_ForceCutsceneOnActor(
     void (*setupAdapter)(Actor* actor, void* actionFunc),
     void* actionFunc);
 
+// Opt-in catchup engagement — companion to Handler::optInPredicate. If
+// a peer already owns the specified cutscene (they broadcast a
+// CUTSCENE_START that we recorded but did not force-apply due to
+// opt-in), this sends a catchup REQUEST to that peer and returns 1.
+// The RESPONSE handler will apply the state via the registered
+// applyForce. Returns 0 if no peer owns the cutscene — actor should
+// proceed with fresh-start.
+extern int Anchor_TryEngageOptInCatchup(const char* csKind, unsigned int csKey);
+
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
 void BgTreemouth_Init(Actor* thisx, PlayState* play);
@@ -166,22 +175,27 @@ void func_808BC8B8(BgTreemouth* this, PlayState* play) {
                     this->dyna.actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED;
                     if (this->dyna.actor.isTargeted) {
                         this->dyna.actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+
+                        // Fix J-alt (log 667) — come-back is opt-in per
+                        // user design: player must intentionally Z-target
+                        // to enter. Local cutscene always fires so
+                        // vanilla enters cutscene mode reliably (safety
+                        // net against catchup timeout / peer disconnect).
+                        // See Analysis/deku_tree_come_back_sync_design_reversal_2026-07-09.md.
                         play->csCtx.segment = D_808BD2A0;
                         gSaveContext.cutsceneTrigger = 1;
                         BgTreemouth_SetupAction(this, func_808BC9EC);
-                        // Fix H (log 664/665) — the come-back branch is
-                        // player-initiated dialog (gated on Z-target),
-                        // NOT an auto-cutscene like the first-encounter
-                        // branch below. Vanilla design intent: each
-                        // player triggers on their own Z-target choice.
-                        // Progression (EVENTCHKINF_DEKU_TREE_OPENED_MOUTH)
-                        // still syncs via the existing SET_FLAG pipeline
-                        // when a player answers "yes". Forcing MP sync
-                        // here would remove per-player autonomy and match
-                        // dialog UX poorly. See
-                        // Analysis/deku_tree_bidirectional_come_back_2026-07-09.md
-                        // Fix H for the full rationale.
-                        // Intentionally NO Anchor_NotifyCutsceneStart call.
+
+                        // If a peer already owns this cutscene, engage
+                        // catchup — the incoming CATCHUP_RESPONSE will
+                        // fast-forward csCtx.frames to the leader's frame,
+                        // converging our shared state. Otherwise
+                        // broadcast our own fresh start; peers will
+                        // record but not force-apply (opt-in) unless
+                        // their own local trigger fires.
+                        if (!Anchor_TryEngageOptInCatchup("deku_tree_intro", 1)) {
+                            Anchor_NotifyCutsceneStart("deku_tree_intro", 1);
+                        }
                     }
                 }
             } else if (Actor_IsFacingAndNearPlayer(&this->dyna.actor, 1658.0f, 0x4E20)) {

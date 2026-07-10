@@ -35,6 +35,25 @@ struct Handler {
     // (null) is a no-op (vanilla drives its own teardown). Rarely
     // needed — reserved for actors that need explicit end-hook cleanup.
     std::function<bool(uint32_t csKey, const std::string& endReason)> applyEnd;
+
+    // Optional per-csKey opt-in predicate. When set + returns true, the
+    // cutscene is treated as "player must intentionally opt in":
+    //   1. ApplyCutsceneStartByKind on receive records the state
+    //      (cutsceneStartActive gets the entry) but does NOT invoke
+    //      applyForce. Receiver stays in gameplay mode.
+    //   2. FRAME_SYNC-driven auto-catchup on receive is suppressed —
+    //      receiver does not force-join the peer's cutscene.
+    //   3. If the receiver's own actor code LATER fires the local
+    //      trigger, it can call Anchor_TryEngageOptInCatchup to
+    //      converge with the ongoing peer cutscene instead of starting
+    //      fresh (see z_bg_treemouth.c come-back branch for the
+    //      canonical use).
+    //
+    // Design intent: come-back-style cutscenes where vanilla requires
+    // an explicit player action to enter (Z-target). Auto-triggered
+    // cutscenes (proximity/story-beat) should leave this null so they
+    // force-sync as before.
+    std::function<bool(uint32_t csKey)> optInPredicate;
 };
 
 // Look up a handler by csKind. Returns nullptr for unregistered kinds.
@@ -70,3 +89,17 @@ extern "C" int Anchor_ForceCutsceneOnActor(
     void* segment,
     void (*setupAdapter)(struct Actor* actor, void* actionFunc),
     void* actionFunc);
+
+// -----------------------------------------------------------------------
+// Opt-in catchup engagement — companion to Handler::optInPredicate.
+//
+// Called from the actor's local trigger site. Checks whether a peer
+// currently owns the specified (csKind, csKey) cutscene (present in
+// cutsceneStartActive but not local-origin). If yes, sends a catchup
+// REQUEST to the peer originator and returns 1 — the actor should skip
+// its normal fresh-start path (segment write, cutsceneTrigger, notify)
+// because the incoming CUTSCENE_CATCHUP_RESPONSE will apply the state.
+// Returns 0 if no peer is running the cutscene — actor should proceed
+// with a normal fresh start (which will also broadcast its own
+// CUTSCENE_START).
+extern "C" int Anchor_TryEngageOptInCatchup(const char* csKind, uint32_t csKey);

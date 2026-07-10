@@ -842,17 +842,30 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
             catchupDeferredTeleportValid ||
             (catchupRequestGateArmedAt !=
                 std::chrono::steady_clock::time_point::min());
+
+        // Opt-in cutscenes suppress FRAME_SYNC-driven auto-REQUEST. The
+        // receiver stays in gameplay unless their own local trigger
+        // fires (which then engages catchup via
+        // Anchor_TryEngageOptInCatchup). See
+        // Analysis/deku_tree_come_back_sync_design_reversal_2026-07-09.md
+        // for the design.
+        bool isOptIn = false;
+        if (const auto* handler = CutsceneKindRegistry::Find(csKind)) {
+            if (handler->optInPredicate && handler->optInPredicate(csKey)) {
+                isOptIn = true;
+            }
+        }
         SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC gates — sender={} own={} "
                     "kindKey='{}' enabled={} alreadyPending={} selfBroadcast={} "
-                    "validSender={} alreadyInCs={} alreadyCatchingUp={} — will{} fire",
+                    "validSender={} alreadyInCs={} alreadyCatchingUp={} optIn={} — will{} fire",
                     senderClientId, ownClientId, kindKey,
                     haveEnabled, alreadyPending, selfBroadcast, validSender,
-                    alreadyInCs, alreadyCatchingUp,
+                    alreadyInCs, alreadyCatchingUp, isOptIn,
                     (validSender && !selfBroadcast && !alreadyPending &&
-                     haveEnabled && !alreadyInCs && !alreadyCatchingUp)
+                     haveEnabled && !alreadyInCs && !alreadyCatchingUp && !isOptIn)
                         ? "" : " NOT");
         if (validSender && !selfBroadcast && !alreadyPending && haveEnabled &&
-            !alreadyInCs && !alreadyCatchingUp) {
+            !alreadyInCs && !alreadyCatchingUp && !isOptIn) {
             PendingCatchup p;
             p.deadline = std::chrono::steady_clock::now()
                          + std::chrono::milliseconds(kCatchupTimeoutMs);

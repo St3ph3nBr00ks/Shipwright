@@ -137,6 +137,17 @@ bool ApplyCutsceneStartByKind(const std::string& csKind, uint32_t csKey) {
     // Analysis/generic_cutscene_dialog_sync_helpers_2026-07-09.md
     // Helpers B + D).
     if (const auto* handler = CutsceneKindRegistry::Find(csKind)) {
+        // Opt-in kinds (e.g., come-back cutscenes gated on Z-target):
+        // record the state but do NOT force-apply. The receiver stays
+        // in gameplay mode; if their own local trigger fires later,
+        // they can engage catchup via Anchor_TryEngageOptInCatchup.
+        // See Analysis/deku_tree_come_back_sync_design_reversal_2026-07-09.md.
+        if (handler->optInPredicate && handler->optInPredicate(csKey)) {
+            SPDLOG_INFO("[CutsceneStart] csKind={} csKey={} is opt-in — "
+                        "recorded but NOT forcing local entry",
+                        csKind, csKey);
+            return true;
+        }
         if (!handler->applyForce) {
             SPDLOG_WARN("[CutsceneStart] csKind='{}' registered without applyForce; "
                         "packet ignored", csKind);
