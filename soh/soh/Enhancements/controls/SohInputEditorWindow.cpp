@@ -1529,12 +1529,14 @@ void SohInputEditorWindow::DrawDeviceToggles(uint8_t portIndex) {
             // Persist the assignment via SDL joystick GUID (stable across launches)
             // so multi-instance / multi-controller users don't re-assign every launch.
             // See Plans/controller_port_persistence_plan.md, libultraship#2.
-            std::string guid;
-            if (auto* joystick = SDL_JoystickFromInstanceID(instanceId); joystick != nullptr) {
-                char guidCStr[33] = "";
-                SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joystick), guidCStr, sizeof(guidCStr));
-                guid = guidCStr;
-            }
+            // Uses the GUID cached during RefreshConnectedSDLGamepads, not a live
+            // SDL_JoystickFromInstanceID query — the latter has failed silently on
+            // some Windows/SDL2 configurations, sending the toggle down the
+            // session-only fallback which was wiped by the next hotplug refresh.
+            std::string guid = connectedDeviceManager->GetGuidForInstanceId(instanceId);
+            SPDLOG_INFO("[ControllerPersistence] toggle port={} instanceId={} notIgnored={} guid={}",
+                        portIndex, instanceId, notIgnored ? "true" : "false",
+                        guid.empty() ? "(empty)" : guid);
             if (!guid.empty()) {
                 if (notIgnored) {
                     connectedDeviceManager->AssignGuidToPort(portIndex, guid);
@@ -1543,8 +1545,9 @@ void SohInputEditorWindow::DrawDeviceToggles(uint8_t portIndex) {
                 }
                 connectedDeviceManager->SaveAssignmentsToConfig();
             } else {
-                // Fall back to session-only ignore semantics if the GUID lookup
-                // failed (device just disconnected between the check and the toggle).
+                // Fall back to session-only ignore semantics if the GUID cache
+                // lookup failed (device just disconnected between the check and
+                // the toggle, or Refresh hasn't populated the cache yet).
                 if (notIgnored) {
                     connectedDeviceManager->UnignoreInstanceIdForPort(portIndex, instanceId);
                 } else {
