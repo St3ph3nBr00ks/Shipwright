@@ -15,6 +15,7 @@
 #include "soh/OTRGlobals.h"
 #include "soh/SaveManager.h"
 #include "soh/ResourceManagerHelpers.h"
+#include "soh/Network/Anchor/Bridge/DialogChoiceVoteInlineDots.h"
 
 // #region SOH [NTSC] - Allows custom messages to work on japanese
 static bool sDisplayNextMessageAsEnglish = false;
@@ -4249,10 +4250,15 @@ void Message_DrawMain(PlayState* play, Gfx** p) {
                     case TEXTBOX_ENDTYPE_2_CHOICE:
                         Message_HandleChoiceSelection(play, 1);
                         Message_DrawTextboxIcon(play, &gfx, msgCtx->textPosX, msgCtx->textPosY);
+                        // Anchor MP inline vote-dots on right side of each choice.
+                        // No-op unless connected + dialog choice vote active for
+                        // this textId. See Anchor/Bridge/DialogChoiceVoteInlineDots.
+                        Anchor_DrawInlineChoiceVoteDots(play, &gfx);
                         break;
                     case TEXTBOX_ENDTYPE_3_CHOICE:
                         Message_HandleChoiceSelection(play, 2);
                         Message_DrawTextboxIcon(play, &gfx, msgCtx->textPosX, msgCtx->textPosY);
+                        Anchor_DrawInlineChoiceVoteDots(play, &gfx);
                         break;
                     case TEXTBOX_ENDTYPE_PERSISTENT:
                         if (msgCtx->textId >= 0x6D && msgCtx->textId < 0x73) {

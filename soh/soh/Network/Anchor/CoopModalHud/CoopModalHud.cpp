@@ -158,8 +158,33 @@ ImVec4 TimerColorForInteger(int wholeSec) {
 // player's Anchor color. Ordering: filled-vs-outline is the shape
 // distinction that keeps the widget color-blindness-friendly (plan
 // §8.5).
+//
+// Brightness-adaptive backer (2 px larger radius) drawn first so
+// bright peer colors stay readable against light backgrounds. Mirrors
+// the Team Marker nametag pattern in soh/soh/Enhancements/nametag.cpp
+// and the inline vote-dots' backer in
+// Anchor/Bridge/DialogChoiceVoteInlineDots.cpp. Applied to both voted
+// (filled) and pending (outlined) states so the reader always sees a
+// clear dot silhouette.
+
+ImU32 BackerColorForImU32(ImU32 color) {
+    // Rec. 601 luma. Format: IM_COL32 packs as ABGR little-endian so
+    // R = color & 0xFF, G = (color >> 8) & 0xFF, B = (color >> 16) & 0xFF.
+    const int r = (int)(color & 0xFF);
+    const int g = (int)((color >> 8) & 0xFF);
+    const int b = (int)((color >> 16) & 0xFF);
+    const int luma = (299 * r + 587 * g + 114 * b) / 1000;
+    if (luma > 127) {
+        return IM_COL32(0, 0, 0, 220);
+    } else {
+        return IM_COL32(255, 255, 255, 220);
+    }
+}
 
 void RenderDot(ImDrawList* dl, ImVec2 center, ImU32 color, bool voted) {
+    // Backer: filled circle, 2 px larger radius, adaptive color.
+    dl->AddCircleFilled(center, kDotRadius + 2.0f,
+                        BackerColorForImU32(color), 24);
     if (voted) {
         dl->AddCircleFilled(center, kDotRadius, color, 24);
     } else {
@@ -354,120 +379,11 @@ void DrawCutsceneCatchupWidget(const Anchor& anchor) {
     ImGui::PopStyleColor(2);
 }
 
-// ---- Dialog choice-vote widget (2026-07-09) -------------------------
-//
-// Renders when Anchor::dialogChoiceVoteState.active is true. Shows
-// dots per choice for each voter's selection + countdown timer.
-//
-// v1 positioning: fixed bottom-right of viewport, mirroring the vote-
-// skip widget. User's design (2026-07-09 answer #3) called for dots
-// anchored to each choice option in the vanilla textbox, offset far
-// enough right to not overlap the vanilla arrow indicator. That
-// requires reading R_TEXT_CHOICE_YPOS + textbox-position math to
-// project N64 coords to modern-resolution screen coords per-choice.
-// TODO(v2): implement per-option overlay positioning. For v1, dots
-// are shown in a compact widget with per-choice rows so the vote
-// state is fully visible even without perfect alignment.
-//
-// Peer cursors are NEVER rendered — only local player's cursor
-// (vanilla behavior preserved). This widget shows the vote tally,
-// not any cursor indicator for peers.
-void DrawDialogChoiceVoteWidget(const Anchor& anchor) {
-    const auto& state = anchor.dialogChoiceVoteState;
-    const bool showContent = state.active && state.numChoices >= 2 &&
-                             (gPlayState != nullptr);
-
-    auto vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowViewport(vp->ID);
-    // Position slightly above the vote-skip widget so the two don't
-    // stack. Vote-skip is at bottom-right; this sits above it.
-    const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
-    const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin - 120.0f;
-    ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
-                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
-
-    ImGui::PushStyleColor(ImGuiCol_WindowBg,
-                          showContent ? kBgColor : ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_Border,
-                          showContent ? kBorderColor : ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
-                        ImVec2(kPadding, kPadding));
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, showContent ? 1.0f : 0.0f);
-
-    const float fontScale =
-        CVarGetFloat(CVAR_SETTING("Notifications.Size"), 1.8f);
-
-    ImGui::Begin(
-        "AnchorCoopHudDialogChoiceVote", nullptr,
-        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
-            ImGuiWindowFlags_NoFocusOnAppearing |
-            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoDocking |
-            ImGuiWindowFlags_NoTitleBar |
-            ImGuiWindowFlags_NoScrollWithMouse |
-            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoSavedSettings);
-
-    if (showContent) {
-        ImGui::SetWindowFontScale(fontScale);
-
-        // Countdown timer.
-        if (state.countdownStarted) {
-            float rem = RemainingSecondsFrom(state.countdownEndsAt);
-            int wholeSec = (int)std::ceil(rem);
-            if (wholeSec < 0) wholeSec = 0;
-            char buf[16];
-            std::snprintf(buf, sizeof(buf), "%d", wholeSec);
-            ImGui::TextColored(TimerColorForInteger(wholeSec), "%s", buf);
-            ImGui::SameLine();
-        }
-        ImGui::TextColored(kPromptColor, "Choose:");
-
-        // Per-choice rows. Show dots for voters who selected each
-        // choice. Local voter's dot is present just like peers'.
-        for (uint8_t choiceIdx = 0; choiceIdx < state.numChoices; choiceIdx++) {
-            ImGui::Text("  Option %d:", (int)choiceIdx + 1);
-            ImGui::SameLine();
-
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 cursor = ImGui::GetCursorScreenPos();
-            float dotX = cursor.x + kDotToTextGap;
-            float dotY = cursor.y + ImGui::GetTextLineHeight() * 0.5f;
-
-            // Draw one dot per voter for THIS choice, in insertion order.
-            int dotsDrawn = 0;
-            for (uint32_t voterId : state.voteOrderByClient) {
-                auto voteIt = state.votesByClient.find(voterId);
-                if (voteIt == state.votesByClient.end()) continue;
-                if (voteIt->second != choiceIdx) continue;
-
-                // Lookup voter's Anchor color.
-                Color_RGB8 c = { 255, 255, 255 };
-                auto clientIt = anchor.clients.find(voterId);
-                if (clientIt != anchor.clients.end()) {
-                    c = clientIt->second.color;
-                }
-                dl->AddCircleFilled(ImVec2(dotX, dotY), kDotRadius,
-                                    ColorFromRgb8(c, 1.0f), 12);
-                dotX += kDotSpacing;
-                dotsDrawn++;
-            }
-
-            // Reserve space so the ImGui layout advances even when no
-            // dots for this choice.
-            ImGui::Dummy(ImVec2(
-                dotsDrawn > 0
-                    ? (kDotToTextGap + kDotSpacing * dotsDrawn)
-                    : (kDotToTextGap + kDotRadius * 2.0f),
-                ImGui::GetTextLineHeight()));
-        }
-    }
-    ImGui::End();
-
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(2);
-}
+// (Dialog choice-vote widget removed 2026-07-10 per user design
+// direction — dots are now rendered inline next to each choice via
+// N64 Gfx display list from `Message_DrawTextboxIcon`. See
+// Anchor/Bridge/DialogChoiceVoteInlineDots.cpp and
+// Claude/Analysis/inline_choice_vote_ui_2026-07-10.md.)
 
 }  // namespace
 
@@ -587,7 +503,8 @@ void Window::Draw() {
     // both render — user sees stacked HUD elements, not a crash.
     DrawVotingSkipWidget(anchor);
     DrawCutsceneCatchupWidget(anchor);
-    DrawDialogChoiceVoteWidget(anchor);
+    // (Dialog choice-vote widget removed 2026-07-10 — inline dots
+    // now render via z_message_PAL.c splice.)
 }
 
 }  // namespace CoopModalHud
