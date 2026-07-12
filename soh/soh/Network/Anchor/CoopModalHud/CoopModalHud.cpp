@@ -429,6 +429,13 @@ constexpr float kInlineDotRightMarginPx = 4.0f;
 // resolutions.
 constexpr float kInlineDotYOffsetOrtho = 16.0f;
 
+// Additional fixed screen-pixel Y nudge on top of the ortho offset.
+// User tuning 2026-07-12: after v4.1, dot needed to drop 5 more screen
+// pixels. Applied as a fixed post-scale offset rather than folded into
+// the ortho constant so it stays a literal 5 px regardless of viewport
+// size (user asked in screen-pixel terms).
+constexpr float kInlineDotYNudgeScreenPx = 5.0f;
+
 void DrawDialogChoiceVoteInlineWidget(const Anchor& anchor) {
     const auto& state = anchor.dialogChoiceVoteState;
     const bool showContent =
@@ -504,7 +511,8 @@ void DrawDialogChoiceVoteInlineWidget(const Anchor& anchor) {
             const float choiceOrthoY =
                 static_cast<float>(R_TEXT_CHOICE_YPOS(choiceIdx))
                 + kInlineDotYOffsetOrtho;
-            const float choiceScreenY = vp->Pos.y + choiceOrthoY * sy;
+            const float choiceScreenY =
+                vp->Pos.y + choiceOrthoY * sy + kInlineDotYNudgeScreenPx;
 
             // Anchor to the RIGHT (choice text). First voter's dot at
             // rightmost position (adjacent to text). Subsequent voters
