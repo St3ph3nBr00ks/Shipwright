@@ -379,11 +379,138 @@ void DrawCutsceneCatchupWidget(const Anchor& anchor) {
     ImGui::PopStyleColor(2);
 }
 
-// (Dialog choice-vote widget removed 2026-07-10 per user design
-// direction — dots are now rendered inline next to each choice via
-// N64 Gfx display list from `Message_DrawTextboxIcon`. See
-// Anchor/Bridge/DialogChoiceVoteInlineDots.cpp and
-// Claude/Analysis/inline_choice_vote_ui_2026-07-10.md.)
+// ---- Dialog choice-vote INLINE widget (v4 — ImGui overlay 2026-07-12) --
+//
+// V4 replaces the earlier v1/v2/v3 Gfx-DList splice into
+// `z_message_PAL.c`. All three prior attempts failed to render circles
+// correctly (v1 corrupt texture, v2 squares + Y offset, v3 still not
+// circular per user field-test 2026-07-12).
+//
+// Per user direction 2026-07-12: dots must look IDENTICAL to the
+// vote-skip HUD circles. The vote-skip renders via `RenderDot()` — the
+// same primitive is reused here to guarantee visual match. Rendering
+// is a transparent ImGui overlay covering the full viewport; dot
+// centres are computed from the vanilla textbox's N64-ortho register
+// values, scaled linearly to viewport pixels.
+//
+// Position: right of the vanilla ▶ arrow (drawn at
+// `R_TEXT_CHOICE_XPOS` in ortho), left of the choice text (indented
+// +32 from `R_TEXT_INIT_XPOS`). One dot row per choice line, dots
+// truncate on overflow into the choice-text area.
+//
+// Coord mapping caveat: linear scaling from N64 ortho (320x240) to
+// `ImGui::GetMainViewport()` pixel size. This assumes the game
+// framebuffer fills the whole viewport (stretch mode). Widescreen
+// letterbox may produce misalignment — flagged as a v5 candidate.
+
+// N64 ortho space (game virtual resolution).
+constexpr float kOrthoWidth  = 320.0f;
+constexpr float kOrthoHeight = 240.0f;
+
+// Arrow geometry in ortho.
+constexpr float kArrowWidth = 16.0f;  // sCharTexSize per z_message_PAL.c:735
+
+// Ortho X of the choice text start = R_TEXT_INIT_XPOS + this.
+constexpr float kChoiceTextIndent = 32.0f;
+
+// Screen-space (pixel) spacing between dot centres. Smaller than
+// vote-skip's kDotSpacing because the arrow-to-text gap is tight in
+// ortho space (18 px = arrow.right(64) → text.left(82)).
+constexpr float kInlineDotSpacing = 14.0f;
+
+// Slight inset so dots don't kiss the choice-text glyphs.
+constexpr float kInlineDotRightMarginPx = 4.0f;
+
+void DrawDialogChoiceVoteInlineWidget(const Anchor& anchor) {
+    const auto& state = anchor.dialogChoiceVoteState;
+    const bool showContent =
+        state.active && state.numChoices >= 2 && (gPlayState != nullptr) &&
+        (gPlayState->msgCtx.textId == state.textId) &&
+        (gPlayState->msgCtx.textboxEndType == TEXTBOX_ENDTYPE_2_CHOICE ||
+         gPlayState->msgCtx.textboxEndType == TEXTBOX_ENDTYPE_3_CHOICE);
+
+    // Following the Fix H pattern (see DrawVotingSkipWidget above),
+    // always Begin/End regardless of visibility so ImGui's multi-
+    // viewport promotion never fires against a retained hidden window.
+    auto vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(vp->Size);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, showContent ? 1.0f : 0.0f);
+
+    ImGui::Begin(
+        "AnchorCoopHudDialogChoiceInline", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+            ImGuiWindowFlags_NoFocusOnAppearing |
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoBackground);
+
+    if (showContent) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // Linear ortho→pixel scale (stretch mode assumption).
+        const float sx = vp->Size.x / kOrthoWidth;
+        const float sy = vp->Size.y / kOrthoHeight;
+
+        // Ortho X anchors.
+        const float arrowOrthoX      = static_cast<float>(R_TEXT_CHOICE_XPOS);
+        const float dotRowLeftOrthoX = arrowOrthoX + kArrowWidth + 2.0f;
+        const float choiceTextOrthoX = static_cast<float>(R_TEXT_INIT_XPOS)
+                                       + kChoiceTextIndent;
+
+        // Screen-space anchors.
+        const float dotRowLeftScreenX =
+            vp->Pos.x + dotRowLeftOrthoX * sx + kDotRadius;
+        const float choiceTextScreenX =
+            vp->Pos.x + choiceTextOrthoX * sx - kInlineDotRightMarginPx;
+
+        for (uint8_t choiceIdx = 0; choiceIdx < state.numChoices;
+             ++choiceIdx) {
+            // Arrow's ortho Y range: [Y, Y+16]. Centre at Y+8.
+            const float choiceOrthoY =
+                static_cast<float>(R_TEXT_CHOICE_YPOS(choiceIdx)) + 8.0f;
+            const float choiceScreenY = vp->Pos.y + choiceOrthoY * sy;
+
+            int dotIdx = 0;
+            for (uint32_t voterId : state.voteOrderByClient) {
+                auto voteIt = state.votesByClient.find(voterId);
+                if (voteIt == state.votesByClient.end()) continue;
+                if (voteIt->second != choiceIdx) continue;
+
+                Color_RGB8 c = { 255, 255, 255 };
+                auto clientIt = anchor.clients.find(voterId);
+                if (clientIt != anchor.clients.end()) {
+                    c = clientIt->second.color;
+                }
+
+                const float centreX =
+                    dotRowLeftScreenX + dotIdx * kInlineDotSpacing;
+                if (centreX + kDotRadius > choiceTextScreenX) break;
+
+                RenderDot(dl,
+                          ImVec2(centreX, choiceScreenY),
+                          ColorFromRgb8(c, 1.0f),
+                          /*voted=*/true);
+                ++dotIdx;
+            }
+        }
+    }
+
+    ImGui::End();
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+}
 
 }  // namespace
 
@@ -503,8 +630,7 @@ void Window::Draw() {
     // both render — user sees stacked HUD elements, not a crash.
     DrawVotingSkipWidget(anchor);
     DrawCutsceneCatchupWidget(anchor);
-    // (Dialog choice-vote widget removed 2026-07-10 — inline dots
-    // now render via z_message_PAL.c splice.)
+    DrawDialogChoiceVoteInlineWidget(anchor);
 }
 
 }  // namespace CoopModalHud
