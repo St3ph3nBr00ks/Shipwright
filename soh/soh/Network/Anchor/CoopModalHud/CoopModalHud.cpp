@@ -421,6 +421,14 @@ constexpr float kInlineDotSpacing = 14.0f;
 // Slight inset so dots don't kiss the choice-text glyphs.
 constexpr float kInlineDotRightMarginPx = 4.0f;
 
+// Empirical Y offset (ortho px) applied to R_TEXT_CHOICE_YPOS(n) to
+// visually centre the dot with the arrow. The pure `+ 8` (arrow half-
+// height in ortho with kArrowWidth=16) put the dot ~25 screen px too
+// high in field-test log 60. Tuned upward to compensate. Ortho-space
+// value scales with viewport via `sy`, so this stays correct across
+// resolutions.
+constexpr float kInlineDotYOffsetOrtho = 16.0f;
+
 void DrawDialogChoiceVoteInlineWidget(const Anchor& anchor) {
     const auto& state = anchor.dialogChoiceVoteState;
     const bool showContent =
@@ -463,24 +471,45 @@ void DrawDialogChoiceVoteInlineWidget(const Anchor& anchor) {
         const float sy = vp->Size.y / kOrthoHeight;
 
         // Ortho X anchors.
+        //   arrowOrthoX      — vanilla arrow's ortho X (left edge of ▶).
+        //   arrowOrthoRight  — right edge of the arrow (its texture is
+        //                      `sCharTexSize = 16 * R_TEXT_CHAR_SCALE/100`
+        //                      ortho px wide; conservative constant 16
+        //                      here — a wider arrow slightly clips the
+        //                      leftmost dot but the truncation guard
+        //                      catches it).
+        //   choiceTextOrthoX — start X of the choice text glyphs (arrow
+        //                      indent is +32 from R_TEXT_INIT_XPOS per
+        //                      z_message_PAL.c:1392-1395).
         const float arrowOrthoX      = static_cast<float>(R_TEXT_CHOICE_XPOS);
-        const float dotRowLeftOrthoX = arrowOrthoX + kArrowWidth + 2.0f;
+        const float arrowOrthoRight  = arrowOrthoX + kArrowWidth;
         const float choiceTextOrthoX = static_cast<float>(R_TEXT_INIT_XPOS)
                                        + kChoiceTextIndent;
 
         // Screen-space anchors.
-        const float dotRowLeftScreenX =
-            vp->Pos.x + dotRowLeftOrthoX * sx + kDotRadius;
-        const float choiceTextScreenX =
-            vp->Pos.x + choiceTextOrthoX * sx - kInlineDotRightMarginPx;
+        const float arrowRightScreenX = vp->Pos.x + arrowOrthoRight * sx;
+        // Rightmost dot centre — sits just left of the choice text.
+        const float rightAnchorScreenX =
+            vp->Pos.x + choiceTextOrthoX * sx
+            - kInlineDotRightMarginPx - kDotRadius;
 
         for (uint8_t choiceIdx = 0; choiceIdx < state.numChoices;
              ++choiceIdx) {
-            // Arrow's ortho Y range: [Y, Y+16]. Centre at Y+8.
+            // Y-centre the dot on the choice line. Empirical vertical
+            // offset (`kInlineDotYOffsetOrtho`) shifts the dot slightly
+            // below the arrow's ortho top so it visually aligns with the
+            // arrow's midline — the pure `+ arrowHalf` calculation left
+            // the dot ~25 screen px too high (log 60 evidence). Ortho
+            // offset scales with viewport height via `sy`.
             const float choiceOrthoY =
-                static_cast<float>(R_TEXT_CHOICE_YPOS(choiceIdx)) + 8.0f;
+                static_cast<float>(R_TEXT_CHOICE_YPOS(choiceIdx))
+                + kInlineDotYOffsetOrtho;
             const float choiceScreenY = vp->Pos.y + choiceOrthoY * sy;
 
+            // Anchor to the RIGHT (choice text). First voter's dot at
+            // rightmost position (adjacent to text). Subsequent voters
+            // extend LEFTWARD. Matches user's Image 62 layout: first
+            // dot closest to text, additional dots grow left.
             int dotIdx = 0;
             for (uint32_t voterId : state.voteOrderByClient) {
                 auto voteIt = state.votesByClient.find(voterId);
@@ -494,8 +523,10 @@ void DrawDialogChoiceVoteInlineWidget(const Anchor& anchor) {
                 }
 
                 const float centreX =
-                    dotRowLeftScreenX + dotIdx * kInlineDotSpacing;
-                if (centreX + kDotRadius > choiceTextScreenX) break;
+                    rightAnchorScreenX - dotIdx * kInlineDotSpacing;
+                // Truncate at arrow's right edge — leftmost dot would
+                // otherwise overlap the arrow.
+                if (centreX - kDotRadius < arrowRightScreenX) break;
 
                 RenderDot(dl,
                           ImVec2(centreX, choiceScreenY),
