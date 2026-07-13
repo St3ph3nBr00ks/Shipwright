@@ -132,17 +132,30 @@ void Cutscene_DrawDebugInfo(PlayState* play, Gfx** dlist, CutsceneContext* csCtx
     GfxPrint_Destroy(&printer);
 }
 
+// Cutscene late-join catchup gate. When a same-team peer is mid-cutscene
+// in our scene and we've just arrived, we hold local vanilla cutscene
+// entry until the CATCHUP_RESPONSE arrives (or 2s timeout).
+// Plan: Claude/Plans/cutscene_late_join_plan.md §3.3.
+// Analysis: Claude/Analysis/cutscene_entry_gate_design_2026-07-07.md.
+extern int Anchor_ShouldSuppressLocalCutsceneEntry(void);
+
 void func_8006450C(PlayState* play, CutsceneContext* csCtx) {
     csCtx->state = CS_STATE_IDLE;
     csCtx->unk_0C = 0.0f;
 }
 
 void func_80064520(PlayState* play, CutsceneContext* csCtx) {
+    if (Anchor_ShouldSuppressLocalCutsceneEntry()) {
+        return;  // Late-joiner catchup pending — hold IDLE.
+    }
     csCtx->state = CS_STATE_SKIPPABLE_INIT;
     csCtx->linkAction = NULL;
 }
 
 void func_80064534(PlayState* play, CutsceneContext* csCtx) {
+    if (Anchor_ShouldSuppressLocalCutsceneEntry()) {
+        return;  // Late-joiner catchup pending — hold IDLE.
+    }
     if (csCtx->state != CS_STATE_UNSKIPPABLE_EXEC) {
         csCtx->state = CS_STATE_UNSKIPPABLE_INIT;
     }
@@ -442,9 +455,16 @@ void Cutscene_Command_SetLighting(PlayState* play, CutsceneContext* csCtx, CsCmd
 }
 
 // Command 0x56: Play Background Music
+// Cutscene late-join: forward-declared shim. Fires when the cutscene
+// script starts a music sequence so the leader's ledger can capture
+// seqId + startedAt for later Anchor_SeekBGMToMs on late-joiner catchup.
+// Plan: Claude/Plans/cutscene_late_join_plan.md §3.4.
+extern void Anchor_NotifyCutsceneMusicStart(int seqId);
+
 void Cutscene_Command_PlayBGM(PlayState* play, CutsceneContext* csCtx, CsCmdMusicChange* cmd) {
     if (csCtx->frames == cmd->startFrame) {
         func_800F595C(cmd->sequence - 1);
+        Anchor_NotifyCutsceneMusicStart((int)(cmd->sequence - 1));
     }
 }
 

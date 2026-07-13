@@ -148,6 +148,67 @@ inline const std::string HYRULE_CASTLE_GATE_OPEN   = "HYRULE_CASTLE_GATE_OPEN";
 inline const std::string CUTSCENE_START            = "CUTSCENE_START";
 inline const std::string CUTSCENE_END              = "CUTSCENE_END";
 inline const std::string CUTSCENE_TEXT_VOTE_STATE  = "CUTSCENE_TEXT_VOTE_STATE";
+// Cutscene late-join (Option B — jump-and-catch-up + skip-and-apply
+// fallback). Plan: Claude/Plans/cutscene_late_join_plan.md.
+//
+// CUTSCENE_FRAME_SYNC — 1Hz periodic broadcast from the leader while
+// their local csCtx.state != CS_STATE_IDLE. Carries leader's current
+// csCtx.frames + state + monotonic seq (Pitfall 43 pattern). Peers use
+// it for ongoing drift correction after initial catch-up.
+inline const std::string CUTSCENE_FRAME_SYNC       = "CUTSCENE_FRAME_SYNC";
+// CUTSCENE_CATCHUP_REQUEST — targeted (late-joiner → leader) when a
+// scene-entry detects a peer mid-cutscene. Asks for the full state
+// snapshot (leader frame, delta ledger since frame 0, actor snapshots,
+// camera snapshot, music seek offset).
+inline const std::string CUTSCENE_CATCHUP_REQUEST  = "CUTSCENE_CATCHUP_REQUEST";
+// CUTSCENE_CATCHUP_RESPONSE — targeted (leader → late-joiner) reply
+// carrying the delta ledger + snapshots. Applied atomically; then
+// csCtx.frames jumps to leader.frame; vanilla playback resumes.
+inline const std::string CUTSCENE_CATCHUP_RESPONSE = "CUTSCENE_CATCHUP_RESPONSE";
+
+// TELEPORT_EFFECT — team-scoped broadcast to trigger a sparkle-burst
+// visual at a specific world position. First landed 2026-07-09 for the
+// cutscene late-join UX (fires at both departure + arrival positions
+// when a peer teleports into a shared cutscene). Designed as a reusable
+// primitive for every teleport site — future consumers: Anchor player
+// teleport (REQUEST_TELEPORT), AI Player Follower G10/G12/G14, NPC
+// Follower stuck-recovery, AI Invader (with hostile color palette).
+//
+// Wire fields:
+//   sceneNum        — sender's scene at effect-fire time (same-scene gate)
+//   pos {x,y,z}     — world position for the sparkle center
+//   primR/G/B       — inner sparkle color (typically peer's Anchor color)
+//   envR/G/B        — outer glow color (typically 60% of primR/G/B)
+//   targetTeamId    — team-scoped routing
+//
+// Receivers spawn a burst via TeleportEffect::SpawnSparkleBurst when
+// the sceneNum matches their local scene.
+inline const std::string TELEPORT_EFFECT           = "TELEPORT_EFFECT";
+
+// DIALOG_CHOICE_* — MP choice-textbox vote system (2026-07-09,
+// feature/dialog-choice-vote). Handles NPC-dialog + cutscene-mode
+// choice windows where the local player would otherwise be able to
+// unilaterally pick which option all peers proceed with. Plurality
+// vote with 10 s countdown starting on first vote; first-vote-wins
+// tiebreaker; early-exit when all voted. See
+// Analysis/dialog_choice_vote_design_v2_2026-07-09.md.
+//
+// DIALOG_CHOICE_VOTE — peer → vote-skip host (targeted). Fields:
+//   textId, choiceIndex, numChoices, sceneNum, targetClientId, timeline.
+inline const std::string DIALOG_CHOICE_VOTE        = "DIALOG_CHOICE_VOTE";
+// DIALOG_CHOICE_VOTE_STATE — vote-skip host → all-team broadcast.
+// Fires on every state mutation + periodic idle refresh for late-
+// joiners. Peers mirror local state for HUD rendering. Fields:
+//   seq (Pitfall 43 monotonic), sceneNum, textId, numChoices,
+//   active, countdownStarted, msRemaining, votes[{clientId,choiceIndex}],
+//   targetTeamId.
+inline const std::string DIALOG_CHOICE_VOTE_STATE  = "DIALOG_CHOICE_VOTE_STATE";
+// DIALOG_CHOICE_APPLIED — vote-skip host → all-team broadcast when a
+// choice-vote resolves. Peers consume on next Message_ShouldAdvance
+// call at TEXT_STATE_CHOICE for the matching textId. Fields:
+//   seq, sceneNum, textId, winningChoiceIndex, reason
+//   ("timer_expired" | "all_voted"), targetTeamId.
+inline const std::string DIALOG_CHOICE_APPLIED     = "DIALOG_CHOICE_APPLIED";
 
 // BOSS_EXIT_TEAM_WARP — team-routed scene transition for synced boss
 // exits. When a team member enters the dungeon-clear blue warp, all

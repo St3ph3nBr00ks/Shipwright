@@ -1,10 +1,12 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Common/CutsceneKindRegistry.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
 #include "soh/cvar_prefixes.h"
 #include <nlohmann/json.hpp>
 #include <libultraship/libultraship.h>
 
 #include <string>
+#include <vector>
 
 extern "C" {
 #include "variables.h"
@@ -12,14 +14,7 @@ extern "C" {
 #include "z64.h"
 #include "z64cutscene.h"
 #include "macros.h"
-#include "overlays/actors/ovl_Bg_Treemouth/z_bg_treemouth.h"
 extern PlayState* gPlayState;
-
-// Bg_Treemouth exports the peer-side trigger entry (defined in
-// z_bg_treemouth.c). Bypasses the local-Link proximity check and drives
-// the intro-cutscene state directly. Returns 1 on success, 0 if no
-// local instance was found in the current scene.
-int BgTreemouth_ForceIntroCutscene(PlayState* play);
 }
 
 /**
@@ -105,25 +100,67 @@ bool ApplyCutsceneStartByKind(const std::string& csKind, uint32_t csKey) {
         if (gPlayState == nullptr || gSaveContext.cutsceneIndex != 0) {
             return false;  // already active locally, or no game state
         }
+        // Fix I.2 — receiver-side defense-in-depth. Refuse the
+        // savecontext apply when a non-savecontext cutscene is
+        // already active (either originated locally or received
+        // from a peer). Applying savecontext by writing
+        // cutsceneIndex=csKey (typically 0xFFFD — the vanilla
+        // "trigger cutscene from cutsceneTrigger flag" magic
+        // sentinel per z_play.c:467-470 + z_demo.c:2145-2157)
+        // while an actor-driven cutscene is in flight overwrites
+        // the actor's own state and may trigger vanilla void /
+        // scene-reload on the peer. Sender-side Fix I.1 blocks
+        // most cases at the source; this guard defends against a
+        // peer whose sender is unpatched OR any race path we
+        // haven't traced. Log 630 root cause. See
+        // Analysis/cutscene_savecontext_double_broadcast_2026-07-08.md.
+        if (Anchor::Instance != nullptr) {
+            for (const auto& k : Anchor::Instance->cutsceneStartActive) {
+                if (k.compare(0, 12, "savecontext:") != 0) {
+                    SPDLOG_INFO("[CutsceneStart] Refused savecontext "
+                                "apply csKey=0x{:04X} — non-savecontext "
+                                "cutscene '{}' already active",
+                                (unsigned)csKey, k);
+                    return false;
+                }
+            }
+        }
         gSaveContext.cutsceneIndex = (u16)csKey;
         SPDLOG_INFO("[CutsceneStart] Applied savecontext csKey=0x{:04X}", (unsigned)csKey);
         return true;
     }
 
-    if (csKind == "deku_tree_intro") {
-        // Bg_Treemouth pilot. Peer locates its local Bg_Treemouth and
-        // fires the intro trigger path bypassing the local-Link
-        // Actor_IsFacingAndNearPlayer distance check that gates the
-        // vanilla trigger (z_bg_treemouth.c:155). The C-side helper
-        // also sets EVENTCHKINF_MET_DEKU_TREE — safe because that
-        // flag would have synced via SET_FLAG anyway.
-        if (gPlayState == nullptr) return false;
-        int fired = BgTreemouth_ForceIntroCutscene(gPlayState);
-        if (fired) {
-            SPDLOG_INFO("[CutsceneStart] Applied deku_tree_intro on peer");
+    // Actor-driven kinds route through the CutsceneKindRegistry table.
+    // Adding a new customer = 1 registration line in
+    // Common/CutsceneKindRegistry.cpp + 1 Force helper in the actor's .c.
+    // Prior if/else-chain dispatch was replaced 2026-07-09 (see
+    // Analysis/generic_cutscene_dialog_sync_helpers_2026-07-09.md
+    // Helpers B + D).
+    if (const auto* handler = CutsceneKindRegistry::Find(csKind)) {
+        // Opt-in kinds (e.g., come-back cutscenes gated on Z-target):
+        // record the state but do NOT force-apply. The receiver stays
+        // in gameplay mode; if their own local trigger fires later,
+        // they can engage catchup via Anchor_TryEngageOptInCatchup.
+        // See Analysis/deku_tree_come_back_sync_design_reversal_2026-07-09.md.
+        if (handler->optInPredicate && handler->optInPredicate(csKey)) {
+            SPDLOG_INFO("[CutsceneStart] csKind={} csKey={} is opt-in — "
+                        "recorded but NOT forcing local entry",
+                        csKind, csKey);
             return true;
         }
-        SPDLOG_INFO("[CutsceneStart] deku_tree_intro peer had no local Bg_Treemouth");
+        if (!handler->applyForce) {
+            SPDLOG_WARN("[CutsceneStart] csKind='{}' registered without applyForce; "
+                        "packet ignored", csKind);
+            return false;
+        }
+        const int fired = handler->applyForce(csKey);
+        if (fired) {
+            SPDLOG_INFO("[CutsceneStart] Applied csKind={} csKey={} on peer",
+                        csKind, csKey);
+            return true;
+        }
+        SPDLOG_INFO("[CutsceneStart] csKind={} apply failed (actor not local?)",
+                    csKind);
         return false;
     }
 
@@ -139,13 +176,20 @@ bool ApplyCutsceneStartByKind(const std::string& csKind, uint32_t csKey) {
 // send-side edge detector's END edges are echoed to peers.
 bool ApplyCutsceneEndByKind(const std::string& csKind, uint32_t csKey,
                             const std::string& endReason) {
-    (void)csKey;
-    (void)endReason;
-    if (csKind == "savecontext" || csKind == "deku_tree_intro") {
-        // No teardown work required. Vanilla local state-machine
-        // cleanup fires naturally. Idempotency dedup key is cleared
-        // by the caller after this returns.
+    if (csKind == "savecontext") {
+        // Vanilla self-teardown; no explicit end hook needed.
         return true;
+    }
+
+    // Actor-driven kinds route through the registry. Handler is optional
+    // (applyEnd may be nullptr) — most customers rely on vanilla self-
+    // teardown, so registered-but-null is the common shape and treated
+    // as a success no-op.
+    if (const auto* handler = CutsceneKindRegistry::Find(csKind)) {
+        if (handler->applyEnd) {
+            return handler->applyEnd(csKey, endReason);
+        }
+        return true;  // registered but no end hook — vanilla self-teardown
     }
     SPDLOG_WARN("[CutsceneStart] Unknown csKind='{}' on END — packet ignored", csKind);
     return false;
@@ -164,7 +208,48 @@ void Anchor::SendPacket_CutsceneStart(const std::string& csKind, uint32_t csKey)
     if (cutsceneStartActive.count(dedupKey) > 0) {
         return;
     }
+
+    // Fix F (log 662) — one-actor-one-variant invariant. For actor-driven
+    // kinds, a fresh START with a different csKey supersedes any prior
+    // variant of the same csKind (BgTreemouth can only be in one cutscene
+    // at a time). Purge stale same-csKind entries by firing synthetic
+    // CUTSCENE_END packets before adding the new key. Prevents the log-662
+    // chain where ActiveKindKey() sees size=2 and returns empty, blocking
+    // ledger creation for the new variant. Skip for savecontext — its
+    // csKey is cutsceneIndex, which can legitimately have concurrent values
+    // in v1 (not enforced but harmless).
+    // See Analysis/deku_tree_stale_ledger_wins_race_2026-07-09.md Fix F.
+    if (csKind != "savecontext") {
+        const std::string prefix = csKind + ":";
+        std::vector<uint32_t> staleCsKeys;
+        for (const auto& activeKey : cutsceneStartActive) {
+            if (activeKey.size() > prefix.size() &&
+                activeKey.compare(0, prefix.size(), prefix) == 0 &&
+                activeKey != dedupKey) {
+                try {
+                    staleCsKeys.push_back((uint32_t)std::stoul(
+                        activeKey.substr(prefix.size())));
+                } catch (...) {}
+            }
+        }
+        for (uint32_t staleCsKey : staleCsKeys) {
+            SendPacket_CutsceneEnd(csKind, staleCsKey, "superseded");
+        }
+    }
+
     cutsceneStartActive.insert(dedupKey);
+    // Fix G — mark this cutscene as locally-originated. Only entries
+    // in this sibling set can promote the local client to leader for
+    // the catchup ledger. Peer-received starts insert into
+    // cutsceneStartActive but NOT this set. See Analysis/cutscene_
+    // late_join_bugs_deep_analysis_2026-07-08.md Bug 2.
+    cutsceneStartActiveLocalOrigin.insert(dedupKey);
+    // Fix O — record local client as the cutscene originator for this
+    // key. Peer-received starts populate this map with the sender's
+    // clientId in HandlePacket_CutsceneStart. Vote-skip authority
+    // routes through this instead of room-host during active cutscenes.
+    // See Analysis/cutscene_room_desync_and_vote_scope_2026-07-08.md.
+    cutsceneOriginatorByKindKey[dedupKey] = ownClientId;
 
     nlohmann::json payload;
     payload["type"]         = CUTSCENE_START;
@@ -209,7 +294,41 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
     if (cutsceneStartActive.count(dedupKey) > 0) {
         return;
     }
+
+    // Fix F (log 662) — same-csKind purge on the receiver side. Defends
+    // against Pitfall 43 goroutine reorder where the sender's synthetic
+    // CUTSCENE_END(superseded) may arrive AFTER this CUTSCENE_START. Erase
+    // stale same-csKind entries locally so the "one-actor-one-variant"
+    // invariant holds regardless of arrival order. No broadcast — the
+    // sender's synthetic END handles cross-client notification.
+    // See Analysis/deku_tree_stale_ledger_wins_race_2026-07-09.md Fix F.
+    if (csKind != "savecontext") {
+        const std::string prefix = csKind + ":";
+        std::vector<std::string> staleKeys;
+        for (const auto& activeKey : cutsceneStartActive) {
+            if (activeKey.size() > prefix.size() &&
+                activeKey.compare(0, prefix.size(), prefix) == 0 &&
+                activeKey != dedupKey) {
+                staleKeys.push_back(activeKey);
+            }
+        }
+        for (const auto& staleKey : staleKeys) {
+            cutsceneStartActive.erase(staleKey);
+            cutsceneStartActiveLocalOrigin.erase(staleKey);
+            cutsceneOriginatorByKindKey.erase(staleKey);
+            SPDLOG_INFO("[CutsceneStart] Fix F — purged stale same-csKind "
+                        "key='{}' on receive of fresh '{}'",
+                        staleKey, dedupKey);
+        }
+    }
+
     cutsceneStartActive.insert(dedupKey);
+    // Fix O — record sender clientId as the cutscene originator. The
+    // relay stamps `clientId` on incoming packets, so payload.value()
+    // returns the sender's client id. Falls back to 0 if absent
+    // (shouldn't happen but defensive).
+    cutsceneOriginatorByKindKey[dedupKey] =
+        payload.value("clientId", (uint32_t)0);
 
     ApplyCutsceneStartByKind(csKind, csKey);
 }
@@ -226,6 +345,10 @@ void Anchor::SendPacket_CutsceneEnd(const std::string& csKind, uint32_t csKey,
         return;
     }
     cutsceneStartActive.erase(dedupKey);
+    // Fix G — mirror erase of the local-origin sibling set.
+    cutsceneStartActiveLocalOrigin.erase(dedupKey);
+    // Fix O — mirror erase of the originator map.
+    cutsceneOriginatorByKindKey.erase(dedupKey);
 
     nlohmann::json payload;
     payload["type"]         = CUTSCENE_END;
@@ -259,6 +382,11 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
         return;  // never saw the START — nothing to clean up
     }
     cutsceneStartActive.erase(dedupKey);
+    // Fix G — mirror erase (idempotent — peer receives never inserted
+    // into the local-origin set, so erase is a no-op for those).
+    cutsceneStartActiveLocalOrigin.erase(dedupKey);
+    // Fix O — mirror erase of the originator map.
+    cutsceneOriginatorByKindKey.erase(dedupKey);
 
     ApplyCutsceneEndByKind(csKind, csKey, endReason);
 }
@@ -273,13 +401,79 @@ void Anchor::TickCutsceneStartDetector() {
     (void)currState;  // reserved for actor-driven edge detection later
 
     // savecontext START edge: cutsceneIndex went 0 → non-zero.
+    // Fix I.1 — suppress the savecontext broadcast when an actor-
+    // driven cutscene is already active locally. The cutsceneIndex
+    // change to non-zero is frequently a downstream side effect of
+    // an actor-driven cutscene's own state machine (e.g., Bg_Treemouth
+    // deku_tree_intro sets cutsceneTrigger=1 in Init; vanilla
+    // func_80068ECC translates that on the next frame into
+    // cutsceneIndex=0xFFFD). Broadcasting an independent
+    // "savecontext, csKey=0xFFFD" packet causes peers to write
+    // cutsceneIndex=0xFFFD on THEIR game state, tripping vanilla's
+    // special-cutscene dispatch and triggering void/reload — the
+    // log 630 P2 crash chain. See Analysis/cutscene_savecontext_
+    // double_broadcast_2026-07-08.md for the full chain.
     if (prevIdx == 0 && currIdx != 0) {
-        SendPacket_CutsceneStart("savecontext", (uint32_t)currIdx);
+        bool actorDrivenActive = false;
+        for (const auto& k : cutsceneStartActiveLocalOrigin) {
+            if (k.compare(0, 12, "savecontext:") != 0) {
+                actorDrivenActive = true;
+                break;
+            }
+        }
+        if (!actorDrivenActive) {
+            SendPacket_CutsceneStart("savecontext", (uint32_t)currIdx);
+        } else {
+            SPDLOG_INFO("[CutsceneStart] Suppressed savecontext broadcast "
+                        "(cutsceneIndex 0x{:X}) — actor-driven cutscene "
+                        "already active", (unsigned)currIdx);
+        }
     }
 
     // savecontext END edge: cutsceneIndex went non-zero → 0.
+    // Fix I.1 (mirror) — when the START was suppressed above, no
+    // matching END was inserted into cutsceneStartActive, so the
+    // erase inside SendPacket_CutsceneEnd is a no-op. The
+    // downstream `cutsceneStartActive.count(dedupKey) == 0` early-
+    // return at CutsceneStart.cpp handles this cleanly. Kept
+    // unconditional for symmetry with legitimate savecontext ends.
     if (prevIdx != 0 && currIdx == 0) {
         SendPacket_CutsceneEnd("savecontext", (uint32_t)prevIdx, "natural");
+
+        // Fix G (log 664/665) — actor-driven cutscene end via the same
+        // falling edge. Vanilla drives cutsceneIndex back to 0 when
+        // ANY cutscene (savecontext or actor-driven via cutsceneTrigger
+        // + func_80068ECC) ends. There is no separate actor-driven end
+        // signal in vanilla. Piggyback on this edge to fire natural
+        // ENDs for any local-origin actor-driven kinds still in
+        // cutsceneStartActive — otherwise their dedup entries persist
+        // forever and block re-triggering (log 664 P2 second come-back
+        // was silently dropped by SendPacket_CutsceneStart's dedup
+        // check because 'deku_tree_intro:1' from the earlier applied
+        // start was never cleared).
+        //
+        // Only iterate cutsceneStartActiveLocalOrigin — we only own
+        // the end signal for cutscenes WE originated. Peer-originated
+        // starts will be ended by the peer's own edge detector, then
+        // propagated via CUTSCENE_END packet.
+        //
+        // See Analysis/deku_tree_bidirectional_come_back_2026-07-09.md
+        // Fix G.
+        std::vector<std::pair<std::string, uint32_t>> actorEnds;
+        for (const auto& key : cutsceneStartActiveLocalOrigin) {
+            auto sep = key.find(':');
+            if (sep == std::string::npos) continue;
+            std::string csKind = key.substr(0, sep);
+            if (csKind == "savecontext") continue;
+            uint32_t csKey = 0;
+            try {
+                csKey = (uint32_t)std::stoul(key.substr(sep + 1));
+            } catch (...) { continue; }
+            actorEnds.emplace_back(std::move(csKind), csKey);
+        }
+        for (const auto& [csKind, csKey] : actorEnds) {
+            SendPacket_CutsceneEnd(csKind, csKey, "natural");
+        }
     }
 
     cutsceneStartDetectorPrevIndex = currIdx;

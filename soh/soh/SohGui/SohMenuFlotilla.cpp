@@ -380,6 +380,42 @@ void SohMenu::AddMenuFlotilla() {
             "(based on Team ID). Suppressed during cutscenes.\n\n"
             "Default: on."));
 
+    // Cutscene late-join catchup (Plans/cutscene_late_join_plan.md).
+    // Local preference — each client independently decides whether to
+    // catch up to a peer's in-progress cutscene. Leader-side ledger
+    // + response are NOT gated on this CVar; only the receiving side is.
+    AddWidget(path, "Cutscene Late-Join", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Catch up to in-progress cutscenes", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoin"))
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "When you enter a scene where a same-team peer is already mid-cutscene, "
+            "your local vanilla cutscene entry is suppressed and you jump into the "
+            "cutscene at the peer's current frame (audio seeks to the leader's "
+            "position; delta state is applied atomically). Falls back to a 'waiting "
+            "for peer' banner if the catchup response doesn't arrive within 2 "
+            "seconds.\n\n"
+            "Same-team only. Local preference — turning this off makes late-joiners "
+            "play the cutscene independently from frame 0 (may leave you out of "
+            "sync with peers for the cutscene's duration).\n\n"
+            "Default: on."));
+
+    AddWidget(path, "Cutscene Late-Join diagnostics", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"))
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Enables detailed diagnostic logging for the cutscene late-join / vote-"
+            "skip subsystems (Bugs 1/2/3 from log 625):\n"
+            "  [VoteState.diag] — every state.active transition logs which branch "
+            "fired, plus msgCtx.msgMode / csCtx.state / csCtx.frames snapshot.\n"
+            "  [CutsceneCatchup.diag] — every ledger-entry creation logs which "
+            "Record* trigger fired, IsRoomHost, Play_InCsMode, and pendingCatchups "
+            "count.\n"
+            "  [CoopModalHud.diag] — every HUD state.active edge logs ImGui "
+            "viewport count + per-viewport pos/size/flags.\n\n"
+            "Off by default — logs are quiet in production. Turn on only when "
+            "field-testing cutscene sync.\n\n"
+            "Default: off."));
+
     AddWidget(path, "Recording", WIDGET_SEPARATOR_TEXT);
 
     AddWidget(path, "Player Recorder Enabled", WIDGET_CVAR_CHECKBOX)

@@ -11,10 +11,31 @@
 
 // Anchor C-linkage helpers — declared here to keep the include set
 // minimal. Implementations in Network/Anchor/Packets/Cutscene/
-// CutsceneStart.cpp. NO-OP in single-player. See #292 follow-up +
-// Plans/packet_family_cutscene_start_end.md for the Deku Tree intro
-// sync design.
+// CutsceneStart.cpp + Network/Anchor/Common/CutsceneKindRegistry.cpp.
+// NO-OP in single-player.
 extern void Anchor_NotifyCutsceneStart(const char* csKind, unsigned int csKey);
+
+// Helper D — generic actor-side cutscene setup. Walks the actor list
+// in the given category for the specified actorId, writes csCtx.segment,
+// sets cutsceneTrigger, and invokes the actor's setup adapter. Returns 1
+// on success, 0 if the actor is not present locally. See
+// Common/CutsceneKindRegistry.h for full documentation.
+extern int Anchor_ForceCutsceneOnActor(
+    PlayState* play,
+    s16 actorId,
+    u8 actorCategory,
+    void* segment,
+    void (*setupAdapter)(Actor* actor, void* actionFunc),
+    void* actionFunc);
+
+// Opt-in catchup engagement — companion to Handler::optInPredicate. If
+// a peer already owns the specified cutscene (they broadcast a
+// CUTSCENE_START that we recorded but did not force-apply due to
+// opt-in), this sends a catchup REQUEST to that peer and returns 1.
+// The RESPONSE handler will apply the state via the registered
+// applyForce. Returns 0 if no peer owns the cutscene — actor should
+// proceed with fresh-start.
+extern int Anchor_TryEngageOptInCatchup(const char* csKind, unsigned int csKey);
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
@@ -154,9 +175,38 @@ void func_808BC8B8(BgTreemouth* this, PlayState* play) {
                     this->dyna.actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED;
                     if (this->dyna.actor.isTargeted) {
                         this->dyna.actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
-                        play->csCtx.segment = D_808BD2A0;
-                        gSaveContext.cutsceneTrigger = 1;
-                        BgTreemouth_SetupAction(this, func_808BC9EC);
+
+                        // Fix K.3 (log 670) — MUTUALLY EXCLUSIVE branches.
+                        // Prior Fix J-alt fired the local cutscene AND
+                        // engaged catchup, which set pendingCatchups AND
+                        // csCtx.state = UNSKIPPABLE_INIT — triggering the
+                        // safety net at Common/CutsceneCatchup.cpp:525
+                        // into a ~30Hz force-IDLE storm that stalled the
+                        // game thread, dropped the incoming RESPONSE, and
+                        // likely contributed to the log-670 P1 crash. See
+                        // Analysis/fix_jalt_fix_k2_safety_net_conflict_
+                        // 2026-07-10.md.
+                        if (Anchor_TryEngageOptInCatchup("deku_tree_intro", 1)) {
+                            // Catchup engaged. The incoming CATCHUP_RESPONSE
+                            // will apply state via the registered
+                            // applyForce → BgTreemouth_ForceIntroCutscene,
+                            // which sets segment + cutsceneTrigger + our
+                            // actionFunc. DO NOT set them here. Actor
+                            // stays in func_808BC8B8 (this function);
+                            // TryEngageOptInCatchup's own pendingCatchups
+                            // dedup prevents REQUEST spam if user holds
+                            // Z-target across multiple frames. If catchup
+                            // times out (2 s), user can Z-target again to
+                            // retry.
+                        } else {
+                            // No peer running come-back; fresh start
+                            // locally + broadcast. Peers receive as
+                            // opt-in (recorded but not force-applied).
+                            play->csCtx.segment = D_808BD2A0;
+                            gSaveContext.cutsceneTrigger = 1;
+                            BgTreemouth_SetupAction(this, func_808BC9EC);
+                            Anchor_NotifyCutsceneStart("deku_tree_intro", 1);
+                        }
                     }
                 }
             } else if (Actor_IsFacingAndNearPlayer(&this->dyna.actor, 1658.0f, 0x4E20)) {
@@ -182,10 +232,16 @@ void func_808BC8B8(BgTreemouth* this, PlayState* play) {
     }
 }
 
+// Cutscene late-join catchup gate — Plans/cutscene_late_join_plan.md §3.3.
+extern int Anchor_ShouldSuppressLocalCutsceneEntry(void);
+
 void func_808BC9EC(BgTreemouth* this, PlayState* play) {
     Player* player = GET_PLAYER(play);
 
     if (play->csCtx.state == CS_STATE_UNSKIPPABLE_INIT) {
+        if (Anchor_ShouldSuppressLocalCutsceneEntry()) {
+            return;  // Late-joiner catchup pending — hold IDLE.
+        }
         if (Actor_IsFacingAndNearPlayer(&this->dyna.actor, 350.0f, 0x7530)) {
             player->actor.world.pos.x = 3827.0f;
             player->actor.world.pos.y = -161.0f;
@@ -270,40 +326,45 @@ void BgTreemouth_Draw(Actor* thisx, PlayState* play) {
     CLOSE_DISPS(play->state.gfxCtx);
 }
 
-// Anchor peer-side trigger. Called from CutsceneStart.cpp's
-// deku_tree_intro handler when a same-scene peer received the
-// CUTSCENE_START packet. Mirrors the vanilla trigger sequence in
-// func_808BC8B8 (the else-if branch at Actor_IsFacingAndNearPlayer)
-// but bypasses the local-Link proximity + facing check and the
-// !EVENTCHKINF_MET_DEKU_TREE outer guard (both of which vanilla would
-// evaluate against the local peer's Link, not the sending client's).
+// Thin adapter for Helper D — casts the untyped Actor* + actionFunc
+// pair into the actor's typed SetupAction signature. Kept next to the
+// setter so per-actor type knowledge stays local (Law of Demeter).
+static void BgTreemouth_SetupActionAdapter(Actor* thisx, void* actionFunc) {
+    BgTreemouth_SetupAction((BgTreemouth*)thisx, (BgTreemouthActionFunc)actionFunc);
+}
+
+// Anchor peer-side trigger. Called from the CutsceneKindRegistry
+// deku_tree_intro handler at both CUTSCENE_START receive and
+// CUTSCENE_CATCHUP setup points. Mirrors the vanilla trigger sequence
+// in func_808BC8B8 but bypasses the local-Link proximity + facing check.
+//
+// csKey selects the vanilla dispatch-table variant WITHOUT reading
+// local save flags (which race SET_FLAG broadcasts — see
+// Analysis/deku_tree_fix_a_wrong_variant_2026-07-09.md Fix E):
+//   csKey == 0 → first-encounter (D_808BCE20). Sets EVENTCHKINF_MET_DEKU_TREE
+//                for vanilla parity with func_808BC8B8 line 163 (idempotent
+//                if SET_FLAG already applied via peer broadcast).
+//   csKey == 1 → come-back (D_808BD2A0). Flag was set by the earlier
+//                first-encounter trigger; no re-set here (mirrors vanilla
+//                come-back branch line 157 which doesn't touch the flag).
+//
+// Body delegates the mechanical parts (actor find, csCtx.segment write,
+// cutsceneTrigger set, actionFunc setup) to Anchor_ForceCutsceneOnActor
+// (Helper D). This function retains the variant-selection + flag-set
+// logic that is specific to Bg_Treemouth.
 //
 // Returns 1 when a local Bg_Treemouth was found + triggered, 0 when
 // no instance was present (peer is out-of-scene or the actor already
 // destroyed itself).
-int BgTreemouth_ForceIntroCutscene(PlayState* play) {
-    Actor* actor;
-    BgTreemouth* this;
-
-    if (play == NULL) {
-        return 0;
+int BgTreemouth_ForceIntroCutscene(PlayState* play, u32 csKey) {
+    void* segment;
+    if (csKey == 1) {
+        segment = D_808BD2A0;
+    } else {
+        Flags_SetEventChkInf(EVENTCHKINF_MET_DEKU_TREE);
+        segment = D_808BCE20;
     }
-    actor = play->actorCtx.actorLists[ACTORCAT_BG].head;
-    while (actor != NULL) {
-        if (actor->id == ACTOR_BG_TREEMOUTH) {
-            this = (BgTreemouth*)actor;
-            // Set the flag first — vanilla path does this on the
-            // triggering client via Flags_SetEventChkInf just before
-            // the segment write. If the SET_FLAG sync already
-            // propagated it, this is a no-op; either way peer's
-            // local branch matches vanilla.
-            Flags_SetEventChkInf(EVENTCHKINF_MET_DEKU_TREE);
-            play->csCtx.segment = D_808BCE20;
-            gSaveContext.cutsceneTrigger = 1;
-            BgTreemouth_SetupAction(this, func_808BC9EC);
-            return 1;
-        }
-        actor = actor->next;
-    }
-    return 0;
+    return Anchor_ForceCutsceneOnActor(play, ACTOR_BG_TREEMOUTH, ACTORCAT_BG,
+                                       segment, BgTreemouth_SetupActionAdapter,
+                                       (void*)func_808BC9EC);
 }

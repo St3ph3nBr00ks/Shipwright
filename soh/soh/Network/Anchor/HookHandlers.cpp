@@ -422,6 +422,97 @@ void Anchor::RegisterHooks() {
             sLastPauseState = curr;
         });
 
+    // HeldActor diagnostic (Analysis/rock_over_head_after_teleport_
+    // 2026-07-09.md §6.1). Per-frame poll of the local player's
+    // heldActor pointer. On any transition (NULL→X, X→Y, X→NULL), logs
+    // a rich SPDLOG describing prior/new attachment, player state, and
+    // interactRangeActor at the moment of change — enough to pinpoint
+    // WHICH mechanism (vanilla Player_LiftActor, DummyPlayer sync,
+    // scene reload, teleport, etc.) drove the write.
+    //
+    // Gated on gEnhancements.Anchor.HeldActorDiag (default 0). Enable
+    // via console: `set gEnhancements.Anchor.HeldActorDiag 1`. Fires
+    // one line per transition, not per frame — no log spam when steady.
+    //
+    // Unconditional hook registration (not COND_HOOK) so the CVar can be
+    // toggled at runtime without reconnecting. Cheap when disabled:
+    // one CVarGetInteger + one pointer compare + early-out.
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(
+        []() {
+            if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.HeldActorDiag"), 0) == 0) {
+                return;
+            }
+            if (gPlayState == nullptr) return;
+            Player* player = GET_PLAYER(gPlayState);
+            if (player == nullptr) return;
+
+            static Actor* sLastHeldActor = nullptr;
+            Actor* curHeldActor = player->heldActor;
+            if (curHeldActor == sLastHeldActor) {
+                return;  // no change
+            }
+
+            // Log the transition. Each actor gets its own SPDLOG_INFO
+            // line so we can print the fields directly via SPDLOG's
+            // fmtlib backend without pre-formatting to std::string.
+            // Emit player context first, then prior, then current.
+            const Vec3f pPos = player->actor.world.pos;
+            SPDLOG_INFO("[HeldActorDiag] TRANSITION player.pos=({:.0f},{:.0f},{:.0f}) "
+                        "stateFlags1=0x{:08X} stateFlags2=0x{:08X}",
+                        pPos.x, pPos.y, pPos.z,
+                        (unsigned)player->stateFlags1,
+                        (unsigned)player->stateFlags2);
+            if (sLastHeldActor == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   prior=NULL");
+            } else if (sLastHeldActor->update == nullptr &&
+                       sLastHeldActor->draw == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   prior=(stale?) ptr={}",
+                            (const void*)sLastHeldActor);
+            } else {
+                SPDLOG_INFO("[HeldActorDiag]   prior id=0x{:04X} cat={} params=0x{:04X} "
+                            "pos=({:.0f},{:.0f},{:.0f}) parent={}",
+                            (unsigned)sLastHeldActor->id,
+                            (int)sLastHeldActor->category,
+                            (unsigned)sLastHeldActor->params,
+                            sLastHeldActor->world.pos.x,
+                            sLastHeldActor->world.pos.y,
+                            sLastHeldActor->world.pos.z,
+                            (const void*)sLastHeldActor->parent);
+            }
+            if (curHeldActor == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   current=NULL");
+            } else if (curHeldActor->update == nullptr &&
+                       curHeldActor->draw == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   current=(stale?) ptr={}",
+                            (const void*)curHeldActor);
+            } else {
+                SPDLOG_INFO("[HeldActorDiag]   current id=0x{:04X} cat={} params=0x{:04X} "
+                            "pos=({:.0f},{:.0f},{:.0f}) parent={}",
+                            (unsigned)curHeldActor->id,
+                            (int)curHeldActor->category,
+                            (unsigned)curHeldActor->params,
+                            curHeldActor->world.pos.x,
+                            curHeldActor->world.pos.y,
+                            curHeldActor->world.pos.z,
+                            (const void*)curHeldActor->parent);
+            }
+            Actor* ira = player->interactRangeActor;
+            if (ira == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   interactRangeActor=NULL");
+            } else {
+                SPDLOG_INFO("[HeldActorDiag]   interactRangeActor id=0x{:04X} cat={} "
+                            "params=0x{:04X} pos=({:.0f},{:.0f},{:.0f})",
+                            (unsigned)ira->id,
+                            (int)ira->category,
+                            (unsigned)ira->params,
+                            ira->world.pos.x,
+                            ira->world.pos.y,
+                            ira->world.pos.z);
+            }
+
+            sLastHeldActor = curHeldActor;
+        });
+
     // Phase α.7+ — voice-pack game-thread polls (unconditional; work
     // offline + multiplayer). Both calls are cheap no-ops in the steady
     // state:
@@ -572,6 +663,53 @@ void Anchor::RegisterHooks() {
             // role we're in reads its counter next.
             Anchor::Instance->voteStateSequence           = 0;
             Anchor::Instance->peerLastAppliedVoteStateSeq = 0;
+
+            // Cutscene late-join detection (Plans/cutscene_late_join_plan.md
+            // §3.3). Scan same-team peers for any who are mid-cutscene in
+            // our scene AND timeline. If found, request catchup and enter
+            // the pending state — the gate predicate
+            // Anchor_ShouldSuppressLocalCutsceneEntry() will suppress any
+            // local vanilla cutscene entry until the response arrives (or
+            // the 2s deadline elapses).
+            //
+            // Team gating: the relay routes CUTSCENE_START by targetTeamId,
+            // so we only see cutsceneStartActive entries broadcast by peers
+            // on our team. Combined with the client.teamId == myTeamId
+            // filter here, we never request catchup from a peer on a
+            // different quest branch.
+            //
+            // Variant C.2.2 (2026-07-09) — arm the scene-entry request
+            // delay gate instead of calling DetectAndRequestCutsceneCatchup
+            // immediately. TickCutsceneCatchup polls the gate and fires
+            // the detection scan once the configured delay (default
+            // 1000 ms) has elapsed. Gives peer's scene-transition fade-in
+            // + initial room render time to complete before catchup
+            // pipeline engages. See Anchor.h catchupRequestGateArmedAt
+            // for full rationale.
+            //
+            // Variant C.2.3 (2026-07-09) — also arm the fade-to-white
+            // overlay state machine. Gated on HasSameSceneMidCsPeer() so
+            // scenes without a mid-cutscene peer don't trigger a
+            // spurious 1 s white flash. See Anchor.h catchupFadeState.
+            if (Anchor::Instance->CutsceneCatchupEnabled() &&
+                Anchor::Instance->HasSameSceneMidCsPeer()) {
+                const auto now = std::chrono::steady_clock::now();
+                Anchor::Instance->catchupRequestGateArmedAt = now;
+                if (CVarGetInteger(CVAR_ENHANCEMENT(
+                        "Anchor.CutsceneLateJoinFadeOverlay"), 1) != 0) {
+                    Anchor::Instance->catchupFadeState =
+                        Anchor::CatchupFadeState::FADING_TO_WHITE;
+                    Anchor::Instance->catchupFadeStateChangedAt = now;
+                    Anchor::Instance->catchupFadeHoldIdleSince =
+                        std::chrono::steady_clock::time_point::min();
+                }
+            }
+
+            // Also reset FRAME_SYNC seq counters on scene load — same
+            // rationale as vote-state (keep small, avoid cross-scene
+            // stale-rejection).
+            Anchor::Instance->cutsceneFrameSyncSequence      = 0;
+            Anchor::Instance->peerLastAppliedCutsceneFrameSeq = 0;
         }
     });
 
@@ -753,6 +891,12 @@ void Anchor::RegisterHooks() {
         // when no active textbox vote is in progress; broadcasts
         // CUTSCENE_TEXT_ADVANCED on timer-0.
         Anchor::Instance->TickCutsceneTextAdvance();
+
+        // Cutscene late-join catchup tick (Plans/cutscene_late_join_plan.md).
+        // 1Hz FRAME_SYNC emit (leader-only) + pending-catchup deadline
+        // enforcement (peer-only). Both are internal gates; safe to
+        // call every frame regardless of role.
+        Anchor::Instance->TickCutsceneCatchup();
 
         // Generic CUTSCENE_START / CUTSCENE_END edge detector — watches
         // gSaveContext.cutsceneIndex transitions for the `savecontext`

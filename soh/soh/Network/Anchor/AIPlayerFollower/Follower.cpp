@@ -1057,8 +1057,19 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                             kSameRoomMaxYAboveActor);
                 return false;
             }
+            // Sparkle burst — DEPARTURE at OLD pos before overwrite.
+            // Effects persist in play->specialEffects and animate for
+            // their 30-frame lifetime regardless of subsequent pos
+            // writes on the follower actor.
+            BroadcastTeleportSparklesForOwnColor(
+                player->actor.world.pos.x,
+                player->actor.world.pos.y,
+                player->actor.world.pos.z);
             player->actor.world.pos = destPos;
             player->actor.prevPos   = destPos;
+            // Sparkle burst — ARRIVAL at NEW pos after overwrite.
+            BroadcastTeleportSparklesForOwnColor(
+                destPos.x, destPos.y, destPos.z);
             SPDLOG_INFO("[Follower] Teleport world.pos ({}) — same room {} pos={:.0f},{:.0f},{:.0f} "
                         "(hold {} frames)",
                         reason, (int)ourRoom, destPos.x, destPos.y, destPos.z,
@@ -1069,6 +1080,19 @@ void Anchor::TickFollower(AnchorFollower::FollowerFrameContext& ctx) {
                     "pos={:.0f},{:.0f},{:.0f}",
                     reason, (int)ourRoom, (int)leaderRoom,
                     destPos.x, destPos.y, destPos.z);
+        // Sparkle burst — DEPARTURE at OLD pos in current scene before
+        // triggering the scene-reload transition. ARRIVAL at NEW pos
+        // (same scene, different room; entranceIndex unchanged per
+        // Farore's Wind pipeline). Local follower's own copy of both
+        // effects will be cleared during scene reload, but remote
+        // observers see them in their own effect contexts. Requester's
+        // own screen is fade-to-black during the transition anyway.
+        BroadcastTeleportSparklesForOwnColor(
+            player->actor.world.pos.x,
+            player->actor.world.pos.y,
+            player->actor.world.pos.z);
+        BroadcastTeleportSparklesForOwnColor(
+            destPos.x, destPos.y, destPos.z);
         // Test 5 (log 71) — switched from RESPAWN_MODE_DOWN to
         // RESPAWN_MODE_TOP. DOWN is the void-out pipeline;
         // z_player.c:10853 inflicts void damage via

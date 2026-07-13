@@ -10,6 +10,7 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
+
 /**
  * TELEPORT_TO
  *
@@ -58,6 +59,30 @@ void Anchor::HandlePacket_TeleportTo(nlohmann::json payload) {
     // as same-timeline so behaviour is unchanged for legacy peers).
     s32 sourceLinkAge  = payload.value("linkAge",  (s32)gSaveContext.linkAge);
     s16 sourceSceneNum = payload.value("sceneNum", (s16)gPlayState->sceneNum);
+
+    // Sparkle burst — fire at both departure and arrival positions so
+    // observers see the teleport as a magical event rather than a
+    // silent pop-in. Sparkles use the requester's Anchor color; particle
+    // lifetime (30 frames) lingers naturally at each site after the
+    // requester's DummyPlayer moves.
+    //
+    // Departure fires in OUR current scene (where we're leaving from).
+    // Arrival fires in the target's scene (where we're going). Sender's
+    // local spawn gates on scene match — we spawn locally for departure
+    // only; arrival renders on observers in the target scene + on our
+    // own screen after the scene load completes (vanilla scene fade
+    // covers the timing gap).
+    Player* localPlayer = GET_PLAYER(gPlayState);
+    if (localPlayer != nullptr) {
+        BroadcastTeleportSparklesForOwnColor(
+            (int16_t)gPlayState->sceneNum,
+            localPlayer->actor.world.pos.x,
+            localPlayer->actor.world.pos.y,
+            localPlayer->actor.world.pos.z);
+    }
+    BroadcastTeleportSparklesForOwnColor(
+        sourceSceneNum,
+        posRot.pos.x, posRot.pos.y, posRot.pos.z);
 
     if (sourceLinkAge != gSaveContext.linkAge) {
         // Cross-timeline route — switch age + teleport in one transition.
