@@ -4124,10 +4124,27 @@ void Anchor::RegisterHooks() {
             // actors even if some other path armed the clamp. Defence
             // in depth — the arming site is also guarded (below), so
             // this branch shouldn't fire for them anyway.
+            //
+            // Composite fix Layer 2: gate on ext->phase != Alive. If
+            // host has NOT signalled that this actor is dying (via
+            // ENEMY_DEFEATED receive → DyingByNetwork transition), the
+            // peer's local timeout SHOULD NOT force a defeat — host
+            // clearly isn't trying to kill it. This catches novel
+            // stun-not-die actors not yet in Layer 1's allowlist.
+            //
+            // Layer 2 blocks the semantic 1s fire. The 3s backstop
+            // (Layer 3, below) fires unconditionally to prevent
+            // permanent softlocks in host-stalled scenarios where
+            // phase never transitions. Verified 2026-07-13 pre-flight
+            // §3b: peer's phase transitions to DyingByNetwork on
+            // ENEMY_DEFEATED receive (EnemyState.cpp:2699+); host's
+            // OnEnemyDefeat hook transitions to DyingByLocal BEFORE
+            // SendPacket_EnemyDefeated (HookHandlers.cpp:4290).
             if (ext != nullptr &&
                 ext->peerKillingBlowClampedAtMs != 0 &&
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
-                !IsStunNotDieActor(actor->id)) {
+                !IsStunNotDieActor(actor->id) &&
+                ext->phase != EnemyStateSync::LifecyclePhase::Alive) {
                 static constexpr uint64_t kFallbackTimeoutMs = 1000;
                 const uint64_t nowMs = (uint64_t)
                     std::chrono::duration_cast<std::chrono::milliseconds>(
