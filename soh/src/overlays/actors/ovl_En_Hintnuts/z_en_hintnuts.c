@@ -126,11 +126,16 @@ void EnHintnuts_Destroy(Actor* thisx, PlayState* play) {
 }
 
 void EnHintnuts_HitByScrubProjectile1(EnHintnuts* this, PlayState* play) {
+    LUSLOG_INFO("[EnHintnuts] HitByScrubProjectile1: params=%d cat=%d counter=%d textId=0x%04X",
+                (int)this->actor.params, (int)this->actor.category,
+                (int)sPuzzleCounter, (unsigned)this->actor.textId);
     if (this->actor.textId != 0 && this->actor.category == ACTORCAT_ENEMY &&
         ((this->actor.params == 0) || (sPuzzleCounter == 2))) {
         this->actor.flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
         this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY;
         Actor_ChangeCategory(play, &play->actorCtx, &this->actor, ACTORCAT_BG);
+        LUSLOG_INFO("[EnHintnuts] HitByScrubProjectile1: -> BG (talkable) params=%d",
+                    (int)this->actor.params);
     }
 }
 
@@ -171,6 +176,7 @@ void EnHintnuts_SetupBurrow(EnHintnuts* this) {
 }
 
 void EnHintnuts_HitByScrubProjectile2(EnHintnuts* this) {
+    s16 counterBefore = sPuzzleCounter;
     Animation_MorphToPlayOnce(&this->skelAnime, &gHintNutsUnburrowAnim, -3.0f);
     this->collider.dim.height = 37;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
@@ -190,8 +196,12 @@ void EnHintnuts_HitByScrubProjectile2(EnHintnuts* this) {
         }
         this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
         this->actionFunc = EnHintnuts_BeginFreeze;
+        LUSLOG_INFO("[EnHintnuts] HitByScrubProjectile2: params=%d counter %d->%d -> FREEZE",
+                    (int)this->actor.params, (int)counterBefore, (int)sPuzzleCounter);
     } else {
         this->actionFunc = EnHintnuts_BeginRun;
+        LUSLOG_INFO("[EnHintnuts] HitByScrubProjectile2: params=%d cat=%d counter=%d -> RUN (talkable path)",
+                    (int)this->actor.params, (int)this->actor.category, (int)counterBefore);
     }
 }
 
@@ -202,12 +212,16 @@ void EnHintnuts_SetupRun(EnHintnuts* this) {
 }
 
 void EnHintnuts_SetupTalk(EnHintnuts* this) {
+    LUSLOG_INFO("[EnHintnuts] SetupTalk: params=%d counter=%d",
+                (int)this->actor.params, (int)sPuzzleCounter);
     Animation_MorphToLoop(&this->skelAnime, &gHintNutsTalkAnim, -5.0f);
     this->actionFunc = EnHintnuts_Talk;
     this->actor.speedXZ = 0.0f;
 }
 
 void EnHintnuts_SetupLeave(EnHintnuts* this, PlayState* play) {
+    LUSLOG_INFO("[EnHintnuts] SetupLeave: params=%d counter=%d",
+                (int)this->actor.params, (int)sPuzzleCounter);
     Animation_MorphToLoop(&this->skelAnime, &gHintNutsRunAnim, -5.0f);
     this->actor.speedXZ = 3.0f;
     this->animFlagAndTimer = 100;
@@ -228,6 +242,7 @@ void EnHintnuts_SetupFreeze(EnHintnuts* this) {
     this->animFlagAndTimer = 0;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_FAINT);
     if (sPuzzleCounter == -3) {
+        LUSLOG_INFO("[EnHintnuts] SetupFreeze: counter reached -3, ERROR sound, counter -> -4 (puzzle reset)");
         Sfx_PlaySfxCentered(NA_SE_SY_ERROR);
         sPuzzleCounter = -4;
     }
@@ -490,9 +505,13 @@ void EnHintnuts_Leave(EnHintnuts* this, PlayState* play) {
     if ((this->animFlagAndTimer == 0) || (this->actor.projectedPos.z < 0.0f)) {
         Message_CloseTextbox(play);
         if (this->actor.params == 3) {
+            LUSLOG_INFO("[EnHintnuts] Leave: params=3 -> Flags_SetClear(room=%d) DOOR OPENS",
+                        (int)this->actor.room);
             Flags_SetClear(play, this->actor.room);
             sPuzzleCounter = 3;
         }
+        LUSLOG_INFO("[EnHintnuts] Leave: Actor_Kill params=%d room=%d counter=%d",
+                    (int)this->actor.params, (int)this->actor.room, (int)sPuzzleCounter);
         if (this->actor.child != NULL) {
             Actor_ChangeCategory(play, &play->actorCtx, this->actor.child, ACTORCAT_PROP);
         }
