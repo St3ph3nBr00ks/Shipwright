@@ -4120,39 +4120,49 @@ void Anchor::RegisterHooks() {
             // collapses simultaneous host + peer broadcasts cleanly.
             // Cosmetic cost: one extra packet on the wire per
             // false-fire.
-            // Composite fix Layer 1: never fire B2-D for stun-not-die
-            // actors even if some other path armed the clamp. Defence
-            // in depth — the arming site is also guarded (below), so
-            // this branch shouldn't fire for them anyway.
+            // Composite fix (2026-07-13) three-layer defence for B2-D
+            // false-fires. Full design at
+            // Claude/Plans/b2d_composite_fix_2026-07-13.md.
             //
-            // Composite fix Layer 2: gate on ext->phase != Alive. If
-            // host has NOT signalled that this actor is dying (via
-            // ENEMY_DEFEATED receive → DyingByNetwork transition), the
-            // peer's local timeout SHOULD NOT force a defeat — host
-            // clearly isn't trying to kill it. This catches novel
-            // stun-not-die actors not yet in Layer 1's allowlist.
+            // Layer 1 (allowlist): stun-not-die actors never fire B2-D.
+            // Applies to both semantic (1 s) and backstop (3 s) tiers —
+            // even a 3 s timeout shouldn't force-kill an actor that
+            // architecturally doesn't die from damage.
             //
-            // Layer 2 blocks the semantic 1s fire. The 3s backstop
-            // (Layer 3, below) fires unconditionally to prevent
-            // permanent softlocks in host-stalled scenarios where
-            // phase never transitions. Verified 2026-07-13 pre-flight
-            // §3b: peer's phase transitions to DyingByNetwork on
-            // ENEMY_DEFEATED receive (EnemyState.cpp:2699+); host's
-            // OnEnemyDefeat hook transitions to DyingByLocal BEFORE
-            // SendPacket_EnemyDefeated (HookHandlers.cpp:4290).
+            // Layer 2 (semantic, 1 s): fires only when host has
+            // signalled death intent via ENEMY_DEFEATED
+            // (ext->phase != Alive). Catches novel stun-not-die actors
+            // not in the Layer 1 allowlist.
+            //
+            // Layer 3 (backstop, 3 s): fires unconditionally on the
+            // extended timeout regardless of phase. Prevents permanent
+            // softlocks when host stalled BEFORE ext->phase transitioned
+            // (Layer 2's blind spot: peer's clamp armed, damage packet
+            // sent, host never processed it, phase stays Alive on
+            // peer). The 3 s constant is user-tuned per Q3.
             if (ext != nullptr &&
                 ext->peerKillingBlowClampedAtMs != 0 &&
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
-                !IsStunNotDieActor(actor->id) &&
-                ext->phase != EnemyStateSync::LifecyclePhase::Alive) {
-                static constexpr uint64_t kFallbackTimeoutMs = 1000;
+                !IsStunNotDieActor(actor->id)) {
+                static constexpr uint64_t kSemanticFallbackMs  = 1000;
+                static constexpr uint64_t kBackstopFallbackMs  = 3000;
                 const uint64_t nowMs = (uint64_t)
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
                 const uint64_t elapsed = nowMs - ext->peerKillingBlowClampedAtMs;
-                if (elapsed >= kFallbackTimeoutMs) {
-                    SPDLOG_INFO("[B2D] Timeout fired after {}ms: netId={} actorId={} — peer kill broadcast",
-                                elapsed, ext->netId, actor->id);
+
+                const bool semanticFire =
+                    elapsed >= kSemanticFallbackMs &&
+                    ext->phase != EnemyStateSync::LifecyclePhase::Alive;
+                const bool backstopFire =
+                    elapsed >= kBackstopFallbackMs;
+
+                if (semanticFire || backstopFire) {
+                    SPDLOG_INFO("[B2D] Timeout fired after {}ms: netId={} actorId={} "
+                                "reason={} phase={}",
+                                elapsed, ext->netId, actor->id,
+                                semanticFire ? "semantic" : "backstop",
+                                (int)ext->phase);
                     const uint32_t netIdToBroadcast = ext->netId;
                     // Clear the timer + stashed damage BEFORE the kill so
                     // any re-entry can't double-fire.
