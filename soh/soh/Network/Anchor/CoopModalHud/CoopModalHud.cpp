@@ -18,6 +18,7 @@ extern "C" {
 #include "z64.h"
 #include "variables.h"
 #include "functions.h"    // Play_InCsMode — Fix Q render-side gate
+#include "message_data_static.h"  // TEXTBOX_TYPE_NONE_BOTTOM / _NO_SHADOW / _CREDITS
 extern PlayState* gPlayState;
 }
 
@@ -76,6 +77,23 @@ struct DotEntry {
 
 ImU32 ColorFromRgb8(const Color_RGB8& c, float alpha) {
     return IM_COL32(c.r, c.g, c.b, (int)(alpha * 255.0f));
+}
+
+// Suppress vote / choice HUDs during lore-heavy dialogue types that
+// vanilla auto-progresses without user input (e.g. Deku Tree's dying
+// speech about Din/Nayru/Farore). These use background-less textbox
+// styles and complete on the cutscene script's own timer — the
+// "Press A to skip" prompt and per-voter dots would be misleading
+// because there's nothing to skip.
+//
+// Types suppressed (per soh/include/message_data_textbox_types.h):
+//   TEXTBOX_TYPE_NONE_BOTTOM (4)      — bottom text overlay, no bg
+//   TEXTBOX_TYPE_NONE_NO_SHADOW (5)   — no bg + no shadow variant
+//   TEXTBOX_TYPE_CREDITS (11)         — credits-style scroll
+bool IsLoreDialogueTextBoxType(uint8_t t) {
+    return t == TEXTBOX_TYPE_NONE_BOTTOM
+        || t == TEXTBOX_TYPE_NONE_NO_SHADOW
+        || t == TEXTBOX_TYPE_CREDITS;
 }
 
 // Collect all peers (including self) that are eligible to vote:
@@ -218,8 +236,15 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
     // Analysis/cutscene_hud_leak_and_latency_2026-07-08.md.
     const bool localInCutscene =
         (gPlayState != nullptr) && Play_InCsMode(gPlayState);
+    // Suppress for lore-dialogue textbox types (Deku Tree dying
+    // speech, etc.) — vanilla auto-progresses these and there's
+    // nothing for the user to A-press-skip.
+    const bool loreDialogueActive =
+        (gPlayState != nullptr) &&
+        IsLoreDialogueTextBoxType(gPlayState->msgCtx.textBoxType);
     const bool showContent =
-        state.active && voters.size() >= 2 && localInCutscene;
+        state.active && voters.size() >= 2 && localInCutscene &&
+        !loreDialogueActive;
 
     // Countdown / prompt string — only computed when we'll render.
     std::string rightLabel;
@@ -438,11 +463,19 @@ constexpr float kInlineDotYNudgeScreenPx = 5.0f;
 
 void DrawDialogChoiceVoteInlineWidget(const Anchor& anchor) {
     const auto& state = anchor.dialogChoiceVoteState;
+    // Also suppress on lore-dialogue textbox types for consistency
+    // with the vote-skip widget. Choice textboxes shouldn't use these
+    // background-less types in vanilla, but the guard is cheap and
+    // keeps both HUDs behaving the same way if they ever coincide.
+    const bool loreDialogueActive =
+        (gPlayState != nullptr) &&
+        IsLoreDialogueTextBoxType(gPlayState->msgCtx.textBoxType);
     const bool showContent =
         state.active && state.numChoices >= 2 && (gPlayState != nullptr) &&
         (gPlayState->msgCtx.textId == state.textId) &&
         (gPlayState->msgCtx.textboxEndType == TEXTBOX_ENDTYPE_2_CHOICE ||
-         gPlayState->msgCtx.textboxEndType == TEXTBOX_ENDTYPE_3_CHOICE);
+         gPlayState->msgCtx.textboxEndType == TEXTBOX_ENDTYPE_3_CHOICE) &&
+        !loreDialogueActive;
 
     // Following the Fix H pattern (see DrawVotingSkipWidget above),
     // always Begin/End regardless of visibility so ImGui's multi-
