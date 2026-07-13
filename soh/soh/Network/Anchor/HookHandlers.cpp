@@ -188,6 +188,36 @@ bool ShouldLogStateChange(uint32_t netId, int16_t cur, int16_t net, bool blocked
     }
     return false;
 }
+
+// Enemies where vanilla damage-response transitions to a state machine
+// (stun / talk / flee / puzzle-counter / animation) rather than calling
+// Actor_Kill. B2-D's fundamental assumption — "if peer's damage would
+// be lethal, host will eventually broadcast ENEMY_DEFEATED" — is wrong
+// for these actors: host correctly does NOT broadcast defeat (because
+// nothing died), and peer's 1-second timeout fires spuriously, killing
+// the actor mid-state.
+//
+// Populated 2026-07-13 from a walk of `IsSyncedWorldActor` allowlist
+// per Claude/Plans/b2d_composite_fix_2026-07-13.md §3a. See analysis
+// Claude/Analysis/hintnut_dialogue_disappear_2026-07-13.md for the
+// motivating regression (hint nut vanish mid-dialogue).
+//
+// Layer 1 of the composite fix (Layers 2 + 3 apply additional gates
+// further down at the B2-D fire site). Even if the composite Layer 2
+// (phase gate) is expected to catch novel additions, this list is
+// kept explicit so the known-safe class is documented in code.
+bool IsStunNotDieActor(int16_t actorId) {
+    switch (actorId) {
+        case ACTOR_EN_HINTNUTS:  // Deku Tree 2→3→1 puzzle scrubs (base case)
+        case ACTOR_EN_SSH:       // Cursed Skulltula people — Actor_Kill only at Init
+                                 // (gsTokens threshold), never damage-driven
+        case ACTOR_EN_MD:        // Mido NPC (Kokiri Forest / Lost Woods)
+        case ACTOR_EN_TA:        // Talon NPC (castle wake / cucco-throw sequence)
+            return true;
+        default:
+            return false;
+    }
+}
 }  // namespace
 
 
@@ -4090,9 +4120,14 @@ void Anchor::RegisterHooks() {
             // collapses simultaneous host + peer broadcasts cleanly.
             // Cosmetic cost: one extra packet on the wire per
             // false-fire.
+            // Composite fix Layer 1: never fire B2-D for stun-not-die
+            // actors even if some other path armed the clamp. Defence
+            // in depth — the arming site is also guarded (below), so
+            // this branch shouldn't fire for them anyway.
             if (ext != nullptr &&
                 ext->peerKillingBlowClampedAtMs != 0 &&
-                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
+                !IsStunNotDieActor(actor->id)) {
                 static constexpr uint64_t kFallbackTimeoutMs = 1000;
                 const uint64_t nowMs = (uint64_t)
                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4155,7 +4190,13 @@ void Anchor::RegisterHooks() {
                 }
             }
 
-            if (!IsSyncedBossActor(actor->id)) {
+            // Composite fix Layer 1: skip clamp arming for stun-not-die
+            // actors (hint nuts, cursed Skulltula people, Mido, Talon).
+            // These use damage as a state trigger, not a life-total
+            // gate — arming the clamp for them causes B2-D's timeout
+            // to fire spuriously ~1 s later, killing them mid-state.
+            // See Claude/Analysis/hintnut_dialogue_disappear_2026-07-13.md.
+            if (!IsSyncedBossActor(actor->id) && !IsStunNotDieActor(actor->id)) {
                 if (ext != nullptr &&
                     !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
                     actor->colChkInfo.damage > 0 &&
