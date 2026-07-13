@@ -798,7 +798,7 @@ void EnHintnuts_ApplyNetState(EnHintnuts* this, PlayState* play, s16 stateIndex)
             Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
             this->actionFunc = EnHintnuts_Leave;
             break;
-        case 9: EnHintnuts_SetupFreeze(this);                  break;
+        case 9:
         case 10:
             // BeginFreeze has no public Setup; in vanilla it just plays
             // the unburrow anim then transitions to Freeze on anim end.
@@ -807,6 +807,24 @@ void EnHintnuts_ApplyNetState(EnHintnuts* this, PlayState* play, s16 stateIndex)
             // BeginFreeze→Freeze transition costs ~10 frames of
             // unburrow-anim visibility on peer; acceptable trade for
             // not having to add a public BeginFreeze setup helper.
+            //
+            // Re-entry guard (2026-07-13): host stays in state 10
+            // (BeginFreeze) for ~1 s while its own unburrow anim plays.
+            // During that window peer receives ~7 ENEMY_STATE broadcasts
+            // at state 10. Without this guard, each apply re-calls
+            // SetupFreeze which resets `skelAnime.curFrame` via
+            // `Animation_PlayLoop` and zeros `animFlagAndTimer`, so
+            // peer's local `EnHintnuts_Freeze` progression never reaches
+            // the Math_StepToF sink + SetupWait recovery branch and the
+            // freeze pose never renders in a sustained way. When peer's
+            // actor is already in Freeze OR BeginFreeze, treat the apply
+            // as a no-op and let vanilla local progression run. See
+            // Claude/Analysis/hintnut_reflect_stun_desync_2026-07-13.md
+            // for the full whys chain.
+            if (this->actionFunc == EnHintnuts_Freeze ||
+                this->actionFunc == EnHintnuts_BeginFreeze) {
+                break;
+            }
             EnHintnuts_SetupFreeze(this);
             break;
         default: break;

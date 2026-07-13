@@ -1158,7 +1158,15 @@ void Anchor::BackfillEnemyNetIds() {
         Actor* actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
         while (actor != nullptr) {
             // Use the same admission predicate OnActorSpawn uses.
+            // Per-variant skip guards must ALSO mirror OnActorSpawn —
+            // without this, a reconnect retroactively assigns netIds
+            // to variants OnActorSpawn intentionally skipped (Dekunuts
+            // flower, Hintnut reveal-child, Honotrap flame). The
+            // resulting netId collision with the parent variant caused
+            // the 2026-07-13 hint nut reflect-stun desync. See
+            // Claude/Analysis/hintnut_reflect_stun_desync_2026-07-13.md.
             if (IsSyncableActor(actor) &&
+                !ShouldSkipNetIdAssignment(actor) &&
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor) == nullptr) {
                 // Single source of truth for the netId encoding lives in
                 // ActorSyncHelpers::EncodeEnemyNetId. Both this backfill path

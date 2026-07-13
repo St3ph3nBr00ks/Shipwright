@@ -1173,42 +1173,12 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        // #135 / en_dekunuts_sync_plan.md §3 step 1 — DEKUNUTS_FLOWER child
-        // shares its parent Mad Scrub's home.pos and actor->id, so the
-        // deterministic netId scheme would collide with the parent. The
-        // flower has no actionFunc (Update early-returns) and no collider
-        // — nothing to sync. Skip netId assignment entirely so the parent
-        // owns the netId unambiguously.
-        if (actor->id == ACTOR_EN_DEKUNUTS && actor->params == /*DEKUNUTS_FLOWER*/ 10) {
-            return;
-        }
-
-        // En_Hintnuts (Inside Deku Tree Compound Room) — same flower
-        // child pattern as Dekunuts. Parent (params 1-3 or 0) spawns a
-        // child with params=0xA (line 100 of z_en_hintnuts.c). The child
-        // is a static decorative flower with no actionFunc, no collider,
-        // and identical home.pos/id to the parent. Skip netId assignment
-        // for the flower so parent owns the netId. Without this skip,
-        // logs show the same netId assigned twice — collision.
-        if (actor->id == ACTOR_EN_HINTNUTS && (actor->params & 0xFF) == 0xA) {
-            return;
-        }
-
-        // en_honotrap_sync — skip the flame projectile variants entirely.
-        // Both clients' local Eye / Dampe spawner run their own
-        // `Actor_SpawnAsChild(ACTOR_EN_HONOTRAP, ..., HONOTRAP_FLAME_*)`
-        // independently, so each client gets one local flame per attack
-        // event. Allowing ENEMY_SPAWN to broadcast the dynamic flame
-        // spawn would double-spawn on peer (one local + one wire). The
-        // flame is fully per-client-local-AI (aim, chase, shield reflect,
-        // damage application — none cross-broadcast). Filtering here
-        // skips netId assignment, the non-host kill branch, and the
-        // host's ENEMY_SPAWN broadcast in one shot. The eye variant
-        // (params == HONOTRAP_EYE) is the only thing that gets a netId
-        // and sync — its state machine sync drives the Open/Close
-        // visual + lets ENEMY_DEFEATED replicate the eye's destruction
-        // via Actor_Kill when one client destroys it locally.
-        if (actor->id == ACTOR_EN_HONOTRAP && actor->params != HONOTRAP_EYE) {
+        // Per-variant skip guards (Dekunuts flower, Hintnut reveal-child,
+        // Honotrap flame). Shared with Anchor::BackfillEnemyNetIds so
+        // reconnects don't retroactively assign netIds that OnActorSpawn
+        // intentionally skipped. See ShouldSkipNetIdAssignment doc-comment
+        // in ActorSyncHelpers.h for the individual per-actor rationale.
+        if (ShouldSkipNetIdAssignment(actor)) {
             return;
         }
 

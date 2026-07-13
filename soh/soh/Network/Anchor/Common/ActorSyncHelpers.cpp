@@ -10,8 +10,34 @@ extern "C" {
 #include "src/overlays/actors/ovl_En_Rd/z_en_rd.h"
 #include "src/overlays/actors/ovl_En_Wf/z_en_wf.h"
 #include "src/overlays/actors/ovl_En_Mb/z_en_mb.h"
+#include "src/overlays/actors/ovl_En_Honotrap/z_en_honotrap.h"  // HONOTRAP_EYE
 extern PlayState* gPlayState;
 extern SaveContext gSaveContext;
+}
+
+bool ShouldSkipNetIdAssignment(Actor* actor) {
+    if (actor == nullptr) {
+        return true;
+    }
+    // #135 — Dekunuts child flower shares parent's home.pos + id. No
+    // actionFunc (Update early-returns), no collider — nothing to sync.
+    if (actor->id == ACTOR_EN_DEKUNUTS && actor->params == /*DEKUNUTS_FLOWER*/ 10) {
+        return true;
+    }
+    // Hint nut reveal child (params=0xA at z_en_hintnuts.c:113 —
+    // Actor_SpawnAsChild). Same home.pos as parent puzzle nut, no
+    // actionFunc (Update early-returns at z_en_hintnuts.c:593). Skip
+    // so parent owns the netId unambiguously.
+    if (actor->id == ACTOR_EN_HINTNUTS && (actor->params & 0xFF) == 0xA) {
+        return true;
+    }
+    // Honotrap flame variants — per-client-local-AI projectile spawned
+    // by the Eye or Dampé. Broadcasting the flame spawn would double-
+    // spawn on peer. Only the eye variant carries a netId + sync.
+    if (actor->id == ACTOR_EN_HONOTRAP && actor->params != HONOTRAP_EYE) {
+        return true;
+    }
+    return false;
 }
 
 SkelAnime* GetEnemySkelAnime(Actor* actor) {
