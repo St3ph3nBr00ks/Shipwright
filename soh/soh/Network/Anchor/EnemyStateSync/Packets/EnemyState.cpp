@@ -7,6 +7,7 @@
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/Common/PushableActorState.h"
 #include "soh/Network/Anchor/Common/SkelAnimeWire.h"
+#include "soh/Network/Anchor/Common/StaleHostGate.h"  // host-freshness gate
 #include "soh/Network/Anchor/Common/SyncedClaimableDrop.h"  // Plan B step 6
 #include "soh/Network/Anchor/Common/DropAdapters/DropAdapter.h"  // Plan B step 6
 #include "soh/Network/Anchor/JsonConversions.hpp"
@@ -1935,6 +1936,13 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
     ext->netRot      = rot;
     ext->netShapeRot = shapeRot;
     ext->netScale    = scale;
+
+    // Host-freshness gate — stamp the receive timestamp so per-actor
+    // sync sites in HookHandlers.cpp can detect prolonged host silence
+    // (actor culling, host far from puzzle room, network stall) and
+    // defer to peer's local AI instead of forcing peer's state back
+    // to the last-cached broadcast. See Common/StaleHostGate.h.
+    EnemyStateSync::RecordStateReceive(ext, EnemyStateSync::NowMs());
 
     EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyUpdate.applyGuard");
     if (!EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {

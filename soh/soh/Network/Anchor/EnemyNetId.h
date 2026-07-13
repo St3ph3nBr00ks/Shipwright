@@ -190,6 +190,23 @@ struct EnemyNetId {
     // after the peer-side timeout fires.
     uint64_t peerKillingBlowClampedAtMs = 0;
 
+    // Host-freshness gate (Common/StaleHostGate.{h,cpp}) — wall-clock
+    // ms of the most recent ENEMY_STATE broadcast accepted for this
+    // netId. Stamped from HandlePacket_EnemyUpdate via
+    // EnemyStateSync::RecordStateReceive. Read at per-actor sync sites
+    // via EnemyStateSync::ShouldDeferToPeerLocalAI to decide whether
+    // to force peer's local state back to `netStateIndex` or let peer's
+    // local AI drive freely.
+    //
+    // 0 sentinel = no broadcast ever received (fresh actor / cleared
+    // extension). The predicate treats 0 as "not stale — apply normally"
+    // so we don't accidentally hand over control on the first frame
+    // after admission.
+    //
+    // Threshold documented at StaleHostGate.h kHostStalenessThresholdMs
+    // (500 ms). Bosses bypass the gate entirely — see predicate body.
+    uint64_t lastStateReceiveMs = 0;
+
     // (#290) EnTest armored-hit capture. Snapshots
     // shieldCollider.acFlags & AC_BOUNCED at ShouldActorUpdate time
     // (pre-update) so the OnActorUpdate send-side gate can detect a

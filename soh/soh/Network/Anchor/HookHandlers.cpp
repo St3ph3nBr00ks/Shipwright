@@ -6,6 +6,7 @@
 #include "soh/cvar_prefixes.h"        // CVAR_REMOTE_ANCHOR / CVAR_ENHANCEMENT (Nav system commit 6c)
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
 #include "Common/SkelAnimeWire.h"     // kExpectedLimbCount (#154 — defense-in-depth limb-count registry)
+#include "Common/StaleHostGate.h"     // ShouldDeferToPeerLocalAI — host-freshness gate for per-actor sync
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
 #include "Common/ItemEligibility.h"   // CanPlayerCollectItem00 (#193 Phase 0)
@@ -2383,6 +2384,17 @@ void Anchor::RegisterHooks() {
                 return;
             }
 
+            // Host-freshness gate — computed once per-actor per frame, consumed
+            // at every per-actor sync site below. When host has been silent for
+            // longer than kHostStalenessThresholdMs (see Common/StaleHostGate.h),
+            // ShouldDeferToPeerLocalAI(actor->id, ext, gateNowMs) returns true
+            // and the sync site skips the force-apply so peer's local AI drives
+            // freely. Boss actors bypass the gate entirely (host-authoritative
+            // always).
+            const uint64_t gateNowMs = EnemyStateSync::NowMs();
+            const bool hostStale = EnemyStateSync::ShouldDeferToPeerLocalAI(
+                actor->id, ext, gateNowMs);
+
             // Detect sword hits by the local (non-host) player this frame and forward
             // them to the host for authoritative damage application.
             //
@@ -2807,7 +2819,7 @@ void Anchor::RegisterHooks() {
             if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 &&
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 s16 curState = karebabaLocalState; // pre-computed above
-                if (curState != ext->netStateIndex && ext->netStateIndex != 7) {
+                if (curState != ext->netStateIndex && ext->netStateIndex != 7 && !hostStale) {
                     // Intra-attack guard (Fix 29): when both the host and local Karebaba are
                     // in the active bite cycle (Upright=3 / Spin=4), let the local state-machine
                     // timers drive the Upright↔Spin transitions rather than forcing the host's
@@ -2859,7 +2871,7 @@ void Anchor::RegisterHooks() {
             if (actor->id == ACTOR_EN_GOROIWA && ext->netStateIndex >= 0) {
                 EnGoroiwa* boulder = (EnGoroiwa*)actor;
                 s16 curState = EnGoroiwa_GetStateIndex(boulder);
-                if (curState != ext->netStateIndex) {
+                if (curState != ext->netStateIndex && !hostStale) {
                     EnGoroiwa_ApplyNetState(boulder, gPlayState, ext->netStateIndex);
                 }
             }
@@ -2883,7 +2895,7 @@ void Anchor::RegisterHooks() {
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 EnDekubaba* baba = (EnDekubaba*)actor;
                 s16 curState = EnDekubaba_GetStateIndex(baba);
-                if (curState != ext->netStateIndex) {
+                if (curState != ext->netStateIndex && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnDekubaba] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2900,7 +2912,7 @@ void Anchor::RegisterHooks() {
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 EnGoma* lg = (EnGoma*)actor;
                 s16 curState = EnGoma_GetStateIndex(lg);
-                if (curState != ext->netStateIndex) {
+                if (curState != ext->netStateIndex && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnGoma] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2924,7 +2936,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 8 || ext->netStateIndex == 10);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnDekunuts] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2969,12 +2981,17 @@ void Anchor::RegisterHooks() {
                 bool netIsDormant  = (ext->netStateIndex == 0);
                 bool localIsActive = (curState == 2 || curState == 3 ||
                                       curState == 5 || curState == 6);
-                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnHintnuts] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
                     }
                     EnHintnuts_ApplyNetState(h, gPlayState, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex && hostStale) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnHintnuts] rx netId={} defer net={} local={} (host-stale gate)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
+                    }
                 } else if (curState != ext->netStateIndex) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         SPDLOG_INFO("[EnHintnuts] rx netId={} block net={} local={} (dormant-active filter)",
@@ -2993,7 +3010,7 @@ void Anchor::RegisterHooks() {
                 s16 curState = EnSt_GetStateIndex(st);
                 bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
                 bool localIsActive = (curState == 2 || curState == 3 || curState == 4);
-                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnSt] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3027,7 +3044,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 7);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnSkb] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3060,7 +3077,7 @@ void Anchor::RegisterHooks() {
                 bool netIsTalk     = (ext->netStateIndex == 5);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !netIsTalk) {
+                    !netIsTalk && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnSsh] rx netId={} apply {}->{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3091,7 +3108,7 @@ void Anchor::RegisterHooks() {
                 s16 curState = EnHonotrap_GetStateIndex(eye);
                 bool netIsDormant  = (ext->netStateIndex == 0);
                 bool localIsActive = (curState >= 1 && curState <= 3);
-                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnHonotrap] rx netId={} apply {}->{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3150,7 +3167,7 @@ void Anchor::RegisterHooks() {
                     if (netDormant && localActive)         blockReason = "dormant-active filter (gold)";
                     else if (netInitTransient && localSettledIdle) blockReason = "settled-init filter (gold)";
                 }
-                if (curState != ext->netStateIndex && !blockTransition && !deathStateNet) {
+                if (curState != ext->netStateIndex && !blockTransition && !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnSw] rx netId={} apply {}→{} swType={}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex, (int)swType);
@@ -3178,7 +3195,7 @@ void Anchor::RegisterHooks() {
                 s16 curState = EnTest_GetStateIndex(tst);
                 bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
                 bool localIsActive = (curState >= 2);
-                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnTest] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3211,7 +3228,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == WOLFOS_ACTION_DIE);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnWf] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3242,7 +3259,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 8 || ext->netStateIndex == 9);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnTite] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3274,7 +3291,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex >= 7);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnFirefly] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3304,7 +3321,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 3 || ext->netStateIndex == 4);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnCrow] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3336,7 +3353,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex >= 8);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnReeba] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3366,7 +3383,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 10);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnIk] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3399,7 +3416,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex >= 12);            // 12+ guarded
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnPoh] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3431,7 +3448,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex >= 13);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnPeehat] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3469,7 +3486,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 10 || ext->netStateIndex == 11);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnEiyer] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3500,7 +3517,7 @@ void Anchor::RegisterHooks() {
                                       ext->netStateIndex == 10);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnBili] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3534,7 +3551,7 @@ void Anchor::RegisterHooks() {
                                       ext->netStateIndex == 9);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnVali] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3585,7 +3602,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 17);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnZf] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3638,7 +3655,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 16 || ext->netStateIndex == 17);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnMb] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3706,7 +3723,7 @@ void Anchor::RegisterHooks() {
                     !(netIsDormant && localIsActive) &&
                     !crossesEmergeBoundary &&
                     !unapplicableNet &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnBigokuta] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3755,7 +3772,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 6);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnFd] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3809,7 +3826,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 1 || ext->netStateIndex == 16);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnGeldB] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3867,7 +3884,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 5);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnPoField] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3898,7 +3915,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 3);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnVm] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3930,7 +3947,7 @@ void Anchor::RegisterHooks() {
                 bool netIsDormant  = (ext->netStateIndex == 0);
                 bool localIsActive = (curState == 1 || curState == 2 || curState == 3);
                 if (curState != ext->netStateIndex &&
-                    !(netIsDormant && localIsActive)) {
+                    !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnFw] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3970,7 +3987,7 @@ void Anchor::RegisterHooks() {
                                      ext->netStateIndex == 5);
                 if (curState != ext->netStateIndex &&
                     !(netIsVariantSpawn && localIsDamageActive) &&
-                    !blockedState) {
+                    !blockedState && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnBb] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
