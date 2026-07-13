@@ -356,7 +356,29 @@ void Anchor::RegisterHooks() {
     // when no swap was active.
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneInit>(
         [](int16_t sceneNum) {
-            (void)sceneNum;
+            // Defensive log — helps correlate crashes to the scene
+            // transition tear-down/rebuild window when a minidump
+            // + PDB isn't available. See Analysis/deku_tree_multi-
+            // player_incidents_2026-07-13.md §3 (Incident 5).
+            SPDLOG_INFO("[Anchor.OnSceneInit] sceneNum=0x{:04X}",
+                        (unsigned)sceneNum);
+
+            // Defensive null-guards. The three per-actor reset
+            // functions and Director::OnSceneInitFromHook are safe
+            // no-ops when Anchor state isn't initialised, BUT the
+            // hook fires during the scene tear-down/rebuild window
+            // where downstream globals may be in transient states.
+            // The Kokiri Forest crash of 2026-07-13 (log 692, RAX=0
+            // during Cutscene_HandleConditionalTriggers) motivates
+            // an explicit guard at every entry point registered on
+            // OnSceneInit — belt-and-suspenders vs. any downstream
+            // null-deref hazard the individual reset functions
+            // might introduce in future edits.
+            if (::Anchor::Instance == nullptr) {
+                SPDLOG_INFO("[Anchor.OnSceneInit] Anchor::Instance null — skipping downstream resets");
+                return;
+            }
+
             Anchor_LocalPlayerFaceSwapResetOnSceneTransition();
             Anchor_FollowerNpcDrawStateResetOnSceneTransition();
             Anchor_InvaderDrawStateResetOnSceneTransition();
