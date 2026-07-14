@@ -666,13 +666,53 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
         // BgTreemouth_ForceIntroCutscene), vanilla's next tick drives
         // the transition IDLE → INIT → EXEC cleanly; fast-forward
         // then accelerates frame-0 command dispatch as intended.
-        gPlayState->csCtx.frames = 0;
-        gPlayState->csCtx.state  = CS_STATE_IDLE;
-        ::Anchor::Instance->catchupFastForwardTarget = leaderFrame;
-        SPDLOG_INFO("[CutsceneCatchup] Applied delta — silent fast-forward "
-                    "target=frame {} (vanilla will drive state machine + "
-                    "command dispatch; TickCutsceneCatchup accelerates)",
-                    leaderFrame);
+        //
+        // Same-cutscene exemption (2026-07-13, log 703). When peer's
+        // csCtx.state is already past IDLE AND peer's frames > 0, peer's
+        // vanilla cutscene is legitimately in progress on the same
+        // cutscene. Resetting to 0 would throw away peer's progression
+        // and force a full frame-0 replay of every already-executed
+        // command (camera moves, actor positions, dialogue open). If
+        // this catchup is a re-engagement (Fix R or repeated FRAME_SYNC
+        // direct-request after prior fast-forward complete), the reset
+        // causes visible replay loops observed in log 703. See
+        // Claude/Analysis/lost_woods_catchup_delay_replay_ocarina_2026-07-13.md
+        // Bug 2 follow-up.
+        const bool peerAlreadyProgressing =
+            gPlayState->csCtx.state != CS_STATE_IDLE &&
+            gPlayState->csCtx.frames > 0;
+
+        // If peer is already progressing AND at or past leader's frame,
+        // there's no delta to apply. Skip fast-forward AND skip Fix N
+        // (the textbox re-open) to prevent re-firing the same catchup
+        // repeatedly. Leader hasn't advanced past our position — vanilla
+        // mirroring will keep us in sync until leader moves forward
+        // (Fix R will re-engage on textId divergence).
+        if (peerAlreadyProgressing &&
+            (int32_t)gPlayState->csCtx.frames >= leaderFrame) {
+            // Suppress the queued Fix N textbox re-open — otherwise
+            // Message_StartTextbox re-fires and resets peer's message
+            // state to TEXT_START each cycle (visible as text flicker).
+            ::Anchor::Instance->catchupPendingMsgTextId = 0;
+            SPDLOG_INFO("[CutsceneCatchup] Applied delta — no-op: peer "
+                        "csCtx.frames={} already >= leader target={} "
+                        "(skipping fast-forward + Fix N)",
+                        (int)gPlayState->csCtx.frames, leaderFrame);
+        } else {
+            if (!peerAlreadyProgressing) {
+                gPlayState->csCtx.frames = 0;
+                gPlayState->csCtx.state  = CS_STATE_IDLE;
+            }
+            ::Anchor::Instance->catchupFastForwardTarget = leaderFrame;
+            SPDLOG_INFO("[CutsceneCatchup] Applied delta — silent fast-forward "
+                        "target=frame {} (peer at frames={} state={}; reset={} "
+                        "— vanilla drives state machine + command dispatch; "
+                        "TickCutsceneCatchup accelerates)",
+                        leaderFrame,
+                        (int)gPlayState->csCtx.frames,
+                        (int)gPlayState->csCtx.state,
+                        peerAlreadyProgressing ? "skipped" : "applied");
+        }
     } else {
         SPDLOG_INFO("[CutsceneCatchup] Applied delta — leaderFrame=0 "
                     "(no fast-forward needed)");
