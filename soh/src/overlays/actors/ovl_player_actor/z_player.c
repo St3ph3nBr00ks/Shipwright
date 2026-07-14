@@ -1769,6 +1769,14 @@ void Player_PlayVoiceSfx(Player* this, u16 sfxId) {
         // ACTORCAT_PLAYER (e.g. Demo_Du-driven Link during rare cutscene
         // sequences). Without the capture, voice-pack substitution loses
         // the local emitter tag and the vanilla voice plays instead.
+        //
+        // Diagnostic: unconditional LUSLOG_INFO so we can confirm the
+        // branch fires at all + verify emitter capture. Remove once the
+        // fix is field-validated in a real cutscene scenario (see
+        // Claude/task_checklist.md "#285 verification").
+        LUSLOG_INFO("[VoicePack.285] else-branch fired sfxId=0x%04X category=%d emitter=%u",
+                    sfxId, this->actor.category,
+                    (unsigned)Anchor_GetLocalEmitterClientId());
         gAnchorCurrentEmitterClientId = Anchor_GetLocalEmitterClientId();
         func_800F4190(&this->actor.projectedPos, sfxId);
         gAnchorCurrentEmitterClientId = 0;
