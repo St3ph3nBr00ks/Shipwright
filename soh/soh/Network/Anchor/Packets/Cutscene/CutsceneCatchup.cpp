@@ -1672,6 +1672,25 @@ void Anchor::TickCutsceneCatchup() {
                                 (int)gPlayState->csCtx.frames,
                                 csKindKey, leaderClientId);
 
+                    // Register pending catchup + fire request (mirrors
+                    // DetectAndRequestCutsceneCatchup line 1195-1203 and
+                    // HandlePacket_CutsceneFrameSync direct-request line
+                    // 869-873). Without this, HandlePacket_CutsceneCatchup-
+                    // Response drops the incoming RESPONSE at line 1008-
+                    // 1013 as "not pending" — Fix R's re-request loops
+                    // indefinitely without ever applying a delta. See
+                    // Claude/Analysis/lost_woods_saria_catchup_2026-07-13.md
+                    // for the second-entry scenario that exposed this
+                    // (P2 arrived in Lost Woods after own local Saria
+                    // cutscene had auto-triggered; alreadyInCs gate
+                    // blocked the initial arming paths, leaving Fix R
+                    // as the only remaining source of REQUESTs).
+                    PendingCatchup p;
+                    p.deadline = std::chrono::steady_clock::now()
+                                 + std::chrono::milliseconds(kCatchupTimeoutMs);
+                    p.leaderClientId = leaderClientId;
+                    pendingCatchups[csKindKey] = p;
+
                     catchupLastReTargetRequestAt = now;
                     SendPacket_CutsceneCatchupRequest(leaderClientId,
                                                      csKind, csKey);
