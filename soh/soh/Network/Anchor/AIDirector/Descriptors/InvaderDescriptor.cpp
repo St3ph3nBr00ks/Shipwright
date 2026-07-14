@@ -592,13 +592,36 @@ std::vector<SpawnProposal> InvaderDescriptor::BuildForcedProposal(const Director
     // Bypasses cooldown / cap / cutscene / scene-blacklist gates — the
     // user explicitly asked for a spawn via the dev button.
     //
-    // Position selection: still tries PickSpawnPosition first (so the
-    // spawn lands on a real walkable node), but if no candidate passes
-    // we fall back to the target player's worldPos. Force-spawn must
-    // produce a visible spawn for testing; "force button did nothing"
-    // would defeat the purpose.
+    // Target selection: prefer the LOCAL player. MostIsolatedPlayer's
+    // scene-agnostic tie-break returns whichever player is first in the
+    // vector when every player is "infinitely isolated" (all in different
+    // scenes), which after Step 5 can select a peer whose XYZ is not
+    // valid inside the local scene. Field-observed (log 708): P2 in
+    // Twins House (scene 39) force-spawns; MostIsolatedPlayer picks P1
+    // in Kokiri Forest at (-1506,-200,1603); Actor_Spawn places the
+    // invader in P2's scene at P1's XYZ (below floor of the Twins House
+    // interior) so it immediately falls to void.
+    //
+    // Force-spawn is a dev-testing button — the user pressing it wants
+    // the invader near their own Link. Match that intent. The scene-
+    // agnostic MostIsolatedPlayer path is preserved for the automatic
+    // ProposeSpawn flow (natural gameplay spawn), which has its own
+    // eligibility gates that already handle multi-scene edge cases.
     (void)director;
-    const PlayerSnapshot* target = view.MostIsolatedPlayer();
+    const PlayerSnapshot* target = nullptr;
+    for (const auto& p : view.players) {
+        if (p.isLocal) {
+            target = &p;
+            break;
+        }
+    }
+    if (target == nullptr) {
+        // No local snapshot (shouldn't happen inside ForceSpawn — the
+        // dev button is only clickable while the local client is a
+        // participant — but keep a defensive fallback for parity with
+        // the automatic path).
+        target = view.MostIsolatedPlayer();
+    }
     if (target == nullptr) {
         SPDLOG_INFO("[InvaderDescriptor] BuildForcedProposal: no target");
         return {};
