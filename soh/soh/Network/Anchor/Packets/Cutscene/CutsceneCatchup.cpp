@@ -816,6 +816,17 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         const bool selfBroadcast   = (senderClientId == ownClientId);
         const bool validSender     = (senderClientId != 0);
         const bool alreadyInCs     = (gPlayState->csCtx.state != CS_STATE_IDLE);
+        // Same-cutscene exemption (2026-07-13, log 702 Bug 1). If we're
+        // in a cutscene AND the sender's kindKey is the one that's
+        // already in our cutsceneStartActive set, our local vanilla
+        // cutscene is a mirror of the leader's — not a foreign cutscene
+        // we need to protect against. Allow engagement so fast-forward
+        // can catch us up to the leader's frame. Without this, only
+        // Fix R can engage catchup (via textId mismatch), which typically
+        // waits 5-15 s until leader's next textbox transition. See
+        // Claude/Analysis/lost_woods_catchup_delay_replay_ocarina_2026-07-13.md.
+        const bool alreadyInSameCs = alreadyInCs &&
+                                      (cutsceneStartActive.count(kindKey) > 0);
         // Fix M — respect active fast-forward. If we're already
         // catching up (RESPONSE received + fast-forward armed), a
         // second FRAME_SYNC-driven REQUEST would trigger a duplicate
@@ -857,15 +868,17 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         }
         SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC gates — sender={} own={} "
                     "kindKey='{}' enabled={} alreadyPending={} selfBroadcast={} "
-                    "validSender={} alreadyInCs={} alreadyCatchingUp={} optIn={} — will{} fire",
+                    "validSender={} alreadyInCs={} alreadyInSameCs={} alreadyCatchingUp={} "
+                    "optIn={} — will{} fire",
                     senderClientId, ownClientId, kindKey,
                     haveEnabled, alreadyPending, selfBroadcast, validSender,
-                    alreadyInCs, alreadyCatchingUp, isOptIn,
+                    alreadyInCs, alreadyInSameCs, alreadyCatchingUp, isOptIn,
                     (validSender && !selfBroadcast && !alreadyPending &&
-                     haveEnabled && !alreadyInCs && !alreadyCatchingUp && !isOptIn)
+                     haveEnabled && (!alreadyInCs || alreadyInSameCs) &&
+                     !alreadyCatchingUp && !isOptIn)
                         ? "" : " NOT");
         if (validSender && !selfBroadcast && !alreadyPending && haveEnabled &&
-            !alreadyInCs && !alreadyCatchingUp && !isOptIn) {
+            (!alreadyInCs || alreadyInSameCs) && !alreadyCatchingUp && !isOptIn) {
             PendingCatchup p;
             p.deadline = std::chrono::steady_clock::now()
                          + std::chrono::milliseconds(kCatchupTimeoutMs);
@@ -1140,11 +1153,21 @@ void Anchor::DetectAndRequestCutsceneCatchup() {
     //   - Play_InCsMode: peer is already locally in a cutscene state
     //     (catchup would replay commands the local cutscene is
     //     already running).
+    //
+    // Same-cutscene exemption (2026-07-13, log 702 Bug 1). If peer is
+    // in a cutscene AND cutsceneStartActive is non-empty, peer's local
+    // cutscene is likely a mirror of the leader's (populated via
+    // CUTSCENE_START or FRAME_SYNC hydration). Allow engagement so
+    // fast-forward can catch peer up to leader's frame. Mirror of the
+    // FRAME_SYNC direct-request path's alreadyInSameCs check. See
+    // Claude/Analysis/lost_woods_catchup_delay_replay_ocarina_2026-07-13.md.
+    const bool inCs = Play_InCsMode(gPlayState);
+    const bool inSameCs = inCs && !cutsceneStartActive.empty();
     if (catchupFastForwardTarget > 0 ||
         catchupDeltaDeferred ||
         catchupDeferredTeleportValid ||
         !pendingCatchups.empty() ||
-        Play_InCsMode(gPlayState)) {
+        (inCs && !inSameCs)) {
         return;
     }
 

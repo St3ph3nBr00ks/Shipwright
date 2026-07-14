@@ -537,6 +537,26 @@ void OnGameFrameUpdate_CutsceneCatchupSafetyNet() {
     // Analysis/cutscene_fast_forward_stall_and_race_2026-07-08.md.
     if (::Anchor::Instance->catchupFastForwardTarget > 0) return;
 
+    // Same-cutscene exemption (2026-07-13, log 702 Bug 2). When the
+    // pending catchup's kindKey is present in cutsceneStartActive, our
+    // local cutscene is a mirror of the leader's (not a leaked gate).
+    // Fix R armed pending on our already-running cutscene to trigger
+    // a re-target; forcing IDLE here destroys peer's csCtx.frames
+    // progress. Fast-forward then has to replay all N frames from 0
+    // (visible replay of camera + player movements — user reported).
+    //
+    // Only exempts when the SAME kindKey we're pending on is active
+    // in our cutsceneStartActive set — a different cutscene running
+    // would still indicate a leaked entry gate that this net should
+    // catch.
+    //
+    // See Claude/Analysis/lost_woods_catchup_delay_replay_ocarina_2026-07-13.md.
+    const auto& pendingKindKey =
+        ::Anchor::Instance->pendingCatchups.begin()->first;
+    if (::Anchor::Instance->cutsceneStartActive.count(pendingKindKey) > 0) {
+        return;
+    }
+
     // Vanilla entered a cutscene despite our pendingCatchup — a gate
     // was missed. Log the leaked state + force IDLE. The pending
     // catchup response (when it arrives) will still apply the delta;
@@ -546,7 +566,7 @@ void OnGameFrameUpdate_CutsceneCatchupSafetyNet() {
                 "frames={} despite pending catchup for '{}'; forcing IDLE",
                 (int)gPlayState->csCtx.state,
                 (int)gPlayState->csCtx.frames,
-                ::Anchor::Instance->pendingCatchups.begin()->first);
+                pendingKindKey);
     gPlayState->csCtx.state = CS_STATE_IDLE;
     gPlayState->csCtx.frames = 0;
 }
