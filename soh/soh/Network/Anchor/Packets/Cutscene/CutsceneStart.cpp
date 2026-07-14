@@ -274,11 +274,14 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
     }
 
     s16 sceneNum = (s16)payload.value("sceneNum", -1);
-    if (sceneNum != (s16)gPlayState->sceneNum) {
-        SPDLOG_INFO("[CutsceneStart] Drop — local scene {} != sender scene {}",
-                    (int)gPlayState->sceneNum, (int)sceneNum);
-        return;
-    }
+    // Split scene check into state-tracking vs Apply. State
+    // (cutsceneStartActive, cutsceneOriginatorByKindKey) is recorded
+    // regardless of scene match — otherwise a peer entering the sender's
+    // scene later would fire its own local SendPacket_CutsceneStart and
+    // become a phantom leader (log 700 P2 Lost Woods Saria desync). Apply
+    // still only runs when in the correct scene, preserving per-kind
+    // side-effect safety. See Claude/Analysis/lost_woods_phantom_leader_2026-07-13.md.
+    const bool sceneMatches = (sceneNum == (s16)gPlayState->sceneNum);
 
     std::string csKind = payload.value("csKind", std::string(""));
     uint32_t    csKey  = payload.value("csKey", (uint32_t)0);
@@ -330,7 +333,15 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
     cutsceneOriginatorByKindKey[dedupKey] =
         payload.value("clientId", (uint32_t)0);
 
-    ApplyCutsceneStartByKind(csKind, csKey);
+    if (sceneMatches) {
+        ApplyCutsceneStartByKind(csKind, csKey);
+    } else {
+        SPDLOG_INFO("[CutsceneStart] Cross-scene state recorded key='{}' — "
+                    "local scene {} != sender scene {}; Apply skipped "
+                    "(will be picked up by dedup + Fix R when we enter "
+                    "the sender's scene)",
+                    dedupKey, (int)gPlayState->sceneNum, (int)sceneNum);
+    }
 }
 
 void Anchor::SendPacket_CutsceneEnd(const std::string& csKind, uint32_t csKey,
@@ -370,7 +381,12 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
     if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
 
     s16 sceneNum = (s16)payload.value("sceneNum", -1);
-    if (sceneNum != (s16)gPlayState->sceneNum) return;
+    // Split scene check — mirror of HandlePacket_CutsceneStart's approach.
+    // State must be cleared regardless of scene match (otherwise
+    // cutsceneStartActive holds a stale peer cutscene forever and blocks
+    // future legitimate STARTs via the dedup gate). Apply still only runs
+    // when in the correct scene. See Claude/Analysis/lost_woods_phantom_leader_2026-07-13.md.
+    const bool sceneMatches = (sceneNum == (s16)gPlayState->sceneNum);
 
     std::string csKind    = payload.value("csKind", std::string(""));
     uint32_t    csKey     = payload.value("csKey", (uint32_t)0);
@@ -388,7 +404,13 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
     // Fix O — mirror erase of the originator map.
     cutsceneOriginatorByKindKey.erase(dedupKey);
 
-    ApplyCutsceneEndByKind(csKind, csKey, endReason);
+    if (sceneMatches) {
+        ApplyCutsceneEndByKind(csKind, csKey, endReason);
+    } else {
+        SPDLOG_INFO("[CutsceneEnd] Cross-scene state cleared key='{}' — "
+                    "local scene {} != sender scene {}; Apply skipped",
+                    dedupKey, (int)gPlayState->sceneNum, (int)sceneNum);
+    }
 }
 
 void Anchor::TickCutsceneStartDetector() {
