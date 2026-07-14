@@ -549,8 +549,13 @@ bool Director::ForceSpawn(uint8_t descriptorId) {
     // Host-only — non-hosts shouldn't be spawning anything; even with
     // the dev button pressed on a peer client, propagating a spawn from
     // a non-authority would conflict with the migration model.
-    if (!::SceneAuthority::IsEffectiveHost()) {
-        SPDLOG_WARN("[Director] ForceSpawn rejected: not effective host");
+    //
+    // Invader Step 5 — pick up Pillar A Phase 2 per-(sceneNum, roomNum,
+    // timeline) authority via IsMyCurrentRoomHost. Global IsEffectiveHost
+    // would reject a peer alone in their current room even though that
+    // peer is the correct authority for spawns there.
+    if (!::SceneAuthority::IsMyCurrentRoomHost()) {
+        SPDLOG_WARN("[Director] ForceSpawn rejected: not current room host");
         return false;
     }
 
@@ -599,7 +604,9 @@ bool Director::ExecuteDespawn(uint32_t netId, DefeatCause cause) {
     // Host-only. Mirrors ExecuteSpawn's host gate — descriptor lifecycle
     // logic should never run on peer clients (their Director ticks are
     // gated at the top of Tick).
-    if (!::SceneAuthority::IsEffectiveHost()) {
+    //
+    // Invader Step 5 — see ForceSpawn for rationale on per-room authority.
+    if (!::SceneAuthority::IsMyCurrentRoomHost()) {
         return false;
     }
     if (gPlayState == nullptr || netId == 0) {
