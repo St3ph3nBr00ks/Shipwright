@@ -58,6 +58,23 @@ namespace {
 constexpr int64_t kCatchupTimeoutMs      = 2000;    // §10 Q3 resolved
 constexpr int32_t kFrameSyncIntervalMs   = 1000;    // 1Hz per §3.1
 
+// Frame-parity tolerance (2026-07-14, log 704 UX polish). Used at two
+// sites to short-circuit no-op catchup rounds:
+//   1. FRAME_SYNC direct-request gate — client-side prediction. If
+//      leader's broadcast frame is within margin of peer's frame,
+//      skip the REQUEST entirely. Prevents ~1 Hz REQUEST/RESPONSE
+//      round-trips + HUD flashes after peer has caught up.
+//   2. ApplyCatchupDelta no-op branch — post-RESPONSE fallback for
+//      cases where the REQUEST slipped through client-side check
+//      (e.g., leader advanced between check and packet send).
+//
+// 3 frames at 60 fps = ~50 ms. Absorbs typical race conditions
+// (fast-forward overshoot, broadcast staleness, vanilla-mirror clock
+// drift, fast-forward frame quantization) without masking legitimate
+// 1-2 sub-second desyncs. Applied only to no-op decisions — the
+// fast-forward loop's exit condition still uses exact `>=`.
+constexpr int32_t kFrameParityMargin     = 3;
+
 // Static timer state — file-scope OK since these are singletons per
 // process. TickCutsceneCatchup polls at 60 Hz; we only actually SEND
 // when the elapsed interval crosses the threshold.
@@ -715,7 +732,7 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
         // fast-forward exit condition (TickCutsceneCatchup at line
         // ~1421) still uses exact `>=` — the fast-forward loop is
         // meant to reach the exact target it was armed with.
-        constexpr int32_t kFrameParityMargin = 3;
+        // File-scope constant defined at top of file (kFrameParityMargin).
         if (peerAlreadyProgressing &&
             (int32_t)gPlayState->csCtx.frames >=
                 (leaderFrame - kFrameParityMargin)) {
@@ -898,6 +915,28 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         // Claude/Analysis/lost_woods_catchup_delay_replay_ocarina_2026-07-13.md.
         const bool alreadyInSameCs = alreadyInCs &&
                                       (cutsceneStartActive.count(kindKey) > 0);
+
+        // Client-side parity check (2026-07-14, log 704 UX polish). If
+        // peer is already in the same cutscene AND within a small margin
+        // of leader's broadcast frame, don't fire the REQUEST at all —
+        // the RESPONSE would be a no-op (Applied delta — no-op branch
+        // in ApplyCatchupDelta). Skipping saves:
+        //   1. Network traffic: no REQUEST/RESPONSE round-trip.
+        //   2. HUD flash: pendingCatchups stays empty, so the "catching
+        //      up to peer cutscene" widget doesn't blink on/off every
+        //      ~1 s while leader broadcasts.
+        //
+        // Only applies when peerAlreadyProgressing on the same cutscene
+        // — a fresh peer (state=IDLE, frames=0) is behind leader by
+        // definition and still needs the initial catchup.
+        const int32_t leaderBroadcastFrame =
+            (int32_t)payload.value("leaderFrame", 0);
+        const bool peerWithinMargin =
+            alreadyInSameCs &&
+            leaderBroadcastFrame > 0 &&
+            gPlayState->csCtx.frames > 0 &&
+            (int32_t)gPlayState->csCtx.frames >=
+                (leaderBroadcastFrame - kFrameParityMargin);
         // Fix M — respect active fast-forward. If we're already
         // catching up (RESPONSE received + fast-forward armed), a
         // second FRAME_SYNC-driven REQUEST would trigger a duplicate
@@ -939,17 +978,22 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
         }
         SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC gates — sender={} own={} "
                     "kindKey='{}' enabled={} alreadyPending={} selfBroadcast={} "
-                    "validSender={} alreadyInCs={} alreadyInSameCs={} alreadyCatchingUp={} "
-                    "optIn={} — will{} fire",
+                    "validSender={} alreadyInCs={} alreadyInSameCs={} "
+                    "peerWithinMargin={} (leaderFrame={} peerFrames={}) "
+                    "alreadyCatchingUp={} optIn={} — will{} fire",
                     senderClientId, ownClientId, kindKey,
                     haveEnabled, alreadyPending, selfBroadcast, validSender,
-                    alreadyInCs, alreadyInSameCs, alreadyCatchingUp, isOptIn,
+                    alreadyInCs, alreadyInSameCs,
+                    peerWithinMargin, leaderBroadcastFrame,
+                    (int)gPlayState->csCtx.frames,
+                    alreadyCatchingUp, isOptIn,
                     (validSender && !selfBroadcast && !alreadyPending &&
                      haveEnabled && (!alreadyInCs || alreadyInSameCs) &&
-                     !alreadyCatchingUp && !isOptIn)
+                     !peerWithinMargin && !alreadyCatchingUp && !isOptIn)
                         ? "" : " NOT");
         if (validSender && !selfBroadcast && !alreadyPending && haveEnabled &&
-            (!alreadyInCs || alreadyInSameCs) && !alreadyCatchingUp && !isOptIn) {
+            (!alreadyInCs || alreadyInSameCs) &&
+            !peerWithinMargin && !alreadyCatchingUp && !isOptIn) {
             PendingCatchup p;
             p.deadline = std::chrono::steady_clock::now()
                          + std::chrono::milliseconds(kCatchupTimeoutMs);
