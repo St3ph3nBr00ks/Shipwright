@@ -1234,7 +1234,22 @@ void Anchor::RegisterHooks() {
         // deadEnemiesByScene is cleared on OnSceneSpawnActors, so this
         // guard only suppresses same-scene-visit revivals — leaving and
         // re-entering the scene proper still respawns enemies as expected.
-        if (::SceneAuthority::IsMyCurrentRoomHost()) {
+        //
+        // Invader Step 5 follow-up: exempt isSpawningDirectorActor. The
+        // Director may intentionally re-spawn an actor at a previously-
+        // killed (scene, id, posHash) tuple — force-spawn from dev UI,
+        // scene-follow continuation, #234 host-actor-missing reconcile.
+        // Deterministic netId encoding collides with the prior kill's
+        // SceneDeath entry (EncodeUniqueDynamicNetId only probes live
+        // actors, not the dead-enemy ledger). Without this exemption the
+        // Director's Actor_Spawn returns a killed-inside-OnActorSpawn
+        // actor while ExecuteSpawn still records it as live; next tick
+        // fires the reconcile branch and loops forever. Mirrors the
+        // sibling exemption on the dynamic-spawn suppression check at
+        // line 1303. Non-Director dynamic spawns still hit this guard —
+        // vanilla enemies that respawn on room re-entry are exactly
+        // what SceneDeath was designed to suppress.
+        if (::SceneAuthority::IsMyCurrentRoomHost() && !isSpawningDirectorActor) {
             if (EnemyStateSync::HostBookkeeping::Instance().IsSceneDeath(gPlayState->sceneNum, netId)) {
                 SPDLOG_INFO("[EnemySpawn] deadEnemiesByScene hit for netId={} on host — "
                             "suppressing same-scene respawn (id={})",
