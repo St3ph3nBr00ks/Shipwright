@@ -1777,6 +1777,49 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
         return;
     }
 
+    // V1 — hide peer body during cutscenes when peer is also mid-cutscene.
+    //
+    // Vanilla cutscene scripts were authored for a single Link and position
+    // GET_PLAYER(play) via csCtx-driven commands. When both local and peer
+    // are running the same vanilla cutscene locally, both Link models end
+    // up at the same scripted positions → visible stacking on top of each
+    // other (log 705 followup discussion, Saria bridge cutscene).
+    //
+    // Rule (per user 2026-07-14): only hide the peer body when BOTH:
+    //   (a) The LOCAL player is currently in a cutscene (Play_InCsMode
+    //       captures both csCtx.state != IDLE and Player_InCsMode via
+    //       linkAction / stateFlags), AND
+    //   (b) THIS PEER is also in a cutscene (client.csCtxState != IDLE,
+    //       broadcast via PLAYER_UPDATE at ~5 Hz).
+    //
+    // Cases NOT hidden (both correct per rule):
+    //   - Local in gameplay, peer in cutscene: peer body renders at
+    //     their cutscene-driven position. Local can watch them.
+    //   - Local in cutscene, peer NOT in cutscene: peer body renders
+    //     normally at their gameplay position. Local sees them
+    //     standing around during the local cutscene.
+    //   - Normal NPC dialogue (textbox): msgCtx-based, not csCtx-based.
+    //     Play_InCsMode returns false — peer renders normally.
+    //   - Item-get without cutscene (Player_InCsMode via GETTING_ITEM
+    //     but peer in gameplay): peer renders normally.
+    //
+    // Peer's nametag registered via NameTag_RegisterForActorWithOptions
+    // in DummyPlayer_Init still renders in either case — the peer's
+    // presence is signalled even when the body is hidden.
+    //
+    // Title-mode exempt (kept above with linkAge check): title cutscene
+    // has its own hand-tuned formation (Plans/title_screen_peer_actors.md).
+    //
+    // Staleness caveat: client.csCtxState broadcast lags by up to
+    // ~200 ms. Edge transitions (both entering / both exiting cutscene)
+    // may show ~200 ms of peer visibility before the hide engages, or
+    // ~200 ms of hide before peer reappears. Not a functional bug.
+    if (!titleMode &&
+        Play_InCsMode(gPlayState) &&
+        client.csCtxState != CS_STATE_IDLE) {
+        return;
+    }
+
     // Log skeleton pointer once per DummyPlayer lifetime so we can verify the
     // correct pack skeleton is active at render time (not a stale/wrong-pack skeleton).
     static std::unordered_map<uint32_t, void*> sLoggedSkeletons;
