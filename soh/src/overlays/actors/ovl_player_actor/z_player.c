@@ -1755,11 +1755,31 @@ void Player_RequestRumble(Player* this, s32 sourceStrength, s32 duration, s32 de
     }
 }
 
+// Flotilla #83/#84/#285 — voice-pack emitter-context threading.
+// See z_actor.c Player_PlaySfx for the primary consumer.
+extern u32 gAnchorCurrentEmitterClientId;
+extern uint32_t Anchor_GetLocalEmitterClientId(void);
+
 void Player_PlayVoiceSfx(Player* this, u16 sfxId) {
     if (this->actor.category == ACTORCAT_PLAYER) {
         Player_PlaySfx(this, sfxId + this->ageProperties->unk_92);
     } else {
+        // #285 — capture the emitter context on the else-branch too. This
+        // branch fires when Link's actor.category is temporarily NOT
+        // ACTORCAT_PLAYER (e.g. Demo_Du-driven Link during rare cutscene
+        // sequences). Without the capture, voice-pack substitution loses
+        // the local emitter tag and the vanilla voice plays instead.
+        //
+        // Diagnostic: unconditional LUSLOG_INFO so we can confirm the
+        // branch fires at all + verify emitter capture. Remove once the
+        // fix is field-validated in a real cutscene scenario (see
+        // Claude/task_checklist.md "#285 verification").
+        LUSLOG_INFO("[VoicePack.285] else-branch fired sfxId=0x%04X category=%d emitter=%u",
+                    sfxId, this->actor.category,
+                    (unsigned)Anchor_GetLocalEmitterClientId());
+        gAnchorCurrentEmitterClientId = Anchor_GetLocalEmitterClientId();
         func_800F4190(&this->actor.projectedPos, sfxId);
+        gAnchorCurrentEmitterClientId = 0;
     }
 }
 

@@ -1401,7 +1401,22 @@ void Anchor::RegisterHooks() {
         // deadEnemiesByScene is cleared on OnSceneSpawnActors, so this
         // guard only suppresses same-scene-visit revivals — leaving and
         // re-entering the scene proper still respawns enemies as expected.
-        if (::SceneAuthority::IsMyCurrentRoomHost()) {
+        //
+        // Invader Step 5 follow-up: exempt isSpawningDirectorActor. The
+        // Director may intentionally re-spawn an actor at a previously-
+        // killed (scene, id, posHash) tuple — force-spawn from dev UI,
+        // scene-follow continuation, #234 host-actor-missing reconcile.
+        // Deterministic netId encoding collides with the prior kill's
+        // SceneDeath entry (EncodeUniqueDynamicNetId only probes live
+        // actors, not the dead-enemy ledger). Without this exemption the
+        // Director's Actor_Spawn returns a killed-inside-OnActorSpawn
+        // actor while ExecuteSpawn still records it as live; next tick
+        // fires the reconcile branch and loops forever. Mirrors the
+        // sibling exemption on the dynamic-spawn suppression check at
+        // line 1303. Non-Director dynamic spawns still hit this guard —
+        // vanilla enemies that respawn on room re-entry are exactly
+        // what SceneDeath was designed to suppress.
+        if (::SceneAuthority::IsMyCurrentRoomHost() && !isSpawningDirectorActor) {
             if (EnemyStateSync::HostBookkeeping::Instance().IsSceneDeath(gPlayState->sceneNum, netId)) {
                 SPDLOG_INFO("[EnemySpawn] deadEnemiesByScene hit for netId={} on host — "
                             "suppressing same-scene respawn (id={})",
@@ -4390,15 +4405,27 @@ void Anchor::RegisterHooks() {
         // need other DefeatCauses (Leash, SceneExit, etc.) trigger those
         // via their own paths before calling Actor_Kill.
         //
-        // Step 6: also fire reactive PlayerKilledEnemy event (and Boss-
-        // Defeated for synced-boss kills) for ANY kill — descriptor
-        // hooks like "ambush after N kills" / "revenge after boss
-        // death" can consume these regardless of whether the killed
-        // actor was director-spawned.
-        if (::SceneAuthority::IsEffectiveHost()) {
-            auto& director = AnchorDirector::Director::Instance();
-            director.OnEnemyRemoved(ext->netId, AnchorDirector::DefeatCause::Kill);
+        // Invader Step 5 follow-up (respawn-after-kill bug): OnEnemyRemoved
+        // fires on every client (not effective-host-gated). Step 5 flipped
+        // Director.Tick + ForceSpawn + ExecuteDespawn to per-room authority
+        // so a client that is current room host but NOT effective host can
+        // spawn an Invader — its state lives locally in mNetIdToDescriptor
+        // and mActiveInvaders. If OnEnemyRemoved stayed effective-host-gated
+        // that client's OnEnemyDefeat would leave stale mActiveInvaders and
+        // InvaderDescriptor::OnTick's #234 host-actor-missing reconcile
+        // would treat the dead actor as "scene-cleanup missing" and re-
+        // instantiate via bypassCooldown follow-spawn on the next tick.
+        // OnEnemyRemoved's internal .find(netId) short-circuit makes firing
+        // on any client safe: cleanup runs only where state actually exists.
+        auto& director = AnchorDirector::Director::Instance();
+        director.OnEnemyRemoved(ext->netId, AnchorDirector::DefeatCause::Kill);
 
+        // Step 6: reactive PlayerKilledEnemy event (and BossDefeated for
+        // synced-boss kills) STAYS effective-host-gated. Descriptor
+        // consumers that count kills ("ambush after N kills", "revenge
+        // after boss death") must see each kill exactly once — firing
+        // on every client would produce duplicate events.
+        if (::SceneAuthority::IsEffectiveHost()) {
             AnchorDirector::DirectorEventPayload evt{};
             evt.clientId = ownClientId;  // local kill on host
             evt.sceneNum = (gPlayState != nullptr) ? (s16)gPlayState->sceneNum : 0;
@@ -4569,10 +4596,13 @@ void Anchor::RegisterHooks() {
         // OnEnemyRemoved itself is idempotent: erases the netId from
         // mNetIdToDescriptor on first call, so a duplicate fire from
         // OnEnemyDefeat (in cases where it wins the race) is a no-op.
-        if (::SceneAuthority::IsEffectiveHost()) {
-            AnchorDirector::Director::Instance().OnEnemyRemoved(
-                ext->netId, AnchorDirector::DefeatCause::Kill);
-        }
+        //
+        // Invader Step 5 follow-up — no longer effective-host-gated. See
+        // the sibling OnEnemyDefeat block above for the full rationale
+        // (per-room-authority spawner must clean up its own Director
+        // state to avoid #234 reconcile respawning the killed actor).
+        AnchorDirector::Director::Instance().OnEnemyRemoved(
+            ext->netId, AnchorDirector::DefeatCause::Kill);
     });
 
     // Issue #171 fix B — clean up all ObjectExtension entries before
