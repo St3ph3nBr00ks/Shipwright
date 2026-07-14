@@ -270,6 +270,24 @@ void Anchor::OnConnected() {
         // via WORLD_STATE_SNAPSHOT; merge is idempotent so first vs.
         // reconnect-after-state-buildup paths converge.
         WorldStateSync::SendRequestWorldState();
+
+        // Late-join cutscene catchup — arm the request gate so that
+        // ~1 s from now (once we've received PLAYER_UPDATE from peers
+        // and populated `clients[].csCtxState`, plus any live FRAME_SYNC
+        // has hydrated cutsceneStartActive), TickCutsceneCatchup fires
+        // DetectAndRequestCutsceneCatchup. If a peer is mid-cutscene
+        // in our scene, we send a CUTSCENE_CATCHUP_REQUEST and receive
+        // the delta.
+        //
+        // Without this, DetectAndRequestCutsceneCatchup only fires on
+        // OnSceneSpawnActors — peers who connect while already IN the
+        // cutscene scene (dev-tool warp / return-to-save state) would
+        // never trigger detection until they leave and re-enter.
+        //
+        // See Claude/Analysis/lost_woods_savecontext_no_handler_2026-07-13.md
+        // "players that come online after the cutscene started" ask.
+        catchupRequestGateArmedAt = std::chrono::steady_clock::now();
+        SPDLOG_INFO("[Anchor] Late-join cutscene catchup gate armed on connect");
     }
 }
 

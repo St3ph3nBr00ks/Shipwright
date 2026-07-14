@@ -126,6 +126,7 @@ namespace {
 // gets a small file-static function; the built-in table below wires them
 // into the registry.
 int DekuTreeIntro_ApplyForce(uint32_t csKey);
+int Savecontext_ApplyForce(uint32_t csKey);
 
 // Populate the registry with built-in customers. Called once via the
 // function-static initializer in GetRegistry(). Add new customers here.
@@ -141,6 +142,19 @@ std::unordered_map<std::string, Handler> MakeBuiltinRegistry() {
         // See Analysis/deku_tree_come_back_sync_design_reversal_2026-07-09.md
         // for the design rationale.
         .optInPredicate  = [](uint32_t csKey) { return csKey == 1; },
+    };
+
+    // Savecontext-driven cutscenes (vanilla auto-triggers via
+    // Cutscene_HandleConditionalTriggers on scene entry — Lost Woods
+    // Saria, Kakariko Nocturne, Desert Requiem, etc.). csKey carries the
+    // cutsceneIndex value (typically 0xFFF0). Registered so
+    // CUTSCENE_CATCHUP_RESPONSE can dispatch here instead of aborting
+    // at "No per-kind setup for csKind='savecontext'". See
+    // Claude/Analysis/lost_woods_savecontext_no_handler_2026-07-13.md.
+    map["savecontext"] = Handler{
+        .applyForce     = &Savecontext_ApplyForce,
+        .applyEnd       = nullptr,
+        .optInPredicate = nullptr,
     };
 
     return map;
@@ -190,6 +204,60 @@ namespace {
 int DekuTreeIntro_ApplyForce(uint32_t csKey) {
     if (gPlayState == nullptr) return 0;
     return BgTreemouth_ForceIntroCutscene(gPlayState, csKey);
+}
+
+// Savecontext catchup applyForce.
+//
+// Called from HandlePacket_CutsceneCatchupResponse's per-kind dispatch
+// (CutsceneCatchup.cpp:528+) when peer needs to enter a savecontext-
+// driven cutscene locally so fast-forward can advance csCtx.frames.
+//
+// Contract:
+//   Return 1 → catchup delta apply proceeds (fast-forward armed).
+//   Return 0 → catchup delta apply aborts (peer stays in current state).
+//
+// Cases:
+//   (a) `gSaveContext.cutsceneIndex != 0`
+//       Peer's vanilla `Cutscene_HandleConditionalTriggers` already fired
+//       locally when peer entered the scene (fresh save flag / normal MP
+//       flow). csCtx.segment is set, state machine is ready to advance.
+//       Fast-forward can drive func_800645A0 to reach leader's frame.
+//       Return 1.
+//
+//   (b) `gSaveContext.cutsceneIndex == 0`
+//       Two possible reasons:
+//         - Peer's save flag is already set (repeat-view scenario) —
+//           vanilla's flag check short-circuited the trigger block at
+//           z_demo.c:2257-2264 (Saria) or sibling special-case triggers.
+//         - Peer is a late-joiner in a scene that never re-fires the
+//           auto-trigger without a scene reload.
+//       In both cases csCtx.segment is null/stale, so writing
+//       cutsceneIndex here would cause vanilla's command dispatch to
+//       read from an invalid segment (crash risk).
+//       Return 0. Peer stays in gameplay while leader plays the cutscene.
+//       Post-cutscene teleport (Fix N, existing) will converge peer with
+//       leader's post-cutscene position when leader finishes.
+int Savecontext_ApplyForce(uint32_t csKey) {
+    if (gPlayState == nullptr) return 0;
+
+    if (gSaveContext.cutsceneIndex != 0) {
+        // Case (a) — vanilla triggered locally. Success.
+        SPDLOG_INFO("[Savecontext_ApplyForce] cutsceneIndex=0x{:04X} "
+                    "already set (vanilla triggered locally); "
+                    "fast-forward can proceed. csKey=0x{:04X}",
+                    (unsigned)gSaveContext.cutsceneIndex, csKey);
+        return 1;
+    }
+
+    // Case (b) — cannot force without valid csCtx.segment. Abort
+    // gracefully. Field-observed via log 702 P2 Lost Woods Saria
+    // (EVENTCHKINF_SPOKE_TO_SARIA_ON_BRIDGE pre-set from prior test).
+    SPDLOG_WARN("[Savecontext_ApplyForce] cutsceneIndex=0 — vanilla local "
+                "trigger did NOT fire (save flag pre-set OR late-join edge "
+                "case). Cannot force without valid csCtx.segment. Catchup "
+                "aborted; peer will stay in gameplay. csKey=0x{:04X}",
+                csKey);
+    return 0;
 }
 
 }  // namespace
