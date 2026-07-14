@@ -682,22 +682,53 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
             gPlayState->csCtx.state != CS_STATE_IDLE &&
             gPlayState->csCtx.frames > 0;
 
-        // If peer is already progressing AND at or past leader's frame,
-        // there's no delta to apply. Skip fast-forward AND skip Fix N
-        // (the textbox re-open) to prevent re-firing the same catchup
-        // repeatedly. Leader hasn't advanced past our position — vanilla
-        // mirroring will keep us in sync until leader moves forward
-        // (Fix R will re-engage on textId divergence).
+        // If peer is already progressing AND within a small margin of
+        // leader's frame, there's no meaningful delta to apply. Skip
+        // fast-forward AND skip Fix N (the textbox re-open) to prevent
+        // re-firing the same catchup repeatedly.
+        //
+        // Frame-parity margin (2026-07-13): a small tolerance (3 frames
+        // = ~50 ms at 60 fps) absorbs real-world race conditions that
+        // would otherwise cause spurious fast-forward re-arms even when
+        // peer is effectively at leader's position:
+        //   1. Fast-forward overshoot: TickCutsceneCatchup ticks
+        //      func_800645A0 up to 10× per real frame. A batch can
+        //      land 1-3 frames past target.
+        //   2. Broadcast staleness: leader broadcasts FRAME_SYNC at
+        //      ~1 Hz. Packet transit is 50-200 ms. During transit,
+        //      leader advances 3-12 frames — target arrives already
+        //      1-2 frames "stale" from peer's perspective.
+        //   3. Vanilla-mirror clock drift: both clients run local
+        //      cutscenes at 60 fps but frame-timing isn't cross-
+        //      machine-locked; they can drift 1-3 frames over the
+        //      course of a cutscene.
+        //   4. Fast-forward frame quantization: fast-forward 10-tick
+        //      batches may not land on exact target frame values.
+        //
+        // At 60 fps: 3 frames = ~50 ms — well below human perception
+        // threshold for most content. Larger margin (>5 frames) would
+        // risk masking legitimate 1-2 sub-second desyncs; smaller
+        // (<2 frames) wouldn't absorb typical overshoot. 3 frames is
+        // the sweet spot.
+        //
+        // NOTE: this margin is applied ONLY to the no-op check. The
+        // fast-forward exit condition (TickCutsceneCatchup at line
+        // ~1421) still uses exact `>=` — the fast-forward loop is
+        // meant to reach the exact target it was armed with.
+        constexpr int32_t kFrameParityMargin = 3;
         if (peerAlreadyProgressing &&
-            (int32_t)gPlayState->csCtx.frames >= leaderFrame) {
+            (int32_t)gPlayState->csCtx.frames >=
+                (leaderFrame - kFrameParityMargin)) {
             // Suppress the queued Fix N textbox re-open — otherwise
             // Message_StartTextbox re-fires and resets peer's message
             // state to TEXT_START each cycle (visible as text flicker).
             ::Anchor::Instance->catchupPendingMsgTextId = 0;
             SPDLOG_INFO("[CutsceneCatchup] Applied delta — no-op: peer "
-                        "csCtx.frames={} already >= leader target={} "
-                        "(skipping fast-forward + Fix N)",
-                        (int)gPlayState->csCtx.frames, leaderFrame);
+                        "csCtx.frames={} within margin ({} frames) of "
+                        "leader target={} (skipping fast-forward + Fix N)",
+                        (int)gPlayState->csCtx.frames,
+                        (int)kFrameParityMargin,
+                        leaderFrame);
         } else {
             if (!peerAlreadyProgressing) {
                 gPlayState->csCtx.frames = 0;
