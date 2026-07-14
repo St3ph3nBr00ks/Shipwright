@@ -15,6 +15,13 @@ extern "C" {
 #include "variables.h"
 #include "textures/message_static/message_static.h"
 extern PlayState* gPlayState;
+// Companion to the V1 hide-peer-in-cutscene gate in DummyPlayer_Draw
+// (Network/Anchor/DummyPlayer.cpp). Returns 1 when this actor is a peer
+// DummyPlayer whose body-draw was suppressed because both local and
+// peer are in co-active cutscenes — the vote-skip HUD already signals
+// their cutscene presence, so the floating nametag would be redundant.
+// Returns 0 for every non-DummyPlayer actor.
+extern int Anchor_ShouldSuppressPeerNameTag(Actor* actor);
 }
 
 typedef struct {
@@ -51,6 +58,17 @@ void FreeNameTag(NameTag* nameTag) {
 void DrawNameTag(PlayState* play, const NameTag* nameTag) {
     if (nameTag->actor == nullptr || nameTag->actor->draw == nullptr || !nameTag->actor->isDrawn ||
         nameTag->vtx == nullptr || nameTag->mtx == nullptr) {
+        return;
+    }
+
+    // V1 hide-peer-in-cutscene companion gate. When both local and peer
+    // are running co-active cutscenes, DummyPlayer_Draw early-returns
+    // without rendering the peer body, but z_actor.c:3153 still sets
+    // isDrawn=true unconditionally after Actor_Draw returns — so the
+    // isDrawn guard above cannot catch this case. Delegate to the Anchor
+    // side, which knows both (a) that this actor is a peer DummyPlayer
+    // and (b) the same co-active-cutscene condition the body-draw uses.
+    if (Anchor_ShouldSuppressPeerNameTag(nameTag->actor) != 0) {
         return;
     }
 

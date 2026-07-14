@@ -1803,9 +1803,12 @@ void DummyPlayer_Draw(Actor* actor, PlayState* play) {
     //   - Item-get without cutscene (Player_InCsMode via GETTING_ITEM
     //     but peer in gameplay): peer renders normally.
     //
-    // Peer's nametag registered via NameTag_RegisterForActorWithOptions
-    // in DummyPlayer_Init still renders in either case — the peer's
-    // presence is signalled even when the body is hidden.
+    // Peer's nametag is suppressed alongside the body via the
+    // `Anchor_ShouldSuppressPeerNameTag` extern "C" gate consumed by
+    // `nametag.cpp DrawNameTag`. The vote-skip HUD dots already signal
+    // which peers are in the cutscene, so the floating name label would
+    // be redundant clutter. The gate lives on the same conditions as
+    // this body-hide early-return, so both hide together.
     //
     // Title-mode exempt (kept above with linkAge check): title cutscene
     // has its own hand-tuned formation (Plans/title_screen_peer_actors.md).
@@ -1983,4 +1986,45 @@ void DummyPlayer_Destroy(Actor* actor, PlayState* play) {
             Anchor::Instance->clients[clientId].RetireBakedModel();
         }
     }
+}
+
+// Companion gate to the V1 hide-peer-in-cutscene body-draw early-return
+// in DummyPlayer_Draw. Answers "should nametag.cpp DrawNameTag skip this
+// actor's tag right now?" for peer DummyPlayers whose body was suppressed
+// because both local and peer are in co-active cutscenes.
+//
+// Called from nametag.cpp DrawNameTag. Returns 0 for any non-DummyPlayer
+// actor (so real NPC / boss / follower / etc. nametags are unaffected).
+// Title-mode DummyPlayers are also exempted (they don't broadcast the
+// gameplay-side csCtxState anyway; title has its own formation).
+//
+// Rule matches the DummyPlayer_Draw gate exactly:
+//   (a) Local player is currently in a cutscene (Play_InCsMode true),
+//   (b) The peer this actor represents is also in a cutscene
+//       (client.csCtxState != CS_STATE_IDLE, broadcast via PLAYER_UPDATE).
+extern "C" int Anchor_ShouldSuppressPeerNameTag(Actor* actor) {
+    if (actor == nullptr || gPlayState == nullptr) {
+        return 0;
+    }
+    if (Anchor::Instance == nullptr) {
+        return 0;
+    }
+    uint32_t clientId = Anchor::Instance->GetDummyPlayerClientId(actor);
+    if (clientId == 0) {
+        return 0;
+    }
+    if (Anchor::Instance->IsDummyPlayerTitleMode(actor)) {
+        return 0;
+    }
+    auto it = Anchor::Instance->clients.find(clientId);
+    if (it == Anchor::Instance->clients.end()) {
+        return 0;
+    }
+    if (!Play_InCsMode(gPlayState)) {
+        return 0;
+    }
+    if (it->second.csCtxState == CS_STATE_IDLE) {
+        return 0;
+    }
+    return 1;
 }
