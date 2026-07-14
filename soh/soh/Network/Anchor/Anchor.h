@@ -10,6 +10,7 @@
 #include <atomic>
 #include <climits>
 #include <map>
+#include <memory>
 #include <queue>
 #include <mutex>
 #include <chrono>
@@ -55,6 +56,14 @@ extern "C" {
 // surface narrow while letting member function signatures
 // reference the type by pointer.
 namespace AnchorNavRoom { struct RoomNavData; }
+// Cutscene late-join ledger types (Plans/cutscene_late_join_plan.md).
+// Full include needed here — MSVC's unordered_map<K, unique_ptr<T>>
+// eagerly instantiates template internals for size/layout, which
+// requires T to be complete at member-declaration time. Forward-decl
+// alone is not enough (unlike std::vector<T> which C++17 standardised
+// as incomplete-type friendly, std::unordered_map does not have that
+// guarantee and MSVC specifically rejects it).
+#include "soh/Network/Anchor/Common/CutsceneCatchup.h"
 
 void DummyPlayer_Init(Actor* actor, PlayState* play);
 void DummyPlayer_Update(Actor* actor, PlayState* play);
@@ -690,6 +699,15 @@ class Anchor : public Network {
     // ========================================================================
     uint32_t ownClientId;
 
+    // Out-of-line destructor (defined = default in Anchor.cpp). Required
+    // because cutsceneCatchupLedger is std::unordered_map<string,
+    // unique_ptr<CutsceneCatchup::CutsceneCatchupEntry>> and the value
+    // type is only forward-declared in this header. Without an out-of-
+    // line dtor, every TU that includes Anchor.h and instantiates
+    // Anchor's implicit dtor (via ~unique_ptr → default_delete → sizeof)
+    // fails with "cannot delete incomplete type". See Pitfall 16 / SoC.
+    ~Anchor();
+
     // Issue #63 — pending-time-sync flag for frozen→advancing scene
     // transitions (log 538 fix). MUST be public (Pitfall 16):
     // TimeOfDayReconcile.cpp accesses these via Anchor::Instance->.
@@ -784,6 +802,9 @@ class Anchor : public Network {
     inline static const std::string& CUTSCENE_TEXT_ADVANCED   = PacketTypes::CUTSCENE_TEXT_ADVANCED;
     inline static const std::string& DAMAGE_ENEMY             = PacketTypes::DAMAGE_ENEMY;
     inline static const std::string& DAMAGE_PLAYER            = PacketTypes::DAMAGE_PLAYER;
+    inline static const std::string& DIALOG_CHOICE_APPLIED    = PacketTypes::DIALOG_CHOICE_APPLIED;
+    inline static const std::string& DIALOG_CHOICE_VOTE       = PacketTypes::DIALOG_CHOICE_VOTE;
+    inline static const std::string& DIALOG_CHOICE_VOTE_STATE = PacketTypes::DIALOG_CHOICE_VOTE_STATE;
     inline static const std::string& DIALOG_END               = PacketTypes::DIALOG_END;
     inline static const std::string& DIRECTOR_STATE_SYNC      = PacketTypes::DIRECTOR_STATE_SYNC;
     inline static const std::string& DISABLE_ANCHOR           = PacketTypes::DISABLE_ANCHOR;
@@ -812,6 +833,9 @@ class Anchor : public Network {
     inline static const std::string& CUTSCENE_START           = PacketTypes::CUTSCENE_START;
     inline static const std::string& CUTSCENE_END             = PacketTypes::CUTSCENE_END;
     inline static const std::string& CUTSCENE_TEXT_VOTE_STATE = PacketTypes::CUTSCENE_TEXT_VOTE_STATE;
+    inline static const std::string& CUTSCENE_FRAME_SYNC      = PacketTypes::CUTSCENE_FRAME_SYNC;
+    inline static const std::string& CUTSCENE_CATCHUP_REQUEST = PacketTypes::CUTSCENE_CATCHUP_REQUEST;
+    inline static const std::string& CUTSCENE_CATCHUP_RESPONSE= PacketTypes::CUTSCENE_CATCHUP_RESPONSE;
     inline static const std::string& MODAL_OFFER_CLAIMED      = PacketTypes::MODAL_OFFER_CLAIMED;
     inline static const std::string& NAV_TEST_DIRECTIVE       = PacketTypes::NAV_TEST_DIRECTIVE;
     inline static const std::string& OCARINA_SFX              = PacketTypes::OCARINA_SFX;
@@ -828,6 +852,7 @@ class Anchor : public Network {
     inline static const std::string& SET_FLAG                 = PacketTypes::SET_FLAG;
     inline static const std::string& SHIELD_BOUNCE_PLAYER     = PacketTypes::SHIELD_BOUNCE_PLAYER;
     inline static const std::string& TALK_REQUEST             = PacketTypes::TALK_REQUEST;
+    inline static const std::string& TELEPORT_EFFECT          = PacketTypes::TELEPORT_EFFECT;
     inline static const std::string& TELEPORT_TO              = PacketTypes::TELEPORT_TO;
     inline static const std::string& TIME_SYNC                = PacketTypes::TIME_SYNC;
     inline static const std::string& UNSET_FLAG               = PacketTypes::UNSET_FLAG;
@@ -1261,6 +1286,65 @@ class Anchor : public Network {
     void SendPacket_BossGomaLookedAt(uint32_t bossNetId);
     void HandlePacket_BossGomaLookedAt(nlohmann::json payload);
 
+    // DIALOG_CHOICE_* — MP choice-textbox vote system (2026-07-09).
+    // See PacketTypes.h + Analysis/dialog_choice_vote_design_v2_
+    // 2026-07-09.md for full design.
+    //
+    // Sends: peer-to-host vote packet; host-to-all state broadcast +
+    // resolution broadcast.
+    void SendPacket_DialogChoiceVote(uint16_t textId, uint8_t choiceIndex,
+                                      uint8_t numChoices);
+    void SendPacket_DialogChoiceVoteState();
+    void SendPacket_DialogChoiceApplied(uint16_t textId,
+                                         uint8_t winningChoiceIndex,
+                                         const char* reason);
+
+    // Receives.
+    void HandlePacket_DialogChoiceVote(nlohmann::json payload);
+    void HandlePacket_DialogChoiceVoteState(nlohmann::json payload);
+    void HandlePacket_DialogChoiceApplied(nlohmann::json payload);
+
+    // Host-side tick (called from TickCutsceneTextAdvance) — polls
+    // countdown expiry + resolves when due.
+    void TickDialogChoiceVote();
+
+    // TELEPORT_EFFECT — team broadcast to trigger a sparkle-burst visual
+    // at a specific world position + color. Landed 2026-07-09 for the
+    // cutscene late-join UX (fires at departure + arrival positions
+    // when a peer teleports into a shared cutscene). Designed as a
+    // reusable primitive for every teleport site — future consumers
+    // documented in PacketTypes.h header comment for TELEPORT_EFFECT.
+    // Sparkle burst rendered via TeleportEffect::SpawnSparkleBurst.
+    // Two overloads:
+    //   - No sceneNum → uses gPlayState->sceneNum (current scene, common
+    //     case: burst fires where sender currently is).
+    //   - sceneNum given → burst fires in a specific target scene
+    //     (Anchor player teleport arrival case: sender is still in
+    //     departure scene at broadcast time, but wants sparkles in the
+    //     target scene where observers will see them).
+    //
+    // Local spawn on the sender only happens when sceneNum matches the
+    // sender's current scene (otherwise the burst would render in the
+    // wrong scene locally). Remote broadcast still goes out either way.
+    void SendPacket_TeleportEffect(float x, float y, float z,
+                                    uint8_t primR, uint8_t primG, uint8_t primB,
+                                    uint8_t envR, uint8_t envG, uint8_t envB);
+    void SendPacket_TeleportEffect(int16_t sceneNum,
+                                    float x, float y, float z,
+                                    uint8_t primR, uint8_t primG, uint8_t primB,
+                                    uint8_t envR, uint8_t envG, uint8_t envB);
+    void HandlePacket_TeleportEffect(nlohmann::json payload);
+
+    // Convenience wrapper — broadcast a sparkle burst using the local
+    // player's own Anchor color. Env color = 60% intensity of prim for
+    // a subtle outer glow. Common consumer pattern across all teleport
+    // sites (cutscene late-join, Anchor player teleport, AI Player
+    // Follower, NPC Follower, AI Invader). Extracted here after the
+    // third consumer per DRY.
+    void BroadcastTeleportSparklesForOwnColor(float x, float y, float z);
+    void BroadcastTeleportSparklesForOwnColor(int16_t sceneNum,
+                                                float x, float y, float z);
+
     // MIDO_POST_DEKU_LEAVE — team broadcast. Sent by the dialog client
     // when its local Mido transitions BlockPath → Walk for the post-
     // Deku-Tree confrontation (z_en_md.c BlockPath transition gated on
@@ -1431,6 +1515,32 @@ class Anchor : public Network {
     void SendPacket_CutsceneTextVoteState();
     void HandlePacket_CutsceneTextVoteState(nlohmann::json payload);
 
+    // Cutscene late-join (Option B v1 — Plans/cutscene_late_join_plan.md).
+    // CUTSCENE_FRAME_SYNC: leader 1Hz broadcast of csCtx.frames + state.
+    // CUTSCENE_CATCHUP_REQUEST: late-joiner → leader, one-shot.
+    // CUTSCENE_CATCHUP_RESPONSE: leader → late-joiner, one-shot.
+    void SendPacket_CutsceneFrameSync();
+    void HandlePacket_CutsceneFrameSync(nlohmann::json payload);
+    void SendPacket_CutsceneCatchupRequest(uint32_t leaderClientId,
+                                            const std::string& csKind,
+                                            uint32_t csKey);
+    void HandlePacket_CutsceneCatchupRequest(nlohmann::json payload);
+    void SendPacket_CutsceneCatchupResponse(uint32_t requesterClientId,
+                                             const std::string& csKind,
+                                             uint32_t csKey);
+    void HandlePacket_CutsceneCatchupResponse(nlohmann::json payload);
+    // Per-frame tick from OnGameFrameUpdate. Emits FRAME_SYNC at 1Hz
+    // while local cutscene active; also decrements pendingCatchup
+    // deadline and triggers Skip-and-Apply fallback on timeout.
+    void TickCutsceneCatchup();
+    // Called on scene entry (OnSceneSpawnActors). Scans same-team,
+    // same-scene, same-timeline peers whose csCtxState != IDLE and
+    // whose cutsceneStartActive we know about; issues one CUTSCENE_
+    // CATCHUP_REQUEST per detected peer + populates pendingCatchups.
+    void DetectAndRequestCutsceneCatchup();
+    // CVar gate — Plan default ON (Q2 resolved 2026-07-07).
+    bool CutsceneCatchupEnabled() const;
+
     // FOLLOWER_NPC_* — Flotilla NPC Follower companion (Plans/
     // npc_follower_plan.md §2.6 / §2.9). Single-owner authority:
     // owner sends, peers apply read-only. Phase 3 wiring.
@@ -1496,6 +1606,55 @@ class Anchor : public Network {
     };
     CutsceneTextAdvanceState cutsceneTextAdvanceState;
 
+    // Dialog choice-vote state (2026-07-09, feature/dialog-choice-vote).
+    // Host-side tally. Reset on new textId edge or resolution.
+    struct DialogChoiceVoteState {
+        bool     active = false;
+        uint16_t textId = 0;
+        int16_t  sceneNum = -1;
+        uint8_t  numChoices = 2;
+        // clientId → choiceIndex. Re-vote overwrites the previous value
+        // (allows changing mind before deadline).
+        std::unordered_map<uint32_t, uint8_t> votesByClient;
+        // Insertion order tracker for first-vote-wins tiebreaker. Only
+        // appended when a client votes for the FIRST time; subsequent
+        // re-votes do not re-order.
+        std::vector<uint32_t> voteOrderByClient;
+        // First voter's choice — pre-computed at the moment state
+        // becomes active. Used as the tiebreaker sentinel at resolve
+        // time (O(1) lookup vs walking voteOrderByClient's votes).
+        uint8_t firstVoteChoiceIndex = 0;
+        std::chrono::steady_clock::time_point countdownEndsAt;
+        bool countdownStarted = false;
+    };
+    DialogChoiceVoteState dialogChoiceVoteState;
+
+    // Cooldown after resolution — dropped-vote for stale votes that
+    // arrive after the choice has already been resolved for the same
+    // textId. Mirrors Fix J.b vote-skip reopen-suppression window.
+    uint16_t dialogChoiceLastResolvedTextId = 0;
+    std::chrono::steady_clock::time_point dialogChoiceLastResolvedAt =
+        std::chrono::steady_clock::time_point::min();
+
+    // Peer-side pending-apply — populated by HandlePacket_DialogChoice-
+    // Applied. Consumed by Anchor_ShouldAdvanceCutsceneTextLocal on the
+    // next TEXT_STATE_CHOICE call for the matching textId. Only holds
+    // a single pending resolution; new receipts overwrite.
+    uint16_t dialogChoicePendingApplyTextId = 0;
+    uint8_t  dialogChoicePendingApplyChoiceIndex = 0;
+
+    // Peer-side monotonic seq trackers (Pitfall 43 pattern).
+    uint64_t dialogChoiceVoteStateSequence = 0;
+    uint64_t peerLastAppliedDialogChoiceStateSeq = 0;
+    uint64_t dialogChoiceAppliedSequence = 0;
+    uint64_t peerLastAppliedDialogChoiceAppliedSeq = 0;
+
+    // Late-join catchup replay map — populated by ApplyCatchupDelta
+    // when the catchup snapshot carries dialogChoiceResolutions. When
+    // peer's local dialog reaches a resolved textId, auto-consume + set
+    // choiceIndex without waiting for a vote.
+    std::unordered_map<uint16_t, uint8_t> dialogChoiceLateJoinResolutions;
+
     // Sequence numbers for CUTSCENE_TEXT_VOTE_STATE ordering.
     // Root cause: Anchor relay spawns a goroutine per (broadcast × recipient)
     // in room.go:56, so two broadcasts sent 1 ms apart on the host can race
@@ -1516,12 +1675,38 @@ class Anchor : public Network {
     // Also resets state on textId-edge (new textbox).
     void TickCutsceneTextAdvance();
 
-    // Receive-side flag — set by HandlePacket_CutsceneTextAdvanced,
-    // consumed by Anchor_ShouldAdvanceCutsceneTextLocal in z_message_PAL.c
-    // hook. Refreshes per textId so multi-page cutscenes don't double-
-    // consume the same advance signal.
-    bool     cutsceneTextAdvanceConsumed = false;
-    uint16_t cutsceneTextAdvanceConsumedTextId = 0;
+    // Design E v5 — counter-based pending advances for cutscene
+    // textbox chain. Replaces the earlier boolean
+    // `cutsceneTextAdvanceConsumed` flag which lost broadcasts when
+    // back-to-back TEXT_ADVANCED packets arrived faster than the
+    // consumers (Fix S/T helper OR CutsceneBridge in AWAIT_NEXT case)
+    // could process them. Log 646 P2 showed 5 broadcasts collapse
+    // into only 3 advances because 2 broadcasts arrived while peer's
+    // msgMode was DISPLAYING (rendering) → flag re-set to true
+    // (no-op — was already true) → still only ONE advance when peer
+    // finally reached AWAIT_NEXT again.
+    //
+    // Semantics with counter:
+    //   Setter sites (HandlePacket_CutsceneTextAdvanced peer receive,
+    //   HandlePacket_CutsceneTextAdvance all-pressed, TickCutsceneText-
+    //   Advance hard-deadline):
+    //     - if textId matches cutsceneTextAdvancePendingTextId: count++
+    //     - else: reset count to 1 and update textId (stale count for
+    //       old textId is dropped — msgMode has moved on)
+    //     - clamp at UINT8_MAX (255) to prevent overflow; in practice
+    //       count rarely exceeds 3-5.
+    //
+    //   Consumer sites (Fix S/T helper's ApplyForcedSubTextAdvance-
+    //   IfInAwaitNext, CutsceneBridge consumed-flag return-1 path):
+    //     - when count > 0 AND textId matches: count--, treat as
+    //       "advance fired."
+    //
+    //   Stale-textId drop (CutsceneBridge line ~127-130):
+    //     - when count > 0 AND textId does NOT match current: reset
+    //       count to 0. The mismatched flag was for a prior textbox
+    //       already advanced past.
+    uint8_t  cutsceneTextAdvancePendingCount = 0;
+    uint16_t cutsceneTextAdvancePendingTextId = 0;
 
     // CUTSCENE_START / CUTSCENE_END edge-detector state. Tracks
     // last-frame values so the detector fires once per transition.
@@ -1534,6 +1719,278 @@ class Anchor : public Network {
     // sent OR received a START for; used for both send-side dedup
     // and receive-side "already started" idempotency.
     std::set<std::string> cutsceneStartActive;
+
+    // Fix G — sibling set that ONLY tracks cutscenes THIS client
+    // originated (i.e., we called SendPacket_CutsceneStart for them).
+    // Peer-received CUTSCENE_START broadcasts + late-join FRAME_SYNC
+    // hydration insert into `cutsceneStartActive` but NOT into this
+    // set. The leader-identity gate in the catchup ledger uses this
+    // set to distinguish "I am the leader" from "I know a cutscene
+    // is running somewhere". Without this, a peer's stale
+    // Player_InCsMode + room-host status could make it a phantom
+    // leader for a cutscene it did not originate (log 629 P2 line
+    // 856). See Analysis/cutscene_late_join_bugs_deep_analysis_
+    // 2026-07-08.md Bug 2.
+    std::set<std::string> cutsceneStartActiveLocalOrigin;
+
+    // ----- Cutscene late-join / catch-up (Option B v1) -----------------
+    // Plan: Claude/Plans/cutscene_late_join_plan.md.
+    //
+    // The ledger accumulates observable side effects on the LEADER's
+    // client while a cutscene is running. Populated by hooks gated on
+    // Play_InCsMode (OnActorSpawn / OnFlagSet / OnItemReceive / music
+    // command). Cleared on CUTSCENE_END for the same kind.
+    //
+    // On a late-joiner scene-entry, if we detect a peer mid-cutscene
+    // in our scene, we send CUTSCENE_CATCHUP_REQUEST; the leader
+    // replies with a CUTSCENE_CATCHUP_RESPONSE built from this ledger
+    // + snapshot data. Late-joiner applies the delta, seeks audio,
+    // jumps csCtx.frames to leader.frame, and resumes vanilla playback.
+    //
+    // Types are defined in Common/CutsceneCatchup.h to keep this header
+    // small (mirror of Common/EnforcedCVarRegistry pattern).
+    std::unordered_map<std::string /* csKind:csKey */,
+                       std::unique_ptr<::CutsceneCatchup::CutsceneCatchupEntry>>
+        cutsceneCatchupLedger;
+
+    // Late-joiner state — one entry per pending catchup. Multiple
+    // concurrent catchups on the same client are rare but possible
+    // (peer A in cutscene X, peer B in cutscene Y, we scene-transition
+    // into a room where both are visible). Map keyed by "<csKind>:<csKey>"
+    // supports per-cutscene deadline tracking + independent completion.
+    // See Analysis/cutscene_entry_gate_design_2026-07-07.md §5.
+    struct PendingCatchup {
+        std::chrono::steady_clock::time_point deadline;
+        uint32_t leaderClientId = 0;  // who we sent the REQUEST to
+    };
+    std::unordered_map<std::string /* kindKey */, PendingCatchup>
+        pendingCatchups;
+
+    // Sequence numbers for CUTSCENE_FRAME_SYNC ordering (Pitfall 43).
+    // Reset in OnSceneSpawnActors so both counters stay small.
+    uint64_t cutsceneFrameSyncSequence = 0;
+    uint64_t peerLastAppliedCutsceneFrameSeq = 0;
+
+    // Cutscene catchup silent fast-forward target (Option B v1).
+    // Analysis: Claude/Analysis/cutscene_catchup_p2_engagement_2026-07-07.md.
+    //
+    // When ApplyCatchupDelta receives a CATCHUP_RESPONSE, it sets this
+    // to the leader's current frame. TickCutsceneCatchup then invokes
+    // vanilla's cutscene tick (func_800645A0) up to kMaxTicksPerRealFrame
+    // extra times per game-thread tick until csCtx.frames catches up.
+    // Vanilla's frame-linear dispatch means each intermediate frame's
+    // setup commands fire correctly (camera cache, Player teleport,
+    // dialogue open/close, flag sets, item grants, actor spawns) —
+    // fixing the "black bars but nothing works" bug seen in field
+    // test 622. 0 = not fast-forwarding.
+    int32_t catchupFastForwardTarget = 0;
+
+    // Fix N + N.2 — leader's textbox + Link position stashed by
+    // ApplyCatchupDelta from the CUTSCENE_CATCHUP_RESPONSE payload.
+    // Consumed by TickCutsceneCatchup the moment fast-forward
+    // reaches target (csCtx.frames >= catchupFastForwardTarget).
+    // Peer opens the matching textbox (Message_StartTextbox) so
+    // vanilla's rewind mechanism holds it there instead of
+    // advancing past leader; peer's Link is teleported to leader's
+    // world position. See Analysis/cutscene_overshoot_and_teleport_
+    // 2026-07-08.md.
+    uint16_t catchupPendingMsgTextId = 0;
+    struct { float x, y, z; } catchupPendingPlayerPos = { 0.0f, 0.0f, 0.0f };
+    int16_t  catchupPendingPlayerYaw = 0;
+    bool     catchupPendingPlayerPosValid = false;
+    // Fix P.1 — leader's roomNum at snapshot. Peer's Fix N.2
+    // teleport gates on curRoom == pending roomNum. -1 = absent
+    // (older-build leader or snapshot without room info).
+    int8_t   catchupPendingRoomNum = -1;
+
+    // Bug 13 fix — persisted teleport request. When Fix P.2 detects
+    // curRoom != leaderRoomNum, initiate a room load via
+    // func_8009728C and defer the teleport by up to a few frames.
+    // Applied by TickCutsceneCatchup once curRoom == pendingSwitchTarget.
+    // -1 = no pending switch.
+    int8_t   catchupPendingRoomSwitchTarget = -1;
+    struct { float x, y, z; } catchupDeferredTeleportPos = { 0.0f, 0.0f, 0.0f };
+    int16_t  catchupDeferredTeleportYaw = 0;
+    bool     catchupDeferredTeleportValid = false;
+
+    // Bug 14 fix — leader's per-frame chain-depth tracker. Increments
+    // when msgCtx.msgLength changes while msgCtx.textId stays the
+    // same (indicates vanilla loaded next sub-textbox via
+    // Message_ContinueTextbox). Reset when textId changes. Captured
+    // by SnapshotCamera and shipped as leaderMsgChainDepth. Peer
+    // stores in catchupPendingMsgChainDepth for post-fast-forward
+    // Message_ContinueTextbox loop.
+    uint16_t leaderMsgChainDepthCurrent = 0;
+    uint16_t leaderChainTrackerLastTextId = 0;
+    uint16_t leaderChainTrackerLastMsgLen = 0;
+    uint16_t catchupPendingMsgChainDepth = 0;
+
+    // Design E v3 — shadow field tracking the msgBufPos value at the
+    // START of the current sub-textbox (i.e., the position Message_
+    // Decode last used as its starting read point). Used by
+    // SnapshotCamera in place of the live msgBufPos to ship a value
+    // peer can decode from cleanly.
+    //
+    // WHY THE SHADOW: live msgCtx.msgBufPos captured mid-DISPLAYING
+    // or during AWAIT_NEXT points AT the BOX_BREAK byte of the sub
+    // currently being displayed. Peer's Message_Decode from that
+    // position reads BOX_BREAK, exits with empty content (see
+    // z_message_PAL.c:2380-2412), and shows no text. The shadow
+    // instead tracks the "start of sub" position — updated at the
+    // moment Fix S/T (or vanilla's advance path via cutsceneText-
+    // AdvanceConsumed → CutsceneBridge → line 4655) increments
+    // msgBufPos past a BOX_BREAK.
+    //
+    // Updated in:
+    //   - Fix S/T helper TryConsumePendingSubTextAdvance —
+    //     after msgBufPos++, save new msgBufPos as the shadow.
+    //   - TickCutsceneCatchup's chain-depth tracker — reset to 0
+    //     when leaderChainTrackerLastTextId transitions (new base
+    //     textbox opens, so Message_StartTextbox resets msgBufPos
+    //     to 0 and the first sub starts at 0).
+    //
+    // Snapshotted by:
+    //   - SnapshotCamera → entry->leaderMsgBufPos (Common/Cutscene-
+    //     Catchup.cpp).
+    uint16_t leaderMsgBufPosLastSubStart = 0;
+
+    // Design E — peer-side landing state for leader's msgBufPos +
+    // msgMode. Populated from CUTSCENE_CATCHUP_RESPONSE payload in
+    // ApplyCatchupDelta. Consumed by TickCutsceneCatchup's Fix N block
+    // immediately after Message_StartTextbox(catchupPendingMsgTextId)
+    // — force-writes gPlayState->msgCtx.msgBufPos + msgMode so
+    // vanilla's next Message_Update dispatches NEXT_MSG case, calls
+    // Message_Decode from the new position, and lands peer at
+    // leader's sub-textbox. Retires the Bug 14 Message_ContinueTextbox
+    // loop which was a broken primitive. See Analysis/cutscene_
+    // catchup_dialogue_chain_design_gap_2026-07-08.md §7 Design E.
+    uint16_t catchupPendingMsgBufPos = 0;
+    uint8_t  catchupPendingMsgMode   = 0;
+
+    // Fix R — continuous re-target on textId mismatch. After fast-forward
+    // completes on a peer, the leader may have already advanced past the
+    // snapshot frame (through a camera pan into the next textbox). Peer
+    // sits at the stale target; user perceives "auto-advance stopped."
+    // TickCutsceneCatchup polls: when peer is in-cutscene, fast-forward
+    // is idle, leader's ongoing CUTSCENE_TEXT_VOTE_STATE broadcasts carry
+    // a msgTextId ≠ peer's local msgCtx.textId, and the rate-limit has
+    // expired, fire a fresh CUTSCENE_CATCHUP_REQUEST. Self-limiting:
+    // stops once textIds match. Rate-limited to prevent request storms
+    // when the leader legitimately holds on a textbox for a long time.
+    std::chrono::steady_clock::time_point catchupLastReTargetRequestAt =
+        std::chrono::steady_clock::time_point::min();
+
+    // Variant C.2.2 (2026-07-09) — scene-entry REQUEST delay.
+    //
+    // Log 653 review showed that even a clean single-cycle catchup
+    // (variant C.2.1) still teleports peer to leader's cutscene coords
+    // within ~1 s of scene entry. User feedback: this feels like an
+    // "instant teleport" through the scene-transition fade — peer never
+    // gets to see their own room-entrance view.
+    //
+    // Fix: after OnSceneSpawnActors fires, arm this timestamp. TickCutscene-
+    // Catchup polls each tick and only fires DetectAndRequestCutsceneCatchup
+    // once the configured delay (default 1000 ms) has elapsed. The
+    // network REQUEST/RESPONSE round-trip and fast-forward all happen
+    // AFTER the delay, giving the fade-in and initial room render time
+    // to complete before catchup engages.
+    //
+    // Only the OnSceneSpawnActors-triggered path is delayed. FRAME_SYNC
+    // direct-request (HandlePacket_CutsceneFrameSync) fires immediately
+    // because that path is for peers already in the scene when a
+    // cutscene starts — no fade-in / room-entrance window to preserve.
+    //
+    // time_point::min() = disarmed. Reset on TickCutsceneCatchup after
+    // the delayed call, and on OnSceneEnd (session teardown).
+    std::chrono::steady_clock::time_point catchupRequestGateArmedAt =
+        std::chrono::steady_clock::time_point::min();
+
+    // Variant C.2.3 (2026-07-09) — fade-to-white overlay driven by the
+    // catchup pipeline. Hides the fast-forward + teleport visual chaos
+    // behind a screen fill so the user doesn't see camera jumps, Link
+    // teleporting, or any transient curRoom.segment null-out.
+    //
+    // Lifecycle (transitions in TickCutsceneCatchup's UpdateCatchupFade-
+    // Overlay):
+    //   INACTIVE           → FADING_TO_WHITE at OnSceneSpawnActors when
+    //                        HasSameSceneMidCsPeer() is true (paired with
+    //                        catchupRequestGateArmedAt).
+    //   FADING_TO_WHITE    → HOLDING_WHITE after ~300 ms fade animation.
+    //   HOLDING_WHITE      → FADING_FROM_WHITE once the entire catchup
+    //                        pipeline is idle for ~200 ms (safety
+    //                        debounce so we don't fade in mid-fast-
+    //                        forward).
+    //   FADING_FROM_WHITE  → INACTIVE after ~500 ms fade animation.
+    //   Any state          → FADING_FROM_WHITE via 8 s safety timeout
+    //                        (prevents a stuck fade from freezing the
+    //                        screen forever).
+    //
+    // Rendering: envCtx.fillScreen + screenFillColor (native OoT
+    // mechanism, same as Cutscene_Command_TransitionFX). Update runs at
+    // END of TickCutsceneCatchup so it's the last write for the frame
+    // and vanilla cutscene-command fades don't clobber it during
+    // fast-forward.
+    //
+    // Gate CVar: gEnhancements.Anchor.CutsceneLateJoinFadeOverlay
+    // (default 1). Set to 0 to disable the fade entirely.
+    enum class CatchupFadeState : uint8_t {
+        INACTIVE = 0,
+        FADING_TO_WHITE,
+        HOLDING_WHITE,
+        FADING_FROM_WHITE,
+    };
+    CatchupFadeState catchupFadeState = CatchupFadeState::INACTIVE;
+    std::chrono::steady_clock::time_point catchupFadeStateChangedAt =
+        std::chrono::steady_clock::time_point::min();
+    std::chrono::steady_clock::time_point catchupFadeHoldIdleSince =
+        std::chrono::steady_clock::time_point::min();
+
+    // Cheap same-scene mid-cs peer scan. Returns true iff there is at
+    // least one online, save-loaded, same-scene, same-timeline, same-
+    // team peer whose csCtxState is non-IDLE. Used to gate arming of
+    // catchupRequestGateArmedAt + catchupFadeState so we don't run the
+    // 1 s delay + fade overlay when no peer is actually mid-cutscene.
+    bool HasSameSceneMidCsPeer() const;
+
+    // Variant C.2 (2026-07-09) — deferred RESPONSE application when the
+    // peer's local room isn't yet fully loaded at RESPONSE-arrival time.
+    // Extends Variant C's teleport-only gate to cover the entire delta
+    // apply pipeline: music seek, per-kind setup, fast-forward arm.
+    //
+    // Without this deferral, the catchup pipeline engages ~100-300 ms
+    // after peer walks through a doorway into a room where a same-team
+    // peer is mid-cutscene. During that window vanilla's scene-transition
+    // fade-in is still in flight; the user sees the completed catchup
+    // state (camera at leader's cutscene view, Link teleported) rather
+    // than their own room-entrance view. Deferring to
+    // IsCurrentRoomFullyLoaded()+stability lets the transition visually
+    // complete before catchup engages.
+    //
+    // Payload is stored verbatim as JSON to survive the deferral window
+    // without requiring the pendingCatchups entry to hold it. Kind-key
+    // is captured so TickCutsceneCatchup can erase the pendingCatchups
+    // entry when the deferred apply fires.
+    //
+    // 2 s safety timeout matches ApplyDeferredTeleportIfReady semantics
+    // (better a stale-context apply than an infinite hang).
+    bool catchupDeltaDeferred = false;
+    nlohmann::json catchupDeltaDeferredPayload;
+    std::string catchupDeltaDeferredKindKey;
+    std::chrono::steady_clock::time_point catchupDeltaDeferredArmedAt =
+        std::chrono::steady_clock::time_point::min();
+
+    // Fix O — cutscene-originator clientId per active kindKey.
+    // Populated by SendPacket_CutsceneStart (self origin) and by
+    // HandlePacket_CutsceneStart / FRAME_SYNC hydration (peer
+    // origin via relay-stamped clientId). Cleared on
+    // Send/HandlePacket_CutsceneEnd. Vote-skip authority uses this
+    // instead of room-host when a cutscene is active so peers in
+    // different rooms during a shared cutscene still coordinate
+    // through a single authoritative host. See
+    // Analysis/cutscene_room_desync_and_vote_scope_2026-07-08.md
+    // Bug 10.
+    std::unordered_map<std::string /* kindKey */, uint32_t /* clientId */>
+        cutsceneOriginatorByKindKey;
 
     // Heartbeat (#194 follow-up) — two-axis liveness signal.
     //

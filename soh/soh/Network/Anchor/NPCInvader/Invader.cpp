@@ -1029,6 +1029,28 @@ void TickFOLLOW(EnInvader* this_, PlayState* play) {
 // always sees an empty path and nudges straight at the target. As
 // future state transitions land STUCK with a populated path, the
 // path-aware nudge takes over without code change.
+// Hostile-themed sparkle burst for AI Invader teleports. Deep red
+// primary with darker glow — reads as "malicious / hostile magic",
+// deliberately distinct from the peer-color palette used for friendly
+// teleports (cutscene late-join, Anchor player teleport, AI Player
+// Follower, NPC Follower). Palette values are tentative; can be
+// promoted to a CVar or InvaderTunables entry if we get user
+// preference feedback.
+constexpr uint8_t kInvaderSparklePrimR = 180;
+constexpr uint8_t kInvaderSparklePrimG = 40;
+constexpr uint8_t kInvaderSparklePrimB = 40;
+constexpr uint8_t kInvaderSparkleEnvR  = 70;
+constexpr uint8_t kInvaderSparkleEnvG  = 15;
+constexpr uint8_t kInvaderSparkleEnvB  = 15;
+
+static void BroadcastInvaderSparkles(float x, float y, float z) {
+    if (Anchor::Instance == nullptr) return;
+    Anchor::Instance->SendPacket_TeleportEffect(
+        x, y, z,
+        kInvaderSparklePrimR, kInvaderSparklePrimG, kInvaderSparklePrimB,
+        kInvaderSparkleEnvR,  kInvaderSparkleEnvG,  kInvaderSparkleEnvB);
+}
+
 // Teleport callback for the shared StuckRecovery dispatch — invoked
 // for cycle 3+ (or vertical-dominant cycle 2+) escalation. Inline
 // pos write + BG check + path reset (Invader has no cross-scene
@@ -1037,8 +1059,11 @@ static void StuckTeleportCallback(void* user, Actor* actor, PlayState* play,
                                    const Vec3f& dest, const char* reason) {
     (void)user;
     (void)reason;
+    BroadcastInvaderSparkles(actor->world.pos.x, actor->world.pos.y,
+                              actor->world.pos.z);
     actor->world.pos = dest;
     actor->speedXZ   = 0.0f;
+    BroadcastInvaderSparkles(dest.x, dest.y, dest.z);
     Actor_UpdateBgCheckInfo(play, actor, 26.0f, 10.0f, 50.0f, 4);
     sLocalInvNav.navState.path.Reset();
     sLocalInvNav.navState.lastPathRefreshFrame = 0;
@@ -1841,8 +1866,10 @@ bool TryFireG10Invader(EnInvader* this_, PlayState* play) {
                 "(>{}u for >{}ms) → snap to target",
                 dist3D, sLocalInvNav.leashFrames,
                 (int)kInvLeashDistance, kInvLeashTimeoutMs);
+    BroadcastInvaderSparkles(a->world.pos.x, a->world.pos.y, a->world.pos.z);
     a->world.pos = target->world.pos;
     a->speedXZ   = 0.0f;
+    BroadcastInvaderSparkles(a->world.pos.x, a->world.pos.y, a->world.pos.z);
     sLocalInvNav.leashFrames        = 0;
     sLocalInvNav.stuckCheckPos      = a->world.pos;
     sLocalInvNav.lastStuckCheckFrame =
@@ -2921,8 +2948,10 @@ bool TryFireG14Invader(EnInvader* this_, PlayState* play) {
                 "progress={:.1f}u over {} frames (<{}u in {}ms) → snap to target",
                 dist3D, progress, sLocalInvNav.closeFailFrames,
                 (int)kInvCloseFailProgressDelta, kInvCloseFailTimeoutMs);
+    BroadcastInvaderSparkles(a->world.pos.x, a->world.pos.y, a->world.pos.z);
     a->world.pos = target->world.pos;
     a->speedXZ   = 0.0f;
+    BroadcastInvaderSparkles(a->world.pos.x, a->world.pos.y, a->world.pos.z);
     sLocalInvNav.closeFailFrames   = 0;
     sLocalInvNav.closeFailBaseline = 0.0f;
     sLocalInvNav.leashFrames       = 0;

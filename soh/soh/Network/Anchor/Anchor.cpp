@@ -3,6 +3,7 @@
 #include "ItemDropNetId.h"     // #243.7.2 — explicit (was transitive via Anchor.h)
 #include "AIDirector/Director.h"
 #include "Common/AnchorNavExt.h"  // B.4 — per-navigator nav state extension
+#include "Common/CutsceneCatchup.h"  // full type for out-of-line ~Anchor()
 #include "Common/PacketSchemas.h"
 #include "Common/TitlePeerFormation.h"  // SpawnTitlePeerLink formation math
 #include "WorldStateSync/WorldStateSync.h"
@@ -269,6 +270,24 @@ void Anchor::OnConnected() {
         // via WORLD_STATE_SNAPSHOT; merge is idempotent so first vs.
         // reconnect-after-state-buildup paths converge.
         WorldStateSync::SendRequestWorldState();
+
+        // Late-join cutscene catchup — arm the request gate so that
+        // ~1 s from now (once we've received PLAYER_UPDATE from peers
+        // and populated `clients[].csCtxState`, plus any live FRAME_SYNC
+        // has hydrated cutsceneStartActive), TickCutsceneCatchup fires
+        // DetectAndRequestCutsceneCatchup. If a peer is mid-cutscene
+        // in our scene, we send a CUTSCENE_CATCHUP_REQUEST and receive
+        // the delta.
+        //
+        // Without this, DetectAndRequestCutsceneCatchup only fires on
+        // OnSceneSpawnActors — peers who connect while already IN the
+        // cutscene scene (dev-tool warp / return-to-save state) would
+        // never trigger detection until they leave and re-enter.
+        //
+        // See Claude/Analysis/lost_woods_savecontext_no_handler_2026-07-13.md
+        // "players that come online after the cutscene started" ask.
+        catchupRequestGateArmedAt = std::chrono::steady_clock::now();
+        SPDLOG_INFO("[Anchor] Late-join cutscene catchup gate armed on connect");
     }
 }
 
@@ -352,6 +371,14 @@ void Anchor::BroadcastJsonToScenePeers(nlohmann::json& payload) {
 // 51-entry std::unordered_map with string keys (the wire-format
 // constants from `Common/PacketSchemas.h`).
 //
+// Out-of-line destructor — required so the implicit dtor of
+// cutsceneCatchupLedger (unordered_map<string,
+// unique_ptr<CutsceneCatchupEntry>>) is instantiated in a TU where
+// CutsceneCatchupEntry is complete. Declared in Anchor.h public
+// section; defined here so `#include "Common/CutsceneCatchup.h"`
+// above provides the full type.
+Anchor::~Anchor() = default;
+
 // Per Plans/decoupling_gap_audit_2026-05-16.md §13.5 (filed as #198):
 // the registry's lookup-miss branch is the natural home for the
 // terminal "unknown packet type" warning. The previous 50-branch
@@ -372,11 +399,20 @@ Anchor::GetPacketHandlerRegistry() {
         { DIALOG_END,              &Anchor::HandlePacket_DialogEnd             },
         { BOSS_GOMA_LOOKED_AT,     &Anchor::HandlePacket_BossGomaLookedAt      },
         { MIDO_POST_DEKU_LEAVE,    &Anchor::HandlePacket_MidoPostDekuLeave     },
+        { TELEPORT_EFFECT,         &Anchor::HandlePacket_TeleportEffect        },
+        // DIALOG_CHOICE_* (2026-07-09) — MP choice-textbox vote system.
+        { DIALOG_CHOICE_VOTE,        &Anchor::HandlePacket_DialogChoiceVote        },
+        { DIALOG_CHOICE_VOTE_STATE,  &Anchor::HandlePacket_DialogChoiceVoteState   },
+        { DIALOG_CHOICE_APPLIED,     &Anchor::HandlePacket_DialogChoiceApplied     },
         { TALON_CASTLE_STATE,      &Anchor::HandlePacket_TalonCastleState      },
         { HYRULE_CASTLE_GATE_OPEN, &Anchor::HandlePacket_HyruleCastleGateOpen  },
         { CUTSCENE_START,          &Anchor::HandlePacket_CutsceneStart         },
         { CUTSCENE_END,            &Anchor::HandlePacket_CutsceneEnd           },
         { CUTSCENE_TEXT_VOTE_STATE, &Anchor::HandlePacket_CutsceneTextVoteState },
+        // Late-join catchup — Plans/cutscene_late_join_plan.md.
+        { CUTSCENE_FRAME_SYNC,       &Anchor::HandlePacket_CutsceneFrameSync       },
+        { CUTSCENE_CATCHUP_REQUEST,  &Anchor::HandlePacket_CutsceneCatchupRequest  },
+        { CUTSCENE_CATCHUP_RESPONSE, &Anchor::HandlePacket_CutsceneCatchupResponse },
         { ITEM_DROP_SYNC,          &Anchor::HandlePacket_ItemDropSync          },
         { ITEM_COLLECTED,          &Anchor::HandlePacket_ItemCollected         },
         { ITEM_DROP_SNAPSHOT,      &Anchor::HandlePacket_ItemDropSnapshot      },
@@ -1140,7 +1176,15 @@ void Anchor::BackfillEnemyNetIds() {
         Actor* actor = gPlayState->actorCtx.actorLists[kSyncableActorCategories[i]].head;
         while (actor != nullptr) {
             // Use the same admission predicate OnActorSpawn uses.
+            // Per-variant skip guards must ALSO mirror OnActorSpawn —
+            // without this, a reconnect retroactively assigns netIds
+            // to variants OnActorSpawn intentionally skipped (Dekunuts
+            // flower, Hintnut reveal-child, Honotrap flame). The
+            // resulting netId collision with the parent variant caused
+            // the 2026-07-13 hint nut reflect-stun desync. See
+            // Claude/Analysis/hintnut_reflect_stun_desync_2026-07-13.md.
             if (IsSyncableActor(actor) &&
+                !ShouldSkipNetIdAssignment(actor) &&
                 ObjectExtension::GetInstance().Get<EnemyNetId>(actor) == nullptr) {
                 // Single source of truth for the netId encoding lives in
                 // ActorSyncHelpers::EncodeEnemyNetId. Both this backfill path

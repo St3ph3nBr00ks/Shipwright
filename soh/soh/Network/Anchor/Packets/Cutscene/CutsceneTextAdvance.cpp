@@ -1,8 +1,12 @@
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/Anchor/Bridge/AnchorMessageBridge.h"
 #include "soh/Network/Anchor/Common/PacketTimeline.h"
+#include "soh/Network/Anchor/Common/RecentlyConsumedVotes.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/cvar_prefixes.h"
+#include <algorithm>
 #include <nlohmann/json.hpp>
+#include <vector>
 #include <libultraship/libultraship.h>
 
 extern "C" {
@@ -48,6 +52,12 @@ namespace {
 
 constexpr int kDefaultInitialDurationMs   = 5000;
 constexpr int kDefaultPerPressReductionMs = 1000;
+// MP dialogue hard deadline — matches solo vanilla auto-advance so
+// dialogue never stays open longer than the solo experience. Vote-
+// skip runs as an inner-bound (min against this) so late presses
+// don't extend the wait. Design: Claude/Analysis/cutscene_ff_reset_
+// and_mp_dialogue_deadline_2026-07-08.md §2.
+constexpr int kDefaultHardDeadlineMs      = 10000;
 
 int GetCutsceneInitialDurationMs() {
     return CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.InitialDurationMs"),
@@ -57,6 +67,151 @@ int GetCutsceneInitialDurationMs() {
 int GetCutscenePerPressReductionMs() {
     return CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.PerPressReductionMs"),
                           kDefaultPerPressReductionMs);
+}
+
+int GetCutsceneHardDeadlineMs() {
+    return CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.HardDeadlineMs"),
+                          kDefaultHardDeadlineMs);
+}
+
+// Design E v5 helper — record a pending advance for a given textId.
+// If textId matches the current pending textId, increment the count
+// (clamped at 255 to prevent overflow). If it differs, reset count
+// to 1 and switch to the new textId (the prior count was stale —
+// msgMode has moved on). Called from every setter site: HandlePacket_
+// CutsceneTextAdvance all-pressed, HandlePacket_CutsceneTextAdvanced
+// (peer receive), TickCutsceneTextAdvance hard-deadline. See
+// Anchor.h cutsceneTextAdvancePendingCount doc for full rationale.
+void RecordPendingAdvance(uint16_t textId, const char* siteTag) {
+    if (Anchor::Instance == nullptr) return;
+    auto* anchor = Anchor::Instance;
+    if (anchor->cutsceneTextAdvancePendingTextId == textId &&
+        anchor->cutsceneTextAdvancePendingCount > 0) {
+        if (anchor->cutsceneTextAdvancePendingCount < 255) {
+            anchor->cutsceneTextAdvancePendingCount++;
+        }
+    } else {
+        anchor->cutsceneTextAdvancePendingCount = 1;
+        anchor->cutsceneTextAdvancePendingTextId = textId;
+    }
+    SPDLOG_INFO("[CutsceneTextAdvance] Design E v5 — pending advance "
+                "recorded ({}) for textId=0x{:04X} count={}",
+                siteTag, (unsigned)textId,
+                (int)anchor->cutsceneTextAdvancePendingCount);
+}
+
+// Fix S / Fix T helper — replicate vanilla's AWAIT_NEXT sub-textbox
+// advance transition directly. Called from top-of-tick (Fix S: catches
+// flags set from network-thread packet handlers) and inline from the
+// game-thread hard_deadline flag-setter (Fix T: same-tick race with
+// top-of-tick check because the setter runs AFTER the check).
+//
+// Vanilla's mechanism to advance a multi-part cutscene textbox
+// (delimited by MESSAGE_BOX_BREAK control codes) is
+// z_message_PAL.c:4651-4657 :
+//
+//   case MSGMODE_TEXT_AWAIT_NEXT:
+//       if (Message_ShouldAdvance(play)) {
+//           msgCtx->msgMode = MSGMODE_TEXT_NEXT_MSG;
+//           msgCtx->textUnskippable = false;
+//           msgCtx->msgBufPos++;
+//       }
+//       break;
+//
+// SoH routes Message_ShouldAdvance through
+// Anchor_ShouldAdvanceCutsceneTextLocal (CutsceneBridge.cpp), which
+// returns 1 when the vote-skip TEXT_ADVANCED broadcast has been
+// consumed. That should trigger the vanilla transition — but logs
+// 638 + 639 show the vanilla transition silently does not stick on
+// the host. This helper explicitly performs the transition when
+// msgMode is AWAIT_NEXT, then clears the consume flag so vanilla's
+// later Message_ShouldAdvance poll (if it fires) does not
+// double-advance msgBufPos.
+//
+// Race-safety: always called from the game thread (either at the top
+// of TickCutsceneTextAdvance, or inline from the hard_deadline
+// branch of the same tick). Message_Update also runs on the game
+// thread later in Play_Update (z_play.c:1295) — deterministic
+// ordering, no torn writes to msgCtx.
+//
+// Idempotent — msgMode moves out of AWAIT_NEXT after the first fire.
+// The decrement of cutsceneTextAdvancePendingCount is what makes the helper
+// safe to call at multiple sites within the same tick; subsequent
+// calls no-op on the same broadcast.
+void TryConsumePendingSubTextAdvance(const char* siteTag) {
+    if (gPlayState == nullptr) return;
+    auto* anchor = Anchor::Instance;
+    if (anchor == nullptr) return;
+    if (anchor->cutsceneTextAdvancePendingCount == 0) return;
+
+    const uint16_t textId = anchor->cutsceneTextAdvancePendingTextId;
+    const int priorMsgBufPos = (int)gPlayState->msgCtx.msgBufPos;
+
+    // Delegate the vanilla-mirror msgCtx write to the bridge. Returns
+    // false if msgMode isn't AWAIT_NEXT or textId doesn't match; we
+    // then leave the pending count alone and try again next tick.
+    if (!AnchorMessageBridge::TryForceSubTextboxAdvance(textId)) return;
+
+    anchor->cutsceneTextAdvancePendingCount--;
+    SPDLOG_INFO("[CutsceneTextAdvance] Fix S/T ({}) — force AWAIT_NEXT→"
+                "NEXT_MSG for textId=0x{:04X} msgBufPos={} → {} "
+                "(pending remaining after decrement={})",
+                siteTag, (unsigned)textId, priorMsgBufPos,
+                (int)gPlayState->msgCtx.msgBufPos,
+                (int)anchor->cutsceneTextAdvancePendingCount);
+}
+
+// True when the local client is in a cutscene text state — the
+// vanilla textbox is loaded and displayed as part of an ongoing
+// cutscene. Used by the host to detect textbox-open edges and start
+// the hard deadline timer.
+//
+// Predicates:
+//   - Play_InCsMode: cutscene active (csCtx.state != IDLE OR
+//     player linkAction non-null).
+//   - msgCtx.msgMode != MSGMODE_NONE: message subsystem has an
+//     active textbox loaded / displaying.
+//   - msgCtx.textId != 0: sanity check that textId is a valid
+//     dialogue reference.
+bool IsHostInCutsceneTextState() {
+    if (gPlayState == nullptr) return false;
+    if (!Play_InCsMode(gPlayState)) return false;
+    if (gPlayState->msgCtx.msgMode == MSGMODE_NONE) return false;
+    if (gPlayState->msgCtx.textId == 0) return false;
+    return true;
+}
+
+// Diag 1 helper — snapshot the vanilla state that drives the vote-state
+// transition. Called from the host tick and from HandlePacket sites so
+// every state.active transition is paired with a "why" log line the log
+// 625 investigation identified as missing. Gated on
+// gEnhancements.Anchor.CutsceneLateJoinDiag so production logs stay clean.
+// See Analysis/cutscene_ff_reset_and_mp_dialogue_deadline_2026-07-08.md
+// Bug 1 "same textId reopen" hypothesis.
+void LogVoteStateTransitionReason(const char* reason,
+                                   bool priorActive, bool newActive,
+                                   uint16_t priorTextId, uint16_t newTextId) {
+    if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"), 0) == 0) {
+        return;
+    }
+    if (gPlayState == nullptr) return;
+    const int  msgMode      = (int)gPlayState->msgCtx.msgMode;
+    const unsigned msgTextId = (unsigned)gPlayState->msgCtx.textId;
+    const int  csState      = (int)gPlayState->csCtx.state;
+    const int  csFrames     = (int)gPlayState->csCtx.frames;
+    const bool inCsMode     = Play_InCsMode(gPlayState);
+    const bool inTextState  = IsHostInCutsceneTextState();
+    // msgLength + Message_GetState — needed to distinguish
+    // "cleared" from "stale" msgCtx states (Fix L.2 diagnosis).
+    const int msgLength = (int)gPlayState->msgCtx.msgLength;
+    const int msgGetState = (int)Message_GetState(&gPlayState->msgCtx);
+    SPDLOG_INFO("[VoteState.diag] reason={} active {}→{} textId 0x{:04X}→0x{:04X} "
+                "| Play_InCsMode={} inTextState={} msgMode={} msgTextId=0x{:04X} "
+                "msgLen={} Message_GetState={} csState={} csFrames={}",
+                reason, (int)priorActive, (int)newActive,
+                (unsigned)priorTextId, (unsigned)newTextId,
+                (int)inCsMode, (int)inTextState, msgMode, msgTextId,
+                msgLength, msgGetState, csState, csFrames);
 }
 
 // Count team members currently in the same scene + same timeline +
@@ -97,6 +252,76 @@ size_t CountInSceneTeamSize() {
     return count;
 }
 
+// Fix E → J.b — file-scope suppression state shared between
+// TickCutsceneTextAdvance (timer-elapsed path) and
+// HandlePacket_CutsceneTextAdvance (all-pressed path). Both forced-
+// advance paths arm this so the open-edge branch in the tick
+// suppresses reopen for the same textId during vanilla's message-
+// pipeline teardown window.
+//
+// Fix E (superseded by J.b): pure-time cooldown of 750 ms. Log 630
+// showed vanilla msgMode stuck at 52 for >800 ms, causing the reopen
+// to fire just past the cooldown (Bug 4). See
+// Analysis/cutscene_savecontext_double_broadcast_2026-07-08.md Bug 4.
+//
+// Fix J.b: semantic-gate replacement. Suppression is lifted only when
+// vanilla's `msgCtx.msgMode` has reached `MSGMODE_NONE` at least once
+// since the forced advance was armed (the semantic signal that vanilla
+// has actually processed the advance and closed its textbox), OR when
+// `curTextId` differs from the advanced textId (a genuinely new
+// textbox). A safety-net timeout of 5 s catches pathological cases
+// where vanilla never returns to NONE — well beyond any legitimate
+// vanilla close window (~30-100 ms in normal cutscenes).
+uint16_t sLastForcedAdvanceTextId = 0;
+bool sLastForcedAdvanceMsgModeReachedNone = false;
+std::chrono::steady_clock::time_point sLastForcedAdvanceAt =
+    std::chrono::steady_clock::time_point::min();
+constexpr int kForcedAdvanceMaxWaitMs = 5000;
+
+// Straggler-vote dedup — shared with the choice-vote system via
+// Common/RecentlyConsumedVotes.h. Log 655 originally motivated the
+// pattern; the choice-vote system reuses the exact same mechanism.
+// See Analysis/vote_skip_straggler_bug_2026-07-09.md for the why-chain
+// and the shared header for the drop-window + purge-window defaults.
+RecentlyConsumedVotes::Buffer sRecentlyConsumedVotesBuffer;
+
+// Fix O — resolve vote-skip authority host for the current state.
+// When a cutscene is active locally (any entry in cutsceneStartActive),
+// authority is the cutscene ORIGINATOR (client that broadcast
+// CUTSCENE_START). Otherwise fall back to room-host of local scene/
+// room. Log 634 Bug 10: P1 and P2 landed in different rooms during
+// deku_tree_intro; each became their own room-host, both broadcast
+// vote-state, both ignored each other's broadcasts — no sync. Using
+// the originator (a single clientId across all peers) collapses this
+// to a single authoritative host. See Analysis/cutscene_room_desync_
+// and_vote_scope_2026-07-08.md Bug 10.
+uint32_t ResolveVoteSkipHostClientId() {
+    if (Anchor::Instance == nullptr) return 0;
+    if (!Anchor::Instance->cutsceneStartActive.empty() &&
+        !Anchor::Instance->cutsceneOriginatorByKindKey.empty()) {
+        // v1 assumes single-cutscene sessions; use first entry.
+        const auto it = Anchor::Instance->cutsceneOriginatorByKindKey.begin();
+        if (it != Anchor::Instance->cutsceneOriginatorByKindKey.end() &&
+            it->second != 0) {
+            return it->second;
+        }
+    }
+    // No active cutscene (or originator unknown) — fall back to
+    // room-host authority for non-cutscene textboxes.
+    if (gPlayState == nullptr) return 0;
+    return ::SceneAuthority::GetRoomHostClientId(
+        (int16_t)gPlayState->sceneNum,
+        (int8_t)gPlayState->roomCtx.curRoom.num,
+        (uint8_t)(gSaveContext.linkAge & 0x1));
+}
+
+// Fix O — am I the vote-skip authority? Reuses ResolveVoteSkipHostClientId.
+bool AmVoteSkipHost() {
+    if (Anchor::Instance == nullptr) return false;
+    const uint32_t host = ResolveVoteSkipHostClientId();
+    return host != 0 && host == Anchor::Instance->ownClientId;
+}
+
 }  // namespace
 
 void Anchor::SendPacket_CutsceneTextAdvance(uint16_t textId) {
@@ -109,30 +334,70 @@ void Anchor::SendPacket_CutsceneTextAdvance(uint16_t textId) {
     payload["textId"]      = (int)textId;
     PacketTimeline::SetTimelineField(payload);
 
-    // Routed to the effective scene host of (sceneNum, my-roomNum, timeline).
-    const uint32_t target = ::SceneAuthority::GetRoomHostClientId(
-        (int16_t)gPlayState->sceneNum,
-        (int8_t)gPlayState->roomCtx.curRoom.num,
-        (uint8_t)(gSaveContext.linkAge & 0x1));
+    // Fix O.1 — route to the cutscene originator when a cutscene is
+    // active; otherwise room-host of local scene/room. Handles the
+    // case where peers landed in different rooms during a shared
+    // cutscene (log 634 Bug 10).
+    const uint32_t target = ResolveVoteSkipHostClientId();
     payload["targetClientId"] = target;
 
     SPDLOG_INFO("[CutsceneTextAdvance] Sending textId=0x{:04X} sceneNum={} target={}",
                 (unsigned)textId, (int)gPlayState->sceneNum, target);
 
     SendJsonToRemote(payload);
+
+    // Fix V — host self-counts its own vote without waiting for the
+    // relay loopback packet. When the local client IS the vote-skip
+    // host, the packet we just sent will be routed by the relay via
+    // targetClientId=self back to us. If the network is healthy, that
+    // packet arrives ~10-50ms later and HandlePacket_CutsceneText-
+    // Advance tallies our vote. But if the incoming TCP direction
+    // stalls (log 646: P1 rx dropped to 0.0 pps for 10s before formal
+    // TCP disconnect at 17:47:00.222), our own vote never comes back,
+    // vote-skip stalls until hard_deadline fires.
+    //
+    // Fix V: synthesize an equivalent payload representing "self
+    // voted" and invoke HandlePacket_CutsceneTextAdvance directly.
+    // HandlePacket's dedup (line 377: state.pressedClientIds.count
+    // (senderId)) makes this idempotent — when the actual loopback
+    // packet arrives later (if it ever does), the second call
+    // returns early without double-counting.
+    //
+    // Only fires when we are the vote-skip host; peer-side clients
+    // still rely on the host receiving their vote packet via the
+    // normal relay path. See Analysis/log_646_vote_skip_regression_
+    // 2026-07-08.md §7 Fix V.
+    if (AmVoteSkipHost()) {
+        nlohmann::json selfPayload = payload;
+        // HandlePacket reads clientId as the sender identifier. The
+        // relay stamps this on incoming packets, but for our direct
+        // self-invoke we must set it explicitly.
+        selfPayload["clientId"] = ownClientId;
+        HandlePacket_CutsceneTextAdvance(selfPayload);
+    }
 }
 
 void Anchor::SendPacket_CutsceneTextAdvanced(uint16_t textId, const char* reason) {
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
+    // Option 3 part 2 (2026-07-09) — include leader's live msgBufPos
+    // (shadow value = start of current sub-textbox). Peers compare their
+    // own msgBufPos to this on receipt; if behind, they bump the pending
+    // count so drift converges within 1-2 broadcasts. See log 648
+    // analysis and HandlePacket_CutsceneTextAdvanced Option 3 block.
+    const uint16_t leaderMsgBufPos =
+        AnchorMessageBridge::GetLeaderMsgBufPosLastSubStart();
     nlohmann::json payload;
-    payload["type"]         = CUTSCENE_TEXT_ADVANCED;
-    payload["sceneNum"]     = (int)gPlayState->sceneNum;
-    payload["textId"]       = (int)textId;
-    payload["reason"]       = std::string(reason ? reason : "unknown");
-    payload["targetTeamId"] = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    payload["type"]             = CUTSCENE_TEXT_ADVANCED;
+    payload["sceneNum"]         = (int)gPlayState->sceneNum;
+    payload["textId"]           = (int)textId;
+    payload["reason"]           = std::string(reason ? reason : "unknown");
+    payload["targetTeamId"]     = CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default");
+    payload["leaderMsgBufPos"]  = (int)leaderMsgBufPos;
     PacketTimeline::SetTimelineField(payload);
-    SPDLOG_INFO("[CutsceneTextAdvanced] Broadcasting textId=0x{:04X} reason={}",
-                (unsigned)textId, reason ? reason : "unknown");
+    SPDLOG_INFO("[CutsceneTextAdvanced] Broadcasting textId=0x{:04X} reason={} "
+                "leaderMsgBufPos={}",
+                (unsigned)textId, reason ? reason : "unknown",
+                (int)leaderMsgBufPos);
     SendJsonToRemote(payload);
 }
 
@@ -144,10 +409,10 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
     int16_t sceneNum = (int16_t)payload.value("sceneNum", -1);
     uint16_t textId  = (uint16_t)payload.value("textId", 0);
 
-    // Host-side gate. Only the room host accumulates votes.
-    if (!::SceneAuthority::IsRoomHost(sceneNum,
-                                       (int8_t)gPlayState->roomCtx.curRoom.num,
-                                       (uint8_t)(gSaveContext.linkAge & 0x1))) {
+    // Fix O.2 — host-side gate. Only the vote-skip authority
+    // accumulates votes: cutscene originator when a cutscene is
+    // active, room host otherwise.
+    if (!AmVoteSkipHost()) {
         return;
     }
 
@@ -156,15 +421,41 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
     uint32_t senderId = payload.value("clientId", (uint32_t)0);
     if (senderId == 0) return;
 
+    // Straggler-vote dedup (log 655, 2026-07-09). Fix V (host self-count)
+    // + relay's unicast-to-self loopback produce duplicate arrivals for
+    // the host's own votes ~50-150 ms apart. The first arrival often
+    // triggers all-pressed and clears state; the second arrival then
+    // sneaks past the pressedClientIds dedup (empty set), re-activates
+    // state, and gets counted as a fresh vote for the same textId. In
+    // HAS_NEXT sub-textbox chains this leaks the host's vote into the
+    // next sub's cycle. Drop duplicate (textId, senderId) arrivals
+    // within a 500 ms window. See Analysis/vote_skip_straggler_bug_
+    // 2026-07-09.md for full why-chain.
+    const auto stragglerNow = std::chrono::steady_clock::now();
+    if (sRecentlyConsumedVotesBuffer.ShouldDrop(textId, senderId, stragglerNow)) {
+        SPDLOG_INFO("[CutsceneTextAdvance] Straggler-vote drop: sender={} "
+                    "textId=0x{:04X} (Fix V self-invoke + relay loopback "
+                    "duplicate)",
+                    senderId, (unsigned)textId);
+        return;
+    }
+
     auto& state = cutsceneTextAdvanceState;
 
-    // New textbox edge — reset state.
+    // New textbox edge — reset state. Also seed the hard-deadline
+    // countdown here in case the vote packet arrives BEFORE
+    // TickCutsceneTextAdvance's textbox-open detection has run (rare
+    // race — peer presses within one game-thread tick of the textbox
+    // appearing). Idempotent with the tick's own activation.
+    auto nowForNewTextbox = std::chrono::steady_clock::now();
     if (!state.active || state.textId != textId || state.sceneNum != sceneNum) {
         state.active           = true;
         state.textId           = textId;
         state.sceneNum         = sceneNum;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
+        state.countdownEndsAt  = nowForNewTextbox + std::chrono::milliseconds(
+            GetCutsceneHardDeadlineMs());
     }
 
     // Multi-press dedup — same client tapping repeatedly only counts once.
@@ -173,12 +464,31 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
     }
     state.pressedClientIds.insert(senderId);
 
+    // Straggler-vote dedup (log 655, 2026-07-09) — record this
+    // acceptance so a subsequent duplicate arrival (Fix V loopback
+    // pattern) is dropped by the check earlier in this function.
+    sRecentlyConsumedVotesBuffer.Record(textId, senderId, stragglerNow);
+
     auto now = std::chrono::steady_clock::now();
     if (!state.countdownStarted) {
         state.countdownStarted = true;
-        state.countdownEndsAt  = now + std::chrono::milliseconds(GetCutsceneInitialDurationMs());
+        // Vote-skip is an inner-bound clamped against the hard
+        // deadline. If the hard-deadline countdown already has less
+        // time left than the vote-skip default, keep the shorter
+        // value — vote-skip never extends the wait beyond the
+        // 10s auto-advance. See design analysis §2.4.
+        auto voteSkipEndsAt = now + std::chrono::milliseconds(
+            GetCutsceneInitialDurationMs());
+        if (state.countdownEndsAt > voteSkipEndsAt) {
+            state.countdownEndsAt = voteSkipEndsAt;
+        }
     } else {
         state.countdownEndsAt -= std::chrono::milliseconds(GetCutscenePerPressReductionMs());
+        // Never shrink below now — additional presses can't fire the
+        // advance retroactively.
+        if (state.countdownEndsAt < now) {
+            state.countdownEndsAt = now;
+        }
     }
 
     SPDLOG_INFO("[CutsceneTextAdvance] Vote received clientId={} textId=0x{:04X} "
@@ -201,11 +511,22 @@ void Anchor::HandlePacket_CutsceneTextAdvance(nlohmann::json payload) {
         // advance). Eliminates the visible-race window where peers'
         // HUD stayed shown across the advance because the state clear
         // arrived after ADVANCED.
-        cutsceneTextAdvanceConsumed = true;
-        cutsceneTextAdvanceConsumedTextId = textId;
+        // Design E v5 — increment pending count (was: bool flag).
+        RecordPendingAdvance(textId, "handle_all_pressed");
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
+        // Fix E → J.b — arm the reopen-suppression (see file-scope
+        // declaration and TickCutsceneTextAdvance's Fix J.b block for
+        // rationale). Reset the msgMode-reached-NONE flag so the tick
+        // detects vanilla actually closing the textbox before allowing
+        // any reopen for the same textId.
+        sLastForcedAdvanceTextId              = textId;
+        sLastForcedAdvanceAt                  = std::chrono::steady_clock::now();
+        sLastForcedAdvanceMsgModeReachedNone  = false;
+        LogVoteStateTransitionReason(
+            "handle_all_pressed",
+            /*priorActive=*/true, /*newActive=*/false, textId, textId);
         SendPacket_CutsceneTextVoteState();
         SendPacket_CutsceneTextAdvanced(textId, "all_pressed");
     }
@@ -224,8 +545,47 @@ void Anchor::HandlePacket_CutsceneTextAdvanced(nlohmann::json payload) {
                 (unsigned)textId,
                 payload.value("reason", std::string("unknown")).c_str());
 
-    cutsceneTextAdvanceConsumed = true;
-    cutsceneTextAdvanceConsumedTextId = textId;
+    const bool priorActive = cutsceneTextAdvanceState.active;
+    const uint16_t priorTextId = cutsceneTextAdvanceState.textId;
+    // Design E v5 — increment pending count (was: bool flag).
+    // Counter semantics prevent broadcast-collision: log 646 P2
+    // showed 5 back-to-back broadcasts collapse into 3 advances
+    // because setting the boolean flag was idempotent when peer's
+    // msgMode was still DISPLAYING → the "extra" flag writes were
+    // lost.
+    RecordPendingAdvance(textId, "peer_recv_advanced");
+
+    // Option 3 part 2 (2026-07-09) — ongoing-drift corrective. If the
+    // leader's live msgBufPos is strictly ahead of our own for the same
+    // textId, we're at least one sub behind (leader advanced during our
+    // catchup or a prior broadcast landed while we were still displaying).
+    // Bump the pending count by an extra unit so TryConsumePendingSub-
+    // TextAdvance fires one additional AWAIT_NEXT tick and converges the
+    // peer over the next 1-2 broadcasts. Only fires when textIds match —
+    // a textId mismatch is Fix R's continuous-re-target's responsibility
+    // (that path fires CATCHUP_REQUEST which yields a full delta apply).
+    // Log 648 pattern: peer perpetually one-sub-behind. Option 3 part 1
+    // (live-read at CATCHUP_RESPONSE) handles the initial drift; this
+    // block handles ongoing drift after peer's local msgMode reached
+    // AWAIT_NEXT but a race deposited a "leader ahead" state.
+    if (payload.contains("leaderMsgBufPos") &&
+        payload["leaderMsgBufPos"].is_number()) {
+        const uint16_t leaderMsgBufPos =
+            (uint16_t)payload["leaderMsgBufPos"].get<int>();
+        const uint16_t peerMsgBufPos =
+            (uint16_t)gPlayState->msgCtx.msgBufPos;
+        if ((uint16_t)gPlayState->msgCtx.textId == textId &&
+            leaderMsgBufPos > peerMsgBufPos &&
+            cutsceneTextAdvancePendingCount < 255) {
+            cutsceneTextAdvancePendingCount++;
+            SPDLOG_INFO("[CutsceneTextAdvanced] Option 3 — drift detected: "
+                        "peer msgBufPos={} < leader msgBufPos={} for "
+                        "textId=0x{:04X}; extra pending count bump (now={})",
+                        (int)peerMsgBufPos, (int)leaderMsgBufPos,
+                        (unsigned)textId,
+                        (int)cutsceneTextAdvancePendingCount);
+        }
+    }
 
     // Belt-and-suspenders — clear the local vote-state mirror so the
     // HUD hides immediately when the advance fires. The host's send
@@ -238,6 +598,11 @@ void Anchor::HandlePacket_CutsceneTextAdvanced(nlohmann::json payload) {
     cutsceneTextAdvanceState.active           = false;
     cutsceneTextAdvanceState.pressedClientIds.clear();
     cutsceneTextAdvanceState.countdownStarted = false;
+    if (priorActive) {
+        LogVoteStateTransitionReason(
+            "peer_recv_advanced",
+            priorActive, /*newActive=*/false, priorTextId, textId);
+    }
 }
 
 void Anchor::TickCutsceneTextAdvance() {
@@ -245,32 +610,207 @@ void Anchor::TickCutsceneTextAdvance() {
     if (!IsSaveLoaded() || gPlayState == nullptr) return;
     if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.Enabled"), 1)) return;
 
+    // Dialog choice-vote timer poll (2026-07-09,
+    // feature/dialog-choice-vote). Host-only — TickDialogChoiceVote
+    // internally short-circuits when we're not the vote-skip authority
+    // or when no vote is active. Placed at top of tick before the
+    // Fix S/T consume so a choice-vote-driven advance can flow through
+    // the same downstream pending-apply consumption path.
+    TickDialogChoiceVote();
+
+    // Fix S / Fix T — force sub-textbox chain advance when TEXT_ADVANCED
+    // consumed. Runs at top of tick for peer paths (network-thread flag
+    // set → picked up next game frame). Fix T ALSO invokes the same
+    // helper inline at the game-thread hard_deadline flag setter below,
+    // because within the same tick TickCutsceneTextAdvance's own
+    // hard_deadline branch sets the flag AFTER this top-of-tick check
+    // already ran → Message_Update fires later that same frame,
+    // CutsceneBridge consumes the flag first, and Fix S at next frame's
+    // top sees an empty flag. Log 639 showed P1 (host) stall + Solo idle
+    // fallback while P2 (peer) advanced correctly via this top-of-tick
+    // path. See detailed rationale on the helper below.
+    TryConsumePendingSubTextAdvance("top_of_tick");
+
     auto& state = cutsceneTextAdvanceState;
-    if (!state.active || !state.countdownStarted) return;
-
-    // Only the host runs the countdown.
-    if (!::SceneAuthority::IsRoomHost(state.sceneNum,
-                                       (int8_t)gPlayState->roomCtx.curRoom.num,
-                                       (uint8_t)(gSaveContext.linkAge & 0x1))) {
-        return;
-    }
-
     auto now = std::chrono::steady_clock::now();
-    if (now >= state.countdownEndsAt) {
-        SPDLOG_INFO("[CutsceneTextAdvance] Timer elapsed for textId=0x{:04X}, broadcasting",
-                    (unsigned)state.textId);
-        // Same order flip as the all-pressed branch above — state
-        // cleared broadcast goes out BEFORE CUTSCENE_TEXT_ADVANCED so
-        // peers hide their HUD in the same frame as the local advance
-        // instead of one packet-arrival later.
-        uint16_t clearedTextId = state.textId;
-        cutsceneTextAdvanceConsumed = true;
-        cutsceneTextAdvanceConsumedTextId = state.textId;
+
+    // Fix O.2 — only the vote-skip authority tracks + broadcasts
+    // textbox state. Cutscene originator when active, room host
+    // otherwise.
+    const int16_t mySceneNum = (int16_t)gPlayState->sceneNum;
+    if (!AmVoteSkipHost()) return;
+
+    // ---- Textbox open/close edge detection (MP hard deadline) -------
+    //
+    // Detect when the host's local msgCtx transitions to a NEW
+    // cutscene textbox and start the 10s hard deadline. Also detect
+    // textbox-close so state deactivates cleanly. Peers see this via
+    // the CUTSCENE_TEXT_VOTE_STATE broadcast (state.countdownEndsAt is
+    // converted to msRemaining on wire, peer recomputes local endsAt).
+    //
+    // This runs on the same tick even when nobody has voted — the
+    // hard deadline is the auto-advance timer that MATCHES SOLO
+    // BEHAVIOR (10s per textbox). Vote-skip is an inner-bound that
+    // lets players advance faster.
+    const bool inTextState = IsHostInCutsceneTextState();
+    const uint16_t curTextId = inTextState
+        ? (uint16_t)gPlayState->msgCtx.textId : (uint16_t)0;
+
+    // Fix B — debounce inTextState==false transitions. Vanilla msgMode
+    // briefly returns to MSGMODE_NONE for a frame or two between adjacent
+    // cutscene textboxes (post-textbox → next-textbox-load window). Without
+    // debounce, state.active rapidly toggles false → true on every gap,
+    // which triggers redundant CUTSCENE_TEXT_VOTE_STATE broadcasts and
+    // (per log 624) an ImGui multi-viewport quirk that spawns a second SoH
+    // window. Track when inTextState was last true; only close state.active
+    // if it's been continuously false for kInTextStateFalseDebounceMs.
+    // See Analysis/cutscene_ff_reset_and_mp_dialogue_deadline_2026-07-08.md
+    // Finding 2.
+    static std::chrono::steady_clock::time_point sLastInTextStateTrueAt =
+        std::chrono::steady_clock::time_point::min();
+    constexpr int kInTextStateFalseDebounceMs = 300;
+    if (inTextState) {
+        sLastInTextStateTrueAt = now;
+    }
+    const bool debouncedInTextState =
+        inTextState ||
+        (sLastInTextStateTrueAt != std::chrono::steady_clock::time_point::min() &&
+         std::chrono::duration_cast<std::chrono::milliseconds>(
+             now - sLastInTextStateTrueAt).count() < kInTextStateFalseDebounceMs);
+
+    // Fix E → J.b — post-advance reopen suppression. When the timer-
+    // elapsed or all-pressed path fires an advance, vanilla takes
+    // several frames to transition `msgMode` from DISPLAYING (53) /
+    // stuck sub-states (e.g. 52 in log 630) through ADVANCING → CLOSING
+    // (54) → NONE (0). During that window, IsHostInCutsceneTextState()
+    // still returns true AND msgCtx.textId still holds the pre-
+    // advance textId — so the open-edge branch below would re-open
+    // state.active for the SAME textId we just advanced past.
+    //
+    // Fix E (pure 750 ms cooldown, superseded): worked for the common
+    // case but log 630 revealed vanilla stuck at msgMode=52 for
+    // ~800 ms, so the reopen fired just past cooldown (Bug 4).
+    //
+    // Fix J.b: gate reopen on vanilla's ACTUAL state, not wall-clock:
+    //   - Suppress while sLastForcedAdvanceTextId == curTextId AND
+    //     vanilla has NOT yet reached MSGMODE_NONE since the arm.
+    //   - Different curTextId (vanilla progressed to next textbox) →
+    //     suppression lifted immediately.
+    //   - Safety-net timeout of kForcedAdvanceMaxWaitMs guards against
+    //     a pathological vanilla state where msgMode never returns to
+    //     NONE — otherwise the HUD would be locked out forever.
+    //
+    // The msgMode-reached-NONE flag is updated every tick below.
+    if (gPlayState != nullptr &&
+        gPlayState->msgCtx.msgMode == MSGMODE_NONE &&
+        !sLastForcedAdvanceMsgModeReachedNone &&
+        sLastForcedAdvanceTextId != 0) {
+        sLastForcedAdvanceMsgModeReachedNone = true;
+        if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"), 0) != 0) {
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                now - sLastForcedAdvanceAt).count();
+            SPDLOG_INFO("[VoteState.diag] msgMode reached NONE {}ms after "
+                        "forced advance of textId=0x{:04X} — reopen "
+                        "suppression lifted",
+                        (long long)ms, (unsigned)sLastForcedAdvanceTextId);
+        }
+    }
+    const bool inForcedAdvanceCooldown =
+        sLastForcedAdvanceTextId == curTextId &&
+        sLastForcedAdvanceTextId != 0 &&
+        !sLastForcedAdvanceMsgModeReachedNone &&
+        sLastForcedAdvanceAt != std::chrono::steady_clock::time_point::min() &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - sLastForcedAdvanceAt).count() < kForcedAdvanceMaxWaitMs;
+
+    if (inTextState && !inForcedAdvanceCooldown &&
+        (!state.active || state.textId != curTextId)) {
+        // Textbox-open edge — new dialog just appeared on host.
+        const bool priorActive = state.active;
+        const uint16_t priorTextId = state.textId;
+        state.active = true;
+        state.textId = curTextId;
+        state.sceneNum = mySceneNum;
+        state.pressedClientIds.clear();
+        state.countdownStarted = false;
+        state.countdownEndsAt = now + std::chrono::milliseconds(
+            GetCutsceneHardDeadlineMs());
+        SPDLOG_INFO("[CutsceneTextAdvance] Textbox opened textId=0x{:04X} — "
+                    "hard deadline {}ms",
+                    (unsigned)curTextId, GetCutsceneHardDeadlineMs());
+        LogVoteStateTransitionReason(
+            (!priorActive) ? "tick_open_edge_from_inactive" : "tick_textid_change",
+            priorActive, /*newActive=*/true, priorTextId, curTextId);
+        SendPacket_CutsceneTextVoteState();
+    } else if (!debouncedInTextState && state.active) {
+        // Textbox-close edge — textbox was advanced or cutscene ended.
+        // Clear state so HUD hides and the next open is a fresh cycle.
+        // Only fires after the debounce window elapses so brief msgMode
+        // gaps between adjacent textboxes don't trigger spurious closes.
+        const uint16_t priorTextId = state.textId;
         state.active = false;
         state.pressedClientIds.clear();
         state.countdownStarted = false;
+        LogVoteStateTransitionReason(
+            "tick_debounced_close",
+            /*priorActive=*/true, /*newActive=*/false, priorTextId, priorTextId);
         SendPacket_CutsceneTextVoteState();
-        SendPacket_CutsceneTextAdvanced(clearedTextId, "timer");
+    }
+
+    // ---- Countdown expiry ------------------------------------------
+    //
+    // Fires whenever state.countdownEndsAt is reached, regardless of
+    // whether the countdown was started by a vote press or the hard
+    // deadline. Vote-press-triggered countdown is clamped against the
+    // hard deadline in HandlePacket_CutsceneTextAdvance so it can't
+    // extend past the hard limit.
+    if (state.active && now >= state.countdownEndsAt) {
+        SPDLOG_INFO("[CutsceneTextAdvance] Timer elapsed for textId=0x{:04X}, "
+                    "broadcasting (reason={})",
+                    (unsigned)state.textId,
+                    state.countdownStarted ? "vote_timer" : "hard_deadline");
+        // Same order flip as the all-pressed branch — state cleared
+        // broadcast goes out BEFORE CUTSCENE_TEXT_ADVANCED so peers
+        // hide their HUD in the same frame as the local advance
+        // instead of one packet-arrival later.
+        uint16_t clearedTextId = state.textId;
+        const bool wasVoteTimer = state.countdownStarted;
+        // Design E v5 — increment pending count (was: bool flag).
+        RecordPendingAdvance(clearedTextId,
+                             wasVoteTimer ? "hard_deadline_vote_tick"
+                                          : "hard_deadline_timer_tick");
+        state.active = false;
+        state.pressedClientIds.clear();
+        state.countdownStarted = false;
+        // Fix E → J.b — arm the reopen-suppression so the next few
+        // ticks don't re-open state.active for the same textId while
+        // vanilla's message pipeline is still tearing down the
+        // advanced textbox. Reset the msgMode-reached-NONE flag so
+        // the tick detects vanilla actually closing the textbox
+        // before allowing any reopen for the same textId.
+        sLastForcedAdvanceTextId              = clearedTextId;
+        sLastForcedAdvanceAt                  = now;
+        sLastForcedAdvanceMsgModeReachedNone  = false;
+        LogVoteStateTransitionReason(
+            wasVoteTimer ? "tick_timer_elapsed_vote" : "tick_timer_elapsed_hard_deadline",
+            /*priorActive=*/true, /*newActive=*/false, clearedTextId, clearedTextId);
+        SendPacket_CutsceneTextVoteState();
+        SendPacket_CutsceneTextAdvanced(clearedTextId,
+                                        wasVoteTimer ? "timer" : "hard_deadline");
+        // Fix T — inline invocation of the sub-textbox force-advance
+        // helper for the host game-thread hard_deadline path. The
+        // top-of-tick Fix S check already ran earlier this tick with
+        // the flag still false; without this inline call the flag
+        // gets consumed by CutsceneBridge during Message_Update later
+        // this same frame, and the next tick's top-of-tick Fix S sees
+        // an empty flag. Log 639 P1 showed exactly this pattern:
+        // "advance-broadcast consumed → local advance" fired but the
+        // vanilla AWAIT_NEXT→NEXT_MSG transition never stuck,
+        // leaving P1 stalled until the 10 s "Solo idle auto-advance"
+        // fallback fired. See Analysis/cutscene_fix_t_host_timing_-
+        // 2026-07-08.md (to be written) if this pattern recurs.
+        TryConsumePendingSubTextAdvance(
+            wasVoteTimer ? "hard_deadline_vote" : "hard_deadline_timer");
     }
 }
 
@@ -301,11 +841,21 @@ void Anchor::SendPacket_CutsceneTextVoteState() {
 
     auto& state = cutsceneTextAdvanceState;
 
-    // ms remaining as a signed clamp — 0 when countdown not started or
-    // has already elapsed. Peers use this to derive their own local
-    // endsAt so the display counts down in local time.
+    // ms remaining as a signed clamp — 0 only when the countdown has
+    // already elapsed. Peers use this to derive their own local endsAt
+    // so the display counts down in local time.
+    //
+    // Fix C — calculate whenever `active` is true, not just when
+    // `countdownStarted`. Both the hard-deadline countdown (started at
+    // textbox-open) and the vote-skip countdown (started at first press)
+    // write into state.countdownEndsAt, but only the vote-skip path sets
+    // countdownStarted=true. Gating on countdownStarted broadcast
+    // msRemaining=0 while the hard deadline was running, which peers
+    // interpreted as "no time left" (or ignored via
+    // countdownStarted=false), producing the log-624 flicker on peer HUDs.
+    // See analysis Finding 3.
     int64_t msRemaining = 0;
-    if (state.countdownStarted) {
+    if (state.active) {
         auto now = std::chrono::steady_clock::now();
         auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
                          state.countdownEndsAt - now).count();
@@ -347,13 +897,20 @@ void Anchor::HandlePacket_CutsceneTextVoteState(nlohmann::json payload) {
     if (PacketTimeline::IsCrossTimelinePacket(payload)) return;
     if (!CVarGetInteger(CVAR_REMOTE_ANCHOR("CutsceneAdvance.Enabled"), 1)) return;
 
-    // Only peers apply — the host's authoritative state comes from its
-    // local vote-tally flow, not a wire echo. Belt-and-suspenders since
-    // the relay wouldn't route the packet back to sender in normal
-    // flow, but a self-broadcast bug would be silently absorbed.
-    if (::SceneAuthority::IsRoomHost((int16_t)gPlayState->sceneNum,
-                                      (int8_t)gPlayState->roomCtx.curRoom.num,
-                                      (uint8_t)(gSaveContext.linkAge & 0x1))) {
+    // Fix O.2 — only peers apply. Vote-skip authority (cutscene
+    // originator when active, room host otherwise) owns its own state
+    // and does not consume its own broadcasts.
+    if (AmVoteSkipHost()) {
+        return;
+    }
+
+    // Fix Q — receive-side gate. Peer applies VoteState only when
+    // locally participating in a cutscene. Otherwise the HUD would
+    // render "Press A to skip" for a cutscene the peer isn't in
+    // (log 635 Bug 11: peer received VoteState 17 s before joining
+    // the cutscene, HUD opened with Play_InCsMode=0 csState=0). See
+    // Analysis/cutscene_hud_leak_and_latency_2026-07-08.md.
+    if (!Play_InCsMode(gPlayState)) {
         return;
     }
 
@@ -381,14 +938,26 @@ void Anchor::HandlePacket_CutsceneTextVoteState(nlohmann::json payload) {
     }
 
     auto& state = cutsceneTextAdvanceState;
+    const bool priorActive = state.active;
+    const uint16_t priorTextId = state.textId;
     state.sceneNum         = (int16_t)payload.value("sceneNum", -1);
     state.textId           = (uint16_t)payload.value("textId", 0);
     state.active           = payload.value("active", false);
     state.countdownStarted = payload.value("countdownStarted", false);
+    if (priorActive != state.active || priorTextId != state.textId) {
+        LogVoteStateTransitionReason(
+            "peer_recv_vote_state",
+            priorActive, state.active, priorTextId, state.textId);
+    }
 
     // Convert wire msRemaining → local endsAt.
+    // Fix C — apply whenever active + msRemaining > 0. Sender's send-side
+    // Fix C already broadcasts msRemaining for the hard-deadline countdown
+    // (which has countdownStarted=false). Gating this on countdownStarted
+    // would drop the hard-deadline timer on peers → HUD countdown display
+    // never appears until first vote press.
     int64_t msRemaining = payload.value("msRemaining", (int64_t)0);
-    if (state.countdownStarted && msRemaining > 0) {
+    if (state.active && msRemaining > 0) {
         state.countdownEndsAt = std::chrono::steady_clock::now() +
                                  std::chrono::milliseconds(msRemaining);
     }

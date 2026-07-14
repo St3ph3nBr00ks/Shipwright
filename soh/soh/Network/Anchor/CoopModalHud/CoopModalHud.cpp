@@ -3,6 +3,11 @@
 #include "soh/cvar_prefixes.h"
 
 #include <libultraship/libultraship.h>
+// Diag D3 uses ImGuiContext + ImGuiWindow (internal API) to
+// enumerate ALL live ImGui windows, not just those promoted to
+// platform viewports. Sibling usage in soh/soh/Enhancements/
+// debugconsole.cpp:23 confirms this include is available.
+#include <imgui_internal.h>
 
 #include <chrono>
 #include <cmath>
@@ -12,6 +17,8 @@
 extern "C" {
 #include "z64.h"
 #include "variables.h"
+#include "functions.h"    // Play_InCsMode — Fix Q render-side gate
+#include "message_data_static.h"  // TEXTBOX_TYPE_NONE_BOTTOM / _NO_SHADOW / _CREDITS
 extern PlayState* gPlayState;
 }
 
@@ -70,6 +77,23 @@ struct DotEntry {
 
 ImU32 ColorFromRgb8(const Color_RGB8& c, float alpha) {
     return IM_COL32(c.r, c.g, c.b, (int)(alpha * 255.0f));
+}
+
+// Suppress vote / choice HUDs during lore-heavy dialogue types that
+// vanilla auto-progresses without user input (e.g. Deku Tree's dying
+// speech about Din/Nayru/Farore). These use background-less textbox
+// styles and complete on the cutscene script's own timer — the
+// "Press A to skip" prompt and per-voter dots would be misleading
+// because there's nothing to skip.
+//
+// Types suppressed (per soh/include/message_data_textbox_types.h):
+//   TEXTBOX_TYPE_NONE_BOTTOM (4)      — bottom text overlay, no bg
+//   TEXTBOX_TYPE_NONE_NO_SHADOW (5)   — no bg + no shadow variant
+//   TEXTBOX_TYPE_CREDITS (11)         — credits-style scroll
+bool IsLoreDialogueTextBoxType(uint8_t t) {
+    return t == TEXTBOX_TYPE_NONE_BOTTOM
+        || t == TEXTBOX_TYPE_NONE_NO_SHADOW
+        || t == TEXTBOX_TYPE_CREDITS;
 }
 
 // Collect all peers (including self) that are eligible to vote:
@@ -152,8 +176,33 @@ ImVec4 TimerColorForInteger(int wholeSec) {
 // player's Anchor color. Ordering: filled-vs-outline is the shape
 // distinction that keeps the widget color-blindness-friendly (plan
 // §8.5).
+//
+// Brightness-adaptive backer (2 px larger radius) drawn first so
+// bright peer colors stay readable against light backgrounds. Mirrors
+// the Team Marker nametag pattern in soh/soh/Enhancements/nametag.cpp
+// and the inline vote-dots' backer in
+// Anchor/Bridge/DialogChoiceVoteInlineDots.cpp. Applied to both voted
+// (filled) and pending (outlined) states so the reader always sees a
+// clear dot silhouette.
+
+ImU32 BackerColorForImU32(ImU32 color) {
+    // Rec. 601 luma. Format: IM_COL32 packs as ABGR little-endian so
+    // R = color & 0xFF, G = (color >> 8) & 0xFF, B = (color >> 16) & 0xFF.
+    const int r = (int)(color & 0xFF);
+    const int g = (int)((color >> 8) & 0xFF);
+    const int b = (int)((color >> 16) & 0xFF);
+    const int luma = (299 * r + 587 * g + 114 * b) / 1000;
+    if (luma > 127) {
+        return IM_COL32(0, 0, 0, 220);
+    } else {
+        return IM_COL32(255, 255, 255, 220);
+    }
+}
 
 void RenderDot(ImDrawList* dl, ImVec2 center, ImU32 color, bool voted) {
+    // Backer: filled circle, 2 px larger radius, adaptive color.
+    dl->AddCircleFilled(center, kDotRadius + 2.0f,
+                        BackerColorForImU32(color), 24);
     if (voted) {
         dl->AddCircleFilled(center, kDotRadius, color, 24);
     } else {
@@ -163,38 +212,62 @@ void RenderDot(ImDrawList* dl, ImVec2 center, ImU32 color, bool voted) {
 }
 
 // ---- Voting-skip widget --------------------------------------------
+//
+// Fix H — always call ImGui::Begin/End every frame, regardless of
+// visibility, to prevent multi-viewport window promotion. When
+// state.active is false OR voters.size() < 2, the window is still
+// Begin/End'd but with alpha=0 and no content — it exists in ImGui's
+// window map with a valid position anchored to the main viewport, so
+// ImGui's viewport-selection logic does not promote it to its own
+// OS-level platform window (log 629 Bug 3 root cause). See
+// Analysis/cutscene_late_join_bugs_deep_analysis_2026-07-08.md Bug 3.
 
 void DrawVotingSkipWidget(const Anchor& anchor) {
     const auto& state = anchor.cutsceneTextAdvanceState;
 
     std::vector<DotEntry> voters = CollectVoters(anchor);
-    if (voters.size() < 2) {
-        // Solo — nothing to display (matches the "alone in cutscene"
-        // short-circuit in CutsceneBridge.cpp). Belt-and-suspenders vs.
-        // the plan §8.3 defensive check.
-        return;
-    }
+    // Fix H — visibility flag replaces early-return. Widget window is
+    // still created; only its content + alpha changes.
+    // Fix Q — also require local Play_InCsMode. Belt-and-suspenders
+    // vs the receive-side Fix Q gate. Peer receiving a VoteState
+    // broadcast for a cutscene it isn't participating in (log 635
+    // Bug 11: broadcast arrived 17 s before peer late-joined)
+    // shouldn't render the "Press A to skip" HUD. See
+    // Analysis/cutscene_hud_leak_and_latency_2026-07-08.md.
+    const bool localInCutscene =
+        (gPlayState != nullptr) && Play_InCsMode(gPlayState);
+    // Suppress for lore-dialogue textbox types (Deku Tree dying
+    // speech, etc.) — vanilla auto-progresses these and there's
+    // nothing for the user to A-press-skip.
+    const bool loreDialogueActive =
+        (gPlayState != nullptr) &&
+        IsLoreDialogueTextBoxType(gPlayState->msgCtx.textBoxType);
+    const bool showContent =
+        state.active && voters.size() >= 2 && localInCutscene &&
+        !loreDialogueActive;
 
-    // Countdown / prompt string.
+    // Countdown / prompt string — only computed when we'll render.
     std::string rightLabel;
     ImVec4 rightColor = kPromptColor;
-    if (state.countdownStarted) {
-        float rem = RemainingSecondsFrom(state.countdownEndsAt);
-        // Ceiling of remaining seconds so the display transitions
-        // 5→4→3→2→1→0 (users expect "1s" to mean "up to 1 second
-        // remaining"). Ceiling avoids the awkward case where the timer
-        // reads "0s" for a full second before the actual advance.
-        int wholeSec = (int)std::ceil(rem);
-        if (wholeSec < 0) wholeSec = 0;
-        char buf[16];
-        // Bare integer — no "s" suffix per user design direction
-        // 2026-07-07. Matches OoT's clean text-driven aesthetic
-        // (e.g. rupee counter, timer icons — no unit label).
-        std::snprintf(buf, sizeof(buf), "%d", wholeSec);
-        rightLabel = buf;
-        rightColor = TimerColorForInteger(wholeSec);
-    } else {
-        rightLabel = "Press A to skip";
+    if (showContent) {
+        if (state.countdownStarted) {
+            float rem = RemainingSecondsFrom(state.countdownEndsAt);
+            // Ceiling of remaining seconds so the display transitions
+            // 5→4→3→2→1→0 (users expect "1s" to mean "up to 1 second
+            // remaining"). Ceiling avoids the awkward case where the timer
+            // reads "0s" for a full second before the actual advance.
+            int wholeSec = (int)std::ceil(rem);
+            if (wholeSec < 0) wholeSec = 0;
+            char buf[16];
+            // Bare integer — no "s" suffix per user design direction
+            // 2026-07-07. Matches OoT's clean text-driven aesthetic
+            // (e.g. rupee counter, timer icons — no unit label).
+            std::snprintf(buf, sizeof(buf), "%d", wholeSec);
+            rightLabel = buf;
+            rightColor = TimerColorForInteger(wholeSec);
+        } else {
+            rightLabel = "Press A to skip";
+        }
     }
 
     // ---- Position + geometry --------------------------------------
@@ -204,13 +277,28 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
             ? (kDotSpacing * (voters.size() - 1)) + (kDotRadius * 2.0f)
             : 0.0f;
 
+    // Fix H — pin the window to the main viewport EVERY frame so
+    // ImGui's multi-viewport WindowSelectViewport logic never
+    // promotes it. Position anchored bottom-right; pivot (1,1) means
+    // the anchor coord IS the widget's bottom-right corner.
     ImGui::SetNextWindowViewport(vp->ID);
+    const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
+    const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
+    ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
+                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, kBgColor);
-    ImGui::PushStyleColor(ImGuiCol_Border, kBorderColor);
+    // Fix H — alpha=0 hides the window fully when there's no content.
+    // Bg + border colors also drop to fully transparent so a
+    // 0-alpha window with zero content doesn't leave any visible
+    // artifact.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,
+                          showContent ? kBgColor : ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border,
+                          showContent ? kBorderColor : ImVec4(0, 0, 0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                         ImVec2(kPadding, kPadding));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, showContent ? 1.0f : 0.0f);
 
     // Font scale — modest bump over default so text is legible over
     // vanilla dialogue. Reuses the same CVar as Notification so users
@@ -229,30 +317,270 @@ void DrawVotingSkipWidget(const Anchor& anchor) {
             ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoSavedSettings);
 
-    ImGui::SetWindowFontScale(fontScale);
+    if (showContent) {
+        ImGui::SetWindowFontScale(fontScale);
 
-    // Layout row: dots on the left, label on the right, gap between.
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 cursor = ImGui::GetCursorScreenPos();
+        // Layout row: dots on the left, label on the right, gap between.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 cursor = ImGui::GetCursorScreenPos();
 
-    // Dot centers.
-    const float dotBaseY = cursor.y + kDotRadius;
-    for (size_t i = 0; i < voters.size(); i++) {
-        const auto& v = voters[i];
-        ImVec2 center(cursor.x + kDotRadius + i * kDotSpacing, dotBaseY);
-        RenderDot(dl, center, v.color, v.voted);
+        // Dot centers.
+        const float dotBaseY = cursor.y + kDotRadius;
+        for (size_t i = 0; i < voters.size(); i++) {
+            const auto& v = voters[i];
+            ImVec2 center(cursor.x + kDotRadius + i * kDotSpacing, dotBaseY);
+            RenderDot(dl, center, v.color, v.voted);
+        }
+
+        // Advance cursor past the dot row so the label sits to its right.
+        ImGui::Dummy(ImVec2(dotRowWidth, kDotRadius * 2.0f));
+        ImGui::SameLine(0.0f, kDotToTextGap);
+        // Nudge vertical to keep the text roughly baseline-aligned with
+        // dot centers.
+        ImGui::TextColored(rightColor, "%s", rightLabel.c_str());
     }
-
-    // Advance cursor past the dot row so the label sits to its right.
-    ImGui::Dummy(ImVec2(dotRowWidth, kDotRadius * 2.0f));
-    ImGui::SameLine(0.0f, kDotToTextGap);
-    // Nudge vertical to keep the text roughly baseline-aligned with
-    // dot centers.
-    ImGui::TextColored(rightColor, "%s", rightLabel.c_str());
 
     ImGui::End();
 
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+}
+
+// ---- Scenario 2: cutscene late-join catchup ------------------------
+//
+// Shown when the local client is a late-joiner awaiting a
+// CUTSCENE_CATCHUP_RESPONSE from a same-team peer. Renders a
+// short banner ("Catching up to peer's cutscene...") in the same
+// bottom-right slot the voting-skip widget uses; the two scenarios
+// are mutually exclusive (voting-skip requires csCtx.state != IDLE
+// on all voters; late-join catchup holds csCtx.state at IDLE) so
+// the priority rule from plan §5.3 doesn't apply in practice.
+//
+// Plan: Claude/Plans/cutscene_late_join_plan.md §3.4 (fallback UX
+// path for Skip-and-Apply timeout OR race-lost safety-net catches).
+void DrawCutsceneCatchupWidget(const Anchor& anchor) {
+    // Fix H — always call Begin/End; visibility controlled via alpha.
+    // See DrawVotingSkipWidget's Fix H block for the multi-viewport
+    // rationale.
+    const bool showContent =
+        (!anchor.pendingCatchups.empty()) && (gPlayState != nullptr);
+
+    auto vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowViewport(vp->ID);
+    const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
+    const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
+    ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
+                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,
+                          showContent ? kBgColor : ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border,
+                          showContent ? kBorderColor : ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                        ImVec2(kPadding, kPadding));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, showContent ? 1.0f : 0.0f);
+
+    const float fontScale =
+        CVarGetFloat(CVAR_SETTING("Notifications.Size"), 1.8f);
+
+    ImGui::Begin(
+        "AnchorCoopHudCutsceneCatchup", nullptr,
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+            ImGuiWindowFlags_NoFocusOnAppearing |
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoSavedSettings);
+    if (showContent) {
+        ImGui::SetWindowFontScale(fontScale);
+        ImGui::TextColored(kPromptColor, "Catching up to peer's cutscene...");
+    }
+    ImGui::End();
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+}
+
+// ---- Dialog choice-vote INLINE widget (v4 — ImGui overlay 2026-07-12) --
+//
+// V4 replaces the earlier v1/v2/v3 Gfx-DList splice into
+// `z_message_PAL.c`. All three prior attempts failed to render circles
+// correctly (v1 corrupt texture, v2 squares + Y offset, v3 still not
+// circular per user field-test 2026-07-12).
+//
+// Per user direction 2026-07-12: dots must look IDENTICAL to the
+// vote-skip HUD circles. The vote-skip renders via `RenderDot()` — the
+// same primitive is reused here to guarantee visual match. Rendering
+// is a transparent ImGui overlay covering the full viewport; dot
+// centres are computed from the vanilla textbox's N64-ortho register
+// values, scaled linearly to viewport pixels.
+//
+// Position: right of the vanilla ▶ arrow (drawn at
+// `R_TEXT_CHOICE_XPOS` in ortho), left of the choice text (indented
+// +32 from `R_TEXT_INIT_XPOS`). One dot row per choice line, dots
+// truncate on overflow into the choice-text area.
+//
+// Coord mapping caveat: linear scaling from N64 ortho (320x240) to
+// `ImGui::GetMainViewport()` pixel size. This assumes the game
+// framebuffer fills the whole viewport (stretch mode). Widescreen
+// letterbox may produce misalignment — flagged as a v5 candidate.
+
+// N64 ortho space (game virtual resolution).
+constexpr float kOrthoWidth  = 320.0f;
+constexpr float kOrthoHeight = 240.0f;
+
+// Arrow geometry in ortho.
+constexpr float kArrowWidth = 16.0f;  // sCharTexSize per z_message_PAL.c:735
+
+// Ortho X of the choice text start = R_TEXT_INIT_XPOS + this.
+constexpr float kChoiceTextIndent = 32.0f;
+
+// Screen-space (pixel) spacing between dot centres. Smaller than
+// vote-skip's kDotSpacing because the arrow-to-text gap is tight in
+// ortho space (18 px = arrow.right(64) → text.left(82)).
+constexpr float kInlineDotSpacing = 14.0f;
+
+// Slight inset so dots don't kiss the choice-text glyphs.
+constexpr float kInlineDotRightMarginPx = 4.0f;
+
+// Empirical Y offset (ortho px) applied to R_TEXT_CHOICE_YPOS(n) to
+// visually centre the dot with the arrow. The pure `+ 8` (arrow half-
+// height in ortho with kArrowWidth=16) put the dot ~25 screen px too
+// high in field-test log 60. Tuned upward to compensate. Ortho-space
+// value scales with viewport via `sy`, so this stays correct across
+// resolutions.
+constexpr float kInlineDotYOffsetOrtho = 16.0f;
+
+// Additional fixed screen-pixel Y nudge on top of the ortho offset.
+// User tuning 2026-07-12: after v4.1, dot needed to drop 5 more screen
+// pixels. Applied as a fixed post-scale offset rather than folded into
+// the ortho constant so it stays a literal 5 px regardless of viewport
+// size (user asked in screen-pixel terms).
+constexpr float kInlineDotYNudgeScreenPx = 5.0f;
+
+void DrawDialogChoiceVoteInlineWidget(const Anchor& anchor) {
+    const auto& state = anchor.dialogChoiceVoteState;
+    // Also suppress on lore-dialogue textbox types for consistency
+    // with the vote-skip widget. Choice textboxes shouldn't use these
+    // background-less types in vanilla, but the guard is cheap and
+    // keeps both HUDs behaving the same way if they ever coincide.
+    const bool loreDialogueActive =
+        (gPlayState != nullptr) &&
+        IsLoreDialogueTextBoxType(gPlayState->msgCtx.textBoxType);
+    const bool showContent =
+        state.active && state.numChoices >= 2 && (gPlayState != nullptr) &&
+        (gPlayState->msgCtx.textId == state.textId) &&
+        (gPlayState->msgCtx.textboxEndType == TEXTBOX_ENDTYPE_2_CHOICE ||
+         gPlayState->msgCtx.textboxEndType == TEXTBOX_ENDTYPE_3_CHOICE) &&
+        !loreDialogueActive;
+
+    // Following the Fix H pattern (see DrawVotingSkipWidget above),
+    // always Begin/End regardless of visibility so ImGui's multi-
+    // viewport promotion never fires against a retained hidden window.
+    auto vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(vp->Size);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, showContent ? 1.0f : 0.0f);
+
+    ImGui::Begin(
+        "AnchorCoopHudDialogChoiceInline", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+            ImGuiWindowFlags_NoFocusOnAppearing |
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoBackground);
+
+    if (showContent) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // Linear ortho→pixel scale (stretch mode assumption).
+        const float sx = vp->Size.x / kOrthoWidth;
+        const float sy = vp->Size.y / kOrthoHeight;
+
+        // Ortho X anchors.
+        //   arrowOrthoX      — vanilla arrow's ortho X (left edge of ▶).
+        //   arrowOrthoRight  — right edge of the arrow (its texture is
+        //                      `sCharTexSize = 16 * R_TEXT_CHAR_SCALE/100`
+        //                      ortho px wide; conservative constant 16
+        //                      here — a wider arrow slightly clips the
+        //                      leftmost dot but the truncation guard
+        //                      catches it).
+        //   choiceTextOrthoX — start X of the choice text glyphs (arrow
+        //                      indent is +32 from R_TEXT_INIT_XPOS per
+        //                      z_message_PAL.c:1392-1395).
+        const float arrowOrthoX      = static_cast<float>(R_TEXT_CHOICE_XPOS);
+        const float arrowOrthoRight  = arrowOrthoX + kArrowWidth;
+        const float choiceTextOrthoX = static_cast<float>(R_TEXT_INIT_XPOS)
+                                       + kChoiceTextIndent;
+
+        // Screen-space anchors.
+        const float arrowRightScreenX = vp->Pos.x + arrowOrthoRight * sx;
+        // Rightmost dot centre — sits just left of the choice text.
+        const float rightAnchorScreenX =
+            vp->Pos.x + choiceTextOrthoX * sx
+            - kInlineDotRightMarginPx - kDotRadius;
+
+        for (uint8_t choiceIdx = 0; choiceIdx < state.numChoices;
+             ++choiceIdx) {
+            // Y-centre the dot on the choice line. Empirical vertical
+            // offset (`kInlineDotYOffsetOrtho`) shifts the dot slightly
+            // below the arrow's ortho top so it visually aligns with the
+            // arrow's midline — the pure `+ arrowHalf` calculation left
+            // the dot ~25 screen px too high (log 60 evidence). Ortho
+            // offset scales with viewport height via `sy`.
+            const float choiceOrthoY =
+                static_cast<float>(R_TEXT_CHOICE_YPOS(choiceIdx))
+                + kInlineDotYOffsetOrtho;
+            const float choiceScreenY =
+                vp->Pos.y + choiceOrthoY * sy + kInlineDotYNudgeScreenPx;
+
+            // Anchor to the RIGHT (choice text). First voter's dot at
+            // rightmost position (adjacent to text). Subsequent voters
+            // extend LEFTWARD. Matches user's Image 62 layout: first
+            // dot closest to text, additional dots grow left.
+            int dotIdx = 0;
+            for (uint32_t voterId : state.voteOrderByClient) {
+                auto voteIt = state.votesByClient.find(voterId);
+                if (voteIt == state.votesByClient.end()) continue;
+                if (voteIt->second != choiceIdx) continue;
+
+                Color_RGB8 c = { 255, 255, 255 };
+                auto clientIt = anchor.clients.find(voterId);
+                if (clientIt != anchor.clients.end()) {
+                    c = clientIt->second.color;
+                }
+
+                const float centreX =
+                    rightAnchorScreenX - dotIdx * kInlineDotSpacing;
+                // Truncate at arrow's right edge — leftmost dot would
+                // otherwise overlap the arrow.
+                if (centreX - kDotRadius < arrowRightScreenX) break;
+
+                RenderDot(dl,
+                          ImVec2(centreX, choiceScreenY),
+                          ColorFromRgb8(c, 1.0f),
+                          /*voted=*/true);
+                ++dotIdx;
+            }
+        }
+    }
+
+    ImGui::End();
+
+    ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(2);
 }
 
@@ -281,25 +609,100 @@ void Window::Draw() {
                     (unsigned)anchor.cutsceneTextAdvanceState.textId,
                     (int)anchor.cutsceneTextAdvanceState.pressedClientIds.size(),
                     (int)anchor.cutsceneTextAdvanceState.countdownStarted);
+
+        // Diag 3 — ImGui viewport enumeration. On every state.active
+        // edge, dump the viewport count + main viewport size so the
+        // "two SoH windows" bug can be correlated with rapid state
+        // transitions. If Platform Viewports count grows past 1
+        // during a flicker sequence, that confirms the multi-viewport
+        // window-spawn theory. Gated on
+        // gEnhancements.Anchor.CutsceneLateJoinDiag.
+        // See Analysis/cutscene_ff_reset_and_mp_dialogue_deadline_2026-07-08.md
+        // Bug 3 hypothesis.
+        if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneLateJoinDiag"), 0) != 0) {
+            ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+            ImGuiViewport* main = ImGui::GetMainViewport();
+            SPDLOG_INFO("[CoopModalHud.diag] viewport-count={} main "
+                        "pos=({:.0f},{:.0f}) size=({:.0f},{:.0f}) "
+                        "flags=0x{:X}",
+                        (int)pio.Viewports.Size,
+                        main ? main->Pos.x : -1.0f,
+                        main ? main->Pos.y : -1.0f,
+                        main ? main->Size.x : -1.0f,
+                        main ? main->Size.y : -1.0f,
+                        main ? (unsigned)main->Flags : 0u);
+            for (int i = 0; i < pio.Viewports.Size; i++) {
+                ImGuiViewport* vp = pio.Viewports[i];
+                if (vp == nullptr) continue;
+                SPDLOG_INFO("[CoopModalHud.diag]   viewport[{}] id=0x{:X} "
+                            "pos=({:.0f},{:.0f}) size=({:.0f},{:.0f}) "
+                            "flags=0x{:X}",
+                            i, (unsigned)vp->ID,
+                            vp->Pos.x, vp->Pos.y,
+                            vp->Size.x, vp->Size.y,
+                            (unsigned)vp->Flags);
+            }
+            // Diag D3 — enumerate ALL currently-active ImGui windows.
+            // Log 632 P2 white-icon investigation: our own viewport
+            // enumeration only shows Windows that ImGui has promoted
+            // to their own platform viewport. A window that renders
+            // as a small icon inside the main viewport wouldn't show
+            // here. Walk the internal window list via ImGui's
+            // current-context. Filter to windows with Active=true so
+            // we only see what's actually rendering this frame.
+            // NOTE: uses ImGui internal API — may need adjustment on
+            // ImGui version upgrade.
+            ImGuiContext* ctx = ImGui::GetCurrentContext();
+            if (ctx != nullptr) {
+                int shown = 0;
+                for (int i = 0; i < ctx->Windows.Size; i++) {
+                    ImGuiWindow* w = ctx->Windows[i];
+                    if (w == nullptr) continue;
+                    if (!w->Active) continue;
+                    // Skip if window has no size (hidden / minimized).
+                    if (w->SizeFull.x <= 0.0f && w->SizeFull.y <= 0.0f) continue;
+                    SPDLOG_INFO("[CoopModalHud.diag]   window[{}] name='{}' "
+                                "pos=({:.0f},{:.0f}) size=({:.0f},{:.0f}) "
+                                "flags=0x{:X} viewport=0x{:X}",
+                                shown, w->Name ? w->Name : "?",
+                                w->Pos.x, w->Pos.y,
+                                w->SizeFull.x, w->SizeFull.y,
+                                (unsigned)w->Flags,
+                                w->Viewport ? (unsigned)w->Viewport->ID : 0u);
+                    shown++;
+                    if (shown >= 30) {
+                        SPDLOG_INFO("[CoopModalHud.diag]   (truncated at 30 windows)");
+                        break;
+                    }
+                }
+                SPDLOG_INFO("[CoopModalHud.diag] total-windows={} shown={}",
+                            (int)ctx->Windows.Size, shown);
+            }
+        }
+
         s_lastActiveLogged = currActive;
     }
 
-    // Phase 1 dispatch. Phase 2/3/4 scenarios plug in as sibling
-    // `else if` branches per plan §5.3 (priority: voting-skip wins
-    // when multiple scenarios coexist).
-    if (currActive) {
-        // Bottom-right of viewport — pivot (1.0, 1.0) so the widget's
-        // bottom-right corner sits at (vp.right - margin, vp.bottom -
-        // margin). Position is aspect-ratio agnostic; approximates
-        // "bottom-right of dialogue box" in the common case where the
-        // vanilla textbox spans most of the bottom third of the frame.
-        auto vp = ImGui::GetMainViewport();
-        const float anchorX = vp->Pos.x + vp->Size.x - kBottomRightMargin;
-        const float anchorY = vp->Pos.y + vp->Size.y - kBottomRightMargin;
-        ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
-                                ImGuiCond_Always, ImVec2(1.0f, 1.0f));
-        DrawVotingSkipWidget(anchor);
-    }
+    // Fix H — always call both widgets every frame. Visibility is
+    // controlled inside each widget via alpha=0 when its state is
+    // inactive. The prior design (conditional Begin/End dispatch)
+    // caused ImGui's WindowSelectViewport logic to promote the
+    // retained-but-not-drawn window to its own OS-level platform
+    // viewport, spawning a second SoH window at the first HUD close
+    // (log 629 Bug 3). Each widget now Begin/End's its own window
+    // unconditionally with ImGui::SetNextWindowViewport pinning to
+    // the main viewport, so promotion cannot occur. See
+    // Analysis/cutscene_late_join_bugs_deep_analysis_2026-07-08.md
+    // Bug 3.
+    //
+    // The two widgets share the same bottom-right slot and are
+    // designed to be mutually exclusive by domain (voting-skip
+    // requires csCtx.state != IDLE; catchup pending holds
+    // csCtx.state at IDLE). If both accidentally activate at once,
+    // both render — user sees stacked HUD elements, not a crash.
+    DrawVotingSkipWidget(anchor);
+    DrawCutsceneCatchupWidget(anchor);
+    DrawDialogChoiceVoteInlineWidget(anchor);
 }
 
 }  // namespace CoopModalHud

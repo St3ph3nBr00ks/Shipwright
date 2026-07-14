@@ -113,6 +113,31 @@ inline bool IsSyncableActor(Actor* actor) {
            IsSyncedWorldActor(actor->id);
 }
 
+// Per-variant exclusions from netId assignment. Some actors have variant
+// children that share their parent's `id` + `home.pos` (thus computing the
+// same deterministic netId under EncodeEnemyNetId), but shouldn't
+// participate in sync — they're static decorative variants with no
+// actionFunc / no collider / no state to replicate. Assigning them a netId
+// creates a collision with the parent and can cause double-application in
+// receive-side scans.
+//
+// Called from BOTH `OnActorSpawn` (HookHandlers.cpp) and
+// `Anchor::BackfillEnemyNetIds` (Anchor.cpp). Keeping both call sites in
+// lockstep is load-bearing: without the shared helper, a reconnect during
+// an active scene retroactively assigns netIds to skipped variants via
+// backfill, producing the netId collision that OnActorSpawn had avoided.
+//
+// Bug this closes: 2026-07-13 hint nut reflect-stun desync. Peer
+// disconnected + reconnected during Deku Tree compound room puzzle. On
+// reconnect, `BackfillEnemyNetIds` assigned netIds to the three
+// params=0xA child reveal flowers (which OnActorSpawn skips), colliding
+// with the three puzzle nut netIds. See
+// Claude/Analysis/hintnut_reflect_stun_desync_2026-07-13.md.
+//
+// Add new skip cases as sync features admit new parent-with-child actors.
+// Skip cases should mirror the OnActorSpawn early-returns exactly.
+bool ShouldSkipNetIdAssignment(Actor* actor);
+
 // Deterministic netId for a syncable actor. Same scene + actor id + home
 // position produce the same netId on every client, so a posHash collision
 // is the only mechanism by which two actors share a netId.

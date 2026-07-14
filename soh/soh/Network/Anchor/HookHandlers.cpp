@@ -6,6 +6,7 @@
 #include "soh/cvar_prefixes.h"        // CVAR_REMOTE_ANCHOR / CVAR_ENHANCEMENT (Nav system commit 6c)
 #include "Common/ActorSyncHelpers.h"  // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor
 #include "Common/SkelAnimeWire.h"     // kExpectedLimbCount (#154 — defense-in-depth limb-count registry)
+#include "Common/StaleHostGate.h"     // ShouldDeferToPeerLocalAI — host-freshness gate for per-actor sync
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
 #include "Common/ItemEligibility.h"   // CanPlayerCollectItem00 (#193 Phase 0)
@@ -188,6 +189,36 @@ bool ShouldLogStateChange(uint32_t netId, int16_t cur, int16_t net, bool blocked
     }
     return false;
 }
+
+// Enemies where vanilla damage-response transitions to a state machine
+// (stun / talk / flee / puzzle-counter / animation) rather than calling
+// Actor_Kill. B2-D's fundamental assumption — "if peer's damage would
+// be lethal, host will eventually broadcast ENEMY_DEFEATED" — is wrong
+// for these actors: host correctly does NOT broadcast defeat (because
+// nothing died), and peer's 1-second timeout fires spuriously, killing
+// the actor mid-state.
+//
+// Populated 2026-07-13 from a walk of `IsSyncedWorldActor` allowlist
+// per Claude/Plans/b2d_composite_fix_2026-07-13.md §3a. See analysis
+// Claude/Analysis/hintnut_dialogue_disappear_2026-07-13.md for the
+// motivating regression (hint nut vanish mid-dialogue).
+//
+// Layer 1 of the composite fix (Layers 2 + 3 apply additional gates
+// further down at the B2-D fire site). Even if the composite Layer 2
+// (phase gate) is expected to catch novel additions, this list is
+// kept explicit so the known-safe class is documented in code.
+bool IsStunNotDieActor(int16_t actorId) {
+    switch (actorId) {
+        case ACTOR_EN_HINTNUTS:  // Deku Tree 2→3→1 puzzle scrubs (base case)
+        case ACTOR_EN_SSH:       // Cursed Skulltula people — Actor_Kill only at Init
+                                 // (gsTokens threshold), never damage-driven
+        case ACTOR_EN_MD:        // Mido NPC (Kokiri Forest / Lost Woods)
+        case ACTOR_EN_TA:        // Talon NPC (castle wake / cucco-throw sequence)
+            return true;
+        default:
+            return false;
+    }
+}
 }  // namespace
 
 
@@ -356,7 +387,29 @@ void Anchor::RegisterHooks() {
     // when no swap was active.
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneInit>(
         [](int16_t sceneNum) {
-            (void)sceneNum;
+            // Defensive log — helps correlate crashes to the scene
+            // transition tear-down/rebuild window when a minidump
+            // + PDB isn't available. See Analysis/deku_tree_multi-
+            // player_incidents_2026-07-13.md §3 (Incident 5).
+            SPDLOG_INFO("[Anchor.OnSceneInit] sceneNum=0x{:04X}",
+                        (unsigned)sceneNum);
+
+            // Defensive null-guards. The three per-actor reset
+            // functions and Director::OnSceneInitFromHook are safe
+            // no-ops when Anchor state isn't initialised, BUT the
+            // hook fires during the scene tear-down/rebuild window
+            // where downstream globals may be in transient states.
+            // The Kokiri Forest crash of 2026-07-13 (log 692, RAX=0
+            // during Cutscene_HandleConditionalTriggers) motivates
+            // an explicit guard at every entry point registered on
+            // OnSceneInit — belt-and-suspenders vs. any downstream
+            // null-deref hazard the individual reset functions
+            // might introduce in future edits.
+            if (::Anchor::Instance == nullptr) {
+                SPDLOG_INFO("[Anchor.OnSceneInit] Anchor::Instance null — skipping downstream resets");
+                return;
+            }
+
             Anchor_LocalPlayerFaceSwapResetOnSceneTransition();
             Anchor_FollowerNpcDrawStateResetOnSceneTransition();
             Anchor_InvaderDrawStateResetOnSceneTransition();
@@ -398,6 +451,97 @@ void Anchor::RegisterHooks() {
                 Anchor_InvaderDrawStateResetOnSceneTransition();
             }
             sLastPauseState = curr;
+        });
+
+    // HeldActor diagnostic (Analysis/rock_over_head_after_teleport_
+    // 2026-07-09.md §6.1). Per-frame poll of the local player's
+    // heldActor pointer. On any transition (NULL→X, X→Y, X→NULL), logs
+    // a rich SPDLOG describing prior/new attachment, player state, and
+    // interactRangeActor at the moment of change — enough to pinpoint
+    // WHICH mechanism (vanilla Player_LiftActor, DummyPlayer sync,
+    // scene reload, teleport, etc.) drove the write.
+    //
+    // Gated on gEnhancements.Anchor.HeldActorDiag (default 0). Enable
+    // via console: `set gEnhancements.Anchor.HeldActorDiag 1`. Fires
+    // one line per transition, not per frame — no log spam when steady.
+    //
+    // Unconditional hook registration (not COND_HOOK) so the CVar can be
+    // toggled at runtime without reconnecting. Cheap when disabled:
+    // one CVarGetInteger + one pointer compare + early-out.
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameFrameUpdate>(
+        []() {
+            if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.HeldActorDiag"), 0) == 0) {
+                return;
+            }
+            if (gPlayState == nullptr) return;
+            Player* player = GET_PLAYER(gPlayState);
+            if (player == nullptr) return;
+
+            static Actor* sLastHeldActor = nullptr;
+            Actor* curHeldActor = player->heldActor;
+            if (curHeldActor == sLastHeldActor) {
+                return;  // no change
+            }
+
+            // Log the transition. Each actor gets its own SPDLOG_INFO
+            // line so we can print the fields directly via SPDLOG's
+            // fmtlib backend without pre-formatting to std::string.
+            // Emit player context first, then prior, then current.
+            const Vec3f pPos = player->actor.world.pos;
+            SPDLOG_INFO("[HeldActorDiag] TRANSITION player.pos=({:.0f},{:.0f},{:.0f}) "
+                        "stateFlags1=0x{:08X} stateFlags2=0x{:08X}",
+                        pPos.x, pPos.y, pPos.z,
+                        (unsigned)player->stateFlags1,
+                        (unsigned)player->stateFlags2);
+            if (sLastHeldActor == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   prior=NULL");
+            } else if (sLastHeldActor->update == nullptr &&
+                       sLastHeldActor->draw == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   prior=(stale?) ptr={}",
+                            (const void*)sLastHeldActor);
+            } else {
+                SPDLOG_INFO("[HeldActorDiag]   prior id=0x{:04X} cat={} params=0x{:04X} "
+                            "pos=({:.0f},{:.0f},{:.0f}) parent={}",
+                            (unsigned)sLastHeldActor->id,
+                            (int)sLastHeldActor->category,
+                            (unsigned)sLastHeldActor->params,
+                            sLastHeldActor->world.pos.x,
+                            sLastHeldActor->world.pos.y,
+                            sLastHeldActor->world.pos.z,
+                            (const void*)sLastHeldActor->parent);
+            }
+            if (curHeldActor == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   current=NULL");
+            } else if (curHeldActor->update == nullptr &&
+                       curHeldActor->draw == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   current=(stale?) ptr={}",
+                            (const void*)curHeldActor);
+            } else {
+                SPDLOG_INFO("[HeldActorDiag]   current id=0x{:04X} cat={} params=0x{:04X} "
+                            "pos=({:.0f},{:.0f},{:.0f}) parent={}",
+                            (unsigned)curHeldActor->id,
+                            (int)curHeldActor->category,
+                            (unsigned)curHeldActor->params,
+                            curHeldActor->world.pos.x,
+                            curHeldActor->world.pos.y,
+                            curHeldActor->world.pos.z,
+                            (const void*)curHeldActor->parent);
+            }
+            Actor* ira = player->interactRangeActor;
+            if (ira == nullptr) {
+                SPDLOG_INFO("[HeldActorDiag]   interactRangeActor=NULL");
+            } else {
+                SPDLOG_INFO("[HeldActorDiag]   interactRangeActor id=0x{:04X} cat={} "
+                            "params=0x{:04X} pos=({:.0f},{:.0f},{:.0f})",
+                            (unsigned)ira->id,
+                            (int)ira->category,
+                            (unsigned)ira->params,
+                            ira->world.pos.x,
+                            ira->world.pos.y,
+                            ira->world.pos.z);
+            }
+
+            sLastHeldActor = curHeldActor;
         });
 
     // Phase α.7+ — voice-pack game-thread polls (unconditional; work
@@ -550,6 +694,53 @@ void Anchor::RegisterHooks() {
             // role we're in reads its counter next.
             Anchor::Instance->voteStateSequence           = 0;
             Anchor::Instance->peerLastAppliedVoteStateSeq = 0;
+
+            // Cutscene late-join detection (Plans/cutscene_late_join_plan.md
+            // §3.3). Scan same-team peers for any who are mid-cutscene in
+            // our scene AND timeline. If found, request catchup and enter
+            // the pending state — the gate predicate
+            // Anchor_ShouldSuppressLocalCutsceneEntry() will suppress any
+            // local vanilla cutscene entry until the response arrives (or
+            // the 2s deadline elapses).
+            //
+            // Team gating: the relay routes CUTSCENE_START by targetTeamId,
+            // so we only see cutsceneStartActive entries broadcast by peers
+            // on our team. Combined with the client.teamId == myTeamId
+            // filter here, we never request catchup from a peer on a
+            // different quest branch.
+            //
+            // Variant C.2.2 (2026-07-09) — arm the scene-entry request
+            // delay gate instead of calling DetectAndRequestCutsceneCatchup
+            // immediately. TickCutsceneCatchup polls the gate and fires
+            // the detection scan once the configured delay (default
+            // 1000 ms) has elapsed. Gives peer's scene-transition fade-in
+            // + initial room render time to complete before catchup
+            // pipeline engages. See Anchor.h catchupRequestGateArmedAt
+            // for full rationale.
+            //
+            // Variant C.2.3 (2026-07-09) — also arm the fade-to-white
+            // overlay state machine. Gated on HasSameSceneMidCsPeer() so
+            // scenes without a mid-cutscene peer don't trigger a
+            // spurious 1 s white flash. See Anchor.h catchupFadeState.
+            if (Anchor::Instance->CutsceneCatchupEnabled() &&
+                Anchor::Instance->HasSameSceneMidCsPeer()) {
+                const auto now = std::chrono::steady_clock::now();
+                Anchor::Instance->catchupRequestGateArmedAt = now;
+                if (CVarGetInteger(CVAR_ENHANCEMENT(
+                        "Anchor.CutsceneLateJoinFadeOverlay"), 1) != 0) {
+                    Anchor::Instance->catchupFadeState =
+                        Anchor::CatchupFadeState::FADING_TO_WHITE;
+                    Anchor::Instance->catchupFadeStateChangedAt = now;
+                    Anchor::Instance->catchupFadeHoldIdleSince =
+                        std::chrono::steady_clock::time_point::min();
+                }
+            }
+
+            // Also reset FRAME_SYNC seq counters on scene load — same
+            // rationale as vote-state (keep small, avoid cross-scene
+            // stale-rejection).
+            Anchor::Instance->cutsceneFrameSyncSequence      = 0;
+            Anchor::Instance->peerLastAppliedCutsceneFrameSeq = 0;
         }
     });
 
@@ -731,6 +922,12 @@ void Anchor::RegisterHooks() {
         // when no active textbox vote is in progress; broadcasts
         // CUTSCENE_TEXT_ADVANCED on timer-0.
         Anchor::Instance->TickCutsceneTextAdvance();
+
+        // Cutscene late-join catchup tick (Plans/cutscene_late_join_plan.md).
+        // 1Hz FRAME_SYNC emit (leader-only) + pending-catchup deadline
+        // enforcement (peer-only). Both are internal gates; safe to
+        // call every frame regardless of role.
+        Anchor::Instance->TickCutsceneCatchup();
 
         // Generic CUTSCENE_START / CUTSCENE_END edge detector — watches
         // gSaveContext.cutsceneIndex transitions for the `savecontext`
@@ -976,42 +1173,12 @@ void Anchor::RegisterHooks() {
             return;
         }
 
-        // #135 / en_dekunuts_sync_plan.md §3 step 1 — DEKUNUTS_FLOWER child
-        // shares its parent Mad Scrub's home.pos and actor->id, so the
-        // deterministic netId scheme would collide with the parent. The
-        // flower has no actionFunc (Update early-returns) and no collider
-        // — nothing to sync. Skip netId assignment entirely so the parent
-        // owns the netId unambiguously.
-        if (actor->id == ACTOR_EN_DEKUNUTS && actor->params == /*DEKUNUTS_FLOWER*/ 10) {
-            return;
-        }
-
-        // En_Hintnuts (Inside Deku Tree Compound Room) — same flower
-        // child pattern as Dekunuts. Parent (params 1-3 or 0) spawns a
-        // child with params=0xA (line 100 of z_en_hintnuts.c). The child
-        // is a static decorative flower with no actionFunc, no collider,
-        // and identical home.pos/id to the parent. Skip netId assignment
-        // for the flower so parent owns the netId. Without this skip,
-        // logs show the same netId assigned twice — collision.
-        if (actor->id == ACTOR_EN_HINTNUTS && (actor->params & 0xFF) == 0xA) {
-            return;
-        }
-
-        // en_honotrap_sync — skip the flame projectile variants entirely.
-        // Both clients' local Eye / Dampe spawner run their own
-        // `Actor_SpawnAsChild(ACTOR_EN_HONOTRAP, ..., HONOTRAP_FLAME_*)`
-        // independently, so each client gets one local flame per attack
-        // event. Allowing ENEMY_SPAWN to broadcast the dynamic flame
-        // spawn would double-spawn on peer (one local + one wire). The
-        // flame is fully per-client-local-AI (aim, chase, shield reflect,
-        // damage application — none cross-broadcast). Filtering here
-        // skips netId assignment, the non-host kill branch, and the
-        // host's ENEMY_SPAWN broadcast in one shot. The eye variant
-        // (params == HONOTRAP_EYE) is the only thing that gets a netId
-        // and sync — its state machine sync drives the Open/Close
-        // visual + lets ENEMY_DEFEATED replicate the eye's destruction
-        // via Actor_Kill when one client destroys it locally.
-        if (actor->id == ACTOR_EN_HONOTRAP && actor->params != HONOTRAP_EYE) {
+        // Per-variant skip guards (Dekunuts flower, Hintnut reveal-child,
+        // Honotrap flame). Shared with Anchor::BackfillEnemyNetIds so
+        // reconnects don't retroactively assign netIds that OnActorSpawn
+        // intentionally skipped. See ShouldSkipNetIdAssignment doc-comment
+        // in ActorSyncHelpers.h for the individual per-actor rationale.
+        if (ShouldSkipNetIdAssignment(actor)) {
             return;
         }
 
@@ -2187,6 +2354,17 @@ void Anchor::RegisterHooks() {
                 return;
             }
 
+            // Host-freshness gate — computed once per-actor per frame, consumed
+            // at every per-actor sync site below. When host has been silent for
+            // longer than kHostStalenessThresholdMs (see Common/StaleHostGate.h),
+            // ShouldDeferToPeerLocalAI(actor->id, ext, gateNowMs) returns true
+            // and the sync site skips the force-apply so peer's local AI drives
+            // freely. Boss actors bypass the gate entirely (host-authoritative
+            // always).
+            const uint64_t gateNowMs = EnemyStateSync::NowMs();
+            const bool hostStale = EnemyStateSync::ShouldDeferToPeerLocalAI(
+                actor->id, ext, gateNowMs);
+
             // Detect sword hits by the local (non-host) player this frame and forward
             // them to the host for authoritative damage application.
             //
@@ -2611,7 +2789,7 @@ void Anchor::RegisterHooks() {
             if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 &&
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 s16 curState = karebabaLocalState; // pre-computed above
-                if (curState != ext->netStateIndex && ext->netStateIndex != 7) {
+                if (curState != ext->netStateIndex && ext->netStateIndex != 7 && !hostStale) {
                     // Intra-attack guard (Fix 29): when both the host and local Karebaba are
                     // in the active bite cycle (Upright=3 / Spin=4), let the local state-machine
                     // timers drive the Upright↔Spin transitions rather than forcing the host's
@@ -2663,7 +2841,7 @@ void Anchor::RegisterHooks() {
             if (actor->id == ACTOR_EN_GOROIWA && ext->netStateIndex >= 0) {
                 EnGoroiwa* boulder = (EnGoroiwa*)actor;
                 s16 curState = EnGoroiwa_GetStateIndex(boulder);
-                if (curState != ext->netStateIndex) {
+                if (curState != ext->netStateIndex && !hostStale) {
                     EnGoroiwa_ApplyNetState(boulder, gPlayState, ext->netStateIndex);
                 }
             }
@@ -2687,7 +2865,7 @@ void Anchor::RegisterHooks() {
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 EnDekubaba* baba = (EnDekubaba*)actor;
                 s16 curState = EnDekubaba_GetStateIndex(baba);
-                if (curState != ext->netStateIndex) {
+                if (curState != ext->netStateIndex && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnDekubaba] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2704,7 +2882,7 @@ void Anchor::RegisterHooks() {
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 EnGoma* lg = (EnGoma*)actor;
                 s16 curState = EnGoma_GetStateIndex(lg);
-                if (curState != ext->netStateIndex) {
+                if (curState != ext->netStateIndex && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnGoma] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2728,7 +2906,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 8 || ext->netStateIndex == 10);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnDekunuts] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2773,12 +2951,17 @@ void Anchor::RegisterHooks() {
                 bool netIsDormant  = (ext->netStateIndex == 0);
                 bool localIsActive = (curState == 2 || curState == 3 ||
                                       curState == 5 || curState == 6);
-                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnHintnuts] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
                     }
                     EnHintnuts_ApplyNetState(h, gPlayState, ext->netStateIndex);
+                } else if (curState != ext->netStateIndex && hostStale) {
+                    if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
+                        SPDLOG_INFO("[EnHintnuts] rx netId={} defer net={} local={} (host-stale gate)",
+                                    ext->netId, (int)ext->netStateIndex, (int)curState);
+                    }
                 } else if (curState != ext->netStateIndex) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                         SPDLOG_INFO("[EnHintnuts] rx netId={} block net={} local={} (dormant-active filter)",
@@ -2797,7 +2980,7 @@ void Anchor::RegisterHooks() {
                 s16 curState = EnSt_GetStateIndex(st);
                 bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
                 bool localIsActive = (curState == 2 || curState == 3 || curState == 4);
-                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnSt] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2831,7 +3014,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 7);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnSkb] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2864,7 +3047,7 @@ void Anchor::RegisterHooks() {
                 bool netIsTalk     = (ext->netStateIndex == 5);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !netIsTalk) {
+                    !netIsTalk && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnSsh] rx netId={} apply {}->{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2895,7 +3078,7 @@ void Anchor::RegisterHooks() {
                 s16 curState = EnHonotrap_GetStateIndex(eye);
                 bool netIsDormant  = (ext->netStateIndex == 0);
                 bool localIsActive = (curState >= 1 && curState <= 3);
-                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnHonotrap] rx netId={} apply {}->{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -2954,7 +3137,7 @@ void Anchor::RegisterHooks() {
                     if (netDormant && localActive)         blockReason = "dormant-active filter (gold)";
                     else if (netInitTransient && localSettledIdle) blockReason = "settled-init filter (gold)";
                 }
-                if (curState != ext->netStateIndex && !blockTransition && !deathStateNet) {
+                if (curState != ext->netStateIndex && !blockTransition && !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnSw] rx netId={} apply {}→{} swType={}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex, (int)swType);
@@ -2982,7 +3165,7 @@ void Anchor::RegisterHooks() {
                 s16 curState = EnTest_GetStateIndex(tst);
                 bool netIsDormant  = (ext->netStateIndex == 0 || ext->netStateIndex == 1);
                 bool localIsActive = (curState >= 2);
-                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive)) {
+                if (curState != ext->netStateIndex && !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnTest] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3015,7 +3198,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == WOLFOS_ACTION_DIE);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnWf] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3046,7 +3229,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 8 || ext->netStateIndex == 9);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnTite] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3078,7 +3261,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex >= 7);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnFirefly] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3108,7 +3291,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 3 || ext->netStateIndex == 4);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnCrow] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3140,7 +3323,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex >= 8);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnReeba] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3170,7 +3353,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 10);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnIk] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3203,7 +3386,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex >= 12);            // 12+ guarded
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnPoh] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3235,7 +3418,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex >= 13);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnPeehat] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3273,7 +3456,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 10 || ext->netStateIndex == 11);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnEiyer] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3304,7 +3487,7 @@ void Anchor::RegisterHooks() {
                                       ext->netStateIndex == 10);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnBili] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3338,7 +3521,7 @@ void Anchor::RegisterHooks() {
                                       ext->netStateIndex == 9);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnVali] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3389,7 +3572,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 17);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnZf] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3442,7 +3625,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 16 || ext->netStateIndex == 17);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnMb] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3510,7 +3693,7 @@ void Anchor::RegisterHooks() {
                     !(netIsDormant && localIsActive) &&
                     !crossesEmergeBoundary &&
                     !unapplicableNet &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnBigokuta] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3559,7 +3742,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 6);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnFd] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3613,7 +3796,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 1 || ext->netStateIndex == 16);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnGeldB] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3671,7 +3854,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 5);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnPoField] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3702,7 +3885,7 @@ void Anchor::RegisterHooks() {
                 bool deathStateNet = (ext->netStateIndex == 3);
                 if (curState != ext->netStateIndex &&
                     !(netIsDormant && localIsActive) &&
-                    !deathStateNet) {
+                    !deathStateNet && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnVm] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3734,7 +3917,7 @@ void Anchor::RegisterHooks() {
                 bool netIsDormant  = (ext->netStateIndex == 0);
                 bool localIsActive = (curState == 1 || curState == 2 || curState == 3);
                 if (curState != ext->netStateIndex &&
-                    !(netIsDormant && localIsActive)) {
+                    !(netIsDormant && localIsActive) && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnFw] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3774,7 +3957,7 @@ void Anchor::RegisterHooks() {
                                      ext->netStateIndex == 5);
                 if (curState != ext->netStateIndex &&
                     !(netIsVariantSpawn && localIsDamageActive) &&
-                    !blockedState) {
+                    !blockedState && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {
                         SPDLOG_INFO("[EnBb] rx netId={} apply {}→{}",
                                     ext->netId, (int)curState, (int)ext->netStateIndex);
@@ -3924,17 +4107,49 @@ void Anchor::RegisterHooks() {
             // collapses simultaneous host + peer broadcasts cleanly.
             // Cosmetic cost: one extra packet on the wire per
             // false-fire.
+            // Composite fix (2026-07-13) three-layer defence for B2-D
+            // false-fires. Full design at
+            // Claude/Plans/b2d_composite_fix_2026-07-13.md.
+            //
+            // Layer 1 (allowlist): stun-not-die actors never fire B2-D.
+            // Applies to both semantic (1 s) and backstop (3 s) tiers —
+            // even a 3 s timeout shouldn't force-kill an actor that
+            // architecturally doesn't die from damage.
+            //
+            // Layer 2 (semantic, 1 s): fires only when host has
+            // signalled death intent via ENEMY_DEFEATED
+            // (ext->phase != Alive). Catches novel stun-not-die actors
+            // not in the Layer 1 allowlist.
+            //
+            // Layer 3 (backstop, 3 s): fires unconditionally on the
+            // extended timeout regardless of phase. Prevents permanent
+            // softlocks when host stalled BEFORE ext->phase transitioned
+            // (Layer 2's blind spot: peer's clamp armed, damage packet
+            // sent, host never processed it, phase stays Alive on
+            // peer). The 3 s constant is user-tuned per Q3.
             if (ext != nullptr &&
                 ext->peerKillingBlowClampedAtMs != 0 &&
-                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
-                static constexpr uint64_t kFallbackTimeoutMs = 1000;
+                !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
+                !IsStunNotDieActor(actor->id)) {
+                static constexpr uint64_t kSemanticFallbackMs  = 1000;
+                static constexpr uint64_t kBackstopFallbackMs  = 3000;
                 const uint64_t nowMs = (uint64_t)
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
                 const uint64_t elapsed = nowMs - ext->peerKillingBlowClampedAtMs;
-                if (elapsed >= kFallbackTimeoutMs) {
-                    SPDLOG_INFO("[B2D] Timeout fired after {}ms: netId={} actorId={} — peer kill broadcast",
-                                elapsed, ext->netId, actor->id);
+
+                const bool semanticFire =
+                    elapsed >= kSemanticFallbackMs &&
+                    ext->phase != EnemyStateSync::LifecyclePhase::Alive;
+                const bool backstopFire =
+                    elapsed >= kBackstopFallbackMs;
+
+                if (semanticFire || backstopFire) {
+                    SPDLOG_INFO("[B2D] Timeout fired after {}ms: netId={} actorId={} "
+                                "reason={} phase={}",
+                                elapsed, ext->netId, actor->id,
+                                semanticFire ? "semantic" : "backstop",
+                                (int)ext->phase);
                     const uint32_t netIdToBroadcast = ext->netId;
                     // Clear the timer + stashed damage BEFORE the kill so
                     // any re-entry can't double-fire.
@@ -3989,7 +4204,13 @@ void Anchor::RegisterHooks() {
                 }
             }
 
-            if (!IsSyncedBossActor(actor->id)) {
+            // Composite fix Layer 1: skip clamp arming for stun-not-die
+            // actors (hint nuts, cursed Skulltula people, Mido, Talon).
+            // These use damage as a state trigger, not a life-total
+            // gate — arming the clamp for them causes B2-D's timeout
+            // to fire spuriously ~1 s later, killing them mid-state.
+            // See Claude/Analysis/hintnut_dialogue_disappear_2026-07-13.md.
+            if (!IsSyncedBossActor(actor->id) && !IsStunNotDieActor(actor->id)) {
                 if (ext != nullptr &&
                     !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase) &&
                     actor->colChkInfo.damage > 0 &&
