@@ -1033,13 +1033,61 @@ void Anchor::RefreshClientActors() {
 }
 
 void Anchor::RecomputeEffectiveHost() {
-    // Pillar A Phase 1 — pure (a) election rule. See Anchor.h doc on the
-    // effectiveHostClientId field for the full semantics.
+    // Pillar A Phase 1 — pure (a) election rule. Phase 1.5 hybrid (b) adds
+    // the pendingMigrateBack short-circuit for mid-migration reconnect. See
+    // Anchor.h doc on effectiveHostClientId + pendingMigrateBack for full
+    // semantics.
     uint32_t orig = roomState.ownerClientId;
     uint32_t newEffective = ownClientId;  // safety fallback
 
     auto origIt = clients.find(orig);
-    if (origIt != clients.end() && origIt->second.online) {
+    const bool origOnline = (origIt != clients.end() && origIt->second.online);
+
+    // Phase 1.5 pendingMigrateBack rising edge: original host reappeared in
+    // ALL_CLIENT_STATE, and the currently-elected effective host isn't the
+    // original owner (i.e. we already migrated away from them). Set the
+    // flag; don't flip authority yet. Migration back happens on the
+    // original owner's next OnSceneSpawnActors (which calls
+    // ClearPendingMigrateBackOnSceneEntry — see below).
+    //
+    // Edge trigger vs level: only fires on the online transition. Once
+    // pendingMigrateBack is true, subsequent RecomputeEffectiveHost calls
+    // preserve current effectiveHostClientId (the else branch below) until
+    // the flag is cleared.
+    if (origOnline && effectiveHostClientId != 0 &&
+        effectiveHostClientId != orig && !pendingMigrateBack) {
+        pendingMigrateBack = true;
+        SPDLOG_INFO("[Anchor] pendingMigrateBack armed: orig owner={} back online, "
+                    "acting host={} keeps authority until orig owner re-enters a scene",
+                    orig, effectiveHostClientId);
+    }
+
+    if (pendingMigrateBack) {
+        // Hold authority with the acting host. If the acting host
+        // themselves went offline during the hold, fall through to the
+        // pure-(a) election below so authority doesn't stall.
+        auto actingIt = clients.find(effectiveHostClientId);
+        if (actingIt != clients.end() && actingIt->second.online) {
+            // Acting host still online — preserve the election result.
+            newEffective = effectiveHostClientId;
+        } else {
+            // Acting host went offline mid-hold. Drop the flag; run pure-(a)
+            // so a new acting host takes over immediately.
+            SPDLOG_INFO("[Anchor] pendingMigrateBack cleared: acting host {} went offline; "
+                        "re-electing", effectiveHostClientId);
+            pendingMigrateBack = false;
+            newEffective = origOnline ? orig : ownClientId;
+            uint32_t lowest = UINT32_MAX;
+            for (auto& [clientId, client] : clients) {
+                if (client.online && clientId < lowest) {
+                    lowest = clientId;
+                }
+            }
+            if (!origOnline && lowest != UINT32_MAX) {
+                newEffective = lowest;
+            }
+        }
+    } else if (origOnline) {
         newEffective = orig;
     } else {
         // Original owner is offline (or not in clients). Pick the lowest-
@@ -1057,9 +1105,10 @@ void Anchor::RecomputeEffectiveHost() {
     }
 
     if (newEffective != effectiveHostClientId) {
-        SPDLOG_INFO("[Anchor] Effective host changed: {} -> {} (orig owner={} {})",
+        SPDLOG_INFO("[Anchor] Effective host changed: {} -> {} (orig owner={} {}{})",
                     effectiveHostClientId, newEffective, orig,
-                    (origIt != clients.end() && origIt->second.online) ? "online" : "offline");
+                    origOnline ? "online" : "offline",
+                    pendingMigrateBack ? " pendingMigrateBack" : "");
         bool localBecameHost = (newEffective == ownClientId &&
                                 effectiveHostClientId != ownClientId);
         effectiveHostClientId = newEffective;
@@ -1067,6 +1116,23 @@ void Anchor::RecomputeEffectiveHost() {
             OnBecameEffectiveHost();
         }
     }
+}
+
+void Anchor::ClearPendingMigrateBackOnSceneEntry() {
+    // Phase 1.5 — called from OnSceneSpawnActors when the local client is
+    // roomState.ownerClientId (the returning original host). Clears the
+    // flag and re-runs the election so authority can flip back to us for
+    // the scene we just entered. Acting host retains authority for
+    // scenes we haven't re-entered because their scene's IsRoomHost
+    // check (Phase 2 per-room authority) already picks them there.
+    if (!pendingMigrateBack) return;
+    if (ownClientId != roomState.ownerClientId) return;
+
+    SPDLOG_INFO("[Anchor] pendingMigrateBack cleared: original owner={} re-entered scene, "
+                "election re-runs (acting host was {})",
+                roomState.ownerClientId, effectiveHostClientId);
+    pendingMigrateBack = false;
+    RecomputeEffectiveHost();
 }
 
 void Anchor::OnBecameEffectiveHost() {

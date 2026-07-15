@@ -561,6 +561,16 @@ void Anchor::RegisterHooks() {
         });
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {
+        // Phase 1.5 pendingMigrateBack — if this client is the original
+        // owner returning mid-migration, clear the hold flag now that we've
+        // physically entered a scene. Election re-runs; ownerClientId-if-
+        // online rule flips effective host back to us. Runs BEFORE the
+        // #63 pendingTimeSync detection block below so subsequent
+        // SendPacket_UpdateClientState carries the corrected authority
+        // state. No-op unless (a) we ARE the original owner and (b) the
+        // flag was set by a prior ALL_CLIENT_STATE reappearance.
+        Anchor::Instance->ClearPendingMigrateBackOnSceneEntry();
+
         // #63 — detect frozen→advancing scene transition for
         // pendingTimeSync. MUST run BEFORE SendPacket_UpdateClientState
         // (next statement) so PrepClientState sees the flag set and

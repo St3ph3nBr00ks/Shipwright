@@ -767,19 +767,36 @@ class Anchor : public Network {
     //   2. Else: lowest-numbered online clientId in clients[].
     //   3. Fallback (no clients online — shouldn't happen): ownClientId.
     //
-    // Pure (a): once migration fires, the new host stays host even if the
-    // original returns within the relay's 5-min INACTIVITY_TIMEOUT window.
-    // The "pendingMigrateBack" hybrid (b) semantics from the design doc are
-    // deferred to a future Phase 1.5 session.
+    // Phase 1.5 — pendingMigrateBack hybrid (b). When the original host
+    // reappears in ALL_CLIENT_STATE mid-migration, do NOT flip authority
+    // immediately. Set pendingMigrateBack = true so the acting host keeps
+    // authority for all currently-loaded scenes. On the original host's
+    // next OnSceneSpawnActors (they entered a scene fresh), clear the flag
+    // — the normal ownerClientId-if-online rule then flips them back to
+    // effective host for THAT scene. Acting host retains authority in
+    // scenes original host isn't in.
+    //
+    // Semantic: original host reconnecting doesn't steal authority for
+    // scenes they haven't yet entered. Acting host's in-flight state
+    // (mSceneDeaths / lastDamagerByNetId / Director ledger) stays valid
+    // until the original host physically returns to those scenes.
     //
     // First migration is via the relay's HEARTBEAT/INACTIVITY detection
     // (~30-90s real time after the original host's actual TCP disconnect).
     // No explicit observation timer in v1 — adding one only affects the
     // upper end of that window.
     uint32_t effectiveHostClientId = 0;
+    bool     pendingMigrateBack     = false;
 
     void RecomputeEffectiveHost();
     void OnBecameEffectiveHost();
+
+    // Phase 1.5 — called from OnSceneSpawnActors when the local client
+    // is the roomState.ownerClientId AND pendingMigrateBack is set. Clears
+    // the flag and re-runs RecomputeEffectiveHost so the ownerClientId-if-
+    // online rule takes effect for this newly-entered scene. See A2.2 in
+    // Plans/anchor_host_migration_plan.md.
+    void ClearPendingMigrateBackOnSceneEntry();
 
     inline static const std::string clientVersion = (char*)gGitCommitHash;
 

@@ -241,6 +241,36 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
     // Online flags, additions, and removals can all flip the election.
     RecomputeEffectiveHost();
 
+    // Pillar A Phase 1.5 A2.3 — banner when returning original host has
+    // been offline past the relay's 5-min INACTIVITY_TIMEOUT. The relay
+    // deletes their old clientId; they reconnect with a new one, so
+    // roomState.ownerClientId is no longer resolvable in clients[]. Only
+    // fires once per session (guarded by sBannerFired) and only on the
+    // local client that IS the returning original owner (based on the
+    // relay's re-assigned local ownClientId not matching roomState.ownerClientId
+    // AND the old ownerClientId being absent from clients[]).
+    static bool sSessionExpiredBannerFired = false;
+    if (!sSessionExpiredBannerFired && !isGlobalRoom) {
+        const uint32_t origOwner = roomState.ownerClientId;
+        if (origOwner != 0 && origOwner != ownClientId &&
+            clients.find(origOwner) == clients.end()) {
+            // origOwner is set (session had a real host at some point),
+            // isn't us, and isn't in the roster anymore. No way to know
+            // from HERE alone whether WE are the returning original — the
+            // banner text is written neutrally ("Session host role has
+            // transferred") so it makes sense on any client that observes
+            // this state.
+            Notification::Emit({
+                .prefix = "Session host expired",
+                .message = "Original host's session timed out; new host retains authority.",
+            });
+            sSessionExpiredBannerFired = true;
+            SPDLOG_INFO("[Anchor] A2.3 session-expired banner emitted: origOwner={} "
+                        "no longer in clients (relay INACTIVITY_TIMEOUT expired)",
+                        origOwner);
+        }
+    }
+
     shouldRefreshActors = true;
 
     // Title-screen peers (Plans/title_screen_peer_actors.md) — peer state
