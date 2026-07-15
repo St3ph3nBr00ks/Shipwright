@@ -28,8 +28,10 @@
 
 extern "C" {
 #include "z64.h"
+#include "macros.h"     // GET_PLAYER
 #include "functions.h"  // Item_DropCollectible / Item_DropCollectibleRandom
 #include "variables.h"  // gSaveContext
+#include "src/overlays/actors/ovl_En_Kusa/z_en_kusa.h"  // EnKusa cast for collider.base.at
 extern PlayState* gPlayState;
 }
 
@@ -200,6 +202,43 @@ extern "C" EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envA
                     (int)(uint16_t)params, (int)(uint16_t)resolvedParams,
                     (int)gSaveContext.health, (int)gSaveContext.healthCapacity);
     }
+    // [Diag] pending-bugs 2026-07-15 — delayed-rupee bug diagnostic.
+    // Log the cutter identity so future recurrences can be traced back
+    // to the actor that struck the grass. When AC_HIT fires on
+    // EN_KUSA's collider, `collider.base.at` points to the AT-collider's
+    // attached actor (the striker). If that pointer is null, the strike
+    // came from something other than a standard AT-vs-AC collision
+    // (e.g. a `Actor_HasParent` lift-throw exit path). Also log local
+    // player distance + weapon state so we can rule out player-side
+    // action. See Claude/Analysis/delayed_green_rupee_from_grass_log717_2026-07-15.md.
+    if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+        Actor* atActor = nullptr;
+        if (envActor->id == ACTOR_EN_KUSA) {
+            atActor = ((EnKusa*)envActor)->collider.base.at;
+        }
+        Player* localLink = GET_PLAYER(gPlayState);
+        float dx = envActor->world.pos.x - localLink->actor.world.pos.x;
+        float dy = envActor->world.pos.y - localLink->actor.world.pos.y;
+        float dz = envActor->world.pos.z - localLink->actor.world.pos.z;
+        float dist3D = sqrtf(dx*dx + dy*dy + dz*dz);
+        SPDLOG_INFO("[EnvActorDrop.diag] cutter envActor.id={} netId={} envActor.pos=({:.0f},{:.0f},{:.0f}) "
+                    "at.id={} at.pos=({:.0f},{:.0f},{:.0f}) at.cat={} "
+                    "localLink.pos=({:.0f},{:.0f},{:.0f}) dist3D={:.0f} "
+                    "heldItemAction={} stateFlags1=0x{:08X} meleeWeaponState={}",
+                    envActor->id, ext->netId,
+                    envActor->world.pos.x, envActor->world.pos.y, envActor->world.pos.z,
+                    atActor ? (int)atActor->id : -1,
+                    atActor ? atActor->world.pos.x : 0.0f,
+                    atActor ? atActor->world.pos.y : 0.0f,
+                    atActor ? atActor->world.pos.z : 0.0f,
+                    atActor ? (int)atActor->category : -1,
+                    localLink->actor.world.pos.x, localLink->actor.world.pos.y, localLink->actor.world.pos.z,
+                    dist3D,
+                    (int)localLink->heldItemAction,
+                    (unsigned)localLink->stateFlags1,
+                    (int)localLink->meleeWeaponState);
+    }
+
     // Peer with a synced env actor and host in scope: notify host,
     // suppress local drop.
     Anchor::Instance->SendPacket_EnvActorDrop(ext->netId, resolvedParams, /*forRandom=*/0, *pos);
