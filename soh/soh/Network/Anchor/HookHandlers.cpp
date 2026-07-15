@@ -4115,6 +4115,24 @@ void Anchor::RegisterHooks() {
                     (stalfos->shieldCollider.base.acFlags & AC_BOUNCED) != 0;
             }
 
+            // [Diag] pending-bugs 2026-07-15 — extra-damage bug diagnostic.
+            // Log peer-side damage every frame it's non-zero. Combined with
+            // existing [DamageEnemy] Sent and [EnemyDefeated] logs, this
+            // reveals whether the same damage is being applied multiple
+            // times, or whether host's ENEMY_STATE broadcast is re-triggering
+            // damage after peer has already applied locally. User report:
+            // Dekubaba dying in 1 strike when it should take 2.
+            // See Claude/Analysis/hintnut_heart_drop_desync_and_extra_damage_2026-07-15.md.
+            if (ext != nullptr && actor->colChkInfo.damage > 0 &&
+                CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+                SPDLOG_INFO("[DamageEnemy.diag] fwd netId={} actorId={} peer.damage={} peer.hp_before={} hp_after_would_be={} phase={}",
+                            ext->netId, actor->id,
+                            (int)actor->colChkInfo.damage,
+                            (int)actor->colChkInfo.health,
+                            (int)actor->colChkInfo.health - (int)actor->colChkInfo.damage,
+                            (int)ext->phase);
+            }
+
             // Candidate B2-D (#288, 2026-06-17) — peer-side timeout
             // fallback for the Race-B killing-blow clamp. If host
             // hasn't broadcast ENEMY_DEFEATED within kFallbackTimeoutMs
