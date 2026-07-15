@@ -24,6 +24,7 @@
 #include "soh/ObjectExtension/ObjectExtension.h"
 
 #include <libultraship/libultraship.h>
+#include <libultraship/bridge/consolevariablebridge.h>  // [Diag] gEnhancements.PendingBugsDiag CVar gate
 
 extern "C" {
 #include "z64.h"
@@ -229,6 +230,21 @@ extern "C" EnItem00* Anchor_DropCollectibleEnvActor(PlayState* play, Actor* envA
 // IS fully policy-3 compliant via Anchor_DropCollectibleEnvActor.
 extern "C" void Anchor_DropCollectibleRandomEnvActor(PlayState* play, Actor* envActor,
                                                      Vec3f* pos, s16 dropGroupParams) {
+    // [Diag] pending-bugs 2026-07-15 — magic-jar bug diagnostic. Log
+    // envActor.world.pos + pos param at entry so we can identify whether
+    // pos is coming from envActor.world.pos (expected) or is being
+    // overridden. See Claude/Analysis/magic_jar_unexplained_pickup_2026-07-15.md.
+    if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+        SPDLOG_INFO("[EnvActor.diag] DropRandomCall envActor.id={} envActor.world.pos=({:.0f},{:.0f},{:.0f}) pos_param=({:.0f},{:.0f},{:.0f}) dropGroupParams=0x{:02X}",
+                    envActor ? envActor->id : -1,
+                    envActor ? envActor->world.pos.x : 0.0f,
+                    envActor ? envActor->world.pos.y : 0.0f,
+                    envActor ? envActor->world.pos.z : 0.0f,
+                    pos ? pos->x : 0.0f,
+                    pos ? pos->y : 0.0f,
+                    pos ? pos->z : 0.0f,
+                    (int)dropGroupParams);
+    }
     if (!Anchor::Instance || !Anchor::Instance->isConnected) {
         Item_DropCollectibleRandom(play, NULL, pos, dropGroupParams);
         return;

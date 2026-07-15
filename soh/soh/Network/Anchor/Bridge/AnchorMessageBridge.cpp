@@ -6,6 +6,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 
 #include <libultraship/libultraship.h>  // SPDLOG
+#include <libultraship/bridge/consolevariablebridge.h>  // [Diag] gEnhancements.PendingBugsDiag CVar gate
 
 extern "C" {
 #include "z64.h"
@@ -25,6 +26,19 @@ void ClearMessageStateForFastForwardTick() {
 
 void JumpToLeaderSubTextboxPosition(uint16_t msgBufPos) {
     if (gPlayState == nullptr) return;
+    // [Diag] pending-bugs 2026-07-15 — cutscene bug 3 (catchup fail).
+    // Log the msgBufPos apply so we can see whether the Fix R RESPONSE
+    // is (a) actually reaching this code path and (b) writing to
+    // msgBufPos with correct values. See
+    // Claude/Analysis/deku_tree_cutscene_bugs_log715_2026-07-15.md Bug 3.
+    if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+        SPDLOG_INFO("[MessageBridge.diag] JumpToLeaderSubTextboxPosition: "
+                    "leader.msgBufPos={} peer.before.msgBufPos={} peer.msgMode={} peer.msgTextId=0x{:04X}",
+                    (int)msgBufPos,
+                    (int)gPlayState->msgCtx.msgBufPos,
+                    (int)gPlayState->msgCtx.msgMode,
+                    (int)gPlayState->msgCtx.textId);
+    }
     // Preserve msgMode at whatever Message_StartTextbox set (typically
     // MSGMODE_TEXT_START). Only advance msgBufPos. Design E v2
     // rationale: vanilla's setup states (TEXT_START → BOX_GROWING ×

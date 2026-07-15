@@ -462,6 +462,15 @@ void Cutscene_Command_SetLighting(PlayState* play, CutsceneContext* csCtx, CsCmd
 extern void Anchor_NotifyCutsceneMusicStart(int seqId);
 
 void Cutscene_Command_PlayBGM(PlayState* play, CutsceneContext* csCtx, CsCmdMusicChange* cmd) {
+    // [Diag] pending-bugs 2026-07-15 — cutscene music bug 1. Log all
+    // hits and fires (matching-frame vs not) so we can tell whether the
+    // command was ever reached on P1 during the Deku Tree intro cutscene.
+    // See Claude/Analysis/deku_tree_cutscene_bugs_log715_2026-07-15.md Bug 1.
+    if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+        LUSLOG_INFO("[CutsceneMusic.diag] PlayBGM cmd startFrame=%d csCtx.frames=%d seqId=%d fired=%d",
+                    (int)cmd->startFrame, (int)csCtx->frames, (int)(cmd->sequence - 1),
+                    (csCtx->frames == cmd->startFrame) ? 1 : 0);
+    }
     if (csCtx->frames == cmd->startFrame) {
         func_800F595C(cmd->sequence - 1);
         Anchor_NotifyCutsceneMusicStart((int)(cmd->sequence - 1));
@@ -470,6 +479,11 @@ void Cutscene_Command_PlayBGM(PlayState* play, CutsceneContext* csCtx, CsCmdMusi
 
 // Command 0x57: Stop Background Music
 void Cutscene_Command_StopBGM(PlayState* play, CutsceneContext* csCtx, CsCmdMusicChange* cmd) {
+    if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+        LUSLOG_INFO("[CutsceneMusic.diag] StopBGM cmd startFrame=%d csCtx.frames=%d fired=%d",
+                    (int)cmd->startFrame, (int)csCtx->frames,
+                    (csCtx->frames == cmd->startFrame) ? 1 : 0);
+    }
     if (csCtx->frames == cmd->startFrame) {
         func_800F59E8(cmd->sequence - 1);
     }
@@ -479,6 +493,10 @@ void Cutscene_Command_StopBGM(PlayState* play, CutsceneContext* csCtx, CsCmdMusi
 void Cutscene_Command_FadeBGM(PlayState* play, CutsceneContext* csCtx, CsCmdMusicFade* cmd) {
     u8 var1;
 
+    if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+        LUSLOG_INFO("[CutsceneMusic.diag] FadeBGM cmd startFrame=%d endFrame=%d csCtx.frames=%d type=%d",
+                    (int)cmd->startFrame, (int)cmd->endFrame, (int)csCtx->frames, (int)cmd->type);
+    }
     if ((csCtx->frames == cmd->startFrame) && (csCtx->frames < cmd->endFrame)) {
         var1 = cmd->endFrame - cmd->startFrame;
 
@@ -2098,6 +2116,13 @@ void func_80068C3C(PlayState* play, CutsceneContext* csCtx) {
 void func_80068D84(PlayState* play, CutsceneContext* csCtx) {
     if (func_8006472C(play, csCtx, 0.0f)) {
         Audio_SetCutsceneFlag(0);
+        // [Diag] pending-bugs 2026-07-15 — cutscene bug 2 (early exit).
+        // Log state → IDLE transitions so we can identify which vanilla
+        // path terminated the cutscene. Site 1 of 3: func_80068D84.
+        if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+            LUSLOG_INFO("[CutsceneState.diag] state=%d→IDLE trigger=func_80068D84 frames=%d",
+                        (int)csCtx->state, (int)csCtx->frames);
+        }
         csCtx->state = CS_STATE_IDLE;
     }
 }
@@ -2131,6 +2156,12 @@ void func_80068DC0(PlayState* play, CutsceneContext* csCtx) {
         }
 
         Audio_SetCutsceneFlag(0);
+        // [Diag] pending-bugs 2026-07-15 — cutscene bug 2 (early exit).
+        // Site 2 of 3: func_80068DC0 (the "entrance-restore" IDLE path).
+        if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+            LUSLOG_INFO("[CutsceneState.diag] state=%d→IDLE trigger=func_80068DC0 frames=%d entranceIndex=0x%X",
+                        (int)csCtx->state, (int)csCtx->frames, (int)gSaveContext.entranceIndex);
+        }
         csCtx->state = CS_STATE_IDLE;
     }
 }

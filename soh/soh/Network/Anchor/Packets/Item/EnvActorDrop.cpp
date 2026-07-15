@@ -79,6 +79,13 @@ void Anchor::SendPacket_EnvActorDrop(uint32_t netId, s16 dropParam,
 
     SPDLOG_INFO("[EnvActorDrop] Sending netId={} dropParam=0x{:02X} random=0x{:02X} target={}",
                 netId, (int)dropParam, (int)dropParamForRandom, targetId);
+    // [Diag] pending-bugs 2026-07-15 — magic-jar bug diagnostic. Log the
+    // pos actually being placed on the wire, so we can compare vs
+    // envActor.world.pos logged from the EnvActor.diag site upstream.
+    if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+        SPDLOG_INFO("[EnvActorDrop.diag] send netId={} wire.pos=({:.0f},{:.0f},{:.0f})",
+                    netId, pos.x, pos.y, pos.z);
+    }
 
     SendJsonToRemote(payload);
 }

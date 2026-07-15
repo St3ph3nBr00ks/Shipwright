@@ -145,6 +145,20 @@ void EnKusa_DropCollectible(EnKusa* this, PlayState* play) {
         return;
     }
 
+    // [Diag] pending-bugs 2026-07-15 — magic-jar bug diagnostic. Log
+    // the En_Kusa's world.pos vs home.pos at destruction time so we can
+    // verify whether the actor moved between spawn and destruction (i.e.
+    // whether pos passed to Anchor_DropCollectibleRandomEnvActor is the
+    // actor's actual current position). See
+    // Claude/Analysis/magic_jar_unexplained_pickup_2026-07-15.md.
+    if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+        LUSLOG_INFO("[EnKusa.diag] destroy actor.ptr=%p world.pos=(%.0f,%.0f,%.0f) home.pos=(%.0f,%.0f,%.0f) params=0x%04X",
+                    &this->actor,
+                    this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z,
+                    this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z,
+                    this->actor.params);
+    }
+
     switch (this->actor.params & 3) {
         case ENKUSA_TYPE_0:
         case ENKUSA_TYPE_2:
