@@ -22,6 +22,14 @@
 // so peer and host both target the same player.
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 
+// Flotilla — bracket direct Actor_Spawn(ACTOR_EN_ITEM00) calls so
+// OnActorSpawn's push_back to g_pendingItemDropBroadcasts gets drained
+// by Anchor_EndItemDrop. Without the bracket, the deferred broadcast
+// never fires and peers don't see the drop. See
+// Claude/Analysis/hintnut_heart_drop_desync_and_extra_damage_2026-07-15.md.
+extern void Anchor_BeginItemDrop(Actor* fromActor);
+extern void Anchor_EndItemDrop(void);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnHintnuts_Init(Actor* thisx, PlayState* play);
@@ -229,8 +237,14 @@ void EnHintnuts_SetupLeave(EnHintnuts* this, PlayState* play) {
     this->collider.base.ocFlags1 &= ~OC1_ON;
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_DAMAGE);
+    // Flotilla — bracket the direct Actor_Spawn so the OnActorSpawn(EN_ITEM00)
+    // hook's push_back to g_pendingItemDropBroadcasts gets drained here.
+    // Without the bracket, peers never receive ITEM_DROP_SYNC and the heart
+    // is only visible on the host.
+    Anchor_BeginItemDrop(NULL);
     Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, this->actor.world.pos.x, this->actor.world.pos.y,
                 this->actor.world.pos.z, 0x0, 0x0, 0x0, 0x3); // recovery heart
+    Anchor_EndItemDrop();
     this->actionFunc = EnHintnuts_Leave;
 }
 

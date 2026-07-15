@@ -15,6 +15,15 @@
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_IGNORE_QUAKE | ACTOR_FLAG_TALK_OFFER_AUTO_ACCEPTED)
 
+// Flotilla — bracket direct Actor_Spawn(ACTOR_EN_ITEM00) calls so
+// OnActorSpawn's push_back to g_pendingItemDropBroadcasts gets drained
+// by Anchor_EndItemDrop. Without the bracket, the deferred broadcast
+// never fires and peers don't see the drop. Same pattern as
+// z_en_hintnuts.c; see
+// Claude/Analysis/hintnut_heart_drop_desync_and_extra_damage_2026-07-15.md.
+extern void Anchor_BeginItemDrop(Actor* fromActor);
+extern void Anchor_EndItemDrop(void);
+
 void EnPoRelay_Init(Actor* thisx, PlayState* play);
 void EnPoRelay_Destroy(Actor* thisx, PlayState* play);
 void EnPoRelay_Update(Actor* thisx, PlayState* play);
@@ -349,7 +358,11 @@ void EnPoRelay_DisappearAndReward(EnPoRelay* this, PlayState* play) {
                 if (Flags_GetCollectible(play, this->actor.params) == 0 && gSaveContext.timerSeconds <= 60) {
                     Item_DropCollectible2(play, &sp60, (this->actor.params << 8) + (0x4000 | ITEM00_HEART_PIECE));
                 } else {
+                    // Flotilla — bracket direct Actor_Spawn so peers receive
+                    // ITEM_DROP_SYNC. See file-top comment on the extern decl.
+                    Anchor_BeginItemDrop(NULL);
                     Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, sp60.x, sp60.y, sp60.z, 0, 0, 0, 2);
+                    Anchor_EndItemDrop();
                 }
             } else {
                 Flags_SetTempClear(play, 4);
@@ -372,7 +385,11 @@ void EnPoRelay_DisappearAndReward(EnPoRelay* this, PlayState* play) {
             if (Flags_GetCollectible(play, this->actor.params) == 0 && gSaveContext.timerSeconds <= 60) {
                 Item_DropCollectible2(play, &sp60, (this->actor.params << 8) + (0x4000 | ITEM00_HEART_PIECE));
             } else if (Flags_GetCollectible(play, this->actor.params) != 0) {
+                // Flotilla — bracket direct Actor_Spawn so peers receive
+                // ITEM_DROP_SYNC. See file-top comment on the extern decl.
+                Anchor_BeginItemDrop(NULL);
                 Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ITEM00, sp60.x, sp60.y, sp60.z, 0, 0, 0, 2);
+                Anchor_EndItemDrop();
             }
         }
         Actor_Kill(&this->actor);
