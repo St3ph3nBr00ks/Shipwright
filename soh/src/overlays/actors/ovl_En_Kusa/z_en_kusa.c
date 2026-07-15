@@ -467,6 +467,15 @@ void EnKusa_Fall(EnKusa* this, PlayState* play) {
 }
 
 void EnKusa_SetupCut(EnKusa* this) {
+    // Own the AC_HIT clear as part of the cut-state transition itself,
+    // not the caller. Fixes phantom re-cut after regrow when the
+    // network path (Anchor_ApplyEnKusaCut) triggers SetupCut without
+    // going through EnKusa_Main's line-350 clear. See
+    // Claude/Analysis/phantom_grass_cut_ac_hit_persistence_log719_2026-07-15.md.
+    // Vanilla EnKusa_Main already clears AC_HIT before calling here;
+    // this clear is redundant in that path (harmless).
+    this->collider.base.acFlags &= ~AC_HIT;
+
     // Env-actor cut-state sync (Claude/Plans/env_actor_destroy_sync.md).
     // TYPE_1 / TYPE_2 grass transitions to a cut-stub state without
     // Actor_Kill on the sender, so the OnActorKill → ENEMY_DEFEATED
@@ -540,6 +549,15 @@ void EnKusa_UprootedWaitRegrow(EnKusa* this, PlayState* play) {
 }
 
 void EnKusa_SetupRegrow(EnKusa* this) {
+    // Defense-in-depth: clear any stale AC_HIT / AC_BOUNCED bits that
+    // may have been set on the collider during CutWaitRegrow (the
+    // collider isn't registered with CollisionCheck during that state,
+    // but the acFlags byte is persistent memory and any future code
+    // path that sets it must not leak into the fresh grown state).
+    // Paired with the same clear in EnKusa_SetupCut. See
+    // Claude/Analysis/phantom_grass_cut_ac_hit_persistence_log719_2026-07-15.md.
+    this->collider.base.acFlags &= ~(AC_HIT | AC_BOUNCED);
+
     EnKusa_SetupAction(this, EnKusa_Regrow);
     EnKusa_SetScaleSmall(this);
     this->actor.shape.rot = this->actor.home.rot;
