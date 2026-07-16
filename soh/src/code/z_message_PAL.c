@@ -165,6 +165,15 @@ void Message_UpdateOcarinaGame(PlayState* play) {
 // returns the input unchanged. Defined in HookHandlers.cpp.
 extern int Anchor_ShouldAdvanceCutsceneTextLocal(int wasLocalPressDetected, unsigned currentTextId);
 
+// User request 2026-07-16 — extend the auto-advance concept to non-
+// cutscene NPC dialog so a single AFK player can't hold up team
+// progress on quest-critical dialogs (SET_FLAG / GIVE_ITEM producers).
+// Returns 1 when the current textbox has been open longer than
+// `gEnhancements.MpNpcDialogAutoAdvanceMs` (default 10s). Skips choice
+// and persistent textboxes. Solo unaffected (gated on Anchor
+// isConnected).
+extern int Anchor_ShouldAutoAdvanceNpcDialog(unsigned currentTextId);
+
 // R1 (2026-07-09) — Anchor shadow-tracking hook called after every
 // vanilla msgBufPos++ transition in the AWAIT_NEXT case. Consolidates
 // what were 3 scattered shadow-update sites in CutsceneBridge.cpp
@@ -193,6 +202,14 @@ u8 Message_ShouldAdvance(PlayState* play) {
         }
         return Anchor_ShouldAdvanceCutsceneTextLocal(localPress ? 1 : 0,
                                                      (unsigned)play->msgCtx.textId) ? 1 : 0;
+    }
+
+    // Non-cutscene NPC dialog — check the MP auto-advance timer. No-op
+    // solo. See extern comment above for rationale.
+    if (Anchor_ShouldAutoAdvanceNpcDialog((unsigned)play->msgCtx.textId)) {
+        Audio_PlaySoundGeneral(NA_SE_SY_MESSAGE_PASS, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
+                               &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
+        return 1;
     }
 
     if (localPress) {
@@ -226,6 +243,13 @@ u8 Message_ShouldAdvanceSilent(PlayState* play) {
                                                      (unsigned)play->msgCtx.textId)
                    ? 1
                    : 0;
+    }
+
+    // Non-cutscene NPC dialog — Silent variant does not play its own
+    // pass-sfx (the caller at MSGMODE_TEXT_DONE picks the correct SFX
+    // based on the return path). Just report advance intent.
+    if (Anchor_ShouldAutoAdvanceNpcDialog((unsigned)play->msgCtx.textId)) {
+        return 1;
     }
 
     return localPress;

@@ -5,6 +5,7 @@
 #include "soh/Network/Anchor/Bridge/AnchorMessageBridge.h"
 #include "soh/Network/Anchor/Anchor.h"
 
+#include <chrono>  // Anchor_ShouldAutoAdvanceNpcDialog local timer
 #include <libultraship/libultraship.h>  // SPDLOG
 #include <libultraship/bridge/consolevariablebridge.h>  // [Diag] gEnhancements.PendingBugsDiag CVar gate
 
@@ -150,3 +151,79 @@ uint8_t GetChoiceNumOptions() {
 }
 
 }  // namespace AnchorMessageBridge
+
+// C-linkage entry for the local-timer NPC dialog auto-advance, called
+// from Message_ShouldAdvance / _Silent in z_message_PAL.c. Returns 1
+// when the current textbox has been open for longer than the
+// MpNpcDialogAutoAdvanceMs CVar (default 10000). Zero when not
+// connected, when the CVar disables it, when the textbox is a choice
+// or persistent (never auto-close those), or when the timer hasn't
+// elapsed yet.
+//
+// Rationale (2026-07-16 user request):
+// "I do not want an individual player to be able to hold-up dialogue
+// for all other players." Quest-critical NPC dialogs produce team-wide
+// state via SET_FLAG / GIVE_ITEM. AFK-in-dialog would soft-lock team
+// progress until the initiating player advances. This local timer
+// forces advance when the local textbox has been idle for >= N ms,
+// preventing the softlock. Choice textboxes are left alone — those
+// need explicit selection, and the existing DIALOG_CHOICE_VOTE
+// mechanism handles cutscene-mode multi-client choices separately.
+//
+// The timer is LOCAL per client (no wire coordination) because
+// regular NPC dialog is inherently per-player: each client is in
+// their own dialog (if any). Different clients may have different
+// textIds open simultaneously; a shared single-textId state (as in
+// CutsceneTextAdvanceState) doesn't scale here.
+//
+// Solo/SP unaffected: gated on Anchor::Instance->isConnected.
+extern "C" int Anchor_ShouldAutoAdvanceNpcDialog(unsigned currentTextId) {
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isConnected) {
+        return 0;
+    }
+    if (gPlayState == nullptr) return 0;
+    if (currentTextId == 0) return 0;
+    if (!CVarGetInteger("gEnhancements.MpNpcDialogAutoAdvance", 1)) {
+        return 0;
+    }
+    // Skip choice / persistent — those need explicit selection.
+    const uint8_t endType = (uint8_t)gPlayState->msgCtx.textboxEndType;
+    if (endType == TEXTBOX_ENDTYPE_2_CHOICE ||
+        endType == TEXTBOX_ENDTYPE_3_CHOICE ||
+        endType == TEXTBOX_ENDTYPE_PERSISTENT) {
+        return 0;
+    }
+
+    static uint16_t sTrackedTextId = 0;
+    static std::chrono::steady_clock::time_point sTextOpenedAt =
+        std::chrono::steady_clock::time_point::min();
+    const auto now = std::chrono::steady_clock::now();
+
+    if ((uint16_t)currentTextId != sTrackedTextId) {
+        sTrackedTextId = (uint16_t)currentTextId;
+        sTextOpenedAt  = now;
+        return 0;
+    }
+    if (sTextOpenedAt == std::chrono::steady_clock::time_point::min()) {
+        sTextOpenedAt = now;
+        return 0;
+    }
+
+    const int timeoutMs = CVarGetInteger("gEnhancements.MpNpcDialogAutoAdvanceMs", 10000);
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - sTextOpenedAt).count();
+    if (elapsedMs >= timeoutMs) {
+        // Reset so the timer doesn't re-fire every frame until the
+        // vanilla advance actually happens. Vanilla will move to the
+        // next textId (or clear textId to 0), which resets the tracker
+        // above naturally. Belt-and-suspenders: shift the opening time
+        // forward by 1s so if vanilla doesn't advance instantly, we
+        // don't spam-advance every frame.
+        sTextOpenedAt = now - std::chrono::milliseconds(timeoutMs - 1000);
+        SPDLOG_INFO("[NpcDialogAutoAdvance] textId=0x{:04X} elapsed={}ms — "
+                    "auto-advancing (MP softlock prevention)",
+                    (unsigned)currentTextId, (long long)elapsedMs);
+        return 1;
+    }
+    return 0;
+}
