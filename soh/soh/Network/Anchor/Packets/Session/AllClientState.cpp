@@ -4,6 +4,7 @@
 #include <libultraship/libultraship.h>
 #include "soh/OTRGlobals.h"
 #include "soh/Notification/Notification.h"
+#include "soh/Enhancements/audio/VoicePack.h"  // OnPeerAudioModChanged — peer pack load on snapshot apply
 
 #include "soh/Network/Anchor/HorseNetId.h"  // #259 late-join re-emit
 
@@ -136,6 +137,18 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
             }
         }
 
+        // Capture peer's prior audio pack before write-through so we can
+        // detect a peer-side change delivered via ALL_CLIENT_STATE
+        // (e.g. reconnect snapshot). The UPDATE_CLIENT_STATE receive path
+        // already fires OnPeerAudioModChanged on delta; ALL_CLIENT_STATE
+        // must do the same or peer's `gPeerPacks[clientId]` stays empty
+        // and P1 hears default voice for P2 (playtest 2026-07-15,
+        // log 723 P2 reconnect at 19:29:10 → voice never loaded on P1).
+        const std::string prevAudio =
+            clients.contains(client.clientId)
+                ? clients[client.clientId].audioModFilename
+                : std::string();
+
         clients[client.clientId].clientId = client.clientId;
         clients[client.clientId].name = client.name;
         clients[client.clientId].color = client.color;
@@ -152,6 +165,17 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
         clients[client.clientId].followerActive = client.followerActive;
         clients[client.clientId].isClimbing = client.isClimbing;
         clients[client.clientId].isCrawling = client.isCrawling;
+
+        // Trigger peer-pack load on transition. Mirrors
+        // UpdateClientState.cpp:224-226. Skip self (local pack managed
+        // by dropdown handler) and no-op when unchanged.
+        if (!client.self &&
+            client.audioModFilename != prevAudio) {
+            SPDLOG_INFO("[CoopVoice] AllClientState clientId={}: audio \"{}\" -> \"{}\"",
+                        client.clientId, prevAudio, client.audioModFilename);
+            SOH::VoicePack::OnPeerAudioModChanged(client.clientId,
+                                                   client.audioModFilename);
+        }
     }
 
     // #259 — re-emit HORSE_SPAWN for any owner-local horses now that a
