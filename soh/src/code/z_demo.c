@@ -2318,10 +2318,23 @@ void Cutscene_HandleConditionalTriggers(PlayState* play) {
             gSaveContext.cutsceneIndex = 0xFFF0;
         } else if ((gSaveContext.entranceIndex == ENTR_LOST_WOODS_BRIDGE_EAST_EXIT) &&
                    !Flags_GetEventChkInf(EVENTCHKINF_SPOKE_TO_SARIA_ON_BRIDGE)) {
-            Flags_SetEventChkInf(EVENTCHKINF_SPOKE_TO_SARIA_ON_BRIDGE);
+            // Anchor MP fix (playtest 2026-07-15 Bug S2-6) — call
+            // Item_Give BEFORE Flags_SetEventChkInf. When the flag
+            // set fires first, its SET_FLAG broadcast reaches peers
+            // ahead of the OnItemReceive-driven GIVE_ITEM broadcast
+            // (which fires from Item_Give). Peers whose local vanilla
+            // trigger checks the flag will then see it set and skip
+            // their own local give path — leaving them without the
+            // ocarina if the GIVE_ITEM packet is delayed or lost.
+            // Reordering makes OnItemReceive fire first, so the give
+            // broadcast to peers is emitted BEFORE peers see the
+            // synced flag. Symmetric with other cutscene-driven give
+            // sites — audit follow-up may extend this reorder pattern.
+            // See Claude/Analysis/playthrough_2026-07-15_session2_triage.md S2-6.
             if (GameInteractor_Should(VB_GIVE_ITEM_FAIRY_OCARINA, true)) {
                 Item_Give(play, ITEM_OCARINA_FAIRY);
             }
+            Flags_SetEventChkInf(EVENTCHKINF_SPOKE_TO_SARIA_ON_BRIDGE);
             gSaveContext.entranceIndex = ENTR_LOST_WOODS_SOUTH_EXIT;
             gSaveContext.cutsceneIndex = 0xFFF0;
         } else if (GameInteractor_Should(
