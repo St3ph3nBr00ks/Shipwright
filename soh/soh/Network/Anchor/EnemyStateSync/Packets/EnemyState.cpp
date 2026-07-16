@@ -284,8 +284,19 @@ struct EnemyUpdateExtras {
     s16  enPoFieldActionState = 0;
 
     // En_Vm — Beamos turret state-machine sync (Wait / Attack / Stun / Die).
-    bool hasEnVm         = false;
-    s16  enVmActionState = 0;
+    // Playtest 2026-07-15 S2-9 addendum — sync `beamRot` (pitch + yaw of
+    // the laser aim vector). Vanilla En_Vm updates beamRot each frame
+    // to track its NEAREST player (see z_en_vm.c:255-256, 322-323); if
+    // peer's local nearest player differs from host's (peer at closer
+    // distance than host, or vice versa), the beam visually points at
+    // different targets on each client. Syncing beamRot from host makes
+    // all clients render the same aim direction as the authoritative
+    // target the host is tracking. Roll (z) not synced — vanilla writes
+    // it as a small oscillation that isn't visually critical.
+    bool hasEnVm          = false;
+    s16  enVmActionState  = 0;
+    s16  enVmBeamRotX     = 0;   // beamRot.x (pitch)
+    s16  enVmBeamRotY     = 0;   // beamRot.y (yaw)
 
     // En_Fw — Flare Dancer core/wisp state-machine sync
     // (Bounce / Run / TurnToParentInitPos / JumpToParentInitPos), #100.
@@ -615,6 +626,8 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         EnVm* vm           = (EnVm*)actor;
         e.hasEnVm          = true;
         e.enVmActionState  = EnVm_GetStateIndex(vm);
+        e.enVmBeamRotX     = vm->beamRot.x;
+        e.enVmBeamRotY     = vm->beamRot.y;
     } else if (actor->id == ACTOR_EN_FW) {
         EnFw* fw           = (EnFw*)actor;
         e.hasEnFw          = true;
@@ -806,6 +819,12 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
     if (cur.hasEnVm != prev.hasEnVm) return true;
     if (cur.hasEnVm) {
         if (cur.enVmActionState != prev.enVmActionState) return true;
+        // S2-9: absolute-value threshold on beam rotation delta so tiny
+        // per-frame jitter doesn't spam the wire, but real aim changes
+        // (>~2.8 degrees) do. Vanilla beamRot updates every frame via
+        // Math_ApproachS, so raw != would fire every packet.
+        if (std::abs((int)cur.enVmBeamRotX - (int)prev.enVmBeamRotX) > 512) return true;
+        if (std::abs((int)cur.enVmBeamRotY - (int)prev.enVmBeamRotY) > 512) return true;
     }
     if (cur.hasEnFw != prev.hasEnFw) return true;
     if (cur.hasEnFw) {
@@ -1444,6 +1463,8 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     // En_Vm — Beamos turret state-machine sync.
     if (extras.hasEnVm) {
         payload["actionState"] = extras.enVmActionState;
+        payload["enVmBeamRotX"] = (int)extras.enVmBeamRotX;
+        payload["enVmBeamRotY"] = (int)extras.enVmBeamRotY;
     }
 
     // En_Fw — Flare Dancer core/wisp state-machine sync (#100).
@@ -2228,9 +2249,19 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_PO_FIELD && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
         }
-        // En_Vm — cache Beamos actionState.
+        // En_Vm — cache Beamos actionState + beam-rotation aim vector.
+        // S2-9: writing beamRot directly onto the local actor makes the
+        // peer's beam point at the host's authoritative target instead
+        // of peer's own local nearest-player pick.
         if (actor->id == ACTOR_EN_VM && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
+            EnVm* vm = (EnVm*)actor;
+            if (payload.contains("enVmBeamRotX")) {
+                vm->beamRot.x = (s16)payload["enVmBeamRotX"].get<int>();
+            }
+            if (payload.contains("enVmBeamRotY")) {
+                vm->beamRot.y = (s16)payload["enVmBeamRotY"].get<int>();
+            }
         }
         // En_Fw — cache Flare Dancer core/wisp actionState (#100).
         if (actor->id == ACTOR_EN_FW && payload.contains("actionState")) {
