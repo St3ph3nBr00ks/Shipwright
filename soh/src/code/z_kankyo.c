@@ -2022,18 +2022,53 @@ void Environment_DrawLightning(PlayState* play, s32 unused) {
 void Environment_PlaySceneSequence(PlayState* play) {
     play->envCtx.unk_E0 = 0xFF;
 
+    // [Diag] pending-bugs 2026-07-15 — S2-1 root cause. Log the full
+    // state that drives the branch selection so the next repro of
+    // "wrong scene's music continues playing after transition"
+    // (playtest: P2 heard Kokiri music inside Deku Tree) identifies
+    // WHICH branch fired and WHY. Enable with:
+    //   set gEnhancements.PendingBugsDiag 1
+    // See Claude/Analysis/playthrough_2026-07-15_session2_triage.md S2-1.
+    if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+        LUSLOG_INFO("[MusicSync.diag] Environment_PlaySceneSequence entry "
+                    "sceneNum=%d entranceIndex=0x%04X "
+                    "gSc.seqId=%d gSc.forcedSeqId=%d gSc.natureAmbId=%d gSc.dayTime=0x%04X "
+                    "seqCtx.seqId=%d seqCtx.natureAmbId=%d",
+                    (int)play->sceneNum, (unsigned)gSaveContext.entranceIndex,
+                    (int)gSaveContext.seqId, (int)gSaveContext.forcedSeqId,
+                    (int)gSaveContext.natureAmbienceId, (unsigned)gSaveContext.dayTime,
+                    (int)play->sequenceCtx.seqId, (int)play->sequenceCtx.natureAmbienceId);
+    }
+
     // both lost woods exits on the bridge from kokiri to hyrule field
     if (((void)0, gSaveContext.entranceIndex) == ENTR_LOST_WOODS_BRIDGE_WEST_EXIT ||
         ((void)0, gSaveContext.entranceIndex) == ENTR_LOST_WOODS_BRIDGE_EAST_EXIT) {
+        if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+            LUSLOG_INFO("[MusicSync.diag] branch=lost_woods_bridge — Audio_PlayNatureAmbienceSequence(KOKIRI_REGION)");
+        }
         Audio_PlayNatureAmbienceSequence(NATURE_ID_KOKIRI_REGION);
     } else if (((void)0, gSaveContext.forcedSeqId) != NA_BGM_GENERAL_SFX) {
+        if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+            LUSLOG_INFO("[MusicSync.diag] branch=forcedSeqId forcedSeqId=%d disabled=%d",
+                        (int)gSaveContext.forcedSeqId,
+                        Environment_IsForcedSequenceDisabled() ? 1 : 0);
+        }
         if (!Environment_IsForcedSequenceDisabled()) {
             Audio_QueueSeqCmd(SEQ_PLAYER_BGM_MAIN << 24 | (s32)((void)0, gSaveContext.forcedSeqId));
         }
         gSaveContext.forcedSeqId = NA_BGM_GENERAL_SFX;
     } else if (play->sequenceCtx.seqId == NA_BGM_NO_MUSIC) {
         if (play->sequenceCtx.natureAmbienceId == NATURE_ID_NONE) {
+            if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+                LUSLOG_INFO("[MusicSync.diag] branch=no_music_no_nature — early return (nothing to play)");
+            }
             return;
+        }
+        if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+            LUSLOG_INFO("[MusicSync.diag] branch=no_music_with_nature — nature target=%d current=%d fired=%d",
+                        (int)play->sequenceCtx.natureAmbienceId,
+                        (int)gSaveContext.natureAmbienceId,
+                        (gSaveContext.natureAmbienceId != play->sequenceCtx.natureAmbienceId) ? 1 : 0);
         }
         if (((void)0, gSaveContext.natureAmbienceId) != play->sequenceCtx.natureAmbienceId) {
             Audio_PlayNatureAmbienceSequence(play->sequenceCtx.natureAmbienceId);
@@ -2042,16 +2077,34 @@ void Environment_PlaySceneSequence(PlayState* play) {
         // "BGM Configuration"
         osSyncPrintf("\n\n\nBGM設定game_play->sound_info.BGM=[%d] old_bgm=[%d]\n\n", play->sequenceCtx.seqId,
                      ((void)0, gSaveContext.seqId));
+        if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+            LUSLOG_INFO("[MusicSync.diag] branch=bgm_no_nature target=%d current=%d fired=%d",
+                        (int)play->sequenceCtx.seqId, (int)gSaveContext.seqId,
+                        (gSaveContext.seqId != play->sequenceCtx.seqId) ? 1 : 0);
+        }
         if (((void)0, gSaveContext.seqId) != play->sequenceCtx.seqId) {
             func_800F5550(play->sequenceCtx.seqId);
         }
     } else if (((void)0, gSaveContext.dayTime) > 0x4AAA && ((void)0, gSaveContext.dayTime) < 0xB71D) {
+        if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+            LUSLOG_INFO("[MusicSync.diag] branch=day_bgm dayTime=0x%04X target=%d current=%d fired=%d",
+                        (unsigned)gSaveContext.dayTime,
+                        (int)play->sequenceCtx.seqId, (int)gSaveContext.seqId,
+                        (gSaveContext.seqId != play->sequenceCtx.seqId) ? 1 : 0);
+        }
         if (((void)0, gSaveContext.seqId) != play->sequenceCtx.seqId) {
             func_800F5550(play->sequenceCtx.seqId);
         }
 
         play->envCtx.unk_E0 = 1;
     } else {
+        if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+            LUSLOG_INFO("[MusicSync.diag] branch=night_nature dayTime=0x%04X target=%d current=%d fired=%d",
+                        (unsigned)gSaveContext.dayTime,
+                        (int)play->sequenceCtx.natureAmbienceId,
+                        (int)gSaveContext.natureAmbienceId,
+                        (gSaveContext.natureAmbienceId != play->sequenceCtx.natureAmbienceId) ? 1 : 0);
+        }
         if (((void)0, gSaveContext.natureAmbienceId) != play->sequenceCtx.natureAmbienceId) {
             Audio_PlayNatureAmbienceSequence(play->sequenceCtx.natureAmbienceId);
         }
