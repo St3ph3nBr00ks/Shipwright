@@ -2495,6 +2495,7 @@ float Anchor_GetEnforcedFloat(const char* cvarName, float localDefault);
 f32 Anchor_DistXZToLocalLink(Actor* actor, PlayState* play);
 s16 Anchor_YawTowardLocalLink(Actor* actor, PlayState* play);
 f32 Anchor_HeightDiffToLocalLink(Actor* actor, PlayState* play);
+f32 Anchor_Dist3DToLocalLink(Actor* actor, PlayState* play);
 // VMP Phase B — direct-damage broadcast for OC2-style touch attackers
 // (En_St / En_Ssh / En_Go / En_Go2) that call play->damagePlayer(play,-N)
 // directly. Sends DAMAGE_PLAYER to each peer whose DummyPlayer is within

@@ -358,6 +358,21 @@ extern "C" f32 Anchor_HeightDiffToLocalLink(Actor* actor, PlayState* play) {
     return Actor_HeightDiff(actor, &p->actor);
 }
 
+// 3D distance to LOCAL Link (bypasses the DummyPlayer overlay applied
+// to actor->xyzDistToPlayerSq). Use this for effect-gates that need to
+// account for Y — e.g. NPC talk-range checks where a peer standing on
+// a ledge above the NPC shouldn't allow local Link to talk to it from
+// below. Composed from the XZ and Y helpers above so callers get a
+// single scalar and don't have to redo the sqrtf themselves.
+extern "C" f32 Anchor_Dist3DToLocalLink(Actor* actor, PlayState* play) {
+    if (actor == nullptr || play == nullptr) return 9999.0f;
+    Player* p = GET_PLAYER(play);
+    if (p == nullptr) return 9999.0f;
+    const f32 dxz = Actor_WorldDistXZToActor(actor, &p->actor);
+    const f32 dy  = Actor_HeightDiff(actor, &p->actor);
+    return sqrtf(dxz * dxz + dy * dy);
+}
+
 // VMP Phase B — broadcast direct damage to peers' DummyPlayers in range.
 // Walks ACTORCAT_NPC for DummyPlayer actors (same iteration as
 // FindNearestPlayerActor) plus the Pillar B Phase 3 cross-timeline
