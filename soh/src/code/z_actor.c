@@ -1956,16 +1956,39 @@ u32 Actor_ProcessTalkRequest(Actor* actor, PlayState* play) {
 s32 func_8002F1C4(Actor* actor, PlayState* play, f32 arg2, f32 arg3, u32 exchangeItemId) {
     Player* player = GET_PLAYER(play);
 
+    // Anchor Vanilla Mirror Pattern — playtest 2026-07-15 Bug 12.
+    // Cached actor->xzDistToPlayer / yDistToPlayer are overlaid by
+    // Anchor's ShouldActorUpdate hook with distance to the NEAREST
+    // player (including peer DummyPlayers) so enemy AI pursues the
+    // closest target. But the A-press that triggers dialog comes from
+    // LOCAL Link's controller — if a peer stands next to an NPC and
+    // local Link presses A from across the room, the cached-field
+    // gate passes and vanilla engages local Link's dialog. Substitute
+    // the local-Link helpers here so talk-range gating checks local
+    // Link's actual distance, not the AI targeting overlay.
+    // In offline SP GET_PLAYER == the only player, so
+    // Anchor_DistXZToLocalLink returns the same value as the cached
+    // field — no behavior change.
+    // Helpers: Common/PlayerLookup.cpp (declared in functions.h).
+    // See Claude/Analysis/playthrough_2026-07-15_bug_triage.md Bug 12.
+    f32 xzToLocalLink = Anchor_DistXZToLocalLink(actor, play);
+    f32 yToLocalLink  = Anchor_HeightDiffToLocalLink(actor, play);
+
     // This is convoluted but it seems like it must be a single if statement to match
     if ((player->actor.flags & ACTOR_FLAG_TALK) || ((exchangeItemId != EXCH_ITEM_NONE) && Player_InCsMode(play)) ||
         (!actor->isTargeted &&
-         ((arg3 < fabsf(actor->yDistToPlayer)) || (player->talkActorDistance < actor->xzDistToPlayer) ||
-          (arg2 < actor->xzDistToPlayer)))) {
+         ((arg3 < fabsf(yToLocalLink)) || (player->talkActorDistance < xzToLocalLink) ||
+          (arg2 < xzToLocalLink)))) {
         return false;
     }
 
     player->talkActor = actor;
-    player->talkActorDistance = actor->xzDistToPlayer;
+    // Store local-Link distance for consistency — the tiebreak above
+    // (player->talkActorDistance < xzToLocalLink) reads this back for
+    // "which is the closest talk offer?" decisions; storing cached
+    // distance would mix targeting-overlay and local-Link values in
+    // the same field.
+    player->talkActorDistance = xzToLocalLink;
     player->exchangeItemId = exchangeItemId;
 
     return true;
