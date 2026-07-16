@@ -5212,6 +5212,27 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // [Diag] pending-bugs 2026-07-16 — Bug 2 rupee pickup failure.
+        // Log every gate decision so we can identify which layer blocks
+        // the pickup on repro. Enable with:
+        //   set gEnhancements.PendingBugsDiag 1
+        // Each block path already has SPDLOG_DEBUG lines, but DEBUG is
+        // off by default in Release. This wrapper elevates to INFO so
+        // the field-test log captures it. Zero behavior change.
+        // See Claude/Analysis/playthrough_2026-07-15_session2_triage.md.
+        if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+            const int64_t nowMsDiag = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const int64_t ageMs = nowMsDiag - ext->spawnTimeMs;
+            SPDLOG_INFO("[ItemDropPickup.diag] gate netId={} params=0x{:02X} pickupState={} "
+                        "ageMs={} killer={} killerTeam='{}' localClient={} localTeam='{}'",
+                        ext->netId, (unsigned)(item00->actor.params & 0xFF),
+                        (int)ext->pickupState, (long long)ageMs,
+                        ext->killerClientId, ext->killerTeamId,
+                        Anchor::Instance->ownClientId,
+                        CVarGetString(CVAR_REMOTE_ANCHOR("TeamId"), "default"));
+        }
+
         // Race A mitigation: Granted state means host has arbitrated
         // this drop in our favour. Transition to Consumed (terminal)
         // and allow vanilla pickup to run.
