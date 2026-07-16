@@ -332,6 +332,25 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_EN_TUBO_TRAP:       return true;  // Flying pot enemy (Forest Temple).
         case ACTOR_EN_WONDER_ITEM:     return true;  // Invisible collectible spot (Hyrule Field secrets).
 
+        // Playtest 2026-07-15 Bug S2-5 — Cuccos (En_Niw). ACTORCAT_PROP
+        // peaceful cucco whose peaceful↔hostile state transition and
+        // wander animations were not visible to peers. Admitting enables
+        // world.pos + shape.rot + jointTable sync via ENEMY_STATE, which
+        // covers the "cucco is here" and "cucco is walking" cases across
+        // clients. The hostile-state transition (unk_2A8 flag set when
+        // hit-count `unk_2A4` reaches zero) is state-machine driven
+        // locally on each client. Pitfall 28 knockback gate is already
+        // in place at z_en_niw.c:1085 via Anchor_DistXZToLocalLink so
+        // hostile cuccos only knock back the actual attacker's Link.
+        // Follow-up (deferred): the swarm children spawned by
+        // EnNiw_SpawnAttackCucco (z_en_niw.c:362) are ACTOR_EN_ATTACK_NIW
+        // (ACTORCAT_ENEMY — already auto-synced). Peer's local main
+        // cucco may fire its own SpawnAttackCucco when the actionFunc
+        // transitions locally, creating duplicate swarm actors. Fix is
+        // a host-authority gate on the spawn call; queued as a follow-
+        // up so the v1 admission ships without blocking.
+        case ACTOR_EN_NIW:             return true;  // Cucco (peaceful).
+
         // Carry / held-actor sync (Plans/carry_held_actor_sync.md Step 0).
         // The cluster spawner for the small/large throwable rocks. ACTOR_EN_ISHI
         // itself is already admitted further up (line ~159, lift-and-throw
