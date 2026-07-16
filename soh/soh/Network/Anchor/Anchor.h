@@ -847,6 +847,7 @@ class Anchor : public Network {
     inline static const std::string& MIDO_POST_DEKU_LEAVE     = PacketTypes::MIDO_POST_DEKU_LEAVE;
     inline static const std::string& TALON_CASTLE_STATE       = PacketTypes::TALON_CASTLE_STATE;
     inline static const std::string& HYRULE_CASTLE_GATE_OPEN  = PacketTypes::HYRULE_CASTLE_GATE_OPEN;
+    inline static const std::string& KAKARIKO_GATE_OPEN       = PacketTypes::KAKARIKO_GATE_OPEN;
     inline static const std::string& CUTSCENE_START           = PacketTypes::CUTSCENE_START;
     inline static const std::string& CUTSCENE_END             = PacketTypes::CUTSCENE_END;
     inline static const std::string& CUTSCENE_TEXT_VOTE_STATE = PacketTypes::CUTSCENE_TEXT_VOTE_STATE;
@@ -1400,6 +1401,19 @@ class Anchor : public Network {
     // via BgSpot15Saku_Init reading the synced INFTABLE_71.
     void SendPacket_HyruleCastleGateOpen();
     void HandlePacket_HyruleCastleGateOpen(nlohmann::json payload);
+
+    // KAKARIKO_GATE_OPEN — sibling of HYRULE_CASTLE_GATE_OPEN for the
+    // Kakariko → Death Mountain trail gate (Bg_Gate_Shutter). Any-client
+    // → all broadcast; fires from En_Heishi2 (Kakariko guard variant)
+    // at the spear-slam site where `gate->openingState = 1` triggers
+    // the opening animation. Same rationale as the Hyrule Castle gate
+    // packet: SET_FLAG for INFTABLE_SHOWED_ZELDAS_LETTER_TO_GATE_GUARD
+    // syncs the pre-open state for late-joiners, but the CURRENT
+    // in-scene animation only fires when openingState is explicitly
+    // written on each peer. See Bug S2-4 in
+    // Claude/Analysis/playthrough_2026-07-15_session2_triage.md.
+    void SendPacket_KakarikoGateOpen();
+    void HandlePacket_KakarikoGateOpen(nlohmann::json payload);
 
     // CUTSCENE_START / CUTSCENE_END — generic primitive that brackets a
     // cutscene across all clients in the same scene + timeline (per

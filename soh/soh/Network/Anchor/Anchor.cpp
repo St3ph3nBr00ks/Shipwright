@@ -406,6 +406,7 @@ Anchor::GetPacketHandlerRegistry() {
         { DIALOG_CHOICE_APPLIED,     &Anchor::HandlePacket_DialogChoiceApplied     },
         { TALON_CASTLE_STATE,      &Anchor::HandlePacket_TalonCastleState      },
         { HYRULE_CASTLE_GATE_OPEN, &Anchor::HandlePacket_HyruleCastleGateOpen  },
+        { KAKARIKO_GATE_OPEN,      &Anchor::HandlePacket_KakarikoGateOpen      },
         { CUTSCENE_START,          &Anchor::HandlePacket_CutsceneStart         },
         { CUTSCENE_END,            &Anchor::HandlePacket_CutsceneEnd           },
         { CUTSCENE_TEXT_VOTE_STATE, &Anchor::HandlePacket_CutsceneTextVoteState },

@@ -145,6 +145,7 @@ inline const std::string BOSS_GOMA_LOOKED_AT       = "BOSS_GOMA_LOOKED_AT";
 inline const std::string MIDO_POST_DEKU_LEAVE      = "MIDO_POST_DEKU_LEAVE";
 inline const std::string TALON_CASTLE_STATE        = "TALON_CASTLE_STATE";
 inline const std::string HYRULE_CASTLE_GATE_OPEN   = "HYRULE_CASTLE_GATE_OPEN";
+inline const std::string KAKARIKO_GATE_OPEN        = "KAKARIKO_GATE_OPEN";
 inline const std::string CUTSCENE_START            = "CUTSCENE_START";
 inline const std::string CUTSCENE_END              = "CUTSCENE_END";
 inline const std::string CUTSCENE_TEXT_VOTE_STATE  = "CUTSCENE_TEXT_VOTE_STATE";

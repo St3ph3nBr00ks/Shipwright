@@ -21,6 +21,12 @@
 // in single-player. See #292.
 extern void Anchor_NotifyHyruleCastleGateOpen(void);
 
+// Sibling — Kakariko → Death Mountain trail gate. Fires from the
+// spear-slam animation site where gate->openingState = 1 (below).
+// Implementation in Packets/World/KakarikoGateOpen.cpp. NO-OP in
+// single-player. See playtest 2026-07-15 Bug S2-4.
+extern void Anchor_NotifyKakarikoGateOpen(void);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY)
 
 void EnHeishi2_Init(Actor* thisx, PlayState* play);
@@ -487,6 +493,16 @@ void func_80A53D0C(EnHeishi2* this, PlayState* play) {
             } else {
                 this->gate = &gate->dyna.actor;
                 gate->openingState = 1;
+                // Anchor MP sync — playtest 2026-07-15 Bug S2-4. Fire the
+                // Kakariko gate broadcast synchronously with the local
+                // openingState write. Same-frame ordering matches the
+                // Hyrule Castle gate site above (line 318): peers must
+                // set openingState BEFORE their local
+                // Flags_SetInfTable(INFTABLE_SHOWED_ZELDAS_LETTER_TO_GATE_GUARD)
+                // arrives via SET_FLAG, or the gate's Update
+                // `!Flags_GetInfTable(...)` gate closes forever and
+                // no opening animation runs on that peer.
+                Anchor_NotifyKakarikoGateOpen();
                 break;
             }
         }
