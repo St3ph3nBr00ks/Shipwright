@@ -245,6 +245,18 @@ bool IsSyncedWorldActor(int16_t actorId) {
         case ACTOR_BG_HEAVY_BLOCK: return true;  // Death Mountain large block
                                                  // (Golden Gauntlets,
                                                  // ACTORCAT_BG).
+        case ACTOR_BG_DDAN_JD:    return true;   // Dodongo's Cavern main
+                                                 // entrance rising stone
+                                                 // platform (ACTORCAT_BG,
+                                                 // DPM_PLAYER — Link can
+                                                 // stand on it). Internal
+                                                 // state machine drives
+                                                 // world.pos.y up/down;
+                                                 // ENEMY_STATE pos sync
+                                                 // keeps clients on the
+                                                 // same platform height.
+                                                 // Playtest 2026-07-15
+                                                 // Bug S2-8.
         case ACTOR_BG_SPOT15_RRBOX: return true; // Lon Lon milk crate
                                                  // (DynaPoly push, same
                                                  // mechanic as OBJ_OSHIHIKI;
