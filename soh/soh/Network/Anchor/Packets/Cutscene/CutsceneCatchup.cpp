@@ -747,19 +747,33 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
                         (int)kFrameParityMargin,
                         leaderFrame);
         } else {
-            if (!peerAlreadyProgressing) {
+            // Bug 1/13 fix (playtest 2026-07-15) — narrow the reset from
+            // "not-progressing → reset frames+state" to "state IS IDLE
+            // → reset frames only". Previously we also forced state to
+            // IDLE whenever peerAlreadyProgressing was false, which
+            // includes the case where state != IDLE but frames == 0
+            // (peer is mid-init, e.g. just entered UNSKIPPABLE_INIT or
+            // UNSKIPPABLE_EXEC on frame 0). Forcing IDLE there rewound
+            // the state machine, and the subsequent fast-forward
+            // re-fired every cs_command from frame 0 up to target —
+            // visible as the cutscene restarting from the beginning
+            // (Bug 1: "P2 restarted first Deku Tree cutscene after P1
+            // reached the point in the cutscene with the second camera
+            // angle change"). The log-623 stale-frames case is still
+            // covered — that class is state == IDLE + frames > 0, so
+            // the reset still fires for it.
+            if (gPlayState->csCtx.state == CS_STATE_IDLE) {
                 gPlayState->csCtx.frames = 0;
-                gPlayState->csCtx.state  = CS_STATE_IDLE;
             }
             ::Anchor::Instance->catchupFastForwardTarget = leaderFrame;
             SPDLOG_INFO("[CutsceneCatchup] Applied delta — silent fast-forward "
-                        "target=frame {} (peer at frames={} state={}; reset={} "
-                        "— vanilla drives state machine + command dispatch; "
-                        "TickCutsceneCatchup accelerates)",
+                        "target=frame {} (peer at frames={} state={}; "
+                        "reset-frames={} — vanilla drives state machine + "
+                        "command dispatch; TickCutsceneCatchup accelerates)",
                         leaderFrame,
                         (int)gPlayState->csCtx.frames,
                         (int)gPlayState->csCtx.state,
-                        peerAlreadyProgressing ? "skipped" : "applied");
+                        (gPlayState->csCtx.state == CS_STATE_IDLE) ? "applied" : "skipped");
         }
     } else {
         SPDLOG_INFO("[CutsceneCatchup] Applied delta — leaderFrame=0 "

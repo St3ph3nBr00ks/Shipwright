@@ -461,17 +461,48 @@ void Cutscene_Command_SetLighting(PlayState* play, CutsceneContext* csCtx, CsCmd
 // Plan: Claude/Plans/cutscene_late_join_plan.md §3.4.
 extern void Anchor_NotifyCutsceneMusicStart(int seqId);
 
+// Anchor MP catchup rewind guard — playtest 2026-07-15 Bug 4.
+// Under MP catchup, csCtx->frames can be driven backward so the peer
+// re-scans commands from an earlier point. Each rewind re-fires
+// Cutscene_Command_PlayBGM at the same startFrame, layering the opening
+// music over the intended track. The watermark below dedups: once a
+// PlayBGM has fired at startFrame N in the current cutscene session,
+// any subsequent match at startFrame <= N is treated as a rewind
+// re-fire and suppressed. Reset when csCtx->frames == 0 (new cutscene
+// entering) so a legitimate re-entry to the same cutscene later in the
+// session still plays music. Vanilla single-player never rewinds
+// csCtx->frames — for offline this is a no-op.
+// See Claude/Analysis/playthrough_2026-07-15_bug_triage.md Bug 4.
+static s32 sLastPlayedBGMStartFrame = -1;
+
 void Cutscene_Command_PlayBGM(PlayState* play, CutsceneContext* csCtx, CsCmdMusicChange* cmd) {
     // [Diag] pending-bugs 2026-07-15 — cutscene music bug 1. Log all
     // hits and fires (matching-frame vs not) so we can tell whether the
     // command was ever reached on P1 during the Deku Tree intro cutscene.
     // See Claude/Analysis/deku_tree_cutscene_bugs_log715_2026-07-15.md Bug 1.
     if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
-        LUSLOG_INFO("[CutsceneMusic.diag] PlayBGM cmd startFrame=%d csCtx.frames=%d seqId=%d fired=%d",
+        LUSLOG_INFO("[CutsceneMusic.diag] PlayBGM cmd startFrame=%d csCtx.frames=%d seqId=%d fired=%d watermark=%d",
                     (int)cmd->startFrame, (int)csCtx->frames, (int)(cmd->sequence - 1),
-                    (csCtx->frames == cmd->startFrame) ? 1 : 0);
+                    (csCtx->frames == cmd->startFrame) ? 1 : 0,
+                    (int)sLastPlayedBGMStartFrame);
+    }
+    // Reset watermark on cutscene start (frame 0). Cheap idempotent
+    // reset; runs every frame during the cutscene but only matters on
+    // the frame the counter is at 0.
+    if (csCtx->frames == 0) {
+        sLastPlayedBGMStartFrame = -1;
     }
     if (csCtx->frames == cmd->startFrame) {
+        if ((s32)cmd->startFrame <= sLastPlayedBGMStartFrame) {
+            // Catchup rewind — this PlayBGM already fired for the current
+            // cutscene session at this (or a later) startFrame. Skip.
+            if (CVarGetInteger("gEnhancements.PendingBugsDiag", 0)) {
+                LUSLOG_INFO("[CutsceneMusic.diag] PlayBGM rewind suppressed startFrame=%d watermark=%d",
+                            (int)cmd->startFrame, (int)sLastPlayedBGMStartFrame);
+            }
+            return;
+        }
+        sLastPlayedBGMStartFrame = (s32)cmd->startFrame;
         func_800F595C(cmd->sequence - 1);
         Anchor_NotifyCutsceneMusicStart((int)(cmd->sequence - 1));
     }

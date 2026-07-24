@@ -1750,6 +1750,19 @@ class Anchor : public Network {
     // 2026-07-08.md Bug 2.
     std::set<std::string> cutsceneStartActiveLocalOrigin;
 
+    // Bugs 8/10/15 (playtest 2026-07-15) — one-shot cutscene replay
+    // when peer enters scene. Track every (csKind, csKey) tuple whose
+    // END we've observed (locally-originated OR received via peer's
+    // CUTSCENE_END). ApplyCutsceneStartByKind refuses to force-apply
+    // any key already in this set — prevents replaying a cutscene we
+    // already watched when a fresh peer enters the scene and their
+    // vanilla trigger fires their local cutscene. Session-scoped
+    // (in-memory only); vanilla EventChkInf handles cross-session
+    // persistence since the LOCAL cutscene trigger won't re-fire on
+    // scene re-entry after we've completed it.
+    // See Claude/Analysis/playthrough_2026-07-15_bug_triage.md.
+    std::set<std::string> cutsceneStartCompleted;
+
     // ----- Cutscene late-join / catch-up (Option B v1) -----------------
     // Plan: Claude/Plans/cutscene_late_join_plan.md.
     //

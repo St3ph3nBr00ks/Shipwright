@@ -92,6 +92,24 @@ std::string MakeDedupKey(const std::string& csKind, uint32_t csKey) {
 // Returns true when the local mirror was fired; false when the peer
 // couldn't apply (missing actor, unknown kind, etc.).
 bool ApplyCutsceneStartByKind(const std::string& csKind, uint32_t csKey) {
+    // Bugs 8/10/15 (playtest 2026-07-15) — refuse to force-apply any
+    // cutscene we've already watched to completion in this session.
+    // Fires when P1 has finished a one-shot cutscene, then P2 enters
+    // the scene, P2's local trigger fires (fresh save context), and
+    // P2's CUTSCENE_START would otherwise force P1 to replay the
+    // same cutscene. Applies uniformly to savecontext and actor-driven
+    // kinds — for both, "completed" means the terminal END was
+    // observed (locally or via peer's CUTSCENE_END). Vanilla EventChkInf
+    // handles cross-session persistence.
+    const std::string dedupKey = csKind + ":" + std::to_string(csKey);
+    if (Anchor::Instance != nullptr &&
+        Anchor::Instance->cutsceneStartCompleted.count(dedupKey) > 0) {
+        SPDLOG_INFO("[CutsceneStart] Refused apply — dedupKey='{}' already "
+                    "completed in this session (playtest bugs 8/10/15)",
+                    dedupKey);
+        return false;
+    }
+
     if (csKind == "savecontext") {
         // Save-context cutscene: write cutsceneIndex + let the engine
         // pick it up on the next frame. Plan §Input-lock approach
@@ -360,6 +378,9 @@ void Anchor::SendPacket_CutsceneEnd(const std::string& csKind, uint32_t csKey,
     cutsceneStartActiveLocalOrigin.erase(dedupKey);
     // Fix O — mirror erase of the originator map.
     cutsceneOriginatorByKindKey.erase(dedupKey);
+    // Bugs 8/10/15 — record local-side completion so future peer STARTs
+    // for the same (kind, key) don't force us to replay this cutscene.
+    cutsceneStartCompleted.insert(dedupKey);
 
     nlohmann::json payload;
     payload["type"]         = CUTSCENE_END;
@@ -403,6 +424,10 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
     cutsceneStartActiveLocalOrigin.erase(dedupKey);
     // Fix O — mirror erase of the originator map.
     cutsceneOriginatorByKindKey.erase(dedupKey);
+    // Bugs 8/10/15 — record completion whether the END was ours or a
+    // peer's. Either way, this cutscene reached its terminal state in
+    // our view of the session; refuse future replays.
+    cutsceneStartCompleted.insert(dedupKey);
 
     if (sceneMatches) {
         ApplyCutsceneEndByKind(csKind, csKey, endReason);
