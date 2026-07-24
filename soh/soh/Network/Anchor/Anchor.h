@@ -2036,6 +2036,49 @@ class Anchor : public Network {
     std::unordered_map<std::string /* kindKey */, uint32_t /* clientId */>
         cutsceneOriginatorByKindKey;
 
+    // Wait-for-peer coordination barrier — Phase 2b of the
+    // coordination-point cutscene sync plan (Analysis/
+    // coordination_point_sync_reassessment_2026-07-16.md). Generic
+    // per-key wait primitive; first consumer will be CUTSCENE_END in
+    // Phase 4a. Dormant until CVar gEnhancements.Anchor.CutsceneWaitForPeer
+    // = 1 AND a consumer arms a barrier.
+    //
+    // Design: Plans/wait_for_peer_primitive_design_2026-07-16.md.
+    struct CoordinationBarrier {
+        std::set<uint32_t> peersRemaining;
+        uint64_t           armedGameFrame   = 0;
+        uint64_t           timeoutGameFrame = 0;
+    };
+    std::unordered_map<std::string /* key */, CoordinationBarrier>
+        pendingCoordination;
+
+    // Arm a barrier for the given key. Snapshots in-scope peers (same
+    // scene, same timeline, save-loaded, kindKey present in their
+    // cutsceneStartActive per our view). If CVar is off OR no peers
+    // qualify, returns immediately without inserting an entry (no
+    // barrier armed).
+    void ArmCoordinationBarrier(const std::string& key);
+
+    // True iff a barrier for the key is currently active. Consumers
+    // gate local advance on !IsWaitingForCoordination(key).
+    bool IsWaitingForCoordination(const std::string& key) const;
+
+    // True iff any barrier is currently active. Used by the freeze
+    // policy in GameTimeController (Phase 4a) to keep Play_InCsMode
+    // true during the wait window.
+    bool AnyCoordinationPending() const;
+
+    // Called by CUTSCENE_END receive path to record peer completion.
+    // Idempotent — no-op if barrier not armed or peer not in
+    // remaining set. Barrier releases when remaining set empties.
+    void MarkCoordinationReceived(const std::string& key,
+                                  uint32_t peerClientId);
+
+    // Per-frame reap: releases barriers whose timeoutGameFrame has
+    // passed. Registered from HookHandlers OnGameFrameUpdate. Cheap
+    // linear scan of pendingCoordination (rarely > 1-3 entries).
+    void TickCoordinationBarriers();
+
     // Heartbeat (#194 follow-up) — two-axis liveness signal.
     //
     // gameFrameCounter is incremented from OnGameFrameUpdate on the game

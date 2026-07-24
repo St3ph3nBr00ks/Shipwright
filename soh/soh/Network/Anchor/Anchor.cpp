@@ -292,7 +292,132 @@ void Anchor::OnConnected() {
 }
 
 void Anchor::OnDisconnected() {
+    // Wait-for-peer barriers are meaningless in single-player. Drop them
+    // so we don't hang the next connected session on stale state.
+    pendingCoordination.clear();
     RegisterHooks();
+}
+
+// MARK: - Wait-for-peer coordination barrier (Phase 2b)
+//
+// Generic per-key wait primitive. Consumers arm a barrier when they
+// broadcast a coordination event (Phase 4a: CUTSCENE_END) and check
+// IsWaitingForCoordination() to gate local advance. Peers acknowledge
+// via MarkCoordinationReceived. Barrier releases when all expected
+// peers acknowledge OR timeout fires (15 s wall-clock).
+//
+// Dormant unless gEnhancements.Anchor.CutsceneWaitForPeer = 1.
+//
+// Design: Plans/wait_for_peer_primitive_design_2026-07-16.md.
+
+static constexpr int kCoordinationBarrierTimeoutMs = 15000;
+
+void Anchor::ArmCoordinationBarrier(const std::string& key) {
+    if (CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneWaitForPeer"), 0) == 0) {
+        return;
+    }
+    if (gPlayState == nullptr) return;
+
+    CoordinationBarrier barrier;
+    barrier.armedGameFrame = gameFrameCounter.load();
+    barrier.timeoutGameFrame =
+        barrier.armedGameFrame + (uint64_t)MsToGameTicks(kCoordinationBarrierTimeoutMs);
+
+    const int16_t localScene    = (int16_t)gPlayState->sceneNum;
+    const s32     localLinkAge  = gSaveContext.linkAge;
+
+    // Phase 4a: filter by peer csCtxState != CS_STATE_IDLE. This is a
+    // more reliable "peer is in a cutscene" signal than local
+    // cutsceneStartActive membership, which may have already been
+    // erased by an incoming peer END before the local Fix G fires.
+    // csCtxState is broadcast via PLAYER_UPDATE (~15 Hz) so it lags
+    // reality by at most a few frames — over-include on network hitch
+    // is caught by the 15 s timeout, under-include is fine (peer is
+    // already done, no wait needed).
+    for (const auto& [clientId, client] : clients) {
+        if (clientId == ownClientId) continue;
+        if (!client.online) continue;
+        if (!client.isSaveLoaded) continue;
+        if ((int16_t)client.sceneNum != localScene) continue;
+        // Same-timeline gate — peers on the other timeline are not in
+        // the same cutscene arc.
+        if (client.linkAge != localLinkAge) continue;
+        // Peer is in a cutscene (any cutscene — this is best-effort).
+        // Under known chains, both clients share the same START
+        // broadcast so this is precise. If two chains happen to
+        // overlap in the same scene concurrently, the timeout is the
+        // safety valve.
+        if (client.csCtxState == CS_STATE_IDLE) continue;
+        barrier.peersRemaining.insert(clientId);
+    }
+
+    if (barrier.peersRemaining.empty()) {
+        // Solo session or no in-scope peers — nothing to wait for.
+        // Do not insert; IsWaitingForCoordination will return false.
+        SPDLOG_INFO("[CoordBarrier] Arm key='{}' — no peers to wait for; "
+                    "released immediately", key);
+        return;
+    }
+
+    // Idempotent re-arm: if a barrier already exists, refresh its
+    // expected set. Rare (would require the consumer to broadcast
+    // twice); log for triage.
+    if (pendingCoordination.count(key) > 0) {
+        SPDLOG_WARN("[CoordBarrier] Re-arm key='{}' — refreshing expected set", key);
+    }
+    pendingCoordination[key] = std::move(barrier);
+
+    SPDLOG_INFO("[CoordBarrier] Armed key='{}' remaining={} timeoutFrames={}",
+                key,
+                pendingCoordination[key].peersRemaining.size(),
+                (uint64_t)MsToGameTicks(kCoordinationBarrierTimeoutMs));
+}
+
+bool Anchor::IsWaitingForCoordination(const std::string& key) const {
+    return pendingCoordination.count(key) > 0;
+}
+
+bool Anchor::AnyCoordinationPending() const {
+    return !pendingCoordination.empty();
+}
+
+void Anchor::MarkCoordinationReceived(const std::string& key,
+                                       uint32_t peerClientId) {
+    auto it = pendingCoordination.find(key);
+    if (it == pendingCoordination.end()) return;
+
+    auto erased = it->second.peersRemaining.erase(peerClientId);
+    if (erased == 0) return;  // peer wasn't expected — ignore
+
+    SPDLOG_INFO("[CoordBarrier] Received key='{}' from clientId={} remaining={}",
+                key, peerClientId, it->second.peersRemaining.size());
+
+    if (it->second.peersRemaining.empty()) {
+        pendingCoordination.erase(it);
+        SPDLOG_INFO("[CoordBarrier] Released key='{}' — all peers acknowledged", key);
+    }
+}
+
+void Anchor::TickCoordinationBarriers() {
+    if (pendingCoordination.empty()) return;
+
+    const uint64_t nowFrame = gameFrameCounter.load();
+    for (auto it = pendingCoordination.begin(); it != pendingCoordination.end(); ) {
+        if (nowFrame >= it->second.timeoutGameFrame) {
+            SPDLOG_WARN("[CoordBarrier] Timeout key='{}' — released with "
+                        "{} peer(s) still remaining",
+                        it->first, it->second.peersRemaining.size());
+            it = pendingCoordination.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+extern "C" bool Anchor_IsWaitingForCutsceneCoordination(const char* key) {
+    if (key == nullptr) return false;
+    if (Anchor::Instance == nullptr || !Anchor::Instance->isEnabled) return false;
+    return Anchor::Instance->IsWaitingForCoordination(std::string(key));
 }
 
 void Anchor::ProcessOutgoingPackets() {

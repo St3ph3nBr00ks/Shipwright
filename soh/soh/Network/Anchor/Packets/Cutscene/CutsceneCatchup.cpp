@@ -544,9 +544,40 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
     int setupRc = 0;
     if (const auto* handler = CutsceneKindRegistry::Find(csKind)) {
         if (handler->applyForce) {
-            setupRc = handler->applyForce(csKeyForSetup);
-            SPDLOG_INFO("[CutsceneCatchup] Setup csKind={} csKey={} rc={}",
-                        csKind, csKeyForSetup, setupRc);
+            // Skip force-setup when peer is already mid-cutscene. Fix R
+            // re-target fires whenever peer's textId lags leader's; if
+            // we call applyForce every time, we RESET the current
+            // cutscene back to its cold-start state on every re-target.
+            // For actor-driven cutscenes that chain into follow-up
+            // cutscenes (e.g., Deku Tree intro → "opens mouth" after
+            // Yes answer), the reset drops peer back to the intro every
+            // 2s, breaking the follow-up cutscene entirely.
+            //
+            // Guard: if peer's csCtx is actively running AND we're
+            // tracking the same csKind as active, the setup is
+            // redundant. Frame-advance target + message state
+            // hydration below still apply — those are what a mid-
+            // cutscene catchup needs. Fresh late-join path (peer's
+            // csCtx.state == IDLE) still runs applyForce as before.
+            //
+            // Playtest 2026-07-16 log 731. See
+            // Claude/Analysis/deku_tree_yes_no_desync_log731_2026-07-16.md.
+            const std::string dedupKey = csKind + ":" + std::to_string(csKeyForSetup);
+            const bool peerAlreadyInCutscene =
+                gPlayState->csCtx.state != CS_STATE_IDLE &&
+                Anchor::Instance != nullptr &&
+                Anchor::Instance->cutsceneStartActive.count(dedupKey) > 0;
+            if (peerAlreadyInCutscene) {
+                SPDLOG_INFO("[CutsceneCatchup] Setup csKind={} csKey={} SKIPPED — "
+                            "peer already mid-cutscene (csCtx.state={}); applyForce "
+                            "would reset the current cutscene back to cold-start.",
+                            csKind, csKeyForSetup, (int)gPlayState->csCtx.state);
+                setupRc = 1;  // Treat as success — no setup needed.
+            } else {
+                setupRc = handler->applyForce(csKeyForSetup);
+                SPDLOG_INFO("[CutsceneCatchup] Setup csKind={} csKey={} rc={}",
+                            csKind, csKeyForSetup, setupRc);
+            }
         } else {
             SPDLOG_WARN("[CutsceneCatchup] csKind='{}' registered without applyForce",
                         csKind);

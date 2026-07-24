@@ -751,6 +751,17 @@ void Anchor::RegisterHooks() {
             // stale-rejection).
             Anchor::Instance->cutsceneFrameSyncSequence      = 0;
             Anchor::Instance->peerLastAppliedCutsceneFrameSeq = 0;
+
+            // Phase 4a — defensive cleanup of wait-for-peer barriers on
+            // scene transition. Barriers armed in the departed scene
+            // are meaningless in the new scene (peers are elsewhere).
+            // Under normal flow, Play_InCsMode freeze prevents scene
+            // transitions during a wait; this cleanup handles edge
+            // cases (crash-recovery, forced warp, timeout race).
+            //
+            // Plans/phase_4a_wire_first_consumer_design_2026-07-16.md
+            // Change 6.
+            Anchor::Instance->pendingCoordination.clear();
         }
     });
 
@@ -946,6 +957,12 @@ void Anchor::RegisterHooks() {
         // Both paths share the same send-side dedup so double-fires are
         // absorbed. Plans/packet_family_cutscene_start_end.md.
         Anchor::Instance->TickCutsceneStartDetector();
+
+        // Wait-for-peer coordination barrier reap (Phase 2b). Cheap
+        // linear scan of pendingCoordination — usually empty or 1-3
+        // entries. Releases barriers whose 15 s timeout has fired.
+        // Dormant unless a consumer arms a barrier (Phase 4a).
+        Anchor::Instance->TickCoordinationBarriers();
 
         // KB-18 (#177) Option 4 — deferred host snapshot broadcast.
         // OnSceneSpawnActors host-path armed pendingSceneActorNetIdsBroadcast;

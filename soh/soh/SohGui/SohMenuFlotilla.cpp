@@ -831,6 +831,39 @@ void SohMenu::AddMenuFlotilla() {
             "read."));
 
     // -----------------------------------------------------------------
+    // Cutscene coordination sync (coordination-point plan Phase 4a)
+    //
+    // Wait-for-peer barrier at CUTSCENE_END. When enabled, the local
+    // client's post-cutscene state freezes until all in-scope peers
+    // have also reached the END (or 15s timeout). Prevents divergence
+    // when one client finishes a cutscene noticeably before others.
+    //
+    // Freeze mechanism: extends Play_InCsMode via the
+    // GameTimeController Cutscene gate. ~30 downstream vanilla
+    // consumers freeze automatically (player input, camera, actor
+    // updates).
+    //
+    // Default OFF — field-test period. If regressions appear during
+    // vote-skip / choice-vote / late-join flows, toggle OFF and file
+    // a report.
+    // -----------------------------------------------------------------
+    AddWidget(path, "Cutscene Coordination", WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Wait for peer at cutscene end",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Anchor.CutsceneWaitForPeer"))
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Coordination-point cutscene sync. When ON: after your "
+            "local cutscene ends, the game freezes briefly until all "
+            "in-scope peers also finish (or 15s timeout).\n\n"
+            "Prevents the class of bugs where one player exits a "
+            "cutscene while others are still watching, and post-"
+            "cutscene state (Link position, NPCs, chest reveals) "
+            "drifts out of sync.\n\n"
+            "Design: Plans/wait_for_peer_primitive_design_2026-07-16.md\n"
+            "Phase 4a: Plans/phase_4a_wire_first_consumer_design_2026-07-16.md"));
+
+    // -----------------------------------------------------------------
     // Nav System
     //
     // Consolidated: removed pure-diagnostic toggles + advanced tuning sliders.

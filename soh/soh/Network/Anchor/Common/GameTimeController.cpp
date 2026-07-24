@@ -48,7 +48,7 @@ static bool LegacyAdvanceWorldTimeRule(TimeContext ctx) {
             Player* player = GET_PLAYER(gPlayState);
             return player == nullptr || !(player->stateFlags1 & PLAYER_STATE1_GETTING_ITEM);
         }
-        case TimeContext::Cutscene:
+        case TimeContext::Cutscene: {
             // Canonical predicate mirrors z_play.c:1811 Play_InCsMode, but
             // calls Player_InCsMode DIRECTLY (NOT Play_InCsMode) to avoid
             // recursion — Play_InCsMode's body is being routed through this
@@ -57,8 +57,24 @@ static bool LegacyAdvanceWorldTimeRule(TimeContext ctx) {
             // unk_6AD == 4 at z_player_lib.c:503-514) is preserved by the
             // direct call. Returns true when time SHOULD advance — i.e. no
             // cutscene active. R7 analysis: Plans/soh_cutscene_flow_analysis.md.
+            //
+            // Phase 4a — extended with a wait-for-peer coordination
+            // check. When any coordination barrier is pending (local
+            // finished a cutscene, awaiting peer acks), keep returning
+            // false so Play_InCsMode stays true and downstream vanilla
+            // consumers freeze during the wait window. Dormant unless
+            // gEnhancements.Anchor.CutsceneWaitForPeer is on AND a
+            // consumer has armed a barrier.
+            //
+            // Plans/phase_4a_wire_first_consumer_design_2026-07-16.md
+            // Change 5.
+            const bool waitingForPeer =
+                (::Anchor::Instance != nullptr) &&
+                ::Anchor::Instance->AnyCoordinationPending();
             return gPlayState->csCtx.state == CS_STATE_IDLE &&
-                   !Player_InCsMode(gPlayState);
+                   !Player_InCsMode(gPlayState) &&
+                   !waitingForPeer;
+        }
         case TimeContext::Ocarina:
             return gPlayState->msgCtx.ocarinaMode == OCARINA_MODE_00;
         case TimeContext::SceneTransition:

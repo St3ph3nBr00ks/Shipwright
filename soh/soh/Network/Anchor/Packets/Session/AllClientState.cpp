@@ -112,6 +112,24 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
                                     "replica(s) for disconnected client {}",
                                     horseRemoved, client.clientId);
                     }
+
+                    // Wait-for-peer coordination barrier cleanup
+                    // (Phase 2b). Peer disconnect drops them from every
+                    // pending barrier's remaining set; barriers whose
+                    // remaining set empties as a result release
+                    // immediately.
+                    for (auto bit = pendingCoordination.begin();
+                         bit != pendingCoordination.end(); ) {
+                        bit->second.peersRemaining.erase(client.clientId);
+                        if (bit->second.peersRemaining.empty()) {
+                            SPDLOG_INFO("[CoordBarrier] Released key='{}' — "
+                                        "last remaining peer {} disconnected",
+                                        bit->first, client.clientId);
+                            bit = pendingCoordination.erase(bit);
+                        } else {
+                            ++bit;
+                        }
+                    }
                 }
             } else if (client.online && !isGlobalRoom) {
                 Notification::Emit({

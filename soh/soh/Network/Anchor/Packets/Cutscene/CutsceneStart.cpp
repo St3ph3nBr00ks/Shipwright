@@ -313,6 +313,42 @@ void Anchor::HandlePacket_CutsceneStart(nlohmann::json payload) {
     // (send-side dedup already prevents this, defense-in-depth here).
     std::string dedupKey = MakeDedupKey(csKind, csKey);
     if (cutsceneStartActive.count(dedupKey) > 0) {
+        // Simultaneous-broadcast tiebreak (playtest 2026-07-16 log 733).
+        // When two clients each fire SendPacket_CutsceneStart for the
+        // same (csKind, csKey) at ~the same time (both entered the
+        // scene, both triggered a fresh-start locally), each sets
+        // cutsceneOriginatorByKindKey[dedupKey] = ownClientId. Without
+        // reconciliation, each client treats itself as the vote-skip
+        // authority and votes never sync between them.
+        //
+        // Deterministic tiebreak: LOWEST clientId wins as originator.
+        // Both clients converge on the same authority.
+        //
+        // If we WERE the originator and lose the tiebreak, remove
+        // ourselves from cutsceneStartActiveLocalOrigin — we defer
+        // FRAME_SYNC leadership to the peer too, avoiding parallel
+        // leader broadcasts.
+        //
+        // See Claude/Analysis/simultaneous_cutscene_start_vote_desync_log733_2026-07-16.md.
+        const uint32_t senderId = payload.value("clientId", (uint32_t)0);
+        const uint32_t currentOriginator =
+            (cutsceneOriginatorByKindKey.count(dedupKey) > 0)
+                ? cutsceneOriginatorByKindKey[dedupKey]
+                : 0;
+        if (senderId != 0 && senderId != currentOriginator &&
+            (currentOriginator == 0 || senderId < currentOriginator)) {
+            const uint32_t prevOriginator = currentOriginator;
+            cutsceneOriginatorByKindKey[dedupKey] = senderId;
+            const bool weWereOriginator = (prevOriginator == ownClientId);
+            if (weWereOriginator) {
+                cutsceneStartActiveLocalOrigin.erase(dedupKey);
+            }
+            SPDLOG_INFO("[CutsceneStart] Simultaneous-broadcast tiebreak: "
+                        "key='{}' sender={} < previous originator={} (self-was-originator={}); "
+                        "originator updated to sender.",
+                        dedupKey, senderId, prevOriginator,
+                        weWereOriginator ? "true" : "false");
+        }
         return;
     }
 
@@ -373,6 +409,20 @@ void Anchor::SendPacket_CutsceneEnd(const std::string& csKind, uint32_t csKey,
         // START for (e.g. cold-boot with a pre-existing non-zero index).
         return;
     }
+
+    // Phase 4a — arm the coordination-point barrier BEFORE state
+    // cleanup so the expected-peer snapshot reflects current
+    // participation. Only for natural ends; superseded / aborted
+    // ends are not coordination points.
+    //
+    // ArmCoordinationBarrier is itself a no-op when the CVar is off
+    // or no peers qualify — safe to call unconditionally.
+    //
+    // Plans/phase_4a_wire_first_consumer_design_2026-07-16.md Change 3.
+    if (endReason == "natural") {
+        ArmCoordinationBarrier(dedupKey);
+    }
+
     cutsceneStartActive.erase(dedupKey);
     // Fix G — mirror erase of the local-origin sibling set.
     cutsceneStartActiveLocalOrigin.erase(dedupKey);
@@ -415,9 +465,40 @@ void Anchor::HandlePacket_CutsceneEnd(nlohmann::json payload) {
     if (csKind.empty()) return;
 
     std::string dedupKey = MakeDedupKey(csKind, csKey);
+
+    // Phase 4a — coordination-point ack. Always fire (no-op if no
+    // barrier armed). The sender's clientId identifies the peer.
+    // Runs BEFORE the cutsceneStartActive check so peer ends that
+    // arrive after we've already cleaned up locally still release
+    // any pending barrier.
+    //
+    // Plans/phase_4a_wire_first_consumer_design_2026-07-16.md Change 4.
+    const uint32_t senderClientId = payload.value("clientId", (uint32_t)0);
+    MarkCoordinationReceived(dedupKey, senderClientId);
+
     if (cutsceneStartActive.count(dedupKey) == 0) {
         return;  // never saw the START — nothing to clean up
     }
+
+    // Phase 4a — deferred erase. When the coordination CVar is ON AND
+    // our local cutscene is still running (csCtx.state != IDLE), the
+    // peer's END means THEY finished, not us. Keeping the entry in
+    // cutsceneStartActive lets our own Fix G iteration find it when
+    // our local cutscene reaches IDLE, so we broadcast our own END
+    // and satisfy peers' coordination barriers. Cleanup happens then.
+    //
+    // With CVar OFF: fall through to eager erase (original behavior).
+    const bool coordEnabled =
+        CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneWaitForPeer"), 0) != 0;
+    const bool localStillInCutscene =
+        coordEnabled && gPlayState->csCtx.state != CS_STATE_IDLE;
+    if (localStillInCutscene) {
+        SPDLOG_INFO("[CutsceneEnd] Peer clientId={} sent END for '{}' but "
+                    "local still in cutscene — deferring state erase to "
+                    "local Fix G", senderClientId, dedupKey);
+        return;
+    }
+
     cutsceneStartActive.erase(dedupKey);
     // Fix G — mirror erase (idempotent — peer receives never inserted
     // into the local-origin set, so erase is a no-op for those).
@@ -460,9 +541,23 @@ void Anchor::TickCutsceneStartDetector() {
     // special-cutscene dispatch and triggering void/reload — the
     // log 630 P2 crash chain. See Analysis/cutscene_savecontext_
     // double_broadcast_2026-07-08.md for the full chain.
+    //
+    // Scope fix (log 734, 2026-07-16): iterate cutsceneStartActive
+    // (all known active cutscenes, self + received) instead of
+    // cutsceneStartActiveLocalOrigin (only cutscenes THIS client
+    // broadcast). Peers receiving deku_tree_intro from another
+    // client have an empty local-origin set for that key, so the
+    // pre-fix check failed → peer spuriously broadcast
+    // savecontext:0xFFFD when vanilla wrote cutsceneIndex=0xFFFD for
+    // the "opens mouth" chain → downstream FRAME_SYNC + Fix R
+    // divergence → cutscene exit on originator. See
+    // Analysis/cutscene_dialogue_architectural_review_log734_2026-07-16.md
+    // and Analysis/coordination_point_sync_reassessment_2026-07-16.md
+    // for the full failure chain + rejected wider architectural rewrite
+    // (rewrite deferred; scope fix is behavior-preserving superset).
     if (prevIdx == 0 && currIdx != 0) {
         bool actorDrivenActive = false;
-        for (const auto& k : cutsceneStartActiveLocalOrigin) {
+        for (const auto& k : cutsceneStartActive) {
             if (k.compare(0, 12, "savecontext:") != 0) {
                 actorDrivenActive = true;
                 break;
@@ -506,8 +601,22 @@ void Anchor::TickCutsceneStartDetector() {
         //
         // See Analysis/deku_tree_bidirectional_come_back_2026-07-09.md
         // Fix G.
+        // Phase 4a — when the coordination-point CVar is ON, iterate
+        // cutsceneStartActive (self-originated + peer-received). This
+        // makes peers also fire END for received cutscenes so the
+        // originator's coordination barrier receives a matching ack.
+        // With CVar OFF (default), keep the original local-origin
+        // iteration for backward compatibility.
+        //
+        // See Plans/phase_4a_wire_first_consumer_design_2026-07-16.md
+        // Change 1.
+        const bool coordEnabled =
+            CVarGetInteger(CVAR_ENHANCEMENT("Anchor.CutsceneWaitForPeer"), 0) != 0;
+        const std::set<std::string>& source =
+            coordEnabled ? cutsceneStartActive : cutsceneStartActiveLocalOrigin;
+
         std::vector<std::pair<std::string, uint32_t>> actorEnds;
-        for (const auto& key : cutsceneStartActiveLocalOrigin) {
+        for (const auto& key : source) {
             auto sep = key.find(':');
             if (sep == std::string::npos) continue;
             std::string csKind = key.substr(0, sep);
