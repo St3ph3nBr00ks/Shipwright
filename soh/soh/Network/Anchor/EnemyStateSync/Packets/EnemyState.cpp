@@ -293,10 +293,17 @@ struct EnemyUpdateExtras {
     // all clients render the same aim direction as the authoritative
     // target the host is tracking. Roll (z) not synced — vanilla writes
     // it as a small oscillation that isn't visually critical.
+    //
+    // 2026-07-26 addendum — also sync `headRotY`. The head limb's yaw
+    // rotation is driven by `headRotY` (z_en_vm.c:498), NOT `beamRot.y`.
+    // Without this the beam vector tracks the correct target but the
+    // head model stays fixed at the peer's local yaw computed when
+    // Attack started. Same threshold pattern as beamRot.
     bool hasEnVm          = false;
     s16  enVmActionState  = 0;
     s16  enVmBeamRotX     = 0;   // beamRot.x (pitch)
     s16  enVmBeamRotY     = 0;   // beamRot.y (yaw)
+    s16  enVmHeadRotY     = 0;   // headRotY   (head-limb yaw)
 
     // En_Fw — Flare Dancer core/wisp state-machine sync
     // (Bounce / Run / TurnToParentInitPos / JumpToParentInitPos), #100.
@@ -628,6 +635,7 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.enVmActionState  = EnVm_GetStateIndex(vm);
         e.enVmBeamRotX     = vm->beamRot.x;
         e.enVmBeamRotY     = vm->beamRot.y;
+        e.enVmHeadRotY     = vm->headRotY;
     } else if (actor->id == ACTOR_EN_FW) {
         EnFw* fw           = (EnFw*)actor;
         e.hasEnFw          = true;
@@ -825,6 +833,9 @@ bool ExtrasDiffer(const EnemyUpdateExtras& cur, const EnemyUpdateExtras& prev) {
         // Math_ApproachS, so raw != would fire every packet.
         if (std::abs((int)cur.enVmBeamRotX - (int)prev.enVmBeamRotX) > 512) return true;
         if (std::abs((int)cur.enVmBeamRotY - (int)prev.enVmBeamRotY) > 512) return true;
+        // 2026-07-26: same threshold for head yaw (head-limb rotation is
+        // driven by headRotY, not beamRot.y — see z_en_vm.c:498).
+        if (std::abs((int)cur.enVmHeadRotY - (int)prev.enVmHeadRotY) > 512) return true;
     }
     if (cur.hasEnFw != prev.hasEnFw) return true;
     if (cur.hasEnFw) {
@@ -1465,6 +1476,7 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         payload["actionState"] = extras.enVmActionState;
         payload["enVmBeamRotX"] = (int)extras.enVmBeamRotX;
         payload["enVmBeamRotY"] = (int)extras.enVmBeamRotY;
+        payload["enVmHeadRotY"] = (int)extras.enVmHeadRotY;
     }
 
     // En_Fw — Flare Dancer core/wisp state-machine sync (#100).
@@ -2261,6 +2273,11 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
             }
             if (payload.contains("enVmBeamRotY")) {
                 vm->beamRot.y = (s16)payload["enVmBeamRotY"].get<int>();
+            }
+            // 2026-07-26: head-limb yaw (independent of beamRot.y; drives
+            // EnVm_OverrideLimbDraw's head rotation at z_en_vm.c:498).
+            if (payload.contains("enVmHeadRotY")) {
+                vm->headRotY = (s16)payload["enVmHeadRotY"].get<int>();
             }
         }
         // En_Fw — cache Flare Dancer core/wisp actionState (#100).
