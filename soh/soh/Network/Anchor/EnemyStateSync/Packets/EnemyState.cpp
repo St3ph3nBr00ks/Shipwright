@@ -3546,26 +3546,11 @@ void Anchor::HandlePacket_EnemyRespawn(nlohmann::json payload) {
         return;
     }
 
-    // Search ACTORCAT_MISC first: Karebaba lives there during
-    // DeadItemDrop / Dead states.
-    Actor* actor = nullptr;
-    {
-        Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_MISC].head;
-        while (it) {
-            const EnemyNetId* e = ObjectExtension::GetInstance().Get<EnemyNetId>(it);
-            if (e && e->netId == netId) { actor = it; break; }
-            it = it->next;
-        }
-    }
-    // Fallback: already back in ACTORCAT_ENEMY.
-    if (!actor) {
-        Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].head;
-        while (it) {
-            const EnemyNetId* e = ObjectExtension::GetInstance().Get<EnemyNetId>(it);
-            if (e && e->netId == netId) { actor = it; break; }
-            it = it->next;
-        }
-    }
+    // FindActorByNetId walks all 8 kSyncableActorCategories, which
+    // includes both ACTORCAT_MISC (where Karebaba lives during
+    // DeadItemDrop / Dead states) and ACTORCAT_ENEMY (where it lives
+    // once regrown). Replaces a prior 17-line dual-walk block.
+    Actor* actor = FindActorByNetId(gPlayState, netId);
 
     if (!actor) {
         // Race fix (logs 31, netId 2153105155): defeat for not-yet-loaded
@@ -3585,7 +3570,16 @@ void Anchor::HandlePacket_EnemyRespawn(nlohmann::json payload) {
     if (ext != nullptr) {
         EnemyStateSync::AuditBooleansVsPhase(*ext, "HandlePacket_EnemyRespawn.pendingCheck");
     }
-    if (!ext || !EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase)) {
+    // Log 745 (2026-07-27) fix: broadened from PhaseImpliesPendingNaturalDeath
+    // (DyingByNetwork | AwaitingDeadItemDrop only) to PhaseImpliesInDeathCycle
+    // (all four death-cycle phases). The narrow predicate silently dropped
+    // host's respawn when peer was the killer (phase=DyingByLocal via
+    // OnEnemyDefeat local hook). Peer then had to fall back to its own
+    // vanilla state machine timer — 22 s vs host's 10 s — leaving a ~12 s
+    // window where host's Karebaba was alive-and-attacking but peer's was
+    // visually absent. See Claude/Analysis/karebaba_respawn_desync_log745_
+    // analysis_2026-07-27.md for full infinite-whys trace.
+    if (!ext || !EnemyStateSync::PhaseImpliesInDeathCycle(ext->phase)) {
         return;
     }
 

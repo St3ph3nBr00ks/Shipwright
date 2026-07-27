@@ -184,6 +184,16 @@ bool PhaseImpliesDeferredDeadItemDrop(LifecyclePhase phase) {
     return phase == LifecyclePhase::AwaitingDeadItemDrop;
 }
 
+bool PhaseImpliesInDeathCycle(LifecyclePhase phase) {
+    // See header for semantic rationale. Same 4 phases as
+    // PhaseImpliesHasLocalDeath minus `Removed`, because carry-exit
+    // actors don't respawn via ENEMY_RESPAWN.
+    return phase == LifecyclePhase::DyingByLocal ||
+           phase == LifecyclePhase::DyingByNetwork ||
+           phase == LifecyclePhase::AwaitingDeadItemDrop ||
+           phase == LifecyclePhase::Dead;
+}
+
 void AuditBooleansVsPhase(const EnemyNetId& /*state*/, const char* /*siteTag*/) {
     // Phase 1 step 5c — all lifecycle-derivative booleans
     // (hasLocalDeath, pendingNaturalDeath, deferredDeadItemDrop) have

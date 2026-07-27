@@ -86,6 +86,23 @@ bool PhaseImpliesDefeatPacketSent(LifecyclePhase phase);
 bool PhaseImpliesPendingNaturalDeath(LifecyclePhase phase);
 bool PhaseImpliesDeferredDeadItemDrop(LifecyclePhase phase);
 
+// True when the actor is progressing through a death cycle on this
+// client — regardless of whether the killing blow was struck locally
+// (DyingByLocal) or received from the network (DyingByNetwork), and
+// including intermediate / terminal cycle phases (AwaitingDeadItemDrop,
+// Dead). This is the correct gate for host-authoritative "skip to
+// Regrow" packets: any of these phases is a valid time to fast-forward.
+//
+// Deliberately EXCLUDES `Removed` — carry-exit actors don't respawn via
+// ENEMY_RESPAWN; they come back via scene reload or ENEMY_SPAWN. Also
+// excludes `Alive` (no death to respawn from) and `Regrowing` (already
+// respawning).
+//
+// Distinct from PhaseImpliesHasLocalDeath, which covers the same 4
+// phases PLUS Removed — that predicate is used to block ENEMY_UPDATE
+// health-revives on removed actors too. Different semantic.
+bool PhaseImpliesInDeathCycle(LifecyclePhase phase);
+
 // Phase 1 step 3 — read-side shadow audit. Compares each legacy boolean
 // against the predicate derived from `state.phase` and logs a WARN the
 // first time any field disagrees per (netId, fieldName). Rate-limited so
