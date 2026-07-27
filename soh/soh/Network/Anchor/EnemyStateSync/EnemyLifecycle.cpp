@@ -130,9 +130,23 @@ void TransitionTo(EnemyNetId& state, LifecyclePhase newPhase) {
     // to clear it. Without this, a respawned Karebaba whose previous
     // cycle's ENEMY_STATE carried health=0 would carry the suppression
     // flag forward and silently drop nothing on its next death.
+    //
+    // Log 746 (2026-07-27) fix: the B2-D Layer 3 backstop clamp fields
+    // belong to the same "phase-derivative death-cycle bookkeeping"
+    // equivalence class as networkDriveDying. Both are relevant only
+    // while the actor is in a death phase; both must be cleared on the
+    // way back to a live phase. Without this clear, a peer-killed
+    // Karebaba that respawns cleanly (via the 2026-07-27 broadened
+    // HandlePacket_EnemyRespawn) still has a live 13-second backstop
+    // timer that fires a stale ENEMY_DEFEATED shortly after respawn,
+    // killing the freshly-respawned actor a second time on both host
+    // and peer. Cleared here = clamp lifecycle correctly matches the
+    // actor's death-cycle lifecycle.
     if (newPhase == LifecyclePhase::Alive ||
         newPhase == LifecyclePhase::Regrowing) {
-        state.networkDriveDying = false;
+        state.networkDriveDying             = false;
+        state.peerKillingBlowClampedAtMs    = 0;
+        state.peerKillingBlowOriginalDamage = 0;
     }
 
     // Phase 1: phase tracks alongside the legacy booleans without writing
