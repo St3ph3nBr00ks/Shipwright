@@ -85,6 +85,22 @@ SkelAnime* GetEnemySkelAnime(Actor* actor) {
         case ACTOR_OBJ_COMB:           // Beehive (Lost Woods, Lake Hylia).
         case ACTOR_EN_TUBO_TRAP:       // Flying pot enemy (Forest Temple).
         case ACTOR_EN_WONDER_ITEM:     // Invisible collectible spot (Hyrule Field secrets).
+        // S2-8 companion to IsSyncedWorldActor admission (log 742
+        // crash 2026-07-26). BgDdanJd is a DynaPolyActor with no
+        // SkelAnime substruct. Without this reject, the generic-
+        // case heuristic below false-positives on DynaPoly bgId
+        // bytes at offset 0x14C and returns a bogus SkelAnime*
+        // whose jointTable pointer indexes into heap no-man's-land
+        // past end-of-struct → HashLimbs / SerializePoseTable
+        // 0xC0000005 access violation with RAX=0xABABABAB… on the
+        // first ENEMY_UPDATE tick after scene load.
+        case ACTOR_BG_DDAN_JD:         // Dodongo's Cavern rising stone platform.
+        // Same DynaPolyActor false-positive risk as BgDdanJd —
+        // currently avoids the crash only because bgId byte 0
+        // happens to be 0 (per the reject-list rationale comment
+        // at line 52-53). Add pre-emptively so a future heap
+        // layout change doesn't surface the latent bug.
+        case ACTOR_BG_SPOT15_RRBOX:    // Lon Lon milk crate (DynaPoly).
             return nullptr;
         default: break;
     }
