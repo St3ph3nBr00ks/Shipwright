@@ -4193,6 +4193,14 @@ void Anchor::RegisterHooks() {
                 !IsStunNotDieActor(actor->id)) {
                 static constexpr uint64_t kSemanticFallbackMs  = 1000;
                 static constexpr uint64_t kBackstopFallbackMs  = 3000;
+                // #305 — Layer 3-LR "last-resort": even with host provably
+                // alive, don't leave the clamp armed forever. Fires only
+                // after 10s to prevent permanent softlocks from actors
+                // stuck in a damage-immune state. Much rarer than the
+                // regular backstop; typically a symptom of an unrelated
+                // bug (e.g. actor whose state machine never releases the
+                // clamp).
+                static constexpr uint64_t kLastResortFallbackMs = 10000;
                 const uint64_t nowMs = (uint64_t)
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -4203,13 +4211,61 @@ void Anchor::RegisterHooks() {
                     ext->phase != EnemyStateSync::LifecyclePhase::Alive;
                 const bool backstopFire =
                     elapsed >= kBackstopFallbackMs;
+                const bool lastResortFire =
+                    elapsed >= kLastResortFallbackMs;
 
                 if (semanticFire || backstopFire) {
+                    // #305 (2026-07-28) — Option A: if host is provably
+                    // alive and processing this actor (ENEMY_STATE received
+                    // within the freshness threshold), the sustained clamp
+                    // must be from a vanilla state-dependent damage floor
+                    // rather than a genuine host stall. Known instances:
+                    //   - Dekubaba PullBack: z_en_dekubaba.c:1188-1190
+                    //     clamps `phi_s0 = 1` when hit during retract.
+                    //   - Karebaba dying-cycle invincibility.
+                    //   - Boss_Goma iframes during specific attack cycles.
+                    //   - Iron Knuckle armor states.
+                    // In these cases peer's swing was "wasted" per vanilla
+                    // single-player semantic — user must swing again. Disarm
+                    // the clamp WITHOUT force-killing; peer's next hit will
+                    // fresh-arm and land through the normal Race-B → host-
+                    // apply → defeat-broadcast path once host exits the
+                    // clamp state.
+                    //
+                    // Last-resort override: if elapsed >= 10s AND host is
+                    // alive, something is architecturally wrong (actor
+                    // stuck in a damage-immune state that never releases).
+                    // Fire anyway with reason=lastResort to prevent a
+                    // permanent softlock.
+                    const uint64_t sinceLastState =
+                        (ext->lastStateReceiveMs > 0)
+                            ? (nowMs - ext->lastStateReceiveMs)
+                            : UINT64_MAX;
+                    const bool hostRecentlyAlive =
+                        sinceLastState < EnemyStateSync::kHostStalenessThresholdMs;
+
+                    if (hostRecentlyAlive && !lastResortFire) {
+                        SPDLOG_INFO("[B2D] Skipping force-kill netId={} actorId={} "
+                                    "elapsed={}ms — host alive (ENEMY_STATE {}ms ago, "
+                                    "threshold {}ms). Disarming clamp; peer must re-hit. "
+                                    "Vanilla state-clamp presumed (e.g. Dekubaba PullBack).",
+                                    ext->netId, actor->id, elapsed,
+                                    sinceLastState,
+                                    EnemyStateSync::kHostStalenessThresholdMs);
+                        ext->peerKillingBlowClampedAtMs    = 0;
+                        ext->peerKillingBlowOriginalDamage = 0;
+                        return;
+                    }
+
+                    const char* reason = lastResortFire ? "lastResort"
+                                       : semanticFire   ? "semantic"
+                                       :                  "backstop";
                     SPDLOG_INFO("[B2D] Timeout fired after {}ms: netId={} actorId={} "
-                                "reason={} phase={}",
+                                "reason={} phase={} hostFreshness={}ms",
                                 elapsed, ext->netId, actor->id,
-                                semanticFire ? "semantic" : "backstop",
-                                (int)ext->phase);
+                                reason,
+                                (int)ext->phase,
+                                sinceLastState);
                     const uint32_t netIdToBroadcast = ext->netId;
                     // Clear the timer + stashed damage BEFORE the kill so
                     // any re-entry can't double-fire.
