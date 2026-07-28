@@ -291,6 +291,13 @@ void DummyPlayer_Init(Actor* actor, PlayState* play) {
     player->cylinder.dim.radius = 30;
     player->actor.colChkInfo.damageTable = &DummyPlayerDamageTable;
 
+    // #304 — Neuter DummyPlayer's sword AT at Init for lifecycle symmetry
+    // with the per-frame clear in DummyPlayer_Update. Prevents any first-
+    // frame edge case where Draw could fire before Update (e.g. freezeTimer
+    // suppressing Update). See DummyPlayer_Update for full rationale.
+    player->meleeWeaponQuads[0].base.atFlags &= ~AT_ON;
+    player->meleeWeaponQuads[1].base.atFlags &= ~AT_ON;
+
     gSaveContext.linkAge = originalAge;
     if (DebugLogSwapWindows()) {
         SPDLOG_INFO("[KB19][SwapExit:Init] clientId={} restoredAge={}", clientId, originalAge);
@@ -1061,6 +1068,35 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
     player->meleeWeaponState     = client.meleeWeaponState;
     player->meleeWeaponAnimation = client.meleeWeaponAnimation;
     player->unk_845              = client.unk_845;
+
+    // #304 — Neuter the DummyPlayer's sword AT collider. Vanilla Player_Init
+    // (which ran when this actor was briefly ACTOR_PLAYER before re-parenting
+    // to ACTOR_EN_OE2) permanently set AT_ON on meleeWeaponQuads[0/1] via
+    // Collider_InitQuad. Then DummyPlayer_Draw calls vanilla Player_Draw,
+    // which reaches func_800906D4 (z_player_lib.c:1573-1577) whenever
+    // meleeWeaponState > 0 (synced above). That function calls
+    // CollisionCheck_SetAT on the sword quads with the remote's sword
+    // dmgFlags — so the remote's swing lands vanilla AT/AC hits on any
+    // enemy AC in range on THIS client's replica. Peer's OnActorUpdate
+    // forwarder then broadcasts DAMAGE_ENEMY back to host, and host's
+    // DrainPendingSyncDamage stacks it (+=) on top of host's own local
+    // vanilla hit → double damage.
+    //
+    // CollisionCheck_AT's filter at z_collision_check.c:2650 skips any
+    // collider whose base.atFlags lacks AT_ON, so clearing this bit
+    // silently disables the phantom hit path. The visible sword trail
+    // (rendered via meleeWeaponInfo[0] with a NULL collider in
+    // func_800906D4) is unaffected — that path doesn't register AT.
+    // Pattern 4 / #277 enemy-AI reads of meleeWeaponState still work
+    // because we only touch the quads' collision flag, not the state field.
+    // PvP damage flow uses DummyPlayer's cylinder AT (line ~1687 gate on
+    // pvpActive), not the sword — also unaffected.
+    //
+    // Applied every frame as defense-in-depth: even if some future vanilla
+    // path re-sets AT_ON, our next tick clears it before Player_Draw
+    // re-registers the quad.
+    player->meleeWeaponQuads[0].base.atFlags &= ~AT_ON;
+    player->meleeWeaponQuads[1].base.atFlags &= ~AT_ON;
 
     // Mirror the remote player's shield-hold pose. Sets rightHandType to
     // PLAYER_MODELTYPE_RH_SHIELD when stateFlags1 carries
