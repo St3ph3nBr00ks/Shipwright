@@ -84,6 +84,14 @@ void Network::ReceiveFromServer() {
             SDLNet_TCP_AddSocket(socketSet, networkSocket);
         }
 
+        // Log 750 (2026-07-28) surfaced a silent-exit case where the
+        // receive loop's while-condition failed WITHOUT any preceding
+        // error log — leaving `Ending receiving thread` as the only
+        // trace. Track the reason so post-hoc triage can distinguish
+        // among the exit paths. Defaults to loopConditionFailed;
+        // overwritten on each `break` site.
+        const char* exitReason = "loopConditionFailed";
+
         // Listen to socket messages
         while (isConnected && networkSocket && isEnabled) {
             // we check first if socket has data, to not block in the TCP_Recv
@@ -91,6 +99,7 @@ void Network::ReceiveFromServer() {
 
             if (socketsReady == -1) {
                 SPDLOG_ERROR("[Network] SDLNet_CheckSockets: {}", SDLNet_GetError());
+                exitReason = "checkSocketsError";
                 break;
             }
 
@@ -106,7 +115,26 @@ void Network::ReceiveFromServer() {
             memset(remoteDataReceived, 0, sizeof(remoteDataReceived));
             int len = SDLNet_TCP_Recv(networkSocket, &remoteDataReceived, sizeof(remoteDataReceived));
             if (!len || !networkSocket || len == -1) {
-                SPDLOG_ERROR("[Network] SDLNet_TCP_Recv: {}", SDLNet_GetError());
+                // Distinguish peer graceful close (len==0) from actual
+                // error (len<0) vs external socket-null (race). All three
+                // hit the same `break` today; separating them lets us
+                // identify server-side kicks vs local socket issues.
+                if (!networkSocket) {
+                    SPDLOG_ERROR("[Network] SDLNet_TCP_Recv: networkSocket became null externally");
+                    exitReason = "externalSocketNull";
+                } else if (len == 0) {
+                    SPDLOG_ERROR("[Network] SDLNet_TCP_Recv: peer graceful close (len=0). SDL error='{}'",
+                                 SDLNet_GetError());
+                    exitReason = "peerGracefulClose";
+                } else if (len == -1) {
+                    SPDLOG_ERROR("[Network] SDLNet_TCP_Recv: recv error (len=-1). SDL error='{}'",
+                                 SDLNet_GetError());
+                    exitReason = "recvError";
+                } else {
+                    SPDLOG_ERROR("[Network] SDLNet_TCP_Recv: unexpected exit (len={}). SDL error='{}'",
+                                 len, SDLNet_GetError());
+                    exitReason = "recvUnexpected";
+                }
                 break;
             }
 
@@ -131,13 +159,41 @@ void Network::ReceiveFromServer() {
             SDLNet_FreeSocketSet(socketSet);
         }
 
+        // Diagnostic snapshot of the three loop-condition flags at
+        // exit time. If exitReason=="loopConditionFailed", one of these
+        // flags flipped externally without going through the
+        // error-log break paths above — which is the log-750 mystery.
+        // A WARN log fires in that case so future triage catches it.
+        const bool wasConnected = isConnected;
+        const bool wasEnabled   = isEnabled;
+        const bool socketWasNull = (networkSocket == nullptr);
+        if (std::string(exitReason) == "loopConditionFailed") {
+            SPDLOG_WARN("[Network] Receive loop exited silently — exitReason={} "
+                        "isConnected={} isEnabled={} networkSocketNull={}. "
+                        "One of the loop-condition flags was mutated externally "
+                        "(no SDLNet error path fired). If this recurs during "
+                        "gameplay, capture what other Anchor / scene-load "
+                        "activity was happening in the ~5s window before this line.",
+                        exitReason, wasConnected, wasEnabled, socketWasNull);
+        }
+
         if (isConnected) {
             SDLNet_TCP_Close(networkSocket);
             networkSocket = nullptr;
             isConnected = false;
             receivedData.clear();
             OnDisconnected();
-            SPDLOG_INFO("[Network] Ending receiving thread...");
+            SPDLOG_INFO("[Network] Ending receiving thread... exitReason={} isEnabled={}",
+                        exitReason, wasEnabled);
+        } else {
+            // If isConnected was already false at cleanup, the normal
+            // "Ending receiving thread" branch is skipped — historically
+            // silent. Log so triage sees SOMETHING when the loop exits
+            // via external isConnected mutation.
+            SPDLOG_WARN("[Network] Receive loop cleanup skipped socket-close "
+                        "(isConnected was already false). exitReason={} isEnabled={} "
+                        "socketNull={}",
+                        exitReason, wasEnabled, socketWasNull);
         }
     }
 #endif
