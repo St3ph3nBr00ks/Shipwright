@@ -25,16 +25,31 @@ extern "C" {
 
 namespace AnchorEnemyEnhancement {
 
-// Per-actor gravity state. Phase 1 empty; Phase 2 populates with
-// stun timer, previous-frame airborne flag, land-frame stamp.
+// Per-actor gravity state. Owned per-actor by the descriptor's state
+// map; NOT thread-safe (game thread only).
 struct GravityAdapterState {
-    // Phase 2 will populate.
+    // Rising-edge detector for landing. Set true when TickGravity
+    // integrated Y this frame (i.e. actor is airborne); cleared on
+    // grounded. Landing transition = airborne last frame + grounded
+    // this frame — that's when OnLandedFromFall fires and the stun
+    // timer arms.
+    bool wasAirborneLastFrame = false;
+
+    // Post-landing stun timer. Non-zero while the actor should hold
+    // still after a fall. Caller checks this via
+    // descriptor->OnLandedFromFall side-effect and its own state
+    // machine — GravityAdapter only writes velocity, not action state.
+    uint16_t stunFramesRemaining = 0;
 };
 
 // Called from the descriptor's per-tick hook after
-// ShouldApplyGravity returned true. Phase 1 no-op returns false.
-// Phase 2 returns true when velocity or state was written.
-bool TickGravity(const EnemyEnhancementDescriptor& descriptor,
+// ShouldApplyGravity returned true. Returns true when velocity or
+// state was written (caller may treat as "gravity tick applied").
+//
+// Takes non-const descriptor so it can invoke non-const virtual hooks
+// (OnLandedFromFall). Descriptor is logically stateless — the
+// non-const-ness is just to satisfy the virtual-dispatch contract.
+bool TickGravity(EnemyEnhancementDescriptor& descriptor,
                  GravityAdapterState& state,
                  Actor* actor,
                  PlayState* play);

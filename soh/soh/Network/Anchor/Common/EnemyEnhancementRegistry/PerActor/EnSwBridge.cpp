@@ -18,6 +18,10 @@
 
 #include "EnSwDescriptor.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/EnhancementRegistry.h"
+#include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/NavConsumer.h"
+#include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GravityAdapter.h"
+
+#include <unordered_map>
 
 namespace {
 
@@ -33,6 +37,15 @@ AnchorEnemyEnhancement::EnSwDescriptor* GetEnSwDescriptor() {
         static_cast<const AnchorEnemyEnhancement::EnSwDescriptor*>(
             reg.Find(ACTOR_EN_SW)));
 }
+
+// Per-actor NavConsumer + GravityAdapter state, keyed by Actor*.
+// Entries persist across ticks; cleared per-actor when Destroy fires
+// (Phase 2+ — currently entries accumulate until scene teardown
+// clears the whole map indirectly via actor pointer invalidation. A
+// scene-transition sweep would be the next hardening step; not blocking
+// for v1 since the map size is small — one entry per living Skullwalltula.
+std::unordered_map<Actor*, AnchorEnemyEnhancement::NavConsumerState>    sNavStates;
+std::unordered_map<Actor*, AnchorEnemyEnhancement::GravityAdapterState> sGravityStates;
 
 }  // namespace
 
@@ -58,23 +71,19 @@ extern "C" void Anchor_Enhance_EnSw_Tick(EnSw* actor, PlayState* play) {
     if (desc == nullptr) return;
     if (!desc->IsInstanceEnhanced(&actor->actor, play)) return;
 
-    // Nav consumption — reads NavConsume CVar internally via
-    // NavConsumer::TickNavMovement, which the descriptor's OnNavTick
-    // delegates to. Phase 1 helper returns false so this currently
-    // has no runtime effect.
+    // Nav consumption — CVar-gated inside NavConsumer::TickNavMovement.
+    // Descriptor's OnNavTick delegates to NavConsumer with its own
+    // per-actor NavConsumerState (map in EnSwDescriptor.cpp file scope).
     desc->OnNavTick(&actor->actor, play);
 
-    // Gravity tick — engages when ShouldApplyGravity returns true.
-    // Phase 1 helper returns false so gravity currently doesn't apply
-    // even if descriptor's ShouldApplyGravity would trigger it.
+    // Gravity — CVar-gated inside TickGravity. ShouldApplyGravity
+    // filters out ineligible states (on-wall, on-floor); only fires
+    // TickGravity when actor is genuinely airborne.
     if (desc->ShouldApplyGravity(&actor->actor, play)) {
-        // TickGravity delegates back to descriptor->OnLandedFromFall
-        // when it detects a landing edge. Passed a nullptr state for
-        // now; Phase 2 Step 5 threads real GravityAdapterState.
-        // (Currently no-op in helper body.)
-        // TODO Phase 2 Step 5: thread per-actor GravityAdapterState
-        // through here via a helper map (same shape as sNavStates in
-        // EnSwDescriptor.cpp).
+        AnchorEnemyEnhancement::GravityAdapterState& gState =
+            sGravityStates[&actor->actor];
+        AnchorEnemyEnhancement::TickGravity(*desc, gState,
+                                             &actor->actor, play);
     }
 }
 

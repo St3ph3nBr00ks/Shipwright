@@ -17,25 +17,18 @@
 #include "EnSwDescriptor.h"
 
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/NavConsumer.h"
-#include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GravityAdapter.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"
 
 #include <unordered_map>
 
 namespace AnchorEnemyEnhancement {
 
-// Per-actor helper state maps. Descriptors don't need to own state
-// directly — NavConsumer / GravityAdapter carry their own bookkeeping
-// per Actor*. Static maps live here so the descriptor's Tick hooks
-// have a stable per-instance handle to pass into the helpers.
-//
-// Lifetime: entries live from OnNavTick's first fire on a given actor
-// until the actor's Destroy runs (via a small OnActorDestroy sweep in
-// EnhancementBridge — Phase 2 Step 6). Phase 1 stub bodies mean the
-// maps stay empty; populating starts when NavConsumer / GravityAdapter
-// bodies land.
-static std::unordered_map<Actor*, NavConsumerState>    sNavStates;
-static std::unordered_map<Actor*, GravityAdapterState> sGravityStates;
+// Per-actor NavConsumer state map lives here (not in the bridge) so
+// the descriptor's OnNavTick override can find its own state without
+// crossing the C-linkage boundary. GravityAdapter state is owned by
+// the bridge because ShouldApplyGravity is checked BEFORE TickGravity
+// and the bridge does the gate + lookup + call.
+static std::unordered_map<Actor*, NavConsumerState> sNavStates;
 
 NavConsumeParams EnSwDescriptor::NavParams() const {
     NavConsumeParams p;

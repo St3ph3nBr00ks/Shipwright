@@ -38,14 +38,13 @@ struct NavConsumerState {
     // without pulling in Common/AILocomotion/NavOrDirect.h yet.
 };
 
-// Called by the descriptor's OnNavTick. Phase 1 no-op returns false
-// (nothing was applied). Phase 2 returns true when velocity was
-// actually written to the actor.
-//
-// Descriptor is passed so implementation can read NavParams (climb
-// mask, speeds, ranges) without touching the actor struct directly
-// (Law of Demeter).
-bool TickNavMovement(const EnemyEnhancementDescriptor& descriptor,
+// Called by the descriptor's OnNavTick. Returns true when velocity
+// was actually written to the actor. Descriptor supplies NavParams
+// (climb mask, speeds, ranges) via its virtual dispatch — helper
+// stays generic and shared across per-actor consumers. Takes
+// non-const descriptor for parity with GravityAdapter and future
+// non-const virtual invocations.
+bool TickNavMovement(EnemyEnhancementDescriptor& descriptor,
                      NavConsumerState& state,
                      Actor* actor,
                      PlayState* play);
