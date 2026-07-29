@@ -1149,6 +1149,80 @@ void SohMenu::AddMenuFlotilla() {
             "other's horses."));
 
     // -----------------------------------------------------------------
+    // Vanilla Enemy Enhancements (#210 Pillar 5)
+    //
+    // Opt-in per-actor behavioral extensions layered on top of vanilla
+    // enemies. Each capability defaults OFF per the project's
+    // "vanilla-altering features ship default-off" convention
+    // (feedback_vanilla_altering_default_off.md). Users toggle
+    // per-actor + per-capability; enhancement stays off for anyone who
+    // doesn't opt in.
+    //
+    // Phase 2 partial: descriptor + bridge + hooks all wired but bodies
+    // are Phase 1 no-ops. Enabling the CVars currently has no gameplay
+    // effect — the sliders exist so the wire format is settled by the
+    // time real bodies land in Phase 2 Steps 4/5/8.
+    //
+    // See Plans/vanilla_enemy_enhancements_plan.md §4 architecture +
+    // §7 Phase 2 rollout.
+    // -----------------------------------------------------------------
+    path.sidebarName = "Enemy Enhancements";
+    path.column = SECTION_COLUMN_1;
+    AddSidebarEntry("Flotilla", path.sidebarName, 1);
+
+    AddWidget(path, "Skullwalltula (En_Sw) — combat variant only. Gold-token variants are always vanilla.",
+              WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Nav-consume: pursue player across floors + climb-any surface",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Skullwalltula.NavConsume"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: enhanced Skullwalltulas leave their wall anchor "
+            "when a player is in range and pursue on any walkable "
+            "floor / ladder / vine / designated wall via the shared "
+            "RoomNavData substrate (same nav pipeline as NPC Follower / "
+            "NPC Invader).\n\n"
+            "Gold-token variants (params & 0xE000 non-zero) are NOT "
+            "affected — token skulltulas remain fully vanilla static.\n\n"
+            "Phase 2 partial — real nav body lands in Phase 2 Step 4. "
+            "Enabling this CVar currently has no runtime effect."));
+
+    AddWidget(path, "Gravity-aware: fall when knocked off wall",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Skullwalltula.GravityAware"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: enhanced Skullwalltulas respond to gravity when "
+            "off their wall AND not on a floor (e.g. knocked off by a "
+            "player attack). Land + brief stun (~20 frames) + resume "
+            "pursuit if Nav-consume is also ON.\n\n"
+            "Independent of Nav-consume — either can be toggled alone. "
+            "GravityAware without NavConsume means the actor falls but "
+            "doesn't try to re-approach; NavConsume without GravityAware "
+            "means the actor walks but sticks to whatever surface "
+            "vanilla physics puts it on.\n\n"
+            "Phase 2 partial — real gravity body lands in Phase 2 "
+            "Step 5. Enabling this CVar currently has no runtime effect."));
+
+    AddWidget(path, "Aggressive acquire: deterministic gaze toward nearest climbing player",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Skullwalltula.AggressiveAcquire"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: replaces vanilla random-gaze-and-hope-for-alignment "
+            "with active target acquisition — the Skullwalltula "
+            "deliberately rotates toward the nearest climbing player "
+            "that passes the lunge predicate (distance + LoS gates). "
+            "Vanilla smooth-rotation cadence preserved.\n\n"
+            "Also bypasses the PLAYER_STATE2_STATIONARY_LADDER "
+            "immunity — a paused climber IS a valid target under "
+            "this CVar. Removes the 'free pause on a vine' loophole.\n\n"
+            "Phase 2 partial — real body lands with the combat "
+            "primitives adaptation (Reading A). Enabling this CVar "
+            "currently has no runtime effect."));
+
+    // -----------------------------------------------------------------
     // Diagnostics
     // -----------------------------------------------------------------
     path.sidebarName = "Diagnostics";
