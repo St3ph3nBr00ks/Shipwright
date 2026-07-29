@@ -90,10 +90,10 @@ bool TickNavMovement(EnemyEnhancementDescriptor& descriptor,
     // key by their target's clientId, but for shared enemy substrate
     // the actor's own identity is fine — trail memoization is per
     // navigator anyway.
-    state.trailKey = (AnchorNav::TrailKey)((uintptr_t)actor & 0xFFFFFFFFu);
+    state.navState.trailKey = (AnchorNav::TrailKey)((uintptr_t)actor & 0xFFFFFFFFu);
 
     AnchorAI::NavOrDirectResult nav =
-        AnchorAI::ChooseSubgoal(actor, target->world.pos, state, policy, play);
+        AnchorAI::ChooseSubgoal(actor, target->world.pos, state.navState, policy, play);
 
     // ---- Apply locomotion -------------------------------------------
     const Vec3f& subgoal = nav.subgoal;

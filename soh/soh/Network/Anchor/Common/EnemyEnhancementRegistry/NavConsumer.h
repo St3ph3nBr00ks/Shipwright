@@ -20,6 +20,7 @@
 #pragma once
 
 #include "EnemyEnhancementDescriptor.h"
+#include "../AILocomotion/NavOrDirect.h"  // AnchorAI::NavState
 
 extern "C" {
 #include "z64.h"
@@ -27,15 +28,12 @@ extern "C" {
 
 namespace AnchorEnemyEnhancement {
 
-// Per-actor nav state. Descriptors hold one instance per instance of
-// their vanilla actor (via ObjectExtension). Fields opaque to callers;
-// the struct is passed by pointer through the API.
-//
-// Phase 1: struct exists but has no fields yet. Phase 2 populates
-// with NavPath cache, last-refresh frame, target snapshot, etc.
+// Per-actor nav state. One instance per enhanced actor, owned by the
+// descriptor's file-static map. Wraps AnchorAI::NavState (the shared
+// substrate's per-navigator bookkeeping: path cache, last-refresh
+// frame, target-drift tracking, trail key).
 struct NavConsumerState {
-    // Phase 2 will populate. Empty in Phase 1 so the header compiles
-    // without pulling in Common/AILocomotion/NavOrDirect.h yet.
+    AnchorAI::NavState navState;
 };
 
 // Called by the descriptor's OnNavTick. Returns true when velocity
