@@ -394,6 +394,25 @@ void Anchor::RegisterHooks() {
             SPDLOG_INFO("[Anchor.OnSceneInit] sceneNum=0x{:04X}",
                         (unsigned)sceneNum);
 
+            // Queue item 39 diagnostic — checkpoints 3 + 4: on Lost
+            // Woods (0x5B) and Hyrule Field (0x51) scene init, dump
+            // slot[SLOT_OCARINA] to trace where INV_CONTENT is lost
+            // between Item_Give and pause-menu inspection. Gated on
+            // gEnhancements.OcarinaInvDiag CVar.
+            if (CVarGetInteger("gEnhancements.OcarinaInvDiag", 0)) {
+                const char* label = nullptr;
+                if (sceneNum == SCENE_LOST_WOODS) label = "CP3 Lost Woods";
+                else if (sceneNum == SCENE_HYRULE_FIELD) label = "CP4 Hyrule Field";
+                if (label != nullptr) {
+                    SPDLOG_INFO("[OcarinaDiag {}] sceneNum=0x{:04X} slot[SLOT_OCARINA]=0x{:02X} "
+                                "eventChkInf(SPOKE_TO_SARIA_ON_BRIDGE=0xC1)={}",
+                                label,
+                                (unsigned)sceneNum,
+                                (unsigned)gSaveContext.inventory.items[SLOT_OCARINA],
+                                Flags_GetEventChkInf(EVENTCHKINF_SPOKE_TO_SARIA_ON_BRIDGE) ? 1 : 0);
+                }
+            }
+
             // Defensive null-guards. The three per-actor reset
             // functions and Director::OnSceneInitFromHook are safe
             // no-ops when Anchor state isn't initialised, BUT the
@@ -413,6 +432,15 @@ void Anchor::RegisterHooks() {
             Anchor_LocalPlayerFaceSwapResetOnSceneTransition();
             Anchor_FollowerNpcDrawStateResetOnSceneTransition();
             Anchor_InvaderDrawStateResetOnSceneTransition();
+            // Queue item 40 (Option D) — clear aborted-catchup tracking
+            // on scene init so revisiting the same cutscene entrance in
+            // a fresh scene load gets a fresh Setup attempt. Prevents
+            // the suppression state from becoming sticky across scenes.
+            if (!::Anchor::Instance->abortedCatchups.empty()) {
+                SPDLOG_INFO("[Anchor.OnSceneInit] Clearing abortedCatchups (size={}) — fresh scene entry allows new catchup attempts",
+                            ::Anchor::Instance->abortedCatchups.size());
+                ::Anchor::Instance->abortedCatchups.clear();
+            }
             // Phase 3 / issue #237: stamp the scene-change frame so
             // Fix 1's grace period kicks in on same-scene reloads
             // (Game Over → Continue at the same scene). The polling
@@ -2266,6 +2294,16 @@ void Anchor::RegisterHooks() {
             // send current state to all clients in scene.
             const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
             if (ext == nullptr) {
+                // Mirror the OnActorSpawn skip: actors that intentionally
+                // don't get netIds (Hintnut reveal-child params=0xA,
+                // Honotrap non-eye flame variants, etc.) also don't get
+                // extensions — no point warning per-frame. Silences log 751's
+                // repeated "no extension for actorId=402" spam from Hintnut
+                // reveal-children (actor 0x192 = ACTOR_EN_HINTNUTS with
+                // params & 0xFF == 0xA). See Plans/log751_followups_2026-07-28.md.
+                if (ShouldSkipNetIdAssignment(actor)) {
+                    return;
+                }
                 // Log once per actor pointer to avoid per-frame spam.
                 static std::unordered_set<const Actor*> warnedNoExt;
                 if (warnedNoExt.insert(actor).second) {
@@ -5213,6 +5251,22 @@ void Anchor::RegisterHooks() {
             *should = true;
         }
     });
+
+    // Queue item 29 — Gold Skulltula token pickup freeze in MP.
+    // Vanilla behaviour sets `player->actor.freezeTimer = 10` on pickup
+    // and refreshes it per frame while the TEXT_GS_NO_FREEZE textbox is
+    // open, locking controller input except A/B. Acceptable in solo;
+    // disruptive in MP because a peer's cosmetic pickup interrupts a
+    // moving player.
+    //
+    // Sources: z_en_si.c:100-102 (contact pickup), :126-128 (hookshot
+    // pickup), :139-141 (per-frame refresh while textbox open). Skipping
+    // VB_FREEZE_ON_SKULL_TOKEN skips both initial set and refresh; the
+    // TEXT_GS_NO_FREEZE textbox variant auto-scrolls so no input is
+    // needed to advance. Matches the pattern already used by the
+    // gEnhancements.SkulltulaFreeze CVar handler at
+    // timesaver_hook_handlers.cpp:711 — this is the MP-active variant.
+    COND_VB_SHOULD(VB_FREEZE_ON_SKULL_TOKEN, isConnected, { *should = false; });
 
     // Generic NPC State Sync Phase 1 — Mido (#184).
     // Vanilla `EnMd_BlockPath` (z_en_md.c:735-758) gates the BlockPath ->

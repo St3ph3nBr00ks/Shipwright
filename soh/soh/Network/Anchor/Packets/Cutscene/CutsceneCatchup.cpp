@@ -600,6 +600,23 @@ void ApplyCatchupDelta(const nlohmann::json& payload) {
                     "setup failed. Client may be in wrong room / missing "
                     "actor. Catchup will not run; local cutscene state "
                     "left as-is.");
+        // Queue item 40 (Option D) — record the aborted key so the
+        // FRAME_SYNC gate at CutsceneCatchup.cpp:1038 stops re-requesting.
+        // Without this, peer's ~1 Hz FRAME_SYNC broadcast triggers a
+        // fresh CATCHUP_REQUEST every tick → RESPONSE → abort → repeat,
+        // showing "Catching up to peer cutscene" toast on loop until
+        // leader's cutscene ends. Set cleared on OnSceneInit so a
+        // subsequent visit gets a fresh attempt.
+        // See Analysis/saria_bridge_peer_flag_gates_cutscene_2026-07-29.md.
+        if (::Anchor::Instance != nullptr) {
+            const std::string kindKey =
+                csKind + ":" + std::to_string(csKeyForSetup);
+            ::Anchor::Instance->abortedCatchups.insert(kindKey);
+            SPDLOG_INFO("[CutsceneCatchup] Aborted key '{}' recorded — "
+                        "future FRAME_SYNC for this key will suppress "
+                        "CATCHUP_REQUEST until next OnSceneInit",
+                        kindKey);
+        }
         return;
     }
 
@@ -1021,24 +1038,31 @@ void Anchor::HandlePacket_CutsceneFrameSync(nlohmann::json payload) {
                 isOptIn = true;
             }
         }
+        // Queue item 40 (Option D) — suppress FRAME_SYNC-driven auto-REQUEST
+        // when we've already attempted this key and Setup rc=0 aborted.
+        // Prevents the "Catching up to peer cutscene" toast infinite loop.
+        // Cleared on OnSceneInit for fresh attempts on re-entry.
+        const bool alreadyAborted = abortedCatchups.count(kindKey) > 0;
         SPDLOG_INFO("[CutsceneCatchup] FRAME_SYNC gates — sender={} own={} "
                     "kindKey='{}' enabled={} alreadyPending={} selfBroadcast={} "
                     "validSender={} alreadyInCs={} alreadyInSameCs={} "
                     "peerWithinMargin={} (leaderFrame={} peerFrames={}) "
-                    "alreadyCatchingUp={} optIn={} — will{} fire",
+                    "alreadyCatchingUp={} optIn={} alreadyAborted={} — will{} fire",
                     senderClientId, ownClientId, kindKey,
                     haveEnabled, alreadyPending, selfBroadcast, validSender,
                     alreadyInCs, alreadyInSameCs,
                     peerWithinMargin, leaderBroadcastFrame,
                     (int)gPlayState->csCtx.frames,
-                    alreadyCatchingUp, isOptIn,
+                    alreadyCatchingUp, isOptIn, alreadyAborted,
                     (validSender && !selfBroadcast && !alreadyPending &&
                      haveEnabled && (!alreadyInCs || alreadyInSameCs) &&
-                     !peerWithinMargin && !alreadyCatchingUp && !isOptIn)
+                     !peerWithinMargin && !alreadyCatchingUp && !isOptIn &&
+                     !alreadyAborted)
                         ? "" : " NOT");
         if (validSender && !selfBroadcast && !alreadyPending && haveEnabled &&
             (!alreadyInCs || alreadyInSameCs) &&
-            !peerWithinMargin && !alreadyCatchingUp && !isOptIn) {
+            !peerWithinMargin && !alreadyCatchingUp && !isOptIn &&
+            !alreadyAborted) {
             PendingCatchup p;
             p.deadline = std::chrono::steady_clock::now()
                          + std::chrono::milliseconds(kCatchupTimeoutMs);

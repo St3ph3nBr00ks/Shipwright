@@ -2271,7 +2271,19 @@ u8 Item_Give(PlayState* play, u8 item) {
 
         return Return_Item(item, MOD_NONE, ITEM_SEEDS);
     } else if (item == ITEM_OCARINA_FAIRY) {
-        INV_CONTENT(ITEM_OCARINA_FAIRY) = ITEM_OCARINA_FAIRY;
+        // Queue item 39 diagnostic — checkpoint 1: confirm the write
+        // actually lands. Log pre + post values of the target slot so
+        // we can distinguish "write didn't fire" from "write was later
+        // reverted". Gated on gEnhancements.OcarinaInvDiag CVar.
+        if (CVarGetInteger("gEnhancements.OcarinaInvDiag", 0)) {
+            u8 preValue = gSaveContext.inventory.items[SLOT_OCARINA];
+            INV_CONTENT(ITEM_OCARINA_FAIRY) = ITEM_OCARINA_FAIRY;
+            u8 postValue = gSaveContext.inventory.items[SLOT_OCARINA];
+            LUSLOG_INFO("[OcarinaDiag CP1] Item_Give(FAIRY) branch — slot[SLOT_OCARINA] pre=0x%02X post=0x%02X (expected 0x07)",
+                        preValue, postValue);
+        } else {
+            INV_CONTENT(ITEM_OCARINA_FAIRY) = ITEM_OCARINA_FAIRY;
+        }
         return Return_Item(item, MOD_NONE, ITEM_NONE);
     } else if (item == ITEM_OCARINA_TIME) {
         INV_CONTENT(ITEM_OCARINA_TIME) = ITEM_OCARINA_TIME;

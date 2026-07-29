@@ -1810,6 +1810,16 @@ class Anchor : public Network {
     std::unordered_map<std::string /* kindKey */, PendingCatchup>
         pendingCatchups;
 
+    // Queue item 40 (Option D) — catchup keys we've attempted but
+    // Setup rc=0 aborted (e.g., Savecontext_ApplyForce case b:
+    // cutsceneIndex==0 due to peer's flag pre-set). Without tracking,
+    // the FRAME_SYNC gate keeps firing → CATCHUP_REQUEST keeps sending
+    // → RESPONSE keeps aborting → infinite "Catching up to peer
+    // cutscene" toast loop. Cleared on OnSceneInit so a fresh scene
+    // entry gets a new attempt.
+    // See Analysis/saria_bridge_peer_flag_gates_cutscene_2026-07-29.md.
+    std::unordered_set<std::string /* kindKey */> abortedCatchups;
+
     // Sequence numbers for CUTSCENE_FRAME_SYNC ordering (Pitfall 43).
     // Reset in OnSceneSpawnActors so both counters stay small.
     uint64_t cutsceneFrameSyncSequence = 0;

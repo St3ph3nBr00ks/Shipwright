@@ -20,7 +20,19 @@ extern PlayState* gPlayState;
 uint8_t incomingIceTrapsFromAnchor = 0;
 
 void Anchor::SendPacket_GiveItem(u16 modId, s16 getItemId) {
-    if (!IsSaveLoaded() || isProcessingIncomingPacket || !roomState.syncItemsAndFlags) {
+    // Note: intentionally NOT gating on IsSaveLoaded(). Item_Give fires from
+    // Cutscene_HandleConditionalTriggers during scene transitions (Player
+    // actor torn down → GET_PLAYER null → IsSaveLoaded false), and its
+    // OnItemReceive hook calls this. Gating silently drops the GIVE_ITEM
+    // broadcast for every transition-triggered item (Fairy Ocarina from
+    // Saria bridge cutscene, etc.). Sibling to receive-side silent-drop
+    // fixed 2026-07-28. Payload doesn't need gPlayState; modId+getItemId
+    // are parameters.
+    // Retain isProcessingIncomingPacket (echo-prevention when this fires
+    // from OnItemReceive triggered by our own HandlePacket_GiveItem) and
+    // !roomState.syncItemsAndFlags (feature opt-out) — both load-bearing.
+    // See Analysis/ocarina_send_side_silent_drop_2026-07-28.md.
+    if (isProcessingIncomingPacket || !roomState.syncItemsAndFlags) {
         return;
     }
 

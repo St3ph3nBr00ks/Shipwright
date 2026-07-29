@@ -2337,6 +2337,16 @@ void Cutscene_HandleConditionalTriggers(PlayState* play) {
             Flags_SetEventChkInf(EVENTCHKINF_SPOKE_TO_SARIA_ON_BRIDGE);
             gSaveContext.entranceIndex = ENTR_LOST_WOODS_SOUTH_EXIT;
             gSaveContext.cutsceneIndex = 0xFFF0;
+            // Queue item 39 diagnostic — checkpoint 2: log slot value
+            // after both writes complete but before Cutscene_HandleConditional
+            // Triggers returns. Confirms state at the moment the entrance-
+            // transition is armed. Gated on gEnhancements.OcarinaInvDiag.
+            if (CVarGetInteger("gEnhancements.OcarinaInvDiag", 0)) {
+                LUSLOG_INFO("[OcarinaDiag CP2] Saria branch complete — slot[SLOT_OCARINA]=0x%02X eventChkInf(0xC1)=%d entranceIdx=0x%04X cutsceneIdx=0x%04X",
+                            gSaveContext.inventory.items[SLOT_OCARINA],
+                            Flags_GetEventChkInf(EVENTCHKINF_SPOKE_TO_SARIA_ON_BRIDGE) ? 1 : 0,
+                            gSaveContext.entranceIndex, gSaveContext.cutsceneIndex);
+            }
         } else if (GameInteractor_Should(
                        VB_BE_ELIGIBLE_FOR_LIGHT_ARROWS,
                        (CHECK_QUEST_ITEM(QUEST_MEDALLION_SPIRIT) && CHECK_QUEST_ITEM(QUEST_MEDALLION_SHADOW) &&

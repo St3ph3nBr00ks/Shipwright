@@ -1625,6 +1625,22 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
                     //
                     // Source-of-truth audit: 2026-06-08 (log 448).
                     ACTOR_EN_GOMA,
+
+                    // ─── Same-shape actors: no func_8002F* AT call ───
+                    // Log 751 (2026-07-28) surfaced three more attackers
+                    // matching the En_Goma pattern — engine-level AT
+                    // collision with toucher.damage set at Init, no
+                    // vanilla `func_8002F6D4/_71C/_758/_7A0` call site.
+                    // Confirmed by research agent grep across each actor's
+                    // .c file. Cross-machine damage sync works via the
+                    // legacy func_80837C0C path in DamagePlayer.cpp; no
+                    // fixed knockback params to add to EnemyKnockbackTable.
+                    // Bug 1 (Pitfall 28 host false-knockback) doesn't apply
+                    // — no AT_HIT branch reads GET_PLAYER for effect application.
+                    // See Plans/log751_followups_2026-07-28.md.
+                    ACTOR_EN_DEKUBABA,  // 0x0055 — Deku Baba
+                    ACTOR_EN_KAREBABA,  // 0x00C7 — Withered Deku Baba
+                    ACTOR_EN_SW,        // 0x0095 — Skullwalltula
                 };
                 static std::unordered_set<u16> sLoggedBypass;
                 const u16 attackerId = player->cylinder.base.ac->id;
