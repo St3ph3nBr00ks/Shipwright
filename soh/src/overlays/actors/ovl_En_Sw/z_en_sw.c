@@ -33,6 +33,7 @@ extern bool Anchor_IsPeerDrivenDeath(Actor* actor);
 extern void Anchor_Enhance_EnSw_OnInit(EnSw* this, PlayState* play);
 extern void Anchor_Enhance_EnSw_Tick(EnSw* this, PlayState* play);
 extern int  Anchor_Enhance_EnSw_GazeOverride(EnSw* this, PlayState* play, Vec3f* outTargetPos);
+extern void Anchor_Enhance_EnSw_OverrideLimb(EnSw* this, PlayState* play, s32 limbIndex, Vec3s* rot);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
@@ -1128,6 +1129,11 @@ s32 EnSw_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* po
     if (limbIndex == 4) {
         gDPSetEnvColor(POLY_OPA_DISP++, this->unk_1F4.r, this->unk_1F4.g, this->unk_1F4.b, 0);
     }
+
+    // #210 Pillar 5 §4.10 — additive limb-bend for enhanced Skullwalltula.
+    // Descriptor's OverrideLimbBend mutates *rot in place when the actor
+    // is ground-walking AND limbIndex ∈ leg table. No-op otherwise.
+    Anchor_Enhance_EnSw_OverrideLimb(this, play, limbIndex, rot);
 
     Collider_UpdateSpheres(limbIndex, &this->collider);
 

@@ -19,6 +19,7 @@
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/NavConsumer.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"
 
+#include <libultraship/bridge/consolevariablebridge.h>
 #include <unordered_map>
 
 namespace AnchorEnemyEnhancement {
@@ -104,14 +105,43 @@ void EnSwDescriptor::OnLandedFromFall(Actor* actor, PlayState* play) {
 
 bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
                                        Actor* actor, PlayState* play) {
-    (void)limbIndex;
-    (void)rotInOut;
-    (void)actor;
     (void)play;
-    // Phase 2 partial: no-op. Phase 2 Step 8 identifies En_Sw leg-limb
-    // indices from the skel header and adds the ~15° downward bend
-    // when the descriptor's state machine reads ground-walking.
-    return false;
+    if (rotInOut == nullptr || actor == nullptr) return false;
+
+    // Gated on NavConsume CVar — leg-bend is cosmetic compensation for
+    // the nav-driven ground-walking mode; when Nav is off, actor stays
+    // on wall and vanilla wall-tangent leg sweep is correct.
+    if (CVarGetInteger(NavConsumeCVar(), 0) == 0) return false;
+
+    // Only bend when actor is on the floor. bgCheckFlags bit 0x1 =
+    // grounded via BgCheck floor. Wall-crawling En_Sw doesn't set
+    // this bit, so the bend fires only during nav-driven ground pursuit.
+    if ((actor->bgCheckFlags & 0x1) == 0) return false;
+
+    // Leg-limb table — enumerated from vanilla EnSw_OverrideLimbDraw
+    // switch (z_en_sw.c:1082-1106). 8 legs at limb indices:
+    //   8, 11, 14, 17, 20, 23, 26, 29
+    // These are the 8 leg-DL slots the gold-variant branch remaps.
+    switch (limbIndex) {
+        case 8:  case 11: case 14: case 17:
+        case 20: case 23: case 26: case 29:
+            break;
+        default:
+            return false;  // not a leg — leave vanilla pose alone
+    }
+
+    // Additive downward bend. s16 angle units — 0x1000 = ~22.5°.
+    // Applied to X (pitch) — visually tips leg segments downward from
+    // their wall-tangent rest pose so the spider appears to step on
+    // the floor rather than slide across it.
+    //
+    // Direction / magnitude are first-pass estimates — field-test may
+    // want to switch to Z (roll) or reduce magnitude if legs clip into
+    // the body. Small enough to be visibly correct without breaking
+    // silhouette; large enough to be visible at typical camera range.
+    static constexpr int16_t kLegBendPitch = 0x0C00;  // ~16.9°
+    rotInOut->x = (int16_t)(rotInOut->x + kLegBendPitch);
+    return true;
 }
 
 }  // namespace AnchorEnemyEnhancement

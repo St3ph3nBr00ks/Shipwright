@@ -87,6 +87,20 @@ extern "C" void Anchor_Enhance_EnSw_Tick(EnSw* actor, PlayState* play) {
     }
 }
 
+extern "C" void Anchor_Enhance_EnSw_OverrideLimb(EnSw* actor, PlayState* play,
+                                                   int32_t limbIndex, Vec3s* rot) {
+    if (actor == nullptr || rot == nullptr) return;
+    auto* desc = GetEnSwDescriptor();
+    if (desc == nullptr) return;
+    if (!desc->IsInstanceEnhanced(&actor->actor, play)) return;
+
+    // Descriptor's OverrideLimbBend mutates *rot in place when the actor
+    // meets its ground-walking criteria AND limbIndex is a leg. Return
+    // value indicates whether rot was modified; caller doesn't need it
+    // (mutation is in-place either way).
+    (void)desc->OverrideLimbBend(limbIndex, rot, &actor->actor, play);
+}
+
 extern "C" int Anchor_Enhance_EnSw_GazeOverride(EnSw* actor, PlayState* play,
                                                  Vec3f* outTargetPos) {
     // Returns 1 (true) if the hook selected a target position and
