@@ -24,6 +24,16 @@ extern bool Anchor_ShouldSuppressEnSwDrop(Actor* actor);
 // visual effects so only the killer sees the flashy particles.
 extern bool Anchor_IsPeerDrivenDeath(Actor* actor);
 
+// Vanilla enemy enhancement bridge (#210 Pillar 5 Phase 2). Defined
+// extern "C" in Anchor/Common/EnemyEnhancementRegistry/PerActor/
+// EnSwBridge.cpp. Gated by descriptor's IsInstanceEnhanced (returns
+// false for gold-token variants) + per-capability CVars. Phase 2
+// partial: all three hooks currently no-op internally; real bodies
+// land in Phase 2 Steps 4/5/8.
+extern void Anchor_Enhance_EnSw_OnInit(EnSw* this, PlayState* play);
+extern void Anchor_Enhance_EnSw_Tick(EnSw* this, PlayState* play);
+extern int  Anchor_Enhance_EnSw_GazeOverride(EnSw* this, PlayState* play, Vec3f* outTargetPos);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
 void EnSw_Init(Actor* thisx, PlayState* play);
@@ -328,6 +338,10 @@ void EnSw_Init(Actor* thisx, PlayState* play) {
     } else {
         this->actionFunc = func_80B0D590;
     }
+
+    // #210 Pillar 5 — enemy-enhancement registry init hook. Gold-token
+    // variants are filtered internally by descriptor's IsInstanceEnhanced.
+    Anchor_Enhance_EnSw_OnInit(this, play);
 }
 
 void EnSw_Destroy(Actor* thisx, PlayState* play) {
@@ -947,10 +961,22 @@ void func_80B0E5E0(EnSw* this, PlayState* play) {
     f32 rand;
 
     if (func_80B0E430(this, 6.0f, 0x3E8, 1, play)) {
-        rand = Rand_ZeroOne();
-        this->unk_444 =
-            ((s16)(20000.0f * rand) + 0x2EE0) * (Rand_ZeroOne() >= 0.5f ? 1.0f : -1.0f) + this->actor.world.rot.z;
-        this->unk_388 = Rand_S16Offset(10, 30);
+        // #210 Pillar 5 §4.11 — active-aggro gaze override. If the hook
+        // returns non-zero it wrote a target position; we convert to
+        // actor-space via the same func_80B0DE34 helper vanilla uses
+        // elsewhere for player-aim conversion. Otherwise fall through
+        // to vanilla random gaze. Phase 2 partial: hook always returns
+        // 0 until canActiveAggro body lands.
+        Vec3f gazeTarget;
+        if (Anchor_Enhance_EnSw_GazeOverride(this, play, &gazeTarget)) {
+            this->unk_444 = func_80B0DE34(this, &gazeTarget);
+            this->unk_388 = Rand_S16Offset(10, 30);
+        } else {
+            rand = Rand_ZeroOne();
+            this->unk_444 =
+                ((s16)(20000.0f * rand) + 0x2EE0) * (Rand_ZeroOne() >= 0.5f ? 1.0f : -1.0f) + this->actor.world.rot.z;
+            this->unk_388 = Rand_S16Offset(10, 30);
+        }
     }
 
     if ((DECR(this->unk_442) == 0) && (func_80B0DEA8(this, play, 1))) {
@@ -1032,6 +1058,13 @@ void EnSw_Update(Actor* thisx, PlayState* play) {
     func_80B0C9F0(this, play);
     this->actionFunc(this, play);
     func_80B0CBE8(this, play);
+
+    // #210 Pillar 5 — post-update enhancement tick. Drives nav
+    // substrate consumption + gravity adaptation via descriptor
+    // OnNavTick / ShouldApplyGravity. Placed AFTER vanilla actionFunc
+    // so any velocity writes done here override vanilla's per-tick
+    // choice for enhanced actors.
+    Anchor_Enhance_EnSw_Tick(this, play);
 }
 
 s32 EnSw_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx) {
