@@ -3,6 +3,15 @@
 #include "soh/Enhancements/randomizer/randomizer_entrance.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
+// Multiplayer multi-player iteration — returns all in-timeline player
+// actor candidates (local Link + same-timeline DummyPlayers + NPC
+// follower if targetable). Used in func_809995D4 to check whether ANY
+// synced player is within snap range, so all clients agree on whether
+// the portal snaps to its hardcoded landing position. See queue item 36.
+// Defined extern "C" in Common/PlayerLookup.cpp. Pitfall 7 — plain
+// `extern` in .c, not `extern "C"` (C-linkage is implicit in C).
+extern int Anchor_GetSyncedPlayerActors(PlayState* play, Actor** outActors, int maxCount);
+
 #define FLAGS 0
 
 void DoorWarp1_Init(Actor* thisx, PlayState* play);
@@ -416,7 +425,28 @@ void DoorWarp1_AwaitClearFlag(DoorWarp1* this, PlayState* play) {
 
 void func_809995D4(DoorWarp1* this, PlayState* play) {
     if (this->warpTimer == 0) {
-        if (this->actor.xzDistToPlayer < 100.0f) {
+        // Queue item 36 — MP portal position sync. Vanilla checks
+        // xzDistToPlayer (local Link only), so the snap-to-landing
+        // decision differs between clients based on where each client's
+        // local Link is positioned. That yields divergent portal
+        // positions when some clients are near and others are far.
+        //
+        // Fix: check ALL synced players (local Link + DummyPlayers).
+        // If ANY player is within snap range, snap on all clients —
+        // guarantees consistent portal position across the team.
+        Actor* players[8];
+        int playerCount = Anchor_GetSyncedPlayerActors(play, players, ARRAY_COUNT(players));
+        s32 anyPlayerInRange = false;
+        for (int i = 0; i < playerCount; i++) {
+            if (players[i] == NULL) continue;
+            f32 dx = this->actor.world.pos.x - players[i]->world.pos.x;
+            f32 dz = this->actor.world.pos.z - players[i]->world.pos.z;
+            if (sqrtf(dx * dx + dz * dz) < 100.0f) {
+                anyPlayerInRange = true;
+                break;
+            }
+        }
+        if (anyPlayerInRange) {
             this->actor.world.pos.x = -98.0f;
             this->actor.world.pos.y = 827.0f;
             this->actor.world.pos.z = -3228.0f;

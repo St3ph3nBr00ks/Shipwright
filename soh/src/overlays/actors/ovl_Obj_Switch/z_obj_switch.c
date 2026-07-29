@@ -379,6 +379,24 @@ void ObjSwitch_FloorUpInit(ObjSwitch* this) {
 }
 
 void ObjSwitch_FloorUp(ObjSwitch* this, PlayState* play) {
+    // Queue item 30 — MP visual sync for FLOOR switches. If the switch
+    // flag is already set (e.g., peer pressed it and SET_FLAG broadcast
+    // arrived) but our local switch is still in FloorUp because no
+    // local player is on top, transition through the press animation
+    // locally so peer's screen depicts the depressed switch. Vanilla
+    // never sets the switch flag while in FloorUp — Flags_SetSwitch
+    // fires only in ObjSwitch_SetOn, which is called during the
+    // FloorUp→FloorPress transition. So the "flag set while in FloorUp"
+    // condition only occurs via cross-client sync (or a scene where
+    // some other actor writes the flag; transitioning is correct in
+    // that case too). Safe in single-player: the branch never fires.
+    // See task_checklist.md queue item 30.
+    if (Flags_GetSwitch(play, (this->dyna.actor.params >> 8 & 0x3F))) {
+        ObjSwitch_FloorPressInit(this);
+        ObjSwitch_SetOn(this, play);  // idempotent — flag already set, just clears cooldownOn
+        return;
+    }
+
     if ((this->dyna.actor.params & 7) == OBJSWITCH_TYPE_FLOOR_RUSTY) {
         if (this->tris.col.base.acFlags & AC_HIT) {
             ObjSwitch_FloorPressInit(this);
