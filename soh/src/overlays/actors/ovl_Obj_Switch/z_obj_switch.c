@@ -467,6 +467,19 @@ void ObjSwitch_FloorDown(ObjSwitch* this, PlayState* play) {
             }
             break;
         case OBJSWITCH_SUBTYPE_FLOOR_1:
+            // Queue item 30 follow-up — MP toggle-switch release. Mirror
+            // of the FloorUp addition: when the peer's switch flag is
+            // unset (host re-pressed a toggle switch), peer's local
+            // switch needs to release even though peer's local Link isn't
+            // stepping on it. Safe in single-player: vanilla only unsets
+            // the flag inside ObjSwitch_SetOff which fires during the
+            // FloorDown→FloorRelease transition itself, so
+            // Flags_GetSwitch stays true locally without cross-client
+            // sync driving the flag transition.
+            if (!Flags_GetSwitch(play, (this->dyna.actor.params >> 8 & 0x3F))) {
+                ObjSwitch_FloorReleaseInit(this);
+                break;
+            }
             if ((this->dyna.interactFlags & DYNA_INTERACT_PLAYER_ON_TOP) &&
                 !(this->prevColFlags & DYNA_INTERACT_PLAYER_ON_TOP)) {
                 ObjSwitch_FloorReleaseInit(this);
