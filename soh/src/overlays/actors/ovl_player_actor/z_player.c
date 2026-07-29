@@ -13590,7 +13590,54 @@ static AnimSfxEntry D_808548B4[] = {
 void Player_Action_8084C760(Player* this, PlayState* play) {
     this->stateFlags2 |= PLAYER_STATE2_DISABLE_ROTATION_ALWAYS;
 
-    if (LinkAnimation_Update(play, &this->skelAnime)) {
+    // Queue item 35 — MP crawl loop. Vanilla plays the entry ONCE anim
+    // (gPlayerAnim_link_child_tunnel_start) then holds its last frame
+    // while player moves via linearVelocity from stick input. Peer
+    // DummyPlayers show a frozen pose sliding forward because
+    // PLAYER_UPDATE's joint-table sync carries the stalled last-frame
+    // pose. Fix: after entry ONCE completes, transition to LOOP mode
+    // on the mid-to-end segment (skip the initial kneel-down portion)
+    // so the joint table keeps updating. Owner-side fix — no wire
+    // changes, PLAYER_UPDATE carries the animated pose naturally.
+    // Also fixes non-MP camera cases where Link's model is visible
+    // (photobox, mirror surfaces, debug free-cam).
+    s32 crawlLoop = CVarGetInteger(CVAR_ENHANCEMENT("MPCrawlLoop"), 1);
+    s32 animDone  = LinkAnimation_Update(play, &this->skelAnime);
+
+    // Transition ONCE→LOOP on the frame the entry animation just
+    // completed. Only when the currently-playing anim is the entry
+    // (guards against picking up during exit-forward/backward paths).
+    if (crawlLoop && animDone &&
+        this->skelAnime.mode == ANIMMODE_ONCE &&
+        this->skelAnime.animation == &gPlayerAnim_link_child_tunnel_start) {
+        f32 lastFrame = Animation_GetLastFrame(&gPlayerAnim_link_child_tunnel_start);
+        f32 loopStart = lastFrame * 0.6f;
+        LinkAnimation_Change(play, &this->skelAnime,
+                             &gPlayerAnim_link_child_tunnel_start,
+                             /*playSpeed*/ 1.0f, loopStart, lastFrame,
+                             ANIMMODE_LOOP, 0.0f);
+    }
+
+    s32 inCrawlLoopMode = crawlLoop &&
+                          this->skelAnime.mode == ANIMMODE_LOOP &&
+                          this->skelAnime.animation == &gPlayerAnim_link_child_tunnel_start;
+
+    // LinkAnimation_Loop wraps at animLength (full-anim cycle) so on
+    // wrap curFrame briefly visits early "standing" frames before our
+    // clamp catches it. Warp to loopStart when curFrame drops below
+    // our segment start OR reaches segment end. Playback speed
+    // matches player forward velocity — stopped = frozen pose.
+    if (inCrawlLoopMode) {
+        f32 lastFrame = Animation_GetLastFrame(&gPlayerAnim_link_child_tunnel_start);
+        f32 loopStart = lastFrame * 0.6f;
+        if (this->skelAnime.curFrame < loopStart ||
+            this->skelAnime.curFrame >= lastFrame) {
+            this->skelAnime.curFrame = loopStart;
+        }
+        this->skelAnime.playSpeed = (sControlInput->rel.stick_y != 0) ? 1.0f : 0.0f;
+    }
+
+    if (animDone || inCrawlLoopMode) {
         if (!(this->stateFlags1 & PLAYER_STATE1_LOADING)) {
             if (this->skelAnime.movementFlags != 0) {
                 this->skelAnime.movementFlags = 0;
@@ -13603,6 +13650,13 @@ void Player_Action_8084C760(Player* this, PlayState* play) {
                     this->linearVelocity = sControlInput->rel.stick_y * 0.03f;
                 }
             }
+        }
+        // In LOOP mode still fire the SFX list so crawl footstep sounds
+        // play at the anim frames tagged in D_808548B4 (running SFX at
+        // frames 40..104). Vanilla only runs this during the initial
+        // ONCE playback; without this, LOOP mode plays silently.
+        if (inCrawlLoopMode) {
+            Player_ProcessAnimSfxList(this, D_808548B4);
         }
         return;
     }
