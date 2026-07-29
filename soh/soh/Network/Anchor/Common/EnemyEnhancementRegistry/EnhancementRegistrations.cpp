@@ -12,6 +12,11 @@
  * See Plans/vanilla_enemy_enhancements_plan.md §4.2 + §7 Phase 2 step 3.
  */
 
+// Pitfall 40 — Anchor.h FIRST so libultraship + nlohmann templates are
+// declared in C++ linkage before EnhancementRegistry.h + EnSwDescriptor.h
+// transitively pull EnemyEnhancementDescriptor.h's extern "C" block.
+#include "soh/Network/Anchor/Anchor.h"
+
 #include "EnhancementRegistry.h"
 #include "PerActor/EnSwDescriptor.h"
 

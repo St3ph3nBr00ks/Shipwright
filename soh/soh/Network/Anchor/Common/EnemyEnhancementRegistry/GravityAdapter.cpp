@@ -5,6 +5,10 @@
  * Plans/vanilla_enemy_enhancements_plan.md §4.7 + §7 Phase 2.
  */
 
+// Pitfall 40 — Anchor.h FIRST so libultraship + nlohmann templates are
+// declared in C++ linkage before GravityAdapter.h opens its extern "C" block.
+#include "soh/Network/Anchor/Anchor.h"
+
 #include "GravityAdapter.h"
 
 namespace AnchorEnemyEnhancement {

@@ -39,6 +39,11 @@ extern "C" {
 #include "z64.h"
 }
 
+// Pitfall 40 — consumer .cpp files MUST include "soh/Network/Anchor/Anchor.h"
+// (or another C++-linkage Anchor header) BEFORE including this header, so
+// libultraship + nlohmann templates are declared in C++ linkage first. See
+// AILocomotion/*.h siblings for the same pattern.
+
 namespace AnchorEnemyEnhancement {
 
 // Capability flags — set to true for each capability an enhanced actor

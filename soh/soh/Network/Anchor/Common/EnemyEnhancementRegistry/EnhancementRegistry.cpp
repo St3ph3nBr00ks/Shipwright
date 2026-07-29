@@ -8,9 +8,12 @@
  * See Plans/vanilla_enemy_enhancements_plan.md §4.2 + §7 Phase 1.
  */
 
-#include "EnhancementRegistry.h"
+// Pitfall 40 — Anchor.h FIRST so libultraship + nlohmann templates are
+// declared in C++ linkage before EnhancementRegistry.h transitively pulls
+// EnemyEnhancementDescriptor.h's extern "C" block.
+#include "soh/Network/Anchor/Anchor.h"
 
-#include <libultraship/libultraship.h>
+#include "EnhancementRegistry.h"
 
 #include "soh/Network/Anchor/Common/ActorSyncHelpers.h"
 

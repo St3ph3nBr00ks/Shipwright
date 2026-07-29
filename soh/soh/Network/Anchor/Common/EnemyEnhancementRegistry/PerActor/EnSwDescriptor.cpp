@@ -9,6 +9,11 @@
  * See Plans/vanilla_enemy_enhancements_plan.md §7 Phase 2.
  */
 
+// Pitfall 40 — Anchor.h FIRST so libultraship + nlohmann templates are
+// declared in C++ linkage before any extern "C" block opens (this TU's
+// registry headers wrap z64.h in extern "C", which fails otherwise).
+#include "soh/Network/Anchor/Anchor.h"
+
 #include "EnSwDescriptor.h"
 
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/NavConsumer.h"
