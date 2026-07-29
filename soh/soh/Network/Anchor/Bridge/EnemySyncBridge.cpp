@@ -115,6 +115,23 @@ extern "C" bool Anchor_ShouldSuppressEnSwDrop(Actor* actor) {
     return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
 }
 
+// General-purpose receiver-side predicate — true when the actor's death
+// cycle is being driven by network state (peer received ENEMY_DEFEATED
+// and called `<Actor>_SetupDyingNet` locally). Actors that spawn showy
+// kill-time visual effects during their death cycle (sparkles, screen-
+// filling particles, etc.) should gate those effects on this predicate
+// so only the killer sees them. State-machine transitions still run on
+// both clients so the death animation is visually synchronized.
+//
+// Queue item 27 — Skullwalltula (En_Sw) kill white flash on every peer.
+// Reused by any future actor with the same "peer sees my kill fx" bug.
+extern "C" bool Anchor_IsPeerDrivenDeath(Actor* actor) {
+    if (actor == nullptr) return false;
+    const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(actor);
+    if (ext == nullptr) return false;
+    return EnemyStateSync::PhaseImpliesPendingNaturalDeath(ext->phase);
+}
+
 // Receiver-side predicate — true when an En_Test (Stalfos) death cycle
 // was network-driven (peer received ENEMY_DEFEATED and is replaying the
 // fall-over → body-break sequence). func_80862E6C and func_808633E8 use

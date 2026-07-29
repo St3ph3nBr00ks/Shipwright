@@ -19,6 +19,11 @@ extern int  Anchor_GetSyncedPlayerActors(PlayState* play, Actor** outActors, int
 // `extern` in .c, not `extern "C"` (C-linkage is implicit in C).
 extern bool Anchor_ShouldSuppressEnSwDrop(Actor* actor);
 
+// Multiplayer local-kill-FX suppression (queue item 27). True when the
+// death cycle is peer-driven (network state replay). Gates death-cycle
+// visual effects so only the killer sees the flashy particles.
+extern bool Anchor_IsPeerDrivenDeath(Actor* actor);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
 void EnSw_Init(Actor* thisx, PlayState* play);
@@ -653,11 +658,17 @@ void func_80B0D878(EnSw* this, PlayState* play) {
     }
 
     if ((this->unk_392 == 0) && (DECR(this->unk_394) != 0)) {
-        pos = this->actor.world.pos;
-        pos.y += 10.0f + ((Rand_ZeroOne() - 0.5f) * 6.0f);
-        pos.x += (Rand_ZeroOne() - 0.5f) * 32.0f;
-        pos.z += (Rand_ZeroOne() - 0.5f) * 32.0f;
-        EffectSsDeadDb_Spawn(play, &pos, &velAndAccel, &velAndAccel, 42, 0, 255, 255, 255, 255, 255, 0, 0, 1, 9, true);
+        // Queue item 27 — gate the full-white death sparkle burst on
+        // whether the death cycle is peer-driven. Only the killer
+        // sees the flashy visuals; non-killers see the actor die
+        // silently. State machine still ticks so animation plays.
+        if (!Anchor_IsPeerDrivenDeath(&this->actor)) {
+            pos = this->actor.world.pos;
+            pos.y += 10.0f + ((Rand_ZeroOne() - 0.5f) * 6.0f);
+            pos.x += (Rand_ZeroOne() - 0.5f) * 32.0f;
+            pos.z += (Rand_ZeroOne() - 0.5f) * 32.0f;
+            EffectSsDeadDb_Spawn(play, &pos, &velAndAccel, &velAndAccel, 42, 0, 255, 255, 255, 255, 255, 0, 0, 1, 9, true);
+        }
     }
 }
 
@@ -692,10 +703,16 @@ void func_80B0DC7C(EnSw* this, PlayState* play) {
     Vec3f pos = { 0.0f, 0.0f, 0.0f };
 
     if (DECR(this->unk_394) != 0) {
-        pos.y = ((Rand_ZeroOne() - 0.5f) * 6.0f) + (this->actor.world.pos.y + 10.0f);
-        pos.x = ((Rand_ZeroOne() - 0.5f) * 32.0f) + this->actor.world.pos.x;
-        pos.z = ((Rand_ZeroOne() - 0.5f) * 32.0f) + this->actor.world.pos.z;
-        EffectSsDeadDb_Spawn(play, &pos, &velAndAccel, &velAndAccel, 42, 0, 255, 255, 255, 255, 255, 0, 0, 1, 9, 1);
+        // Queue item 27 — gate the combat-death dust-ring sparkle on
+        // whether the death cycle is peer-driven. Rotation update
+        // stays unconditional (it's cheap actor-state, and the FX
+        // suppression preserves visual synchronization otherwise).
+        if (!Anchor_IsPeerDrivenDeath(&this->actor)) {
+            pos.y = ((Rand_ZeroOne() - 0.5f) * 6.0f) + (this->actor.world.pos.y + 10.0f);
+            pos.x = ((Rand_ZeroOne() - 0.5f) * 32.0f) + this->actor.world.pos.x;
+            pos.z = ((Rand_ZeroOne() - 0.5f) * 32.0f) + this->actor.world.pos.z;
+            EffectSsDeadDb_Spawn(play, &pos, &velAndAccel, &velAndAccel, 42, 0, 255, 255, 255, 255, 255, 0, 0, 1, 9, 1);
+        }
         this->actor.shape.rot.x += 0x1000;
         this->actor.shape.rot.z += 0x1000;
     } else {
