@@ -108,12 +108,37 @@ extern "C" int Anchor_Enhance_EnSw_GazeOverride(EnSw* actor, PlayState* play,
     // random `unk_444` assignment with `func_80B0DE34(this, outTargetPos)`.
     // Returns 0 (false) to let vanilla random gaze run unmodified.
     //
-    // Phase 2 partial: canActiveAggro is DEFERRED — real body lands
-    // alongside the En_Sw combat primitives adaptation (Reading A).
-    // Currently always returns 0 so vanilla random gaze runs unchanged
-    // even with CVar on.
-    (void)actor;
-    (void)play;
-    (void)outTargetPos;
-    return 0;
+    // Under AggressiveAcquire ON: PickGazeTarget iterates synced players
+    // + returns a climbing candidate's world.pos, so the spider aims
+    // deterministically at target instead of picking a random angle.
+    // Combined with ShouldRelaxLungeGates below, the state-7 wind-up
+    // is stable in MP scenarios where peer motion previously
+    // flickered the vanilla per-frame gate re-validation.
+    if (actor == nullptr || outTargetPos == nullptr) return 0;
+    auto* desc = GetEnSwDescriptor();
+    if (desc == nullptr) return 0;
+    if (!desc->IsInstanceEnhanced(&actor->actor, play)) return 0;
+    return desc->PickGazeTarget(&actor->actor, play, outTargetPos) ? 1 : 0;
+}
+
+extern "C" int Anchor_Enhance_EnSw_ShouldRelaxLungeGates(EnSw* actor) {
+    // Consulted by vanilla EnSw_PickLungeTarget at the top. Returns 1
+    // when descriptor says the flicker-prone gates (STATIONARY_LADDER,
+    // angular arc) should be skipped this pick. Distance + LoS gates
+    // remain — target must actually escape range or lose sight to fail
+    // the picker.
+    //
+    // Under AggressiveAcquire ON, this is the KEY fix for the
+    // "purple-flash-then-abort" bug (see Analysis/en_sw_lunge_abort_
+    // when_host_far_from_peer_2026-07-29.md). The state-7 20-frame
+    // wind-up otherwise re-validates all gates per frame and aborts
+    // whenever peer moves rapidly (climbing) enough to slip out of
+    // the ~22° arc gate temporarily.
+    if (actor == nullptr) return 0;
+    auto* desc = GetEnSwDescriptor();
+    if (desc == nullptr) return 0;
+    // Passing nullptr for play — ShouldRelaxLungeGates only reads the
+    // CVar + actor's instance status, doesn't touch play. If a future
+    // implementation needs play, we'd thread it through.
+    return desc->ShouldRelaxLungeGates(&actor->actor, nullptr) ? 1 : 0;
 }

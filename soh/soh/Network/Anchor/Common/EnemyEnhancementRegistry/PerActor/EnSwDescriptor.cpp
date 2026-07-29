@@ -17,9 +17,11 @@
 #include "EnSwDescriptor.h"
 
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/NavConsumer.h"
+#include "soh/Network/Anchor/Common/PlayerLookup.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
+#include <cmath>
 #include <unordered_map>
 
 namespace AnchorEnemyEnhancement {
@@ -142,6 +144,63 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
     static constexpr int16_t kLegBendPitch = 0x0C00;  // ~16.9°
     rotInOut->x = (int16_t)(rotInOut->x + kLegBendPitch);
     return true;
+}
+
+bool EnSwDescriptor::PickGazeTarget(Actor* actor, PlayState* play,
+                                     Vec3f* outTargetPos) {
+    if (actor == nullptr || play == nullptr || outTargetPos == nullptr) {
+        return false;
+    }
+    if (!IsInstanceEnhanced(actor, play)) return false;
+    if (CVarGetInteger(ActiveAggroCVar(), 0) == 0) return false;
+
+    // Iterate synced players; return first that passes climbing +
+    // distance + LoS gates. Skip STATIONARY_LADDER + arc — those are
+    // the vanilla-purity gates that this capability is designed to
+    // relax (plan §4.11 properties list).
+    Actor* candidates[8];
+    int n = GetSyncedPlayerActors(play, candidates, 8);
+    if (n <= 0) return false;
+
+    CollisionPoly* losPoly = nullptr;
+    int32_t losId = 0;
+    Vec3f losPos = { 0.0f, 0.0f, 0.0f };
+
+    for (int i = 0; i < n; i++) {
+        Player* p = (Player*)candidates[i];
+        if (p == nullptr) continue;
+        // Out-of-scene DummyPlayer sentinel — skip.
+        if (p->actor.world.pos.y <= -9000.0f) continue;
+        // Vanilla climbing requirement — only pursue climbers. This IS
+        // kept (not relaxed) because attacking non-climbers would change
+        // vanilla gameplay too much; the plan's intent is to fix
+        // flicker-abort mid-lunge, not turn En_Sw into an omni-attacker.
+        if (!(p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER)) continue;
+        // Distance gate — vanilla 130u 3D radius (kept — target must
+        // actually be in range).
+        const float dx = p->actor.world.pos.x - actor->world.pos.x;
+        const float dy = p->actor.world.pos.y - actor->world.pos.y;
+        const float dz = p->actor.world.pos.z - actor->world.pos.z;
+        if ((dx*dx + dy*dy + dz*dz) >= (130.0f * 130.0f)) continue;
+        // LoS gate — vanilla, line clear from En_Sw to player (kept).
+        if (BgCheck_EntityLineTest1(&play->colCtx, &actor->world.pos,
+                                     &p->actor.world.pos, &losPos,
+                                     &losPoly, true, false, false, true,
+                                     &losId)) {
+            continue;  // line blocked → next candidate
+        }
+        *outTargetPos = p->actor.world.pos;
+        return true;
+    }
+    return false;
+}
+
+bool EnSwDescriptor::ShouldRelaxLungeGates(Actor* actor, PlayState* play) {
+    // Any instance where AggressiveAcquire is active gets the relaxed
+    // gate set applied to its state-7 wind-up picker. IsInstanceEnhanced
+    // filters gold-token variants (never relax gates for tokens).
+    if (!IsInstanceEnhanced(actor, play)) return false;
+    return CVarGetInteger(ActiveAggroCVar(), 0) != 0;
 }
 
 }  // namespace AnchorEnemyEnhancement

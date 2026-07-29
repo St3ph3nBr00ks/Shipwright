@@ -100,6 +100,20 @@ public:
     // walking. Wall / lunge / dying states leave vanilla pose alone.
     bool OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
                           Actor* actor, PlayState* play) override;
+
+    // Active-aggro gaze target picker — plan §4.11. Iterates synced
+    // players, applies climbing + 130u + LoS gates (skip STATIONARY_LADDER
+    // + arc), returns first valid player's world.pos. Gated on
+    // AggressiveAcquire CVar.
+    bool PickGazeTarget(Actor* actor, PlayState* play,
+                        Vec3f* outTargetPos) override;
+
+    // Gate-relaxation signal for vanilla EnSw_PickLungeTarget. Returns
+    // true when AggressiveAcquire is ON — picker skips STATIONARY_LADDER
+    // + arc gates so state 7's 20-frame wind-up doesn't flicker-abort
+    // on peer motion. See Analysis/en_sw_lunge_abort_when_host_far_
+    // from_peer_2026-07-29.md for the flicker root cause.
+    bool ShouldRelaxLungeGates(Actor* actor, PlayState* play) override;
 };
 
 }  // namespace AnchorEnemyEnhancement

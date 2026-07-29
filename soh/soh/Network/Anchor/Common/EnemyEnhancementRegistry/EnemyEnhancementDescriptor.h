@@ -165,6 +165,33 @@ public:
         return false;
     }
 
+    // Active-aggro gaze target picker (canActiveAggro capability, plan
+    // §4.11). Called from the vanilla actor's random-gaze branch via
+    // the per-actor bridge. Return true when descriptor wants to inject
+    // a deterministic target this frame + wrote target world.pos to
+    // *outTargetPos; return false to let vanilla random gaze run. Default
+    // false. Implementation should honour ActiveAggroCVar internally.
+    virtual bool PickGazeTarget(Actor* actor, PlayState* play,
+                                Vec3f* outTargetPos) {
+        (void)actor;
+        (void)play;
+        (void)outTargetPos;
+        return false;
+    }
+
+    // Companion to PickGazeTarget for actors whose vanilla lunge/attack
+    // gate re-validates every frame during a short wind-up (e.g. En_Sw
+    // state 7 20-frame wind-up). When true, the per-actor bridge shim
+    // signals the vanilla picker to skip flicker-prone gates
+    // (STATIONARY_LADDER, angular arc) so the wind-up survives peer
+    // motion. Distance + LoS gates remain — target must actually escape
+    // or lose sight to abort. Default false = vanilla gate set.
+    virtual bool ShouldRelaxLungeGates(Actor* actor, PlayState* play) {
+        (void)actor;
+        (void)play;
+        return false;
+    }
+
     // Per-instance carve-out hook. Default: enhancement applies to
     // ALL instances of the actor. Override to read actor->params or
     // per-room state (D12 — per-instance exceptions added on playtest

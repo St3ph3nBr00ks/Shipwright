@@ -34,6 +34,7 @@ extern void Anchor_Enhance_EnSw_OnInit(EnSw* this, PlayState* play);
 extern void Anchor_Enhance_EnSw_Tick(EnSw* this, PlayState* play);
 extern int  Anchor_Enhance_EnSw_GazeOverride(EnSw* this, PlayState* play, Vec3f* outTargetPos);
 extern void Anchor_Enhance_EnSw_OverrideLimb(EnSw* this, PlayState* play, s32 limbIndex, Vec3s* rot);
+extern int  Anchor_Enhance_EnSw_ShouldRelaxLungeGates(EnSw* this);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
@@ -797,6 +798,13 @@ static Player* EnSw_PickLungeTarget(EnSw* this, PlayState* play, s32 arg2) {
     s32 sp54;
     Vec3f sp48;
 
+    // #210 Pillar 5 §4.11 — AggressiveAcquire gate-relaxation. When ON,
+    // skip STATIONARY_LADDER + angular-arc gates. Distance + LoS remain.
+    // Fixes the state-7 20-frame wind-up flicker where peer motion
+    // caused the per-frame arc-gate re-validation to abort mid-lunge
+    // (see Analysis/en_sw_lunge_abort_when_host_far_from_peer_2026-07-29.md).
+    s32 relaxGates = Anchor_Enhance_EnSw_ShouldRelaxLungeGates(this);
+
     for (int i = 0; i < n; i++) {
         Player* p = (Player*)candidates[i];
         if (p == NULL) continue;
@@ -806,6 +814,8 @@ static Player* EnSw_PickLungeTarget(EnSw* this, PlayState* play, s32 arg2) {
         if (p->actor.world.pos.y <= -9000.0f) continue;
 
         // Climbing gate — vanilla: only attack climbing players.
+        // KEPT even under AggressiveAcquire — the plan intent is to fix
+        // flicker-abort, not turn En_Sw into an omni-attacker.
         if (!(p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) continue;
 
         // Stationary-ladder gate — vanilla en_sw refuses to lunge at
@@ -820,7 +830,11 @@ static Player* EnSw_PickLungeTarget(EnSw* this, PlayState* play, s32 arg2) {
         // Per-candidate `p->stateFlags2` gives each player vanilla
         // independence (stateFlags2 is wire-synced for DummyPlayers
         // via Packets/Player/PlayerUpdate.cpp:323).
-        if ((p->stateFlags2 & PLAYER_STATE2_STATIONARY_LADDER) && arg2) continue;
+        //
+        // AggressiveAcquire bypass — plan §4.11 property list:
+        // "a paused climbing player IS a valid target." Removes the
+        // "free pause on a vine" loophole in MP.
+        if (!relaxGates && (p->stateFlags2 & PLAYER_STATE2_STATIONARY_LADDER) && arg2) continue;
 
         // Arc gate — vanilla 0x1FC2 (~22°) cone around En_Sw's current
         // gaze direction (shape.rot.z). Use s32 for the angular
@@ -831,15 +845,23 @@ static Player* EnSw_PickLungeTarget(EnSw* this, PlayState* play, s32 arg2) {
         // because arc and shape.rot.z usually stay within a moderate
         // range, but multi-player + remote DummyPlayers makes wild
         // arcs more frequent).
-        s32 arcRaw  = func_80B0DE34(this, &p->actor.world.pos);
-        s32 arcDiff = (arcRaw - (s32)this->actor.shape.rot.z) & 0xFFFF;
-        if (arcDiff > 0x8000) arcDiff = 0x10000 - arcDiff;
-        if (arcDiff >= 0x1FC2) continue;
+        //
+        // AggressiveAcquire bypass — active-gaze-tracking mode aims
+        // deterministically at target, so the arc gate is redundant
+        // (would pass anyway once gaze catches up). Skipping it
+        // stabilises the state-7 wind-up against target motion.
+        if (!relaxGates) {
+            s32 arcRaw  = func_80B0DE34(this, &p->actor.world.pos);
+            s32 arcDiff = (arcRaw - (s32)this->actor.shape.rot.z) & 0xFFFF;
+            if (arcDiff > 0x8000) arcDiff = 0x10000 - arcDiff;
+            if (arcDiff >= 0x1FC2) continue;
+        }
 
-        // Distance gate — vanilla 130u 3D radius.
+        // Distance gate — vanilla 130u 3D radius. KEPT under both modes.
         if (Math_Vec3f_DistXYZ(&this->actor.world.pos, &p->actor.world.pos) >= 130.0f) continue;
 
         // Line-of-sight gate — vanilla, line clear from En_Sw to player.
+        // KEPT under both modes.
         if (BgCheck_EntityLineTest1(&play->colCtx, &this->actor.world.pos, &p->actor.world.pos,
                                     &sp48, &sp58, true, false, false, true, &sp54)) {
             continue;  // line blocked → try next candidate
