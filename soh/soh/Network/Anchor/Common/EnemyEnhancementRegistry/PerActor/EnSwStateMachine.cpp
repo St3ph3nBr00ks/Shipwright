@@ -291,33 +291,44 @@ void RebuildWorldRotFromBasis(EnSw* self, const Vec3f& fwd, const Vec3f& normal)
     self->actor.shape.rot = self->actor.world.rot;
 }
 
-// Rebuild actor.world.rot from a GROUND (floor / slope) basis. Reflects
-// the fact that vanilla En_Sw was authored for wall attachment: model's
-// local +Y is the SKULL direction, so on a wall it correctly faces the
-// normal (into room). On the ground we want the skull to face along
-// walk direction (horizontal), not the normal (world-up). The basis
-// therefore SWAPS the column assignments:
-//   Column 0 = right-side (fwd x normal)         — spider's local X (right)
-//   Column 1 = fwd (walk direction)              — spider's local Y (skull front)
-//   Column 2 = normal (up-from-surface)          — spider's local Z (back/spine)
-// User-reported bug (screenshot 2026-07-30): reusing the wall basis
-// on ground put the skull pointing UP (aligned with floor normal),
-// which then clipped through the floor when the spider was rendered.
-// The ground basis gives natural belly-down + skull-forward posture.
+// Rebuild actor.world.rot from a GROUND (floor / slope) basis.
 //
-// Handedness note: `right = fwd × normal` (NOT normal × fwd) so the
-// basis is right-handed (det=+1). Matrix_MtxFToYXZRotS assumes a
-// proper rotation matrix; a left-handed (reflection) basis produces
-// garbage Euler angles.
+// Second iteration: previous attempt put fwd in col1 (assuming model's
+// local +Y = skull) — resulted in "spider walks backwards" (butt toward
+// target). Correction: use the standard OoT actor convention where a
+// rot=(0,0,0) actor faces +Z direction. That means model's skull is at
+// local +Z. So put fwd in col2 (skull along walk direction), normal in
+// col1 (up above head), and right in col0.
+//
+// Basis columns:
+//   Column 0 = right-side (normal x fwd)   — model's local +X (right)
+//   Column 1 = normal (up from surface)    — model's local +Y (above head)
+//   Column 2 = fwd (walk direction)        — model's local +Z (skull front)
+//
+// For flat floor + facing north (yaw=0): fwd=(0,0,1), normal=(0,1,0),
+// right = normal × fwd = (1,0,0). Basis is the identity matrix, which
+// decomposes to rot=(0,0,0) — exactly what "spider facing north with
+// belly down" should produce.
+//
+// Handedness: `right = normal × fwd`. Verify: right × normal =
+// (normal × fwd) × normal = fwd * (normal·normal) - normal * (fwd·normal)
+// = fwd - 0 = fwd = col2 ✓. Right-handed.
+//
+// If this iteration ALSO produces wrong orientation (e.g., spider
+// walks sideways or upside down), the next hypothesis is that vanilla
+// En_Sw's model was authored with a 90° offset (Init at z_en_sw.c:291
+// adds `+ 0x4000` to yaw when computing tangent-X, hinting at a non-
+// standard model orientation). If so, we'd need to apply an additional
+// yaw offset here — but let's field-test this first.
 void RebuildWorldRotFromGroundBasis(EnSw* self, const Vec3f& fwd, const Vec3f& normal) {
     Vec3f right;
-    Cross(fwd, normal, &right);
+    Cross(normal, fwd, &right);
     if (!Normalize(&right)) return;  // degenerate — leave rot alone
 
     MtxF basis;
     basis.xx = right.x;  basis.yx = right.y;  basis.zx = right.z;  basis.wx = 0.0f;
-    basis.xy = fwd.x;    basis.yy = fwd.y;    basis.zy = fwd.z;    basis.wy = 0.0f;
-    basis.xz = normal.x; basis.yz = normal.y; basis.zz = normal.z; basis.wz = 0.0f;
+    basis.xy = normal.x; basis.yy = normal.y; basis.zy = normal.z; basis.wy = 0.0f;
+    basis.xz = fwd.x;    basis.yz = fwd.y;    basis.zz = fwd.z;    basis.wz = 0.0f;
     basis.xw = 0.0f;     basis.yw = 0.0f;     basis.zw = 0.0f;     basis.ww = 1.0f;
 
     Matrix_MtxFToYXZRotS(&basis, &self->actor.world.rot, 0);
@@ -574,9 +585,16 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     self->actor.world.pos.y += fwd.y * step;
     self->actor.world.pos.z += fwd.z * step;
 
-    // Rebuild world.rot + shape.rot from the tangent basis (fwd + normal
-    // + fwd x normal).
-    RebuildWorldRotFromBasis(self, fwd, s.wallNormal);
+    // Do NOT overwrite shape.rot on walls. Vanilla combat En_Sw's
+    // scene-placed shape.rot is what makes the spider belly-on-wall
+    // in the correct orientation; vanilla ambient actionFunc only
+    // rotates shape.rot.z for gaze (unk_444). Attempting to rebuild
+    // rot from a fwd+normal basis produces a 90° offset because
+    // vanilla En_Sw's model is authored non-standard (shape.rot.y=0
+    // means walk-east per the +0x4000 offset in Init line 291).
+    // Preserving scene placement keeps the spider looking natural on
+    // walls; motion still traverses along the wall tangent plane
+    // toward the target.
 }
 
 // -------------------------------------------------------------------
@@ -744,11 +762,15 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         return;
     }
 
-    // Yaw toward target in world XZ, then project onto the floor's
-    // tangent plane so spider's walk direction follows slope geometry
-    // (vs stubbornly world-XZ which would push into upward slopes and
-    // fly off downward slopes). fwd is guaranteed non-degenerate here
-    // because floor normal has ny > 0.5 (nearly-vertical component).
+    // Yaw toward target in world XZ, project onto floor tangent plane
+    // for slope-following motion. Rotation itself is applied via a
+    // simple shape.rot.y write (NOT the basis-matrix approach) with a
+    // -0x4000 offset that matches vanilla En_Sw's model authoring
+    // convention. Vanilla Init line 291 computes
+    // `unk_370 = sin(shape.rot.y + 0x4000)` — the +90° offset reveals
+    // that the model's local +X is the walk direction (so shape.rot.y=0
+    // means walk-east, not walk-north like standard OoT actors). To
+    // make the spider face our target-derived yaw, subtract the offset.
     const s16 yaw = (s16)(std::atan2(dx, dz) * (0x8000 / M_PI));
     Vec3f fwd = {
         std::sin(yaw * (M_PI / 0x8000)),
@@ -762,21 +784,19 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         fwd.z - floorNormal.z * fwdDotN,
     };
     if (!Normalize(&fwdTangent)) {
-        // Degenerate — floor normal was nearly parallel to fwd (should
-        // never happen with a floor). Fall back to plain world-XZ yaw.
-        self->actor.world.rot.x = 0;
-        self->actor.world.rot.y = yaw;
-        self->actor.world.rot.z = 0;
-        self->actor.shape.rot = self->actor.world.rot;
-    } else {
-        // Slope-aware orientation via RebuildWorldRotFromGroundBasis —
-        // uses the ground-specific basis (skull along walk direction,
-        // spine along floor normal) so spider walks belly-down on
-        // slopes with skull facing target. Do NOT reuse the WALL basis
-        // helper here — it would put skull along floor-normal (straight
-        // up), clipping into geometry.
-        RebuildWorldRotFromGroundBasis(self, fwdTangent, floorNormal);
+        fwdTangent = fwd;  // floor was near-vertical; use unprojected fwd
     }
+
+    // Apply model orientation via simple yaw write with -0x4000 offset.
+    // World.rot.x/z = 0 → spider stands upright (belly-down on flat
+    // floor). Slope-tilt for inclined floors is deferred; the yaw-only
+    // fix addresses the "walking backwards" bug from log-762 retest
+    // while keeping the model orientation math simple.
+    const s16 modelYaw = (s16)(yaw - 0x4000);
+    self->actor.world.rot.x = 0;
+    self->actor.world.rot.y = modelYaw;
+    self->actor.world.rot.z = 0;
+    self->actor.shape.rot = self->actor.world.rot;
 
     constexpr float kAttackRangeSq = 50.0f * 50.0f;
     if (distXZSq <= kAttackRangeSq) {
