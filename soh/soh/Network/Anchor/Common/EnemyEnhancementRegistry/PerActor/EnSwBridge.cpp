@@ -17,9 +17,11 @@
 #include "soh/Network/Anchor/Anchor.h"
 
 #include "EnSwDescriptor.h"
+#include "EnSwStateMachine.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/EnhancementRegistry.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/NavConsumer.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GravityAdapter.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"  // AnchorCVarSync::GetEnforcedInt
 
 #include <unordered_map>
 
@@ -55,14 +57,14 @@ extern "C" void Anchor_Enhance_EnSw_OnInit(EnSw* actor, PlayState* play) {
     if (actor == nullptr) return;
     auto* desc = GetEnSwDescriptor();
     if (desc == nullptr) return;
+    if (!desc->IsInstanceEnhanced(&actor->actor, play)) return;
 
-    // Phase 2 partial: descriptor's per-actor init hook. Currently a
-    // no-op (Phase 2 Step 4 wires NavConsumer state map). Kept as an
-    // entry point so future setup logic lands here rather than at
-    // every per-tick call.
-    (void)desc;
-    (void)play;
-    // Future: desc->OnActorInit(&actor->actor, play);
+    // Snapshot vanilla's ambient actionFunc so the state machine's per-
+    // tick dispatch can detect when vanilla has advanced to lunge cycle
+    // (self->actionFunc != snapshot) and yield the frame. Snapshot is
+    // captured regardless of CVar state so it's available if the CVar
+    // toggles on mid-session. Idempotent — repeat calls are no-ops.
+    AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_SnapshotAmbient(actor);
 }
 
 extern "C" void Anchor_Enhance_EnSw_Tick(EnSw* actor, PlayState* play) {
@@ -71,14 +73,25 @@ extern "C" void Anchor_Enhance_EnSw_Tick(EnSw* actor, PlayState* play) {
     if (desc == nullptr) return;
     if (!desc->IsInstanceEnhanced(&actor->actor, play)) return;
 
-    // Nav consumption — CVar-gated inside NavConsumer::TickNavMovement.
-    // Descriptor's OnNavTick delegates to NavConsumer with its own
-    // per-actor NavConsumerState (map in EnSwDescriptor.cpp file scope).
-    desc->OnNavTick(&actor->actor, play);
+    // Enhanced state machine — Option B pilot (Plans/en_sw_enhanced_
+    // state_machine_pilot.md). Fires when NavConsume CVar is enabled
+    // AND the actor was snapshotted at OnInit. Runs AFTER vanilla
+    // actionFunc (this is a post-hook); state machine overrides motion
+    // in ambient states, yields to vanilla when actionFunc has advanced
+    // to lunge cycle. Internal CVar check happens inside the state
+    // machine's Tick to keep the gate + snapshot side-effect in one
+    // place.
+    if (AnchorCVarSync::GetEnforcedInt(
+            "gEnhancements.Skullwalltula.NavConsume", 0) != 0) {
+        AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_Tick(actor, play);
+    }
 
-    // Gravity — CVar-gated inside TickGravity. ShouldApplyGravity
-    // filters out ineligible states (on-wall, on-floor); only fires
-    // TickGravity when actor is genuinely airborne.
+    // Legacy NavConsumer + GravityAdapter dispatch — bodies stubbed to
+    // no-op post M1 (see NavConsumer.cpp / GravityAdapter.cpp header
+    // comments). Left in place for future non-En_Sw wall-crawler
+    // descriptors that may want simpler pos+yaw-only nav semantics
+    // without a state machine.
+    desc->OnNavTick(&actor->actor, play);
     if (desc->ShouldApplyGravity(&actor->actor, play)) {
         AnchorEnemyEnhancement::GravityAdapterState& gState =
             sGravityStates[&actor->actor];

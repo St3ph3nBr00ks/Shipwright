@@ -731,6 +731,73 @@ void SohMenu::AddMenuFlotilla() {
         .Options(CheckboxOptions().Tooltip(
             "Prevents the Deku Shield from burning on fire damage."));
 
+    // ---- Pillar 5 — Enemy Enhancements (GH #210) ------------------------
+    // Per-actor behavioural extensions layered on top of vanilla enemies.
+    // Host-authoritative so the party experiences the same enemy behaviour
+    // regardless of individual client CVar settings; peer widgets are
+    // dimmed via the shared PreFunc gate.
+    //
+    // Widgets moved from the former "Enemy Enhancements" sidebar to Host
+    // Settings 2026-07-30 per user direction. See
+    // Plans/en_sw_enhanced_state_machine_pilot.md §8.4 for the move
+    // rationale + §7 for the current M1 stub / M4-M7 state-machine
+    // buildout status.
+    AddWidget(path, "Skullwalltula (En_Sw) — combat variant only. Gold-token variants are always vanilla.",
+              WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Nav-consume: pursue player across floors + climb-any surface##Flotilla",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Skullwalltula.NavConsume"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: enhanced Skullwalltulas leave their wall anchor "
+            "when a player is in range and pursue on any walkable "
+            "floor / ladder / vine / designated wall via the shared "
+            "RoomNavData substrate (same nav pipeline as NPC Follower / "
+            "NPC Invader).\n\n"
+            "Gold-token variants (params & 0xE000 non-zero) are NOT "
+            "affected — token skulltulas remain fully vanilla static.\n\n"
+            "Currently stubbed pending state-machine buildout (M4-M7 "
+            "of Plans/en_sw_enhanced_state_machine_pilot.md). Enabling "
+            "this CVar has no runtime effect until the state machine "
+            "lands."));
+
+    AddWidget(path, "Gravity-aware: fall when knocked off wall##Flotilla",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Skullwalltula.GravityAware"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: enhanced Skullwalltulas respond to gravity when "
+            "off their wall AND not on a floor (e.g. knocked off by a "
+            "player attack). Land + brief stun (~20 frames) + resume "
+            "pursuit if Nav-consume is also ON.\n\n"
+            "Independent of Nav-consume — either can be toggled alone. "
+            "Under the state machine (M4+), gravity + landing detection "
+            "is absorbed into the WallEdgeDrop + GroundPursue states.\n\n"
+            "Currently stubbed pending state-machine buildout. Enabling "
+            "this CVar has no runtime effect until the state machine "
+            "lands."));
+
+    AddWidget(path, "Aggressive acquire: deterministic gaze toward nearest climbing player##Flotilla",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Skullwalltula.AggressiveAcquire"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: replaces vanilla random-gaze-and-hope-for-alignment "
+            "with active target acquisition — the Skullwalltula "
+            "deliberately rotates toward the nearest climbing player "
+            "that passes the lunge predicate (distance + LoS gates). "
+            "Vanilla smooth-rotation cadence preserved.\n\n"
+            "Also relaxes the state-7 wind-up abort gates so a brief "
+            "arc miss during climbing motion doesn't cancel the lunge "
+            "— fixes the purple-flash-abort bug (log 757).\n\n"
+            "This capability IS active independent of the state machine — "
+            "PickGazeTarget + ShouldRelaxLungeGates fire via the "
+            "existing vanilla-hook path."));
+
     // -----------------------------------------------------------------
     // Scene Info
     // -----------------------------------------------------------------
@@ -1147,80 +1214,6 @@ void SohMenu::AddMenuFlotilla() {
             "Default OFF per the project 'vanilla-altering features ship "
             "default-off' convention. Both players must enable to see each "
             "other's horses."));
-
-    // -----------------------------------------------------------------
-    // Vanilla Enemy Enhancements (#210 Pillar 5)
-    //
-    // Opt-in per-actor behavioral extensions layered on top of vanilla
-    // enemies. Each capability defaults OFF per the project's
-    // "vanilla-altering features ship default-off" convention
-    // (feedback_vanilla_altering_default_off.md). Users toggle
-    // per-actor + per-capability; enhancement stays off for anyone who
-    // doesn't opt in.
-    //
-    // Phase 2 partial: descriptor + bridge + hooks all wired but bodies
-    // are Phase 1 no-ops. Enabling the CVars currently has no gameplay
-    // effect — the sliders exist so the wire format is settled by the
-    // time real bodies land in Phase 2 Steps 4/5/8.
-    //
-    // See Plans/vanilla_enemy_enhancements_plan.md §4 architecture +
-    // §7 Phase 2 rollout.
-    // -----------------------------------------------------------------
-    path.sidebarName = "Enemy Enhancements";
-    path.column = SECTION_COLUMN_1;
-    AddSidebarEntry("Flotilla", path.sidebarName, 1);
-
-    AddWidget(path, "Skullwalltula (En_Sw) — combat variant only. Gold-token variants are always vanilla.",
-              WIDGET_SEPARATOR_TEXT);
-
-    AddWidget(path, "Nav-consume: pursue player across floors + climb-any surface",
-              WIDGET_CVAR_CHECKBOX)
-        .CVar(CVAR_ENHANCEMENT("Skullwalltula.NavConsume"))
-        .RaceDisable(false)
-        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
-            "When ON: enhanced Skullwalltulas leave their wall anchor "
-            "when a player is in range and pursue on any walkable "
-            "floor / ladder / vine / designated wall via the shared "
-            "RoomNavData substrate (same nav pipeline as NPC Follower / "
-            "NPC Invader).\n\n"
-            "Gold-token variants (params & 0xE000 non-zero) are NOT "
-            "affected — token skulltulas remain fully vanilla static.\n\n"
-            "Phase 2 partial — real nav body lands in Phase 2 Step 4. "
-            "Enabling this CVar currently has no runtime effect."));
-
-    AddWidget(path, "Gravity-aware: fall when knocked off wall",
-              WIDGET_CVAR_CHECKBOX)
-        .CVar(CVAR_ENHANCEMENT("Skullwalltula.GravityAware"))
-        .RaceDisable(false)
-        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
-            "When ON: enhanced Skullwalltulas respond to gravity when "
-            "off their wall AND not on a floor (e.g. knocked off by a "
-            "player attack). Land + brief stun (~20 frames) + resume "
-            "pursuit if Nav-consume is also ON.\n\n"
-            "Independent of Nav-consume — either can be toggled alone. "
-            "GravityAware without NavConsume means the actor falls but "
-            "doesn't try to re-approach; NavConsume without GravityAware "
-            "means the actor walks but sticks to whatever surface "
-            "vanilla physics puts it on.\n\n"
-            "Phase 2 partial — real gravity body lands in Phase 2 "
-            "Step 5. Enabling this CVar currently has no runtime effect."));
-
-    AddWidget(path, "Aggressive acquire: deterministic gaze toward nearest climbing player",
-              WIDGET_CVAR_CHECKBOX)
-        .CVar(CVAR_ENHANCEMENT("Skullwalltula.AggressiveAcquire"))
-        .RaceDisable(false)
-        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
-            "When ON: replaces vanilla random-gaze-and-hope-for-alignment "
-            "with active target acquisition — the Skullwalltula "
-            "deliberately rotates toward the nearest climbing player "
-            "that passes the lunge predicate (distance + LoS gates). "
-            "Vanilla smooth-rotation cadence preserved.\n\n"
-            "Also bypasses the PLAYER_STATE2_STATIONARY_LADDER "
-            "immunity — a paused climber IS a valid target under "
-            "this CVar. Removes the 'free pause on a vine' loophole.\n\n"
-            "Phase 2 partial — real body lands with the combat "
-            "primitives adaptation (Reading A). Enabling this CVar "
-            "currently has no runtime effect."));
 
     // -----------------------------------------------------------------
     // Diagnostics

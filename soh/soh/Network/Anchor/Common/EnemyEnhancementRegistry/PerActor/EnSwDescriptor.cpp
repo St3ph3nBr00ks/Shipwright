@@ -17,6 +17,8 @@
 #include "EnSwDescriptor.h"
 
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/NavConsumer.h"
+#include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/PerActor/EnSwStateMachine.h"  // GroundPursue query for leg-bend gate
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"  // AnchorCVarSync::GetEnforcedInt (host-authoritative wrapper)
 #include "soh/Network/Anchor/Common/PlayerLookup.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"
 
@@ -113,12 +115,21 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
     // Gated on NavConsume CVar — leg-bend is cosmetic compensation for
     // the nav-driven ground-walking mode; when Nav is off, actor stays
     // on wall and vanilla wall-tangent leg sweep is correct.
-    if (CVarGetInteger(NavConsumeCVar(), 0) == 0) return false;
+    if (AnchorCVarSync::GetEnforcedInt(NavConsumeCVar(), 0) == 0) return false;
 
-    // Only bend when actor is on the floor. bgCheckFlags bit 0x1 =
-    // grounded via BgCheck floor. Wall-crawling En_Sw doesn't set
-    // this bit, so the bend fires only during nav-driven ground pursuit.
-    if ((actor->bgCheckFlags & 0x1) == 0) return false;
+    // Only bend when the state machine has the spider in GroundPursue.
+    // Original M4 impl gated on bgCheckFlags & 0x1 (grounded) — but
+    // vanilla En_Sw's Actor_UpdateBgCheckInfo call at z_en_sw.c:695
+    // uses flags=5 (wall+water only), which never populates the floor
+    // bit for combat En_Sw. Query the state machine directly so the
+    // leg-bend actually fires when the spider is on the ground per our
+    // state model. Actor cast to EnSw* is safe because IsInstanceEnhanced
+    // gate above already excluded gold-tokens; only combat variants
+    // reach here and they're all EnSw structs.
+    EnSw* enSw = reinterpret_cast<EnSw*>(actor);
+    const AnchorEnemyEnhancement::EnSwState smState =
+        AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_QueryState(enSw);
+    if (smState != AnchorEnemyEnhancement::EnSwState::GroundPursue) return false;
 
     // Leg-limb table — enumerated from vanilla EnSw_OverrideLimbDraw
     // switch (z_en_sw.c:1082-1106). 8 legs at limb indices:
@@ -152,7 +163,7 @@ bool EnSwDescriptor::PickGazeTarget(Actor* actor, PlayState* play,
         return false;
     }
     if (!IsInstanceEnhanced(actor, play)) return false;
-    if (CVarGetInteger(ActiveAggroCVar(), 0) == 0) return false;
+    if (AnchorCVarSync::GetEnforcedInt(ActiveAggroCVar(), 0) == 0) return false;
 
     // Iterate synced players; return first that passes climbing +
     // distance + LoS gates. Skip STATIONARY_LADDER + arc — those are
@@ -200,7 +211,7 @@ bool EnSwDescriptor::ShouldRelaxLungeGates(Actor* actor, PlayState* play) {
     // gate set applied to its state-7 wind-up picker. IsInstanceEnhanced
     // filters gold-token variants (never relax gates for tokens).
     if (!IsInstanceEnhanced(actor, play)) return false;
-    return CVarGetInteger(ActiveAggroCVar(), 0) != 0;
+    return AnchorCVarSync::GetEnforcedInt(ActiveAggroCVar(), 0) != 0;
 }
 
 }  // namespace AnchorEnemyEnhancement

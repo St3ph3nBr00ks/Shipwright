@@ -178,6 +178,17 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     // NonBlockingItemGet; consumed via the ShouldAdvanceWorldTime
     // TextBox context in GameTimeController.
     { CVAR_ENHANCEMENT("Anchor.NonBlockingTextBox"), 1 },
+
+    // --- Pillar 5 — Skullwalltula enhancement toggles (GH #210) ---
+    // Host-authoritative. Enhanced behaviour is host-driven; peers
+    // observe via existing ENEMY_UPDATE sync. Defaults 0 per project
+    // policy (`feedback_vanilla_altering_default_off.md`). Enforcement
+    // added per `Plans/en_sw_enhanced_state_machine_pilot.md` §8.
+    // Widgets moved from "Enemy Enhancements" to Host Settings sidebar
+    // in same milestone.
+    { CVAR_ENHANCEMENT("Skullwalltula.NavConsume"),        0 },
+    { CVAR_ENHANCEMENT("Skullwalltula.GravityAware"),      0 },
+    { CVAR_ENHANCEMENT("Skullwalltula.AggressiveAcquire"), 0 },
 };
 
 const std::vector<FloatCVarEntry> kEnforcedFloats = {

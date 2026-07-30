@@ -1,18 +1,25 @@
 /**
- * GravityAdapter — Phase 2 real implementation.
+ * GravityAdapter — Phase 2 SUPERSEDED body (kept as callable helper).
  *
- * Applies simple gravity + terminal-velocity clamp to an enhanced
- * enemy when the descriptor's ShouldApplyGravity returns true. Uses
- * vanilla `bgCheckFlags & 0x1` as the on-ground signal — same
- * predicate vanilla actor code uses for its own airborne detection.
+ * Original Phase 2 design applied gravity + terminal-velocity clamp
+ * to an enhanced enemy when its descriptor's ShouldApplyGravity
+ * returned true. Used vanilla `bgCheckFlags & 0x1` as the on-ground
+ * signal. Field-test log 761 (2026-07-30) proved this dormant for
+ * combat En_Sw: vanilla combat En_Sw never populates bgCheckFlags
+ * (`bgFlags=0x0` on every diagnostic emission), so ShouldApplyGravity
+ * — which reads those flags — never returns true, and TickGravity is
+ * never reached.
  *
- * Stun-on-land: when the actor transitions airborne → grounded and
- * the descriptor's GravityParams.stunOnLand is true, we write the
- * stun-frame count to state.stunFramesRemaining. Caller (via
- * descriptor's OnLandedFromFall override) reads this and applies its
- * own "hold still" gate.
+ * Superseded by the En_Sw enhanced state machine (Option B, per
+ * Plans/en_sw_enhanced_state_machine_pilot.md). The state machine's
+ * WallEdgeDrop + GroundPursue states absorb gravity + landing logic
+ * directly, driving vertical motion under a state machine that owns
+ * bgCheck-independent detection of wall-vs-floor state.
  *
- * See Plans/vanilla_enemy_enhancements_plan.md §4.7 + §7 Phase 2 step 2.
+ * Body reduced to early-return. Kept as a callable helper for future
+ * enemy descriptors that DO participate in vanilla bgCheck and want
+ * simple gravity semantics without a full state machine. Original
+ * body preserved in git history.
  */
 
 // Pitfall 40 — Anchor.h FIRST so libultraship + nlohmann templates are
@@ -20,6 +27,8 @@
 #include "soh/Network/Anchor/Anchor.h"
 
 #include "GravityAdapter.h"
+
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"  // AnchorCVarSync::GetEnforcedInt
 
 #include <libultraship/bridge/consolevariablebridge.h>
 
@@ -29,60 +38,23 @@ bool TickGravity(EnemyEnhancementDescriptor& descriptor,
                  GravityAdapterState& state,
                  Actor* actor,
                  PlayState* play) {
+    (void)state;
     if (actor == nullptr || play == nullptr) return false;
 
-    // CVar gate — descriptor supplies the CVar name.
+    // CVar gate preserved so callers that check the CVar independently
+    // still get consistent enable/disable semantics. Routes through
+    // AnchorCVarSync so peers honour host's enforced value.
     const char* cvarName = descriptor.GravityAwareCVar();
-    if (cvarName != nullptr && CVarGetInteger(cvarName, 0) == 0) {
+    if (cvarName != nullptr && AnchorCVarSync::GetEnforcedInt(cvarName, 0) == 0) {
         return false;
     }
 
-    const GravityAwareParams params = descriptor.GravityParams();
-
-    // On-ground check via vanilla bgCheckFlags bit 0x1.
-    const bool onGround = (actor->bgCheckFlags & 0x1) != 0;
-
-    // Landing edge detection — airborne last frame, grounded this frame.
-    if (onGround && state.wasAirborneLastFrame) {
-        // Zero downward velocity so vanilla update doesn't keep pushing
-        // the actor into the floor.
-        if (actor->velocity.y < 0.0f) {
-            actor->velocity.y = 0.0f;
-        }
-        // Arm stun timer if configured.
-        if (params.stunOnLand) {
-            state.stunFramesRemaining = (uint16_t)params.stunFrames;
-        }
-        state.wasAirborneLastFrame = false;
-        descriptor.OnLandedFromFall(actor, play);
-        return true;
-    }
-
-    if (onGround) {
-        // Steady state — grounded. Decrement stun timer if active. No
-        // velocity write; vanilla actor keeps its own XZ locomotion.
-        if (state.stunFramesRemaining > 0) {
-            state.stunFramesRemaining--;
-            return true;
-        }
-        state.wasAirborneLastFrame = false;
-        return false;
-    }
-
-    // Airborne — apply gravity + terminal-velocity clamp.
-    actor->velocity.y += params.gravity;
-    if (actor->velocity.y < params.maxFallSpeed) {
-        actor->velocity.y = params.maxFallSpeed;
-    }
-    // Integrate world position from velocity. Vanilla Actor_MoveXZGravity
-    // would do this but we avoid calling it — many enhanced enemies
-    // have their own custom position integration that we don't want to
-    // interfere with. Direct Y integration is sufficient for the
-    // fall-through-air case.
-    actor->world.pos.y += actor->velocity.y;
-
-    state.wasAirborneLastFrame = true;
-    return true;
+    // SUPERSEDED by En_Sw enhanced state machine (Option B pilot). The
+    // state machine's WallEdgeDrop state applies gravity directly when
+    // an on-wall spider steps off a wall's edge; GroundPursue handles
+    // the landed case. No consumer calls this helper today. See git
+    // history for the previous full implementation.
+    return false;
 }
 
 }  // namespace AnchorEnemyEnhancement
