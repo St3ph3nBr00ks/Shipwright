@@ -780,21 +780,25 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         fwdTangent = fwd;  // floor was near-vertical; use unprojected fwd
     }
 
-    // Ground orientation — third iteration. Field-test regression proved
-    // that `shape.rot = (0, yaw-0x4000, 0)` leaves the spider upside-
-    // down (skull-pattern surface / dorsal facing world -Y down). That
-    // means the En_Sw model's default pose at rot=(0,0,0) has its
-    // dorsal side aligned with local -Y — rotating only around Y (yaw)
-    // never moves the dorsal off world -Y, so spider stays inverted.
+    // Ground orientation — fourth iteration.
     //
-    // Fix: apply a 180° pitch (shape.rot.x = 0x8000) to flip the model
-    // dorsal-up + belly-down. Combined with yaw for target-facing:
-    //   rot.x = 0x8000  → flip 180° around X (dorsal -Y → +Y = up)
-    //   rot.y = yaw     → face target direction (standard OoT convention
-    //                     assuming skull at local +Z; if wrong, this
-    //                     will iterate on the yaw offset)
-    //   rot.z = 0
-    self->actor.world.rot.x = (s16)0x8000;
+    // History:
+    //   1. Wall basis on floor       → skull clipped into floor
+    //   2. Ground basis (col1=fwd)   → spider walked backwards
+    //   3. rot=(0, yaw-0x4000, 0)    → spider upside-down (regression)
+    //   4. rot=(0x8000, yaw, 0)      → spider upright, skull-UP
+    //   5. THIS: rot=(-0x4000, yaw, 0) → 90° pitch, skull-forward
+    //
+    // Math: En_Sw model has skull at local -Y (per field observation
+    // of iterations 3-4). YXZ Euler rotation of skull vector (0,-1,0)
+    // through (rx, ry, 0) gives skull_world =
+    //   (-sin(rx)·sin(ry), -cos(rx), -sin(rx)·cos(ry))
+    // For target-north (yaw=0), want skull_world=(0,0,1):
+    //   need cos(rx)=0 → rx=±90°; -sin(rx)=1 → rx=-90° = -0x4000
+    // For target-east (yaw=+0x4000), want skull_world=(1,0,0):
+    //   with rx=-0x4000, sin(rx)=-1 → sin(ry)=1 → ry=+0x4000 = yaw ✓
+    // General: rx = -0x4000, ry = yaw (no offset), rz = 0.
+    self->actor.world.rot.x = (s16)-0x4000;  // -90° pitch → dorsal-up + skull-forward
     self->actor.world.rot.y = yaw;
     self->actor.world.rot.z = 0;
     self->actor.shape.rot = self->actor.world.rot;
