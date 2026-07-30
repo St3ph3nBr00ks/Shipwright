@@ -763,14 +763,7 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     }
 
     // Yaw toward target in world XZ, project onto floor tangent plane
-    // for slope-following motion. Rotation itself is applied via a
-    // simple shape.rot.y write (NOT the basis-matrix approach) with a
-    // -0x4000 offset that matches vanilla En_Sw's model authoring
-    // convention. Vanilla Init line 291 computes
-    // `unk_370 = sin(shape.rot.y + 0x4000)` — the +90° offset reveals
-    // that the model's local +X is the walk direction (so shape.rot.y=0
-    // means walk-east, not walk-north like standard OoT actors). To
-    // make the spider face our target-derived yaw, subtract the offset.
+    // for slope-following motion.
     const s16 yaw = (s16)(std::atan2(dx, dz) * (0x8000 / M_PI));
     Vec3f fwd = {
         std::sin(yaw * (M_PI / 0x8000)),
@@ -787,14 +780,22 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         fwdTangent = fwd;  // floor was near-vertical; use unprojected fwd
     }
 
-    // Apply model orientation via simple yaw write with -0x4000 offset.
-    // World.rot.x/z = 0 → spider stands upright (belly-down on flat
-    // floor). Slope-tilt for inclined floors is deferred; the yaw-only
-    // fix addresses the "walking backwards" bug from log-762 retest
-    // while keeping the model orientation math simple.
-    const s16 modelYaw = (s16)(yaw - 0x4000);
-    self->actor.world.rot.x = 0;
-    self->actor.world.rot.y = modelYaw;
+    // Ground orientation — third iteration. Field-test regression proved
+    // that `shape.rot = (0, yaw-0x4000, 0)` leaves the spider upside-
+    // down (skull-pattern surface / dorsal facing world -Y down). That
+    // means the En_Sw model's default pose at rot=(0,0,0) has its
+    // dorsal side aligned with local -Y — rotating only around Y (yaw)
+    // never moves the dorsal off world -Y, so spider stays inverted.
+    //
+    // Fix: apply a 180° pitch (shape.rot.x = 0x8000) to flip the model
+    // dorsal-up + belly-down. Combined with yaw for target-facing:
+    //   rot.x = 0x8000  → flip 180° around X (dorsal -Y → +Y = up)
+    //   rot.y = yaw     → face target direction (standard OoT convention
+    //                     assuming skull at local +Z; if wrong, this
+    //                     will iterate on the yaw offset)
+    //   rot.z = 0
+    self->actor.world.rot.x = (s16)0x8000;
+    self->actor.world.rot.y = yaw;
     self->actor.world.rot.z = 0;
     self->actor.shape.rot = self->actor.world.rot;
 
