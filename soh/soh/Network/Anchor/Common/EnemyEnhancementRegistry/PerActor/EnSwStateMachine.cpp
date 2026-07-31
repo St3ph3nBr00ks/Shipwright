@@ -69,32 +69,63 @@ EnSwEnhancedState* Find(EnSw* self) {
 // alongside the other TickXxx handlers.
 // -------------------------------------------------------------------
 constexpr int   kJumpWindupFrames    = 10;     // ~0.5 s telegraph at 20fps
-constexpr float kJumpInitialVy       = 12.0f;  // upward launch velocity
 constexpr float kJumpForwardSpeed    = 10.0f;  // horizontal launch magnitude
 constexpr int   kJumpMaxAirFrames    = 90;     // ~4.5 s safety cap
 constexpr float kJumpTriggerRange    = 300.0f; // rule 2/3 max spider→link
                                                 // distance for jump trigger
 constexpr float kJumpMinTriggerRange = 60.0f;  // don't jump if already at
                                                 // point-blank walk range
+constexpr float kJumpMinLaunchVy     = 4.0f;   // always launch with some
+                                                // upward kick so the arc
+                                                // is visible even for
+                                                // downhill jumps
+constexpr float kJumpMaxLaunchVy     = 20.0f;  // sanity cap for uphill
+                                                // jumps at max trigger
+                                                // range
+constexpr float kJumpFallbackVy      = 8.0f;   // used when target is
+                                                // directly above/below
+                                                // (distXZ ~ 0)
 
-// Populate s.jumpVel* with horizontal aim toward target + fixed upward
-// launch. Called from rule 2 (TickWallPursue) and rule 3 (TickGroundPursue)
-// trigger sites before TransitionTo(JumpLunge). jumpAirborne=false so
-// TickJumpLunge's wind-up phase runs first.
+// Populate s.jumpVel* with a BALLISTIC AIM at the target. Horizontal
+// speed is fixed (kJumpForwardSpeed) and airtime N = distXZ /
+// kJumpForwardSpeed frames; we solve for the initial Vy that makes
+// the spider's Y equal target Y after N frames of semi-implicit-Euler
+// integration used by TickJumpLunge:
+//
+//   pos_y(N) - pos_y(0) = N*vy_0 + g * N*(N+1)/2
+//   → vy_0 = dy/N - g*(N+1)/2
+//
+// vy_0 is clamped to [kJumpMinLaunchVy, kJumpMaxLaunchVy] so:
+//   - downhill jumps (dy < 0) still have a visible arc rather than a
+//     straight-line dive; spider will overshoot target Y and continue
+//     falling until it hits floor/wall (or safety timeout).
+//   - uphill jumps (dy > 0) beyond the spider's launch power fall
+//     short of target — trust-physics per design decision.
+// jumpAirborne=false so TickJumpLunge's wind-up phase runs first.
 inline void SetupJumpToward(EnSwEnhancedState& s, const Vec3f& spiderPos,
                             const Vec3f& targetPos) {
-    const float dx = targetPos.x - spiderPos.x;
-    const float dz = targetPos.z - spiderPos.z;
+    const float dx     = targetPos.x - spiderPos.x;
+    const float dz     = targetPos.z - spiderPos.z;
+    const float dy     = targetPos.y - spiderPos.y;
     const float distXZ = std::sqrt(dx * dx + dz * dz);
+
     if (distXZ < 0.001f) {
+        // Target directly overhead / underfoot — no horizontal aim
+        // possible, fall back to a fixed upward kick.
         s.jumpVelX = 0.0f;
         s.jumpVelZ = 0.0f;
+        s.jumpVelY = kJumpFallbackVy;
     } else {
         const float inv = 1.0f / distXZ;
         s.jumpVelX = dx * inv * kJumpForwardSpeed;
         s.jumpVelZ = dz * inv * kJumpForwardSpeed;
+
+        const float N   = distXZ / kJumpForwardSpeed;
+        float       vy0 = dy / N - kGravityAccel * (N + 1.0f) * 0.5f;
+        if (vy0 < kJumpMinLaunchVy) vy0 = kJumpMinLaunchVy;
+        if (vy0 > kJumpMaxLaunchVy) vy0 = kJumpMaxLaunchVy;
+        s.jumpVelY = vy0;
     }
-    s.jumpVelY     = kJumpInitialVy;
     s.jumpAirborne = false;
 }
 
