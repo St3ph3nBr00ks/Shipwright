@@ -43,6 +43,7 @@ extern "C" {
 #include "z64.h"
 #include "macros.h"
 #include "functions.h"
+#include "variables.h"  // gSfxDefaultFreqAndVolScale, gSfxDefaultReverb
 // Custom actor id for the geyser plume. Registered via
 // ActorDB::AddBuiltInCustomActors; declared in soh/src/code/z_play.c.
 extern s16 gEnKarebabaGeyserId;
@@ -247,6 +248,47 @@ constexpr Color_RGBA8 kSplashEnvColor  = {  30,  80,  20, 255 };  // V5: darker 
 constexpr Color_RGBA8 kDustPrimColor   = { 180, 230, 130, 150 };  // V5: restored pre-V4
 constexpr Color_RGBA8 kDustEnvColor    = {  80, 130,  60, 255 };
 
+// V7 — +50% volume helper for key SFX. Audio_PlayActorSound2 has
+// no volume control — falls back to distance attenuation. To boost
+// perceived volume, use Audio_PlaySoundGeneral which accepts a
+// pointer to a float volume scale. gSfxDefaultFreqAndVolScale is
+// 1.0f; 1.5f = +50% louder (may clip if audio system caps at 1.0
+// internally, but that's the system's problem — we ask for +50%).
+static f32 sBoostedVolScale = 1.5f;
+
+inline void PlayBoostedActorSfx(Actor* actor, u16 sfxId) {
+    Audio_PlaySoundGeneral(sfxId, &actor->projectedPos, 4,
+                            &gSfxDefaultFreqAndVolScale,
+                            &sBoostedVolScale,
+                            &gSfxDefaultReverb);
+}
+
+// V7 — telegraph render helper. Extracted so both OnUprightTick
+// and OnSpinTick can call it (user spec: telegraph persists through
+// Spin animation, only clears after acid actually fires). Sets
+// head scale + spawns mouth spit every N frames.
+inline void RenderTelegraph(EnKarebaba* actor, PlayState* play) {
+    // Head at kTelegraphHeadScale (1.25× vanilla).
+    Actor_SetScale(&actor->actor, kVanillaScale * kTelegraphHeadScale);
+
+    // Mouth spit every kTelegraphSpitPeriod frames — matches
+    // attack-time spit visibility (V7 change 2 per user: telegraph
+    // spit was too small at half-scale, now uses full attack-time
+    // params so it reads clearly against the enlarged head).
+    if ((play->gameplayFrames % kTelegraphSpitPeriod) == 0) {
+        Color_RGBA8 primC = kSpitPrimColor;
+        Color_RGBA8 envC  = kSpitEnvColor;
+        Vec3f pos = {
+            actor->actor.world.pos.x + (Rand_ZeroOne() - 0.5f) * 6.0f,
+            actor->actor.world.pos.y + kSpitYOffset +
+                (Rand_ZeroOne() - 0.5f) * 4.0f,
+            actor->actor.world.pos.z + (Rand_ZeroOne() - 0.5f) * 6.0f,
+        };
+        EffectSsGSplash_Spawn(play, &pos, &primC, &envC,
+                                kSpitSplashType, kSpitSplashScale);
+    }
+}
+
 }  // namespace
 
 bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
@@ -314,7 +356,8 @@ bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
                 state.cooldownSpins       = kAcidCooldownSpins;
                 state.chargeCounter       = 0;
                 // SFX — dramatic "eruption" sound at attack start.
-                Audio_PlayActorSound2(&actor->actor, NA_SE_EV_ERUPTION_CLOUD);
+                // V7 — +50% vol per user "erupt too quiet".
+                PlayBoostedActorSfx(&actor->actor, NA_SE_EV_ERUPTION_CLOUD);
                 return true;
             }
             // Out of range — preserve Ready state per user spec
@@ -336,7 +379,8 @@ bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
                 state.chargeState = KarebabaChargeState::Ready;
                 // SFX — subtle "bubble" tell so player notices the
                 // telegraph state change.
-                Audio_PlayActorSound2(&actor->actor, NA_SE_EV_WATER_BUBBLE);
+                // V7 — +50% vol per user "sizzle too quiet".
+                PlayBoostedActorSfx(&actor->actor, NA_SE_EV_WATER_BUBBLE);
             } else {
                 // Fail — increment counter, clamped to max (chance
                 // never exceeds 100%).
@@ -376,88 +420,81 @@ void EnKarebabaDescriptor::OnPeerReceiveChargedFlag(EnKarebaba* actor,
 }
 
 void EnKarebabaDescriptor::OnUprightTick(EnKarebaba* actor, PlayState* play) {
-    // V6 — Ready-phase telegraph. Applied per-frame during vanilla
-    // EnKarebaba_Upright. Two visual channels:
-    //   - Head at kTelegraphHeadScale (1.25× vanilla).
-    //   - Subtle mouth spit every kTelegraphSpitPeriod frames.
-    // Rendered on both host (chargeState==Ready) and peer
-    // (netCharged==true). Peer's chargeState is stale — the
-    // telegraph decision uses whichever source is authoritative
-    // for the local client.
+    // Ready-phase telegraph. Applied per-frame during vanilla
+    // EnKarebaba_Upright when charge state indicates Ready (host)
+    // or netCharged (peer). V7 change 7 — telegraph render logic
+    // extracted to shared RenderTelegraph() helper so OnSpinTick
+    // can render the same telegraph during non-firing spins
+    // (Ready + Link out of range).
     if (actor == nullptr || play == nullptr) return;
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return;
     KarebabaEnhancedState& state = it->second;
 
-    // Determine telegraph active — union of host-side authoritative
-    // Ready state OR peer-side received flag. On host both agree;
-    // on peer only netCharged is truthful.
     const bool telegraphActive =
         (state.chargeState == KarebabaChargeState::Ready) ||
         state.netCharged;
     if (!telegraphActive) return;
 
-    // Apply enlarged head.
-    Actor_SetScale(&actor->actor, kVanillaScale * kTelegraphHeadScale);
-
-    // Subtle mouth spit every N frames. Uses game frame counter for
-    // deterministic timing (both clients render synced particles
-    // because gameplayFrames is host-synced via TIME_SYNC family).
-    if ((play->gameplayFrames % kTelegraphSpitPeriod) == 0) {
-        Color_RGBA8 primC = kSpitPrimColor;
-        Color_RGBA8 envC  = kSpitEnvColor;
-        Vec3f pos = {
-            actor->actor.world.pos.x + (Rand_ZeroOne() - 0.5f) * 6.0f,
-            actor->actor.world.pos.y + kSpitYOffset +
-                (Rand_ZeroOne() - 0.5f) * 4.0f,
-            actor->actor.world.pos.z + (Rand_ZeroOne() - 0.5f) * 6.0f,
-        };
-        // Half-scale of attack-time spit — subtle continuous signal
-        // rather than the dramatic bursts of the actual attack.
-        EffectSsGSplash_Spawn(play, &pos, &primC, &envC,
-                                kSpitSplashType, kSpitSplashScale / 2);
-    }
+    RenderTelegraph(actor, play);
 }
 
 void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
     if (actor == nullptr || play == nullptr) return;
 
-    // V6 — clear any leftover telegraph scale from prior Upright on
-    // FIRST spin frame (params==39 = just decremented from 40). Runs
-    // unconditionally on host + peer so telegraph → spin transition
-    // is clean regardless of Ready/enhanced state. If this spin IS
-    // enhanced, OnSpinTick's sinusoid below re-scales starting at
-    // 1.0 anyway; if not enhanced, scale stays vanilla for the
-    // vanilla Spin cycle. Zero net cost when scale already at vanilla.
-    if (actor->actor.params == 39) {
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) {
+        // Not tracked — defensive scale reset on first spin frame in
+        // case telegraph scale leaked in from somewhere. Very rare.
+        if (actor->actor.params == 39) {
+            Actor_SetScale(&actor->actor, kVanillaScale);
+        }
+        return;
+    }
+    KarebabaEnhancedState& state = it->second;
+
+    // V7 change 6+7 — head-scale + telegraph rendering during Spin.
+    // User spec: "head should only return to normal size after the
+    // acid attack is used" AND "telegraph mouth spit persists during
+    // spin". Two cases:
+    //   (a) Ready state + Link out of range → non-enhanced Spin
+    //       running. Render telegraph (1.25× head + mouth spit)
+    //       through the spin — preserves visual continuity with
+    //       Upright telegraph.
+    //   (b) Enhanced spin firing → constant 1.25× head throughout
+    //       (was sinusoid 1.0→1.25→1.0 in V6, changed to constant
+    //       per user "should only return to normal after acid used").
+    //       Continues rendering Phase 1 attack visuals below.
+    //   (c) Not Ready, not enhanced → normal vanilla spin, scale 1.0.
+
+    const bool telegraphActive =
+        (state.chargeState == KarebabaChargeState::Ready) ||
+        state.netCharged;
+
+    if (state.currentSpinEnhanced) {
+        // Case (b) — head at constant 1.25 through entire enhanced
+        // spin (V7 change 6). Vanilla Spin doesn't write scale, so
+        // we own it. OnSpinExit will reset to 1.0 after acid fires.
+        Actor_SetScale(&actor->actor, kVanillaScale * kTelegraphHeadScale);
+    } else if (telegraphActive) {
+        // Case (a) — render telegraph for a Ready spin that isn't
+        // firing acid (Link out of range). Head 1.25 + mouth spit.
+        RenderTelegraph(actor, play);
+    } else if (actor->actor.params == 39) {
+        // Case (c) — first frame of vanilla spin, reset scale from
+        // any prior state (defensive; scale should already be 1.0).
         Actor_SetScale(&actor->actor, kVanillaScale);
     }
 
-    auto it = sStates.find(&actor->actor);
-    if (it == sStates.end()) return;  // not tracked
-    KarebabaEnhancedState& state = it->second;
     if (!state.currentSpinEnhanced) return;
 
+    // ---- Enhanced spin: Phase 1-4 visual attack ----
     // Frame index within the spin cycle. Vanilla params starts at
     // 40 and counts down. Frame 0 = params == 40; frame 39 = params
     // == 1. (params == 0 fires the SetupUpright transition; caller
     // handles that.)
     const int paramsNow = (int)actor->actor.params;
     const float frameF = kSpinTotalFrames - (float)paramsNow;
-    // Clamp defensively — spin might tick once more after params
-    // hits 0 depending on ordering.
-    const float t = (frameF < 0.0f) ? 0.0f
-                    : (frameF > kSpinTotalFrames ? kSpinTotalFrames : frameF);
-    // Sinusoid: 1.0 at t=0, peak at t=20, 1.0 at t=40.
-    // sin(π*t/40) is 0 at endpoints, 1 at t=20.
-    const float sinePhase =
-        Math_SinS((s16)((t / kSpinTotalFrames) * 0x8000));
-    const float scaleMul =
-        kHeadScaleBase + (kHeadScalePeak - kHeadScaleBase) * sinePhase;
-
-    // Apply to actor scale — vanilla Spin doesn't write scale, so
-    // we own it during enhanced spin.
-    Actor_SetScale(&actor->actor, kVanillaScale * scaleMul);
 
     // Spawn the AC-collider actor once per enhanced spin, on frame 20
     // (V6 — was frame 1, delayed per user spec so damage window matches
@@ -566,11 +603,28 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
     // Phase 3 — Ground-splash burst (5 splashes, 1 per frame, at
     // random XZ around the plant). Fires as rain hits the ground.
     // Impact frame kGroundImpactStartFrame chosen to match rain
-    // velocity + gravity + 30u fall distance (~7 frames of flight).
+    // velocity + gravity + 130u fall distance (~20 frames of flight
+    // per V4).
+    //
+    // V7 plan-B (per user "still white water splash") — use SAME
+    // GSplash config as the head-spit (kSpit* constants) instead
+    // of the kSplash* config. The head-spit reads clearly green
+    // in-scene; the kGroundSplash config with larger scale (400) +
+    // splash silhouette type 1 was letting the underlying white
+    // water texture bleed through. Copying the exact head-spit
+    // params (scale 250 + type 2 + kSpit tints) puts the ground
+    // splashes on the same tinting path that already reads green.
+    // kSplashPrim/Env/GroundSplashScale/Type constants preserved
+    // above but no longer referenced — kept in-file for potential
+    // future revert.
+    //
+    // V7 also — WATERDROP SFX removed per user "too loud and always
+    // playing". If a punctuation SFX at ground impact is wanted
+    // later, can add a quieter alternative.
     if (frameI >= kGroundImpactStartFrame &&
         state.groundSplashesFired < kGroundSplashTotalCount) {
-        Color_RGBA8 primC = kSplashPrimColor;
-        Color_RGBA8 envC  = kSplashEnvColor;
+        Color_RGBA8 primC = kSpitPrimColor;
+        Color_RGBA8 envC  = kSpitEnvColor;
         // Random XZ within a ring around home. Prefer ring-ish
         // distribution (not uniformly filled disk) so splashes
         // don't cluster at center — sqrt(u) biases toward the rim.
@@ -583,13 +637,7 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
             actor->actor.home.pos.z + r * std::sin(ang),
         };
         EffectSsGSplash_Spawn(play, &splashPos, &primC, &envC,
-                                kGroundSplashType, kGroundSplashScale);
-        // V6 SFX — waterdrop tick on FIRST splash only (avoid
-        // 5-splash SFX spam over 5 frames — one is enough for the
-        // "acid hits ground" tell).
-        if (state.groundSplashesFired == 0) {
-            Audio_PlayActorSound2(&actor->actor, NA_SE_EV_WATERDROP);
-        }
+                                kSpitSplashType, kSpitSplashScale);
         state.groundSplashesFired++;
     }
 
