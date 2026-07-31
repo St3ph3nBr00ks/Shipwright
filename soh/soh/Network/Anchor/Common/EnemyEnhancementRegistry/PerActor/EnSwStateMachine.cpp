@@ -1591,6 +1591,11 @@ void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         }
     }
 
+    // Capture position BEFORE integrating — used for swept collision
+    // check below. See Analysis/en_sw_jumplunge_wall_clip_2026-07-31.md
+    // for full rationale (Option A: continuous collision detection).
+    s.jumpPrevPos = self->actor.world.pos;
+
     // Airborne — integrate position with gravity on Y component.
     self->actor.velocity.y += kGravityAccel;
     if (self->actor.velocity.y < kMaxFallSpeed) {
@@ -1602,47 +1607,57 @@ void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 
     LogTickState(self, s, "jump_airborne");
 
-    // Landing detection — only fires during the DOWNWARD phase of the
-    // arc (velocity.y < 0). During upward launch the raycast would go
-    // UP (from = pos+5, to = pos + velY - 5 → higher than from when
-    // velY > 10), potentially hitting an upper-room floor poly and
-    // snap-teleporting the spider there. Ceiling contact during rise
-    // is intentionally ignored — the spider just continues its arc
-    // and gravity will bring it back down.
-    if (self->actor.velocity.y < 0.0f) {
-        Vec3f from = self->actor.world.pos;
-        from.y += 5.0f;
-        Vec3f to = {
-            self->actor.world.pos.x,
-            self->actor.world.pos.y + self->actor.velocity.y - 5.0f,
-            self->actor.world.pos.z,
-        };
+    // Swept collision — cast a ray from prevPos (start of this frame)
+    // to current pos (after integration). Catches ANY geometry the arc
+    // crossed this frame — floor, wall, ceiling — during BOTH upward
+    // and downward phases. Replaces the previous vertical-only raycast
+    // which:
+    //   - missed all upward-phase collisions (gated on velocity.y < 0)
+    //   - missed wall clips in horizontal motion (probed strictly DOWN)
+    //   - allowed thin-wall tunneling at high speeds
+    // Cost: one BgCheck_EntityLineTest1 per airborne frame, trivial.
+    {
         CollisionPoly* poly = nullptr;
         s32 bgId = 0;
         Vec3f hitPos = {0.0f, 0.0f, 0.0f};
-        if (BgCheck_EntityLineTest1(&play->colCtx, &from, &to, &hitPos, &poly,
-                                     1, 1, 1, 0, &bgId) && poly != nullptr) {
+        if (BgCheck_EntityLineTest1(&play->colCtx, &s.jumpPrevPos,
+                                     &self->actor.world.pos,
+                                     &hitPos, &poly, 1, 1, 1, 0, &bgId) &&
+            poly != nullptr) {
             const float ny = COLPOLY_GET_NORMAL(poly->normal.y);
             if (ny > kWallNormalYThreshold) {
-                // Floor landing.
+                // Floor landing — snap XZ to hit + body offset above.
+                self->actor.world.pos.x = hitPos.x;
                 self->actor.world.pos.y = hitPos.y + kBodySurfaceOffset;
+                self->actor.world.pos.z = hitPos.z;
                 self->actor.velocity.x = self->actor.velocity.y =
                     self->actor.velocity.z = 0.0f;
                 s.jumpAirborne = false;
-                TransitionTo(self, s, EnSwState::GroundPursue, "jump_landed_floor");
+                TransitionTo(self, s, EnSwState::GroundPursue,
+                             "jump_landed_floor");
                 return;
             }
             if (std::fabs(ny) < kWallNormalYThreshold) {
-                // Wall contact — zero velocity, transition to Uninitialized
-                // so the basis raycast re-establishes on the new wall.
+                // Wall contact — snap to hit, back off along the wall
+                // normal by kBodySurfaceOffset so next-tick basis
+                // raycast doesn't start inside the wall poly.
+                const float nx = COLPOLY_GET_NORMAL(poly->normal.x);
+                const float nz = COLPOLY_GET_NORMAL(poly->normal.z);
+                self->actor.world.pos.x = hitPos.x + nx * kBodySurfaceOffset;
+                self->actor.world.pos.y = hitPos.y + ny * kBodySurfaceOffset;
+                self->actor.world.pos.z = hitPos.z + nz * kBodySurfaceOffset;
                 self->actor.velocity.x = self->actor.velocity.y =
                     self->actor.velocity.z = 0.0f;
                 s.jumpAirborne = false;
                 s.hasWallBasis = false;
-                TransitionTo(self, s, EnSwState::Uninitialized, "jump_hit_wall");
+                TransitionTo(self, s, EnSwState::Uninitialized,
+                             "jump_hit_wall");
                 return;
             }
-            // Ceiling on the way down — ignore, keep falling.
+            // Ceiling (ny < -threshold) — spider bonked head. Ignore
+            // and continue arc; gravity brings it back down. Not
+            // treated as a landing since the spider can't "hang" from
+            // a ceiling mid-jump.
         }
     }
 

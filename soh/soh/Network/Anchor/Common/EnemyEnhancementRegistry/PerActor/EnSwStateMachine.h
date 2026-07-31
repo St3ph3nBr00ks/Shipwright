@@ -124,6 +124,13 @@ struct EnSwEnhancedState {
     float jumpVelX     = 0.0f;
     float jumpVelY     = 0.0f;
     float jumpVelZ     = 0.0f;
+    // Position at the start of the current airborne tick — captured
+    // before physics integration for swept collision detection. See
+    // Analysis/en_sw_jumplunge_wall_clip_2026-07-31.md — the previous
+    // vertical-only raycast missed wall clips during upward phase and
+    // during horizontal motion, letting spiders tunnel through walls
+    // and fall into voids.
+    Vec3f jumpPrevPos = {0.0f, 0.0f, 0.0f};
 
     // Sticky targeting — cached target Actor* to avoid re-picking every
     // frame. Reference model: NPC Invader's state.targetClientId. Set
