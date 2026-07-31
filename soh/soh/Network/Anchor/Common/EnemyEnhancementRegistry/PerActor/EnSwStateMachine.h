@@ -124,6 +124,23 @@ struct EnSwEnhancedState {
     float jumpVelX     = 0.0f;
     float jumpVelY     = 0.0f;
     float jumpVelZ     = 0.0f;
+
+    // Sticky targeting — cached target Actor* to avoid re-picking every
+    // frame. Reference model: NPC Invader's state.targetClientId. Set
+    // whenever FindNearestPlayerActor returns a valid target; held for
+    // up to kStickyGraceFrames after target lookup fails (rare — mostly
+    // during scene transitions). Cleared when the pointer becomes stale
+    // (target->update == nullptr) or grace expires.
+    Actor* stickyTarget     = nullptr;
+    int    stickyLossFrames = 0;
+
+    // Idle gaze rotation — slow random yaw sweep for ground spider not
+    // pursuing/attacking (vanilla func_80B0E5E0 does the same for wall
+    // spider via shape.rot.z, which our post-hook doesn't override on
+    // wall). Frame count is absolute (play->gameplayFrames-based) so
+    // it survives state transitions cleanly.
+    s16 idleGazeTargetYaw       = 0;
+    int idleGazeNextChangeFrame = 0;
 };
 
 // -------------------------------------------------------------------

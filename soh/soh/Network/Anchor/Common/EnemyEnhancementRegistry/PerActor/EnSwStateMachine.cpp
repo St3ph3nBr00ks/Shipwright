@@ -170,6 +170,113 @@ inline void SetupWalkLungeToward(EnSwEnhancedState& s,
 }
 
 // -------------------------------------------------------------------
+// Detection / visibility / sticky-target helpers.
+// Used by TickWallIdle, TickWallPursue, TickGroundPursue for target
+// acquisition + attack-gate decisions.
+// -------------------------------------------------------------------
+
+// Vanilla En_Sw picker's 3D distance gate is 130u (func_80B0DEA8 line
+// 861); we treat that as the "contact-awareness" range where the
+// spider can attack regardless of facing direction. Beyond 130u but
+// within kIdleDetectRangeSq, vision-cone gate applies.
+constexpr float kVanillaDetectRangeSq = 130.0f * 130.0f;
+
+// Max vertical reach for a JumpLunge — at kJumpMaxLaunchVy = 20 and
+// kGravityAccel = -1.2, theoretical peak is Vy²/(2|g|) = 400/2.4 ≈ 167u.
+// We gate at 120u to leave headroom so triggered jumps have a real
+// chance of hitting rather than peaking exactly at target Y with no
+// energy to spare.
+constexpr float kMaxJumpHeightUp = 120.0f;
+
+// Sticky-target grace — spider keeps pursuing / attacking against the
+// last-known target for this many frames after target lookup fails
+// (rare in practice; mostly scene-transition frames where DummyPlayer
+// list is briefly empty). Reference model: NPC Invader's OnTick sticky
+// re-eval logic in InvaderDescriptor.cpp.
+constexpr int kStickyGraceFrames = 30;
+
+// Idle gaze rotation — ground spider slowly turns yaw between random
+// targets when not pursuing / attacking. Wall spider handled by
+// vanilla func_80B0E5E0's shape.rot.z random-gaze mechanism (correct
+// axis for wall orientation), so we don't touch wall idle here.
+constexpr int kIdleGazeChangeInterval = 30;   // frames between random target picks
+constexpr s16 kIdleGazeStepScale      = 8;
+constexpr s16 kIdleGazeStepMax        = 0x100; // ~1.4° per frame — slow sweep
+
+// Sticky target lookup — returns cached target if lookup fails this
+// tick, up to kStickyGraceFrames of persistence. Reference: NPC
+// Invader targetClientId re-eval pattern.
+inline Actor* GetStickyTarget(EnSwEnhancedState& s, EnSw* self,
+                              PlayState* play) {
+    Actor* current = FindNearestPlayerActor(&self->actor, play);
+    if (current != nullptr) {
+        s.stickyTarget     = current;
+        s.stickyLossFrames = 0;
+        return current;
+    }
+    if (s.stickyTarget != nullptr) {
+        s.stickyLossFrames++;
+        if (s.stickyLossFrames > kStickyGraceFrames ||
+            s.stickyTarget->update == nullptr) {
+            s.stickyTarget = nullptr;
+            return nullptr;
+        }
+        return s.stickyTarget;
+    }
+    return nullptr;
+}
+
+// 3D squared distance spider→target.
+inline float Dist3DSq(const EnSw* spider, const Actor* target) {
+    const float dx = target->world.pos.x - spider->actor.world.pos.x;
+    const float dy = target->world.pos.y - spider->actor.world.pos.y;
+    const float dz = target->world.pos.z - spider->actor.world.pos.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+// Vision cone gate — within 130u 3D always visible. Beyond that, up
+// to kIdleDetectRangeSq (200u), require in-front hemisphere via XZ
+// forward dot product from spider's shape.rot.y facing direction.
+inline bool IsTargetVisible(const EnSw* spider, const Actor* target) {
+    const float d2 = Dist3DSq(spider, target);
+    if (d2 > kIdleDetectRangeSq)   return false;  // beyond max detect
+    if (d2 <= kVanillaDetectRangeSq) return true; // always visible close
+    const float dx = target->world.pos.x - spider->actor.world.pos.x;
+    const float dz = target->world.pos.z - spider->actor.world.pos.z;
+    const float yawRad =
+        spider->actor.shape.rot.y * (float)(M_PI / 0x8000);
+    const float fwdX = std::sin(yawRad);
+    const float fwdZ = std::cos(yawRad);
+    return (fwdX * dx + fwdZ * dz) > 0.0f;
+}
+
+// Jump-height gate — only jump if target is at or below spider Y,
+// or above by no more than kMaxJumpHeightUp. Physics-based misses on
+// horizontal aim are OK (trust-physics per design), but a jump toward
+// an unreachable-above target has 0% chance of hitting.
+inline bool IsTargetJumpReachable(const EnSw* spider, const Actor* target) {
+    return target->world.pos.y - spider->actor.world.pos.y
+           <= kMaxJumpHeightUp;
+}
+
+// Idle gaze rotation — ground spider slowly turns yaw between random
+// s16 targets, changed every kIdleGazeChangeInterval frames. Writes
+// world.rot.y directly; caller sets world.rot.x/z + copies to shape.rot.
+inline void UpdateIdleGaze(EnSwEnhancedState& s, EnSw* self,
+                            PlayState* play) {
+    const int now = (int)play->gameplayFrames;
+    if (now >= s.idleGazeNextChangeFrame) {
+        // Pick a new target ±90° from current facing so the spider
+        // sweeps rather than snapping to a random direction.
+        const s16 offset = (s16)((Rand_ZeroOne() - 0.5f) * 0x8000);
+        s.idleGazeTargetYaw       = self->actor.world.rot.y + offset;
+        s.idleGazeNextChangeFrame = now + kIdleGazeChangeInterval;
+    }
+    Math_SmoothStepToS(&self->actor.world.rot.y, s.idleGazeTargetYaw,
+                        kIdleGazeStepScale, kIdleGazeStepMax, 0);
+}
+
+// -------------------------------------------------------------------
 // Tuning constants
 // -------------------------------------------------------------------
 
@@ -656,19 +763,19 @@ void TickUninitialized(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 }
 
 // TickWallIdle — on-wall, no target. Hold position (no motion writes).
-// Watch for a target entering detect range → transition to WallPursue.
+// Vanilla func_80B0E5E0 handles the random-gaze rotation (shape.rot.z
+// smooth-step toward random unk_444) — that's the correct axis for
+// wall orientation so we don't touch it here. Watch for a target
+// entering 3D detect range → transition to WallPursue.
 void TickWallIdle(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     LogTickState(self, s, "holding");
 
-    // Target detection — mirror of what NavConsumer used to do. Uses
-    // FindNearestPlayerActor (which honours dead-player + cutscene
-    // filters landed 2026-06-17).
-    Actor* target = FindNearestPlayerActor(&self->actor, play);
+    // Sticky target — see helper. Grace period covers 1-frame lookup
+    // failures (rare, mostly scene-transition frames).
+    Actor* target = GetStickyTarget(s, self, play);
     if (target == nullptr) return;  // no valid target; stay idle
 
-    const float dx = target->world.pos.x - self->actor.world.pos.x;
-    const float dz = target->world.pos.z - self->actor.world.pos.z;
-    if ((dx * dx + dz * dz) > kIdleDetectRangeSq) return;
+    if (Dist3DSq(self, target) > kIdleDetectRangeSq) return;
 
     TransitionTo(self, s, EnSwState::WallPursue, "target_in_range");
 }
@@ -752,8 +859,9 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         return;
     }
 
-    // Target lookup + range checks.
-    Actor* target = FindNearestPlayerActor(&self->actor, play);
+    // Target lookup + range checks. Sticky helper covers 1-frame
+    // lookup failures.
+    Actor* target = GetStickyTarget(s, self, play);
     if (target == nullptr) {
         TransitionTo(self, s, EnSwState::WallIdle, "target_lost");
         return;
@@ -762,7 +870,9 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const float dxT = target->world.pos.x - self->actor.world.pos.x;
     const float dzT = target->world.pos.z - self->actor.world.pos.z;
     const float distXZSq = dxT * dxT + dzT * dzT;
-    if (distXZSq > kIdleDetectRangeSq) {
+    const float dyT = target->world.pos.y - self->actor.world.pos.y;
+    const float dist3DSq = distXZSq + dyT * dyT;
+    if (dist3DSq > kIdleDetectRangeSq) {
         TransitionTo(self, s, EnSwState::WallIdle, "out_of_range");
         return;
     }
@@ -775,22 +885,23 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     // "in attack range" since the spider needs to attach to a wall
     // and pursue upward).
     constexpr float kAttackRangeSq = 50.0f * 50.0f;
-    const float dyT = target->world.pos.y - self->actor.world.pos.y;
-    const float dist3DSq = distXZSq + dyT * dyT;
     const bool inAttackRange = (dist3DSq <= kAttackRangeSq);
 
     // Rule 2 — spider on wall + Link off wall + close enough → jump.
-    // Skipped when Link is climbing (any surface), since that's rule 1
-    // (walk-lunge only). Range gate: kJumpMinTriggerRange < dist3D <=
-    // kJumpTriggerRange, so close-range walking still resolves via the
-    // vanilla lunge chain instead of a jump.
+    // Skipped when Link is climbing (any surface — rule 1 walk-lunge).
+    // Gated on IsTargetVisible (vision cone beyond 130u) + jump-height
+    // (spider can't reach targets above kMaxJumpHeightUp anyway).
+    // Range gate: kJumpMinTriggerRange < dist3D <= kJumpTriggerRange
+    // keeps close-range walking under the vanilla lunge chain.
     const Player* targetPlayer = reinterpret_cast<const Player*>(target);
     const bool linkClimbing =
         (targetPlayer->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
     const float dist3D = std::sqrt(dist3DSq);
     if (!linkClimbing &&
         dist3D > kJumpMinTriggerRange &&
-        dist3D <= kJumpTriggerRange) {
+        dist3D <= kJumpTriggerRange &&
+        IsTargetVisible(self, target) &&
+        IsTargetJumpReachable(self, target)) {
         SetupJumpToward(s, self->actor.world.pos, target->world.pos);
         TransitionTo(self, s, EnSwState::JumpLunge, "wall_jump_at_ground_link");
         return;
@@ -1009,17 +1120,16 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         }
     }
 
-    Actor* target = FindNearestPlayerActor(&self->actor, play);
+    // Sticky target — see helper. Grace period covers 1-frame lookup
+    // failures (mostly during scene transitions).
+    Actor* target = GetStickyTarget(s, self, play);
     if (target == nullptr) {
-        // No valid target this frame — hold ground orientation and
-        // idle in place. Previously transitioned to Uninitialized,
-        // which walked TryEstablishBasis, found any nearby wall,
-        // then landed in WallIdle where vanilla's random ambient
-        // gaze rotated the (still-on-ground) spider idly around its
-        // wall-axis — the "rotates idly like it's on a wall"
-        // symptom. Staying in GroundPursue with the last-known ground
-        // orientation avoids this cross-state pollution; next tick's
-        // target lookup can re-acquire.
+        // No valid target this frame — idle in place with ground
+        // orientation + slow random gaze rotation ("looking for prey"
+        // per user spec). Transitioning to Uninitialized here would
+        // route to WallIdle via TryEstablishBasis and reintroduce
+        // vanilla ambient rotation on the wrong (wall) axis.
+        UpdateIdleGaze(s, self, play);
         self->actor.world.rot.x = (s16)-0x4000;
         self->actor.world.rot.z = 0;
         self->actor.shape.rot   = self->actor.world.rot;
@@ -1028,17 +1138,18 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 
     const float dx = target->world.pos.x - self->actor.world.pos.x;
     const float dz = target->world.pos.z - self->actor.world.pos.z;
+    const float dy = target->world.pos.y - self->actor.world.pos.y;
     const float distXZSq = dx * dx + dz * dz;
-    if (distXZSq > kIdleDetectRangeSq) {
-        // Target out of range — hold ground orientation + face last-
-        // known target direction. Same reasoning as target-null path
-        // above: transitioning to Uninitialized reroutes to WallIdle
-        // via TryEstablishBasis, which reintroduces vanilla ambient
-        // rotation. Better to idle in place and re-acquire next tick.
-        const s16 yawLast =
-            (s16)(std::atan2(dx, dz) * (0x8000 / M_PI));
+    const float dist3DSq = distXZSq + dy * dy;
+    if (dist3DSq > kIdleDetectRangeSq) {
+        // Target out of 3D detect range — idle in place with slow
+        // gaze rotation. Same rationale as target-null path.
+        // Previously used XZ distance which let the spider "engage"
+        // Link when Link was climbing 500u up a nearby wall (small
+        // XZ, huge Y) — silly. 3D range gates engagement to what the
+        // spider can realistically reach.
+        UpdateIdleGaze(s, self, play);
         self->actor.world.rot.x = (s16)-0x4000;
-        self->actor.world.rot.y = yawLast;
         self->actor.world.rot.z = 0;
         self->actor.shape.rot   = self->actor.world.rot;
         return;
@@ -1085,21 +1196,16 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     self->actor.world.rot.z = 0;
     self->actor.shape.rot = self->actor.world.rot;
 
-    // Attack-range hold uses 3D distance so a climbing target directly
-    // above the spider (small distXZ, large distY) doesn't trigger
-    // premature hold. Reported symptom: spider waited at wall base
-    // when player was climbing above. With 3D check, spider stays in
-    // pursuit mode → hits wall via forward probe → GroundToWallReattach
-    // → transitions to WallPursue to climb after the player.
+    // Attack-range check uses 3D distance so vertical separation
+    // matters. dist3DSq already computed at target-range gate above.
     constexpr float kAttackRangeSq = 50.0f * 50.0f;
-    const float dyG = target->world.pos.y - self->actor.world.pos.y;
-    const float dist3DSq = distXZSq + dyG * dyG;
     if (dist3DSq <= kAttackRangeSq) {
-        // Rule 3 — spider ANY position + Link off wall + close enough
-        // + no path → JumpLunge. "No path" is proxied by LoS check:
-        // if a raycast from spider to Link is blocked by geometry,
-        // walk-lunge cannot reach Link (direct-yaw motion doesn't
-        // route around obstacles) and jumping is the only option.
+        // Rule 3 — spider on ground + Link off wall + close enough +
+        // (LoS blocked OR jumpable-above) → JumpLunge. "No path" is
+        // proxied by LoS check; walk-lunge can't route around walls,
+        // jumping is the only option. Also gated on IsTargetVisible
+        // (vision cone beyond 130u) + IsTargetJumpReachable
+        // (kMaxJumpHeightUp physics ceiling).
         const Player* targetPlayer = reinterpret_cast<const Player*>(target);
         const bool linkClimbing =
             (targetPlayer->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
@@ -1116,23 +1222,23 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
                 BgCheck_EntityLineTest1(&play->colCtx, &losFrom, &losTo,
                                          &losHit, &losPoly, 1, 0, 0, 1,
                                          &losBgId);
-            if (losBlocked) {
+            if (losBlocked &&
+                IsTargetVisible(self, target) &&
+                IsTargetJumpReachable(self, target)) {
                 SetupJumpToward(s, self->actor.world.pos, target->world.pos);
                 TransitionTo(self, s, EnSwState::JumpLunge, "ground_jump_no_path");
                 return;
             }
-            // Line-of-sight is clear → dedicated WalkLunge state
-            // (custom wind-up + straight-line dash). Previously this
-            // branch set unk_442 = 0 to trigger vanilla's func_80B0E728
-            // walk-lunge chain, but that produced actionFunc
-            // oscillation (E5E0 → E728 → E9BC/E90C → E5E0 → ...) that
-            // flickered the purple color and rotated the spider around
-            // the wrong axis (vanilla shape.rot.z writes designed for
-            // wall spiders don't fit ground orientation). WalkLunge
-            // owns the whole attack lifecycle so no vanilla actionFunc
-            // change is required.
-            SetupWalkLungeToward(s, self->actor.world.pos, target->world.pos);
-            TransitionTo(self, s, EnSwState::WalkLunge, "ground_walk_lunge");
+            // LoS clear (or jump gated) → WalkLunge (custom ground
+            // wind-up + straight-line dash). Vision-cone gate applies
+            // — at 50u attack range dist3D is within 130u vanilla-
+            // exempt zone, so IsTargetVisible always passes here in
+            // practice; kept for consistency + defense against future
+            // range widening.
+            if (IsTargetVisible(self, target)) {
+                SetupWalkLungeToward(s, self->actor.world.pos, target->world.pos);
+                TransitionTo(self, s, EnSwState::WalkLunge, "ground_walk_lunge");
+            }
         }
         return;
     }
