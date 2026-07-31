@@ -1011,7 +1011,18 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 
     Actor* target = FindNearestPlayerActor(&self->actor, play);
     if (target == nullptr) {
-        TransitionTo(self, s, EnSwState::Uninitialized, "target_lost_on_ground");
+        // No valid target this frame — hold ground orientation and
+        // idle in place. Previously transitioned to Uninitialized,
+        // which walked TryEstablishBasis, found any nearby wall,
+        // then landed in WallIdle where vanilla's random ambient
+        // gaze rotated the (still-on-ground) spider idly around its
+        // wall-axis — the "rotates idly like it's on a wall"
+        // symptom. Staying in GroundPursue with the last-known ground
+        // orientation avoids this cross-state pollution; next tick's
+        // target lookup can re-acquire.
+        self->actor.world.rot.x = (s16)-0x4000;
+        self->actor.world.rot.z = 0;
+        self->actor.shape.rot   = self->actor.world.rot;
         return;
     }
 
@@ -1019,7 +1030,17 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const float dz = target->world.pos.z - self->actor.world.pos.z;
     const float distXZSq = dx * dx + dz * dz;
     if (distXZSq > kIdleDetectRangeSq) {
-        TransitionTo(self, s, EnSwState::Uninitialized, "out_of_range_on_ground");
+        // Target out of range — hold ground orientation + face last-
+        // known target direction. Same reasoning as target-null path
+        // above: transitioning to Uninitialized reroutes to WallIdle
+        // via TryEstablishBasis, which reintroduces vanilla ambient
+        // rotation. Better to idle in place and re-acquire next tick.
+        const s16 yawLast =
+            (s16)(std::atan2(dx, dz) * (0x8000 / M_PI));
+        self->actor.world.rot.x = (s16)-0x4000;
+        self->actor.world.rot.y = yawLast;
+        self->actor.world.rot.z = 0;
+        self->actor.shape.rot   = self->actor.world.rot;
         return;
     }
 
@@ -1236,6 +1257,21 @@ void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     // airborne motion).
     self->unk_442 = 100;
 
+    // Smoothly rotate toward the target ground orientation over ~20
+    // frames (~1 s at 20 fps). Starts from whatever rotation the
+    // launch state left us in (wall orientation for rule-2 wall
+    // jumps, ground orientation for rule-3 ground jumps). Yaw aims
+    // at the jump direction (same as dash direction, since horizontal
+    // velocity was set that way in SetupJumpToward). Math_SmoothStepToS
+    // with scale=4 covers ~75% of the remaining angle per frame — a
+    // 90° pitch delta closes to <1° within ~15 frames.
+    const s16 flightYaw =
+        (s16)(std::atan2(s.jumpVelX, s.jumpVelZ) * (0x8000 / M_PI));
+    Math_SmoothStepToS(&self->actor.world.rot.x, (s16)-0x4000, 4, 0x1000, 0x40);
+    Math_SmoothStepToS(&self->actor.world.rot.y, flightYaw,    4, 0x1000, 0x40);
+    Math_SmoothStepToS(&self->actor.world.rot.z, (s16)0,       4, 0x1000, 0x40);
+    self->actor.shape.rot = self->actor.world.rot;
+
     // Wind-up phase — hold in place, telegraph via purple fog color.
     if (s.framesInState < kJumpWindupFrames) {
         LogTickState(self, s, "jump_windup");
@@ -1334,6 +1370,19 @@ void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 // via shape.rot.z writes designed for wall spiders).
 void TickWalkLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     self->unk_442 = 100;
+
+    // Lock ground orientation + face dash direction every frame.
+    // Without this, vanilla func_80B0E430 line 981's `world.rot =
+    // shape.rot` copy carries shape.rot.z drift (from vanilla's
+    // random-gaze smooth-step toward unk_444) — spider visibly
+    // rotates side-to-side during the dash. Our writes here overwrite
+    // vanilla's per the post-hook pattern.
+    const s16 dashYaw =
+        (s16)(std::atan2(s.jumpVelX, s.jumpVelZ) * (0x8000 / M_PI));
+    self->actor.world.rot.x = (s16)-0x4000;
+    self->actor.world.rot.y = dashYaw;
+    self->actor.world.rot.z = 0;
+    self->actor.shape.rot   = self->actor.world.rot;
 
     // Wind-up phase — hold in place, telegraph via purple fog color.
     if (s.framesInState < kWalkLungeWindupFrames) {
