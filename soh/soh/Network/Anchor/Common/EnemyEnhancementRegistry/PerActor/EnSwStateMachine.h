@@ -64,6 +64,7 @@ enum class EnSwState : uint8_t {
     GroundToWallReattach = 5,  // GroundPursue hit a wall; establishing new basis      (M6)
     LungeYield           = 6,  // vanilla state 7 wind-up firing; delegate to vanilla  (M7)
     PermanentlyDisabled  = 7,  // basis raycast failed at init; yield to vanilla forever
+    JumpLunge            = 8,  // ballistic wind-up + arc + landing (Tektite-style)    (M10)
 };
 
 // -------------------------------------------------------------------
@@ -99,6 +100,27 @@ struct EnSwEnhancedState {
     // simpler and preserves vanilla lunge for free.
     EnSwActionFunc initialAmbientActionFunc = nullptr;
     bool           haveAmbientSnapshot      = false;
+
+    // Snapshot of vanilla actionFunc at the moment we entered LungeYield.
+    // Used to detect vanilla's post-lunge transition (func_80B0E728 →
+    // func_80B0E9BC walk-home OR func_80B0E90C post-lunge-stop). Once
+    // vanilla leaves the initial lunge state, we force it back to
+    // ambient via Anchor_Enhance_EnSw_ForceAmbient so the enhanced
+    // state machine can re-take control (resume GroundPursue / chain
+    // another lunge if still in attack range) instead of letting
+    // vanilla walk-home in a straight line to actor.home.pos.
+    EnSwActionFunc lungeEntryActionFunc = nullptr;
+
+    // JumpLunge state — Tektite-style ballistic attack. Wind-up phase
+    // (kJumpWindupFrames) plays a purple telegraph in place; then
+    // airborne phase applies (jumpVelXZ_x/z, jumpVelY) with gravity
+    // accumulating each frame until floor/wall contact.
+    //   jumpAirborne = false during wind-up, true once launched
+    //   jumpVel* = per-frame velocity components (Y updated by gravity)
+    bool  jumpAirborne = false;
+    float jumpVelX     = 0.0f;
+    float jumpVelY     = 0.0f;
+    float jumpVelZ     = 0.0f;
 };
 
 // -------------------------------------------------------------------

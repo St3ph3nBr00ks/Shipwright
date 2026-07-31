@@ -35,6 +35,7 @@ extern void Anchor_Enhance_EnSw_Tick(EnSw* this, PlayState* play);
 extern int  Anchor_Enhance_EnSw_GazeOverride(EnSw* this, PlayState* play, Vec3f* outTargetPos);
 extern void Anchor_Enhance_EnSw_OverrideLimb(EnSw* this, PlayState* play, s32 limbIndex, Vec3s* rot);
 extern int  Anchor_Enhance_EnSw_ShouldRelaxLungeGates(EnSw* this);
+extern int  Anchor_Enhance_EnSw_IsJumpAttacking(EnSw* this);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
@@ -814,9 +815,14 @@ static Player* EnSw_PickLungeTarget(EnSw* this, PlayState* play, s32 arg2) {
         if (p->actor.world.pos.y <= -9000.0f) continue;
 
         // Climbing gate — vanilla: only attack climbing players.
-        // KEPT even under AggressiveAcquire — the plan intent is to fix
-        // flicker-abort, not turn En_Sw into an omni-attacker.
-        if (!(p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) continue;
+        // Skipped under relaxGates so NavConsume ground-walking En_Sw
+        // (Pillar 5 §4.10) can lunge at a standing player on the floor.
+        // AggressiveAcquire alone previously kept this gate to bound
+        // scope; extending relaxGates semantics to include NavConsume
+        // means "any enhanced instance that WOULD reach a non-climbing
+        // player is allowed to attack." Distance + LoS still bound
+        // engagement to the same 130u radius vanilla enforces.
+        if (!relaxGates && !(p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) && arg2) continue;
 
         // Stationary-ladder gate — vanilla en_sw refuses to lunge at
         // a motionless climber (func_8002DDF4 = stateFlags2 &
@@ -1074,6 +1080,22 @@ void func_80B0E9BC(EnSw* this, PlayState* play) {
     }
 }
 
+// #210 Pillar 5 §4.10 — bridge helper: force actionFunc back to the
+// combat-variant ambient state (func_80B0E5E0). Used by the enhanced
+// state machine's LungeYield handler to preempt vanilla's post-lunge
+// transitions to `func_80B0E9BC` (walk-home) or `func_80B0E90C`
+// (post-lunge stop) — those states would move the spider back to
+// `actor.home.pos` in a straight line, ignoring the nav substrate and
+// leaving the enhanced ground orientation. Resetting to ambient lets
+// the state machine's next tick re-enter GroundPursue and chain
+// another lunge if the target is still in attack range.
+void EnSw_ForceAmbient(EnSw* this) {
+    this->actionFunc = func_80B0E5E0;
+    this->unk_442 = 0;  // wind-up timer — 0 = picker fires next tick
+    this->unk_440 = 0;  // dash sfx cooldown
+    this->actor.speedXZ = 0.0f;  // vanilla lunge left speed; reset so we don't drift
+}
+
 void EnSw_Update(Actor* thisx, PlayState* play) {
     EnSw* this = (EnSw*)thisx;
 
@@ -1203,7 +1225,12 @@ void EnSw_Draw(Actor* thisx, PlayState* play) {
             Matrix_Translate(0.0f, 0.0f, 200.0f, MTXMODE_APPLY);
         }
         func_8002EBCC(&this->actor, play, 0);
-    } else if (this->actionFunc == func_80B0E728) {
+    } else if (this->actionFunc == func_80B0E728 ||
+               Anchor_Enhance_EnSw_IsJumpAttacking(this)) {
+        // Purple fog applied both for the vanilla walk-lunge wind-up
+        // (func_80B0E728) AND the enhanced state machine's JumpLunge
+        // wind-up + airborne phases. Same visual telegraph for both
+        // attack shapes.
         func_80B0EDB8(play, &sp30, 0x14, 0x1E);
     }
 

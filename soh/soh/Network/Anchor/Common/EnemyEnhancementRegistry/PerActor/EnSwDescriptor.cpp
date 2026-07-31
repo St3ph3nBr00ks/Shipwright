@@ -162,15 +162,45 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
     // if the offset changes, this may need adjustment.
     static constexpr int16_t kBaseBend = 0x1200;  // ~25°
 
-    // Walk-cycle oscillation. Amplitude ±0x0600 (~8°) around the base:
-    // during pursuit, legs rise ~8° above and dip ~8° below their
-    // resting position, giving a visible step-and-plant motion.
-    // Period 20 frames (~1 second at 20fps game tick).
-    // Per-leg phase offset (2π/8 = 45° per leg) spreads the 8 legs
-    // across one cycle → ripple gait, not synchronized stomp.
-    static constexpr int16_t kWalkAmplitude = 0x0600;  // ~8° swing
-    static constexpr float   kStepPeriod    = 20.0f;   // frames per cycle
-    static constexpr float   kLegPhaseStep  = 2.0f * (float)M_PI / 8.0f;
+    // Walk cycle — alternating tetrapod gait. Two groups of 4 legs
+    // alternate stance (planted at kBaseBend) and swing (lifted via
+    // half-sine arc). Group B is 180° out of phase from Group A.
+    //
+    // Group assignment follows the kinematic rules from Hao et al
+    // 2019 "Analysis of Spiders' Joint Kinematics and Driving Modes
+    // under Different Ground Conditions" (PMC6935789):
+    //   - Same-side legs 1 and 3 move together (also 2 and 4)
+    //   - Diagonal pairs move together (L1+R2, L2+R1, L3+R4, L4+R3)
+    // → Group A: L1, L3, R2, R4  →  legIdx {5, 2, 4, 7}
+    // → Group B: L2, L4, R1, R3  →  legIdx {0, 1, 6, 3}
+    //
+    // Duty cycle: 60% of the cycle is stance (foot planted, holding
+    // body weight); 40% is swing (foot lifted, moving forward). The
+    // swing lift uses a half-sine arc (0 → peak → 0) so the foot
+    // rises smoothly and plants smoothly, which reads more natural
+    // than a triangular lerp or a full sine.
+    static constexpr uint8_t kLegGroupB[8] = {
+        1,  // 0 — L2 — group B
+        1,  // 1 — L4 — group B
+        0,  // 2 — L3 — group A
+        1,  // 3 — R3 — group B
+        0,  // 4 — R2 — group A
+        0,  // 5 — L1 — group A
+        1,  // 6 — R1 — group B
+        0,  // 7 — R4 — group A
+    };
+    static constexpr int16_t kLiftAmplitude = 0x1200;  // ~25° lift — matches
+                                                        // kBaseBend so peak-
+                                                        // swing leg is at
+                                                        // neutral (fully
+                                                        // lifted off surface,
+                                                        // no overswing).
+    static constexpr float   kStepPeriod    = 8.0f;    // frames per full
+                                                        // cycle (~0.4 s at
+                                                        // 20 fps) — matches
+                                                        // vanilla horizontal
+                                                        // leg-sweep cadence.
+    static constexpr float   kStancePortion = 0.6f;    // 60% planted.
 
     // Per-leg sign — diagonal (cross-mirror) pattern derived
     // empirically 2026-07-30. En_Sw model rig pairs diagonally-
@@ -196,11 +226,24 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
 
     int16_t bend = kBaseBend;
     if (isMoving) {
-        const float phase =
-            (float)play->gameplayFrames * (2.0f * (float)M_PI / kStepPeriod)
-            + (float)legIndex * kLegPhaseStep;
-        const float wave = std::sin(phase);
-        bend = (int16_t)(kBaseBend + (int)(wave * kWalkAmplitude));
+        // Normalized progress through the gait cycle, [0.0, 1.0).
+        const float rawT = (float)play->gameplayFrames / kStepPeriod;
+        float t = rawT - std::floor(rawT);
+        // Group B trails Group A by half a cycle.
+        if (kLegGroupB[legIndex]) {
+            t += 0.5f;
+            if (t >= 1.0f) t -= 1.0f;
+        }
+        // Stance (t < 0.6): planted at kBaseBend. Swing (t >= 0.6):
+        // lift via half-sine → foot rises to fully-lifted at mid-
+        // swing then returns to plant, over the remaining 40% of
+        // the cycle.
+        if (t >= kStancePortion) {
+            const float swingT = (t - kStancePortion) /
+                                  (1.0f - kStancePortion);
+            const float lift   = std::sin(swingT * (float)M_PI);
+            bend = (int16_t)(kBaseBend - (int)(lift * kLiftAmplitude));
+        }
     }
     bend = (int16_t)(bend * kLegBendSign[legIndex]);
     rotInOut->x = (int16_t)(rotInOut->x + bend);
@@ -257,11 +300,15 @@ bool EnSwDescriptor::PickGazeTarget(Actor* actor, PlayState* play,
 }
 
 bool EnSwDescriptor::ShouldRelaxLungeGates(Actor* actor, PlayState* play) {
-    // Any instance where AggressiveAcquire is active gets the relaxed
-    // gate set applied to its state-7 wind-up picker. IsInstanceEnhanced
+    // Relaxed picker applies to enhanced instances under AggressiveAcquire
+    // OR NavConsume. NavConsume drives the spider onto the floor and
+    // pursues non-climbing players; the vanilla climbing-required gate
+    // would otherwise reject every attack. AggressiveAcquire also implies
+    // relaxed gates for its wind-up-flicker fix. IsInstanceEnhanced
     // filters gold-token variants (never relax gates for tokens).
     if (!IsInstanceEnhanced(actor, play)) return false;
-    return AnchorCVarSync::GetEnforcedInt(ActiveAggroCVar(), 0) != 0;
+    return AnchorCVarSync::GetEnforcedInt(ActiveAggroCVar(), 0) != 0 ||
+           AnchorCVarSync::GetEnforcedInt(NavConsumeCVar(), 0) != 0;
 }
 
 }  // namespace AnchorEnemyEnhancement

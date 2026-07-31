@@ -134,6 +134,17 @@ extern "C" int Anchor_Enhance_EnSw_GazeOverride(EnSw* actor, PlayState* play,
     return desc->PickGazeTarget(&actor->actor, play, outTargetPos) ? 1 : 0;
 }
 
+extern "C" int Anchor_Enhance_EnSw_IsJumpAttacking(EnSw* actor) {
+    // Consulted by vanilla EnSw_Draw to layer the purple attack fog
+    // color when the enhanced state machine is running a Tektite-style
+    // JumpLunge (wind-up + airborne). Returns 1 for both phases so the
+    // spider glows purple through the whole attack, matching the
+    // vanilla func_80B0E728 purple treatment for the walk-lunge.
+    if (actor == nullptr) return 0;
+    return (AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_QueryState(actor)
+            == AnchorEnemyEnhancement::EnSwState::JumpLunge) ? 1 : 0;
+}
+
 extern "C" int Anchor_Enhance_EnSw_ShouldRelaxLungeGates(EnSw* actor) {
     // Consulted by vanilla EnSw_PickLungeTarget at the top. Returns 1
     // when descriptor says the flicker-prone gates (STATIONARY_LADDER,

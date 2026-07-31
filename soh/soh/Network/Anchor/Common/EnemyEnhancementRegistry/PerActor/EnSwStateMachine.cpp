@@ -38,6 +38,11 @@
 #include <libultraship/bridge/consolevariablebridge.h>  // CVarGetInteger
 #include <libultraship/libultraship.h>                 // SPDLOG_INFO
 
+// C-side helper — force vanilla actionFunc back to combat ambient
+// (func_80B0E5E0). Defined in z_en_sw.c; used by the LungeYield tick
+// below to preempt vanilla's post-lunge walk-home / stop transitions.
+extern "C" void EnSw_ForceAmbient(EnSw* actor);
+
 namespace AnchorEnemyEnhancement {
 
 namespace {
@@ -132,6 +137,7 @@ const char* StateName(EnSwState s) {
         case EnSwState::GroundPursue:         return "GROUND_PURSUE";
         case EnSwState::GroundToWallReattach: return "GROUND_TO_WALL";
         case EnSwState::LungeYield:           return "LUNGE_YIELD";
+        case EnSwState::JumpLunge:            return "JUMP_LUNGE";
         case EnSwState::PermanentlyDisabled:  return "DISABLED";
     }
     return "?";
@@ -665,6 +671,23 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const float dist3DSq = distXZSq + dyT * dyT;
     const bool inAttackRange = (dist3DSq <= kAttackRangeSq);
 
+    // Rule 2 — spider on wall + Link off wall + close enough → jump.
+    // Skipped when Link is climbing (any surface), since that's rule 1
+    // (walk-lunge only). Range gate: kJumpMinTriggerRange < dist3D <=
+    // kJumpTriggerRange, so close-range walking still resolves via the
+    // vanilla lunge chain instead of a jump.
+    const Player* targetPlayer = reinterpret_cast<const Player*>(target);
+    const bool linkClimbing =
+        (targetPlayer->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
+    const float dist3D = std::sqrt(dist3DSq);
+    if (!linkClimbing &&
+        dist3D > kJumpMinTriggerRange &&
+        dist3D <= kJumpTriggerRange) {
+        SetupJumpToward(s, self->actor.world.pos, target->world.pos);
+        TransitionTo(self, s, EnSwState::JumpLunge, "wall_jump_at_ground_link");
+        return;
+    }
+
     // Project (target - actor) onto tangent plane by dropping normal
     // component. This yields the on-wall direction pointing at the
     // target's projection.
@@ -937,9 +960,77 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const float dyG = target->world.pos.y - self->actor.world.pos.y;
     const float dist3DSq = distXZSq + dyG * dyG;
     if (dist3DSq <= kAttackRangeSq) {
-        // Hold — vanilla lunge cycle will pick up (see LungeYield path).
+        // Rule 3 — spider ANY position + Link off wall + close enough
+        // + no path → JumpLunge. "No path" is proxied by LoS check:
+        // if a raycast from spider to Link is blocked by geometry,
+        // walk-lunge cannot reach Link (direct-yaw motion doesn't
+        // route around obstacles) and jumping is the only option.
+        const Player* targetPlayer = reinterpret_cast<const Player*>(target);
+        const bool linkClimbing =
+            (targetPlayer->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
+        if (!linkClimbing) {
+            Vec3f losFrom = self->actor.world.pos;
+            losFrom.y += 20.0f;  // above body so ray doesn't clip the
+                                  // spider's own floor poly
+            Vec3f losTo   = target->world.pos;
+            losTo.y      += 20.0f;  // aim at Link's mid-body, not feet
+            CollisionPoly* losPoly = nullptr;
+            s32 losBgId = 0;
+            Vec3f losHit = {0.0f, 0.0f, 0.0f};
+            const bool losBlocked =
+                BgCheck_EntityLineTest1(&play->colCtx, &losFrom, &losTo,
+                                         &losHit, &losPoly, 1, 0, 0, 1,
+                                         &losBgId);
+            if (losBlocked) {
+                SetupJumpToward(s, self->actor.world.pos, target->world.pos);
+                TransitionTo(self, s, EnSwState::JumpLunge, "ground_jump_no_path");
+                return;
+            }
+        }
+        // Force vanilla's wind-up timer to 0 so `func_80B0E5E0`'s
+        // next-frame check `(DECR(unk_442) == 0 && picker_ok)` fires
+        // immediately. The picker itself succeeds because
+        // ShouldRelaxLungeGates returns true when NavConsume is on,
+        // skipping the climbing-required gate for our floor target.
+        // Vanilla then transitions actionFunc to `func_80B0E728`
+        // (purple wind-up flash + lunge motion), and our snapshot
+        // detector routes us into LungeYield to let vanilla drive.
+        self->unk_442 = 0;
         return;
     }
+
+    // Body oscillation — vertical bob + pitch + roll during walking.
+    // Amplitudes drawn from Weihmann 2013 (PLOS One 10.1371/journal.
+    // pone.0065788) forward-walking Cupiennius salei kinematics:
+    // vertical bob ≈ 1.7mm, pitch ≈ 4.6°, roll ≈ 6.6°. All oscillate
+    // at ~stride frequency (one full cycle per gait stride). Real-
+    // spider fluctuations are "relatively low" (paper's conclusion),
+    // so amplitudes stay modest. Frequency matches the gait's
+    // kStepPeriod (8 frames) used by the leg-bend animation.
+    //
+    // Pitch is offset 90° from bob so the nose leads the bob
+    // (nose-up at rising-body midpoint, nose-down at plant); roll
+    // shares bob's phase (body tilts one way at swing peak, other
+    // way at plant). This 3-axis phase relationship reads as a
+    // rolling stride rather than a jitter.
+    static constexpr float   kBodyBobAmplitude   = 1.5f;   // world units +Y
+    static constexpr int16_t kBodyPitchAmplitude = 0x0400;  // ~4.5°
+    static constexpr int16_t kBodyRollAmplitude  = 0x05C0;  // ~8°
+    static constexpr float   kBodyOscPeriod     = 8.0f;    // frames per cycle
+                                                            // (matches leg
+                                                            // kStepPeriod).
+    const float bodyPhase =
+        (float)play->gameplayFrames * (2.0f * (float)M_PI / kBodyOscPeriod);
+    const float bobT   = std::sin(bodyPhase);
+    const float pitchT = std::sin(bodyPhase + (float)M_PI * 0.5f);  // +90°
+    const float rollT  = std::sin(bodyPhase);
+    // Anchored surface = floor; away = +Y in world.
+    self->actor.world.pos.y += bobT * kBodyBobAmplitude;
+    // Overlay pitch + roll on base ground orientation.
+    self->actor.world.rot.x =
+        (s16)((-0x4000) + (int16_t)(pitchT * (float)kBodyPitchAmplitude));
+    self->actor.world.rot.z = (s16)((int16_t)(rollT * (float)kBodyRollAmplitude));
+    self->actor.shape.rot   = self->actor.world.rot;
 
     // Advance world.pos along the slope-projected tangent direction.
     // On flat floor fwdTangent ≈ (sin(yaw), 0, cos(yaw)); on a slope
@@ -1005,6 +1096,136 @@ void TickGroundToWallReattach(EnSw* self, PlayState* play, EnSwEnhancedState& s)
     TransitionTo(self, s, EnSwState::GroundPursue, "reattach_failed_fallback");
 }
 
+// TickJumpLunge — Tektite-style ballistic attack. Two phases:
+//   1. Wind-up (framesInState < kJumpWindupFrames): no motion.
+//      Purple color visible via Anchor_Enhance_EnSw_IsJumpAttacking
+//      bridge → EnSw_Draw applies fog color. Telegraph phase.
+//   2. Airborne (framesInState >= kJumpWindupFrames + jumpAirborne=true):
+//      apply per-tick velocity + gravity accumulation. Land on floor
+//      (→ GroundPursue) or wall (→ Uninitialized for basis re-establish).
+//
+// Trust-physics landing model — the spider is a predator without regard
+// for whether the target landing is reachable; if it lands somewhere
+// isolated, subsequent GroundPursue / GroundToWallReattach / WallEdgeDrop
+// handle recovery. Safety timeout kJumpMaxAirFrames aborts to
+// PermanentlyDisabled if flight never lands (void fall).
+constexpr int   kJumpWindupFrames    = 10;     // ~0.5 s telegraph at 20fps
+constexpr float kJumpInitialVy       = 12.0f;  // upward launch velocity
+constexpr float kJumpForwardSpeed    = 10.0f;  // horizontal launch magnitude
+constexpr int   kJumpMaxAirFrames    = 90;     // ~4.5 s safety cap
+constexpr float kJumpTriggerRange    = 300.0f; // rule 2/3 max spider→link
+                                                // distance for jump trigger
+constexpr float kJumpMinTriggerRange = 60.0f;  // don't jump if already at
+                                                // point-blank walk range
+
+// Populate s.jumpVel* with horizontal aim toward target + fixed upward
+// launch. Called from rule 2 (TickWallPursue) and rule 3 (TickGroundPursue)
+// trigger sites before TransitionTo(JumpLunge). jumpAirborne=false so
+// TickJumpLunge's wind-up phase runs first.
+void SetupJumpToward(EnSwEnhancedState& s, const Vec3f& spiderPos,
+                     const Vec3f& targetPos) {
+    const float dx = targetPos.x - spiderPos.x;
+    const float dz = targetPos.z - spiderPos.z;
+    const float distXZ = std::sqrt(dx * dx + dz * dz);
+    if (distXZ < 0.001f) {
+        s.jumpVelX = 0.0f;
+        s.jumpVelZ = 0.0f;
+    } else {
+        const float inv = 1.0f / distXZ;
+        s.jumpVelX = dx * inv * kJumpForwardSpeed;
+        s.jumpVelZ = dz * inv * kJumpForwardSpeed;
+    }
+    s.jumpVelY     = kJumpInitialVy;
+    s.jumpAirborne = false;
+}
+
+void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
+    // Suppress vanilla's ambient-actionFunc lunge trigger for the
+    // duration of the jump. func_80B0E5E0 checks
+    // `(DECR(unk_442) == 0 && picker_ok)` each frame; pinning
+    // unk_442 above 0 keeps that check false so vanilla never
+    // transitions to func_80B0E728 mid-jump (which would flip our
+    // snapshot detector into LungeYield and preempt our custom
+    // airborne motion).
+    self->unk_442 = 100;
+
+    // Wind-up phase — hold in place, telegraph via purple fog color.
+    if (s.framesInState < kJumpWindupFrames) {
+        LogTickState(self, s, "jump_windup");
+        return;
+    }
+
+    // Rising edge from wind-up to airborne — capture initial velocity
+    // that was pre-computed at TransitionTo(JumpLunge) call site.
+    if (!s.jumpAirborne) {
+        s.jumpAirborne = true;
+        self->actor.velocity.x = s.jumpVelX;
+        self->actor.velocity.y = s.jumpVelY;
+        self->actor.velocity.z = s.jumpVelZ;
+        if (DiagEnabled()) {
+            SPDLOG_INFO("[EEDiag/SM] actor=0x{:x} JUMP_LUNGE launch "
+                        "vel=({:.2f},{:.2f},{:.2f}) pos=({:.1f},{:.1f},{:.1f})",
+                        (uintptr_t)self, s.jumpVelX, s.jumpVelY, s.jumpVelZ,
+                        self->actor.world.pos.x, self->actor.world.pos.y,
+                        self->actor.world.pos.z);
+        }
+    }
+
+    // Airborne — integrate position with gravity on Y component.
+    self->actor.velocity.y += kGravityAccel;
+    if (self->actor.velocity.y < kMaxFallSpeed) {
+        self->actor.velocity.y = kMaxFallSpeed;
+    }
+    self->actor.world.pos.x += self->actor.velocity.x;
+    self->actor.world.pos.y += self->actor.velocity.y;
+    self->actor.world.pos.z += self->actor.velocity.z;
+
+    LogTickState(self, s, "jump_airborne");
+
+    // Landing detection — raycast from just-above-actor down through
+    // this-tick's velocity.y sweep to catch floor/wall contact.
+    Vec3f from = self->actor.world.pos;
+    from.y += 5.0f;
+    Vec3f to = {
+        self->actor.world.pos.x,
+        self->actor.world.pos.y + self->actor.velocity.y - 5.0f,
+        self->actor.world.pos.z,
+    };
+    CollisionPoly* poly = nullptr;
+    s32 bgId = 0;
+    Vec3f hitPos = {0.0f, 0.0f, 0.0f};
+    if (BgCheck_EntityLineTest1(&play->colCtx, &from, &to, &hitPos, &poly,
+                                 1, 1, 1, 0, &bgId) && poly != nullptr) {
+        const float ny = COLPOLY_GET_NORMAL(poly->normal.y);
+        if (ny > kWallNormalYThreshold) {
+            // Floor landing.
+            self->actor.world.pos.y = hitPos.y + kBodySurfaceOffset;
+            self->actor.velocity.x = self->actor.velocity.y =
+                self->actor.velocity.z = 0.0f;
+            s.jumpAirborne = false;
+            TransitionTo(self, s, EnSwState::GroundPursue, "jump_landed_floor");
+            return;
+        }
+        if (std::fabs(ny) < kWallNormalYThreshold) {
+            // Wall contact — zero velocity, transition to Uninitialized
+            // so the basis raycast re-establishes on the new wall.
+            self->actor.velocity.x = self->actor.velocity.y =
+                self->actor.velocity.z = 0.0f;
+            s.jumpAirborne = false;
+            s.hasWallBasis = false;
+            TransitionTo(self, s, EnSwState::Uninitialized, "jump_hit_wall");
+            return;
+        }
+        // Ceiling — ignore, keep falling.
+    }
+
+    // Safety timeout — void fall.
+    if (s.framesInState > kJumpMaxAirFrames + kJumpWindupFrames) {
+        s.jumpAirborne = false;
+        TransitionTo(self, s, EnSwState::PermanentlyDisabled, "jump_timeout");
+    }
+}
+
 // Placeholder handlers for states landed in M7. Each emits a once-per-
 // entry diagnostic so we know if execution ever reaches them before
 // their real bodies land.
@@ -1046,6 +1267,13 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
         s.initialAmbientActionFunc != nullptr &&
         self->actionFunc != s.initialAmbientActionFunc) {
         if (s.state != EnSwState::LungeYield) {
+            // Snapshot the vanilla actionFunc we entered LungeYield
+            // WITH. Typically this is func_80B0E728 (lunge wind-up +
+            // motion). We use it below to detect when vanilla has
+            // moved on from the lunge to a follow-up state (walk-home
+            // = func_80B0E9BC, or post-lunge stop = func_80B0E90C) —
+            // both of which we want to preempt.
+            s.lungeEntryActionFunc = self->actionFunc;
             TransitionTo(self, s, EnSwState::LungeYield, "vanilla_actionfunc_advanced");
         } else {
             // Steady LungeYield tick — increment framesInState so the
@@ -1062,6 +1290,31 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
                             (uintptr_t)s.initialAmbientActionFunc);
             }
 
+            // Post-lunge preemption: if vanilla has moved off the
+            // initial lunge actionFunc into a follow-up state (walk-
+            // home / post-lunge-stop) but hasn't returned to ambient
+            // yet, force it back to ambient so the state machine can
+            // re-take control on the next tick. Without this, vanilla
+            // walks the spider in a straight line to actor.home.pos
+            // (the original wall spawn point), bypassing our nav
+            // substrate and reverting to the wall-oriented rotation.
+            if (s.lungeEntryActionFunc != nullptr &&
+                self->actionFunc != s.lungeEntryActionFunc) {
+                if (DiagEnabled()) {
+                    SPDLOG_INFO("[EEDiag/SM] actor=0x{:x} LUNGE_YIELD preempt "
+                                "post-lunge state: vanillaActionFunc=0x{:x} "
+                                "lungeEntry=0x{:x} → ForceAmbient",
+                                (uintptr_t)self,
+                                (uintptr_t)self->actionFunc,
+                                (uintptr_t)s.lungeEntryActionFunc);
+                }
+                EnSw_ForceAmbient(self);
+                s.hasWallBasis = false;
+                TransitionTo(self, s, EnSwState::Uninitialized,
+                             "lunge_yield_post_lunge_preempt");
+                return;
+            }
+
             // Safety timeout — vanilla lunge cycle typically completes in
             // 60-120 frames. If we've been yielded >300 frames (~15s at
             // 20fps), something's wrong: vanilla actionFunc got stuck OR
@@ -1071,6 +1324,7 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
             // vanilla is genuinely doing something long-running.
             constexpr int kLungeYieldTimeoutFrames = 300;
             if (s.framesInState > kLungeYieldTimeoutFrames) {
+                EnSw_ForceAmbient(self);
                 s.hasWallBasis = false;
                 TransitionTo(self, s, EnSwState::Uninitialized,
                              "lunge_yield_timeout");
@@ -1112,6 +1366,9 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
             // Unreachable here — yield-check above returns early when
             // LungeYield is the correct state. Left in the switch for
             // exhaustiveness against the enum.
+            break;
+        case EnSwState::JumpLunge:
+            TickJumpLunge(self, play, s);
             break;
         case EnSwState::PermanentlyDisabled:
             // No-op forever. Vanilla actionFunc runs unchanged (which
