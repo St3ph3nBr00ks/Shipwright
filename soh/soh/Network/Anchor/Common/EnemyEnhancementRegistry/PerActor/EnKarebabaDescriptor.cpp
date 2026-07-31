@@ -90,6 +90,34 @@ constexpr float kHeadScalePeak    = 1.5f;
 // Multiplier applied to actor.scale during enhanced Spin.
 constexpr float kVanillaScale = 0.01f;
 
+// Layered geyser visual tuning (2026-07-31 refactor after playtest
+// feedback — original hahen effect read as falling leaves, not
+// acid). Split into two independent particle layers per user
+// direction:
+//   - Rising bubbles attached to the HEAD position (which sweeps
+//     around the plant during Spin) — reads as head spitting acid
+//     as it swings.
+//   - Falling dust from 60u ABOVE the plant, random XZ within a
+//     modest radius — reads as a caustic vapor ceiling raining
+//     down around the plant.
+constexpr int   kRisingBubblesPerFrame = 3;
+constexpr float kRisingBubbleSpeed     = 6.0f;   // upward Y velocity
+constexpr float kRisingBubbleAccelY    = -0.25f; // slight gravity so bubbles arc down
+constexpr int   kFallingDustPerFrame   = 2;
+constexpr float kFallingSpawnHeight    = 60.0f;  // Y above home.pos
+constexpr float kFallingSpawnRadius    = 60.0f;  // XZ jitter around home.pos
+constexpr float kFallingDustSpeed      = -1.5f;  // downward Y velocity
+constexpr float kFallingDustAccelY     = -0.35f; // gravity
+
+// Acid green tints. Prim = bright fill color; Env = darker outline
+// color for the multi-tone gradient the softsprite render uses.
+// Alphas below 255 keep particles translucent so they blend into
+// each other and don't look like solid blobs.
+constexpr Color_RGBA8 kBubblePrimColor = { 150, 220, 100, 200 };
+constexpr Color_RGBA8 kBubbleEnvColor  = {  60, 100,  40, 255 };
+constexpr Color_RGBA8 kDustPrimColor   = { 180, 230, 130, 150 };
+constexpr Color_RGBA8 kDustEnvColor    = {  80, 130,  60, 255 };
+
 }  // namespace
 
 bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
@@ -174,20 +202,18 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
     // we own it during enhanced spin.
     Actor_SetScale(&actor->actor, kVanillaScale * scaleMul);
 
-    // Spawn the geyser plume once per enhanced spin, on frame 1
+    // Spawn the AC-collider actor once per enhanced spin, on frame 1
     // (params == 39 — first tick after SetupSpin sets params=40 +
     // Update decrements). Guaranteed frame-consistent between host
     // and peer because both process the same params-decrement
     // schedule.
+    //
+    // Position: actor.home.pos (stem base) — damage cylinder stays
+    // stationary at the plant even while the visible head sweeps
+    // around it. Encompasses both the head's swing radius (60u) and
+    // the falling-dust XZ footprint below.
     if (!state.geyserSpawnedThisSpin && paramsNow <= 39) {
         state.geyserSpawnedThisSpin = true;
-
-        // Spawn at actor.home.pos (stem base) — deterministic across
-        // clients. Y-rotation is arbitrary; use 0. Params encode
-        // nothing v1; reserved for future variants.
-        //
-        // Guarded on gEnKarebabaGeyserId != 0 — the extern is
-        // initialized by ActorDB::AddBuiltInCustomActors at boot.
         if (gEnKarebabaGeyserId != 0) {
             Actor_Spawn(&play->actorCtx, play,
                          gEnKarebabaGeyserId,
@@ -195,6 +221,70 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
                          actor->actor.home.pos.y,
                          actor->actor.home.pos.z,
                          0, 0, 0, 0);
+        }
+    }
+
+    // ---- Layered visual particles (2026-07-31 refactor) ----
+    // Both layers spawn each Spin frame while enhanced. Copies of the
+    // color/vec constants are made because the effect helpers accept
+    // non-const pointers.
+
+    // Rising bubble layer — spawn AT THE HEAD (actor.world.pos is
+    // updated by vanilla Spin to the swinging head position each
+    // frame). Reads as head spitting acid as it swings around.
+    {
+        Vec3f bubblePos = actor->actor.world.pos;
+        Vec3f bubbleAccel = { 0.0f, kRisingBubbleAccelY, 0.0f };
+        Color_RGBA8 primC = kBubblePrimColor;
+        Color_RGBA8 envC  = kBubbleEnvColor;
+        for (int i = 0; i < kRisingBubblesPerFrame; i++) {
+            Vec3f bubbleVel = {
+                (Rand_ZeroOne() - 0.5f) * 2.5f,          // small XZ jitter
+                kRisingBubbleSpeed + Rand_ZeroOne() * 2.0f,  // upward + variance
+                (Rand_ZeroOne() - 0.5f) * 2.5f,
+            };
+            // scale 120-170 gives a moderate bubble; life 25 lets
+            // them rise + fade before their arc peaks.
+            const s16 scale = (s16)(120 + (int)(Rand_ZeroOne() * 50.0f));
+            EffectSsDtBubble_SpawnCustomColor(play, &bubblePos, &bubbleVel,
+                                                &bubbleAccel, &primC, &envC,
+                                                scale, 25,
+                                                8 /* randXZ jitter units */);
+        }
+    }
+
+    // Falling dust layer — spawn at (home.pos + 60Y) with random XZ
+    // jitter inside a 60u radius circle. Downward velocity + slight
+    // gravity so they rain onto the ground around the plant. Random
+    // pattern per user direction: "do not have to respect the current
+    // position of the deku baba head, they can fall in a random
+    // pattern around the karebaba."
+    {
+        Vec3f dustAccel = { 0.0f, kFallingDustAccelY, 0.0f };
+        Color_RGBA8 primC = kDustPrimColor;
+        Color_RGBA8 envC  = kDustEnvColor;
+        for (int i = 0; i < kFallingDustPerFrame; i++) {
+            Vec3f dustPos = {
+                actor->actor.home.pos.x +
+                    (Rand_ZeroOne() - 0.5f) * 2.0f * kFallingSpawnRadius,
+                actor->actor.home.pos.y + kFallingSpawnHeight,
+                actor->actor.home.pos.z +
+                    (Rand_ZeroOne() - 0.5f) * 2.0f * kFallingSpawnRadius,
+            };
+            Vec3f dustVel = {
+                (Rand_ZeroOne() - 0.5f) * 0.5f,  // slight XZ drift
+                kFallingDustSpeed + (Rand_ZeroOne() - 0.5f) * 0.8f,
+                (Rand_ZeroOne() - 0.5f) * 0.5f,
+            };
+            // scale 300 growing by scaleStep=8 → puffy expanding cloud.
+            // life 20 lets it reach the ground and disperse.
+            EffectSsDust_Spawn(play, 0 /* drawFlags: default */,
+                                &dustPos, &dustVel, &dustAccel,
+                                &primC, &envC,
+                                300 /* scale */,
+                                8   /* scaleStep — grow */,
+                                20  /* life */,
+                                0   /* updateMode: default */);
         }
     }
 }
