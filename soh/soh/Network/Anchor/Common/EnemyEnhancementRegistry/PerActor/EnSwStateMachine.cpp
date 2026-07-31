@@ -248,19 +248,56 @@ inline float Dist3DSq(const EnSw* spider, const Actor* target) {
 }
 
 // Vision cone gate — within 130u 3D always visible. Beyond that, up
-// to kIdleDetectRangeSq (200u), require in-front hemisphere via XZ
-// forward dot product from spider's shape.rot.y facing direction.
-inline bool IsTargetVisible(const EnSw* spider, const Actor* target) {
+// to kIdleDetectRangeSq (200u), require target within a 120° cone
+// centered on spider's forward direction (dot > 0.5 = cos(60°)).
+//
+// Forward direction derivation is state-aware:
+//   - Wall states: use s.wallTangentU (the wall-walk direction stored
+//     by TickWallPursue's motion block + TryEstablishBasis). shape.rot
+//     is a YXZ-Euler extraction from RebuildWorldRotFromWallBasis's
+//     compound rotation, so shape.rot.y does NOT map cleanly to XZ
+//     facing for wall spiders. Using wallTangentU directly is correct.
+//   - Ground/airborne/other: derive from shape.rot.y (correct because
+//     our ground orientation (-0x4000, yaw, 0) has shape.rot.y as the
+//     true XZ yaw).
+//
+// Cone width tightened from 180° hemisphere (dot > 0) to 120° cone
+// (dot_normalized > 0.5): field test 794 showed the hemisphere let
+// Link at ~85° off spider's forward trigger attacks — geometrically
+// "in front" but user-perceived as "behind/side."
+inline bool IsTargetVisible(const EnSw* spider, const Actor* target,
+                            const EnSwEnhancedState& s) {
     const float d2 = Dist3DSq(spider, target);
-    if (d2 > kIdleDetectRangeSq)   return false;  // beyond max detect
-    if (d2 <= kVanillaDetectRangeSq) return true; // always visible close
-    const float dx = target->world.pos.x - spider->actor.world.pos.x;
-    const float dz = target->world.pos.z - spider->actor.world.pos.z;
-    const float yawRad =
-        spider->actor.shape.rot.y * (float)(M_PI / 0x8000);
-    const float fwdX = std::sin(yawRad);
-    const float fwdZ = std::cos(yawRad);
-    return (fwdX * dx + fwdZ * dz) > 0.0f;
+    if (d2 > kIdleDetectRangeSq)     return false;  // beyond max detect
+    if (d2 <= kVanillaDetectRangeSq) return true;   // always visible close
+
+    // Spider forward in XZ (state-aware).
+    float fwdX, fwdZ;
+    if (s.state == EnSwState::WallIdle || s.state == EnSwState::WallPursue) {
+        fwdX = s.wallTangentU.x;
+        fwdZ = s.wallTangentU.z;
+    } else {
+        const float yawRad =
+            spider->actor.shape.rot.y * (float)(M_PI / 0x8000);
+        fwdX = std::sin(yawRad);
+        fwdZ = std::cos(yawRad);
+    }
+    // Normalize forward XZ (wallTangentU may have Y component; drop it).
+    const float fwdMag = std::sqrt(fwdX * fwdX + fwdZ * fwdZ);
+    if (fwdMag < 0.001f) return true;  // degenerate — pass conservatively
+    fwdX /= fwdMag;
+    fwdZ /= fwdMag;
+
+    // Delta unit-XZ.
+    const float dx     = target->world.pos.x - spider->actor.world.pos.x;
+    const float dz     = target->world.pos.z - spider->actor.world.pos.z;
+    const float delMag = std::sqrt(dx * dx + dz * dz);
+    if (delMag < 0.001f) return true;  // directly overhead — pass
+    const float dxN = dx / delMag;
+    const float dzN = dz / delMag;
+
+    // 120° cone: cos(60°) = 0.5.
+    return (fwdX * dxN + fwdZ * dzN) > 0.5f;
 }
 
 // Jump-height gate — only jump if target is at or below spider Y,
@@ -906,7 +943,7 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     if (!linkClimbing &&
         dist3D > kJumpMinTriggerRange &&
         dist3D <= kJumpTriggerRange &&
-        IsTargetVisible(self, target) &&
+        IsTargetVisible(self, target, s) &&
         IsTargetJumpReachable(self, target)) {
         SetupJumpToward(s, self->actor.world.pos, target->world.pos);
         TransitionTo(self, s, EnSwState::JumpLunge, "wall_jump_at_ground_link");
@@ -954,6 +991,9 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     // Advance world.pos along tangent (cap at |deltaTan| to prevent
     // overshoot — irrelevant in practice for slow speeds but defensive).
     const float step = (speed < tanMag) ? speed : tanMag;
+    if (step > 0.01f) {
+        s.isWalkAnimActive = true;  // actually translating this tick
+    }
     self->actor.world.pos.x += fwd.x * step;
     self->actor.world.pos.y += fwd.y * step;
     self->actor.world.pos.z += fwd.z * step;
@@ -1231,7 +1271,7 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
                                          &losHit, &losPoly, 1, 0, 0, 1,
                                          &losBgId);
             if (losBlocked &&
-                IsTargetVisible(self, target) &&
+                IsTargetVisible(self, target, s) &&
                 IsTargetJumpReachable(self, target)) {
                 SetupJumpToward(s, self->actor.world.pos, target->world.pos);
                 TransitionTo(self, s, EnSwState::JumpLunge, "ground_jump_no_path");
@@ -1243,7 +1283,7 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
             // exempt zone, so IsTargetVisible always passes here in
             // practice; kept for consistency + defense against future
             // range widening.
-            if (IsTargetVisible(self, target)) {
+            if (IsTargetVisible(self, target, s)) {
                 SetupWalkLungeToward(s, self->actor.world.pos, target->world.pos);
                 TransitionTo(self, s, EnSwState::WalkLunge, "ground_walk_lunge");
             }
@@ -1297,6 +1337,7 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     // immediately.
     const float dist = std::sqrt(distXZSq);
     const float speed = (dist > 300.0f) ? kGroundRunSpeed : kGroundWalkSpeed;
+    s.isWalkAnimActive = true;  // actually translating this tick
     self->actor.world.pos.x += fwdTangent.x * speed;
     self->actor.world.pos.y += fwdTangent.y * speed;
     self->actor.world.pos.z += fwdTangent.z * speed;
@@ -1519,6 +1560,7 @@ void TickWalkLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         return;
     }
 
+    s.isWalkAnimActive = true;  // actually translating during dash
     self->actor.world.pos.x += s.jumpVelX;
     self->actor.world.pos.z += s.jumpVelZ;
     LogTickState(self, s, "walk_lunge_dash");
@@ -1568,6 +1610,12 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
     if (self == nullptr || play == nullptr) return;
 
     EnSwEnhancedState& s = GetOrCreate(self);
+
+    // Walk-anim gate default: false each tick. Actual motion sites
+    // opt-in by setting s.isWalkAnimActive = true. Placed BEFORE yield-
+    // check so LungeYield / any other early-return path also resets
+    // the flag (default: not walking).
+    s.isWalkAnimActive = false;
 
     // Yield-check: if we have an ambient-actionFunc snapshot AND vanilla
     // has advanced actionFunc away from it, vanilla is in a non-ambient
@@ -1668,6 +1716,8 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
 
     s.framesInState++;
 
+    // (s.isWalkAnimActive reset at top of Tick, before yield-check.)
+
     switch (s.state) {
         case EnSwState::Uninitialized:
             TickUninitialized(self, play, s);
@@ -1726,6 +1776,11 @@ void EnSw_EnhancedStateMachine_Forget(EnSw* self) {
 EnSwState EnSw_EnhancedStateMachine_QueryState(EnSw* self) {
     auto* s = Find(self);
     return (s == nullptr) ? EnSwState::Uninitialized : s->state;
+}
+
+bool EnSw_EnhancedStateMachine_IsWalkAnimActive(EnSw* self) {
+    auto* s = Find(self);
+    return (s != nullptr) && s->isWalkAnimActive;
 }
 
 }  // namespace AnchorEnemyEnhancement

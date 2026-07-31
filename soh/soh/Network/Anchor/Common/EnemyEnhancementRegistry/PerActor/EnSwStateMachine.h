@@ -141,6 +141,14 @@ struct EnSwEnhancedState {
     // it survives state transitions cleanly.
     s16 idleGazeTargetYaw       = 0;
     int idleGazeNextChangeFrame = 0;
+
+    // Walk-animation gate — true only when the spider is actually
+    // translating in XZ (wall crawling, ground pursuing, walk-lunge
+    // dash). False during holds, idle, wind-ups, jumps, gaze rotation.
+    // OverrideLimbBend in EnSwDescriptor consults this via bridge to
+    // suppress the leg-lift cycle when spider is stationary — otherwise
+    // legs oscillate even during idle, which looks wrong.
+    bool isWalkAnimActive = false;
 };
 
 // -------------------------------------------------------------------
@@ -175,5 +183,12 @@ void EnSw_EnhancedStateMachine_Forget(EnSw* self);
 // [EEDiag] output extension (M8). Returns Uninitialized if the actor
 // has no state block yet (never ticked).
 EnSwState EnSw_EnhancedStateMachine_QueryState(EnSw* self);
+
+// Walk-animation gate — true only when the spider is actively
+// translating (wall pursue motion, ground pursue motion, walk-lunge
+// dash). Consumed by EnSwDescriptor::OverrideLimbBend to suppress the
+// leg-lift cycle when spider is stationary. Returns false if the
+// actor has no state block yet (never ticked).
+bool EnSw_EnhancedStateMachine_IsWalkAnimActive(EnSw* self);
 
 }  // namespace AnchorEnemyEnhancement

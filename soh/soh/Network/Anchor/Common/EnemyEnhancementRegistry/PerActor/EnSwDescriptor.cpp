@@ -116,29 +116,19 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
     // on wall and vanilla wall-tangent leg sweep is correct.
     if (AnchorCVarSync::GetEnforcedInt(NavConsumeCVar(), 0) == 0) return false;
 
-    // Fire in any Wall* or Ground* state where the body is offset from
-    // the surface (see EnSwStateMachine kBodySurfaceOffset). Legs bend
-    // outward to visually reach the surface across the gap. Moving
-    // states (Pursue) additionally oscillate the bend per-leg to
-    // produce a walking cycle; idle/transitional states hold a static
-    // bend so feet rest against the surface.
+    // Walk-anim gate — state machine sets isWalkAnimActive = true only
+    // during ticks that ACTUALLY translate the spider (WallPursue
+    // motion block, GroundPursue motion block, WalkLunge dash). During
+    // holds (attack-range hold, target-out-of-range idle, wind-ups,
+    // JumpLunge airborne, WallIdle) the flag stays false and we skip
+    // the leg bend entirely, letting vanilla base pose render — matches
+    // user request: "walk animation stops when spider is not moving."
     EnSw* enSw = reinterpret_cast<EnSw*>(actor);
-    const AnchorEnemyEnhancement::EnSwState smState =
-        AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_QueryState(enSw);
-    bool isMoving;
-    switch (smState) {
-        case AnchorEnemyEnhancement::EnSwState::WallPursue:
-        case AnchorEnemyEnhancement::EnSwState::GroundPursue:
-            isMoving = true;
-            break;
-        case AnchorEnemyEnhancement::EnSwState::WallIdle:
-        case AnchorEnemyEnhancement::EnSwState::GroundToWallReattach:
-            isMoving = false;
-            break;
-        default:
-            return false;  // Uninitialized / WallEdgeDrop / LungeYield /
-                           // PermanentlyDisabled — vanilla pose intact
+    if (!AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_IsWalkAnimActive(enSw)) {
+        return false;  // no override → vanilla base pose (legs static)
     }
+    // isMoving is implied true past this gate (walk-anim active).
+    constexpr bool isMoving = true;
 
     // Leg-limb table — enumerated from vanilla EnSw_OverrideLimbDraw
     // switch (z_en_sw.c:1082-1106). 8 legs at limb indices:
