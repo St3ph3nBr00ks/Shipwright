@@ -78,11 +78,12 @@ public:
     // ---- Enhancement API (called from EnKarebabaBridge extern "C"
     // shims which the vanilla z_en_karebaba.c invokes at hook points)
 
-    // Called from EnKarebaba_SetupSpin on the HOST. Rolls a 33%
-    // chance if the CVar is ON. On success, marks this actor's
-    // current Spin cycle as enhanced (head-scale + geyser will
-    // apply). Returns true if the roll succeeded — caller broadcasts
-    // the flag over ENEMY_STATE.
+    // Called from EnKarebaba_SetupSpin on the HOST. Runs the
+    // charge state machine per V6 spec:
+    //   - Charging: chance = counter*25%. Success → Ready.
+    //   - Ready:    range-check + fire acid, else preserve.
+    //   - Cooldown: decrement, unblock when 0.
+    // Returns true iff acid attack fires THIS spin.
     bool OnHostSetupSpin(EnKarebaba* actor, PlayState* play);
 
     // Called from HookHandlers on the PEER before EnKarebaba_ApplyNetState.
@@ -90,20 +91,42 @@ public:
     // per-actor state map so that peer's local Setup Spin sees it.
     void OnPeerReceiveEnhancedSpinFlag(EnKarebaba* actor, bool enhanced);
 
+    // V6 — records the network-received karebabaCharged flag so
+    // peer's OnUprightTick can render the telegraph.
+    void OnPeerReceiveChargedFlag(EnKarebaba* actor, bool charged);
+
     // Called from EnKarebaba_Spin per-frame on BOTH clients. If this
     // spin cycle is enhanced, applies the head-scale sinusoid and
-    // spawns the geyser plume actor on frame 1 (once per spin).
+    // spawns the geyser plume actor on frame 20 (V6: delayed from f1
+    // per user spec — collider becomes active 0.5s after rain start).
     void OnSpinTick(EnKarebaba* actor, PlayState* play);
 
+    // V6 — per-frame during EnKarebaba_Upright. Renders the "charged"
+    // telegraph (head 1.25× + subtle mouth spit) when the charge
+    // state machine (host) or received flag (peer) indicates Ready.
+    void OnUprightTick(EnKarebaba* actor, PlayState* play);
+
     // Called from EnKarebaba_SetupUpright (spin exit) to reset per-
-    // actor enhancement state so the next Spin re-rolls fresh.
+    // spin flags (currentSpinEnhanced, geyserSpawnedThisSpin,
+    // groundSplashesFired) so the next Spin cycle starts fresh.
+    // Charge counters + cooldown persist per V6 spec.
     void OnSpinExit(EnKarebaba* actor);
+
+    // V6 — called from EnKarebaba_SetupDying. Resets ALL counters
+    // (charge state, chargeCounter, cooldownRemaining, per-spin
+    // flags) per user spec: "all counter reset on death".
+    void OnDeath(EnKarebaba* actor);
 
     // Query helper used by EnemyState.cpp send-side to include the
     // flag in the outgoing ENEMY_STATE payload when this actor's
     // current spin is enhanced. Returns false when actor isn't
     // currently in an enhanced spin cycle.
     bool IsCurrentSpinEnhanced(EnKarebaba* actor);
+
+    // V6 — query helper for the "charged" (Ready state) flag. Sent
+    // over ENEMY_STATE so peer can render the telegraph during
+    // Upright.
+    bool IsCharged(EnKarebaba* actor);
 
     // Cleanup — called from EnKarebaba_Destroy to remove per-actor
     // state entry.

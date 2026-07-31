@@ -92,6 +92,38 @@ extern "C" int Anchor_Enhance_EnKarebaba_IsCurrentSpinEnhanced(EnKarebaba* actor
     return desc->IsCurrentSpinEnhanced(actor) ? 1 : 0;
 }
 
+// V6 — telegraph render + charge state wire-sync hooks.
+
+extern "C" void Anchor_Enhance_EnKarebaba_OnUprightTick(EnKarebaba* actor,
+                                                          PlayState* play) {
+    if (actor == nullptr) return;
+    auto* desc = GetKarebabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnUprightTick(actor, play);
+}
+
+extern "C" void Anchor_Enhance_EnKarebaba_OnDeath(EnKarebaba* actor) {
+    if (actor == nullptr) return;
+    auto* desc = GetKarebabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnDeath(actor);
+}
+
+extern "C" int Anchor_Enhance_EnKarebaba_IsCharged(EnKarebaba* actor) {
+    if (actor == nullptr) return 0;
+    auto* desc = GetKarebabaDescriptor();
+    if (desc == nullptr) return 0;
+    return desc->IsCharged(actor) ? 1 : 0;
+}
+
+extern "C" void Anchor_Enhance_EnKarebaba_ApplyPeerChargedFlag(EnKarebaba* actor,
+                                                                 int charged) {
+    if (actor == nullptr) return;
+    auto* desc = GetKarebabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnPeerReceiveChargedFlag(actor, charged != 0);
+}
+
 extern "C" void Anchor_Enhance_EnKarebaba_OnActorDestroy(EnKarebaba* actor) {
     if (actor == nullptr) return;
     auto* desc = GetKarebabaDescriptor();

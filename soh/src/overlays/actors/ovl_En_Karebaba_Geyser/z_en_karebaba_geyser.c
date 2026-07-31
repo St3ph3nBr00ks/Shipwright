@@ -37,10 +37,11 @@
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
-// ~1 second at 20 fps game rate. Matches most of the 40-frame Karebaba
-// Spin window; leaves a couple frames head/tail so the AoE ends
-// slightly before Spin exits.
-#define EN_KAREBABA_GEYSER_LIFETIME_FRAMES 30
+// V6 tuning — lifetime reduced 30 → 20 to match the delayed-spawn
+// window. Descriptor now spawns geyser at f20 of Spin (0.5s after
+// rain begins falling per user spec); lifetime 20 frames means
+// damage volume covers f20-f40 (up to spin end).
+#define EN_KAREBABA_GEYSER_LIFETIME_FRAMES 20
 
 // Cylinder AT dimensions per plan §"Design":
 //   radius 60u — small AoE, requires standing near the Karebaba.

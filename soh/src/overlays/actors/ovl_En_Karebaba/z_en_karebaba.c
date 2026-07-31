@@ -30,8 +30,12 @@ extern int  Anchor_Enhance_EnKarebaba_OnHostSetupSpin(EnKarebaba* actor, PlaySta
 extern void Anchor_Enhance_EnKarebaba_OnSpinTick(EnKarebaba* actor, PlayState* play);
 extern void Anchor_Enhance_EnKarebaba_OnSpinExit(EnKarebaba* actor);
 extern void Anchor_Enhance_EnKarebaba_OnActorDestroy(EnKarebaba* actor);
+// V6 — telegraph tick + reset-on-death hooks.
+extern void Anchor_Enhance_EnKarebaba_OnUprightTick(EnKarebaba* actor, PlayState* play);
+extern void Anchor_Enhance_EnKarebaba_OnDeath(EnKarebaba* actor);
 // Consumed by EnemyState.cpp send-side; kept here for symmetry.
 extern int  Anchor_Enhance_EnKarebaba_IsCurrentSpinEnhanced(EnKarebaba* actor);
+extern int  Anchor_Enhance_EnKarebaba_IsCharged(EnKarebaba* actor);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
@@ -217,6 +221,11 @@ void EnKarebaba_SetupSpin(EnKarebaba* this) {
 }
 
 void EnKarebaba_SetupDying(EnKarebaba* this) {
+    // Pillar 5 (GH #310) V6 — reset all enhancement state on death
+    // per user spec: charge counters + cooldown wiped, next respawn
+    // starts fresh at 0% chance.
+    Anchor_Enhance_EnKarebaba_OnDeath(this);
+
     this->actor.params = 0;
     this->actor.gravity = -0.8f;
     this->actor.velocity.y = 4.0f;
@@ -450,6 +459,11 @@ void EnKarebaba_Upright(EnKarebaba* this, PlayState* play) {
     if (Animation_OnFrame(&this->skelAnime, 0.0f) || Animation_OnFrame(&this->skelAnime, 12.0f)) {
         Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_JR_MOUTH);
     }
+
+    // Pillar 5 (GH #310) V6 — per-frame telegraph render when Ready.
+    // Applies 1.25× head scale + subtle mouth spit. No-op when not
+    // in Ready state (host chargeState) or netCharged (peer).
+    Anchor_Enhance_EnKarebaba_OnUprightTick(this, play);
 
     if (this->bodyCollider.base.acFlags & AC_HIT) {
         EnKarebaba_SetupDying(this);

@@ -46,6 +46,12 @@ struct EnKarebabaState {
     // BEFORE calling EnKarebaba_ApplyNetState, so peer's local
     // SetupSpin sees the correct flag when transitioning to state 4.
     bool netEnhancedSpin = false;
+
+    // V6 — telegraph flag. True when host's Karebaba is in Ready
+    // charge state (about to fire acid on next in-range spin).
+    // Peer applies via Anchor_Enhance_EnKarebaba_ApplyPeerChargedFlag
+    // so peer's OnUprightTick renders the 1.25× head + mouth spit.
+    bool netCharged      = false;
 };
 
 }  // namespace EnemySync

@@ -122,14 +122,16 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
-// Pillar 5 (GH #310) — Karebaba geyser enhancement query bridge.
+// Pillar 5 (GH #310) — Karebaba geyser enhancement query bridges.
 // Reads whether the actor's current spin cycle is enhanced (host
-// rolled RNG at Spin entry). Declared here at C++ file scope
-// (extern "C" linkage for symbol resolution but the callable
-// signature is C++-usable). Implementation in
+// rolled RNG at Spin entry) and whether the charge state is Ready
+// (V6 telegraph render). Declared here at C++ file scope (extern
+// "C" linkage for symbol resolution but the callable signature is
+// C++-usable). Implementation in
 // soh/Network/Anchor/Common/EnemyEnhancementRegistry/PerActor/
 // EnKarebabaBridge.cpp.
 extern "C" int Anchor_Enhance_EnKarebaba_IsCurrentSpinEnhanced(EnKarebaba* actor);
+extern "C" int Anchor_Enhance_EnKarebaba_IsCharged(EnKarebaba* actor);
 
 // Pillar C2 Phase 4 Commit C — consolidated ENEMY_STATE handler.
 //
@@ -158,9 +160,13 @@ struct EnemyUpdateExtras {
     s16  karebabaActorParams      = 0;
     // Pillar 5 (GH #310) — geyser AoE Spin enhancement. Host sets
     // true at Spin entry when Karebaba.GeyserSpin CVar is ON and
-    // 33% RNG succeeds. Peer reads before ApplyNetState fires local
-    // Setup Spin so head-scale + geyser plume spawn are in sync.
+    // charge state machine fires acid this spin. Peer reads before
+    // ApplyNetState fires local Setup Spin so head-scale + geyser
+    // plume spawn are in sync.
     bool karebabaEnhancedSpin     = false;
+    // V6 — telegraph flag for Ready charge state. Rendered on peer
+    // during Upright as 1.25× head + subtle mouth spit.
+    bool karebabaCharged          = false;
 
     bool hasGoroiwa          = false;
     s16  goroiwaActionState  = 0;
@@ -521,6 +527,9 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         // says this actor's current cycle is geyser-enhanced. Included
         // ONLY when true so absent-key defaults to false on receive.
         e.karebabaEnhancedSpin = Anchor_Enhance_EnKarebaba_IsCurrentSpinEnhanced(
+                                     (EnKarebaba*)actor) != 0;
+        // V6 — charged flag for Ready-phase telegraph.
+        e.karebabaCharged      = Anchor_Enhance_EnKarebaba_IsCharged(
                                      (EnKarebaba*)actor) != 0;
     } else if (actor->id == ACTOR_EN_GOROIWA) {
         EnGoroiwa* b         = (EnGoroiwa*)actor;
@@ -1320,6 +1329,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         // peers per sync rule 5 conventions).
         if (extras.karebabaEnhancedSpin) {
             payload["karebabaEnhancedSpin"] = true;
+        }
+        // V6 — Ready-phase telegraph flag. Same absent-when-false
+        // pattern.
+        if (extras.karebabaCharged) {
+            payload["karebabaCharged"] = true;
         }
     }
 
@@ -2131,6 +2145,10 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
             // Pillar 5 (#310) — geyser enhancement flag. Absent-key
             // defaults to false for backward compat with pre-schema peers.
             ext->karebaba.netEnhancedSpin = payload.value("karebabaEnhancedSpin", false);
+            // V6 — telegraph flag (peer's OnUprightTick reads via
+            // Anchor_Enhance_EnKarebaba_ApplyPeerChargedFlag call
+            // from HookHandlers, same idiom as EnhancedSpin).
+            ext->karebaba.netCharged      = payload.value("karebabaCharged", false);
         }
 
         // KB-08 / #7 — cache Dekubaba host state so OnActorUpdate can call

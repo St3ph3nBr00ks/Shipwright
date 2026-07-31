@@ -157,11 +157,13 @@ float OTRGetDimensionFromLeftEdge(float v);
 float OTRGetDimensionFromRightEdge(float v);
 }
 
-// Pillar 5 (GH #310) — Karebaba geyser enhancement peer-flag bridge.
+// Pillar 5 (GH #310) — Karebaba geyser enhancement peer-flag bridges.
 // Called BEFORE EnKarebaba_ApplyNetState on peer so the descriptor's
-// per-actor state carries the enhanced-spin flag when the local
-// SetupSpin fires from ApplyNetState case 4.
+// per-actor state carries the enhanced-spin + charged flags when
+// the local SetupSpin fires from ApplyNetState case 4, and so
+// OnUprightTick can render the telegraph on peer.
 extern "C" void Anchor_Enhance_EnKarebaba_ApplyPeerEnhancedFlag(EnKarebaba* actor, int enhanced);
+extern "C" void Anchor_Enhance_EnKarebaba_ApplyPeerChargedFlag(EnKarebaba* actor, int charged);
 
 // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor moved to
 // Common/ActorSyncHelpers.h in #173 Phase 1.
@@ -2874,6 +2876,15 @@ void Anchor::RegisterHooks() {
             //     is itself blocked from overriding already-active (Upright/Spin) actors.
             if (actor->id == ACTOR_EN_KAREBABA && ext->netStateIndex >= 0 &&
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
+                // V6 (#310) — apply Ready-phase telegraph flag on EVERY
+                // ENEMY_STATE receive (not just state-change branch)
+                // so peer's OnUprightTick renders the telegraph
+                // continuously during Upright. Charge state changes
+                // are frequent enough that a per-receive apply is
+                // needed to keep peer visuals current.
+                Anchor_Enhance_EnKarebaba_ApplyPeerChargedFlag(
+                    (EnKarebaba*)actor,
+                    ext->karebaba.netCharged ? 1 : 0);
                 s16 curState = karebabaLocalState; // pre-computed above
                 if (curState != ext->netStateIndex && ext->netStateIndex != 7 && !hostStale) {
                     // Intra-attack guard (Fix 29): when both the host and local Karebaba are

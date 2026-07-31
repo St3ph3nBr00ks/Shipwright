@@ -52,15 +52,35 @@ namespace AnchorEnemyEnhancement {
 
 namespace {
 
-// Per-actor enhancement state. Reset at OnSpinExit; created on
-// demand at OnHostSetupSpin / OnPeerReceiveEnhancedSpinFlag.
+// V6 — charge state machine phase per user spec.
+enum class KarebabaChargeState : u8 {
+    Charging = 0,  // rolling per-spin, chance = counter*25%
+    Ready    = 1,  // waiting for spin+range to fire acid; telegraph visible
+    Cooldown = 2,  // 3-spin post-attack lockout, no roll
+};
+
+// Per-actor enhancement state. Some fields reset at OnSpinExit;
+// charge counters persist per V6 spec (reset on OnDeath +
+// OnActorDestroy). Created on demand at OnHostSetupSpin /
+// OnPeerReceiveEnhancedSpinFlag / OnUprightTick.
 struct KarebabaEnhancedState {
+    // Per-spin flags — reset at OnSpinExit.
     bool currentSpinEnhanced   = false;
     bool geyserSpawnedThisSpin = false;
     // Counts ground-splash bursts fired this spin cycle (0..5).
-    // See kGroundSplashTotalCount — user spec: 5 splashes in rapid
-    // succession as the falling rain impacts.
     u8   groundSplashesFired   = 0;
+
+    // V6 charge state machine — persist across spins, reset on death.
+    KarebabaChargeState chargeState     = KarebabaChargeState::Charging;
+    u8                  chargeCounter   = 0;  // 0..4, chance = counter*25%
+    u8                  cooldownSpins   = 0;  // 3..0 during Cooldown
+
+    // V6 — peer-received flag for the Ready telegraph. On peer, drives
+    // OnUprightTick's decision to render 1.25× head + mouth spit.
+    // Host writes this from its own chargeState. Peer's chargeState
+    // is stale (only host runs the state machine) so this bool is
+    // the actual telegraph source of truth on peer.
+    bool                netCharged      = false;
 };
 
 // Keyed by Actor* — file-static, single-threaded (game thread only).
@@ -74,11 +94,32 @@ KarebabaEnhancedState& GetOrCreate(EnKarebaba* actor) {
     return sStates[&actor->actor];
 }
 
-// 33% chance per spin per plan §"Design". Field-tune if too
-// frequent — but Karebaba's Spin only fires when a player is in
-// range, so 1-in-3 spins carries the AoE means a player who
-// hangs around a Karebaba for several attack cycles WILL see the
-// geyser eventually.
+// V6 charge state machine constants per user 2026-07-31 spec.
+//   - Charging: chance per spin = counter × kAcidChargePerCounter.
+//     Counter starts at 0 → first spin 0%. Counter++ on fail.
+//     Max 4 → max chance 100% at 5th spin.
+//   - Ready: fires acid on next spin IF Link in acid-range.
+//   - Cooldown: 3 spins guaranteed no-acid post-attack.
+constexpr float kAcidChargePerCounter = 0.25f;
+constexpr u8    kAcidChargeMaxCounter = 4;   // clamp to keep chance ≤ 1.0
+constexpr u8    kAcidCooldownSpins    = 3;
+
+// Range gate — Link must be within 2 × cylinder radius (60u) = 120u
+// XZ to actually USE the ready acid attack. Range gate does NOT
+// affect charge roll (per user #2 clarification: chance ramps
+// regardless of Link position).
+constexpr float kAcidRangeXZ          = 60.0f * 2.0f;  // = 120u
+
+// Telegraph parameters during Ready state (visible in Upright).
+//   - Head scale: 1.25× (matches spin's mid-swell peak).
+//   - Mouth spit: 1 GSplash every N frames — subtle continuous
+//     visual signal. Same color/scale/type as attack-time spit
+//     but at lower spawn rate.
+constexpr float kTelegraphHeadScale    = 1.25f;
+constexpr int   kTelegraphSpitPeriod   = 8;   // spawn every N Upright frames
+
+// Legacy — no longer used (V6 replaced flat 33% with state machine).
+// Kept as reference / removable in a future cleanup.
 constexpr float kEnhancedSpinChance = 0.33f;
 
 // Head-scale sinusoid parameters. Vanilla Spin runs 40 frames
@@ -225,9 +266,9 @@ bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
     // Gate on the CVar (host-authoritative via enforced registry —
     // peer's view of this CVar is host's).
     if (AnchorCVarSync::GetEnforcedInt(GeyserSpinCVarName(), 0) == 0) {
-        // Fresh Spin cycle without CVar → clear any stale enhanced
-        // flag from previous spin (defensive; SetupUpright normally
-        // clears on exit).
+        // Fresh Spin cycle without CVar → clear any stale per-spin
+        // flags. Charge counters preserved so if CVar re-enables
+        // mid-session the ramp continues where it left off.
         auto it = sStates.find(&actor->actor);
         if (it != sStates.end()) {
             it->second.currentSpinEnhanced   = false;
@@ -237,20 +278,77 @@ bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
         return false;
     }
 
-    // Roll RNG. Rand_ZeroOne is the vanilla RNG source.
+    // V6 — charge state machine dispatch.
     KarebabaEnhancedState& state = GetOrCreate(actor);
-    if (Rand_ZeroOne() >= kEnhancedSpinChance) {
-        // Roll failed — mark as non-enhanced for this cycle.
-        state.currentSpinEnhanced   = false;
-        state.geyserSpawnedThisSpin = false;
-        state.groundSplashesFired   = 0;
-        return false;
-    }
-
-    state.currentSpinEnhanced   = true;
+    // Always clear per-spin flags at spin entry — this spin decides
+    // whether to enhance based on state machine outcome below.
+    state.currentSpinEnhanced   = false;
     state.geyserSpawnedThisSpin = false;
     state.groundSplashesFired   = 0;
-    return true;
+
+    switch (state.chargeState) {
+        case KarebabaChargeState::Cooldown: {
+            // 3-spin post-attack lockout. Decrement per spin.
+            // When decremented to 0 → transition to Charging with
+            // fresh counter=0 (post-cooldown first spin has 0% chance,
+            // matching post-spawn behavior per user spec).
+            if (state.cooldownSpins > 0) state.cooldownSpins--;
+            if (state.cooldownSpins == 0) {
+                state.chargeState   = KarebabaChargeState::Charging;
+                state.chargeCounter = 0;
+            }
+            // No acid, no roll this spin.
+            return false;
+        }
+
+        case KarebabaChargeState::Ready: {
+            // Range gate — Link within 2× cylinder radius (120u XZ).
+            // vanilla `xzDistToPlayer` is already updated by
+            // z_actor.c per-frame (patched by SoH's #153 nearest-
+            // player overlay for MP correctness — see session_state
+            // Pitfall 28).
+            if (actor->actor.xzDistToPlayer <= kAcidRangeXZ) {
+                // Fire acid this spin. Transition to Cooldown.
+                state.currentSpinEnhanced = true;
+                state.chargeState         = KarebabaChargeState::Cooldown;
+                state.cooldownSpins       = kAcidCooldownSpins;
+                state.chargeCounter       = 0;
+                // SFX — dramatic "eruption" sound at attack start.
+                Audio_PlayActorSound2(&actor->actor, NA_SE_EV_ERUPTION_CLOUD);
+                return true;
+            }
+            // Out of range — preserve Ready state per user spec
+            // ("skip AND preserve charge"). No acid, no roll.
+            return false;
+        }
+
+        case KarebabaChargeState::Charging: {
+            // Roll chance = counter × 25%. Counter starts at 0 on
+            // spawn/cooldown-exit → first spin 0% chance (mandatory
+            // vanilla).
+            const float chance =
+                (float)state.chargeCounter * kAcidChargePerCounter;
+            if (Rand_ZeroOne() < chance) {
+                // Success — enter Ready phase. Telegraph appears
+                // starting this Upright cycle. Acid fires NEXT spin
+                // if Link in range. Counter frozen (irrelevant in
+                // Ready state).
+                state.chargeState = KarebabaChargeState::Ready;
+                // SFX — subtle "bubble" tell so player notices the
+                // telegraph state change.
+                Audio_PlayActorSound2(&actor->actor, NA_SE_EV_WATER_BUBBLE);
+            } else {
+                // Fail — increment counter, clamped to max (chance
+                // never exceeds 100%).
+                if (state.chargeCounter < kAcidChargeMaxCounter) {
+                    state.chargeCounter++;
+                }
+            }
+            return false;  // No acid this spin regardless of roll.
+        }
+    }
+
+    return false;  // unreachable; defensive
 }
 
 void EnKarebabaDescriptor::OnPeerReceiveEnhancedSpinFlag(EnKarebaba* actor,
@@ -266,8 +364,75 @@ void EnKarebabaDescriptor::OnPeerReceiveEnhancedSpinFlag(EnKarebaba* actor,
     }
 }
 
+void EnKarebabaDescriptor::OnPeerReceiveChargedFlag(EnKarebaba* actor,
+                                                     bool charged) {
+    if (actor == nullptr) return;
+    // V6 — peer stores host's "Ready" state for telegraph rendering
+    // in OnUprightTick. Peer's own chargeState is not authoritative
+    // (only host runs the state machine); netCharged is the source
+    // of truth on peer.
+    KarebabaEnhancedState& state = GetOrCreate(actor);
+    state.netCharged = charged;
+}
+
+void EnKarebabaDescriptor::OnUprightTick(EnKarebaba* actor, PlayState* play) {
+    // V6 — Ready-phase telegraph. Applied per-frame during vanilla
+    // EnKarebaba_Upright. Two visual channels:
+    //   - Head at kTelegraphHeadScale (1.25× vanilla).
+    //   - Subtle mouth spit every kTelegraphSpitPeriod frames.
+    // Rendered on both host (chargeState==Ready) and peer
+    // (netCharged==true). Peer's chargeState is stale — the
+    // telegraph decision uses whichever source is authoritative
+    // for the local client.
+    if (actor == nullptr || play == nullptr) return;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return;
+    KarebabaEnhancedState& state = it->second;
+
+    // Determine telegraph active — union of host-side authoritative
+    // Ready state OR peer-side received flag. On host both agree;
+    // on peer only netCharged is truthful.
+    const bool telegraphActive =
+        (state.chargeState == KarebabaChargeState::Ready) ||
+        state.netCharged;
+    if (!telegraphActive) return;
+
+    // Apply enlarged head.
+    Actor_SetScale(&actor->actor, kVanillaScale * kTelegraphHeadScale);
+
+    // Subtle mouth spit every N frames. Uses game frame counter for
+    // deterministic timing (both clients render synced particles
+    // because gameplayFrames is host-synced via TIME_SYNC family).
+    if ((play->gameplayFrames % kTelegraphSpitPeriod) == 0) {
+        Color_RGBA8 primC = kSpitPrimColor;
+        Color_RGBA8 envC  = kSpitEnvColor;
+        Vec3f pos = {
+            actor->actor.world.pos.x + (Rand_ZeroOne() - 0.5f) * 6.0f,
+            actor->actor.world.pos.y + kSpitYOffset +
+                (Rand_ZeroOne() - 0.5f) * 4.0f,
+            actor->actor.world.pos.z + (Rand_ZeroOne() - 0.5f) * 6.0f,
+        };
+        // Half-scale of attack-time spit — subtle continuous signal
+        // rather than the dramatic bursts of the actual attack.
+        EffectSsGSplash_Spawn(play, &pos, &primC, &envC,
+                                kSpitSplashType, kSpitSplashScale / 2);
+    }
+}
+
 void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
     if (actor == nullptr || play == nullptr) return;
+
+    // V6 — clear any leftover telegraph scale from prior Upright on
+    // FIRST spin frame (params==39 = just decremented from 40). Runs
+    // unconditionally on host + peer so telegraph → spin transition
+    // is clean regardless of Ready/enhanced state. If this spin IS
+    // enhanced, OnSpinTick's sinusoid below re-scales starting at
+    // 1.0 anyway; if not enhanced, scale stays vanilla for the
+    // vanilla Spin cycle. Zero net cost when scale already at vanilla.
+    if (actor->actor.params == 39) {
+        Actor_SetScale(&actor->actor, kVanillaScale);
+    }
+
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return;  // not tracked
     KarebabaEnhancedState& state = it->second;
@@ -294,17 +459,19 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
     // we own it during enhanced spin.
     Actor_SetScale(&actor->actor, kVanillaScale * scaleMul);
 
-    // Spawn the AC-collider actor once per enhanced spin, on frame 1
-    // (params == 39 — first tick after SetupSpin sets params=40 +
-    // Update decrements). Guaranteed frame-consistent between host
-    // and peer because both process the same params-decrement
-    // schedule.
+    // Spawn the AC-collider actor once per enhanced spin, on frame 20
+    // (V6 — was frame 1, delayed per user spec so damage window matches
+    // the visual: acid isn't dangerous until 0.5s after rain begins
+    // falling. Rain starts at f10 → damage active f20. Geyser actor
+    // lifetime = 20 frames = to spin end at f40).
     //
     // Position: actor.home.pos (stem base) — damage cylinder stays
     // stationary at the plant even while the visible head sweeps
     // around it. Encompasses both the head's swing radius (60u) and
     // the falling-dust XZ footprint below.
-    if (!state.geyserSpawnedThisSpin && paramsNow <= 39) {
+    // paramsNow starts at 40 (SetupSpin), decrements each Update.
+    // frameF = 40 - paramsNow, so paramsNow == 20 means frameF == 20.
+    if (!state.geyserSpawnedThisSpin && paramsNow <= 20) {
         state.geyserSpawnedThisSpin = true;
         if (gEnKarebabaGeyserId != 0) {
             Actor_Spawn(&play->actorCtx, play,
@@ -417,6 +584,12 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
         };
         EffectSsGSplash_Spawn(play, &splashPos, &primC, &envC,
                                 kGroundSplashType, kGroundSplashScale);
+        // V6 SFX — waterdrop tick on FIRST splash only (avoid
+        // 5-splash SFX spam over 5 frames — one is enough for the
+        // "acid hits ground" tell).
+        if (state.groundSplashesFired == 0) {
+            Audio_PlayActorSound2(&actor->actor, NA_SE_EV_WATERDROP);
+        }
         state.groundSplashesFired++;
     }
 
@@ -472,6 +645,38 @@ bool EnKarebabaDescriptor::IsCurrentSpinEnhanced(EnKarebaba* actor) {
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return false;
     return it->second.currentSpinEnhanced;
+}
+
+bool EnKarebabaDescriptor::IsCharged(EnKarebaba* actor) {
+    // V6 — for ENEMY_STATE wire send-side. Returns whether host's
+    // charge state is Ready (telegraph should show). Peer's query
+    // is irrelevant (peer never sends this field back to host).
+    if (actor == nullptr) return false;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return false;
+    return it->second.chargeState == KarebabaChargeState::Ready;
+}
+
+void EnKarebabaDescriptor::OnDeath(EnKarebaba* actor) {
+    // V6 — per user spec: "all counter reset on death". Wipes both
+    // charge state machine (chargeState/chargeCounter/cooldownSpins)
+    // AND per-spin flags. Karebaba's Dying → Regrow → Idle cycle
+    // preserves the Actor* pointer so the state map entry stays,
+    // but its contents get zeroed. Next spin after respawn behaves
+    // like fresh spawn (Charging, counter=0 → first spin 0%).
+    if (actor == nullptr) return;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return;
+    KarebabaEnhancedState& state = it->second;
+    state.currentSpinEnhanced   = false;
+    state.geyserSpawnedThisSpin = false;
+    state.groundSplashesFired   = 0;
+    state.chargeState           = KarebabaChargeState::Charging;
+    state.chargeCounter         = 0;
+    state.cooldownSpins         = 0;
+    state.netCharged            = false;
+    // Reset actor.scale in case telegraph was active at death moment.
+    Actor_SetScale(&actor->actor, kVanillaScale);
 }
 
 void EnKarebabaDescriptor::OnActorDestroy(EnKarebaba* actor) {
