@@ -320,6 +320,48 @@ void RebuildWorldRotFromBasis(EnSw* self, const Vec3f& fwd, const Vec3f& normal)
 // adds `+ 0x4000` to yaw when computing tangent-X, hinting at a non-
 // standard model orientation). If so, we'd need to apply an additional
 // yaw offset here — but let's field-test this first.
+// Rebuild actor.world.rot to orient the En_Sw on a WALL surface such
+// that its "belly" is against the wall and its skull-face points along
+// walk direction. Analogous to the ground orientation but with the
+// surface's normal replacing the world-up axis.
+//
+// Model orientation established from ground fix (iteration 4):
+//   Skull  at local -Y  (front of body)
+//   Belly  at local -Z  (bottom of body / touches surface)
+//   Dorsal at local +Z  (top of body / opposite belly)
+//   Right  at local +X
+//   (Back  at local +Y, opposite skull)
+//
+// For wall placement:
+//   R * (0,-1,0) = fwd           (skull → walk direction on wall)
+//   R * (0,0,-1) = -wall_normal  (belly → into wall)
+//   R * (1,0,0)  = wall_normal × fwd   (right side; right-hand rule)
+//
+// Basis columns (col i = R applied to local +i axis):
+//   Col 0 (local +X = right)  = wall_normal × fwd
+//   Col 1 (local +Y = back)   = -fwd
+//   Col 2 (local +Z = dorsal) = wall_normal
+//
+// Right-handed check: col0 × col1 = (wall_normal × fwd) × (-fwd)
+//   = -(fwd × (wall_normal × fwd))  ... wait, use triple identity:
+//   (A × B) × C = B(A·C) - A(B·C)
+//   (wall_normal × fwd) × (-fwd) = -[fwd(wall_normal·fwd) - wall_normal(fwd·fwd)]
+//   = -[0 - wall_normal] = wall_normal = col2  ✓
+void RebuildWorldRotFromWallBasis(EnSw* self, const Vec3f& fwd, const Vec3f& wall_normal) {
+    Vec3f right;
+    Cross(wall_normal, fwd, &right);
+    if (!Normalize(&right)) return;  // degenerate (fwd parallel to normal)
+
+    MtxF basis;
+    basis.xx = right.x;         basis.yx = right.y;         basis.zx = right.z;         basis.wx = 0.0f;
+    basis.xy = -fwd.x;          basis.yy = -fwd.y;          basis.zy = -fwd.z;          basis.wy = 0.0f;
+    basis.xz = wall_normal.x;   basis.yz = wall_normal.y;   basis.zz = wall_normal.z;   basis.wz = 0.0f;
+    basis.xw = 0.0f;            basis.yw = 0.0f;            basis.zw = 0.0f;            basis.ww = 1.0f;
+
+    Matrix_MtxFToYXZRotS(&basis, &self->actor.world.rot, 0);
+    self->actor.shape.rot = self->actor.world.rot;
+}
+
 void RebuildWorldRotFromGroundBasis(EnSw* self, const Vec3f& fwd, const Vec3f& normal) {
     Vec3f right;
     Cross(normal, fwd, &right);
@@ -585,16 +627,13 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     self->actor.world.pos.y += fwd.y * step;
     self->actor.world.pos.z += fwd.z * step;
 
-    // Do NOT overwrite shape.rot on walls. Vanilla combat En_Sw's
-    // scene-placed shape.rot is what makes the spider belly-on-wall
-    // in the correct orientation; vanilla ambient actionFunc only
-    // rotates shape.rot.z for gaze (unk_444). Attempting to rebuild
-    // rot from a fwd+normal basis produces a 90° offset because
-    // vanilla En_Sw's model is authored non-standard (shape.rot.y=0
-    // means walk-east per the +0x4000 offset in Init line 291).
-    // Preserving scene placement keeps the spider looking natural on
-    // walls; motion still traverses along the wall tangent plane
-    // toward the target.
+    // Wall orientation — analogous to the ground rot fix (iteration 5),
+    // with the wall's normal replacing world-up. Model's local axes:
+    //   local -Y = skull  → walk direction (fwd)
+    //   local -Z = belly  → into wall (-normal)
+    //   local +X = right  → wall_normal × fwd
+    // See RebuildWorldRotFromWallBasis for the basis derivation.
+    RebuildWorldRotFromWallBasis(self, fwd, s.wallNormal);
 }
 
 // -------------------------------------------------------------------
