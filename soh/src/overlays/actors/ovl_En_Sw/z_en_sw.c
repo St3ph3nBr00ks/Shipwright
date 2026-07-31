@@ -1236,7 +1236,13 @@ void EnSw_Draw(Actor* thisx, PlayState* play) {
 
     Gfx_SetupDL_25Opa(play->state.gfxCtx);
     SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnSw_OverrideLimbDraw, EnSw_PostLimbDraw, this);
-    if (this->actionFunc == func_80B0E728) {
+    // Fog reset MUST mirror the condition that applied the purple fog
+    // above, otherwise the fog leaks into every subsequent actor
+    // drawn from the same POLY_OPA_DISP this frame (observed: nearby
+    // chests tint purple during a JumpLunge). Both branches use
+    // func_80B0EEA4 = Play_SetFog to restore the scene's default fog.
+    if (this->actionFunc == func_80B0E728 ||
+        Anchor_Enhance_EnSw_IsJumpAttacking(this)) {
         func_80B0EEA4(play);
     }
 }
