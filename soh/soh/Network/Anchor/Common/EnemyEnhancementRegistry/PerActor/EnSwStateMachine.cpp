@@ -209,12 +209,12 @@ constexpr float kMaxJumpHeightUp = 120.0f;
 constexpr int kStickyGraceFrames = 30;
 
 // Idle gaze rotation — ground spider slowly turns yaw between random
-// targets when not pursuing / attacking. Wall spider handled by
-// vanilla func_80B0E5E0's shape.rot.z random-gaze mechanism (correct
-// axis for wall orientation), so we don't touch wall idle here.
-constexpr int kIdleGazeChangeInterval = 30;   // frames between random target picks
-constexpr s16 kIdleGazeStepScale      = 8;
-constexpr s16 kIdleGazeStepMax        = 0x100; // ~1.4° per frame — slow sweep
+// targets when not pursuing / attacking, in a two-phase rest/look
+// cycle (see UpdateIdleGaze). Wall spider handled by vanilla
+// func_80B0E5E0's shape.rot.z random-gaze mechanism (correct axis
+// for wall orientation), so we don't touch wall idle here.
+constexpr s16 kIdleGazeStepScale = 8;
+constexpr s16 kIdleGazeStepMax   = 0x100; // ~1.4° per frame — slow sweep
 
 // Sticky target lookup — returns cached target if lookup fails this
 // tick, up to kStickyGraceFrames of persistence. Reference: NPC
@@ -309,28 +309,44 @@ inline bool IsTargetJumpReachable(const EnSw* spider, const Actor* target) {
            <= kMaxJumpHeightUp;
 }
 
-// Idle gaze rotation — ground spider slowly turns yaw between random
-// s16 targets, changed every kIdleGazeChangeInterval frames. Writes
-// world.rot.y directly; caller sets world.rot.x/z + copies to shape.rot.
-// Sets s.isWalkAnimActive = true whenever yaw actually changed this
-// tick (spider is "looking around" — legs should shuffle). Between
-// gaze targets when yaw has arrived and rest, the flag stays false
-// and legs render static.
+// Idle gaze rotation — vanilla-style two-phase cycle for the ground
+// spider "looking for prey":
+//   Rest phase: sit still (no yaw change, no leg animation) until
+//     the scheduled next-look frame.
+//   Look phase: pick a random target yaw ±90° from current facing,
+//     smooth-step toward it. Legs animate while rotating. When
+//     arrived, schedule the next look after a random 10-40-frame
+//     rest (matches vanilla func_80B0E5E0 unk_388 =
+//     Rand_S16Offset(10, 30) cadence).
 inline void UpdateIdleGaze(EnSwEnhancedState& s, EnSw* self,
                             PlayState* play) {
     const int now = (int)play->gameplayFrames;
-    if (now >= s.idleGazeNextChangeFrame) {
-        // Pick a new target ±90° from current facing so the spider
-        // sweeps rather than snapping to a random direction.
-        const s16 offset = (s16)((Rand_ZeroOne() - 0.5f) * 0x8000);
-        s.idleGazeTargetYaw       = self->actor.world.rot.y + offset;
-        s.idleGazeNextChangeFrame = now + kIdleGazeChangeInterval;
+
+    // Rest phase — wait until the scheduled next look, then arm
+    // the look phase with a fresh target yaw.
+    if (!s.idleGazeIsLooking) {
+        if (now < s.idleGazeNextChangeFrame) return;  // still resting
+        const s16 offset =
+            (s16)((Rand_ZeroOne() - 0.5f) * 0x8000);  // ±90°
+        s.idleGazeTargetYaw = self->actor.world.rot.y + offset;
+        s.idleGazeIsLooking = true;
+        // fall through into first look-phase step this tick
     }
+
+    // Look phase — smooth-step yaw toward target; walk-anim active
+    // whenever yaw actually changed this tick.
     const s16 preYaw = self->actor.world.rot.y;
     Math_SmoothStepToS(&self->actor.world.rot.y, s.idleGazeTargetYaw,
                         kIdleGazeStepScale, kIdleGazeStepMax, 0);
     if (self->actor.world.rot.y != preYaw) {
-        s.isWalkAnimActive = true;  // rotating this tick → animate legs
+        s.isWalkAnimActive = true;
+    }
+
+    // Reached target — go back to rest with random duration.
+    if (self->actor.world.rot.y == s.idleGazeTargetYaw) {
+        s.idleGazeIsLooking       = false;
+        s.idleGazeNextChangeFrame =
+            now + 10 + (int)(Rand_ZeroOne() * 30.0f);  // 10..40 frames
     }
 }
 

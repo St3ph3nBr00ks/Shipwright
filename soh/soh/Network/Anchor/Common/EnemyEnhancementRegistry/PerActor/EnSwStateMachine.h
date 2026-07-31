@@ -139,8 +139,16 @@ struct EnSwEnhancedState {
     // spider via shape.rot.z, which our post-hook doesn't override on
     // wall). Frame count is absolute (play->gameplayFrames-based) so
     // it survives state transitions cleanly.
-    s16 idleGazeTargetYaw       = 0;
-    int idleGazeNextChangeFrame = 0;
+    s16  idleGazeTargetYaw       = 0;
+    int  idleGazeNextChangeFrame = 0;
+    // Two-phase rhythm — spider alternates:
+    //   Rest phase (isLooking=false): sit still, no rotation / no
+    //     leg animation, until gameplayFrames >= idleGazeNextChangeFrame.
+    //   Look phase (isLooking=true):  smooth-step yaw toward
+    //     idleGazeTargetYaw; when arrived, return to rest phase with
+    //     a fresh random duration (10-40 frames, matching vanilla
+    //     func_80B0E5E0 unk_388 = Rand_S16Offset(10, 30)).
+    bool idleGazeIsLooking = false;
 
     // Walk-animation gate — true only when the spider is actually
     // translating in XZ (wall crawling, ground pursuing, walk-lunge
