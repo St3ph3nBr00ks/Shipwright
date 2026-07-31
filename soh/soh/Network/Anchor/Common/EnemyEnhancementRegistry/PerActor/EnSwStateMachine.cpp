@@ -25,6 +25,7 @@
 
 #include "soh/Network/Anchor/Common/PlayerLookup.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GroupMovement.h"
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Bug 5 fix — nav JumpAnchor consumption
 
 // functions.h + z64bgcheck.h pulled in transitively via EnSwStateMachine.h's
 // z_en_sw.h -> global.h -> {functions.h, z64.h -> z64bgcheck.h}. Pitfall 40:
@@ -324,6 +325,115 @@ inline bool IsTargetVisible(const EnSw* spider, const Actor* target,
 inline bool IsTargetJumpReachable(const EnSw* spider, const Actor* target) {
     return target->world.pos.y - spider->actor.world.pos.y
            <= kMaxJumpHeightUp;
+}
+
+// Bug 6 fix (2026-07-31) — direct line-of-flight raycast from spider
+// pos to target pos. Returns TRUE if line is clear of walls / ceilings
+// / floors / dyna. Applied as an additional gate before triggering
+// attack-style JumpLunge. Conservative approximation: ballistic arc
+// curves upward, so a CLEAR straight line doesn't guarantee the arc
+// clears (arc may exceed line envelope going up), but a BLOCKED line
+// GUARANTEES the arc is blocked. This catches the "Link on unreachable
+// platform above / behind overhang" case where the physics ceiling
+// (kMaxJumpHeightUp=120u) says the jump is possible but geometry blocks
+// the arc.
+//
+// Anchor-driven jumps EXEMPT — nav JumpAnchors are scan-time arc-
+// verified (RoomNavData.cpp:4188-4202 arc-samples the parabolic path
+// and rejects anchors whose arc hits geometry). If an anchor exists,
+// trust it.
+inline bool IsLineOfFlightClear(PlayState* play,
+                                 const Vec3f& fromPos, const Vec3f& toPos) {
+    Vec3f a = fromPos;
+    Vec3f b = toPos;
+    // Aim at target's mid-body / mid-height so the ray isn't a floor-
+    // hugger. Small +Y shift on both endpoints; matches Player LoS
+    // convention in TickGroundPursue (Rule 3 losFrom/losTo +20).
+    a.y += 15.0f;
+    b.y += 15.0f;
+    CollisionPoly* poly = nullptr;
+    s32 bgId = 0;
+    Vec3f hitPos = { 0.0f, 0.0f, 0.0f };
+    const bool blocked = BgCheck_EntityLineTest1(
+        &play->colCtx, &a, &b, &hitPos, &poly, 1, 1, 1, 0, &bgId);
+    return !blocked;
+}
+
+// Bug 5 fix (2026-07-31) — query the room's nav JumpAnchors for one
+// whose "far endpoint" (the endpoint NOT close to spider) meaningfully
+// progresses toward the target. Returns TRUE + writes *outLanding if
+// found. False if no useful anchor. Bail cheap if room has no nav data.
+//
+// Design notes:
+//   - JumpAnchors are BIDIRECTIONAL (fromPos↔toPos pair). Spider may
+//     be near EITHER endpoint; pick the nearer as "source", the
+//     other as "landing".
+//   - kAnchorProximity gates "spider is at this anchor" — chosen 60u
+//     to allow spider approaching-but-not-yet-on the anchor to still
+//     trigger, without hijacking anchors on the far side of the room.
+//   - Progress threshold 0.7× ensures the jump meaningfully shortens
+//     distance to target (rejects lateral / away-facing anchors).
+//   - Y-delta check: landing must be within kMaxJumpHeightUp above
+//     current pos (physics ceiling), matches IsTargetJumpReachable.
+inline bool FindJumpAnchorTowardTarget(EnSw* self, PlayState* play,
+                                        const Vec3f& targetPos,
+                                        Vec3f* outLanding) {
+    if (play == nullptr || outLanding == nullptr) return false;
+    const AnchorNavRoom::RoomNavData* data =
+        AnchorNavRoom::GetForRoom(play->sceneNum,
+                                    play->roomCtx.curRoom.num);
+    if (data == nullptr || data->jumpAnchors.empty()) return false;
+
+    constexpr float kAnchorProximity = 60.0f;
+    constexpr float kProgressThreshold = 0.7f;
+
+    const Vec3f& sp = self->actor.world.pos;
+    const float curDistToTargetSq =
+        (targetPos.x - sp.x) * (targetPos.x - sp.x) +
+        (targetPos.z - sp.z) * (targetPos.z - sp.z);
+    if (curDistToTargetSq < 100.0f) return false;  // already at target
+
+    bool  found = false;
+    float bestProgressSq = curDistToTargetSq * kProgressThreshold *
+                            kProgressThreshold;
+    Vec3f bestLanding = { 0.0f, 0.0f, 0.0f };
+
+    for (const AnchorNavRoom::JumpAnchor& a : data->jumpAnchors) {
+        // Which endpoint is near spider? Pick the closer one as "source"
+        // (implicit — we care about the OTHER endpoint as "landing").
+        const float dxA = a.fromPos.x - sp.x;
+        const float dzA = a.fromPos.z - sp.z;
+        const float distFromSq = dxA * dxA + dzA * dzA;
+        const float dxB = a.toPos.x - sp.x;
+        const float dzB = a.toPos.z - sp.z;
+        const float distToSq = dxB * dxB + dzB * dzB;
+
+        Vec3f landing;
+        if (distFromSq <= distToSq) {
+            if (distFromSq > kAnchorProximity * kAnchorProximity) continue;
+            landing = a.toPos;
+        } else {
+            if (distToSq > kAnchorProximity * kAnchorProximity) continue;
+            landing = a.fromPos;
+        }
+
+        // Y-delta gate — landing must be within physics ceiling.
+        if (landing.y - sp.y > kMaxJumpHeightUp) continue;
+
+        // Progress gate — landing must meaningfully close distance to
+        // target vs staying put.
+        const float landDx = targetPos.x - landing.x;
+        const float landDz = targetPos.z - landing.z;
+        const float landDistSq = landDx * landDx + landDz * landDz;
+        if (landDistSq < bestProgressSq) {
+            bestProgressSq = landDistSq;
+            bestLanding = landing;
+            found = true;
+        }
+    }
+
+    if (found) *outLanding = bestLanding;
+    return found;
 }
 
 // Idle gaze rotation — vanilla-style two-phase cycle for the ground
@@ -1053,11 +1163,21 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const bool linkClimbing =
         (targetPlayer->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
     const float dist3D = std::sqrt(dist3DSq);
+    // Bug 6 fix — additional line-of-flight raycast rejects jumps at
+    // targets on unreachable platforms above / behind overhangs.
+    // IsTargetJumpReachable checks physics ceiling but NOT geometry;
+    // this catches the "spider on wall, Link on platform above" case
+    // where Y-delta is < kMaxJumpHeightUp but the arc bonks the
+    // platform's underside. Line-of-flight is conservative (rejects
+    // some true-positives that arc-clear) — anchor-driven jumps below
+    // (Bug 5 fix) are exempt because anchors are scan-time verified.
     if (!linkClimbing &&
         dist3D > kJumpMinTriggerRange &&
         dist3D <= kJumpTriggerRange &&
         IsTargetVisible(self, target, s) &&
-        IsTargetJumpReachable(self, target)) {
+        IsTargetJumpReachable(self, target) &&
+        IsLineOfFlightClear(play, self->actor.world.pos,
+                             target->world.pos)) {
         SetupJumpToward(s, self->actor.world.pos, target->world.pos);
         TransitionTo(self, s, EnSwState::JumpLunge, "wall_jump_at_ground_link");
         return;
@@ -1375,6 +1495,31 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         }
     }
 
+    // Bug 5 fix — nav jump-anchor gap traversal. Before running normal
+    // pursuit motion, check if a nearby JumpAnchor bridges toward the
+    // target (e.g., across a gap the spider would otherwise fall into
+    // via TickWallEdgeDrop). Anchor arc is scan-time verified so no
+    // runtime line-of-flight check needed. Skip if spider is already
+    // in melee range — vanilla lunge cycle should handle that.
+    if (dist3DSq > 100.0f * 100.0f) {
+        Vec3f anchorLanding = { 0.0f, 0.0f, 0.0f };
+        if (FindJumpAnchorTowardTarget(self, play, target->world.pos,
+                                         &anchorLanding)) {
+            if (DiagEnabled()) {
+                SPDLOG_INFO("[EEDiag/SM] actor=0x{:x} GROUND->JUMP "
+                            "anchor-driven gap traversal "
+                            "landing=({:.0f},{:.0f},{:.0f})",
+                            (uintptr_t)self,
+                            anchorLanding.x, anchorLanding.y,
+                            anchorLanding.z);
+            }
+            SetupJumpToward(s, self->actor.world.pos, anchorLanding);
+            TransitionTo(self, s, EnSwState::JumpLunge,
+                         "traverse_jump_via_anchor");
+            return;
+        }
+    }
+
     // Yaw toward target in world XZ, project onto floor tangent plane
     // for slope-following motion.
     const s16 yaw = (s16)(std::atan2(dx, dz) * (0x8000 / M_PI));
@@ -1442,9 +1587,20 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
                 BgCheck_EntityLineTest1(&play->colCtx, &losFrom, &losTo,
                                          &losHit, &losPoly, 1, 0, 0, 1,
                                          &losBgId);
+            // Bug 6 fix — line-of-flight gate rejects jumps at targets
+            // on unreachable platforms above. IsTargetJumpReachable only
+            // checks physics ceiling (Y-delta) — a target on a platform
+            // 100u above but behind an overhang passes that check even
+            // though the arc bonks the platform's edge. Direct raycast
+            // from spider to target is conservative (arc may clear when
+            // line is blocked, but arc is DEFINITELY blocked when line
+            // is blocked) — matches user's own suggested fix for this
+            // symptom class.
             if (losBlocked &&
                 IsTargetVisible(self, target, s) &&
-                IsTargetJumpReachable(self, target)) {
+                IsTargetJumpReachable(self, target) &&
+                IsLineOfFlightClear(play, self->actor.world.pos,
+                                     target->world.pos)) {
                 SetupJumpToward(s, self->actor.world.pos, target->world.pos);
                 TransitionTo(self, s, EnSwState::JumpLunge, "ground_jump_no_path");
                 return;
