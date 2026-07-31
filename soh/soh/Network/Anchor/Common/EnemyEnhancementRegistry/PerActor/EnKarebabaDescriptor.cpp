@@ -181,26 +181,29 @@ constexpr s16   kRisingDustLife        = 25;
 // Acid green tints. Prim = bright fill color; Env = darker outline
 // color for the multi-tone gradient the softsprite render uses.
 // Alphas below 255 keep particles translucent so they blend into
-// each other and don't look like solid blobs.
+// each other and don't look like solid blobs (bubbles + dust).
 //
-// V4 tuning — primary RGB reduced 25% across all vomit-derived
-// effects (spit / bubbles / rain / splash / rising dust). Env
-// colors preserved as edge-outline definition. Rendered values:
-//   Spit  prim 170→128 240→180 110→ 82  (was bright yellow-green)
-//   Bub   prim 150→112 220→165 100→ 75
-//   Rain  prim 150→112 220→165 100→ 75
-//   Splsh prim 170→128 240→180 110→ 82
-//   Dust  prim 180→135 230→172 130→ 97
-// Alphas preserved (transparency is orthogonal to brightness).
-constexpr Color_RGBA8 kSpitPrimColor   = { 128, 180,  82, 220 };
+// V5 tuning (2026-07-31 per user playtest — V4's uniform 25%
+// brightness reduction perceived as too aggressive; splashes
+// also read as white/blue rather than green):
+//   - Spit / Rain / Dust: restored to pre-V4 100% originals.
+//   - Bubble: KEPT at V4-dimmed values per user "content with
+//     bubbles" feedback (they read as translucent accent to
+//     spit, not primary color).
+//   - Splash: dedicated saturation-boost pass — R and B reduced
+//     to reject the white water-texture bleed-through, G maxed,
+//     alpha 230→255 so tint fully overrides texture. Env darkened
+//     for stronger outline contrast against the bright water
+//     splash texture.
+constexpr Color_RGBA8 kSpitPrimColor   = { 170, 240, 110, 220 };  // V5: restored pre-V4
 constexpr Color_RGBA8 kSpitEnvColor    = {  50,  90,  30, 255 };
-constexpr Color_RGBA8 kBubblePrimColor = { 112, 165,  75, 200 };
+constexpr Color_RGBA8 kBubblePrimColor = { 112, 165,  75, 200 };  // V5: KEEP V4 (user content)
 constexpr Color_RGBA8 kBubbleEnvColor  = {  60, 100,  40, 255 };
-constexpr Color_RGBA8 kRainPrimColor   = { 112, 165,  75, 220 };
+constexpr Color_RGBA8 kRainPrimColor   = { 150, 220, 100, 220 };  // V5: restored pre-V4
 constexpr Color_RGBA8 kRainEnvColor    = {  60, 100,  40, 255 };
-constexpr Color_RGBA8 kSplashPrimColor = { 128, 180,  82, 230 };
-constexpr Color_RGBA8 kSplashEnvColor  = {  50,  90,  30, 255 };
-constexpr Color_RGBA8 kDustPrimColor   = { 135, 172,  97, 150 };
+constexpr Color_RGBA8 kSplashPrimColor = { 120, 255,  70, 255 };  // V5: saturated green + full α to override white water tex
+constexpr Color_RGBA8 kSplashEnvColor  = {  30,  80,  20, 255 };  // V5: darker outline for contrast
+constexpr Color_RGBA8 kDustPrimColor   = { 180, 230, 130, 150 };  // V5: restored pre-V4
 constexpr Color_RGBA8 kDustEnvColor    = {  80, 130,  60, 255 };
 
 }  // namespace
