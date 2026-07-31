@@ -99,6 +99,17 @@ constexpr float kIdleDetectRangeSq = 200.0f * 200.0f;
 // so leg tips visually reach the surface across the offset gap.
 constexpr float kBodySurfaceOffset = 8.0f;
 
+// Wall-base floor-detection probe. TickWallPursue casts a short ray
+// straight down from the actor position to detect when the spider has
+// walked to a vertical wall's bottom edge (floor level). Without this,
+// ValidateBasis's horizontal probe re-hits the wall poly at floor
+// level and the state machine gets stuck in WALL_PURSUE indefinitely
+// (analysis 2026-07-30, log 770). Probe extends kWallBaseFloorProbe
+// units downward; a floor hit within kGroundContactThreshold of the
+// actor's Y counts as "at wall base."
+constexpr float kWallBaseFloorProbe     = 20.0f;
+constexpr float kGroundContactThreshold = 10.0f;
+
 // -------------------------------------------------------------------
 // Diagnostic
 // -------------------------------------------------------------------
@@ -559,11 +570,59 @@ void TickWallIdle(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     LogTickState(self, s, "pursuing");
 
-    // Basis validation FIRST — if we walked off the edge, we can't
-    // apply tangent motion this frame. Transition to WallEdgeDrop so
-    // TickWallEdgeDrop applies gravity + detects landing on floor →
-    // GroundPursue. (M5's stopgap went to Uninitialized directly; M6
-    // replaces that with the proper airborne + landing flow.)
+    // Wall-base floor detection FIRST — analysis 2026-07-30 (log 770):
+    // ValidateBasis's horizontal probe cannot detect when the spider
+    // has walked to a vertical wall's bottom edge (still hits the wall
+    // poly at floor level, returns SamePoly, no transition fires). We
+    // need an independent downward probe to catch this. If the actor
+    // is within kGroundContactThreshold of a floor poly AND the target
+    // is below the actor's Y, the spider has reached the wall's base
+    // and should transition to GroundPursue for floor-plane pursuit.
+    //
+    // Runs BEFORE ValidateBasis so it takes precedence over the
+    // spurious SamePoly result.
+    {
+        Actor* preTarget = FindNearestPlayerActor(&self->actor, play);
+        if (preTarget != nullptr) {
+            Vec3f from = self->actor.world.pos;
+            from.y += 5.0f;  // start above so we catch when already on floor
+            Vec3f to = {
+                self->actor.world.pos.x,
+                self->actor.world.pos.y + 5.0f - kWallBaseFloorProbe,
+                self->actor.world.pos.z,
+            };
+            CollisionPoly* floorPoly = nullptr;
+            s32 bgId = 0;
+            Vec3f floorHit = {0.0f, 0.0f, 0.0f};
+            if (BgCheck_EntityLineTest1(&play->colCtx, &from, &to, &floorHit, &floorPoly,
+                                         1, 1, 1, 0, &bgId) && floorPoly != nullptr) {
+                const float ny = COLPOLY_GET_NORMAL(floorPoly->normal.y);
+                if (ny > kWallNormalYThreshold) {
+                    const float distToFloor = self->actor.world.pos.y - floorHit.y;
+                    const bool atGroundLevel = (distToFloor < kGroundContactThreshold);
+                    const bool targetBelow = (preTarget->world.pos.y < self->actor.world.pos.y);
+                    if (atGroundLevel && targetBelow) {
+                        // Wall's bottom edge reached with target below. Skip
+                        // WallEdgeDrop (we're already at floor level; no
+                        // gravity fall needed). Snap Y to floor + body offset
+                        // and transition to GroundPursue.
+                        s.hasWallBasis = false;
+                        self->actor.world.pos.y = floorHit.y + kBodySurfaceOffset;
+                        self->actor.velocity.x = 0.0f;
+                        self->actor.velocity.y = 0.0f;
+                        self->actor.velocity.z = 0.0f;
+                        TransitionTo(self, s, EnSwState::GroundPursue, "reached_wall_base");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Basis validation — if we walked off the SIDE edge (not the bottom
+    // edge, which is caught by the floor probe above), the horizontal
+    // ray will miss the wall and return Lost → transition to WallEdgeDrop
+    // for gravity fall.
     const BasisValidateResult v = ValidateBasis(self, play, s);
     if (v == BasisValidateResult::Lost) {
         s.hasWallBasis = false;
