@@ -63,6 +63,42 @@ EnSwEnhancedState* Find(EnSw* self) {
 }
 
 // -------------------------------------------------------------------
+// JumpLunge tuning + launch-velocity helper — defined here (before
+// TickWallPursue + TickGroundPursue) because rule-2 and rule-3
+// triggers reference them. TickJumpLunge itself lives further down
+// alongside the other TickXxx handlers.
+// -------------------------------------------------------------------
+constexpr int   kJumpWindupFrames    = 10;     // ~0.5 s telegraph at 20fps
+constexpr float kJumpInitialVy       = 12.0f;  // upward launch velocity
+constexpr float kJumpForwardSpeed    = 10.0f;  // horizontal launch magnitude
+constexpr int   kJumpMaxAirFrames    = 90;     // ~4.5 s safety cap
+constexpr float kJumpTriggerRange    = 300.0f; // rule 2/3 max spider→link
+                                                // distance for jump trigger
+constexpr float kJumpMinTriggerRange = 60.0f;  // don't jump if already at
+                                                // point-blank walk range
+
+// Populate s.jumpVel* with horizontal aim toward target + fixed upward
+// launch. Called from rule 2 (TickWallPursue) and rule 3 (TickGroundPursue)
+// trigger sites before TransitionTo(JumpLunge). jumpAirborne=false so
+// TickJumpLunge's wind-up phase runs first.
+inline void SetupJumpToward(EnSwEnhancedState& s, const Vec3f& spiderPos,
+                            const Vec3f& targetPos) {
+    const float dx = targetPos.x - spiderPos.x;
+    const float dz = targetPos.z - spiderPos.z;
+    const float distXZ = std::sqrt(dx * dx + dz * dz);
+    if (distXZ < 0.001f) {
+        s.jumpVelX = 0.0f;
+        s.jumpVelZ = 0.0f;
+    } else {
+        const float inv = 1.0f / distXZ;
+        s.jumpVelX = dx * inv * kJumpForwardSpeed;
+        s.jumpVelZ = dz * inv * kJumpForwardSpeed;
+    }
+    s.jumpVelY     = kJumpInitialVy;
+    s.jumpAirborne = false;
+}
+
+// -------------------------------------------------------------------
 // Tuning constants
 // -------------------------------------------------------------------
 
@@ -1109,36 +1145,6 @@ void TickGroundToWallReattach(EnSw* self, PlayState* play, EnSwEnhancedState& s)
 // isolated, subsequent GroundPursue / GroundToWallReattach / WallEdgeDrop
 // handle recovery. Safety timeout kJumpMaxAirFrames aborts to
 // PermanentlyDisabled if flight never lands (void fall).
-constexpr int   kJumpWindupFrames    = 10;     // ~0.5 s telegraph at 20fps
-constexpr float kJumpInitialVy       = 12.0f;  // upward launch velocity
-constexpr float kJumpForwardSpeed    = 10.0f;  // horizontal launch magnitude
-constexpr int   kJumpMaxAirFrames    = 90;     // ~4.5 s safety cap
-constexpr float kJumpTriggerRange    = 300.0f; // rule 2/3 max spider→link
-                                                // distance for jump trigger
-constexpr float kJumpMinTriggerRange = 60.0f;  // don't jump if already at
-                                                // point-blank walk range
-
-// Populate s.jumpVel* with horizontal aim toward target + fixed upward
-// launch. Called from rule 2 (TickWallPursue) and rule 3 (TickGroundPursue)
-// trigger sites before TransitionTo(JumpLunge). jumpAirborne=false so
-// TickJumpLunge's wind-up phase runs first.
-void SetupJumpToward(EnSwEnhancedState& s, const Vec3f& spiderPos,
-                     const Vec3f& targetPos) {
-    const float dx = targetPos.x - spiderPos.x;
-    const float dz = targetPos.z - spiderPos.z;
-    const float distXZ = std::sqrt(dx * dx + dz * dz);
-    if (distXZ < 0.001f) {
-        s.jumpVelX = 0.0f;
-        s.jumpVelZ = 0.0f;
-    } else {
-        const float inv = 1.0f / distXZ;
-        s.jumpVelX = dx * inv * kJumpForwardSpeed;
-        s.jumpVelZ = dz * inv * kJumpForwardSpeed;
-    }
-    s.jumpVelY     = kJumpInitialVy;
-    s.jumpAirborne = false;
-}
-
 void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     // Suppress vanilla's ambient-actionFunc lunge trigger for the
     // duration of the jump. func_80B0E5E0 checks
