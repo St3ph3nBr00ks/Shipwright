@@ -79,6 +79,23 @@ constexpr float kWallNormalYThreshold = 0.5f;
 // descriptor value.
 constexpr float kIdleDetectRangeSq = 600.0f * 600.0f;
 
+// Body-offset distance perpendicular to the surface (both ground and
+// wall). Vanilla En_Sw's body naturally sits FLUSH against the wall
+// (belly touching wall). Under our enhancement, we lift the body off
+// the surface so legs are visible extending from body to surface —
+// looks more like an actual spider clinging to / walking on the
+// surface, less like a decal.
+//
+// Applied at three sites:
+//   - TryEstablishBasis (initial wall attach)
+//   - TickWallEdgeDrop (landing snap)
+//   - TickGroundPursue (per-tick ground-follow)
+//
+// Companion: EnSwDescriptor::OverrideLimbBend increases leg-bend
+// pitch so leg tips still visually reach the surface despite the
+// body being lifted.
+constexpr float kBodySurfaceOffset = 15.0f;
+
 // -------------------------------------------------------------------
 // Diagnostic
 // -------------------------------------------------------------------
@@ -467,11 +484,12 @@ bool TryEstablishBasis(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         s.wallPoly = h.poly;
         s.hasWallBasis = true;
 
-        // Snap actor to hit point with 2u outward offset from wall.
-        constexpr float kAttachOffset = 2.0f;
-        self->actor.world.pos.x = h.pos.x + h.normal.x * kAttachOffset;
-        self->actor.world.pos.y = h.pos.y + h.normal.y * kAttachOffset;
-        self->actor.world.pos.z = h.pos.z + h.normal.z * kAttachOffset;
+        // Snap actor to hit point with body offset outward from wall
+        // (see kBodySurfaceOffset — body floats away from wall, legs
+        // visibly reach across the gap to the wall surface).
+        self->actor.world.pos.x = h.pos.x + h.normal.x * kBodySurfaceOffset;
+        self->actor.world.pos.y = h.pos.y + h.normal.y * kBodySurfaceOffset;
+        self->actor.world.pos.z = h.pos.z + h.normal.z * kBodySurfaceOffset;
 
         if (DiagEnabled()) {
             SPDLOG_INFO("[EEDiag/SM] actor=0x{:x} basis established via dir[{}] "
@@ -702,8 +720,9 @@ void TickWallEdgeDrop(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
                                  1, 1, 1, 0, &bgId) && poly != nullptr) {
         const float ny = COLPOLY_GET_NORMAL(poly->normal.y);
         if (ny > kWallNormalYThreshold) {
-            // Landed on a floor. Snap position, zero velocity.
-            self->actor.world.pos.y = hitPos.y;
+            // Landed on a floor. Snap position with body offset above
+            // the surface (see kBodySurfaceOffset). Zero velocity.
+            self->actor.world.pos.y = hitPos.y + kBodySurfaceOffset;
             self->actor.velocity.y = 0.0f;
 
             // Reset rotation to upright (world-Y aligned). Vanilla En_Sw
@@ -774,7 +793,8 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
                                      1, 1, 1, 0, &floorBgId) && floorPoly != nullptr) {
             const float ny = COLPOLY_GET_NORMAL(floorPoly->normal.y);
             if (ny > kWallNormalYThreshold) {
-                self->actor.world.pos.y = floorHit.y;
+                // Body offset above the floor (see kBodySurfaceOffset).
+                self->actor.world.pos.y = floorHit.y + kBodySurfaceOffset;
                 floorNormal.x = COLPOLY_GET_NORMAL(floorPoly->normal.x);
                 floorNormal.y = ny;
                 floorNormal.z = COLPOLY_GET_NORMAL(floorPoly->normal.z);

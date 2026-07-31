@@ -117,19 +117,26 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
     // on wall and vanilla wall-tangent leg sweep is correct.
     if (AnchorCVarSync::GetEnforcedInt(NavConsumeCVar(), 0) == 0) return false;
 
-    // Only bend when the state machine has the spider in GroundPursue.
-    // Original M4 impl gated on bgCheckFlags & 0x1 (grounded) — but
-    // vanilla En_Sw's Actor_UpdateBgCheckInfo call at z_en_sw.c:695
-    // uses flags=5 (wall+water only), which never populates the floor
-    // bit for combat En_Sw. Query the state machine directly so the
-    // leg-bend actually fires when the spider is on the ground per our
-    // state model. Actor cast to EnSw* is safe because IsInstanceEnhanced
-    // gate above already excluded gold-tokens; only combat variants
-    // reach here and they're all EnSw structs.
+    // Fire in any Wall* or Ground* state where the body is offset from
+    // the surface (see EnSwStateMachine kBodySurfaceOffset). Vanilla
+    // en_sw draws legs in the wall-tangent plane with belly touching
+    // wall; with our offset the body is ~15u away from the surface, so
+    // legs need to bend outward to visually reach it. Actor cast to
+    // EnSw* is safe because IsInstanceEnhanced gate above already
+    // excluded gold-tokens.
     EnSw* enSw = reinterpret_cast<EnSw*>(actor);
     const AnchorEnemyEnhancement::EnSwState smState =
         AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_QueryState(enSw);
-    if (smState != AnchorEnemyEnhancement::EnSwState::GroundPursue) return false;
+    switch (smState) {
+        case AnchorEnemyEnhancement::EnSwState::WallIdle:
+        case AnchorEnemyEnhancement::EnSwState::WallPursue:
+        case AnchorEnemyEnhancement::EnSwState::GroundPursue:
+        case AnchorEnemyEnhancement::EnSwState::GroundToWallReattach:
+            break;
+        default:
+            return false;  // Uninitialized / WallEdgeDrop / LungeYield /
+                           // PermanentlyDisabled — vanilla pose intact
+    }
 
     // Leg-limb table — enumerated from vanilla EnSw_OverrideLimbDraw
     // switch (z_en_sw.c:1082-1106). 8 legs at limb indices:
@@ -143,16 +150,16 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
             return false;  // not a leg — leave vanilla pose alone
     }
 
-    // Additive downward bend. s16 angle units — 0x1000 = ~22.5°.
-    // Applied to X (pitch) — visually tips leg segments downward from
-    // their wall-tangent rest pose so the spider appears to step on
-    // the floor rather than slide across it.
+    // Additive downward bend. s16 angle units — 0x2000 = ~45°.
+    // Bumped from 0x0C00 (~17°) to compensate for the 15u body offset
+    // added at the same time; smaller bend leaves legs floating in
+    // mid-air short of the surface. Applied to X (pitch) — tips leg
+    // segments outward from their wall-tangent rest pose.
     //
-    // Direction / magnitude are first-pass estimates — field-test may
-    // want to switch to Z (roll) or reduce magnitude if legs clip into
-    // the body. Small enough to be visibly correct without breaking
-    // silhouette; large enough to be visible at typical camera range.
-    static constexpr int16_t kLegBendPitch = 0x0C00;  // ~16.9°
+    // Tune via field-test: too much bend → legs clip through the
+    // surface / body; too little → visible gap between leg tip and
+    // surface. Companion: kBodySurfaceOffset in EnSwStateMachine.cpp.
+    static constexpr int16_t kLegBendPitch = 0x2000;  // ~45°
     rotInOut->x = (int16_t)(rotInOut->x + kLegBendPitch);
     return true;
 }
