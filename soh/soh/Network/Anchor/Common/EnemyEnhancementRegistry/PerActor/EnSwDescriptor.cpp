@@ -172,6 +172,28 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
     static constexpr float   kStepPeriod    = 20.0f;   // frames per cycle
     static constexpr float   kLegPhaseStep  = 2.0f * (float)M_PI / 8.0f;
 
+    // Per-leg sign — diagonal (cross-mirror) pattern derived
+    // empirically 2026-07-30. En_Sw model rig pairs diagonally-
+    // opposite legs (front-left mirrors back-right, front-right
+    // mirrors back-left) rather than the usual left-right mirror,
+    // so each diagonal-pair members need matching sign and the two
+    // diagonals need opposite signs. Anatomical map (from parent-
+    // joint origin analysis via [EnSwLegMap2] diagnostic, log 780):
+    //   leg 0 = front-mid-left      leg 4 = front-mid-right
+    //   leg 1 = back-most-left      leg 7 = back-most-right
+    //   leg 2 = back-mid-left       leg 3 = back-mid-right
+    //   leg 5 = front-most-left     leg 6 = front-most-right
+    static constexpr int8_t kLegBendSign[8] = {
+        +1,  // 0 — front-mid-left
+        -1,  // 1 — back-most-left
+        -1,  // 2 — back-mid-left
+        +1,  // 3 — back-mid-right
+        -1,  // 4 — front-mid-right
+        +1,  // 5 — front-most-left
+        -1,  // 6 — front-most-right
+        +1,  // 7 — back-most-right
+    };
+
     int16_t bend = kBaseBend;
     if (isMoving) {
         const float phase =
@@ -180,6 +202,7 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
         const float wave = std::sin(phase);
         bend = (int16_t)(kBaseBend + (int)(wave * kWalkAmplitude));
     }
+    bend = (int16_t)(bend * kLegBendSign[legIndex]);
     rotInOut->x = (int16_t)(rotInOut->x + bend);
     return true;
 }
