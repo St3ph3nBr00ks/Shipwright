@@ -90,19 +90,26 @@ constexpr float kHeadScalePeak    = 1.5f;
 // Multiplier applied to actor.scale during enhanced Spin.
 constexpr float kVanillaScale = 0.01f;
 
-// Layered geyser visual tuning (2026-07-31 refactor after playtest
-// feedback — original hahen effect read as falling leaves, not
-// acid). Split into two independent particle layers per user
-// direction:
-//   - Rising bubbles attached to the HEAD position (which sweeps
-//     around the plant during Spin) — reads as head spitting acid
-//     as it swings.
-//   - Falling dust from 60u ABOVE the plant, random XZ within a
-//     modest radius — reads as a caustic vapor ceiling raining
-//     down around the plant.
-constexpr int   kRisingBubblesPerFrame = 3;
+// Layered geyser visual tuning (2026-07-31 second refactor after
+// playtest — user direction: reduce bubbles + add water-splash
+// spit at head).
+//
+// Three independent particle layers, all spawned per Spin frame
+// while enhanced:
+//   1. Water-splash SPIT at HEAD — EffectSsGSplash green-tinted,
+//      reads as head vomiting acid as it swings.
+//   2. Rising bubbles at HEAD (reduced from 3 → 1) — supporting
+//      accent to the splash, adds bubble motion without dominating.
+//   3. Falling dust from 60u ABOVE the plant, random XZ around it —
+//      caustic vapor ceiling raining down around the plant.
+constexpr int   kSpitSplashesPerFrame  = 2;
+constexpr s16   kSpitSplashType        = 2;      // silhouette variant 0/1/2
+constexpr s16   kSpitSplashScale       = 500;    // ~half of vanilla water surface splash
+
+constexpr int   kRisingBubblesPerFrame = 1;      // reduced from 3
 constexpr float kRisingBubbleSpeed     = 6.0f;   // upward Y velocity
 constexpr float kRisingBubbleAccelY    = -0.25f; // slight gravity so bubbles arc down
+
 constexpr int   kFallingDustPerFrame   = 2;
 constexpr float kFallingSpawnHeight    = 60.0f;  // Y above home.pos
 constexpr float kFallingSpawnRadius    = 60.0f;  // XZ jitter around home.pos
@@ -113,6 +120,8 @@ constexpr float kFallingDustAccelY     = -0.35f; // gravity
 // color for the multi-tone gradient the softsprite render uses.
 // Alphas below 255 keep particles translucent so they blend into
 // each other and don't look like solid blobs.
+constexpr Color_RGBA8 kSpitPrimColor   = { 170, 240, 110, 220 };
+constexpr Color_RGBA8 kSpitEnvColor    = {  50,  90,  30, 255 };
 constexpr Color_RGBA8 kBubblePrimColor = { 150, 220, 100, 200 };
 constexpr Color_RGBA8 kBubbleEnvColor  = {  60, 100,  40, 255 };
 constexpr Color_RGBA8 kDustPrimColor   = { 180, 230, 130, 150 };
@@ -224,14 +233,39 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
         }
     }
 
-    // ---- Layered visual particles (2026-07-31 refactor) ----
-    // Both layers spawn each Spin frame while enhanced. Copies of the
+    // ---- Layered visual particles (2026-07-31 refactor v2) ----
+    // Three layers spawn each Spin frame while enhanced. Copies of the
     // color/vec constants are made because the effect helpers accept
     // non-const pointers.
 
-    // Rising bubble layer — spawn AT THE HEAD (actor.world.pos is
-    // updated by vanilla Spin to the swinging head position each
-    // frame). Reads as head spitting acid as it swings around.
+    // Spit-splash layer — vanilla water-splash textures at the HEAD.
+    // Reads as head vomiting acid globs as it swings. EffectSsGSplash
+    // is a stationary bloom (no velocity), 8-frame life; spawning
+    // per-frame while the head sweeps produces a trail of splashes
+    // following the head arc. Type 2 gives a puffier silhouette than
+    // types 0/1.
+    {
+        Vec3f spitPos = actor->actor.world.pos;
+        Color_RGBA8 primC = kSpitPrimColor;
+        Color_RGBA8 envC  = kSpitEnvColor;
+        for (int i = 0; i < kSpitSplashesPerFrame; i++) {
+            // Small XZ jitter so consecutive splashes don't stack
+            // exactly on top of each other → reads as "spitting
+            // multiple globs" not "one static splash".
+            Vec3f jitteredPos = {
+                spitPos.x + (Rand_ZeroOne() - 0.5f) * 10.0f,
+                spitPos.y + (Rand_ZeroOne() - 0.5f) * 6.0f,
+                spitPos.z + (Rand_ZeroOne() - 0.5f) * 10.0f,
+            };
+            EffectSsGSplash_Spawn(play, &jitteredPos, &primC, &envC,
+                                    kSpitSplashType, kSpitSplashScale);
+        }
+    }
+
+    // Rising bubble layer (reduced from 3 → 1 per frame) — small
+    // supporting accent to the splash. Spawns AT THE HEAD
+    // (actor.world.pos is updated by vanilla Spin to the swinging
+    // head position each frame).
     {
         Vec3f bubblePos = actor->actor.world.pos;
         Vec3f bubbleAccel = { 0.0f, kRisingBubbleAccelY, 0.0f };
