@@ -55,8 +55,12 @@ namespace {
 // Per-actor enhancement state. Reset at OnSpinExit; created on
 // demand at OnHostSetupSpin / OnPeerReceiveEnhancedSpinFlag.
 struct KarebabaEnhancedState {
-    bool currentSpinEnhanced = false;
+    bool currentSpinEnhanced   = false;
     bool geyserSpawnedThisSpin = false;
+    // Counts ground-splash bursts fired this spin cycle (0..5).
+    // See kGroundSplashTotalCount — user spec: 5 splashes in rapid
+    // succession as the falling rain impacts.
+    u8   groundSplashesFired   = 0;
 };
 
 // Keyed by Actor* — file-static, single-threaded (game thread only).
@@ -79,42 +83,85 @@ constexpr float kEnhancedSpinChance = 0.33f;
 
 // Head-scale sinusoid parameters. Vanilla Spin runs 40 frames
 // (params counts 40→0). Multiplier goes 1.0 at frame 0, peaks at
-// 1.5 at frame 20 (mid-spin, matches vanilla's `value` peak), back
-// to 1.0 at frame 40. Half-cycle of sine from 0 to π gives that
-// shape.
+// kHeadScalePeak at frame 20 (mid-spin, matches vanilla's `value`
+// peak), back to 1.0 at frame 40. Half-cycle of sine from 0 to π
+// gives that shape. Peak reduced 1.5→1.25 per user direction
+// 2026-07-31 (subtler swell — less "boss form", more "attack tell").
 constexpr float kSpinTotalFrames  = 40.0f;
 constexpr float kHeadScaleBase    = 1.0f;
-constexpr float kHeadScalePeak    = 1.5f;
+constexpr float kHeadScalePeak    = 1.25f;
 
 // Vanilla Karebaba scale at Init: 0.01f (per z_en_karebaba.c).
 // Multiplier applied to actor.scale during enhanced Spin.
 constexpr float kVanillaScale = 0.01f;
 
-// Layered geyser visual tuning (2026-07-31 second refactor after
-// playtest — user direction: reduce bubbles + add water-splash
-// spit at head).
+// Sequenced geyser visual (2026-07-31 refactor v3 per user
+// direction). Four phases across the 40-frame Spin cycle, tied to
+// `frameF = 40 - actor.params`:
 //
-// Three independent particle layers, all spawned per Spin frame
-// while enhanced:
-//   1. Water-splash SPIT at HEAD — EffectSsGSplash green-tinted,
-//      reads as head vomiting acid as it swings.
-//   2. Rising bubbles at HEAD (reduced from 3 → 1) — supporting
-//      accent to the splash, adds bubble motion without dominating.
-//   3. Falling dust from 60u ABOVE the plant, random XZ around it —
-//      caustic vapor ceiling raining down around the plant.
+//   Phase 1  (f 0-40)  — Head-attached SPIT + supporting bubbles.
+//                        Continuous throughout spin. Spit raised
+//                        +5u Y so it originates from the mouth
+//                        rather than slightly below the head.
+//   Phase 2  (f 10-40) — Falling RAIN from Y=home+30 in a modest
+//                        column. Starts 0.5s (10 frames at 20fps)
+//                        after spit begins — reads as "the vomit
+//                        that went up is now coming down".
+//   Phase 3  (f 17-21) — 5 GROUND SPLASHES in rapid succession
+//                        (1/frame × 5 frames) at random XZ around
+//                        the plant. Timed to fire as the first
+//                        falling rain drops reach the ground.
+//                        Impact frame computed from rain velocity
+//                        (-3) + gravity (-0.35) + 30u fall distance
+//                        ≈ 7 frames of flight → f10 + f7 = f17.
+//   Phase 4  (f 17-40) — Rising DUST from ground (repurposed —
+//                        previously fell from above, now rises).
+//                        Complements the rain-impact by looking
+//                        like a caustic vapor kicked up on impact.
+
+// Phase 1 constants.
+constexpr float kSpitYOffset           = 5.0f;   // raise above head to mouth level
 constexpr int   kSpitSplashesPerFrame  = 2;
 constexpr s16   kSpitSplashType        = 2;      // silhouette variant 0/1/2
 constexpr s16   kSpitSplashScale       = 500;    // ~half of vanilla water surface splash
 
-constexpr int   kRisingBubblesPerFrame = 1;      // reduced from 3
+constexpr int   kRisingBubblesPerFrame = 1;      // supporting accent to the spit
 constexpr float kRisingBubbleSpeed     = 6.0f;   // upward Y velocity
 constexpr float kRisingBubbleAccelY    = -0.25f; // slight gravity so bubbles arc down
 
-constexpr int   kFallingDustPerFrame   = 2;
-constexpr float kFallingSpawnHeight    = 60.0f;  // Y above home.pos
-constexpr float kFallingSpawnRadius    = 60.0f;  // XZ jitter around home.pos
-constexpr float kFallingDustSpeed      = -1.5f;  // downward Y velocity
-constexpr float kFallingDustAccelY     = -0.35f; // gravity
+// Phase 2 constants. Rain starts at f10 and continues through spin
+// end. XZ radius kept modest so the column reads as directly above
+// the plant rather than a scattered downpour.
+constexpr int   kRainStartFrame        = 10;
+constexpr int   kRainDropletsPerFrame  = 3;
+constexpr float kRainSpawnHeightY      = 30.0f;  // Y above home.pos
+constexpr float kRainSpawnRadius       = 30.0f;  // XZ jitter around home
+constexpr float kRainDropletSpeed      = -3.0f;  // initial downward velocity
+constexpr float kRainDropletAccelY     = -0.35f; // gravity
+constexpr s16   kRainDropletScale      = 90;     // small drops
+constexpr s16   kRainDropletLife       = 20;     // enough to reach ground + fade
+
+// Phase 3 constants. 5 total splashes over 5 consecutive frames.
+// Impact frame chosen to match rain flight time — see comment block
+// above for the physics derivation.
+constexpr int   kGroundImpactStartFrame = 17;
+constexpr u8    kGroundSplashTotalCount = 5;
+constexpr float kGroundSplashRadius     = 40.0f; // XZ ring around home
+constexpr s16   kGroundSplashScale      = 400;   // slightly smaller than spit
+constexpr s16   kGroundSplashType       = 1;     // sharper silhouette (types 0/1/2)
+
+// Phase 4 constants. Rising dust from ground upward. Small positive
+// Y velocity + slight decay accel → dust rises then slows and
+// disperses. Wider XZ radius spreads the mist around the plant.
+constexpr int   kRisingDustStartFrame  = 17;
+constexpr int   kRisingDustPerFrame    = 2;
+constexpr float kRisingDustSpawnYOffset = 5.0f;  // just above ground so we see it rise
+constexpr float kRisingDustSpeed       = 1.5f;   // upward velocity
+constexpr float kRisingDustAccelY      = -0.05f; // slight decay
+constexpr float kRisingDustRadius      = 60.0f;  // XZ spread
+constexpr s16   kRisingDustScale       = 300;
+constexpr s16   kRisingDustScaleStep   = 8;      // grow → puffy mist
+constexpr s16   kRisingDustLife        = 25;
 
 // Acid green tints. Prim = bright fill color; Env = darker outline
 // color for the multi-tone gradient the softsprite render uses.
@@ -124,6 +171,10 @@ constexpr Color_RGBA8 kSpitPrimColor   = { 170, 240, 110, 220 };
 constexpr Color_RGBA8 kSpitEnvColor    = {  50,  90,  30, 255 };
 constexpr Color_RGBA8 kBubblePrimColor = { 150, 220, 100, 200 };
 constexpr Color_RGBA8 kBubbleEnvColor  = {  60, 100,  40, 255 };
+constexpr Color_RGBA8 kRainPrimColor   = { 150, 220, 100, 220 };
+constexpr Color_RGBA8 kRainEnvColor    = {  60, 100,  40, 255 };
+constexpr Color_RGBA8 kSplashPrimColor = { 170, 240, 110, 230 };
+constexpr Color_RGBA8 kSplashEnvColor  = {  50,  90,  30, 255 };
 constexpr Color_RGBA8 kDustPrimColor   = { 180, 230, 130, 150 };
 constexpr Color_RGBA8 kDustEnvColor    = {  80, 130,  60, 255 };
 
@@ -153,6 +204,7 @@ bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
         if (it != sStates.end()) {
             it->second.currentSpinEnhanced   = false;
             it->second.geyserSpawnedThisSpin = false;
+            it->second.groundSplashesFired   = 0;
         }
         return false;
     }
@@ -163,11 +215,13 @@ bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
         // Roll failed — mark as non-enhanced for this cycle.
         state.currentSpinEnhanced   = false;
         state.geyserSpawnedThisSpin = false;
+        state.groundSplashesFired   = 0;
         return false;
     }
 
     state.currentSpinEnhanced   = true;
     state.geyserSpawnedThisSpin = false;
+    state.groundSplashesFired   = 0;
     return true;
 }
 
@@ -176,10 +230,11 @@ void EnKarebabaDescriptor::OnPeerReceiveEnhancedSpinFlag(EnKarebaba* actor,
     if (actor == nullptr) return;
     KarebabaEnhancedState& state = GetOrCreate(actor);
     state.currentSpinEnhanced   = enhanced;
-    // If newly-enabling for this spin, reset geyser-spawned flag
-    // so the peer's local Spin also spawns the plume once.
+    // If newly-enabling for this spin, reset per-spin counters so
+    // peer's local Spin fires the sequenced phases from scratch.
     if (enhanced) {
         state.geyserSpawnedThisSpin = false;
+        state.groundSplashesFired   = 0;
     }
 }
 
@@ -233,92 +288,136 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
         }
     }
 
-    // ---- Layered visual particles (2026-07-31 refactor v2) ----
-    // Three layers spawn each Spin frame while enhanced. Copies of the
-    // color/vec constants are made because the effect helpers accept
+    // ---- Sequenced visual particles (refactor v3) ----
+    // Frame-phased across the 40-frame Spin. Copies of color/vec
+    // constants are made because the effect helpers accept
     // non-const pointers.
+    //
+    // frameF derived earlier from paramsNow. Integer cast for phase
+    // comparisons.
+    const int frameI = (int)frameF;
 
-    // Spit-splash layer — vanilla water-splash textures at the HEAD.
-    // Reads as head vomiting acid globs as it swings. EffectSsGSplash
-    // is a stationary bloom (no velocity), 8-frame life; spawning
-    // per-frame while the head sweeps produces a trail of splashes
-    // following the head arc. Type 2 gives a puffier silhouette than
-    // types 0/1.
+    // Phase 1a — Spit-splash at the HEAD (raised +5u to originate
+    // from the mouth rather than slightly below the head per user
+    // feedback). EffectSsGSplash is a stationary bloom, 8-frame
+    // life; spawning per-frame while head sweeps produces a trail.
     {
-        Vec3f spitPos = actor->actor.world.pos;
         Color_RGBA8 primC = kSpitPrimColor;
         Color_RGBA8 envC  = kSpitEnvColor;
         for (int i = 0; i < kSpitSplashesPerFrame; i++) {
-            // Small XZ jitter so consecutive splashes don't stack
-            // exactly on top of each other → reads as "spitting
-            // multiple globs" not "one static splash".
             Vec3f jitteredPos = {
-                spitPos.x + (Rand_ZeroOne() - 0.5f) * 10.0f,
-                spitPos.y + (Rand_ZeroOne() - 0.5f) * 6.0f,
-                spitPos.z + (Rand_ZeroOne() - 0.5f) * 10.0f,
+                actor->actor.world.pos.x + (Rand_ZeroOne() - 0.5f) * 10.0f,
+                actor->actor.world.pos.y + kSpitYOffset +
+                    (Rand_ZeroOne() - 0.5f) * 6.0f,
+                actor->actor.world.pos.z + (Rand_ZeroOne() - 0.5f) * 10.0f,
             };
             EffectSsGSplash_Spawn(play, &jitteredPos, &primC, &envC,
                                     kSpitSplashType, kSpitSplashScale);
         }
     }
 
-    // Rising bubble layer (reduced from 3 → 1 per frame) — small
-    // supporting accent to the splash. Spawns AT THE HEAD
-    // (actor.world.pos is updated by vanilla Spin to the swinging
-    // head position each frame).
+    // Phase 1b — Supporting rising bubble at HEAD (1/frame accent).
     {
         Vec3f bubblePos = actor->actor.world.pos;
+        bubblePos.y += kSpitYOffset;  // stays with mouth-height spit
         Vec3f bubbleAccel = { 0.0f, kRisingBubbleAccelY, 0.0f };
         Color_RGBA8 primC = kBubblePrimColor;
         Color_RGBA8 envC  = kBubbleEnvColor;
         for (int i = 0; i < kRisingBubblesPerFrame; i++) {
             Vec3f bubbleVel = {
-                (Rand_ZeroOne() - 0.5f) * 2.5f,          // small XZ jitter
-                kRisingBubbleSpeed + Rand_ZeroOne() * 2.0f,  // upward + variance
+                (Rand_ZeroOne() - 0.5f) * 2.5f,
+                kRisingBubbleSpeed + Rand_ZeroOne() * 2.0f,
                 (Rand_ZeroOne() - 0.5f) * 2.5f,
             };
-            // scale 120-170 gives a moderate bubble; life 25 lets
-            // them rise + fade before their arc peaks.
             const s16 scale = (s16)(120 + (int)(Rand_ZeroOne() * 50.0f));
             EffectSsDtBubble_SpawnCustomColor(play, &bubblePos, &bubbleVel,
                                                 &bubbleAccel, &primC, &envC,
-                                                scale, 25,
-                                                8 /* randXZ jitter units */);
+                                                scale, 25, 8);
         }
     }
 
-    // Falling dust layer — spawn at (home.pos + 60Y) with random XZ
-    // jitter inside a 60u radius circle. Downward velocity + slight
-    // gravity so they rain onto the ground around the plant. Random
-    // pattern per user direction: "do not have to respect the current
-    // position of the deku baba head, they can fall in a random
-    // pattern around the karebaba."
-    {
-        Vec3f dustAccel = { 0.0f, kFallingDustAccelY, 0.0f };
+    // Phase 2 — Falling rain from Y=home+30 (starts f10). Downward
+    // velocity + gravity so drops fall onto the ground around the
+    // plant. Read as "vomit that went up now coming down". Reuses
+    // EffectSsDtBubble with downward velocity — the same effect
+    // renders equally well as rising bubbles or falling droplets.
+    if (frameI >= kRainStartFrame) {
+        Vec3f rainAccel = { 0.0f, kRainDropletAccelY, 0.0f };
+        Color_RGBA8 primC = kRainPrimColor;
+        Color_RGBA8 envC  = kRainEnvColor;
+        for (int i = 0; i < kRainDropletsPerFrame; i++) {
+            Vec3f rainPos = {
+                actor->actor.home.pos.x +
+                    (Rand_ZeroOne() - 0.5f) * 2.0f * kRainSpawnRadius,
+                actor->actor.home.pos.y + kRainSpawnHeightY,
+                actor->actor.home.pos.z +
+                    (Rand_ZeroOne() - 0.5f) * 2.0f * kRainSpawnRadius,
+            };
+            Vec3f rainVel = {
+                (Rand_ZeroOne() - 0.5f) * 0.3f,  // minimal XZ drift
+                kRainDropletSpeed + (Rand_ZeroOne() - 0.5f) * 0.5f,
+                (Rand_ZeroOne() - 0.5f) * 0.3f,
+            };
+            EffectSsDtBubble_SpawnCustomColor(play, &rainPos, &rainVel,
+                                                &rainAccel, &primC, &envC,
+                                                kRainDropletScale,
+                                                kRainDropletLife,
+                                                6 /* randXZ jitter */);
+        }
+    }
+
+    // Phase 3 — Ground-splash burst (5 splashes, 1 per frame, at
+    // random XZ around the plant). Fires as rain hits the ground.
+    // Impact frame kGroundImpactStartFrame chosen to match rain
+    // velocity + gravity + 30u fall distance (~7 frames of flight).
+    if (frameI >= kGroundImpactStartFrame &&
+        state.groundSplashesFired < kGroundSplashTotalCount) {
+        Color_RGBA8 primC = kSplashPrimColor;
+        Color_RGBA8 envC  = kSplashEnvColor;
+        // Random XZ within a ring around home. Prefer ring-ish
+        // distribution (not uniformly filled disk) so splashes
+        // don't cluster at center — sqrt(u) biases toward the rim.
+        const float u = Rand_ZeroOne();
+        const float r = kGroundSplashRadius * std::sqrt(u);
+        const float ang = Rand_ZeroOne() * 2.0f * (float)M_PI;
+        Vec3f splashPos = {
+            actor->actor.home.pos.x + r * std::cos(ang),
+            actor->actor.home.pos.y,  // ground level
+            actor->actor.home.pos.z + r * std::sin(ang),
+        };
+        EffectSsGSplash_Spawn(play, &splashPos, &primC, &envC,
+                                kGroundSplashType, kGroundSplashScale);
+        state.groundSplashesFired++;
+    }
+
+    // Phase 4 — Rising dust from ground (fires from
+    // kRisingDustStartFrame through spin end). Repurposes what
+    // was previously "falling dust from above" — now dust rises
+    // out of the ground as if kicked up by the rain impact.
+    if (frameI >= kRisingDustStartFrame) {
+        Vec3f dustAccel = { 0.0f, kRisingDustAccelY, 0.0f };
         Color_RGBA8 primC = kDustPrimColor;
         Color_RGBA8 envC  = kDustEnvColor;
-        for (int i = 0; i < kFallingDustPerFrame; i++) {
+        for (int i = 0; i < kRisingDustPerFrame; i++) {
             Vec3f dustPos = {
                 actor->actor.home.pos.x +
-                    (Rand_ZeroOne() - 0.5f) * 2.0f * kFallingSpawnRadius,
-                actor->actor.home.pos.y + kFallingSpawnHeight,
+                    (Rand_ZeroOne() - 0.5f) * 2.0f * kRisingDustRadius,
+                actor->actor.home.pos.y + kRisingDustSpawnYOffset,
                 actor->actor.home.pos.z +
-                    (Rand_ZeroOne() - 0.5f) * 2.0f * kFallingSpawnRadius,
+                    (Rand_ZeroOne() - 0.5f) * 2.0f * kRisingDustRadius,
             };
             Vec3f dustVel = {
-                (Rand_ZeroOne() - 0.5f) * 0.5f,  // slight XZ drift
-                kFallingDustSpeed + (Rand_ZeroOne() - 0.5f) * 0.8f,
-                (Rand_ZeroOne() - 0.5f) * 0.5f,
+                (Rand_ZeroOne() - 0.5f) * 0.4f,
+                kRisingDustSpeed + (Rand_ZeroOne() - 0.5f) * 0.4f,
+                (Rand_ZeroOne() - 0.5f) * 0.4f,
             };
-            // scale 300 growing by scaleStep=8 → puffy expanding cloud.
-            // life 20 lets it reach the ground and disperse.
-            EffectSsDust_Spawn(play, 0 /* drawFlags: default */,
+            EffectSsDust_Spawn(play, 0 /* drawFlags */,
                                 &dustPos, &dustVel, &dustAccel,
                                 &primC, &envC,
-                                300 /* scale */,
-                                8   /* scaleStep — grow */,
-                                20  /* life */,
-                                0   /* updateMode: default */);
+                                kRisingDustScale,
+                                kRisingDustScaleStep,
+                                kRisingDustLife,
+                                0 /* updateMode */);
         }
     }
 }
@@ -335,6 +434,7 @@ void EnKarebabaDescriptor::OnSpinExit(EnKarebaba* actor) {
 
     state.currentSpinEnhanced   = false;
     state.geyserSpawnedThisSpin = false;
+    state.groundSplashesFired   = 0;
 }
 
 bool EnKarebabaDescriptor::IsCurrentSpinEnhanced(EnKarebaba* actor) {
