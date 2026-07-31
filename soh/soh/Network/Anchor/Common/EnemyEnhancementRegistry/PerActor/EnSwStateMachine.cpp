@@ -1917,6 +1917,26 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
             // vanilla's own state machine).
             break;
     }
+
+    // SkelAnime playSpeed override — freeze when spider isn't walking.
+    // Vanilla's built-in playSpeed rhythm (func_80B0E430 in z_en_sw.c
+    // — freezes anim when unk_388 > 0, runs at 6× when converged +
+    // reset) BREAKS for our ground spider because our hold branches
+    // clobber shape.rot.z = 0 each frame, preventing vanilla's
+    // Math_SmoothStepToS(&shape.rot.z, unk_444, ...) from ever
+    // reaching unk_444 (the trigger for func_80B0E430 to return 1 →
+    // func_80B0E5E0 to reset unk_388). Result: unk_388 stays 0, anim
+    // never freezes, body/head/mouth animate perpetually even when
+    // spider is idle. Log 797 evidence: user report "ground spider
+    // walk animation always playing while sitting still" —
+    // wall spider unaffected because our WallIdle handler doesn't
+    // clobber shape.rot.z, so vanilla's rhythm still works there.
+    // Fix: take direct control. isWalkAnimActive false → freeze,
+    // true → run at 1.0. Simpler than un-clobbering shape.rot.z (which
+    // would require substantially reworking the ground orientation
+    // model) and universally correct (works for wall/ground/any
+    // future consumer that adopts the isWalkAnimActive flag).
+    self->skelAnime.playSpeed = s.isWalkAnimActive ? 1.0f : 0.0f;
 }
 
 void EnSw_EnhancedStateMachine_SnapshotAmbient(EnSw* self) {
