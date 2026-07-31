@@ -977,8 +977,10 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 
 // Ground pursuit tuning. Slower than wall pursuit because spider legs
 // on floor don't have the same purchase as tangent-plane wall walk.
-constexpr float kGroundWalkSpeed = 2.0f;
-constexpr float kGroundRunSpeed  = 3.5f;
+constexpr float kGroundWalkSpeed = 3.0f;    // ×1.5 from prior 2.0 —
+                                             // ground felt too slow in
+                                             // field test vs wall pursuit
+constexpr float kGroundRunSpeed  = 5.25f;   // ×1.5 from prior 3.5
 
 // Forward-probe distance for GroundPursue wall-hit detection.
 constexpr float kGroundForwardProbe = 30.0f;
@@ -1263,9 +1265,14 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     // shares bob's phase (body tilts one way at swing peak, other
     // way at plant). This 3-axis phase relationship reads as a
     // rolling stride rather than a jitter.
-    static constexpr float   kBodyBobAmplitude   = 1.5f;   // world units +Y
-    static constexpr int16_t kBodyPitchAmplitude = 0x0400;  // ~4.5°
-    static constexpr int16_t kBodyRollAmplitude  = 0x05C0;  // ~8°
+    static constexpr float   kBodyBobAmplitude   = 0.75f;   // ×0.5 from prior
+                                                             // 1.5 — walking
+                                                             // oscillation
+                                                             // was too much
+    static constexpr int16_t kBodyPitchAmplitude = 0x0200;   // ~2.25°, ×0.5
+                                                             // from prior 0x0400
+    static constexpr int16_t kBodyRollAmplitude  = 0x02E0;   // ~4°, ×0.5 from
+                                                             // prior 0x05C0
     static constexpr float   kBodyOscPeriod     = 8.0f;    // frames per cycle
                                                             // (matches leg
                                                             // kStepPeriod).
