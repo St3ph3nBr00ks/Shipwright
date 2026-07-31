@@ -63,6 +63,16 @@ EnSwEnhancedState* Find(EnSw* self) {
 }
 
 // -------------------------------------------------------------------
+// Gravity + terminal velocity for airborne spider. Values match the
+// prior GravityAdapter Phase 2 body (which is stubbed post-M1) so if
+// that helper is ever revived for other wall-crawlers the physics
+// stays consistent. Defined here (before SetupJumpToward) so the
+// ballistic-aim formula can reference kGravityAccel.
+// -------------------------------------------------------------------
+constexpr float kGravityAccel   = -1.2f;
+constexpr float kMaxFallSpeed   = -20.0f;
+
+// -------------------------------------------------------------------
 // JumpLunge tuning + launch-velocity helper — defined here (before
 // TickWallPursue + TickGroundPursue) because rule-2 and rule-3
 // triggers reference them. TickJumpLunge itself lives further down
@@ -813,12 +823,9 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 // M6 airborne + ground states
 // -------------------------------------------------------------------
 
-// Gravity + terminal velocity for airborne spider. Values match the
-// prior GravityAdapter Phase 2 body (which is stubbed post-M1) so if
-// that helper is ever revived for other wall-crawlers the physics
-// stays consistent.
-constexpr float kGravityAccel   = -1.2f;
-constexpr float kMaxFallSpeed   = -20.0f;
+// (kGravityAccel + kMaxFallSpeed relocated to top of anonymous
+//  namespace so SetupJumpToward's ballistic-aim formula can reference
+//  kGravityAccel. See the constants block near the top of this file.)
 
 // Ground pursuit tuning. Slower than wall pursuit because spider legs
 // on floor don't have the same purchase as tangent-plane wall walk.
