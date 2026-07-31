@@ -33,8 +33,10 @@
 // for future readers. BgCheck_EntityLineTest1 + COLPOLY_GET_NORMAL are both
 // in scope from the transitive chain above.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <unordered_map>
 #include <libultraship/bridge/consolevariablebridge.h>  // CVarGetInteger
 #include <libultraship/libultraship.h>                 // SPDLOG_INFO
@@ -189,11 +191,25 @@ inline void SetupWalkLungeToward(EnSwEnhancedState& s,
 // reference it.
 constexpr float kIdleDetectRangeSq = 200.0f * 200.0f;
 
+// Extended detect range when the target is on a climb surface (vine,
+// ladder, designated wall). Vine walls in Deku Tree extend 200-800u+
+// vertically — the standard 200u gate would lose the target after
+// Link climbed just past spider height, causing the spider to idle at
+// the vine base (Bug 3). 600u accommodates the tallest vanilla vines
+// (~500u in Deku Tree main room) plus headroom.
+constexpr float kClimbingTargetDetectRangeSq = 600.0f * 600.0f;
+
 // Vanilla En_Sw picker's 3D distance gate is 130u (func_80B0DEA8 line
 // 861); we treat that as the "contact-awareness" range where the
 // spider can attack regardless of facing direction. Beyond 130u but
 // within kIdleDetectRangeSq, vision-cone gate applies.
 constexpr float kVanillaDetectRangeSq = 130.0f * 130.0f;
+
+// Minimum floor for skelAnime.playSpeed when animation is active but
+// the spider is moving slowly (Bug 2). Below ~0.15 the leg cycle is
+// so slow it reads as "stuck moving"; this ensures barely-moving
+// spiders still show a visible slow crawl.
+constexpr float kMinAnimPlaySpeed = 0.15f;
 
 // Max vertical reach for a JumpLunge — at kJumpMaxLaunchVy = 20 and
 // kGravityAccel = -1.2, theoretical peak is Vy²/(2|g|) = 400/2.4 ≈ 167u.
@@ -350,6 +366,15 @@ inline void UpdateIdleGaze(EnSwEnhancedState& s, EnSw* self,
                         kIdleGazeStepScale, kIdleGazeStepMax, 1);
     if (self->actor.world.rot.y != preYaw) {
         s.isWalkAnimActive = true;
+        // Bug 2 fix — scale playSpeed by rotation delta. Small rotations
+        // (near-target smooth-step converging in single-step increments)
+        // get proportionally slow leg animation; large rotations get
+        // near-max intensity. kIdleGazeStepMax is the smooth-step cap
+        // per frame — used as the "max rotation for full anim" divisor.
+        const int diff = std::abs((int)self->actor.world.rot.y - (int)preYaw);
+        const float rate = (float)diff / (float)kIdleGazeStepMax;
+        s.animMotionRate = std::max(s.animMotionRate,
+                                     std::min(rate, 1.0f));
     }
 
     // Reached target — go back to rest with random duration.
@@ -433,6 +458,39 @@ const char* StateName(EnSwState s) {
         case EnSwState::PermanentlyDisabled:  return "DISABLED";
     }
     return "?";
+}
+
+// Whether OUR state machine (not vanilla) owns skelAnime.playSpeed for
+// the given state. Post-tick playSpeed write is applied ONLY when
+// this returns true. For states like WallIdle where vanilla
+// func_80B0E5E0 runs its own rest/look rotation cycle with self-managed
+// playSpeed (z_en_sw.c:960-985), our unconditional write would clobber
+// vanilla's animation (Bug 1 root cause). Yielding to vanilla for
+// those states preserves the vanilla rotation-anim + look-phase
+// completion path.
+//
+// States where WE own animation control:
+//   WallPursue     — we drive world.pos writes directly along tangent
+//   GroundPursue   — we drive world.pos + orientation each frame
+//   WalkLunge      — custom ground dash, we own motion + rotation
+//   JumpLunge      — custom ballistic, we own motion + rotation
+//   WallEdgeDrop / GroundToWallReattach / LungeYield / Uninitialized
+//                  — transitional, vanilla ambient runs; still returns
+//                    false so vanilla can drive its own cycle
+//
+// States where VANILLA owns animation control:
+//   WallIdle       — vanilla func_80B0E5E0 runs rest/look cycle
+//   PermanentlyDisabled — vanilla drives entire actor
+bool IsAnimAuthoritative(EnSwState s) {
+    switch (s) {
+        case EnSwState::WallPursue:
+        case EnSwState::GroundPursue:
+        case EnSwState::WalkLunge:
+        case EnSwState::JumpLunge:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // Emit a transition event. Includes the previous framesInState so log
@@ -818,6 +876,23 @@ bool TryEstablishBasis(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     return false;
 }
 
+// Detect-range gate that extends when the target is on a climb
+// surface (vine, ladder, designated wall). Vine walls in Deku Tree
+// extend 200-800u+ vertically — without the extension the spider
+// loses target after Link climbs past ~200u up and idles at the
+// vine base (Bug 3). Ladders don't manifest the bug because they're
+// typically shorter than 200u in-scene, but the same helper covers
+// both uniformly. Cast to Player* is safe — target came from
+// FindNearestPlayerActor / GetSyncedPlayerActors which return
+// Player-class actors.
+float TargetAwareDetectRangeSq(const Actor* target) {
+    if (target == nullptr) return kIdleDetectRangeSq;
+    const Player* p = reinterpret_cast<const Player*>(target);
+    const bool climbing =
+        (p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
+    return climbing ? kClimbingTargetDetectRangeSq : kIdleDetectRangeSq;
+}
+
 // -------------------------------------------------------------------
 // State handlers
 // -------------------------------------------------------------------
@@ -852,7 +927,10 @@ void TickWallIdle(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     Actor* target = GetStickyTarget(s, self, play);
     if (target == nullptr) return;  // no valid target; stay idle
 
-    if (Dist3DSq(self, target) > kIdleDetectRangeSq) return;
+    // Bug 3 fix — climbing targets get extended detect range so the
+    // spider keeps pursuing a vine-climbing Link who's ascended past
+    // the standard 200u threshold.
+    if (Dist3DSq(self, target) > TargetAwareDetectRangeSq(target)) return;
 
     TransitionTo(self, s, EnSwState::WallPursue, "target_in_range");
 }
@@ -949,7 +1027,8 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const float distXZSq = dxT * dxT + dzT * dzT;
     const float dyT = target->world.pos.y - self->actor.world.pos.y;
     const float dist3DSq = distXZSq + dyT * dyT;
-    if (dist3DSq > kIdleDetectRangeSq) {
+    // Bug 3 fix — climbing targets get extended detect range.
+    if (dist3DSq > TargetAwareDetectRangeSq(target)) {
         TransitionTo(self, s, EnSwState::WallIdle, "out_of_range");
         return;
     }
@@ -1027,6 +1106,12 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const float step = (speed < tanMag) ? speed : tanMag;
     if (step > 0.01f) {
         s.isWalkAnimActive = true;  // actually translating this tick
+        // Bug 2 fix — scale playSpeed by step magnitude. Divisor is the
+        // fastest-possible pursuit speed so run gets full anim, walk
+        // gets ~60%, and short steps get proportionally slower legs.
+        const float rate = step / kPursuitRunSpeed;
+        s.animMotionRate = std::max(s.animMotionRate,
+                                     std::min(rate, 1.0f));
     }
     self->actor.world.pos.x += fwd.x * step;
     self->actor.world.pos.y += fwd.y * step;
@@ -1242,7 +1327,9 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const float dy = target->world.pos.y - self->actor.world.pos.y;
     const float distXZSq = dx * dx + dz * dz;
     const float dist3DSq = distXZSq + dy * dy;
-    if (dist3DSq > kIdleDetectRangeSq) {
+    // Bug 3 fix — climbing targets get extended detect range so the
+    // spider keeps pursuing a Link who has climbed high on a vine.
+    if (dist3DSq > TargetAwareDetectRangeSq(target)) {
         // Target out of 3D detect range — idle in place with slow
         // gaze rotation. Same rationale as target-null path.
         // Previously used XZ distance which let the spider "engage"
@@ -1254,6 +1341,38 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         self->actor.world.rot.z = 0;
         self->actor.shape.rot   = self->actor.world.rot;
         return;
+    }
+
+    // Bug 3 fix — opportunistic wall re-attach. When the target is
+    // significantly above and horizontally close (spider is under
+    // Link's climbing position), try to establish a wall basis
+    // immediately rather than waiting for a forward-raycast wall-hit
+    // to trigger GroundToWallReattach naturally. The forward-raycast
+    // path may miss vine walls if the pursuit direction is undefined
+    // (Link directly overhead → atan2(0,0) → arbitrary +Z motion)
+    // OR if the spider's already past the vine-column XZ.
+    // Preconditions:
+    //   - Target is climbing (has a climbable surface nearby)
+    //   - Target is > 60u above spider (worth climbing to reach)
+    //   - Spider is within 80u XZ of target (close enough for the
+    //     100u basis-probe raycast to plausibly find the target's wall)
+    {
+        const Player* p = reinterpret_cast<const Player*>(target);
+        const bool targetClimbing =
+            (p->stateFlags1 & PLAYER_STATE1_CLIMBING_LADDER) != 0;
+        if (targetClimbing && dy > 60.0f && distXZSq < 80.0f * 80.0f) {
+            if (TryEstablishBasis(self, play, s)) {
+                if (DiagEnabled()) {
+                    SPDLOG_INFO("[EEDiag/SM] actor=0x{:x} GROUND->WALL "
+                                "opportunistic attach (climbing target above) "
+                                "dy={:.1f} distXZ={:.1f}",
+                                (uintptr_t)self, dy, std::sqrt(distXZSq));
+                }
+                TransitionTo(self, s, EnSwState::WallPursue,
+                             "opportunistic_climb_attach");
+                return;
+            }
+        }
     }
 
     // Yaw toward target in world XZ, project onto floor tangent plane
@@ -1438,6 +1557,15 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const float dist = std::sqrt(distXZSq);
     const float speed = (dist > 300.0f) ? kGroundRunSpeed : kGroundWalkSpeed;
     s.isWalkAnimActive = true;  // actually translating this tick
+    // Bug 2 fix — scale playSpeed by pursuit speed. Run gets full anim,
+    // walk gets ~57% (3.0/5.25), guaranteeing barely-moving spiders
+    // don't animate at max intensity while imperceptibly translating.
+    // Post-hook clamps to kMinAnimPlaySpeed floor.
+    {
+        const float rate = speed / kGroundRunSpeed;
+        s.animMotionRate = std::max(s.animMotionRate,
+                                     std::min(rate, 1.0f));
+    }
 
     // Group-movement separation — combine pursuit-forward with a
     // repulsion vector from nearby enemies so multiple pursuers don't
@@ -1554,26 +1682,35 @@ void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     // airborne motion).
     self->unk_442 = 100;
 
+    // Wind-up phase — hold in place, telegraph via purple fog color.
+    // IMPORTANT (Bug 4 fix 2026-07-31): do NOT rotate the spider
+    // toward ground orientation during wind-up. Previously the
+    // Math_SmoothStepToS rotation block ran unconditionally at the
+    // top of this tick — the spider began tilting away from its
+    // pre-jump orientation (wall for rule-2 wall jumps) BEFORE the
+    // launch actually fired, producing a 1-2s "detached and hovering"
+    // visual glitch during the wind-up telegraph. Match WalkLunge's
+    // pattern: wind-up returns early WITHOUT rotation changes.
+    if (s.framesInState < kJumpWindupFrames) {
+        LogTickState(self, s, "jump_windup");
+        return;
+    }
+
     // Smoothly rotate toward the target ground orientation over ~20
-    // frames (~1 s at 20 fps). Starts from whatever rotation the
-    // launch state left us in (wall orientation for rule-2 wall
-    // jumps, ground orientation for rule-3 ground jumps). Yaw aims
-    // at the jump direction (same as dash direction, since horizontal
-    // velocity was set that way in SetupJumpToward). Math_SmoothStepToS
-    // with scale=4 covers ~75% of the remaining angle per frame — a
-    // 90° pitch delta closes to <1° within ~15 frames.
+    // frames (~1 s at 20 fps). Runs ONLY during airborne phase (per
+    // Bug 4 fix). Starts from whatever rotation the launch state
+    // left us in (wall orientation for rule-2 wall jumps, ground
+    // orientation for rule-3 ground jumps). Yaw aims at the jump
+    // direction (same as dash direction, since horizontal velocity
+    // was set that way in SetupJumpToward). Math_SmoothStepToS with
+    // scale=4 covers ~75% of the remaining angle per frame — a 90°
+    // pitch delta closes to <1° within ~15 frames.
     const s16 flightYaw =
         (s16)(std::atan2(s.jumpVelX, s.jumpVelZ) * (0x8000 / M_PI));
     Math_SmoothStepToS(&self->actor.world.rot.x, (s16)-0x4000, 4, 0x1000, 0x40);
     Math_SmoothStepToS(&self->actor.world.rot.y, flightYaw,    4, 0x1000, 0x40);
     Math_SmoothStepToS(&self->actor.world.rot.z, (s16)0,       4, 0x1000, 0x40);
     self->actor.shape.rot = self->actor.world.rot;
-
-    // Wind-up phase — hold in place, telegraph via purple fog color.
-    if (s.framesInState < kJumpWindupFrames) {
-        LogTickState(self, s, "jump_windup");
-        return;
-    }
 
     // Rising edge from wind-up to airborne — capture initial velocity
     // that was pre-computed at TransitionTo(JumpLunge) call site.
@@ -1713,6 +1850,7 @@ void TickWalkLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     }
 
     s.isWalkAnimActive = true;  // actually translating during dash
+    s.animMotionRate   = 1.0f;   // Bug 2 fix — dash is always full speed
     self->actor.world.pos.x += s.jumpVelX;
     self->actor.world.pos.z += s.jumpVelZ;
 
@@ -1794,6 +1932,9 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
     // check so LungeYield / any other early-return path also resets
     // the flag (default: not walking).
     s.isWalkAnimActive = false;
+    // Bug 2 fix — animMotionRate mirrors the isWalkAnimActive reset
+    // pattern. State code writes the rate alongside setting the flag.
+    s.animMotionRate = 0.0f;
 
     // Yield-check: if we have an ambient-actionFunc snapshot AND vanilla
     // has advanced actionFunc away from it, vanilla is in a non-ambient
@@ -1951,7 +2092,32 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
     // would require substantially reworking the ground orientation
     // model) and universally correct (works for wall/ground/any
     // future consumer that adopts the isWalkAnimActive flag).
-    self->skelAnime.playSpeed = s.isWalkAnimActive ? 1.0f : 0.0f;
+    //
+    // Bug 1 fix (2026-07-31) — this write is now STATE-CONDITIONAL.
+    // Applied ONLY for states where our machine owns motion (per
+    // IsAnimAuthoritative). For WallIdle and other vanilla-owned
+    // states, we DON'T touch playSpeed and vanilla's rest/look
+    // rhythm runs unimpeded (rotation animation plays during look
+    // phase). Previously the unconditional write clobbered vanilla's
+    // playSpeed during rotation → user report "no leg animation
+    // during wall rotation + rotates more, stops less".
+    //
+    // Bug 2 fix (2026-07-31) — the write also SCALES by animMotionRate
+    // (0..1) instead of binary 0/1. Small motions get proportionally
+    // slower leg animation; run/dash gets full speed. Floor at
+    // kMinAnimPlaySpeed so barely-moving spiders still show a visible
+    // slow cycle rather than freezing mid-motion.
+    if (IsAnimAuthoritative(s.state)) {
+        if (s.isWalkAnimActive) {
+            const float rate = std::max(s.animMotionRate,
+                                          kMinAnimPlaySpeed);
+            self->skelAnime.playSpeed = std::min(rate, 1.0f);
+        } else {
+            self->skelAnime.playSpeed = 0.0f;
+        }
+    }
+    // else: leave playSpeed alone — vanilla func_80B0E5E0 /
+    // func_80B0E430 manage it for wall-idle rotation animation.
 }
 
 void EnSw_EnhancedStateMachine_SnapshotAmbient(EnSw* self) {

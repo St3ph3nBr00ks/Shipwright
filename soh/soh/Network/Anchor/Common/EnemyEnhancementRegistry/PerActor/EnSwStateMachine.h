@@ -164,6 +164,19 @@ struct EnSwEnhancedState {
     // suppress the leg-lift cycle when spider is stationary — otherwise
     // legs oscillate even during idle, which looks wrong.
     bool isWalkAnimActive = false;
+
+    // Walk-animation intensity — normalized [0..1] rate that scales
+    // skelAnime.playSpeed via the post-tick write (see Bug 2 in
+    // Analysis/en_sw_bugs_wall_idle_ground_intensity_vine_jump_2026-07-31.md).
+    // Reset to 0 at top of each tick; state code sets it alongside
+    // isWalkAnimActive when activating animation. Post-tick clamps to
+    // >= kMinAnimPlaySpeed so a barely-moving spider still shows a
+    // visible leg cycle (avoids "moving but frozen" uncanny valley).
+    // Values:
+    //   0.0  = frozen (isWalkAnimActive false OR explicit stop)
+    //   0.15 = min "actually moving" floor
+    //   1.0  = maximum-speed run/dash animation
+    float animMotionRate = 0.0f;
 };
 
 // -------------------------------------------------------------------
