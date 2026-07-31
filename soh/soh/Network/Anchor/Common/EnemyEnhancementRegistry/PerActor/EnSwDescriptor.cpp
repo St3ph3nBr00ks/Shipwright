@@ -237,7 +237,17 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
         }
     }
     bend = (int16_t)(bend * kLegBendSign[legIndex]);
-    rotInOut->x = (int16_t)(rotInOut->x + bend);
+    // REPLACE the animation-provided rot.x rather than adding to it.
+    // `rotInOut->x` comes in carrying vanilla SkelAnime_Update's pose
+    // value for this limb — for En_Sw's default animation that's a
+    // walking-cycle rot.x that OSCILLATES per frame regardless of
+    // spider state. If we only ADD our bend on top, vanilla's cycle
+    // leaks through: legs animate whenever the spider is idle (bend
+    // static) OR moving (bend oscillating), because vanilla's
+    // underlying cycle is always ticking. Replacing pins the leg
+    // rot.x to our value exactly — legs static when isMoving = false,
+    // legs animated ONLY by our tetrapod cycle when isMoving = true.
+    rotInOut->x = bend;
     return true;
 }
 

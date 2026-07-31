@@ -337,8 +337,17 @@ inline void UpdateIdleGaze(EnSwEnhancedState& s, EnSw* self,
     // Look phase — smooth-step yaw toward target; walk-anim active
     // whenever yaw actually changed this tick.
     const s16 preYaw = self->actor.world.rot.y;
+    // minStep MUST be non-zero (was 0 pre-fix). vanilla Math_SmoothStepToS
+    // (z_lib.c:514): when `diff/scale` rounds to 0, it falls into the
+    // else branch and adds ±minStep. With minStep=0 that adds 0 →
+    // yaw stalls within `scale-1` units of target and never converges
+    // → `yaw == target` check below never fires → isLooking = true
+    // forever, spider stuck in look phase with no visible rotation
+    // (log 797: rot.y drifted then locked at -19917 for 17+ seconds).
+    // minStep=1 guarantees convergence within a few ticks of the
+    // small-delta regime.
     Math_SmoothStepToS(&self->actor.world.rot.y, s.idleGazeTargetYaw,
-                        kIdleGazeStepScale, kIdleGazeStepMax, 0);
+                        kIdleGazeStepScale, kIdleGazeStepMax, 1);
     if (self->actor.world.rot.y != preYaw) {
         s.isWalkAnimActive = true;
     }
