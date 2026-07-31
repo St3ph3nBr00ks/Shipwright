@@ -1307,9 +1307,56 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
             // exempt zone, so IsTargetVisible always passes here in
             // practice; kept for consistency + defense against future
             // range widening.
+            //
+            // Pre-lunge path-blocker probe: LoS above (spider Y+20 to
+            // target Y+20) catches walls tall enough to block a
+            // waist-level ray, but flies OVER short obstacles (steps,
+            // curbs, pots at body level). Additional horizontal ray at
+            // spider body height along the dash direction over the
+            // full dash reach catches those low blockers. If hit,
+            // refuse the WalkLunge trigger this tick — spider walks
+            // closer next frame and re-decides. Wall-normal check
+            // (|ny| < threshold) so slopes / floors aren't treated as
+            // blockers.
             if (IsTargetVisible(self, target, s)) {
-                SetupWalkLungeToward(s, self->actor.world.pos, target->world.pos);
-                TransitionTo(self, s, EnSwState::WalkLunge, "ground_walk_lunge");
+                constexpr float kDashReach =
+                    kWalkLungeDashSpeed * (float)kWalkLungeDashFrames;
+                const float dxL = target->world.pos.x - self->actor.world.pos.x;
+                const float dzL = target->world.pos.z - self->actor.world.pos.z;
+                const float lenL = std::sqrt(dxL * dxL + dzL * dzL);
+                bool pathBlocked = false;
+                if (lenL > 0.001f) {
+                    const float invL = 1.0f / lenL;
+                    Vec3f bpFrom = self->actor.world.pos;
+                    bpFrom.y += kBodySurfaceOffset;  // body center-ish
+                    Vec3f bpTo = {
+                        bpFrom.x + dxL * invL * kDashReach,
+                        bpFrom.y,
+                        bpFrom.z + dzL * invL * kDashReach,
+                    };
+                    CollisionPoly* bpPoly = nullptr;
+                    s32 bpBgId = 0;
+                    Vec3f bpHit = {0.0f, 0.0f, 0.0f};
+                    if (BgCheck_EntityLineTest1(&play->colCtx, &bpFrom,
+                                                 &bpTo, &bpHit, &bpPoly,
+                                                 1, 0, 0, 1, &bpBgId) &&
+                        bpPoly != nullptr) {
+                        const float ny =
+                            COLPOLY_GET_NORMAL(bpPoly->normal.y);
+                        if (std::fabs(ny) < kWallNormalYThreshold) {
+                            pathBlocked = true;
+                        }
+                    }
+                }
+                if (!pathBlocked) {
+                    SetupWalkLungeToward(s, self->actor.world.pos,
+                                          target->world.pos);
+                    TransitionTo(self, s, EnSwState::WalkLunge,
+                                 "ground_walk_lunge");
+                }
+                // pathBlocked: fall through (return below). Next tick
+                // spider approaches closer; may re-fire or route via
+                // JumpLunge if LoS is also blocked.
             }
         }
         return;
@@ -1587,6 +1634,32 @@ void TickWalkLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     s.isWalkAnimActive = true;  // actually translating during dash
     self->actor.world.pos.x += s.jumpVelX;
     self->actor.world.pos.z += s.jumpVelZ;
+
+    // Ground-follow — snap Y to floor + kBodySurfaceOffset each frame
+    // so the spider hugs terrain instead of dashing horizontally through
+    // dips and hills. Same probe shape as TickGroundPursue's top-block
+    // ground-follow. Only accepts polys with normal.y > kWallNormalYThreshold
+    // (walkable floors, not walls / ceilings encountered mid-dash).
+    {
+        Vec3f gfFrom = self->actor.world.pos;
+        gfFrom.y += 5.0f;
+        Vec3f gfTo = {
+            self->actor.world.pos.x,
+            self->actor.world.pos.y - kGroundFollowProbe,
+            self->actor.world.pos.z,
+        };
+        CollisionPoly* gfPoly = nullptr;
+        s32 gfBgId = 0;
+        Vec3f gfHit = {0.0f, 0.0f, 0.0f};
+        if (BgCheck_EntityLineTest1(&play->colCtx, &gfFrom, &gfTo, &gfHit,
+                                     &gfPoly, 1, 1, 1, 0, &gfBgId) &&
+            gfPoly != nullptr) {
+            const float ny = COLPOLY_GET_NORMAL(gfPoly->normal.y);
+            if (ny > kWallNormalYThreshold) {
+                self->actor.world.pos.y = gfHit.y + kBodySurfaceOffset;
+            }
+        }
+    }
     LogTickState(self, s, "walk_lunge_dash");
 
     // Wall-hit detection — cast forward from actor.pos in the dash
