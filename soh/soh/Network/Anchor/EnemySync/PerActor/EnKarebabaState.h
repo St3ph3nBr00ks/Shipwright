@@ -39,6 +39,13 @@ struct EnKarebabaState {
     // applies this mirror BEFORE calling the actor's actionFunc so the
     // two paths stay in lock-step with the host.
     s16 netActorParams = 0;
+
+    // Pillar 5 (GH #310) — geyser AoE Spin enhancement flag from most
+    // recent host broadcast. Peer's HookHandlers forwards this to the
+    // EnKarebabaDescriptor via Anchor_Enhance_EnKarebaba_ApplyPeerEnhancedFlag
+    // BEFORE calling EnKarebaba_ApplyNetState, so peer's local
+    // SetupSpin sees the correct flag when transitioning to state 4.
+    bool netEnhancedSpin = false;
 };
 
 }  // namespace EnemySync

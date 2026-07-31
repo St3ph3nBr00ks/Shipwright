@@ -122,6 +122,15 @@ extern "C" {
 extern PlayState* gPlayState;
 }
 
+// Pillar 5 (GH #310) — Karebaba geyser enhancement query bridge.
+// Reads whether the actor's current spin cycle is enhanced (host
+// rolled RNG at Spin entry). Declared here at C++ file scope
+// (extern "C" linkage for symbol resolution but the callable
+// signature is C++-usable). Implementation in
+// soh/Network/Anchor/Common/EnemyEnhancementRegistry/PerActor/
+// EnKarebabaBridge.cpp.
+extern "C" int Anchor_Enhance_EnKarebaba_IsCurrentSpinEnhanced(EnKarebaba* actor);
+
 // Pillar C2 Phase 4 Commit C — consolidated ENEMY_STATE handler.
 //
 // All four legacy packet types (ENEMY_UPDATE, ENEMY_DEFEATED, ENEMY_SPAWN,
@@ -144,9 +153,14 @@ extern PlayState* gPlayState;
 namespace {
 
 struct EnemyUpdateExtras {
-    bool hasKarebaba         = false;
-    s16  karebabaActionState = 0;
-    s16  karebabaActorParams = 0;
+    bool hasKarebaba              = false;
+    s16  karebabaActionState      = 0;
+    s16  karebabaActorParams      = 0;
+    // Pillar 5 (GH #310) — geyser AoE Spin enhancement. Host sets
+    // true at Spin entry when Karebaba.GeyserSpin CVar is ON and
+    // 33% RNG succeeds. Peer reads before ApplyNetState fires local
+    // Setup Spin so head-scale + geyser plume spawn are in sync.
+    bool karebabaEnhancedSpin     = false;
 
     bool hasGoroiwa          = false;
     s16  goroiwaActionState  = 0;
@@ -500,9 +514,14 @@ uint64_t HashLimbs(const SkelAnime* anime, uint8_t limbCount) {
 EnemyUpdateExtras GatherExtras(Actor* actor) {
     EnemyUpdateExtras e;
     if (actor->id == ACTOR_EN_KAREBABA) {
-        e.hasKarebaba         = true;
-        e.karebabaActionState = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
-        e.karebabaActorParams = (s16)actor->params;
+        e.hasKarebaba          = true;
+        e.karebabaActionState  = EnKarebaba_GetStateIndex((EnKarebaba*)actor);
+        e.karebabaActorParams  = (s16)actor->params;
+        // Pillar 5 (#310) — include the enhanced-spin flag when descriptor
+        // says this actor's current cycle is geyser-enhanced. Included
+        // ONLY when true so absent-key defaults to false on receive.
+        e.karebabaEnhancedSpin = Anchor_Enhance_EnKarebaba_IsCurrentSpinEnhanced(
+                                     (EnKarebaba*)actor) != 0;
     } else if (actor->id == ACTOR_EN_GOROIWA) {
         EnGoroiwa* b         = (EnGoroiwa*)actor;
         e.hasGoroiwa         = true;
@@ -1296,6 +1315,12 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
     if (extras.hasKarebaba) {
         payload["actionState"] = extras.karebabaActionState;
         payload["actorParams"] = extras.karebabaActorParams;
+        // Pillar 5 (#310) — include only when true so absent-key on
+        // receive defaults to false (backward-compat with pre-schema
+        // peers per sync rule 5 conventions).
+        if (extras.karebabaEnhancedSpin) {
+            payload["karebabaEnhancedSpin"] = true;
+        }
     }
 
     if (extras.hasGoroiwa) {
@@ -2103,6 +2128,9 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         if (actor->id == ACTOR_EN_KAREBABA && payload.contains("actionState")) {
             ext->netStateIndex            = (s16)payload["actionState"].get<int>();
             ext->karebaba.netActorParams  = (s16)payload.value("actorParams", (int)0);
+            // Pillar 5 (#310) — geyser enhancement flag. Absent-key
+            // defaults to false for backward compat with pre-schema peers.
+            ext->karebaba.netEnhancedSpin = payload.value("karebabaEnhancedSpin", false);
         }
 
         // KB-08 / #7 — cache Dekubaba host state so OnActorUpdate can call

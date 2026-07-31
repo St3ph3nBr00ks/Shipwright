@@ -157,6 +157,12 @@ float OTRGetDimensionFromLeftEdge(float v);
 float OTRGetDimensionFromRightEdge(float v);
 }
 
+// Pillar 5 (GH #310) — Karebaba geyser enhancement peer-flag bridge.
+// Called BEFORE EnKarebaba_ApplyNetState on peer so the descriptor's
+// per-actor state carries the enhanced-spin flag when the local
+// SetupSpin fires from ApplyNetState case 4.
+extern "C" void Anchor_Enhance_EnKarebaba_ApplyPeerEnhancedFlag(EnKarebaba* actor, int enhanced);
+
 // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor moved to
 // Common/ActorSyncHelpers.h in #173 Phase 1.
 // FindNearestPlayerActor moved to Common/PlayerLookup.h.
@@ -2895,6 +2901,18 @@ void Anchor::RegisterHooks() {
                                 SPDLOG_INFO("[EnKarebaba] rx netId={} apply {}→{}",
                                             ext->netId, (int)curState, (int)ext->netStateIndex);
                             }
+                            // Pillar 5 (#310) — apply peer's enhanced-spin flag
+                            // BEFORE ApplyNetState so that when ApplyNetState's
+                            // case-4 branch fires EnKarebaba_SetupSpin →
+                            // Anchor_Enhance_EnKarebaba_OnHostSetupSpin, the
+                            // per-actor state map already carries the
+                            // network-received flag. Peer's OnHostSetupSpin
+                            // early-returns via SceneAuthority::IsMyCurrentRoomHost
+                            // (peer isn't host for this room) so it doesn't
+                            // overwrite the flag.
+                            Anchor_Enhance_EnKarebaba_ApplyPeerEnhancedFlag(
+                                (EnKarebaba*)actor,
+                                ext->karebaba.netEnhancedSpin ? 1 : 0);
                             EnKarebaba_ApplyNetState((EnKarebaba*)actor, ext->netStateIndex, ext->karebaba.netActorParams);
                         } else if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, true)) {
                             SPDLOG_INFO("[EnKarebaba] rx netId={} block net={} local={} (dormant-active filter)",

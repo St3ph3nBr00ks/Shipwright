@@ -18,6 +18,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 
 #include "EnhancementRegistry.h"
+#include "PerActor/EnKarebabaDescriptor.h"
 #include "PerActor/EnSwDescriptor.h"
 
 #include "soh/ShipInit.hpp"
@@ -31,9 +32,12 @@ void RegisterEnemyEnhancementDescriptors() {
     // Phase 2 pilot — Skullwalltula.
     reg.Register(std::make_unique<AnchorEnemyEnhancement::EnSwDescriptor>());
 
+    // Karebaba — geyser AoE Spin (#310).
+    reg.Register(std::make_unique<AnchorEnemyEnhancement::EnKarebabaDescriptor>());
+
     // Future per-actor descriptors land here:
+    //   reg.Register(std::make_unique<EnDekubabaDescriptor>()); // Pillar 5 #308/#309
     //   reg.Register(std::make_unique<BariDescriptor>());       // Phase 4
-    //   reg.Register(std::make_unique<FloormasterDescriptor>()); // Phase 5+
     //   ... etc.
 }
 

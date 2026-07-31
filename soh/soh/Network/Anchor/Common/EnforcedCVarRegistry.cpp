@@ -189,6 +189,14 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     { CVAR_ENHANCEMENT("Skullwalltula.NavConsume"),        0 },
     { CVAR_ENHANCEMENT("Skullwalltula.GravityAware"),      0 },
     { CVAR_ENHANCEMENT("Skullwalltula.AggressiveAcquire"), 0 },
+
+    // --- Pillar 5 — Karebaba enhancement toggle (GH #310) ---
+    // Host-authoritative geyser AoE Spin. Default 0 per project
+    // policy. When ON, host rolls 33% chance at each Spin entry;
+    // on success, head scales up + a vertical acid plume erupts
+    // from actor.home.pos for the spin window. See
+    // Plans/en_karebaba_enhanced_plan.md.
+    { CVAR_ENHANCEMENT("Karebaba.GeyserSpin"), 0 },
 };
 
 const std::vector<FloatCVarEntry> kEnforcedFloats = {

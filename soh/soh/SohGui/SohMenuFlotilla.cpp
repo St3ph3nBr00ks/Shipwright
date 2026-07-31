@@ -798,6 +798,24 @@ void SohMenu::AddMenuFlotilla() {
             "PickGazeTarget + ShouldRelaxLungeGates fire via the "
             "existing vanilla-hook path."));
 
+    AddWidget(path, "Karebaba (En_Karebaba) — geyser AoE during Spin",
+              WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Geyser spin: 33% chance to erupt vertical acid plume during Spin state##Flotilla",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Karebaba.GeyserSpin"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: each Karebaba Spin state has a 33% chance to be "
+            "enhanced. Enhanced spins scale the head 1.0×→1.5×→1.0× "
+            "over the spin window AND spawn a vertical acid plume "
+            "from the stem base for ~1 second, damaging any player "
+            "standing in a small radius around the Karebaba.\n\n"
+            "Vanilla head-collider contact damage is NOT disabled — "
+            "the plant is more dangerous but not un-fightable.\n\n"
+            "See Plans/en_karebaba_enhanced_plan.md, tracker #310."));
+
     // -----------------------------------------------------------------
     // Scene Info
     // -----------------------------------------------------------------

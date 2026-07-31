@@ -20,6 +20,19 @@ extern void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, s32 getIt
 // Phase 3 C-hybrid: see z_en_dekubaba.c for the full comment.
 extern void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play);
 
+// Pillar 5 Karebaba enhancement (GH #310, Plans/en_karebaba_enhanced_plan.md).
+// Bridge to soh/Network/Anchor/Common/EnemyEnhancementRegistry/PerActor/
+// EnKarebabaBridge.cpp — extern C shims that dispatch to
+// EnKarebabaDescriptor. All hooks are cheap no-ops when the CVar
+// is off or no descriptor is registered. Pitfall 7: plain `extern`,
+// not `extern "C"` (this is a .c file).
+extern int  Anchor_Enhance_EnKarebaba_OnHostSetupSpin(EnKarebaba* actor, PlayState* play);
+extern void Anchor_Enhance_EnKarebaba_OnSpinTick(EnKarebaba* actor, PlayState* play);
+extern void Anchor_Enhance_EnKarebaba_OnSpinExit(EnKarebaba* actor);
+extern void Anchor_Enhance_EnKarebaba_OnActorDestroy(EnKarebaba* actor);
+// Consumed by EnemyState.cpp send-side; kept here for symmetry.
+extern int  Anchor_Enhance_EnKarebaba_IsCurrentSpinEnhanced(EnKarebaba* actor);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnKarebaba_Init(Actor* thisx, PlayState* play);
@@ -128,6 +141,9 @@ void EnKarebaba_Init(Actor* thisx, PlayState* play) {
 void EnKarebaba_Destroy(Actor* thisx, PlayState* play) {
     EnKarebaba* this = (EnKarebaba*)thisx;
 
+    // Pillar 5 (GH #310) — clean up per-actor enhancement state.
+    Anchor_Enhance_EnKarebaba_OnActorDestroy(this);
+
     Collider_DestroyCylinder(play, &this->bodyCollider);
     Collider_DestroyCylinder(play, &this->headCollider);
 
@@ -167,6 +183,10 @@ void EnKarebaba_SetupAwaken(EnKarebaba* this) {
 }
 
 void EnKarebaba_SetupUpright(EnKarebaba* this) {
+    // Pillar 5 (GH #310) — clear enhanced-spin flag + reset actor
+    // scale to vanilla when exiting Spin. Applies on both host and
+    // peer (state exit is symmetric).
+    Anchor_Enhance_EnKarebaba_OnSpinExit(this);
     if (this->actionFunc != EnKarebaba_Spin) {
         Actor_SetScale(&this->actor, 0.01f);
         this->bodyCollider.base.colType = COLTYPE_HIT6;
@@ -186,6 +206,12 @@ void EnKarebaba_SetupUpright(EnKarebaba* this) {
 void EnKarebaba_SetupSpin(EnKarebaba* this) {
     this->actor.params = 40;
     this->actionFunc = EnKarebaba_Spin;
+    // Pillar 5 (GH #310) — host-only RNG roll for geyser AoE variant.
+    // On peer, this is a no-op (SceneAuthority gate inside the
+    // descriptor); peer's enhanced flag was set by HookHandlers'
+    // OnPeerReceiveEnhancedSpinFlag BEFORE this SetupSpin fires
+    // from ApplyNetState case 4.
+    Anchor_Enhance_EnKarebaba_OnHostSetupSpin(this, gPlayState);
     LUSLOG_INFO("[Karebaba] SetupSpin home=(%.0f,%.0f,%.0f)",
                 this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
 }
@@ -474,6 +500,13 @@ void EnKarebaba_Spin(EnKarebaba* this, PlayState* play) {
 
     this->actor.world.pos.x = (Math_SinS(this->actor.shape.rot.y) * cos60) + this->actor.home.pos.x;
     this->actor.world.pos.z = (Math_CosS(this->actor.shape.rot.y) * cos60) + this->actor.home.pos.z;
+
+    // Pillar 5 (GH #310) — per-frame geyser enhancement hook. No-op
+    // when descriptor's per-actor state has currentSpinEnhanced=false
+    // (i.e. CVar off, RNG failed, or peer never received the flag).
+    // When enhanced: overrides actor.scale to a 1.0×→1.5×→1.0× sinusoid
+    // + spawns the geyser plume once on frame 1 of the spin cycle.
+    Anchor_Enhance_EnKarebaba_OnSpinTick(this, play);
 
     if (this->bodyCollider.base.acFlags & AC_HIT) {
         EnKarebaba_SetupDying(this);
