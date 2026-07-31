@@ -575,12 +575,15 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 
     // Within attack range → hold position + rebuild rotation toward
     // target so the spider FACES the player while vanilla lunge state 6-7
-    // takes over. M5 scope doesn't emit any lunge trigger itself; when
-    // vanilla's own state machine advances self->actionFunc to lunge
-    // (via its internal timer + predicate), our Tick's yield-check
-    // at the top will defer motion until vanilla returns to ambient.
+    // takes over. Uses 3D distance so vertical separation keeps the
+    // spider pursuing (e.g., climbing target directly above ground
+    // spider — distXZ small, distY large — should NOT be treated as
+    // "in attack range" since the spider needs to attach to a wall
+    // and pursue upward).
     constexpr float kAttackRangeSq = 50.0f * 50.0f;
-    const bool inAttackRange = (distXZSq <= kAttackRangeSq);
+    const float dyT = target->world.pos.y - self->actor.world.pos.y;
+    const float dist3DSq = distXZSq + dyT * dyT;
+    const bool inAttackRange = (dist3DSq <= kAttackRangeSq);
 
     // Project (target - actor) onto tangent plane by dropping normal
     // component. This yields the on-wall direction pointing at the
@@ -842,8 +845,16 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     self->actor.world.rot.z = 0;
     self->actor.shape.rot = self->actor.world.rot;
 
+    // Attack-range hold uses 3D distance so a climbing target directly
+    // above the spider (small distXZ, large distY) doesn't trigger
+    // premature hold. Reported symptom: spider waited at wall base
+    // when player was climbing above. With 3D check, spider stays in
+    // pursuit mode → hits wall via forward probe → GroundToWallReattach
+    // → transitions to WallPursue to climb after the player.
     constexpr float kAttackRangeSq = 50.0f * 50.0f;
-    if (distXZSq <= kAttackRangeSq) {
+    const float dyG = target->world.pos.y - self->actor.world.pos.y;
+    const float dist3DSq = distXZSq + dyG * dyG;
+    if (dist3DSq <= kAttackRangeSq) {
         // Hold — vanilla lunge cycle will pick up (see LungeYield path).
         return;
     }
