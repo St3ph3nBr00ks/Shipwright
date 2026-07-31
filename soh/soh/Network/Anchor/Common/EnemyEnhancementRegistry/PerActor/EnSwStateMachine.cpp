@@ -312,6 +312,10 @@ inline bool IsTargetJumpReachable(const EnSw* spider, const Actor* target) {
 // Idle gaze rotation — ground spider slowly turns yaw between random
 // s16 targets, changed every kIdleGazeChangeInterval frames. Writes
 // world.rot.y directly; caller sets world.rot.x/z + copies to shape.rot.
+// Sets s.isWalkAnimActive = true whenever yaw actually changed this
+// tick (spider is "looking around" — legs should shuffle). Between
+// gaze targets when yaw has arrived and rest, the flag stays false
+// and legs render static.
 inline void UpdateIdleGaze(EnSwEnhancedState& s, EnSw* self,
                             PlayState* play) {
     const int now = (int)play->gameplayFrames;
@@ -322,8 +326,12 @@ inline void UpdateIdleGaze(EnSwEnhancedState& s, EnSw* self,
         s.idleGazeTargetYaw       = self->actor.world.rot.y + offset;
         s.idleGazeNextChangeFrame = now + kIdleGazeChangeInterval;
     }
+    const s16 preYaw = self->actor.world.rot.y;
     Math_SmoothStepToS(&self->actor.world.rot.y, s.idleGazeTargetYaw,
                         kIdleGazeStepScale, kIdleGazeStepMax, 0);
+    if (self->actor.world.rot.y != preYaw) {
+        s.isWalkAnimActive = true;  // rotating this tick → animate legs
+    }
 }
 
 // -------------------------------------------------------------------
