@@ -175,6 +175,19 @@ inline void SetupWalkLungeToward(EnSwEnhancedState& s,
 // acquisition + attack-gate decisions.
 // -------------------------------------------------------------------
 
+// Target-detect radius (squared distance for cheap comparison). Used
+// by TickWallIdle / TickWallPursue / TickGroundPursue / TickGround-
+// ToWallReattach to gate "target close enough to pursue". Vanilla
+// En_Sw uses 130u for its lunge-target-acquisition predicate; we go
+// slightly higher (200u) so the spider can see the player from wall
+// placement and start crawling toward them, but not so high that
+// spiders across the room start migrating (previous 600u caused
+// spiders on the ceiling of Deku Tree main room to descend to the
+// floor whenever any player entered). Defined here (top of anon
+// namespace) so IsTargetVisible + other detection helpers below can
+// reference it.
+constexpr float kIdleDetectRangeSq = 200.0f * 200.0f;
+
 // Vanilla En_Sw picker's 3D distance gate is 130u (func_80B0DEA8 line
 // 861); we treat that as the "contact-awareness" range where the
 // spider can attack regardless of facing direction. Beyond 130u but
@@ -291,16 +304,9 @@ constexpr float kBasisProbeRange = 100.0f;
 // anything shallower is a slope, not a wall.
 constexpr float kWallNormalYThreshold = 0.5f;
 
-// Target-detect radius (squared distance for cheap comparison). Used
-// by TickWallIdle / TickWallPursue / TickGroundPursue / TickGround-
-// ToWallReattach to gate "target close enough to pursue". Vanilla
-// En_Sw uses 130u for its lunge-target-acquisition predicate; we go
-// slightly higher (200u) so the spider can see the player from wall
-// placement and start crawling toward them, but not so high that
-// spiders across the room start migrating (previous 600u caused
-// spiders on the ceiling of Deku Tree main room to descend to the
-// floor whenever any player entered).
-constexpr float kIdleDetectRangeSq = 200.0f * 200.0f;
+// (kIdleDetectRangeSq relocated to top of anonymous namespace so
+//  IsTargetVisible + related helpers can reference it. See the
+//  detection-helpers block near the top of this file.)
 
 // Body-offset distance perpendicular to the surface (both ground and
 // wall). Vanilla En_Sw's body naturally sits FLUSH against the wall
