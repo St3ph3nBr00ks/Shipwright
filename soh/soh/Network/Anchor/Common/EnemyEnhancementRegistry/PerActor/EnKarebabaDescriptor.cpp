@@ -119,32 +119,46 @@ constexpr float kVanillaScale = 0.01f;
 //                        Complements the rain-impact by looking
 //                        like a caustic vapor kicked up on impact.
 
-// Phase 1 constants.
-constexpr float kSpitYOffset           = 5.0f;   // raise above head to mouth level
+// Phase 1 constants. Spit position lifted from head+5 to head+15
+// (V4 tuning) so splash originates cleanly above the mouth. Splash
+// scale halved 500 → 250 to reduce visual dominance.
+constexpr float kSpitYOffset           = 15.0f;  // above head (mouth clearance)
 constexpr int   kSpitSplashesPerFrame  = 2;
 constexpr s16   kSpitSplashType        = 2;      // silhouette variant 0/1/2
-constexpr s16   kSpitSplashScale       = 500;    // ~half of vanilla water surface splash
+constexpr s16   kSpitSplashScale       = 250;    // V4: halved from 500
 
 constexpr int   kRisingBubblesPerFrame = 1;      // supporting accent to the spit
 constexpr float kRisingBubbleSpeed     = 6.0f;   // upward Y velocity
 constexpr float kRisingBubbleAccelY    = -0.25f; // slight gravity so bubbles arc down
+// V4 tuning — up-bubble scale halved. Range 120-170 → 60-85.
+constexpr int   kRisingBubbleScaleBase = 60;
+constexpr int   kRisingBubbleScaleRand = 25;
 
 // Phase 2 constants. Rain starts at f10 and continues through spin
 // end. XZ radius kept modest so the column reads as directly above
 // the plant rather than a scattered downpour.
+//
+// V4 tuning — spawn height raised 30u → 130u per user direction.
+// Recomputed impact frame: with initial velocity -3 and gravity
+// -0.35, distance 130 = 3t + 0.175t² → 0.175t² + 3t - 130 = 0
+//   → t = (-3 + sqrt(9 + 91)) / 0.35 = (-3 + 10) / 0.35 = 20 frames
+// So rain hits ground at f10 + f20 = f30 (was f17 with 30u fall).
+// Rain-drop life bumped 20 → 25 so drops remain visible AT the
+// impact frame (would otherwise die exactly on impact and not
+// visually connect to the splash burst).
 constexpr int   kRainStartFrame        = 10;
 constexpr int   kRainDropletsPerFrame  = 3;
-constexpr float kRainSpawnHeightY      = 30.0f;  // Y above home.pos
+constexpr float kRainSpawnHeightY      = 130.0f; // V4: was 30.0
 constexpr float kRainSpawnRadius       = 30.0f;  // XZ jitter around home
 constexpr float kRainDropletSpeed      = -3.0f;  // initial downward velocity
 constexpr float kRainDropletAccelY     = -0.35f; // gravity
 constexpr s16   kRainDropletScale      = 90;     // small drops
-constexpr s16   kRainDropletLife       = 20;     // enough to reach ground + fade
+constexpr s16   kRainDropletLife       = 25;     // V4: bumped 20 → 25 to survive longer fall
 
 // Phase 3 constants. 5 total splashes over 5 consecutive frames.
-// Impact frame chosen to match rain flight time — see comment block
-// above for the physics derivation.
-constexpr int   kGroundImpactStartFrame = 17;
+// Impact frame recomputed from rain physics (see Phase 2 block
+// above): 20-frame fall + f10 start = f30 impact.
+constexpr int   kGroundImpactStartFrame = 30;    // V4: was 17 (rain fell 30u); now 130u fall
 constexpr u8    kGroundSplashTotalCount = 5;
 constexpr float kGroundSplashRadius     = 40.0f; // XZ ring around home
 constexpr s16   kGroundSplashScale      = 400;   // slightly smaller than spit
@@ -153,7 +167,8 @@ constexpr s16   kGroundSplashType       = 1;     // sharper silhouette (types 0/
 // Phase 4 constants. Rising dust from ground upward. Small positive
 // Y velocity + slight decay accel → dust rises then slows and
 // disperses. Wider XZ radius spreads the mist around the plant.
-constexpr int   kRisingDustStartFrame  = 17;
+// Start frame follows Phase 3 impact (V4: was 17, now 30).
+constexpr int   kRisingDustStartFrame  = 30;
 constexpr int   kRisingDustPerFrame    = 2;
 constexpr float kRisingDustSpawnYOffset = 5.0f;  // just above ground so we see it rise
 constexpr float kRisingDustSpeed       = 1.5f;   // upward velocity
@@ -167,15 +182,25 @@ constexpr s16   kRisingDustLife        = 25;
 // color for the multi-tone gradient the softsprite render uses.
 // Alphas below 255 keep particles translucent so they blend into
 // each other and don't look like solid blobs.
-constexpr Color_RGBA8 kSpitPrimColor   = { 170, 240, 110, 220 };
+//
+// V4 tuning — primary RGB reduced 25% across all vomit-derived
+// effects (spit / bubbles / rain / splash / rising dust). Env
+// colors preserved as edge-outline definition. Rendered values:
+//   Spit  prim 170→128 240→180 110→ 82  (was bright yellow-green)
+//   Bub   prim 150→112 220→165 100→ 75
+//   Rain  prim 150→112 220→165 100→ 75
+//   Splsh prim 170→128 240→180 110→ 82
+//   Dust  prim 180→135 230→172 130→ 97
+// Alphas preserved (transparency is orthogonal to brightness).
+constexpr Color_RGBA8 kSpitPrimColor   = { 128, 180,  82, 220 };
 constexpr Color_RGBA8 kSpitEnvColor    = {  50,  90,  30, 255 };
-constexpr Color_RGBA8 kBubblePrimColor = { 150, 220, 100, 200 };
+constexpr Color_RGBA8 kBubblePrimColor = { 112, 165,  75, 200 };
 constexpr Color_RGBA8 kBubbleEnvColor  = {  60, 100,  40, 255 };
-constexpr Color_RGBA8 kRainPrimColor   = { 150, 220, 100, 220 };
+constexpr Color_RGBA8 kRainPrimColor   = { 112, 165,  75, 220 };
 constexpr Color_RGBA8 kRainEnvColor    = {  60, 100,  40, 255 };
-constexpr Color_RGBA8 kSplashPrimColor = { 170, 240, 110, 230 };
+constexpr Color_RGBA8 kSplashPrimColor = { 128, 180,  82, 230 };
 constexpr Color_RGBA8 kSplashEnvColor  = {  50,  90,  30, 255 };
-constexpr Color_RGBA8 kDustPrimColor   = { 180, 230, 130, 150 };
+constexpr Color_RGBA8 kDustPrimColor   = { 135, 172,  97, 150 };
 constexpr Color_RGBA8 kDustEnvColor    = {  80, 130,  60, 255 };
 
 }  // namespace
@@ -329,7 +354,9 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
                 kRisingBubbleSpeed + Rand_ZeroOne() * 2.0f,
                 (Rand_ZeroOne() - 0.5f) * 2.5f,
             };
-            const s16 scale = (s16)(120 + (int)(Rand_ZeroOne() * 50.0f));
+            // V4 tuning — up-bubble scale halved (was 120 + rand*50).
+            const s16 scale = (s16)(kRisingBubbleScaleBase +
+                                     (int)(Rand_ZeroOne() * (float)kRisingBubbleScaleRand));
             EffectSsDtBubble_SpawnCustomColor(play, &bubblePos, &bubbleVel,
                                                 &bubbleAccel, &primC, &envC,
                                                 scale, 25, 8);
