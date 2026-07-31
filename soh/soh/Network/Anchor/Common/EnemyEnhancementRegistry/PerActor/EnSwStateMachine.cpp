@@ -140,6 +140,36 @@ inline void SetupJumpToward(EnSwEnhancedState& s, const Vec3f& spiderPos,
 }
 
 // -------------------------------------------------------------------
+// WalkLunge tuning + helper. WalkLunge replaces the vanilla
+// func_80B0E728 walk-lunge for enhanced GroundPursue spiders. Same
+// wind-up + dash shape but implemented entirely in our namespace so
+// we control shape.rot / world.pos and vanilla actionFunc stays
+// pinned at ambient throughout the attack. Reuses s.jumpVelX/Z for
+// dash direction (Y unused — walk-lunge is planar).
+// -------------------------------------------------------------------
+constexpr int   kWalkLungeWindupFrames = 10;    // ~0.5 s telegraph
+constexpr int   kWalkLungeDashFrames   = 16;    // ~0.8 s dash phase
+constexpr float kWalkLungeDashSpeed    = 8.0f;  // matches vanilla lunge speed
+
+inline void SetupWalkLungeToward(EnSwEnhancedState& s,
+                                  const Vec3f& spiderPos,
+                                  const Vec3f& targetPos) {
+    const float dx = targetPos.x - spiderPos.x;
+    const float dz = targetPos.z - spiderPos.z;
+    const float distXZ = std::sqrt(dx * dx + dz * dz);
+    if (distXZ < 0.001f) {
+        s.jumpVelX = 0.0f;
+        s.jumpVelZ = 0.0f;
+    } else {
+        const float inv = 1.0f / distXZ;
+        s.jumpVelX = dx * inv * kWalkLungeDashSpeed;
+        s.jumpVelZ = dz * inv * kWalkLungeDashSpeed;
+    }
+    s.jumpVelY     = 0.0f;   // no vertical component for walk-lunge
+    s.jumpAirborne = false;  // wind-up runs first
+}
+
+// -------------------------------------------------------------------
 // Tuning constants
 // -------------------------------------------------------------------
 
@@ -215,6 +245,7 @@ const char* StateName(EnSwState s) {
         case EnSwState::GroundToWallReattach: return "GROUND_TO_WALL";
         case EnSwState::LungeYield:           return "LUNGE_YIELD";
         case EnSwState::JumpLunge:            return "JUMP_LUNGE";
+        case EnSwState::WalkLunge:            return "WALK_LUNGE";
         case EnSwState::PermanentlyDisabled:  return "DISABLED";
     }
     return "?";
@@ -929,6 +960,15 @@ constexpr float kGroundFollowProbe = 200.0f;
 void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     LogTickState(self, s, "ground_pursue");
 
+    // Pin vanilla's ambient wind-up timer so `func_80B0E5E0` never
+    // transitions to `func_80B0E728` on its own. WalkLunge and JumpLunge
+    // are the ONLY paths into an attack for enhanced ground spiders —
+    // vanilla's actionFunc chain is inappropriate for our floor
+    // orientation (wall-oriented rotation writes, straight-line dash
+    // that clashes with our motion). LungeYield remains as a defensive
+    // fallback for edge cases (damage → func_80B0D878 death, etc).
+    self->unk_442 = 100;
+
     // Ground-follow probe FIRST — snap Y to floor before any motion
     // writes. Raycast from a small height above actor.pos down by
     // kGroundFollowProbe. Anything with normal.y > threshold counts as
@@ -1060,16 +1100,19 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
                 TransitionTo(self, s, EnSwState::JumpLunge, "ground_jump_no_path");
                 return;
             }
+            // Line-of-sight is clear → dedicated WalkLunge state
+            // (custom wind-up + straight-line dash). Previously this
+            // branch set unk_442 = 0 to trigger vanilla's func_80B0E728
+            // walk-lunge chain, but that produced actionFunc
+            // oscillation (E5E0 → E728 → E9BC/E90C → E5E0 → ...) that
+            // flickered the purple color and rotated the spider around
+            // the wrong axis (vanilla shape.rot.z writes designed for
+            // wall spiders don't fit ground orientation). WalkLunge
+            // owns the whole attack lifecycle so no vanilla actionFunc
+            // change is required.
+            SetupWalkLungeToward(s, self->actor.world.pos, target->world.pos);
+            TransitionTo(self, s, EnSwState::WalkLunge, "ground_walk_lunge");
         }
-        // Force vanilla's wind-up timer to 0 so `func_80B0E5E0`'s
-        // next-frame check `(DECR(unk_442) == 0 && picker_ok)` fires
-        // immediately. The picker itself succeeds because
-        // ShouldRelaxLungeGates returns true when NavConsume is on,
-        // skipping the climbing-required gate for our floor target.
-        // Vanilla then transitions actionFunc to `func_80B0E728`
-        // (purple wind-up flash + lunge motion), and our snapshot
-        // detector routes us into LungeYield to let vanilla drive.
-        self->unk_442 = 0;
         return;
     }
 
@@ -1277,6 +1320,63 @@ void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     }
 }
 
+// TickWalkLunge — custom ground walk-lunge (replaces vanilla
+// func_80B0E728 for enhanced GroundPursue spiders). Two phases:
+//   1. Wind-up (kWalkLungeWindupFrames): stationary, purple flash via
+//      Anchor_Enhance_EnSw_IsJumpAttacking bridge.
+//   2. Dash (kWalkLungeDashFrames): apply s.jumpVelX/Z to world.pos
+//      each frame, no vertical motion (Y stays at entry level). Wall
+//      contact during dash → GroundToWallReattach. Duration expiry →
+//      GroundPursue for re-evaluation.
+//
+// Pins unk_442 = 100 each frame so vanilla's ambient func_80B0E5E0
+// never triggers its own lunge chain (which would fight our motion
+// via shape.rot.z writes designed for wall spiders).
+void TickWalkLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
+    self->unk_442 = 100;
+
+    // Wind-up phase — hold in place, telegraph via purple fog color.
+    if (s.framesInState < kWalkLungeWindupFrames) {
+        LogTickState(self, s, "walk_lunge_windup");
+        return;
+    }
+
+    // Dash phase — apply horizontal velocity, integrate world.pos.
+    const int dashFramesElapsed = s.framesInState - kWalkLungeWindupFrames;
+    if (dashFramesElapsed >= kWalkLungeDashFrames) {
+        // Dash complete — return to GroundPursue for re-evaluation.
+        // If Link is still in attack range next tick, another WalkLunge
+        // (or JumpLunge if LoS blocked) will chain naturally.
+        TransitionTo(self, s, EnSwState::GroundPursue, "walk_lunge_complete");
+        return;
+    }
+
+    self->actor.world.pos.x += s.jumpVelX;
+    self->actor.world.pos.z += s.jumpVelZ;
+    LogTickState(self, s, "walk_lunge_dash");
+
+    // Wall-hit detection — cast forward from actor.pos in the dash
+    // direction. If we bump into a wall mid-dash, transition to
+    // reattach (same shape as TickGroundPursue's wall-ahead check).
+    Vec3f from = self->actor.world.pos;
+    Vec3f to = {
+        from.x + s.jumpVelX * kGroundForwardProbe / kWalkLungeDashSpeed,
+        from.y,
+        from.z + s.jumpVelZ * kGroundForwardProbe / kWalkLungeDashSpeed,
+    };
+    CollisionPoly* poly = nullptr;
+    s32 bgId = 0;
+    Vec3f hitPos = {0.0f, 0.0f, 0.0f};
+    if (BgCheck_EntityLineTest1(&play->colCtx, &from, &to, &hitPos, &poly,
+                                 1, 1, 1, 0, &bgId) && poly != nullptr) {
+        const float ny = COLPOLY_GET_NORMAL(poly->normal.y);
+        if (std::fabs(ny) < kWallNormalYThreshold) {
+            TransitionTo(self, s, EnSwState::GroundToWallReattach,
+                         "walk_lunge_wall_ahead");
+        }
+    }
+}
+
 // Placeholder handlers for states landed in M7. Each emits a once-per-
 // entry diagnostic so we know if execution ever reaches them before
 // their real bodies land.
@@ -1350,7 +1450,13 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
             // (the original wall spawn point), bypassing our nav
             // substrate and reverting to the wall-oriented rotation.
             if (s.lungeEntryActionFunc != nullptr &&
-                self->actionFunc != s.lungeEntryActionFunc) {
+                self->actionFunc != s.lungeEntryActionFunc &&
+                self->actor.colChkInfo.health > 0) {
+                // Health check — if the spider is dead, vanilla has
+                // set actionFunc to func_80B0D878 (death sequence).
+                // Forcing back to ambient here would interrupt the
+                // death animation + stick-drop spawn. Let vanilla
+                // drive death sequences unimpeded.
                 if (DiagEnabled()) {
                     SPDLOG_INFO("[EEDiag/SM] actor=0x{:x} LUNGE_YIELD preempt "
                                 "post-lunge state: vanillaActionFunc=0x{:x} "
@@ -1420,6 +1526,9 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
             break;
         case EnSwState::JumpLunge:
             TickJumpLunge(self, play, s);
+            break;
+        case EnSwState::WalkLunge:
+            TickWalkLunge(self, play, s);
             break;
         case EnSwState::PermanentlyDisabled:
             // No-op forever. Vanilla actionFunc runs unchanged (which

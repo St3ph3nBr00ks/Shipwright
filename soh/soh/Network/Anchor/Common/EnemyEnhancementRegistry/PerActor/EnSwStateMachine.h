@@ -65,6 +65,9 @@ enum class EnSwState : uint8_t {
     LungeYield           = 6,  // vanilla state 7 wind-up firing; delegate to vanilla  (M7)
     PermanentlyDisabled  = 7,  // basis raycast failed at init; yield to vanilla forever
     JumpLunge            = 8,  // ballistic wind-up + arc + landing (Tektite-style)    (M10)
+    WalkLunge            = 9,  // custom ground wind-up + straight-line dash (M11 —
+                                // replaces vanilla func_80B0E728 walk-lunge for
+                                // enhanced spiders, eliminates actionFunc oscillation)
 };
 
 // -------------------------------------------------------------------

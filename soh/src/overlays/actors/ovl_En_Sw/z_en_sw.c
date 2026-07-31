@@ -1091,7 +1091,14 @@ void func_80B0E9BC(EnSw* this, PlayState* play) {
 // another lunge if the target is still in attack range.
 void EnSw_ForceAmbient(EnSw* this) {
     this->actionFunc = func_80B0E5E0;
-    this->unk_442 = 0;  // wind-up timer — 0 = picker fires next tick
+    // unk_442 = 30 matches vanilla's natural re-arm cadence
+    // (Rand_S16Offset(20, 10) at func_80B0E728 post-lunge). Previously
+    // set to 0 for aggressive immediate re-lunge; that only made sense
+    // when the ground walk-lunge routed through vanilla func_80B0E728.
+    // GroundPursue now uses our custom WalkLunge state (which pins
+    // unk_442 = 100 anyway), and WallPursue's rule-1 case wants
+    // vanilla-like cooldown between lunges.
+    this->unk_442 = 30;
     this->unk_440 = 0;  // dash sfx cooldown
     this->actor.speedXZ = 0.0f;  // vanilla lunge left speed; reset so we don't drift
 }

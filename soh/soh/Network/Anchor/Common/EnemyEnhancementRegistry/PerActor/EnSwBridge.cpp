@@ -136,13 +136,19 @@ extern "C" int Anchor_Enhance_EnSw_GazeOverride(EnSw* actor, PlayState* play,
 
 extern "C" int Anchor_Enhance_EnSw_IsJumpAttacking(EnSw* actor) {
     // Consulted by vanilla EnSw_Draw to layer the purple attack fog
-    // color when the enhanced state machine is running a Tektite-style
-    // JumpLunge (wind-up + airborne). Returns 1 for both phases so the
-    // spider glows purple through the whole attack, matching the
-    // vanilla func_80B0E728 purple treatment for the walk-lunge.
+    // color while our state machine is running one of its custom
+    // attack states: JumpLunge (Tektite-style ballistic wind-up +
+    // airborne) OR WalkLunge (ground wind-up + straight-line dash,
+    // replaces the vanilla func_80B0E728 walk-lunge for enhanced
+    // ground spiders). Both should glow purple through the whole
+    // attack cycle, matching the vanilla func_80B0E728 treatment.
+    // Function name kept for wire-format compat; semantic covers
+    // any custom attack state.
     if (actor == nullptr) return 0;
-    return (AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_QueryState(actor)
-            == AnchorEnemyEnhancement::EnSwState::JumpLunge) ? 1 : 0;
+    const auto st =
+        AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_QueryState(actor);
+    return (st == AnchorEnemyEnhancement::EnSwState::JumpLunge ||
+            st == AnchorEnemyEnhancement::EnSwState::WalkLunge) ? 1 : 0;
 }
 
 extern "C" int Anchor_Enhance_EnSw_ShouldRelaxLungeGates(EnSw* actor) {
