@@ -109,8 +109,7 @@ void EnSwDescriptor::OnLandedFromFall(Actor* actor, PlayState* play) {
 
 bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
                                        Actor* actor, PlayState* play) {
-    (void)play;
-    if (rotInOut == nullptr || actor == nullptr) return false;
+    if (rotInOut == nullptr || actor == nullptr || play == nullptr) return false;
 
     // Gated on NavConsume CVar — leg-bend is cosmetic compensation for
     // the nav-driven ground-walking mode; when Nav is off, actor stays
@@ -118,20 +117,23 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
     if (AnchorCVarSync::GetEnforcedInt(NavConsumeCVar(), 0) == 0) return false;
 
     // Fire in any Wall* or Ground* state where the body is offset from
-    // the surface (see EnSwStateMachine kBodySurfaceOffset). Vanilla
-    // en_sw draws legs in the wall-tangent plane with belly touching
-    // wall; with our offset the body is ~15u away from the surface, so
-    // legs need to bend outward to visually reach it. Actor cast to
-    // EnSw* is safe because IsInstanceEnhanced gate above already
-    // excluded gold-tokens.
+    // the surface (see EnSwStateMachine kBodySurfaceOffset). Legs bend
+    // outward to visually reach the surface across the gap. Moving
+    // states (Pursue) additionally oscillate the bend per-leg to
+    // produce a walking cycle; idle/transitional states hold a static
+    // bend so feet rest against the surface.
     EnSw* enSw = reinterpret_cast<EnSw*>(actor);
     const AnchorEnemyEnhancement::EnSwState smState =
         AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_QueryState(enSw);
+    bool isMoving;
     switch (smState) {
-        case AnchorEnemyEnhancement::EnSwState::WallIdle:
         case AnchorEnemyEnhancement::EnSwState::WallPursue:
         case AnchorEnemyEnhancement::EnSwState::GroundPursue:
+            isMoving = true;
+            break;
+        case AnchorEnemyEnhancement::EnSwState::WallIdle:
         case AnchorEnemyEnhancement::EnSwState::GroundToWallReattach:
+            isMoving = false;
             break;
         default:
             return false;  // Uninitialized / WallEdgeDrop / LungeYield /
@@ -142,25 +144,43 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
     // switch (z_en_sw.c:1082-1106). 8 legs at limb indices:
     //   8, 11, 14, 17, 20, 23, 26, 29
     // These are the 8 leg-DL slots the gold-variant branch remaps.
+    int legIndex = -1;
     switch (limbIndex) {
-        case 8:  case 11: case 14: case 17:
-        case 20: case 23: case 26: case 29:
-            break;
-        default:
-            return false;  // not a leg — leave vanilla pose alone
+        case 8:  legIndex = 0; break;
+        case 11: legIndex = 1; break;
+        case 14: legIndex = 2; break;
+        case 17: legIndex = 3; break;
+        case 20: legIndex = 4; break;
+        case 23: legIndex = 5; break;
+        case 26: legIndex = 6; break;
+        case 29: legIndex = 7; break;
+        default: return false;  // not a leg — leave vanilla pose alone
     }
 
-    // Additive downward bend. s16 angle units — 0x2000 = ~45°.
-    // Bumped from 0x0C00 (~17°) to compensate for the 15u body offset
-    // added at the same time; smaller bend leaves legs floating in
-    // mid-air short of the surface. Applied to X (pitch) — tips leg
-    // segments outward from their wall-tangent rest pose.
-    //
-    // Tune via field-test: too much bend → legs clip through the
-    // surface / body; too little → visible gap between leg tip and
-    // surface. Companion: kBodySurfaceOffset in EnSwStateMachine.cpp.
-    static constexpr int16_t kLegBendPitch = 0x2000;  // ~45°
-    rotInOut->x = (int16_t)(rotInOut->x + kLegBendPitch);
+    // Base bend positions leg tips against the surface across the
+    // ~8u body offset (see kBodySurfaceOffset). Tuned for that offset;
+    // if the offset changes, this may need adjustment.
+    static constexpr int16_t kBaseBend = 0x1200;  // ~25°
+
+    // Walk-cycle oscillation. Amplitude ±0x0600 (~8°) around the base:
+    // during pursuit, legs rise ~8° above and dip ~8° below their
+    // resting position, giving a visible step-and-plant motion.
+    // Period 20 frames (~1 second at 20fps game tick).
+    // Per-leg phase offset (2π/8 = 45° per leg) spreads the 8 legs
+    // across one cycle → ripple gait, not synchronized stomp.
+    static constexpr int16_t kWalkAmplitude = 0x0600;  // ~8° swing
+    static constexpr float   kStepPeriod    = 20.0f;   // frames per cycle
+    static constexpr float   kLegPhaseStep  = 2.0f * (float)M_PI / 8.0f;
+
+    int16_t bend = kBaseBend;
+    if (isMoving) {
+        const float phase =
+            (float)play->gameplayFrames * (2.0f * (float)M_PI / kStepPeriod)
+            + (float)legIndex * kLegPhaseStep;
+        const float wave = std::sin(phase);
+        bend = (int16_t)(kBaseBend + (int)(wave * kWalkAmplitude));
+    }
+    rotInOut->x = (int16_t)(rotInOut->x + bend);
     return true;
 }
 

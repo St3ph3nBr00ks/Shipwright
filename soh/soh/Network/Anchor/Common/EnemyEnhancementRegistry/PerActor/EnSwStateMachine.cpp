@@ -72,12 +72,16 @@ constexpr float kBasisProbeRange = 100.0f;
 // anything shallower is a slope, not a wall.
 constexpr float kWallNormalYThreshold = 0.5f;
 
-// TickWallIdle target-detect radius. Uses the descriptor's NavParams
-// detectRange normally; for M4 skeleton the state machine hard-codes
-// this constant so it doesn't need to reach through the descriptor
-// yet. M5's WallPursue implementation replaces this with the
-// descriptor value.
-constexpr float kIdleDetectRangeSq = 600.0f * 600.0f;
+// Target-detect radius (squared distance for cheap comparison). Used
+// by TickWallIdle / TickWallPursue / TickGroundPursue / TickGround-
+// ToWallReattach to gate "target close enough to pursue". Vanilla
+// En_Sw uses 130u for its lunge-target-acquisition predicate; we go
+// slightly higher (200u) so the spider can see the player from wall
+// placement and start crawling toward them, but not so high that
+// spiders across the room start migrating (previous 600u caused
+// spiders on the ceiling of Deku Tree main room to descend to the
+// floor whenever any player entered).
+constexpr float kIdleDetectRangeSq = 200.0f * 200.0f;
 
 // Body-offset distance perpendicular to the surface (both ground and
 // wall). Vanilla En_Sw's body naturally sits FLUSH against the wall
@@ -91,10 +95,9 @@ constexpr float kIdleDetectRangeSq = 600.0f * 600.0f;
 //   - TickWallEdgeDrop (landing snap)
 //   - TickGroundPursue (per-tick ground-follow)
 //
-// Companion: EnSwDescriptor::OverrideLimbBend increases leg-bend
-// pitch so leg tips still visually reach the surface despite the
-// body being lifted.
-constexpr float kBodySurfaceOffset = 15.0f;
+// Companion: EnSwDescriptor::OverrideLimbBend applies leg-bend pitch
+// so leg tips visually reach the surface across the offset gap.
+constexpr float kBodySurfaceOffset = 8.0f;
 
 // -------------------------------------------------------------------
 // Diagnostic
