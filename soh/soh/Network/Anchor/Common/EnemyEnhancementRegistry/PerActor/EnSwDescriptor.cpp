@@ -118,17 +118,18 @@ bool EnSwDescriptor::OverrideLimbBend(int32_t limbIndex, Vec3s* rotInOut,
 
     // Walk-anim gate — state machine sets isWalkAnimActive = true only
     // during ticks that ACTUALLY translate the spider (WallPursue
-    // motion block, GroundPursue motion block, WalkLunge dash). During
-    // holds (attack-range hold, target-out-of-range idle, wind-ups,
-    // JumpLunge airborne, WallIdle) the flag stays false and we skip
-    // the leg bend entirely, letting vanilla base pose render — matches
-    // user request: "walk animation stops when spider is not moving."
+    // motion block, GroundPursue motion block, WalkLunge dash) OR
+    // rotate the spider (idle-gaze smooth-step). Otherwise we still
+    // write a STATIC leg bend (kBaseBend, no oscillation) — critically,
+    // we must not `return false` here because vanilla EnSw_Update
+    // advances SkelAnime each frame (line 1085 of z_en_sw.c) and the
+    // default animation is a wall-walking leg cycle. Returning false
+    // lets vanilla's cycle render, so legs appear to walk even while
+    // spider is stationary. Applying our static bend as an OVERRIDE
+    // pins the legs to a rest pose over vanilla's animation.
     EnSw* enSw = reinterpret_cast<EnSw*>(actor);
-    if (!AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_IsWalkAnimActive(enSw)) {
-        return false;  // no override → vanilla base pose (legs static)
-    }
-    // isMoving is implied true past this gate (walk-anim active).
-    constexpr bool isMoving = true;
+    const bool isMoving =
+        AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_IsWalkAnimActive(enSw);
 
     // Leg-limb table — enumerated from vanilla EnSw_OverrideLimbDraw
     // switch (z_en_sw.c:1082-1106). 8 legs at limb indices:
