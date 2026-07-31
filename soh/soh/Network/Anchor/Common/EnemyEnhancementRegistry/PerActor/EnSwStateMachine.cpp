@@ -24,6 +24,7 @@
 #include "EnSwStateMachine.h"
 
 #include "soh/Network/Anchor/Common/PlayerLookup.h"
+#include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GroupMovement.h"
 
 // functions.h + z64bgcheck.h pulled in transitively via EnSwStateMachine.h's
 // z_en_sw.h -> global.h -> {functions.h, z64.h -> z64bgcheck.h}. Pitfall 40:
@@ -1046,6 +1047,25 @@ constexpr float kGroundWalkSpeed = 3.0f;    // ×1.5 from prior 2.0 —
                                              // field test vs wall pursuit
 constexpr float kGroundRunSpeed  = 5.25f;   // ×1.5 from prior 3.5
 
+// Group-movement separation config for ground En_Sw pursuit. Default
+// predicate (IsAnyOtherActor) covers Zelda's "any enemy avoids any
+// other enemy" flocking semantic. See Plans/group_movement_helper_plan.md.
+//   neighborRadius = 45u — spider collider radius ~15u × 3, i.e., start
+//                          repelling when body-widths apart
+//   weight         = 40u  — tuned so at neighborRadius edge the force is
+//                          small (0.02 = weight/radius²) but at
+//                          minDistance overlap it dominates pursuit
+//                          (40/64 = 0.625 vs pursuit ≈ 1.0 unit forward)
+//   minDistance    = 8u   — safe below spider collider radius (~15u); clamps
+//                          divide-by-zero, spider bodies barely brush
+constexpr AnchorGroupMovement::SeparationConfig kEnSwSepGround = {
+    /* neighborRadius   */ 45.0f,
+    /* weight           */ 40.0f,
+    /* minDistance      */ 8.0f,
+    /* projectToSurface */ false,
+    /* surfaceNormal    */ {0.0f, 1.0f, 0.0f},
+};
+
 // Forward-probe distance for GroundPursue wall-hit detection.
 constexpr float kGroundForwardProbe = 30.0f;
 
@@ -1409,18 +1429,55 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     const float dist = std::sqrt(distXZSq);
     const float speed = (dist > 300.0f) ? kGroundRunSpeed : kGroundWalkSpeed;
     s.isWalkAnimActive = true;  // actually translating this tick
-    self->actor.world.pos.x += fwdTangent.x * speed;
-    self->actor.world.pos.y += fwdTangent.y * speed;
-    self->actor.world.pos.z += fwdTangent.z * speed;
+
+    // Group-movement separation — combine pursuit-forward with a
+    // repulsion vector from nearby enemies so multiple pursuers don't
+    // stack on top of each other at Link. Default predicate + nullptr
+    // categories = walks all synced enemy categories, filters to "any
+    // other actor" — matches Plans §8 Q3 "no enemy-vs-enemy hostility
+    // in Zelda; every enemy avoids overlapping every other enemy."
+    // Combined vector is then re-projected onto the floor tangent so
+    // slope-following stays correct.
+    Vec3f sep = {0.0f, 0.0f, 0.0f};
+    AnchorGroupMovement::ComputeSeparation(
+        &self->actor, play,
+        /* categories     */ nullptr,
+        /* categoryCount  */ 0,
+        AnchorGroupMovement::IsAnyOtherActor,
+        kEnSwSepGround, &sep);
+    Vec3f steer = {
+        fwdTangent.x + sep.x,
+        fwdTangent.y + sep.y,
+        fwdTangent.z + sep.z,
+    };
+    if (!Normalize(&steer)) {
+        // Degenerate (separation exactly cancels pursuit) — fall back
+        // to pursuit direction.
+        steer = fwdTangent;
+    }
+    // Re-project the combined steer onto the floor tangent plane so
+    // slope-following stays correct (separation might have introduced
+    // a small vertical component from stacked-height neighbors).
+    const float steerDotN = Dot(steer, floorNormal);
+    steer.x -= floorNormal.x * steerDotN;
+    steer.y -= floorNormal.y * steerDotN;
+    steer.z -= floorNormal.z * steerDotN;
+    if (!Normalize(&steer)) steer = fwdTangent;
+
+    self->actor.world.pos.x += steer.x * speed;
+    self->actor.world.pos.y += steer.y * speed;
+    self->actor.world.pos.z += steer.z * speed;
 
     // Wall-hit detection — cast forward from actor.pos in the direction
     // we just moved. If we hit a wall within kGroundForwardProbe, try
-    // to reattach next tick. Uses fwdTangent so the probe follows slope.
+    // to reattach next tick. Probe uses `steer` (pursuit+separation
+    // combined) so it catches walls we're actually moving into after
+    // group-movement deflection, not the un-deflected pursuit heading.
     Vec3f from = self->actor.world.pos;
     Vec3f to = {
-        from.x + fwdTangent.x * kGroundForwardProbe,
-        from.y + fwdTangent.y * kGroundForwardProbe,
-        from.z + fwdTangent.z * kGroundForwardProbe,
+        from.x + steer.x * kGroundForwardProbe,
+        from.y + steer.y * kGroundForwardProbe,
+        from.z + steer.z * kGroundForwardProbe,
     };
     CollisionPoly* poly = nullptr;
     s32 bgId = 0;
