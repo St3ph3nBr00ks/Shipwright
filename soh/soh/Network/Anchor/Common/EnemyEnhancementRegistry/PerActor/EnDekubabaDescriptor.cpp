@@ -26,6 +26,7 @@
 
 #include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
+#include "soh/Network/Anchor/Common/PlayerLookup.h"  // FindNearestPlayerActor
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/AcidVisuals.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/EnhancementAudio.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/ChargeStateMachine.h"
@@ -541,7 +542,7 @@ void EnDekubabaDescriptor::OnDetachedSquirmTick(EnDekubaba* actor,
               (float)(kSquirmStemAmplitude / 2));  // tail tapered
 
     // Face nearest player + move forward.
-    Actor* target = Anchor_GetNearestPlayerActor(&actor->actor, play);
+    Actor* target = FindNearestPlayerActor(&actor->actor, play);
     if (target != nullptr) {
         const s16 targetYaw = Math_Vec3f_Yaw(&actor->actor.world.pos,
                                               &target->world.pos);
@@ -689,7 +690,7 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
     if (state.seedCharge.IsReady()) {
         // Compute landing target — behind-Link primary, random
         // fallback if nav-invalid.
-        Actor* target = Anchor_GetNearestPlayerActor(&actor->actor, play);
+        Actor* target = FindNearestPlayerActor(&actor->actor, play);
         Vec3f landingTarget = ComputeBehindLinkTarget(actor, target);
 
         // Nav-validate. If failure, fallback to random XZ within
