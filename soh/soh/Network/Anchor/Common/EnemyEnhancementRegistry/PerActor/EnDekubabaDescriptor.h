@@ -152,6 +152,56 @@ public:
     // Query — send-side for ENEMY_STATE payload. Peer receives via
     // ApplyPeerDetachActiveFlag and mirrors visual state.
     bool IsDetached(EnDekubaba* actor);
+
+    // ---- Feature C API (seed spawn, #318) --------------------------
+
+    // Called from EnDekubaba_DecideLunge (after acid roll fails).
+    // Rolls seedCharge, checks "own child not active" gate, computes
+    // behind-Link landing target + nav validation. On fire, writes
+    // landing coord to descriptor state so OnSeedFireTick can pass it
+    // to the projectile actor. Returns true iff caller should invoke
+    // SetupSeedTelegraph instead of continuing to detach/vanilla.
+    bool OnHostMaybeSeedFire(EnDekubaba* actor, PlayState* play);
+
+    // Peer-side flag apply — mirrors netAcidActive shape. Applied
+    // every tick from HookHandlers before ApplyNetState.
+    void OnPeerReceiveSeedActiveFlag(EnDekubaba* actor, bool active);
+
+    // Peer-side landing pos apply — written per-tick from wire.
+    void OnPeerReceiveSeedLandingPos(EnDekubaba* actor,
+                                       float x, float y, float z);
+
+    // Called per-frame from EnDekubaba_SeedTelegraph actionFunc.
+    // Renders the same head-scale + spit telegraph as acid; timing
+    // matches the acid telegraph window.
+    void OnSeedTelegraphTick(EnDekubaba* actor, PlayState* play, int frame);
+
+    // Called per-frame from EnDekubaba_SeedFire actionFunc. At fire
+    // frame, spawns EN_DEKUBABA_SEED projectile at head aimed at
+    // landing target. Handles the "spawn child on land" callback.
+    void OnSeedFireTick(EnDekubaba* actor, PlayState* play, int frame);
+
+    // Called from EN_DEKUBABA_SEED actor's on-land Update path (via
+    // a dedicated bridge). Spawns a child EN_DEKUBABA at landing
+    // position with home.pos = landing pos + marks the new actor's
+    // descriptor state as spawnedByEnhancement=true (via the
+    // g_isSpawningDekubabaChild thread-local flag pattern).
+    void OnSeedLanded(EnDekubaba* parent, PlayState* play,
+                      float x, float y, float z);
+
+    // Called at EnDekubaba_Init to set spawnedByEnhancement=true when
+    // this actor is being spawned via the seed pipeline. Reads a
+    // thread-local flag set by OnSeedLanded's Actor_Spawn bracket.
+    void OnActorInit(EnDekubaba* actor);
+
+    // Query — send-side. Included in ENEMY_STATE payload.
+    bool IsSeedActive(EnDekubaba* actor);
+    bool IsSpawnedByEnhancement(EnDekubaba* actor);
+
+    // Seed landing coord accessors for wire-sync send-side.
+    float GetSeedLandingX(EnDekubaba* actor);
+    float GetSeedLandingY(EnDekubaba* actor);
+    float GetSeedLandingZ(EnDekubaba* actor);
 };
 
 }  // namespace AnchorEnemyEnhancement

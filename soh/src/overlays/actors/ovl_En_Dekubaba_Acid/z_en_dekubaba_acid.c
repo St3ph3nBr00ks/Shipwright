@@ -52,8 +52,17 @@
 #define EN_DEKUBABA_ACID_LIFETIME_FRAMES  60
 
 // AT collider — small mobile cylinder that damages Link on contact.
-// dmgFlags 0xFFCFFFFF matches vanilla enemy contact damage (all
-// player damage types except iron boots + shrunken).
+//
+// dmgFlags 0x00000200 = electric/environmental class — matches
+// Karebaba geyser behavior per user 2026-07-31 Q1: acid attack cannot
+// be blocked by shield. Regular shield AC quads don't defend against
+// this damage class (mirrors how wall-of-water / electric-shock pass
+// through). Player takes full damage on contact regardless of facing
+// direction or shield state.
+//
+// This is intentional design — acid vomit is an unblockable spit
+// that requires positional dodge (walk out of the arc), not shield
+// deflection. Consistent with Karebaba's AoE geyser.
 static ColliderCylinderInit sColliderInit = {
     {
         COLTYPE_HARD,
@@ -65,7 +74,7 @@ static ColliderCylinderInit sColliderInit = {
     },
     {
         ELEMTYPE_UNK0,
-        { 0xFFCFFFFF, 0x00, 0x08 },
+        { 0x00000200, 0x00, 0x08 },
         { 0x00000000, 0x00, 0x00 },
         TOUCH_ON | TOUCH_SFX_NONE,
         BUMP_NONE,

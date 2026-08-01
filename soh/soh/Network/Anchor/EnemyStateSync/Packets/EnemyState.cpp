@@ -141,6 +141,10 @@ extern "C" int Anchor_Enhance_EnKarebaba_IsCharged(EnKarebaba* actor);
 extern "C" int Anchor_Enhance_EnDekubaba_IsCurrentAttackAcid(EnDekubaba* actor);
 extern "C" int Anchor_Enhance_EnDekubaba_IsAcidCharged(EnDekubaba* actor);
 extern "C" int Anchor_Enhance_EnDekubaba_IsDetached(EnDekubaba* actor);
+extern "C" int Anchor_Enhance_EnDekubaba_IsSeedActive(EnDekubaba* actor);
+extern "C" float Anchor_Enhance_EnDekubaba_GetSeedLandingX(EnDekubaba* actor);
+extern "C" float Anchor_Enhance_EnDekubaba_GetSeedLandingY(EnDekubaba* actor);
+extern "C" float Anchor_Enhance_EnDekubaba_GetSeedLandingZ(EnDekubaba* actor);
 
 // Pillar C2 Phase 4 Commit C — consolidated ENEMY_STATE handler.
 //
@@ -207,6 +211,15 @@ struct EnemyUpdateExtras {
     // flow through end of life. Peer's leaf-bundle Draw gate + local
     // SetupDetachedSquirm path read this to mirror host visuals.
     bool dekubabaDetachActive = false;
+    // Pillar 5 (GH #318) — seed spawn enhancement. Set true when host
+    // is currently in SeedTelegraph or SeedFire attack cycle; peer
+    // mirrors telegraph + spawns projectile locally at fire frame.
+    bool dekubabaSeedActive   = false;
+    // Seed landing target — shipped so peer's projectile arcs to
+    // the same coord (deterministic straight-line landing).
+    f32  dekubabaSeedLandingX = 0.0f;
+    f32  dekubabaSeedLandingY = 0.0f;
+    f32  dekubabaSeedLandingZ = 0.0f;
 
     // Plan §7 / KB-26 — En_Goma (Larva) state-machine sync.
     bool hasEnGoma         = false;
@@ -576,6 +589,14 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         // Pillar 5 (#309) — detach + pursue flag.
         e.dekubabaDetachActive = Anchor_Enhance_EnDekubaba_IsDetached(
                                     baba) != 0;
+        // Pillar 5 (#318) — seed spawn flag + landing target.
+        e.dekubabaSeedActive   = Anchor_Enhance_EnDekubaba_IsSeedActive(
+                                    baba) != 0;
+        if (e.dekubabaSeedActive) {
+            e.dekubabaSeedLandingX = Anchor_Enhance_EnDekubaba_GetSeedLandingX(baba);
+            e.dekubabaSeedLandingY = Anchor_Enhance_EnDekubaba_GetSeedLandingY(baba);
+            e.dekubabaSeedLandingZ = Anchor_Enhance_EnDekubaba_GetSeedLandingZ(baba);
+        }
     } else if (actor->id == ACTOR_EN_GOMA) {
         EnGoma* lg          = (EnGoma*)actor;
         e.hasEnGoma         = true;
@@ -1400,6 +1421,15 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         if (extras.dekubabaDetachActive) {
             payload["dekubabaDetachActive"] = true;
         }
+        // Pillar 5 (#318) — seed spawn flag + landing coord. Landing
+        // only included while seed is active (SeedTelegraph or SeedFire
+        // state); ~12 bytes per broadcast for that ~25-frame window.
+        if (extras.dekubabaSeedActive) {
+            payload["dekubabaSeedActive"] = true;
+            payload["dekubabaSeedLX"] = extras.dekubabaSeedLandingX;
+            payload["dekubabaSeedLY"] = extras.dekubabaSeedLandingY;
+            payload["dekubabaSeedLZ"] = extras.dekubabaSeedLandingZ;
+        }
     }
 
     // Plan §7 / KB-26 — En_Goma (Larva) state-machine sync. Drives non-
@@ -2208,6 +2238,17 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
             // Pillar 5 (#309) — detach + pursue flag.
             ext->dekubaba.netDetachActive =
                 payload.value("dekubabaDetachActive", false);
+            // Pillar 5 (#318) — seed spawn flag + landing target.
+            ext->dekubaba.netSeedActive =
+                payload.value("dekubabaSeedActive", false);
+            if (ext->dekubaba.netSeedActive) {
+                ext->dekubaba.netSeedLandingX =
+                    payload.value("dekubabaSeedLX", 0.0f);
+                ext->dekubaba.netSeedLandingY =
+                    payload.value("dekubabaSeedLY", 0.0f);
+                ext->dekubaba.netSeedLandingZ =
+                    payload.value("dekubabaSeedLZ", 0.0f);
+            }
         }
 
         // Plan §7 / KB-26 — cache En_Goma actionState. Drives

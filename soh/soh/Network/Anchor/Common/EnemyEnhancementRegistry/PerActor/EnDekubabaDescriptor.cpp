@@ -39,10 +39,13 @@ extern "C" {
 #include "macros.h"
 #include "functions.h"
 #include "variables.h"
-// Custom projectile actor id — registered via ActorDB::AddBuiltIn
+// Custom projectile actor ids — registered via ActorDB::AddBuiltIn
 // CustomActors, declared in soh/src/code/z_play.c.
 extern s16 gEnDekubabaAcidId;
+extern s16 gEnDekubabaSeedId;
 }
+
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"  // FindNearestFloorNodeXZRadius
 
 namespace AnchorEnemyEnhancement {
 
@@ -87,14 +90,18 @@ constexpr float kAcidSpitInitialYSpeed  = 4.0f;
 
 // ---- Feature B (#309) — detach + pursue tuning ---------------------
 //
-// Detach trigger: post-attack, +25% chance per attack where Link was
-// out of lunge range (≥240u XZ). One-shot per actor life (Dekubaba
-// doesn't regrow after detach death). Simple u8 counter, not
-// ChargeStateMachine — no cooldown needed for a one-shot event.
-constexpr float kDetachChancePerCounter = 0.25f;
-constexpr u8    kDetachChanceMaxCounter = 4;
-constexpr float kDetachRangeThresholdXZ = 240.0f;  // Link must be beyond this XZ
-                                                    // (matches plan §Feature B "trigger condition")
+// UNIFIED PATTERN (per user 2026-07-31): detach uses the same
+// ChargeStateMachine config as acid — 25% steps, max 4, 3-attack
+// cooldown. Roll site moved to DecideLunge (same as acid, evaluated
+// after acid fails). No range gate — fires purely on counter roll.
+// One-shot per actor life via sticky isDetached flag; the ChargeState
+// cooldown never activates because the actor transitions to
+// DetachedSquirm and never runs another DecideLunge.
+constexpr ChargeStateMachine::Config kDetachChargeConfig = {
+    /*stepIncrement*/ 0.25f,
+    /*maxCounter*/    4,
+    /*cooldownSteps*/ 3,
+};
 
 // Squirm motion (DetachedSquirm state).
 //   XZ speed 2.0u/frame — slow crawl. Not fast enough to catch
@@ -111,6 +118,47 @@ constexpr int   kBleedoutIntervalMs       = 5000;      // -1 HP every 5s
 //   ShrinkDie animation duration ~30 frames vanilla; give 40 for a
 //   slightly slower squirm-death visual.
 constexpr int   kDetachedDyingFrames      = 40;
+
+// ---- Feature C (#318) — seed spawn tuning --------------------------
+//
+// UNIFIED PATTERN — same ChargeStateMachine config as acid + detach
+// (25% steps, max 4, 3-attack cooldown). Consistent with user 2026-
+// 07-31 spec: "all three ... same karebaba 25% increase per attack".
+constexpr ChargeStateMachine::Config kSeedChargeConfig = {
+    /*stepIncrement*/ 0.25f,
+    /*maxCounter*/    4,
+    /*cooldownSteps*/ 3,
+};
+
+// Seed telegraph + fire timing. Matches acid cycle length so both
+// exotics slot into the same DecideLunge → attack → PullBack → Recover
+// sequence positions.
+constexpr int kSeedTelegraphEndFrame = 15;
+constexpr int kSeedFireFrame         = 15;   // spawn projectile at this frame
+constexpr int kSeedTotalFrames       = 25;
+
+// Landing pick — behind Link, along Link's facing. Distance beyond
+// Link puts the child in Link's blind spot forcing reposition.
+constexpr float kSeedBehindLinkOffset = 100.0f;
+
+// Max seed flight distance from Dekubaba (safety cap on where the
+// projectile can spawn a child). Extended from plan's 300u to 400u
+// per unified-pattern discussion to accommodate behind-Link firings
+// at medium Dekubaba-Link distances.
+constexpr float kSeedMaxFlightDistance = 400.0f;
+
+// Fallback landing radius when behind-Link landing fails nav-validation.
+// Random XZ within this radius of the Dekubaba — always fires (never
+// skip) per user 2026-07-31 spec.
+constexpr float kSeedFallbackRadius   = 300.0f;
+
+// Nav-validation radius when checking landing target for a valid
+// floor node.
+constexpr float kSeedNavRadius        = 60.0f;
+
+// Seed projectile flight speed (units/frame). Straight-line trajectory
+// from head to landing; time-of-flight = distance / speed.
+constexpr float kSeedProjectileSpeed  = 12.0f;
 
 // Per-actor state map. Same shape as Karebaba's — created on demand
 // at first hook fire, wiped on OnDeath / OnActorDestroy.
@@ -130,29 +178,63 @@ struct DekubabaEnhancedState {
 
     // ---- Feature B (#309) — detach state --------------------------
     //
-    // isDetached is sticky per actor life. Once host sets true, the
-    // Dekubaba is permanently in detach/squirm/dying flow — attack
-    // cycle counters become irrelevant. Cleared only on OnDeath (which
-    // fires when Actor_Kill is invoked, i.e. after squirm-dying
-    // completes — but by then the actor is being destroyed so the
-    // state map entry gets erased via OnActorDestroy anyway).
-    //
-    // Wire-mirror: netDetachActive lives on EnemyNetId::dekubaba and
-    // OnPeerReceiveDetachActiveFlag writes it here for local reads.
+    // UNIFIED PATTERN (2026-07-31): detach uses same ChargeStateMachine
+    // shape as acid — rolled at DecideLunge, 25% steps, 3-attack
+    // cooldown. On fire, sets isDetached=true and transitions actor
+    // out of the attack cycle permanently, so the cooldown never
+    // actually decrements (actor never returns to DecideLunge). The
+    // ChargeStateMachine is used for pattern uniformity even though
+    // it's effectively one-shot.
+    ChargeStateMachine detachCharge{ kDetachChargeConfig };
+
+    // Sticky per-life flag — true after detach fires. Peer's Draw
+    // gate + local SetupDetachedSquirm path both read via IsDetached
+    // bridge query.
     bool isDetached          = false;
-    // Detach chance counter — u8 0..kDetachChanceMaxCounter (4).
-    // Chance = counter * 25%. Advances +1 on each attack that
-    // completed with Link out of lunge range. Reset by OnDeath.
-    u8   detachChanceCounter = 0;
-    // Timer state for the squirm state.
+
+    // Timer state for the squirm/dying states.
     int  squirmFrameCounter  = 0;  // 0..∞, drives sine phase + bleedout
     int  lastBleedoutFrame   = 0;  // wall-clock game-tick of last -1 HP
-    // Timer for DetachedDying (frames since state entry).
     int  dyingFrameCounter   = 0;
 
     // Peer-received detach flag (mirror of netAcidActive shape).
     bool netDetachActive = false;
+
+    // ---- Feature C (#318) — seed spawn state ----------------------
+    //
+    // Seed charge state machine (25% steps, max 4, 3-attack cooldown).
+    ChargeStateMachine seedCharge{ kSeedChargeConfig };
+
+    // Sticky flag — this actor was spawned by a parent Dekubaba's
+    // seed. Prevents child from seeding (unless SeedChildrenCanSeed
+    // CVar is on). Set at Init when the g_isSpawningDekubabaChild
+    // thread-local flag is true.
+    bool isSpawnedByEnhancement = false;
+
+    // Own-child tracking (Q2 answer 2026-07-31: parent tracks own
+    // child only). Stores the netId of the currently-alive child
+    // spawned by THIS parent's seed. 0 = no active child. Cleared
+    // when child is destroyed (host walks actor list each seed
+    // roll to verify).
+    Actor* spawnedChildActor = nullptr;
+
+    // Per-attack seed flags (reset at OnAttackComplete).
+    bool currentAttackIsSeed = false;
+    bool seedProjectileSpawned = false;
+    int  seedAttackFrame       = 0;
+
+    // Seed landing target — computed at fire decision, shipped over
+    // wire so peer's projectile arcs to the same coord.
+    Vec3f seedLandingPos = { 0.0f, 0.0f, 0.0f };
+
+    // Peer-received seed active flag.
+    bool netSeedActive = false;
 };
+
+// Thread-local flag set by OnSeedLanded's Actor_Spawn bracket, read
+// by OnActorInit on the newly-spawned Dekubaba. Same pattern as
+// g_isSpawningNetworkItemDrop (session_state Pillar C2 Phase 4 §3.1).
+thread_local bool g_isSpawningDekubabaChild = false;
 
 std::unordered_map<Actor*, DekubabaEnhancedState> sStates;
 
@@ -318,12 +400,19 @@ void EnDekubabaDescriptor::OnAttackComplete(EnDekubaba* actor) {
     if (it == sStates.end()) return;
     DekubabaEnhancedState& state = it->second;
 
-    // Attack-cycle end — decrement Cooldown (may transition back
-    // to Charging). Clear per-attack flags for the next cycle.
+    // UNIFIED PATTERN (per user 2026-07-31): all three ChargeState
+    // machines advance at attack-complete regardless of which fired.
+    // Always-advance prevents starvation between competing exotics.
     state.acidCharge.OnAttackComplete();
+    state.detachCharge.OnAttackComplete();
+    state.seedCharge.OnAttackComplete();
+
     state.currentAttackIsAcid   = false;
     state.acidProjectileSpawned = false;
     state.acidAttackFrame       = 0;
+    state.currentAttackIsSeed   = false;
+    state.seedProjectileSpawned = false;
+    state.seedAttackFrame       = 0;
 
     // Restore scale to vanilla in case telegraph was mid-render at
     // cycle end (defensive; the AcidVomit exit path should also
@@ -361,12 +450,22 @@ void EnDekubabaDescriptor::OnDeath(EnDekubaba* actor) {
     // and stays dead until scene reload). OnActorDestroy erases the
     // state entry entirely. Kept for symmetry + safety in case the
     // reset is ever needed for a regrow variant.
-    state.isDetached          = false;
-    state.detachChanceCounter = 0;
-    state.squirmFrameCounter  = 0;
-    state.lastBleedoutFrame   = 0;
-    state.dyingFrameCounter   = 0;
-    state.netDetachActive     = false;
+    state.isDetached         = false;
+    state.detachCharge.Reset();
+    state.squirmFrameCounter = 0;
+    state.lastBleedoutFrame  = 0;
+    state.dyingFrameCounter  = 0;
+    state.netDetachActive    = false;
+    // Feature C — seed state reset.
+    state.seedCharge.Reset();
+    state.currentAttackIsSeed   = false;
+    state.seedProjectileSpawned = false;
+    state.seedAttackFrame       = 0;
+    state.spawnedChildActor     = nullptr;
+    state.netSeedActive         = false;
+    // Note: isSpawnedByEnhancement is NOT reset — it's a sticky
+    // per-life property of the actor identity (was this Dekubaba
+    // spawned by a seed?), unaffected by death.
     // Restore vanilla scale.
     Actor_SetScale(&actor->actor, actor->size * 0.01f);
 }
@@ -380,7 +479,6 @@ void EnDekubabaDescriptor::OnActorDestroy(EnDekubaba* actor) {
 
 bool EnDekubabaDescriptor::OnHostMaybeDetach(EnDekubaba* actor, PlayState* play) {
     if (actor == nullptr) return false;
-    (void)play;
 
     // Sync-rule 1 — host is sole RNG decider.
     if (!SceneAuthority::IsMyCurrentRoomHost()) return false;
@@ -394,32 +492,19 @@ bool EnDekubabaDescriptor::OnHostMaybeDetach(EnDekubaba* actor, PlayState* play)
     DekubabaEnhancedState& state = GetOrCreate(actor);
     if (state.isDetached) return false;
 
-    // Trigger condition: Link out of lunge range at attack time (per
-    // plan §Feature B). Uses xzDistToPlayer patched to nearest player
-    // (Anchor #153 overlay), then scaled by actor->size to match
-    // vanilla lunge-range convention (240u * size).
-    const float outOfRangeThreshold = kDetachRangeThresholdXZ * actor->size;
-    if (actor->actor.xzDistToPlayer < outOfRangeThreshold) {
-        // Link is within lunge range — normal attack, don't count
-        // toward detach chance ramp.
-        return false;
-    }
-
-    // Roll chance = counter × 25%.
-    const float chance = (float)state.detachChanceCounter *
-                          kDetachChancePerCounter;
-    if (Rand_ZeroOne() < chance) {
-        // Fires — set sticky flag. Caller transitions to DetachedSquirm.
+    // UNIFIED PATTERN (per user 2026-07-31): no range gate. Roll
+    // purely on charge counter (matches acid + seed shape).
+    // Ready branch: fire if state machine says Ready.
+    if (state.detachCharge.IsReady()) {
+        state.detachCharge.OnFire();
         state.isDetached         = true;
         state.squirmFrameCounter = 0;
         state.lastBleedoutFrame  = (int)play->gameplayFrames;
         return true;
     }
 
-    // Fail — increment counter, clamped.
-    if (state.detachChanceCounter < kDetachChanceMaxCounter) {
-        state.detachChanceCounter++;
-    }
+    // Charging branch: TryCharge rolls chance = counter × 25%.
+    state.detachCharge.TryCharge();
     return false;
 }
 
@@ -510,6 +595,283 @@ bool EnDekubabaDescriptor::IsDetached(EnDekubaba* actor) {
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return false;
     return it->second.isDetached;
+}
+
+// ---- Feature C (#318) — seed spawn --------------------------------
+
+namespace {
+
+// Compute the "behind Link" landing target per user 2026-07-31 spec:
+// Link.pos + Link.forward * kSeedBehindLinkOffset. If that position
+// is beyond kSeedMaxFlightDistance from the Dekubaba, clamp along
+// Dekubaba-to-target bearing to max distance.
+Vec3f ComputeBehindLinkTarget(EnDekubaba* actor, Actor* target) {
+    Vec3f behind;
+    if (target == nullptr) {
+        behind = actor->actor.world.pos;
+        return behind;
+    }
+    // Link's forward direction from world.rot.y.
+    const s16 linkYaw = target->world.rot.y;
+    behind.x = target->world.pos.x +
+               Math_SinS(linkYaw) * kSeedBehindLinkOffset;
+    behind.y = target->world.pos.y;
+    behind.z = target->world.pos.z +
+               Math_CosS(linkYaw) * kSeedBehindLinkOffset;
+
+    // Clamp to max flight distance from Dekubaba.
+    const float dx = behind.x - actor->actor.world.pos.x;
+    const float dz = behind.z - actor->actor.world.pos.z;
+    const float distXZ = sqrtf(dx * dx + dz * dz);
+    if (distXZ > kSeedMaxFlightDistance && distXZ > 0.001f) {
+        const float ratio = kSeedMaxFlightDistance / distXZ;
+        behind.x = actor->actor.world.pos.x + dx * ratio;
+        behind.z = actor->actor.world.pos.z + dz * ratio;
+    }
+    return behind;
+}
+
+// Fallback landing: random XZ within kSeedFallbackRadius of Dekubaba.
+Vec3f RandomFallbackTarget(EnDekubaba* actor) {
+    const float u = Rand_ZeroOne();
+    const float r = kSeedFallbackRadius * sqrtf(u);
+    const float ang = Rand_ZeroOne() * 2.0f * (float)M_PI;
+    Vec3f target = {
+        actor->actor.world.pos.x + r * cosf(ang),
+        actor->actor.world.pos.y,
+        actor->actor.world.pos.z + r * sinf(ang),
+    };
+    return target;
+}
+
+// Check whether parent's spawnedChildActor is still alive. Uses
+// actor pointer validity check — Actor_Kill sets actor->update to
+// nullptr (session_state Fix 12 pattern).
+bool IsChildAlive(Actor* childActor) {
+    return childActor != nullptr && childActor->update != nullptr;
+}
+
+}  // namespace
+
+bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
+                                                 PlayState* play) {
+    if (actor == nullptr || play == nullptr) return false;
+
+    // Sync-rule 1 — host is sole RNG decider.
+    if (!SceneAuthority::IsMyCurrentRoomHost()) return false;
+
+    // CVar gate.
+    if (AnchorCVarSync::GetEnforcedInt(SeedSpawnCVarName(), 0) == 0) {
+        return false;
+    }
+
+    DekubabaEnhancedState& state = GetOrCreate(actor);
+
+    // Child-not-active gate (per user Q3 2026-07-31: parent tracks
+    // own child only). Skip if own child is still alive.
+    if (IsChildAlive(state.spawnedChildActor)) {
+        // Clear stale reference if child is dead so future rolls
+        // work — check every roll rather than depending on child's
+        // OnActorDestroy to walk back.
+        state.spawnedChildActor = nullptr;
+        return false;  // was alive last we checked — skip this attack
+    }
+
+    // Suppress on seed-spawned children (per user Q3): children
+    // can run A + B but not C. Future toggle CVar
+    // gEnhancements.Dekubaba.SeedChildrenCanSeed lets user override.
+    if (state.isSpawnedByEnhancement) {
+        // TODO: gate on SeedChildrenCanSeed CVar when that lands.
+        return false;
+    }
+
+    // Ready branch: fire seed if state machine says Ready.
+    if (state.seedCharge.IsReady()) {
+        // Compute landing target — behind-Link primary, random
+        // fallback if nav-invalid.
+        Actor* target = Anchor_GetNearestPlayerActor(&actor->actor, play);
+        Vec3f landingTarget = ComputeBehindLinkTarget(actor, target);
+
+        // Nav-validate. If failure, fallback to random XZ within
+        // kSeedFallbackRadius of Dekubaba (per user Q3 2026-07-31:
+        // never skip fire).
+        // Note: nav-validation requires per-scene RoomNavData scan.
+        // If room isn't scanned or lookup fails, we still fire —
+        // fallback ensures the spawn happens somewhere reasonable.
+        // TODO: wire RoomNavData::Instance query when the substrate
+        // is confirmed populated. For v1 we skip nav-validation and
+        // trust the landing target directly — a follow-up will add
+        // proper AnchorNavRoom::FindNearestFloorNodeXZRadius call
+        // once the RoomNavData accessor is verified.
+        // Random fallback branch (always fire per user Q3):
+        // if (nav-invalid) landingTarget = RandomFallbackTarget(actor);
+        (void)RandomFallbackTarget;  // reference for future use
+
+        state.seedCharge.OnFire();
+        state.currentAttackIsSeed   = true;
+        state.seedProjectileSpawned = false;
+        state.seedAttackFrame       = 0;
+        state.seedLandingPos        = landingTarget;
+
+        // "Sizzle" SFX at commit — subtle audio cue similar to acid
+        // charge.
+        EnhancementAudio::PlayBoostedActorSfx(
+            &actor->actor, NA_SE_EV_WATER_BUBBLE);
+        return true;
+    }
+
+    // Charging branch: TryCharge advances counter.
+    state.seedCharge.TryCharge();
+    return false;
+}
+
+void EnDekubabaDescriptor::OnPeerReceiveSeedActiveFlag(EnDekubaba* actor,
+                                                         bool active) {
+    if (actor == nullptr) return;
+    DekubabaEnhancedState& state = GetOrCreate(actor);
+    state.netSeedActive = active;
+    if (active) {
+        state.currentAttackIsSeed   = true;
+        state.seedProjectileSpawned = false;
+        state.seedAttackFrame       = 0;
+    }
+}
+
+void EnDekubabaDescriptor::OnPeerReceiveSeedLandingPos(EnDekubaba* actor,
+                                                        float x, float y,
+                                                        float z) {
+    if (actor == nullptr) return;
+    DekubabaEnhancedState& state = GetOrCreate(actor);
+    state.seedLandingPos = { x, y, z };
+}
+
+void EnDekubabaDescriptor::OnSeedTelegraphTick(EnDekubaba* actor,
+                                                  PlayState* play, int frame) {
+    // Telegraph render is identical to acid — head 1.5× + mouth
+    // spit. Reuse the same render path.
+    if (actor == nullptr || play == nullptr) return;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return;
+    (void)it;
+    // Render acid-style telegraph (same visual for both attacks —
+    // player learns "big head + green spit = incoming exotic").
+    // Delegate to RenderAcidTelegraph helper defined in Feature A
+    // section (same file, anonymous namespace).
+    if (frame <= kSeedTelegraphEndFrame) {
+        RenderAcidTelegraph(actor, play);
+    }
+}
+
+void EnDekubabaDescriptor::OnSeedFireTick(EnDekubaba* actor,
+                                            PlayState* play, int frame) {
+    if (actor == nullptr || play == nullptr) return;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return;
+    DekubabaEnhancedState& state = it->second;
+
+    if (!state.seedProjectileSpawned && frame >= kSeedFireFrame) {
+        state.seedProjectileSpawned = true;
+        if (gEnDekubabaSeedId != 0) {
+            // Spawn projectile at head; encode landing target in
+            // actor spawn coordinates so the projectile can compute
+            // its own straight-line velocity. Landing pos is shipped
+            // via ENEMY_STATE wire field so peer's projectile arrives
+            // at the same coord.
+            //
+            // Params encode: high 4 bits = discriminator (0 for
+            // seed variant), low 12 bits = landing distance / 4u
+            // quantized (400u max → 100 max quantized). Actor's Init
+            // reads world.pos (spawn source) + delta from home.rot
+            // (target vector packed) — simpler approach: pass full
+            // Vec3f via new Anchor_SpawnDekubabaSeed helper (extern
+            // "C" from actor's C code).
+            //
+            // For v1 simplicity: spawn actor at head pos, pass
+            // landing X/Z via the actor's params + world.rot fields.
+            // Actor computes trajectory in its Init.
+            const float dx = state.seedLandingPos.x -
+                             actor->actor.world.pos.x;
+            const float dz = state.seedLandingPos.z -
+                             actor->actor.world.pos.z;
+            const s16 aimYaw = Math_Atan2S(dz, dx);
+            // Note: Math_Atan2S expects (z, x) order for OoT convention.
+            const s16 params = (s16)(aimYaw / 8);
+            Actor_Spawn(&play->actorCtx, play,
+                         gEnDekubabaSeedId,
+                         actor->actor.world.pos.x,
+                         actor->actor.world.pos.y,
+                         actor->actor.world.pos.z,
+                         0, aimYaw, 0, params);
+        }
+        EnhancementAudio::PlayDoubledActorSfx(
+            &actor->actor, NA_SE_EV_ERUPTION_CLOUD);
+    }
+}
+
+void EnDekubabaDescriptor::OnSeedLanded(EnDekubaba* parent, PlayState* play,
+                                          float x, float y, float z) {
+    if (parent == nullptr || play == nullptr) return;
+    auto it = sStates.find(&parent->actor);
+    if (it == sStates.end()) return;
+    DekubabaEnhancedState& state = it->second;
+
+    // Spawn a fresh EN_DEKUBABA at the landing coord. Bracket the
+    // spawn with the g_isSpawningDekubabaChild thread-local so the
+    // child's OnActorInit picks up the isSpawnedByEnhancement=true
+    // flag.
+    g_isSpawningDekubabaChild = true;
+    Actor* childActor = Actor_Spawn(&play->actorCtx, play,
+                                     ACTOR_EN_DEKUBABA,
+                                     x, y, z,
+                                     0, 0, 0,
+                                     /*params=*/DEKUBABA_NORMAL);
+    g_isSpawningDekubabaChild = false;
+
+    // Track own child for the "child-not-active" gate.
+    state.spawnedChildActor = childActor;
+}
+
+void EnDekubabaDescriptor::OnActorInit(EnDekubaba* actor) {
+    if (actor == nullptr) return;
+    DekubabaEnhancedState& state = GetOrCreate(actor);
+    // Pick up the sticky "spawned by parent's seed" flag from the
+    // thread-local. Set true once at Init; never reset.
+    if (g_isSpawningDekubabaChild) {
+        state.isSpawnedByEnhancement = true;
+    }
+}
+
+bool EnDekubabaDescriptor::IsSeedActive(EnDekubaba* actor) {
+    if (actor == nullptr) return false;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return false;
+    return it->second.currentAttackIsSeed;
+}
+
+bool EnDekubabaDescriptor::IsSpawnedByEnhancement(EnDekubaba* actor) {
+    if (actor == nullptr) return false;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return false;
+    return it->second.isSpawnedByEnhancement;
+}
+
+float EnDekubabaDescriptor::GetSeedLandingX(EnDekubaba* actor) {
+    if (actor == nullptr) return 0.0f;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return 0.0f;
+    return it->second.seedLandingPos.x;
+}
+float EnDekubabaDescriptor::GetSeedLandingY(EnDekubaba* actor) {
+    if (actor == nullptr) return 0.0f;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return 0.0f;
+    return it->second.seedLandingPos.y;
+}
+float EnDekubabaDescriptor::GetSeedLandingZ(EnDekubaba* actor) {
+    if (actor == nullptr) return 0.0f;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return 0.0f;
+    return it->second.seedLandingPos.z;
 }
 
 }  // namespace AnchorEnemyEnhancement

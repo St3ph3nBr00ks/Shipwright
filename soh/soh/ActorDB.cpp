@@ -713,6 +713,24 @@ static ActorDBInit EnDekubabaAcidInit = {
 };
 extern "C" s16 gEnDekubabaAcidId;
 
+// Pillar 5 (GH #318) — seed projectile fired by enhanced EnDekubaba
+// during SeedFire attack; spawns a new EN_DEKUBABA at landing.
+#include "src/overlays/actors/ovl_En_Dekubaba_Seed/z_en_dekubaba_seed.h"
+static ActorDBInit EnDekubabaSeedInit = {
+    "En_Dekubaba_Seed",
+    "Dekubaba Seed spawn projectile (Flotilla)",
+    ACTORCAT_MISC,
+    (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
+    OBJECT_GAMEPLAY_KEEP,
+    sizeof(EnDekubabaSeed),
+    (ActorFunc)EnDekubabaSeed_Init,
+    (ActorFunc)EnDekubabaSeed_Destroy,
+    (ActorFunc)EnDekubabaSeed_Update,
+    (ActorFunc)EnDekubabaSeed_Draw,
+    nullptr,
+};
+extern "C" s16 gEnDekubabaSeedId;
+
 void ActorDB::AddBuiltInCustomActors() {
     gEnPartnerId        = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
     gEnFollowerId       = ActorDB::Instance->AddEntry(EnFollowerInit).entry.id;
@@ -720,6 +738,7 @@ void ActorDB::AddBuiltInCustomActors() {
     gEnTeamMarkerId     = ActorDB::Instance->AddEntry(EnTeamMarkerInit).entry.id;
     gEnKarebabaGeyserId = ActorDB::Instance->AddEntry(EnKarebabaGeyserInit).entry.id;
     gEnDekubabaAcidId   = ActorDB::Instance->AddEntry(EnDekubabaAcidInit).entry.id;
+    gEnDekubabaSeedId   = ActorDB::Instance->AddEntry(EnDekubabaSeedInit).entry.id;
 }
 
 extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {

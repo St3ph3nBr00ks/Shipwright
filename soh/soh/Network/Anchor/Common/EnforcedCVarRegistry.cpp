@@ -208,13 +208,22 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     { CVAR_ENHANCEMENT("Dekubaba.AcidVomit"), 0 },
 
     // Pillar 5 (#309) — Dekubaba detach + pursue enhancement.
-    // Independent from AcidVomit. When ON, each attack that fires
-    // with Link out of lunge range (≥240u XZ * size) advances a +25%
-    // detach counter; on success, Dekubaba severs from stem and
-    // squirms toward nearest player. -1 HP every 5s (bleedout);
-    // dies at 0 HP (stays dead until scene reload — matches vanilla
-    // Dekubaba which doesn't regrow). One-shot per life.
+    // Independent from AcidVomit. When ON, each attack advances a
+    // +25% detach counter; on success, Dekubaba severs from stem and
+    // squirms toward nearest player. -1 HP every 5s (bleedout); dies
+    // at 0 HP (stays dead until scene reload — matches vanilla
+    // Dekubaba which doesn't regrow). One-shot per life. Unified
+    // pattern per 2026-07-31 user spec — no range gate.
     { CVAR_ENHANCEMENT("Dekubaba.DetachAndPursue"), 0 },
+
+    // Pillar 5 (#318) — Dekubaba seed spawn enhancement.
+    // Independent from Acid + Detach. When ON, each attack advances
+    // a +25% seed counter; on success, Dekubaba spits a seed
+    // projectile behind Link that spawns a child Dekubaba on land.
+    // Parent tracks own child — cannot fire another seed while own
+    // child is alive. Children CAN acid + detach but NOT seed
+    // (unless future SeedChildrenCanSeed override CVar ON).
+    { CVAR_ENHANCEMENT("Dekubaba.SeedSpawn"), 0 },
 };
 
 const std::vector<FloatCVarEntry> kEnforcedFloats = {

@@ -176,6 +176,11 @@ extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerAcidChargedFlag(EnDekubaba* a
 // Draw gate reflects host's detach state even before the state-14
 // transition arrives.
 extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerDetachActiveFlag(EnDekubaba* actor, int active);
+// Pillar 5 (GH #318) — seed spawn peer-flag bridges. Applied every
+// tick before EnDekubaba_ApplyNetState so peer's SetupSeedTelegraph
+// path picks up the right visuals + landing coord.
+extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerSeedActiveFlag(EnDekubaba* actor, int active);
+extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerSeedLandingPos(EnDekubaba* actor, float x, float y, float z);
 
 // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor moved to
 // Common/ActorSyncHelpers.h in #173 Phase 1.
@@ -2997,6 +3002,16 @@ void Anchor::RegisterHooks() {
                 // Pillar 5 (#309) — mirror detach flag onto descriptor.
                 Anchor_Enhance_EnDekubaba_ApplyPeerDetachActiveFlag(
                     baba, ext->dekubaba.netDetachActive ? 1 : 0);
+                // Pillar 5 (#318) — mirror seed flag + landing pos.
+                Anchor_Enhance_EnDekubaba_ApplyPeerSeedActiveFlag(
+                    baba, ext->dekubaba.netSeedActive ? 1 : 0);
+                if (ext->dekubaba.netSeedActive) {
+                    Anchor_Enhance_EnDekubaba_ApplyPeerSeedLandingPos(
+                        baba,
+                        ext->dekubaba.netSeedLandingX,
+                        ext->dekubaba.netSeedLandingY,
+                        ext->dekubaba.netSeedLandingZ);
+                }
                 s16 curState = EnDekubaba_GetStateIndex(baba);
                 if (curState != ext->netStateIndex && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {

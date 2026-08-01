@@ -152,6 +152,97 @@ extern "C" int Anchor_Enhance_EnDekubaba_IsDetached(EnDekubaba* actor) {
     return desc->IsDetached(actor) ? 1 : 0;
 }
 
+// --- Feature C (#318) — seed spawn bridge shims ---------------------
+
+extern "C" int Anchor_Enhance_EnDekubaba_MaybeSeedFire(EnDekubaba* actor,
+                                                        PlayState* play) {
+    if (actor == nullptr) return 0;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0;
+    return desc->OnHostMaybeSeedFire(actor, play) ? 1 : 0;
+}
+
+extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerSeedActiveFlag(
+    EnDekubaba* actor, int active) {
+    if (actor == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnPeerReceiveSeedActiveFlag(actor, active != 0);
+}
+
+extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerSeedLandingPos(
+    EnDekubaba* actor, float x, float y, float z) {
+    if (actor == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnPeerReceiveSeedLandingPos(actor, x, y, z);
+}
+
+extern "C" void Anchor_Enhance_EnDekubaba_OnSeedTelegraphTick(
+    EnDekubaba* actor, PlayState* play, int frame) {
+    if (actor == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnSeedTelegraphTick(actor, play, frame);
+}
+
+extern "C" void Anchor_Enhance_EnDekubaba_OnSeedFireTick(
+    EnDekubaba* actor, PlayState* play, int frame) {
+    if (actor == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnSeedFireTick(actor, play, frame);
+}
+
+extern "C" void Anchor_Enhance_EnDekubaba_OnSeedLanded(
+    EnDekubaba* parent, PlayState* play, float x, float y, float z) {
+    if (parent == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnSeedLanded(parent, play, x, y, z);
+}
+
+extern "C" void Anchor_Enhance_EnDekubaba_OnActorInit(EnDekubaba* actor) {
+    if (actor == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnActorInit(actor);
+}
+
+extern "C" int Anchor_Enhance_EnDekubaba_IsSeedActive(EnDekubaba* actor) {
+    if (actor == nullptr) return 0;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0;
+    return desc->IsSeedActive(actor) ? 1 : 0;
+}
+
+extern "C" int Anchor_Enhance_EnDekubaba_IsSpawnedByEnhancement(
+    EnDekubaba* actor) {
+    if (actor == nullptr) return 0;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0;
+    return desc->IsSpawnedByEnhancement(actor) ? 1 : 0;
+}
+
+extern "C" float Anchor_Enhance_EnDekubaba_GetSeedLandingX(EnDekubaba* actor) {
+    if (actor == nullptr) return 0.0f;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0.0f;
+    return desc->GetSeedLandingX(actor);
+}
+extern "C" float Anchor_Enhance_EnDekubaba_GetSeedLandingY(EnDekubaba* actor) {
+    if (actor == nullptr) return 0.0f;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0.0f;
+    return desc->GetSeedLandingY(actor);
+}
+extern "C" float Anchor_Enhance_EnDekubaba_GetSeedLandingZ(EnDekubaba* actor) {
+    if (actor == nullptr) return 0.0f;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0.0f;
+    return desc->GetSeedLandingZ(actor);
+}
+
 // --- CVar-gated audio boost shim (mirrors Karebaba V8) --------------
 //
 // Called from z_en_dekubaba.c at Audio_PlayActorSound2 sites so

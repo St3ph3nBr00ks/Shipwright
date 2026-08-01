@@ -41,6 +41,14 @@ extern void Anchor_Enhance_EnDekubaba_OnDetachedSquirmTick(EnDekubaba* actor, Pl
 extern void Anchor_Enhance_EnDekubaba_OnDetachedDyingTick(EnDekubaba* actor, PlayState* play);
 extern int  Anchor_Enhance_EnDekubaba_IsDetached(EnDekubaba* actor);
 
+// Feature C (#318) — seed spawn bridge shims.
+extern int  Anchor_Enhance_EnDekubaba_MaybeSeedFire(EnDekubaba* actor, PlayState* play);
+extern void Anchor_Enhance_EnDekubaba_OnSeedTelegraphTick(EnDekubaba* actor, PlayState* play, int frame);
+extern void Anchor_Enhance_EnDekubaba_OnSeedFireTick(EnDekubaba* actor, PlayState* play, int frame);
+extern void Anchor_Enhance_EnDekubaba_OnActorInit(EnDekubaba* actor);
+extern int  Anchor_Enhance_EnDekubaba_IsSeedActive(EnDekubaba* actor);
+extern int  Anchor_Enhance_EnDekubaba_IsSpawnedByEnhancement(EnDekubaba* actor);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnDekubaba_Init(Actor* thisx, PlayState* play);
@@ -83,6 +91,11 @@ void EnDekubaba_SetupDetachedSquirm(EnDekubaba* this);
 void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play);
 void EnDekubaba_SetupDetachedDying(EnDekubaba* this);
 void EnDekubaba_DetachedDying(EnDekubaba* this, PlayState* play);
+// Pillar 5 (#318) — seed spawn states.
+void EnDekubaba_SetupSeedTelegraph(EnDekubaba* this);
+void EnDekubaba_SeedTelegraph(EnDekubaba* this, PlayState* play);
+void EnDekubaba_SetupSeedFire(EnDekubaba* this);
+void EnDekubaba_SeedFire(EnDekubaba* this, PlayState* play);
 
 static Vec3f sZeroVec = { 0.0f, 0.0f, 0.0f };
 
@@ -328,6 +341,12 @@ void EnDekubaba_Init(Actor* thisx, PlayState* play) {
     this->timer = 0;
     this->boundFloor = NULL;
     this->bodyPartsPos[3] = this->actor.home.pos;
+
+    // Pillar 5 (#318) — descriptor Init hook. If this actor was
+    // spawned via a parent's seed (g_isSpawningDekubabaChild flag),
+    // marks isSpawnedByEnhancement=true so Feature C's "no seed for
+    // children" gate fires. No-op otherwise.
+    Anchor_Enhance_EnDekubaba_OnActorInit(this);
 }
 
 void EnDekubaba_Destroy(Actor* thisx, PlayState* play) {
@@ -385,6 +404,9 @@ s16 EnDekubaba_GetStateIndex(EnDekubaba* this) {
     // Pillar 5 (#309) — detach + pursue state indices 15/16.
     if (this->actionFunc == EnDekubaba_DetachedSquirm)   return 15;
     if (this->actionFunc == EnDekubaba_DetachedDying)    return 16;
+    // Pillar 5 (#318) — seed spawn state indices 17/18.
+    if (this->actionFunc == EnDekubaba_SeedTelegraph)    return 17;
+    if (this->actionFunc == EnDekubaba_SeedFire)         return 18;
     return -1;
 }
 
@@ -440,6 +462,8 @@ void EnDekubaba_ApplyNetState(EnDekubaba* this, s16 stateIndex) {
         case 14: EnDekubaba_SetupAcidVomit(this);        break;
         case 15: EnDekubaba_SetupDetachedSquirm(this);   break;
         case 16: EnDekubaba_SetupDetachedDying(this);    break;
+        case 17: EnDekubaba_SetupSeedTelegraph(this);    break;
+        case 18: EnDekubaba_SetupSeedFire(this);         break;
         default:
             // 11=PrunedSomersault / 12=ShrinkDie / 13=DeadStickDrop —
             // see header comment above.
@@ -607,6 +631,15 @@ void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play) {
         EnDekubaba_SetupDetachedDying(this);
     }
 
+    // Contact damage — per user spec "detached form deals damage by
+    // crashing into target". Head sphere has TOUCH_ON | AT_TYPE_ENEMY
+    // from the base collider init (line 185, 108); registering AT
+    // each tick lets vanilla collision math apply contact damage to
+    // Link on head-sphere overlap. Body cylinder AC also stays on
+    // (SetupDetachedSquirm sets AC_ON) so Link can sword-hit the
+    // squirming plant to speed up its death.
+    CollisionCheck_SetAT(play, &play->colChkCtx, &this->collider.base);
+
     // Vanilla head-position math uses stemSectionAngle[] which the
     // descriptor just wrote — call it to update visible head pose.
     EnDekubaba_UpdateHeadPosition(this);
@@ -652,6 +685,45 @@ void EnDekubaba_DetachedDying(EnDekubaba* this, PlayState* play) {
         // (Q5: neither snap-back nor regrow; vanilla-Dekubaba parity).
         Actor_Kill(&this->actor);
     }
+}
+
+// Pillar 5 (#318) — SeedTelegraph: pre-fire windup. Same visual as
+// acid telegraph (head 1.5× + mouth spit) so player recognizes an
+// exotic incoming. Transitions to SeedFire after telegraph window.
+void EnDekubaba_SetupSeedTelegraph(EnDekubaba* this) {
+    Animation_PlayOnce(&this->skelAnime, &gDekuBabaPauseChompAnim);
+    this->timer = 0;
+    this->collider.base.acFlags &= ~AC_ON;  // no contact damage
+    this->actionFunc = EnDekubaba_SeedTelegraph;
+}
+
+void EnDekubaba_SeedTelegraph(EnDekubaba* this, PlayState* play) {
+    SkelAnime_Update(&this->skelAnime);
+    Anchor_Enhance_EnDekubaba_OnSeedTelegraphTick(this, play, (int)this->timer);
+    this->timer++;
+    if (this->timer >= 15) {
+        EnDekubaba_SetupSeedFire(this);
+    }
+    EnDekubaba_UpdateHeadPosition(this);
+}
+
+// SeedFire: spawn projectile at frame 15, transition to PullBack
+// at frame 25. Descriptor handles the actual projectile spawn.
+void EnDekubaba_SetupSeedFire(EnDekubaba* this) {
+    // Anim continues from PauseChomp — no new asset needed.
+    this->timer = 0;
+    this->actionFunc = EnDekubaba_SeedFire;
+}
+
+void EnDekubaba_SeedFire(EnDekubaba* this, PlayState* play) {
+    SkelAnime_Update(&this->skelAnime);
+    Anchor_Enhance_EnDekubaba_OnSeedFireTick(this, play, (int)this->timer);
+    this->timer++;
+    if (this->timer >= 10) {
+        // Fire cycle done; transition to PullBack for recovery.
+        EnDekubaba_SetupPullBack(this);
+    }
+    EnDekubaba_UpdateHeadPosition(this);
 }
 
 void EnDekubaba_SetupPullBack(EnDekubaba* this) {
@@ -978,14 +1050,23 @@ void EnDekubaba_DecideLunge(EnDekubaba* this, PlayState* play) {
     if (240.0f * this->size < Math_Vec3f_DistXZ(&this->actor.home.pos, &nearestPlayer->world.pos)) {
         EnDekubaba_SetupRetract(this);
     } else if ((this->timer == 0) || (this->actor.xzDistToPlayer < 80.0f * this->size)) {
-        // Pillar 5 (#308) — acid vomit decision. Bridge rolls charge
-        // state machine + range gate. If returns 1, host committed
-        // to acid → transition to AcidVomit state instead of vanilla
-        // PrepareLunge. Peer skips this branch (bridge returns 0 on
-        // non-host) and follows the wire-received actionState via
-        // ApplyNetState (which routes state 14 → SetupAcidVomit).
+        // Pillar 5 UNIFIED ATTACK DECISION (per user 2026-07-31):
+        // priority-ordered rolls at single site — acid → seed → detach
+        // → vanilla lunge. Priority-mutex is implicit: only one exotic
+        // fires per DecideLunge cycle. Detach preempts the whole
+        // attack cycle by transitioning to DetachedSquirm (actor never
+        // returns to DecideLunge).
+        //
+        // Feature C (seed, #318) slot reserved between acid and detach
+        // per plan §Feature-interaction "seed rolls first" — wait,
+        // user's 2026-07-31 spec is acid → seed → detach → vanilla.
+        // Seed spawn slot lands when Feature C ships.
         if (Anchor_Enhance_EnDekubaba_MaybeAcidLunge(this, play)) {
             EnDekubaba_SetupAcidVomit(this);
+        } else if (Anchor_Enhance_EnDekubaba_MaybeSeedFire(this, play)) {
+            EnDekubaba_SetupSeedTelegraph(this);
+        } else if (Anchor_Enhance_EnDekubaba_MaybeDetach(this, play)) {
+            EnDekubaba_SetupDetachedSquirm(this);
         } else {
             EnDekubaba_SetupPrepareLunge(this);
         }
@@ -1176,23 +1257,14 @@ void EnDekubaba_Recover(EnDekubaba* this, PlayState* play) {
         }
 
         if (this->timer == 0) {
-            // Pillar 5 (#308) — attack-cycle end. Advance charge
-            // counters + clear per-attack flags. Fires once per
-            // Recover-to-DecideLunge transition regardless of which
-            // attack ran (vanilla lunge or acid vomit).
+            // Pillar 5 UNIFIED (2026-07-31) — attack-cycle end.
+            // Advance ALL charge counters (acid + detach + seed when
+            // C lands) + clear per-attack flags. Always-advance
+            // semantics prevent starvation between exotics.
+            // Detach roll site moved to DecideLunge; Recover only
+            // handles counter advancement now.
             Anchor_Enhance_EnDekubaba_OnAttackComplete(this);
-            // Pillar 5 (#309) — detach + pursue decision. Rolls after
-            // attack-complete counter advancement. If Link was out of
-            // lunge range at attack time AND the chance roll fires,
-            // Dekubaba severs from stem and enters the DetachedSquirm
-            // state instead of returning to DecideLunge. One-shot per
-            // life — Dekubaba won't detach twice (dies via bleedout,
-            // stays dead until scene reload).
-            if (Anchor_Enhance_EnDekubaba_MaybeDetach(this, play)) {
-                EnDekubaba_SetupDetachedSquirm(this);
-            } else {
-                EnDekubaba_SetupDecideLunge(this);
-            }
+            EnDekubaba_SetupDecideLunge(this);
         }
     }
 

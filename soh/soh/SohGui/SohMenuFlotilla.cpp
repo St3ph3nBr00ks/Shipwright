@@ -842,18 +842,41 @@ void SohMenu::AddMenuFlotilla() {
         .PreFunc(FlotillaHostSettingsPreFunc)
         .Callback(FlotillaHostSettingsCallback)
         .Options(CheckboxOptions().DefaultValue(false).Tooltip(
-            "When ON: each attack that Dekubaba completes with Link "
-            "OUT of lunge range (≥240u XZ * size) advances an escalating "
-            "detach counter (0% → 25% → 50% → 75% → 100%). On success, "
-            "the plant severs from its stem base and squirms toward "
-            "the nearest player using serpentine wave motion.\n\n"
+            "When ON: each attack advances an escalating detach "
+            "counter (0% → 25% → 50% → 75% → 100%). On success, the "
+            "plant severs from its stem base and squirms toward the "
+            "nearest player using serpentine wave motion. Detached "
+            "form deals contact damage on head-crash.\n\n"
             "Detached form bleeds out — loses 1 HP every 5 seconds. "
             "Small Dekubaba (1 HP) survives 5s; Big Dekubaba (2 HP) "
             "survives 10s. Dies wherever it squirmed to; stays dead "
             "until scene reload (matches vanilla Dekubaba parity).\n\n"
-            "One-shot per actor life — a Dekubaba can only detach "
-            "once. Vanilla Dekubabas that don't detach behave normally.\n\n"
+            "One-shot per actor life. Vanilla Dekubabas that don't "
+            "detach behave normally. Rolled at DecideLunge after acid "
+            "and seed fail — unified priority pattern.\n\n"
             "See Plans/en_dekubaba_enhanced_plan.md §Feature B, tracker #309."));
+
+    AddWidget(path, "Seed spawn: fire seed projectile behind Link to spawn child Dekubaba##Flotilla",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Dekubaba.SeedSpawn"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: each attack advances an escalating seed counter "
+            "(0% → 25% → 50% → 75% → 100%). On success, the Dekubaba "
+            "spits a straight-line seed projectile targeted BEHIND "
+            "the nearest player — forces the player to reposition to "
+            "avoid being flanked by the newly-spawned child.\n\n"
+            "On land, the seed spawns a fresh EN_DEKUBABA at that "
+            "position. Parent can only have ONE active child at a "
+            "time — waits for the child to die before firing another "
+            "seed. Children can use Acid + Detach but not Seed "
+            "(prevents exponential growth).\n\n"
+            "Seed projectile does NO damage — pure spawner. Ignores "
+            "geometry in flight. If landing target has no valid nav "
+            "floor, spawns randomly within 300u of the Dekubaba.\n\n"
+            "Rolled at DecideLunge after acid fails; before detach.\n\n"
+            "See Plans/en_dekubaba_enhanced_plan.md §Feature C, tracker #318."));
 
     // -----------------------------------------------------------------
     // Scene Info

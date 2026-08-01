@@ -44,6 +44,17 @@ struct EnDekubabaState {
     // so peer's Draw-side leaf-bundle hide + SetupDetachedSquirm
     // path see the right state.
     bool netDetachActive = false;
+
+    // Pillar 5 (GH #318) — seed spawn active flag + landing target.
+    // Applied per-tick to descriptor via
+    //   Anchor_Enhance_EnDekubaba_ApplyPeerSeedActiveFlag
+    //   Anchor_Enhance_EnDekubaba_ApplyPeerSeedLandingPos
+    // so peer's SetupSeedTelegraph → SeedFire → projectile spawn
+    // sequence mirrors host's landing coord exactly.
+    bool netSeedActive        = false;
+    float netSeedLandingX     = 0.0f;
+    float netSeedLandingY     = 0.0f;
+    float netSeedLandingZ     = 0.0f;
 };
 
 }  // namespace EnemySync
