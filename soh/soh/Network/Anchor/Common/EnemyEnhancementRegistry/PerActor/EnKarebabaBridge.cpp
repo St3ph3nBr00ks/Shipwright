@@ -37,18 +37,9 @@
 
 #include "EnKarebabaDescriptor.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/EnhancementRegistry.h"
-#include "soh/Network/Anchor/Common/EnforcedCVars.h"  // AnchorCVarSync::GetEnforcedInt
-
-extern "C" {
-#include "functions.h"  // Audio_PlayActorSound2, Audio_PlaySoundGeneral
-#include "variables.h"  // gSfxDefaultFreqAndVolScale, gSfxDefaultReverb
-}
+#include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/EnhancementAudio.h"
 
 namespace {
-
-// V8 — doubled-volume scale for the CVar-on branch of PlayActorSfx.
-// Static-lifetime pointer required by Audio_PlaySoundGeneral's API.
-f32 sDoubledVolScale = 2.0f;
 
 // Look up the registered EnKarebabaDescriptor. Returns nullptr when
 // no descriptor is registered (impossible post-ShipInit but checked
@@ -163,15 +154,8 @@ extern "C" void Anchor_Enhance_EnKarebaba_OnActorDestroy(EnKarebaba* actor) {
 // enhancement-scoped tuning, not a global buff.
 extern "C" void Anchor_Enhance_EnKarebaba_PlayActorSfx(Actor* actor,
                                                         u16 sfxId) {
-    if (actor == nullptr) return;
-    if (AnchorCVarSync::GetEnforcedInt(
-            AnchorEnemyEnhancement::EnKarebabaDescriptor::GeyserSpinCVarName(),
-            0) == 0) {
-        Audio_PlayActorSound2(actor, sfxId);
-        return;
-    }
-    Audio_PlaySoundGeneral(sfxId, &actor->projectedPos, 4,
-                            &gSfxDefaultFreqAndVolScale,
-                            &sDoubledVolScale,
-                            &gSfxDefaultReverb);
+    AnchorEnemyEnhancement::EnhancementAudio::PlayCVarGatedActorSfx(
+        actor, sfxId,
+        AnchorEnemyEnhancement::EnKarebabaDescriptor::GeyserSpinCVarName(),
+        &AnchorEnemyEnhancement::EnhancementAudio::kDoubledVolScale);
 }

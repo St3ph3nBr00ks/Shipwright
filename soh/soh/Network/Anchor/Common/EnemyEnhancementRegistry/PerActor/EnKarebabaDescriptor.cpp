@@ -36,6 +36,12 @@
 #include "soh/Network/Anchor/Common/EnforcedCVars.h"  // AnchorCVarSync::GetEnforcedInt
 #include "soh/Network/Anchor/Common/SceneAuthority.h" // IsMyCurrentRoomHost
 
+// Shared helpers extracted 2026-07-31 during Dekubaba prep — see the
+// files under Common/EnemyEnhancementRegistry/ for the substrate.
+#include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/AcidVisuals.h"
+#include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/EnhancementAudio.h"
+#include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/ChargeStateMachine.h"
+
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <unordered_map>
 
@@ -53,15 +59,17 @@ namespace AnchorEnemyEnhancement {
 
 namespace {
 
-// V6 — charge state machine phase per user spec.
-enum class KarebabaChargeState : u8 {
-    Charging = 0,  // rolling per-spin, chance = counter*25%
-    Ready    = 1,  // waiting for spin+range to fire acid; telegraph visible
-    Cooldown = 2,  // 3-spin post-attack lockout, no roll
+// V6 charge machine numbers (extracted into shared ChargeStateMachine
+// 2026-07-31 during Dekubaba prep). Karebaba spec: 25% steps, max
+// counter 4, 3-spin post-fire cooldown.
+constexpr ChargeStateMachine::Config kAcidChargeConfig = {
+    /*stepIncrement*/ 0.25f,
+    /*maxCounter*/    4,
+    /*cooldownSteps*/ 3,
 };
 
 // Per-actor enhancement state. Some fields reset at OnSpinExit;
-// charge counters persist per V6 spec (reset on OnDeath +
+// charge machine persists per V6 spec (reset on OnDeath +
 // OnActorDestroy). Created on demand at OnHostSetupSpin /
 // OnPeerReceiveEnhancedSpinFlag / OnUprightTick.
 struct KarebabaEnhancedState {
@@ -72,15 +80,13 @@ struct KarebabaEnhancedState {
     u8   groundSplashesFired   = 0;
 
     // V6 charge state machine — persist across spins, reset on death.
-    KarebabaChargeState chargeState     = KarebabaChargeState::Charging;
-    u8                  chargeCounter   = 0;  // 0..4, chance = counter*25%
-    u8                  cooldownSpins   = 0;  // 3..0 during Cooldown
+    ChargeStateMachine acidCharge{ kAcidChargeConfig };
 
     // V6 — peer-received flag for the Ready telegraph. On peer, drives
     // OnUprightTick's decision to render 1.25× head + mouth spit.
-    // Host writes this from its own chargeState. Peer's chargeState
-    // is stale (only host runs the state machine) so this bool is
-    // the actual telegraph source of truth on peer.
+    // Host writes this from its own charge state. Peer's charge
+    // machine is stale (only host runs it) so this bool is the actual
+    // telegraph source of truth on peer.
     bool                netCharged      = false;
 };
 
@@ -94,16 +100,6 @@ std::unordered_map<Actor*, KarebabaEnhancedState> sStates;
 KarebabaEnhancedState& GetOrCreate(EnKarebaba* actor) {
     return sStates[&actor->actor];
 }
-
-// V6 charge state machine constants per user 2026-07-31 spec.
-//   - Charging: chance per spin = counter × kAcidChargePerCounter.
-//     Counter starts at 0 → first spin 0%. Counter++ on fail.
-//     Max 4 → max chance 100% at 5th spin.
-//   - Ready: fires acid on next spin IF Link in acid-range.
-//   - Cooldown: 3 spins guaranteed no-acid post-attack.
-constexpr float kAcidChargePerCounter = 0.25f;
-constexpr u8    kAcidChargeMaxCounter = 4;   // clamp to keep chance ≤ 1.0
-constexpr u8    kAcidCooldownSpins    = 3;
 
 // Range gate — Link must be within 2 × cylinder radius (60u) = 120u
 // XZ to actually USE the ready acid attack. Range gate does NOT
@@ -119,19 +115,8 @@ constexpr float kAcidRangeXZ          = 60.0f * 2.0f;  // = 120u
 constexpr float kTelegraphHeadScale    = 1.25f;
 constexpr int   kTelegraphSpitPeriod   = 8;   // spawn every N Upright frames
 
-// Legacy — no longer used (V6 replaced flat 33% with state machine).
-// Kept as reference / removable in a future cleanup.
-constexpr float kEnhancedSpinChance = 0.33f;
-
-// Head-scale sinusoid parameters. Vanilla Spin runs 40 frames
-// (params counts 40→0). Multiplier goes 1.0 at frame 0, peaks at
-// kHeadScalePeak at frame 20 (mid-spin, matches vanilla's `value`
-// peak), back to 1.0 at frame 40. Half-cycle of sine from 0 to π
-// gives that shape. Peak reduced 1.5→1.25 per user direction
-// 2026-07-31 (subtler swell — less "boss form", more "attack tell").
+// Spin animation duration (vanilla params counts 40 → 0).
 constexpr float kSpinTotalFrames  = 40.0f;
-constexpr float kHeadScaleBase    = 1.0f;
-constexpr float kHeadScalePeak    = 1.25f;
 
 // Vanilla Karebaba scale at Init: 0.01f (per z_en_karebaba.c).
 // Multiplier applied to actor.scale during enhanced Spin.
@@ -161,107 +146,35 @@ constexpr float kVanillaScale = 0.01f;
 //                        Complements the rain-impact by looking
 //                        like a caustic vapor kicked up on impact.
 
-// Phase 1 constants. Spit position lifted from head+5 to head+15
-// (V4 tuning) so splash originates cleanly above the mouth. Splash
-// scale halved 500 → 250 to reduce visual dominance.
-constexpr float kSpitYOffset           = 15.0f;  // above head (mouth clearance)
-constexpr int   kSpitSplashesPerFrame  = 2;
-constexpr s16   kSpitSplashType        = 2;      // silhouette variant 0/1/2
-constexpr s16   kSpitSplashScale       = 250;    // V4: halved from 500
-
-constexpr int   kRisingBubblesPerFrame = 1;      // supporting accent to the spit
-constexpr float kRisingBubbleSpeed     = 6.0f;   // upward Y velocity
-constexpr float kRisingBubbleAccelY    = -0.25f; // slight gravity so bubbles arc down
-// V4 tuning — up-bubble scale halved. Range 120-170 → 60-85.
-constexpr int   kRisingBubbleScaleBase = 60;
-constexpr int   kRisingBubbleScaleRand = 25;
-
-// Phase 2 constants. Rain starts at f10 and continues through spin
-// end. XZ radius kept modest so the column reads as directly above
-// the plant rather than a scattered downpour.
+// Karebaba-specific tuning constants (not shared — dial-in for this
+// actor's geyser attack). Non-tint constants live locally; the
+// green-acid tint palette + splash type/scale + bubble/rain/dust
+// particle attrs come from AcidVisuals.h (shared with Dekubaba).
 //
-// V4 tuning — spawn height raised 30u → 130u per user direction.
-// Recomputed impact frame: with initial velocity -3 and gravity
-// -0.35, distance 130 = 3t + 0.175t² → 0.175t² + 3t - 130 = 0
-//   → t = (-3 + sqrt(9 + 91)) / 0.35 = (-3 + 10) / 0.35 = 20 frames
-// So rain hits ground at f10 + f20 = f30 (was f17 with 30u fall).
-// Rain-drop life bumped 20 → 25 so drops remain visible AT the
-// impact frame (would otherwise die exactly on impact and not
-// visually connect to the splash burst).
-constexpr int   kRainStartFrame        = 10;
-constexpr int   kRainDropletsPerFrame  = 3;
-constexpr float kRainSpawnHeightY      = 130.0f; // V4: was 30.0
-constexpr float kRainSpawnRadius       = 30.0f;  // XZ jitter around home
-constexpr float kRainDropletSpeed      = -3.0f;  // initial downward velocity
-constexpr float kRainDropletAccelY     = -0.35f; // gravity
-constexpr s16   kRainDropletScale      = 90;     // small drops
-constexpr s16   kRainDropletLife       = 25;     // V4: bumped 20 → 25 to survive longer fall
+// Phase 1 — mouth spit position + spawn density.
+constexpr float kSpitYOffset          = 15.0f;
+constexpr int   kSpitSplashesPerFrame = 2;
+constexpr int   kRisingBubblesPerFrame = 1;
 
-// Phase 3 constants. 5 total splashes over 5 consecutive frames.
-// Impact frame recomputed from rain physics (see Phase 2 block
-// above): 20-frame fall + f10 start = f30 impact.
-constexpr int   kGroundImpactStartFrame = 30;    // V4: was 17 (rain fell 30u); now 130u fall
+// Phase 2 — rain start frame (10 frames after spin begin) + spawn
+// density + spawn column geometry.
+constexpr int   kRainStartFrame       = 10;
+constexpr int   kRainDropletsPerFrame = 3;
+constexpr float kRainSpawnHeightY     = 130.0f;
+constexpr float kRainSpawnRadius      = 30.0f;
+
+// Phase 3 — ground splash burst starting at rain-impact frame.
+// Impact frame derived from rain physics: 20-frame fall + f10 start
+// = f30 impact. Total 5 splashes over 5 consecutive frames.
+constexpr int   kGroundImpactStartFrame = 30;
 constexpr u8    kGroundSplashTotalCount = 5;
-constexpr float kGroundSplashRadius     = 40.0f; // XZ ring around home
-constexpr s16   kGroundSplashScale      = 400;   // slightly smaller than spit
-constexpr s16   kGroundSplashType       = 1;     // sharper silhouette (types 0/1/2)
+constexpr float kGroundSplashRadius     = 40.0f;
 
-// Phase 4 constants. Rising dust from ground upward. Small positive
-// Y velocity + slight decay accel → dust rises then slows and
-// disperses. Wider XZ radius spreads the mist around the plant.
-// Start frame follows Phase 3 impact (V4: was 17, now 30).
-constexpr int   kRisingDustStartFrame  = 30;
-constexpr int   kRisingDustPerFrame    = 2;
-constexpr float kRisingDustSpawnYOffset = 5.0f;  // just above ground so we see it rise
-constexpr float kRisingDustSpeed       = 1.5f;   // upward velocity
-constexpr float kRisingDustAccelY      = -0.05f; // slight decay
-constexpr float kRisingDustRadius      = 60.0f;  // XZ spread
-constexpr s16   kRisingDustScale       = 300;
-constexpr s16   kRisingDustScaleStep   = 8;      // grow → puffy mist
-constexpr s16   kRisingDustLife        = 25;
-
-// Acid green tints. Prim = bright fill color; Env = darker outline
-// color for the multi-tone gradient the softsprite render uses.
-// Alphas below 255 keep particles translucent so they blend into
-// each other and don't look like solid blobs (bubbles + dust).
-//
-// V5 tuning (2026-07-31 per user playtest — V4's uniform 25%
-// brightness reduction perceived as too aggressive; splashes
-// also read as white/blue rather than green):
-//   - Spit / Rain / Dust: restored to pre-V4 100% originals.
-//   - Bubble: KEPT at V4-dimmed values per user "content with
-//     bubbles" feedback (they read as translucent accent to
-//     spit, not primary color).
-//   - Splash: dedicated saturation-boost pass — R and B reduced
-//     to reject the white water-texture bleed-through, G maxed,
-//     alpha 230→255 so tint fully overrides texture. Env darkened
-//     for stronger outline contrast against the bright water
-//     splash texture.
-constexpr Color_RGBA8 kSpitPrimColor   = { 170, 240, 110, 220 };  // V5: restored pre-V4
-constexpr Color_RGBA8 kSpitEnvColor    = {  50,  90,  30, 255 };
-constexpr Color_RGBA8 kBubblePrimColor = { 112, 165,  75, 200 };  // V5: KEEP V4 (user content)
-constexpr Color_RGBA8 kBubbleEnvColor  = {  60, 100,  40, 255 };
-constexpr Color_RGBA8 kRainPrimColor   = { 150, 220, 100, 220 };  // V5: restored pre-V4
-constexpr Color_RGBA8 kRainEnvColor    = {  60, 100,  40, 255 };
-constexpr Color_RGBA8 kSplashPrimColor = { 120, 255,  70, 255 };  // V5: saturated green + full α to override white water tex
-constexpr Color_RGBA8 kSplashEnvColor  = {  30,  80,  20, 255 };  // V5: darker outline for contrast
-constexpr Color_RGBA8 kDustPrimColor   = { 180, 230, 130, 150 };  // V5: restored pre-V4
-constexpr Color_RGBA8 kDustEnvColor    = {  80, 130,  60, 255 };
-
-// V7 — +50% volume helper for key SFX. Audio_PlayActorSound2 has
-// no volume control — falls back to distance attenuation. To boost
-// perceived volume, use Audio_PlaySoundGeneral which accepts a
-// pointer to a float volume scale. gSfxDefaultFreqAndVolScale is
-// 1.0f; 1.5f = +50% louder (may clip if audio system caps at 1.0
-// internally, but that's the system's problem — we ask for +50%).
-static f32 sBoostedVolScale = 1.5f;
-
-inline void PlayBoostedActorSfx(Actor* actor, u16 sfxId) {
-    Audio_PlaySoundGeneral(sfxId, &actor->projectedPos, 4,
-                            &gSfxDefaultFreqAndVolScale,
-                            &sBoostedVolScale,
-                            &gSfxDefaultReverb);
-}
+// Phase 4 — rising dust from ground.
+constexpr int   kRisingDustStartFrame   = 30;
+constexpr int   kRisingDustPerFrame     = 2;
+constexpr float kRisingDustSpawnYOffset = 5.0f;
+constexpr float kRisingDustRadius       = 60.0f;
 
 // V7 — telegraph render helper. Extracted so both OnUprightTick
 // and OnSpinTick can call it (user spec: telegraph persists through
@@ -271,13 +184,12 @@ inline void RenderTelegraph(EnKarebaba* actor, PlayState* play) {
     // Head at kTelegraphHeadScale (1.25× vanilla).
     Actor_SetScale(&actor->actor, kVanillaScale * kTelegraphHeadScale);
 
-    // Mouth spit every kTelegraphSpitPeriod frames — matches
-    // attack-time spit visibility (V7 change 2 per user: telegraph
-    // spit was too small at half-scale, now uses full attack-time
-    // params so it reads clearly against the enlarged head).
+    // Mouth spit every kTelegraphSpitPeriod frames using shared
+    // AcidVisuals splash config (type 2, scale 250 — proven visible-
+    // green in Karebaba V7 plan-B).
     if ((play->gameplayFrames % kTelegraphSpitPeriod) == 0) {
-        Color_RGBA8 primC = kSpitPrimColor;
-        Color_RGBA8 envC  = kSpitEnvColor;
+        Color_RGBA8 primC = AcidVisuals::kSpitPrimColor;
+        Color_RGBA8 envC  = AcidVisuals::kSpitEnvColor;
         Vec3f pos = {
             actor->actor.world.pos.x + (Rand_ZeroOne() - 0.5f) * 6.0f,
             actor->actor.world.pos.y + kSpitYOffset +
@@ -285,7 +197,8 @@ inline void RenderTelegraph(EnKarebaba* actor, PlayState* play) {
             actor->actor.world.pos.z + (Rand_ZeroOne() - 0.5f) * 6.0f,
         };
         EffectSsGSplash_Spawn(play, &pos, &primC, &envC,
-                                kSpitSplashType, kSpitSplashScale);
+                                AcidVisuals::kSpitSplashType,
+                                AcidVisuals::kSpitSplashScale);
     }
 }
 
@@ -320,7 +233,7 @@ bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
         return false;
     }
 
-    // V6 — charge state machine dispatch.
+    // Shared ChargeStateMachine dispatch (extracted 2026-07-31).
     KarebabaEnhancedState& state = GetOrCreate(actor);
     // Always clear per-spin flags at spin entry — this spin decides
     // whether to enhance based on state machine outcome below.
@@ -328,71 +241,44 @@ bool EnKarebabaDescriptor::OnHostSetupSpin(EnKarebaba* actor, PlayState* play) {
     state.geyserSpawnedThisSpin = false;
     state.groundSplashesFired   = 0;
 
-    switch (state.chargeState) {
-        case KarebabaChargeState::Cooldown: {
-            // 3-spin post-attack lockout. Decrement per spin.
-            // When decremented to 0 → transition to Charging with
-            // fresh counter=0 (post-cooldown first spin has 0% chance,
-            // matching post-spawn behavior per user spec).
-            if (state.cooldownSpins > 0) state.cooldownSpins--;
-            if (state.cooldownSpins == 0) {
-                state.chargeState   = KarebabaChargeState::Charging;
-                state.chargeCounter = 0;
-            }
-            // No acid, no roll this spin.
-            return false;
-        }
+    // Attack-complete decrement runs at spin entry (equivalent for
+    // Karebaba — no distinct Recover state, spin exit is the natural
+    // "attack complete" moment). Decrements Cooldown counter; may
+    // transition Cooldown → Charging.
+    state.acidCharge.OnAttackComplete();
 
-        case KarebabaChargeState::Ready: {
-            // Range gate — Link within 2× cylinder radius (120u XZ).
-            // vanilla `xzDistToPlayer` is already updated by
-            // z_actor.c per-frame (patched by SoH's #153 nearest-
-            // player overlay for MP correctness — see session_state
-            // Pitfall 28).
-            if (actor->actor.xzDistToPlayer <= kAcidRangeXZ) {
-                // Fire acid this spin. Transition to Cooldown.
-                state.currentSpinEnhanced = true;
-                state.chargeState         = KarebabaChargeState::Cooldown;
-                state.cooldownSpins       = kAcidCooldownSpins;
-                state.chargeCounter       = 0;
-                // SFX — dramatic "eruption" sound at attack start.
-                // V7 — +50% vol per user "erupt too quiet".
-                PlayBoostedActorSfx(&actor->actor, NA_SE_EV_ERUPTION_CLOUD);
-                return true;
-            }
-            // Out of range — preserve Ready state per user spec
-            // ("skip AND preserve charge"). No acid, no roll.
-            return false;
+    // Ready branch: if charged, gate on Link-in-range, fire acid.
+    if (state.acidCharge.IsReady()) {
+        // Range gate — Link within 2× cylinder radius (120u XZ).
+        // vanilla `xzDistToPlayer` is already updated by z_actor.c
+        // per-frame (patched by SoH's #153 nearest-player overlay
+        // for MP correctness — see session_state Pitfall 28).
+        if (actor->actor.xzDistToPlayer <= kAcidRangeXZ) {
+            // Fire acid this spin. OnFire transitions Ready → Cooldown.
+            state.acidCharge.OnFire();
+            state.currentSpinEnhanced = true;
+            // SFX — dramatic "eruption" sound at attack start. +50%
+            // volume per V7 "erupt too quiet" tuning (shared helper
+            // default is kBoostedVolScale = 1.5f).
+            EnhancementAudio::PlayBoostedActorSfx(
+                &actor->actor, NA_SE_EV_ERUPTION_CLOUD);
+            return true;
         }
-
-        case KarebabaChargeState::Charging: {
-            // Roll chance = counter × 25%. Counter starts at 0 on
-            // spawn/cooldown-exit → first spin 0% chance (mandatory
-            // vanilla).
-            const float chance =
-                (float)state.chargeCounter * kAcidChargePerCounter;
-            if (Rand_ZeroOne() < chance) {
-                // Success — enter Ready phase. Telegraph appears
-                // starting this Upright cycle. Acid fires NEXT spin
-                // if Link in range. Counter frozen (irrelevant in
-                // Ready state).
-                state.chargeState = KarebabaChargeState::Ready;
-                // SFX — subtle "bubble" tell so player notices the
-                // telegraph state change.
-                // V7 — +50% vol per user "sizzle too quiet".
-                PlayBoostedActorSfx(&actor->actor, NA_SE_EV_WATER_BUBBLE);
-            } else {
-                // Fail — increment counter, clamped to max (chance
-                // never exceeds 100%).
-                if (state.chargeCounter < kAcidChargeMaxCounter) {
-                    state.chargeCounter++;
-                }
-            }
-            return false;  // No acid this spin regardless of roll.
-        }
+        // Out of range — Ready state preserved (per user spec "skip
+        // AND preserve charge"). No fire, no counter change.
+        return false;
     }
 
-    return false;  // unreachable; defensive
+    // Charging branch: TryCharge rolls chance = counter*25% and
+    // transitions Charging → Ready on success. Returns true only
+    // on the transition edge so we can play the SFX exactly once.
+    if (state.acidCharge.TryCharge()) {
+        // Just entered Ready. Play "sizzle" tell so player notices
+        // the telegraph state change.
+        EnhancementAudio::PlayBoostedActorSfx(
+            &actor->actor, NA_SE_EV_WATER_BUBBLE);
+    }
+    return false;  // No acid this spin (Ready fires on NEXT spin).
 }
 
 void EnKarebabaDescriptor::OnPeerReceiveEnhancedSpinFlag(EnKarebaba* actor,
@@ -432,8 +318,7 @@ void EnKarebabaDescriptor::OnUprightTick(EnKarebaba* actor, PlayState* play) {
     KarebabaEnhancedState& state = it->second;
 
     const bool telegraphActive =
-        (state.chargeState == KarebabaChargeState::Ready) ||
-        state.netCharged;
+        state.acidCharge.IsReady() || state.netCharged;
     if (!telegraphActive) return;
 
     RenderTelegraph(actor, play);
@@ -468,8 +353,7 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
     //   (c) Not Ready, not enhanced → normal vanilla spin, scale 1.0.
 
     const bool telegraphActive =
-        (state.chargeState == KarebabaChargeState::Ready) ||
-        state.netCharged;
+        state.acidCharge.IsReady() || state.netCharged;
 
     if (state.currentSpinEnhanced) {
         // Case (b) — head at constant 1.25 through entire enhanced
@@ -529,13 +413,12 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
     // comparisons.
     const int frameI = (int)frameF;
 
-    // Phase 1a — Spit-splash at the HEAD (raised +5u to originate
-    // from the mouth rather than slightly below the head per user
-    // feedback). EffectSsGSplash is a stationary bloom, 8-frame
-    // life; spawning per-frame while head sweeps produces a trail.
+    // Phase 1a — Spit-splash at the HEAD. Uses shared AcidVisuals
+    // tint palette + splash type/scale (proven visible-green in
+    // Karebaba V7 plan-B).
     {
-        Color_RGBA8 primC = kSpitPrimColor;
-        Color_RGBA8 envC  = kSpitEnvColor;
+        Color_RGBA8 primC = AcidVisuals::kSpitPrimColor;
+        Color_RGBA8 envC  = AcidVisuals::kSpitEnvColor;
         for (int i = 0; i < kSpitSplashesPerFrame; i++) {
             Vec3f jitteredPos = {
                 actor->actor.world.pos.x + (Rand_ZeroOne() - 0.5f) * 10.0f,
@@ -544,41 +427,41 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
                 actor->actor.world.pos.z + (Rand_ZeroOne() - 0.5f) * 10.0f,
             };
             EffectSsGSplash_Spawn(play, &jitteredPos, &primC, &envC,
-                                    kSpitSplashType, kSpitSplashScale);
+                                    AcidVisuals::kSpitSplashType,
+                                    AcidVisuals::kSpitSplashScale);
         }
     }
 
     // Phase 1b — Supporting rising bubble at HEAD (1/frame accent).
     {
         Vec3f bubblePos = actor->actor.world.pos;
-        bubblePos.y += kSpitYOffset;  // stays with mouth-height spit
-        Vec3f bubbleAccel = { 0.0f, kRisingBubbleAccelY, 0.0f };
-        Color_RGBA8 primC = kBubblePrimColor;
-        Color_RGBA8 envC  = kBubbleEnvColor;
+        bubblePos.y += kSpitYOffset;
+        Vec3f bubbleAccel = { 0.0f, AcidVisuals::kRisingBubbleAccelY, 0.0f };
+        Color_RGBA8 primC = AcidVisuals::kBubblePrimColor;
+        Color_RGBA8 envC  = AcidVisuals::kBubbleEnvColor;
         for (int i = 0; i < kRisingBubblesPerFrame; i++) {
             Vec3f bubbleVel = {
                 (Rand_ZeroOne() - 0.5f) * 2.5f,
-                kRisingBubbleSpeed + Rand_ZeroOne() * 2.0f,
+                AcidVisuals::kRisingBubbleSpeed + Rand_ZeroOne() * 2.0f,
                 (Rand_ZeroOne() - 0.5f) * 2.5f,
             };
-            // V4 tuning — up-bubble scale halved (was 120 + rand*50).
-            const s16 scale = (s16)(kRisingBubbleScaleBase +
-                                     (int)(Rand_ZeroOne() * (float)kRisingBubbleScaleRand));
+            const s16 scale = (s16)(AcidVisuals::kRisingBubbleScaleBase +
+                                     (int)(Rand_ZeroOne() *
+                                            (float)AcidVisuals::kRisingBubbleScaleRand));
             EffectSsDtBubble_SpawnCustomColor(play, &bubblePos, &bubbleVel,
                                                 &bubbleAccel, &primC, &envC,
                                                 scale, 25, 8);
         }
     }
 
-    // Phase 2 — Falling rain from Y=home+30 (starts f10). Downward
-    // velocity + gravity so drops fall onto the ground around the
-    // plant. Read as "vomit that went up now coming down". Reuses
-    // EffectSsDtBubble with downward velocity — the same effect
-    // renders equally well as rising bubbles or falling droplets.
+    // Phase 2 — Falling rain from Y=home+130 (starts f10). Downward
+    // velocity + gravity so drops fall onto the ground. Reuses
+    // EffectSsDtBubble with downward velocity + shared AcidVisuals
+    // rain constants (speed/accel/scale/life).
     if (frameI >= kRainStartFrame) {
-        Vec3f rainAccel = { 0.0f, kRainDropletAccelY, 0.0f };
-        Color_RGBA8 primC = kRainPrimColor;
-        Color_RGBA8 envC  = kRainEnvColor;
+        Vec3f rainAccel = { 0.0f, AcidVisuals::kRainDropletAccelY, 0.0f };
+        Color_RGBA8 primC = AcidVisuals::kRainPrimColor;
+        Color_RGBA8 envC  = AcidVisuals::kRainEnvColor;
         for (int i = 0; i < kRainDropletsPerFrame; i++) {
             Vec3f rainPos = {
                 actor->actor.home.pos.x +
@@ -588,67 +471,45 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
                     (Rand_ZeroOne() - 0.5f) * 2.0f * kRainSpawnRadius,
             };
             Vec3f rainVel = {
-                (Rand_ZeroOne() - 0.5f) * 0.3f,  // minimal XZ drift
-                kRainDropletSpeed + (Rand_ZeroOne() - 0.5f) * 0.5f,
+                (Rand_ZeroOne() - 0.5f) * 0.3f,
+                AcidVisuals::kRainDropletSpeed + (Rand_ZeroOne() - 0.5f) * 0.5f,
                 (Rand_ZeroOne() - 0.5f) * 0.3f,
             };
             EffectSsDtBubble_SpawnCustomColor(play, &rainPos, &rainVel,
                                                 &rainAccel, &primC, &envC,
-                                                kRainDropletScale,
-                                                kRainDropletLife,
+                                                AcidVisuals::kRainDropletScale,
+                                                AcidVisuals::kRainDropletLife,
                                                 6 /* randXZ jitter */);
         }
     }
 
-    // Phase 3 — Ground-splash burst (5 splashes, 1 per frame, at
-    // random XZ around the plant). Fires as rain hits the ground.
-    // Impact frame kGroundImpactStartFrame chosen to match rain
-    // velocity + gravity + 130u fall distance (~20 frames of flight
-    // per V4).
-    //
-    // V7 plan-B (per user "still white water splash") — use SAME
-    // GSplash config as the head-spit (kSpit* constants) instead
-    // of the kSplash* config. The head-spit reads clearly green
-    // in-scene; the kGroundSplash config with larger scale (400) +
-    // splash silhouette type 1 was letting the underlying white
-    // water texture bleed through. Copying the exact head-spit
-    // params (scale 250 + type 2 + kSpit tints) puts the ground
-    // splashes on the same tinting path that already reads green.
-    // kSplashPrim/Env/GroundSplashScale/Type constants preserved
-    // above but no longer referenced — kept in-file for potential
-    // future revert.
-    //
-    // V7 also — WATERDROP SFX removed per user "too loud and always
-    // playing". If a punctuation SFX at ground impact is wanted
-    // later, can add a quieter alternative.
+    // Phase 3 — Ground-splash burst (V7 plan-B): reuse head-spit
+    // config (visible-green) rather than the earlier kSplash* config
+    // that let the white water texture bleed through.
     if (frameI >= kGroundImpactStartFrame &&
         state.groundSplashesFired < kGroundSplashTotalCount) {
-        Color_RGBA8 primC = kSpitPrimColor;
-        Color_RGBA8 envC  = kSpitEnvColor;
-        // Random XZ within a ring around home. Prefer ring-ish
-        // distribution (not uniformly filled disk) so splashes
-        // don't cluster at center — sqrt(u) biases toward the rim.
+        Color_RGBA8 primC = AcidVisuals::kSpitPrimColor;
+        Color_RGBA8 envC  = AcidVisuals::kSpitEnvColor;
         const float u = Rand_ZeroOne();
         const float r = kGroundSplashRadius * std::sqrt(u);
         const float ang = Rand_ZeroOne() * 2.0f * (float)M_PI;
         Vec3f splashPos = {
             actor->actor.home.pos.x + r * std::cos(ang),
-            actor->actor.home.pos.y,  // ground level
+            actor->actor.home.pos.y,
             actor->actor.home.pos.z + r * std::sin(ang),
         };
         EffectSsGSplash_Spawn(play, &splashPos, &primC, &envC,
-                                kSpitSplashType, kSpitSplashScale);
+                                AcidVisuals::kSpitSplashType,
+                                AcidVisuals::kSpitSplashScale);
         state.groundSplashesFired++;
     }
 
     // Phase 4 — Rising dust from ground (fires from
-    // kRisingDustStartFrame through spin end). Repurposes what
-    // was previously "falling dust from above" — now dust rises
-    // out of the ground as if kicked up by the rain impact.
+    // kRisingDustStartFrame through spin end).
     if (frameI >= kRisingDustStartFrame) {
-        Vec3f dustAccel = { 0.0f, kRisingDustAccelY, 0.0f };
-        Color_RGBA8 primC = kDustPrimColor;
-        Color_RGBA8 envC  = kDustEnvColor;
+        Vec3f dustAccel = { 0.0f, AcidVisuals::kRisingDustAccelY, 0.0f };
+        Color_RGBA8 primC = AcidVisuals::kDustPrimColor;
+        Color_RGBA8 envC  = AcidVisuals::kDustEnvColor;
         for (int i = 0; i < kRisingDustPerFrame; i++) {
             Vec3f dustPos = {
                 actor->actor.home.pos.x +
@@ -659,15 +520,15 @@ void EnKarebabaDescriptor::OnSpinTick(EnKarebaba* actor, PlayState* play) {
             };
             Vec3f dustVel = {
                 (Rand_ZeroOne() - 0.5f) * 0.4f,
-                kRisingDustSpeed + (Rand_ZeroOne() - 0.5f) * 0.4f,
+                AcidVisuals::kRisingDustSpeed + (Rand_ZeroOne() - 0.5f) * 0.4f,
                 (Rand_ZeroOne() - 0.5f) * 0.4f,
             };
             EffectSsDust_Spawn(play, 0 /* drawFlags */,
                                 &dustPos, &dustVel, &dustAccel,
                                 &primC, &envC,
-                                kRisingDustScale,
-                                kRisingDustScaleStep,
-                                kRisingDustLife,
+                                AcidVisuals::kRisingDustScale,
+                                AcidVisuals::kRisingDustScaleStep,
+                                AcidVisuals::kRisingDustLife,
                                 0 /* updateMode */);
         }
     }
@@ -702,16 +563,16 @@ bool EnKarebabaDescriptor::IsCharged(EnKarebaba* actor) {
     if (actor == nullptr) return false;
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return false;
-    return it->second.chargeState == KarebabaChargeState::Ready;
+    return it->second.acidCharge.IsReady();
 }
 
 void EnKarebabaDescriptor::OnDeath(EnKarebaba* actor) {
     // V6 — per user spec: "all counter reset on death". Wipes both
-    // charge state machine (chargeState/chargeCounter/cooldownSpins)
-    // AND per-spin flags. Karebaba's Dying → Regrow → Idle cycle
-    // preserves the Actor* pointer so the state map entry stays,
-    // but its contents get zeroed. Next spin after respawn behaves
-    // like fresh spawn (Charging, counter=0 → first spin 0%).
+    // charge state machine AND per-spin flags. Karebaba's Dying →
+    // Regrow → Idle cycle preserves the Actor* pointer so the state
+    // map entry stays, but its contents get zeroed. Next spin after
+    // respawn behaves like fresh spawn (Charging, counter=0 → first
+    // spin 0%).
     if (actor == nullptr) return;
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return;
@@ -719,9 +580,7 @@ void EnKarebabaDescriptor::OnDeath(EnKarebaba* actor) {
     state.currentSpinEnhanced   = false;
     state.geyserSpawnedThisSpin = false;
     state.groundSplashesFired   = 0;
-    state.chargeState           = KarebabaChargeState::Charging;
-    state.chargeCounter         = 0;
-    state.cooldownSpins         = 0;
+    state.acidCharge.Reset();
     state.netCharged            = false;
     // Reset actor.scale in case telegraph was active at death moment.
     Actor_SetScale(&actor->actor, kVanillaScale);
