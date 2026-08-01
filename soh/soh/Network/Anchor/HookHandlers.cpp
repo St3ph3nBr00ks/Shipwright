@@ -165,6 +165,13 @@ float OTRGetDimensionFromRightEdge(float v);
 extern "C" void Anchor_Enhance_EnKarebaba_ApplyPeerEnhancedFlag(EnKarebaba* actor, int enhanced);
 extern "C" void Anchor_Enhance_EnKarebaba_ApplyPeerChargedFlag(EnKarebaba* actor, int charged);
 
+// Pillar 5 (GH #308) — Dekubaba acid vomit peer-flag bridges. Same
+// idiom as Karebaba — called every tick before EnDekubaba_ApplyNetState
+// so peer's per-actor descriptor state carries host's netAcidActive /
+// netAcidCharged; peer's OnAcidVomitTick + telegraph render use them.
+extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerAcidActiveFlag(EnDekubaba* actor, int active);
+extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerAcidChargedFlag(EnDekubaba* actor, int charged);
+
 // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor moved to
 // Common/ActorSyncHelpers.h in #173 Phase 1.
 // FindNearestPlayerActor moved to Common/PlayerLookup.h.
@@ -2973,6 +2980,15 @@ void Anchor::RegisterHooks() {
             if (actor->id == ACTOR_EN_DEKUBABA && ext->netStateIndex >= 0 &&
                 !EnemyStateSync::PhaseImpliesHasLocalDeath(ext->phase)) {
                 EnDekubaba* baba = (EnDekubaba*)actor;
+                // Pillar 5 (#308) — apply peer's acid flags EVERY tick
+                // (not gated on state change) so telegraph rendering
+                // during PrepareLunge tracks the host's charge state
+                // continuously. Mirror of the Karebaba pattern where
+                // netCharged is applied per-tick to drive OnUprightTick.
+                Anchor_Enhance_EnDekubaba_ApplyPeerAcidActiveFlag(
+                    baba, ext->dekubaba.netAcidActive ? 1 : 0);
+                Anchor_Enhance_EnDekubaba_ApplyPeerAcidChargedFlag(
+                    baba, ext->dekubaba.netAcidCharged ? 1 : 0);
                 s16 curState = EnDekubaba_GetStateIndex(baba);
                 if (curState != ext->netStateIndex && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {

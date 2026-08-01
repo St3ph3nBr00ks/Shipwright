@@ -17,6 +17,24 @@ extern void Anchor_OfferGetItemNearby(Actor* offerer, PlayState* play, s32 getIt
 // pickup in solo). See ModalOfferAdapter.cpp.
 extern void Anchor_SpawnSyncedStickDrop(Actor* offerer, PlayState* play);
 
+// Pillar 5 Dekubaba enhancement (#308 acid vomit + future #309 detach +
+// #318 seed). Bridge to soh/Network/Anchor/Common/EnemyEnhancementRegistry/
+// PerActor/EnDekubabaBridge.cpp. All hooks are cheap no-ops when the
+// respective CVar is off or no descriptor is registered. Pitfall 7:
+// plain `extern` (not extern "C") — this is a .c file.
+extern int  Anchor_Enhance_EnDekubaba_MaybeAcidLunge(EnDekubaba* actor, PlayState* play);
+extern void Anchor_Enhance_EnDekubaba_OnAcidVomitTick(EnDekubaba* actor, PlayState* play, int frame);
+extern void Anchor_Enhance_EnDekubaba_OnAttackComplete(EnDekubaba* actor);
+extern void Anchor_Enhance_EnDekubaba_OnDeath(EnDekubaba* actor);
+extern void Anchor_Enhance_EnDekubaba_OnActorDestroy(EnDekubaba* actor);
+extern int  Anchor_Enhance_EnDekubaba_IsCurrentAttackAcid(EnDekubaba* actor);
+extern int  Anchor_Enhance_EnDekubaba_IsAcidCharged(EnDekubaba* actor);
+// V8-style CVar-gated audio boost — currently applied inline as
+// hooks at Audio_PlayActorSound2 sites when +100% volume is wanted
+// during the enhancement. Not called from vanilla sites yet; provided
+// for future audio-balance parity.
+extern void Anchor_Enhance_EnDekubaba_PlayActorSfx(Actor* actor, u16 sfxId);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnDekubaba_Init(Actor* thisx, PlayState* play);
@@ -50,6 +68,10 @@ void EnDekubaba_Sway(EnDekubaba* this, PlayState* play);
 void EnDekubaba_PrunedSomersault(EnDekubaba* this, PlayState* play);
 void EnDekubaba_ShrinkDie(EnDekubaba* this, PlayState* play);
 void EnDekubaba_DeadStickDrop(EnDekubaba* this, PlayState* play);
+// Pillar 5 (#308) — acid vomit state (replaces vanilla lunge when
+// descriptor rolls acid at DecideLunge decision point).
+void EnDekubaba_SetupAcidVomit(EnDekubaba* this);
+void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play);
 
 static Vec3f sZeroVec = { 0.0f, 0.0f, 0.0f };
 
@@ -300,6 +322,10 @@ void EnDekubaba_Init(Actor* thisx, PlayState* play) {
 void EnDekubaba_Destroy(Actor* thisx, PlayState* play) {
     EnDekubaba* this = (EnDekubaba*)thisx;
 
+    // Pillar 5 (#308) — remove per-actor descriptor state entry so
+    // the state map doesn't leak across scene transitions.
+    Anchor_Enhance_EnDekubaba_OnActorDestroy(this);
+
     Collider_DestroyJntSph(play, &this->collider);
 
     ResourceMgr_UnregisterSkeleton(&this->skelAnime);
@@ -343,6 +369,8 @@ s16 EnDekubaba_GetStateIndex(EnDekubaba* this) {
     if (this->actionFunc == EnDekubaba_PrunedSomersault) return 11;
     if (this->actionFunc == EnDekubaba_ShrinkDie)        return 12;
     if (this->actionFunc == EnDekubaba_DeadStickDrop)    return 13;
+    // Pillar 5 (#308) — acid vomit state index 14.
+    if (this->actionFunc == EnDekubaba_AcidVomit)        return 14;
     return -1;
 }
 
@@ -395,6 +423,7 @@ void EnDekubaba_ApplyNetState(EnDekubaba* this, s16 stateIndex) {
         case 8:  EnDekubaba_SetupHit(this, 0);           break;
         case 9:  EnDekubaba_SetupStunnedVertical(this);  break;
         case 10: EnDekubaba_SetupSway(this);             break;
+        case 14: EnDekubaba_SetupAcidVomit(this);        break;
         default:
             // 11=PrunedSomersault / 12=ShrinkDie / 13=DeadStickDrop —
             // see header comment above.
@@ -481,6 +510,42 @@ void EnDekubaba_SetupLunge(EnDekubaba* this) {
     this->actionFunc = EnDekubaba_Lunge;
 }
 
+// Pillar 5 (#308) — acid vomit attack. Replaces vanilla lunge when
+// descriptor rolls acid at DecideLunge. Uses the same PauseChompAnim
+// as vanilla lunge so peer receives the same visible chomp animation,
+// but the AC collider stays off (this is a ranged attack, not
+// contact). Timer counts UP from 0 through kAcidTotalFrames (25).
+// Descriptor's OnAcidVomitTick renders telegraph particles + spawns
+// EN_DEKUBABA_ACID projectile at fire frame (15).
+void EnDekubaba_SetupAcidVomit(EnDekubaba* this) {
+    Animation_PlayOnce(&this->skelAnime, &gDekuBabaPauseChompAnim);
+    this->timer = 0;
+    this->collider.base.acFlags &= ~AC_ON;  // no contact damage; ranged
+    this->actionFunc = EnDekubaba_AcidVomit;
+}
+
+void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play) {
+    SkelAnime_Update(&this->skelAnime);
+
+    // Delegate per-frame visuals + projectile spawn to descriptor.
+    // Descriptor's OnAcidVomitTick reads this->timer (which we drive
+    // up from 0) to sequence telegraph → fire → follow-through.
+    Anchor_Enhance_EnDekubaba_OnAcidVomitTick(this, play, (int)this->timer);
+
+    this->timer++;
+
+    // Cycle length matches descriptor's kAcidTotalFrames (25). At
+    // cycle end, transition to PullBack (vanilla recovery path).
+    // This keeps the animation flow familiar — the acid vomit slots
+    // into the same PrepareLunge → attack → PullBack → Recover
+    // sequence positions the vanilla lunge occupies.
+    if (this->timer >= 25) {
+        EnDekubaba_SetupPullBack(this);
+    }
+
+    EnDekubaba_UpdateHeadPosition(this);
+}
+
 void EnDekubaba_SetupPullBack(EnDekubaba* this) {
     Animation_Change(&this->skelAnime, &gDekuBabaPauseChompAnim, 1.0f, 15.0f,
                      Animation_GetLastFrame(&gDekuBabaPauseChompAnim), ANIMMODE_ONCE, -3.0f);
@@ -521,6 +586,11 @@ void EnDekubaba_SetupPrunedSomersault(EnDekubaba* this) {
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->actionFunc = EnDekubaba_PrunedSomersault;
 
+    // Pillar 5 (#308) — reset descriptor charge state + per-attack
+    // flags on death. Post-Regrow first attack starts fresh at 0%
+    // chance per plan §Sync ("dead → reset per Karebaba pattern").
+    Anchor_Enhance_EnDekubaba_OnDeath(this);
+
     GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
 }
 
@@ -529,6 +599,9 @@ void EnDekubaba_SetupShrinkDie(EnDekubaba* this) {
                      0.0f, ANIMMODE_ONCE, -3.0f);
     this->collider.base.acFlags &= ~AC_ON;
     this->actionFunc = EnDekubaba_ShrinkDie;
+
+    // Pillar 5 (#308) — reset descriptor charge state on death.
+    Anchor_Enhance_EnDekubaba_OnDeath(this);
 
     GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
 }
@@ -797,7 +870,17 @@ void EnDekubaba_DecideLunge(EnDekubaba* this, PlayState* play) {
     if (240.0f * this->size < Math_Vec3f_DistXZ(&this->actor.home.pos, &nearestPlayer->world.pos)) {
         EnDekubaba_SetupRetract(this);
     } else if ((this->timer == 0) || (this->actor.xzDistToPlayer < 80.0f * this->size)) {
-        EnDekubaba_SetupPrepareLunge(this);
+        // Pillar 5 (#308) — acid vomit decision. Bridge rolls charge
+        // state machine + range gate. If returns 1, host committed
+        // to acid → transition to AcidVomit state instead of vanilla
+        // PrepareLunge. Peer skips this branch (bridge returns 0 on
+        // non-host) and follows the wire-received actionState via
+        // ApplyNetState (which routes state 14 → SetupAcidVomit).
+        if (Anchor_Enhance_EnDekubaba_MaybeAcidLunge(this, play)) {
+            EnDekubaba_SetupAcidVomit(this);
+        } else {
+            EnDekubaba_SetupPrepareLunge(this);
+        }
     }
 }
 
@@ -985,6 +1068,13 @@ void EnDekubaba_Recover(EnDekubaba* this, PlayState* play) {
         }
 
         if (this->timer == 0) {
+            // Pillar 5 (#308) — attack-cycle end. Advance charge
+            // counters + clear per-attack flags. Fires once per
+            // Recover-to-DecideLunge transition regardless of which
+            // attack ran (vanilla lunge or acid vomit). Descriptor
+            // pattern per plan §Feature-interaction "Counter-
+            // advancement rules".
+            Anchor_Enhance_EnDekubaba_OnAttackComplete(this);
             EnDekubaba_SetupDecideLunge(this);
         }
     }

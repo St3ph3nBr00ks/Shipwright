@@ -17,6 +17,7 @@ extern "C" {
 
 #include "EnemyStateSync/EnemyLifecycle.h"
 #include "EnemySync/PerActor/EnKarebabaState.h"  // refactor A.7
+#include "EnemySync/PerActor/EnDekubabaState.h"  // Pillar 5 #308
 
 struct EnemyNetId {
     uint32_t netId = 0;
@@ -107,6 +108,11 @@ struct EnemyNetId {
     // see EnemySync/PerActor/EnKarebabaState.h for the pattern future
     // regrow-class enemies should follow.
     EnemySync::EnKarebabaState karebaba;
+
+    // Pillar 5 (#308) — Dekubaba-specific per-actor state. Currently
+    // holds acid-vomit enhancement flags from most recent broadcast.
+    // Feature B (#309) + C (#318) will add fields here as they land.
+    EnemySync::EnDekubabaState dekubaba;
 
     // pendingNaturalDeath was deleted at end of C2 Phase 1 step 5b.
     // Read sites use EnemyStateSync::PhaseImpliesPendingNaturalDeath(

@@ -133,6 +133,14 @@ extern PlayState* gPlayState;
 extern "C" int Anchor_Enhance_EnKarebaba_IsCurrentSpinEnhanced(EnKarebaba* actor);
 extern "C" int Anchor_Enhance_EnKarebaba_IsCharged(EnKarebaba* actor);
 
+// Pillar 5 (GH #308) — Dekubaba acid-vomit enhancement query bridges.
+// Mirror of the Karebaba pair. Included in ENEMY_STATE payload when
+// host is broadcasting a Dekubaba whose current attack is an acid
+// vomit OR whose charge state is Ready (telegraph should render on
+// peer). Impl in EnDekubabaBridge.cpp.
+extern "C" int Anchor_Enhance_EnDekubaba_IsCurrentAttackAcid(EnDekubaba* actor);
+extern "C" int Anchor_Enhance_EnDekubaba_IsAcidCharged(EnDekubaba* actor);
+
 // Pillar C2 Phase 4 Commit C — consolidated ENEMY_STATE handler.
 //
 // All four legacy packet types (ENEMY_UPDATE, ENEMY_DEFEATED, ENEMY_SPAWN,
@@ -185,6 +193,14 @@ struct EnemyUpdateExtras {
     // from the host whenever the Dekubaba is animating (Grow, Lunge,
     // PullBack, Recover, Hit). Six bytes per packet.
     s16  dekubabaStemAngles[3] = { 0, 0, 0 };
+    // Pillar 5 (GH #308) — acid vomit enhancement. Set true when host
+    // is currently in the AcidVomit attack cycle; peer mirrors visuals
+    // and spawns projectile locally at the deterministic fire frame.
+    bool dekubabaAcidActive  = false;
+    // Ready-phase telegraph flag (mirror of karebabaCharged). Peer
+    // renders 1.5× head + mouth spit during PrepareLunge when this
+    // is true.
+    bool dekubabaAcidCharged = false;
 
     // Plan §7 / KB-26 — En_Goma (Larva) state-machine sync.
     bool hasEnGoma         = false;
@@ -546,6 +562,11 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.dekubabaStemAngles[0] = baba->stemSectionAngle[0];
         e.dekubabaStemAngles[1] = baba->stemSectionAngle[1];
         e.dekubabaStemAngles[2] = baba->stemSectionAngle[2];
+        // Pillar 5 (#308) — acid vomit + charged flags.
+        e.dekubabaAcidActive  = Anchor_Enhance_EnDekubaba_IsCurrentAttackAcid(
+                                    baba) != 0;
+        e.dekubabaAcidCharged = Anchor_Enhance_EnDekubaba_IsAcidCharged(
+                                    baba) != 0;
     } else if (actor->id == ACTOR_EN_GOMA) {
         EnGoma* lg          = (EnGoma*)actor;
         e.hasEnGoma         = true;
@@ -1356,6 +1377,15 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         stems.push_back((int)extras.dekubabaStemAngles[1]);
         stems.push_back((int)extras.dekubabaStemAngles[2]);
         payload["dekubabaStems"] = stems;
+        // Pillar 5 (#308) — acid vomit + charged flags. Included only
+        // when true so absent-key defaults to false on receive
+        // (backward-compat with older builds that don't ship the field).
+        if (extras.dekubabaAcidActive) {
+            payload["dekubabaAcidActive"] = true;
+        }
+        if (extras.dekubabaAcidCharged) {
+            payload["dekubabaAcidCharged"] = true;
+        }
     }
 
     // Plan §7 / KB-26 — En_Goma (Larva) state-machine sync. Drives non-
@@ -2155,6 +2185,12 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
         // EnDekubaba_ApplyNetState when local state diverges from net.
         if (actor->id == ACTOR_EN_DEKUBABA && payload.contains("actionState")) {
             ext->netStateIndex = (s16)payload["actionState"].get<int>();
+            // Pillar 5 (#308) — acid vomit + charged flags. Absent-key
+            // defaults to false for backward compat.
+            ext->dekubaba.netAcidActive  =
+                payload.value("dekubabaAcidActive", false);
+            ext->dekubaba.netAcidCharged =
+                payload.value("dekubabaAcidCharged", false);
         }
 
         // Plan §7 / KB-26 — cache En_Goma actionState. Drives

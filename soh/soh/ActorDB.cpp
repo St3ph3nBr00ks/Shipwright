@@ -695,12 +695,31 @@ static ActorDBInit EnKarebabaGeyserInit = {
 };
 extern "C" s16 gEnKarebabaGeyserId;
 
+// Pillar 5 (GH #308) — acid vomit projectile fired by enhanced
+// EnDekubaba during acid-vomit attack. See Plans/en_dekubaba_enhanced_plan.md.
+#include "src/overlays/actors/ovl_En_Dekubaba_Acid/z_en_dekubaba_acid.h"
+static ActorDBInit EnDekubabaAcidInit = {
+    "En_Dekubaba_Acid",
+    "Dekubaba Acid Vomit projectile (Flotilla)",
+    ACTORCAT_MISC,
+    (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
+    OBJECT_GAMEPLAY_KEEP,
+    sizeof(EnDekubabaAcid),
+    (ActorFunc)EnDekubabaAcid_Init,
+    (ActorFunc)EnDekubabaAcid_Destroy,
+    (ActorFunc)EnDekubabaAcid_Update,
+    (ActorFunc)EnDekubabaAcid_Draw,
+    nullptr,
+};
+extern "C" s16 gEnDekubabaAcidId;
+
 void ActorDB::AddBuiltInCustomActors() {
     gEnPartnerId        = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
     gEnFollowerId       = ActorDB::Instance->AddEntry(EnFollowerInit).entry.id;
     gEnInvaderId        = ActorDB::Instance->AddEntry(EnInvaderInit).entry.id;
     gEnTeamMarkerId     = ActorDB::Instance->AddEntry(EnTeamMarkerInit).entry.id;
     gEnKarebabaGeyserId = ActorDB::Instance->AddEntry(EnKarebabaGeyserInit).entry.id;
+    gEnDekubabaAcidId   = ActorDB::Instance->AddEntry(EnDekubabaAcidInit).entry.id;
 }
 
 extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {

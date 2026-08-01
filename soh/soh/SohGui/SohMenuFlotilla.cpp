@@ -816,6 +816,26 @@ void SohMenu::AddMenuFlotilla() {
             "the plant is more dangerous but not un-fightable.\n\n"
             "See Plans/en_karebaba_enhanced_plan.md, tracker #310."));
 
+    AddWidget(path, "Dekubaba (En_Dekubaba) — acid vomit + more",
+              WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Acid vomit: ranged spit attack in place of lunge##Flotilla",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Dekubaba.AcidVomit"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: each Dekubaba lunge decision has an escalating "
+            "chance (0% → 25% → 50% → 75% → 100% over successive "
+            "attacks) to fire an acid-vomit projectile instead of the "
+            "vanilla melee lunge. Requires Link outside melee range "
+            "(100-400u XZ) to trigger. Charge counter resets on fire "
+            "or on death; 3-attack cooldown after firing.\n\n"
+            "Vanilla melee lunge is preserved at close range — the "
+            "plant becomes ranged when you back away, not un-fightable "
+            "up close.\n\n"
+            "See Plans/en_dekubaba_enhanced_plan.md, tracker #308."));
+
     // -----------------------------------------------------------------
     // Scene Info
     // -----------------------------------------------------------------

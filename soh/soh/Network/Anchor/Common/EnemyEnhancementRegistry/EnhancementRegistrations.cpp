@@ -18,6 +18,7 @@
 #include "soh/Network/Anchor/Anchor.h"
 
 #include "EnhancementRegistry.h"
+#include "PerActor/EnDekubabaDescriptor.h"
 #include "PerActor/EnKarebabaDescriptor.h"
 #include "PerActor/EnSwDescriptor.h"
 
@@ -35,8 +36,11 @@ void RegisterEnemyEnhancementDescriptors() {
     // Karebaba — geyser AoE Spin (#310).
     reg.Register(std::make_unique<AnchorEnemyEnhancement::EnKarebabaDescriptor>());
 
+    // Dekubaba — Feature A acid vomit (#308). Features B (#309) and
+    // C (#318) extend this same descriptor when they land.
+    reg.Register(std::make_unique<AnchorEnemyEnhancement::EnDekubabaDescriptor>());
+
     // Future per-actor descriptors land here:
-    //   reg.Register(std::make_unique<EnDekubabaDescriptor>()); // Pillar 5 #308/#309
     //   reg.Register(std::make_unique<BariDescriptor>());       // Phase 4
     //   ... etc.
 }

@@ -197,6 +197,15 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     // from actor.home.pos for the spin window. See
     // Plans/en_karebaba_enhanced_plan.md.
     { CVAR_ENHANCEMENT("Karebaba.GeyserSpin"), 0 },
+
+    // Pillar 5 (#308) — Dekubaba acid vomit projectile enhancement.
+    // Independent CVar per plan §CVars. When ON, host rolls acid
+    // chance at each DecideLunge (25% steps ramp per attack); on
+    // success + Link in acid range → transitions to AcidVomit state
+    // that spawns EN_DEKUBABA_ACID projectile instead of vanilla
+    // lunge. Features B (#309 detach) and C (#318 seed) will be
+    // separate CVars.
+    { CVAR_ENHANCEMENT("Dekubaba.AcidVomit"), 0 },
 };
 
 const std::vector<FloatCVarEntry> kEnforcedFloats = {
