@@ -37,8 +37,18 @@
 
 #include "EnKarebabaDescriptor.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/EnhancementRegistry.h"
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"  // AnchorCVarSync::GetEnforcedInt
+
+extern "C" {
+#include "functions.h"  // Audio_PlayActorSound2, Audio_PlaySoundGeneral
+#include "variables.h"  // gSfxDefaultFreqAndVolScale, gSfxDefaultReverb
+}
 
 namespace {
+
+// V8 — doubled-volume scale for the CVar-on branch of PlayActorSfx.
+// Static-lifetime pointer required by Audio_PlaySoundGeneral's API.
+f32 sDoubledVolScale = 2.0f;
 
 // Look up the registered EnKarebabaDescriptor. Returns nullptr when
 // no descriptor is registered (impossible post-ShipInit but checked
@@ -129,4 +139,39 @@ extern "C" void Anchor_Enhance_EnKarebaba_OnActorDestroy(EnKarebaba* actor) {
     auto* desc = GetKarebabaDescriptor();
     if (desc == nullptr) return;
     desc->OnActorDestroy(actor);
+}
+
+// V8 (2026-07-31) — CVar-gated SFX volume boost for vanilla En_Karebaba
+// sound effects. Called from every Audio_PlayActorSound2 site in
+// z_en_karebaba.c (6 sites: SetupAwaken growl, SetupDying + SetupDyingNet
+// death, Upright + Spin mouth chomps, Dying ground-impact). When the
+// GeyserSpin CVar is OFF, forwards to vanilla Audio_PlayActorSound2
+// unchanged (identical single-player behavior). When ON, routes through
+// Audio_PlaySoundGeneral with a 2.0f volScale pointer — the whole
+// Karebaba sounds twice as loud during the enhancement, matching the
+// louder acid attack SFX (sizzle/erupt boosted +50% in V7).
+//
+// Rationale — user 2026-07-31: "double the volume of the remaining
+// karebaba sound effects" after V7 boosted only WATER_BUBBLE +
+// ERUPTION_CLOUD (the descriptor's own new SFX). The vanilla
+// enemy-family SFX (NA_SE_EN_DEKU_JR_*, NA_SE_EN_DODO_M_GND,
+// NA_SE_EN_DUMMY482) were still at baseline volume, making the enhanced
+// Karebaba sound uneven — loud acid attack, quiet mouth chomps and
+// death cry. Doubling brings them into balance with the enhancement.
+//
+// Vanilla behavior is preserved when the CVar is off — this is an
+// enhancement-scoped tuning, not a global buff.
+extern "C" void Anchor_Enhance_EnKarebaba_PlayActorSfx(Actor* actor,
+                                                        u16 sfxId) {
+    if (actor == nullptr) return;
+    if (AnchorCVarSync::GetEnforcedInt(
+            AnchorEnemyEnhancement::EnKarebabaDescriptor::GeyserSpinCVarName(),
+            0) == 0) {
+        Audio_PlayActorSound2(actor, sfxId);
+        return;
+    }
+    Audio_PlaySoundGeneral(sfxId, &actor->projectedPos, 4,
+                            &gSfxDefaultFreqAndVolScale,
+                            &sDoubledVolScale,
+                            &gSfxDefaultReverb);
 }

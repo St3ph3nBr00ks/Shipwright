@@ -36,6 +36,10 @@ extern void Anchor_Enhance_EnKarebaba_OnDeath(EnKarebaba* actor);
 // Consumed by EnemyState.cpp send-side; kept here for symmetry.
 extern int  Anchor_Enhance_EnKarebaba_IsCurrentSpinEnhanced(EnKarebaba* actor);
 extern int  Anchor_Enhance_EnKarebaba_IsCharged(EnKarebaba* actor);
+// V8 — CVar-gated SFX volume boost. Forwards to Audio_PlayActorSound2
+// when the enhancement CVar is off (single-player identical); plays at
+// 2.0× volume via Audio_PlaySoundGeneral when on. Six sites below.
+extern void Anchor_Enhance_EnKarebaba_PlayActorSfx(Actor* actor, u16 sfxId);
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
@@ -180,7 +184,7 @@ void EnKarebaba_SetupIdle(EnKarebaba* this) {
 void EnKarebaba_SetupAwaken(EnKarebaba* this) {
     Animation_Change(&this->skelAnime, &gDekuBabaFastChompAnim, 4.0f, 0.0f,
                      Animation_GetLastFrame(&gDekuBabaFastChompAnim), ANIMMODE_LOOP, -3.0f);
-    Audio_PlayActorSound2(&this->actor, NA_SE_EN_DUMMY482);
+    Anchor_Enhance_EnKarebaba_PlayActorSfx(&this->actor, NA_SE_EN_DUMMY482);
     this->actionFunc = EnKarebaba_Awaken;
     LUSLOG_INFO("[Karebaba] SetupAwaken home=(%.0f,%.0f,%.0f)",
                 this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z);
@@ -231,7 +235,7 @@ void EnKarebaba_SetupDying(EnKarebaba* this) {
     this->actor.velocity.y = 4.0f;
     this->actor.world.rot.y = this->actor.shape.rot.y + 0x8000;
     this->actor.speedXZ = 3.0f;
-    Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_JR_DEAD);
+    Anchor_Enhance_EnKarebaba_PlayActorSfx(&this->actor, NA_SE_EN_DEKU_JR_DEAD);
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->actionFunc = EnKarebaba_Dying;
     LUSLOG_INFO("[Karebaba] SetupDying ptr=%p cat=%d home=(%.0f,%.0f,%.0f)",
@@ -349,7 +353,7 @@ void EnKarebaba_SetupDyingNet(EnKarebaba* this) {
     this->actor.velocity.y = 4.0f;
     this->actor.world.rot.y = this->actor.shape.rot.y + 0x8000;
     this->actor.speedXZ = 3.0f;
-    Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_JR_DEAD);
+    Anchor_Enhance_EnKarebaba_PlayActorSfx(&this->actor, NA_SE_EN_DEKU_JR_DEAD);
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
     this->actionFunc = EnKarebaba_Dying;
 }
@@ -457,7 +461,7 @@ void EnKarebaba_Upright(EnKarebaba* this, PlayState* play) {
     }
 
     if (Animation_OnFrame(&this->skelAnime, 0.0f) || Animation_OnFrame(&this->skelAnime, 12.0f)) {
-        Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_JR_MOUTH);
+        Anchor_Enhance_EnKarebaba_PlayActorSfx(&this->actor, NA_SE_EN_DEKU_JR_MOUTH);
     }
 
     // Pillar 5 (GH #310) V6 — per-frame telegraph render when Ready.
@@ -495,7 +499,7 @@ void EnKarebaba_Spin(EnKarebaba* this, PlayState* play) {
 
     if (Animation_OnFrame(&this->skelAnime, 0.0f) || Animation_OnFrame(&this->skelAnime, 12.0f)) {
 
-        Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_JR_MOUTH);
+        Anchor_Enhance_EnKarebaba_PlayActorSfx(&this->actor, NA_SE_EN_DEKU_JR_MOUTH);
     }
 
     value = 20 - this->actor.params;
@@ -550,7 +554,7 @@ void EnKarebaba_Dying(EnKarebaba* this, PlayState* play) {
         }
 
         if (this->actor.bgCheckFlags & 2) {
-            Audio_PlayActorSound2(&this->actor, NA_SE_EN_DODO_M_GND);
+            Anchor_Enhance_EnKarebaba_PlayActorSfx(&this->actor, NA_SE_EN_DODO_M_GND);
             this->actor.params = 1;
         }
     } else if (this->actor.params == 1) {
