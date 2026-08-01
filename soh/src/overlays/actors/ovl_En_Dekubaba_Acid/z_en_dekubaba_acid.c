@@ -127,9 +127,8 @@ void EnDekubabaAcid_Update(Actor* thisx, PlayState* play) {
     // Ballistic arc — Actor_MoveXZGravity applies velocity + gravity.
     // BgCheck_Update tests floor / wall / ceiling intersections.
     Actor_MoveXZGravity(&this->actor);
-    Actor_UpdateBgCheckInfo(play, &this->actor, 10.0f, 15.0f, 15.0f,
-                             UPDBGCHECKINFO_FLAG_0 | UPDBGCHECKINFO_FLAG_2 |
-                             UPDBGCHECKINFO_FLAG_4);
+    // bgCheck flags = 5 (floor + wall) — vanilla convention.
+    Actor_UpdateBgCheckInfo(play, &this->actor, 10.0f, 15.0f, 15.0f, 5);
 
     // Ground / wall contact → despawn (with room for future splash
     // VFX at impact position — descriptor could handle via a

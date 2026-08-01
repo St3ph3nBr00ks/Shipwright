@@ -82,6 +82,11 @@ void EnDekubaba_Sway(EnDekubaba* this, PlayState* play);
 void EnDekubaba_PrunedSomersault(EnDekubaba* this, PlayState* play);
 void EnDekubaba_ShrinkDie(EnDekubaba* this, PlayState* play);
 void EnDekubaba_DeadStickDrop(EnDekubaba* this, PlayState* play);
+// Pillar 5 (#308/#309/#318) forward-decl — UpdateHeadPosition definition
+// was pushed past line 996 by the new AcidVomit / DetachedSquirm /
+// SeedFire actionFuncs; callers inside those new functions need the
+// forward-decl to compile without implicit-int-return errors.
+void EnDekubaba_UpdateHeadPosition(EnDekubaba* this);
 // Pillar 5 (#308) — acid vomit state (replaces vanilla lunge when
 // descriptor rolls acid at DecideLunge decision point).
 void EnDekubaba_SetupAcidVomit(EnDekubaba* this);
@@ -621,9 +626,9 @@ void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play) {
 
     // Vanilla-style physics — velocity → position + bgCheck floor test.
     Actor_MoveXZGravity(&this->actor);
-    Actor_UpdateBgCheckInfo(play, &this->actor, 20.0f, 40.0f, 40.0f,
-                             UPDBGCHECKINFO_FLAG_0 | UPDBGCHECKINFO_FLAG_2 |
-                             UPDBGCHECKINFO_FLAG_4);
+    // bgCheck flags = 5 (floor + wall). Matches vanilla Dekubaba
+    // convention at z_en_dekubaba.c:1541.
+    Actor_UpdateBgCheckInfo(play, &this->actor, 20.0f, 40.0f, 40.0f, 5);
 
     // Bleedout death — colChkInfo.health decremented by descriptor
     // per interval. When it hits 0, transition to death.

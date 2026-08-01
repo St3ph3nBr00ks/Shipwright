@@ -98,9 +98,8 @@ void EnDekubabaSeed_Update(Actor* thisx, PlayState* play) {
     Actor_MoveXZGravity(&this->actor);
 
     // Ground contact detection — bgCheck for early-land at floor.
-    Actor_UpdateBgCheckInfo(play, &this->actor, 10.0f, 15.0f, 15.0f,
-                             UPDBGCHECKINFO_FLAG_0 | UPDBGCHECKINFO_FLAG_2 |
-                             UPDBGCHECKINFO_FLAG_4);
+    // Flags = 5 (floor + wall) matches vanilla Dekubaba convention.
+    Actor_UpdateBgCheckInfo(play, &this->actor, 10.0f, 15.0f, 15.0f, 5);
     if (this->actor.bgCheckFlags & 1) {
         // Ground hit — spawn child here.
         Anchor_Enhance_EnDekubaba_OnSeedLanded(
