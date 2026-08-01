@@ -111,6 +111,47 @@ extern "C" void Anchor_Enhance_EnDekubaba_OnActorDestroy(EnDekubaba* actor) {
     desc->OnActorDestroy(actor);
 }
 
+// --- Feature B (#309) — detach + pursue bridge shims -----------------
+
+extern "C" int Anchor_Enhance_EnDekubaba_MaybeDetach(EnDekubaba* actor,
+                                                      PlayState* play) {
+    if (actor == nullptr) return 0;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0;
+    return desc->OnHostMaybeDetach(actor, play) ? 1 : 0;
+}
+
+extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerDetachActiveFlag(
+    EnDekubaba* actor, int active) {
+    if (actor == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnPeerReceiveDetachActiveFlag(actor, active != 0);
+}
+
+extern "C" void Anchor_Enhance_EnDekubaba_OnDetachedSquirmTick(
+    EnDekubaba* actor, PlayState* play) {
+    if (actor == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnDetachedSquirmTick(actor, play);
+}
+
+extern "C" void Anchor_Enhance_EnDekubaba_OnDetachedDyingTick(
+    EnDekubaba* actor, PlayState* play) {
+    if (actor == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnDetachedDyingTick(actor, play);
+}
+
+extern "C" int Anchor_Enhance_EnDekubaba_IsDetached(EnDekubaba* actor) {
+    if (actor == nullptr) return 0;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0;
+    return desc->IsDetached(actor) ? 1 : 0;
+}
+
 // --- CVar-gated audio boost shim (mirrors Karebaba V8) --------------
 //
 // Called from z_en_dekubaba.c at Audio_PlayActorSound2 sites so

@@ -35,6 +35,12 @@ extern int  Anchor_Enhance_EnDekubaba_IsAcidCharged(EnDekubaba* actor);
 // for future audio-balance parity.
 extern void Anchor_Enhance_EnDekubaba_PlayActorSfx(Actor* actor, u16 sfxId);
 
+// Feature B (#309) — detach + pursue bridge shims.
+extern int  Anchor_Enhance_EnDekubaba_MaybeDetach(EnDekubaba* actor, PlayState* play);
+extern void Anchor_Enhance_EnDekubaba_OnDetachedSquirmTick(EnDekubaba* actor, PlayState* play);
+extern void Anchor_Enhance_EnDekubaba_OnDetachedDyingTick(EnDekubaba* actor, PlayState* play);
+extern int  Anchor_Enhance_EnDekubaba_IsDetached(EnDekubaba* actor);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnDekubaba_Init(Actor* thisx, PlayState* play);
@@ -72,6 +78,11 @@ void EnDekubaba_DeadStickDrop(EnDekubaba* this, PlayState* play);
 // descriptor rolls acid at DecideLunge decision point).
 void EnDekubaba_SetupAcidVomit(EnDekubaba* this);
 void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play);
+// Pillar 5 (#309) — detach + pursue states.
+void EnDekubaba_SetupDetachedSquirm(EnDekubaba* this);
+void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play);
+void EnDekubaba_SetupDetachedDying(EnDekubaba* this);
+void EnDekubaba_DetachedDying(EnDekubaba* this, PlayState* play);
 
 static Vec3f sZeroVec = { 0.0f, 0.0f, 0.0f };
 
@@ -371,6 +382,9 @@ s16 EnDekubaba_GetStateIndex(EnDekubaba* this) {
     if (this->actionFunc == EnDekubaba_DeadStickDrop)    return 13;
     // Pillar 5 (#308) — acid vomit state index 14.
     if (this->actionFunc == EnDekubaba_AcidVomit)        return 14;
+    // Pillar 5 (#309) — detach + pursue state indices 15/16.
+    if (this->actionFunc == EnDekubaba_DetachedSquirm)   return 15;
+    if (this->actionFunc == EnDekubaba_DetachedDying)    return 16;
     return -1;
 }
 
@@ -424,6 +438,8 @@ void EnDekubaba_ApplyNetState(EnDekubaba* this, s16 stateIndex) {
         case 9:  EnDekubaba_SetupStunnedVertical(this);  break;
         case 10: EnDekubaba_SetupSway(this);             break;
         case 14: EnDekubaba_SetupAcidVomit(this);        break;
+        case 15: EnDekubaba_SetupDetachedSquirm(this);   break;
+        case 16: EnDekubaba_SetupDetachedDying(this);    break;
         default:
             // 11=PrunedSomersault / 12=ShrinkDie / 13=DeadStickDrop —
             // see header comment above.
@@ -544,6 +560,98 @@ void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play) {
     }
 
     EnDekubaba_UpdateHeadPosition(this);
+}
+
+// Pillar 5 (#309) — DetachedSquirm state. Actor has severed from stem
+// (leaf-bundle base hidden via Draw gate). Serpentine motion via
+// sine-wave stem angles + Actor_MoveXZGravity toward nearest player
+// + bleedout timer (-1 HP every 5 seconds). Transitions to
+// DetachedDying when colChkInfo.health <= 0.
+void EnDekubaba_SetupDetachedSquirm(EnDekubaba* this) {
+    // Loop the FastChomp anim for a mouth-open squirm visual.
+    Animation_Change(&this->skelAnime, &gDekuBabaFastChompAnim, 0.5f, 0.0f,
+                     Animation_GetLastFrame(&gDekuBabaFastChompAnim),
+                     ANIMMODE_LOOP, -3.0f);
+    this->timer = 0;
+    // Body cylinder collider stays ON so player can still damage it.
+    this->collider.base.acFlags |= AC_ON;
+    // Gravity so the head-stem settles onto ground surface.
+    this->actor.gravity = -1.0f;
+    // Slight upward velocity to unglue from home.pos initial anchor
+    // (helps the first bgCheck settle Y correctly).
+    this->actor.velocity.y = 2.0f;
+    // Face the actor's facing direction as movement forward. World.rot
+    // gets driven each tick by the descriptor toward nearest player.
+    this->actor.world.rot.y = this->actor.shape.rot.y;
+    this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
+    this->actionFunc = EnDekubaba_DetachedSquirm;
+}
+
+void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play) {
+    SkelAnime_Update(&this->skelAnime);
+
+    // Descriptor handles: serpentine sine on stemSectionAngle,
+    // yaw toward nearest player, XZ velocity write, ground-follow
+    // raycast Y-snap, host-only bleedout timer.
+    Anchor_Enhance_EnDekubaba_OnDetachedSquirmTick(this, play);
+
+    // Vanilla-style physics — velocity → position + bgCheck floor test.
+    Actor_MoveXZGravity(&this->actor);
+    Actor_UpdateBgCheckInfo(play, &this->actor, 20.0f, 40.0f, 40.0f,
+                             UPDBGCHECKINFO_FLAG_0 | UPDBGCHECKINFO_FLAG_2 |
+                             UPDBGCHECKINFO_FLAG_4);
+
+    // Bleedout death — colChkInfo.health decremented by descriptor
+    // per interval. When it hits 0, transition to death.
+    if (this->actor.colChkInfo.health <= 0) {
+        EnDekubaba_SetupDetachedDying(this);
+    }
+
+    // Vanilla head-position math uses stemSectionAngle[] which the
+    // descriptor just wrote — call it to update visible head pose.
+    EnDekubaba_UpdateHeadPosition(this);
+}
+
+// DetachedDying — shrink-die at current squirm position. Plays vanilla
+// ShrinkDie animation reversed (as in EnDekubaba_SetupShrinkDie) then
+// Actor_Kill. Drops Deku Nuts via GameInteractor_ExecuteOnEnemyDefeat.
+void EnDekubaba_SetupDetachedDying(EnDekubaba* this) {
+    Animation_Change(&this->skelAnime, &gDekuBabaFastChompAnim, -1.5f,
+                     Animation_GetLastFrame(&gDekuBabaFastChompAnim),
+                     0.0f, ANIMMODE_ONCE, -3.0f);
+    this->collider.base.acFlags &= ~AC_ON;
+    this->actor.speedXZ = 0.0f;
+    this->actor.velocity.x = 0.0f;
+    this->actor.velocity.z = 0.0f;
+    this->timer = 0;
+    this->actionFunc = EnDekubaba_DetachedDying;
+
+    // Fire vanilla defeat notification — drops nuts, updates
+    // enemy-defeat trackers.
+    GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+    // Reset descriptor state (matches other death setup funcs).
+    Anchor_Enhance_EnDekubaba_OnDeath(this);
+}
+
+void EnDekubaba_DetachedDying(EnDekubaba* this, PlayState* play) {
+    SkelAnime_Update(&this->skelAnime);
+    Anchor_Enhance_EnDekubaba_OnDetachedDyingTick(this, play);
+
+    this->timer++;
+
+    // Shrink the actor visually across the dying frames.
+    const f32 progress = 1.0f - ((f32)this->timer / 40.0f);
+    const f32 baseScale = this->size * 0.01f;
+    Actor_SetScale(&this->actor, baseScale * (progress > 0.0f ? progress : 0.0f));
+
+    // Sink into the ground slightly to sell the death.
+    this->actor.world.pos.y -= 0.3f;
+
+    if (this->timer >= 40) {
+        // Actor_Kill — stays dead until scene reload per user spec
+        // (Q5: neither snap-back nor regrow; vanilla-Dekubaba parity).
+        Actor_Kill(&this->actor);
+    }
 }
 
 void EnDekubaba_SetupPullBack(EnDekubaba* this) {
@@ -1071,11 +1179,20 @@ void EnDekubaba_Recover(EnDekubaba* this, PlayState* play) {
             // Pillar 5 (#308) — attack-cycle end. Advance charge
             // counters + clear per-attack flags. Fires once per
             // Recover-to-DecideLunge transition regardless of which
-            // attack ran (vanilla lunge or acid vomit). Descriptor
-            // pattern per plan §Feature-interaction "Counter-
-            // advancement rules".
+            // attack ran (vanilla lunge or acid vomit).
             Anchor_Enhance_EnDekubaba_OnAttackComplete(this);
-            EnDekubaba_SetupDecideLunge(this);
+            // Pillar 5 (#309) — detach + pursue decision. Rolls after
+            // attack-complete counter advancement. If Link was out of
+            // lunge range at attack time AND the chance roll fires,
+            // Dekubaba severs from stem and enters the DetachedSquirm
+            // state instead of returning to DecideLunge. One-shot per
+            // life — Dekubaba won't detach twice (dies via bleedout,
+            // stays dead until scene reload).
+            if (Anchor_Enhance_EnDekubaba_MaybeDetach(this, play)) {
+                EnDekubaba_SetupDetachedSquirm(this);
+            } else {
+                EnDekubaba_SetupDecideLunge(this);
+            }
         }
     }
 
@@ -1517,7 +1634,13 @@ void EnDekubaba_Draw(Actor* thisx, PlayState* play) {
         Matrix_RotateY(this->actor.home.rot.y * (M_PI / 0x8000), MTXMODE_APPLY);
         Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
         gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
-        gSPDisplayList(POLY_OPA_DISP++, gDekuBabaBaseLeavesDL);
+        // Pillar 5 (#309) — hide leaf-bundle base when detached. The
+        // whole point of the detach visual is that the plant has
+        // severed from the stem base; the leaf-bundle should NOT be
+        // rendered at home.pos while the head-and-stem squirm away.
+        if (!Anchor_Enhance_EnDekubaba_IsDetached(this)) {
+            gSPDisplayList(POLY_OPA_DISP++, gDekuBabaBaseLeavesDL);
+        }
 
         if (this->actionFunc == EnDekubaba_PrunedSomersault) {
             EnDekubaba_DrawStemBasePruned(this, play);

@@ -836,6 +836,25 @@ void SohMenu::AddMenuFlotilla() {
             "up close.\n\n"
             "See Plans/en_dekubaba_enhanced_plan.md, tracker #308."));
 
+    AddWidget(path, "Detach + pursue: sever from stem and squirm toward Link##Flotilla",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Dekubaba.DetachAndPursue"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: each attack that Dekubaba completes with Link "
+            "OUT of lunge range (≥240u XZ * size) advances an escalating "
+            "detach counter (0% → 25% → 50% → 75% → 100%). On success, "
+            "the plant severs from its stem base and squirms toward "
+            "the nearest player using serpentine wave motion.\n\n"
+            "Detached form bleeds out — loses 1 HP every 5 seconds. "
+            "Small Dekubaba (1 HP) survives 5s; Big Dekubaba (2 HP) "
+            "survives 10s. Dies wherever it squirmed to; stays dead "
+            "until scene reload (matches vanilla Dekubaba parity).\n\n"
+            "One-shot per actor life — a Dekubaba can only detach "
+            "once. Vanilla Dekubabas that don't detach behave normally.\n\n"
+            "See Plans/en_dekubaba_enhanced_plan.md §Feature B, tracker #309."));
+
     // -----------------------------------------------------------------
     // Scene Info
     // -----------------------------------------------------------------

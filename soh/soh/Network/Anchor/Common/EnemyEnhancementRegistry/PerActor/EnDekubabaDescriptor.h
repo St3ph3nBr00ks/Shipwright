@@ -122,6 +122,36 @@ public:
 
     // Cleanup on actor destroy — removes per-actor state entry.
     void OnActorDestroy(EnDekubaba* actor);
+
+    // ---- Feature B API (detach + pursue, #309) --------------------
+
+    // Called from EnDekubaba_Recover at attack-cycle end, before
+    // Anchor_Enhance_EnDekubaba_OnAttackComplete. Rolls detach chance
+    // if Link was OUT of lunge range at attack time. Returns true iff
+    // host committed to detach — caller invokes SetupDetachedSquirm
+    // instead of the vanilla SetupDecideLunge chain.
+    // One-shot per actor life (Dekubaba doesn't regrow after detach
+    // death).
+    bool OnHostMaybeDetach(EnDekubaba* actor, PlayState* play);
+
+    // Peer-side flag — mirrors netAcidActive pattern. Applied every
+    // tick from HookHandlers before EnDekubaba_ApplyNetState so peer's
+    // local SetupDetachedSquirm sees the right state.
+    void OnPeerReceiveDetachActiveFlag(EnDekubaba* actor, bool active);
+
+    // Called per-frame from the new EnDekubaba_DetachedSquirm actionFunc.
+    // Drives serpentine motion via sine-wave stem angles, ground-follow
+    // Y-snap, and bleedout timer (-1 HP every 5 seconds).
+    void OnDetachedSquirmTick(EnDekubaba* actor, PlayState* play);
+
+    // Called per-frame from the new EnDekubaba_DetachedDying actionFunc.
+    // Plays vanilla ShrinkDie animation at current squirm position;
+    // caller Actor_Kills when timer expires.
+    void OnDetachedDyingTick(EnDekubaba* actor, PlayState* play);
+
+    // Query — send-side for ENEMY_STATE payload. Peer receives via
+    // ApplyPeerDetachActiveFlag and mirrors visual state.
+    bool IsDetached(EnDekubaba* actor);
 };
 
 }  // namespace AnchorEnemyEnhancement

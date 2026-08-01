@@ -171,6 +171,11 @@ extern "C" void Anchor_Enhance_EnKarebaba_ApplyPeerChargedFlag(EnKarebaba* actor
 // netAcidCharged; peer's OnAcidVomitTick + telegraph render use them.
 extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerAcidActiveFlag(EnDekubaba* actor, int active);
 extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerAcidChargedFlag(EnDekubaba* actor, int charged);
+// Pillar 5 (GH #309) — detach + pursue peer-flag bridge. Applied
+// every tick before EnDekubaba_ApplyNetState so peer's leaf-bundle
+// Draw gate reflects host's detach state even before the state-14
+// transition arrives.
+extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerDetachActiveFlag(EnDekubaba* actor, int active);
 
 // GetEnemySkelAnime, IsSyncedWorldActor, IsSyncableActor moved to
 // Common/ActorSyncHelpers.h in #173 Phase 1.
@@ -2989,6 +2994,9 @@ void Anchor::RegisterHooks() {
                     baba, ext->dekubaba.netAcidActive ? 1 : 0);
                 Anchor_Enhance_EnDekubaba_ApplyPeerAcidChargedFlag(
                     baba, ext->dekubaba.netAcidCharged ? 1 : 0);
+                // Pillar 5 (#309) — mirror detach flag onto descriptor.
+                Anchor_Enhance_EnDekubaba_ApplyPeerDetachActiveFlag(
+                    baba, ext->dekubaba.netDetachActive ? 1 : 0);
                 s16 curState = EnDekubaba_GetStateIndex(baba);
                 if (curState != ext->netStateIndex && !hostStale) {
                     if (ShouldLogStateChange(ext->netId, curState, ext->netStateIndex, false)) {

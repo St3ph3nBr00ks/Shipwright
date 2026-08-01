@@ -140,6 +140,7 @@ extern "C" int Anchor_Enhance_EnKarebaba_IsCharged(EnKarebaba* actor);
 // peer). Impl in EnDekubabaBridge.cpp.
 extern "C" int Anchor_Enhance_EnDekubaba_IsCurrentAttackAcid(EnDekubaba* actor);
 extern "C" int Anchor_Enhance_EnDekubaba_IsAcidCharged(EnDekubaba* actor);
+extern "C" int Anchor_Enhance_EnDekubaba_IsDetached(EnDekubaba* actor);
 
 // Pillar C2 Phase 4 Commit C — consolidated ENEMY_STATE handler.
 //
@@ -201,6 +202,11 @@ struct EnemyUpdateExtras {
     // renders 1.5× head + mouth spit during PrepareLunge when this
     // is true.
     bool dekubabaAcidCharged = false;
+    // Pillar 5 (GH #309) — detach + pursue enhancement. Sticky flag —
+    // once true, actor is in the detached-squirm / detached-dying
+    // flow through end of life. Peer's leaf-bundle Draw gate + local
+    // SetupDetachedSquirm path read this to mirror host visuals.
+    bool dekubabaDetachActive = false;
 
     // Plan §7 / KB-26 — En_Goma (Larva) state-machine sync.
     bool hasEnGoma         = false;
@@ -566,6 +572,9 @@ EnemyUpdateExtras GatherExtras(Actor* actor) {
         e.dekubabaAcidActive  = Anchor_Enhance_EnDekubaba_IsCurrentAttackAcid(
                                     baba) != 0;
         e.dekubabaAcidCharged = Anchor_Enhance_EnDekubaba_IsAcidCharged(
+                                    baba) != 0;
+        // Pillar 5 (#309) — detach + pursue flag.
+        e.dekubabaDetachActive = Anchor_Enhance_EnDekubaba_IsDetached(
                                     baba) != 0;
     } else if (actor->id == ACTOR_EN_GOMA) {
         EnGoma* lg          = (EnGoma*)actor;
@@ -1386,6 +1395,11 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
         if (extras.dekubabaAcidCharged) {
             payload["dekubabaAcidCharged"] = true;
         }
+        // Pillar 5 (#309) — detach + pursue flag. Same optional-when-
+        // true encoding.
+        if (extras.dekubabaDetachActive) {
+            payload["dekubabaDetachActive"] = true;
+        }
     }
 
     // Plan §7 / KB-26 — En_Goma (Larva) state-machine sync. Drives non-
@@ -2191,6 +2205,9 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
                 payload.value("dekubabaAcidActive", false);
             ext->dekubaba.netAcidCharged =
                 payload.value("dekubabaAcidCharged", false);
+            // Pillar 5 (#309) — detach + pursue flag.
+            ext->dekubaba.netDetachActive =
+                payload.value("dekubabaDetachActive", false);
         }
 
         // Plan §7 / KB-26 — cache En_Goma actionState. Drives

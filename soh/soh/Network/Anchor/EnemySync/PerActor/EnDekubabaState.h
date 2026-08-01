@@ -37,6 +37,13 @@ struct EnDekubabaState {
     // state index 14) sees the right visuals + telegraph state.
     bool netAcidActive  = false;
     bool netAcidCharged = false;
+
+    // Pillar 5 (GH #309) — detach + pursue enhancement flag. Sticky
+    // per actor life; peer's HookHandlers forwards to descriptor via
+    //   Anchor_Enhance_EnDekubaba_ApplyPeerDetachActiveFlag
+    // so peer's Draw-side leaf-bundle hide + SetupDetachedSquirm
+    // path see the right state.
+    bool netDetachActive = false;
 };
 
 }  // namespace EnemySync

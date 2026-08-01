@@ -206,6 +206,15 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     // lunge. Features B (#309 detach) and C (#318 seed) will be
     // separate CVars.
     { CVAR_ENHANCEMENT("Dekubaba.AcidVomit"), 0 },
+
+    // Pillar 5 (#309) — Dekubaba detach + pursue enhancement.
+    // Independent from AcidVomit. When ON, each attack that fires
+    // with Link out of lunge range (≥240u XZ * size) advances a +25%
+    // detach counter; on success, Dekubaba severs from stem and
+    // squirms toward nearest player. -1 HP every 5s (bleedout);
+    // dies at 0 HP (stays dead until scene reload — matches vanilla
+    // Dekubaba which doesn't regrow). One-shot per life.
+    { CVAR_ENHANCEMENT("Dekubaba.DetachAndPursue"), 0 },
 };
 
 const std::vector<FloatCVarEntry> kEnforcedFloats = {
