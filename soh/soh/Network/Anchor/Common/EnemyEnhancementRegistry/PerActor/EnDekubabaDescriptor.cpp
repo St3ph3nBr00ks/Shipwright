@@ -724,12 +724,16 @@ Vec3f ComputeBehindLinkTarget(EnDekubaba* actor, Actor* target) {
         behind = actor->actor.world.pos;
         return behind;
     }
-    // Link's forward direction from world.rot.y.
+    // Bug 10 fix (2026-08-02) — was `+ Math_SinS(yaw)` which moves in
+    // Link's FORWARD direction (child spawned AHEAD of Link). User
+    // wants BEHIND Link so player is forced to reposition when a
+    // child appears in their blind spot. Negate the offset for
+    // backward direction.
     const s16 linkYaw = target->world.rot.y;
-    behind.x = target->world.pos.x +
+    behind.x = target->world.pos.x -
                Math_SinS(linkYaw) * kSeedBehindLinkOffset;
     behind.y = target->world.pos.y;
-    behind.z = target->world.pos.z +
+    behind.z = target->world.pos.z -
                Math_CosS(linkYaw) * kSeedBehindLinkOffset;
 
     // Clamp to max flight distance from Dekubaba.

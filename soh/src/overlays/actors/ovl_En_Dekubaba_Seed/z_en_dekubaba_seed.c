@@ -42,6 +42,17 @@ extern Actor* Anchor_Enhance_EnDekubaba_ConsumePendingSeedParent(void);
 #define EN_DEKUBABA_SEED_SPEED             12.0f
 #define EN_DEKUBABA_SEED_LIFETIME_FRAMES   180  // safety cap ~9s @ 20fps
 
+// Bug 10 fix (2026-08-02) — trail particles during flight. Draw is
+// a stub (Deku Nut mesh deferred per Feature C §"deferred polish");
+// projectile was invisible flying from Dekubaba mouth to landing.
+// Add per-frame EffectSsGSplash trail so player sees the seed arc.
+// Tan/brown tint (nut color) distinguishes from acid's green trail.
+#define SEED_TRAIL_PERIOD_FRAMES 2
+static Color_RGBA8 sSeedTrailPrimColor = { 180, 130,  60, 220 };  // nut tan
+static Color_RGBA8 sSeedTrailEnvColor  = {  80,  50,  20, 255 };  // dark shadow
+#define SEED_TRAIL_SPLASH_TYPE  2
+#define SEED_TRAIL_SPLASH_SCALE 150   // smaller than acid (250) — nut is small
+
 void EnDekubabaSeed_Init(Actor* thisx, PlayState* play) {
     EnDekubabaSeed* this = (EnDekubabaSeed*)thisx;
 
@@ -96,6 +107,18 @@ void EnDekubabaSeed_Update(Actor* thisx, PlayState* play) {
             this->actor.world.pos.z);
         Actor_Kill(&this->actor);
         return;
+    }
+
+    // Bug 10 fix (2026-08-02) — trail particle for in-flight visual.
+    // Draw is a stub; without this, the projectile is invisible from
+    // launch to landing. Small tan splash every 2 frames traces the
+    // arc.
+    if ((play->gameplayFrames % SEED_TRAIL_PERIOD_FRAMES) == 0) {
+        Vec3f trailPos = this->actor.world.pos;
+        EffectSsGSplash_Spawn(play, &trailPos,
+                               &sSeedTrailPrimColor, &sSeedTrailEnvColor,
+                               SEED_TRAIL_SPLASH_TYPE,
+                               SEED_TRAIL_SPLASH_SCALE);
     }
 
     // Move projectile — straight-line, no gravity.
