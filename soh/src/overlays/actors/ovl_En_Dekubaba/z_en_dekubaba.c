@@ -607,6 +607,13 @@ void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play) {
     // into the same PrepareLunge → attack → PullBack → Recover
     // sequence positions the vanilla lunge occupies.
     if (this->timer >= 25) {
+        // Bug 9 fix (2026-08-02) — reset head scale to vanilla
+        // BEFORE transitioning. RenderAcidTelegraph writes scale
+        // 1.25× during frames 0-14; without this reset, the
+        // enlarged head persists through PullBack + Recover
+        // (~40-60 frames) until OnAttackComplete fires. User
+        // reported "head doesn't return to 1× after attack".
+        Actor_SetScale(&this->actor, this->size * 0.01f);
         EnDekubaba_SetupPullBack(this);
     }
 
@@ -785,6 +792,11 @@ void EnDekubaba_SeedFire(EnDekubaba* this, PlayState* play) {
     // frames total (matches AcidVomit's single-state cycle length)
     // so spawn at frame 15 fires + 10 frames of follow-through.
     if (this->timer >= 25) {
+        // Bug 9 fix (2026-08-02) — reset head scale on exit.
+        // SeedTelegraph frames 0-14 wrote scale 1.25× via
+        // RenderAcidTelegraph; without this reset, enlarged head
+        // persists through PullBack + Recover.
+        Actor_SetScale(&this->actor, this->size * 0.01f);
         EnDekubaba_SetupPullBack(this);
     }
     EnDekubaba_UpdateHeadPosition(this);
