@@ -94,12 +94,28 @@ constexpr int kAcidTelegraphEndFrame = 15;
 constexpr int kAcidSpawnFrame        = 15;
 constexpr int kAcidTotalFrames       = 25;
 
-// Projectile spawn — velocity computed toward player XZ at spawn
-// time (moving-target-not-tracked per plan). Y velocity gives a
-// shallow arc; gravity pulls it down. Tuned so the projectile
-// reaches ~300u XZ before dropping to ground.
-constexpr float kAcidSpitInitialXZSpeed = 8.0f;
-constexpr float kAcidSpitInitialYSpeed  = 4.0f;
+// Projectile ballistic parameters.
+//
+// Bug 4 fix (2026-08-01): projectile was overshooting Link because
+// vy was fixed at 4.0f regardless of target distance. Now solved
+// per-fire from actual target position via ballistic math (see
+// OnAcidVomitTick).
+//
+// Fixed XZ speed keeps the projectile visibly readable (not too
+// slow, not lightning-fast). Gravity matches z_en_dekubaba_acid.c.
+constexpr float kAcidSpitXZSpeed        = 8.0f;
+constexpr float kAcidSpitGravity        = -0.7f;
+// Aim at Link's chest (~20u above his feet) for more forgiving
+// vertical framing — hitting feet exactly is finicky if Link's
+// standing on uneven ground.
+constexpr float kAcidTargetChestOffsetY = 20.0f;
+// Ballistic time-of-flight guardrails. Very close targets get a
+// clamped-minimum flight time so the projectile doesn't have a
+// near-vertical trajectory that looks like a spit-straight-down;
+// very far targets are clamped at a sensible max so we don't launch
+// at absurd upward velocity.
+constexpr float kAcidMinFlightFrames    = 8.0f;
+constexpr float kAcidMaxFlightFrames    = 50.0f;
 
 // ---- Feature B (#309) — detach + pursue tuning ---------------------
 //
@@ -378,31 +394,73 @@ void EnDekubabaDescriptor::OnAcidVomitTick(EnDekubaba* actor,
     }
 
     // Fire projectile at kAcidSpawnFrame — both host and peer spawn
-    // locally with deterministic position + velocity.
+    // locally with proper ballistic trajectory to target's current
+    // position. Each client aims at its OWN nearest player, so peer's
+    // client sees a projectile aimed at peer's Link; host's client
+    // sees one aimed at host's Link. Users see acid coming at them.
     if (!state.acidProjectileSpawned && frame >= kAcidSpawnFrame) {
         state.acidProjectileSpawned = true;
         if (gEnDekubabaAcidId != 0) {
-            // Compute velocity toward player XZ at spawn moment.
-            // Moving-target intentionally not tracked per plan
-            // "vanilla-lunge-parity".
-            const s16 aimYaw = actor->actor.yawTowardsPlayer;
-            const f32 vx = Math_SinS(aimYaw) * kAcidSpitInitialXZSpeed;
-            const f32 vz = Math_CosS(aimYaw) * kAcidSpitInitialXZSpeed;
-            // Encode velocity in the actor params bit-field so the
-            // new actor's Init reads it: high 5 bits = signed Y vel
-            // (unused here; Y starts fixed), low 11 bits = aim yaw
-            // in 16ths of a degree (approx). Actually simpler: the
-            // spawned actor reads projectedPos + parent home.pos and
-            // computes its own initial velocity. Params carry only
-            // the aim yaw quantized to s16 range.
-            const s16 params = (s16)(aimYaw / 8);  // ~0.7°/step
-            Actor_Spawn(&play->actorCtx, play,
-                         gEnDekubabaAcidId,
-                         actor->actor.world.pos.x,
-                         actor->actor.world.pos.y,
-                         actor->actor.world.pos.z,
-                         0, aimYaw, 0, params);
-            (void)vx; (void)vz;
+            // Bug 4 fix (2026-08-01) — proper ballistic solution.
+            // Previously: fixed vy=4.0f + fixed XZ speed → projectile
+            // overshot Link's head at close range, undershot at far
+            // range. Now: sample target position at fire moment,
+            // solve for initial vy given horizontal distance + fixed
+            // XZ speed so parabolic arc lands ON the target.
+            Actor* target = FindNearestPlayerActor(&actor->actor, play);
+            if (target != nullptr) {
+                const Vec3f spawnPos = actor->actor.world.pos;
+                Vec3f targetPos = target->world.pos;
+                targetPos.y += kAcidTargetChestOffsetY;  // aim at chest, not feet
+
+                const f32 dx = targetPos.x - spawnPos.x;
+                const f32 dz = targetPos.z - spawnPos.z;
+                const f32 distXZ = sqrtf(dx * dx + dz * dz);
+
+                if (distXZ > 0.001f) {
+                    // Time-of-flight = XZ distance / horizontal speed.
+                    // Clamped to plausible bounds so close/far edge cases
+                    // don't produce silly trajectories.
+                    f32 tFlight = distXZ / kAcidSpitXZSpeed;
+                    if (tFlight < kAcidMinFlightFrames) tFlight = kAcidMinFlightFrames;
+                    if (tFlight > kAcidMaxFlightFrames) tFlight = kAcidMaxFlightFrames;
+
+                    // Ballistic Y: y(t) = y0 + vy*t + 0.5*g*t²
+                    // Solve for vy given y(tFlight) == targetPos.y:
+                    //   vy = (yTarget - y0 - 0.5*g*t²) / t
+                    const f32 vy = (targetPos.y - spawnPos.y -
+                                     0.5f * kAcidSpitGravity * tFlight * tFlight)
+                                    / tFlight;
+
+                    // XZ velocity — unit direction × speed.
+                    const f32 invDist = 1.0f / distXZ;
+                    const f32 vx = dx * invDist * kAcidSpitXZSpeed;
+                    const f32 vz = dz * invDist * kAcidSpitXZSpeed;
+
+                    // Yaw for actor.world.rot.y — points along XZ flight
+                    // direction so the projectile visually rotates to
+                    // face its trajectory.
+                    const s16 aimYaw = Math_Atan2S(dz, dx);
+                    const s16 params = (s16)(aimYaw / 8);
+
+                    Actor* projectile = Actor_Spawn(&play->actorCtx, play,
+                                                     gEnDekubabaAcidId,
+                                                     spawnPos.x, spawnPos.y, spawnPos.z,
+                                                     0, aimYaw, 0, params);
+                    if (projectile != nullptr) {
+                        // Override the projectile's Init-computed
+                        // velocity with our ballistic solution. Init
+                        // set velocity from params (fixed vy=4); this
+                        // is the trajectory we want the projectile to
+                        // actually follow.
+                        projectile->velocity.x = vx;
+                        projectile->velocity.y = vy;
+                        projectile->velocity.z = vz;
+                        projectile->speedXZ    = kAcidSpitXZSpeed;
+                        projectile->gravity    = kAcidSpitGravity;
+                    }
+                }
+            }
         }
         // Spawn SFX — "eruption cloud" fires at the moment the
         // projectile launches.
