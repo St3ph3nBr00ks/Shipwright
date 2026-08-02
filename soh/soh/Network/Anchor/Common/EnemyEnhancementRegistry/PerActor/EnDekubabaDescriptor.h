@@ -212,6 +212,15 @@ public:
     float GetSeedLandingX(EnDekubaba* actor);
     float GetSeedLandingY(EnDekubaba* actor);
     float GetSeedLandingZ(EnDekubaba* actor);
+
+    // ---- Per-frame ready-state visual (2026-08-02) ----------------
+    // Called every frame from EnDekubaba_Update (via bridge shim).
+    // Renders the small green rising-bubble accent while any charge
+    // machine is in Ready state — warns player that acid/seed/detach
+    // is armed and could fire on next DecideLunge. No-op when no
+    // charge machine is Ready or when actor is already inside an
+    // active attack state (avoids double-drawing with the telegraph).
+    void OnEveryFrameTick(EnDekubaba* actor, PlayState* play);
 };
 
 }  // namespace AnchorEnemyEnhancement

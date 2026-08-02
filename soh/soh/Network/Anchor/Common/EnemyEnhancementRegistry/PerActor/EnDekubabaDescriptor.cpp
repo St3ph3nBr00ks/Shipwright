@@ -95,6 +95,14 @@ constexpr float kAcidMaxRangeXZ = 400.0f;
 constexpr float kTelegraphHeadScale = 1.25f;
 constexpr int   kTelegraphSpitPeriod = 4;  // spawn every N frames
 
+// Change 2 (2026-08-02) — Dekubaba-only spit tuning per user:
+//   "move the acid/water particle effect further forward in the
+//   mouth 5u and increase particle effect size 25%."
+// Local overrides so Karebaba's spit config (shared AcidVisuals)
+// stays untouched.
+constexpr float kSpitForwardOffset  = 5.0f;
+constexpr float kSpitScaleMult      = 1.25f;
+
 // Acid attack timing (per plan §Feature A Design "~15-20 frames"):
 //   Frames 0-15  — telegraph (head grows, mouth spits, stem rears)
 //   Frame 15     — projectile spawn (host + peer both spawn locally)
@@ -304,15 +312,34 @@ inline void RenderAcidTelegraph(EnDekubaba* actor, PlayState* play) {
         // Spawn at head position. Dekubaba's world.pos IS the head
         // tip (per session_state Fix 7 — world.pos is animation-
         // computed, not stem base). Small XZ jitter for organic feel.
+        // Change 2 (2026-08-02) — shift +5u along shape.rot.y so the
+        // spit visibly emerges from the mouth (forward of head-tip)
+        // rather than centered on the head.
+        const s16 yaw = actor->actor.shape.rot.y;
+        const float fwdX = Math_SinS(yaw) * kSpitForwardOffset;
+        const float fwdZ = Math_CosS(yaw) * kSpitForwardOffset;
         Vec3f pos = {
-            actor->actor.world.pos.x + (Rand_ZeroOne() - 0.5f) * 8.0f,
+            actor->actor.world.pos.x + fwdX + (Rand_ZeroOne() - 0.5f) * 8.0f,
             actor->actor.world.pos.y + (Rand_ZeroOne() - 0.5f) * 4.0f,
-            actor->actor.world.pos.z + (Rand_ZeroOne() - 0.5f) * 8.0f,
+            actor->actor.world.pos.z + fwdZ + (Rand_ZeroOne() - 0.5f) * 8.0f,
         };
+        // Change 2 (2026-08-02) — Dekubaba-only 1.25× scale bump.
+        // Karebaba path (EnKarebabaDescriptor::RenderTelegraph) still
+        // uses the shared unmodified kSpitSplashScale.
+        const s16 dekubabaSpitScale =
+            (s16)(AcidVisuals::kSpitSplashScale * kSpitScaleMult);
         EffectSsGSplash_Spawn(play, &pos, &primC, &envC,
                                 AcidVisuals::kSpitSplashType,
-                                AcidVisuals::kSpitSplashScale);
+                                dekubabaSpitScale);
     }
+
+    // Ready-state green bubble accent (user 2026-08-02) — while any
+    // charge machine is Ready OR we are inside the telegraph itself,
+    // spawn a small ~30u peak vertical bubble on the head so the
+    // player has a persistent visual cue that an exotic attack is
+    // armed. Placed at head; matches Karebaba's Ready visual.
+    Vec3f bubblePos = actor->actor.world.pos;
+    AcidVisuals::SpawnReadyBubbles(play, bubblePos);
 }
 
 }  // namespace
@@ -721,6 +748,15 @@ void EnDekubabaDescriptor::OnDetachedSquirmTick(EnDekubaba* actor,
     // the health change via ENEMY_STATE health field naturally.
     if (SceneAuthority::IsMyCurrentRoomHost() && Anchor::Instance != nullptr) {
         const int nowFrame = (int)play->gameplayFrames;
+        // Defensive-seed on first squirm frame — protects against
+        // callers that entered DetachedSquirm without seeding
+        // lastBleedoutFrame (stem-cut detach + seed-child spawn
+        // paths both hit this). Without the seed, `nowFrame - 0`
+        // trivially exceeds intervalTicks on frame 0 and drops HP
+        // immediately, killing HP=1 forms before Link can react.
+        if (state.squirmFrameCounter == 0) {
+            state.lastBleedoutFrame = nowFrame;
+        }
         const int intervalTicks = Anchor::Instance->MsToGameTicks(
                                     kBleedoutIntervalMs);
         if (intervalTicks > 0 &&
@@ -776,13 +812,15 @@ bool EnDekubabaDescriptor::OnHostMaybeStemCutDetach(EnDekubaba* actor) {
     if (Rand_ZeroOne() >= 0.25f) return false;
 
     // Success — set sticky flag + restore HP so bleedout timer has
-    // time to run. Set to 2 (matches vanilla Dekubaba init HP for
-    // small variant per sColChkInfoInit); big Dekubaba gets same
-    // treatment (10s squirming vs vanilla's shorter big-HP =
-    // acceptable balance — this is a bonus not a scaling reward).
+    // time to run.
+    // 2026-08-02 (Change 1): HP=1 per user request "Use 1hp/1 hit to
+    // kill instead." Prior 2 HP let bleedout tick twice (~10s squirm)
+    // before death; 1 HP means first bleedout tick (5s) OR any Link
+    // hit kills the last-stand form. Balance: shorter squirm window
+    // but the surprise/reposition value remains.
     state.isDetached         = true;
     state.squirmFrameCounter = 0;
-    actor->actor.colChkInfo.health = 2;
+    actor->actor.colChkInfo.health = 1;
     SPDLOG_INFO("[Dekubaba] stem-cut DETACH triggered — actor={} HP restored to {}",
                 (void*)&actor->actor, actor->actor.colChkInfo.health);
     DEKUBABA_DBG("stem-cut detach FIRE — last-stand squirm");
@@ -1032,23 +1070,61 @@ void EnDekubabaDescriptor::OnSeedFireTick(EnDekubaba* actor,
                                               spawnPos.x, spawnPos.y, spawnPos.z,
                                               0, aimYaw, 0, params);
             g_pendingSeedProjectileParent = nullptr;
-            // Bug 8b (2026-08-02) — trajectory override. Seed actor's
-            // Init sets gravity=0 + velocity.y=0 → projectile flies
-            // horizontally at spawn Y forever, never contacts ground
-            // (only times out at 180 frames). Override with straight-
-            // line vector from spawn → landing target so projectile
-            // actually descends to ground + triggers on-land spawn.
+            // Bug 2 fix (2026-08-02) — parabolic arc trajectory.
+            // The prior straight-line vector had the seed spend most
+            // of its flight time near the ground (spawn Y=49 dropping
+            // linearly to Y=0 over ~0.5s means Y<20 for half the arc),
+            // and combined with the stub Draw + trail-only visual it
+            // read as "seed only appears on the floor."
+            //
+            // New arc: solve ballistic vy so the projectile lofts to
+            // spawnY + 40u peak before descending. Fixed XZ speed,
+            // constant gravity — mirror of the acid projectile solver
+            // (Bug 4 fix pattern).
+            //
+            //   Given horizontal distance distXZ + horizontal speed
+            //   kSeedXZSpeed, tFlight = distXZ / kSeedXZSpeed.
+            //   Peak height above spawn = kSeedArcHeight.
+            //   For projectile to reach yTarget at tFlight with peak
+            //   at kSeedArcHeight, solve:
+            //     yTarget = y0 + vy*t + 0.5*g*t²
+            //   Solved for vy:
+            //     vy = (yTarget - y0 - 0.5*g*t²) / t
+            //   Additionally boost vy so peak = y0 + kSeedArcHeight:
+            //     vyMin = sqrt(2 * |g| * kSeedArcHeight)
+            //     vy = max(vyMin, ballistic_vy)
             if (projectile != nullptr) {
-                const float dist3D = sqrtf(dx * dx + dy * dy + dz * dz);
-                if (dist3D > 0.001f) {
-                    const float kSeedSpeed = 12.0f;  // units/frame
-                    const float invDist = 1.0f / dist3D;
-                    projectile->velocity.x = dx * invDist * kSeedSpeed;
-                    projectile->velocity.y = dy * invDist * kSeedSpeed;
-                    projectile->velocity.z = dz * invDist * kSeedSpeed;
-                    // XZ speed component for Actor_MoveXZGravity.
-                    projectile->speedXZ = kSeedSpeed *
-                                           sqrtf(dx*dx + dz*dz) / dist3D;
+                constexpr float kSeedXZSpeed   = 8.0f;    // slower than
+                                                          // straight-line
+                                                          // for readability
+                constexpr float kSeedGravity   = -1.0f;   // matches acid
+                constexpr float kSeedArcHeight = 40.0f;   // peak above spawn
+                constexpr float kMinFlightF    = 8.0f;
+                constexpr float kMaxFlightF    = 60.0f;
+                const float distXZ = sqrtf(dx * dx + dz * dz);
+                if (distXZ > 0.001f) {
+                    float tFlight = distXZ / kSeedXZSpeed;
+                    if (tFlight < kMinFlightF) tFlight = kMinFlightF;
+                    if (tFlight > kMaxFlightF) tFlight = kMaxFlightF;
+                    // Ballistic vy to reach target dy at tFlight.
+                    const float ballisticVy =
+                        (dy - 0.5f * kSeedGravity * tFlight * tFlight)
+                        / tFlight;
+                    // Minimum vy that guarantees arc peak = arcHeight.
+                    const float minVyForArc =
+                        sqrtf(2.0f * (-kSeedGravity) * kSeedArcHeight);
+                    const float vy = (ballisticVy > minVyForArc)
+                                       ? ballisticVy
+                                       : minVyForArc;
+                    // Unit XZ direction × horizontal speed.
+                    const float invDistXZ = 1.0f / distXZ;
+                    projectile->velocity.x = dx * invDistXZ * kSeedXZSpeed;
+                    projectile->velocity.z = dz * invDistXZ * kSeedXZSpeed;
+                    projectile->velocity.y = vy;
+                    projectile->speedXZ    = kSeedXZSpeed;
+                    projectile->gravity    = kSeedGravity;
+                    SPDLOG_INFO("[Dekubaba] seed ballistic — distXZ={:.0f} dy={:.0f} tFlight={:.1f}f vy={:.2f}",
+                                distXZ, dy, tFlight, vy);
                 }
             }
             SPDLOG_INFO("[Dekubaba] seed projectile spawn — actor={} projectile={} yaw={} landing=({:.0f},{:.0f},{:.0f})",
@@ -1110,7 +1186,17 @@ void EnDekubabaDescriptor::OnActorInit(EnDekubaba* actor) {
     // thread-local. Set true once at Init; never reset.
     if (g_isSpawningDekubabaChild) {
         state.isSpawnedByEnhancement = true;
-        SPDLOG_INFO("[Dekubaba] OnActorInit — CHILD spawned by seed. actor={} isSpawnedByEnhancement=true",
+        // Bug 1 fix (2026-08-02) — seed-spawned children start life
+        // in the detached-squirm state. Set isDetached=true here so
+        // the C actor's EnDekubaba_Update IsDetached() guard fires
+        // from frame 0 (protects the child from AT/AC transitions
+        // reverting to vanilla state) and OnDetachedSquirmTick's
+        // bleedout timer runs. Pair with EnDekubaba_Init's routing
+        // to SetupDetachedSquirm + HP=1.
+        state.isDetached         = true;
+        state.squirmFrameCounter = 0;
+        state.lastBleedoutFrame  = 0;  // OnDetachedSquirmTick seeds from play->gameplayFrames
+        SPDLOG_INFO("[Dekubaba] OnActorInit — CHILD spawned by seed. actor={} isSpawnedByEnhancement=true isDetached=true",
                     (void*)&actor->actor);
     } else {
         DEKUBABA_DBG("OnActorInit — natural spawn actor={}",
@@ -1149,6 +1235,43 @@ float EnDekubabaDescriptor::GetSeedLandingZ(EnDekubaba* actor) {
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return 0.0f;
     return it->second.seedLandingPos.z;
+}
+
+// Change 3 (2026-08-02) — per-frame ready-state bubble accent.
+// Fires while any of the three charge machines is Ready and the
+// actor is NOT currently inside an active enhancement action state
+// (AcidVomit/SeedTelegraph/SeedFire/DetachedSquirm/DetachedDying —
+// each of those already renders its own telegraph or squirm visual;
+// double-drawing would look busy).
+//
+// Detached: reads netAcidActive/netSeedActive/netDetachActive as
+// "attack in flight" markers. Any true → skip ready bubble (attack
+// visual owns the frame).
+void EnDekubabaDescriptor::OnEveryFrameTick(EnDekubaba* actor,
+                                              PlayState* play) {
+    if (actor == nullptr || play == nullptr) return;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return;
+    DekubabaEnhancedState& state = it->second;
+
+    // Suppress while an attack is actively rendering its own visual.
+    // netAcidActive covers acid + seed active-flag broadcast, and
+    // isDetached covers both squirm + dying. currentAttackIsSeed
+    // covers SeedTelegraph pre-fire window.
+    if (state.isDetached) return;
+    if (state.currentAttackIsAcid || state.netAcidActive) return;
+    if (state.currentAttackIsSeed || state.netSeedActive) return;
+
+    const bool anyReady =
+        state.acidCharge.IsReady()   ||
+        state.seedCharge.IsReady()   ||
+        state.detachCharge.IsReady() ||
+        state.netAcidCharged;
+    if (!anyReady) return;
+
+    // Head position matches acid telegraph spawn origin.
+    Vec3f bubblePos = actor->actor.world.pos;
+    AcidVisuals::SpawnReadyBubbles(play, bubblePos);
 }
 
 }  // namespace AnchorEnemyEnhancement

@@ -47,11 +47,16 @@ extern Actor* Anchor_Enhance_EnDekubaba_ConsumePendingSeedParent(void);
 // projectile was invisible flying from Dekubaba mouth to landing.
 // Add per-frame EffectSsGSplash trail so player sees the seed arc.
 // Tan/brown tint (nut color) distinguishes from acid's green trail.
-#define SEED_TRAIL_PERIOD_FRAMES 2
-static Color_RGBA8 sSeedTrailPrimColor = { 180, 130,  60, 220 };  // nut tan
-static Color_RGBA8 sSeedTrailEnvColor  = {  80,  50,  20, 255 };  // dark shadow
+//
+// Bug 2 fix (2026-08-02) — trail spawn every frame (was every 2) +
+// scale bumped 150 → 250 to match acid trail visibility. User
+// reported "no visible seed model flying, something on the floor" —
+// the sparse low-scale trail was almost invisible above ankle.
+#define SEED_TRAIL_PERIOD_FRAMES 1
+static Color_RGBA8 sSeedTrailPrimColor = { 200, 150,  70, 220 };  // brighter nut tan
+static Color_RGBA8 sSeedTrailEnvColor  = { 100,  60,  25, 255 };  // dark shadow
 #define SEED_TRAIL_SPLASH_TYPE  2
-#define SEED_TRAIL_SPLASH_SCALE 150   // smaller than acid (250) — nut is small
+#define SEED_TRAIL_SPLASH_SCALE 250   // matches acid trail visibility
 
 void EnDekubabaSeed_Init(Actor* thisx, PlayState* play) {
     EnDekubabaSeed* this = (EnDekubabaSeed*)thisx;

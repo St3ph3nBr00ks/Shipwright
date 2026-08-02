@@ -53,6 +53,11 @@ extern void Anchor_Enhance_EnDekubaba_OnActorInit(EnDekubaba* actor);
 extern int  Anchor_Enhance_EnDekubaba_IsSeedActive(EnDekubaba* actor);
 extern int  Anchor_Enhance_EnDekubaba_IsSpawnedByEnhancement(EnDekubaba* actor);
 
+// Change 3 (2026-08-02) — per-frame ready-state visual pump.
+// Called unconditionally from EnDekubaba_Update; descriptor gates
+// internally on any charge machine's Ready state.
+extern void Anchor_Enhance_EnDekubaba_OnEveryFrameTick(EnDekubaba* actor, PlayState* play);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnDekubaba_Init(Actor* thisx, PlayState* play);
@@ -356,6 +361,25 @@ void EnDekubaba_Init(Actor* thisx, PlayState* play) {
     // marks isSpawnedByEnhancement=true so Feature C's "no seed for
     // children" gate fires. No-op otherwise.
     Anchor_Enhance_EnDekubaba_OnActorInit(this);
+
+    // Bug 1 fix (2026-08-02) — seed-spawned children are supposed to
+    // stay in the crawling/detached form until bleedout or a hit
+    // kills them (per user 2026-08-02: "did still die after time
+    // expired" implies expected lifecycle is time-limited crawl, NOT
+    // vanilla Wait → Grow → Attack). Reroute Init: if the actor was
+    // spawned via a parent's seed, override the just-set SetupWait
+    // with SetupDetachedSquirm + HP=1. SetupDetachedSquirm reassigns
+    // actionFunc so Wait never runs a frame.
+    // HP=1 pairs with Change 1's stem-cut convention — one bleedout
+    // tick OR one Link hit ends it.
+    if (Anchor_Enhance_EnDekubaba_IsSpawnedByEnhancement(this)) {
+        this->actor.colChkInfo.health = 1;
+        EnDekubaba_SetupDetachedSquirm(this);
+        LUSLOG_INFO("[Dekubaba] seed-child rerouted to DetachedSquirm — actor=%p home=(%.0f,%.0f,%.0f)",
+                    (void*)&this->actor,
+                    this->actor.home.pos.x, this->actor.home.pos.y,
+                    this->actor.home.pos.z);
+    }
 }
 
 void EnDekubaba_Destroy(Actor* thisx, PlayState* play) {
@@ -1714,6 +1738,12 @@ void EnDekubaba_Update(Actor* thisx, PlayState* play) {
     if (this->actionFunc != EnDekubaba_DeadStickDrop) {
         CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
     }
+
+    // Change 3 (2026-08-02) — per-frame ready-state visual pump.
+    // Descriptor gates internally on any charge machine's Ready state
+    // + suppresses during active attack rendering. No-op when the
+    // AcidVomit CVar (or Detach / SeedSpawn) isn't enabled.
+    Anchor_Enhance_EnDekubaba_OnEveryFrameTick(this, play);
 }
 
 // Draw functions

@@ -200,6 +200,16 @@ inline void RenderTelegraph(EnKarebaba* actor, PlayState* play) {
                                 AcidVisuals::kSpitSplashType,
                                 AcidVisuals::kSpitSplashScale);
     }
+
+    // Ready-state green bubble accent (user 2026-08-02) — small
+    // ~30u peak vertical bubble on the head to warn player that
+    // acid is armed. Rate-limited internally to 1 per 3 frames.
+    Vec3f bubblePos = {
+        actor->actor.world.pos.x,
+        actor->actor.world.pos.y + kSpitYOffset,
+        actor->actor.world.pos.z,
+    };
+    AcidVisuals::SpawnReadyBubbles(play, bubblePos);
 }
 
 }  // namespace

@@ -30,6 +30,7 @@
 
 extern "C" {
 #include "z64.h"
+#include "functions.h"  // Rand_ZeroOne, EffectSsDtBubble_SpawnCustomColor
 }
 
 namespace AnchorEnemyEnhancement {
@@ -87,6 +88,59 @@ inline constexpr f32 kRisingDustAccelY    = -0.05f;
 inline constexpr s16 kRisingDustScale     = 300;
 inline constexpr s16 kRisingDustScaleStep = 8;
 inline constexpr s16 kRisingDustLife      = 25;
+
+// --- Ready-state bubble accent (added 2026-08-02) ------------------
+//
+// Small vertical green bubble used to indicate that a charge machine
+// has reached Ready state (i.e., next attack decision will fire the
+// enhanced attack). User request 2026-08-02: "add a small vertical
+// green bubble effect to the ready state to help with visibility.
+// Use the bubbles in the karebaba acid geyser attack as a reference.
+// the 'ready' state bubbles should be a smaller effect, smaller
+// radius, shorter vertical height, approx. 30 units."
+//
+// Sizing derivation (peak height = vy² / (2 × |accel|)):
+//   vy = 4.0, accel = -0.25 → peak ≈ 4² / 0.5 = 32u ✓ (~30u target)
+//   scale 30 + rand(15) = 30-45 (half of geyser's 60-85)
+//   life 25 frames (unchanged from geyser)
+//   Per-frame call rate throttled by caller (see SpawnReadyBubbles).
+inline constexpr f32 kReadyBubbleSpeed        = 4.0f;
+inline constexpr f32 kReadyBubbleSpeedRand    = 1.0f;
+inline constexpr f32 kReadyBubbleAccelY       = -0.25f;
+inline constexpr int kReadyBubbleScaleBase    = 30;
+inline constexpr int kReadyBubbleScaleRand    = 15;
+inline constexpr f32 kReadyBubbleXZJitter     = 1.25f;   // half of geyser 2.5
+inline constexpr s16 kReadyBubbleLife         = 25;
+inline constexpr int kReadyBubbleSpawnPeriod  = 3;       // 1 per 3 frames
+
+// Spawns one ready-state bubble at `spawnPos` if this frame is a
+// spawn tick (throttled by kReadyBubbleSpawnPeriod). Callers pass
+// the head position of the actor + PlayState for frame counter +
+// particle system.
+//
+// Extract-at-2 pattern: single free function reused by Karebaba's
+// RenderTelegraph + Dekubaba's OnEveryFrameTick. Rendering physics
+// (vy/accel/scale/life) locked here so both actors read identical.
+inline void SpawnReadyBubbles(PlayState* play, const Vec3f& spawnPos) {
+    if (play == nullptr) return;
+    if ((play->gameplayFrames % kReadyBubbleSpawnPeriod) != 0) return;
+
+    Vec3f pos = spawnPos;
+    Vec3f vel = {
+        (Rand_ZeroOne() - 0.5f) * kReadyBubbleXZJitter,
+        kReadyBubbleSpeed + Rand_ZeroOne() * kReadyBubbleSpeedRand,
+        (Rand_ZeroOne() - 0.5f) * kReadyBubbleXZJitter,
+    };
+    Vec3f accel = { 0.0f, kReadyBubbleAccelY, 0.0f };
+    Color_RGBA8 primC = kBubblePrimColor;
+    Color_RGBA8 envC  = kBubbleEnvColor;
+    const s16 scale = (s16)(kReadyBubbleScaleBase +
+                             (int)(Rand_ZeroOne() *
+                                    (float)kReadyBubbleScaleRand));
+    EffectSsDtBubble_SpawnCustomColor(play, &pos, &vel, &accel,
+                                        &primC, &envC,
+                                        scale, kReadyBubbleLife, 4);
+}
 
 }  // namespace AcidVisuals
 }  // namespace AnchorEnemyEnhancement

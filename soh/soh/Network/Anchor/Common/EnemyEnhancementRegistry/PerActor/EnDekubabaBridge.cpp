@@ -221,6 +221,18 @@ extern "C" void Anchor_Enhance_EnDekubaba_OnActorInit(EnDekubaba* actor) {
     desc->OnActorInit(actor);
 }
 
+// Change 3 (2026-08-02) — per-frame ready-state visual pump.
+// Called from EnDekubaba_Update unconditionally each tick. Descriptor
+// gates internally on any charge machine's Ready state + suppresses
+// while an active attack is rendering its own visual.
+extern "C" void Anchor_Enhance_EnDekubaba_OnEveryFrameTick(
+    EnDekubaba* actor, PlayState* play) {
+    if (actor == nullptr || play == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnEveryFrameTick(actor, play);
+}
+
 extern "C" int Anchor_Enhance_EnDekubaba_IsSeedActive(EnDekubaba* actor) {
     if (actor == nullptr) return 0;
     auto* desc = GetDekubabaDescriptor();
