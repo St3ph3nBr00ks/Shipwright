@@ -31,6 +31,11 @@
 // Pillar 5 (#318) — descriptor callback shims.
 extern void Anchor_Enhance_EnDekubaba_OnSeedLanded(Actor* parent, PlayState* play,
                                                      float x, float y, float z);
+// Bug 8 fix (2026-08-02) — consume the pending-parent thread-local
+// set by descriptor's OnSeedFireTick immediately before Actor_Spawn.
+// Returns the parent Dekubaba's Actor* or NULL if spawned outside
+// the descriptor path (defensive fallback).
+extern Actor* Anchor_Enhance_EnDekubaba_ConsumePendingSeedParent(void);
 
 #define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
 
@@ -54,21 +59,20 @@ void EnDekubabaSeed_Init(Actor* thisx, PlayState* play) {
 
     this->lifetimeFrames   = EN_DEKUBABA_SEED_LIFETIME_FRAMES;
 
-    // TODO: parent pointer + landingTarget will be set by a follow-up
-    // enhancement to Anchor_Enhance_EnDekubaba_OnSeedFireTick so the
-    // projectile knows exactly where to stop + who to notify. For v1
-    // it flies until lifetime expires OR hits ground bgcheck; on
-    // stop it queries the descriptor for the "current parent" via a
-    // nearest-Dekubaba lookup (fallback). Setting parent to NULL for
-    // now; the on-land callback checks NULL and picks nearest Dekubaba.
-    this->parentDekubaba = NULL;
+    // Bug 8 fix (2026-08-02) — consume pending parent pointer set by
+    // descriptor's OnSeedFireTick immediately before Actor_Spawn.
+    // Without this, parentDekubaba stayed NULL and OnSeedLanded's
+    // parent-tracking (spawnedChildActor field on descriptor state)
+    // never got populated → child-not-active gate could never fire.
+    this->parentDekubaba = Anchor_Enhance_EnDekubaba_ConsumePendingSeedParent();
     this->landingTarget.x = 0.0f;
     this->landingTarget.y = 0.0f;
     this->landingTarget.z = 0.0f;
 
-    LUSLOG_INFO("[DekubabaSeed] Init pos=(%.0f,%.0f,%.0f) yaw=%d",
+    LUSLOG_INFO("[DekubabaSeed] Init pos=(%.0f,%.0f,%.0f) yaw=%d parent=%p",
                 this->actor.world.pos.x, this->actor.world.pos.y,
-                this->actor.world.pos.z, aimYaw);
+                this->actor.world.pos.z, aimYaw,
+                (void*)this->parentDekubaba);
 }
 
 void EnDekubabaSeed_Destroy(Actor* thisx, PlayState* play) {

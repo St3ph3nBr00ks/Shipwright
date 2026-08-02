@@ -311,6 +311,15 @@ inline void RenderAcidTelegraph(EnDekubaba* actor, PlayState* play) {
 
 }  // namespace
 
+// Bug 8 fix (2026-08-02) — parent-pointer bridging for seed projectile.
+// Namespace-scope (NOT anonymous) so the bridge cpp file can extern it
+// via `extern thread_local Actor* AnchorEnemyEnhancement::g_pendingSeedProjectileParent;`.
+// Set by OnSeedFireTick before Actor_Spawn(EN_DEKUBABA_SEED); read +
+// cleared via Anchor_Enhance_EnDekubaba_ConsumePendingSeedParent from
+// the seed actor's Init. Consumers see nullptr if the projectile is
+// spawned by any other path (defensive default).
+thread_local Actor* g_pendingSeedProjectileParent = nullptr;
+
 // ---- Feature A implementation ---------------------------------------
 
 bool EnDekubabaDescriptor::OnHostMaybeAcidLunge(EnDekubaba* actor,
@@ -822,6 +831,12 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
         state.seedAttackFrame       = 0;
         state.seedLandingPos        = landingTarget;
 
+        // Hard SPDLOG (unconditional, not gated on DebugLog CVar)
+        // so any log will show that seed fired. Investigation aid
+        // for 2026-08-02 report "haven't seen seed fire".
+        SPDLOG_INFO("[Dekubaba] seed FIRE decision — landing=({:.0f},{:.0f},{:.0f}) actor={}",
+                     landingTarget.x, landingTarget.y, landingTarget.z,
+                     (void*)&actor->actor);
         DEKUBABA_DBG("seed FIRE — landing=({:.0f},{:.0f},{:.0f})",
                      landingTarget.x, landingTarget.y, landingTarget.z);
         EnhancementAudio::PlayBoostedActorSfx(
@@ -901,19 +916,46 @@ void EnDekubabaDescriptor::OnSeedFireTick(EnDekubaba* actor,
             // For v1 simplicity: spawn actor at head pos, pass
             // landing X/Z via the actor's params + world.rot fields.
             // Actor computes trajectory in its Init.
-            const float dx = state.seedLandingPos.x -
-                             actor->actor.world.pos.x;
-            const float dz = state.seedLandingPos.z -
-                             actor->actor.world.pos.z;
+            const Vec3f spawnPos = actor->actor.world.pos;
+            const float dx = state.seedLandingPos.x - spawnPos.x;
+            const float dy = state.seedLandingPos.y - spawnPos.y;
+            const float dz = state.seedLandingPos.z - spawnPos.z;
             const s16 aimYaw = Math_Atan2S(dz, dx);
             // Note: Math_Atan2S expects (z, x) order for OoT convention.
             const s16 params = (s16)(aimYaw / 8);
-            Actor_Spawn(&play->actorCtx, play,
-                         gEnDekubabaSeedId,
-                         actor->actor.world.pos.x,
-                         actor->actor.world.pos.y,
-                         actor->actor.world.pos.z,
-                         0, aimYaw, 0, params);
+            // Bug 8 fix (2026-08-02) — bracket Actor_Spawn with the
+            // pending-parent thread-local so seed actor's Init picks
+            // up parentDekubaba pointer. Without this, OnSeedLanded
+            // early-returned on null parent → no child spawned.
+            g_pendingSeedProjectileParent = &actor->actor;
+            Actor* projectile = Actor_Spawn(&play->actorCtx, play,
+                                              gEnDekubabaSeedId,
+                                              spawnPos.x, spawnPos.y, spawnPos.z,
+                                              0, aimYaw, 0, params);
+            g_pendingSeedProjectileParent = nullptr;
+            // Bug 8b (2026-08-02) — trajectory override. Seed actor's
+            // Init sets gravity=0 + velocity.y=0 → projectile flies
+            // horizontally at spawn Y forever, never contacts ground
+            // (only times out at 180 frames). Override with straight-
+            // line vector from spawn → landing target so projectile
+            // actually descends to ground + triggers on-land spawn.
+            if (projectile != nullptr) {
+                const float dist3D = sqrtf(dx * dx + dy * dy + dz * dz);
+                if (dist3D > 0.001f) {
+                    const float kSeedSpeed = 12.0f;  // units/frame
+                    const float invDist = 1.0f / dist3D;
+                    projectile->velocity.x = dx * invDist * kSeedSpeed;
+                    projectile->velocity.y = dy * invDist * kSeedSpeed;
+                    projectile->velocity.z = dz * invDist * kSeedSpeed;
+                    // XZ speed component for Actor_MoveXZGravity.
+                    projectile->speedXZ = kSeedSpeed *
+                                           sqrtf(dx*dx + dz*dz) / dist3D;
+                }
+            }
+            SPDLOG_INFO("[Dekubaba] seed projectile spawn — actor={} projectile={} yaw={} landing=({:.0f},{:.0f},{:.0f})",
+                        (void*)&actor->actor, (void*)projectile, (int)aimYaw,
+                        state.seedLandingPos.x, state.seedLandingPos.y,
+                        state.seedLandingPos.z);
         }
         EnhancementAudio::PlayDoubledActorSfx(
             &actor->actor, NA_SE_EV_ERUPTION_CLOUD);
@@ -922,10 +964,24 @@ void EnDekubabaDescriptor::OnSeedFireTick(EnDekubaba* actor,
 
 void EnDekubabaDescriptor::OnSeedLanded(EnDekubaba* parent, PlayState* play,
                                           float x, float y, float z) {
-    if (parent == nullptr || play == nullptr) return;
-    auto it = sStates.find(&parent->actor);
-    if (it == sStates.end()) return;
-    DekubabaEnhancedState& state = it->second;
+    // Bug 8 fix (2026-08-02): hard SPDLOG regardless of parent
+    // validity so we can trace whether the callback is even reached.
+    SPDLOG_INFO("[Dekubaba] seed LANDED — parent={} landing=({:.0f},{:.0f},{:.0f})",
+                (void*)parent, x, y, z);
+    if (play == nullptr) return;
+
+    // Parent may be null when the seed projectile times out without
+    // its Init having read the pending-parent thread-local (edge
+    // case — should not happen in practice with Bug 8 fix). We can
+    // still spawn the child; parent-tracking (spawnedChildActor)
+    // just won't be updated.
+    DekubabaEnhancedState* statePtr = nullptr;
+    if (parent != nullptr) {
+        auto it = sStates.find(&parent->actor);
+        if (it != sStates.end()) {
+            statePtr = &it->second;
+        }
+    }
 
     // Spawn a fresh EN_DEKUBABA at the landing coord. Bracket the
     // spawn with the g_isSpawningDekubabaChild thread-local so the
@@ -939,8 +995,13 @@ void EnDekubabaDescriptor::OnSeedLanded(EnDekubaba* parent, PlayState* play,
                                      /*params=*/DEKUBABA_NORMAL);
     g_isSpawningDekubabaChild = false;
 
+    SPDLOG_INFO("[Dekubaba] seed child SPAWNED — child={} parentTracked={}",
+                (void*)childActor, statePtr != nullptr);
+
     // Track own child for the "child-not-active" gate.
-    state.spawnedChildActor = childActor;
+    if (statePtr != nullptr) {
+        statePtr->spawnedChildActor = childActor;
+    }
 }
 
 void EnDekubabaDescriptor::OnActorInit(EnDekubaba* actor) {

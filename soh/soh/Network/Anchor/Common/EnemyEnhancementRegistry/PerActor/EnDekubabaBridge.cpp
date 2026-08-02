@@ -243,6 +243,21 @@ extern "C" float Anchor_Enhance_EnDekubaba_GetSeedLandingZ(EnDekubaba* actor) {
     return desc->GetSeedLandingZ(actor);
 }
 
+// Bug 8 fix (2026-08-02) — bridge to the pending-seed-parent
+// thread-local in the descriptor. Called from seed actor's Init
+// to populate its parentDekubaba pointer. Descriptor sets the
+// thread-local BEFORE Actor_Spawn(gEnDekubabaSeedId) and clears
+// it AFTER; the seed's Init reads it once and it's consumed.
+// Same idiom as g_isSpawningDekubabaChild for the child spawn.
+namespace AnchorEnemyEnhancement {
+extern thread_local Actor* g_pendingSeedProjectileParent;
+}
+extern "C" Actor* Anchor_Enhance_EnDekubaba_ConsumePendingSeedParent(void) {
+    Actor* p = AnchorEnemyEnhancement::g_pendingSeedProjectileParent;
+    AnchorEnemyEnhancement::g_pendingSeedProjectileParent = nullptr;
+    return p;
+}
+
 // --- CVar-gated audio boost shim (mirrors Karebaba V8) --------------
 //
 // Called from z_en_dekubaba.c at Audio_PlayActorSound2 sites so
