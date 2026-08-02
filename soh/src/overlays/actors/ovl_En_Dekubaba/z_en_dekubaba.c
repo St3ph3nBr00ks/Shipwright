@@ -4,6 +4,7 @@
 #include "overlays/effects/ovl_Effect_Ss_Hahen/z_eff_ss_hahen.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/ResourceManagerHelpers.h"
+#include <libultraship/log/luslog.h>  // LUSLOG_INFO for state-entry diagnostics
 
 // Anchor multiplayer: nearest-player lookup (returns local player when not connected).
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
@@ -566,6 +567,10 @@ void EnDekubaba_SetupLunge(EnDekubaba* this) {
 // Descriptor's OnAcidVomitTick renders telegraph particles + spawns
 // EN_DEKUBABA_ACID projectile at fire frame (15).
 void EnDekubaba_SetupAcidVomit(EnDekubaba* this) {
+    LUSLOG_INFO("[Dekubaba] SetupAcidVomit — actor=%p home=(%.0f,%.0f,%.0f)",
+                (void*)&this->actor,
+                this->actor.home.pos.x, this->actor.home.pos.y,
+                this->actor.home.pos.z);
     Animation_PlayOnce(&this->skelAnime, &gDekuBabaPauseChompAnim);
     // Explicit playSpeed reset (2026-08-01) — some vanilla states
     // set skelAnime.playSpeed = 0.0f (SetupPrepareLunge) or -1.0f
@@ -656,6 +661,10 @@ void EnDekubaba_SetupDetachedSquirm(EnDekubaba* this) {
     this->actor.shape.rot.x = 0;
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
     this->actionFunc = EnDekubaba_DetachedSquirm;
+    LUSLOG_INFO("[Dekubaba] SetupDetachedSquirm — actor=%p world=(%.0f,%.0f,%.0f) yaw=0x%04x",
+                (void*)&this->actor,
+                this->actor.world.pos.x, this->actor.world.pos.y,
+                this->actor.world.pos.z, (u16)this->actor.world.rot.y);
 }
 
 void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play) {
@@ -731,6 +740,10 @@ void EnDekubaba_SetupDetachedDying(EnDekubaba* this) {
     GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
     // Reset descriptor state (matches other death setup funcs).
     Anchor_Enhance_EnDekubaba_OnDeath(this);
+    LUSLOG_INFO("[Dekubaba] SetupDetachedDying — actor=%p world=(%.0f,%.0f,%.0f)",
+                (void*)&this->actor,
+                this->actor.world.pos.x, this->actor.world.pos.y,
+                this->actor.world.pos.z);
 }
 
 void EnDekubaba_DetachedDying(EnDekubaba* this, PlayState* play) {
@@ -763,6 +776,10 @@ void EnDekubaba_SetupSeedTelegraph(EnDekubaba* this) {
     this->timer = 0;
     this->collider.base.acFlags &= ~AC_ON;  // no contact damage
     this->actionFunc = EnDekubaba_SeedTelegraph;
+    LUSLOG_INFO("[Dekubaba] SetupSeedTelegraph — actor=%p home=(%.0f,%.0f,%.0f)",
+                (void*)&this->actor,
+                this->actor.home.pos.x, this->actor.home.pos.y,
+                this->actor.home.pos.z);
 }
 
 void EnDekubaba_SeedTelegraph(EnDekubaba* this, PlayState* play) {
@@ -782,6 +799,10 @@ void EnDekubaba_SetupSeedFire(EnDekubaba* this) {
     this->skelAnime.playSpeed = 1.0f;  // explicit reset — see SetupAcidVomit comment
     this->timer = 0;
     this->actionFunc = EnDekubaba_SeedFire;
+    LUSLOG_INFO("[Dekubaba] SetupSeedFire — actor=%p home=(%.0f,%.0f,%.0f)",
+                (void*)&this->actor,
+                this->actor.home.pos.x, this->actor.home.pos.y,
+                this->actor.home.pos.z);
 }
 
 void EnDekubaba_SeedFire(EnDekubaba* this, PlayState* play) {

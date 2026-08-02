@@ -364,7 +364,8 @@ bool EnDekubabaDescriptor::OnHostMaybeAcidLunge(EnDekubaba* actor,
         if (dist >= kAcidMinRangeXZ && dist <= kAcidMaxRangeXZ) {
             state.acidCharge.OnFire();
             state.currentAttackIsAcid = true;
-            DEKUBABA_DBG("acid FIRE — cooldown armed 3 attacks");
+            SPDLOG_INFO("[Dekubaba] acid FIRE decision — actor={} dist={:.0f} (cooldown armed 3)",
+                        (void*)&actor->actor, dist);
             EnhancementAudio::PlayBoostedActorSfx(
                 &actor->actor, NA_SE_EV_WATER_BUBBLE);
             return true;
@@ -389,7 +390,13 @@ void EnDekubabaDescriptor::OnPeerReceiveAcidActiveFlag(EnDekubaba* actor,
                                                         bool active) {
     if (actor == nullptr) return;
     DekubabaEnhancedState& state = GetOrCreate(actor);
+    const bool wasActive = state.netAcidActive;
     state.netAcidActive = active;
+    // Transition log — only fire on false↔true flip (not per-tick).
+    if (wasActive != active) {
+        SPDLOG_INFO("[Dekubaba] peer RECV acid active: {} → {} actor={}",
+                    wasActive, active, (void*)&actor->actor);
+    }
     // If newly-enabling for this attack, reset per-attack counters
     // so peer's local AcidVomit fires the sequence from scratch.
     if (active) {
@@ -403,7 +410,12 @@ void EnDekubabaDescriptor::OnPeerReceiveAcidChargedFlag(EnDekubaba* actor,
                                                          bool charged) {
     if (actor == nullptr) return;
     DekubabaEnhancedState& state = GetOrCreate(actor);
+    const bool wasCharged = state.netAcidCharged;
     state.netAcidCharged = charged;
+    if (wasCharged != charged) {
+        SPDLOG_INFO("[Dekubaba] peer RECV acid charged: {} → {} actor={}",
+                    wasCharged, charged, (void*)&actor->actor);
+    }
 }
 
 void EnDekubabaDescriptor::OnAcidVomitTick(EnDekubaba* actor,
@@ -486,6 +498,12 @@ void EnDekubabaDescriptor::OnAcidVomitTick(EnDekubaba* actor,
                         projectile->speedXZ    = kAcidSpitXZSpeed;
                         projectile->gravity    = kAcidSpitGravity;
                     }
+                    // Hard SPDLOG — acid projectile spawn moment.
+                    SPDLOG_INFO("[Dekubaba] acid projectile SPAWN — actor={} projectile={} spawn=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) vy={:.2f} tFlight={:.1f}f",
+                                (void*)&actor->actor, (void*)projectile,
+                                spawnPos.x, spawnPos.y, spawnPos.z,
+                                targetPos.x, targetPos.y, targetPos.z,
+                                vy, tFlight);
                 }
             }
         }
@@ -516,6 +534,16 @@ void EnDekubabaDescriptor::OnAttackComplete(EnDekubaba* actor) {
     state.seedProjectileSpawned = false;
     state.seedAttackFrame       = 0;
 
+    // Diagnostic — three-machine counter summary after advancement.
+    // Gated on DebugLog CVar to avoid per-attack spam in normal play.
+    DEKUBABA_DBG("OnAttackComplete counters: acid={}%({}) seed={}%({}) detach={}%({})",
+                 state.acidCharge.GetCounter() * 25,
+                 (int)state.acidCharge.GetState(),
+                 state.seedCharge.GetCounter() * 25,
+                 (int)state.seedCharge.GetState(),
+                 state.detachCharge.GetCounter() * 25,
+                 (int)state.detachCharge.GetState());
+
     // Restore scale to vanilla in case telegraph was mid-render at
     // cycle end (defensive; the AcidVomit exit path should also
     // reset).
@@ -541,6 +569,9 @@ void EnDekubabaDescriptor::OnDeath(EnDekubaba* actor) {
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return;
     DekubabaEnhancedState& state = it->second;
+    SPDLOG_INFO("[Dekubaba] OnDeath — actor={} wasDetached={} spawnedByEnhance={}",
+                (void*)&actor->actor, state.isDetached,
+                state.isSpawnedByEnhancement);
     state.currentAttackIsAcid   = false;
     state.acidProjectileSpawned = false;
     state.acidAttackFrame       = 0;
@@ -601,7 +632,8 @@ bool EnDekubabaDescriptor::OnHostMaybeDetach(EnDekubaba* actor, PlayState* play)
         state.isDetached         = true;
         state.squirmFrameCounter = 0;
         state.lastBleedoutFrame  = (int)play->gameplayFrames;
-        DEKUBABA_DBG("detach FIRE — actor sever, one-shot");
+        SPDLOG_INFO("[Dekubaba] detach FIRE decision — actor={} (one-shot per life)",
+                    (void*)&actor->actor);
         return true;
     }
 
@@ -619,12 +651,19 @@ void EnDekubabaDescriptor::OnPeerReceiveDetachActiveFlag(EnDekubaba* actor,
                                                           bool active) {
     if (actor == nullptr) return;
     DekubabaEnhancedState& state = GetOrCreate(actor);
+    const bool wasActive = state.netDetachActive;
     state.netDetachActive = active;
+    if (wasActive != active) {
+        SPDLOG_INFO("[Dekubaba] peer RECV detach active: {} → {} actor={}",
+                    wasActive, active, (void*)&actor->actor);
+    }
     // Mirror into isDetached so peer's Draw / OnDetachedSquirmTick
     // read the right value regardless of authority origin.
     if (active && !state.isDetached) {
         state.isDetached         = true;
         state.squirmFrameCounter = 0;
+        SPDLOG_INFO("[Dekubaba] peer MIRRORED isDetached=true (from wire) actor={}",
+                    (void*)&actor->actor);
     }
 }
 
@@ -900,7 +939,12 @@ void EnDekubabaDescriptor::OnPeerReceiveSeedActiveFlag(EnDekubaba* actor,
                                                          bool active) {
     if (actor == nullptr) return;
     DekubabaEnhancedState& state = GetOrCreate(actor);
+    const bool wasActive = state.netSeedActive;
     state.netSeedActive = active;
+    if (wasActive != active) {
+        SPDLOG_INFO("[Dekubaba] peer RECV seed active: {} → {} actor={}",
+                    wasActive, active, (void*)&actor->actor);
+    }
     if (active) {
         state.currentAttackIsSeed   = true;
         state.seedProjectileSpawned = false;
@@ -913,7 +957,18 @@ void EnDekubabaDescriptor::OnPeerReceiveSeedLandingPos(EnDekubaba* actor,
                                                         float z) {
     if (actor == nullptr) return;
     DekubabaEnhancedState& state = GetOrCreate(actor);
+    // Log only when landing pos changes meaningfully (>1u any axis)
+    // to avoid per-tick spam. Landing coord is set once per fire
+    // decision on host, so transitions are rare.
+    const bool changed =
+        fabsf(state.seedLandingPos.x - x) > 1.0f ||
+        fabsf(state.seedLandingPos.y - y) > 1.0f ||
+        fabsf(state.seedLandingPos.z - z) > 1.0f;
     state.seedLandingPos = { x, y, z };
+    if (changed) {
+        SPDLOG_INFO("[Dekubaba] peer RECV seed landing: ({:.0f},{:.0f},{:.0f}) actor={}",
+                    x, y, z, (void*)&actor->actor);
+    }
 }
 
 void EnDekubabaDescriptor::OnSeedTelegraphTick(EnDekubaba* actor,
@@ -1055,6 +1110,11 @@ void EnDekubabaDescriptor::OnActorInit(EnDekubaba* actor) {
     // thread-local. Set true once at Init; never reset.
     if (g_isSpawningDekubabaChild) {
         state.isSpawnedByEnhancement = true;
+        SPDLOG_INFO("[Dekubaba] OnActorInit — CHILD spawned by seed. actor={} isSpawnedByEnhancement=true",
+                    (void*)&actor->actor);
+    } else {
+        DEKUBABA_DBG("OnActorInit — natural spawn actor={}",
+                     (void*)&actor->actor);
     }
 }
 
