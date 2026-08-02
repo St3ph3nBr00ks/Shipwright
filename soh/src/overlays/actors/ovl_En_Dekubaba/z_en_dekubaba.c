@@ -564,6 +564,12 @@ void EnDekubaba_SetupLunge(EnDekubaba* this) {
 // EN_DEKUBABA_ACID projectile at fire frame (15).
 void EnDekubaba_SetupAcidVomit(EnDekubaba* this) {
     Animation_PlayOnce(&this->skelAnime, &gDekuBabaPauseChompAnim);
+    // Explicit playSpeed reset (2026-08-01) — some vanilla states
+    // set skelAnime.playSpeed = 0.0f (SetupPrepareLunge) or -1.0f
+    // (SetupRecover). Animation_PlayOnce doesn't always overwrite
+    // playSpeed. Setting to 1.0f explicitly ensures the acid animation
+    // plays at normal speed regardless of prior state.
+    this->skelAnime.playSpeed = 1.0f;
     this->timer = 0;
     this->collider.base.acFlags &= ~AC_ON;  // no contact damage; ranged
     this->actionFunc = EnDekubaba_AcidVomit;
@@ -717,6 +723,7 @@ void EnDekubaba_DetachedDying(EnDekubaba* this, PlayState* play) {
 // exotic incoming. Transitions to SeedFire after telegraph window.
 void EnDekubaba_SetupSeedTelegraph(EnDekubaba* this) {
     Animation_PlayOnce(&this->skelAnime, &gDekuBabaPauseChompAnim);
+    this->skelAnime.playSpeed = 1.0f;  // explicit reset — see SetupAcidVomit comment
     this->timer = 0;
     this->collider.base.acFlags &= ~AC_ON;  // no contact damage
     this->actionFunc = EnDekubaba_SeedTelegraph;
@@ -736,6 +743,7 @@ void EnDekubaba_SeedTelegraph(EnDekubaba* this, PlayState* play) {
 // at frame 25. Descriptor handles the actual projectile spawn.
 void EnDekubaba_SetupSeedFire(EnDekubaba* this) {
     // Anim continues from PauseChomp — no new asset needed.
+    this->skelAnime.playSpeed = 1.0f;  // explicit reset — see SetupAcidVomit comment
     this->timer = 0;
     this->actionFunc = EnDekubaba_SeedFire;
 }
@@ -1557,6 +1565,47 @@ void EnDekubaba_UpdateDamage(EnDekubaba* this, PlayState* play) {
 void EnDekubaba_Update(Actor* thisx, PlayState* play) {
     s32 pad;
     EnDekubaba* this = (EnDekubaba*)thisx;
+
+    // Bug 5 fix (2026-08-01) — detached form has its own damage
+    // handling. Vanilla AT_HIT → SetupRecover (line below) and
+    // UpdateDamage AC_HIT → SetupHit both transition state back
+    // toward the vanilla DecideLunge cycle, LOSING detached state
+    // the first time Link contacts or damages the squirming plant.
+    // Guard: when detached, apply damage directly to health, clear
+    // the AT_HIT flag without transitioning, let DetachedSquirm keep
+    // running until bleedout kills it. DetachedDying state is exempt
+    // (IsDetached returns false after OnDeath resets in SetupDetachedDying).
+    if (Anchor_Enhance_EnDekubaba_IsDetached(this)) {
+        // Link damaged the plant — apply directly, don't transition.
+        // DetachedSquirm's `if (health <= 0)` check transitions to
+        // DetachedDying next frame.
+        if (this->collider.base.acFlags & AC_HIT) {
+            this->collider.base.acFlags &= ~AC_HIT;
+            if (this->actor.colChkInfo.damage > 0) {
+                s32 remaining = this->actor.colChkInfo.health -
+                                this->actor.colChkInfo.damage;
+                this->actor.colChkInfo.health = (remaining > 0) ? remaining : 0;
+                Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_DAMAGE);
+                Actor_SetDropFlagJntSph(&this->actor, &this->collider, 1);
+            }
+        }
+        // Plant hit Link — vanilla knockback path fired via AT
+        // collider hookup. Clear flag WITHOUT SetupRecover so the
+        // squirm continues chasing.
+        if (this->collider.base.atFlags & AT_HIT) {
+            this->collider.base.atFlags &= ~AT_HIT;
+        }
+        // DetachedSquirm actionFunc handles its own physics +
+        // bgcheck internally (Actor_MoveXZGravity +
+        // Actor_UpdateBgCheckInfo called there). Just dispatch it.
+        this->actionFunc(this, play);
+        // Register collision each frame so future hits work.
+        if (this->collider.base.acFlags & AC_ON) {
+            CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
+        }
+        CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
+        return;
+    }
 
     if (this->collider.base.atFlags & AT_HIT) {
         this->collider.base.atFlags &= ~AT_HIT;

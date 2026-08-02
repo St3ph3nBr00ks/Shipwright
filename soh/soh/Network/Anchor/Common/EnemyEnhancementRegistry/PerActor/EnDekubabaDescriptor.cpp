@@ -82,7 +82,13 @@ constexpr float kAcidMaxRangeXZ = 400.0f;
 // Vanilla Dekubaba scale at Init: this->size × 0.01 (where size is
 // 1.0 for NORMAL, ~2.0 for BIG). Multiplier used during the acid
 // telegraph to grow the head 1.5×.
-constexpr float kTelegraphHeadScale = 1.5f;
+// Telegraph head scale — 1.25× vanilla per user 2026-08-01. Previously
+// 1.5× which was too dramatic and (because Actor_SetScale scales the
+// ENTIRE actor including stem, not just head) made the whole plant
+// look oversized during the attack, giving a "slow motion" feel to
+// the attack animation. 1.25× matches Karebaba's kTelegraphHeadScale
+// for consistency.
+constexpr float kTelegraphHeadScale = 1.25f;
 constexpr int   kTelegraphSpitPeriod = 4;  // spawn every N frames
 
 // Acid attack timing (per plan §Feature A Design "~15-20 frames"):
