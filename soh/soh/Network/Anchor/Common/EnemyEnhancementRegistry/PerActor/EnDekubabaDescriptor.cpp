@@ -66,10 +66,14 @@ namespace {
 
 // Charge state machine — matches Karebaba pattern (25% steps, max 4,
 // 3-attack cooldown). Rolls on each DecideLunge → attack transition.
+// initialCounter = 1 (2026-08-02 per user) — Dekubabas die fast so
+// first attack gets 25% chance instead of 0% baseline. Post-cooldown
+// restart also uses 25%.
 constexpr ChargeStateMachine::Config kAcidChargeConfig = {
     /*stepIncrement*/ 0.25f,
     /*maxCounter*/    4,
     /*cooldownSteps*/ 3,
+    /*initialCounter*/ 1,
 };
 
 // Range gate — acid is useful when Link is outside melee lunge range
@@ -136,6 +140,7 @@ constexpr ChargeStateMachine::Config kDetachChargeConfig = {
     /*stepIncrement*/ 0.25f,
     /*maxCounter*/    4,
     /*cooldownSteps*/ 3,
+    /*initialCounter*/ 1,  // 2026-08-02 — start at 25% chance (see acid config)
 };
 
 // Squirm motion (DetachedSquirm state).
@@ -166,9 +171,10 @@ constexpr int   kDetachedDyingFrames      = 40;
 // (25% steps, max 4, 3-attack cooldown). Consistent with user 2026-
 // 07-31 spec: "all three ... same karebaba 25% increase per attack".
 constexpr ChargeStateMachine::Config kSeedChargeConfig = {
-    /*stepIncrement*/ 0.25f,
-    /*maxCounter*/    4,
-    /*cooldownSteps*/ 3,
+    /*stepIncrement*/  0.25f,
+    /*maxCounter*/     4,
+    /*cooldownSteps*/  3,
+    /*initialCounter*/ 1,  // 2026-08-02 — start at 25% (see acid config)
 };
 
 // Seed telegraph + fire timing. Matches acid cycle length so both
@@ -708,6 +714,40 @@ bool EnDekubabaDescriptor::IsDetached(EnDekubaba* actor) {
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return false;
     return it->second.isDetached;
+}
+
+bool EnDekubabaDescriptor::OnHostMaybeStemCutDetach(EnDekubaba* actor) {
+    if (actor == nullptr) return false;
+
+    // Sync-rule 1 — host is sole RNG decider.
+    if (!SceneAuthority::IsMyCurrentRoomHost()) return false;
+
+    // CVar gate — reuses DetachAndPursue CVar (same feature).
+    if (AnchorCVarSync::GetEnforcedInt(DetachAndPursueCVarName(), 0) == 0) {
+        return false;
+    }
+
+    // One-shot per life — already detached, can't detach again.
+    DekubabaEnhancedState& state = GetOrCreate(actor);
+    if (state.isDetached) return false;
+
+    // 25% fixed chance (not ramped — this is a "last-stand" surprise
+    // per user 2026-08-02 request "add a 25% chance that instead of
+    // dying, the deku baba enters its detached state" when stem cut).
+    if (Rand_ZeroOne() >= 0.25f) return false;
+
+    // Success — set sticky flag + restore HP so bleedout timer has
+    // time to run. Set to 2 (matches vanilla Dekubaba init HP for
+    // small variant per sColChkInfoInit); big Dekubaba gets same
+    // treatment (10s squirming vs vanilla's shorter big-HP =
+    // acceptable balance — this is a bonus not a scaling reward).
+    state.isDetached         = true;
+    state.squirmFrameCounter = 0;
+    actor->actor.colChkInfo.health = 2;
+    SPDLOG_INFO("[Dekubaba] stem-cut DETACH triggered — actor={} HP restored to {}",
+                (void*)&actor->actor, actor->actor.colChkInfo.health);
+    DEKUBABA_DBG("stem-cut detach FIRE — last-stand squirm");
+    return true;
 }
 
 // ---- Feature C (#318) — seed spawn --------------------------------

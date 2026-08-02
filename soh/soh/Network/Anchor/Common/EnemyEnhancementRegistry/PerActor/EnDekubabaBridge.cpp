@@ -152,6 +152,18 @@ extern "C" int Anchor_Enhance_EnDekubaba_IsDetached(EnDekubaba* actor) {
     return desc->IsDetached(actor) ? 1 : 0;
 }
 
+// 2026-08-02 — stem-cut detach chance (25% conversion of a killing
+// blow into detach). Called from EnDekubaba_SetupShrinkDie and
+// EnDekubaba_SetupPrunedSomersault BEFORE any death-cycle side
+// effects run. Returns 1 iff caller should skip death setup and
+// invoke SetupDetachedSquirm instead.
+extern "C" int Anchor_Enhance_EnDekubaba_MaybeStemCutDetach(EnDekubaba* actor) {
+    if (actor == nullptr) return 0;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0;
+    return desc->OnHostMaybeStemCutDetach(actor) ? 1 : 0;
+}
+
 // --- Feature C (#318) — seed spawn bridge shims ---------------------
 
 extern "C" int Anchor_Enhance_EnDekubaba_MaybeSeedFire(EnDekubaba* actor,

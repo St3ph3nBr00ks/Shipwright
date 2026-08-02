@@ -40,6 +40,9 @@ extern int  Anchor_Enhance_EnDekubaba_MaybeDetach(EnDekubaba* actor, PlayState* 
 extern void Anchor_Enhance_EnDekubaba_OnDetachedSquirmTick(EnDekubaba* actor, PlayState* play);
 extern void Anchor_Enhance_EnDekubaba_OnDetachedDyingTick(EnDekubaba* actor, PlayState* play);
 extern int  Anchor_Enhance_EnDekubaba_IsDetached(EnDekubaba* actor);
+// 2026-08-02 — 25% chance to convert a killing-blow death into a
+// detach event. Called at entry of SetupShrinkDie / SetupPrunedSomersault.
+extern int  Anchor_Enhance_EnDekubaba_MaybeStemCutDetach(EnDekubaba* actor);
 
 // Feature C (#318) — seed spawn bridge shims.
 extern int  Anchor_Enhance_EnDekubaba_MaybeSeedFire(EnDekubaba* actor, PlayState* play);
@@ -832,6 +835,15 @@ void EnDekubaba_SetupHit(EnDekubaba* this, s32 arg1) {
 }
 
 void EnDekubaba_SetupPrunedSomersault(EnDekubaba* this) {
+    // 2026-08-02 — stem-cut detach intercept (Enhancement 2 per user).
+    // 25% chance to convert this killing blow into a detach event
+    // instead. Fires only when DetachAndPursue CVar is enabled AND
+    // actor isn't already detached (one-shot per life).
+    if (Anchor_Enhance_EnDekubaba_MaybeStemCutDetach(this)) {
+        EnDekubaba_SetupDetachedSquirm(this);
+        return;
+    }
+
     this->timer = 0;
     this->skelAnime.playSpeed = 0.0f;
     this->actor.gravity = -0.8f;
@@ -851,6 +863,13 @@ void EnDekubaba_SetupPrunedSomersault(EnDekubaba* this) {
 }
 
 void EnDekubaba_SetupShrinkDie(EnDekubaba* this) {
+    // 2026-08-02 — stem-cut detach intercept (Enhancement 2). See
+    // SetupPrunedSomersault for full rationale.
+    if (Anchor_Enhance_EnDekubaba_MaybeStemCutDetach(this)) {
+        EnDekubaba_SetupDetachedSquirm(this);
+        return;
+    }
+
     Animation_Change(&this->skelAnime, &gDekuBabaFastChompAnim, -1.5f, Animation_GetLastFrame(&gDekuBabaFastChompAnim),
                      0.0f, ANIMMODE_ONCE, -3.0f);
     this->collider.base.acFlags &= ~AC_ON;

@@ -153,6 +153,16 @@ public:
     // ApplyPeerDetachActiveFlag and mirrors visual state.
     bool IsDetached(EnDekubaba* actor);
 
+    // Called from EnDekubaba_SetupShrinkDie + SetupPrunedSomersault
+    // BEFORE any death-cycle logic runs. Rolls 25% chance to convert
+    // the killing blow into a detach event instead — Dekubaba enters
+    // DetachedSquirm with restored HP. Gated on DetachAndPursue CVar
+    // + !isDetached (one-shot per life). Per user 2026-08-02: gives
+    // the plant a "last-stand" chance to squirm after being severed.
+    // Returns true iff caller should invoke SetupDetachedSquirm
+    // instead of the normal death setup.
+    bool OnHostMaybeStemCutDetach(EnDekubaba* actor);
+
     // ---- Feature C API (seed spawn, #318) --------------------------
 
     // Called from EnDekubaba_DecideLunge (after acid roll fails).

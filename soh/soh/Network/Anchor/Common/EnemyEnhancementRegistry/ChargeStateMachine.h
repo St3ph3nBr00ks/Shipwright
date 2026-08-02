@@ -59,12 +59,24 @@ public:
         f32 stepIncrement    = 0.25f;  // per-attack chance step
         u8  maxCounter       = 4;      // chance clamps at counter × step
         u8  cooldownSteps    = 3;      // post-fire lockout in "attacks"
+        // 2026-08-02 — starting counter value at construction, after
+        // Reset(), and after Cooldown → Charging transition. Default
+        // 0 keeps Karebaba's "first spin has 0% chance" behavior.
+        // Dekubaba uses 1 (25% chance on first attack) per user 2026-
+        // 08-02 request "when deku first activate, they already have
+        // a 25% chance to use their new attacks" — short-lived enemies
+        // need a shot at their new abilities before Link kills them.
+        u8  initialCounter   = 0;
     };
 
     ChargeStateMachine() = default;
-    explicit ChargeStateMachine(const Config& cfg) : mConfig(cfg) {}
+    explicit ChargeStateMachine(const Config& cfg)
+        : mConfig(cfg), mCounter(cfg.initialCounter) {}
 
-    void SetConfig(const Config& cfg) { mConfig = cfg; }
+    void SetConfig(const Config& cfg) {
+        mConfig = cfg;
+        mCounter = cfg.initialCounter;
+    }
 
     // --- State machine transitions ------------------------------------
 
@@ -112,14 +124,14 @@ public:
         if (mCooldownLeft > 0) mCooldownLeft--;
         if (mCooldownLeft == 0) {
             mState   = State::Charging;
-            mCounter = 0;
+            mCounter = mConfig.initialCounter;
         }
     }
 
     // Full reset — used on actor death / respawn / scene teardown.
     void Reset() {
         mState        = State::Charging;
-        mCounter      = 0;
+        mCounter      = mConfig.initialCounter;
         mCooldownLeft = 0;
     }
 
@@ -137,7 +149,7 @@ public:
 private:
     Config mConfig{};
     State  mState        = State::Charging;
-    u8     mCounter      = 0;
+    u8     mCounter      = 0;  // set to mConfig.initialCounter in ctor / Reset / OnAttackComplete
     u8     mCooldownLeft = 0;
 };
 
