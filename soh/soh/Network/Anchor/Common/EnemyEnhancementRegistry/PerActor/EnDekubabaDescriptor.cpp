@@ -33,6 +33,7 @@
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GroundFollow.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
+#include <spdlog/spdlog.h>
 #include <unordered_map>
 
 extern "C" {
@@ -51,6 +52,17 @@ extern s16 gEnDekubabaSeedId;
 namespace AnchorEnemyEnhancement {
 
 namespace {
+
+// Diagnostic logging — gated on gEnhancements.Dekubaba.DebugLog CVar.
+// Off by default; enable in Flotilla menu or via console for
+// post-2026-08-01 field-test analysis of acid/seed/detach paths.
+// Wraps SPDLOG_INFO so unused calls don't compile out format args.
+#define DEKUBABA_DBG(fmt, ...) \
+    do { \
+        if (CVarGetInteger("gEnhancements.Dekubaba.DebugLog", 0) != 0) { \
+            SPDLOG_INFO("[Dekubaba] " fmt, ##__VA_ARGS__); \
+        } \
+    } while (0)
 
 // Charge state machine — matches Karebaba pattern (25% steps, max 4,
 // 3-attack cooldown). Rolls on each DecideLunge → attack transition.
@@ -304,26 +316,30 @@ bool EnDekubabaDescriptor::OnHostMaybeAcidLunge(EnDekubaba* actor,
     // Ready branch: charged + Link in valid range → fire acid.
     if (state.acidCharge.IsReady()) {
         const f32 dist = actor->actor.xzDistToPlayer;
+        DEKUBABA_DBG("acid Ready — dist={:.0f} range=[{:.0f},{:.0f}]",
+                     dist, kAcidMinRangeXZ, kAcidMaxRangeXZ);
         if (dist >= kAcidMinRangeXZ && dist <= kAcidMaxRangeXZ) {
             state.acidCharge.OnFire();
             state.currentAttackIsAcid = true;
-            // "Sizzle" SFX at attack commit — subtle audio cue.
+            DEKUBABA_DBG("acid FIRE — cooldown armed 3 attacks");
             EnhancementAudio::PlayBoostedActorSfx(
                 &actor->actor, NA_SE_EV_WATER_BUBBLE);
             return true;
         }
-        // Out of range — Ready preserved. Vanilla lunge proceeds.
-        return false;
+        return false;  // Out of range — preserve Ready.
     }
 
-    // Charging branch: TryCharge rolls chance = counter*25%. On
-    // Charging → Ready transition returns true; play "charging" SFX
-    // at that moment.
+    // Charging branch.
+    const u8 counterBefore = state.acidCharge.GetCounter();
     if (state.acidCharge.TryCharge()) {
+        DEKUBABA_DBG("acid CHARGED — counter {} → Ready", counterBefore);
         EnhancementAudio::PlayBoostedActorSfx(
             &actor->actor, NA_SE_EV_WATER_BUBBLE);
+    } else {
+        DEKUBABA_DBG("acid rolling — counter {}%, state={}",
+                     counterBefore * 25, (int)state.acidCharge.GetState());
     }
-    return false;  // Charging state doesn't fire acid this attack.
+    return false;
 }
 
 void EnDekubabaDescriptor::OnPeerReceiveAcidActiveFlag(EnDekubaba* actor,
@@ -495,17 +511,22 @@ bool EnDekubabaDescriptor::OnHostMaybeDetach(EnDekubaba* actor, PlayState* play)
 
     // UNIFIED PATTERN (per user 2026-07-31): no range gate. Roll
     // purely on charge counter (matches acid + seed shape).
-    // Ready branch: fire if state machine says Ready.
     if (state.detachCharge.IsReady()) {
         state.detachCharge.OnFire();
         state.isDetached         = true;
         state.squirmFrameCounter = 0;
         state.lastBleedoutFrame  = (int)play->gameplayFrames;
+        DEKUBABA_DBG("detach FIRE — actor sever, one-shot");
         return true;
     }
 
-    // Charging branch: TryCharge rolls chance = counter × 25%.
-    state.detachCharge.TryCharge();
+    const u8 counterBefore = state.detachCharge.GetCounter();
+    if (state.detachCharge.TryCharge()) {
+        DEKUBABA_DBG("detach CHARGED — counter {} → Ready", counterBefore);
+    } else {
+        DEKUBABA_DBG("detach rolling — counter {}%",
+                     counterBefore * 25);
+    }
     return false;
 }
 
@@ -559,6 +580,18 @@ void EnDekubabaDescriptor::OnDetachedSquirmTick(EnDekubaba* actor,
     // stays on ground even on gentle slopes. Uses shared helper. Body
     // offset 0 (Dekubaba head-base sits at floor level naturally).
     GroundFollow::ProbeAndSnap(&actor->actor, play, /*bodyOffset=*/0.0f);
+
+    // Position + velocity telemetry every 20 frames (~1s @ 20fps).
+    if ((state.squirmFrameCounter % 20) == 0) {
+        DEKUBABA_DBG("squirm@f{} pos=({:.0f},{:.0f},{:.0f}) vel=({:.1f},{:.1f}) hp={}",
+                     state.squirmFrameCounter,
+                     actor->actor.world.pos.x,
+                     actor->actor.world.pos.y,
+                     actor->actor.world.pos.z,
+                     actor->actor.velocity.x,
+                     actor->actor.velocity.z,
+                     actor->actor.colChkInfo.health);
+    }
 
     // Bleedout — host-only decrement HP every 5 seconds. Peer sees
     // the health change via ENEMY_STATE health field naturally.
@@ -667,22 +700,27 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
     }
 
     DekubabaEnhancedState& state = GetOrCreate(actor);
+    DEKUBABA_DBG("seed rolled — childAlive={} spawnedByEnhance={} counter={}%",
+                 IsChildAlive(state.spawnedChildActor),
+                 state.isSpawnedByEnhancement,
+                 state.seedCharge.GetCounter() * 25);
 
     // Child-not-active gate (per user Q3 2026-07-31: parent tracks
     // own child only). Skip if own child is still alive.
     if (IsChildAlive(state.spawnedChildActor)) {
-        // Clear stale reference if child is dead so future rolls
-        // work — check every roll rather than depending on child's
-        // OnActorDestroy to walk back.
+        DEKUBABA_DBG("seed BLOCKED — own child alive");
+        return false;
+    }
+    // Clear stale pointer if the child died.
+    if (state.spawnedChildActor != nullptr && !IsChildAlive(state.spawnedChildActor)) {
         state.spawnedChildActor = nullptr;
-        return false;  // was alive last we checked — skip this attack
     }
 
     // Suppress on seed-spawned children (per user Q3): children
     // can run A + B but not C. Future toggle CVar
     // gEnhancements.Dekubaba.SeedChildrenCanSeed lets user override.
     if (state.isSpawnedByEnhancement) {
-        // TODO: gate on SeedChildrenCanSeed CVar when that lands.
+        DEKUBABA_DBG("seed BLOCKED — this actor is a spawnedByEnhancement child");
         return false;
     }
 
@@ -714,15 +752,18 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
         state.seedAttackFrame       = 0;
         state.seedLandingPos        = landingTarget;
 
-        // "Sizzle" SFX at commit — subtle audio cue similar to acid
-        // charge.
+        DEKUBABA_DBG("seed FIRE — landing=({:.0f},{:.0f},{:.0f})",
+                     landingTarget.x, landingTarget.y, landingTarget.z);
         EnhancementAudio::PlayBoostedActorSfx(
             &actor->actor, NA_SE_EV_WATER_BUBBLE);
         return true;
     }
 
-    // Charging branch: TryCharge advances counter.
-    state.seedCharge.TryCharge();
+    // Charging branch.
+    const u8 counterBefore = state.seedCharge.GetCounter();
+    if (state.seedCharge.TryCharge()) {
+        DEKUBABA_DBG("seed CHARGED — counter {} → Ready", counterBefore);
+    }
     return false;
 }
 

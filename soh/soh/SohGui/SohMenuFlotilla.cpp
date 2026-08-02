@@ -856,6 +856,21 @@ void SohMenu::AddMenuFlotilla() {
             "and seed fail — unified priority pattern.\n\n"
             "See Plans/en_dekubaba_enhanced_plan.md §Feature B, tracker #309."));
 
+    AddWidget(path, "Dekubaba diagnostic log (debugging)##Flotilla",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Dekubaba.DebugLog"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: SPDLOG_INFO fires at every Dekubaba enhancement "
+            "roll decision (acid / seed / detach) + charge state "
+            "transitions + squirm position telemetry.\n\n"
+            "Grep the SoH log for `[Dekubaba]` prefix. Used for "
+            "post-field-test analysis when features don't fire as "
+            "expected — reveals whether roll decisions are reached, "
+            "whether preconditions block firing, and whether motion "
+            "code is executed. Zero gameplay impact when off."));
+
     AddWidget(path, "Seed spawn: fire seed projectile behind Link to spawn child Dekubaba##Flotilla",
               WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("Dekubaba.SeedSpawn"))

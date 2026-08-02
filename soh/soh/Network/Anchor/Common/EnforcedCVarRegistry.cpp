@@ -224,6 +224,13 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     // child is alive. Children CAN acid + detach but NOT seed
     // (unless future SeedChildrenCanSeed override CVar ON).
     { CVAR_ENHANCEMENT("Dekubaba.SeedSpawn"), 0 },
+
+    // Pillar 5 (2026-08-01) — Dekubaba diagnostic logging gate.
+    // When ON, SPDLOG_INFO fires at every acid/seed/detach roll
+    // decision + charge state transition + squirm position telemetry.
+    // Used for field-test analysis of enhancement fire behavior.
+    // Host-authoritative so both clients emit the same trace lines.
+    { CVAR_ENHANCEMENT("Dekubaba.DebugLog"), 0 },
 };
 
 const std::vector<FloatCVarEntry> kEnforcedFloats = {

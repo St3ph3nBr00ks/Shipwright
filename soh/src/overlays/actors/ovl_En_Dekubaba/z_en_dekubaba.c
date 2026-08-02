@@ -624,11 +624,29 @@ void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play) {
     // raycast Y-snap, host-only bleedout timer.
     Anchor_Enhance_EnDekubaba_OnDetachedSquirmTick(this, play);
 
-    // Vanilla-style physics — velocity → position + bgCheck floor test.
+    // Bug 3 fix (2026-08-01) — motion pipeline for detached form.
+    //
+    // Vanilla `EnDekubaba_UpdateHeadPosition` (called at end of this
+    // actionFunc) writes:
+    //     world.pos = home.pos + sin/cos(stemSectionAngle) * offset
+    // ...which OVERWRITES any world.pos change from Actor_MoveXZGravity
+    // because vanilla assumes home.pos is a fixed stem-base anchor.
+    //
+    // For the detached (mobile) form, we snapshot world.pos BEFORE
+    // motion, run Actor_MoveXZGravity to apply velocity, then apply
+    // the SAME delta to home.pos so UpdateHeadPosition's anchor moves
+    // with the plant. Head still bobs via sine-wave stem angles
+    // around the moving anchor — serpentine motion preserved.
+    Vec3f prevWorldPos = this->actor.world.pos;
     Actor_MoveXZGravity(&this->actor);
     // bgCheck flags = 5 (floor + wall). Matches vanilla Dekubaba
     // convention at z_en_dekubaba.c:1541.
     Actor_UpdateBgCheckInfo(play, &this->actor, 20.0f, 40.0f, 40.0f, 5);
+    // Apply motion delta to home.pos so UpdateHeadPosition anchors
+    // on the new position, not the stationary original stem-base.
+    this->actor.home.pos.x += (this->actor.world.pos.x - prevWorldPos.x);
+    this->actor.home.pos.y += (this->actor.world.pos.y - prevWorldPos.y);
+    this->actor.home.pos.z += (this->actor.world.pos.z - prevWorldPos.z);
 
     // Bleedout death — colChkInfo.health decremented by descriptor
     // per interval. When it hits 0, transition to death.
@@ -647,6 +665,8 @@ void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play) {
 
     // Vanilla head-position math uses stemSectionAngle[] which the
     // descriptor just wrote — call it to update visible head pose.
+    // Now safe: home.pos was updated above to track motion, so this
+    // computes world.pos = new home.pos + serpentine offset.
     EnDekubaba_UpdateHeadPosition(this);
 }
 
@@ -724,8 +744,13 @@ void EnDekubaba_SeedFire(EnDekubaba* this, PlayState* play) {
     SkelAnime_Update(&this->skelAnime);
     Anchor_Enhance_EnDekubaba_OnSeedFireTick(this, play, (int)this->timer);
     this->timer++;
-    if (this->timer >= 10) {
-        // Fire cycle done; transition to PullBack for recovery.
+    // Bug 2 fix (2026-08-01) — was `>= 10` but descriptor's
+    // OnSeedFireTick uses `frame >= kSeedFireFrame` where
+    // kSeedFireFrame = 15. Exiting at timer 10 meant frame 15 was
+    // NEVER reached → seed projectile NEVER spawned. Extended to 25
+    // frames total (matches AcidVomit's single-state cycle length)
+    // so spawn at frame 15 fires + 10 frames of follow-through.
+    if (this->timer >= 25) {
         EnDekubaba_SetupPullBack(this);
     }
     EnDekubaba_UpdateHeadPosition(this);

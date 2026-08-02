@@ -47,6 +47,18 @@
 #define EN_DEKUBABA_ACID_INITIAL_Y_SPEED  4.0f
 #define EN_DEKUBABA_ACID_GRAVITY          -0.7f
 
+// Pillar 5 (#308) Bug 1 fix (2026-08-01) — trail particles during
+// flight. Draw is a stub (no mesh); user reported "acid not observed"
+// because between telegraph and ground impact the projectile was
+// invisible. Fix: spawn green splash particle every 2 frames using
+// the same AcidVisuals palette the descriptor uses for telegraph
+// mouth spit. C-side inline copy of the C++ header constants.
+#define ACID_TRAIL_PERIOD_FRAMES 2
+static Color_RGBA8 sAcidTrailPrimColor = { 170, 240, 110, 220 };
+static Color_RGBA8 sAcidTrailEnvColor  = {  50,  90,  30, 255 };
+#define ACID_TRAIL_SPLASH_TYPE  2
+#define ACID_TRAIL_SPLASH_SCALE 250
+
 // Lifetime — 60 frames max (3 sec at 20fps, 1 sec at 60fps).
 // Ground / wall contact terminates earlier.
 #define EN_DEKUBABA_ACID_LIFETIME_FRAMES  60
@@ -122,6 +134,18 @@ void EnDekubabaAcid_Update(Actor* thisx, PlayState* play) {
     if (this->lifetimeFrames <= 0) {
         Actor_Kill(&this->actor);
         return;
+    }
+
+    // Bug 1 fix (2026-08-01) — trail particle at current position.
+    // Fires every ACID_TRAIL_PERIOD_FRAMES frames so player can see
+    // the projectile in flight. Uses same green splash config as
+    // the descriptor's telegraph mouth spit.
+    if ((play->gameplayFrames % ACID_TRAIL_PERIOD_FRAMES) == 0) {
+        Vec3f trailPos = this->actor.world.pos;
+        EffectSsGSplash_Spawn(play, &trailPos,
+                               &sAcidTrailPrimColor, &sAcidTrailEnvColor,
+                               ACID_TRAIL_SPLASH_TYPE,
+                               ACID_TRAIL_SPLASH_SCALE);
     }
 
     // Ballistic arc — Actor_MoveXZGravity applies velocity + gravity.
