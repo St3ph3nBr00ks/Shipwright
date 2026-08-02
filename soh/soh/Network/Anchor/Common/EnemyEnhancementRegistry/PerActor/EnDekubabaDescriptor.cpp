@@ -144,7 +144,13 @@ constexpr ChargeStateMachine::Config kDetachChargeConfig = {
 //   Stem-angle sine amplitude 0x1000 (~5.6°) with 3-segment phase
 //   offset 0°/120°/240° for a serpentine wave.
 constexpr float kSquirmSpeedXZ            = 2.0f;
-constexpr s16   kSquirmStemAmplitude      = 0x1000;
+// Bug 7 fix (2026-08-01) — slither amplitude tripled per user
+// request. Was 0x1000 (~22.5° swing) which felt too subtle; user
+// wanted 3× → 0x3000 (~67.5° swing). Combined with base 0x0800
+// (~11.25°), stem sections swing between -0x2800 and +0x3800.
+// UpdateHeadPosition's spherical trig produces visibly dramatic
+// serpentine motion at this amplitude.
+constexpr s16   kSquirmStemAmplitude      = 0x3000;
 constexpr s16   kSquirmStemBase           = 0x0800;
 constexpr float kSquirmPhasePerFrame      = 0.10472f;  // 2π/60 → 60-frame period
 constexpr int   kBleedoutIntervalMs       = 5000;      // -1 HP every 5s

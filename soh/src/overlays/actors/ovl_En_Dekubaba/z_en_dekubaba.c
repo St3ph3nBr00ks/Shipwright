@@ -578,6 +578,22 @@ void EnDekubaba_SetupAcidVomit(EnDekubaba* this) {
 void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play) {
     SkelAnime_Update(&this->skelAnime);
 
+    // Bug 6 fix (2026-08-01) — match vanilla Lunge's animation
+    // pattern for the strike phase. Vanilla Lunge starts with
+    // PauseChomp (mouth-opening telegraph) then switches to
+    // FastChomp at 4.0× speed for the actual bite (line 1142:
+    // Animation_PlayLoopSetSpeed(gDekuBabaFastChompAnim, 4.0f)).
+    //
+    // My AcidVomit was staying on PauseChomp at 1.0× throughout,
+    // so the strike/spit motion looked slow-motion compared to
+    // vanilla Lunge. Switch to FastChomp at frame 15 (the spawn
+    // frame) so the projectile-launch moment coincides with a fast
+    // chomp motion — reads as a proper spit action.
+    if (this->timer == 15) {
+        Animation_PlayLoopSetSpeed(&this->skelAnime,
+                                    &gDekuBabaFastChompAnim, 4.0f);
+    }
+
     // Delegate per-frame visuals + projectile spawn to descriptor.
     // Descriptor's OnAcidVomitTick reads this->timer (which we drive
     // up from 0) to sequence telegraph → fire → follow-through.
@@ -618,6 +634,16 @@ void EnDekubaba_SetupDetachedSquirm(EnDekubaba* this) {
     // Face the actor's facing direction as movement forward. World.rot
     // gets driven each tick by the descriptor toward nearest player.
     this->actor.world.rot.y = this->actor.shape.rot.y;
+    // Bug 7 fix (2026-08-01) — reset shape.rot.x to horizontal.
+    // Prior states (Wait: -0x4000 = -90° pitched up; PrepareLunge
+    // target: 0x1800 = ~+34° pitched forward-down; Lunge: 0 mid-cycle
+    // via Math_ScaledStepToS) leave shape.rot.x in various pitched
+    // orientations. If detach fires from those states, the actor's
+    // draw matrix combines shape.rot.x + stemSectionAngle → head
+    // pitched >90° down → head clips into ground. Reset to 0
+    // (horizontal) so the detached form slithers along the ground
+    // with head facing forward.
+    this->actor.shape.rot.x = 0;
     this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
     this->actionFunc = EnDekubaba_DetachedSquirm;
 }
