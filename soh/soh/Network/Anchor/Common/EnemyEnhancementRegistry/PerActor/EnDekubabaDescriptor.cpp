@@ -1377,42 +1377,19 @@ void EnDekubabaDescriptor::OnEveryFrameTick(EnDekubaba* actor,
     // Priority follows DecideLunge order: acid → seed → detach → vanilla.
     // Show visual of whichever attack fires NEXT so player anticipates.
     //
-    // 2026-08-03 (user "I did not notice green bubbles when acid
-    // ready") — widened trigger. IsReady() alone has a zero-frame
-    // visible window in the common case: OnHostMaybeAcidLunge calls
-    // TryCharge (Charging→Ready) AND OnFire (Ready→Cooldown) in the
-    // same DecideLunge tick when Link is in range, so OnEveryFrameTick
-    // never observes Ready. Widen to include "Charging state with 50%+
-    // chance next roll" — this reads as "an exotic attack is loaded"
-    // during the Wait/PrepareLunge window where the player sees it.
-    //
-    // Threshold: counter × stepIncrement >= 0.5. For acid+seed (step
-    // 0.25) → counter >= 2. For detach (step 0.10) → counter >= 5.
-    // Cooldown state → IsReady()==false + State!=Charging so filter
-    // clean; won't show bubbles during post-fire cooldown.
-    auto warningTriggered = [](const ChargeStateMachine& c) {
-        if (c.IsReady()) return true;
-        if (c.GetState() != ChargeStateMachine::State::Charging) return false;
-        const float chance = (float)c.GetCounter() *
-                              (c.IsReady() ? 0.0f : 0.25f);
-        (void)chance;  // Kept for future per-machine step introspection
-        // Use raw counter threshold — cheaper than reading step. Acid+
-        // seed configs use step=0.25 so counter>=2 → 50%; detach uses
-        // step=0.10 so counter>=5 → 50%. Callers pass the appropriate
-        // threshold below.
-        return false;  // caller uses inline check with per-machine threshold
-    };
-    (void)warningTriggered;  // helper kept for future generalization
-
-    const bool acidReady =
-        state.acidCharge.IsReady() ||
-        (state.acidCharge.GetState() == ChargeStateMachine::State::Charging &&
-         state.acidCharge.GetCounter() >= 2) ||
-        state.netAcidCharged;
-    const bool seedReady =
-        state.seedCharge.IsReady() ||
-        (state.seedCharge.GetState() == ChargeStateMachine::State::Charging &&
-         state.seedCharge.GetCounter() >= 2);
+    // 2026-08-03 REVERT: bubble trigger back to IsReady()-only.
+    // Prior widening to "Charging + counter >= 2" fired constantly
+    // because initialCounter=2 puts every enhanced Dekubaba in
+    // "counter>=2 && state==Charging" from spawn → permanent bubbles.
+    // Correct semantic: bubbles show only when charge has TRANSITIONED
+    // to Ready but hasn't fired yet (rare — usually only when Link is
+    // out of acid range while the charge is armed). The "attack is
+    // happening" visual is instead handled by RenderAcidTelegraph
+    // (fires during AcidVomit actionFunc frames 0-14) — which now
+    // includes bubbles alongside its green spit splashes so the
+    // player still sees bubbles during the actual attack windup.
+    const bool acidReady = state.acidCharge.IsReady() || state.netAcidCharged;
+    const bool seedReady = state.seedCharge.IsReady();
     // Detach: intentionally no-visual per prior design ("subtle
     // surprise"). Kept as a variable so the else-if chain below stays
     // structurally consistent + easy to enable later if desired.
