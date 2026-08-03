@@ -77,6 +77,14 @@ void EnDekubaba_SetupRecover(EnDekubaba* this);
 void EnDekubaba_SetupHit(EnDekubaba* this, s32 arg1);
 void EnDekubaba_SetupStunnedVertical(EnDekubaba* this);
 void EnDekubaba_SetupSway(EnDekubaba* this);
+// Log-819 Bug 5 fix (2026-08-02) — forward-decls added because the new
+// HP<=0 checks at top of AcidVomit / SeedTelegraph / SeedFire call
+// SetupPrunedSomersault, which is defined at line ~945 (after those
+// callers). Without the decl, MSVC infers implicit-int return and
+// then throws C2371 "different basic types" when it reaches the
+// void definition. Pitfall documented in session_state.md.
+void EnDekubaba_SetupPrunedSomersault(EnDekubaba* this);
+void EnDekubaba_SetupShrinkDie(EnDekubaba* this);
 void EnDekubaba_Wait(EnDekubaba* this, PlayState* play);
 void EnDekubaba_Grow(EnDekubaba* this, PlayState* play);
 void EnDekubaba_Retract(EnDekubaba* this, PlayState* play);
