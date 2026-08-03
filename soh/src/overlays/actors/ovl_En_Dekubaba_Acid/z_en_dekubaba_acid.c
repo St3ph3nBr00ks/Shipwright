@@ -59,6 +59,19 @@ static Color_RGBA8 sAcidTrailEnvColor  = {  50,  90,  30, 255 };
 #define ACID_TRAIL_SPLASH_TYPE  2
 #define ACID_TRAIL_SPLASH_SCALE 250
 
+// 2026-08-03 (user) — impact VFX at landing spot. Karebaba-geyser
+// style but smaller since this is a targeted single-hit attack.
+// Green tint matches trail; splash burst gives immediate "splat"
+// read, rising acid dust cloud lingers ~25 frames as caustic vapor.
+#define ACID_IMPACT_SPLASH_COUNT  3
+#define ACID_IMPACT_SPLASH_RADIUS 25.0f  // vs Karebaba geyser 40u
+#define ACID_IMPACT_DUST_COUNT    3
+#define ACID_IMPACT_DUST_SCALE    150    // vs geyser 300
+#define ACID_IMPACT_DUST_SCALESTEP  6    // rises + expands slowly
+#define ACID_IMPACT_DUST_LIFE     20     // ~1s @ 20fps
+static Color_RGBA8 sAcidImpactDustPrimColor = { 180, 230, 130, 150 };
+static Color_RGBA8 sAcidImpactDustEnvColor  = {  80, 130,  60, 255 };
+
 // Lifetime — 60 frames max (3 sec at 20fps, 1 sec at 60fps).
 // Ground / wall contact terminates earlier.
 #define EN_DEKUBABA_ACID_LIFETIME_FRAMES  60
@@ -126,6 +139,46 @@ void EnDekubabaAcid_Destroy(Actor* thisx, PlayState* play) {
     Collider_DestroyCylinder(play, &this->collider);
 }
 
+// 2026-08-03 — impact VFX at landing spot. Called on ground OR wall
+// contact. Karebaba-geyser style but smaller:
+//   - N green splash bursts scattered within a small radius (splat)
+//   - N rising acid-dust particles (caustic vapor lingers)
+static void EnDekubabaAcid_SpawnImpactVfx(PlayState* play, Vec3f* impactPos) {
+    // Splash burst — small radius scatter around impact.
+    for (int i = 0; i < ACID_IMPACT_SPLASH_COUNT; i++) {
+        Vec3f p = *impactPos;
+        p.x += Rand_CenteredFloat(2.0f * ACID_IMPACT_SPLASH_RADIUS);
+        p.z += Rand_CenteredFloat(2.0f * ACID_IMPACT_SPLASH_RADIUS);
+        // Slight upward bias so splash silhouettes read above ground.
+        p.y += 4.0f;
+        EffectSsGSplash_Spawn(play, &p,
+                               &sAcidTrailPrimColor, &sAcidTrailEnvColor,
+                               ACID_TRAIL_SPLASH_TYPE,
+                               ACID_TRAIL_SPLASH_SCALE);
+    }
+
+    // Rising acid dust cloud — same downward-accel-fights-upward-velocity
+    // pattern as vanilla Dust effects. Small scatter around impact so
+    // it reads as a puff, not a single point.
+    Vec3f dustVel   = { 0.0f, 1.5f, 0.0f };
+    Vec3f dustAccel = { 0.0f, -0.05f, 0.0f };
+    for (int i = 0; i < ACID_IMPACT_DUST_COUNT; i++) {
+        Vec3f p = *impactPos;
+        p.x += Rand_CenteredFloat(20.0f);
+        p.z += Rand_CenteredFloat(20.0f);
+        p.y += 8.0f + Rand_ZeroOne() * 8.0f;
+        EffectSsDust_Spawn(play,
+                            /*drawFlags*/ 0,
+                            &p, &dustVel, &dustAccel,
+                            &sAcidImpactDustPrimColor,
+                            &sAcidImpactDustEnvColor,
+                            ACID_IMPACT_DUST_SCALE,
+                            ACID_IMPACT_DUST_SCALESTEP,
+                            ACID_IMPACT_DUST_LIFE,
+                            /*updateMode*/ 0);
+    }
+}
+
 void EnDekubabaAcid_Update(Actor* thisx, PlayState* play) {
     EnDekubabaAcid* this = (EnDekubabaAcid*)thisx;
 
@@ -154,14 +207,16 @@ void EnDekubabaAcid_Update(Actor* thisx, PlayState* play) {
     // bgCheck flags = 5 (floor + wall) — vanilla convention.
     Actor_UpdateBgCheckInfo(play, &this->actor, 10.0f, 15.0f, 15.0f, 5);
 
-    // Ground / wall contact → despawn (with room for future splash
-    // VFX at impact position — descriptor could handle via a
-    // callback if desired).
+    // Ground / wall contact → spawn impact VFX + despawn.
+    // 2026-08-03 (user): landing splash burst + rising acid cloud
+    // for reads-clearly-as-acid impact. Karebaba-geyser style but
+    // smaller since this is a single-target attack.
     if (this->actor.bgCheckFlags & 1) {
         // Ground contact.
         LUSLOG_INFO("[DekubabaAcid] Ground contact at (%.0f,%.0f,%.0f)",
                     this->actor.world.pos.x, this->actor.world.pos.y,
                     this->actor.world.pos.z);
+        EnDekubabaAcid_SpawnImpactVfx(play, &this->actor.world.pos);
         Actor_Kill(&this->actor);
         return;
     }
@@ -170,6 +225,7 @@ void EnDekubabaAcid_Update(Actor* thisx, PlayState* play) {
         LUSLOG_INFO("[DekubabaAcid] Wall contact at (%.0f,%.0f,%.0f)",
                     this->actor.world.pos.x, this->actor.world.pos.y,
                     this->actor.world.pos.z);
+        EnDekubabaAcid_SpawnImpactVfx(play, &this->actor.world.pos);
         Actor_Kill(&this->actor);
         return;
     }
