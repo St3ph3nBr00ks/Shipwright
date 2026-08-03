@@ -310,6 +310,15 @@ struct DekubabaEnhancedState {
     int  lastBleedoutFrame   = 0;  // wall-clock game-tick of last -1 HP
     int  dyingFrameCounter   = 0;
 
+    // 2026-08-03 fix — stable base facing yaw for the detached form.
+    // Steered toward player each tick via ScaledStepToS. shape.rot.y
+    // is written each tick as (baseYaw + sine wiggle) for visual head
+    // sway; world.rot.y is written as baseYaw so velocity flows smooth
+    // toward player without inheriting the wiggle. Prior implementation
+    // did `shape.rot.y += wiggle` which accumulated unboundedly across
+    // frames → yaw spun wildly → head appeared to whip / disappear.
+    s16  squirmBaseFacingYaw = 0;
+
     // Peer-received detach flag (mirror of netAcidActive shape).
     bool netDetachActive = false;
 
@@ -732,6 +741,7 @@ bool EnDekubabaDescriptor::OnHostMaybeDetach(EnDekubaba* actor, PlayState* play)
         state.isDetached         = true;
         state.squirmFrameCounter = 0;
         state.lastBleedoutFrame  = (int)play->gameplayFrames;
+        state.squirmBaseFacingYaw = actor->actor.shape.rot.y;  // seed from current facing
         SPDLOG_INFO("[Dekubaba] detach FIRE decision — actor={} (one-shot per life)",
                     (void*)&actor->actor);
         return true;
@@ -762,6 +772,7 @@ void EnDekubabaDescriptor::OnPeerReceiveDetachActiveFlag(EnDekubaba* actor,
     if (active && !state.isDetached) {
         state.isDetached         = true;
         state.squirmFrameCounter = 0;
+        state.squirmBaseFacingYaw = actor->actor.shape.rot.y;  // seed from current facing
         SPDLOG_INFO("[Dekubaba] peer MIRRORED isDetached=true (from wire) actor={}",
                     (void*)&actor->actor);
     }
@@ -786,34 +797,41 @@ void EnDekubabaDescriptor::OnDetachedSquirmTick(EnDekubaba* actor,
         (s16)(sinf(phase + (float)M_PI * 4.0f / 3.0f) *
               (float)(kSquirmStemAmplitude / 2));  // tail tapered
 
-    // Face nearest player + move forward.
+    // Face nearest player. Steer the stable base yaw (not shape.rot.y
+    // directly) so the visual head-sway wiggle below doesn't feed
+    // back into the target-seeking behavior.
     Actor* target = FindNearestPlayerActor(&actor->actor, play);
     if (target != nullptr) {
         const s16 targetYaw = Math_Vec3f_Yaw(&actor->actor.world.pos,
                                               &target->world.pos);
-        Math_ScaledStepToS(&actor->actor.shape.rot.y, targetYaw, 0x400);
+        Math_ScaledStepToS(&state.squirmBaseFacingYaw, targetYaw, 0x400);
     }
 
-    // 2026-08-03 (user) — horizontal squirm modulation on shape.rot.y.
-    // Adds a sine wave of same magnitude as the vertical stem-section
-    // squirm (kSquirmStemAmplitude) on top of the target-facing yaw.
-    // Result: plant head yaws side-to-side while inch-worming toward
-    // Link — snake-like slither instead of straight-line pursuit.
+    // 2026-08-03 fix (user "head invisible + stem spins in wild
+    // circles"): rewrite horizontal wiggle to SET shape.rot.y from
+    // (baseYaw + wiggle) each frame instead of adding to shape.rot.y.
+    // Prior code did `shape.rot.y += wiggle` — the sine value
+    // accumulated into shape.rot.y every frame, blowing the yaw
+    // unboundedly. Draw uses shape.rot.y for stem direction, so the
+    // head visibly whipped around the base and vanilla
+    // UpdateHeadPosition's world.pos math (also driven by shape.rot.y)
+    // jittered the actor position each frame → head appeared to
+    // teleport / disappear.
     //
-    // Because world.rot.y is derived from shape.rot.y below, the
-    // velocity direction inherits the yaw wiggle → the plant physically
-    // zigzags along the path to Link. Ground-follow snap keeps Y flat.
+    // Correct structure:
+    //   world.rot.y = baseYaw          — steady velocity vector
+    //   shape.rot.y = baseYaw + wiggle — visual head-sway only
+    // Velocity math uses world.rot.y so forward motion is smooth
+    // toward the player; draw uses shape.rot.y so the head sways
+    // side-to-side around the smooth path.
     //
-    // 90° phase offset from vertical wave so the head "leads with the
-    // side that's peaked" — natural snake gait vs. mechanical
-    // in-phase wiggle.
+    // 90° phase offset from vertical (stemSectionAngle) sine so the
+    // horizontal head-lean leads with the peaked-side of the
+    // vertical bob — natural snake gait vs mechanical in-phase.
     const s16 yawWiggle =
         (s16)(sinf(phase + (float)M_PI / 2.0f) * (float)kSquirmStemAmplitude);
-    actor->actor.shape.rot.y += yawWiggle;
-
-    // world.rot.y follows shape.rot.y so both draw + velocity share
-    // the wiggle.
-    actor->actor.world.rot.y = actor->actor.shape.rot.y;
+    actor->actor.shape.rot.y = state.squirmBaseFacingYaw + yawWiggle;
+    actor->actor.world.rot.y = state.squirmBaseFacingYaw;
 
     actor->actor.speedXZ  = kSquirmSpeedXZ;
     actor->actor.velocity.x = Math_SinS(actor->actor.world.rot.y) *
@@ -914,6 +932,7 @@ bool EnDekubabaDescriptor::OnHostMaybeStemCutDetach(EnDekubaba* actor) {
     // but the surprise/reposition value remains.
     state.isDetached         = true;
     state.squirmFrameCounter = 0;
+    state.squirmBaseFacingYaw = actor->actor.shape.rot.y;  // seed from current facing
     actor->actor.colChkInfo.health = 1;
     SPDLOG_INFO("[Dekubaba] stem-cut DETACH triggered — actor={} HP restored to {}",
                 (void*)&actor->actor, actor->actor.colChkInfo.health);
