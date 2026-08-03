@@ -77,10 +77,20 @@ static void EnDekubabaSpliceSeedInMouth(PlayState* play,
     Matrix_ReplaceRotation(&play->billboardMtxF);
     Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
 
-    gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL(gDropDekuNutTex));
+    // Pitfall 46 — gameplay_keep DList/tex symbols are declared as
+    // `static const ALIGN_ASSET(2) char gFoo[] = "__OTR__..."` (asset
+    // paths). C files pass them straight to gSP* (implicit char[] →
+    // void*/Gfx* conversion); C++ rejects the same code with C2664.
+    // Also reinterpret_cast<Gfx*>(const char[]) is rejected (C2440
+    // — incompatible object layouts). C-style cast via `void*`
+    // bridges both const-stripping and pointer-type reinterpretation
+    // in one expression, matching how the vanilla C files effectively
+    // do the same conversion via implicit rules.
+    gSPSegment(POLY_OPA_DISP++, 0x08,
+               (uintptr_t)SEGMENTED_TO_VIRTUAL(gDropDekuNutTex));
     gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx),
                 G_MTX_MODELVIEW | G_MTX_LOAD);
-    gSPDisplayList(POLY_OPA_DISP++, gItemDropDL);
+    gSPDisplayList(POLY_OPA_DISP++, (Gfx*)(void*)gItemDropDL);
 
     CLOSE_DISPS(play->state.gfxCtx);
 }
