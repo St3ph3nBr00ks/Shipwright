@@ -121,7 +121,7 @@ namespace {
 constexpr ChargeStateMachine::Config kAcidChargeConfig = {
     /*stepIncrement*/ 0.25f,
     /*maxCounter*/    4,
-    /*cooldownSteps*/ 3,
+    /*cooldownSteps*/ 1,
     /*initialCounter*/ 2,
 };
 
@@ -129,7 +129,15 @@ constexpr ChargeStateMachine::Config kAcidChargeConfig = {
 // but within a plausible arc distance. Melee lunge ends at ~80u*size.
 // Acid range 120..300u XZ — Link too close makes acid trivially
 // dodgeable; too far and the arc math gets silly.
-constexpr float kAcidMinRangeXZ = 100.0f;
+// 2026-08-03 (user item 6 "acid Ready + vanilla lunge fires instead"):
+// removed min range gate. If acid is Ready and MaybeAcidLunge runs,
+// fire regardless of proximity. Without this the plant telegraphed
+// acid, Link closed the gap, range gate failed → vanilla lunge fired
+// with acid still stuck in Ready. Now the visual promise is honored:
+// Ready → next DecideLunge fires acid. Ballistic solver clamps
+// tFlight ≥ 8 frames so close-range shots produce a small vertical
+// arc rather than an absurd near-vertical trajectory.
+constexpr float kAcidMinRangeXZ = 0.0f;   // was 100 — see comment above
 constexpr float kAcidMaxRangeXZ = 400.0f;
 
 // Vanilla Dekubaba scale at Init: this->size × 0.01 (where size is
@@ -149,8 +157,13 @@ constexpr int   kTelegraphSpitPeriod = 4;  // spawn every N frames
 //   mouth 5u and increase particle effect size 25%."
 // Local overrides so Karebaba's spit config (shared AcidVisuals)
 // stays untouched.
-constexpr float kSpitForwardOffset  = 5.0f;
+constexpr float kSpitForwardOffset  = 5.0f;    // attack telegraph
 constexpr float kSpitScaleMult      = 1.25f;
+// 2026-08-03 (user item 1) — ready-state spit sits 5u further forward
+// than the attack telegraph. The ready-state effect was reading as
+// "in the throat" not "at the mouth"; +5u moves it fully forward of
+// the head-tip so it visibly emerges from the mouth.
+constexpr float kReadySpitForwardOffset = 10.0f;
 
 // Acid attack timing (per plan §Feature A Design "~15-20 frames"):
 //   Frames 0-15  — telegraph (head grows, mouth spits, stem rears)
@@ -227,7 +240,10 @@ constexpr float kSquirmSpeedXZ            = 2.0f;
 // serpentine motion at this amplitude.
 constexpr s16   kSquirmStemAmplitude      = 0x3000;
 constexpr s16   kSquirmStemBase           = 0x0800;
-constexpr float kSquirmPhasePerFrame      = 0.10472f;  // 2π/60 → 60-frame period
+// 2026-08-03 (user item 7) — 25% faster sine phase per "detach looks
+// too smooth. It should appear fast and twitchy." 0.10472 × 1.25 =
+// 0.13090 → 48-frame period vs prior 60.
+constexpr float kSquirmPhasePerFrame      = 0.13090f;
 constexpr int   kBleedoutIntervalMs       = 5000;      // -1 HP every 5s
 
 // DetachedDying state.
@@ -480,6 +496,35 @@ bool EnDekubabaDescriptor::OnHostMaybeAcidLunge(EnDekubaba* actor,
         DEKUBABA_DBG("acid skipped — cross-cooldown remaining={}",
                      state.exoticCooldownRemaining);
         return false;
+    }
+
+    // 2026-08-03 (user item 4) — distance-conditional override.
+    // If Link is out of vanilla lunge range (dist > 80×size) AND acid
+    // isn't already Ready AND isn't in Cooldown AND saved counter
+    // chance is BELOW 100%: use flat 75% chance to enter Ready this
+    // roll. Rationale: vanilla lunge would miss anyway; acid is the
+    // only attack that reaches Link, so bias the roll toward using it.
+    // If counter already at max (100%), let normal TryCharge below
+    // handle it (guaranteed success).
+    // If in Cooldown state, this branch is skipped (guarded below).
+    if (state.acidCharge.GetState() == ChargeStateMachine::State::Charging) {
+        const f32 dist = actor->actor.xzDistToPlayer;
+        const f32 vanillaLungeRange = 80.0f * actor->size;
+        if (dist > vanillaLungeRange) {
+            const float savedChance =
+                (float)state.acidCharge.GetCounter() * 0.25f;
+            if (savedChance < 1.0f) {
+                if (Rand_ZeroOne() < 0.75f) {
+                    state.acidCharge.ForceState(
+                        ChargeStateMachine::State::Ready);
+                    DEKUBABA_DBG("acid distance-override — 75%% roll succeeded "
+                                 "(Link far: dist={:.0f} vanillaRange={:.0f})",
+                                 dist, vanillaLungeRange);
+                }
+                // If failed, fall through to normal TryCharge — the
+                // counter still advances so future attempts benefit.
+            }
+        }
     }
 
     // Ready branch: charged + Link in valid range → fire acid.
@@ -865,8 +910,25 @@ void EnDekubabaDescriptor::OnDetachedSquirmTick(EnDekubaba* actor,
     // vertical bob — natural snake gait vs mechanical in-phase.
     const s16 yawWiggle =
         (s16)(sinf(phase + (float)M_PI / 2.0f) * (float)kSquirmStemAmplitude);
+    const s16 preYaw = actor->actor.shape.rot.y;
     actor->actor.shape.rot.y = state.squirmBaseFacingYaw + yawWiggle;
     actor->actor.world.rot.y = state.squirmBaseFacingYaw;
+
+    // 2026-08-03 (user item 7) — pivot offset toward head. Same
+    // approach as PrepareLunge: shift home.pos opposite to the
+    // head's rotation-induced swing so the head stays visually
+    // pinned during yaw changes. Combined with DetachedSquirm's
+    // existing home-tracks-world-delta code below, this gives a
+    // "head is the pivot" feel — stem base wobbles under a
+    // relatively-stable head.
+    const s16 postYaw = actor->actor.shape.rot.y;
+    if (preYaw != postYaw) {
+        const f32 stemLen = 40.0f * actor->size;
+        const f32 dxHead = stemLen * (Math_SinS(postYaw) - Math_SinS(preYaw));
+        const f32 dzHead = stemLen * (Math_CosS(postYaw) - Math_CosS(preYaw));
+        actor->actor.home.pos.x -= dxHead;
+        actor->actor.home.pos.z -= dzHead;
+    }
 
     actor->actor.speedXZ  = kSquirmSpeedXZ;
     actor->actor.velocity.x = Math_SinS(actor->actor.world.rot.y) *
@@ -1078,6 +1140,32 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
         DEKUBABA_DBG("seed skipped — cross-cooldown remaining={}",
                      state.exoticCooldownRemaining);
         return false;
+    }
+
+    // 2026-08-03 (user item 5) — distance-conditional override.
+    // If Link is INSIDE vanilla lunge range (dist ≤ 80×size) AND no
+    // live child is already tracked (child-not-active gate above passed)
+    // AND seed isn't already Ready AND isn't in Cooldown AND saved
+    // counter chance is BELOW 100%: use flat 75% chance to enter Ready.
+    // Rationale: seed lands behind Link → forces reposition. Best
+    // deployed when Link is close (in melee range where they're
+    // committing to attack the Dekubaba); pushes them out.
+    if (state.seedCharge.GetState() == ChargeStateMachine::State::Charging) {
+        const f32 dist = actor->actor.xzDistToPlayer;
+        const f32 vanillaLungeRange = 80.0f * actor->size;
+        if (dist <= vanillaLungeRange) {
+            const float savedChance =
+                (float)state.seedCharge.GetCounter() * 0.25f;
+            if (savedChance < 1.0f) {
+                if (Rand_ZeroOne() < 0.75f) {
+                    state.seedCharge.ForceState(
+                        ChargeStateMachine::State::Ready);
+                    DEKUBABA_DBG("seed distance-override — 75%% roll succeeded "
+                                 "(Link close: dist={:.0f} vanillaRange={:.0f})",
+                                 dist, vanillaLungeRange);
+                }
+            }
+        }
     }
 
     // Ready branch: fire seed if state machine says Ready.
@@ -1475,11 +1563,12 @@ void EnDekubabaDescriptor::OnEveryFrameTick(EnDekubaba* actor,
         if ((play->gameplayFrames % kTelegraphSpitPeriod) == 0) {
             Color_RGBA8 primC = AcidVisuals::kSpitPrimColor;
             Color_RGBA8 envC  = AcidVisuals::kSpitEnvColor;
-            // Same forward-of-mouth offset as RenderAcidTelegraph so
-            // the water effect emerges from the mouth, not head-tip.
+            // 2026-08-03 (user item 1) — use kReadySpitForwardOffset
+            // (10u vs attack's 5u) so ready-state effect fully clears
+            // the head-tip and reads as "in the mouth."
             const s16 yaw = actor->actor.shape.rot.y;
-            const float fwdX = Math_SinS(yaw) * kSpitForwardOffset;
-            const float fwdZ = Math_CosS(yaw) * kSpitForwardOffset;
+            const float fwdX = Math_SinS(yaw) * kReadySpitForwardOffset;
+            const float fwdZ = Math_CosS(yaw) * kReadySpitForwardOffset;
             Vec3f spitPos = {
                 actor->actor.world.pos.x + fwdX + (Rand_ZeroOne() - 0.5f) * 6.0f,
                 actor->actor.world.pos.y + (Rand_ZeroOne() - 0.5f) * 3.0f,

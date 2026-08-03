@@ -603,40 +603,29 @@ void EnDekubaba_SetupAcidVomit(EnDekubaba* this) {
                 (void*)&this->actor,
                 this->actor.home.pos.x, this->actor.home.pos.y,
                 this->actor.home.pos.z);
+    // 2026-08-03 (user item 2 + item 3) — REWRITE as halfway-
+    // interrupted lunge. Prior implementation used gDekuBabaPauseChompAnim
+    // at 1.0× for 15 frames (slow-motion "telegraph"), then switched to
+    // gDekuBabaFastChompAnim at 4× for the spit. User: "the acid
+    // attack should be spat out during a modified version of the lunge
+    // animation that is interrupted halfway through the lunge motion"
+    // and "I am still observing slow-motion deku baba lunges."
+    //
+    // New structure mirrors vanilla EnDekubaba_Lunge's phase 1
+    // (thrust): PauseChomp at 1.0× while stemSectionAngle steps toward
+    // -0xE38 (forward thrust). When all steps done ("peak of lunge"),
+    // spawn projectile + transition to PullBack. Vanilla Lunge would
+    // continue into phase 2 (FastChomp + player-track) here; the
+    // acid variant SKIPS phase 2 — that's the "interrupted halfway."
     Animation_PlayOnce(&this->skelAnime, &gDekuBabaPauseChompAnim);
-    // Explicit playSpeed reset (2026-08-01) — some vanilla states
-    // set skelAnime.playSpeed = 0.0f (SetupPrepareLunge) or -1.0f
-    // (SetupRecover). Animation_PlayOnce doesn't always overwrite
-    // playSpeed. Setting to 1.0f explicitly ensures the acid animation
-    // plays at normal speed regardless of prior state.
     this->skelAnime.playSpeed = 1.0f;
     this->timer = 0;
-    // Log-819 Bug 2 fix (2026-08-02) — do NOT clear AC_ON here.
-    // Prior comment "no contact damage; ranged" conflated AT (outgoing
-    // damage — Dekubaba biting Link) with AC (incoming damage — Link
-    // hitting Dekubaba). Clearing AC_ON disabled the AC-register site
-    // in EnDekubaba_Update line 1734 (`if (acFlags & AC_ON)
-    // CollisionCheck_SetAC(...)`), which meant sword swings never
-    // detected our collider → Dekubaba was invincible during telegraph.
-    // Vanilla PrepareLunge/Lunge leave AC_ON untouched — Link can
-    // freely damage attacking Dekubaba. Outgoing-damage (AT) is
-    // separately gated at line 1729 (`if (actionFunc == Lunge)
-    // CollisionCheck_SetAT`) — our AcidVomit isn't in that whitelist
-    // so no AT damage fires. Both concerns cleanly separate.
+    // AC_ON stays (Bug 2 log-819) — sword damage during windup.
     this->actionFunc = EnDekubaba_AcidVomit;
 }
 
 void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play) {
-    // Log-819 Bug 5 fix (2026-08-02) — if HP dropped to 0 during
-    // this attack (e.g. sword hit landed via Bug 2 fix that restored
-    // AC_ON), transition to death immediately. Without this, vanilla
-    // UpdateDamage plays death SFX at HP=0 but doesn't transition
-    // actionFunc (vanilla defers death to Recover state at line 1429).
-    // Our 25-frame AcidVomit → PullBack → Recover chain leaves the
-    // dead Dekubaba attacking for ~50 frames after fatal hit. User
-    // reported "receive killing blow, play death SFX, keep attacking".
-    // SetupPrunedSomersault gives fly-back animation + optional
-    // stem-cut detach at landing (Bug 4 fix pipeline).
+    // HP<=0 during attack → immediate death (Bug 5 log-819).
     if (this->actor.colChkInfo.health <= 0) {
         EnDekubaba_SetupPrunedSomersault(this);
         return;
@@ -644,43 +633,44 @@ void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play) {
 
     SkelAnime_Update(&this->skelAnime);
 
-    // Bug 6 fix (2026-08-01) — match vanilla Lunge's animation
-    // pattern for the strike phase. Vanilla Lunge starts with
-    // PauseChomp (mouth-opening telegraph) then switches to
-    // FastChomp at 4.0× speed for the actual bite (line 1142:
-    // Animation_PlayLoopSetSpeed(gDekuBabaFastChompAnim, 4.0f)).
-    //
-    // My AcidVomit was staying on PauseChomp at 1.0× throughout,
-    // so the strike/spit motion looked slow-motion compared to
-    // vanilla Lunge. Switch to FastChomp at frame 15 (the spawn
-    // frame) so the projectile-launch moment coincides with a fast
-    // chomp motion — reads as a proper spit action.
-    if (this->timer == 15) {
-        Animation_PlayLoopSetSpeed(&this->skelAnime,
-                                    &gDekuBabaFastChompAnim, 4.0f);
-    }
+    // 2026-08-03 (user items 2+3) — vanilla-Lunge thrust math.
+    // Steps stemSectionAngle[i] toward -0xE38 (forward thrust) with
+    // curFrame-scaled step size. When all three sections reach the
+    // target ("peak of thrust"), spawn projectile + PullBack.
+    // Copied from EnDekubaba_Lunge phase 1 for visual parity.
+    Math_ScaledStepToS(&this->actor.shape.rot.x, 0, 0x222);
+    s16 curFrame10 = this->skelAnime.curFrame * 10.0f;
+    s32 allStepsDone = 1;
+    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[0], -0xE38, curFrame10 + 0x38E);
+    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[1], -0xE38, curFrame10 + 0x71C);
+    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[2], -0xE38, curFrame10 + 0xE38);
 
-    // Delegate per-frame visuals + projectile spawn to descriptor.
-    // Descriptor's OnAcidVomitTick reads this->timer (which we drive
-    // up from 0) to sequence telegraph → fire → follow-through.
+    // Delegate per-frame render (head-scale + mouth spit + bubbles)
+    // to descriptor. Frame parameter used only for internal render
+    // sequencing; timer counts up regardless.
     Anchor_Enhance_EnDekubaba_OnAcidVomitTick(this, play, (int)this->timer);
-
     this->timer++;
 
-    // Cycle length matches descriptor's kAcidTotalFrames (25). At
-    // cycle end, transition to PullBack (vanilla recovery path).
-    // This keeps the animation flow familiar — the acid vomit slots
-    // into the same PrepareLunge → attack → PullBack → Recover
-    // sequence positions the vanilla lunge occupies.
-    if (this->timer >= 25) {
-        // Bug 9 fix (2026-08-02) — reset head scale to vanilla
-        // BEFORE transitioning. RenderAcidTelegraph writes scale
-        // 1.25× during frames 0-14; without this reset, the
-        // enlarged head persists through PullBack + Recover
-        // (~40-60 frames) until OnAttackComplete fires. User
-        // reported "head doesn't return to 1× after attack".
+    if (allStepsDone) {
+        // Peak of lunge thrust — fire projectile + PullBack.
+        // Force fire frame by calling OnAcidVomitTick with the
+        // configured spawn frame (bypassing the up-counting timer).
+        // The descriptor's tick reads `frame >= kAcidSpawnFrame` to
+        // gate the actual spawn — passing a fire-ready frame here
+        // triggers the spawn regardless of how long thrust took.
+        Anchor_Enhance_EnDekubaba_OnAcidVomitTick(this, play, /*fireFrame=*/999);
+        // Reset head scale (Bug 9 log-818 fix) before PullBack takes over.
         Actor_SetScale(&this->actor, this->size * 0.01f);
         EnDekubaba_SetupPullBack(this);
+        return;
+    }
+
+    // Safety timeout — if thrust math never reaches allStepsDone
+    // (shouldn't happen but defensive), force-exit after 30 frames.
+    if (this->timer >= 30) {
+        Actor_SetScale(&this->actor, this->size * 0.01f);
+        EnDekubaba_SetupPullBack(this);
+        return;
     }
 
     EnDekubaba_UpdateHeadPosition(this);
@@ -693,7 +683,9 @@ void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play) {
 // DetachedDying when colChkInfo.health <= 0.
 void EnDekubaba_SetupDetachedSquirm(EnDekubaba* this) {
     // Loop the FastChomp anim for a mouth-open squirm visual.
-    Animation_Change(&this->skelAnime, &gDekuBabaFastChompAnim, 0.5f, 0.0f,
+    // 2026-08-03 (user item 7) — playSpeed 0.5 → 0.625 (25% faster).
+    // "It should appear fast and twitchy" — quicker chomp cadence.
+    Animation_Change(&this->skelAnime, &gDekuBabaFastChompAnim, 0.625f, 0.0f,
                      Animation_GetLastFrame(&gDekuBabaFastChompAnim),
                      ANIMMODE_LOOP, -3.0f);
     this->timer = 0;
@@ -887,8 +879,7 @@ void EnDekubaba_SetupSeedFire(EnDekubaba* this) {
 }
 
 void EnDekubaba_SeedFire(EnDekubaba* this, PlayState* play) {
-    // Log-819 Bug 5 fix (2026-08-02) — same rationale as AcidVomit's
-    // health check above. Killing-blow-then-continue-attacking bug.
+    // HP<=0 during attack → immediate death (Bug 5 log-819).
     if (this->actor.colChkInfo.health <= 0) {
         EnDekubaba_SetupPrunedSomersault(this);
         return;
@@ -896,34 +887,35 @@ void EnDekubaba_SeedFire(EnDekubaba* this, PlayState* play) {
 
     SkelAnime_Update(&this->skelAnime);
 
-    // Log-819 Bug 1 fix (2026-08-02) — mirror AcidVomit Bug 6 fix.
-    // SeedFire was staying on gDekuBabaPauseChompAnim at playSpeed=1
-    // for its entire 25-frame cycle, so the spit motion looked
-    // slow-motion (~0.5× vanilla lunge speed per user observation).
-    // Switch to gDekuBabaFastChompAnim at 4× at the fire frame (15)
-    // so the projectile-launch moment coincides with a fast chomp
-    // motion — matches vanilla lunge readability + acid attack.
-    if (this->timer == 15) {
-        Animation_PlayLoopSetSpeed(&this->skelAnime,
-                                    &gDekuBabaFastChompAnim, 4.0f);
-    }
+    // 2026-08-03 (user item 2) — halfway-interrupted lunge-thrust,
+    // mirror of AcidVomit rewrite. Same vanilla-Lunge phase-1 thrust
+    // math; on allStepsDone spawn seed projectile + PullBack.
+    Math_ScaledStepToS(&this->actor.shape.rot.x, 0, 0x222);
+    s16 curFrame10 = this->skelAnime.curFrame * 10.0f;
+    s32 allStepsDone = 1;
+    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[0], -0xE38, curFrame10 + 0x38E);
+    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[1], -0xE38, curFrame10 + 0x71C);
+    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[2], -0xE38, curFrame10 + 0xE38);
 
     Anchor_Enhance_EnDekubaba_OnSeedFireTick(this, play, (int)this->timer);
     this->timer++;
-    // Bug 2 fix (2026-08-01) — was `>= 10` but descriptor's
-    // OnSeedFireTick uses `frame >= kSeedFireFrame` where
-    // kSeedFireFrame = 15. Exiting at timer 10 meant frame 15 was
-    // NEVER reached → seed projectile NEVER spawned. Extended to 25
-    // frames total (matches AcidVomit's single-state cycle length)
-    // so spawn at frame 15 fires + 10 frames of follow-through.
-    if (this->timer >= 25) {
-        // Bug 9 fix (2026-08-02) — reset head scale on exit.
-        // SeedTelegraph frames 0-14 wrote scale 1.25× via
-        // RenderAcidTelegraph; without this reset, enlarged head
-        // persists through PullBack + Recover.
+
+    if (allStepsDone) {
+        // Peak of thrust — force fire via out-of-band frame value
+        // (descriptor gates spawn on `frame >= kSeedFireFrame`).
+        Anchor_Enhance_EnDekubaba_OnSeedFireTick(this, play, /*fireFrame=*/999);
         Actor_SetScale(&this->actor, this->size * 0.01f);
         EnDekubaba_SetupPullBack(this);
+        return;
     }
+
+    // Safety timeout.
+    if (this->timer >= 30) {
+        Actor_SetScale(&this->actor, this->size * 0.01f);
+        EnDekubaba_SetupPullBack(this);
+        return;
+    }
+
     EnDekubaba_UpdateHeadPosition(this);
 }
 
