@@ -110,16 +110,19 @@ namespace {
         } \
     } while (0)
 
-// Charge state machine — matches Karebaba pattern (25% steps, max 4,
-// 3-attack cooldown). Rolls on each DecideLunge → attack transition.
-// initialCounter = 1 (2026-08-02 per user) — Dekubabas die fast so
-// first attack gets 25% chance instead of 0% baseline. Post-cooldown
-// restart also uses 25%.
+// Charge state machine — 25% steps, max 4, 3-attack cooldown. Rolls
+// on each DecideLunge → attack transition. Chance = counter × step.
+//
+// initialCounter = 2 (2026-08-03 per user) — first attack gets 50%
+// chance so short-lived Dekubabas actually get to use the new
+// attacks before dying. Post-cooldown restart uses same 50% baseline.
+// Prior value (1 = 25%) still had many Dekubabas dying without
+// firing acid at all.
 constexpr ChargeStateMachine::Config kAcidChargeConfig = {
     /*stepIncrement*/ 0.25f,
     /*maxCounter*/    4,
     /*cooldownSteps*/ 3,
-    /*initialCounter*/ 1,
+    /*initialCounter*/ 2,
 };
 
 // Range gate — acid is useful when Link is outside melee lunge range
@@ -190,11 +193,20 @@ constexpr float kAcidMaxFlightFrames    = 50.0f;
 // One-shot per actor life via sticky isDetached flag; the ChargeState
 // cooldown never activates because the actor transitions to
 // DetachedSquirm and never runs another DecideLunge.
+// Detach tuning tweaked 2026-08-03 per user request: "Reduce chance
+// to enter detached mode to 10% on first attack and increase by 10%
+// each time." Was 25% + 25%/attack, now 10% + 10%/attack. Detach
+// is more dramatic than acid/seed (permanent state change, plant
+// dies to bleedout), so slower ramp gives Link more time to finish
+// the encounter conventionally before the plant severs itself.
+// maxCounter 10 so chance can still climb to 100% at max (10 × 0.10);
+// realistic ceiling is ~5-6 attacks (which would be an unusually
+// long fight to trigger anyway).
 constexpr ChargeStateMachine::Config kDetachChargeConfig = {
-    /*stepIncrement*/ 0.25f,
-    /*maxCounter*/    4,
-    /*cooldownSteps*/ 3,
-    /*initialCounter*/ 1,  // 2026-08-02 — start at 25% chance (see acid config)
+    /*stepIncrement*/  0.10f,
+    /*maxCounter*/     10,
+    /*cooldownSteps*/  3,
+    /*initialCounter*/ 1,   // 2026-08-03 — 10% first attack
 };
 
 // Squirm motion (DetachedSquirm state).
@@ -228,7 +240,7 @@ constexpr ChargeStateMachine::Config kSeedChargeConfig = {
     /*stepIncrement*/  0.25f,
     /*maxCounter*/     4,
     /*cooldownSteps*/  3,
-    /*initialCounter*/ 1,  // 2026-08-02 — start at 25% (see acid config)
+    /*initialCounter*/ 2,  // 2026-08-03 — start at 50% (see acid config)
 };
 
 // Seed telegraph + fire timing. Matches acid cycle length so both
@@ -780,8 +792,29 @@ void EnDekubabaDescriptor::OnDetachedSquirmTick(EnDekubaba* actor,
         const s16 targetYaw = Math_Vec3f_Yaw(&actor->actor.world.pos,
                                               &target->world.pos);
         Math_ScaledStepToS(&actor->actor.shape.rot.y, targetYaw, 0x400);
-        actor->actor.world.rot.y = actor->actor.shape.rot.y;
     }
+
+    // 2026-08-03 (user) — horizontal squirm modulation on shape.rot.y.
+    // Adds a sine wave of same magnitude as the vertical stem-section
+    // squirm (kSquirmStemAmplitude) on top of the target-facing yaw.
+    // Result: plant head yaws side-to-side while inch-worming toward
+    // Link — snake-like slither instead of straight-line pursuit.
+    //
+    // Because world.rot.y is derived from shape.rot.y below, the
+    // velocity direction inherits the yaw wiggle → the plant physically
+    // zigzags along the path to Link. Ground-follow snap keeps Y flat.
+    //
+    // 90° phase offset from vertical wave so the head "leads with the
+    // side that's peaked" — natural snake gait vs. mechanical
+    // in-phase wiggle.
+    const s16 yawWiggle =
+        (s16)(sinf(phase + (float)M_PI / 2.0f) * (float)kSquirmStemAmplitude);
+    actor->actor.shape.rot.y += yawWiggle;
+
+    // world.rot.y follows shape.rot.y so both draw + velocity share
+    // the wiggle.
+    actor->actor.world.rot.y = actor->actor.shape.rot.y;
+
     actor->actor.speedXZ  = kSquirmSpeedXZ;
     actor->actor.velocity.x = Math_SinS(actor->actor.world.rot.y) *
                                kSquirmSpeedXZ;
