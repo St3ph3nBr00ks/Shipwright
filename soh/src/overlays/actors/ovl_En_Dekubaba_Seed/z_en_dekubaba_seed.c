@@ -27,6 +27,11 @@
 
 #include "z_en_dekubaba_seed.h"
 #include <libultraship/log/luslog.h>
+// Log-820 Bug 2b fix (2026-08-02) — mesh render. gameplay_keep DLists
+// gItemDropDL + gDropDekuNutTex used to draw the seed as a Deku Nut
+// sprite in flight. gameplay_keep is always loaded; no object load
+// hazards.
+#include "assets/objects/gameplay_keep/gameplay_keep.h"
 
 // Pillar 5 (#318) — descriptor callback shims.
 extern void Anchor_Enhance_EnDekubaba_OnSeedLanded(Actor* parent, PlayState* play,
@@ -148,11 +153,32 @@ void EnDekubabaSeed_Update(Actor* thisx, PlayState* play) {
 }
 
 void EnDekubabaSeed_Draw(Actor* thisx, PlayState* play) {
-    // No mesh in v1 — visual placeholder. Object dekunuts flower/nut
-    // DList (per user C1) will be wired here in a follow-up polish
-    // pass; requires resolving the exact DList symbol name from
-    // object_dekunuts. For v1 the seed is invisible in flight but
-    // the on-land Dekubaba spawn IS visible.
-    (void)thisx;
-    (void)play;
+    // Log-820 Bug 2b fix (2026-08-02) — render Deku Nut sprite in
+    // flight. User: "currently, I still do not see the dekubaba seed
+    // model in the air when the attack is used, and I should."
+    //
+    // Uses gameplay_keep gItemDropDL + gDropDekuNutTex — same asset
+    // pair as the mouth-nut visual (Bug 2a). Consistent readability:
+    // the nut in the mouth becomes the nut in the air becomes the
+    // (eventual) new Dekubaba on landing.
+    EnDekubabaSeed* this = (EnDekubabaSeed*)thisx;
+
+    OPEN_DISPS(play->state.gfxCtx);
+    Gfx_SetupDL_25Opa(play->state.gfxCtx);
+    POLY_OPA_DISP = Play_SetFog(play, POLY_OPA_DISP);
+    POLY_OPA_DISP = Gfx_SetupDL_66(POLY_OPA_DISP);
+
+    Matrix_Translate(this->actor.world.pos.x, this->actor.world.pos.y,
+                     this->actor.world.pos.z, MTXMODE_NEW);
+    // Face-camera billboard rotation. Sprite is a texture on a quad.
+    Matrix_ReplaceRotation(&play->billboardMtxF);
+    // Small scale so the nut reads as ammunition-sized (~30u).
+    Matrix_Scale(0.006f, 0.006f, 0.006f, MTXMODE_APPLY);
+
+    gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL(gDropDekuNutTex));
+    gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx),
+                G_MTX_MODELVIEW | G_MTX_LOAD);
+    gSPDisplayList(POLY_OPA_DISP++, gItemDropDL);
+
+    CLOSE_DISPS(play->state.gfxCtx);
 }

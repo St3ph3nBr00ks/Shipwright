@@ -58,6 +58,12 @@ extern int  Anchor_Enhance_EnDekubaba_IsSpawnedByEnhancement(EnDekubaba* actor);
 // internally on any charge machine's Ready state.
 extern void Anchor_Enhance_EnDekubaba_OnEveryFrameTick(EnDekubaba* actor, PlayState* play);
 
+// Log-820 Bug 2a fix (2026-08-02) — draw-time hook. Called from
+// EnDekubaba_Draw after the main render. Descriptor renders a
+// Deku Nut sprite in the mouth when seed-telegraph or seed-ready
+// state is active.
+extern void Anchor_Enhance_EnDekubaba_OnDrawHook(EnDekubaba* actor, PlayState* play);
+
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
 
 void EnDekubaba_Init(Actor* thisx, PlayState* play);
@@ -1765,9 +1771,26 @@ void EnDekubaba_Update(Actor* thisx, PlayState* play) {
     // the first time Link contacts or damages the squirming plant.
     // Guard: when detached, apply damage directly to health, clear
     // the AT_HIT flag without transitioning, let DetachedSquirm keep
-    // running until bleedout kills it. DetachedDying state is exempt
-    // (IsDetached returns false after OnDeath resets in SetupDetachedDying).
-    if (Anchor_Enhance_EnDekubaba_IsDetached(this)) {
+    // running until bleedout kills it.
+    //
+    // Log-820 Bug 1 fix (2026-08-02) — guard also covers DetachedDying.
+    // Prior version exempted DetachedDying (IsDetached returns false
+    // after OnDeath resets in SetupDetachedDying). BUT: DetachedSquirm's
+    // per-tick CollisionCheck_SetAT registers the AT collider so the
+    // plant deals contact damage on head-sphere overlap. The
+    // collision system sets AT_HIT on the collider when a hit lands,
+    // and atFlags & AT_HIT can persist into the frame that
+    // SetupDetachedDying fires (transition happens INSIDE
+    // DetachedSquirm at HP<=0 check). Without the DetachedDying
+    // exemption in the guard, the vanilla fall-through path at line
+    // ~1802 (`if (atFlags & AT_HIT) SetupRecover`) fires — plant
+    // suddenly becomes upright and resumes vanilla lunge cycle.
+    // User 2026-08-02 log-820: "A dekubaba in the detached state
+    // returned to its upright lunge, vanilla behavior."
+    // Widening the guard to cover both squirming AND dying states
+    // protects the entire terminal-death arc from vanilla resets.
+    if (Anchor_Enhance_EnDekubaba_IsDetached(this) ||
+        this->actionFunc == EnDekubaba_DetachedDying) {
         // Link damaged the plant — apply directly, don't transition.
         // DetachedSquirm's `if (health <= 0)` check transitions to
         // DetachedDying next frame.
@@ -1998,6 +2021,13 @@ void EnDekubaba_Draw(Actor* thisx, PlayState* play) {
         if (this->boundFloor != NULL) {
             EnDekubaba_DrawBaseShadow(this, play);
         }
+
+        // Log-820 Bug 2a fix (2026-08-02) — descriptor draw hook.
+        // Renders Deku Nut in mouth when seed telegraph OR seed-ready.
+        // No-op when the flag isn't set. Placed here so the nut draws
+        // ON TOP of the head/stem (later in Z order). No effect when
+        // the actor is in DeadStickDrop branch (whole outer if bypasses).
+        Anchor_Enhance_EnDekubaba_OnDrawHook(this, play);
 
         // Display solid until 40 frames left, then blink until killed.
     } else if ((this->timer > 40) || ((this->timer % 2) != 0)) {

@@ -31,6 +31,10 @@
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/EnhancementAudio.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/ChargeStateMachine.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GroundFollow.h"
+// Pitfall 17 — frame_interpolation.h BEFORE the extern "C" block so
+// OPEN_DISPS macro expansions in the global-namespace splice helper
+// have C-linkage FrameInterpolation_Record{Open,Close}Child decls.
+#include "soh/frame_interpolation.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <spdlog/spdlog.h>
@@ -41,6 +45,10 @@ extern "C" {
 #include "macros.h"
 #include "functions.h"
 #include "variables.h"
+// gameplay_keep DList + texture symbols used by the seed-in-mouth
+// render (Log-820 Bug 2a fix). gameplay_keep is always loaded, so
+// these symbols are safe to reference from any actor draw callback.
+#include "assets/objects/gameplay_keep/gameplay_keep.h"
 // Custom projectile actor ids — registered via ActorDB::AddBuiltIn
 // CustomActors, declared in soh/src/code/z_play.c.
 extern s16 gEnDekubabaAcidId;
@@ -48,6 +56,34 @@ extern s16 gEnDekubabaSeedId;
 }
 
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // FindNearestFloorNodeXZRadius
+
+// Log-820 Bug 2a fix (2026-08-02) — global-namespace splice helper for
+// the mouth-nut render. Pitfall 17: OPEN_DISPS macro expansions contain
+// FrameInterpolation_Record{Open,Close}Child block-scope decls; if
+// expanded inside a C++ namespace those decls take C++ linkage and
+// defeat the C-linkage definitions in frame_interpolation.c → link
+// error. Confining the splice to global namespace avoids that. Called
+// via `::EnDekubabaSpliceSeedInMouth(...)` from the namespaced
+// OnDrawHook method.
+static void EnDekubabaSpliceSeedInMouth(PlayState* play,
+                                          f32 posX, f32 posY, f32 posZ,
+                                          f32 scale) {
+    OPEN_DISPS(play->state.gfxCtx);
+    Gfx_SetupDL_25Opa(play->state.gfxCtx);
+    POLY_OPA_DISP = Play_SetFog(play, POLY_OPA_DISP);
+    POLY_OPA_DISP = Gfx_SetupDL_66(POLY_OPA_DISP);
+
+    Matrix_Translate(posX, posY, posZ, MTXMODE_NEW);
+    Matrix_ReplaceRotation(&play->billboardMtxF);
+    Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+
+    gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL(gDropDekuNutTex));
+    gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx),
+                G_MTX_MODELVIEW | G_MTX_LOAD);
+    gSPDisplayList(POLY_OPA_DISP++, gItemDropDL);
+
+    CLOSE_DISPS(play->state.gfxCtx);
+}
 
 namespace AnchorEnemyEnhancement {
 
@@ -284,6 +320,17 @@ struct DekubabaEnhancedState {
 
     // Peer-received seed active flag.
     bool netSeedActive = false;
+
+    // Log-820 Bug 2a fix (2026-08-02) — per-frame draw-hook state.
+    // Set true whenever the Dekubaba should display a Deku Nut model
+    // at its mouth. Consumed by OnDrawHook (called from EnDekubaba_Draw).
+    // Set true when: (a) SeedTelegraph is running pre-fire OR (b) seed
+    // charge is Ready but no attack is active AND acid isn't also Ready
+    // (acid takes render priority — matches DecideLunge order).
+    // Cleared each frame at top of OnEveryFrameTick; re-set only when
+    // conditions apply. Also cleared at seed projectile spawn moment
+    // in OnSeedFireTick + on OnAttackComplete + OnDeath.
+    bool showSeedInMouth = false;
 };
 
 // Thread-local flag set by OnSeedLanded's Actor_Spawn bracket, read
@@ -560,6 +607,8 @@ void EnDekubabaDescriptor::OnAttackComplete(EnDekubaba* actor) {
     state.currentAttackIsSeed   = false;
     state.seedProjectileSpawned = false;
     state.seedAttackFrame       = 0;
+    // Log-820 Bug 2a fix — clear seed mouth visual on cycle complete.
+    state.showSeedInMouth       = false;
 
     // Diagnostic — three-machine counter summary after advancement.
     // Gated on DebugLog CVar to avoid per-attack spam in normal play.
@@ -623,6 +672,8 @@ void EnDekubabaDescriptor::OnDeath(EnDekubaba* actor) {
     state.seedAttackFrame       = 0;
     state.spawnedChildActor     = nullptr;
     state.netSeedActive         = false;
+    // Log-820 Bug 2a fix — clear seed mouth visual on death.
+    state.showSeedInMouth       = false;
     // Note: isSpawnedByEnhancement is NOT reset — it's a sticky
     // per-life property of the actor identity (was this Dekubaba
     // spawned by a seed?), unaffected by death.
@@ -1011,18 +1062,27 @@ void EnDekubabaDescriptor::OnPeerReceiveSeedLandingPos(EnDekubaba* actor,
 
 void EnDekubabaDescriptor::OnSeedTelegraphTick(EnDekubaba* actor,
                                                   PlayState* play, int frame) {
-    // Telegraph render is identical to acid — head 1.5× + mouth
-    // spit. Reuse the same render path.
+    // Log-820 Bug 2a fix (2026-08-02) — seed uses DISTINCT visual
+    // from acid (nut model in mouth instead of green spit+bubbles).
+    // Prior implementation reused RenderAcidTelegraph — user's
+    // feedback: "the seed attack uses the acid/vomit/water tinted
+    // green particle effect and bubbles. This effect is meant to
+    // display that the acid attack is ready to use, not the seed
+    // attack. To signify the seed attack is ready to use the deku
+    // seed model should appear in the deku baba mouth."
     if (actor == nullptr || play == nullptr) return;
     auto it = sStates.find(&actor->actor);
     if (it == sStates.end()) return;
-    (void)it;
-    // Render acid-style telegraph (same visual for both attacks —
-    // player learns "big head + green spit = incoming exotic").
-    // Delegate to RenderAcidTelegraph helper defined in Feature A
-    // section (same file, anonymous namespace).
+    DekubabaEnhancedState& state = it->second;
+
     if (frame <= kSeedTelegraphEndFrame) {
-        RenderAcidTelegraph(actor, play);
+        // Enlarge head to indicate incoming attack (matches acid's
+        // 1.25× scale — visible signal that Dekubaba is winding up).
+        const f32 baseScale = actor->size * 0.01f;
+        Actor_SetScale(&actor->actor, baseScale * kTelegraphHeadScale);
+        // Flag draw hook to render the nut in the mouth. Cleared by
+        // OnEveryFrameTick each tick + re-set here.
+        state.showSeedInMouth = true;
     }
 }
 
@@ -1035,6 +1095,11 @@ void EnDekubabaDescriptor::OnSeedFireTick(EnDekubaba* actor,
 
     if (!state.seedProjectileSpawned && frame >= kSeedFireFrame) {
         state.seedProjectileSpawned = true;
+        // Log-820 Bug 2a fix — nut launches; mouth no longer holds it.
+        // Explicit reset here so the visual disappears at the exact
+        // frame the projectile spawns (OnSeedTelegraphTick stops
+        // firing after SeedFire actionFunc takes over).
+        state.showSeedInMouth = false;
         if (gEnDekubabaSeedId != 0) {
             // Spawn projectile at head; encode landing target in
             // actor spawn coordinates so the projectile can compute
@@ -1250,24 +1315,83 @@ void EnDekubabaDescriptor::OnEveryFrameTick(EnDekubaba* actor,
     if (it == sStates.end()) return;
     DekubabaEnhancedState& state = it->second;
 
+    // Log-820 Bug 2a fix — clear seed-in-mouth flag every tick;
+    // re-set below OR by OnSeedTelegraphTick when appropriate.
+    // Ensures the visual disappears immediately when conditions
+    // change (attack fires, charge cools down, etc.).
+    state.showSeedInMouth = false;
+
     // Suppress while an attack is actively rendering its own visual.
     // netAcidActive covers acid + seed active-flag broadcast, and
     // isDetached covers both squirm + dying. currentAttackIsSeed
-    // covers SeedTelegraph pre-fire window.
+    // covers SeedTelegraph pre-fire window (but SeedTelegraph itself
+    // sets showSeedInMouth via OnSeedTelegraphTick).
     if (state.isDetached) return;
     if (state.currentAttackIsAcid || state.netAcidActive) return;
     if (state.currentAttackIsSeed || state.netSeedActive) return;
 
-    const bool anyReady =
-        state.acidCharge.IsReady()   ||
-        state.seedCharge.IsReady()   ||
-        state.detachCharge.IsReady() ||
-        state.netAcidCharged;
-    if (!anyReady) return;
+    // Log-820 Bug 2a fix — split visual routing per attack type.
+    // Priority follows DecideLunge order: acid → seed → detach → vanilla.
+    // Show visual of whichever attack fires NEXT so player anticipates.
+    const bool acidReady =
+        state.acidCharge.IsReady() || state.netAcidCharged;
+    const bool seedReady = state.seedCharge.IsReady();
+    const bool detachReady = state.detachCharge.IsReady();
 
-    // Head position matches acid telegraph spawn origin.
-    Vec3f bubblePos = actor->actor.world.pos;
-    AcidVisuals::SpawnReadyBubbles(play, bubblePos);
+    if (acidReady) {
+        // Acid ready — green rising-bubble accent at head. Matches
+        // acid attack's visual language (green liquid family).
+        Vec3f bubblePos = actor->actor.world.pos;
+        AcidVisuals::SpawnReadyBubbles(play, bubblePos);
+    } else if (seedReady) {
+        // Seed ready — Deku Nut model rendered at mouth (via draw
+        // hook). Distinct from acid's green liquid — reads as
+        // "physical projectile forthcoming."
+        state.showSeedInMouth = true;
+    } else if (detachReady) {
+        // Detach ready — no visual (subtle/surprise per design).
+        // Detach is a defensive/reactive attack; telegraphing it
+        // would eliminate the surprise. No-op.
+        (void)detachReady;
+    }
+}
+
+// Log-820 Bug 2a fix (2026-08-02) — draw-time hook, called from
+// EnDekubaba_Draw after the vanilla skeleton + stem render.
+// Splices additional DLists based on descriptor state — currently
+// the Deku Nut sprite in the mouth when seed telegraph or seed-ready
+// state is active. Uses gameplay_keep DList (gItemDropDL +
+// gDropDekuNutTex) which is always loaded, safe from any actor draw.
+//
+// Positioning: nut appears at head.pos + forward offset along
+// shape.rot.y so it emerges from the mouth (matches the same
+// mouth-forward direction used by Change 2's acid spit position).
+void EnDekubabaDescriptor::OnDrawHook(EnDekubaba* actor, PlayState* play) {
+    if (actor == nullptr || play == nullptr) return;
+    auto it = sStates.find(&actor->actor);
+    if (it == sStates.end()) return;
+    const DekubabaEnhancedState& state = it->second;
+
+    if (!state.showSeedInMouth) return;
+
+    // Position: head.pos + forward offset (mouth is a bit in front
+    // of the head-tip center). Small downward bias so nut appears
+    // resting between the "jaws" of the chomp anim.
+    const s16 yaw = actor->actor.shape.rot.y;
+    const float kMouthForward = 10.0f;
+    const float kMouthDown    = 4.0f;
+    const float posX = actor->actor.world.pos.x +
+                        Math_SinS(yaw) * kMouthForward;
+    const float posY = actor->actor.world.pos.y - kMouthDown;
+    const float posZ = actor->actor.world.pos.z +
+                        Math_CosS(yaw) * kMouthForward;
+    // Nut sprite scale — proportional to Dekubaba head at 1.25×
+    // telegraph scale (~55u * 0.6 = ~33u tall).
+    const float kNutScale = actor->size * 0.006f;
+
+    // Delegate to global-namespace splice (Pitfall 17). ::-prefix
+    // required to escape the enclosing namespace lookup.
+    ::EnDekubabaSpliceSeedInMouth(play, posX, posY, posZ, kNutScale);
 }
 
 }  // namespace AnchorEnemyEnhancement

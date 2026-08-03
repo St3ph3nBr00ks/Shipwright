@@ -233,6 +233,19 @@ extern "C" void Anchor_Enhance_EnDekubaba_OnEveryFrameTick(
     desc->OnEveryFrameTick(actor, play);
 }
 
+// Log-820 Bug 2a fix (2026-08-02) — draw-time hook.
+// Called from EnDekubaba_Draw after the vanilla skeleton + stem
+// render. Descriptor consumes state flags to splice additional
+// DLists — currently the Deku Nut model in the mouth when seed
+// telegraph or seed-ready state is active.
+extern "C" void Anchor_Enhance_EnDekubaba_OnDrawHook(
+    EnDekubaba* actor, PlayState* play) {
+    if (actor == nullptr || play == nullptr) return;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return;
+    desc->OnDrawHook(actor, play);
+}
+
 extern "C" int Anchor_Enhance_EnDekubaba_IsSeedActive(EnDekubaba* actor) {
     if (actor == nullptr) return 0;
     auto* desc = GetDekubabaDescriptor();

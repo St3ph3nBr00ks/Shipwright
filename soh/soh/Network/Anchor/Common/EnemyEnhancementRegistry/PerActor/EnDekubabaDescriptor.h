@@ -221,6 +221,14 @@ public:
     // charge machine is Ready or when actor is already inside an
     // active attack state (avoids double-drawing with the telegraph).
     void OnEveryFrameTick(EnDekubaba* actor, PlayState* play);
+
+    // Log-820 Bug 2a fix (2026-08-02) — draw-time hook. Called from
+    // EnDekubaba_Draw AFTER the vanilla skeleton + stem render.
+    // Consumes descriptor state to splice additional DLists — currently
+    // the Deku Nut model at the mouth when seed telegraph or seed-
+    // ready state is active. gameplay_keep DList (gItemDropDL +
+    // gDropDekuNutTex) — always loaded, safe from any actor draw.
+    void OnDrawHook(EnDekubaba* actor, PlayState* play);
 };
 
 }  // namespace AnchorEnemyEnhancement
