@@ -1357,7 +1357,43 @@ void EnDekubaba_PrepareLunge(EnDekubaba* this, PlayState* play) {
     }
 
     Math_SmoothStepToS(&this->actor.shape.rot.x, 0x1800, 2, 0xE38, 0x71C);
-    Math_ApproachS(&this->actor.shape.rot.y, Math_Vec3f_Yaw(&this->actor.home.pos, &nearestPlayer->world.pos), 2, 0xE38);
+
+    // 2026-08-03 (user) — rotation lerp cap. Was 0xE38 max step per
+    // frame (~20° at 20fps = ~400°/sec). User request: cap at 30°/sec
+    // for a natural head-tracking read. 30°/sec at 20fps = 1.5°/frame.
+    // s16 step = 1.5 * 65536 / 360 = 273 = 0x111.
+    // Save pre-yaw so we can apply the pivot offset below.
+    const s16 preYaw = this->actor.shape.rot.y;
+    Math_ApproachS(&this->actor.shape.rot.y,
+                    Math_Vec3f_Yaw(&this->actor.home.pos, &nearestPlayer->world.pos),
+                    2, 0x111);
+
+    // 2026-08-03 (user) — pivot offset. Vanilla rotates around
+    // home.pos (stem base) which sends the head swinging in a wide
+    // arc. User wants pivot to appear near the head — the visual
+    // "center of mass" of the plant. Approach: shift home.pos in
+    // the opposite direction of the head's rotation-induced swing,
+    // so the head stays visually pinned while the stem BASE rotates.
+    //
+    // Head XZ offset from home.pos is approximately:
+    //   stem_length * sin(shape.rot.y)  (X)
+    //   stem_length * cos(shape.rot.y)  (Z)
+    // where stem_length ≈ 40u × size (3 stem segments × ~13u avg
+    // horizontal projection given the PrepareLunge stemSectionAngles).
+    //
+    // Delta home = (headOffset_old - headOffset_new) — subtract
+    // the change so the head world position stays the same.
+    const s16 postYaw = this->actor.shape.rot.y;
+    if (preYaw != postYaw) {
+        const f32 stemLen = 40.0f * this->size;
+        const f32 dxHead = stemLen * (Math_SinS(postYaw) - Math_SinS(preYaw));
+        const f32 dzHead = stemLen * (Math_CosS(postYaw) - Math_CosS(preYaw));
+        // Shift home.pos opposite to head's rotation-swing so head
+        // stays put in world space. Y unchanged.
+        this->actor.home.pos.x -= dxHead;
+        this->actor.home.pos.z -= dzHead;
+    }
+
     Math_ScaledStepToS(&this->stemSectionAngle[0], 0xAAA, 0x444);
     Math_ScaledStepToS(&this->stemSectionAngle[1], -0x4718, 0x888);
     Math_ScaledStepToS(&this->stemSectionAngle[2], -0x6AA4, 0x888);

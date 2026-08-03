@@ -121,7 +121,14 @@ inline constexpr int kReadyBubbleSpawnPeriod  = 3;       // 1 per 3 frames
 // Extract-at-2 pattern: single free function reused by Karebaba's
 // RenderTelegraph + Dekubaba's OnEveryFrameTick. Rendering physics
 // (vy/accel/scale/life) locked here so both actors read identical.
-inline void SpawnReadyBubbles(PlayState* play, const Vec3f& spawnPos) {
+//
+// scaleMult (2026-08-03 add): per-caller size scale for consumers
+// wanting larger/smaller bubbles than the default. Default 1.0
+// preserves prior Karebaba behavior; Dekubaba consumer passes 2.0
+// per user 2026-08-03 request "double the size of the dekubaba
+// ready state bubble effect."
+inline void SpawnReadyBubbles(PlayState* play, const Vec3f& spawnPos,
+                              float scaleMult = 1.0f) {
     if (play == nullptr) return;
     if ((play->gameplayFrames % kReadyBubbleSpawnPeriod) != 0) return;
 
@@ -134,9 +141,10 @@ inline void SpawnReadyBubbles(PlayState* play, const Vec3f& spawnPos) {
     Vec3f accel = { 0.0f, kReadyBubbleAccelY, 0.0f };
     Color_RGBA8 primC = kBubblePrimColor;
     Color_RGBA8 envC  = kBubbleEnvColor;
-    const s16 scale = (s16)(kReadyBubbleScaleBase +
+    const s16 scale = (s16)((float)(kReadyBubbleScaleBase +
                              (int)(Rand_ZeroOne() *
-                                    (float)kReadyBubbleScaleRand));
+                                    (float)kReadyBubbleScaleRand)) *
+                             scaleMult);
     EffectSsDtBubble_SpawnCustomColor(play, &pos, &vel, &accel,
                                         &primC, &envC,
                                         scale, kReadyBubbleLife, 4);

@@ -175,7 +175,11 @@ constexpr float kAcidSpitGravity        = -0.7f;
 // Aim at Link's chest (~20u above his feet) for more forgiving
 // vertical framing — hitting feet exactly is finicky if Link's
 // standing on uneven ground.
-constexpr float kAcidTargetChestOffsetY = 20.0f;
+// 2026-08-03 (user) — split Adult vs Child chest offset. Prior single
+// value (20u) aimed at adult chest, sailed over Child Link's head
+// (~24u shorter). Child chest is ~8u above feet, adult ~20u.
+constexpr float kAcidTargetChestOffsetY_Adult = 20.0f;
+constexpr float kAcidTargetChestOffsetY_Child = 8.0f;
 // Ballistic time-of-flight guardrails. Very close targets get a
 // clamped-minimum flight time so the projectile doesn't have a
 // near-vertical trajectory that looks like a spit-straight-down;
@@ -573,7 +577,9 @@ void EnDekubabaDescriptor::OnAcidVomitTick(EnDekubaba* actor,
             if (target != nullptr) {
                 const Vec3f spawnPos = actor->actor.world.pos;
                 Vec3f targetPos = target->world.pos;
-                targetPos.y += kAcidTargetChestOffsetY;  // aim at chest, not feet
+                // 2026-08-03 — split per Link age (see constant defs).
+                targetPos.y += LINK_IS_ADULT ? kAcidTargetChestOffsetY_Adult
+                                              : kAcidTargetChestOffsetY_Child;
 
                 const f32 dx = targetPos.x - spawnPos.x;
                 const f32 dz = targetPos.z - spawnPos.z;
@@ -1453,10 +1459,44 @@ void EnDekubabaDescriptor::OnEveryFrameTick(EnDekubaba* actor,
     const bool detachReady = false;
 
     if (acidReady) {
-        // Acid ready — green rising-bubble accent at head. Matches
-        // acid attack's visual language (green liquid family).
+        // Acid ready — combined visual per user 2026-08-03:
+        //   1. Mouth-spit splash (like Karebaba RenderTelegraph) —
+        //      user "the karebaba has an acid water effect in its
+        //      mouth when its acid geyser effect is ready. That
+        //      effect appears to be absent from the dekubaba."
+        //   2. Rising bubbles at 2× default scale — user "the
+        //      dekubaba ready state does show bubbles but they are
+        //      too small, double the size."
+        //
+        // Both use shared AcidVisuals config so they read as the
+        // same acid family visual language as the actual attack.
+        // Mouth-spit fires every kTelegraphSpitPeriod frames
+        // (same cadence as the AcidVomit telegraph itself).
+        if ((play->gameplayFrames % kTelegraphSpitPeriod) == 0) {
+            Color_RGBA8 primC = AcidVisuals::kSpitPrimColor;
+            Color_RGBA8 envC  = AcidVisuals::kSpitEnvColor;
+            // Same forward-of-mouth offset as RenderAcidTelegraph so
+            // the water effect emerges from the mouth, not head-tip.
+            const s16 yaw = actor->actor.shape.rot.y;
+            const float fwdX = Math_SinS(yaw) * kSpitForwardOffset;
+            const float fwdZ = Math_CosS(yaw) * kSpitForwardOffset;
+            Vec3f spitPos = {
+                actor->actor.world.pos.x + fwdX + (Rand_ZeroOne() - 0.5f) * 6.0f,
+                actor->actor.world.pos.y + (Rand_ZeroOne() - 0.5f) * 3.0f,
+                actor->actor.world.pos.z + fwdZ + (Rand_ZeroOne() - 0.5f) * 6.0f,
+            };
+            // Ready-state spit is slightly smaller than the attack
+            // spit (0.9× the Dekubaba attack scale) so the ACTUAL
+            // attack still reads as "louder" visually.
+            const s16 readySpitScale =
+                (s16)(AcidVisuals::kSpitSplashScale * kSpitScaleMult * 0.9f);
+            EffectSsGSplash_Spawn(play, &spitPos, &primC, &envC,
+                                    AcidVisuals::kSpitSplashType,
+                                    readySpitScale);
+        }
+
         Vec3f bubblePos = actor->actor.world.pos;
-        AcidVisuals::SpawnReadyBubbles(play, bubblePos);
+        AcidVisuals::SpawnReadyBubbles(play, bubblePos, /*scaleMult=*/2.0f);
     } else if (seedReady) {
         // Seed ready — Deku Nut model rendered at mouth (via draw
         // hook). Distinct from acid's green liquid — reads as

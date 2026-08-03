@@ -59,17 +59,19 @@ static Color_RGBA8 sAcidTrailEnvColor  = {  50,  90,  30, 255 };
 #define ACID_TRAIL_SPLASH_TYPE  2
 #define ACID_TRAIL_SPLASH_SCALE 250
 
-// 2026-08-03 (user) — impact VFX at landing spot. Karebaba-geyser
-// style but smaller since this is a targeted single-hit attack.
-// Green tint matches trail; splash burst gives immediate "splat"
-// read, rising acid dust cloud lingers ~25 frames as caustic vapor.
-#define ACID_IMPACT_SPLASH_COUNT  3
-#define ACID_IMPACT_SPLASH_RADIUS 25.0f  // vs Karebaba geyser 40u
-#define ACID_IMPACT_DUST_COUNT    3
-#define ACID_IMPACT_DUST_SCALE    150    // vs geyser 300
-#define ACID_IMPACT_DUST_SCALESTEP  6    // rises + expands slowly
-#define ACID_IMPACT_DUST_LIFE     20     // ~1s @ 20fps
-static Color_RGBA8 sAcidImpactDustPrimColor = { 180, 230, 130, 150 };
+// 2026-08-03 (user "not implemented?") — impact VFX bump. Prior scale
+// (3 splashes / 3 dust / dust-scale 150) was too subtle vs. Deku
+// Tree green environment. Bumped to Karebaba-geyser magnitudes so
+// the impact reads as clearly acid-family, matching the "reference"
+// user asked for. Still smaller than geyser (single-splash-burst
+// vs geyser's 5-splash sequence).
+#define ACID_IMPACT_SPLASH_COUNT  6      // was 3
+#define ACID_IMPACT_SPLASH_RADIUS 35.0f  // was 25 (geyser 40)
+#define ACID_IMPACT_DUST_COUNT    6      // was 3
+#define ACID_IMPACT_DUST_SCALE    300    // was 150 — matches geyser
+#define ACID_IMPACT_DUST_SCALESTEP  8    // was 6 — expands faster
+#define ACID_IMPACT_DUST_LIFE     25     // was 20 — slightly longer
+static Color_RGBA8 sAcidImpactDustPrimColor = { 180, 230, 130, 220 };  // alpha 150 → 220
 static Color_RGBA8 sAcidImpactDustEnvColor  = {  80, 130,  60, 255 };
 
 // Lifetime — 60 frames max (3 sec at 20fps, 1 sec at 60fps).
