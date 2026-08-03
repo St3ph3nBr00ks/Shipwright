@@ -352,6 +352,14 @@ struct DekubabaEnhancedState {
     // Peer-received seed active flag.
     bool netSeedActive = false;
 
+    // 2026-08-03 (user) — cross-cooldown between acid + seed. Prevents
+    // back-to-back exotic attacks: after either acid or seed fires,
+    // both are locked out for exoticCooldownRemaining attacks. Set to
+    // 1 on fire in OnHostMaybeAcidLunge and OnHostMaybeSeedFire;
+    // decremented in OnAttackComplete (which fires at Recover end).
+    // Both attack gates skip fire when > 0.
+    int  exoticCooldownRemaining = 0;
+
     // Log-820 Bug 2a fix (2026-08-02) — per-frame draw-hook state.
     // Set true whenever the Dekubaba should display a Deku Nut model
     // at its mouth. Consumed by OnDrawHook (called from EnDekubaba_Draw).
@@ -461,6 +469,15 @@ bool EnDekubabaDescriptor::OnHostMaybeAcidLunge(EnDekubaba* actor,
     state.acidProjectileSpawned = false;
     state.acidAttackFrame       = 0;
 
+    // 2026-08-03 (user) — cross-cooldown: skip acid fire if seed OR
+    // acid fired last attack. Both attack gates respect the shared
+    // counter to prevent back-to-back exotics.
+    if (state.exoticCooldownRemaining > 0) {
+        DEKUBABA_DBG("acid skipped — cross-cooldown remaining={}",
+                     state.exoticCooldownRemaining);
+        return false;
+    }
+
     // Ready branch: charged + Link in valid range → fire acid.
     if (state.acidCharge.IsReady()) {
         const f32 dist = actor->actor.xzDistToPlayer;
@@ -469,6 +486,7 @@ bool EnDekubabaDescriptor::OnHostMaybeAcidLunge(EnDekubaba* actor,
         if (dist >= kAcidMinRangeXZ && dist <= kAcidMaxRangeXZ) {
             state.acidCharge.OnFire();
             state.currentAttackIsAcid = true;
+            state.exoticCooldownRemaining = 1;  // 2026-08-03 — block seed next attack
             SPDLOG_INFO("[Dekubaba] acid FIRE decision — actor={} dist={:.0f} (cooldown armed 3)",
                         (void*)&actor->actor, dist);
             EnhancementAudio::PlayBoostedActorSfx(
@@ -641,6 +659,14 @@ void EnDekubabaDescriptor::OnAttackComplete(EnDekubaba* actor) {
     // Log-820 Bug 2a fix — clear seed mouth visual on cycle complete.
     state.showSeedInMouth       = false;
 
+    // 2026-08-03 (user) — decrement cross-cooldown. Fires at end of
+    // every attack (Recover exit → OnAttackComplete). After acid or
+    // seed fires and cooldown is set to 1, the NEXT OnAttackComplete
+    // decrements it to 0, unlocking both attacks for the attack after.
+    if (state.exoticCooldownRemaining > 0) {
+        --state.exoticCooldownRemaining;
+    }
+
     // Diagnostic — three-machine counter summary after advancement.
     // Gated on DebugLog CVar to avoid per-attack spam in normal play.
     DEKUBABA_DBG("OnAttackComplete counters: acid={}%({}) seed={}%({}) detach={}%({})",
@@ -685,6 +711,9 @@ void EnDekubabaDescriptor::OnDeath(EnDekubaba* actor) {
     state.acidCharge.Reset();
     state.netAcidActive         = false;
     state.netAcidCharged        = false;
+    // 2026-08-03 — cross-cooldown reset on death (symmetry with
+    // per-machine reset above).
+    state.exoticCooldownRemaining = 0;
     // Feature B — detach state reset. Note: for vanilla Dekubaba this
     // reset doesn't take effect because Dekubaba doesn't regrow (dies
     // and stays dead until scene reload). OnActorDestroy erases the
@@ -1037,6 +1066,14 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
         return false;
     }
 
+    // 2026-08-03 (user) — cross-cooldown: skip seed fire if acid OR
+    // seed fired last attack. Prevents back-to-back exotic attacks.
+    if (state.exoticCooldownRemaining > 0) {
+        DEKUBABA_DBG("seed skipped — cross-cooldown remaining={}",
+                     state.exoticCooldownRemaining);
+        return false;
+    }
+
     // Ready branch: fire seed if state machine says Ready.
     if (state.seedCharge.IsReady()) {
         // Compute landing target — behind-Link primary, random
@@ -1064,6 +1101,7 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
         state.seedProjectileSpawned = false;
         state.seedAttackFrame       = 0;
         state.seedLandingPos        = landingTarget;
+        state.exoticCooldownRemaining = 1;  // 2026-08-03 — block acid next attack
 
         // Hard SPDLOG (unconditional, not gated on DebugLog CVar)
         // so any log will show that seed fired. Investigation aid
