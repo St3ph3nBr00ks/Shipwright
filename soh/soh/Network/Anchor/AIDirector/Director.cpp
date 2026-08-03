@@ -44,6 +44,7 @@
  */
 
 #include "Director.h"
+#include "Descriptors/GenericSpawnDescriptor.h"  // #311 scaffold
 #include "Descriptors/InvaderDescriptor.h"
 #include "Descriptors/TestDescriptor.h"
 
@@ -121,6 +122,16 @@ Director::Director() {
     // the debug panel surfaces the descriptor row even when the
     // master Invaders.Enabled CVar is off.
     Register(std::make_unique<InvaderDescriptor>());
+
+    // #311 substrate (2026-08-02) — data-driven scene/room ambient
+    // spawns. Registry is empty at scaffold; consumers (Werewolf
+    // #316, Goma egg swarms #323, per-dungeon ambient pools) append
+    // entries to RoomSpawnRegistry() as they land. Permanently
+    // registered so the debug panel surfaces the descriptor row
+    // even when the master GenericSpawnsEnabled CVar is off.
+    // Priority = Ambient (20) < Invader Standard (50) — background
+    // flavor yields to hostile-pursuer gameplay.
+    Register(std::make_unique<GenericSpawnDescriptor>());
 }
 
 SpawnableEnemyDescriptor* Director::Register(std::unique_ptr<SpawnableEnemyDescriptor> descriptor) {
@@ -717,7 +728,7 @@ void Director::OnHostMigrated(bool isNewHost) {
     }
 }
 
-SessionView Director::BuildSessionView() const {
+SessionView Director::BuildSessionView() {
     SessionView view;
     view.globalFrameCounter = mGlobalFrameCounter;
 
@@ -777,6 +788,30 @@ SessionView Director::BuildSessionView() const {
         // boss-room / scene-residency plumbing lands. Documented in
         // SessionView::AllPlayersInBossRoom + the descriptor that
         // first needs framesInCurrentScene.
+
+        // #311 substrate (2026-08-02) — populate framesInCurrentScene /
+        // framesInCurrentRoom. Track per-client (scene, room) transitions
+        // via the ClientLocationCache map; stamp entry frames on
+        // detected change. Skip clients without a loaded save (their
+        // sceneNum/roomNum aren't meaningful).
+        if (snap.isSaveLoaded) {
+            auto& cache = mClientLocationByClient[clientId];
+            if (cache.sceneNum != snap.sceneNum) {
+                cache.sceneNum        = snap.sceneNum;
+                cache.sceneEntryFrame = mGlobalFrameCounter;
+                // Scene change implies room change (rooms are per-scene
+                // by construction).
+                cache.roomNum         = snap.roomNum;
+                cache.roomEntryFrame  = mGlobalFrameCounter;
+            } else if (cache.roomNum != snap.roomNum) {
+                cache.roomNum        = snap.roomNum;
+                cache.roomEntryFrame = mGlobalFrameCounter;
+            }
+            snap.framesInCurrentScene = (int)(mGlobalFrameCounter -
+                                              cache.sceneEntryFrame);
+            snap.framesInCurrentRoom  = (int)(mGlobalFrameCounter -
+                                              cache.roomEntryFrame);
+        }
 
         view.players.push_back(std::move(snap));
     }

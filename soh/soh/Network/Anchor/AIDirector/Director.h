@@ -66,7 +66,16 @@ struct PlayerSnapshot {
 
     // step 12+ fields — populated lazily when a descriptor needs them.
     bool         currentRoomHasLiveBoss = false;
+
+    // Frames the player has been in their current scene / room.
+    // Zero on the frame they entered. Populated by BuildSessionView from
+    // Director's per-client entry-frame maps
+    // (mSceneEntryFrameByClient / mRoomEntryFrameByClient), which are
+    // updated by the same BuildSessionView on detected scene/room
+    // change. Consumers: GenericSpawnDescriptor's "wait N seconds
+    // before proposing spawn in a new scene" gate (#311 substrate).
     int          framesInCurrentScene   = 0;
+    int          framesInCurrentRoom    = 0;
 };
 
 // Per-tick read-only snapshot of session state passed to descriptors.
@@ -277,7 +286,13 @@ private:
 
     // Build a SessionView snapshot for this tick. Step 1 returns an
     // always-invalid view; step 2 walks players + DummyPlayers.
-    SessionView BuildSessionView() const;
+    // Non-const — updates per-client scene/room entry-frame tracking
+    // maps in place (mSceneEntryFrameByClient etc.) so
+    // PlayerSnapshot::framesInCurrentScene/Room fields can be
+    // populated correctly. Callers on const paths use the
+    // BuildSessionView-on-Director-instance access via a const_cast
+    // or by exposing a read-only view helper if needed later.
+    SessionView BuildSessionView();
 
     // ExecuteSpawn — declared public above for descriptor access
     // (Phase 1 §7.5 scene-follow continuations call it directly,
@@ -330,6 +345,29 @@ private:
     // so the first tick reads "0 frames since change" — conservative
     // (reconcile waits one grace period at startup, harmless).
     uint64_t mLastLocalSceneChangeFrame = 0;
+
+    // Per-client scene/room entry-frame tracking for
+    // PlayerSnapshot::framesInCurrentScene/Room population. Updated
+    // by BuildSessionView on detected change. Keyed on
+    // AnchorClient::clientId. Populated lazily — clients that never
+    // appear in BuildSessionView keep no entry.
+    //
+    // Cache values track the (sceneNum, roomNum) observed at each
+    // client's last visit, keyed on clientId. mSceneEntryFrameByClient
+    // stores the mGlobalFrameCounter value at the tick where the
+    // client first entered its current scene. Same for the room map.
+    // Values persist across scene reloads but are reset when the
+    // observed scene/room changes vs. the cache.
+    //
+    // #311 substrate (added 2026-08-02) — Phase 0 of
+    // Plans/game_director_scene_room_spawns.md.
+    struct ClientLocationCache {
+        int16_t sceneNum = -1;
+        int8_t  roomNum  = -1;
+        uint64_t sceneEntryFrame = 0;
+        uint64_t roomEntryFrame  = 0;
+    };
+    mutable std::unordered_map<uint32_t, ClientLocationCache> mClientLocationByClient;
 };
 
 }  // namespace AnchorDirector

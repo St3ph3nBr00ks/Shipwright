@@ -231,6 +231,16 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     // Used for field-test analysis of enhancement fire behavior.
     // Host-authoritative so both clients emit the same trace lines.
     { CVAR_ENHANCEMENT("Dekubaba.DebugLog"), 0 },
+
+    // Game Director #311 substrate (2026-08-02) — master gate for the
+    // GenericSpawnDescriptor's data-driven scene/room ambient spawns.
+    // When ON, host rolls per-tick against RoomSpawnRegistry entries
+    // for the local player's (scene, room). Registry is EMPTY at
+    // scaffold — consumers (Werewolf #316, Goma egg swarms #323,
+    // per-dungeon ambient pools) append entries. Host-authoritative
+    // so both clients share the "generic spawns are ON" state.
+    // Default OFF per project rule for vanilla-altering features.
+    { CVAR_ENHANCEMENT("Director.GenericSpawnsEnabled"), 0 },
 };
 
 const std::vector<FloatCVarEntry> kEnforcedFloats = {

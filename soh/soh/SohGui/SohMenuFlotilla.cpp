@@ -1244,6 +1244,23 @@ void SohMenu::AddMenuFlotilla() {
             "gate blocked a spawn (live-count cap / no target / target invalid / cooldown), "
             "or when a proposal was offered. Throttled to once per ~5s per descriptor."));
 
+    // #311 substrate (2026-08-02) — GenericSpawnDescriptor master gate.
+    AddWidget(path, "Generic Spawns (scene/room ambient)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Director.GenericSpawnsEnabled"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "Master toggle for the Game Director's data-driven scene/room "
+            "ambient spawn system (#311). When ON, the host rolls per-tick "
+            "against a registry of (sceneNum, roomNum) → weighted actor pool "
+            "entries for each player's current room. Yields to Invader by "
+            "priority (Ambient < Standard).\n\n"
+            "Registry is empty at scaffold — future consumers (Werewolf #316, "
+            "Goma egg swarms #323, per-dungeon ambient pools) append entries. "
+            "Toggling this ON with an empty registry is a no-op — no spawns "
+            "will fire until a consumer registers.\n\n"
+            "Host-authoritative — the host's setting is enforced on all peers "
+            "so both clients agree on whether ambient spawns are active."));
+
     // -----------------------------------------------------------------
     // NPC Companion
     // -----------------------------------------------------------------
