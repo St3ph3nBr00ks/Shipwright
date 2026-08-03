@@ -1186,17 +1186,13 @@ void EnDekubabaDescriptor::OnActorInit(EnDekubaba* actor) {
     // thread-local. Set true once at Init; never reset.
     if (g_isSpawningDekubabaChild) {
         state.isSpawnedByEnhancement = true;
-        // Bug 1 fix (2026-08-02) — seed-spawned children start life
-        // in the detached-squirm state. Set isDetached=true here so
-        // the C actor's EnDekubaba_Update IsDetached() guard fires
-        // from frame 0 (protects the child from AT/AC transitions
-        // reverting to vanilla state) and OnDetachedSquirmTick's
-        // bleedout timer runs. Pair with EnDekubaba_Init's routing
-        // to SetupDetachedSquirm + HP=1.
-        state.isDetached         = true;
-        state.squirmFrameCounter = 0;
-        state.lastBleedoutFrame  = 0;  // OnDetachedSquirmTick seeds from play->gameplayFrames
-        SPDLOG_INFO("[Dekubaba] OnActorInit — CHILD spawned by seed. actor={} isSpawnedByEnhancement=true isDetached=true",
+        // Log-819 Bug 6 fix (2026-08-02) — REVERTED prior isDetached
+        // setting. Seed-children now run the full vanilla Dekubaba
+        // lifecycle (SetupWait → SetupGrow when player approaches →
+        // active Dekubaba). See EnDekubaba_Init for full rationale.
+        // The isSpawnedByEnhancement flag stays — used by Feature C's
+        // "no seed for children" gate (prevents recursive seed-spawn).
+        SPDLOG_INFO("[Dekubaba] OnActorInit — CHILD spawned by seed. actor={} isSpawnedByEnhancement=true (vanilla lifecycle)",
                     (void*)&actor->actor);
     } else {
         DEKUBABA_DBG("OnActorInit — natural spawn actor={}",

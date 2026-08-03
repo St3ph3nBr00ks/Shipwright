@@ -362,24 +362,18 @@ void EnDekubaba_Init(Actor* thisx, PlayState* play) {
     // children" gate fires. No-op otherwise.
     Anchor_Enhance_EnDekubaba_OnActorInit(this);
 
-    // Bug 1 fix (2026-08-02) — seed-spawned children are supposed to
-    // stay in the crawling/detached form until bleedout or a hit
-    // kills them (per user 2026-08-02: "did still die after time
-    // expired" implies expected lifecycle is time-limited crawl, NOT
-    // vanilla Wait → Grow → Attack). Reroute Init: if the actor was
-    // spawned via a parent's seed, override the just-set SetupWait
-    // with SetupDetachedSquirm + HP=1. SetupDetachedSquirm reassigns
-    // actionFunc so Wait never runs a frame.
-    // HP=1 pairs with Change 1's stem-cut convention — one bleedout
-    // tick OR one Link hit ends it.
-    if (Anchor_Enhance_EnDekubaba_IsSpawnedByEnhancement(this)) {
-        this->actor.colChkInfo.health = 1;
-        EnDekubaba_SetupDetachedSquirm(this);
-        LUSLOG_INFO("[Dekubaba] seed-child rerouted to DetachedSquirm — actor=%p home=(%.0f,%.0f,%.0f)",
-                    (void*)&this->actor,
-                    this->actor.home.pos.x, this->actor.home.pos.y,
-                    this->actor.home.pos.z);
-    }
+    // Log-819 Bug 6 fix (2026-08-02) — REVERTED prior-session
+    // reroute to SetupDetachedSquirm. User clarified 2026-08-02
+    // (post-log-819): "before any other animations or states are
+    // allowed to take place, the child dekubaba should appear on
+    // the ground and it should activate as a dekubaba would in
+    // vanilla gameplay, ie play its activation animation when a
+    // player is close enough." So seed-children now run the full
+    // vanilla lifecycle: SetupWait (dormant baby form on ground)
+    // → SetupGrow (activation animation when player approaches)
+    // → active Dekubaba. The isSpawnedByEnhancement flag remains
+    // set by OnActorInit — still used by Feature C's
+    // "no seed for children" gate (child can't recursively fire seed).
 }
 
 void EnDekubaba_Destroy(Actor* thisx, PlayState* play) {
@@ -603,11 +597,37 @@ void EnDekubaba_SetupAcidVomit(EnDekubaba* this) {
     // plays at normal speed regardless of prior state.
     this->skelAnime.playSpeed = 1.0f;
     this->timer = 0;
-    this->collider.base.acFlags &= ~AC_ON;  // no contact damage; ranged
+    // Log-819 Bug 2 fix (2026-08-02) — do NOT clear AC_ON here.
+    // Prior comment "no contact damage; ranged" conflated AT (outgoing
+    // damage — Dekubaba biting Link) with AC (incoming damage — Link
+    // hitting Dekubaba). Clearing AC_ON disabled the AC-register site
+    // in EnDekubaba_Update line 1734 (`if (acFlags & AC_ON)
+    // CollisionCheck_SetAC(...)`), which meant sword swings never
+    // detected our collider → Dekubaba was invincible during telegraph.
+    // Vanilla PrepareLunge/Lunge leave AC_ON untouched — Link can
+    // freely damage attacking Dekubaba. Outgoing-damage (AT) is
+    // separately gated at line 1729 (`if (actionFunc == Lunge)
+    // CollisionCheck_SetAT`) — our AcidVomit isn't in that whitelist
+    // so no AT damage fires. Both concerns cleanly separate.
     this->actionFunc = EnDekubaba_AcidVomit;
 }
 
 void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play) {
+    // Log-819 Bug 5 fix (2026-08-02) — if HP dropped to 0 during
+    // this attack (e.g. sword hit landed via Bug 2 fix that restored
+    // AC_ON), transition to death immediately. Without this, vanilla
+    // UpdateDamage plays death SFX at HP=0 but doesn't transition
+    // actionFunc (vanilla defers death to Recover state at line 1429).
+    // Our 25-frame AcidVomit → PullBack → Recover chain leaves the
+    // dead Dekubaba attacking for ~50 frames after fatal hit. User
+    // reported "receive killing blow, play death SFX, keep attacking".
+    // SetupPrunedSomersault gives fly-back animation + optional
+    // stem-cut detach at landing (Bug 4 fix pipeline).
+    if (this->actor.colChkInfo.health <= 0) {
+        EnDekubaba_SetupPrunedSomersault(this);
+        return;
+    }
+
     SkelAnime_Update(&this->skelAnime);
 
     // Bug 6 fix (2026-08-01) — match vanilla Lunge's animation
@@ -665,6 +685,18 @@ void EnDekubaba_SetupDetachedSquirm(EnDekubaba* this) {
     this->timer = 0;
     // Body cylinder collider stays ON so player can still damage it.
     this->collider.base.acFlags |= AC_ON;
+    // Log-819 Bug 3 fix (2026-08-02) — reset colType from HARD → HIT6
+    // and clear AC_HARD. Necessary because seed-spawned children pass
+    // through EnDekubaba_Init → SetupWait BEFORE the IsSpawnedByEnhancement
+    // reroute calls SetupDetachedSquirm. SetupWait (line 520-521) sets
+    // colType=HARD + AC_HARD (baby form: sword bounces off dormant
+    // Dekubaba). Without this reset, the detached form inherits HARD
+    // → sword bounces → seed-child is immune to damage.
+    // Vanilla SetupGrow (line 547-548) is the model for this reset.
+    // Also applies to stem-cut detach path from PrunedSomersault when
+    // that path routes through DetachedSquirm — same collider hygiene.
+    this->collider.base.colType = COLTYPE_HIT6;
+    this->collider.base.acFlags &= ~AC_HARD;
     // Gravity so the head-stem settles onto ground surface.
     this->actor.gravity = -1.0f;
     // Slight upward velocity to unglue from home.pos initial anchor
@@ -798,7 +830,11 @@ void EnDekubaba_SetupSeedTelegraph(EnDekubaba* this) {
     Animation_PlayOnce(&this->skelAnime, &gDekuBabaPauseChompAnim);
     this->skelAnime.playSpeed = 1.0f;  // explicit reset — see SetupAcidVomit comment
     this->timer = 0;
-    this->collider.base.acFlags &= ~AC_ON;  // no contact damage
+    // Log-819 Bug 2 fix (2026-08-02) — do NOT clear AC_ON here.
+    // See SetupAcidVomit for full reasoning: AC = incoming damage;
+    // AT = outgoing damage. Clearing AC_ON made Dekubaba invincible
+    // during telegraph. Vanilla PrepareLunge leaves AC_ON on so
+    // Link can damage attacking Dekubaba.
     this->actionFunc = EnDekubaba_SeedTelegraph;
     LUSLOG_INFO("[Dekubaba] SetupSeedTelegraph — actor=%p home=(%.0f,%.0f,%.0f)",
                 (void*)&this->actor,
@@ -807,6 +843,13 @@ void EnDekubaba_SetupSeedTelegraph(EnDekubaba* this) {
 }
 
 void EnDekubaba_SeedTelegraph(EnDekubaba* this, PlayState* play) {
+    // Log-819 Bug 5 fix (2026-08-02) — same rationale as AcidVomit's
+    // health check above. Killing-blow-then-continue-attacking bug.
+    if (this->actor.colChkInfo.health <= 0) {
+        EnDekubaba_SetupPrunedSomersault(this);
+        return;
+    }
+
     SkelAnime_Update(&this->skelAnime);
     Anchor_Enhance_EnDekubaba_OnSeedTelegraphTick(this, play, (int)this->timer);
     this->timer++;
@@ -830,7 +873,27 @@ void EnDekubaba_SetupSeedFire(EnDekubaba* this) {
 }
 
 void EnDekubaba_SeedFire(EnDekubaba* this, PlayState* play) {
+    // Log-819 Bug 5 fix (2026-08-02) — same rationale as AcidVomit's
+    // health check above. Killing-blow-then-continue-attacking bug.
+    if (this->actor.colChkInfo.health <= 0) {
+        EnDekubaba_SetupPrunedSomersault(this);
+        return;
+    }
+
     SkelAnime_Update(&this->skelAnime);
+
+    // Log-819 Bug 1 fix (2026-08-02) — mirror AcidVomit Bug 6 fix.
+    // SeedFire was staying on gDekuBabaPauseChompAnim at playSpeed=1
+    // for its entire 25-frame cycle, so the spit motion looked
+    // slow-motion (~0.5× vanilla lunge speed per user observation).
+    // Switch to gDekuBabaFastChompAnim at 4× at the fire frame (15)
+    // so the projectile-launch moment coincides with a fast chomp
+    // motion — matches vanilla lunge readability + acid attack.
+    if (this->timer == 15) {
+        Animation_PlayLoopSetSpeed(&this->skelAnime,
+                                    &gDekuBabaFastChompAnim, 4.0f);
+    }
+
     Anchor_Enhance_EnDekubaba_OnSeedFireTick(this, play, (int)this->timer);
     this->timer++;
     // Bug 2 fix (2026-08-01) — was `>= 10` but descriptor's
@@ -880,15 +943,14 @@ void EnDekubaba_SetupHit(EnDekubaba* this, s32 arg1) {
 }
 
 void EnDekubaba_SetupPrunedSomersault(EnDekubaba* this) {
-    // 2026-08-02 — stem-cut detach intercept (Enhancement 2 per user).
-    // 25% chance to convert this killing blow into a detach event
-    // instead. Fires only when DetachAndPursue CVar is enabled AND
-    // actor isn't already detached (one-shot per life).
-    if (Anchor_Enhance_EnDekubaba_MaybeStemCutDetach(this)) {
-        EnDekubaba_SetupDetachedSquirm(this);
-        return;
-    }
-
+    // Log-819 Bug 4 fix (2026-08-02) — DO NOT intercept for stem-cut
+    // detach here. Prior implementation short-circuited to
+    // SetupDetachedSquirm at setup entry, which skipped the vanilla
+    // fly-back somersault animation entirely (user 2026-08-02:
+    // "immediately move to the ground with no animation").
+    // Intercept moved into EnDekubaba_PrunedSomersault at the
+    // timer==1 → SetupDeadStickDrop transition (after landing) —
+    // vanilla animation plays in full, then detach decision at land.
     this->timer = 0;
     this->skelAnime.playSpeed = 0.0f;
     this->actor.gravity = -0.8f;
@@ -908,12 +970,13 @@ void EnDekubaba_SetupPrunedSomersault(EnDekubaba* this) {
 }
 
 void EnDekubaba_SetupShrinkDie(EnDekubaba* this) {
-    // 2026-08-02 — stem-cut detach intercept (Enhancement 2). See
-    // SetupPrunedSomersault for full rationale.
-    if (Anchor_Enhance_EnDekubaba_MaybeStemCutDetach(this)) {
-        EnDekubaba_SetupDetachedSquirm(this);
-        return;
-    }
+    // Log-819 Bug 4 fix (2026-08-02) — stem-cut detach intercept
+    // REMOVED here. This is the cumulative-damage death path (Recover
+    // detects health==0 at line 1429 → calls SetupShrinkDie); user
+    // spec ("kill by stem cut") maps only to the PrunedSomersault
+    // path (sword-cut-through-stem death from StunnedVertical +
+    // SWORD/BOOMERANG at line 1620). ShrinkDie shouldn't trigger
+    // detach — it's death without a "clean stem cut" moment.
 
     Animation_Change(&this->skelAnime, &gDekuBabaFastChompAnim, -1.5f, Animation_GetLastFrame(&gDekuBabaFastChompAnim),
                      0.0f, ANIMMODE_ONCE, -3.0f);
@@ -1535,6 +1598,25 @@ void EnDekubaba_PrunedSomersault(EnDekubaba* this, PlayState* play) {
         }
 
         func_800286CC(play, &this->actor.home.pos, &sZeroVec, &sZeroVec, this->size * 500.0f, this->size * 100.0f);
+
+        // Log-819 Bug 4 fix (2026-08-02) — stem-cut detach intercept
+        // MOVED HERE from SetupPrunedSomersault entry. By deferring
+        // the roll until the fly-back animation has landed (timer==1
+        // fires the frame after Audio_PlayActorSound2 with
+        // NA_SE_EN_DODO_M_GND at line 1520 — the "landed on ground"
+        // event), we get vanilla's full fly-back visual + optional
+        // detach at rest. If detach fires, use current world.pos as
+        // the squirm start (already at ground level from PrunedSomersault
+        // physics). Otherwise fall through to vanilla SetupDeadStickDrop.
+        // home.pos update ensures DetachedSquirm's serpentine motion
+        // starts from where the plant landed, not where it was cut.
+        if (Anchor_Enhance_EnDekubaba_MaybeStemCutDetach(this)) {
+            this->actor.home.pos.x = this->actor.world.pos.x;
+            this->actor.home.pos.z = this->actor.world.pos.z;
+            EnDekubaba_SetupDetachedSquirm(this);
+            return;
+        }
+
         EnDekubaba_SetupDeadStickDrop(this, play);
     }
 }
