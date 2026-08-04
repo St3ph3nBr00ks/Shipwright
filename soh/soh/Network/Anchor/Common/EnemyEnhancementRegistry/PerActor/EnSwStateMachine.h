@@ -80,6 +80,14 @@ struct EnSwEnhancedState {
     EnSwState state         = EnSwState::Uninitialized;
     int       framesInState = 0;
 
+    // 2026-08-04 (Pillar 5 Phase 3) — set true by
+    // EnSw_EnhancedStateMachine_MarkFromStSwap when this actor was
+    // spawned via the En_St→En_Sw swap. The per-tick handler forces
+    // scale = 0.06 (~3× vanilla En_Sw 0.02, matches En_St BIG size)
+    // and snaps world.pos.y to floorHeight each tick so vanilla En_Sw
+    // Init's wall-cling attempts don't leave the actor dangling.
+    bool spawnedFromStSwap = false;
+
     // Wall basis established via TickUninitialized's raycast. Reused
     // by TickWallIdle / TickWallPursue for rotation rebuild + tangent-
     // plane motion. Recomputed on GroundToWallReattach for new walls.
@@ -218,5 +226,14 @@ EnSwState EnSw_EnhancedStateMachine_QueryState(EnSw* self);
 // leg-lift cycle when spider is stationary. Returns false if the
 // actor has no state block yet (never ticked).
 bool EnSw_EnhancedStateMachine_IsWalkAnimActive(EnSw* self);
+
+// 2026-08-04 (Pillar 5 Phase 3, GH #210) — mark this En_Sw as spawned
+// via the En_St → En_Sw swap. Called from EnStBridge FireSwap right
+// after Actor_Spawn(EN_SW). Persistent flag stored on the state
+// block; per-tick handler forces scale = 0.06 (matches En_St BIG
+// variant visual size) and snaps world.pos.y to floorHeight so the
+// actor lands on the ground instead of dangling in midair looking
+// for a wall to cling to.
+void EnSw_EnhancedStateMachine_MarkFromStSwap(EnSw* self);
 
 }  // namespace AnchorEnemyEnhancement

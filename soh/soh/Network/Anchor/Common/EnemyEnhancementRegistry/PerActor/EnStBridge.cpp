@@ -33,9 +33,11 @@
  *   - Enhanced En_Sw (inherits Skullwalltula.* CVar toggles at spawn time)
  *   - Same feature/vanilla-enemy-enhancements branch
  *
- * Gold-variant guard: En_St `params == 1` (gold-token variant) never
- * swaps. Spawned En_Sw uses `params = 0` (combat wall-crawler; NOT the
- * gold-token variants of En_Sw either).
+ * 2026-08-04 CORRECTION (log 849): No params guard needed. Per
+ * z_en_st.c:4 header the En_St variants are "normal / big / invisible"
+ * (params 0/1/2 respectively). Gold-token Skulltulas are a different
+ * actor entirely (ACTOR_EN_SSH). All En_St variants swap; spawned
+ * En_Sw uses `params = 0` (combat wall-crawler, not gold-token).
  */
 
 // Pitfall 40 — Anchor.h FIRST.
@@ -44,6 +46,7 @@
 #include "soh/Network/Anchor/Common/EnforcedCVars.h"
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/EnemyNetId.h"
+#include "soh/Enhancements/RoomNavData/RoomNavData.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
 #include <spdlog/spdlog.h>
@@ -54,17 +57,24 @@ extern "C" {
 #include "functions.h"
 #include "variables.h"
 #include "src/overlays/actors/ovl_En_St/z_en_st.h"
+#include "src/overlays/actors/ovl_En_Sw/z_en_sw.h"
 }
+
+// EnSw mark helper — declared in EnSwBridge.cpp. Sets a per-actor
+// flag consumed by EnSwStateMachine.cpp Tick to enforce visual scale
+// (0.06) + floor-snap each frame (see EnStBridge.cpp file header).
+extern "C" void Anchor_Enhance_EnSw_MarkFromStSwap(EnSw* actor);
 
 namespace {
 
-// En_St params discriminator per z_en_st.c:844 — params == 1 marks
-// the gold-token variant. Other values (0 = normal, 2 = invisible,
-// plus token-ID-encoded variants) are all valid swap candidates.
-// 2026-08-04 relaxed from "params != 0 blocks" (too strict — vanilla
-// scenes place normal Skulltulas with various non-zero params) to
-// "only params == 1 (gold-token) blocks".
-constexpr s16 kEnStParamsGold      = 1;
+// 2026-08-04 latest (log 849): CORRECTED variant understanding.
+// Per z_en_st.c:4 file header: "Skulltula (normal, big, invisible)".
+//   params 0 = normal combat Skulltula
+//   params 1 = BIG variant (larger radius, different naviEnemyId)
+//   params 2 = invisible (Lens-of-Truth reactive)
+// Gold-token Skulltulas are a DIFFERENT actor entirely
+// (ACTOR_EN_SSH / ACTOR_EN_STH) — they never call these hooks.
+// All three En_St variants can swap. No params guard needed.
 
 // Spawned En_Sw uses combat variant params — (params & 0xE000) == 0
 // selects the wall-crawler combat form (NOT gold-token variants of
@@ -91,8 +101,36 @@ void FireSwap(Actor* oldEnSt, PlayState* play, const char* triggerReason) {
     if (oldEnSt == nullptr || play == nullptr) return;
 
     const uint32_t oldNetId = GetEnStNetId(oldEnSt);
-    const Vec3f spawnPos = oldEnSt->world.pos;
+    Vec3f spawnPos = oldEnSt->world.pos;
     const s16 spawnYaw = oldEnSt->shape.rot.y;
+
+    // 2026-08-04 (user) — find nearest floor node within 300u. Prior
+    // code snapped to actor.floorHeight which is the floor DIRECTLY
+    // below the actor — if the Skulltula dangles over a pit, that
+    // returns the pit floor (two levels below the intended arena).
+    // RoomNavData's floor-node graph knows about the actual walkable
+    // ground in the room; use that as the truth for the spawn coord.
+    constexpr float kMaxSpawnSearchXZ = 300.0f;
+    const AnchorNavRoom::RoomNavData* navData =
+        AnchorNavRoom::GetForRoom(gPlayState->sceneNum,
+                                    (int8_t)gPlayState->roomCtx.curRoom.num);
+    if (navData != nullptr) {
+        const int nodeIdx = AnchorNavRoom::FindNearestFloorNodeXZRadius(
+            navData, spawnPos, kMaxSpawnSearchXZ);
+        if (nodeIdx >= 0) {
+            const Vec3f oldSpawn = spawnPos;
+            spawnPos = navData->nodes[nodeIdx].pos;
+            SPDLOG_INFO("[EnStSwap] Nav-node spawn adjust: ({:.0f},{:.0f},{:.0f}) -> ({:.0f},{:.0f},{:.0f}) (nearest floor node within {:.0f}u)",
+                        oldSpawn.x, oldSpawn.y, oldSpawn.z,
+                        spawnPos.x, spawnPos.y, spawnPos.z, kMaxSpawnSearchXZ);
+        } else {
+            SPDLOG_INFO("[EnStSwap] No floor node within {:.0f}u — using En_St world.pos as-is",
+                        kMaxSpawnSearchXZ);
+        }
+    } else {
+        SPDLOG_INFO("[EnStSwap] RoomNavData unavailable for scene {}/{} — using En_St world.pos as-is",
+                    gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num);
+    }
 
     SPDLOG_INFO("[EnStSwap] Firing En_St→En_Sw swap — trigger={} oldNetId={} pos=({:.0f},{:.0f},{:.0f})",
                 triggerReason, oldNetId,
@@ -116,6 +154,14 @@ void FireSwap(Actor* oldEnSt, PlayState* play, const char* triggerReason) {
                     "Old En_St stays alive.");
         return;
     }
+
+    // 2026-08-04 (Phase 3 v2) — mark the new En_Sw so the state
+    // machine's per-tick handler enforces (a) scale = 0.06 to match
+    // the source En_St BIG variant visual size (vanilla En_Sw is
+    // 0.02 ≈ 3× smaller than En_St) and (b) floor-snap so the actor
+    // sits on the ground instead of dangling in midair looking for
+    // a wall to cling to.
+    Anchor_Enhance_EnSw_MarkFromStSwap((EnSw*)newEnSw);
 
     // Silently kill the old En_St on host. Peer already handled its own
     // kill in HandlePacket_EnemySpawn via replacesNetId when the SPAWN
@@ -150,13 +196,9 @@ extern "C" int Anchor_Enhance_EnSt_OnGroundImpact(EnSt* actor, PlayState* play) 
     // with replacesNetId.
     if (!SceneAuthority::IsMyCurrentRoomHost()) return 0;
 
-    // Gold-variant guard: only block the explicit gold-token type.
-    // Normal + invisible variants swap freely.
-    const s16 params = actor->actor.params;
-    if (params == kEnStParamsGold) {
-        SPDLOG_INFO("[EnStSwap] Skipped — gold-token variant (params=1)");
-        return 0;
-    }
+    // No params guard — all En_St variants (normal/big/invisible)
+    // swap. Gold-token Skulltulas use a different actor id entirely
+    // and never enter this hook.
 
     // CVar chance gate — default 30% if CVar unset (solo before any
     // UI toggle).
@@ -191,11 +233,8 @@ extern "C" int Anchor_Enhance_EnSt_OnHitDuringDescent(EnSt* actor, PlayState* pl
 
     if (!SceneAuthority::IsMyCurrentRoomHost()) return 0;
 
-    const s16 params = actor->actor.params;
-    if (params == kEnStParamsGold) {
-        SPDLOG_INFO("[EnStSwap] Skipped — gold-token variant (params=1)");
-        return 0;
-    }
+    // No params guard — all En_St variants swap (see OnGroundImpact
+    // comment). Gold-token Skulltulas use a different actor id.
 
     if (chancePercent <= 0) return 0;
 

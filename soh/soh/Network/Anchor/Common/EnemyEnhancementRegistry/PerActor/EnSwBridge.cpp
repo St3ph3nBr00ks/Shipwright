@@ -172,3 +172,12 @@ extern "C" int Anchor_Enhance_EnSw_ShouldRelaxLungeGates(EnSw* actor) {
     // implementation needs play, we'd thread it through.
     return desc->ShouldRelaxLungeGates(&actor->actor, nullptr) ? 1 : 0;
 }
+
+// 2026-08-04 (Pillar 5 Phase 3, GH #210) — mark this En_Sw as spawned
+// via En_St→En_Sw swap. Called by EnStBridge FireSwap right after
+// Actor_Spawn(EN_SW). Sets a state-block flag which the state
+// machine's per-tick handler reads to enforce scale + floor-snap.
+extern "C" void Anchor_Enhance_EnSw_MarkFromStSwap(EnSw* actor) {
+    if (actor == nullptr) return;
+    AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_MarkFromStSwap(actor);
+}

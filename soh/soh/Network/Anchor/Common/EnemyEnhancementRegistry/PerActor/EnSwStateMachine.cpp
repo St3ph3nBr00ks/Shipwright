@@ -530,6 +530,19 @@ constexpr float kWallNormalYThreshold = 0.5f;
 // so leg tips visually reach the surface across the offset gap.
 constexpr float kBodySurfaceOffset = 8.0f;
 
+// 2026-08-04 (user "surface-offset is too little for larger swap-
+// spawned En_Sw") — scale the body-off-surface distance with the
+// actor's visual scale. Vanilla En_Sw sits at scale 0.02 with 8u
+// offset (kBodySurfaceOffset / vanillaScale = 400u-per-unit-scale
+// ratio). Swap-spawned En_Sw at scale 0.06 needs 24u offset for
+// leg-tips to visually reach the surface. Linear scaling per
+// user spec.
+inline float BodySurfaceOffsetFor(EnSw* self) {
+    if (self == nullptr) return kBodySurfaceOffset;
+    constexpr float kVanillaScale = 0.02f;
+    return kBodySurfaceOffset * (self->actor.scale.x / kVanillaScale);
+}
+
 // Wall-base floor-detection probe. TickWallPursue casts a short ray
 // straight down from the actor position to detect when the spider has
 // walked to a vertical wall's bottom edge (floor level). Without this,
@@ -967,9 +980,9 @@ bool TryEstablishBasis(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         // Snap actor to hit point with body offset outward from wall
         // (see kBodySurfaceOffset — body floats away from wall, legs
         // visibly reach across the gap to the wall surface).
-        self->actor.world.pos.x = h.pos.x + h.normal.x * kBodySurfaceOffset;
-        self->actor.world.pos.y = h.pos.y + h.normal.y * kBodySurfaceOffset;
-        self->actor.world.pos.z = h.pos.z + h.normal.z * kBodySurfaceOffset;
+        self->actor.world.pos.x = h.pos.x + h.normal.x * BodySurfaceOffsetFor(self);
+        self->actor.world.pos.y = h.pos.y + h.normal.y * BodySurfaceOffsetFor(self);
+        self->actor.world.pos.z = h.pos.z + h.normal.z * BodySurfaceOffsetFor(self);
 
         if (DiagEnabled()) {
             SPDLOG_INFO("[EEDiag/SM] actor=0x{:x} basis established via dir[{}] "
@@ -1093,7 +1106,7 @@ void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
                         // gravity fall needed). Snap Y to floor + body offset
                         // and transition to GroundPursue.
                         s.hasWallBasis = false;
-                        self->actor.world.pos.y = floorHit.y + kBodySurfaceOffset;
+                        self->actor.world.pos.y = floorHit.y + BodySurfaceOffsetFor(self);
                         self->actor.velocity.x = 0.0f;
                         self->actor.velocity.y = 0.0f;
                         self->actor.velocity.z = 0.0f;
@@ -1329,7 +1342,7 @@ void TickWallEdgeDrop(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
         if (ny > kWallNormalYThreshold) {
             // Landed on a floor. Snap position with body offset above
             // the surface (see kBodySurfaceOffset). Zero velocity.
-            self->actor.world.pos.y = hitPos.y + kBodySurfaceOffset;
+            self->actor.world.pos.y = hitPos.y + BodySurfaceOffsetFor(self);
             self->actor.velocity.y = 0.0f;
 
             // Reset rotation to upright (world-Y aligned). Vanilla En_Sw
@@ -1410,7 +1423,7 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
             const float ny = COLPOLY_GET_NORMAL(floorPoly->normal.y);
             if (ny > kWallNormalYThreshold) {
                 // Body offset above the floor (see kBodySurfaceOffset).
-                self->actor.world.pos.y = floorHit.y + kBodySurfaceOffset;
+                self->actor.world.pos.y = floorHit.y + BodySurfaceOffsetFor(self);
                 floorNormal.x = COLPOLY_GET_NORMAL(floorPoly->normal.x);
                 floorNormal.y = ny;
                 floorNormal.z = COLPOLY_GET_NORMAL(floorPoly->normal.z);
@@ -1632,7 +1645,7 @@ void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
                 if (lenL > 0.001f) {
                     const float invL = 1.0f / lenL;
                     Vec3f bpFrom = self->actor.world.pos;
-                    bpFrom.y += kBodySurfaceOffset;  // body center-ish
+                    bpFrom.y += BodySurfaceOffsetFor(self);  // body center-ish
                     Vec3f bpTo = {
                         bpFrom.x + dxL * invL * kDashReach,
                         bpFrom.y,
@@ -1921,7 +1934,7 @@ void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
             if (ny > kWallNormalYThreshold) {
                 // Floor landing — snap XZ to hit + body offset above.
                 self->actor.world.pos.x = hitPos.x;
-                self->actor.world.pos.y = hitPos.y + kBodySurfaceOffset;
+                self->actor.world.pos.y = hitPos.y + BodySurfaceOffsetFor(self);
                 self->actor.world.pos.z = hitPos.z;
                 self->actor.velocity.x = self->actor.velocity.y =
                     self->actor.velocity.z = 0.0f;
@@ -1936,9 +1949,9 @@ void TickJumpLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
                 // raycast doesn't start inside the wall poly.
                 const float nx = COLPOLY_GET_NORMAL(poly->normal.x);
                 const float nz = COLPOLY_GET_NORMAL(poly->normal.z);
-                self->actor.world.pos.x = hitPos.x + nx * kBodySurfaceOffset;
-                self->actor.world.pos.y = hitPos.y + ny * kBodySurfaceOffset;
-                self->actor.world.pos.z = hitPos.z + nz * kBodySurfaceOffset;
+                self->actor.world.pos.x = hitPos.x + nx * BodySurfaceOffsetFor(self);
+                self->actor.world.pos.y = hitPos.y + ny * BodySurfaceOffsetFor(self);
+                self->actor.world.pos.z = hitPos.z + nz * BodySurfaceOffsetFor(self);
                 self->actor.velocity.x = self->actor.velocity.y =
                     self->actor.velocity.z = 0.0f;
                 s.jumpAirborne = false;
@@ -2031,7 +2044,7 @@ void TickWalkLunge(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
             gfPoly != nullptr) {
             const float ny = COLPOLY_GET_NORMAL(gfPoly->normal.y);
             if (ny > kWallNormalYThreshold) {
-                self->actor.world.pos.y = gfHit.y + kBodySurfaceOffset;
+                self->actor.world.pos.y = gfHit.y + BodySurfaceOffsetFor(self);
             }
         }
     }
@@ -2082,6 +2095,42 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
     if (self == nullptr || play == nullptr) return;
 
     EnSwEnhancedState& s = GetOrCreate(self);
+
+    // 2026-08-04 (Pillar 5 Phase 3) — spawned-from-St-swap overrides.
+    // Runs BEFORE the yield-check so the overrides apply every tick
+    // regardless of what vanilla En_Sw's Update did. Vanilla writes
+    // scale=0.02 in multiple places (Init line 280 + Math_ApproachF
+    // targets at 553/571/596); this post-write forces 0.06 (matches
+    // En_St BIG variant visual). Floor-snap prevents the wall-cling
+    // dangling behavior — En_Sw's Init runs func_80B0DFFC looking for
+    // a wall behind the actor; if none found (ceiling-Skulltula drop
+    // has no wall backing), the actor hangs in midair. Force
+    // world.pos.y to floorHeight so gravity + ground-walking mode
+    // (via NavConsume descriptor) take over.
+    if (s.spawnedFromStSwap) {
+        Actor_SetScale(&self->actor, 0.06f);
+        // Floor snap: only when we have a valid floor reading (≠ sentinel).
+        // Snap DOWN if actor is above floor by any margin — keeps the
+        // spider grounded even if vanilla's per-tick physics tried to
+        // lift it.
+        if (self->actor.floorHeight > BGCHECK_Y_MIN &&
+            self->actor.world.pos.y > self->actor.floorHeight) {
+            self->actor.world.pos.y = self->actor.floorHeight;
+            self->actor.velocity.y = 0.0f;
+        }
+        // 2026-08-04 (user "still spawned in wall-climbing state") —
+        // force into GroundPursue on first tick. Vanilla En_Sw Init
+        // + TickUninitialized both try to find a wall to cling to;
+        // for a swap-spawned actor there IS no wall (we're on the
+        // floor). Skip the raycast wall search and go straight to
+        // ground-walking. TickGroundPursue handles all subsequent
+        // motion + wall-attach transitions naturally.
+        if (s.state == EnSwState::Uninitialized ||
+            s.state == EnSwState::WallIdle ||
+            s.state == EnSwState::WallPursue) {
+            TransitionTo(self, s, EnSwState::GroundPursue, "en_st_swap_force_ground");
+        }
+    }
 
     // Walk-anim gate default: false each tick. Actual motion sites
     // opt-in by setting s.isWalkAnimActive = true. Placed BEFORE yield-
@@ -2301,6 +2350,17 @@ EnSwState EnSw_EnhancedStateMachine_QueryState(EnSw* self) {
 bool EnSw_EnhancedStateMachine_IsWalkAnimActive(EnSw* self) {
     auto* s = Find(self);
     return (s != nullptr) && s->isWalkAnimActive;
+}
+
+// 2026-08-04 (Pillar 5 Phase 3) — mark as spawned via En_St→En_Sw
+// swap. GetOrCreate ensures the state block exists before the flag
+// is set (the En_Sw's own Tick call may not have run yet at this point).
+void EnSw_EnhancedStateMachine_MarkFromStSwap(EnSw* self) {
+    if (self == nullptr) return;
+    auto& s = GetOrCreate(self);
+    s.spawnedFromStSwap = true;
+    SPDLOG_INFO("[EnStSwap] Marked En_Sw as spawned-from-St-swap actor={}",
+                (void*)&self->actor);
 }
 
 }  // namespace AnchorEnemyEnhancement
