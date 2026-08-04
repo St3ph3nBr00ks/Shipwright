@@ -113,16 +113,18 @@ namespace {
 // Charge state machine — 25% steps, max 4, 3-attack cooldown. Rolls
 // on each DecideLunge → attack transition. Chance = counter × step.
 //
-// initialCounter = 2 (2026-08-03 per user) — first attack gets 50%
-// chance so short-lived Dekubabas actually get to use the new
-// attacks before dying. Post-cooldown restart uses same 50% baseline.
-// Prior value (1 = 25%) still had many Dekubabas dying without
-// firing acid at all.
+// initialCounter (2026-08-03 latest) — reduced 2→1 after the Grow-exit
+// attack roll landed. Grow-exit lets the first attack after activation
+// actually roll (previously vanilla went Grow→PrepareLunge skipping
+// DecideLunge entirely). With that roll now firing, 50% baseline caused
+// exotics to happen every activation. User: "Now that the dekubaba can
+// use the attacks upon activation they are occurring too frequently."
+// Back to 25% first-attack chance; ramps to 50% by second, 75% by third.
 constexpr ChargeStateMachine::Config kAcidChargeConfig = {
     /*stepIncrement*/ 0.25f,
     /*maxCounter*/    4,
     /*cooldownSteps*/ 1,
-    /*initialCounter*/ 2,
+    /*initialCounter*/ 1,
 };
 
 // Range gate — acid is useful when Link is outside melee lunge range
@@ -238,12 +240,33 @@ constexpr float kSquirmSpeedXZ            = 2.0f;
 // (~11.25°), stem sections swing between -0x2800 and +0x3800.
 // UpdateHeadPosition's spherical trig produces visibly dramatic
 // serpentine motion at this amplitude.
-constexpr s16   kSquirmStemAmplitude      = 0x3000;
-constexpr s16   kSquirmStemBase           = 0x0800;
+// 2026-08-03 latest⁵ (user "rotated too far off the ground; wants
+// stem more horizontal"). Prior base -0x1800 + amplitude 0x1000
+// gave head ~57-105u above home at peak — visibly too steep, ~45-60°
+// stem angle. Halved the bias and shrunk the amplitude:
+//   Base -0x0C00 (-17°) — moderate negative bias, head hovers 30-40u
+//     above home on average instead of 80u.
+//   Amplitude 0x0800 (~11°) — smaller wiggle keeps section range
+//     [-0x1400, -0x0400], all negative so head stays above home.
+//   Yaw amplitude 0x1800 unchanged — horizontal sway is the primary
+//     serpentine feel.
+constexpr s16   kSquirmStemAmplitude      = 0x0800;
+constexpr s16   kSquirmStemBase           = -0x0C00;
+constexpr s16   kSquirmYawAmplitude       = 0x1800;
 // 2026-08-03 (user item 7) — 25% faster sine phase per "detach looks
 // too smooth. It should appear fast and twitchy." 0.10472 × 1.25 =
 // 0.13090 → 48-frame period vs prior 60.
 constexpr float kSquirmPhasePerFrame      = 0.13090f;
+// 2026-08-03 latest (user "clamping at edges; slow down at extremes
+// so it looks like weight in the movements as the dekubaba shifts
+// the direction of force"). Wraps sin() in tanh(k * sin) which
+// saturates near ±1 for a longer duration each cycle. Result: the
+// wave looks like a soft square wave — motion snaps through zero
+// quickly, then "hangs" at each extreme before reversing. k=2.5
+// keeps the middle transition sharp but not perfectly square.
+static inline float EasedSquirmWave(float phase) {
+    return tanhf(sinf(phase) * 2.5f);
+}
 constexpr int   kBleedoutIntervalMs       = 5000;      // -1 HP every 5s
 
 // DetachedDying state.
@@ -260,7 +283,7 @@ constexpr ChargeStateMachine::Config kSeedChargeConfig = {
     /*stepIncrement*/  0.25f,
     /*maxCounter*/     4,
     /*cooldownSteps*/  3,
-    /*initialCounter*/ 2,  // 2026-08-03 — start at 50% (see acid config)
+    /*initialCounter*/ 1,  // 2026-08-03 latest — 25% first attack (see acid config)
 };
 
 // Seed telegraph + fire timing. Matches acid cycle length so both
@@ -275,15 +298,19 @@ constexpr int kSeedTotalFrames       = 25;
 constexpr float kSeedBehindLinkOffset = 100.0f;
 
 // Max seed flight distance from Dekubaba (safety cap on where the
-// projectile can spawn a child). Extended from plan's 300u to 400u
-// per unified-pattern discussion to accommodate behind-Link firings
-// at medium Dekubaba-Link distances.
-constexpr float kSeedMaxFlightDistance = 400.0f;
+// projectile can spawn a child).
+// 2026-08-03 latest (user): reduced 400u → 180u. Vanilla Dekubaba
+// activation radius is 200u × size (see EnDekubaba_Wait predicate).
+// A child spawned beyond that distance never wakes up in the current
+// fight — impotent addition. 180u is just under activation for a
+// full-size DEKUBABA_BIG (200u); smaller for scaled-down variants
+// their size ratio still keeps landing within their own activation.
+constexpr float kSeedMaxFlightDistance = 180.0f;
 
 // Fallback landing radius when behind-Link landing fails nav-validation.
-// Random XZ within this radius of the Dekubaba — always fires (never
-// skip) per user 2026-07-31 spec.
-constexpr float kSeedFallbackRadius   = 300.0f;
+// 2026-08-03 latest — reduced 300u → 150u for same "must land inside
+// activation range" reason as kSeedMaxFlightDistance.
+constexpr float kSeedFallbackRadius   = 150.0f;
 
 // Nav-validation radius when checking landing target for a valid
 // floor node.
@@ -372,13 +399,19 @@ struct DekubabaEnhancedState {
     // Peer-received seed active flag.
     bool netSeedActive = false;
 
-    // 2026-08-03 (user) — cross-cooldown between acid + seed. Prevents
-    // back-to-back exotic attacks: after either acid or seed fires,
-    // both are locked out for exoticCooldownRemaining attacks. Set to
-    // 1 on fire in OnHostMaybeAcidLunge and OnHostMaybeSeedFire;
-    // decremented in OnAttackComplete (which fires at Recover end).
-    // Both attack gates skip fire when > 0.
-    int  exoticCooldownRemaining = 0;
+    // 2026-08-03 latest⁹ (user) — INDEPENDENT per-attack cooldowns.
+    // Prior single shared `exoticCooldownRemaining` blocked BOTH acid
+    // and seed for 2 cycles after either fired — meant seed rarely
+    // got a turn because acid always won dispatch priority and its
+    // cooldown blocked seed too. Now each attack has its own counter:
+    // firing acid blocks acid only; firing seed blocks seed only.
+    // Both decrement in OnAttackComplete. Set to 2 at fire so this-
+    // attack's Recover decrements to 1 (blocks), next attack's
+    // Recover decrements to 0 (unlocks). Result: guaranteed one
+    // intervening attack of the OTHER type or vanilla between two
+    // fires of the SAME exotic.
+    int  acidCooldownRemaining = 0;
+    int  seedCooldownRemaining = 0;
 
     // Log-820 Bug 2a fix (2026-08-02) — per-frame draw-hook state.
     // Set true whenever the Dekubaba should display a Deku Nut model
@@ -489,12 +522,12 @@ bool EnDekubabaDescriptor::OnHostMaybeAcidLunge(EnDekubaba* actor,
     state.acidProjectileSpawned = false;
     state.acidAttackFrame       = 0;
 
-    // 2026-08-03 (user) — cross-cooldown: skip acid fire if seed OR
-    // acid fired last attack. Both attack gates respect the shared
-    // counter to prevent back-to-back exotics.
-    if (state.exoticCooldownRemaining > 0) {
-        DEKUBABA_DBG("acid skipped — cross-cooldown remaining={}",
-                     state.exoticCooldownRemaining);
+    // 2026-08-03 latest⁹ — independent per-attack cooldown. Only
+    // blocks acid if THIS acid fired recently; seed cooldown is
+    // separate. Prior shared cooldown starved seed of opportunities.
+    if (state.acidCooldownRemaining > 0) {
+        DEKUBABA_DBG("acid skipped — acid-cooldown remaining={}",
+                     state.acidCooldownRemaining);
         return false;
     }
 
@@ -514,10 +547,14 @@ bool EnDekubabaDescriptor::OnHostMaybeAcidLunge(EnDekubaba* actor,
             const float savedChance =
                 (float)state.acidCharge.GetCounter() * 0.25f;
             if (savedChance < 1.0f) {
-                if (Rand_ZeroOne() < 0.75f) {
+                // 2026-08-03 latest — 75% → 50% per user "occurring too
+                // frequently" after Grow-exit roll landed. Distance
+                // override still biases toward acid when vanilla lunge
+                // would miss, but with a fair coin flip instead of 3-in-4.
+                if (Rand_ZeroOne() < 0.50f) {
                     state.acidCharge.ForceState(
                         ChargeStateMachine::State::Ready);
-                    DEKUBABA_DBG("acid distance-override — 75%% roll succeeded "
+                    DEKUBABA_DBG("acid distance-override — 50%% roll succeeded "
                                  "(Link far: dist={:.0f} vanillaRange={:.0f})",
                                  dist, vanillaLungeRange);
                 }
@@ -535,8 +572,13 @@ bool EnDekubabaDescriptor::OnHostMaybeAcidLunge(EnDekubaba* actor,
         if (dist >= kAcidMinRangeXZ && dist <= kAcidMaxRangeXZ) {
             state.acidCharge.OnFire();
             state.currentAttackIsAcid = true;
-            state.exoticCooldownRemaining = 1;  // 2026-08-03 — block seed next attack
-            SPDLOG_INFO("[Dekubaba] acid FIRE decision — actor={} dist={:.0f} (cooldown armed 3)",
+            // 2026-08-03 latest⁹ — independent per-attack cooldown.
+            // Only blocks acid, not seed. Value 2 = this-cycle Recover
+            // decrements 2→1 (still blocks acid), next-cycle Recover
+            // decrements 1→0 (unlocks acid). Guarantees one intervening
+            // non-acid attack (may be seed or vanilla) between acids.
+            state.acidCooldownRemaining = 2;
+            SPDLOG_INFO("[Dekubaba] acid FIRE decision — actor={} dist={:.0f} (acidCd armed 2)",
                         (void*)&actor->actor, dist);
             EnhancementAudio::PlayBoostedActorSfx(
                 &actor->actor, NA_SE_EV_WATER_BUBBLE);
@@ -710,12 +752,14 @@ void EnDekubabaDescriptor::OnAttackComplete(EnDekubaba* actor) {
     // Log-820 Bug 2a fix — clear seed mouth visual on cycle complete.
     state.showSeedInMouth       = false;
 
-    // 2026-08-03 (user) — decrement cross-cooldown. Fires at end of
-    // every attack (Recover exit → OnAttackComplete). After acid or
-    // seed fires and cooldown is set to 1, the NEXT OnAttackComplete
-    // decrements it to 0, unlocking both attacks for the attack after.
-    if (state.exoticCooldownRemaining > 0) {
-        --state.exoticCooldownRemaining;
+    // 2026-08-03 latest⁹ — decrement INDEPENDENT per-attack cooldowns.
+    // Each fires at Recover exit; each counts down independently so
+    // acid and seed can fire on alternating attack cycles.
+    if (state.acidCooldownRemaining > 0) {
+        --state.acidCooldownRemaining;
+    }
+    if (state.seedCooldownRemaining > 0) {
+        --state.seedCooldownRemaining;
     }
 
     // Diagnostic — three-machine counter summary after advancement.
@@ -762,9 +806,10 @@ void EnDekubabaDescriptor::OnDeath(EnDekubaba* actor) {
     state.acidCharge.Reset();
     state.netAcidActive         = false;
     state.netAcidCharged        = false;
-    // 2026-08-03 — cross-cooldown reset on death (symmetry with
-    // per-machine reset above).
-    state.exoticCooldownRemaining = 0;
+    // 2026-08-03 latest⁹ — independent per-attack cooldown reset on
+    // death (symmetry with per-machine reset above).
+    state.acidCooldownRemaining = 0;
+    state.seedCooldownRemaining = 0;
     // Feature B — detach state reset. Note: for vanilla Dekubaba this
     // reset doesn't take effect because Dekubaba doesn't regrow (dies
     // and stays dead until scene reload). OnActorDestroy erases the
@@ -869,13 +914,19 @@ void EnDekubabaDescriptor::OnDetachedSquirmTick(EnDekubaba* actor,
     // wave-like.
     const float phase = (float)state.squirmFrameCounter * kSquirmPhasePerFrame;
     actor->stemSectionAngle[0] = kSquirmStemBase +
-        (s16)(sinf(phase) * (float)kSquirmStemAmplitude);
+        (s16)(EasedSquirmWave(phase) * (float)kSquirmStemAmplitude);
     actor->stemSectionAngle[1] = kSquirmStemBase +
-        (s16)(sinf(phase + (float)M_PI * 2.0f / 3.0f) *
+        (s16)(EasedSquirmWave(phase + (float)M_PI * 2.0f / 3.0f) *
               (float)kSquirmStemAmplitude);
     actor->stemSectionAngle[2] = kSquirmStemBase +
-        (s16)(sinf(phase + (float)M_PI * 4.0f / 3.0f) *
+        (s16)(EasedSquirmWave(phase + (float)M_PI * 4.0f / 3.0f) *
               (float)(kSquirmStemAmplitude / 2));  // tail tapered
+    // 2026-08-03 latest³ — removed section-2 tip lift. With base 0
+    // and small amplitude 0x0800, sines_sum stays near 0 → head Y
+    // ≈ home.y (no need to bias sections). Head lift now comes from
+    // (a) home.pos.y being snapped to floor in the C-side
+    // DetachedSquirm (kills prior drift-underground bug) and
+    // (b) the head-limb tilt in OverrideLimbDraw.
 
     // Face nearest player. Steer the stable base yaw (not shape.rot.y
     // directly) so the visual head-sway wiggle below doesn't feed
@@ -908,11 +959,26 @@ void EnDekubabaDescriptor::OnDetachedSquirmTick(EnDekubaba* actor,
     // 90° phase offset from vertical (stemSectionAngle) sine so the
     // horizontal head-lean leads with the peaked-side of the
     // vertical bob — natural snake gait vs mechanical in-phase.
-    const s16 yawWiggle =
-        (s16)(sinf(phase + (float)M_PI / 2.0f) * (float)kSquirmStemAmplitude);
+    // 2026-08-03 latest⁶ (user "entire model rotating instead of stem
+    // articulating"). REMOVED whole-actor yaw wiggle. The prior wiggle
+    // rotated shape.rot.y ±34° per cycle, which rotates the ENTIRE
+    // stem+head assembly rigidly (whole-actor spin). Lateral serpentine
+    // motion now comes from the per-section yaw wave in DrawStemExtended
+    // (each stem section draws with its own yaw offset creating an
+    // S-curve). shape.rot.y stays fixed at the stable player-facing
+    // direction; only the visible stem geometry articulates.
     const s16 preYaw = actor->actor.shape.rot.y;
-    actor->actor.shape.rot.y = state.squirmBaseFacingYaw + yawWiggle;
+    actor->actor.shape.rot.y = state.squirmBaseFacingYaw;
     actor->actor.world.rot.y = state.squirmBaseFacingYaw;
+
+    // 2026-08-03 latest⁷ (user "add side-to-side roll rotation 15°").
+    // Whole-plant roll about the forward axis via shape.rot.z. Eased
+    // wave same as vertical stem wave (tanh saturation at extremes).
+    // Amplitude 0x0AAA ≈ 15° matches user spec. shape.rot.z propagates
+    // to the SkelAnime head draw naturally; DrawStemExtended also
+    // applies it explicitly so the whole assembly rocks together.
+    actor->actor.shape.rot.z =
+        (s16)(EasedSquirmWave(phase + (float)M_PI / 4.0f) * (float)0x0AAA);
 
     // 2026-08-03 (user item 7) — pivot offset toward head. Same
     // approach as PrepareLunge: shift home.pos opposite to the
@@ -1037,6 +1103,33 @@ bool EnDekubabaDescriptor::OnHostMaybeStemCutDetach(EnDekubaba* actor) {
     return true;
 }
 
+// 2026-08-03 latest — DetachedLunge trigger check. Pure range check;
+// no RNG. Host-only per sync-rule 1 so both clients agree on the
+// state transition (peer receives via ENEMY_STATE index 19). Cooldown
+// enforcement lives C-side via this->timer inside DetachedSquirm.
+bool EnDekubabaDescriptor::OnHostShouldDetachedLunge(EnDekubaba* actor,
+                                                     PlayState* play) {
+    if (actor == nullptr || play == nullptr) return false;
+    if (!SceneAuthority::IsMyCurrentRoomHost()) return false;
+
+    DekubabaEnhancedState& state = GetOrCreate(actor);
+    if (!state.isDetached) return false;
+
+    Actor* target = FindNearestPlayerActor(&actor->actor, play);
+    if (target == nullptr) return false;
+
+    // Same range as vanilla lunge trigger — see EnDekubaba_DecideLunge
+    // condition at z_en_dekubaba.c ~line 1281 (`xzDistToPlayer < 80×size`).
+    const f32 dist = Math_Vec3f_DistXZ(&actor->actor.world.pos,
+                                        &target->world.pos);
+    const f32 lungeRange = 80.0f * actor->size;
+    if (dist > lungeRange) return false;
+
+    DEKUBABA_DBG("detached-lunge trigger — dist={:.0f} range={:.0f}",
+                 dist, lungeRange);
+    return true;
+}
+
 // ---- Feature C (#318) — seed spawn --------------------------------
 
 namespace {
@@ -1134,11 +1227,13 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
         return false;
     }
 
-    // 2026-08-03 (user) — cross-cooldown: skip seed fire if acid OR
-    // seed fired last attack. Prevents back-to-back exotic attacks.
-    if (state.exoticCooldownRemaining > 0) {
-        DEKUBABA_DBG("seed skipped — cross-cooldown remaining={}",
-                     state.exoticCooldownRemaining);
+    // 2026-08-03 latest⁹ — independent per-attack cooldown. Only
+    // blocks seed if THIS seed fired recently; acid cooldown is
+    // separate. Prior shared cooldown starved seed of opportunities
+    // because acid always won dispatch priority and locked seed too.
+    if (state.seedCooldownRemaining > 0) {
+        DEKUBABA_DBG("seed skipped — seed-cooldown remaining={}",
+                     state.seedCooldownRemaining);
         return false;
     }
 
@@ -1157,10 +1252,11 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
             const float savedChance =
                 (float)state.seedCharge.GetCounter() * 0.25f;
             if (savedChance < 1.0f) {
-                if (Rand_ZeroOne() < 0.75f) {
+                // 2026-08-03 latest — 75% → 50% (see acid mirror comment).
+                if (Rand_ZeroOne() < 0.50f) {
                     state.seedCharge.ForceState(
                         ChargeStateMachine::State::Ready);
-                    DEKUBABA_DBG("seed distance-override — 75%% roll succeeded "
+                    DEKUBABA_DBG("seed distance-override — 50%% roll succeeded "
                                  "(Link close: dist={:.0f} vanillaRange={:.0f})",
                                  dist, vanillaLungeRange);
                 }
@@ -1195,7 +1291,11 @@ bool EnDekubabaDescriptor::OnHostMaybeSeedFire(EnDekubaba* actor,
         state.seedProjectileSpawned = false;
         state.seedAttackFrame       = 0;
         state.seedLandingPos        = landingTarget;
-        state.exoticCooldownRemaining = 1;  // 2026-08-03 — block acid next attack
+        // 2026-08-03 latest⁹ — independent per-attack cooldown. Only
+        // blocks seed, not acid. Same 2-cycle timing as acid so one
+        // intervening non-seed attack (may be acid or vanilla) between
+        // seeds.
+        state.seedCooldownRemaining = 2;
 
         // Hard SPDLOG (unconditional, not gated on DebugLog CVar)
         // so any log will show that seed fired. Investigation aid

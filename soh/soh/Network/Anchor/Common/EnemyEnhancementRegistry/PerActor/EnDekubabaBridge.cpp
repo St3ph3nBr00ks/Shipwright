@@ -121,6 +121,18 @@ extern "C" int Anchor_Enhance_EnDekubaba_MaybeDetach(EnDekubaba* actor,
     return desc->OnHostMaybeDetach(actor, play) ? 1 : 0;
 }
 
+// 2026-08-03 latest (user) — DetachedLunge trigger check. Host-only
+// decision to transition a squirming detached plant into a coil-lurch
+// attack when Link is inside vanilla lunge range. Peers receive the
+// resulting state transition via ENEMY_STATE (index 19).
+extern "C" int Anchor_Enhance_EnDekubaba_HostShouldDetachedLunge(
+    EnDekubaba* actor, PlayState* play) {
+    if (actor == nullptr) return 0;
+    auto* desc = GetDekubabaDescriptor();
+    if (desc == nullptr) return 0;
+    return desc->OnHostShouldDetachedLunge(actor, play) ? 1 : 0;
+}
+
 extern "C" void Anchor_Enhance_EnDekubaba_ApplyPeerDetachActiveFlag(
     EnDekubaba* actor, int active) {
     if (actor == nullptr) return;

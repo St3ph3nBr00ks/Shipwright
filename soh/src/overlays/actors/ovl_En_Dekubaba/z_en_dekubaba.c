@@ -119,6 +119,11 @@ void EnDekubaba_SetupDetachedSquirm(EnDekubaba* this);
 void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play);
 void EnDekubaba_SetupDetachedDying(EnDekubaba* this);
 void EnDekubaba_DetachedDying(EnDekubaba* this, PlayState* play);
+void EnDekubaba_SetupDetachedLunge(EnDekubaba* this);
+void EnDekubaba_DetachedLunge(EnDekubaba* this, PlayState* play);
+// Host-only "should the detached-squirm plant start a coil-lurch attack
+// now?" — descriptor gates on IsMyCurrentRoomHost + Link in range.
+extern int Anchor_Enhance_EnDekubaba_HostShouldDetachedLunge(EnDekubaba* actor, PlayState* play);
 // Pillar 5 (#318) — seed spawn states.
 void EnDekubaba_SetupSeedTelegraph(EnDekubaba* this);
 void EnDekubaba_SeedTelegraph(EnDekubaba* this, PlayState* play);
@@ -448,6 +453,8 @@ s16 EnDekubaba_GetStateIndex(EnDekubaba* this) {
     // Pillar 5 (#318) — seed spawn state indices 17/18.
     if (this->actionFunc == EnDekubaba_SeedTelegraph)    return 17;
     if (this->actionFunc == EnDekubaba_SeedFire)         return 18;
+    // Pillar 5 (#309) latest — detached-mode lunge attack index 19.
+    if (this->actionFunc == EnDekubaba_DetachedLunge)    return 19;
     return -1;
 }
 
@@ -505,6 +512,7 @@ void EnDekubaba_ApplyNetState(EnDekubaba* this, s16 stateIndex) {
         case 16: EnDekubaba_SetupDetachedDying(this);    break;
         case 17: EnDekubaba_SetupSeedTelegraph(this);    break;
         case 18: EnDekubaba_SetupSeedFire(this);         break;
+        case 19: EnDekubaba_SetupDetachedLunge(this);    break;
         default:
             // 11=PrunedSomersault / 12=ShrinkDie / 13=DeadStickDrop —
             // see header comment above.
@@ -618,7 +626,15 @@ void EnDekubaba_SetupAcidVomit(EnDekubaba* this) {
     // continue into phase 2 (FastChomp + player-track) here; the
     // acid variant SKIPS phase 2 — that's the "interrupted halfway."
     Animation_PlayOnce(&this->skelAnime, &gDekuBabaPauseChompAnim);
-    this->skelAnime.playSpeed = 1.0f;
+    // 2026-08-03 latest — playSpeed 1.0 → 3.0. User: "the seed attack
+    // play slowly instead of at the vanilla 4x speed." Same fix
+    // applies to acid. Vanilla Lunge switches to gDekuBabaFastChompAnim
+    // at 4× ONLY after phase-1 thrust completes; our truncated
+    // half-lunge exits before that switch, so the base PauseChomp
+    // stays at whatever playSpeed we set here throughout the attack.
+    // 3× matches "fast quick jab" pace without overshooting anim-frame
+    // math (4× can skip past kAcidSpawnFrame frame index).
+    this->skelAnime.playSpeed = 3.0f;
     this->timer = 0;
     // AC_ON stays (Bug 2 log-819) — sword damage during windup.
     this->actionFunc = EnDekubaba_AcidVomit;
@@ -633,43 +649,39 @@ void EnDekubaba_AcidVomit(EnDekubaba* this, PlayState* play) {
 
     SkelAnime_Update(&this->skelAnime);
 
-    // 2026-08-03 (user items 2+3) — vanilla-Lunge thrust math.
-    // Steps stemSectionAngle[i] toward -0xE38 (forward thrust) with
-    // curFrame-scaled step size. When all three sections reach the
-    // target ("peak of thrust"), spawn projectile + PullBack.
-    // Copied from EnDekubaba_Lunge phase 1 for visual parity.
+    // 2026-08-03 latest³ (user image "still playing full lunge").
+    // Prior "step toward -0xE38 with cap" approaches didn't work
+    // because after AcidVomit exits to PullBack, PullBack cycles
+    // stem angles through -0x888 → other values, and the pose at
+    // stems ≈ -0x888 IS the "head-at-ground" full-lunge visual.
+    // My AcidVomit truncation only controlled the pre-fire phase;
+    // PullBack completed the ground-reach.
+    //
+    // New approach: step stems toward -0x3000 (moderate negative =
+    // halfway pose between idle-reared -0x5555 and full-forward
+    // -0xE38). Sines_sum ≈ -1.14 → head at home.y + ~23u × size
+    // above home = mid-height between idle and lunge-end. On exit,
+    // skip PullBack entirely and go straight to Recover so the
+    // plant retracts UPWARD from the halfway pose rather than
+    // continuing forward through -0x888.
     Math_ScaledStepToS(&this->actor.shape.rot.x, 0, 0x222);
-    s16 curFrame10 = this->skelAnime.curFrame * 10.0f;
-    s32 allStepsDone = 1;
-    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[0], -0xE38, curFrame10 + 0x38E);
-    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[1], -0xE38, curFrame10 + 0x71C);
-    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[2], -0xE38, curFrame10 + 0xE38);
+    Math_ScaledStepToS(&this->stemSectionAngle[0], -0x3000, 0x600);
+    Math_ScaledStepToS(&this->stemSectionAngle[1], -0x3000, 0x600);
+    Math_ScaledStepToS(&this->stemSectionAngle[2], -0x3000, 0x600);
 
     // Delegate per-frame render (head-scale + mouth spit + bubbles)
-    // to descriptor. Frame parameter used only for internal render
-    // sequencing; timer counts up regardless.
+    // to descriptor.
     Anchor_Enhance_EnDekubaba_OnAcidVomitTick(this, play, (int)this->timer);
     this->timer++;
 
-    if (allStepsDone) {
-        // Peak of lunge thrust — fire projectile + PullBack.
-        // Force fire frame by calling OnAcidVomitTick with the
-        // configured spawn frame (bypassing the up-counting timer).
-        // The descriptor's tick reads `frame >= kAcidSpawnFrame` to
-        // gate the actual spawn — passing a fire-ready frame here
-        // triggers the spawn regardless of how long thrust took.
+    // Half-lunge early exit — fire projectile + Recover at frame 8.
+    // Recover directly (not PullBack) because PullBack's stage 0
+    // targets stems to -0x888 which produces the visual "head at
+    // ground" pose. Recover retracts UPWARD instead.
+    if (this->timer >= 8) {
         Anchor_Enhance_EnDekubaba_OnAcidVomitTick(this, play, /*fireFrame=*/999);
-        // Reset head scale (Bug 9 log-818 fix) before PullBack takes over.
         Actor_SetScale(&this->actor, this->size * 0.01f);
-        EnDekubaba_SetupPullBack(this);
-        return;
-    }
-
-    // Safety timeout — if thrust math never reaches allStepsDone
-    // (shouldn't happen but defensive), force-exit after 30 frames.
-    if (this->timer >= 30) {
-        Actor_SetScale(&this->actor, this->size * 0.01f);
-        EnDekubaba_SetupPullBack(this);
+        EnDekubaba_SetupRecover(this);
         return;
     }
 
@@ -703,6 +715,11 @@ void EnDekubaba_SetupDetachedSquirm(EnDekubaba* this) {
     // that path routes through DetachedSquirm — same collider hygiene.
     this->collider.base.colType = COLTYPE_HIT6;
     this->collider.base.acFlags &= ~AC_HARD;
+    // 2026-08-03 REVERT (user) — AT toggle was mistaken. Turning off
+    // AT during squirm made the plant untargetable except during the
+    // lurch. Base init keeps AT_ON (line 226); leave it alone. Both
+    // squirm and lunge phases now have AT active — plant deals
+    // contact damage whenever the head touches Link.
     // Gravity so the head-stem settles onto ground surface.
     this->actor.gravity = -1.0f;
     // Slight upward velocity to unglue from home.pos initial anchor
@@ -758,8 +775,22 @@ void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play) {
     // Apply motion delta to home.pos so UpdateHeadPosition anchors
     // on the new position, not the stationary original stem-base.
     this->actor.home.pos.x += (this->actor.world.pos.x - prevWorldPos.x);
-    this->actor.home.pos.y += (this->actor.world.pos.y - prevWorldPos.y);
     this->actor.home.pos.z += (this->actor.world.pos.z - prevWorldPos.z);
+    // 2026-08-03 latest³ (user "head halfway underground"). Prior
+    // delta-Y tracking was broken: `prevWorldPos.y` is the HEAD Y
+    // (UpdateHeadPosition sets world.pos to head each frame), not
+    // the base Y. Gravity + bgCheck snap world.pos.y to floor.
+    // delta = floor - head_y < 0. home.pos.y accumulates negative
+    // drift, eventually dragging the whole plant underground.
+    // Fix: on floor contact, snap home.pos.y directly to the floor
+    // and zero velocity.y. Off-floor case (e.g. edge of a cliff)
+    // still applies gravity to home Y via the delta below.
+    if (this->actor.bgCheckFlags & 1) {
+        this->actor.home.pos.y = this->actor.world.pos.y;
+        this->actor.velocity.y = 0.0f;
+    } else {
+        this->actor.home.pos.y += (this->actor.world.pos.y - prevWorldPos.y);
+    }
 
     // Bleedout death — colChkInfo.health decremented by descriptor
     // per interval. When it hits 0, transition to death.
@@ -767,14 +798,28 @@ void EnDekubaba_DetachedSquirm(EnDekubaba* this, PlayState* play) {
         EnDekubaba_SetupDetachedDying(this);
     }
 
-    // Contact damage — per user spec "detached form deals damage by
-    // crashing into target". Head sphere has TOUCH_ON | AT_TYPE_ENEMY
-    // from the base collider init (line 185, 108); registering AT
-    // each tick lets vanilla collision math apply contact damage to
-    // Link on head-sphere overlap. Body cylinder AC also stays on
-    // (SetupDetachedSquirm sets AC_ON) so Link can sword-hit the
-    // squirming plant to speed up its death.
+    // 2026-08-03 latest — squirm no longer registers AT (AT_ON was
+    // cleared in SetupDetachedSquirm per user "damage collider should
+    // be disabled when squirming/moving"). SetAT stays for AC sword
+    // hit registration; AT is off so no contact damage to Link during
+    // squirm. Contact damage now only fires during DetachedLunge's
+    // lurch phase which re-enables AT_ON briefly.
     CollisionCheck_SetAT(play, &play->colChkCtx, &this->collider.base);
+
+    // 2026-08-03 latest — lunge trigger. Squirm→Lunge when Link enters
+    // vanilla lunge range AND cooldown (this->timer) expired. Host
+    // decides; peers receive via ENEMY_STATE. Uses this->timer for
+    // per-instance cooldown — SetupDetachedSquirm zeroed it, and
+    // DetachedLunge sets it to 40 (~2s at 20fps) before returning to
+    // squirm to prevent back-to-back lunges.
+    if (this->timer > 0) {
+        this->timer--;
+    }
+    if (this->timer == 0 &&
+        Anchor_Enhance_EnDekubaba_HostShouldDetachedLunge(this, play)) {
+        EnDekubaba_SetupDetachedLunge(this);
+        return;
+    }
 
     // Vanilla head-position math uses stemSectionAngle[] which the
     // descriptor just wrote — call it to update visible head pose.
@@ -814,19 +859,153 @@ void EnDekubaba_DetachedDying(EnDekubaba* this, PlayState* play) {
 
     this->timer++;
 
-    // Shrink the actor visually across the dying frames.
-    const f32 progress = 1.0f - ((f32)this->timer / 40.0f);
-    const f32 baseScale = this->size * 0.01f;
-    Actor_SetScale(&this->actor, baseScale * (progress > 0.0f ? progress : 0.0f));
+    // 2026-08-03 latest⁸ (user "add disintegration effect like Queen
+    // Gohma instead of shrink-and-sink"). Replaces prior shrink+sink
+    // with a debris-burst disintegration using EffectSsHahen_SpawnBurst
+    // — the same shard/fragment particle system Queen Gohma uses
+    // during her death cycle (`z_boss_goma.c:1087`). Multiple bursts
+    // spawned at random points along the stem+head over 20 frames,
+    // then Actor_Kill. No sink or scale reduction — the plant is
+    // "shattering" not "dissolving."
+    //
+    // Burst spec: 6-8 shards per frame at random offsets from world.pos.
+    // Radius scales with actor size for parity with visible model.
+    static const Vec3f sHahenVel   = { 0.0f, 2.0f, 0.0f };
+    static const Vec3f sHahenAccel = { 0.0f, -0.5f, 0.0f };
 
-    // Sink into the ground slightly to sell the death.
-    this->actor.world.pos.y -= 0.3f;
+    // Fire a burst every 2 frames (10 bursts total over 20 frames).
+    if ((this->timer % 2) == 0 && this->timer < 20) {
+        Vec3f burstPos = this->actor.world.pos;
+        // Randomize XZ within stem envelope so bursts scatter along body.
+        burstPos.x += Rand_CenteredFloat(30.0f * this->size);
+        burstPos.y += Rand_CenteredFloat(15.0f * this->size);
+        burstPos.z += Rand_CenteredFloat(30.0f * this->size);
+        EffectSsHahen_SpawnBurst(play, &burstPos,
+                                  this->size * 3.0f,        // burstScale
+                                  0,                        // unused
+                                  this->size * 15.0f,       // scale
+                                  this->size * 6.0f,        // randScaleRange
+                                  8,                        // count
+                                  HAHEN_OBJECT_DEFAULT,     // objId
+                                  10,                       // life
+                                  NULL);                    // dList
 
-    if (this->timer >= 40) {
-        // Actor_Kill — stays dead until scene reload per user spec
-        // (Q5: neither snap-back nor regrow; vanilla-Dekubaba parity).
+        Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_DAMAGE);
+    }
+
+    // At frame 8, hide the model by zeroing scale — the debris takes
+    // over as the visible representation. Prior "gradual shrink" was
+    // the shrink-and-sink effect the user wanted removed.
+    if (this->timer == 8) {
+        Actor_SetScale(&this->actor, 0.0f);
+    }
+
+    if (this->timer >= 22) {
+        // Actor_Kill after debris finishes.
         Actor_Kill(&this->actor);
     }
+}
+
+// Pillar 5 (#309) latest — DetachedLunge: coil-and-lurch attack the
+// detached plant uses when Link is within melee range. Three phases:
+//   Phase 1 (coil,  frames 0-9):  stem rears back further; AT off,
+//                                  speedXZ = 0. Head anim plays at
+//                                  1.5× so the coil reads deliberate
+//                                  but not slow.
+//   Phase 2 (lurch, frames 10-15): stem snaps forward; AT_ON so head
+//                                  contact damages Link; speedXZ = 8
+//                                  toward last-known Link position;
+//                                  home.pos tracks motion (mirror of
+//                                  DetachedSquirm delta-motion).
+//   Phase 3 (return, frame 16+):  AT off, speedXZ = 0, back to squirm
+//                                  with cooldown timer armed.
+// Same overall range as vanilla Dekubaba lunge — trigger checked in
+// DetachedSquirm gates on 80u × size distance to nearest player.
+void EnDekubaba_SetupDetachedLunge(EnDekubaba* this) {
+    Animation_Change(&this->skelAnime, &gDekuBabaFastChompAnim, 1.5f, 0.0f,
+                     Animation_GetLastFrame(&gDekuBabaFastChompAnim),
+                     ANIMMODE_ONCE, -3.0f);
+    this->timer = 0;
+    // 2026-08-03 REVERT (user) — AT stays on (see SetupDetachedSquirm).
+    this->actor.speedXZ = 0.0f;
+    this->actor.velocity.x = 0.0f;
+    this->actor.velocity.z = 0.0f;
+    this->actionFunc = EnDekubaba_DetachedLunge;
+    LUSLOG_INFO("[Dekubaba] SetupDetachedLunge — actor=%p world=(%.0f,%.0f,%.0f)",
+                (void*)&this->actor,
+                this->actor.world.pos.x, this->actor.world.pos.y,
+                this->actor.world.pos.z);
+}
+
+void EnDekubaba_DetachedLunge(EnDekubaba* this, PlayState* play) {
+    SkelAnime_Update(&this->skelAnime);
+
+    // Bleedout HP<=0 during lunge → immediate death (mirror of squirm
+    // death guard). Prevents "already-dead lunges into Link" edge case.
+    if (this->actor.colChkInfo.health <= 0) {
+        EnDekubaba_SetupDetachedDying(this);
+        return;
+    }
+
+    // 2026-08-03 latest⁶ (user "coil not visible, violent vibration
+    // snapping around 300 sq units"). Cache target yaw ONCE at frame
+    // 0 into world.rot.y instead of recomputing per tick. Fresh
+    // recomputation caused shape.rot.y to jump every frame if Link
+    // moved during the coil, producing the "vibration" visual.
+    if (this->timer == 0) {
+        Actor* target = Anchor_GetNearestPlayerActor(&this->actor, play);
+        if (target != NULL) {
+            this->actor.world.rot.y =
+                Math_Vec3f_Yaw(&this->actor.world.pos, &target->world.pos);
+        } else {
+            this->actor.world.rot.y = this->actor.shape.rot.y;
+        }
+    }
+    const s16 lockedTargetYaw = this->actor.world.rot.y;
+
+    // Phase 1 — coil on the HORIZONTAL axis. Curl shape.rot.y AWAY from
+    // locked target over 20 frames (extended from 10 for visibility).
+    // Max offset 0x2000 = ~45° sideways curl.
+    if (this->timer < 20) {
+        const s16 coilOffset = (s16)((s32)0x2000 * this->timer / 20);
+        this->actor.shape.rot.y = lockedTargetYaw + coilOffset;
+        Math_ScaledStepToS(&this->stemSectionAngle[0], -0x800, 0x80);
+        Math_ScaledStepToS(&this->stemSectionAngle[1], -0x800, 0x80);
+        Math_ScaledStepToS(&this->stemSectionAngle[2], -0x800, 0x80);
+        this->actor.speedXZ = 0.0f;
+    }
+    // Phase 2 — lurch forward (frames 20-34, 14 frames total).
+    // 2026-08-03 latest⁸ (user "lurch happens over too-few frames,
+    // looks like model jumping A→B with no in-between"). Extended
+    // from 6 frames to 14 for a visible arc of forward motion.
+    // Total lurch travel = 14 frames × 3u/frame = 42u — comparable
+    // to prior 6×4=24u but spread over more visible frames.
+    else if (this->timer < 34) {
+        if (this->timer == 20) {
+            this->actor.shape.rot.y = lockedTargetYaw;
+            this->actor.speedXZ = 3.0f;  // slower per-frame speed; more frames
+            Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEKU_ATTACK);
+        }
+        Math_ScaledStepToS(&this->stemSectionAngle[0], -0xE38, 0x200);
+        Math_ScaledStepToS(&this->stemSectionAngle[1], -0xE38, 0x200);
+        Math_ScaledStepToS(&this->stemSectionAngle[2], -0xE38, 0x200);
+        Vec3f prevWorldPos = this->actor.world.pos;
+        Actor_MoveXZGravity(&this->actor);
+        Actor_UpdateBgCheckInfo(play, &this->actor, 20.0f, 40.0f, 40.0f, 5);
+        this->actor.home.pos.x += (this->actor.world.pos.x - prevWorldPos.x);
+        this->actor.home.pos.z += (this->actor.world.pos.z - prevWorldPos.z);
+        CollisionCheck_SetAT(play, &play->colChkCtx, &this->collider.base);
+    }
+    // Phase 3 — return to squirm with cooldown armed.
+    else {
+        this->actor.speedXZ = 0.0f;
+        EnDekubaba_SetupDetachedSquirm(this);
+        this->timer = 40;
+        return;
+    }
+
+    this->timer++;
+    EnDekubaba_UpdateHeadPosition(this);
 }
 
 // Pillar 5 (#318) — SeedTelegraph: pre-fire windup. Same visual as
@@ -869,7 +1048,10 @@ void EnDekubaba_SeedTelegraph(EnDekubaba* this, PlayState* play) {
 // at frame 25. Descriptor handles the actual projectile spawn.
 void EnDekubaba_SetupSeedFire(EnDekubaba* this) {
     // Anim continues from PauseChomp — no new asset needed.
-    this->skelAnime.playSpeed = 1.0f;  // explicit reset — see SetupAcidVomit comment
+    // 2026-08-03 latest — playSpeed 1.0 → 3.0. See SetupAcidVomit
+    // comment for rationale (halfway truncated attack + user "slow
+    // instead of vanilla 4x speed" complaint).
+    this->skelAnime.playSpeed = 3.0f;
     this->timer = 0;
     this->actionFunc = EnDekubaba_SeedFire;
     LUSLOG_INFO("[Dekubaba] SetupSeedFire — actor=%p home=(%.0f,%.0f,%.0f)",
@@ -887,32 +1069,22 @@ void EnDekubaba_SeedFire(EnDekubaba* this, PlayState* play) {
 
     SkelAnime_Update(&this->skelAnime);
 
-    // 2026-08-03 (user item 2) — halfway-interrupted lunge-thrust,
-    // mirror of AcidVomit rewrite. Same vanilla-Lunge phase-1 thrust
-    // math; on allStepsDone spawn seed projectile + PullBack.
+    // 2026-08-03 latest³ — halfway-pose target + skip PullBack (see
+    // AcidVomit body for full rationale — PullBack's stage 0 was
+    // producing the "head at ground" visual regardless of what
+    // AcidVomit/SeedFire stopped at).
     Math_ScaledStepToS(&this->actor.shape.rot.x, 0, 0x222);
-    s16 curFrame10 = this->skelAnime.curFrame * 10.0f;
-    s32 allStepsDone = 1;
-    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[0], -0xE38, curFrame10 + 0x38E);
-    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[1], -0xE38, curFrame10 + 0x71C);
-    allStepsDone &= Math_ScaledStepToS(&this->stemSectionAngle[2], -0xE38, curFrame10 + 0xE38);
+    Math_ScaledStepToS(&this->stemSectionAngle[0], -0x3000, 0x600);
+    Math_ScaledStepToS(&this->stemSectionAngle[1], -0x3000, 0x600);
+    Math_ScaledStepToS(&this->stemSectionAngle[2], -0x3000, 0x600);
 
     Anchor_Enhance_EnDekubaba_OnSeedFireTick(this, play, (int)this->timer);
     this->timer++;
 
-    if (allStepsDone) {
-        // Peak of thrust — force fire via out-of-band frame value
-        // (descriptor gates spawn on `frame >= kSeedFireFrame`).
+    if (this->timer >= 8) {
         Anchor_Enhance_EnDekubaba_OnSeedFireTick(this, play, /*fireFrame=*/999);
         Actor_SetScale(&this->actor, this->size * 0.01f);
-        EnDekubaba_SetupPullBack(this);
-        return;
-    }
-
-    // Safety timeout.
-    if (this->timer >= 30) {
-        Actor_SetScale(&this->actor, this->size * 0.01f);
-        EnDekubaba_SetupPullBack(this);
+        EnDekubaba_SetupRecover(this);
         return;
     }
 
@@ -1138,7 +1310,28 @@ void EnDekubaba_Grow(EnDekubaba* this, PlayState* play) {
 
     if (this->timer == 0) {
         if (Math_Vec3f_DistXZ(&this->actor.home.pos, &nearestPlayer->world.pos) < 240.0f * this->size) {
-            EnDekubaba_SetupPrepareLunge(this);
+            // Log-fix (2026-08-03) — attack-decision roll AT GROW EXIT.
+            // Vanilla went straight to SetupPrepareLunge here, bypassing
+            // DecideLunge entirely on the first attack after activation.
+            // That meant the charge machine (rolled inside DecideLunge)
+            // never fired on the first attack — Dekubaba always did one
+            // plain vanilla lunge, and players killed it during that
+            // lunge before any enhanced attack could ready.
+            //
+            // Same 4-branch priority (acid → seed → detach → vanilla) as
+            // the DecideLunge site at line ~1273. Duplicated (not
+            // extracted) because the two sites differ in Retract fallback
+            // logic and inlining keeps the vanilla state-machine layout
+            // readable.
+            if (Anchor_Enhance_EnDekubaba_MaybeAcidLunge(this, play)) {
+                EnDekubaba_SetupAcidVomit(this);
+            } else if (Anchor_Enhance_EnDekubaba_MaybeSeedFire(this, play)) {
+                EnDekubaba_SetupSeedTelegraph(this);
+            } else if (Anchor_Enhance_EnDekubaba_MaybeDetach(this, play)) {
+                EnDekubaba_SetupDetachedSquirm(this);
+            } else {
+                EnDekubaba_SetupPrepareLunge(this);
+            }
         } else {
             EnDekubaba_SetupRetract(this);
         }
@@ -1207,14 +1400,33 @@ void EnDekubaba_UpdateHeadPosition(EnDekubaba* this) {
                                Math_CosS(this->stemSectionAngle[2])) *
                               20.0f;
 
+    // 2026-08-03 latest⁴ (user "whole model sunk into ground").
+    // Prior verticalMul reduction 20→5 collapsed the head-Y offset
+    // so head sat near home.y = ground level → head sphere half-
+    // submerged. Restored to 20 (vanilla value). Now with negative
+    // stem base (see descriptor), sines_sum ≈ -1.15 mean →
+    // head Y = home.y - (-1.15) × 20 × size = home.y + 23×size.
+    // For BIG size 2.5: head ~57u above ground = well clear of the
+    // ~37u head radius. Head stays visibly above ground.
+    f32 verticalMul = 20.0f;
+
     this->actor.world.pos.x =
         this->actor.home.pos.x + Math_SinS(this->actor.shape.rot.y) * (horizontalHeadShift * this->size);
     this->actor.world.pos.y =
         this->actor.home.pos.y - (Math_SinS(this->stemSectionAngle[0]) + Math_SinS(this->stemSectionAngle[1]) +
                                   Math_SinS(this->stemSectionAngle[2])) *
-                                     20.0f * this->size;
+                                     verticalMul * this->size;
     this->actor.world.pos.z =
         this->actor.home.pos.z + Math_CosS(this->actor.shape.rot.y) * (horizontalHeadShift * this->size);
+
+    // 2026-08-03 latest⁵ (user "lower the height on the entire deku
+    // baba model 5u"). Stem draw starts at world.pos and extends
+    // backward via section offsets, so lowering world.pos.y also
+    // lowers the visible stem. Head + stem shift down 5u together.
+    if (Anchor_Enhance_EnDekubaba_IsDetached(this) ||
+        this->actionFunc == EnDekubaba_DetachedDying) {
+        this->actor.world.pos.y -= 5.0f;
+    }
 }
 
 void EnDekubaba_DecideLunge(EnDekubaba* this, PlayState* play) {
@@ -1655,6 +1867,13 @@ void EnDekubaba_PrunedSomersault(EnDekubaba* this, PlayState* play) {
         if (Anchor_Enhance_EnDekubaba_MaybeStemCutDetach(this)) {
             this->actor.home.pos.x = this->actor.world.pos.x;
             this->actor.home.pos.z = this->actor.world.pos.z;
+            // Log-fix (2026-08-02) — restore scale before detach handoff.
+            // Line 1616-1622 above zeros scale to 0 when PrunedSomersault
+            // lands against a wall/slope (bgCheckFlags & 2 || & 8). If we
+            // detach out of that path, DetachedSquirm inherits scale=0 and
+            // the head-and-stem model is invisible. Reset to the standard
+            // fully-grown scale so the squirming baba renders.
+            Actor_SetScale(&this->actor, this->size * 0.01f);
             EnDekubaba_SetupDetachedSquirm(this);
             return;
         }
@@ -1928,6 +2147,13 @@ void EnDekubaba_DrawStemExtended(EnDekubaba* this, PlayState* play) {
     scale = this->size * 0.01f;
     Matrix_Translate(this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z, MTXMODE_NEW);
     Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+    // 2026-08-03 latest⁷ — apply detached-state roll to the stem draw.
+    // Vanilla DrawStemExtended ignores shape.rot.z (RotateZYX third
+    // arg is 0). For the detached-state roll wave (set in descriptor
+    // OnDetachedSquirmTick) to also roll the visible stem sections,
+    // explicitly rotate the outer matrix by shape.rot.z here.
+    // Non-detached actors have shape.rot.z ≈ 0 → identity rotation.
+    Matrix_RotateZ((f32)this->actor.shape.rot.z * (M_PI / 0x8000), MTXMODE_APPLY);
     Matrix_Get(&mtx);
     if (this->actor.colorFilterTimer != 0) {
         spA4 = this->size * 20.0f;
@@ -1936,14 +2162,32 @@ void EnDekubaba_DrawStemExtended(EnDekubaba* this, PlayState* play) {
         this->bodyPartsPos[2].z = this->actor.world.pos.z;
     }
 
+    // 2026-08-03 latest⁶ (user "lateral horizontal side-to-side
+    // articulation of the stem is essentially non-existent; looks like
+    // the entire dekubaba model is rotating"). When detached, apply a
+    // per-section YAW OFFSET so each stem section draws in a slightly
+    // different direction from the previous one. This creates a
+    // stepped S-curve serpentine visual instead of a rigid stem that
+    // rotates as a whole. Offset amplitude 0x1400 (~28°) per section
+    // with 90° phase between sections; play->gameplayFrames drives
+    // the wave so it advances smoothly per frame.
+    const s32 detachedYawWave = (Anchor_Enhance_EnDekubaba_IsDetached(this) ||
+                                  this->actionFunc == EnDekubaba_DetachedDying);
+
     for (i = 0; i < stemSections; i++) {
+        s16 sectionYaw = this->actor.shape.rot.y;
+        if (detachedYawWave) {
+            const float phase = (float)play->gameplayFrames * 0.15f +
+                                (float)i * (float)(M_PI * 0.5f);
+            sectionYaw += (s16)(sinf(phase) * (float)0x1400);
+        }
         mtx.yw += 20.0f * Math_SinS(this->stemSectionAngle[i]) * this->size;
         horizontalStepSize = 20.0f * Math_CosS(this->stemSectionAngle[i]) * this->size;
-        mtx.xw -= horizontalStepSize * Math_SinS(this->actor.shape.rot.y);
-        mtx.zw -= horizontalStepSize * Math_CosS(this->actor.shape.rot.y);
+        mtx.xw -= horizontalStepSize * Math_SinS(sectionYaw);
+        mtx.zw -= horizontalStepSize * Math_CosS(sectionYaw);
 
         Matrix_Put(&mtx);
-        Matrix_RotateZYX(this->stemSectionAngle[i], this->actor.shape.rot.y, 0, MTXMODE_APPLY);
+        Matrix_RotateZYX(this->stemSectionAngle[i], sectionYaw, 0, MTXMODE_APPLY);
         gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
 
         gSPDisplayList(POLY_OPA_DISP++, stemDLists[i]);
@@ -2013,6 +2257,38 @@ void EnDekubaba_PostLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3s*
     }
 }
 
+// 2026-08-03 latest (user "rotate the head itself down 15°"). Adds a
+// pitch offset to the head limb when the plant is in detached state.
+// Pairs with the descriptor-side stemSectionAngle[2] -= 0x0AAA lift:
+// stem tip rises, head visually tilts back down. Result: raised head
+// still points at the ground.
+//
+// Per Pitfall 35 the `rot` param is a stack-local COPY of the limb
+// rotation; modifying it affects only this limb's draw for this
+// frame. Head is limb 1 per the JntSph mapping (element 0 attaches
+// the head-sized sphere to limbIndex 1).
+s32 EnDekubaba_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList,
+                                  Vec3f* pos, Vec3s* rot, void* thisx) {
+    EnDekubaba* this = (EnDekubaba*)thisx;
+    if (limbIndex == 1 &&
+        (Anchor_Enhance_EnDekubaba_IsDetached(this) ||
+         this->actionFunc == EnDekubaba_DetachedDying)) {
+        rot->x += 0x0AAA;  // pitch down ~15° (s16 units; 0x10000 = 360°)
+
+        // 2026-08-03 latest⁷ (user "add left/right position 2u and
+        // rotation 5° wobble to the head"). Independent wave via
+        // play->gameplayFrames so head jiggles even during coil/lurch
+        // (where descriptor state is frozen). Slightly different
+        // frequencies for position vs rotation so the wobble reads
+        // organically (not mechanically-linked).
+        const float wobPosPhase = (float)play->gameplayFrames * 0.20f;
+        const float wobRotPhase = (float)play->gameplayFrames * 0.17f;
+        pos->x += sinf(wobPosPhase) * 2.0f;              // lateral ±2u
+        rot->y += (s16)(sinf(wobRotPhase) * (float)0x0E38);  // yaw ±5°
+    }
+    return 0;  // 0 = don't skip draw
+}
+
 void EnDekubaba_Draw(Actor* thisx, PlayState* play) {
     EnDekubaba* this = (EnDekubaba*)thisx;
     f32 scale;
@@ -2021,7 +2297,7 @@ void EnDekubaba_Draw(Actor* thisx, PlayState* play) {
     Gfx_SetupDL_25Opa(play->state.gfxCtx);
 
     if (this->actionFunc != EnDekubaba_DeadStickDrop) {
-        SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, NULL, EnDekubaba_PostLimbDraw, this);
+        SkelAnime_DrawSkeletonOpa(play, &this->skelAnime, EnDekubaba_OverrideLimbDraw, EnDekubaba_PostLimbDraw, this);
 
         if (this->actionFunc == EnDekubaba_Wait) {
             EnDekubaba_DrawStemRetracted(this, play);
@@ -2038,7 +2314,13 @@ void EnDekubaba_Draw(Actor* thisx, PlayState* play) {
         // whole point of the detach visual is that the plant has
         // severed from the stem base; the leaf-bundle should NOT be
         // rendered at home.pos while the head-and-stem squirm away.
-        if (!Anchor_Enhance_EnDekubaba_IsDetached(this)) {
+        // Also cover DetachedDying — IsDetached returns false during
+        // dying, but the plant is still severed. Without this, the
+        // leaf-bundle pops back into view the frame the lethal hit
+        // transitions squirm→dying. Same guard-scope pattern as the
+        // Update-tick DetachedDying protection.
+        if (!Anchor_Enhance_EnDekubaba_IsDetached(this) &&
+            this->actionFunc != EnDekubaba_DetachedDying) {
             gSPDisplayList(POLY_OPA_DISP++, gDekuBabaBaseLeavesDL);
         }
 
@@ -2046,7 +2328,14 @@ void EnDekubaba_Draw(Actor* thisx, PlayState* play) {
             EnDekubaba_DrawStemBasePruned(this, play);
         }
 
-        if (this->boundFloor != NULL) {
+        // 2026-08-03 latest (user) — suppress base shadow while detached.
+        // Shadow is drawn at home.pos representing the "planted stem
+        // base," but the plant has severed and crawled away — visible
+        // shadow at the old base spot reads as a bug. Same guard-scope
+        // pattern as the leaf-bundle base render above.
+        if (this->boundFloor != NULL &&
+            !Anchor_Enhance_EnDekubaba_IsDetached(this) &&
+            this->actionFunc != EnDekubaba_DetachedDying) {
             EnDekubaba_DrawBaseShadow(this, play);
         }
 

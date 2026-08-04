@@ -240,7 +240,26 @@ void EnDekubabaAcid_Update(Actor* thisx, PlayState* play) {
     CollisionCheck_SetAT(play, &play->colChkCtx, &this->collider.base);
 
     if (this->collider.base.atFlags & AT_HIT) {
-        LUSLOG_INFO("[DekubabaAcid] AT hit — despawning");
+        // 2026-08-03 latest (user) — reduce knockback to 25% of vanilla
+        // default. Vanilla's Player_Update knockback response for dmgFlags
+        // 0x200 (electric/environmental) throws Link back hard. Override
+        // via func_8002F71C — writes the 5 knockback fields on the target
+        // (see Pitfall 28). Called after AT_HIT resolves so vanilla's
+        // default write happened first; ours overwrites with reduced
+        // params. Runs per-client on whichever client's local Link was
+        // hit (each client has its own local acid actor and its own
+        // local Link), so both host and peer see the reduced knockback
+        // without extra sync plumbing.
+        Player* player = GET_PLAYER(play);
+        if (player != NULL) {
+            const s16 knockbackYaw =
+                Math_Vec3f_Yaw(&this->actor.world.pos, &player->actor.world.pos);
+            // Vanilla defaults for this class approximate speed 6.0 /
+            // yVel 6.0; 25% = 1.5.
+            func_8002F71C(play, &player->actor, /*speedXZ*/ 1.5f,
+                          knockbackYaw, /*yVel*/ 1.5f);
+        }
+        LUSLOG_INFO("[DekubabaAcid] AT hit — despawning (knockback reduced 75%%)");
         Actor_Kill(&this->actor);
         return;
     }

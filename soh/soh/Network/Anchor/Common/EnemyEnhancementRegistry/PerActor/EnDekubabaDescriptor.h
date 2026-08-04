@@ -163,6 +163,16 @@ public:
     // instead of the normal death setup.
     bool OnHostMaybeStemCutDetach(EnDekubaba* actor);
 
+    // 2026-08-03 latest — DetachedLunge trigger. Called from
+    // EnDekubaba_DetachedSquirm each tick. Returns true iff host
+    // wants to transition the squirming detached plant into a
+    // coil-lurch melee attack (state 19). Gates:
+    //   - IsMyCurrentRoomHost (peers receive via ENEMY_STATE)
+    //   - isDetached
+    //   - Nearest player within vanilla lunge range (80u × size)
+    // Cooldown between lunges is enforced C-side via this->timer.
+    bool OnHostShouldDetachedLunge(EnDekubaba* actor, PlayState* play);
+
     // ---- Feature C API (seed spawn, #318) --------------------------
 
     // Called from EnDekubaba_DecideLunge (after acid roll fails).
