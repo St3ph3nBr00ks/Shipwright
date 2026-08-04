@@ -1586,7 +1586,17 @@ void Anchor::RegisterHooks() {
         // for this guard.
         if (isDynamicSpawn && ::SceneAuthority::IsMyCurrentRoomHost() &&
             !isSpawningNetworkActor && !isSpawningDirectorActor) {
-            SendPacket_EnemySpawn(actor);
+            // 2026-08-04 (Phase 3 En_St→En_Sw swap): consume pending
+            // replacesNetId set by swap-triggering code (EnStBridge)
+            // so peers atomically kill the old En_St before spawning
+            // the new En_Sw. Cleared here — swap flow expects
+            // one-shot consumption per Actor_Spawn call.
+            uint32_t replaces = Anchor::Instance->pendingReplacesNetId;
+            Anchor::Instance->pendingReplacesNetId = 0;
+            SendPacket_EnemySpawn(actor, /*directorDescriptorId=*/0,
+                                  /*directorVariantId=*/0,
+                                  /*directorGroupId=*/0,
+                                  /*replacesNetId=*/replaces);
         }
     });
 

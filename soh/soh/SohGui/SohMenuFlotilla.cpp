@@ -798,6 +798,38 @@ void SohMenu::AddMenuFlotilla() {
             "PickGazeTarget + ShouldRelaxLungeGates fire via the "
             "existing vanilla-hook path."));
 
+    AddWidget(path, "Skulltula (En_St) — chance to transform into Skullwalltula",
+              WIDGET_SEPARATOR_TEXT);
+
+    AddWidget(path, "Ground-drop: % chance a descending Skulltula transforms when it hits the floor##Flotilla",
+              WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("Skulltula.GroundDrop"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(IntSliderOptions().Min(0).Max(100).DefaultValue(30).Tooltip(
+            "When a ceiling Skulltula descends to attack Link and "
+            "touches the floor, roll this % chance to transform it "
+            "into a Skullwalltula at the same spot. 0 = never, "
+            "100 = always. Default 30%.\n\n"
+            "Combined with the Skullwalltula enhancement CVars above, "
+            "the spawned Skullwalltula inherits ground-walking + climb-"
+            "any-surface + aggressive-acquire capabilities.\n\n"
+            "Gold-token Skulltulas never transform."));
+
+    AddWidget(path, "Aggressive-drop: % chance to transform if hit while descending##Flotilla",
+              WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("Skulltula.AggressiveDrop"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(IntSliderOptions().Min(0).Max(100).DefaultValue(50).Tooltip(
+            "When >0: damage to a Skulltula while it's in the descending "
+            "state (dropping toward Link but not yet on the ground) rolls "
+            "this % chance to transform it into a Skullwalltula. Player "
+            "attacks that would normally spin-hurt or kill the Skulltula "
+            "in mid-air become swap triggers instead of damage.\n\n"
+            "0 = never, 100 = always. Default 50%.\n\n"
+            "Gold-token Skulltulas still never transform."));
+
     AddWidget(path, "Karebaba (En_Karebaba) — geyser AoE during Spin",
               WIDGET_SEPARATOR_TEXT);
 

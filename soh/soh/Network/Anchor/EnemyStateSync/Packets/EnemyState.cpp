@@ -1742,7 +1742,8 @@ void Anchor::SendPacket_EnemyUpdate(uint32_t netId, Actor* actor) {
 void Anchor::SendPacket_EnemySpawn(Actor* actor,
                                    uint8_t directorDescriptorId,
                                    uint8_t directorVariantId,
-                                   int     directorGroupId) {
+                                   int     directorGroupId,
+                                   uint32_t replacesNetId) {
     if (!IsSaveLoaded()) {
         return;
     }
@@ -1781,6 +1782,14 @@ void Anchor::SendPacket_EnemySpawn(Actor* actor,
     payload["directorDescriptorId"] = directorDescriptorId;
     payload["directorVariantId"]    = directorVariantId;
     payload["directorGroupId"]      = directorGroupId;
+
+    // 2026-08-04 (Phase 3) — optional replacesNetId. When non-zero, the
+    // receiver kills the actor with this netId before spawning the new
+    // one. Used by Skulltula→Skullwalltula swap (host En_St fires event;
+    // peer atomically transitions to En_Sw at the same coord).
+    if (replacesNetId != 0) {
+        payload["replacesNetId"] = replacesNetId;
+    }
 
     SPDLOG_INFO("[EnemySpawn] Sending spawn actorId={} netId={} pos=({:.1f},{:.1f},{:.1f}) params={} director={}/{}",
                 actor->id,
@@ -2713,6 +2722,25 @@ void Anchor::HandlePacket_EnemySpawn(nlohmann::json payload) {
                         "exists for actorId={} ptr={} (idempotency guard)",
                         incomingNetId, existing->id, (void*)existing);
             return;
+        }
+    }
+
+    // 2026-08-04 (Phase 3) — replacesNetId. When present, silently kill
+    // the actor with that netId BEFORE spawning the replacement. Used
+    // by Skulltula→Skullwalltula swap: host En_St fires the trigger,
+    // peer atomically kills its own En_St and spawns En_Sw at the same
+    // coord. KillNetworkActorSilently avoids echoing an ENEMY_DEFEATED
+    // back to host (which would double-count the "kill").
+    if (payload.contains("replacesNetId")) {
+        uint32_t oldNetId = payload["replacesNetId"].get<uint32_t>();
+        Actor* oldActor = FindActorByNetId(gPlayState, oldNetId);
+        if (oldActor != nullptr) {
+            SPDLOG_INFO("[EnemySpawn] Replacing netId={} (actorId={}) with new spawn actorId={}",
+                        oldNetId, oldActor->id, actorId);
+            KillNetworkActorSilently(oldActor);
+        } else {
+            SPDLOG_INFO("[EnemySpawn] replacesNetId={} not found locally — spawning replacement anyway",
+                        oldNetId);
         }
     }
 

@@ -741,6 +741,16 @@ class Anchor : public Network {
     // Anchor::HandlePacket_EnemySpawn).
     bool isSpawningDirectorActor = false;
 
+    // 2026-08-04 (Phase 3 En_St→En_Sw swap): when non-zero, the next
+    // dynamic-spawn broadcast (in HookHandlers OnActorSpawn) will
+    // include this netId in the payload's replacesNetId field. Caller
+    // sets before Actor_Spawn + clears immediately after (bracket
+    // pattern like isSpawningDirectorActor). Peers use replacesNetId
+    // to atomically kill the old actor before spawning the replacement.
+    // Public so external Flotilla enhancement bridges (EnStBridge) can
+    // set/clear it directly, same rationale as isSpawningDirectorActor.
+    uint32_t pendingReplacesNetId = 0;
+
     // Public wrapper around isKillingNetworkActor + Actor_Kill for
     // external Flotilla modules that need to kill an actor without
     // triggering the OnActorKill ENEMY_DEFEATED broadcast. The flag
@@ -1237,10 +1247,15 @@ class Anchor : public Network {
     // dynamic spawns and current hook-site callers. Director's
     // ExecuteSpawn passes the descriptor's values explicitly.
     // Wire-format schema 5 (Pillar F hard bump 2026-05; see PacketSchemas.h).
+    // 2026-08-04 (Phase 3 En_St→En_Sw swap): optional replacesNetId — when
+    // non-zero, receiver kills the actor with that netId before spawning
+    // the new one. Enables atomic actor-type transitions (Skulltula turns
+    // into Skullwalltula) without a spawn-during-death race.
     void SendPacket_EnemySpawn(Actor* actor,
                                uint8_t directorDescriptorId = 0,
                                uint8_t directorVariantId    = 0,
-                               int     directorGroupId      = 0);
+                               int     directorGroupId      = 0,
+                               uint32_t replacesNetId       = 0);
     void SendPacket_EnemyRespawn(uint32_t netId);                // phase=Regrowing   phaseChanged=true
     // Carry-exit: the local player took an actor (held in hand) into a
     // different scene. Caller passes the actor's netId and the scene it

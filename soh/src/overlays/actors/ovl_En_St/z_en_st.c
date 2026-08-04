@@ -13,6 +13,13 @@
 // Defined extern "C" in HookHandlers.cpp.
 extern Actor* Anchor_GetNearestPlayerActor(Actor* enemy, PlayState* play);
 
+// Pillar 5 Phase 3 (GH #210) — Skulltula → Skullwalltula swap.
+// Defined in soh/soh/Network/Anchor/Common/EnemyEnhancementRegistry/
+// PerActor/EnStBridge.cpp. Return 1 if the swap fired (caller should
+// early-return; actor is being killed and replaced).
+extern int Anchor_Enhance_EnSt_OnGroundImpact(EnSt* actor, PlayState* play);
+extern int Anchor_Enhance_EnSt_OnHitDuringDescent(EnSt* actor, PlayState* play);
+
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
      ACTOR_FLAG_DRAW_CULLING_DISABLED)
@@ -499,6 +506,18 @@ s32 EnSt_CheckHitBackside(EnSt* this, PlayState* play) {
     Animation_ChangeByInfo(&this->skelAnime, sAnimationInfo, ENST_ANIM_3);
     this->takeDamageSpinTimer = this->skelAnime.animLength;
     Actor_SetColorFilter(&this->actor, 0x4000, 0xC8, 0, this->takeDamageSpinTimer);
+
+    // Pillar 5 Phase 3 (GH #210, 2026-08-04) — Skulltula→Skullwalltula
+    // hit-during-descent swap trigger. If Link damages this En_St while
+    // it's descending (actionFunc == EnSt_MoveToGround), the bridge
+    // returns 1 to indicate the actor has been swapped. Return here
+    // BEFORE Actor_ApplyDamage so we don't accidentally kill it via
+    // the vanilla damage flow (the bridge already silently killed it).
+    if (this->actionFunc == EnSt_MoveToGround &&
+        Anchor_Enhance_EnSt_OnHitDuringDescent(this, play)) {
+        return false;
+    }
+
     if (Actor_ApplyDamage(&this->actor)) {
         Audio_PlayActorSound2(&this->actor, NA_SE_EN_STALTU_DAMAGE);
         return false;
@@ -937,6 +956,15 @@ void EnSt_LandOnGround(EnSt* this, PlayState* play) {
     if ((this->actor.floorHeight + this->floorHeightOffset) < this->actor.world.pos.y) {
         // the Skulltula has hit the ground.
         this->sfxTimer = 0;
+        // Pillar 5 Phase 3 (GH #210, 2026-08-04) — swap trigger point.
+        // Host rolls Skulltula.GroundDrop % chance; on success, swaps
+        // this En_St for a fresh En_Sw at the same coord. If the swap
+        // fires, this actor is being killed silently by the bridge;
+        // return immediately so we don't transition to WaitOnGround
+        // (undefined behavior post-kill).
+        if (Anchor_Enhance_EnSt_OnGroundImpact(this, play)) {
+            return;
+        }
         EnSt_SetupAction(this, EnSt_WaitOnGround);
     } else {
         Math_SmoothStepToF(&this->actor.velocity.y, 2.0f, 0.3f, 1.0f, 0.0f);

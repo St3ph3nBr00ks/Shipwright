@@ -190,6 +190,22 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     { CVAR_ENHANCEMENT("Skullwalltula.GravityAware"),      0 },
     { CVAR_ENHANCEMENT("Skullwalltula.AggressiveAcquire"), 0 },
 
+    // --- Pillar 5 Phase 3 — Skulltula → Skullwalltula swap (GH #210) ---
+    // Host-authoritative. When a ceiling Skulltula (En_St) descends
+    // toward the ground, it may transform into a Skullwalltula (En_Sw)
+    // for combat variety. Two triggers:
+    //   Skulltula.GroundDrop     — random chance % on ground impact
+    //                              (default 30% per user 2026-08-04)
+    //   Skulltula.AggressiveDrop — 100% swap if hit while descending
+    // Combined with the Skullwalltula.* enhancement toggles above the
+    // spawned En_Sw inherits the enhanced-mode nav-consume + gravity-
+    // aware + aggressive-acquire capabilities.
+    { CVAR_ENHANCEMENT("Skulltula.GroundDrop"),           30 },
+    // 2026-08-04 (user) — AggressiveDrop is a percentage slider,
+    // not a bool. Default 50 (halfway) so first-time users see
+    // moderate swap frequency; 100 was too intrusive per playtest.
+    { CVAR_ENHANCEMENT("Skulltula.AggressiveDrop"),       50 },
+
     // --- Pillar 5 — Karebaba enhancement toggle (GH #310) ---
     // Host-authoritative geyser AoE Spin. Default 0 per project
     // policy. When ON, host rolls 33% chance at each Spin entry;
