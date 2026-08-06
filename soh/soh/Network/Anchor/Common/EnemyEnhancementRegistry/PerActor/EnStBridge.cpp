@@ -247,13 +247,18 @@ void FireSwap(Actor* oldEnSt, PlayState* play, const char* triggerReason) {
     // peer's local ENEMY_UPDATE from host will drive its position via
     // the sync pipeline).
     //
-    // GH #210 Feature B (2026-08-06) — snapshot the En_St's current HP
-    // BEFORE Actor_Spawn / KillNetworkActorSilently touch it. This
-    // value flows through to Anchor_Enhance_EnSw_ApplyCarryoverHealth
-    // below. Two trigger scenarios both leave the value meaningful:
-    //   OnHitDuringDescent — called from z_en_st.c:517 BEFORE
-    //     Actor_ApplyDamage runs, so this reads the pre-hit HP
-    //     (which is what the user intends to carry over).
+    // GH #210 Feature B (2026-08-06, Option B semantics) — snapshot
+    // the En_St's current HP BEFORE Actor_Spawn / KillNetworkActor-
+    // Silently touch it. This value flows through to
+    // Anchor_Enhance_EnSw_ApplyCarryoverHealth below.
+    //
+    // Both trigger sites deliver POST-hit HP:
+    //   OnHitDuringDescent — called from z_en_st.c AFTER
+    //     Actor_ApplyDamage returns "survived", so `colChkInfo.health`
+    //     is already the post-hit value. A lethal hit never reaches
+    //     this bridge (the death branch runs first). Result: hit
+    //     that triggers swap ALSO deducts HP — a 2-HP En_St hit for
+    //     1 damage produces a 1-HP En_Sw.
     //   OnGroundImpact — called from z_en_st.c:965 during a
     //     non-damage transition (LandOnGround → WaitOnGround), so
     //     the HP is whatever it was after any prior hits.

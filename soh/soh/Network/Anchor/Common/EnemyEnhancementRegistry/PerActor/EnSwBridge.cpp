@@ -222,10 +222,12 @@ extern "C" void Anchor_Enhance_EnSw_ArmSwapTransition(EnSw* actor,
 // from host regardless.
 //
 // sourceHealth = the En_St's colChkInfo.health at swap trigger time.
-// For OnHitDuringDescent this is the PRE-hit value (see z_en_st.c:517
-// call site — the hook returns before Actor_ApplyDamage runs). For
-// OnGroundImpact the En_St isn't taking damage so it's the current
-// value.
+// Option B semantics (2026-08-06): for OnHitDuringDescent this is
+// the POST-hit value (z_en_st.c:521 branch — Actor_ApplyDamage runs
+// FIRST; swap check runs in the "survived" branch only). A lethal
+// hit never reaches this function — the En_St's death path runs
+// instead. For OnGroundImpact the En_St isn't taking damage so
+// sourceHealth is just the current HP.
 //
 // Applied HP = min(sourceHealth, GetSwapMaxHP()). Cap defaults to 2
 // so a full-HP En_St (vanilla 2) yields a full-HP En_Sw at defaults

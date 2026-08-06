@@ -507,19 +507,26 @@ s32 EnSt_CheckHitBackside(EnSt* this, PlayState* play) {
     this->takeDamageSpinTimer = this->skelAnime.animLength;
     Actor_SetColorFilter(&this->actor, 0x4000, 0xC8, 0, this->takeDamageSpinTimer);
 
-    // Pillar 5 Phase 3 (GH #210, 2026-08-04) — Skulltula→Skullwalltula
-    // hit-during-descent swap trigger. If Link damages this En_St while
-    // it's descending (actionFunc == EnSt_MoveToGround), the bridge
-    // returns 1 to indicate the actor has been swapped. Return here
-    // BEFORE Actor_ApplyDamage so we don't accidentally kill it via
-    // the vanilla damage flow (the bridge already silently killed it).
-    if (this->actionFunc == EnSt_MoveToGround &&
-        Anchor_Enhance_EnSt_OnHitDuringDescent(this, play)) {
-        return false;
-    }
-
     if (Actor_ApplyDamage(&this->actor)) {
+        // Actor survived the hit. `colChkInfo.health` is now the
+        // post-hit value.
         Audio_PlayActorSound2(&this->actor, NA_SE_EN_STALTU_DAMAGE);
+
+        // Pillar 5 Phase 3 (GH #210, 2026-08-06 Option B) —
+        // Skulltula→Skullwalltula hit-during-descent swap trigger.
+        // Runs AFTER Actor_ApplyDamage so the swap carries the
+        // post-hit HP into the new En_Sw. If the swap rolls, the
+        // bridge silently kills this En_St; return value ignored
+        // because either branch (swap fired or didn't) leaves us
+        // in the same "actor survived" state from vanilla's
+        // perspective — return false below.
+        //
+        // A lethal hit falls through to the death path below (this
+        // branch is only entered when the actor survived), so a
+        // one-shot kill never triggers a swap — the actor dies.
+        if (this->actionFunc == EnSt_MoveToGround) {
+            (void)Anchor_Enhance_EnSt_OnHitDuringDescent(this, play);
+        }
         return false;
     }
     Enemy_StartFinishingBlow(play, &this->actor);
